@@ -1,0 +1,40 @@
+# Local development infrastructure ONLY.
+# In production (Easypanel) Postgres and Redis are provisioned as native
+# panel services - do NOT deploy this file there.
+#
+# Usage:  docker compose up -d
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: secretaria-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: secretaria
+      POSTGRES_PASSWORD: secretaria
+      POSTGRES_DB: secretaria
+    ports:
+      - "5432:5432"
+    volumes:
+      - secretaria_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U secretaria -d secretaria"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: secretaria-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  secretaria_pgdata:
+    name: secretaria_pgdata
