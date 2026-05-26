@@ -11,8 +11,6 @@ __pycache__
 !.env.example
 tests
 docker-compose.yml
-README.md
-*.md
 .idea
 .vscode
 logs
