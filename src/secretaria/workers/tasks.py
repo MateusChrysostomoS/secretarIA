@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from secretaria.ai.graph import run_agent
+from secretaria.ai.graph import run_agent  # noqa: F401  # TEMP: re-enable on _send_bot_reply
 from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
@@ -163,11 +163,14 @@ async def _persist_inbound_message(
 
 async def _send_bot_reply(reply: _ReplyContext) -> None:
     """Generate a reply, send it via the Cloud API, and record it."""
-    # TODO(ai): run_agent is a stub - swap for the real LangGraph agent.
-    reply_text = await run_agent(
-        reply.inbound_body,
-        context={"conversation_id": str(reply.conversation_id)},
-    )
+    # TEMP(connectivity-test): bypass LangGraph and send a fixed string so we can
+    # validate the end-to-end webhook -> worker -> Cloud API path. Restore the
+    # `run_agent(...)` call below once the smoke test is green.
+    reply_text = "✅ SecretarIA online — teste de conexão com a Cloud API OK."
+    # reply_text = await run_agent(
+    #     reply.inbound_body,
+    #     context={"conversation_id": str(reply.conversation_id)},
+    # )
 
     try:
         result = await WhatsAppClient().send_text_message(to=reply.patient_wa_id, body=reply_text)
