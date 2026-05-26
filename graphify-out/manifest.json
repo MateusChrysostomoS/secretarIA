@@ -20,9 +20,9 @@
     "semantic_hash": "63486cc3a8cdf1c814fb0ca942fc6c50"
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\config.py": {
-    "mtime": 1779424399.957433,
-    "ast_hash": "3818f4daaeff332bd27966f2ddef1c3d",
-    "semantic_hash": "3818f4daaeff332bd27966f2ddef1c3d"
+    "mtime": 1779835170.4815004,
+    "ast_hash": "1c7a99276acbd505e69b0e092b859d1d",
+    "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\main.py": {
     "mtime": 1779424399.957433,
@@ -35,14 +35,14 @@
     "semantic_hash": "fe92ecbb6a15546267ab53b27b7716d8"
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\ai\\graph.py": {
-    "mtime": 1779424185.101617,
-    "ast_hash": "2fcf60d442fde78a33632a15a51926a9",
-    "semantic_hash": "2fcf60d442fde78a33632a15a51926a9"
+    "mtime": 1779836051.0673318,
+    "ast_hash": "7887e1f5b22aaeb51e650ec9c1c0df57",
+    "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\ai\\tools.py": {
-    "mtime": 1779424186.7757123,
-    "ast_hash": "15a760d6ed14bd22f2514b4d5f048aa0",
-    "semantic_hash": "15a760d6ed14bd22f2514b4d5f048aa0"
+    "mtime": 1779835945.4618807,
+    "ast_hash": "64b3df87f9ecb797b5fb51ed351957fa",
+    "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\ai\\__init__.py": {
     "mtime": 1779424182.9126582,
@@ -125,9 +125,9 @@
     "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\services\\calendar.py": {
-    "mtime": 1779424399.957433,
-    "ast_hash": "348764e522b2f19b431d1b93ffc8a6f5",
-    "semantic_hash": "348764e522b2f19b431d1b93ffc8a6f5"
+    "mtime": 1779833175.2966456,
+    "ast_hash": "b117ab0ea9d7f27686e65bf03ff33688",
+    "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\services\\handover.py": {
     "mtime": 1779424177.109254,
@@ -155,7 +155,7 @@
     "semantic_hash": "92fdb1640d0627a0cc080ec131a56906"
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\workers\\tasks.py": {
-    "mtime": 1779424399.953922,
+    "mtime": 1779764998.4653745,
     "ast_hash": "73b63b54bb98f9e4772e2d5245ab6a26",
     "semantic_hash": "73b63b54bb98f9e4772e2d5245ab6a26"
   },
@@ -198,5 +198,25 @@
     "mtime": 1779424823.4319575,
     "ast_hash": "838ce88efba610859ce917826d2289a5",
     "semantic_hash": "838ce88efba610859ce917826d2289a5"
+  },
+  "C:\\TECH\\secretarIA\\scripts\\check_scopes.py": {
+    "mtime": 1779832328.0834248,
+    "ast_hash": "37b6316dcd48438da2a86e8cc7838fa5",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\secretarIA\\scripts\\gcal_auth.py": {
+    "mtime": 1779828291.74713,
+    "ast_hash": "17d8e89565f9d10bc74962241d043b3a",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\secretarIA\\scripts\\test_agent.py": {
+    "mtime": 1779836024.7270715,
+    "ast_hash": "3e5253924285741f71d5435beedc5bee",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\secretarIA\\src\\secretaria\\ai\\prompts.py": {
+    "mtime": 1779835936.1363566,
+    "ast_hash": "36bfd1c93ddb5523af25d2f29db0f0b4",
+    "semantic_hash": ""
   }
 }

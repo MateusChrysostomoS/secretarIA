@@ -44,6 +44,25 @@ class Settings(BaseSettings):
     # --- Handover (bot <-> human secretary) ---
     HANDOVER_TIMEOUT_MINUTES: int = 30
 
+    # --- OpenAI (conversational AI) ---
+    OPENAI_API_KEY: str = ""
+    OPENAI_MODEL: str = "gpt-5-mini"
+    # Hard cap per LLM call. Includes reasoning tokens on o-series / gpt-5
+    # models — set too low and the budget is consumed by reasoning, returning
+    # content="" (the model "ran out" before producing visible text). 2500 is
+    # a safe floor for gpt-5-mini conversational turns with tool calls.
+    OPENAI_MAX_TOKENS: int = 2500
+
+    # --- Google Calendar ---
+    # OAuth Web application client (same client_id/secret for every tenant).
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    # Single-tenant Fase A: refresh token in env. Multi-tenant: encrypted DB col.
+    GOOGLE_REFRESH_TOKEN: str = ""
+    GOOGLE_CALENDAR_ID: str = "primary"
+    # IANA tz used to interpret naive datetimes coming from the LLM.
+    CLINIC_TIMEZONE: str = "America/Sao_Paulo"
+
     @property
     def is_production(self) -> bool:
         return self.APP_ENV.lower() in {"production", "prod"}
