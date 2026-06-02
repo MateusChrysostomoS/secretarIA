@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +26,7 @@ from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import (
     Conversation,
+    HandoverState,
     Message,
     MessageDirection,
     MessageSender,
@@ -42,6 +43,32 @@ from secretaria.services.handover import HandoverManager
 from secretaria.services.whatsapp import WhatsAppClient
 
 logger = get_logger(__name__)
+
+# Slash commands the patient can type to reset the conversation. Matched
+# case-insensitively against the trimmed message body.
+_MENU_COMMANDS = frozenset({"/menu", "/reset", "/recomecar", "/recomeçar", "/inicio", "/início"})
+
+# Static menu shown after a /menu command. Three reply buttons fit the WhatsApp
+# cap (max 3) and the labels double as the body the LLM will see on the next
+# inbound — clicking "Marcar consulta" sends the literal string "Marcar
+# consulta" to the agent, which knows how to handle it.
+_MENU_BODY = (
+    "Bem-vindo(a) à Eye Company 👁️\n"
+    "Cuidado oftalmológico personalizado com o Dr. Mateus Chrysóstomo.\n\n"
+    "Como posso te ajudar?"
+)
+_MENU_BUTTONS = [
+    ("menu|book", "Marcar consulta"),
+    ("menu|cancel", "Cancelar consulta"),
+    ("menu|human", "Falar com humano"),
+]
+
+
+def is_menu_command(body: str | None) -> bool:
+    """True when the patient typed a `/menu`-style reset command."""
+    if not body:
+        return False
+    return body.strip().lower() in _MENU_COMMANDS
 
 
 @dataclass(frozen=True)
@@ -102,6 +129,15 @@ async def _handle_patient_messages(value: WebhookValue) -> None:
         contact = contacts.get(msg.from_)
         patient_name = contact.profile.name if contact and contact.profile else None
         body = extract_inbound_body(msg)
+
+        if is_menu_command(body):
+            await _handle_menu_command(
+                phone_number_id=phone_number_id,
+                wa_id=msg.from_,
+                patient_name=patient_name,
+                wam_id=msg.id,
+            )
+            continue
 
         reply = await _persist_inbound_message(
             phone_number_id=phone_number_id,
@@ -171,6 +207,84 @@ async def _persist_inbound_message(
             # A concurrent worker already claimed this event id.
             logger.info("worker_message_duplicate_race", wam_id=wam_id)
             return None
+
+
+async def _handle_menu_command(
+    *,
+    phone_number_id: str | None,
+    wa_id: str,
+    patient_name: str | None,
+    wam_id: str,
+) -> None:
+    """Reset the conversation and send a fresh button menu.
+
+    Wipes every prior message for the conversation, flips handover back to
+    BOT_ACTIVE and pushes a static welcome card. The `/menu` event itself is
+    NOT persisted - it is a control command, not real conversation content.
+    """
+    async with async_session_factory() as session:
+        try:
+            async with session.begin():
+                if await _event_already_processed(session, wam_id):
+                    logger.info("worker_menu_duplicate", wam_id=wam_id)
+                    return
+                session.add(ProcessedEvent(event_id=wam_id))
+
+                tenant = await _resolve_tenant(session, phone_number_id)
+                if tenant is None:
+                    logger.error(
+                        "worker_menu_tenant_unresolved",
+                        phone_number_id=phone_number_id,
+                    )
+                    return
+
+                patient = await _get_or_create_patient(
+                    session, tenant, wa_id, patient_name
+                )
+                conversation = await _get_or_create_conversation(
+                    session, tenant, patient
+                )
+
+                await session.execute(
+                    delete(Message).where(Message.conversation_id == conversation.id)
+                )
+                conversation.handover_state = HandoverState.BOT_ACTIVE
+                conversation.last_human_message_at = None
+                conversation.last_bot_message_at = None
+                conversation_id = conversation.id
+        except IntegrityError:
+            logger.info("worker_menu_duplicate_race", wam_id=wam_id)
+            return
+
+    try:
+        result = await WhatsAppClient().send_buttons(
+            to=wa_id,
+            body=_MENU_BODY,
+            buttons=_MENU_BUTTONS,
+        )
+    except Exception as exc:
+        logger.error(
+            "worker_menu_send_failed",
+            error=str(exc),
+            conversation_id=str(conversation_id),
+        )
+        return
+
+    async with async_session_factory() as session:
+        async with session.begin():
+            session.add(
+                Message(
+                    conversation_id=conversation_id,
+                    direction=MessageDirection.OUTBOUND,
+                    sender=MessageSender.BOT,
+                    wam_id=_extract_sent_wam_id(result),
+                    body=_MENU_BODY,
+                )
+            )
+            conversation = await session.get(Conversation, conversation_id)
+            if conversation is not None:
+                conversation.last_bot_message_at = datetime.now(UTC)
+    logger.info("worker_menu_sent", conversation_id=str(conversation_id))
 
 
 async def _send_bot_reply(reply: _ReplyContext) -> None:

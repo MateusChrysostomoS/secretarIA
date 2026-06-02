@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     # --- Handover (bot <-> human secretary) ---
     HANDOVER_TIMEOUT_MINUTES: int = 30
 
+    # --- Admin endpoint ---
+    # Shared secret required on the X-Admin-Token header for POST /admin/reset.
+    # Leave empty to keep the endpoint disabled (returns 503).
+    ADMIN_TOKEN: str = ""
+
     # --- OpenAI (conversational AI) ---
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-5-mini"

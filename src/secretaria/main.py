@@ -11,7 +11,7 @@ from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import FastAPI
 
-from secretaria.api import health, webhook
+from secretaria.api import admin, health, webhook
 from secretaria.config import get_settings
 from secretaria.core.logging import get_logger, setup_logging
 
@@ -56,6 +56,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(health.router, tags=["health"])
     app.include_router(webhook.router, tags=["webhook"])
+    app.include_router(admin.router, tags=["admin"])
     return app
 
 
