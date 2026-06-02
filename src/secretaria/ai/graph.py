@@ -15,7 +15,12 @@ from langgraph.prebuilt import create_react_agent
 from sqlalchemy import select
 
 from secretaria.ai.prompts import secretary_system_prompt
-from secretaria.ai.tools import cancel_event, check_availability, create_event
+from secretaria.ai.tools import (
+    cancel_event,
+    check_availability,
+    create_event,
+    list_free_slots,
+)
 from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
@@ -75,7 +80,7 @@ def build_agent() -> Any:
     )
     _AGENT = create_react_agent(
         model,
-        tools=[check_availability, create_event, cancel_event],
+        tools=[check_availability, list_free_slots, create_event, cancel_event],
         prompt=_prompt_with_today,
     )
     return _AGENT

@@ -10,7 +10,7 @@ a worker thread with asyncio.to_thread to keep the event loop responsive.
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -123,6 +123,60 @@ class CalendarService:
             return out
 
         return await asyncio.to_thread(_list)
+
+    async def list_free_slots(
+        self,
+        day: datetime,
+        slot_minutes: int = 30,
+        open_hour: int = 8,
+        close_hour: int = 18,
+        max_slots: int = 6,
+    ) -> list[dict]:
+        """Return free [start, end) slots on `day` within business hours.
+
+        Walks the day in `slot_minutes` increments and keeps slots that do
+        not overlap with any busy event already on the calendar. Returns up
+        to `max_slots` slots so the UI list message stays under WhatsApp's
+        10-row cap and the patient is not buried in options.
+        """
+        day_local = self._ensure_tz(day)
+        start_of_day = day_local.replace(
+            hour=open_hour, minute=0, second=0, microsecond=0
+        )
+        end_of_day = day_local.replace(
+            hour=close_hour, minute=0, second=0, microsecond=0
+        )
+        if start_of_day >= end_of_day:
+            return []
+
+        busy = await self.check_availability(start_of_day, end_of_day)
+        busy_ranges: list[tuple[datetime, datetime]] = []
+        for ev in busy:
+            try:
+                bs = datetime.fromisoformat(ev["start"])
+                be = datetime.fromisoformat(ev["end"])
+            except (KeyError, ValueError):
+                continue
+            busy_ranges.append((self._ensure_tz(bs), self._ensure_tz(be)))
+
+        delta = timedelta(minutes=slot_minutes)
+        slots: list[dict] = []
+        cursor = start_of_day
+        while cursor + delta <= end_of_day and len(slots) < max_slots:
+            slot_end = cursor + delta
+            overlaps = any(bs < slot_end and be > cursor for bs, be in busy_ranges)
+            if not overlaps:
+                slots.append(
+                    {
+                        # Naive ISO (no tz) so it round-trips through the LLM
+                        # exactly like check_availability / create_event inputs.
+                        "start": cursor.replace(tzinfo=None).isoformat(timespec="minutes"),
+                        "end": slot_end.replace(tzinfo=None).isoformat(timespec="minutes"),
+                        "label": cursor.strftime("%H:%M"),
+                    }
+                )
+            cursor = slot_end
+        return slots
 
     async def create_event(
         self,

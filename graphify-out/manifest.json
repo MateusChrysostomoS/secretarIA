@@ -35,14 +35,14 @@
     "semantic_hash": "fe92ecbb6a15546267ab53b27b7716d8"
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\ai\\graph.py": {
-    "mtime": 1779840228.1907594,
-    "ast_hash": "16fc399d317f8439d7493948304df716",
-    "semantic_hash": "16fc399d317f8439d7493948304df716"
+    "mtime": 1780360642.5341241,
+    "ast_hash": "2b923496a4a62e3b31bd101b2f0d7ade",
+    "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\ai\\tools.py": {
-    "mtime": 1779835945.4618807,
-    "ast_hash": "64b3df87f9ecb797b5fb51ed351957fa",
-    "semantic_hash": "64b3df87f9ecb797b5fb51ed351957fa"
+    "mtime": 1780360631.7758746,
+    "ast_hash": "9f56f853313fe2baafcf2688fa2712c1",
+    "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\ai\\__init__.py": {
     "mtime": 1779424182.9126582,
@@ -115,9 +115,9 @@
     "semantic_hash": "e4a111b6ebf0d93c03ade86c65b7c094"
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\schemas\\webhook.py": {
-    "mtime": 1779424135.1406734,
-    "ast_hash": "abf470bc64e33e58e9f64fe56f8c7ca5",
-    "semantic_hash": "abf470bc64e33e58e9f64fe56f8c7ca5"
+    "mtime": 1780360523.9991877,
+    "ast_hash": "d4fb9788c1a7e71f29b6d1c9de8f4650",
+    "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\schemas\\__init__.py": {
     "mtime": 1779424130.0465767,
@@ -125,9 +125,9 @@
     "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\services\\calendar.py": {
-    "mtime": 1779833175.2966456,
-    "ast_hash": "b117ab0ea9d7f27686e65bf03ff33688",
-    "semantic_hash": "b117ab0ea9d7f27686e65bf03ff33688"
+    "mtime": 1780360619.1351173,
+    "ast_hash": "76c602b0b1776d0a73588129483aba09",
+    "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\services\\handover.py": {
     "mtime": 1779424177.109254,
@@ -140,9 +140,9 @@
     "semantic_hash": "87257429b62d96b28cac58abbe3867eb"
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\services\\whatsapp.py": {
-    "mtime": 1779424399.9559233,
-    "ast_hash": "a54c1b65bcba2f54df4c719c14f1d245",
-    "semantic_hash": "a54c1b65bcba2f54df4c719c14f1d245"
+    "mtime": 1780360416.8421926,
+    "ast_hash": "201e778d791c99a60386104b11ba9ed9",
+    "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\services\\__init__.py": {
     "mtime": 1779424168.35006,
@@ -155,9 +155,9 @@
     "semantic_hash": "92fdb1640d0627a0cc080ec131a56906"
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\workers\\tasks.py": {
-    "mtime": 1779764998.4653745,
-    "ast_hash": "73b63b54bb98f9e4772e2d5245ab6a26",
-    "semantic_hash": "73b63b54bb98f9e4772e2d5245ab6a26"
+    "mtime": 1780360776.9039326,
+    "ast_hash": "6c629deb08b40dce78165b7ba10a30ce",
+    "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\workers\\__init__.py": {
     "mtime": 1779424236.0045598,
@@ -215,8 +215,23 @@
     "semantic_hash": "3e5253924285741f71d5435beedc5bee"
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\ai\\prompts.py": {
-    "mtime": 1779840233.3564014,
-    "ast_hash": "5c8d87ef479c9dabb4b1fc21858cad60",
-    "semantic_hash": "5c8d87ef479c9dabb4b1fc21858cad60"
+    "mtime": 1780360591.1609752,
+    "ast_hash": "b13919173dc1d18bf319cf4b83dd7aa3",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\secretarIA\\src\\secretaria\\ai\\formatter.py": {
+    "mtime": 1780360729.2427375,
+    "ast_hash": "503913b84ec03e112fdea3989e55ea3b",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\secretarIA\\tests\\test_formatter.py": {
+    "mtime": 1780360673.1578023,
+    "ast_hash": "6744146775cd0ba5323ce65b1663b506",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\secretarIA\\tests\\test_webhook_parsing.py": {
+    "mtime": 1780360686.4731715,
+    "ast_hash": "a578fa38ef05432125333a9f3a9fc7cb",
+    "semantic_hash": ""
   }
 }

@@ -12,6 +12,14 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from secretaria.ai.formatter import (
+    BUTTON_ID_CANCEL,
+    BUTTON_ID_CONFIRM,
+    ButtonBubble,
+    SlotsBubble,
+    TextBubble,
+    parse,
+)
 from secretaria.ai.graph import run_agent
 from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
@@ -25,7 +33,11 @@ from secretaria.models import (
     ProcessedEvent,
     Tenant,
 )
-from secretaria.schemas.webhook import WebhookPayload, WebhookValue
+from secretaria.schemas.webhook import (
+    WebhookPayload,
+    WebhookValue,
+    extract_inbound_body,
+)
 from secretaria.services.handover import HandoverManager
 from secretaria.services.whatsapp import WhatsAppClient
 
@@ -89,7 +101,7 @@ async def _handle_patient_messages(value: WebhookValue) -> None:
 
         contact = contacts.get(msg.from_)
         patient_name = contact.profile.name if contact and contact.profile else None
-        body = msg.text.body if msg.text else None
+        body = extract_inbound_body(msg)
 
         reply = await _persist_inbound_message(
             phone_number_id=phone_number_id,
@@ -162,41 +174,102 @@ async def _persist_inbound_message(
 
 
 async def _send_bot_reply(reply: _ReplyContext) -> None:
-    """Generate a reply, send it via the Cloud API, and record it."""
-    # TODO(ai): run_agent is a stub - swap for the real LangGraph agent.
+    """Generate a reply, split it into bubbles, send each, and record them."""
     reply_text = await run_agent(
         reply.inbound_body,
         context={"conversation_id": str(reply.conversation_id)},
     )
-
-    try:
-        result = await WhatsAppClient().send_text_message(to=reply.patient_wa_id, body=reply_text)
-    except Exception as exc:
-        # MVP: do not retry. A transient send failure means this one auto-reply
-        # is lost; the human secretary still sees the patient's message.
-        # TODO(reliability): add an outbox + retry for guaranteed delivery.
-        logger.error(
-            "worker_bot_reply_failed",
-            error=str(exc),
+    bubbles = parse(reply_text)
+    if not bubbles:
+        logger.warning(
+            "worker_bot_reply_empty_after_parse",
             conversation_id=str(reply.conversation_id),
         )
         return
 
-    async with async_session_factory() as session:
-        async with session.begin():
-            session.add(
-                Message(
-                    conversation_id=reply.conversation_id,
-                    direction=MessageDirection.OUTBOUND,
-                    sender=MessageSender.BOT,
-                    wam_id=_extract_sent_wam_id(result),
-                    body=reply_text,
-                )
+    client = WhatsAppClient()
+    sent_count = 0
+    for index, bubble in enumerate(bubbles):
+        try:
+            result = await _send_bubble(client, reply.patient_wa_id, bubble)
+        except Exception as exc:
+            # MVP: do not retry. A transient send failure means this one auto-reply
+            # is lost; the human secretary still sees the patient's message.
+            # TODO(reliability): add an outbox + retry for guaranteed delivery.
+            logger.error(
+                "worker_bot_reply_failed",
+                error=str(exc),
+                conversation_id=str(reply.conversation_id),
+                bubble_index=index,
+                bubble_kind=bubble.kind,
             )
-            conversation = await session.get(Conversation, reply.conversation_id)
-            if conversation is not None:
-                conversation.last_bot_message_at = datetime.now(UTC)
-    logger.info("worker_bot_reply_sent", conversation_id=str(reply.conversation_id))
+            # A failed mid-turn send still records the bubbles already sent so
+            # the LLM history stays consistent on the next inbound.
+            break
+
+        sent_count += 1
+        async with async_session_factory() as session:
+            async with session.begin():
+                session.add(
+                    Message(
+                        conversation_id=reply.conversation_id,
+                        direction=MessageDirection.OUTBOUND,
+                        sender=MessageSender.BOT,
+                        wam_id=_extract_sent_wam_id(result),
+                        body=_bubble_history_body(bubble),
+                    )
+                )
+                conversation = await session.get(Conversation, reply.conversation_id)
+                if conversation is not None:
+                    conversation.last_bot_message_at = datetime.now(UTC)
+
+    if sent_count:
+        logger.info(
+            "worker_bot_reply_sent",
+            conversation_id=str(reply.conversation_id),
+            bubbles=sent_count,
+        )
+
+
+async def _send_bubble(
+    client: WhatsAppClient,
+    to: str,
+    bubble: TextBubble | ButtonBubble | SlotsBubble,
+) -> dict:
+    """Dispatch a single bubble to the right WhatsAppClient method."""
+    if isinstance(bubble, ButtonBubble):
+        return await client.send_buttons(
+            to=to,
+            body=bubble.body,
+            buttons=[
+                (BUTTON_ID_CONFIRM, bubble.confirm_label),
+                (BUTTON_ID_CANCEL, bubble.cancel_label),
+            ],
+        )
+    if isinstance(bubble, SlotsBubble):
+        return await client.send_list(
+            to=to,
+            body=bubble.body,
+            button_label=bubble.button_label,
+            rows=[(rid, label, None) for rid, label in bubble.rows],
+            section_title=bubble.section_title,
+        )
+    return await client.send_text_message(to=to, body=bubble.body)
+
+
+def _bubble_history_body(bubble: TextBubble | ButtonBubble | SlotsBubble) -> str:
+    """Render an outbound bubble as the text the LLM should see in history.
+
+    Interactive cards collapse to a clean string (no markup tags) so the
+    next agent turn rebuilt from the DB does not see leftover `[CONFIRM]`
+    syntax and try to repeat it.
+    """
+    if isinstance(bubble, ButtonBubble):
+        return bubble.body
+    if isinstance(bubble, SlotsBubble):
+        labels = ", ".join(label for _, label in bubble.rows)
+        return f"{bubble.body}\n(opções: {labels})" if labels else bubble.body
+    return bubble.body
 
 
 # --------------------------------------------------------------------------
@@ -221,7 +294,7 @@ async def _handle_human_echoes(value: WebhookValue) -> None:
             phone_number_id=phone_number_id,
             patient_wa_id=patient_wa_id,
             wam_id=echo.id,
-            body=echo.text.body if echo.text else None,
+            body=extract_inbound_body(echo),
         )
 
 

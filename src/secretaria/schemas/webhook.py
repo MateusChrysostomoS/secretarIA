@@ -39,6 +39,30 @@ class WebhookMetadata(BaseModel):
     phone_number_id: str | None = None
 
 
+class WebhookInteractiveReply(BaseModel):
+    """Common shape for both `button_reply` and `list_reply` sub-objects."""
+
+    model_config = _PERMISSIVE
+
+    id: str | None = None
+    title: str | None = None
+    description: str | None = None
+
+
+class WebhookInteractive(BaseModel):
+    """Container the patient sends back after tapping an interactive control.
+
+    `type` is "button_reply" for reply buttons or "list_reply" for list rows.
+    Exactly one of the two sub-fields is populated.
+    """
+
+    model_config = _PERMISSIVE
+
+    type: str | None = None
+    button_reply: WebhookInteractiveReply | None = None
+    list_reply: WebhookInteractiveReply | None = None
+
+
 class WebhookMessage(BaseModel):
     model_config = _PERMISSIVE
 
@@ -49,6 +73,7 @@ class WebhookMessage(BaseModel):
     timestamp: str | None = None
     type: str | None = None
     text: WebhookText | None = None
+    interactive: WebhookInteractive | None = None
 
 
 class WebhookValue(BaseModel):
@@ -107,3 +132,37 @@ def iter_event_ids(payload: dict) -> Iterator[str]:
                 for item in value.get(key) or []:
                     if isinstance(item, dict) and item.get("id"):
                         yield item["id"]
+
+
+def extract_inbound_body(msg: WebhookMessage) -> str | None:
+    """Return the human-readable text body of an inbound message.
+
+    Handles text messages (`text.body`) plus the two Cloud API interactive
+    callbacks: reply-button taps (`interactive.button_reply`) and list-row
+    taps (`interactive.list_reply`).
+
+    Returns None when the message type is not one the bot can act on
+    (image, audio, location, etc.) so the worker can decide to stay quiet
+    rather than feed a meaningless body to the LLM.
+    """
+    if msg.text and msg.text.body:
+        return msg.text.body
+
+    interactive = msg.interactive
+    if interactive is None:
+        return None
+
+    reply = interactive.button_reply or interactive.list_reply
+    if reply is None:
+        return None
+    title = (reply.title or "").strip()
+    payload_id = (reply.id or "").strip()
+    if not title and not payload_id:
+        return None
+
+    # Slot taps carry both a human label and the ISO datetime in the id, so
+    # the agent sees a self-describing string: "15:00 (2026-05-29T15:00)".
+    if payload_id.startswith("slot|"):
+        iso = payload_id.split("|", 1)[1]
+        return f"{title} ({iso})" if title else iso
+    return title or payload_id

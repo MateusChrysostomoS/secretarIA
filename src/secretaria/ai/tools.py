@@ -5,7 +5,7 @@ lazily at module import and reused across calls — a process-wide singleton
 that amortises the OAuth credential refresh.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 
 from langchain_core.tools import tool
 
@@ -37,6 +37,27 @@ async def check_availability(start: str, end: str) -> dict:
         datetime.fromisoformat(end),
     )
     return {"busy": busy}
+
+
+@tool
+async def list_free_slots(day: str, max_slots: int = 6) -> dict:
+    """Lista até `max_slots` horários livres de 30 minutos em `day`, dentro do
+    horário comercial da clínica (08-18h, seg-sex). Use quando o paciente
+    pedir um dia inteiro (\"tem horário sexta?\") ou quando você quiser
+    sugerir alternativas. Renderize a resposta usando o marcador [SLOTS] do
+    sistema.
+
+    Args:
+        day: Dia no formato YYYY-MM-DD (ex: 2026-05-29).
+        max_slots: Quantidade máxima de slots a retornar (default 6, máx 10).
+    """
+    target_day = date.fromisoformat(day)
+    day_dt = datetime.combine(target_day, datetime.min.time())
+    slots = await _get_calendar().list_free_slots(
+        day=day_dt,
+        max_slots=min(max(max_slots, 1), 10),
+    )
+    return {"slots": slots}
 
 
 @tool
