@@ -5,13 +5,17 @@ Fase A, now driven by the arq worker. Conversation history is rebuilt from
 the messages table on every call so the worker stays stateless.
 """
 
+import asyncio
 import re
+import ssl
 from typing import Any
 from uuid import UUID
 
+import httpx
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
+from openai import APIConnectionError, APITimeoutError
 from sqlalchemy import select
 
 from secretaria.ai.prompts import secretary_system_prompt
@@ -30,8 +34,23 @@ logger = get_logger(__name__)
 
 HISTORY_LIMIT = 30
 FALLBACK_REPLY = (
-    "Desculpe, tive um problema técnico agora. Pode tentar de novo em alguns "
-    "instantes?"
+    "Desculpe, tive uma instabilidade rápida aqui 🙏. Pode me repetir sua "
+    "última mensagem? Já te respondo."
+)
+
+# Errors that a single retry usually recovers from: TLS connection torn down
+# mid-read, OpenAI gateway returning a brief connection refusal, a timeout
+# we want to give one more shot. The openai SDK already retries internally
+# (see build_agent), but a top-level retry salvages the turn when even the
+# SDK retries get exhausted by a sustained blip.
+_TRANSIENT_NETWORK_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    APIConnectionError,
+    APITimeoutError,
+    httpx.ReadError,
+    httpx.ConnectError,
+    httpx.RemoteProtocolError,
+    httpx.ReadTimeout,
+    ssl.SSLEOFError,
 )
 
 # Patterns the LLM should NEVER emit to a patient. If any match, the reply is
@@ -77,6 +96,14 @@ def build_agent() -> Any:
         # (not max_tokens). langchain-openai 1.x accepts it as a direct
         # kwarg even though it isn't a typed field.
         max_completion_tokens=s.OPENAI_MAX_TOKENS,
+        # Default is 2 — bumping to 5 cushions us against SSL_EOF /
+        # APIConnectionError flakes that show up under sustained load.
+        # The openai SDK applies exponential backoff between attempts.
+        max_retries=5,
+        # Per-request HTTP timeout. Without an explicit value the SDK falls
+        # back to "no timeout", which means a stuck socket can block the
+        # whole arq job until the worker is killed.
+        timeout=60,
     )
     _AGENT = create_react_agent(
         model,
@@ -94,6 +121,32 @@ async def invoke_agent(messages: list[BaseMessage]) -> str:
     result = await build_agent().ainvoke({"messages": messages})
     last = result["messages"][-1]
     return (getattr(last, "content", "") or "").strip()
+
+
+async def _invoke_agent_with_retry(
+    messages: list[BaseMessage],
+    conversation_id: UUID,
+) -> str:
+    """Top-level safety net: one extra attempt on transient network errors.
+
+    The openai SDK already retries APIConnectionError / APITimeoutError 5x
+    inside a single LLM call. This wrapper covers the remaining failure
+    mode: a TLS connection that survives the SDK retries but dies between
+    the LLM call and the tool call (or vice-versa) inside the ReAct loop.
+    One full re-invocation of the agent salvages the turn at the cost of
+    re-doing the work already done in the failed attempt.
+    """
+    try:
+        return await invoke_agent(messages)
+    except _TRANSIENT_NETWORK_EXCEPTIONS as exc:
+        logger.warning(
+            "ai_run_agent_transient_retry",
+            error=str(exc),
+            error_type=type(exc).__name__,
+            conversation_id=str(conversation_id),
+        )
+        await asyncio.sleep(1)
+        return await invoke_agent(messages)
 
 
 async def _load_history(conversation_id: UUID) -> list[BaseMessage]:
@@ -144,11 +197,12 @@ async def run_agent(message: str, context: dict) -> str:
             # Defensive: if the inbound wasn't persisted yet for some reason,
             # at least feed the message we received.
             history = [HumanMessage(content=message)]
-        reply = await invoke_agent(history)
+        reply = await _invoke_agent_with_retry(history, conversation_id)
     except Exception as exc:
         logger.error(
             "ai_run_agent_failed",
             error=str(exc),
+            error_type=type(exc).__name__,
             conversation_id=str(conversation_id),
         )
         return FALLBACK_REPLY
