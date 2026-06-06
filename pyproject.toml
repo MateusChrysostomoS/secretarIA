@@ -23,6 +23,7 @@ dependencies = [
     "google-auth-oauthlib>=1.4.0",
     "tzdata>=2026.2",
     "langchain-openai>=1.2.2",
+    "cryptography>=44.0.0",
 ]
 
 [dependency-groups]
@@ -50,6 +51,11 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.ruff.lint.isort]
 known-first-party = ["secretaria"]
 combine-as-imports = true
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection markers are meant to be used as argument
+# defaults; they are not the mutable-default footgun B008 targets.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Header", "fastapi.Query"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

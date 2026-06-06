@@ -10,8 +10,9 @@ from contextlib import asynccontextmanager
 from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-from secretaria.api import admin, health, webhook
+from secretaria.api import admin, config, health, oauth, webhook
 from secretaria.config import get_settings
 from secretaria.core.logging import get_logger, setup_logging
 
@@ -54,9 +55,20 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+    # CORS for the Next.js doctor portal (origins are configurable per env).
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=get_settings().cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     app.include_router(health.router, tags=["health"])
     app.include_router(webhook.router, tags=["webhook"])
     app.include_router(admin.router, tags=["admin"])
+    # Doctor hub: tenant config + Google Calendar OAuth onboarding.
+    app.include_router(config.router)
+    app.include_router(oauth.router)
     return app
 
 

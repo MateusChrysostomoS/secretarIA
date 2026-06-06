@@ -68,6 +68,42 @@ class Settings(BaseSettings):
     # IANA tz used to interpret naive datetimes coming from the LLM.
     CLINIC_TIMEZONE: str = "America/Sao_Paulo"
 
+    # --- Platform encryption (tenant secrets at rest) ---
+    # Fernet key (urlsafe base64, 32 bytes). Generate one with the snippet in
+    # .env.example / docs/doctor-hub-backend.md. Needed before a Calendar connects.
+    ENCRYPTION_KEY: str = ""
+
+    # --- Doctor hub auth (MVP fake-token seam) ---
+    # Placeholder "subscription" token. Presenting it as `Authorization: Bearer
+    # <token>` authenticates the doctor hub. This is a stand-in for a paid
+    # subscription until the Payments/Subscription API exists. The ONE place to
+    # swap it for the real check is core/subscription.py:verify_subscription_token.
+    MVP_FAKE_TOKEN: str = ""
+    # Which tenant the fake token maps to. If empty AND exactly one tenant row
+    # exists, that tenant is used. Set explicitly once there is more than one.
+    MVP_FAKE_TOKEN_TENANT_ID: str = ""
+
+    # --- Google Calendar OAuth (platform-level hub onboarding) ---
+    # Reuses GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET above (an OAuth *Web
+    # application* client). The redirect URI must be registered in the Google
+    # Cloud Console exactly as set here.
+    GOOGLE_OAUTH_REDIRECT_URI: str = "http://localhost:8000/oauth/google/callback"
+    # Secret used to sign the opaque OAuth `state` (anti-CSRF; binds the tenant).
+    OAUTH_STATE_SECRET: str = ""
+    # Max age (seconds) of a `state` token between /start and /callback.
+    OAUTH_STATE_MAX_AGE: int = 600
+    # Where to send the doctor's browser after the OAuth callback completes.
+    PORTAL_POST_OAUTH_REDIRECT: str = "http://localhost:3000/calendar/connected"
+
+    # --- CORS (the Next.js doctor portal) ---
+    # Comma-separated list of allowed origins for the hub API.
+    CORS_ALLOW_ORIGINS: str = "http://localhost:3000"
+
+    @property
+    def cors_origins(self) -> list[str]:
+        """Parse CORS_ALLOW_ORIGINS into a clean list of origins."""
+        return [o.strip() for o in self.CORS_ALLOW_ORIGINS.split(",") if o.strip()]
+
     @property
     def is_production(self) -> bool:
         return self.APP_ENV.lower() in {"production", "prod"}

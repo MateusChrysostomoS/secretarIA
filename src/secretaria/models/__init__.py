@@ -9,6 +9,7 @@ from secretaria.models.message import Message, MessageDirection, MessageSender
 from secretaria.models.patient import Patient
 from secretaria.models.processed_event import ProcessedEvent
 from secretaria.models.tenant import Tenant
+from secretaria.models.tenant_credentials import TenantCredentials
 
 __all__ = [
     "Conversation",
@@ -19,4 +20,5 @@ __all__ = [
     "Patient",
     "ProcessedEvent",
     "Tenant",
+    "TenantCredentials",
 ]
