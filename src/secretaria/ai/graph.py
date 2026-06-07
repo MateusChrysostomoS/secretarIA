@@ -3,11 +3,16 @@
 create_react_agent gives us the exact LLM -> tool -> LLM loop validated in
 Fase A, now driven by the arq worker. Conversation history is rebuilt from
 the messages table on every call so the worker stays stateless.
+
+Multi-tenant: the CalendarService and system prompt are scoped per invocation
+via ContextVars so the process-wide cached agent can serve multiple tenants
+concurrently without interference.
 """
 
 import asyncio
 import re
 import ssl
+from contextvars import ContextVar
 from typing import Any
 from uuid import UUID
 
@@ -20,6 +25,7 @@ from sqlalchemy import select
 
 from secretaria.ai.prompts import secretary_system_prompt
 from secretaria.ai.tools import (
+    _calendar_ctx,
     cancel_event,
     check_availability,
     create_event,
@@ -29,6 +35,8 @@ from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import Message, MessageSender
+from secretaria.services.calendar import CalendarService
+from secretaria.services.tenant_config import TenantRuntimeConfig
 
 logger = get_logger(__name__)
 
@@ -36,6 +44,11 @@ HISTORY_LIMIT = 30
 FALLBACK_REPLY = (
     "Desculpe, tive uma instabilidade rápida aqui 🙏. Pode me repetir sua "
     "última mensagem? Já te respondo."
+)
+
+# Per-async-task TenantRuntimeConfig. Set by run_agent; used by _prompt_with_today.
+_tenant_config_ctx: ContextVar[TenantRuntimeConfig | None] = ContextVar(
+    "_tenant_config", default=None
 )
 
 # Errors that a single retry usually recovers from: TLS connection torn down
@@ -74,11 +87,32 @@ _AGENT: Any | None = None
 def _prompt_with_today(state: dict) -> list[BaseMessage]:
     """Prepend a freshly-rendered system prompt so today's date is current.
 
-    Called by LangGraph on every agent invocation, so the prompt never goes
-    stale even if the worker has been running for days.
+    Reads TenantRuntimeConfig from the ContextVar set by run_agent. Falls back
+    to a settings-based prompt for dev scripts (Fase A convenience).
     """
-    tz = get_settings().CLINIC_TIMEZONE
-    return [SystemMessage(content=secretary_system_prompt(tz)), *state["messages"]]
+    config = _tenant_config_ctx.get()
+    if config is not None:
+        content = secretary_system_prompt(config)
+    else:
+        # Dev fallback: single-tenant prompt from env vars.
+        from secretaria.services.tenant_config import TenantRuntimeConfig as _RC
+        s = get_settings()
+        content = secretary_system_prompt(
+            _RC(
+                tenant_id=None,  # type: ignore[arg-type]
+                clinic_name="Clínica",
+                greeting_message=None,
+                persona_notes=None,
+                language="pt-BR",
+                timezone=s.CLINIC_TIMEZONE,
+                appointment_duration_min=30,
+                appointment_types=[],
+                business_hours={},
+                google_calendar_id="primary",
+                google_refresh_token=None,
+            )
+        )
+    return [SystemMessage(content=content), *state["messages"]]
 
 
 def build_agent() -> Any:
@@ -180,22 +214,34 @@ async def _load_history(conversation_id: UUID) -> list[BaseMessage]:
     return out
 
 
-async def run_agent(message: str, context: dict) -> str:
+async def run_agent(
+    message: str,
+    context: dict,
+    tenant_config: TenantRuntimeConfig | None = None,
+) -> str:
     """arq-side entry point: build history + run agent + return reply text.
 
-    `message` is the latest inbound body (kept for signature compatibility
-    with the previous stub); the actual content is read fresh from the DB
-    via conversation_id so the LLM sees the full thread.
+    `tenant_config` provides per-tenant Calendar credentials and prompt data.
+    When None, falls back to the single-tenant env-var scaffold (Fase A / dev).
     """
     conversation_id = UUID(context["conversation_id"])
+
+    # Build a per-tenant CalendarService and inject it via ContextVar so the
+    # cached process-wide agent uses the right credentials for this call.
+    cal = (
+        CalendarService.from_tenant_config(tenant_config)
+        if tenant_config is not None
+        else CalendarService()
+    )
+    tok_cal = _calendar_ctx.set(cal)
+    tok_cfg = _tenant_config_ctx.set(tenant_config)
+
     try:
         history = await _load_history(conversation_id)
         if not history:
             logger.warning(
                 "ai_run_agent_no_history", conversation_id=str(conversation_id)
             )
-            # Defensive: if the inbound wasn't persisted yet for some reason,
-            # at least feed the message we received.
             history = [HumanMessage(content=message)]
         reply = await _invoke_agent_with_retry(history, conversation_id)
     except Exception as exc:
@@ -206,6 +252,9 @@ async def run_agent(message: str, context: dict) -> str:
             conversation_id=str(conversation_id),
         )
         return FALLBACK_REPLY
+    finally:
+        _calendar_ctx.reset(tok_cal)
+        _tenant_config_ctx.reset(tok_cfg)
 
     if not reply:
         logger.warning(

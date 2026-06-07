@@ -34,6 +34,8 @@ from secretaria.models import (
     ProcessedEvent,
     Tenant,
 )
+from secretaria.services.tenant_config import load_tenant_config
+from secretaria.services.whatsapp import WhatsAppClient
 from secretaria.schemas.webhook import (
     WebhookPayload,
     WebhookValue,
@@ -289,9 +291,26 @@ async def _handle_menu_command(
 
 async def _send_bot_reply(reply: _ReplyContext) -> None:
     """Generate a reply, split it into bubbles, send each, and record them."""
+    # Load per-tenant config (decrypted credentials + prompt data) for this call.
+    tenant_config = None
+    try:
+        async with async_session_factory() as session:
+            conversation = await session.get(Conversation, reply.conversation_id)
+            if conversation is not None:
+                tenant = await session.get(Tenant, conversation.tenant_id)
+                if tenant is not None:
+                    tenant_config = await load_tenant_config(session, tenant)
+    except Exception as exc:
+        logger.warning(
+            "worker_tenant_config_load_failed",
+            error=str(exc),
+            conversation_id=str(reply.conversation_id),
+        )
+
     reply_text = await run_agent(
         reply.inbound_body,
         context={"conversation_id": str(reply.conversation_id)},
+        tenant_config=tenant_config,
     )
     bubbles = parse(reply_text)
     if not bubbles:
@@ -550,3 +569,36 @@ async def _get_or_create_conversation(
         session.add(conversation)
         await session.flush()
     return conversation
+
+
+# --------------------------------------------------------------------------
+# Platform-initiated patient notification
+# --------------------------------------------------------------------------
+
+
+async def send_patient_notification(ctx: dict, tenant_id: str, phone: str, message: str) -> None:
+    """arq job: send a text message to a patient on behalf of a specific tenant.
+
+    Triggered by the doctor hub calendar endpoints (cancel / reschedule) when
+    the doctor opts in to notifying the patient. The `phone` is the patient's
+    WhatsApp ID (wa_id / E.164 digits only).
+    """
+    async with async_session_factory() as session:
+        tenant = await session.get(Tenant, UUID(tenant_id))
+        if tenant is None:
+            logger.error("send_patient_notification_tenant_not_found", tenant_id=tenant_id)
+            return
+
+    try:
+        await WhatsAppClient.from_tenant(tenant).send_text_message(to=phone, body=message)
+        logger.info(
+            "send_patient_notification_sent",
+            tenant_id=tenant_id,
+            message_len=len(message),
+        )
+    except Exception as exc:
+        logger.error(
+            "send_patient_notification_failed",
+            tenant_id=tenant_id,
+            error=str(exc),
+        )

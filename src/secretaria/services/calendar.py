@@ -11,8 +11,11 @@ a worker thread with asyncio.to_thread to keep the event loop responsive.
 
 import asyncio
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
+
+if TYPE_CHECKING:
+    from secretaria.services.tenant_config import TenantRuntimeConfig
 
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.credentials import Credentials
@@ -35,18 +38,34 @@ class CalendarService:
         self._settings = settings or get_settings()
         self._tz = ZoneInfo(self._settings.CLINIC_TIMEZONE)
         self._calendar_id = self._settings.GOOGLE_CALENDAR_ID
+        self._refresh_token_override: str | None = None
         self._service: Any | None = None
+
+    @classmethod
+    def from_tenant_config(cls, config: "TenantRuntimeConfig") -> "CalendarService":
+        """Build a CalendarService using per-tenant credentials.
+
+        The OAuth app (client_id / client_secret) belongs to the platform and
+        is read from settings. Only the refresh_token and calendar_id come from
+        the tenant row.
+        """
+        instance = cls()
+        instance._tz = ZoneInfo(config.timezone)
+        instance._calendar_id = config.google_calendar_id
+        instance._refresh_token_override = config.google_refresh_token
+        return instance
 
     def _build_service(self) -> Any:
         s = self._settings
-        if not (s.GOOGLE_CLIENT_ID and s.GOOGLE_CLIENT_SECRET and s.GOOGLE_REFRESH_TOKEN):
+        refresh_token = self._refresh_token_override or s.GOOGLE_REFRESH_TOKEN
+        if not (s.GOOGLE_CLIENT_ID and s.GOOGLE_CLIENT_SECRET and refresh_token):
             raise RuntimeError(
                 "Google Calendar credentials missing. Set GOOGLE_CLIENT_ID, "
                 "GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN in .env first."
             )
         creds = Credentials(
             token=None,
-            refresh_token=s.GOOGLE_REFRESH_TOKEN,
+            refresh_token=refresh_token,
             token_uri=TOKEN_URI,
             client_id=s.GOOGLE_CLIENT_ID,
             client_secret=s.GOOGLE_CLIENT_SECRET,
@@ -211,6 +230,38 @@ class CalendarService:
 
         event = await asyncio.to_thread(_insert)
         logger.info("calendar_event_created", event_id=event.get("id"), summary=summary)
+        return event
+
+    async def update_event(
+        self,
+        event_id: str,
+        start: datetime,
+        end: datetime,
+    ) -> dict:
+        """Move an existing event to a new [start, end) window. Returns the updated event."""
+        start_dt = self._ensure_tz(start)
+        end_dt = self._ensure_tz(end)
+        tz_name = str(self._tz)
+        body = {
+            "start": {"dateTime": start_dt.isoformat(), "timeZone": tz_name},
+            "end": {"dateTime": end_dt.isoformat(), "timeZone": tz_name},
+        }
+        calendar_id = self._calendar_id
+
+        def _patch() -> dict:
+            try:
+                return (
+                    self._client()
+                    .events()
+                    .patch(calendarId=calendar_id, eventId=event_id, body=body)
+                    .execute()
+                )
+            except HttpError as exc:
+                logger.error("calendar_patch_http_error", error=str(exc))
+                raise
+
+        event = await asyncio.to_thread(_patch)
+        logger.info("calendar_event_updated", event_id=event_id)
         return event
 
     async def cancel_event(self, event_id: str) -> None:

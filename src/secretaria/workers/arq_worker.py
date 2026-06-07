@@ -9,7 +9,7 @@ from arq.connections import RedisSettings
 from secretaria.config import get_settings
 from secretaria.core.database import engine
 from secretaria.core.logging import get_logger, setup_logging
-from secretaria.workers.tasks import process_webhook_event
+from secretaria.workers.tasks import process_webhook_event, send_patient_notification
 
 logger = get_logger(__name__)
 
@@ -33,7 +33,7 @@ class WorkerSettings:
     RedisSettings instance (not a classmethod / callable).
     """
 
-    functions = [process_webhook_event]
+    functions = [process_webhook_event, send_patient_notification]
     on_startup = on_startup
     on_shutdown = on_shutdown
     redis_settings = RedisSettings.from_dsn(get_settings().REDIS_URL)

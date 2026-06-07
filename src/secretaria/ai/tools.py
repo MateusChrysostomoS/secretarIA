@@ -1,24 +1,30 @@
 """LangChain tools for the LangGraph agent.
 
-Each tool wraps a CalendarService method. The CalendarService is built
-lazily at module import and reused across calls — a process-wide singleton
-that amortises the OAuth credential refresh.
+Each tool wraps a CalendarService method. The active CalendarService is stored
+in a ContextVar so the process-wide cached agent can serve different tenants
+concurrently without interference. graph.py sets the ContextVar before invoking
+the agent and resets it afterwards.
 """
 
+from contextvars import ContextVar
 from datetime import date, datetime
 
 from langchain_core.tools import tool
 
 from secretaria.services.calendar import CalendarService
 
-_calendar: CalendarService | None = None
+# Per-async-task CalendarService. Set by graph.run_agent before invoking the
+# agent; each concurrent worker task has its own slot.
+_calendar_ctx: ContextVar[CalendarService | None] = ContextVar("_calendar", default=None)
 
 
 def _get_calendar() -> CalendarService:
-    global _calendar
-    if _calendar is None:
-        _calendar = CalendarService()
-    return _calendar
+    cal = _calendar_ctx.get()
+    if cal is None:
+        # Fallback for dev scripts that call invoke_agent directly without
+        # setting a tenant context (Fase A single-tenant convenience).
+        return CalendarService()
+    return cal
 
 
 @tool
@@ -41,11 +47,10 @@ async def check_availability(start: str, end: str) -> dict:
 
 @tool
 async def list_free_slots(day: str, max_slots: int = 6) -> dict:
-    """Lista até `max_slots` horários livres de 30 minutos em `day`, dentro do
-    horário comercial da clínica (08-18h, seg-sex). Use quando o paciente
-    pedir um dia inteiro (\"tem horário sexta?\") ou quando você quiser
-    sugerir alternativas. Renderize a resposta usando o marcador [SLOTS] do
-    sistema.
+    """Lista até `max_slots` horários livres dentro do horário comercial da
+    clínica para o dia especificado. Use quando o paciente pedir um dia inteiro
+    (\"tem horário sexta?\") ou quando quiser oferecer alternativas. Renderize
+    a resposta usando o marcador [SLOTS] do sistema.
 
     Args:
         day: Dia no formato YYYY-MM-DD (ex: 2026-05-29).

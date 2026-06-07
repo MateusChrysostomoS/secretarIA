@@ -17,23 +17,32 @@ def _extract_message_id(response_data: dict) -> str | None:
 
 
 class WhatsAppClient:
-    """Async client for the Meta WhatsApp Cloud API.
+    """Async client for the Meta WhatsApp Cloud API."""
 
-    For the MVP (single tenant) credentials come from Settings. A multi-tenant
-    version would take the tenant's phone_number_id / access_token instead.
-    """
-
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        phone_number_id: str | None = None,
+        access_token: str | None = None,
+    ) -> None:
         self._settings = settings or get_settings()
         self._base_url = f"https://graph.facebook.com/{self._settings.META_GRAPH_API_VERSION}"
+        # Per-tenant override: when provided, these take precedence over settings.
+        self._phone_number_id = phone_number_id or self._settings.META_PHONE_NUMBER_ID
+        self._access_token = access_token or self._settings.META_ACCESS_TOKEN
+
+    @classmethod
+    def from_tenant(cls, tenant: "Tenant") -> "WhatsAppClient":  # type: ignore[name-defined]
+        """Build a client using a tenant's WhatsApp credentials."""
+        return cls(phone_number_id=tenant.phone_number_id, access_token=tenant.access_token)
 
     async def _post(self, payload: dict, to: str) -> dict:
         # TODO(rate-limit): WhatsApp Coexistence caps outbound traffic at
         #   ~5 messages/second per number. Add a token-bucket / Redis-backed
         #   limiter here before going to production.
-        url = f"{self._base_url}/{self._settings.META_PHONE_NUMBER_ID}/messages"
+        url = f"{self._base_url}/{self._phone_number_id}/messages"
         headers = {
-            "Authorization": f"Bearer {self._settings.META_ACCESS_TOKEN}",
+            "Authorization": f"Bearer {self._access_token}",
             "Content-Type": "application/json",
         }
         async with httpx.AsyncClient(timeout=15.0) as client:
