@@ -10,15 +10,21 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 revision: str = "c4d8e2f1a5b6"
 down_revision: str | None = "b2f1a7c9d3e4"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-appointment_status = sa.Enum(
+# create_type=False is essential: we create the type explicitly in upgrade()
+# with checkfirst=True (idempotent). Without this flag, op.create_table() would
+# ALSO auto-emit `CREATE TYPE appointment_status` (no checkfirst) and collide
+# with the explicit create -> DuplicateObjectError.
+appointment_status = postgresql.ENUM(
     "scheduled", "cancelled", "rescheduled", "confirmed", "attended", "no_show",
     name="appointment_status",
+    create_type=False,
 )
 
 
