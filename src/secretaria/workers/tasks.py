@@ -50,22 +50,6 @@ logger = get_logger(__name__)
 # case-insensitively against the trimmed message body.
 _MENU_COMMANDS = frozenset({"/menu", "/reset", "/recomecar", "/recomeçar", "/inicio", "/início"})
 
-# Static menu shown after a /menu command. Three reply buttons fit the WhatsApp
-# cap (max 3) and the labels double as the body the LLM will see on the next
-# inbound — clicking "Marcar consulta" sends the literal string "Marcar
-# consulta" to the agent, which knows how to handle it.
-_MENU_BODY = (
-    "Bem-vindo(a) à Eye Company 👁️\n"
-    "Cuidado oftalmológico personalizado com o Dr. Mateus Chrysóstomo.\n\n"
-    "Como posso te ajudar?"
-)
-_MENU_BUTTONS = [
-    ("menu|book", "Marcar consulta"),
-    ("menu|cancel", "Cancelar consulta"),
-    ("menu|human", "Falar com humano"),
-]
-
-
 def is_menu_command(body: str | None) -> bool:
     """True when the patient typed a `/menu`-style reset command."""
     if not body:
@@ -248,11 +232,12 @@ async def _handle_menu_command(
     patient_name: str | None,
     wam_id: str,
 ) -> None:
-    """Reset the conversation and send a fresh button menu.
+    """Reset the conversation: wipe all context, then re-send the greeting.
 
-    Wipes every prior message for the conversation, flips handover back to
-    BOT_ACTIVE and pushes a static welcome card. The `/menu` event itself is
-    NOT persisted - it is a control command, not real conversation content.
+    Wipes every prior message for the conversation (so the agent starts as if
+    it had never spoken to this patient), flips handover back to BOT_ACTIVE and
+    re-sends the tenant's configured first-contact greeting. The `/menu` event
+    itself is NOT persisted - it is a control command, not conversation content.
     """
     async with async_session_factory() as session:
         try:
@@ -284,39 +269,31 @@ async def _handle_menu_command(
                 conversation.last_human_message_at = None
                 conversation.last_bot_message_at = None
                 conversation_id = conversation.id
+                # Captured inside the txn so the values survive the session close.
+                greeting = (tenant.greeting_message or "").strip()
+                greeting_buttons = [str(b) for b in (tenant.greeting_buttons or [])]
         except IntegrityError:
             logger.info("worker_menu_duplicate_race", wam_id=wam_id)
             return
 
-    try:
-        result = await WhatsAppClient().send_buttons(
-            to=wa_id,
-            body=_MENU_BODY,
-            buttons=_MENU_BUTTONS,
-        )
-    except Exception as exc:
-        logger.error(
-            "worker_menu_send_failed",
-            error=str(exc),
-            conversation_id=str(conversation_id),
-        )
+    if not greeting:
+        # No greeting configured: context is cleared and the next patient
+        # message will get the LLM's improvised opener. Nothing to send now.
+        logger.info("worker_menu_reset_no_greeting", conversation_id=str(conversation_id))
         return
 
-    async with async_session_factory() as session:
-        async with session.begin():
-            session.add(
-                Message(
-                    conversation_id=conversation_id,
-                    direction=MessageDirection.OUTBOUND,
-                    sender=MessageSender.BOT,
-                    wam_id=_extract_sent_wam_id(result),
-                    body=_MENU_BODY,
-                )
-            )
-            conversation = await session.get(Conversation, conversation_id)
-            if conversation is not None:
-                conversation.last_bot_message_at = datetime.now(UTC)
-    logger.info("worker_menu_sent", conversation_id=str(conversation_id))
+    # Re-send the greeting exactly as a first contact would (verbatim, one
+    # message, with the configured quick-reply buttons).
+    await _send_greeting(
+        _ReplyContext(
+            conversation_id=conversation_id,
+            patient_wa_id=wa_id,
+            inbound_body="",
+            greeting_override=greeting,
+            greeting_buttons=greeting_buttons,
+        )
+    )
+    logger.info("worker_menu_reset", conversation_id=str(conversation_id))
 
 
 async def _send_bot_reply(reply: _ReplyContext) -> None:

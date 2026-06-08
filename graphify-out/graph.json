@@ -339,7 +339,7 @@
       "source_file": "scripts/chat_tenant.py",
       "source_location": "L1",
       "id": "scripts_chat_tenant_py",
-      "community": 6,
+      "community": 71,
       "norm_label": "chat_tenant.py"
     },
     {
@@ -348,7 +348,7 @@
       "source_file": "scripts/chat_tenant.py",
       "source_location": "L33",
       "id": "scripts_chat_tenant_load_config",
-      "community": 6,
+      "community": 71,
       "norm_label": "_load_config()"
     },
     {
@@ -357,7 +357,7 @@
       "source_file": "scripts/chat_tenant.py",
       "source_location": "L48",
       "id": "scripts_chat_tenant_main",
-      "community": 6,
+      "community": 71,
       "norm_label": "main()"
     },
     {
@@ -366,7 +366,7 @@
       "source_file": "scripts/chat_tenant.py",
       "source_location": "L1",
       "id": "scripts_chat_tenant_rationale_1",
-      "community": 6,
+      "community": 71,
       "norm_label": "terminal chat with the agent dressed by a real tenant's hub config.  unlike scri"
     },
     {
@@ -537,7 +537,7 @@
       "source_file": "scripts/test_agent.py",
       "source_location": "L1",
       "id": "scripts_test_agent_py",
-      "community": 10,
+      "community": 6,
       "norm_label": "test_agent.py"
     },
     {
@@ -546,7 +546,7 @@
       "source_file": "scripts/test_agent.py",
       "source_location": "L25",
       "id": "scripts_test_agent_print_tool_calls",
-      "community": 10,
+      "community": 6,
       "norm_label": "_print_tool_calls()"
     },
     {
@@ -555,7 +555,7 @@
       "source_file": "scripts/test_agent.py",
       "source_location": "L33",
       "id": "scripts_test_agent_main",
-      "community": 10,
+      "community": 6,
       "norm_label": "main()"
     },
     {
@@ -564,7 +564,7 @@
       "source_file": "scripts/test_agent.py",
       "source_location": "L1",
       "id": "scripts_test_agent_rationale_1",
-      "community": 10,
+      "community": 6,
       "norm_label": "terminal agent loop for secretaria (fase a smoke test).  uses the same langgraph"
     },
     {
@@ -573,7 +573,7 @@
       "source_file": "scripts/test_agent.py",
       "source_location": "L26",
       "id": "scripts_test_agent_rationale_26",
-      "community": 10,
+      "community": 6,
       "norm_label": "surface tool invocations so the dev can see what the llm decided."
     },
     {
@@ -595,10 +595,19 @@
       "norm_label": "greeting_message"
     },
     {
-      "label": "persona_notes",
+      "label": "greeting_buttons",
       "file_type": "code",
       "source_file": "scripts/configs/clinica-psi-infantil.json",
       "source_location": "L3",
+      "id": "configs_clinica_psi_infantil_greeting_buttons",
+      "community": 41,
+      "norm_label": "greeting_buttons"
+    },
+    {
+      "label": "persona_notes",
+      "file_type": "code",
+      "source_file": "scripts/configs/clinica-psi-infantil.json",
+      "source_location": "L4",
       "id": "configs_clinica_psi_infantil_persona_notes",
       "community": 41,
       "norm_label": "persona_notes"
@@ -607,7 +616,7 @@
       "label": "language",
       "file_type": "code",
       "source_file": "scripts/configs/clinica-psi-infantil.json",
-      "source_location": "L4",
+      "source_location": "L5",
       "id": "configs_clinica_psi_infantil_language",
       "community": 41,
       "norm_label": "language"
@@ -616,7 +625,7 @@
       "label": "timezone",
       "file_type": "code",
       "source_file": "scripts/configs/clinica-psi-infantil.json",
-      "source_location": "L5",
+      "source_location": "L6",
       "id": "configs_clinica_psi_infantil_timezone",
       "community": 41,
       "norm_label": "timezone"
@@ -625,7 +634,7 @@
       "label": "appointment_duration_min",
       "file_type": "code",
       "source_file": "scripts/configs/clinica-psi-infantil.json",
-      "source_location": "L6",
+      "source_location": "L7",
       "id": "configs_clinica_psi_infantil_appointment_duration_min",
       "community": 41,
       "norm_label": "appointment_duration_min"
@@ -634,7 +643,7 @@
       "label": "business_hours",
       "file_type": "code",
       "source_file": "scripts/configs/clinica-psi-infantil.json",
-      "source_location": "L7",
+      "source_location": "L8",
       "id": "configs_clinica_psi_infantil_business_hours",
       "community": 41,
       "norm_label": "business_hours"
@@ -643,7 +652,7 @@
       "label": "monday",
       "file_type": "code",
       "source_file": "scripts/configs/clinica-psi-infantil.json",
-      "source_location": "L8",
+      "source_location": "L9",
       "id": "configs_clinica_psi_infantil_business_hours_monday",
       "community": 41,
       "norm_label": "monday"
@@ -652,7 +661,7 @@
       "label": "tuesday",
       "file_type": "code",
       "source_file": "scripts/configs/clinica-psi-infantil.json",
-      "source_location": "L9",
+      "source_location": "L10",
       "id": "configs_clinica_psi_infantil_business_hours_tuesday",
       "community": 41,
       "norm_label": "tuesday"
@@ -661,7 +670,7 @@
       "label": "wednesday",
       "file_type": "code",
       "source_file": "scripts/configs/clinica-psi-infantil.json",
-      "source_location": "L10",
+      "source_location": "L11",
       "id": "configs_clinica_psi_infantil_business_hours_wednesday",
       "community": 41,
       "norm_label": "wednesday"
@@ -670,7 +679,7 @@
       "label": "thursday",
       "file_type": "code",
       "source_file": "scripts/configs/clinica-psi-infantil.json",
-      "source_location": "L11",
+      "source_location": "L12",
       "id": "configs_clinica_psi_infantil_business_hours_thursday",
       "community": 41,
       "norm_label": "thursday"
@@ -679,7 +688,7 @@
       "label": "friday",
       "file_type": "code",
       "source_file": "scripts/configs/clinica-psi-infantil.json",
-      "source_location": "L12",
+      "source_location": "L13",
       "id": "configs_clinica_psi_infantil_business_hours_friday",
       "community": 41,
       "norm_label": "friday"
@@ -688,7 +697,7 @@
       "label": "saturday",
       "file_type": "code",
       "source_file": "scripts/configs/clinica-psi-infantil.json",
-      "source_location": "L13",
+      "source_location": "L14",
       "id": "configs_clinica_psi_infantil_business_hours_saturday",
       "community": 41,
       "norm_label": "saturday"
@@ -697,7 +706,7 @@
       "label": "appointment_types",
       "file_type": "code",
       "source_file": "scripts/configs/clinica-psi-infantil.json",
-      "source_location": "L15",
+      "source_location": "L16",
       "id": "configs_clinica_psi_infantil_appointment_types",
       "community": 41,
       "norm_label": "appointment_types"
@@ -753,7 +762,7 @@
       "source_file": "src/secretaria/config.py",
       "source_location": "L113",
       "id": "secretaria_config_get_settings",
-      "community": 58,
+      "community": 47,
       "norm_label": "get_settings()"
     },
     {
@@ -789,7 +798,7 @@
       "source_file": "src/secretaria/config.py",
       "source_location": "L114",
       "id": "secretaria_config_rationale_114",
-      "community": 58,
+      "community": 47,
       "norm_label": "return a cached settings instance (read once per process)."
     },
     {
@@ -1320,7 +1329,7 @@
       "source_file": "src/secretaria/api/admin.py",
       "source_location": "L1",
       "id": "src_secretaria_api_admin_py",
-      "community": 49,
+      "community": 38,
       "norm_label": "admin.py"
     },
     {
@@ -1329,7 +1338,7 @@
       "source_file": "src/secretaria/api/admin.py",
       "source_location": "L34",
       "id": "api_admin_require_admin",
-      "community": 49,
+      "community": 47,
       "norm_label": "require_admin()"
     },
     {
@@ -1338,7 +1347,7 @@
       "source_file": "src/secretaria/api/admin.py",
       "source_location": "L55",
       "id": "api_admin_resetrequest",
-      "community": 49,
+      "community": 38,
       "norm_label": "resetrequest"
     },
     {
@@ -1356,7 +1365,7 @@
       "source_file": "src/secretaria/api/admin.py",
       "source_location": "L69",
       "id": "api_admin_resetresponse",
-      "community": 49,
+      "community": 38,
       "norm_label": "resetresponse"
     },
     {
@@ -1365,7 +1374,7 @@
       "source_file": "src/secretaria/api/admin.py",
       "source_location": "L92",
       "id": "api_admin_reset_data",
-      "community": 49,
+      "community": 38,
       "norm_label": "reset_data()"
     },
     {
@@ -1374,7 +1383,7 @@
       "source_file": "src/secretaria/api/admin.py",
       "source_location": "L1",
       "id": "api_admin_rationale_1",
-      "community": 49,
+      "community": 38,
       "norm_label": "administrative endpoints (currently: data wipe).  every route here is guarded by"
     },
     {
@@ -1383,7 +1392,7 @@
       "source_file": "src/secretaria/api/admin.py",
       "source_location": "L37",
       "id": "api_admin_rationale_37",
-      "community": 49,
+      "community": 47,
       "norm_label": "fastapi dependency: 403 unless `x-admin-token` matches the env token.      uses"
     },
     {
@@ -1392,7 +1401,7 @@
       "source_file": "src/secretaria/api/admin.py",
       "source_location": "L93",
       "id": "api_admin_rationale_93",
-      "community": 49,
+      "community": 38,
       "norm_label": "reset the database. requires `confirm: true` to actually run."
     },
     {
@@ -1761,7 +1770,7 @@
       "source_file": "src/secretaria/api/webhook.py",
       "source_location": "L1",
       "id": "src_secretaria_api_webhook_py",
-      "community": 8,
+      "community": 7,
       "norm_label": "webhook.py"
     },
     {
@@ -1770,7 +1779,7 @@
       "source_file": "src/secretaria/api/webhook.py",
       "source_location": "L32",
       "id": "api_webhook_verify_webhook",
-      "community": 8,
+      "community": 7,
       "norm_label": "verify_webhook()"
     },
     {
@@ -1779,7 +1788,7 @@
       "source_file": "src/secretaria/api/webhook.py",
       "source_location": "L52",
       "id": "api_webhook_filter_new_event_ids",
-      "community": 8,
+      "community": 7,
       "norm_label": "_filter_new_event_ids()"
     },
     {
@@ -1788,7 +1797,7 @@
       "source_file": "src/secretaria/api/webhook.py",
       "source_location": "L71",
       "id": "api_webhook_receive_webhook",
-      "community": 8,
+      "community": 7,
       "norm_label": "receive_webhook()"
     },
     {
@@ -1797,7 +1806,7 @@
       "source_file": "src/secretaria/api/webhook.py",
       "source_location": "L1",
       "id": "api_webhook_rationale_1",
-      "community": 8,
+      "community": 7,
       "norm_label": "whatsapp webhook endpoints.  get  /webhook  - meta verification handshake (echoe"
     },
     {
@@ -1806,7 +1815,7 @@
       "source_file": "src/secretaria/api/webhook.py",
       "source_location": "L33",
       "id": "api_webhook_rationale_33",
-      "community": 8,
+      "community": 7,
       "norm_label": "meta verification handshake.      meta calls this once when the webhook is confi"
     },
     {
@@ -1815,7 +1824,7 @@
       "source_file": "src/secretaria/api/webhook.py",
       "source_location": "L53",
       "id": "api_webhook_rationale_53",
-      "community": 8,
+      "community": 7,
       "norm_label": "return the subset of `event_ids` not yet in `processed_events`.      fail-open:"
     },
     {
@@ -1824,7 +1833,7 @@
       "source_file": "src/secretaria/api/webhook.py",
       "source_location": "L72",
       "id": "api_webhook_rationale_72",
-      "community": 8,
+      "community": 7,
       "norm_label": "receive a webhook event.      golden rule: return 200 in well under 5 seconds. o"
     },
     {
@@ -1860,7 +1869,7 @@
       "source_file": "",
       "source_location": "",
       "id": "runtimeerror",
-      "community": 36,
+      "community": 5,
       "norm_label": "runtimeerror"
     },
     {
@@ -1941,7 +1950,7 @@
       "source_file": "src/secretaria/core/database.py",
       "source_location": "L1",
       "id": "src_secretaria_core_database_py",
-      "community": 52,
+      "community": 1,
       "norm_label": "database.py"
     },
     {
@@ -1968,7 +1977,7 @@
       "source_file": "src/secretaria/core/database.py",
       "source_location": "L35",
       "id": "core_database_get_session",
-      "community": 52,
+      "community": 1,
       "norm_label": "get_session()"
     },
     {
@@ -1977,7 +1986,7 @@
       "source_file": "src/secretaria/core/database.py",
       "source_location": "L1",
       "id": "core_database_rationale_1",
-      "community": 52,
+      "community": 1,
       "norm_label": "async sqlalchemy 2.0 engine, session factory and declarative base."
     },
     {
@@ -1995,7 +2004,7 @@
       "source_file": "src/secretaria/core/database.py",
       "source_location": "L36",
       "id": "core_database_rationale_36",
-      "community": 52,
+      "community": 1,
       "norm_label": "fastapi dependency that yields a database session."
     },
     {
@@ -2355,7 +2364,7 @@
       "source_file": "src/secretaria/models/message.py",
       "source_location": "L1",
       "id": "src_secretaria_models_message_py",
-      "community": 7,
+      "community": 1,
       "norm_label": "message.py"
     },
     {
@@ -2364,7 +2373,7 @@
       "source_file": "src/secretaria/models/message.py",
       "source_location": "L13",
       "id": "models_message_messagedirection",
-      "community": 7,
+      "community": 1,
       "norm_label": "messagedirection"
     },
     {
@@ -2373,7 +2382,7 @@
       "source_file": "src/secretaria/models/message.py",
       "source_location": "L20",
       "id": "models_message_messagesender",
-      "community": 7,
+      "community": 1,
       "norm_label": "messagesender"
     },
     {
@@ -2382,7 +2391,7 @@
       "source_file": "src/secretaria/models/message.py",
       "source_location": "L28",
       "id": "models_message_enum_values",
-      "community": 7,
+      "community": 1,
       "norm_label": "_enum_values()"
     },
     {
@@ -2400,7 +2409,7 @@
       "source_file": "src/secretaria/models/message.py",
       "source_location": "L1",
       "id": "models_message_rationale_1",
-      "community": 7,
+      "community": 1,
       "norm_label": "message model - a single message inside a conversation."
     },
     {
@@ -2409,7 +2418,7 @@
       "source_file": "src/secretaria/models/message.py",
       "source_location": "L14",
       "id": "models_message_rationale_14",
-      "community": 7,
+      "community": 1,
       "norm_label": "relative to the clinic's whatsapp number."
     },
     {
@@ -2418,7 +2427,7 @@
       "source_file": "src/secretaria/models/message.py",
       "source_location": "L21",
       "id": "models_message_rationale_21",
-      "community": 7,
+      "community": 1,
       "norm_label": "who authored the message."
     },
     {
@@ -2508,7 +2517,7 @@
       "source_file": "src/secretaria/models/tenant.py",
       "source_location": "L1",
       "id": "src_secretaria_models_tenant_py",
-      "community": 65,
+      "community": 1,
       "norm_label": "tenant.py"
     },
     {
@@ -2517,7 +2526,7 @@
       "source_file": "src/secretaria/models/tenant.py",
       "source_location": "L12",
       "id": "models_tenant_tenant",
-      "community": 65,
+      "community": 1,
       "norm_label": "tenant"
     },
     {
@@ -2526,7 +2535,7 @@
       "source_file": "src/secretaria/models/tenant.py",
       "source_location": "L1",
       "id": "models_tenant_rationale_1",
-      "community": 65,
+      "community": 1,
       "norm_label": "tenant model - one clinic, with its own whatsapp business credentials."
     },
     {
@@ -2535,7 +2544,7 @@
       "source_file": "src/secretaria/models/tenant.py",
       "source_location": "L13",
       "id": "models_tenant_rationale_13",
-      "community": 65,
+      "community": 1,
       "norm_label": "a clinic using secretaria.      the system is multi-tenant in the data model. fo"
     },
     {
@@ -2544,7 +2553,7 @@
       "source_file": "src/secretaria/models/tenant_credentials.py",
       "source_location": "L1",
       "id": "src_secretaria_models_tenant_credentials_py",
-      "community": 1,
+      "community": 36,
       "norm_label": "tenant_credentials.py"
     },
     {
@@ -2553,7 +2562,7 @@
       "source_file": "src/secretaria/models/tenant_credentials.py",
       "source_location": "L18",
       "id": "models_tenant_credentials_tenantcredentials",
-      "community": 1,
+      "community": 36,
       "norm_label": "tenantcredentials"
     },
     {
@@ -2562,7 +2571,7 @@
       "source_file": "src/secretaria/models/tenant_credentials.py",
       "source_location": "L1",
       "id": "models_tenant_credentials_rationale_1",
-      "community": 1,
+      "community": 36,
       "norm_label": "encrypted-at-rest credentials for a tenant.  kept in a separate table from `tena"
     },
     {
@@ -2571,7 +2580,7 @@
       "source_file": "src/secretaria/models/tenant_credentials.py",
       "source_location": "L19",
       "id": "models_tenant_credentials_rationale_19",
-      "community": 1,
+      "community": 36,
       "norm_label": "one row per tenant holding its encrypted google calendar refresh token."
     },
     {
@@ -3039,7 +3048,7 @@
       "source_file": "src/secretaria/schemas/webhook.py",
       "source_location": "L114",
       "id": "schemas_webhook_iter_event_ids",
-      "community": 8,
+      "community": 7,
       "norm_label": "iter_event_ids()"
     },
     {
@@ -3084,7 +3093,7 @@
       "source_file": "src/secretaria/schemas/webhook.py",
       "source_location": "L115",
       "id": "schemas_webhook_rationale_115",
-      "community": 8,
+      "community": 7,
       "norm_label": "yield every message / echo id in a raw webhook payload (light parsing).      use"
     },
     {
@@ -3489,7 +3498,7 @@
       "source_file": "src/secretaria/services/precheck.py",
       "source_location": "L1",
       "id": "src_secretaria_services_precheck_py",
-      "community": 55,
+      "community": 9,
       "norm_label": "precheck.py"
     },
     {
@@ -3552,7 +3561,7 @@
       "source_file": "src/secretaria/services/precheck.py",
       "source_location": "L1",
       "id": "services_precheck_rationale_1",
-      "community": 55,
+      "community": 9,
       "norm_label": "http client for the precheck service (a separate fastapi app).  precheck runs in"
     },
     {
@@ -3597,7 +3606,7 @@
       "source_file": "src/secretaria/services/precheck.py",
       "source_location": "L60",
       "id": "services_precheck_rationale_60",
-      "community": 55,
+      "community": 9,
       "norm_label": "# todo: precheck_contract_needed - confirmar path e payload com o dono da api"
     },
     {
@@ -3606,7 +3615,7 @@
       "source_file": "src/secretaria/services/precheck.py",
       "source_location": "L69",
       "id": "services_precheck_rationale_69",
-      "community": 55,
+      "community": 9,
       "norm_label": "# todo: precheck_contract_needed - confirmar path e payload com o dono da api"
     },
     {
@@ -3975,7 +3984,7 @@
       "source_file": "src/secretaria/workers/arq_worker.py",
       "source_location": "L1",
       "id": "src_secretaria_workers_arq_worker_py",
-      "community": 46,
+      "community": 52,
       "norm_label": "arq_worker.py"
     },
     {
@@ -3984,7 +3993,7 @@
       "source_file": "src/secretaria/workers/arq_worker.py",
       "source_location": "L17",
       "id": "workers_arq_worker_on_startup",
-      "community": 46,
+      "community": 52,
       "norm_label": "on_startup()"
     },
     {
@@ -3993,7 +4002,7 @@
       "source_file": "src/secretaria/workers/arq_worker.py",
       "source_location": "L23",
       "id": "workers_arq_worker_on_shutdown",
-      "community": 46,
+      "community": 52,
       "norm_label": "on_shutdown()"
     },
     {
@@ -4002,7 +4011,7 @@
       "source_file": "src/secretaria/workers/arq_worker.py",
       "source_location": "L29",
       "id": "workers_arq_worker_workersettings",
-      "community": 46,
+      "community": 52,
       "norm_label": "workersettings"
     },
     {
@@ -4011,7 +4020,7 @@
       "source_file": "src/secretaria/workers/arq_worker.py",
       "source_location": "L1",
       "id": "workers_arq_worker_rationale_1",
-      "community": 46,
+      "community": 52,
       "norm_label": "arq worker entry point.  start the worker with:     arq secretaria.workers.arq_w"
     },
     {
@@ -4020,7 +4029,7 @@
       "source_file": "src/secretaria/workers/arq_worker.py",
       "source_location": "L18",
       "id": "workers_arq_worker_rationale_18",
-      "community": 46,
+      "community": 52,
       "norm_label": "run once when the worker process starts."
     },
     {
@@ -4029,7 +4038,7 @@
       "source_file": "src/secretaria/workers/arq_worker.py",
       "source_location": "L24",
       "id": "workers_arq_worker_rationale_24",
-      "community": 46,
+      "community": 52,
       "norm_label": "run once when the worker process stops."
     },
     {
@@ -4038,7 +4047,7 @@
       "source_file": "src/secretaria/workers/arq_worker.py",
       "source_location": "L30",
       "id": "workers_arq_worker_rationale_30",
-      "community": 46,
+      "community": 52,
       "norm_label": "arq worker configuration.      arq reads these as plain class attributes, so `re"
     },
     {
@@ -4047,14 +4056,14 @@
       "source_file": "src/secretaria/workers/tasks.py",
       "source_location": "L1",
       "id": "src_secretaria_workers_tasks_py",
-      "community": 4,
+      "community": 55,
       "norm_label": "tasks.py"
     },
     {
       "label": "is_menu_command()",
       "file_type": "code",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L69",
+      "source_location": "L53",
       "id": "workers_tasks_is_menu_command",
       "community": 59,
       "norm_label": "is_menu_command()"
@@ -4063,7 +4072,7 @@
       "label": "_ReplyContext",
       "file_type": "code",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L77",
+      "source_location": "L61",
       "id": "workers_tasks_replycontext",
       "community": 32,
       "norm_label": "_replycontext"
@@ -4072,7 +4081,7 @@
       "label": "process_webhook_event()",
       "file_type": "code",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L91",
+      "source_location": "L75",
       "id": "workers_tasks_process_webhook_event",
       "community": 34,
       "norm_label": "process_webhook_event()"
@@ -4081,7 +4090,7 @@
       "label": "_handle_patient_messages()",
       "file_type": "code",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L127",
+      "source_location": "L111",
       "id": "workers_tasks_handle_patient_messages",
       "community": 54,
       "norm_label": "_handle_patient_messages()"
@@ -4090,7 +4099,7 @@
       "label": "_persist_inbound_message()",
       "file_type": "code",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L161",
+      "source_location": "L145",
       "id": "workers_tasks_persist_inbound_message",
       "community": 54,
       "norm_label": "_persist_inbound_message()"
@@ -4099,16 +4108,16 @@
       "label": "_handle_menu_command()",
       "file_type": "code",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L244",
+      "source_location": "L228",
       "id": "workers_tasks_handle_menu_command",
-      "community": 64,
+      "community": 50,
       "norm_label": "_handle_menu_command()"
     },
     {
       "label": "_send_bot_reply()",
       "file_type": "code",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L322",
+      "source_location": "L299",
       "id": "workers_tasks_send_bot_reply",
       "community": 4,
       "norm_label": "_send_bot_reply()"
@@ -4117,25 +4126,25 @@
       "label": "_send_greeting()",
       "file_type": "code",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L404",
+      "source_location": "L381",
       "id": "workers_tasks_send_greeting",
-      "community": 4,
+      "community": 10,
       "norm_label": "_send_greeting()"
     },
     {
       "label": "_send_bubble()",
       "file_type": "code",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L453",
+      "source_location": "L430",
       "id": "workers_tasks_send_bubble",
-      "community": 4,
+      "community": 55,
       "norm_label": "_send_bubble()"
     },
     {
       "label": "_bubble_history_body()",
       "file_type": "code",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L479",
+      "source_location": "L456",
       "id": "workers_tasks_bubble_history_body",
       "community": 4,
       "norm_label": "_bubble_history_body()"
@@ -4144,7 +4153,7 @@
       "label": "_handle_human_echoes()",
       "file_type": "code",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L499",
+      "source_location": "L476",
       "id": "workers_tasks_handle_human_echoes",
       "community": 34,
       "norm_label": "_handle_human_echoes()"
@@ -4153,7 +4162,7 @@
       "label": "_persist_human_echo()",
       "file_type": "code",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L520",
+      "source_location": "L497",
       "id": "workers_tasks_persist_human_echo",
       "community": 50,
       "norm_label": "_persist_human_echo()"
@@ -4162,25 +4171,25 @@
       "label": "_extract_sent_wam_id()",
       "file_type": "code",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L563",
+      "source_location": "L540",
       "id": "workers_tasks_extract_sent_wam_id",
-      "community": 4,
+      "community": 10,
       "norm_label": "_extract_sent_wam_id()"
     },
     {
       "label": "_event_already_processed()",
       "file_type": "code",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L571",
+      "source_location": "L548",
       "id": "workers_tasks_event_already_processed",
-      "community": 50,
+      "community": 63,
       "norm_label": "_event_already_processed()"
     },
     {
       "label": "_resolve_tenant()",
       "file_type": "code",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L579",
+      "source_location": "L556",
       "id": "workers_tasks_resolve_tenant",
       "community": 65,
       "norm_label": "_resolve_tenant()"
@@ -4189,7 +4198,7 @@
       "label": "_get_or_create_patient()",
       "file_type": "code",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L619",
+      "source_location": "L596",
       "id": "workers_tasks_get_or_create_patient",
       "community": 51,
       "norm_label": "_get_or_create_patient()"
@@ -4198,7 +4207,7 @@
       "label": "_get_or_create_conversation()",
       "file_type": "code",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L641",
+      "source_location": "L618",
       "id": "workers_tasks_get_or_create_conversation",
       "community": 64,
       "norm_label": "_get_or_create_conversation()"
@@ -4207,7 +4216,7 @@
       "label": "send_patient_notification()",
       "file_type": "code",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L665",
+      "source_location": "L642",
       "id": "workers_tasks_send_patient_notification",
       "community": 37,
       "norm_label": "send_patient_notification()"
@@ -4218,15 +4227,15 @@
       "source_file": "src/secretaria/workers/tasks.py",
       "source_location": "L1",
       "id": "workers_tasks_rationale_1",
-      "community": 4,
+      "community": 55,
       "norm_label": "arq job functions - all async webhook processing happens here.  this code runs o"
     },
     {
       "label": "True when the patient typed a `/menu`-style reset command.",
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L70",
-      "id": "workers_tasks_rationale_70",
+      "source_location": "L54",
+      "id": "workers_tasks_rationale_54",
       "community": 59,
       "norm_label": "true when the patient typed a `/menu`-style reset command."
     },
@@ -4234,8 +4243,8 @@
       "label": "Minimal data needed to send a bot reply once the inbound DB txn commits.",
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L78",
-      "id": "workers_tasks_rationale_78",
+      "source_location": "L62",
+      "id": "workers_tasks_rationale_62",
       "community": 32,
       "norm_label": "minimal data needed to send a bot reply once the inbound db txn commits."
     },
@@ -4243,8 +4252,8 @@
       "label": "arq job: route a WhatsApp webhook event to the right handler.      Registered as",
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L92",
-      "id": "workers_tasks_rationale_92",
+      "source_location": "L76",
+      "id": "workers_tasks_rationale_76",
       "community": 34,
       "norm_label": "arq job: route a whatsapp webhook event to the right handler.      registered as"
     },
@@ -4252,8 +4261,8 @@
       "label": "Persist inbound patient messages and, if the bot is active, reply.",
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L128",
-      "id": "workers_tasks_rationale_128",
+      "source_location": "L112",
+      "id": "workers_tasks_rationale_112",
       "community": 54,
       "norm_label": "persist inbound patient messages and, if the bot is active, reply."
     },
@@ -4261,26 +4270,26 @@
       "label": "Record an inbound message in its own transaction.      Returns a `_ReplyContext`",
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L169",
-      "id": "workers_tasks_rationale_169",
+      "source_location": "L153",
+      "id": "workers_tasks_rationale_153",
       "community": 54,
       "norm_label": "record an inbound message in its own transaction.      returns a `_replycontext`"
     },
     {
-      "label": "Reset the conversation and send a fresh button menu.      Wipes every prior mess",
+      "label": "Reset the conversation: wipe all context, then re-send the greeting.      Wipes",
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L251",
-      "id": "workers_tasks_rationale_251",
-      "community": 64,
-      "norm_label": "reset the conversation and send a fresh button menu.      wipes every prior mess"
+      "source_location": "L235",
+      "id": "workers_tasks_rationale_235",
+      "community": 50,
+      "norm_label": "reset the conversation: wipe all context, then re-send the greeting.      wipes"
     },
     {
       "label": "Generate a reply, split it into bubbles, send each, and record them.",
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L323",
-      "id": "workers_tasks_rationale_323",
+      "source_location": "L300",
+      "id": "workers_tasks_rationale_300",
       "community": 4,
       "norm_label": "generate a reply, split it into bubbles, send each, and record them."
     },
@@ -4288,26 +4297,26 @@
       "label": "Send the tenant's first-contact greeting as a single verbatim message.      With",
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L405",
-      "id": "workers_tasks_rationale_405",
-      "community": 4,
+      "source_location": "L382",
+      "id": "workers_tasks_rationale_382",
+      "community": 10,
       "norm_label": "send the tenant's first-contact greeting as a single verbatim message.      with"
     },
     {
       "label": "Dispatch a single bubble to the right WhatsAppClient method.",
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L458",
-      "id": "workers_tasks_rationale_458",
-      "community": 4,
+      "source_location": "L435",
+      "id": "workers_tasks_rationale_435",
+      "community": 55,
       "norm_label": "dispatch a single bubble to the right whatsappclient method."
     },
     {
       "label": "Render an outbound bubble as the text the LLM should see in history.      Intera",
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L480",
-      "id": "workers_tasks_rationale_480",
+      "source_location": "L457",
+      "id": "workers_tasks_rationale_457",
       "community": 4,
       "norm_label": "render an outbound bubble as the text the llm should see in history.      intera"
     },
@@ -4315,8 +4324,8 @@
       "label": "Process `smb_message_echoes`: the human secretary replied from the app.",
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L500",
-      "id": "workers_tasks_rationale_500",
+      "source_location": "L477",
+      "id": "workers_tasks_rationale_477",
       "community": 34,
       "norm_label": "process `smb_message_echoes`: the human secretary replied from the app."
     },
@@ -4324,8 +4333,8 @@
       "label": "Record a human echo and switch the conversation to HUMAN_ACTIVE.",
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L527",
-      "id": "workers_tasks_rationale_527",
+      "source_location": "L504",
+      "id": "workers_tasks_rationale_504",
       "community": 50,
       "norm_label": "record a human echo and switch the conversation to human_active."
     },
@@ -4333,26 +4342,26 @@
       "label": "Pull the wamid from a Cloud API send response, tolerating bad shapes.",
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L564",
-      "id": "workers_tasks_rationale_564",
-      "community": 4,
+      "source_location": "L541",
+      "id": "workers_tasks_rationale_541",
+      "community": 10,
       "norm_label": "pull the wamid from a cloud api send response, tolerating bad shapes."
     },
     {
       "label": "True when `event_id` is already in the `processed_events` ledger.",
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L572",
-      "id": "workers_tasks_rationale_572",
-      "community": 50,
+      "source_location": "L549",
+      "id": "workers_tasks_rationale_549",
+      "community": 63,
       "norm_label": "true when `event_id` is already in the `processed_events` ledger."
     },
     {
       "label": "Find the tenant for an inbound event.      MVP single-tenant convenience: when n",
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L580",
-      "id": "workers_tasks_rationale_580",
+      "source_location": "L557",
+      "id": "workers_tasks_rationale_557",
       "community": 65,
       "norm_label": "find the tenant for an inbound event.      mvp single-tenant convenience: when n"
     },
@@ -4360,8 +4369,8 @@
       "label": "Return the patient for (tenant, wa_id), creating it if needed.",
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L625",
-      "id": "workers_tasks_rationale_625",
+      "source_location": "L602",
+      "id": "workers_tasks_rationale_602",
       "community": 51,
       "norm_label": "return the patient for (tenant, wa_id), creating it if needed."
     },
@@ -4369,8 +4378,8 @@
       "label": "Return the conversation for (tenant, patient), creating it if needed.",
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L646",
-      "id": "workers_tasks_rationale_646",
+      "source_location": "L623",
+      "id": "workers_tasks_rationale_623",
       "community": 64,
       "norm_label": "return the conversation for (tenant, patient), creating it if needed."
     },
@@ -4378,8 +4387,8 @@
       "label": "arq job: send a text message to a patient on behalf of a specific tenant.      T",
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L666",
-      "id": "workers_tasks_rationale_666",
+      "source_location": "L643",
+      "id": "workers_tasks_rationale_643",
       "community": 37,
       "norm_label": "arq job: send a text message to a patient on behalf of a specific tenant.      t"
     },
@@ -5455,6 +5464,168 @@
       "norm_label": "status / open todos"
     },
     {
+      "label": "True when the patient typed a `/menu`-style reset command.",
+      "file_type": "rationale",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L70",
+      "community": 59,
+      "norm_label": "true when the patient typed a `/menu`-style reset command.",
+      "id": "workers_tasks_rationale_70"
+    },
+    {
+      "label": "Minimal data needed to send a bot reply once the inbound DB txn commits.",
+      "file_type": "rationale",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L78",
+      "community": 32,
+      "norm_label": "minimal data needed to send a bot reply once the inbound db txn commits.",
+      "id": "workers_tasks_rationale_78"
+    },
+    {
+      "label": "arq job: route a WhatsApp webhook event to the right handler.      Registered as",
+      "file_type": "rationale",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L92",
+      "community": 34,
+      "norm_label": "arq job: route a whatsapp webhook event to the right handler.      registered as",
+      "id": "workers_tasks_rationale_92"
+    },
+    {
+      "label": "Persist inbound patient messages and, if the bot is active, reply.",
+      "file_type": "rationale",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L128",
+      "community": 54,
+      "norm_label": "persist inbound patient messages and, if the bot is active, reply.",
+      "id": "workers_tasks_rationale_128"
+    },
+    {
+      "label": "Record an inbound message in its own transaction.      Returns a `_ReplyContext`",
+      "file_type": "rationale",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L169",
+      "community": 54,
+      "norm_label": "record an inbound message in its own transaction.      returns a `_replycontext`",
+      "id": "workers_tasks_rationale_169"
+    },
+    {
+      "label": "Reset the conversation and send a fresh button menu.      Wipes every prior mess",
+      "file_type": "rationale",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L251",
+      "community": 50,
+      "norm_label": "reset the conversation and send a fresh button menu.      wipes every prior mess",
+      "id": "workers_tasks_rationale_251"
+    },
+    {
+      "label": "Generate a reply, split it into bubbles, send each, and record them.",
+      "file_type": "rationale",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L323",
+      "community": 4,
+      "norm_label": "generate a reply, split it into bubbles, send each, and record them.",
+      "id": "workers_tasks_rationale_323"
+    },
+    {
+      "label": "Send the tenant's first-contact greeting as a single verbatim message.      With",
+      "file_type": "rationale",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L405",
+      "community": 10,
+      "norm_label": "send the tenant's first-contact greeting as a single verbatim message.      with",
+      "id": "workers_tasks_rationale_405"
+    },
+    {
+      "label": "Dispatch a single bubble to the right WhatsAppClient method.",
+      "file_type": "rationale",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L458",
+      "community": 55,
+      "norm_label": "dispatch a single bubble to the right whatsappclient method.",
+      "id": "workers_tasks_rationale_458"
+    },
+    {
+      "label": "Render an outbound bubble as the text the LLM should see in history.      Intera",
+      "file_type": "rationale",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L480",
+      "community": 4,
+      "norm_label": "render an outbound bubble as the text the llm should see in history.      intera",
+      "id": "workers_tasks_rationale_480"
+    },
+    {
+      "label": "Process `smb_message_echoes`: the human secretary replied from the app.",
+      "file_type": "rationale",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L500",
+      "community": 34,
+      "norm_label": "process `smb_message_echoes`: the human secretary replied from the app.",
+      "id": "workers_tasks_rationale_500"
+    },
+    {
+      "label": "Record a human echo and switch the conversation to HUMAN_ACTIVE.",
+      "file_type": "rationale",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L527",
+      "community": 50,
+      "norm_label": "record a human echo and switch the conversation to human_active.",
+      "id": "workers_tasks_rationale_527"
+    },
+    {
+      "label": "Pull the wamid from a Cloud API send response, tolerating bad shapes.",
+      "file_type": "rationale",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L564",
+      "community": 10,
+      "norm_label": "pull the wamid from a cloud api send response, tolerating bad shapes.",
+      "id": "workers_tasks_rationale_564"
+    },
+    {
+      "label": "True when `event_id` is already in the `processed_events` ledger.",
+      "file_type": "rationale",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L572",
+      "community": 63,
+      "norm_label": "true when `event_id` is already in the `processed_events` ledger.",
+      "id": "workers_tasks_rationale_572"
+    },
+    {
+      "label": "Find the tenant for an inbound event.      MVP single-tenant convenience: when n",
+      "file_type": "rationale",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L580",
+      "community": 65,
+      "norm_label": "find the tenant for an inbound event.      mvp single-tenant convenience: when n",
+      "id": "workers_tasks_rationale_580"
+    },
+    {
+      "label": "Return the patient for (tenant, wa_id), creating it if needed.",
+      "file_type": "rationale",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L625",
+      "community": 51,
+      "norm_label": "return the patient for (tenant, wa_id), creating it if needed.",
+      "id": "workers_tasks_rationale_625"
+    },
+    {
+      "label": "Return the conversation for (tenant, patient), creating it if needed.",
+      "file_type": "rationale",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L646",
+      "community": 64,
+      "norm_label": "return the conversation for (tenant, patient), creating it if needed.",
+      "id": "workers_tasks_rationale_646"
+    },
+    {
+      "label": "arq job: send a text message to a patient on behalf of a specific tenant.      T",
+      "file_type": "rationale",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L666",
+      "community": 37,
+      "norm_label": "arq job: send a text message to a patient on behalf of a specific tenant.      t",
+      "id": "workers_tasks_rationale_666"
+    },
+    {
       "label": "Parse an \"HH:MM\" string into a time, raising ValueError if out of range.",
       "file_type": "rationale",
       "source_file": "src/secretaria/schemas/config.py",
@@ -5540,7 +5711,7 @@
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
       "source_location": "L241",
-      "community": 64,
+      "community": 50,
       "norm_label": "reset the conversation and send a fresh button menu.      wipes every prior mess",
       "id": "workers_tasks_rationale_241"
     },
@@ -5558,7 +5729,7 @@
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
       "source_location": "L395",
-      "community": 4,
+      "community": 10,
       "norm_label": "send the tenant's first-contact greeting as a single verbatim message.",
       "id": "workers_tasks_rationale_395"
     },
@@ -5567,7 +5738,7 @@
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
       "source_location": "L433",
-      "community": 4,
+      "community": 55,
       "norm_label": "dispatch a single bubble to the right whatsappclient method.",
       "id": "workers_tasks_rationale_433"
     },
@@ -5603,7 +5774,7 @@
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
       "source_location": "L539",
-      "community": 4,
+      "community": 10,
       "norm_label": "pull the wamid from a cloud api send response, tolerating bad shapes.",
       "id": "workers_tasks_rationale_539"
     },
@@ -5612,7 +5783,7 @@
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
       "source_location": "L547",
-      "community": 50,
+      "community": 63,
       "norm_label": "true when `event_id` is already in the `processed_events` ledger.",
       "id": "workers_tasks_rationale_547"
     },
@@ -5657,7 +5828,7 @@
       "file_type": "rationale",
       "source_file": "src/secretaria/config.py",
       "source_location": "L73",
-      "community": 58,
+      "community": 47,
       "norm_label": "return a cached settings instance (read once per process).",
       "id": "secretaria_config_rationale_73"
     },
@@ -5882,7 +6053,7 @@
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
       "source_location": "L239",
-      "community": 4,
+      "community": 55,
       "norm_label": "dispatch a single bubble to the right whatsappclient method.",
       "id": "workers_tasks_rationale_239"
     },
@@ -5918,7 +6089,7 @@
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
       "source_location": "L345",
-      "community": 4,
+      "community": 10,
       "norm_label": "pull the wamid from a cloud api send response, tolerating bad shapes.",
       "id": "workers_tasks_rationale_345"
     },
@@ -5927,7 +6098,7 @@
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
       "source_location": "L353",
-      "community": 50,
+      "community": 63,
       "norm_label": "true when `event_id` is already in the `processed_events` ledger.",
       "id": "workers_tasks_rationale_353"
     },
@@ -6026,7 +6197,7 @@
       "file_type": "rationale",
       "source_file": "src/secretaria/schemas/webhook.py",
       "source_location": "L90",
-      "community": 8,
+      "community": 7,
       "norm_label": "yield every message / echo id in a raw webhook payload (light parsing).      use",
       "id": "schemas_webhook_rationale_90"
     },
@@ -6112,20 +6283,11 @@
       "id": "workers_tasks_rationale_208"
     },
     {
-      "label": "Record a human echo and switch the conversation to HUMAN_ACTIVE.",
-      "file_type": "rationale",
-      "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L235",
-      "community": 50,
-      "norm_label": "record a human echo and switch the conversation to human_active.",
-      "id": "workers_tasks_rationale_235"
-    },
-    {
       "label": "Pull the wamid from a Cloud API send response, tolerating bad shapes.",
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
       "source_location": "L272",
-      "community": 4,
+      "community": 10,
       "norm_label": "pull the wamid from a cloud api send response, tolerating bad shapes.",
       "id": "workers_tasks_rationale_272"
     },
@@ -6134,7 +6296,7 @@
       "file_type": "rationale",
       "source_file": "src/secretaria/workers/tasks.py",
       "source_location": "L280",
-      "community": 50,
+      "community": 63,
       "norm_label": "true when `event_id` is already in the `processed_events` ledger.",
       "id": "workers_tasks_rationale_280"
     },
@@ -6200,7 +6362,7 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "community": 48,
+      "community": 1,
       "norm_label": "run_migrations_online",
       "id": "env_run_migrations_online"
     },
@@ -6213,7 +6375,7 @@
       "captured_at": null,
       "author": null,
       "contributor": null,
-      "community": 48,
+      "community": 1,
       "norm_label": "_do_run_migrations",
       "id": "env_do_run_migrations"
     },
@@ -7535,9 +7697,9 @@
       "source_file": "migrations/versions/d5e9f3a2b7c8_greeting_buttons.py",
       "source_location": "L24",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "migrations_versions_d5e9f3a2b7c8_greeting_buttons_py",
-      "target": "versions_d5e9f3a2b7c8_greeting_buttons_upgrade",
-      "confidence_score": 1.0
+      "target": "versions_d5e9f3a2b7c8_greeting_buttons_upgrade"
     },
     {
       "relation": "contains",
@@ -7545,9 +7707,9 @@
       "source_file": "migrations/versions/d5e9f3a2b7c8_greeting_buttons.py",
       "source_location": "L33",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "migrations_versions_d5e9f3a2b7c8_greeting_buttons_py",
-      "target": "versions_d5e9f3a2b7c8_greeting_buttons_downgrade",
-      "confidence_score": 1.0
+      "target": "versions_d5e9f3a2b7c8_greeting_buttons_downgrade"
     },
     {
       "relation": "contains",
@@ -7989,6 +8151,16 @@
       "confidence_score": 1.0,
       "source": "scripts_configs_clinica_psi_infantil_json",
       "target": "configs_clinica_psi_infantil_greeting_message"
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/configs/clinica-psi-infantil.json",
+      "source_location": "L3",
+      "weight": 1.0,
+      "source": "scripts_configs_clinica_psi_infantil_json",
+      "target": "configs_clinica_psi_infantil_greeting_buttons",
+      "confidence_score": 1.0
     },
     {
       "relation": "contains",
@@ -12146,17 +12318,6 @@
       "confidence": "INFERRED",
       "confidence_score": 0.8,
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L298",
-      "weight": 1.0,
-      "source": "workers_tasks_handle_menu_command",
-      "target": "models_message_message"
-    },
-    {
-      "relation": "calls",
-      "context": "call",
-      "confidence": "INFERRED",
-      "confidence_score": 0.8,
-      "source_file": "src/secretaria/workers/tasks.py",
       "source_location": "L188",
       "weight": 1.0,
       "source": "workers_tasks_send_bot_reply",
@@ -12182,6 +12343,17 @@
       "source_location": "L253",
       "weight": 1.0,
       "source": "workers_tasks_persist_human_echo",
+      "target": "models_message_message"
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L298",
+      "weight": 1.0,
+      "source": "workers_tasks_handle_menu_command",
       "target": "models_message_message"
     },
     {
@@ -12686,9 +12858,9 @@
       "source_file": "src/secretaria/schemas/config.py",
       "source_location": "L103",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "src_secretaria_schemas_config_py",
-      "target": "schemas_config_check_greeting_buttons",
-      "confidence_score": 1.0
+      "target": "schemas_config_check_greeting_buttons"
     },
     {
       "relation": "contains",
@@ -12696,9 +12868,9 @@
       "source_file": "src/secretaria/schemas/config.py",
       "source_location": "L128",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "src_secretaria_schemas_config_py",
-      "target": "schemas_config_check_greeting_with_buttons",
-      "confidence_score": 1.0
+      "target": "schemas_config_check_greeting_with_buttons"
     },
     {
       "relation": "contains",
@@ -12758,9 +12930,9 @@
       "source_file": "src/secretaria/schemas/config.py",
       "source_location": "L36",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "schemas_config_rationale_36",
-      "target": "schemas_config_parse_hhmm",
-      "confidence_score": 1.0
+      "target": "schemas_config_parse_hhmm"
     },
     {
       "relation": "rationale_for",
@@ -12778,9 +12950,9 @@
       "source_file": "src/secretaria/schemas/config.py",
       "source_location": "L42",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "schemas_config_rationale_42",
-      "target": "schemas_config_timewindow",
-      "confidence_score": 1.0
+      "target": "schemas_config_timewindow"
     },
     {
       "relation": "rationale_for",
@@ -12798,9 +12970,9 @@
       "source_file": "src/secretaria/schemas/config.py",
       "source_location": "L55",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "schemas_config_rationale_55",
-      "target": "schemas_config_appointmenttype",
-      "confidence_score": 1.0
+      "target": "schemas_config_appointmenttype"
     },
     {
       "relation": "rationale_for",
@@ -12829,9 +13001,9 @@
       "source_file": "src/secretaria/schemas/config.py",
       "source_location": "L65",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "schemas_config_rationale_65",
-      "target": "schemas_config_validate_business_hours",
-      "confidence_score": 1.0
+      "target": "schemas_config_validate_business_hours"
     },
     {
       "relation": "rationale_for",
@@ -12849,9 +13021,9 @@
       "source_file": "src/secretaria/schemas/config.py",
       "source_location": "L77",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "schemas_config_rationale_77",
-      "target": "schemas_config_tenantconfigupdate",
-      "confidence_score": 1.0
+      "target": "schemas_config_tenantconfigupdate"
     },
     {
       "relation": "rationale_for",
@@ -12869,9 +13041,9 @@
       "source_file": "src/secretaria/schemas/config.py",
       "source_location": "L158",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "schemas_config_rationale_158",
-      "target": "schemas_config_tenantconfigread",
-      "confidence_score": 1.0
+      "target": "schemas_config_tenantconfigread"
     },
     {
       "relation": "rationale_for",
@@ -14392,17 +14564,6 @@
       "confidence": "INFERRED",
       "confidence_score": 0.8,
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L282",
-      "weight": 1.0,
-      "source": "workers_tasks_handle_menu_command",
-      "target": "services_whatsapp_whatsappclient"
-    },
-    {
-      "relation": "calls",
-      "context": "call",
-      "confidence": "INFERRED",
-      "confidence_score": 0.8,
-      "source_file": "src/secretaria/workers/tasks.py",
       "source_location": "L173",
       "weight": 1.0,
       "source": "workers_tasks_send_bot_reply",
@@ -14417,6 +14578,17 @@
       "source_location": "L398",
       "weight": 1.0,
       "source": "workers_tasks_send_greeting",
+      "target": "services_whatsapp_whatsappclient"
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L282",
+      "weight": 1.0,
+      "source": "workers_tasks_handle_menu_command",
       "target": "services_whatsapp_whatsappclient"
     },
     {
@@ -14797,11 +14969,11 @@
       "relation": "rationale_for",
       "confidence": "EXTRACTED",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L70",
+      "source_location": "L54",
       "weight": 1.0,
-      "confidence_score": 1.0,
-      "source": "workers_tasks_rationale_70",
-      "target": "workers_tasks_is_menu_command"
+      "source": "workers_tasks_rationale_54",
+      "target": "workers_tasks_is_menu_command",
+      "confidence_score": 1.0
     },
     {
       "relation": "calls",
@@ -14826,6 +14998,16 @@
       "target": "workers_tasks_is_menu_command"
     },
     {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L70",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "workers_tasks_rationale_70",
+      "target": "workers_tasks_is_menu_command"
+    },
+    {
       "relation": "calls",
       "context": "call",
       "confidence": "EXTRACTED",
@@ -14835,6 +15017,27 @@
       "confidence_score": 1.0,
       "source": "workers_tasks_persist_inbound_message",
       "target": "workers_tasks_replycontext"
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L288",
+      "weight": 1.0,
+      "source": "workers_tasks_handle_menu_command",
+      "target": "workers_tasks_replycontext",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L62",
+      "weight": 1.0,
+      "source": "workers_tasks_rationale_62",
+      "target": "workers_tasks_replycontext",
+      "confidence_score": 1.0
     },
     {
       "relation": "rationale_for",
@@ -14892,11 +15095,21 @@
       "relation": "rationale_for",
       "confidence": "EXTRACTED",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L92",
+      "source_location": "L76",
       "weight": 1.0,
-      "source": "workers_tasks_rationale_92",
+      "source": "workers_tasks_rationale_76",
       "target": "workers_tasks_process_webhook_event",
       "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L92",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "workers_tasks_rationale_92",
+      "target": "workers_tasks_process_webhook_event"
     },
     {
       "relation": "rationale_for",
@@ -14965,11 +15178,21 @@
       "relation": "rationale_for",
       "confidence": "EXTRACTED",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L128",
+      "source_location": "L112",
       "weight": 1.0,
-      "source": "workers_tasks_rationale_128",
+      "source": "workers_tasks_rationale_112",
       "target": "workers_tasks_handle_patient_messages",
       "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L128",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "workers_tasks_rationale_128",
+      "target": "workers_tasks_handle_patient_messages"
     },
     {
       "relation": "rationale_for",
@@ -15049,11 +15272,21 @@
       "relation": "rationale_for",
       "confidence": "EXTRACTED",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L169",
+      "source_location": "L153",
       "weight": 1.0,
-      "source": "workers_tasks_rationale_169",
+      "source": "workers_tasks_rationale_153",
       "target": "workers_tasks_persist_inbound_message",
       "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L169",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "workers_tasks_rationale_169",
+      "target": "workers_tasks_persist_inbound_message"
     },
     {
       "relation": "rationale_for",
@@ -15134,6 +15367,27 @@
       "context": "call",
       "confidence": "EXTRACTED",
       "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L287",
+      "weight": 1.0,
+      "source": "workers_tasks_handle_menu_command",
+      "target": "workers_tasks_send_greeting",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L235",
+      "weight": 1.0,
+      "source": "workers_tasks_rationale_235",
+      "target": "workers_tasks_handle_menu_command",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "src/secretaria/workers/tasks.py",
       "source_location": "L302",
       "weight": 1.0,
       "confidence_score": 1.0,
@@ -15146,9 +15400,9 @@
       "source_file": "src/secretaria/workers/tasks.py",
       "source_location": "L251",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "workers_tasks_rationale_251",
-      "target": "workers_tasks_handle_menu_command",
-      "confidence_score": 1.0
+      "target": "workers_tasks_handle_menu_command"
     },
     {
       "relation": "rationale_for",
@@ -15208,11 +15462,21 @@
       "relation": "rationale_for",
       "confidence": "EXTRACTED",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L323",
+      "source_location": "L300",
       "weight": 1.0,
-      "source": "workers_tasks_rationale_323",
+      "source": "workers_tasks_rationale_300",
       "target": "workers_tasks_send_bot_reply",
       "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L323",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "workers_tasks_rationale_323",
+      "target": "workers_tasks_send_bot_reply"
     },
     {
       "relation": "rationale_for",
@@ -15259,11 +15523,21 @@
       "relation": "rationale_for",
       "confidence": "EXTRACTED",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L405",
+      "source_location": "L382",
       "weight": 1.0,
-      "source": "workers_tasks_rationale_405",
+      "source": "workers_tasks_rationale_382",
       "target": "workers_tasks_send_greeting",
       "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L405",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "workers_tasks_rationale_405",
+      "target": "workers_tasks_send_greeting"
     },
     {
       "relation": "rationale_for",
@@ -15279,11 +15553,21 @@
       "relation": "rationale_for",
       "confidence": "EXTRACTED",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L458",
+      "source_location": "L435",
       "weight": 1.0,
-      "source": "workers_tasks_rationale_458",
+      "source": "workers_tasks_rationale_435",
       "target": "workers_tasks_send_bubble",
       "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L458",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "workers_tasks_rationale_458",
+      "target": "workers_tasks_send_bubble"
     },
     {
       "relation": "rationale_for",
@@ -15309,11 +15593,21 @@
       "relation": "rationale_for",
       "confidence": "EXTRACTED",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L480",
+      "source_location": "L457",
       "weight": 1.0,
-      "source": "workers_tasks_rationale_480",
+      "source": "workers_tasks_rationale_457",
       "target": "workers_tasks_bubble_history_body",
       "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L480",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "workers_tasks_rationale_480",
+      "target": "workers_tasks_bubble_history_body"
     },
     {
       "relation": "rationale_for",
@@ -15350,11 +15644,21 @@
       "relation": "rationale_for",
       "confidence": "EXTRACTED",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L500",
+      "source_location": "L477",
       "weight": 1.0,
-      "source": "workers_tasks_rationale_500",
+      "source": "workers_tasks_rationale_477",
       "target": "workers_tasks_handle_human_echoes",
       "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L500",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "workers_tasks_rationale_500",
+      "target": "workers_tasks_handle_human_echoes"
     },
     {
       "relation": "rationale_for",
@@ -15434,11 +15738,21 @@
       "relation": "rationale_for",
       "confidence": "EXTRACTED",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L527",
+      "source_location": "L504",
       "weight": 1.0,
-      "source": "workers_tasks_rationale_527",
+      "source": "workers_tasks_rationale_504",
       "target": "workers_tasks_persist_human_echo",
       "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L527",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "workers_tasks_rationale_527",
+      "target": "workers_tasks_persist_human_echo"
     },
     {
       "relation": "rationale_for",
@@ -15474,11 +15788,21 @@
       "relation": "rationale_for",
       "confidence": "EXTRACTED",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L564",
+      "source_location": "L541",
       "weight": 1.0,
-      "source": "workers_tasks_rationale_564",
+      "source": "workers_tasks_rationale_541",
       "target": "workers_tasks_extract_sent_wam_id",
       "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L564",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "workers_tasks_rationale_564",
+      "target": "workers_tasks_extract_sent_wam_id"
     },
     {
       "relation": "rationale_for",
@@ -15514,11 +15838,21 @@
       "relation": "rationale_for",
       "confidence": "EXTRACTED",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L572",
+      "source_location": "L549",
       "weight": 1.0,
-      "source": "workers_tasks_rationale_572",
+      "source": "workers_tasks_rationale_549",
       "target": "workers_tasks_event_already_processed",
       "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L572",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "workers_tasks_rationale_572",
+      "target": "workers_tasks_event_already_processed"
     },
     {
       "relation": "rationale_for",
@@ -15554,11 +15888,21 @@
       "relation": "rationale_for",
       "confidence": "EXTRACTED",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L580",
+      "source_location": "L557",
       "weight": 1.0,
-      "source": "workers_tasks_rationale_580",
+      "source": "workers_tasks_rationale_557",
       "target": "workers_tasks_resolve_tenant",
       "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L580",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "workers_tasks_rationale_580",
+      "target": "workers_tasks_resolve_tenant"
     },
     {
       "relation": "rationale_for",
@@ -15594,11 +15938,21 @@
       "relation": "rationale_for",
       "confidence": "EXTRACTED",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L625",
+      "source_location": "L602",
       "weight": 1.0,
-      "source": "workers_tasks_rationale_625",
+      "source": "workers_tasks_rationale_602",
       "target": "workers_tasks_get_or_create_patient",
       "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L625",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "workers_tasks_rationale_625",
+      "target": "workers_tasks_get_or_create_patient"
     },
     {
       "relation": "rationale_for",
@@ -15634,11 +15988,21 @@
       "relation": "rationale_for",
       "confidence": "EXTRACTED",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L646",
+      "source_location": "L623",
       "weight": 1.0,
-      "source": "workers_tasks_rationale_646",
+      "source": "workers_tasks_rationale_623",
       "target": "workers_tasks_get_or_create_conversation",
       "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L646",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "workers_tasks_rationale_646",
+      "target": "workers_tasks_get_or_create_conversation"
     },
     {
       "relation": "rationale_for",
@@ -15674,11 +16038,21 @@
       "relation": "rationale_for",
       "confidence": "EXTRACTED",
       "source_file": "src/secretaria/workers/tasks.py",
-      "source_location": "L666",
+      "source_location": "L643",
       "weight": 1.0,
-      "source": "workers_tasks_rationale_666",
+      "source": "workers_tasks_rationale_643",
       "target": "workers_tasks_send_patient_notification",
       "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "src/secretaria/workers/tasks.py",
+      "source_location": "L666",
+      "weight": 1.0,
+      "confidence_score": 1.0,
+      "source": "workers_tasks_rationale_666",
+      "target": "workers_tasks_send_patient_notification"
     },
     {
       "relation": "rationale_for",
@@ -18136,5 +18510,5 @@
       "source_file": "CLAUDE.md"
     }
   ],
-  "built_at_commit": "c1a1ea2e0bc176c92f48cd1484692410ebfb500d"
+  "built_at_commit": "c041d95dcdb73ef00511ad4fac8e33d802d2d503"
 }
