@@ -4,11 +4,11 @@ This code runs OUTSIDE the HTTP request/response cycle, so it may safely do
 database writes, handover logic and outbound Cloud API calls.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -80,6 +80,12 @@ class _ReplyContext:
     conversation_id: UUID
     patient_wa_id: str
     inbound_body: str
+    # When set, this is the tenant's verbatim first-contact greeting: it is sent
+    # as a single message and the LLM is NOT invoked for this turn.
+    greeting_override: str | None = None
+    # Optional quick-reply labels rendered as buttons on the greeting. The label
+    # the patient taps comes back as their next message body.
+    greeting_buttons: list[str] = field(default_factory=list)
 
 
 async def process_webhook_event(ctx: dict, payload: dict) -> None:
@@ -181,6 +187,16 @@ async def _persist_inbound_message(
                 patient = await _get_or_create_patient(session, tenant, wa_id, patient_name)
                 conversation = await _get_or_create_conversation(session, tenant, patient)
 
+                # First contact = no prior message on this conversation. Counted
+                # BEFORE the inbound below is added so a brand-new conversation
+                # reads as 0. Drives the verbatim greeting (see below).
+                prior_messages = await session.scalar(
+                    select(func.count())
+                    .select_from(Message)
+                    .where(Message.conversation_id == conversation.id)
+                )
+                is_first_contact = (prior_messages or 0) == 0
+
                 session.add(
                     Message(
                         conversation_id=conversation.id,
@@ -200,10 +216,24 @@ async def _persist_inbound_message(
                     )
                     return None
 
+                # On first contact, reply with the tenant's configured greeting
+                # verbatim (one message, no LLM, no bubble-splitting), optionally
+                # with quick-reply buttons. Tenants without a greeting fall
+                # through to the improvised LLM opener.
+                greeting = (tenant.greeting_message or "").strip()
+                if is_first_contact and greeting:
+                    greeting_override = greeting
+                    greeting_buttons = [str(b) for b in (tenant.greeting_buttons or [])]
+                else:
+                    greeting_override = None
+                    greeting_buttons = []
+
                 return _ReplyContext(
                     conversation_id=conversation.id,
                     patient_wa_id=wa_id,
                     inbound_body=body or "",
+                    greeting_override=greeting_override,
+                    greeting_buttons=greeting_buttons,
                 )
         except IntegrityError:
             # A concurrent worker already claimed this event id.
@@ -291,6 +321,13 @@ async def _handle_menu_command(
 
 async def _send_bot_reply(reply: _ReplyContext) -> None:
     """Generate a reply, split it into bubbles, send each, and record them."""
+    # First-contact greeting: deterministic, verbatim, single message. Skips the
+    # LLM and the bubble-splitter so the configured pitch arrives exactly as the
+    # clinic wrote it, in one WhatsApp message.
+    if reply.greeting_override is not None:
+        await _send_greeting(reply)
+        return
+
     # Load per-tenant config (decrypted credentials + prompt data) for this call.
     tenant_config = None
     try:
@@ -362,6 +399,55 @@ async def _send_bot_reply(reply: _ReplyContext) -> None:
             conversation_id=str(reply.conversation_id),
             bubbles=sent_count,
         )
+
+
+async def _send_greeting(reply: _ReplyContext) -> None:
+    """Send the tenant's first-contact greeting as a single verbatim message.
+
+    With configured labels it goes out as an interactive reply-button message
+    (the tapped label becomes the patient's next inbound); otherwise as plain
+    text. The whole greeting is one WhatsApp message either way.
+    """
+    body = reply.greeting_override or ""
+    client = WhatsAppClient()
+    try:
+        if reply.greeting_buttons:
+            # WhatsApp needs a unique id per button; the label drives the LLM,
+            # so a positional id is enough (see extract_inbound_body).
+            buttons = [
+                (f"greeting|{index}", label)
+                for index, label in enumerate(reply.greeting_buttons)
+            ]
+            result = await client.send_buttons(
+                to=reply.patient_wa_id, body=body, buttons=buttons
+            )
+        else:
+            result = await client.send_text_message(to=reply.patient_wa_id, body=body)
+    except Exception as exc:
+        # MVP: no retry (mirrors _send_bot_reply). The patient's message still
+        # reached the human secretary; the auto-greeting is simply lost.
+        logger.error(
+            "worker_greeting_send_failed",
+            error=str(exc),
+            conversation_id=str(reply.conversation_id),
+        )
+        return
+
+    async with async_session_factory() as session:
+        async with session.begin():
+            session.add(
+                Message(
+                    conversation_id=reply.conversation_id,
+                    direction=MessageDirection.OUTBOUND,
+                    sender=MessageSender.BOT,
+                    wam_id=_extract_sent_wam_id(result),
+                    body=body,
+                )
+            )
+            conversation = await session.get(Conversation, reply.conversation_id)
+            if conversation is not None:
+                conversation.last_bot_message_at = datetime.now(UTC)
+    logger.info("worker_greeting_sent", conversation_id=str(reply.conversation_id))
 
 
 async def _send_bubble(

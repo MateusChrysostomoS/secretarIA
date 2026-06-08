@@ -32,6 +32,13 @@ class Tenant(Base):
     # --- Tenant config (edited via the doctor hub; all non-sensitive) ---
     # Literal first-contact greeting (sent verbatim, not improvised by the LLM).
     greeting_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Optional quick-reply buttons appended to the first-contact greeting, e.g.
+    #   ["Agendar consulta", "Como funciona?", "Horários e valores"]
+    # Max 3 labels, <=20 chars each (WhatsApp reply-button limits). Empty list =
+    # plain-text greeting. The label the patient taps becomes their next message.
+    greeting_buttons: Mapped[list] = mapped_column(
+        JSON, server_default=text("'[]'"), default=list
+    )
     # Tone/persona instructions injected into the system prompt (LLM interprets).
     persona_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     language: Mapped[str] = mapped_column(String(8), server_default="pt-BR", default="pt-BR")

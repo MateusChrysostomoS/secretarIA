@@ -22,6 +22,7 @@ router = APIRouter(prefix="/tenants/me", tags=["hub-config"])
 # because it is gated by the activation rule).
 _SCALAR_FIELDS = (
     "greeting_message",
+    "greeting_buttons",
     "persona_notes",
     "language",
     "timezone",
@@ -37,6 +38,7 @@ async def _read_model(session: AsyncSession, tenant: Tenant) -> TenantConfigRead
     return TenantConfigRead(
         clinic_name=tenant.clinic_name,
         greeting_message=tenant.greeting_message,
+        greeting_buttons=tenant.greeting_buttons or [],
         persona_notes=tenant.persona_notes,
         language=tenant.language,
         timezone=tenant.timezone,

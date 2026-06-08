@@ -24,6 +24,13 @@ WEEKDAYS: tuple[str, ...] = (
 
 _HHMM = r"^\d{2}:\d{2}$"
 
+# WhatsApp reply-button limits: at most 3 buttons, 20-char titles. An interactive
+# message body caps at 1024 chars (a plain text message allows 4096), so a
+# greeting that carries buttons must stay within the smaller limit.
+MAX_GREETING_BUTTONS = 3
+MAX_BUTTON_LABEL_CHARS = 20
+MAX_GREETING_WITH_BUTTONS_CHARS = 1024
+
 
 def _parse_hhmm(value: str) -> time:
     """Parse an "HH:MM" string into a time, raising ValueError if out of range."""
@@ -74,6 +81,7 @@ class TenantConfigUpdate(BaseModel):
     """
 
     greeting_message: str | None = Field(default=None, max_length=4000)
+    greeting_buttons: list[str] | None = None
     persona_notes: str | None = Field(default=None, max_length=4000)
     language: str | None = Field(default=None, max_length=8)
     timezone: str | None = None
@@ -89,6 +97,50 @@ class TenantConfigUpdate(BaseModel):
         cls, value: dict[str, list[TimeWindow]] | None
     ) -> dict[str, list[TimeWindow]] | None:
         return None if value is None else _validate_business_hours(value)
+
+    @field_validator("greeting_buttons")
+    @classmethod
+    def _check_greeting_buttons(cls, value: list[str] | None) -> list[str] | None:
+        """Trim labels, reject blanks/dupes and enforce WhatsApp's 3x20 limits."""
+        if value is None:
+            return None
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw in value:
+            label = raw.strip()
+            if not label:
+                raise ValueError("greeting button labels cannot be blank")
+            if len(label) > MAX_BUTTON_LABEL_CHARS:
+                raise ValueError(
+                    f"greeting button label {label!r} exceeds "
+                    f"{MAX_BUTTON_LABEL_CHARS} characters"
+                )
+            key = label.casefold()
+            if key in seen:
+                raise ValueError(f"duplicate greeting button label {label!r}")
+            seen.add(key)
+            cleaned.append(label)
+        if len(cleaned) > MAX_GREETING_BUTTONS:
+            raise ValueError(f"at most {MAX_GREETING_BUTTONS} greeting buttons allowed")
+        return cleaned
+
+    @model_validator(mode="after")
+    def _check_greeting_with_buttons(self) -> "TenantConfigUpdate":
+        """A greeting that carries buttons must fit WhatsApp's interactive body cap.
+
+        Only enforced when both fields arrive in the same request (the hub form
+        sends them together); a buttons-only update can't see the stored body.
+        """
+        if (
+            self.greeting_buttons
+            and self.greeting_message is not None
+            and len(self.greeting_message) > MAX_GREETING_WITH_BUTTONS_CHARS
+        ):
+            raise ValueError(
+                f"a greeting with buttons must be at most "
+                f"{MAX_GREETING_WITH_BUTTONS_CHARS} characters"
+            )
+        return self
 
     @field_validator("timezone")
     @classmethod
@@ -107,6 +159,7 @@ class TenantConfigRead(BaseModel):
 
     clinic_name: str
     greeting_message: str | None
+    greeting_buttons: list[str]
     persona_notes: str | None
     language: str
     timezone: str
