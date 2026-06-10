@@ -94,6 +94,10 @@ class Conversation(Base):
     flow_selected_day: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # ISO datetime of the slot the patient chose.
     flow_selected_slot: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    # Set while a returning patient is mid-"quer continuar?" prompt: holds the
+    # FlowState value to resume to AND marks that the next inbound is the Sim/Não
+    # answer. NULL whenever no reactivation prompt is pending.
+    reactivation_origin: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

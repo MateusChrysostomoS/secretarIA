@@ -12,7 +12,13 @@
   "initial_flows": {
     "enabled": true,
     "menu_label": "Como posso te ajudar?",
-    "buttons": ["Agendar consulta", "Horários", "Outro assunto"]
+    "buttons": ["Agendar consulta", "Horários", "Outro assunto"],
+    "reactivation": {
+      "enabled": true,
+      "gap_minutes": 360,
+      "continue_prompt": "Você quer continuar com a nossa última conversa?",
+      "buttons": ["Sim", "Não"]
+    }
   },
   "business_hours": {
     "monday":    [{ "start": "08:00", "end": "12:00" }, { "start": "13:00", "end": "18:00" }],

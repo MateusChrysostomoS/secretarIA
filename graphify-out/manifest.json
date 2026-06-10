@@ -20,8 +20,8 @@
     "semantic_hash": "63486cc3a8cdf1c814fb0ca942fc6c50"
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\config.py": {
-    "mtime": 1781031747.3370972,
-    "ast_hash": "bfc33806c0c3a612317d2777d5655e16",
+    "mtime": 1781120897.1893265,
+    "ast_hash": "51eafefadacf2fd6bd30e17428cc3d2b",
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\main.py": {
@@ -85,8 +85,8 @@
     "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\models\\conversation.py": {
-    "mtime": 1781031248.2783568,
-    "ast_hash": "d8db95c662cafeaf32116310979da181",
+    "mtime": 1781128256.1941473,
+    "ast_hash": "5dd84d967e5a7fce1bfef9f2039798a2",
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\models\\message.py": {
@@ -105,8 +105,8 @@
     "semantic_hash": "8da5fb2e8dc98f78565885665e5d4dd5"
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\models\\tenant.py": {
-    "mtime": 1781031228.6874602,
-    "ast_hash": "c1fc50efd6e179d1cad0a572bb2241d2",
+    "mtime": 1781117589.963629,
+    "ast_hash": "17961f7e5fcaa0a5777b0f9142e2875a",
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\models\\__init__.py": {
@@ -155,8 +155,8 @@
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\workers\\tasks.py": {
-    "mtime": 1781115724.7890644,
-    "ast_hash": "e6ee8bc41c375afb826509d77f9e7868",
+    "mtime": 1781128534.2308567,
+    "ast_hash": "5d94b441752df9a4b413d30b83bed8d2",
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\workers\\__init__.py": {
@@ -260,8 +260,8 @@
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\scripts\\configs\\clinica-psi-infantil.json": {
-    "mtime": 1781060863.0291445,
-    "ast_hash": "953dd1304c9e2489ba769808e322480e",
+    "mtime": 1781128566.7667384,
+    "ast_hash": "e6fb88c6a7f2a539fd800c4d40df46d6",
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\api\\admin.py": {
@@ -385,8 +385,8 @@
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\services\\flow_router.py": {
-    "mtime": 1781033864.2465851,
-    "ast_hash": "ce2d8463776d85a57e0b9b7312f1c391",
+    "mtime": 1781128331.3789475,
+    "ast_hash": "d1c44016de9bac5cd185e9a501735703",
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\tests\\test_flow_router.py": {
@@ -395,8 +395,28 @@
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\tests\\test_tasks_helpers.py": {
-    "mtime": 1781032976.2070816,
-    "ast_hash": "660b0655c52b970d8fd623584195eea5",
+    "mtime": 1781120923.5362954,
+    "ast_hash": "429b24b16856079d89e579355ce8b4ff",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\secretarIA\\migrations\\versions\\b1c2d3e4f5a6_conversation_reactivation_origin.py": {
+    "mtime": 1781128263.3389785,
+    "ast_hash": "5fa74c286bebfc230be7c3b1040aba82",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\secretarIA\\migrations\\versions\\c5d6e7f8a9b0_tenant_contact_email.py": {
+    "mtime": 1781117600.963371,
+    "ast_hash": "dbf62afbfee62cbaa10277c7d12e0521",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\secretarIA\\src\\secretaria\\services\\email.py": {
+    "mtime": 1781120905.462147,
+    "ast_hash": "f0ed84c9a77bdf89a310b30e80e0e3be",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\secretarIA\\tests\\test_reactivation.py": {
+    "mtime": 1781128724.9639065,
+    "ast_hash": "073966f52e74a647ed699a6c0480c0eb",
     "semantic_hash": ""
   }
 }

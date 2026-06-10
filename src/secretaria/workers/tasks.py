@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import delete, func, select
@@ -30,6 +31,7 @@ from secretaria.models import (
     Appointment,
     AppointmentStatus,
     Conversation,
+    FlowState,
     HandoverState,
     Message,
     MessageDirection,
@@ -44,13 +46,21 @@ from secretaria.schemas.webhook import (
     extract_inbound_body,
 )
 from secretaria.services.calendar import CalendarService
+from secretaria.services.email import send_calendar_alert
 from secretaria.services.flow_router import (
+    FlowRouterResult,
     MenuBubble,
+    classify_yes_no,
     flows_enabled,
     menu_buttons,
+    menu_label,
+    reactivation_choice_buttons,
+    reactivation_continue_prompt,
+    reactivation_enabled,
+    reactivation_gap_minutes,
+    resume_bubbles,
     route,
 )
-from secretaria.services.email import send_calendar_alert
 from secretaria.services.handover import HandoverManager
 from secretaria.services.tenant_config import load_tenant_config
 from secretaria.services.whatsapp import WhatsAppClient
@@ -165,6 +175,20 @@ async def _is_rate_limited(redis, phone_number_id: str | None, wa_id: str) -> bo
 
 
 @dataclass(frozen=True)
+class _ReactivationDirective:
+    """How to handle a returning patient's answer to the 'continuar?' prompt.
+
+    kind="resume" re-renders where they left off (or, for an LLM-mode origin,
+    falls through to the agent with history intact); kind="reset" drops the
+    saved flow and shows the menu. `origin` is the FlowState value captured when
+    the prompt was offered.
+    """
+
+    kind: Literal["resume", "reset"]
+    origin: str
+
+
+@dataclass(frozen=True)
 class _ReplyContext:
     """Minimal data needed to send a bot reply once the inbound DB txn commits."""
 
@@ -180,6 +204,9 @@ class _ReplyContext:
     # When True, the tenant's bot is not activated: send a single polite
     # fallback and do nothing else (no conversation, no LLM).
     service_unavailable: bool = False
+    # Set when this inbound is a returning patient's answer to the "quer
+    # continuar?" prompt: drives resume-vs-reset in `_send_bot_reply`.
+    reactivation: "_ReactivationDirective | None" = None
 
 
 async def process_webhook_event(ctx: dict, payload: dict) -> None:
@@ -337,6 +364,14 @@ async def _persist_inbound_message(
                 )
                 is_first_contact = (prior_messages or 0) == 0
 
+                # Timestamp of the last activity BEFORE this inbound, used to
+                # measure the silence gap for the returning-patient offer.
+                last_activity_at = await session.scalar(
+                    select(func.max(Message.created_at)).where(
+                        Message.conversation_id == conversation.id
+                    )
+                )
+
                 session.add(
                     Message(
                         conversation_id=conversation.id,
@@ -356,6 +391,34 @@ async def _persist_inbound_message(
                     )
                     return None
 
+                # A pending "quer continuar?" answer takes precedence over any
+                # greeting/offer: resume where they were, or reset to the menu.
+                if conversation.reactivation_origin is not None:
+                    origin = conversation.reactivation_origin
+                    conversation.reactivation_origin = None  # consume the gate
+                    answer = classify_yes_no(body, tenant)
+                    if answer == "no":
+                        conversation.flow_state = FlowState.IDLE
+                        conversation.flow_step = None
+                        conversation.flow_selected_type = None
+                        conversation.flow_selected_day = None
+                        conversation.flow_selected_slot = None
+                        return _ReplyContext(
+                            conversation_id=conversation.id,
+                            patient_wa_id=wa_id,
+                            inbound_body=body or "",
+                            reactivation=_ReactivationDirective(kind="reset", origin=origin),
+                        )
+                    if answer == "yes":
+                        return _ReplyContext(
+                            conversation_id=conversation.id,
+                            patient_wa_id=wa_id,
+                            inbound_body=body or "",
+                            reactivation=_ReactivationDirective(kind="resume", origin=origin),
+                        )
+                    # "other": gate consumed; fall through to normal dispatch so
+                    # their message is routed against the preserved flow state.
+
                 # On first contact, reply with a verbatim greeting (one message,
                 # no LLM): the returning greeting (with {{name}}) for a known
                 # patient, else the first-contact greeting. Tenants without a
@@ -363,6 +426,20 @@ async def _persist_inbound_message(
                 greeting_override = _select_greeting(
                     tenant, patient, is_first_contact, is_returning_patient
                 )
+
+                # Returning after a silence gap (and not already greeting on first
+                # contact): offer to resume the prior workflow, or re-greet.
+                if (
+                    greeting_override is None
+                    and is_returning_patient
+                    and reactivation_enabled(tenant)
+                ):
+                    offer = _reactivation_offer(
+                        conversation, tenant, patient, wa_id, body, last_activity_at
+                    )
+                    if offer is not None:
+                        return offer
+
                 greeting_buttons = _greeting_buttons_for(tenant, greeting_override)
 
                 return _ReplyContext(
@@ -410,6 +487,68 @@ def _greeting_buttons_for(tenant: Tenant, greeting_override: str | None) -> list
     if flows_enabled(tenant):
         return menu_buttons(tenant)
     return [str(b) for b in (tenant.greeting_buttons or [])]
+
+
+def _as_utc(dt: datetime) -> datetime:
+    """Treat a naive timestamp (e.g. from SQLite) as UTC; pass tz-aware through."""
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
+def _reactivation_offer(
+    conversation: Conversation,
+    tenant: Tenant,
+    patient: Patient,
+    wa_id: str,
+    body: str | None,
+    last_activity_at: datetime | None,
+) -> _ReplyContext | None:
+    """Maybe offer a returning patient to resume, after a silence gap.
+
+    When the conversation has a resumable state, arms the gate
+    (`conversation.reactivation_origin`) and returns an offer that reuses the
+    greeting send path: the returning greeting + the configured "quer continuar?"
+    question, with Sim/Não buttons. For an IDLE conversation there is nothing to
+    resume, so it sends just the returning greeting + menu. Returns None to fall
+    through to normal dispatch (gap not reached yet, or nothing to say).
+    """
+    if last_activity_at is None:
+        return None
+    gap = datetime.now(UTC) - _as_utc(last_activity_at)
+    if gap < timedelta(minutes=reactivation_gap_minutes(tenant)):
+        return None
+
+    returning = (tenant.returning_greeting_message or "").strip() or (
+        tenant.greeting_message or ""
+    ).strip()
+    greeting = _render_greeting_template(returning, patient.name) if returning else ""
+
+    if conversation.flow_state in (
+        FlowState.MENU,
+        FlowState.SERVICE_CATALOG,
+        FlowState.LLM,
+    ):
+        # Resumable: arm the gate and ask whether to continue.
+        conversation.reactivation_origin = conversation.flow_state.value
+        prompt = reactivation_continue_prompt(tenant)
+        body_text = f"{greeting}\n\n{prompt}".strip() if greeting else prompt
+        return _ReplyContext(
+            conversation_id=conversation.id,
+            patient_wa_id=wa_id,
+            inbound_body=body or "",
+            greeting_override=body_text,
+            greeting_buttons=reactivation_choice_buttons(tenant),
+        )
+
+    # IDLE / nothing to resume: a plain returning greeting + menu, if configured.
+    if not greeting:
+        return None
+    return _ReplyContext(
+        conversation_id=conversation.id,
+        patient_wa_id=wa_id,
+        inbound_body=body or "",
+        greeting_override=greeting,
+        greeting_buttons=_greeting_buttons_for(tenant, greeting),
+    )
 
 
 async def _handle_menu_command(
@@ -588,6 +727,39 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
             conversation_id=str(reply.conversation_id),
         )
 
+    # Returning-patient resume/reset: act on the "quer continuar?" answer. The
+    # offer itself went out via the greeting path; this handles the tap.
+    if reply.reactivation is not None and flow_snapshot is not None:
+        conv_snapshot, tenant_snapshot = flow_snapshot
+        if reply.reactivation.kind == "reset":
+            # "Não": drop the saved flow and show a fresh menu.
+            result = FlowRouterResult(
+                action="reply",
+                bubbles=[
+                    MenuBubble(
+                        body=menu_label(tenant_snapshot),
+                        labels=menu_buttons(tenant_snapshot),
+                    )
+                ],
+                flow_state=FlowState.MENU,
+            )
+            await _apply_flow_result(reply, result, patient_wa, redis=redis)
+            return
+        # "Sim": re-render the deterministic step they were on. LLM-mode origins
+        # (and any resume that has to delegate) fall through to the agent below,
+        # which already has the full history.
+        if reply.reactivation.origin != FlowState.LLM.value:
+            calendar = (
+                CalendarService.from_tenant_config(tenant_config)
+                if tenant_config
+                else None
+            )
+            result = await resume_bubbles(conv_snapshot, tenant_snapshot, calendar)
+            if await _apply_flow_result(reply, result, patient_wa, redis=redis):
+                return
+        # Skip the deterministic block so "Sim" isn't re-interpreted as input.
+        flow_snapshot = None
+
     # Deterministic flow engine: when enabled, try to handle the turn with zero
     # LLM calls. Returns True when fully handled; False falls through to the LLM.
     if flow_snapshot is not None:
@@ -652,6 +824,21 @@ async def _run_flow(
         )
         return False
 
+    return await _apply_flow_result(reply, result, patient_wa, redis=redis)
+
+
+async def _apply_flow_result(
+    reply: _ReplyContext,
+    result: FlowRouterResult,
+    patient_wa: str | None,
+    redis=None,
+) -> bool:
+    """Persist a FlowRouterResult (+ any appointment) and dispatch its bubbles.
+
+    Shared by the live flow router (`_run_flow`) and the returning-patient
+    resume/reset path. Returns True when the turn was fully handled (bubbles
+    sent, or handed off on a calendar outage); False for `delegate_llm`.
+    """
     # Persist the new flow state (+ any booked appointment) in one short txn.
     persisted = True
     try:

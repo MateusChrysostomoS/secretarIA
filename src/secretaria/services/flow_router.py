@@ -42,6 +42,12 @@ logger = get_logger(__name__)
 DEFAULT_MENU_BUTTONS = ["Serviços e Custo", "Horários", "Outro"]
 DEFAULT_MENU_LABEL = "Como posso te ajudar?"
 
+# Reactivation ("welcome back" / resume) defaults. Overridable per tenant under
+# initial_flows.reactivation.
+DEFAULT_REACTIVATION_GAP_MINUTES = 360  # 6h of silence => treat as returning.
+DEFAULT_CONTINUE_PROMPT = "Você quer continuar com a nossa última conversa?"
+DEFAULT_REACTIVATION_BUTTONS = ["Sim", "Não"]
+
 # Button labels used inside the catalog flow (also the text taps come back as).
 LABEL_BOOK_SERVICE = "Sim"
 LABEL_OTHER_SERVICE = "Outro serviço"
@@ -125,6 +131,58 @@ def menu_buttons(tenant: Tenant) -> list[str]:
 def menu_label(tenant: Tenant) -> str:
     """The question shown above the menu buttons."""
     return str((tenant.initial_flows or {}).get("menu_label") or DEFAULT_MENU_LABEL)
+
+
+# --------------------------------------------------------------------------
+# Reactivation config (shared with the worker's returning-patient path)
+# --------------------------------------------------------------------------
+
+
+def _reactivation_config(tenant: Tenant) -> dict:
+    return (tenant.initial_flows or {}).get("reactivation") or {}
+
+
+def reactivation_enabled(tenant: Tenant) -> bool:
+    """True when this tenant offers a 'welcome back / continue?' prompt."""
+    return bool(_reactivation_config(tenant).get("enabled"))
+
+
+def reactivation_gap_minutes(tenant: Tenant) -> int:
+    """Minutes of silence after which a returning patient is offered to resume."""
+    try:
+        value = _reactivation_config(tenant).get("gap_minutes")
+        return int(value) if value is not None else DEFAULT_REACTIVATION_GAP_MINUTES
+    except (TypeError, ValueError):
+        return DEFAULT_REACTIVATION_GAP_MINUTES
+
+
+def reactivation_continue_prompt(tenant: Tenant) -> str:
+    """The question appended to the returning greeting (e.g. 'Quer continuar?')."""
+    return str(_reactivation_config(tenant).get("continue_prompt") or DEFAULT_CONTINUE_PROMPT)
+
+
+def reactivation_choice_buttons(tenant: Tenant) -> list[str]:
+    """The [yes, no] reply-button labels for the continue prompt (max 3)."""
+    buttons = _reactivation_config(tenant).get("buttons") or DEFAULT_REACTIVATION_BUTTONS
+    return [str(b) for b in buttons][:3]
+
+
+def classify_yes_no(body: str | None, tenant: Tenant) -> str:
+    """Classify a continue-prompt answer as "yes", "no", or "other".
+
+    Matched against the tenant's configured buttons (and their 20-char tap
+    truncation). Anything that is neither button is "other" — the caller treats
+    that as "just route their message normally against the preserved state".
+    """
+    buttons = reactivation_choice_buttons(tenant)
+    yes_label = buttons[0] if buttons else DEFAULT_REACTIVATION_BUTTONS[0]
+    no_label = buttons[1] if len(buttons) > 1 else DEFAULT_REACTIVATION_BUTTONS[1]
+    target = _norm(body)
+    if target and (target == _norm(no_label) or target == _norm(no_label[:20])):
+        return "no"
+    if target and (target == _norm(yes_label) or target == _norm(yes_label[:20])):
+        return "yes"
+    return "other"
 
 
 def format_business_hours(hours: dict) -> str:
@@ -629,4 +687,123 @@ async def _handle_confirmation(
         flow_selected_day=None,
         flow_selected_slot=None,
         appointment=appointment,
+    )
+
+
+# --------------------------------------------------------------------------
+# Resume (re-render the current step without consuming input)
+# --------------------------------------------------------------------------
+
+
+def _preserve_reply(
+    conversation: Conversation, bubbles: list, *, step: str | None = None
+) -> FlowRouterResult:
+    """A `reply` result that keeps the conversation's current flow fields."""
+    return FlowRouterResult(
+        action="reply",
+        bubbles=bubbles,
+        flow_state=conversation.flow_state,
+        flow_step=conversation.flow_step if step is None else step,
+        flow_selected_type=conversation.flow_selected_type,
+        flow_selected_day=conversation.flow_selected_day,
+        flow_selected_slot=conversation.flow_selected_slot,
+    )
+
+
+def _confirmation_recap(conversation: Conversation) -> str | None:
+    """Rebuild the confirmation recap text from the stored slot, or None."""
+    slot = conversation.flow_selected_slot
+    if not slot:
+        return None
+    try:
+        start = datetime.fromisoformat(slot)
+    except ValueError:
+        return None
+    return (
+        f"{conversation.flow_selected_type or 'Consulta'}\n"
+        f"{start.strftime('%d/%m/%Y às %H:%M')}"
+    )
+
+
+async def resume_bubbles(
+    conversation: Conversation,
+    tenant: Tenant,
+    calendar: CalendarService | None,
+) -> FlowRouterResult:
+    """Re-emit the prompt for the conversation's CURRENT flow step.
+
+    Used when a returning patient taps "continue": it re-renders where they left
+    off without consuming input, so the saved flow_state/flow_step/flow_selected_*
+    stay unchanged. Falls back to the menu for MENU/unknown states, and to
+    `delegate_llm` (via `_handle_day` / `_preserve`) when the calendar is needed
+    but unavailable — the caller then degrades to the LLM with history intact.
+    """
+    state = conversation.flow_state
+    step = conversation.flow_step
+    services = active_appointment_types(tenant)
+
+    # MENU, or any state without a catalog step: re-present the menu.
+    if state != FlowState.SERVICE_CATALOG or step is None:
+        return FlowRouterResult(
+            action="reply", bubbles=_menu_bubbles(tenant), flow_state=FlowState.MENU
+        )
+
+    if step == STEP_AWAITING_SERVICE:
+        if not services:
+            return FlowRouterResult(
+                action="reply", bubbles=_menu_bubbles(tenant), flow_state=FlowState.MENU
+            )
+        return _preserve_reply(conversation, [_service_list_bubble(tenant, services)])
+
+    if step == STEP_AWAITING_SERVICE_CONFIRM:
+        service = _match_service(services, conversation.flow_selected_type)
+        if service is None:
+            return _preserve_reply(
+                conversation,
+                [_service_list_bubble(tenant, services)],
+                step=STEP_AWAITING_SERVICE,
+            )
+        return _preserve_reply(
+            conversation,
+            [
+                ButtonBubble(
+                    body=_service_detail_text(service, tenant),
+                    confirm_label=LABEL_BOOK_SERVICE,
+                    cancel_label=LABEL_OTHER_SERVICE,
+                )
+            ],
+        )
+
+    if step == STEP_AWAITING_DAY:
+        return _ask_day(conversation)
+
+    if step == STEP_AWAITING_SLOT:
+        # Re-list fresh slots for the saved day (availability may have changed).
+        return await _handle_day(
+            conversation, tenant, calendar, conversation.flow_selected_day or ""
+        )
+
+    if step == STEP_AWAITING_CONFIRMATION:
+        recap = _confirmation_recap(conversation)
+        if recap is None:
+            return _ask_day(conversation)  # lost the slot somehow: re-ask the day.
+        return _preserve_reply(
+            conversation,
+            [ButtonBubble(body=recap, confirm_label=LABEL_CONFIRM, cancel_label=LABEL_CANCEL)],
+        )
+
+    if step == STEP_AWAITING_RETRY:
+        return _preserve_reply(
+            conversation,
+            [
+                MenuBubble(
+                    body="Quer escolher outro horário?",
+                    labels=[LABEL_RETRY_YES, LABEL_RETRY_MENU],
+                )
+            ],
+        )
+
+    # Unknown step: re-present the menu.
+    return FlowRouterResult(
+        action="reply", bubbles=_menu_bubbles(tenant), flow_state=FlowState.MENU
     )
