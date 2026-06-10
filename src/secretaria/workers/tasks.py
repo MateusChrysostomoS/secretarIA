@@ -30,7 +30,6 @@ from secretaria.models import (
     Appointment,
     AppointmentStatus,
     Conversation,
-    FlowState,
     HandoverState,
     Message,
     MessageDirection,
@@ -419,12 +418,19 @@ async def _handle_menu_command(
     patient_name: str | None,
     wam_id: str,
 ) -> None:
-    """Reset the conversation: wipe all context, then re-send the greeting.
+    """Dev reset: delete the patient who sent /menu, then greet them as new.
 
-    Wipes every prior message for the conversation (so the agent starts as if
-    it had never spoken to this patient), flips handover back to BOT_ACTIVE and
-    re-sends the tenant's configured first-contact greeting. The `/menu` event
-    itself is NOT persisted - it is a control command, not conversation content.
+    DELETES the patient row for this number and everything tied to it - their
+    conversation, every message, and their appointment records - so the number
+    is treated as a brand-new first contact. A fresh, empty patient +
+    conversation is then created and the tenant's *first-contact* greeting
+    (`greeting_message`) is sent, NOT the returning greeting.
+
+    This is a development-only convenience for retesting the new-patient flow
+    from a clean slate; it is not part of the shipped patient experience. It
+    removes the local appointment rows but does NOT delete the underlying Google
+    Calendar events. The `/menu` event itself is not persisted as conversation
+    content - it is a control command.
     """
     async with async_session_factory() as session:
         try:
@@ -442,47 +448,76 @@ async def _handle_menu_command(
                     )
                     return
 
+                # Wipe the existing patient and all data hanging off them. Done
+                # as explicit ordered deletes (not relying on DB cascade) so it
+                # behaves identically on Postgres and the SQLite test engine.
+                # We select only the id, so no stale ORM object lingers in the
+                # identity map after the row is deleted.
+                existing_id = await session.scalar(
+                    select(Patient.id).where(
+                        Patient.tenant_id == tenant.id,
+                        Patient.wa_id == wa_id,
+                    )
+                )
+                if existing_id is not None:
+                    conv_ids = (
+                        await session.scalars(
+                            select(Conversation.id).where(
+                                Conversation.patient_id == existing_id
+                            )
+                        )
+                    ).all()
+                    # Appointments first (FK -> patients/conversations). The
+                    # schema would SET NULL and keep them; for a dev reset we
+                    # remove the rows so the number leaves zero local trace.
+                    await session.execute(
+                        delete(Appointment).where(
+                            Appointment.patient_id == existing_id
+                        )
+                    )
+                    if conv_ids:
+                        await session.execute(
+                            delete(Message).where(
+                                Message.conversation_id.in_(conv_ids)
+                            )
+                        )
+                        await session.execute(
+                            delete(Conversation).where(
+                                Conversation.id.in_(conv_ids)
+                            )
+                        )
+                    await session.execute(
+                        delete(Patient).where(Patient.id == existing_id)
+                    )
+                    await session.flush()
+                    logger.info("worker_menu_patient_deleted", wa_id=wa_id)
+
+                # Recreate a clean patient + conversation. A fresh conversation
+                # already defaults to BOT_ACTIVE + flow IDLE, so there is no
+                # prior state left to reset.
                 patient = await _get_or_create_patient(
                     session, tenant, wa_id, patient_name
                 )
                 conversation = await _get_or_create_conversation(
                     session, tenant, patient
                 )
-
-                await session.execute(
-                    delete(Message).where(Message.conversation_id == conversation.id)
-                )
-                conversation.handover_state = HandoverState.BOT_ACTIVE
-                conversation.last_human_message_at = None
-                conversation.last_bot_message_at = None
-                # Reset the deterministic flow so the menu starts fresh.
-                conversation.flow_state = FlowState.IDLE
-                conversation.flow_step = None
-                conversation.flow_selected_type = None
-                conversation.flow_selected_day = None
-                conversation.flow_selected_slot = None
                 conversation_id = conversation.id
-                # Captured inside the txn so the values survive the session close.
-                # A patient typing /menu has been seen before, so prefer the
-                # returning greeting (with {{name}}) when the tenant set one.
-                returning = (tenant.returning_greeting_message or "").strip()
-                if returning:
-                    greeting = _render_greeting_template(returning, patient.name)
-                else:
-                    greeting = (tenant.greeting_message or "").strip()
+                # Send the first-contact greeting (the "initial" one), NOT the
+                # returning greeting - the whole point of deleting the patient.
+                greeting = (tenant.greeting_message or "").strip()
                 greeting_buttons = _greeting_buttons_for(tenant, greeting or None)
         except IntegrityError:
             logger.info("worker_menu_duplicate_race", wam_id=wam_id)
             return
 
     if not greeting:
-        # No greeting configured: context is cleared and the next patient
-        # message will get the LLM's improvised opener. Nothing to send now.
+        # No first-contact greeting configured: the slate is clean and the next
+        # patient message will get the LLM's improvised opener. Nothing to send.
         logger.info("worker_menu_reset_no_greeting", conversation_id=str(conversation_id))
         return
 
-    # Re-send the greeting exactly as a first contact would (verbatim, one
-    # message, with the configured quick-reply buttons).
+    # Send the first-contact greeting verbatim (one message, with the configured
+    # quick-reply buttons), exactly as a brand-new patient would receive it.
     await _send_greeting(
         _ReplyContext(
             conversation_id=conversation_id,
