@@ -122,7 +122,16 @@ async def main() -> None:
     async with async_session_factory() as session:
         async with session.begin():
             if args.tenant_id:
-                tenant = await session.get(Tenant, UUID(args.tenant_id))
+                try:
+                    tenant_uuid = UUID(args.tenant_id)
+                except ValueError:
+                    raise SystemExit(
+                        f"'{args.tenant_id}' is not a valid tenant UUID. Omit the "
+                        "argument to target the single existing tenant, or pass a "
+                        "real id (SELECT id FROM tenants;). Note: '[tenant_id]' in "
+                        "the docs is an optional-arg placeholder, not literal text."
+                    ) from None
+                tenant = await session.get(Tenant, tenant_uuid)
             else:
                 rows = (await session.scalars(select(Tenant).limit(2))).all()
                 if len(rows) != 1:

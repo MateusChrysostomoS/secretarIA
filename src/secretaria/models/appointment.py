@@ -64,7 +64,19 @@ class Appointment(Base):
     # the patient even if the Patient row changes (e.g. number ported).
     phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
     status: Mapped[AppointmentStatus] = mapped_column(
-        SAEnum(AppointmentStatus, name="appointment_status", create_type=True),
+        # The Postgres `appointment_status` type stores the lowercase enum
+        # *values* ("scheduled", ...) — see the c4d8e2f1a5b6 migration. Without
+        # values_callable, SQLAlchemy persists the member *names* ("SCHEDULED")
+        # instead, which the native PG enum rejects with
+        # InvalidTextRepresentationError. values_callable makes both writes and
+        # reads use the values, matching the deployed type. (Not caught by the
+        # SQLite test suite, which renders Enum as a permissive VARCHAR+CHECK.)
+        SAEnum(
+            AppointmentStatus,
+            name="appointment_status",
+            create_type=True,
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
         default=AppointmentStatus.SCHEDULED,
         server_default="scheduled",
     )
