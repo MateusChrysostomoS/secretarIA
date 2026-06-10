@@ -103,6 +103,18 @@ class Settings(BaseSettings):
     # Where to send the doctor's browser after the OAuth callback completes.
     PORTAL_POST_OAUTH_REDIRECT: str = "http://localhost:3000/calendar/connected"
 
+    # --- SMTP (operational alerts to tenants) ---
+    # When SMTP_HOST is empty, email alerts are silently skipped (fail-open).
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM_EMAIL: str = ""
+    SMTP_FROM_NAME: str = "SecretarIA"
+    SMTP_USE_TLS: bool = True
+    # How long to silence repeated calendar-unavailable alerts per tenant (seconds).
+    CALENDAR_ALERT_SILENCE_SECONDS: int = 14400  # 4 hours
+
     # --- CORS (the Next.js doctor portal) ---
     # Comma-separated list of allowed origins for the hub API.
     CORS_ALLOW_ORIGINS: str = "http://localhost:3000"

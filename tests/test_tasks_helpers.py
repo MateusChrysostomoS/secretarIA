@@ -9,12 +9,14 @@ os.environ.setdefault("META_ACCESS_TOKEN", "test-access-token")
 os.environ.setdefault("META_PHONE_NUMBER_ID", "1234567890")
 
 import pytest  # noqa: E402
+from unittest.mock import AsyncMock, patch  # noqa: E402
 
 from secretaria.workers.tasks import (  # noqa: E402
     _is_rate_limited,
     _render_greeting_template,
     extract_patient_name,
 )
+from secretaria.services.email import send_calendar_alert  # noqa: E402
 
 
 @pytest.mark.parametrize(
@@ -85,3 +87,55 @@ async def test_rate_limit_is_per_sender():
         await _is_rate_limited(redis, "pn", "aaa")
     # A different wa_id has its own counter and is not affected.
     assert await _is_rate_limited(redis, "pn", "bbb") is False
+
+
+# ---------------------------------------------------------------------------
+# Calendar alert email (send_calendar_alert)
+# ---------------------------------------------------------------------------
+
+
+async def test_calendar_alert_no_smtp_host_skips_silently():
+    """When SMTP_HOST is empty the function returns without trying to connect."""
+    with patch("secretaria.services.email.get_settings") as mock_settings:
+        mock_settings.return_value.SMTP_HOST = ""
+        # asyncio.to_thread must NOT be called — if it is the test would hang.
+        with patch("asyncio.to_thread", new_callable=AsyncMock) as mock_thread:
+            await send_calendar_alert("owner@example.com", "Clínica Teste")
+            mock_thread.assert_not_called()
+
+
+async def test_calendar_alert_sends_when_smtp_configured():
+    """When SMTP_HOST is set, asyncio.to_thread is called with the right args."""
+    with patch("secretaria.services.email.get_settings") as mock_settings:
+        cfg = mock_settings.return_value
+        cfg.SMTP_HOST = "smtp.example.com"
+        cfg.SMTP_PORT = 587
+        cfg.SMTP_USERNAME = "user@example.com"
+        cfg.SMTP_PASSWORD = "secret"
+        cfg.SMTP_FROM_EMAIL = "noreply@example.com"
+        cfg.SMTP_FROM_NAME = "SecretarIA"
+        cfg.SMTP_USE_TLS = True
+
+        with patch("asyncio.to_thread", new_callable=AsyncMock) as mock_thread:
+            await send_calendar_alert("owner@clinic.com", "Clínica Exemplo")
+            mock_thread.assert_called_once()
+            # First positional arg to to_thread is the sync function
+            sync_fn = mock_thread.call_args.args[0]
+            assert sync_fn.__name__ == "_send_sync"
+            assert mock_thread.call_args.args[1] == "owner@clinic.com"
+
+
+async def test_calendar_alert_swallows_smtp_error():
+    """A send failure does not raise — it is logged and swallowed."""
+    with patch("secretaria.services.email.get_settings") as mock_settings:
+        mock_settings.return_value.SMTP_HOST = "smtp.example.com"
+        mock_settings.return_value.SMTP_PORT = 587
+        mock_settings.return_value.SMTP_USERNAME = ""
+        mock_settings.return_value.SMTP_PASSWORD = ""
+        mock_settings.return_value.SMTP_FROM_EMAIL = ""
+        mock_settings.return_value.SMTP_FROM_NAME = ""
+        mock_settings.return_value.SMTP_USE_TLS = False
+
+        with patch("asyncio.to_thread", new_callable=AsyncMock, side_effect=OSError("conn refused")):
+            # Must not raise
+            await send_calendar_alert("owner@clinic.com", "Clínica Exemplo")

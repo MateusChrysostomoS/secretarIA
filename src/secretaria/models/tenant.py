@@ -81,4 +81,7 @@ class Tenant(Base):
         JSON, server_default=text("'{}'"), default=dict
     )
 
+    # Optional email address for operational alerts (e.g. calendar access lost).
+    contact_email: Mapped[str | None] = mapped_column(String(254), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

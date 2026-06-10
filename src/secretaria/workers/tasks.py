@@ -50,6 +50,7 @@ from secretaria.services.flow_router import (
     menu_buttons,
     route,
 )
+from secretaria.services.email import send_calendar_alert
 from secretaria.services.handover import HandoverManager
 from secretaria.services.tenant_config import load_tenant_config
 from secretaria.services.whatsapp import WhatsAppClient
@@ -259,7 +260,7 @@ async def _handle_patient_messages(value: WebhookValue, redis=None) -> None:
             body=body,
         )
         if reply is not None:
-            await _send_bot_reply(reply)
+            await _send_bot_reply(reply, redis=redis)
 
 
 async def _persist_inbound_message(
@@ -530,7 +531,7 @@ async def _handle_menu_command(
     logger.info("worker_menu_reset", conversation_id=str(conversation_id))
 
 
-async def _send_bot_reply(reply: _ReplyContext) -> None:
+async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     """Generate a reply, split it into bubbles, send each, and record them."""
     # Tenant bot not activated: one polite fallback, nothing else.
     if reply.service_unavailable:
@@ -592,7 +593,8 @@ async def _send_bot_reply(reply: _ReplyContext) -> None:
     if flow_snapshot is not None:
         conv_snapshot, tenant_snapshot = flow_snapshot
         if await _run_flow(
-            reply, conv_snapshot, tenant_snapshot, tenant_config, patient_name, patient_wa
+            reply, conv_snapshot, tenant_snapshot, tenant_config, patient_name, patient_wa,
+            redis=redis,
         ):
             return
 
@@ -605,7 +607,7 @@ async def _send_bot_reply(reply: _ReplyContext) -> None:
     # A tool failed because the calendar is unreachable: tell the patient and
     # hand the conversation to a human secretary instead of faking success.
     if reply_text == CALENDAR_UNAVAILABLE_SENTINEL:
-        await _handle_calendar_unavailable(reply)
+        await _handle_calendar_unavailable(reply, redis=redis)
         return
 
     bubbles = parse(reply_text)
@@ -626,6 +628,7 @@ async def _run_flow(
     tenant_config,
     patient_name: str | None,
     patient_wa: str | None,
+    redis=None,
 ) -> bool:
     """Run the deterministic flow router for this turn.
 
@@ -681,13 +684,13 @@ async def _run_flow(
         )
 
     if result.action == "calendar_unavailable":
-        await _handle_calendar_unavailable(reply)
+        await _handle_calendar_unavailable(reply, redis=redis)
         return True
     # A booking was made on Google Calendar but recording it failed: do NOT
     # tell the patient it is confirmed. Hand off to a human to reconcile the
     # (now orphaned) event instead of claiming success or risking a re-book.
     if result.appointment is not None and not persisted:
-        await _handle_calendar_unavailable(reply)
+        await _handle_calendar_unavailable(reply, redis=redis)
         return True
     if result.action == "reply":
         if result.bubbles:
@@ -810,11 +813,12 @@ async def _send_simple_text(to: str, body: str) -> None:
         logger.error("worker_simple_text_send_failed", error=str(exc), to=to)
 
 
-async def _handle_calendar_unavailable(reply: _ReplyContext) -> None:
-    """Degrade gracefully on a calendar outage: notify + hand off to a human."""
+async def _handle_calendar_unavailable(reply: _ReplyContext, redis=None) -> None:
+    """Degrade gracefully on a calendar outage: notify patient + hand off + alert tenant."""
     logger.error(
         "worker_calendar_unavailable", conversation_id=str(reply.conversation_id)
     )
+    tenant: Tenant | None = None
     if reply.conversation_id is not None:
         try:
             async with async_session_factory() as session:
@@ -822,13 +826,32 @@ async def _handle_calendar_unavailable(reply: _ReplyContext) -> None:
                     conversation = await session.get(Conversation, reply.conversation_id)
                     if conversation is not None:
                         await HandoverManager(session).set_human_active(conversation)
+                        tenant = await session.get(Tenant, conversation.tenant_id)
         except Exception as exc:
             logger.error(
                 "worker_calendar_unavailable_handover_failed",
                 error=str(exc),
                 conversation_id=str(reply.conversation_id),
             )
+
     await _send_simple_text(reply.patient_wa_id, CALENDAR_UNAVAILABLE_MESSAGE)
+
+    # Alert the clinic owner by email (at most once every CALENDAR_ALERT_SILENCE_SECONDS).
+    if tenant is not None and tenant.contact_email:
+        settings = get_settings()
+        alert_key = f"calendar:alert:{tenant.id}"
+        should_send = True
+        if redis is not None:
+            try:
+                already_sent = await redis.exists(alert_key)
+                if already_sent:
+                    should_send = False
+                else:
+                    await redis.setex(alert_key, settings.CALENDAR_ALERT_SILENCE_SECONDS, "1")
+            except Exception as exc:
+                logger.warning("worker_calendar_alert_redis_failed", error=str(exc))
+        if should_send:
+            await send_calendar_alert(tenant.contact_email, tenant.clinic_name)
 
 
 async def _send_bubble(
