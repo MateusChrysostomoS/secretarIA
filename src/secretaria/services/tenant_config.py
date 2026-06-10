@@ -31,6 +31,8 @@ class RuntimeAppointmentType:
     name: str
     description: str | None
     duration_min: int
+    price: str | None = None
+    long_description: str | None = None
 
 
 @dataclass(frozen=True)
@@ -139,6 +141,8 @@ async def load_tenant_config(session: AsyncSession, tenant: Tenant) -> TenantRun
             name=t["name"],
             description=t.get("description"),
             duration_min=int(t.get("duration_min", tenant.appointment_duration_min)),
+            price=t.get("price"),
+            long_description=t.get("long_description"),
         )
         for t in active_appointment_types(tenant)
     ]

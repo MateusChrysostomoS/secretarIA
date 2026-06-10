@@ -5,7 +5,7 @@ what Alembic autogenerate and the test fixtures rely on.
 """
 
 from secretaria.models.appointment import Appointment, AppointmentStatus
-from secretaria.models.conversation import Conversation, HandoverState
+from secretaria.models.conversation import Conversation, FlowState, HandoverState
 from secretaria.models.message import Message, MessageDirection, MessageSender
 from secretaria.models.patient import Patient
 from secretaria.models.processed_event import ProcessedEvent
@@ -16,6 +16,7 @@ __all__ = [
     "Appointment",
     "AppointmentStatus",
     "Conversation",
+    "FlowState",
     "HandoverState",
     "Message",
     "MessageDirection",

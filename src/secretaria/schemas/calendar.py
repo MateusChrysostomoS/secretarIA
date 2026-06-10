@@ -69,7 +69,12 @@ class AppointmentRead(BaseModel):
     id: str
     tenant_id: str
     patient_id: str | None
+    conversation_id: str | None = None
     google_event_id: str
+    google_event_link: str | None = None
+    appointment_type: str | None = None
+    start_at: datetime | None = None
+    end_at: datetime | None = None
     phone: str | None
     status: AppointmentStatus
     created_at: datetime

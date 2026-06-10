@@ -32,6 +32,11 @@ class Tenant(Base):
     # --- Tenant config (edited via the doctor hub; all non-sensitive) ---
     # Literal first-contact greeting (sent verbatim, not improvised by the LLM).
     greeting_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Greeting sent to a patient who has contacted the clinic before (a known
+    # patient starting a fresh conversation). Supports a `{{name}}` placeholder
+    # substituted with the patient's stored name (or "" when unknown). NULL =
+    # returning patients fall through to the normal first-contact path.
+    returning_greeting_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Optional quick-reply buttons appended to the first-contact greeting, e.g.
     #   ["Agendar consulta", "Como funciona?", "Horários e valores"]
     # Max 3 labels, <=20 chars each (WhatsApp reply-button limits). Empty list =
@@ -67,6 +72,13 @@ class Tenant(Base):
     # connected Calendar + at least one active appointment type and window.
     is_active: Mapped[bool] = mapped_column(
         Boolean, server_default=text("false"), default=False
+    )
+    # Deterministic (zero-LLM) entry flows configuration. Shape, e.g.:
+    #   {"enabled": true, "menu_label": "Como posso te ajudar?",
+    #    "buttons": ["Serviços e Custo", "Horários", "Outro"]}
+    # Empty dict / "enabled" false = the legacy full-LLM path is used.
+    initial_flows: Mapped[dict] = mapped_column(
+        JSON, server_default=text("'{}'"), default=dict
     )
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -41,7 +41,12 @@ def _appointment_read(appt: Appointment) -> AppointmentRead:
         id=str(appt.id),
         tenant_id=str(appt.tenant_id),
         patient_id=str(appt.patient_id) if appt.patient_id else None,
+        conversation_id=str(appt.conversation_id) if appt.conversation_id else None,
         google_event_id=appt.google_event_id,
+        google_event_link=appt.google_event_link,
+        appointment_type=appt.appointment_type,
+        start_at=appt.start_at,
+        end_at=appt.end_at,
         phone=appt.phone,
         status=appt.status,
         created_at=appt.created_at,
@@ -67,7 +72,7 @@ async def _get_appointment(
     try:
         appt_uuid = UUID(appointment_id)
     except ValueError:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Appointment not found")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Appointment not found") from None
     appt = await session.scalar(
         select(Appointment).where(
             Appointment.id == appt_uuid,
@@ -146,13 +151,20 @@ async def create_appointment(
         tenant_id=tenant.id,
         patient_id=patient_uuid,
         google_event_id=google_event_id,
+        google_event_link=event.get("htmlLink"),
+        start_at=body.start,
+        end_at=body.end,
         phone=phone,
         status=AppointmentStatus.SCHEDULED,
     )
     session.add(appt)
     await session.commit()
     await session.refresh(appt)
-    logger.info("calendar_appointment_created", appointment_id=str(appt.id), google_event_id=google_event_id)
+    logger.info(
+        "calendar_appointment_created",
+        appointment_id=str(appt.id),
+        google_event_id=google_event_id,
+    )
     return _appointment_read(appt)
 
 
@@ -178,6 +190,10 @@ async def create_block(
         tenant_id=tenant.id,
         patient_id=None,
         google_event_id=event.get("id", ""),
+        google_event_link=event.get("htmlLink"),
+        appointment_type="Bloqueado",
+        start_at=body.start,
+        end_at=body.end,
         phone=None,
         status=AppointmentStatus.SCHEDULED,
     )

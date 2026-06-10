@@ -47,8 +47,9 @@ def _format_appointment_types(types: list, default_duration: int) -> str:
     lines: list[str] = []
     for t in types:
         dur = t.duration_min
+        price = f" - {t.price}" if getattr(t, "price", None) else ""
         desc = f" — {t.description}" if t.description else ""
-        lines.append(f"- {t.name} ({dur} min){desc}")
+        lines.append(f"- {t.name} ({dur} min){price}{desc}")
     return "\n".join(lines)
 
 
@@ -58,7 +59,9 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
     tz = config.timezone
     clinic = config.clinic_name
     hours_text = _format_business_hours(config.business_hours)
-    types_text = _format_appointment_types(config.appointment_types, config.appointment_duration_min)
+    types_text = _format_appointment_types(
+        config.appointment_types, config.appointment_duration_min
+    )
     persona_section = (
         f"\n\nINSTRUÇÕES DE PERSONA:\n{config.persona_notes}" if config.persona_notes else ""
     )

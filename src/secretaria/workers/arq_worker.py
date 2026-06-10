@@ -4,12 +4,17 @@ Start the worker with:
     arq secretaria.workers.arq_worker.WorkerSettings
 """
 
+from arq import cron
 from arq.connections import RedisSettings
 
 from secretaria.config import get_settings
 from secretaria.core.database import engine
 from secretaria.core.logging import get_logger, setup_logging
-from secretaria.workers.tasks import process_webhook_event, send_patient_notification
+from secretaria.workers.tasks import (
+    check_handover_timeouts,
+    process_webhook_event,
+    send_patient_notification,
+)
 
 logger = get_logger(__name__)
 
@@ -34,6 +39,10 @@ class WorkerSettings:
     """
 
     functions = [process_webhook_event, send_patient_notification]
+    # Sweep stale human-handover conversations back to the bot every 15 min.
+    cron_jobs = [
+        cron(check_handover_timeouts, minute={0, 15, 30, 45}),
+    ]
     on_startup = on_startup
     on_shutdown = on_shutdown
     redis_settings = RedisSettings.from_dsn(get_settings().REDIS_URL)

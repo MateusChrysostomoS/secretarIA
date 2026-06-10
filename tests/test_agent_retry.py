@@ -20,6 +20,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 import pytest  # noqa: E402
 
 from secretaria.ai import graph  # noqa: E402
+from secretaria.services.calendar import CalendarUnavailableError  # noqa: E402
 
 
 class _FakeError(Exception):
@@ -122,6 +123,30 @@ async def test_failure_log_records_exception_class(
     )
     assert captured.get("event") == "ai_run_agent_failed"
     assert captured.get("error_type") == "_FakeError"
+
+
+async def test_calendar_unavailable_returns_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CalendarUnavailableError from a tool must surface the degradation
+    sentinel (not the generic retry fallback) so the worker hands off to a human.
+    """
+    calls: list[int] = []
+
+    async def _calendar_down(_messages):  # noqa: ANN001
+        calls.append(1)
+        raise CalendarUnavailableError("refresh token revoked")
+
+    monkeypatch.setattr(graph, "invoke_agent", _calendar_down)
+    monkeypatch.setattr(graph.asyncio, "sleep", _noop_sleep)
+
+    reply = await graph.run_agent(
+        "quero marcar amanhã",
+        context={"conversation_id": "11111111-2222-3333-4444-555555555555"},
+    )
+    assert reply == graph.CALENDAR_UNAVAILABLE_SENTINEL
+    # Not a transient network error -> no retry.
+    assert len(calls) == 1
 
 
 async def _noop_sleep(_seconds: float) -> None:

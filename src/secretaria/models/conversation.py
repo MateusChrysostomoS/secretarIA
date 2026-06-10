@@ -4,7 +4,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, UniqueConstraint, func
+from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from secretaria.core.database import Base
@@ -19,6 +19,25 @@ class HandoverState(enum.StrEnum):
 
     BOT_ACTIVE = "BOT_ACTIVE"
     HUMAN_ACTIVE = "HUMAN_ACTIVE"
+
+
+class FlowState(enum.StrEnum):
+    """Which deterministic (zero-LLM) flow the conversation is currently in.
+
+    IDLE            - no active flow; the next inbound opens the menu when
+                      the tenant has `initial_flows.enabled`.
+    MENU            - the menu buttons were sent; awaiting a tap.
+    SERVICE_CATALOG - patient is inside the multi-step service booking flow.
+    BUSINESS_HOURS  - patient asked for hours (one-shot, returns to IDLE).
+    LLM             - full LLM mode (patient chose "Outro" or deviated); the
+                      conversation stays here until a /menu reset.
+    """
+
+    IDLE = "IDLE"
+    MENU = "MENU"
+    SERVICE_CATALOG = "SERVICE_CATALOG"
+    BUSINESS_HOURS = "BUSINESS_HOURS"
+    LLM = "LLM"
 
 
 def _handover_values(enum_cls: type[enum.Enum]) -> list[str]:
@@ -55,6 +74,26 @@ class Conversation(Base):
     last_bot_message_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # --- Deterministic flow engine state (Track 2) ---
+    # Stored as VARCHAR-backed enum to match handover_state (non-native).
+    flow_state: Mapped[FlowState] = mapped_column(
+        SAEnum(
+            FlowState,
+            native_enum=False,
+            length=32,
+            values_callable=_handover_values,
+        ),
+        server_default=FlowState.IDLE.value,
+        default=FlowState.IDLE,
+    )
+    # Sub-step within the active flow (e.g. "show_services", "awaiting_day").
+    flow_step: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    # Appointment type name the patient picked inside SERVICE_CATALOG.
+    flow_selected_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # ISO date string the patient indicated (resolved from free text).
+    flow_selected_day: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # ISO datetime of the slot the patient chose.
+    flow_selected_slot: Mapped[str | None] = mapped_column(String(48), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

@@ -44,6 +44,14 @@ class Settings(BaseSettings):
     # --- Handover (bot <-> human secretary) ---
     HANDOVER_TIMEOUT_MINUTES: int = 30
 
+    # --- Inbound rate limiting (per WhatsApp id, Redis-backed) ---
+    # Caps how many inbound messages one wa_id may send in a sliding window
+    # before the bot goes silent for them, protecting against floods that would
+    # otherwise drive unbounded LLM spend. Silence is intentional (no reply).
+    RATE_LIMIT_MAX_MESSAGES: int = 10
+    RATE_LIMIT_WINDOW_SECONDS: int = 60
+    RATE_LIMIT_SILENCE_SECONDS: int = 300
+
     # --- Admin endpoint ---
     # Shared secret required on the X-Admin-Token header for POST /admin/reset.
     # Leave empty to keep the endpoint disabled (returns 503).

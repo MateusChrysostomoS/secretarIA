@@ -26,6 +26,8 @@ from sqlalchemy import select
 from secretaria.ai.prompts import secretary_system_prompt
 from secretaria.ai.tools import (
     _calendar_ctx,
+    _conversation_id_ctx,
+    _tenant_id_ctx,
     cancel_event,
     check_availability,
     create_event,
@@ -35,7 +37,7 @@ from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import Message, MessageSender
-from secretaria.services.calendar import CalendarService
+from secretaria.services.calendar import CalendarService, CalendarUnavailableError
 from secretaria.services.tenant_config import TenantRuntimeConfig
 
 logger = get_logger(__name__)
@@ -45,6 +47,10 @@ FALLBACK_REPLY = (
     "Desculpe, tive uma instabilidade rápida aqui 🙏. Pode me repetir sua "
     "última mensagem? Já te respondo."
 )
+# Returned by run_agent when a tool failed because Google Calendar is
+# unreachable / the credentials were rejected. The worker turns this into a
+# patient-facing message and hands the conversation to a human secretary.
+CALENDAR_UNAVAILABLE_SENTINEL = "__CALENDAR_UNAVAILABLE__"
 
 # Per-async-task TenantRuntimeConfig. Set by run_agent; used by _prompt_with_today.
 _tenant_config_ctx: ContextVar[TenantRuntimeConfig | None] = ContextVar(
@@ -235,6 +241,8 @@ async def run_agent(
     )
     tok_cal = _calendar_ctx.set(cal)
     tok_cfg = _tenant_config_ctx.set(tenant_config)
+    tok_conv = _conversation_id_ctx.set(conversation_id)
+    tok_tid = _tenant_id_ctx.set(tenant_config.tenant_id if tenant_config else None)
 
     try:
         history = await _load_history(conversation_id)
@@ -244,6 +252,17 @@ async def run_agent(
             )
             history = [HumanMessage(content=message)]
         reply = await _invoke_agent_with_retry(history, conversation_id)
+    except CalendarUnavailableError:
+        # A calendar tool failed (token revoked / Google down / 5xx). It
+        # propagates unwrapped out of the LangGraph ToolNode, so we catch it by
+        # type here. The worker turns this sentinel into a patient message and
+        # hands the conversation to a human secretary. (A ContextVar flag would
+        # NOT work: LangGraph runs tool nodes in a copied context.)
+        logger.warning(
+            "ai_run_agent_calendar_unavailable",
+            conversation_id=str(conversation_id),
+        )
+        return CALENDAR_UNAVAILABLE_SENTINEL
     except Exception as exc:
         logger.error(
             "ai_run_agent_failed",
@@ -255,6 +274,8 @@ async def run_agent(
     finally:
         _calendar_ctx.reset(tok_cal)
         _tenant_config_ctx.reset(tok_cfg)
+        _conversation_id_ctx.reset(tok_conv)
+        _tenant_id_ctx.reset(tok_tid)
 
     if not reply:
         logger.warning(

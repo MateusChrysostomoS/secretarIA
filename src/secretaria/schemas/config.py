@@ -59,6 +59,11 @@ class AppointmentType(BaseModel):
     duration_min: int = Field(gt=0, le=600)
     is_active: bool = True
     sort_order: int = 0
+    # Display price shown in the service catalog, e.g. "R$ 250,00". Free text so
+    # the clinic controls formatting/currency.
+    price: str | None = Field(default=None, max_length=40)
+    # Longer copy shown on the service detail step of the deterministic flow.
+    long_description: str | None = Field(default=None, max_length=2000)
 
 
 def _validate_business_hours(value: dict[str, list[TimeWindow]]) -> dict[str, list[TimeWindow]]:
@@ -81,6 +86,7 @@ class TenantConfigUpdate(BaseModel):
     """
 
     greeting_message: str | None = Field(default=None, max_length=4000)
+    returning_greeting_message: str | None = Field(default=None, max_length=4000)
     greeting_buttons: list[str] | None = None
     persona_notes: str | None = Field(default=None, max_length=4000)
     language: str | None = Field(default=None, max_length=8)
@@ -89,7 +95,33 @@ class TenantConfigUpdate(BaseModel):
     appointment_duration_min: int | None = Field(default=None, gt=0, le=600)
     business_hours: dict[str, list[TimeWindow]] | None = None
     appointment_types: list[AppointmentType] | None = None
+    initial_flows: dict | None = None
     is_active: bool | None = None
+
+    @field_validator("initial_flows")
+    @classmethod
+    def _check_initial_flows(cls, value: dict | None) -> dict | None:
+        """Light shape check for the deterministic-flow config blob."""
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError("initial_flows must be an object")
+        buttons = value.get("buttons")
+        if buttons is not None:
+            if not isinstance(buttons, list) or len(buttons) > MAX_GREETING_BUTTONS:
+                raise ValueError(
+                    f"initial_flows.buttons must be a list of at most "
+                    f"{MAX_GREETING_BUTTONS} labels"
+                )
+            for label in buttons:
+                if not isinstance(label, str) or not label.strip():
+                    raise ValueError("initial_flows.buttons labels must be non-empty strings")
+                if len(label.strip()) > MAX_BUTTON_LABEL_CHARS:
+                    raise ValueError(
+                        f"initial_flows.buttons label {label!r} exceeds "
+                        f"{MAX_BUTTON_LABEL_CHARS} characters (WhatsApp button limit)"
+                    )
+        return value
 
     @field_validator("business_hours")
     @classmethod
@@ -159,6 +191,7 @@ class TenantConfigRead(BaseModel):
 
     clinic_name: str
     greeting_message: str | None
+    returning_greeting_message: str | None
     greeting_buttons: list[str]
     persona_notes: str | None
     language: str
@@ -167,6 +200,7 @@ class TenantConfigRead(BaseModel):
     appointment_duration_min: int
     business_hours: dict
     appointment_types: list
+    initial_flows: dict
     is_active: bool
     # True when a Google Calendar refresh token is stored for this tenant.
     calendar_connected: bool

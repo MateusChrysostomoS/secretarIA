@@ -17,10 +17,12 @@ from zoneinfo import ZoneInfo
 if TYPE_CHECKING:
     from secretaria.services.tenant_config import TenantRuntimeConfig
 
+from google.auth.exceptions import RefreshError, TransportError
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from httplib2 import ServerNotFoundError
 
 from secretaria.config import Settings, get_settings
 from secretaria.core.logging import get_logger
@@ -29,6 +31,52 @@ logger = get_logger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 TOKEN_URI = "https://oauth2.googleapis.com/token"
+
+# Weekday index (date.weekday(): Mon=0) -> business_hours JSON key.
+_WEEKDAY_KEYS = (
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+)
+
+# Network / transport failures that mean Google Calendar is unreachable right
+# now (not a logic error). OSError covers socket.timeout, ConnectionError and
+# TimeoutError; ServerNotFoundError (httplib2) and TransportError (google-auth)
+# are separate hierarchies. All are surfaced as CalendarUnavailableError.
+_NETWORK_ERRORS: tuple[type[BaseException], ...] = (
+    OSError,
+    TransportError,
+    ServerNotFoundError,
+)
+
+# HTTP statuses that mean the calendar is unavailable rather than the request
+# being wrong: auth expired/revoked (401/403) and Google-side outages (5xx).
+_UNAVAILABLE_HTTP_STATUSES = frozenset({401, 403, 500, 502, 503, 504})
+
+
+class CalendarUnavailableError(Exception):
+    """Raised when Google Calendar cannot be reached or refused our credentials.
+
+    Distinct from a programming/logic error so the agent layer can degrade
+    gracefully (hand the conversation to a human) instead of returning the
+    generic retry fallback. Triggered by an expired/revoked refresh token
+    (401/403 or RefreshError), a Google-side 5xx, or a network failure.
+    """
+
+
+def _raise_if_unavailable(exc: HttpError) -> None:
+    """Translate an outage/auth HttpError into CalendarUnavailableError.
+
+    Returns normally for client errors (404, 409, 400, ...) so the caller can
+    handle or re-raise them as before.
+    """
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    if status in _UNAVAILABLE_HTTP_STATUSES:
+        raise CalendarUnavailableError(f"Google Calendar returned HTTP {status}") from exc
 
 
 class CalendarService:
@@ -40,6 +88,10 @@ class CalendarService:
         self._calendar_id = self._settings.GOOGLE_CALENDAR_ID
         self._refresh_token_override: str | None = None
         self._service: Any | None = None
+        # Per-tenant availability config. Empty business_hours => the legacy
+        # fixed 08-18 window is used by list_free_slots (dev/Fase A fallback).
+        self._business_hours: dict = {}
+        self._default_slot_minutes: int = 30
 
     @classmethod
     def from_tenant_config(cls, config: "TenantRuntimeConfig") -> "CalendarService":
@@ -53,6 +105,8 @@ class CalendarService:
         instance._tz = ZoneInfo(config.timezone)
         instance._calendar_id = config.google_calendar_id
         instance._refresh_token_override = config.google_refresh_token
+        instance._business_hours = config.business_hours or {}
+        instance._default_slot_minutes = config.appointment_duration_min or 30
         return instance
 
     def _build_service(self) -> Any:
@@ -72,14 +126,28 @@ class CalendarService:
             scopes=SCOPES,
         )
         # Force a refresh now so a bad/expired refresh_token fails here rather
-        # than on the first real API call.
-        creds.refresh(GoogleRequest())
+        # than on the first real API call. A revoked/expired token raises
+        # RefreshError; a network blip raises a transport error. Both mean the
+        # calendar is unavailable, not that the caller did something wrong.
+        try:
+            creds.refresh(GoogleRequest())
+        except RefreshError as exc:
+            logger.error("calendar_token_refresh_failed", error=str(exc))
+            raise CalendarUnavailableError("Google Calendar refresh token rejected") from exc
+        except _NETWORK_ERRORS as exc:
+            logger.error("calendar_token_refresh_network_error", error=str(exc))
+            raise CalendarUnavailableError("Google Calendar unreachable during auth") from exc
         return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
     def _client(self) -> Any:
         if self._service is None:
             self._service = self._build_service()
         return self._service
+
+    @property
+    def tzinfo(self) -> ZoneInfo:
+        """The clinic-local timezone this service interprets naive times in."""
+        return self._tz
 
     def _ensure_tz(self, dt: datetime) -> datetime:
         return dt if dt.tzinfo else dt.replace(tzinfo=self._tz)
@@ -117,7 +185,11 @@ class CalendarService:
                 )
             except HttpError as exc:
                 logger.error("calendar_events_list_http_error", error=str(exc))
+                _raise_if_unavailable(exc)
                 raise
+            except _NETWORK_ERRORS as exc:
+                logger.error("calendar_events_list_network_error", error=str(exc))
+                raise CalendarUnavailableError("Google Calendar unreachable") from exc
             out: list[dict] = []
             for ev in resp.get("items", []):
                 # transparency=="transparent" means the owner marked the event
@@ -143,32 +215,65 @@ class CalendarService:
 
         return await asyncio.to_thread(_list)
 
+    def _windows_for_day(
+        self, day_local: datetime, open_hour: int, close_hour: int
+    ) -> list[tuple[datetime, datetime]]:
+        """Resolve the availability windows for `day_local` (clinic-local).
+
+        Uses the tenant's per-weekday business_hours when configured; otherwise
+        falls back to a single [open_hour, close_hour) window (Fase A / dev).
+        Returns an empty list for a closed day.
+        """
+        weekday_key = _WEEKDAY_KEYS[day_local.weekday()]
+        configured = self._business_hours.get(weekday_key) if self._business_hours else None
+        windows: list[tuple[datetime, datetime]] = []
+        if configured:
+            for w in configured:
+                try:
+                    sh, sm = (int(x) for x in str(w["start"]).split(":"))
+                    eh, em = (int(x) for x in str(w["end"]).split(":"))
+                except (KeyError, ValueError, TypeError):
+                    continue
+                start = day_local.replace(hour=sh, minute=sm, second=0, microsecond=0)
+                end = day_local.replace(hour=eh, minute=em, second=0, microsecond=0)
+                if start < end:
+                    windows.append((start, end))
+        elif self._business_hours:
+            # business_hours is configured but this weekday has no windows ->
+            # the clinic is closed that day. Do not fall back to 08-18.
+            return []
+        else:
+            start = day_local.replace(hour=open_hour, minute=0, second=0, microsecond=0)
+            end = day_local.replace(hour=close_hour, minute=0, second=0, microsecond=0)
+            if start < end:
+                windows.append((start, end))
+        return sorted(windows)
+
     async def list_free_slots(
         self,
         day: datetime,
-        slot_minutes: int = 30,
+        slot_minutes: int | None = None,
         open_hour: int = 8,
         close_hour: int = 18,
         max_slots: int = 6,
     ) -> list[dict]:
         """Return free [start, end) slots on `day` within business hours.
 
-        Walks the day in `slot_minutes` increments and keeps slots that do
-        not overlap with any busy event already on the calendar. Returns up
-        to `max_slots` slots so the UI list message stays under WhatsApp's
-        10-row cap and the patient is not buried in options.
+        Walks each availability window for the weekday (per-tenant
+        business_hours when set, else a fixed 08-18 fallback) in `slot_minutes`
+        increments and keeps slots that do not overlap with any busy event on
+        the calendar. Returns up to `max_slots` slots so the UI list message
+        stays under WhatsApp's 10-row cap. `slot_minutes` defaults to the
+        tenant's configured appointment duration.
         """
         day_local = self._ensure_tz(day)
-        start_of_day = day_local.replace(
-            hour=open_hour, minute=0, second=0, microsecond=0
-        )
-        end_of_day = day_local.replace(
-            hour=close_hour, minute=0, second=0, microsecond=0
-        )
-        if start_of_day >= end_of_day:
+        windows = self._windows_for_day(day_local, open_hour, close_hour)
+        if not windows:
             return []
 
-        busy = await self.check_availability(start_of_day, end_of_day)
+        span_start = windows[0][0]
+        span_end = windows[-1][1]
+        busy = await self.check_availability(span_start, span_end)
         busy_ranges: list[tuple[datetime, datetime]] = []
         for ev in busy:
             try:
@@ -178,23 +283,31 @@ class CalendarService:
                 continue
             busy_ranges.append((self._ensure_tz(bs), self._ensure_tz(be)))
 
-        delta = timedelta(minutes=slot_minutes)
+        delta = timedelta(minutes=slot_minutes or self._default_slot_minutes)
+        # Never offer a slot that has already started (matters for "hoje").
+        now = datetime.now(self._tz)
         slots: list[dict] = []
-        cursor = start_of_day
-        while cursor + delta <= end_of_day and len(slots) < max_slots:
-            slot_end = cursor + delta
-            overlaps = any(bs < slot_end and be > cursor for bs, be in busy_ranges)
-            if not overlaps:
-                slots.append(
-                    {
-                        # Naive ISO (no tz) so it round-trips through the LLM
-                        # exactly like check_availability / create_event inputs.
-                        "start": cursor.replace(tzinfo=None).isoformat(timespec="minutes"),
-                        "end": slot_end.replace(tzinfo=None).isoformat(timespec="minutes"),
-                        "label": cursor.strftime("%H:%M"),
-                    }
-                )
-            cursor = slot_end
+        for window_start, window_end in windows:
+            cursor = window_start
+            while cursor + delta <= window_end and len(slots) < max_slots:
+                slot_end = cursor + delta
+                if cursor < now:
+                    cursor = slot_end
+                    continue
+                overlaps = any(bs < slot_end and be > cursor for bs, be in busy_ranges)
+                if not overlaps:
+                    slots.append(
+                        {
+                            # Naive ISO (no tz) so it round-trips through the LLM
+                            # exactly like check_availability / create_event inputs.
+                            "start": cursor.replace(tzinfo=None).isoformat(timespec="minutes"),
+                            "end": slot_end.replace(tzinfo=None).isoformat(timespec="minutes"),
+                            "label": cursor.strftime("%H:%M"),
+                        }
+                    )
+                cursor = slot_end
+            if len(slots) >= max_slots:
+                break
         return slots
 
     async def create_event(
@@ -226,7 +339,11 @@ class CalendarService:
                 )
             except HttpError as exc:
                 logger.error("calendar_insert_http_error", error=str(exc))
+                _raise_if_unavailable(exc)
                 raise
+            except _NETWORK_ERRORS as exc:
+                logger.error("calendar_insert_network_error", error=str(exc))
+                raise CalendarUnavailableError("Google Calendar unreachable") from exc
 
         event = await asyncio.to_thread(_insert)
         logger.info("calendar_event_created", event_id=event.get("id"), summary=summary)
@@ -258,7 +375,11 @@ class CalendarService:
                 )
             except HttpError as exc:
                 logger.error("calendar_patch_http_error", error=str(exc))
+                _raise_if_unavailable(exc)
                 raise
+            except _NETWORK_ERRORS as exc:
+                logger.error("calendar_patch_network_error", error=str(exc))
+                raise CalendarUnavailableError("Google Calendar unreachable") from exc
 
         event = await asyncio.to_thread(_patch)
         logger.info("calendar_event_updated", event_id=event_id)
@@ -278,7 +399,11 @@ class CalendarService:
                     logger.info("calendar_event_already_gone", event_id=event_id)
                     return
                 logger.error("calendar_delete_http_error", error=str(exc))
+                _raise_if_unavailable(exc)
                 raise
+            except _NETWORK_ERRORS as exc:
+                logger.error("calendar_delete_network_error", error=str(exc))
+                raise CalendarUnavailableError("Google Calendar unreachable") from exc
 
         await asyncio.to_thread(_delete)
         logger.info("calendar_event_cancelled", event_id=event_id)
