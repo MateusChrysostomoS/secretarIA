@@ -40,6 +40,7 @@ logger = get_logger(__name__)
 # plus clinic_name and the activation flag). is_active is handled separately.
 _ALLOWED_FIELDS = (
     "clinic_name",
+    "contact_email",
     "greeting_message",
     "returning_greeting_message",
     "greeting_buttons",

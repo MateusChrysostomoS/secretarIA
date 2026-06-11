@@ -25,8 +25,8 @@
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\main.py": {
-    "mtime": 1780442193.578293,
-    "ast_hash": "eb05ce94871e88953025ec0dad77a05a",
+    "mtime": 1781209246.0029914,
+    "ast_hash": "4b0aaf7ced3440440cfaecced86766e6",
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\__init__.py": {
@@ -417,6 +417,21 @@
   "C:\\TECH\\secretarIA\\tests\\test_reactivation.py": {
     "mtime": 1781128724.9639065,
     "ast_hash": "073966f52e74a647ed699a6c0480c0eb",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\secretarIA\\src\\secretaria\\api\\tenants.py": {
+    "mtime": 1781209233.5112052,
+    "ast_hash": "a7035a05fa8bc2d572fcd2887d14efdd",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\secretarIA\\src\\secretaria\\schemas\\admin.py": {
+    "mtime": 1781209370.0168004,
+    "ast_hash": "fe14893b6311f861de03c486c4671d9f",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\secretarIA\\tests\\test_admin_tenants.py": {
+    "mtime": 1781209322.5156646,
+    "ast_hash": "f278d3ab523790a62c56fd1a1f1261b3",
     "semantic_hash": ""
   }
 }

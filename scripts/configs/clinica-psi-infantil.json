@@ -9,6 +9,7 @@
   "google_calendar_id": "primary",
   "appointment_duration_min": 50,
   "is_active": true,
+  "contact_email": "mateuschrysostomo.20251@poli.ufrj.br",
   "initial_flows": {
     "enabled": true,
     "menu_label": "Como posso te ajudar?",
