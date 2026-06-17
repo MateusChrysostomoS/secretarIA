@@ -85,8 +85,8 @@
     "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\models\\conversation.py": {
-    "mtime": 1781128256.1941473,
-    "ast_hash": "5dd84d967e5a7fce1bfef9f2039798a2",
+    "mtime": 1781667536.4154496,
+    "ast_hash": "64c5e4c98ef7f1234f981bdf89ca4e62",
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\models\\message.py": {
@@ -155,8 +155,8 @@
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\workers\\tasks.py": {
-    "mtime": 1781128534.2308567,
-    "ast_hash": "5d94b441752df9a4b413d30b83bed8d2",
+    "mtime": 1781667950.6750183,
+    "ast_hash": "2e28e1db5372d3cff56f5997567a467c",
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\workers\\__init__.py": {
@@ -260,8 +260,8 @@
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\scripts\\configs\\clinica-psi-infantil.json": {
-    "mtime": 1781128566.7667384,
-    "ast_hash": "e6fb88c6a7f2a539fd800c4d40df46d6",
+    "mtime": 1781212887.0516977,
+    "ast_hash": "98d2da4f0dc7f4eca6a1f8aa22eedb09",
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\api\\admin.py": {
@@ -360,8 +360,8 @@
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\.claude\\settings.local.json": {
-    "mtime": 1781110776.8547988,
-    "ast_hash": "758eb75e8f6679f6953549279572d089",
+    "mtime": 1781668335.2250667,
+    "ast_hash": "2e7c059e7f620689a7b43f255316f7a2",
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\migrations\\versions\\a3c4d5e6f7b8_flow_engine.py": {
@@ -380,18 +380,18 @@
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\scripts\\apply_config.py": {
-    "mtime": 1781110430.8333874,
-    "ast_hash": "6c84ce83af2b5df95839fd5e56dc5ac5",
+    "mtime": 1781212877.2180252,
+    "ast_hash": "f62643b89267fcc7b0cfd5059e8c0377",
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\src\\secretaria\\services\\flow_router.py": {
-    "mtime": 1781128331.3789475,
-    "ast_hash": "d1c44016de9bac5cd185e9a501735703",
+    "mtime": 1781667980.6369596,
+    "ast_hash": "7baeb60d47ad754e3307a57ed432fab9",
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\tests\\test_flow_router.py": {
-    "mtime": 1781033994.9473317,
-    "ast_hash": "a8cdedfd6a8e6858fd641726196892cc",
+    "mtime": 1781668364.045693,
+    "ast_hash": "ef27dfe5e54c04e3749ac84aa22d9eb7",
     "semantic_hash": ""
   },
   "C:\\TECH\\secretarIA\\tests\\test_tasks_helpers.py": {
@@ -432,6 +432,51 @@
   "C:\\TECH\\secretarIA\\tests\\test_admin_tenants.py": {
     "mtime": 1781209322.5156646,
     "ast_hash": "f278d3ab523790a62c56fd1a1f1261b3",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\secretarIA\\docs\\aprendizado\\exemplos\\fastapi-minimo\\app.py": {
+    "mtime": 1781480765.9913673,
+    "ast_hash": "861770d713fbad1d06eb6e1bf01c626e",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\secretarIA\\docs\\aprendizado\\exemplos\\langgraph-minimo\\01_react_prebuilt.py": {
+    "mtime": 1781480779.2648103,
+    "ast_hash": "5ce9ae3d517da73cf875170cc683e7f1",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\secretarIA\\docs\\aprendizado\\exemplos\\langgraph-minimo\\02_stategraph_custom.py": {
+    "mtime": 1781480794.7835484,
+    "ast_hash": "7122ab940d0efc27c7303cd3c4ceb953",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\secretarIA\\scripts\\break_calendar.py": {
+    "mtime": 1781212900.5178325,
+    "ast_hash": "9852dc90d2d0184a2042a8c5d2454b26",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\secretarIA\\tests\\test_calendar_unavailable_mapping.py": {
+    "mtime": 1781363380.9345875,
+    "ast_hash": "41067955bef0fc055978821d76cc0710",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\secretarIA\\docs\\aprendizado\\guia-secretaria.html": {
+    "mtime": 1781481024.073828,
+    "ast_hash": "81a0deaee346f2638ca582c9c79082ff",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\secretarIA\\docs\\aprendizado\\README.md": {
+    "mtime": 1781480837.354987,
+    "ast_hash": "70170af212088c6bfad775a635f7eeae",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\secretarIA\\docs\\aprendizado\\exemplos\\fastapi-minimo\\README.md": {
+    "mtime": 1781480810.6446483,
+    "ast_hash": "cf59a1d2a15b5bec4f729bac95cdc11b",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\secretarIA\\docs\\aprendizado\\exemplos\\langgraph-minimo\\README.md": {
+    "mtime": 1781480824.4148798,
+    "ast_hash": "fcc54c4f3a536661ac2d2de0a0eeb54b",
     "semantic_hash": ""
   }
 }

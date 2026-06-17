@@ -1,16 +1,16 @@
-# Graph Report - secretarIA  (2026-06-11)
+# Graph Report - secretarIA  (2026-06-17)
 
 ## Corpus Check
-- 86 files · ~36,213 words
+- 94 files · ~46,882 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1157 nodes · 1787 edges · 106 communities (89 shown, 17 thin omitted)
-- Extraction: 79% EXTRACTED · 21% INFERRED · 0% AMBIGUOUS · INFERRED: 373 edges (avg confidence: 0.76)
+- 1314 nodes · 2068 edges · 124 communities (106 shown, 18 thin omitted)
+- Extraction: 80% EXTRACTED · 20% INFERRED · 0% AMBIGUOUS · INFERRED: 412 edges (avg confidence: 0.76)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `3179d5a6`
+- Built from commit: `c099d551`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -105,18 +105,36 @@
 - [[_COMMUNITY_Community 103|Community 103]]
 - [[_COMMUNITY_Community 104|Community 104]]
 - [[_COMMUNITY_Community 105|Community 105]]
+- [[_COMMUNITY_Community 106|Community 106]]
+- [[_COMMUNITY_Community 107|Community 107]]
+- [[_COMMUNITY_Community 108|Community 108]]
+- [[_COMMUNITY_Community 109|Community 109]]
+- [[_COMMUNITY_Community 110|Community 110]]
+- [[_COMMUNITY_Community 111|Community 111]]
+- [[_COMMUNITY_Community 112|Community 112]]
+- [[_COMMUNITY_Community 113|Community 113]]
+- [[_COMMUNITY_Community 114|Community 114]]
+- [[_COMMUNITY_Community 115|Community 115]]
+- [[_COMMUNITY_Community 116|Community 116]]
+- [[_COMMUNITY_Community 117|Community 117]]
+- [[_COMMUNITY_Community 118|Community 118]]
+- [[_COMMUNITY_Community 119|Community 119]]
+- [[_COMMUNITY_Community 120|Community 120]]
+- [[_COMMUNITY_Community 121|Community 121]]
+- [[_COMMUNITY_Community 122|Community 122]]
+- [[_COMMUNITY_Community 123|Community 123]]
 
 ## God Nodes (most connected - your core abstractions)
-1. `get_settings()` - 37 edges
-2. `_send_bot_reply()` - 29 edges
-3. `route()` - 28 edges
-4. `resume_bubbles()` - 26 edges
-5. `_persist_inbound_message()` - 26 edges
-6. `parse()` - 23 edges
-7. `CalendarService` - 23 edges
-8. `_tenant()` - 23 edges
-9. `FlowRouterResult` - 21 edges
-10. `_ReplyContext` - 20 edges
+1. `route()` - 41 edges
+2. `get_settings()` - 37 edges
+3. `_send_bot_reply()` - 33 edges
+4. `FlowRouterResult` - 28 edges
+5. `resume_bubbles()` - 27 edges
+6. `_persist_inbound_message()` - 27 edges
+7. `_tenant()` - 26 edges
+8. `_conversation()` - 26 edges
+9. `_FakeCalendar` - 26 edges
+10. `CalendarService` - 25 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `Graphify Bash PreToolUse Hook` --conceptually_related_to--> `receive_webhook (POST)`  [AMBIGUOUS]
@@ -141,15 +159,15 @@
 - **Google Calendar Integration Layer** — calendar_service, tools_check_availability, tools_create_event, tools_cancel_event, calendar_scopes_constant [EXTRACTED 0.95]
 - **Fase A OAuth Scaffolding Scripts** — gcal_auth_main, check_scopes_main, test_agent_main, config_settings [INFERRED 0.85]
 
-## Communities (106 total, 17 thin omitted)
+## Communities (124 total, 18 thin omitted)
 
 ### Community 0 - "Community 0"
 Cohesion: 0.18
 Nodes (14): CalendarService._build_service, CalendarService.cancel_event, CalendarService.check_availability, CalendarService.create_event, SCOPES = calendar.events, CalendarService, check_scopes.main, check_scopes._short (+6 more)
 
 ### Community 1 - "Community 1"
-Cohesion: 0.16
-Nodes (18): Base, Bot/human handover state, Base (DeclarativeBase), _do_run_migrations, run_migrations_online, Initial schema upgrade, Conversation, HandoverState (+10 more)
+Cohesion: 0.15
+Nodes (17): Bot/human handover state, Base (DeclarativeBase), Initial schema upgrade, Conversation, HandoverState, Conversation model - one ongoing thread between a patient and a clinic., Who currently owns the conversation.      BOT_ACTIVE   - the AI may answer autom, A patient <-> clinic conversation and its handover state. (+9 more)
 
 ### Community 2 - "Community 2"
 Cohesion: 0.25
@@ -160,32 +178,32 @@ Cohesion: 0.09
 Nodes (30): WorkerSettings (arq config), postgres compose service, redis compose service, HandoverManager, PrecheckClient, ProcessedEvent (idempotency ledger), Idempotency ledger pattern, MVP single-tenant auto-provision (+22 more)
 
 ### Community 4 - "Community 4"
-Cohesion: 0.22
-Nodes (12): _apply_flow_result(), _dispatch_bubbles(), _handle_calendar_unavailable(), arq job functions - all async webhook processing happens here.  This code runs O, Degrade gracefully on a calendar outage: notify patient + hand off + alert tenan, Run the deterministic flow router for this turn.      `conv_snapshot`/`tenant_sn, Send each bubble in order, recording outbound messages. Returns count sent., Run the deterministic flow router for this turn.      `conv_snapshot`/`tenant_sn (+4 more)
+Cohesion: 0.15
+Nodes (15): _persist_appointment(), Record a bot-created appointment. Best-effort: never raises.      Skipped silent, Appointment, Platform-side record of a clinic appointment.      Created whenever the platform, _apply_flow_result(), _handle_calendar_unavailable(), Degrade gracefully on a calendar outage: notify patient + hand off + alert tenan, Degrade gracefully on a calendar outage: notify patient + hand off + alert tenan (+7 more)
 
 ### Community 5 - "Community 5"
-Cohesion: 0.08
-Nodes (21): CalendarService, Create an event on the clinic's calendar. Returns the inserted event., Return free [start, end) slots on `day` within business hours.          Walks th, Return free [start, end) slots on `day` within business hours.          Walks th, Return events overlapping [start, end) on the clinic calendar.          Each ite, Delete an event by id. 404/410 are treated as success (idempotent)., Create an event on the clinic's calendar. Returns the inserted event., Create an event on the clinic's calendar. Returns the inserted event. (+13 more)
+Cohesion: 0.13
+Nodes (13): CalendarService, Return free [start, end) slots on `day` within business hours.          Walks th, Return free [start, end) slots on `day` within business hours.          Walks th, Return events overlapping [start, end) on the clinic calendar.          Each ite, Resolve the availability windows for `day_local` (clinic-local).          Uses t, Move an existing event to a new [start, end) window. Returns the updated event., Return free [start, end) slots on `day` within business hours.          Walks ea, Async wrapper around the (sync) Google Calendar v3 API. (+5 more)
 
 ### Community 6 - "Community 6"
-Cohesion: 0.05
-Nodes (44): build_agent(), invoke_agent(), _invoke_agent_with_retry(), _load_history(), _looks_like_meta_output(), _prompt_with_today(), LangGraph agent for SecretarIA (Phase 5 / Fase B).  create_react_agent gives us, Reconstruct LangChain message history from the DB.      Pulls the most recent HI (+36 more)
+Cohesion: 0.06
+Nodes (40): build_agent(), invoke_agent(), _invoke_agent_with_retry(), _load_history(), _looks_like_meta_output(), _prompt_with_today(), LangGraph agent for SecretarIA (Phase 5 / Fase B).  create_react_agent gives us, Reconstruct LangChain message history from the DB.      Pulls the most recent HI (+32 more)
 
 ### Community 7 - "Community 7"
 Cohesion: 0.20
-Nodes (10): _filter_new_event_ids(), WhatsApp webhook endpoints.  GET  /webhook  - Meta verification handshake (echoe, Meta verification handshake.      Meta calls this once when the webhook is confi, Return the subset of `event_ids` not yet in `processed_events`.      Fail-open:, Receive a webhook event.      GOLDEN RULE: return 200 in well under 5 seconds. O, receive_webhook(), verify_webhook(), iter_event_ids() (+2 more)
+Nodes (14): _raise_if_unavailable(), Translate an outage/auth HttpError into CalendarUnavailableError.      Returns n, _http_error(), Detection-layer contract: every "Google Calendar is broken" mode funnels into a, A googleapiclient HttpError carrying `status`, as the Google client raises., Minimal Settings duck-type: enough for CalendarService.__init__ + _build_service, A CalendarService whose credential refresh raises `exc` at _build_service., _service_whose_refresh_raises() (+6 more)
 
 ### Community 8 - "Community 8"
-Cohesion: 0.23
-Nodes (13): Security helpers - Meta webhook HMAC-SHA256 signature validation.  Meta signs ev, Return True if `signature_header` is a valid HMAC of `raw_body`.      Args:, verify_meta_signature(), Tests for the Meta webhook HMAC-SHA256 signature validation., Build a valid `X-Hub-Signature-256` header value for `body`., _sign(), test_empty_app_secret_is_rejected(), test_invalid_signature_is_rejected() (+5 more)
+Cohesion: 0.11
+Nodes (23): _filter_new_event_ids(), WhatsApp webhook endpoints.  GET  /webhook  - Meta verification handshake (echoe, Meta verification handshake.      Meta calls this once when the webhook is confi, Return the subset of `event_ids` not yet in `processed_events`.      Fail-open:, Receive a webhook event.      GOLDEN RULE: return 200 in well under 5 seconds. O, receive_webhook(), verify_webhook(), Security helpers - Meta webhook HMAC-SHA256 signature validation.  Meta signs ev (+15 more)
 
 ### Community 9 - "Community 9"
 Cohesion: 0.18
 Nodes (8): PrecheckClient, HTTP client for the Precheck service (a separate FastAPI app).  Precheck runs in, Async client for the Precheck (anamnese) service., Issue an authenticated request, logging structured errors., Start an anamnese (pre-consultation questionnaire) for a patient., # TODO: PRECHECK_CONTRACT_NEEDED - confirmar path e payload com o dono da API, Fetch the result of a previously started anamnese., # TODO: PRECHECK_CONTRACT_NEEDED - confirmar path e payload com o dono da API
 
 ### Community 10 - "Community 10"
-Cohesion: 0.25
-Nodes (8): _extract_sent_wam_id(), Pull the wamid from a Cloud API send response, tolerating bad shapes., Pull the wamid from a Cloud API send response, tolerating bad shapes., Pull the wamid from a Cloud API send response, tolerating bad shapes., Pull the wamid from a Cloud API send response, tolerating bad shapes., Pull the wamid from a Cloud API send response, tolerating bad shapes., Pull the wamid from a Cloud API send response, tolerating bad shapes., Pull the wamid from a Cloud API send response, tolerating bad shapes.
+Cohesion: 0.22
+Nodes (9): _extract_sent_wam_id(), Pull the wamid from a Cloud API send response, tolerating bad shapes., Pull the wamid from a Cloud API send response, tolerating bad shapes., Pull the wamid from a Cloud API send response, tolerating bad shapes., Pull the wamid from a Cloud API send response, tolerating bad shapes., Pull the wamid from a Cloud API send response, tolerating bad shapes., Pull the wamid from a Cloud API send response, tolerating bad shapes., Pull the wamid from a Cloud API send response, tolerating bad shapes. (+1 more)
 
 ### Community 11 - "Community 11"
 Cohesion: 0.17
@@ -216,24 +234,24 @@ Cohesion: 0.06
 Nodes (35): 1. Install dependencies, 2. Create your .env, 3. Start Postgres + Redis, 4. Apply database migrations, 5. (optional) Seed a development tenant, 6. Run the API, 7. Run the worker (in a second terminal), Architecture (+27 more)
 
 ### Community 32 - "Community 32"
-Cohesion: 0.15
-Nodes (27): _ask_day(), _catalog_step(), _enter_menu_choice(), FlowRouterResult, format_business_hours(), _handle_confirmation(), _handle_day(), _match_service() (+19 more)
+Cohesion: 0.17
+Nodes (20): ButtonBubble, _ask_day(), _catalog_step(), _enter_menu_choice(), FlowRouterResult, _handle_confirmation(), _handle_day(), _handle_slot() (+12 more)
 
 ### Community 33 - "Community 33"
-Cohesion: 0.09
-Nodes (28): cancel_event(), check_availability(), create_event(), _event_window(), _get_calendar(), list_free_slots(), _mark_appointment_cancelled(), _persist_appointment() (+20 more)
+Cohesion: 0.12
+Nodes (19): cancel_event(), check_availability(), _event_window(), _get_calendar(), list_free_slots(), _mark_appointment_cancelled(), LangChain tools for the LangGraph agent.  Each tool wraps a CalendarService meth, Flip the matching appointment row(s) to CANCELLED. Best-effort. (+11 more)
 
 ### Community 34 - "Community 34"
-Cohesion: 0.09
-Nodes (25): extract_inbound_body(), Return the human-readable text body of an inbound message.      Handles text mes, Tests for the webhook payload parser, focused on interactive replies., test_empty_interactive_yields_none(), test_extract_button_reply(), test_extract_list_reply_non_slot_id_falls_back_to_title(), test_extract_list_reply_slot_includes_iso_in_body(), test_extract_text_body() (+17 more)
+Cohesion: 0.05
+Nodes (45): extract_inbound_body(), Return the human-readable text body of an inbound message.      Handles text mes, Tests for the /menu reset-command predicate., test_non_triggers(), test_recognised_triggers(), Tests for the webhook payload parser, focused on interactive replies., test_empty_interactive_yields_none(), test_extract_button_reply() (+37 more)
 
 ### Community 35 - "Community 35"
 Cohesion: 0.22
 Nodes (8): Auxiliary scripts (Fase A scaffolding), graphify, Implementation status, Per-tenant config (the rows we must grow), Product vision, SecretarIA, The hardcoded "Eye Company" is placeholder test data, What the agent needs to become
 
 ### Community 36 - "Community 36"
-Cohesion: 0.06
-Nodes (46): decrypt(), encrypt(), EncryptionError, _fernet(), Symmetric encryption for tenant secrets at rest (Fernet / AES-128-CBC + HMAC)., Raised when encryption/decryption cannot be performed., Build the process-wide Fernet from settings.ENCRYPTION_KEY.      Cached so we va, Encrypt `plaintext`, returning a urlsafe-base64 ciphertext string. (+38 more)
+Cohesion: 0.13
+Nodes (19): clear_google_refresh_token(), _get_credentials(), get_google_refresh_token(), has_google_refresh_token(), load_tenant_config(), Tenant configuration: runtime read-model + encrypted-credential helpers.  `load_, Forget the Calendar refresh token (disconnect). Caller commits., Forget the Calendar refresh token (disconnect). Caller commits. (+11 more)
 
 ### Community 37 - "Community 37"
 Cohesion: 0.11
@@ -244,8 +262,8 @@ Cohesion: 0.14
 Nodes (17): AppointmentStatus, Appointment model - links a Google Calendar event to a patient + phone., AppointmentCancel, AppointmentCreate, AppointmentRead, AppointmentReschedule, AppointmentStatusUpdate, BlockCreate (+9 more)
 
 ### Community 39 - "Community 39"
-Cohesion: 0.14
-Nodes (13): _check_business_hours(), _end_after_start(), _parse_hhmm(), Request/response schemas for the doctor-hub config endpoints.  All domain *shape, Parse an "HH:MM" string into a time, raising ValueError if out of range., Parse an "HH:MM" string into a time, raising ValueError if out of range., Reject unknown weekday keys and overlapping windows within a day., Reject unknown weekday keys and overlapping windows within a day. (+5 more)
+Cohesion: 0.11
+Nodes (16): _check_business_hours(), _end_after_start(), _parse_hhmm(), Request/response schemas for the doctor-hub config endpoints.  All domain *shape, Parse an "HH:MM" string into a time, raising ValueError if out of range., A single availability window within a day (local clinic time)., Parse an "HH:MM" string into a time, raising ValueError if out of range., A single availability window within a day (local clinic time). (+8 more)
 
 ### Community 40 - "Community 40"
 Cohesion: 0.18
@@ -253,7 +271,7 @@ Nodes (12): _bearer_token(), get_current_tenant(), Shared FastAPI dependencies f
 
 ### Community 41 - "Community 41"
 Cohesion: 0.07
-Nodes (27): appointment_duration_min, appointment_types, business_hours, friday, monday, saturday, thursday, tuesday (+19 more)
+Nodes (28): appointment_duration_min, appointment_types, business_hours, friday, monday, saturday, thursday, tuesday (+20 more)
 
 ### Community 42 - "Community 42"
 Cohesion: 0.14
@@ -272,28 +290,28 @@ Cohesion: 0.28
 Nodes (9): Async offload via arq queue, HMAC-SHA256 webhook signature verification, Webhook idempotency fast-path, get_logger, FastAPI lifespan, verify_meta_signature, Graphify Bash PreToolUse Hook, _filter_new_event_ids (+1 more)
 
 ### Community 46 - "Community 46"
-Cohesion: 0.17
-Nodes (10): get_logger(), Structured logging setup using structlog.  JSON output in non-dev environments,, Configure structlog + stdlib logging. Safe to call more than once., Return a bound structlog logger., setup_logging(), main(), Dev shortcut: store the Fase A GOOGLE_REFRESH_TOKEN as the tenant's encrypted Ca, on_startup() (+2 more)
+Cohesion: 0.15
+Nodes (12): Configure structlog + stdlib logging. Safe to call more than once., setup_logging(), main(), Dev/test: store an INVALID Google Calendar refresh token for a tenant so the nex, main(), Dev shortcut: store the Fase A GOOGLE_REFRESH_TOKEN as the tenant's encrypted Ca, Encrypt and upsert the Calendar refresh token. Caller commits., Encrypt and upsert the Calendar refresh token. Caller commits. (+4 more)
 
 ### Community 47 - "Community 47"
-Cohesion: 0.15
-Nodes (12): FastAPI dependency: 403 unless `X-Admin-Token` matches the env token.      Uses, require_admin(), main(), Generate a Google Calendar refresh token for Fase A (single tenant).  One-shot C, get_settings(), Return a cached Settings instance (read once per process)., Return a cached Settings instance (read once per process)., Return a cached Settings instance (read once per process). (+4 more)
+Cohesion: 0.14
+Nodes (12): main(), Generate a Google Calendar refresh token for Fase A (single tenant).  One-shot C, get_settings(), Return a cached Settings instance (read once per process)., Return a cached Settings instance (read once per process)., Return a cached Settings instance (read once per process)., Return a cached Settings instance (read once per process)., build_authorization_url() (+4 more)
 
 ### Community 48 - "Community 48"
-Cohesion: 0.36
-Nodes (8): Multi-tenant routing by phone_number_id, get_settings (lru_cache), async_session_factory, async engine, get_session dependency, run_migrations_offline, setup_logging, seed (dev tenant)
+Cohesion: 0.27
+Nodes (10): Multi-tenant routing by phone_number_id, get_settings (lru_cache), async_session_factory, async engine, get_session dependency, _do_run_migrations, run_migrations_offline, run_migrations_online (+2 more)
 
 ### Community 49 - "Community 49"
-Cohesion: 0.13
-Nodes (33): Exception, CalendarUnavailableError, _raise_if_unavailable(), Google Calendar integration for the clinic.  Fase A (single tenant): credentials, Raised when Google Calendar cannot be reached or refused our credentials.      D, Translate an outage/auth HttpError into CalendarUnavailableError.      Returns n, Decide the next deterministic step for this inbound turn.      `patient_name` is, Decide the next deterministic step for this inbound turn.      `patient_name` is (+25 more)
+Cohesion: 0.14
+Nodes (40): Exception, CalendarUnavailableError, Raised when Google Calendar cannot be reached or refused our credentials.      D, Decide the next deterministic step for this inbound turn.      `patient_name` is, Decide the next deterministic step for this inbound turn.      `patient_name` is, Decide the next deterministic step for this inbound turn.      `patient_name` an, route(), _FakeError (+32 more)
 
 ### Community 50 - "Community 50"
-Cohesion: 0.25
-Nodes (8): _event_already_processed(), True when `event_id` is already in the `processed_events` ledger., True when `event_id` is already in the `processed_events` ledger., True when `event_id` is already in the `processed_events` ledger., True when `event_id` is already in the `processed_events` ledger., True when `event_id` is already in the `processed_events` ledger., True when `event_id` is already in the `processed_events` ledger., True when `event_id` is already in the `processed_events` ledger.
+Cohesion: 0.22
+Nodes (9): _event_already_processed(), True when `event_id` is already in the `processed_events` ledger., True when `event_id` is already in the `processed_events` ledger., True when `event_id` is already in the `processed_events` ledger., True when `event_id` is already in the `processed_events` ledger., True when `event_id` is already in the `processed_events` ledger., True when `event_id` is already in the `processed_events` ledger., True when `event_id` is already in the `processed_events` ledger. (+1 more)
 
 ### Community 51 - "Community 51"
-Cohesion: 0.25
-Nodes (8): _get_or_create_patient(), Return the patient for (tenant, wa_id), creating it if needed., Return the patient for (tenant, wa_id), creating it if needed., Return the patient for (tenant, wa_id), creating it if needed., Return the patient for (tenant, wa_id), creating it if needed., Return the patient for (tenant, wa_id), creating it if needed., Return the patient for (tenant, wa_id), creating it if needed., Return the patient for (tenant, wa_id), creating it if needed.
+Cohesion: 0.22
+Nodes (9): _get_or_create_patient(), Return the patient for (tenant, wa_id), creating it if needed., Return the patient for (tenant, wa_id), creating it if needed., Return the patient for (tenant, wa_id), creating it if needed., Return the patient for (tenant, wa_id), creating it if needed., Return the patient for (tenant, wa_id), creating it if needed., Return the patient for (tenant, wa_id), creating it if needed., Return the patient for (tenant, wa_id), creating it if needed. (+1 more)
 
 ### Community 52 - "Community 52"
 Cohesion: 0.25
@@ -304,60 +322,60 @@ Cohesion: 0.29
 Nodes (4): BaseSettings, Application configuration loaded from environment variables / .env file., Strongly-typed settings. Values come from the environment or `.env`.      Real e, Settings
 
 ### Community 54 - "Community 54"
-Cohesion: 0.14
-Nodes (15): _handle_patient_messages(), _persist_inbound_message(), Persist inbound patient messages and, if the bot is active, reply., Record an inbound message in its own transaction.      Returns a `_ReplyContext`, Persist inbound patient messages and, if the bot is active, reply., Persist inbound patient messages and, if the bot is active, reply., Record an inbound message in its own transaction.      Returns a `_ReplyContext`, Record an inbound message in its own transaction.      Returns a `_ReplyContext` (+7 more)
+Cohesion: 0.17
+Nodes (11): ProcessedEvent, ProcessedEvent model - idempotency ledger for incoming webhook events., One row per Meta event id already handled.      The unique constraint on `event_, _persist_inbound_message(), Record an inbound message in its own transaction.      Returns a `_ReplyContext`, Record an inbound message in its own transaction.      Returns a `_ReplyContext`, Record an inbound message in its own transaction.      Returns a `_ReplyContext`, Record an inbound message in its own transaction.      Returns a `_ReplyContext` (+3 more)
 
 ### Community 55 - "Community 55"
-Cohesion: 0.29
-Nodes (7): Dispatch a single bubble to the right WhatsAppClient method., Dispatch a single bubble to the right WhatsAppClient method., Dispatch a single bubble to the right WhatsAppClient method., Dispatch a single bubble to the right WhatsAppClient method., Dispatch a single bubble to the right WhatsAppClient method., Dispatch a single bubble to the right WhatsAppClient method., _send_bubble()
+Cohesion: 0.25
+Nodes (8): Dispatch a single bubble to the right WhatsAppClient method., Dispatch a single bubble to the right WhatsAppClient method., Dispatch a single bubble to the right WhatsAppClient method., Dispatch a single bubble to the right WhatsAppClient method., Dispatch a single bubble to the right WhatsAppClient method., Dispatch a single bubble to the right WhatsAppClient method., Dispatch a single bubble to the right WhatsAppClient method., _send_bubble()
 
 ### Community 56 - "Community 56"
 Cohesion: 0.33
 Nodes (6): Eye Company is Placeholder Scaffold, Multi-tenant SaaS Vision, Per-tenant Config (identity/services/hours/tz/lang/calendar/whatsapp), WhatsApp Cloud API Coexistence Model, ai.graph._prompt_with_today, secretary_system_prompt
 
 ### Community 58 - "Community 58"
-Cohesion: 0.33
-Nodes (5): build_authorization_url(), exchange_code_for_refresh_token(), Google Calendar OAuth helpers (platform-level hub onboarding).  A manual authori, Build the Google consent URL the doctor is redirected to., Exchange an authorization `code` for tokens; return the refresh_token.      Retu
+Cohesion: 0.15
+Nodes (11): get_settings(), heavy_work(), InboundMessage, FastAPI mínimo — espelha o padrão do webhook da secretarIA.  Demonstra, em ~40 l, O corpo do POST. O FastAPI valida e converte automaticamente., Uma 'dependência'. Em apps reais devolveria config/DB/auth., Handshake de verificação (estilo Meta): ecoa hub.challenge se o token bate., Simula o 'trabalho pesado' que a secretarIA joga para o worker arq. (+3 more)
 
 ### Community 59 - "Community 59"
-Cohesion: 0.06
-Nodes (33): Outbound email — operational alerts sent to clinic owners.  Uses stdlib smtplib, Blocking SMTP send — called via asyncio.to_thread., Email the clinic owner when Google Calendar becomes unreachable.      No-ops sil, send_calendar_alert(), _send_sync(), _FakeRedis, Unit tests for worker helper functions (no DB / network)., When SMTP_HOST is set, asyncio.to_thread is called with the right args. (+25 more)
+Cohesion: 0.05
+Nodes (37): Outbound email — operational alerts sent to clinic owners.  Uses stdlib smtplib, Blocking SMTP send — called via asyncio.to_thread., Email the clinic owner when Google Calendar becomes unreachable.      No-ops sil, send_calendar_alert(), _send_sync(), _FakeRedis, Unit tests for worker helper functions (no DB / network)., When SMTP_HOST is set, asyncio.to_thread is called with the right args. (+29 more)
 
 ### Community 61 - "Community 61"
 Cohesion: 0.67
 Nodes (3): main(), Diagnose Fase A auth: what scopes does our refresh token actually carry?  A refr, _short()
 
 ### Community 63 - "Community 63"
-Cohesion: 0.12
-Nodes (14): Base, get_session(), Async SQLAlchemy 2.0 engine, session factory and declarative Base., Declarative base shared by every ORM model., FastAPI dependency that yields a database session., DeclarativeBase, MessageDirection, MessageSender (+6 more)
+Cohesion: 0.13
+Nodes (13): Base, get_session(), Async SQLAlchemy 2.0 engine, session factory and declarative Base., Declarative base shared by every ORM model., FastAPI dependency that yields a database session., DeclarativeBase, FlowState, Which deterministic (zero-LLM) flow the conversation is currently in.      IDLE (+5 more)
 
 ### Community 64 - "Community 64"
-Cohesion: 0.25
-Nodes (8): _get_or_create_conversation(), Return the conversation for (tenant, patient), creating it if needed., Return the conversation for (tenant, patient), creating it if needed., Return the conversation for (tenant, patient), creating it if needed., Return the conversation for (tenant, patient), creating it if needed., Return the conversation for (tenant, patient), creating it if needed., Return the conversation for (tenant, patient), creating it if needed., Return the conversation for (tenant, patient), creating it if needed.
+Cohesion: 0.22
+Nodes (9): _get_or_create_conversation(), Return the conversation for (tenant, patient), creating it if needed., Return the conversation for (tenant, patient), creating it if needed., Return the conversation for (tenant, patient), creating it if needed., Return the conversation for (tenant, patient), creating it if needed., Return the conversation for (tenant, patient), creating it if needed., Return the conversation for (tenant, patient), creating it if needed., Return the conversation for (tenant, patient), creating it if needed. (+1 more)
 
 ### Community 65 - "Community 65"
-Cohesion: 0.17
-Nodes (11): Tenant model - one clinic, with its own WhatsApp Business credentials., A clinic using SecretarIA.      The system is multi-tenant in the data model. Fo, Tenant, Find the tenant for an inbound event.      MVP single-tenant convenience: when n, Find the tenant for an inbound event.      MVP single-tenant convenience: when n, Find the tenant for an inbound event.      MVP single-tenant convenience: when n, Find the tenant for an inbound event.      MVP single-tenant convenience: when n, Find the tenant for an inbound event.      MVP single-tenant convenience: when n (+3 more)
+Cohesion: 0.15
+Nodes (12): Tenant model - one clinic, with its own WhatsApp Business credentials., A clinic using SecretarIA.      The system is multi-tenant in the data model. Fo, Tenant, Find the tenant for an inbound event.      MVP single-tenant convenience: when n, Find the tenant for an inbound event.      MVP single-tenant convenience: when n, Find the tenant for an inbound event.      MVP single-tenant convenience: when n, Find the tenant for an inbound event.      MVP single-tenant convenience: when n, Find the tenant for an inbound event.      MVP single-tenant convenience: when n (+4 more)
 
 ### Community 71 - "Community 71"
-Cohesion: 0.08
-Nodes (37): _appointment_read(), cancel_appointment(), create_appointment(), create_block(), _get_appointment(), _get_calendar(), list_events(), Doctor hub — calendar platform endpoints (authenticated).  GET   /tenants/me/cal (+29 more)
+Cohesion: 0.28
+Nodes (15): _appointment_read(), cancel_appointment(), create_appointment(), create_block(), _get_appointment(), _get_calendar(), list_events(), Doctor hub — calendar platform endpoints (authenticated).  GET   /tenants/me/cal (+7 more)
 
 ### Community 72 - "Community 72"
-Cohesion: 0.10
-Nodes (51): classify_yes_no(), _confirmation_recap(), True when this tenant offers a 'welcome back / continue?' prompt., Minutes of silence after which a returning patient is offered to resume., The question appended to the returning greeting (e.g. 'Quer continuar?')., The [yes, no] reply-button labels for the continue prompt (max 3)., Classify a continue-prompt answer as "yes", "no", or "other".      Matched again, Rebuild the confirmation recap text from the stored slot, or None. (+43 more)
+Cohesion: 0.07
+Nodes (60): classify_yes_no(), _confirmation_recap(), Rebuild the confirmation recap text from the stored slot, or None., Re-emit the prompt for the conversation's CURRENT flow step.      Used when a re, True when this tenant offers a 'welcome back / continue?' prompt., Minutes of silence after which a returning patient is offered to resume., The question appended to the returning greeting (e.g. 'Quer continuar?')., The [yes, no] reply-button labels for the continue prompt (max 3). (+52 more)
 
 ### Community 73 - "Community 73"
-Cohesion: 0.29
-Nodes (7): _bubble_history_body(), Render an outbound bubble as the text the LLM should see in history.      Intera, Render an outbound bubble as the text the LLM should see in history.      Intera, Render an outbound bubble as the text the LLM should see in history.      Intera, Render an outbound bubble as the text the LLM should see in history.      Intera, Render an outbound bubble as the text the LLM should see in history.      Intera, Render an outbound bubble as the text the LLM should see in history.      Intera
+Cohesion: 0.18
+Nodes (11): _bubble_history_body(), _dispatch_bubbles(), Render an outbound bubble as the text the LLM should see in history.      Intera, Render an outbound bubble as the text the LLM should see in history.      Intera, Render an outbound bubble as the text the LLM should see in history.      Intera, Render an outbound bubble as the text the LLM should see in history.      Intera, Render an outbound bubble as the text the LLM should see in history.      Intera, Send each bubble in order, recording outbound messages. Returns count sent. (+3 more)
 
 ### Community 74 - "Community 74"
 Cohesion: 0.12
-Nodes (19): ButtonBubble, SlotsBubble, _handle_slot(), MenuBubble, An N-button reply card (the formatter's ButtonBubble is confirm/cancel     only), Parse the ISO datetime out of a slot-row tap ("14:00 (2026-06-12T14:00)")., Parse the ISO datetime out of a slot-row tap ("14:00 (2026-06-12T14:00)")., An N-button reply card (the formatter's ButtonBubble is confirm/cancel     only) (+11 more)
+Nodes (15): _finalise(), Parse the agent's text output into a sequence of WhatsApp message bubbles.  The, Drop empty/emoji-only bubbles and merge tails beyond the cap., SlotsBubble, format_business_hours(), MenuBubble, An N-button reply card (the formatter's ButtonBubble is confirm/cancel     only), An N-button reply card (the formatter's ButtonBubble is confirm/cancel     only) (+7 more)
 
 ### Community 75 - "Community 75"
-Cohesion: 0.16
-Nodes (19): _clean(), parse(), Split a free-text chunk into one or more text bubbles on `---`., Trim trailing blank lines and normalise WhatsApp-unfriendly spacing.      WhatsA, Turn an LLM reply string into a list of `Bubble`s.      Order of operations:, _split_text(), Tests for the agent-output formatter (bubble splitting + markup parsing)., test_bubble_cap_merges_extra_text_tail() (+11 more)
+Cohesion: 0.13
+Nodes (23): _clean(), parse(), _parse_slot_rows(), _pop_preceding_text_for(), Split a free-text chunk into one or more text bubbles on `---`., Trim trailing blank lines and normalise WhatsApp-unfriendly spacing.      WhatsA, Each non-empty line is `<id>|<label>`; malformed lines are skipped., Promote the last short text bubble into the slot card's header.      A list mess (+15 more)
 
 ### Community 76 - "Community 76"
 Cohesion: 0.14
@@ -365,15 +383,15 @@ Nodes (8): _make_config(), _make_tenant(), Tests for the admin fleet endpoints (
 
 ### Community 77 - "Community 77"
 Cohesion: 0.25
-Nodes (8): Tests for the /menu reset-command predicate., test_non_triggers(), test_recognised_triggers(), is_menu_command(), True when the patient typed a `/menu`-style reset command., True when the patient typed a `/menu`-style reset command., True when the patient typed a `/menu`-style reset command., True when the patient typed a `/menu`-style reset command.
+Nodes (10): decrypt(), encrypt(), EncryptionError, _fernet(), Symmetric encryption for tenant secrets at rest (Fernet / AES-128-CBC + HMAC)., Raised when encryption/decryption cannot be performed., Build the process-wide Fernet from settings.ENCRYPTION_KEY.      Cached so we va, Encrypt `plaintext`, returning a urlsafe-base64 ciphertext string. (+2 more)
 
 ### Community 78 - "Community 78"
 Cohesion: 0.50
 Nodes (3): permissions, additionalDirectories, allow
 
 ### Community 79 - "Community 79"
-Cohesion: 0.25
-Nodes (8): Generate a reply, send it via the Cloud API, and record it., Generate a reply, split it into bubbles, send each, and record them., Generate a reply, split it into bubbles, send each, and record them., Generate a reply, split it into bubbles, send each, and record them., Generate a reply, split it into bubbles, send each, and record them., Generate a reply, split it into bubbles, send each, and record them., Generate a reply, split it into bubbles, send each, and record them., _send_bot_reply()
+Cohesion: 0.11
+Nodes (20): manage_label(), The button label that opens the cancel/reschedule sub-flow., _label_match_body(), _load_upcoming_appointments(), arq job functions - all async webhook processing happens here.  This code runs O, Send a single plain-text message, swallowing send errors (MVP: no retry)., Generate a reply, send it via the Cloud API, and record it., Generate a reply, split it into bubbles, send each, and record them. (+12 more)
 
 ### Community 88 - "Community 88"
 Cohesion: 0.29
@@ -384,80 +402,148 @@ Cohesion: 0.21
 Nodes (15): BaseModel, Pydantic schemas for the Meta WhatsApp webhook payload.  The models are intentio, Common shape for both `button_reply` and `list_reply` sub-objects., Container the patient sends back after tapping an interactive control.      `typ, WebhookChange, WebhookContact, WebhookContactProfile, WebhookEntry (+7 more)
 
 ### Community 90 - "Community 90"
-Cohesion: 0.20
-Nodes (11): _menu_bubbles(), menu_buttons(), _menu_index(), menu_label(), The up-to-3 menu button labels (falls back to the MVP defaults)., The up-to-3 menu button labels (falls back to the MVP defaults)., The question shown above the menu buttons., Index of the menu button whose label matches `body`, or None. (+3 more)
+Cohesion: 0.13
+Nodes (18): _appt_row_label(), _enter_manage(), _menu_bubbles(), menu_buttons(), _menu_index(), menu_label(), The up-to-3 menu button labels (falls back to the MVP defaults)., The up-to-3 menu button labels (falls back to the MVP defaults). (+10 more)
 
 ### Community 91 - "Community 91"
-Cohesion: 0.25
-Nodes (8): _finalise(), _parse_slot_rows(), _pop_preceding_text_for(), Parse the agent's text output into a sequence of WhatsApp message bubbles.  The, Each non-empty line is `<id>|<label>`; malformed lines are skipped., Promote the last short text bubble into the slot card's header.      A list mess, Drop empty/emoji-only bubbles and merge tails beyond the cap., TextBubble
+Cohesion: 0.27
+Nodes (14): TextBubble, _appt_duration_minutes(), _find_appt_by_id(), _manage_cancel(), _manage_handle_day(), _manage_reschedule(), _manage_step(), _norm() (+6 more)
 
 ### Community 92 - "Community 92"
 Cohesion: 0.28
 Nodes (8): get_config(), Doctor hub — tenant configuration endpoints (authenticated).  GET  /tenants/me/c, _read_model(), update_config(), GET/PUT response. Never includes secrets — only a `calendar_connected` flag., GET/PUT response. Never includes secrets — only a `calendar_connected` flag., GET/PUT response. Never includes secrets — only a `calendar_connected` flag., TenantConfigRead
 
 ### Community 93 - "Community 93"
-Cohesion: 0.67
-Nodes (3): Send a single plain-text message, swallowing send errors (MVP: no retry)., Send a single plain-text message, swallowing send errors (MVP: no retry)., _send_simple_text()
+Cohesion: 0.22
+Nodes (9): calendar_disconnect(), oauth_callback(), oauth_start(), _portal_redirect(), Doctor hub — Google Calendar OAuth (start / callback / disconnect).  The refresh, Forget the Calendar refresh token and force the tenant offline.      Without a C, Send the doctor's browser back to the portal with a status flag.      Falls back, Return the Google consent URL (the frontend redirects the browser to it). (+1 more)
 
 ### Community 94 - "Community 94"
-Cohesion: 0.18
-Nodes (10): ProcessedEvent, ProcessedEvent model - idempotency ledger for incoming webhook events., One row per Meta event id already handled.      The unique constraint on `event_, _persist_human_echo(), Record a human echo and switch the conversation to HUMAN_ACTIVE., Record a human echo and switch the conversation to HUMAN_ACTIVE., Record a human echo and switch the conversation to HUMAN_ACTIVE., Record a human echo and switch the conversation to HUMAN_ACTIVE. (+2 more)
+Cohesion: 0.25
+Nodes (8): _persist_human_echo(), Record a human echo and switch the conversation to HUMAN_ACTIVE., Record a human echo and switch the conversation to HUMAN_ACTIVE., Record a human echo and switch the conversation to HUMAN_ACTIVE., Record a human echo and switch the conversation to HUMAN_ACTIVE., Record a human echo and switch the conversation to HUMAN_ACTIVE., Record a human echo and switch the conversation to HUMAN_ACTIVE., Record a human echo and switch the conversation to HUMAN_ACTIVE.
 
 ### Community 95 - "Community 95"
-Cohesion: 0.22
-Nodes (9): _greeting_buttons_for(), _handle_menu_command(), Reset the conversation: wipe all context, then re-send the greeting.      Wipes, Reset the conversation and send a fresh button menu.      Wipes every prior mess, Reset the conversation and send a fresh button menu.      Wipes every prior mess, Buttons to attach to a greeting.      When deterministic flows are enabled the g, Dev reset: delete the patient who sent /menu, then greet them as new.      DELET, Buttons to attach to a greeting.      When deterministic flows are enabled the g (+1 more)
+Cohesion: 0.29
+Nodes (7): _handle_menu_command(), Reset the conversation: wipe all context, then re-send the greeting.      Wipes, Reset the conversation and send a fresh button menu.      Wipes every prior mess, Reset the conversation and send a fresh button menu.      Wipes every prior mess, Dev reset: delete the patient who sent /menu, then greet them as new.      DELET, Dev reset: delete the patient who sent /menu, then greet them as new.      DELET, Dev reset: delete the patient who sent /menu, then greet them as new.      DELET
 
 ### Community 96 - "Community 96"
-Cohesion: 0.40
-Nodes (3): FlowState, Conversation model - one ongoing thread between a patient and a clinic., Which deterministic (zero-LLM) flow the conversation is currently in.      IDLE
+Cohesion: 0.25
+Nodes (8): build_agent(), horarios_livres(), main(), LangGraph mínimo (2/2) — o MESMO agente, mas com StateGraph na mão.  Resolve a m, Lista horários livres (FAKE) para um dia no formato YYYY-MM-DD., Monta o grafo model <-> tools manualmente e compila., State, TypedDict
 
 ### Community 97 - "Community 97"
 Cohesion: 0.50
 Nodes (3): Create a development tenant from environment settings.  Usage:     uv run python, Insert a single development tenant if one does not already exist., seed()
 
 ### Community 98 - "Community 98"
-Cohesion: 0.40
-Nodes (5): Administrative endpoints (currently: data wipe).  Every route here is guarded by, Reset the database. Requires `confirm: true` to actually run., reset_data(), ResetRequest, ResetResponse
+Cohesion: 0.29
+Nodes (7): Administrative endpoints (currently: data wipe).  Every route here is guarded by, FastAPI dependency: 403 unless `X-Admin-Token` matches the env token.      Uses, Reset the database. Requires `confirm: true` to actually run., require_admin(), reset_data(), ResetRequest, ResetResponse
 
 ### Community 99 - "Community 99"
-Cohesion: 0.50
-Nodes (4): _parse_day(), _parse_day_manual(), Resolve free-text like "amanhã" / "sexta" / "12/06" into a date.      Uses datep, Resolve free-text like "amanhã" / "sexta" / "12/06" into a date.      Uses datep
+Cohesion: 0.13
+Nodes (16): _appt_summary(), _label_match(), _manage_action_card(), _parse_day(), _parse_day_manual(), _preserve_reply(), Deterministic (zero-LLM) conversation flows.  The router turns a tenant's `initi, A `reply` result that keeps the conversation's current flow fields. (+8 more)
 
 ### Community 102 - "Community 102"
 Cohesion: 0.67
 Nodes (3): AppointmentType, A bookable reason for a consult, with its own duration., A bookable reason for a consult, with its own duration.
 
 ### Community 103 - "Community 103"
-Cohesion: 0.67
-Nodes (3): A single availability window within a day (local clinic time)., A single availability window within a day (local clinic time)., TimeWindow
+Cohesion: 0.36
+Nodes (7): _b64decode(), _b64encode(), Opaque, signed, time-limited tokens (stdlib HMAC-SHA256).  Used for the Google O, Serialise `payload` (+ a timestamp) and append an HMAC signature., Return the original payload if `token` is authentic and fresh, else None.      N, sign(), verify()
 
 ### Community 105 - "Community 105"
+Cohesion: 0.29
+Nodes (7): Send the tenant's first-contact greeting as a single verbatim message.      With, Send the tenant's first-contact greeting as a single verbatim message.      With, Send the tenant's first-contact greeting as a single verbatim message., Send the tenant's first-contact greeting as a single verbatim message.      With, Send the tenant's first-contact greeting as a single verbatim message.      With, Send the tenant's first-contact greeting as a single verbatim message.      With, _send_greeting()
+
+### Community 106 - "Community 106"
+Cohesion: 0.25
+Nodes (7): code:bash (uv run uvicorn app:app --reload --port 8010 --app-dir docs/a), code:bash (# GET: handshake de verificação — deve responder "42"), Exercícios, FastAPI mínimo (espelha o webhook da secretarIA), O que olhar no código (`app.py`), Rodar, Testar (em outro terminal)
+
+### Community 107 - "Community 107"
+Cohesion: 0.25
+Nodes (7): code:bash (# PowerShell), code:bash (uv run python docs/aprendizado/exemplos/langgraph-minimo/01_), Exercícios, LangGraph mínimo (espelha o agente da secretarIA), O que olhar, Pré-requisitos, Rodar (da raiz do repositório)
+
+### Community 108 - "Community 108"
+Cohesion: 0.25
+Nodes (8): flows_enabled(), True when this tenant uses the deterministic entry flows., True when this tenant uses the deterministic entry flows., True when this tenant uses the deterministic entry flows., _greeting_buttons_for(), Buttons to attach to a greeting.      When deterministic flows are enabled the g, Buttons to attach to a greeting.      When deterministic flows are enabled the g, Buttons to attach to a greeting.      When deterministic flows are enabled the g
+
+### Community 109 - "Community 109"
+Cohesion: 0.25
+Nodes (8): Minimal data needed to send a bot reply once the inbound DB txn commits., Minimal data needed to send a bot reply once the inbound DB txn commits., Minimal data needed to send a bot reply once the inbound DB txn commits., Minimal data needed to send a bot reply once the inbound DB txn commits., Minimal data needed to send a bot reply once the inbound DB txn commits., Minimal data needed to send a bot reply once the inbound DB txn commits., Minimal data needed to send a bot reply once the inbound DB txn commits., _ReplyContext
+
+### Community 110 - "Community 110"
 Cohesion: 0.33
-Nodes (6): Send the tenant's first-contact greeting as a single verbatim message.      With, Send the tenant's first-contact greeting as a single verbatim message., Send the tenant's first-contact greeting as a single verbatim message.      With, Send the tenant's first-contact greeting as a single verbatim message.      With, Send the tenant's first-contact greeting as a single verbatim message.      With, _send_greeting()
+Nodes (6): build_agent(), horarios_livres(), main(), LangGraph mínimo (1/2) — o atalho `create_react_agent`.  É EXATAMENTE o padrão q, Lista horários livres (FAKE) para um dia no formato YYYY-MM-DD.      Use quando, Compila o agente ReAct (modelo + tools + prompt).
+
+### Community 111 - "Community 111"
+Cohesion: 0.38
+Nodes (6): main(), _parse_args(), Apply a JSON config file onto a tenant row (the doctor-hub columns).  This is th, Return a list of human-readable warnings (does not block the write)., Return a list of human-readable warnings (does not block the write)., _validate()
+
+### Community 112 - "Community 112"
+Cohesion: 0.29
+Nodes (7): _find_appt_by_iso(), _manage_handle_slot(), Parse the ISO datetime out of a slot-row tap ("14:00 (2026-06-12T14:00)")., Parse the ISO datetime out of a slot-row tap ("14:00 (2026-06-12T14:00)")., Parse the ISO datetime out of a slot-row tap ("14:00 (2026-06-12T14:00)")., Resolve the appointment whose start matches the tapped slot-row ISO., _slot_iso_from_body()
+
+### Community 113 - "Community 113"
+Cohesion: 0.29
+Nodes (7): arq job: send a text message to a patient on behalf of a specific tenant.      T, arq job: send a text message to a patient on behalf of a specific tenant.      T, arq job: send a text message to a patient on behalf of a specific tenant.      T, arq job: send a text message to a patient on behalf of a specific tenant.      T, arq job: send a text message to a patient on behalf of a specific tenant.      T, arq job: send a text message to a patient on behalf of a specific tenant.      T, send_patient_notification()
+
+### Community 114 - "Community 114"
+Cohesion: 0.33
+Nodes (6): active_business_hours(), can_activate(), Weekday -> non-empty window list. Days with no windows are dropped., Weekday -> non-empty window list. Days with no windows are dropped., Whether the tenant may be set `is_active=True`.      Returns (ok, reason). The b, Whether the tenant may be set `is_active=True`.      Returns (ok, reason). The b
+
+### Community 115 - "Community 115"
+Cohesion: 0.40
+Nodes (5): create_event(), Cria um evento (consulta) no calendário da clínica. Use SOMENTE depois     de ch, Cria um evento (consulta) no calendário da clínica. Use SOMENTE depois     de ch, Cria um evento (consulta) no calendário da clínica. Use SOMENTE depois     de ch, Cria um evento (consulta) no calendário da clínica. Use SOMENTE depois     de ch
+
+### Community 116 - "Community 116"
+Cohesion: 0.40
+Nodes (4): 1. O guia (comece aqui), 2. Exemplos executáveis, Material de aprendizado da secretarIA, Roteiro sugerido
+
+### Community 117 - "Community 117"
+Cohesion: 0.40
+Nodes (4): Base, Encrypted-at-rest credentials for a tenant.  Kept in a SEPARATE table from `tena, One row per tenant holding its encrypted Google Calendar refresh token., TenantCredentials
+
+### Community 118 - "Community 118"
+Cohesion: 0.50
+Nodes (4): main(), _print_tool_calls(), Terminal agent loop for SecretarIA (Fase A smoke test).  Uses the SAME LangGraph, Surface tool invocations so the dev can see what the LLM decided.
+
+### Community 119 - "Community 119"
+Cohesion: 0.40
+Nodes (4): Delete an event by id. 404/410 are treated as success (idempotent)., Delete an event by id. 404/410 are treated as success (idempotent)., Delete an event by id. 404/410 are treated as success (idempotent)., Delete an event by id. 404/410 are treated as success (idempotent).
+
+### Community 120 - "Community 120"
+Cohesion: 0.40
+Nodes (4): Create an event on the clinic's calendar. Returns the inserted event., Create an event on the clinic's calendar. Returns the inserted event., Create an event on the clinic's calendar. Returns the inserted event., Create an event on the clinic's calendar. Returns the inserted event.
+
+### Community 121 - "Community 121"
+Cohesion: 0.50
+Nodes (3): get_logger(), Structured logging setup using structlog.  JSON output in non-dev environments,, Return a bound structlog logger.
+
+### Community 123 - "Community 123"
+Cohesion: 0.50
+Nodes (4): check_handover_timeouts(), arq cron: hand stale HUMAN_ACTIVE conversations back to the bot.      A conversa, arq cron: hand stale HUMAN_ACTIVE conversations back to the bot.      A conversa, arq cron: hand stale HUMAN_ACTIVE conversations back to the bot.      A conversa
 
 ## Ambiguous Edges - Review These
 - `Graphify Bash PreToolUse Hook` → `receive_webhook (POST)`  [AMBIGUOUS]
   .claude/settings.json · relation: conceptually_related_to
 
 ## Knowledge Gaps
-- **72 isolated node(s):** `PreToolUse`, `allow`, `additionalDirectories`, `clinic_name`, `greeting_message` (+67 more)
+- **84 isolated node(s):** `PreToolUse`, `allow`, `additionalDirectories`, `clinic_name`, `greeting_message` (+79 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **17 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **18 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
 - **What is the exact relationship between `Graphify Bash PreToolUse Hook` and `receive_webhook (POST)`?**
   _Edge tagged AMBIGUOUS (relation: conceptually_related_to) - confidence is low._
-- **Why does `get_settings()` connect `Community 47` to `Community 97`, `Community 2`, `Community 65`, `Community 36`, `Community 5`, `Community 6`, `Community 71`, `Community 7`, `Community 40`, `Community 9`, `Community 11`, `Community 12`, `Community 4`, `Community 46`, `Community 53`, `Community 58`, `Community 59`, `Community 61`?**
-  _High betweenness centrality (0.171) - this node is a cross-community bridge._
-- **Why does `_send_bot_reply()` connect `Community 79` to `Community 32`, `Community 1`, `Community 4`, `Community 36`, `Community 6`, `Community 71`, `Community 72`, `Community 105`, `Community 74`, `Community 75`, `Community 12`, `Community 10`, `Community 73`, `Community 54`, `Community 55`, `Community 90`, `Community 93`?**
-  _High betweenness centrality (0.102) - this node is a cross-community bridge._
-- **Are the 52 inferred relationships involving `str` (e.g. with `main()` and `main()`) actually correct?**
-  _`str` has 52 INFERRED edges - model-reasoned connections that need verification._
+- **Why does `get_settings()` connect `Community 47` to `Community 2`, `Community 4`, `Community 6`, `Community 8`, `Community 9`, `Community 11`, `Community 12`, `Community 40`, `Community 46`, `Community 53`, `Community 59`, `Community 61`, `Community 65`, `Community 77`, `Community 93`, `Community 97`, `Community 98`, `Community 111`, `Community 118`, `Community 123`?**
+  _High betweenness centrality (0.124) - this node is a cross-community bridge._
+- **Why does `_send_bot_reply()` connect `Community 79` to `Community 32`, `Community 1`, `Community 34`, `Community 4`, `Community 36`, `Community 6`, `Community 71`, `Community 72`, `Community 73`, `Community 105`, `Community 74`, `Community 108`, `Community 75`, `Community 12`, `Community 10`, `Community 55`, `Community 90`?**
+  _High betweenness centrality (0.094) - this node is a cross-community bridge._
+- **Why does `CalendarService` connect `Community 5` to `Community 32`, `Community 33`, `Community 36`, `Community 6`, `Community 7`, `Community 74`, `Community 109`, `Community 47`, `Community 53`, `Community 119`, `Community 120`, `Community 122`?**
+  _High betweenness centrality (0.085) - this node is a cross-community bridge._
+- **Are the 66 inferred relationships involving `str` (e.g. with `main()` and `main()`) actually correct?**
+  _`str` has 66 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 26 inferred relationships involving `route()` (e.g. with `_run_flow()` and `test_disabled_flows_delegate_llm()`) actually correct?**
+  _`route()` has 26 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 31 inferred relationships involving `get_settings()` (e.g. with `main()` and `main()`) actually correct?**
   _`get_settings()` has 31 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 11 inferred relationships involving `_send_bot_reply()` (e.g. with `load_tenant_config()` and `flows_enabled()`) actually correct?**
-  _`_send_bot_reply()` has 11 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 18 inferred relationships involving `route()` (e.g. with `_run_flow()` and `test_disabled_flows_delegate_llm()`) actually correct?**
-  _`route()` has 18 INFERRED edges - model-reasoned connections that need verification._

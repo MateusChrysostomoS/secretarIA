@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -52,6 +52,7 @@ from secretaria.services.flow_router import (
     MenuBubble,
     classify_yes_no,
     flows_enabled,
+    manage_label,
     menu_buttons,
     menu_label,
     reactivation_choice_buttons,
@@ -689,6 +690,7 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     # detached ORM instance after the session closes.
     tenant_config = None
     flow_snapshot: tuple[SimpleNamespace, SimpleNamespace] | None = None
+    upcoming_appointments: list[dict] | None = None
     patient_name = None
     patient_wa = reply.patient_wa_id
     try:
@@ -720,6 +722,16 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                             business_hours=tenant.business_hours,
                         ),
                     )
+                    # Load the patient's future appointments only when the manage
+                    # (cancel/reschedule) flow is active or being opened, so the
+                    # router can list/resolve them without doing its own DB I/O.
+                    wants_manage = conversation.flow_state == FlowState.MANAGE_BOOKING or (
+                        _label_match_body(reply.inbound_body, manage_label(tenant))
+                    )
+                    if wants_manage and conversation.patient_id is not None:
+                        upcoming_appointments = await _load_upcoming_appointments(
+                            session, tenant.id, conversation.patient_id
+                        )
     except Exception as exc:
         logger.warning(
             "worker_tenant_config_load_failed",
@@ -766,7 +778,7 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
         conv_snapshot, tenant_snapshot = flow_snapshot
         if await _run_flow(
             reply, conv_snapshot, tenant_snapshot, tenant_config, patient_name, patient_wa,
-            redis=redis,
+            upcoming_appointments=upcoming_appointments, redis=redis,
         ):
             return
 
@@ -793,6 +805,44 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     await _dispatch_bubbles(reply, bubbles)
 
 
+def _label_match_body(body: str | None, label: str) -> bool:
+    """True when `body` equals `label` or its 20-char button truncation."""
+    target = (body or "").strip().casefold()
+    return bool(target) and (
+        target == label.strip().casefold() or target == label[:20].strip().casefold()
+    )
+
+
+async def _load_upcoming_appointments(
+    session: AsyncSession, tenant_id, patient_id
+) -> list[dict]:
+    """Future SCHEDULED appointments for a patient, oldest first.
+
+    Returned as plain dicts (detached from the ORM) so the flow router can read
+    them after the session closes. Used by the cancel/reschedule flow.
+    """
+    rows = await session.scalars(
+        select(Appointment)
+        .where(
+            Appointment.patient_id == patient_id,
+            Appointment.tenant_id == tenant_id,
+            Appointment.status == AppointmentStatus.SCHEDULED,
+            Appointment.start_at >= datetime.now(UTC),
+        )
+        .order_by(Appointment.start_at)
+    )
+    return [
+        {
+            "id": str(appt.id),
+            "google_event_id": appt.google_event_id,
+            "appointment_type": appt.appointment_type,
+            "start_at": appt.start_at,
+            "end_at": appt.end_at,
+        }
+        for appt in rows
+    ]
+
+
 async def _run_flow(
     reply: _ReplyContext,
     conv_snapshot: SimpleNamespace,
@@ -800,6 +850,7 @@ async def _run_flow(
     tenant_config,
     patient_name: str | None,
     patient_wa: str | None,
+    upcoming_appointments: list[dict] | None = None,
     redis=None,
 ) -> bool:
     """Run the deterministic flow router for this turn.
@@ -814,7 +865,12 @@ async def _run_flow(
     )
     try:
         result = await route(
-            conv_snapshot, tenant_snapshot, calendar, reply.inbound_body, patient_name
+            conv_snapshot,
+            tenant_snapshot,
+            calendar,
+            reply.inbound_body,
+            patient_name,
+            upcoming_appointments=upcoming_appointments,
         )
     except Exception as exc:
         logger.warning(
@@ -860,6 +916,33 @@ async def _apply_flow_result(
                                 phone=patient_wa,
                                 status=AppointmentStatus.SCHEDULED,
                                 **result.appointment,
+                            )
+                        )
+                    # Cancel/reschedule mirror the calendar action onto the
+                    # platform row, scoped by tenant_id (google_event_id is
+                    # indexed but not globally unique). Best-effort: the calendar
+                    # is the source of truth, so a stale row never blocks the reply.
+                    if result.appointment_cancel_id:
+                        await session.execute(
+                            update(Appointment)
+                            .where(
+                                Appointment.google_event_id == result.appointment_cancel_id,
+                                Appointment.tenant_id == conv.tenant_id,
+                            )
+                            .values(status=AppointmentStatus.CANCELLED)
+                        )
+                    if result.appointment_reschedule:
+                        resched = result.appointment_reschedule
+                        await session.execute(
+                            update(Appointment)
+                            .where(
+                                Appointment.google_event_id == resched["google_event_id"],
+                                Appointment.tenant_id == conv.tenant_id,
+                            )
+                            .values(
+                                start_at=resched["start_at"],
+                                end_at=resched["end_at"],
+                                status=AppointmentStatus.RESCHEDULED,
                             )
                         )
     except Exception as exc:

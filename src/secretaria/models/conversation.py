@@ -28,6 +28,8 @@ class FlowState(enum.StrEnum):
                       the tenant has `initial_flows.enabled`.
     MENU            - the menu buttons were sent; awaiting a tap.
     SERVICE_CATALOG - patient is inside the multi-step service booking flow.
+    MANAGE_BOOKING  - patient is inside the cancel/reschedule flow (pick an
+                      existing appointment, then cancel or move it).
     BUSINESS_HOURS  - patient asked for hours (one-shot, returns to IDLE).
     LLM             - full LLM mode (patient chose "Outro" or deviated); the
                       conversation stays here until a /menu reset.
@@ -36,6 +38,7 @@ class FlowState(enum.StrEnum):
     IDLE = "IDLE"
     MENU = "MENU"
     SERVICE_CATALOG = "SERVICE_CATALOG"
+    MANAGE_BOOKING = "MANAGE_BOOKING"
     BUSINESS_HOURS = "BUSINESS_HOURS"
     LLM = "LLM"
 
