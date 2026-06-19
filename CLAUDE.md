@@ -43,6 +43,35 @@ Today `Tenant` carries only the WhatsApp credentials. Everything above is open w
 - `scripts/test_agent.py` — dev terminal that exercises the same LangGraph agent the worker uses, with in-memory history.
 - `scripts/check_scopes.py` — OAuth scope/Calendar diagnostic when Google returns 403.
 
+## Code conventions & project structure
+
+These are the standing rules for how code is organized in this repo. Apply them to every change.
+
+### Layering (where code belongs)
+The request flows in one direction — keep it that way:
+`api/` (HTTP) → `workers/` (orchestration) → `services/` + `ai/` (business logic) → `models/` (ORM) → `core/` (infra).
+
+- **`api/`** — thin HTTP layer only: parse/validate input, call a service, shape the response. No business logic, no DB transactions beyond trivial reads. Each module exposes one `APIRouter` registered in `main.py`.
+- **`workers/`** — async orchestration (arq jobs). `tasks.py` decides *which brain* answers; it does not contain calendar/whatsapp logic itself — it calls `services/`.
+- **`services/`** — business logic, reusable by both brains (flow router AND the LLM agent). Calendar/availability logic lives ONLY in `services/calendar.py`.
+- **`ai/`** — everything LLM-specific (the agent, prompts, tools, formatter). No business-specific clinic facts here (see the Eye Company rule above).
+- **`core/`** — framework-agnostic infra (db engine, crypto, security, logging). Must not import from `api/`, `services/`, or `ai/`.
+
+### Folder granularity — group by domain, not "one folder per file"
+A flat package of route modules is the idiomatic FastAPI layout and is correct while small. **Do NOT create a folder per file.** Promote a flat module to a subpackage only when a single domain reaches **~3+ files** (router + its own schemas/deps). Until then, keep it flat.
+
+Current `api/` domains (for reference when it grows):
+- **MVP pipeline** (`webhook.py`, `health.py`) — patient/WhatsApp path. Keep flat; it is small and critical.
+- **Admin** (`admin.py`, `tenants.py`) — SaaS-owner fleet view.
+- **Doctor hub / CRM** (`config.py`, `oauth.py`, `calendar.py`, `deps.py`) — tenant-facing dashboard backend. This cluster is the one that has crossed the threshold; group it into `api/hub/` next time it is touched, updating `main.py` router imports and `tests/` accordingly.
+
+When you restructure, do it as a dedicated change (move files + fix imports in `main.py` + fix `tests/`), then run `graphify update .` — never bundle a structural move with a behavioural change.
+
+### General
+- Pure decision functions over side-effects: prefer the `flow_router.route()` pattern — return a result object, let the caller persist/send. Easier to test without network/DB.
+- All env config goes through `config.py::Settings` (pydantic-settings). Never read `os.environ` directly elsewhere.
+- Per-tenant secrets are decrypted exactly once, in `services/tenant_config.py::load_tenant_config`. Never log or return them from the API.
+
 ## graphify
 
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.

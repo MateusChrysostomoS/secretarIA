@@ -12,7 +12,9 @@ from arq.connections import RedisSettings
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from secretaria.api import admin, calendar, config, health, oauth, tenants, webhook
+from secretaria.api import health, webhook
+from secretaria.api.admin import panel, tenants
+from secretaria.api.hub import calendar, config, oauth
 from secretaria.config import get_settings
 from secretaria.core.logging import get_logger, setup_logging
 
@@ -65,7 +67,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(health.router, tags=["health"])
     app.include_router(webhook.router, tags=["webhook"])
-    app.include_router(admin.router, tags=["admin"])
+    app.include_router(panel.router, tags=["admin"])
     # Admin fleet view: list tenants + per-tenant Google Calendar health (router self-tags).
     app.include_router(tenants.router)
     # Doctor hub: tenant config + Google Calendar OAuth onboarding + calendar actions.

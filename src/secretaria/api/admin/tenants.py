@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from secretaria.api.admin import require_admin
+from secretaria.api.admin.panel import require_admin
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
 from secretaria.models import Tenant

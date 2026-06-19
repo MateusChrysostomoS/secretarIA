@@ -35,7 +35,7 @@ def _fake_wipe(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
             tables.append(admin_service.TENANT_TABLE)
         return tables
 
-    monkeypatch.setattr("secretaria.api.admin.wipe_data", _record)
+    monkeypatch.setattr("secretaria.api.admin.panel.wipe_data", _record)
     return calls
 
 

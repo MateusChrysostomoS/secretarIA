@@ -8,7 +8,7 @@ PUT  /tenants/me/config  - update non-sensitive config; enforces the activation
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from secretaria.api.deps import get_current_tenant
+from secretaria.api.hub.deps import get_current_tenant
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
 from secretaria.models import Tenant
