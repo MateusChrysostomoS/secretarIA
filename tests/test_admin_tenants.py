@@ -21,7 +21,7 @@ os.environ["ADMIN_TOKEN"] = "test-admin-token"
 import pytest  # noqa: E402
 from httpx import AsyncClient  # noqa: E402
 
-from secretaria.api import tenants as tenants_api  # noqa: E402
+from secretaria.api.admin import tenants as tenants_api  # noqa: E402
 from secretaria.models import Tenant  # noqa: E402
 from secretaria.schemas.admin import CalendarHealth, CalendarHealthStatus  # noqa: E402
 from secretaria.services.calendar import CalendarUnavailableError  # noqa: E402
