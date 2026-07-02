@@ -37,9 +37,20 @@ class Settings(BaseSettings):
     META_PHONE_NUMBER_ID: str = ""
     META_GRAPH_API_VERSION: str = "v21.0"
 
-    # --- Precheck service (service-to-service) ---
+    # --- Precheck service (service-to-service, OUTBOUND) ---
+    # secretaria -> precheck. Sent BY us as X-Internal-Api-Key (see services/precheck.py).
     PRECHECK_BASE_URL: str = "http://localhost:8001"
     PRECHECK_API_KEY: str = ""
+
+    # --- Internal API (service-to-service, INBOUND) ---
+    # Shared secret that callers in the Brain Co mesh (today: brain-api fetching a
+    # tenant's appointments/patients for the doctor portal) must present on the
+    # X-Internal-Api-Key header to reach /internal/*. MUST equal brain-api's own
+    # INTERNAL_API_KEY byte-for-byte. Empty fails CLOSED: /internal/* then rejects
+    # every caller (api/internal.py: require_internal_api_key). NEVER logged.
+    # Distinct from PRECHECK_API_KEY above (that is the OUTBOUND key we send to
+    # precheck) and from ADMIN_TOKEN below (a different mechanism / surface).
+    INTERNAL_API_KEY: str = ""
 
     # --- Handover (bot <-> human secretary) ---
     HANDOVER_TIMEOUT_MINUTES: int = 30
