@@ -22,7 +22,7 @@ from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.core.security import verify_meta_signature
 from secretaria.models.processed_event import ProcessedEvent
-from secretaria.schemas.webhook import iter_event_ids
+from secretaria.schemas.webhook import iter_audio_messages, iter_event_ids
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -110,6 +110,17 @@ async def receive_webhook(request: Request) -> Response:
         return JSONResponse({"status": "unavailable"}, status_code=503)
 
     await arq_pool.enqueue_job("process_webhook_event", payload)
+
+    # Voice notes get their own dedicated job with a minimal payload (never
+    # the full body) - the download + STT work happens there, off this
+    # request/response cycle. See workers/tasks.py:transcribe_audio_message.
+    audio_count = 0
+    for audio_ref in iter_audio_messages(payload):
+        await arq_pool.enqueue_job("transcribe_audio_message", **audio_ref)
+        audio_count += 1
+    if audio_count:
+        logger.info("webhook_audio_enqueued", count=audio_count)
+
     logger.info("webhook_enqueued", event_count=len(event_ids))
 
     # 6. Fast 200 ack.

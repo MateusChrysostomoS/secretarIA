@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -119,13 +120,30 @@ class Settings(BaseSettings):
 
     # --- OpenAI (conversational AI) ---
     OPENAI_API_KEY: str = ""
-    OPENAI_MODEL: str = "gpt-5-mini"
+    # OPENAI_MODEL is accepted as a legacy env alias (AliasChoices tries the
+    # new name first) so existing deployments that only set OPENAI_MODEL
+    # don't silently change model on upgrade.
+    OPENAI_SECRETARIA_MODEL: str = Field(
+        default="gpt-5-mini",
+        validation_alias=AliasChoices("OPENAI_SECRETARIA_MODEL", "OPENAI_MODEL"),
+    )
     # Hard cap per LLM call. Includes reasoning tokens on o-series / gpt-5
     # models — set too low and the budget is consumed by reasoning, returning
     # content="" (the model "ran out" before producing visible text). 2500 is
     # a safe floor for gpt-5-mini conversational turns with tool calls.
     OPENAI_MAX_TOKENS: int = 2500
 
+    # --- Audio transcription (transcription-core) ---
+    # STT model, NEVER the chat model: the transcription endpoint rejects chat
+    # models, and TranscriptionConfig fails fast on one.
+    OPENAI_TRANSCRIPT_MODEL: str = "gpt-4o-mini-transcribe"
+    GROQ_API_KEY: str = ""  # optional fallback STT provider
+    AUDIO_TRANSCRIPTION_PRIMARY: str = "openai"  # "openai" | "groq"
+    AUDIO_DOMAIN_PROMPT: str = (
+        "Mensagem de voz em português do Brasil enviada à secretária de uma "
+        "clínica: agendar, remarcar ou cancelar consulta, horários, convênio, "
+        "exames, receita."
+    )
 
     # --- Google Calendar ---
     # OAuth Web application client (same client_id/secret for every tenant).

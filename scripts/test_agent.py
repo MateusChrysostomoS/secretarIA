@@ -5,7 +5,7 @@ Fase B, just with in-memory history instead of the database. Lets you
 exercise the agent end-to-end without WhatsApp/arq/postgres.
 
 Pre-reqs in .env:
-  - OPENAI_API_KEY, OPENAI_MODEL, OPENAI_MAX_TOKENS
+  - OPENAI_API_KEY, OPENAI_SECRETARIA_MODEL, OPENAI_MAX_TOKENS
   - GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN
 
 Run:
@@ -40,7 +40,7 @@ async def main() -> None:
 
     print("=" * 60)
     print("SecretarIA - terminal agent (Fase A)")
-    print(f"  model:    {settings.OPENAI_MODEL}")
+    print(f"  model:    {settings.OPENAI_SECRETARIA_MODEL}")
     print(f"  calendar: {settings.GOOGLE_CALENDAR_ID}")
     print(f"  tz:       {settings.CLINIC_TIMEZONE}")
     print("Digite 'sair' para encerrar.")

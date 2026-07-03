@@ -165,7 +165,7 @@ def build_agent(extra_tools: Sequence = ()) -> Any:
     if not s.OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY missing in environment.")
     model = ChatOpenAI(
-        model=s.OPENAI_MODEL,
+        model=s.OPENAI_SECRETARIA_MODEL,
         api_key=s.OPENAI_API_KEY,
         # gpt-5 / o-series reasoning models require max_completion_tokens
         # (not max_tokens). langchain-openai 1.x accepts it as a direct

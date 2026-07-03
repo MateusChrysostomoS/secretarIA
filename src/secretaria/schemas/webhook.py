@@ -63,6 +63,16 @@ class WebhookInteractive(BaseModel):
     list_reply: WebhookInteractiveReply | None = None
 
 
+class WebhookAudio(BaseModel):
+    """The `audio` sub-object on an inbound voice-note message."""
+
+    model_config = _PERMISSIVE
+
+    id: str | None = None
+    mime_type: str | None = None
+    voice: bool | None = None
+
+
 class WebhookMessage(BaseModel):
     model_config = _PERMISSIVE
 
@@ -74,6 +84,7 @@ class WebhookMessage(BaseModel):
     type: str | None = None
     text: WebhookText | None = None
     interactive: WebhookInteractive | None = None
+    audio: WebhookAudio | None = None
 
 
 class WebhookValue(BaseModel):
@@ -132,6 +143,79 @@ def iter_event_ids(payload: dict) -> Iterator[str]:
                 for item in value.get(key) or []:
                     if isinstance(item, dict) and item.get("id"):
                         yield item["id"]
+
+
+def iter_audio_messages(payload: dict) -> Iterator[dict]:
+    """Yield one minimal dict per inbound WhatsApp voice-note audio message.
+
+    Mirrors `iter_event_ids`'s style and defensiveness exactly: pure dict
+    walking, isinstance checks throughout, never raises on a malformed
+    payload. Used by the webhook POST handler to enqueue the dedicated
+    `transcribe_audio_message` arq job with a minimal payload (never the
+    full webhook body).
+
+    Unlike `iter_event_ids`, this ONLY scans changes where
+    `change.get("field") == "messages"` - Coexistence echoes under
+    `smb_message_echoes` are never transcribed (that's the business's own
+    outbound audio, sent by the human secretary from the WhatsApp app, not a
+    patient voice note).
+
+    For each message dict with `type == "audio"` and a truthy `audio.id`
+    (and both `id` and `from` present), yields:
+        {"media_id", "phone_number_id", "wa_id", "message_id", "patient_name"}
+    `patient_name` is looked up from the change's `contacts` list (matching
+    `wa_id`), defensively - missing/malformed contacts just yield None.
+    """
+    if not isinstance(payload, dict):
+        return
+    for entry in payload.get("entry") or []:
+        if not isinstance(entry, dict):
+            continue
+        for change in entry.get("changes") or []:
+            if not isinstance(change, dict):
+                continue
+            if change.get("field") != "messages":
+                continue
+            value = change.get("value") or {}
+            if not isinstance(value, dict):
+                continue
+
+            metadata = value.get("metadata")
+            phone_number_id = (
+                metadata.get("phone_number_id") if isinstance(metadata, dict) else None
+            )
+
+            names_by_wa_id: dict[str, str | None] = {}
+            for contact in value.get("contacts") or []:
+                if not isinstance(contact, dict):
+                    continue
+                wa_id = contact.get("wa_id")
+                if not wa_id:
+                    continue
+                profile = contact.get("profile")
+                names_by_wa_id[wa_id] = profile.get("name") if isinstance(profile, dict) else None
+
+            for msg in value.get("messages") or []:
+                if not isinstance(msg, dict):
+                    continue
+                if msg.get("type") != "audio":
+                    continue
+                message_id = msg.get("id")
+                wa_id = msg.get("from")
+                if not message_id or not wa_id:
+                    continue
+                audio = msg.get("audio")
+                media_id = audio.get("id") if isinstance(audio, dict) else None
+                if not media_id:
+                    continue
+
+                yield {
+                    "media_id": media_id,
+                    "phone_number_id": phone_number_id or None,
+                    "wa_id": wa_id,
+                    "message_id": message_id,
+                    "patient_name": names_by_wa_id.get(wa_id),
+                }
 
 
 def extract_inbound_body(msg: WebhookMessage) -> str | None:
