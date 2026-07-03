@@ -14,6 +14,8 @@ os.environ["META_APP_SECRET"] = "test-app-secret"
 os.environ["META_VERIFY_TOKEN"] = "test-verify-token"
 os.environ["META_ACCESS_TOKEN"] = "test-access-token"
 os.environ["META_PHONE_NUMBER_ID"] = "1234567890"
+# Valid Fernet key (test-only) so the encrypted-credential seams work in tests.
+os.environ["ENCRYPTION_KEY"] = "gBSpATEZoI21UX0_59nHvxdUDJ4drCttg2RAEaPJc1w="
 os.environ.setdefault(
     "DATABASE_URL",
     "postgresql+asyncpg://secretaria:secretaria@localhost:5432/secretaria",

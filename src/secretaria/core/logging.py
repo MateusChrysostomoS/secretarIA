@@ -13,6 +13,36 @@ from secretaria.config import get_settings
 
 _configured = False
 
+# tenant-secrets-encryption skill: discipline fails, a processor doesn't. Any value
+# whose key ends in `_encrypted` or looks secret-bearing is blanked before ANY
+# renderer sees it — even an exception field that happens to carry a token.
+_SECRET_HINTS = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "authorization",
+    "api_key",
+    "apikey",
+    "refresh_token",
+    "access_token",
+    "encryption_key",
+)
+_REDACTED = "***REDACTED***"
+
+
+def redact_secrets(
+    _logger: object, _method: str, event_dict: structlog.types.EventDict
+) -> structlog.types.EventDict:
+    """Blank any structured value whose key ends in `_encrypted` or looks secret-bearing."""
+    for key in list(event_dict):
+        low = key.lower()
+        if low == "event":
+            continue  # the event NAME is never a secret; never blank it
+        if low.endswith("_encrypted") or any(hint in low for hint in _SECRET_HINTS):
+            event_dict[key] = _REDACTED
+    return event_dict
+
 
 def setup_logging() -> None:
     """Configure structlog + stdlib logging. Safe to call more than once."""
@@ -29,6 +59,7 @@ def setup_logging() -> None:
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
+        redact_secrets,  # before any renderer (tenant-secrets-encryption)
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
     ]

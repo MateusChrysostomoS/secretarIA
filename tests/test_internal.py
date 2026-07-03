@@ -229,3 +229,72 @@ async def test_internal_routes_in_openapi(client: AsyncClient) -> None:
     assert "/internal/tenants/{tenant_id}/patients" in paths
     get = paths["/internal/tenants/{tenant_id}/appointments"]["get"]
     assert "internal" in get["tags"]
+
+
+# --------------------------------------------------------------------------
+# Key rotation: INTERNAL_API_KEY_PREVIOUS is accepted alongside INTERNAL_API_KEY
+# --------------------------------------------------------------------------
+
+
+async def test_previous_key_is_accepted_during_rotation(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from secretaria.config import get_settings
+
+    monkeypatch.setenv("INTERNAL_API_KEY_PREVIOUS", "old-internal-key")
+    get_settings.cache_clear()
+    _override_session([])
+    try:
+        response = await client.get(APPTS, headers={"X-Internal-Api-Key": "old-internal-key"})
+        assert response.status_code == 200
+    finally:
+        _clear_override()
+        monkeypatch.setenv("INTERNAL_API_KEY_PREVIOUS", "")
+        get_settings.cache_clear()
+
+
+async def test_current_key_still_accepted_when_previous_is_configured(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from secretaria.config import get_settings
+
+    monkeypatch.setenv("INTERNAL_API_KEY_PREVIOUS", "old-internal-key")
+    get_settings.cache_clear()
+    _override_session([])
+    try:
+        response = await client.get(APPTS, headers={"X-Internal-Api-Key": GOOD_KEY})
+        assert response.status_code == 200
+    finally:
+        _clear_override()
+        monkeypatch.setenv("INTERNAL_API_KEY_PREVIOUS", "")
+        get_settings.cache_clear()
+
+
+async def test_neither_current_nor_previous_key_is_unauthorized(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from secretaria.config import get_settings
+
+    monkeypatch.setenv("INTERNAL_API_KEY_PREVIOUS", "old-internal-key")
+    get_settings.cache_clear()
+    try:
+        response = await client.get(APPTS, headers={"X-Internal-Api-Key": "some-other-key"})
+        assert response.status_code == 401
+    finally:
+        monkeypatch.setenv("INTERNAL_API_KEY_PREVIOUS", "")
+        get_settings.cache_clear()
+
+
+async def test_unset_previous_key_does_not_grant_empty_header_access(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """INTERNAL_API_KEY_PREVIOUS unset (empty) must never itself become a valid key."""
+    from secretaria.config import get_settings
+
+    monkeypatch.setenv("INTERNAL_API_KEY_PREVIOUS", "")
+    get_settings.cache_clear()
+    try:
+        response = await client.get(APPTS, headers={"X-Internal-Api-Key": ""})
+        assert response.status_code == 401
+    finally:
+        get_settings.cache_clear()

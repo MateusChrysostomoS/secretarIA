@@ -1,76 +1,157 @@
-"""Subscription-token verification — the seam where the future Payments API plugs in.
+"""Subscription-token verification — the doctor-hub auth seam.
 
 ============================ READ THIS BEFORE EDITING ============================
 
-TODAY (MVP):
-    A single static "fake" token (settings.MVP_FAKE_TOKEN) stands in for an active
-    paid subscription. Presenting it as `Authorization: Bearer <token>` on the
-    doctor-hub endpoints authenticates the request as the tenant identified by
-    settings.MVP_FAKE_TOKEN_TENANT_ID (or, if that is empty and exactly one tenant
-    exists, that single tenant).
+`verify_subscription_token` turns an opaque bearer token from the doctor hub into
+a `SubscriptionClaim` by asking brain-api (the identity + billing authority) to
+verify it. brain-api owns the token's signature/expiry AND the tenant's plan
+entitlement (active/trialing + `secretaria_enabled`); we never re-derive either
+locally.
 
-FUTURE (after secretarIA is finished, when you build the Payments/Subscription API):
-    Replace the body of `verify_subscription_token` with a call to that API. It
-    should validate the bearer token, confirm the subscription is active/paid, and
-    return the tenant_id it maps to. Return None for any invalid/expired/unpaid
-    token.
+Contract (brain-api, already implemented, do not change): POST
+{BRAIN_API_BASE_URL}/internal/secretaria/hub-token/verify, header
+X-Internal-Api-Key: <INTERNAL_API_KEY>, body {"token": "<token>"}. 200 response:
+{"active": bool, "tenant_id": "<uuid>" | null}. "active" is the LIVE answer —
+token validity AND entitlement, in one call.
 
-    *** THIS FUNCTION IS THE ONLY PLACE THAT NEEDS TO CHANGE. ***
-    Every hub endpoint depends on api/deps.py:get_current_tenant, which depends on
-    this function. Nothing else in the codebase reads the token directly.
+Everything here FAILS CLOSED: any ambiguity (unconfigured settings, network
+error, timeout, bad response) returns None, which the caller (api/hub/deps.py)
+turns into a 401. A short-lived in-process cache remembers POSITIVE results
+only, so a revoked/canceled subscription re-locks within
+SUBSCRIPTION_CACHE_TTL_SECONDS without us re-hitting brain-api on every request.
+
+*** THIS FUNCTION IS THE ONLY PLACE THAT NEEDS TO CHANGE. *** Every hub endpoint
+depends on api/hub/deps.py:get_current_tenant, which depends on this function.
+Nothing else in the codebase reads the token directly.
+
+The token itself is NEVER logged — only its sha256 hash (for the cache key) or
+nothing at all.
 
 =================================================================================
 """
 
-import hmac
+import hashlib
+import time
 from dataclasses import dataclass
 from uuid import UUID
+
+import httpx
 
 from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+# In-process cache of POSITIVE verification results: sha256(token).hexdigest()
+# -> (monotonic expiry, claim). Never caches negative/refused results — a
+# refusal always re-checks brain-api next time. Bounded below to avoid
+# unbounded growth if it's never restarted.
+_cache: dict[str, tuple[float, "SubscriptionClaim"]] = {}
+_CACHE_MAX_SIZE = 512
+
 
 @dataclass(frozen=True)
 class SubscriptionClaim:
-    """The result of validating a subscription token.
+    """The result of validating a subscription token against brain-api.
 
-    tenant_id: which tenant the token authorises (None = "resolve the single
-        tenant" in MVP mode; the future API should always return a concrete id).
-    active:    whether the subscription is currently active/paid.
+    tenant_id: which tenant the token authorises. A real (non-None) claim
+        always carries a concrete tenant_id.
+    active:    whether the subscription is currently active/trialing AND
+        secretaria_enabled, as reported by brain-api.
     """
 
     tenant_id: UUID | None
     active: bool
 
 
-def verify_subscription_token(token: str) -> SubscriptionClaim | None:
-    """Validate a bearer token and return its subscription claim, or None.
+def _cache_key(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
-    MVP implementation: constant-time compare against settings.MVP_FAKE_TOKEN.
-    See the module docstring for the future-API replacement plan.
+
+def _cache_get(key: str) -> "SubscriptionClaim | None":
+    entry = _cache.get(key)
+    if entry is None:
+        return None
+    expiry, claim = entry
+    if time.monotonic() >= expiry:
+        _cache.pop(key, None)
+        return None
+    return claim
+
+
+def _cache_put(key: str, claim: "SubscriptionClaim", ttl_seconds: int) -> None:
+    if ttl_seconds <= 0:
+        return
+    if len(_cache) > _CACHE_MAX_SIZE:
+        # Simple, correct-enough bound: drop everything rather than evict
+        # cleverly. A brief cache-cold spell is cheap; unbounded memory is not.
+        _cache.clear()
+    _cache[key] = (time.monotonic() + ttl_seconds, claim)
+
+
+async def verify_subscription_token(token: str) -> SubscriptionClaim | None:
+    """Validate a bearer token against brain-api and return its claim, or None.
+
+    None means "treat as unauthenticated" — covers an empty token, missing
+    config, a brain-api refusal (active=false), and any error talking to
+    brain-api (fail closed).
     """
+    if not token or not token.strip():
+        return None
+
     settings = get_settings()
-    expected = settings.MVP_FAKE_TOKEN
-
-    if not expected:
-        # No fake token configured -> the hub is effectively locked. Fail closed.
-        logger.warning("subscription_no_fake_token_configured")
+    if not settings.BRAIN_API_BASE_URL or not settings.INTERNAL_API_KEY:
+        # No brain-api to ask -> the hub is effectively locked. Fail closed.
+        logger.warning("subscription_verify_unconfigured")
         return None
 
-    if not hmac.compare_digest(token, expected):
-        return None
+    key = _cache_key(token)
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
 
-    tenant_id: UUID | None = None
-    if settings.MVP_FAKE_TOKEN_TENANT_ID:
-        try:
-            tenant_id = UUID(settings.MVP_FAKE_TOKEN_TENANT_ID)
-        except ValueError:
-            logger.error(
-                "subscription_bad_tenant_id_setting",
-                value=settings.MVP_FAKE_TOKEN_TENANT_ID,
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.BRAIN_API_BASE_URL,
+            headers={"X-Internal-Api-Key": settings.INTERNAL_API_KEY},
+            timeout=settings.BRAIN_API_TIMEOUT_SECONDS,
+        ) as client:
+            response = await client.post(
+                "/internal/secretaria/hub-token/verify",
+                json={"token": token},
             )
-            tenant_id = None
+    except httpx.HTTPError as exc:
+        logger.warning("subscription_verify_failed", reason="network_error", error=str(exc))
+        return None
 
-    return SubscriptionClaim(tenant_id=tenant_id, active=True)
+    if response.status_code != 200:
+        logger.warning(
+            "subscription_verify_failed",
+            reason="non_200_status",
+            status_code=response.status_code,
+        )
+        return None
+
+    try:
+        body = response.json()
+    except ValueError as exc:
+        logger.warning("subscription_verify_failed", reason="invalid_json", error=str(exc))
+        return None
+
+    if not isinstance(body, dict) or not body.get("active"):
+        return None
+
+    raw_tenant_id = body.get("tenant_id")
+    if not raw_tenant_id:
+        logger.warning("subscription_verify_failed", reason="active_without_tenant_id")
+        return None
+
+    try:
+        tenant_id = UUID(raw_tenant_id)
+    except (ValueError, AttributeError, TypeError):
+        logger.warning("subscription_verify_failed", reason="bad_tenant_id")
+        return None
+
+    claim = SubscriptionClaim(tenant_id=tenant_id, active=True)
+    _cache_put(key, claim, settings.SUBSCRIPTION_CACHE_TTL_SECONDS)
+    return claim

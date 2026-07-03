@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, UniqueConstraint, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from secretaria.core.database import Base
@@ -22,4 +22,14 @@ class Patient(Base):
     # WhatsApp id == the patient's phone number in E.164-ish digits.
     wa_id: Mapped[str] = mapped_column(String(32), index=True)
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Explicit opt-out from proactive reminder sends (plugins/reminders.py).
+    # Reminders otherwise ride on the booking relationship itself — a patient
+    # who booked an appointment has a legitimate expectation of a reminder
+    # about it, so no separate opt-IN flow gates sending them. An explicit
+    # opt-out, though, is always honored: this is that one override. A full
+    # LGPD consent/preference registry (marketing opt-in, channel prefs, ...)
+    # is a separate round — TODO(lgpd-consent-registry).
+    reminder_opt_out: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false"), default=False
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

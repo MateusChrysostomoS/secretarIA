@@ -6,11 +6,10 @@ Meta sends a `smb_message_echoes` event; we move that conversation to
 HUMAN_ACTIVE so the bot stays quiet and never talks over the human.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
 from secretaria.models.conversation import Conversation, HandoverState
 
@@ -43,19 +42,3 @@ class HandoverManager:
         conversation.handover_state = HandoverState.BOT_ACTIVE
         await self._session.flush()
         logger.info("handover_set_bot_active", conversation_id=str(conversation.id))
-
-    def is_human_timed_out(self, conversation: Conversation) -> bool:
-        """True when a HUMAN_ACTIVE conversation has been idle long enough to
-        hand control back to the bot.
-
-        TODO(handover-timeout): this predicate is implemented but nothing
-        calls it yet. Wire it to a periodic arq cron job that scans
-        HUMAN_ACTIVE conversations and calls `set_bot_active` on timed-out
-        ones. Timeout is configurable via HANDOVER_TIMEOUT_MINUTES.
-        """
-        if conversation.handover_state != HandoverState.HUMAN_ACTIVE:
-            return False
-        if conversation.last_human_message_at is None:
-            return False
-        timeout = timedelta(minutes=get_settings().HANDOVER_TIMEOUT_MINUTES)
-        return datetime.now(UTC) - conversation.last_human_message_at > timeout

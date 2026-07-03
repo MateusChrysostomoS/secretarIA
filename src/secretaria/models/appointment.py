@@ -54,15 +54,23 @@ class Appointment(Base):
     appointment_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
     # The booked window, mirrored from Google Calendar so appointments can be
     # queried (reminders, analytics) without round-tripping to Google.
-    start_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    end_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Phone stored at appointment creation time so cancel/reschedule can reach
     # the patient even if the Patient row changes (e.g. number ported).
     phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Which professional this booking is with (multi_professional addon). NULL
+    # for tenants without the addon, or when the agent didn't route through a
+    # professional-aware tool. SET NULL so deleting a professional keeps the
+    # appointment record intact.
+    professional_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("professionals.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    # Which physical location this booking is at (multi_unit addon). NULL for
+    # tenants without the addon. SET NULL so deleting a unit keeps the record.
+    unit_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("units.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     status: Mapped[AppointmentStatus] = mapped_column(
         # The Postgres `appointment_status` type stores the lowercase enum
         # *values* ("scheduled", ...) — see the c4d8e2f1a5b6 migration. Without
@@ -80,9 +88,7 @@ class Appointment(Base):
         default=AppointmentStatus.SCHEDULED,
         server_default="scheduled",
     )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

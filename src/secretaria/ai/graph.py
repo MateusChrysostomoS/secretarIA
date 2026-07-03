@@ -12,6 +12,7 @@ concurrently without interference.
 import asyncio
 import re
 import ssl
+from collections.abc import Sequence
 from contextvars import ContextVar
 from typing import Any
 from uuid import UUID
@@ -27,10 +28,13 @@ from secretaria.ai.prompts import secretary_system_prompt
 from secretaria.ai.tools import (
     _calendar_ctx,
     _conversation_id_ctx,
+    _redis_ctx,
+    _tenant_config_ctx,
     _tenant_id_ctx,
     cancel_event,
     check_availability,
     create_event,
+    iniciar_pre_consulta,
     list_free_slots,
 )
 from secretaria.config import get_settings
@@ -52,10 +56,17 @@ FALLBACK_REPLY = (
 # patient-facing message and hands the conversation to a human secretary.
 CALENDAR_UNAVAILABLE_SENTINEL = "__CALENDAR_UNAVAILABLE__"
 
-# Per-async-task TenantRuntimeConfig. Set by run_agent; used by _prompt_with_today.
-_tenant_config_ctx: ContextVar[TenantRuntimeConfig | None] = ContextVar(
-    "_tenant_config", default=None
-)
+# Per-async-task TenantRuntimeConfig, used by _prompt_with_today. Defined in
+# ai/tools.py (imported above as `_tenant_config_ctx`) rather than here, so a
+# plugin tool module (e.g. plugins/multi_professional.py) can read it to build
+# a CalendarService without importing graph.py.
+
+# Per-async-task extra (plugin-contributed) tools for the CURRENT turn. Set by
+# run_agent, read by invoke_agent when resolving/building the cached agent for
+# this call's capability set. Same ContextVar pattern as the vars above: each
+# concurrent worker task gets its own slot, and it is reset in run_agent's
+# `finally` so it never leaks across turns/tenants.
+_extra_tools_ctx: ContextVar[Sequence] = ContextVar("_extra_tools", default=())
 
 # Errors that a single retry usually recovers from: TLS connection torn down
 # mid-read, OpenAI gateway returning a brief connection refusal, a timeout
@@ -87,7 +98,21 @@ def _looks_like_meta_output(text: str) -> bool:
     return any(p.search(text) for p in _META_TEXT_PATTERNS)
 
 
-_AGENT: Any | None = None
+_BASE_TOOLS = (
+    check_availability,
+    list_free_slots,
+    create_event,
+    cancel_event,
+    iniciar_pre_consulta,
+)
+
+# Compiled agent cache, keyed by the frozenset of tool NAMES the agent was
+# built with (base tools + whatever plugins a tenant is entitled to). Replaces
+# the old process-wide `_AGENT` singleton: different tenants can be entitled to
+# different plugin tool sets concurrently, so a single cached graph is no
+# longer enough. Tool set combinations are small and bounded (one entry per
+# distinct combination actually seen in production), so this dict stays small.
+_AGENTS: dict[frozenset[str], Any] = {}
 
 
 def _prompt_with_today(state: dict) -> list[BaseMessage]:
@@ -102,6 +127,7 @@ def _prompt_with_today(state: dict) -> list[BaseMessage]:
     else:
         # Dev fallback: single-tenant prompt from env vars.
         from secretaria.services.tenant_config import TenantRuntimeConfig as _RC
+
         s = get_settings()
         content = secretary_system_prompt(
             _RC(
@@ -121,11 +147,20 @@ def _prompt_with_today(state: dict) -> list[BaseMessage]:
     return [SystemMessage(content=content), *state["messages"]]
 
 
-def build_agent() -> Any:
-    """Compile the ReAct agent. Idempotent: cached process-wide."""
-    global _AGENT
-    if _AGENT is not None:
-        return _AGENT
+def build_agent(extra_tools: Sequence = ()) -> Any:
+    """Compile (or fetch from cache) the ReAct agent for base tools + extra_tools.
+
+    Cached per distinct capability set, keyed by tool NAME (see `_AGENTS`
+    above) so the process can serve tenants with different plugin
+    entitlements concurrently without rebuilding the graph on every call.
+    The base tools are always included and unchanged.
+    """
+    tools = [*_BASE_TOOLS, *extra_tools]
+    key = frozenset(getattr(t, "name", str(t)) for t in tools)
+    cached = _AGENTS.get(key)
+    if cached is not None:
+        return cached
+
     s = get_settings()
     if not s.OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY missing in environment.")
@@ -145,20 +180,24 @@ def build_agent() -> Any:
         # whole arq job until the worker is killed.
         timeout=60,
     )
-    _AGENT = create_react_agent(
+    agent = create_react_agent(
         model,
-        tools=[check_availability, list_free_slots, create_event, cancel_event],
+        tools=tools,
         prompt=_prompt_with_today,
     )
-    return _AGENT
+    _AGENTS[key] = agent
+    return agent
 
 
 async def invoke_agent(messages: list[BaseMessage]) -> str:
     """Run the agent on a message list, return the last assistant reply.
 
     Shared by the dev terminal (scripts/test_agent.py) and run_agent below.
+    Reads `_extra_tools_ctx` (set by run_agent) rather than taking extra_tools
+    as a parameter, so this function's signature — and every existing test
+    that monkeypatches it with a `(messages)`-only fake — stays unchanged.
     """
-    result = await build_agent().ainvoke({"messages": messages})
+    result = await build_agent(_extra_tools_ctx.get()).ainvoke({"messages": messages})
     last = result["messages"][-1]
     return (getattr(last, "content", "") or "").strip()
 
@@ -224,11 +263,22 @@ async def run_agent(
     message: str,
     context: dict,
     tenant_config: TenantRuntimeConfig | None = None,
+    extra_tools: Sequence = (),
+    redis=None,
 ) -> str:
     """arq-side entry point: build history + run agent + return reply text.
 
     `tenant_config` provides per-tenant Calendar credentials and prompt data.
     When None, falls back to the single-tenant env-var scaffold (Fase A / dev).
+    `extra_tools` are plugin-contributed LangChain tools for THIS tenant's
+    entitlements (see plugins/registry.py:agent_tools_for) — appended to the
+    base tools; the agent for that exact combination is resolved/cached by
+    build_agent (via invoke_agent, which reads them off `_extra_tools_ctx`).
+    `redis` is the arq Redis pool (workers/tasks.py's `ctx["redis"]`), threaded
+    through via `_redis_ctx` purely so a tool deep inside the agent loop
+    (ai/tools.py:_persist_appointment) can fire-and-forget enqueue
+    `run_post_booking_hooks` after a successful booking. `None` (dev scripts,
+    tests) makes that enqueue a silent no-op.
     """
     conversation_id = UUID(context["conversation_id"])
 
@@ -243,13 +293,13 @@ async def run_agent(
     tok_cfg = _tenant_config_ctx.set(tenant_config)
     tok_conv = _conversation_id_ctx.set(conversation_id)
     tok_tid = _tenant_id_ctx.set(tenant_config.tenant_id if tenant_config else None)
+    tok_tools = _extra_tools_ctx.set(extra_tools)
+    tok_redis = _redis_ctx.set(redis)
 
     try:
         history = await _load_history(conversation_id)
         if not history:
-            logger.warning(
-                "ai_run_agent_no_history", conversation_id=str(conversation_id)
-            )
+            logger.warning("ai_run_agent_no_history", conversation_id=str(conversation_id))
             history = [HumanMessage(content=message)]
         reply = await _invoke_agent_with_retry(history, conversation_id)
     except CalendarUnavailableError:
@@ -276,11 +326,11 @@ async def run_agent(
         _tenant_config_ctx.reset(tok_cfg)
         _conversation_id_ctx.reset(tok_conv)
         _tenant_id_ctx.reset(tok_tid)
+        _extra_tools_ctx.reset(tok_tools)
+        _redis_ctx.reset(tok_redis)
 
     if not reply:
-        logger.warning(
-            "ai_run_agent_empty_reply", conversation_id=str(conversation_id)
-        )
+        logger.warning("ai_run_agent_empty_reply", conversation_id=str(conversation_id))
         return FALLBACK_REPLY
     if _looks_like_meta_output(reply):
         # Model hallucinated chat-platform narration ("this message was

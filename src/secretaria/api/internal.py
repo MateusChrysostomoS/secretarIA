@@ -58,8 +58,15 @@ def require_internal_api_key(
     unconfigured admin token): the internal contract returns 401/403 in every reject
     case, and returning the same family whether the server is unconfigured or the caller
     is wrong avoids advertising server-config state to an unauthenticated caller.
+
+    Accepts INTERNAL_API_KEY_PREVIOUS as well as INTERNAL_API_KEY (any-of) so a key
+    can be rotated without downtime: deploy the new value as INTERNAL_API_KEY, keep
+    the old one as INTERNAL_API_KEY_PREVIOUS until every caller has switched, then
+    drop it. We only ever SEND INTERNAL_API_KEY outbound (services/precheck.py and
+    core/subscription.py never send the previous value).
     """
-    expected = get_settings().INTERNAL_API_KEY
+    settings = get_settings()
+    expected = settings.INTERNAL_API_KEY
     if not expected:
         # No server-side key => the surface is locked, not "try again later".
         logger.warning("internal_auth_unconfigured")
@@ -67,7 +74,10 @@ def require_internal_api_key(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Internal API not configured.",
         )
-    if not key or not secrets.compare_digest(key, expected):
+    previous = settings.INTERNAL_API_KEY_PREVIOUS
+    is_current = bool(key) and secrets.compare_digest(key, expected)
+    is_previous = bool(key) and bool(previous) and secrets.compare_digest(key, previous)
+    if not (is_current or is_previous):
         # Never log `key` (the candidate secret) — only that auth failed.
         logger.warning("internal_auth_failed")
         raise HTTPException(

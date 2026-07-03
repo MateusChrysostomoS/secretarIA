@@ -69,3 +69,36 @@ async def send_calendar_alert(to_email: str, clinic_name: str) -> None:
             to=to_email,
             clinic=clinic_name,
         )
+
+
+async def send_human_backup_alert(to_email: str, clinic_name: str) -> None:
+    """Email the clinic owner when the human_backup_24_7 addon engages
+    (an inbound message arrived outside business hours and was handed off).
+
+    No-ops silently when SMTP_HOST is not configured.
+    """
+    settings = get_settings()
+    if not settings.SMTP_HOST:
+        return
+
+    subject = f"[SecretarIA] Mensagem fora do horário — {clinic_name}"
+    body = (
+        f"Olá,\n\n"
+        f"Um paciente escreveu para '{clinic_name}' fora do horário de atendimento "
+        f"configurado.\n\n"
+        f"A conversa foi encaminhada para a secretária humana (o bot ficará em "
+        f"silêncio nela) e o paciente já recebeu uma mensagem confirmando o "
+        f"recebimento.\n\n"
+        f"— Equipe SecretarIA"
+    )
+
+    try:
+        await asyncio.to_thread(_send_sync, to_email, subject, body)
+        logger.info("human_backup_alert_email_sent", to=to_email, clinic=clinic_name)
+    except Exception as exc:
+        logger.warning(
+            "human_backup_alert_email_failed",
+            error=str(exc),
+            to=to_email,
+            clinic=clinic_name,
+        )

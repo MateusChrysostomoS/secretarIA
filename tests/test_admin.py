@@ -121,3 +121,69 @@ async def test_endpoint_is_in_openapi_schema(client: AsyncClient) -> None:
     assert "/admin/reset" in schema["paths"]
     post = schema["paths"]["/admin/reset"]["post"]
     assert "admin" in post["tags"]
+
+
+# --------------------------------------------------------------------------
+# Key rotation: ADMIN_TOKEN_PREVIOUS is accepted alongside ADMIN_TOKEN
+# --------------------------------------------------------------------------
+
+
+async def test_previous_token_is_accepted_during_rotation(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    _fake_wipe: list[dict],
+) -> None:
+    from secretaria.config import get_settings
+
+    monkeypatch.setenv("ADMIN_TOKEN_PREVIOUS", "old-admin-token")
+    get_settings.cache_clear()
+    try:
+        response = await client.post(
+            ENDPOINT,
+            json={"confirm": True},
+            headers={"X-Admin-Token": "old-admin-token"},
+        )
+        assert response.status_code == 200
+    finally:
+        monkeypatch.setenv("ADMIN_TOKEN_PREVIOUS", "")
+        get_settings.cache_clear()
+
+
+async def test_current_token_still_accepted_when_previous_is_configured(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    _fake_wipe: list[dict],
+) -> None:
+    from secretaria.config import get_settings
+
+    monkeypatch.setenv("ADMIN_TOKEN_PREVIOUS", "old-admin-token")
+    get_settings.cache_clear()
+    try:
+        response = await client.post(
+            ENDPOINT,
+            json={"confirm": True},
+            headers={"X-Admin-Token": GOOD_TOKEN},
+        )
+        assert response.status_code == 200
+    finally:
+        monkeypatch.setenv("ADMIN_TOKEN_PREVIOUS", "")
+        get_settings.cache_clear()
+
+
+async def test_neither_current_nor_previous_token_is_forbidden(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from secretaria.config import get_settings
+
+    monkeypatch.setenv("ADMIN_TOKEN_PREVIOUS", "old-admin-token")
+    get_settings.cache_clear()
+    try:
+        response = await client.post(
+            ENDPOINT,
+            json={"confirm": True},
+            headers={"X-Admin-Token": "some-other-token"},
+        )
+        assert response.status_code == 403
+    finally:
+        monkeypatch.setenv("ADMIN_TOKEN_PREVIOUS", "")
+        get_settings.cache_clear()

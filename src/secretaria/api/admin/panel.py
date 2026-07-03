@@ -38,6 +38,10 @@ def require_admin(
 
     Uses `secrets.compare_digest` so equal-length tokens are compared in
     constant time, avoiding header-timing oracles.
+
+    Accepts ADMIN_TOKEN_PREVIOUS as well as ADMIN_TOKEN (any-of) so the token can
+    be rotated without downtime: deploy the new value as ADMIN_TOKEN, keep the old
+    one as ADMIN_TOKEN_PREVIOUS until every caller has switched, then drop it.
     """
     settings = get_settings()
     if not settings.ADMIN_TOKEN:
@@ -45,7 +49,13 @@ def require_admin(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Admin endpoint not configured.",
         )
-    if not token or not secrets.compare_digest(token, settings.ADMIN_TOKEN):
+    is_current = bool(token) and secrets.compare_digest(token, settings.ADMIN_TOKEN)
+    is_previous = (
+        bool(token)
+        and bool(settings.ADMIN_TOKEN_PREVIOUS)
+        and secrets.compare_digest(token, settings.ADMIN_TOKEN_PREVIOUS)
+    )
+    if not (is_current or is_previous):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid admin token.",

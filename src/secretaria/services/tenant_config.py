@@ -124,6 +124,42 @@ async def clear_google_refresh_token(session: AsyncSession, tenant_id: UUID) -> 
         cred.google_refresh_token_encrypted = None
 
 
+async def has_waba_token(session: AsyncSession, tenant_id: UUID) -> bool:
+    """True when a (non-null) per-tenant WhatsApp token is stored for this tenant."""
+    cred = await _get_credentials(session, tenant_id)
+    return bool(cred and cred.waba_token_encrypted)
+
+
+async def get_waba_token(session: AsyncSession, tenant_id: UUID) -> str | None:
+    """Return the decrypted WhatsApp access token, or None when not provisioned.
+
+    THE single decrypt point for the WABA token (tenant-secrets-encryption). A None
+    means "fall back to the single-tenant META_ACCESS_TOKEN env scaffold" — callers
+    hand the value straight to WhatsAppClient, never to a response or a log.
+    """
+    cred = await _get_credentials(session, tenant_id)
+    if not cred or not cred.waba_token_encrypted:
+        return None
+    return decrypt(cred.waba_token_encrypted)
+
+
+async def set_waba_token(session: AsyncSession, tenant_id: UUID, token: str) -> None:
+    """Encrypt and upsert the WhatsApp access token. Caller commits."""
+    encrypted = encrypt(token)
+    cred = await _get_credentials(session, tenant_id)
+    if cred is None:
+        session.add(TenantCredentials(tenant_id=tenant_id, waba_token_encrypted=encrypted))
+    else:
+        cred.waba_token_encrypted = encrypted
+
+
+async def clear_waba_token(session: AsyncSession, tenant_id: UUID) -> None:
+    """Forget the WhatsApp access token (the env scaffold takes over). Caller commits."""
+    cred = await _get_credentials(session, tenant_id)
+    if cred is not None:
+        cred.waba_token_encrypted = None
+
+
 # --------------------------------------------------------------------------
 # Runtime config loader (for the agent — next backend step)
 # --------------------------------------------------------------------------

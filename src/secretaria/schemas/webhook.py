@@ -166,3 +166,23 @@ def extract_inbound_body(msg: WebhookMessage) -> str | None:
         iso = payload_id.split("|", 1)[1]
         return f"{title} ({iso})" if title else iso
     return title or payload_id
+
+
+def extract_echo_body(msg: WebhookMessage) -> str | None:
+    """Return the history body for a `smb_message_echoes` (Coexistence) event.
+
+    Echoes are stored as Message rows the LLM later reads back as
+    conversation history, so `edit` and `revoke` — which carry no readable
+    body of their own — get a readable placeholder instead of the None that
+    `extract_inbound_body` would produce (a body=None row would look like a
+    missing turn). Everything else (plain text, and any type we don't
+    special-case, e.g. media) delegates to `extract_inbound_body`, including
+    its None-for-unactionable contract.
+    """
+    if msg.type == "edit":
+        if msg.text and msg.text.body:
+            return f"[mensagem editada: {msg.text.body}]"
+        return "[mensagem editada]"
+    if msg.type == "revoke":
+        return "[mensagem apagada]"
+    return extract_inbound_body(msg)

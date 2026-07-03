@@ -34,8 +34,8 @@ Today `Tenant` carries only the WhatsApp credentials. Everything above is open w
 
 - **Fase A** (terminal OpenAI + Google Calendar tool loop) — validated via `scripts/test_agent.py`.
 - **Fase B** (LangGraph ReAct agent inside the arq worker) — code complete and imports clean, end-to-end WhatsApp test pending.
-- **Multi-tenant adaptation** — not started. Blocks production.
-- **Encryption at rest** — `Tenant.access_token` is plaintext today; future `google_refresh_token` column must be encrypted (Fernet / KMS / Vault) before any real customer.
+- **Multi-tenant adaptation** — LARGELY DONE (plugin round, docs/CHECKPOINT_plugins.md): per-tenant config/calendar/WhatsApp-token on the whole reply path, entitlement-gated bot + capability plugins (registry in `src/secretaria/plugins/`). Remaining: hosted OAuth onboarding polish + outbound rate limiter.
+- **Encryption at rest** — DONE. Both tenant secrets are Fernet ciphertext in `tenant_credentials` (`google_refresh_token_encrypted`, `waba_token_encrypted`); `Tenant` carries no secret column (migration `d7e8f9a0b1c2` moved + dropped `access_token`). Decryption happens ONLY in `services/tenant_config.py` (`get_google_refresh_token` / `get_waba_token`); structlog runs a `redact_secrets` processor. Requires `ENCRYPTION_KEY`.
 
 ## Auxiliary scripts (Fase A scaffolding)
 
@@ -71,6 +71,24 @@ When you restructure, do it as a dedicated change (move files + fix imports in `
 - Pure decision functions over side-effects: prefer the `flow_router.route()` pattern — return a result object, let the caller persist/send. Easier to test without network/DB.
 - All env config goes through `config.py::Settings` (pydantic-settings). Never read `os.environ` directly elsewhere.
 - Per-tenant secrets are decrypted exactly once, in `services/tenant_config.py::load_tenant_config`. Never log or return them from the API.
+
+## Documentação — manter em dia (obrigatório)
+
+Os arquivos em `docs/` são a **fonte de verdade pra entender o projeto** — o objetivo é que uma
+sessão nova do Claude Code (ou qualquer pessoa) entenda tudo, profundamente, só lendo `docs/`.
+Por isso eles **têm que refletir o estado real** do projeto.
+
+**Quando atualizar:** ao fazer mudanças numa sessão, atualize os docs afetados — **não
+necessariamente na hora de cada mudança, mas no FIM da sessão**, depois que tudo foi **validado e
+verificado** (testes passando, deploy/migração confirmados). Documentar antes de validar gera doc
+errado; documentar depois garante que o doc descreve o que realmente está no ar.
+
+**Regras:**
+- Feature grande/multi-camada → um `docs/CHECKPOINT_<FEATURE>.md` (estado, o que entrou onde,
+  deployado/testado, pendências) + 1 linha de ponteiro nos docs relevantes — é o padrão já usado em
+  `docs/CHECKPOINT_plugins.md`.
+- Cite âncoras estáveis (nome de função/módulo), não números de linha frágeis, quando possível.
+- Mantenha o `CHECKPOINT_*` da feature em dia até ela ser 100% concluída/encerrada; aí vira histórico.
 
 ## graphify
 

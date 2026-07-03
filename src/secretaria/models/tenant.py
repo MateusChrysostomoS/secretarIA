@@ -23,9 +23,9 @@ class Tenant(Base):
     # The WhatsApp phone_number_id (NOT the phone number).
     phone_number_id: Mapped[str] = mapped_column(String(64), unique=True)
     waba_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # TODO(security): encrypt the access token at rest (Fernet / KMS / Vault).
-    #   Stored in plaintext for the MVP only.
-    access_token: Mapped[str] = mapped_column(String(512), default="")
+    # The WhatsApp access token does NOT live here: it is Fernet-encrypted at rest as
+    # `tenant_credentials.waba_token_encrypted` (tenant-secrets-encryption skill) and
+    # decrypted ONLY via services/tenant_config.get_waba_token.
     # Feature flag: only call the Precheck service when enabled for this tenant.
     precheck_enabled: Mapped[bool] = mapped_column(default=False)
 
@@ -83,5 +83,17 @@ class Tenant(Base):
 
     # Optional email address for operational alerts (e.g. calendar access lost).
     contact_email: Mapped[str | None] = mapped_column(String(254), nullable=True)
+
+    # Which EHR provider (plugins/ehr.py's PROVIDERS registry key, e.g.
+    # "iclinic") this tenant pushes booked appointments to. NULL = the `ehr`
+    # addon's post_booking hook no-ops (no provider selected yet).
+    ehr_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # The clinic's OWN Pix key (email/phone/random key/CPF-CNPJ) used to
+    # receive deposit payments (plugins/pix_whatsapp.py). This is a PUBLIC
+    # payment address, not a secret credential — unlike the encrypted
+    # tenant_credentials columns, it lives here in plaintext. Still never
+    # logged in full (only tenant_id is logged around it), out of caution.
+    # NULL = the `pix_whatsapp` addon's post_booking hook silently no-ops.
+    pix_key: Mapped[str | None] = mapped_column(String(140), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

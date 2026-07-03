@@ -2,7 +2,7 @@
 
 `get_current_tenant` is the single authentication gate for every hub endpoint.
 It turns an `Authorization: Bearer <token>` header into a Tenant row, delegating
-token validation to core.subscription (the future-Payments-API seam).
+token validation to core.subscription (which calls brain-api).
 """
 
 from fastapi import Depends, Header, HTTPException, status
@@ -26,11 +26,14 @@ def _bearer_token(authorization: str | None) -> str | None:
 
 
 async def _resolve_tenant(session: AsyncSession, tenant_id) -> Tenant | None:
-    """Load the claimed tenant, or the only tenant when the claim has no id."""
+    """Load the claimed tenant, or the only tenant when the claim has no id.
+
+    A real brain-api claim always carries a concrete tenant_id, so the
+    single-tenant fallback below is dead in practice today; it stays as a
+    defensive fallback rather than a relied-upon code path.
+    """
     if tenant_id is not None:
         return await session.get(Tenant, tenant_id)
-    # MVP convenience: no tenant_id on the claim -> if there is exactly one
-    # tenant, use it. With several tenants, MVP_FAKE_TOKEN_TENANT_ID is required.
     rows = (await session.scalars(select(Tenant).limit(2))).all()
     return rows[0] if len(rows) == 1 else None
 
@@ -41,14 +44,14 @@ async def get_current_tenant(
 ) -> Tenant:
     """Authenticate the request and return the caller's Tenant row.
 
-    401 for a missing/invalid token, 404 when the token is valid but no tenant
-    can be resolved (set MVP_FAKE_TOKEN_TENANT_ID once you have several tenants).
+    401 for a missing/invalid/inactive token, 404 when the token is valid but
+    no tenant can be resolved.
     """
     token = _bearer_token(authorization)
     if not token:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
 
-    claim = verify_subscription_token(token)
+    claim = await verify_subscription_token(token)
     if claim is None or not claim.active:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or inactive subscription token")
 

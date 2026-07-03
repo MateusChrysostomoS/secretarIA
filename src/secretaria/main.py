@@ -12,9 +12,17 @@ from arq.connections import RedisSettings
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from secretaria.api import health, internal, webhook
+from secretaria.api import health, internal, internal_privacy, webhook
 from secretaria.api.admin import panel, tenants
-from secretaria.api.hub import calendar, config, oauth
+from secretaria.api.hub import (
+    analytics,
+    calendar,
+    config,
+    conversations,
+    oauth,
+    professionals,
+    units,
+)
 from secretaria.config import get_settings
 from secretaria.core.logging import get_logger, setup_logging
 
@@ -70,6 +78,8 @@ def create_app() -> FastAPI:
     # Internal-only service-to-service surface (brain-api -> appointments/patients),
     # guarded by X-Internal-Api-Key at the router level (self-tags "internal").
     app.include_router(internal.router)
+    # LGPD privacy endpoints (export/erase), same X-Internal-Api-Key gate.
+    app.include_router(internal_privacy.router)
     app.include_router(panel.router, tags=["admin"])
     # Admin fleet view: list tenants + per-tenant Google Calendar health (router self-tags).
     app.include_router(tenants.router)
@@ -77,6 +87,15 @@ def create_app() -> FastAPI:
     app.include_router(config.router)
     app.include_router(oauth.router)
     app.include_router(calendar.router)
+    # Addon CRUD: multi_professional / multi_unit (entitlement + limit gated
+    # in the routers themselves; see api/hub/professionals.py, api/hub/units.py).
+    app.include_router(professionals.router)
+    app.include_router(units.router)
+    # Per-conversation manual handover control for the dashboard (list +
+    # BOT_ACTIVE/HUMAN_ACTIVE toggle); see api/hub/conversations.py.
+    app.include_router(conversations.router)
+    # analytics_bi addon: booking-count summary (entitlement gated in the router).
+    app.include_router(analytics.router)
     return app
 
 

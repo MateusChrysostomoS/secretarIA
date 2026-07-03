@@ -140,8 +140,8 @@ To test locally, expose the API with a tunnel (ngrok / cloudflared).
 | `META_ACCESS_TOKEN` | Permanent **System User** token (Business Settings → Users) |
 | `META_PHONE_NUMBER_ID` | WhatsApp → API Setup → **phone number ID** (not the number) |
 | `META_GRAPH_API_VERSION` | e.g. `v21.0` |
-| `PRECHECK_BASE_URL` | Easypanel: `http://precheck-api:8000` · local: `http://localhost:8001` |
-| `PRECHECK_API_KEY` | Shared secret agreed with the Precheck service owner |
+| `PRECHECK_WHATSAPP_NUMBER` | The SHARED PreCheck WhatsApp number (digits only) for wa.me hand-off links; empty disables the hand-off tool |
+| `PRECHECK_HANDOFF_PREFILL` | Cosmetic prefilled text for the wa.me link (routing happens server-side via brain-api) |
 
 For the MVP, use the **Meta test number** — do not connect a real clinic line.
 
@@ -194,8 +194,8 @@ src/secretaria/
 
 - **AI graph** (`ai/graph.py`) — stub; returns a fixed reply.
 - **Google Calendar** (`services/calendar.py`) — stub (`NotImplementedError`).
-- **Precheck endpoints** — marked `PRECHECK_CONTRACT_NEEDED`; confirm with the
-  Precheck service owner.
+- **Precheck hand-off** — DONE via brain-api (`services/precheck.py`); the old
+  direct-to-PreCheck design (`PRECHECK_BASE_URL`/`PRECHECK_API_KEY`) was removed.
 - **Handover timeout** — predicate implemented; periodic cron wiring pending.
 - **Outbound rate limiting** and **access-token encryption** — see inline
   `TODO` comments.

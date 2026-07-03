@@ -4,6 +4,7 @@ import httpx
 
 from secretaria.config import Settings, get_settings
 from secretaria.core.logging import get_logger
+from secretaria.models.tenant import Tenant
 
 logger = get_logger(__name__)
 
@@ -32,9 +33,15 @@ class WhatsAppClient:
         self._access_token = access_token or self._settings.META_ACCESS_TOKEN
 
     @classmethod
-    def from_tenant(cls, tenant: "Tenant") -> "WhatsAppClient":  # type: ignore[name-defined]
-        """Build a client using a tenant's WhatsApp credentials."""
-        return cls(phone_number_id=tenant.phone_number_id, access_token=tenant.access_token)
+    def for_tenant(cls, tenant: Tenant, access_token: str | None) -> "WhatsAppClient":
+        """Build a client for a tenant. The DECRYPTED token is injected by the caller.
+
+        The token no longer lives on the Tenant row — it is Fernet ciphertext in
+        `tenant_credentials`, decrypted ONLY by `services/tenant_config.get_waba_token`
+        (the single decrypt seam). `None` falls back to the single-tenant
+        META_ACCESS_TOKEN env scaffold via the constructor.
+        """
+        return cls(phone_number_id=tenant.phone_number_id, access_token=access_token)
 
     async def _post(self, payload: dict, to: str) -> dict:
         # TODO(rate-limit): WhatsApp Coexistence caps outbound traffic at
@@ -124,6 +131,44 @@ class WhatsAppClient:
         }
         return await self._post(payload, to=to)
 
+    async def send_template(
+        self,
+        to: str,
+        template: str,
+        lang: str,
+        variables: list[str],
+    ) -> dict:
+        """Send a pre-approved WhatsApp utility template (HSM) message.
+
+        Required OUTSIDE the 24h customer-service window (Meta Cloud API
+        rule: free-form text/interactive messages are only allowed within it)
+        and billed per send. `template` must already be an approved template
+        on the tenant's WABA.
+
+        Args:
+            to: recipient wa_id.
+            template: the approved template's name.
+            lang: Meta language code, e.g. "pt_BR" (NOT "pt-BR").
+            variables: body parameter values, filling the template's
+                positional `{{1}}`, `{{2}}`, ... placeholders in order.
+        """
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "template",
+            "template": {
+                "name": template,
+                "language": {"code": lang},
+                "components": [
+                    {
+                        "type": "body",
+                        "parameters": [{"type": "text", "text": v} for v in variables],
+                    }
+                ],
+            },
+        }
+        return await self._post(payload, to=to)
+
     async def send_list(
         self,
         to: str,
@@ -158,9 +203,7 @@ class WhatsAppClient:
                 "body": {"text": body[:1024]},
                 "action": {
                     "button": button_label[:20],
-                    "sections": [
-                        {"title": section_title[:24], "rows": capped_rows}
-                    ],
+                    "sections": [{"title": section_title[:24], "rows": capped_rows}],
                 },
             },
         }

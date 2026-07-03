@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Literal
 from uuid import UUID
 
+import httpx
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,6 +31,7 @@ from secretaria.core.logging import get_logger
 from secretaria.models import (
     Appointment,
     AppointmentStatus,
+    ConsentEvent,
     Conversation,
     FlowState,
     HandoverState,
@@ -40,13 +42,18 @@ from secretaria.models import (
     ProcessedEvent,
     Tenant,
 )
+from secretaria.plugins.base import InboundContext
+from secretaria.plugins.post_booking import enqueue_post_booking_hooks
+from secretaria.plugins.registry import agent_tools_for, run_on_inbound
 from secretaria.schemas.webhook import (
     WebhookPayload,
     WebhookValue,
+    extract_echo_body,
     extract_inbound_body,
 )
 from secretaria.services.calendar import CalendarService
 from secretaria.services.email import send_calendar_alert
+from secretaria.services.entitlements_client import get_entitlements
 from secretaria.services.flow_router import (
     FlowRouterResult,
     MenuBubble,
@@ -63,7 +70,7 @@ from secretaria.services.flow_router import (
     route,
 )
 from secretaria.services.handover import HandoverManager
-from secretaria.services.tenant_config import load_tenant_config
+from secretaria.services.tenant_config import get_waba_token, load_tenant_config, set_waba_token
 from secretaria.services.whatsapp import WhatsAppClient
 
 logger = get_logger(__name__)
@@ -71,17 +78,16 @@ logger = get_logger(__name__)
 # Patient-facing fallbacks for non-conversational outcomes. Hardcoded for the
 # MVP; candidates for per-tenant configuration later.
 SERVICE_UNAVAILABLE_MESSAGE = (
-    "Nosso sistema de agendamento está em configuração. "
-    "Em breve estará disponível. 🙏"
+    "Nosso sistema de agendamento está em configuração. Em breve estará disponível. 🙏"
 )
 CALENDAR_UNAVAILABLE_MESSAGE = (
     "Estou com uma dificuldade técnica para acessar a agenda agora. "
     "Nossa equipe foi avisada e entrará em contato em breve. 🙏"
 )
-
 # Slash commands the patient can type to reset the conversation. Matched
 # case-insensitively against the trimmed message body.
 _MENU_COMMANDS = frozenset({"/menu", "/reset", "/recomecar", "/recomeçar", "/inicio", "/início"})
+
 
 def is_menu_command(body: str | None) -> bool:
     """True when the patient typed a `/menu`-style reset command."""
@@ -100,8 +106,26 @@ _NAME_PATTERNS = (
 )
 # Words that terminate a captured name (connectors / fillers that follow it).
 _NAME_STOPWORDS = frozenset(
-    {"e", "de", "da", "do", "das", "dos", "que", "mas", "então", "entao",
-     "por", "favor", "pra", "para", "com", "sou", "tudo", "bem"}
+    {
+        "e",
+        "de",
+        "da",
+        "do",
+        "das",
+        "dos",
+        "que",
+        "mas",
+        "então",
+        "entao",
+        "por",
+        "favor",
+        "pra",
+        "para",
+        "com",
+        "sou",
+        "tudo",
+        "bem",
+    }
 )
 
 
@@ -342,6 +366,19 @@ async def _persist_inbound_message(
                     patient = Patient(tenant_id=tenant.id, wa_id=wa_id, name=patient_name)
                     session.add(patient)
                     await session.flush()
+                    # Consent groundwork (LGPD): exactly ONE event per new
+                    # patient row, never per message. See models/consent_event.py.
+                    session.add(
+                        ConsentEvent(
+                            tenant_id=tenant.id,
+                            wa_id=wa_id,
+                            kind="first_contact_service",
+                            legal_basis=(
+                                "TODO_LAWYER: execução de contrato vs consentimento — "
+                                "pendencias_advogado.md item pendente"
+                            ),
+                        )
+                    )
                 elif patient_name and not patient.name:
                     patient.name = patient_name
 
@@ -603,45 +640,31 @@ async def _handle_menu_command(
                 if existing_id is not None:
                     conv_ids = (
                         await session.scalars(
-                            select(Conversation.id).where(
-                                Conversation.patient_id == existing_id
-                            )
+                            select(Conversation.id).where(Conversation.patient_id == existing_id)
                         )
                     ).all()
                     # Appointments first (FK -> patients/conversations). The
                     # schema would SET NULL and keep them; for a dev reset we
                     # remove the rows so the number leaves zero local trace.
                     await session.execute(
-                        delete(Appointment).where(
-                            Appointment.patient_id == existing_id
-                        )
+                        delete(Appointment).where(Appointment.patient_id == existing_id)
                     )
                     if conv_ids:
                         await session.execute(
-                            delete(Message).where(
-                                Message.conversation_id.in_(conv_ids)
-                            )
+                            delete(Message).where(Message.conversation_id.in_(conv_ids))
                         )
                         await session.execute(
-                            delete(Conversation).where(
-                                Conversation.id.in_(conv_ids)
-                            )
+                            delete(Conversation).where(Conversation.id.in_(conv_ids))
                         )
-                    await session.execute(
-                        delete(Patient).where(Patient.id == existing_id)
-                    )
+                    await session.execute(delete(Patient).where(Patient.id == existing_id))
                     await session.flush()
                     logger.info("worker_menu_patient_deleted", wa_id=wa_id)
 
                 # Recreate a clean patient + conversation. A fresh conversation
                 # already defaults to BOT_ACTIVE + flow IDLE, so there is no
                 # prior state left to reset.
-                patient = await _get_or_create_patient(
-                    session, tenant, wa_id, patient_name
-                )
-                conversation = await _get_or_create_conversation(
-                    session, tenant, patient
-                )
+                patient = await _get_or_create_patient(session, tenant, wa_id, patient_name)
+                conversation = await _get_or_create_conversation(session, tenant, patient)
                 conversation_id = conversation.id
                 # Send the first-contact greeting (the "initial" one), NOT the
                 # returning greeting - the whole point of deleting the patient.
@@ -688,7 +711,10 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     # Load per-tenant config + flow context (one short read). We snapshot the
     # flow-relevant fields into plain objects so the router never touches a
     # detached ORM instance after the session closes.
+    tenant: Tenant | None = None
     tenant_config = None
+    waba_token: str | None = None
+    summary = None
     flow_snapshot: tuple[SimpleNamespace, SimpleNamespace] | None = None
     upcoming_appointments: list[dict] | None = None
     patient_name = None
@@ -700,6 +726,12 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                 tenant = await session.get(Tenant, conversation.tenant_id)
                 if tenant is not None:
                     tenant_config = await load_tenant_config(session, tenant)
+                    # Decrypt inside the session (single seam); the plaintext
+                    # value only travels in memory from here on.
+                    waba_token = await get_waba_token(session, tenant.id)
+                    # The ONE entitlement read for this inbound message
+                    # (Redis-cached — see services/entitlements_client.py).
+                    summary = await get_entitlements(tenant.id, redis)
                 if conversation.patient_id is not None:
                     patient = await session.get(Patient, conversation.patient_id)
                     if patient is not None:
@@ -739,6 +771,38 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
             conversation_id=str(reply.conversation_id),
         )
 
+    # Entitlement gate: a tenant whose subscription/status doesn't clear brain-api
+    # gets NO reply at all (the inbound message stays persisted; handover state is
+    # untouched — a human can still see and answer it). Fails closed: a missing
+    # summary (fetch failure with no stale fallback, or no tenant to check) is
+    # treated the same as an explicit "not entitled".
+    if summary is None or not (summary.active and summary.secretaria_enabled):
+        logger.warning(
+            "bot_reply_suppressed_unentitled",
+            tenant_id=str(tenant.id) if tenant is not None else None,
+            status=summary.status if summary is not None else None,
+        )
+        return
+
+    # Optional-addon inbound interception (e.g. human_backup_24_7's
+    # outside-business-hours handover). Runs once entitlement is confirmed,
+    # BEFORE any flow logic decides what the bot would say. A hook that
+    # returns True owns this turn completely - no further reply is sent.
+    if tenant is not None and reply.conversation_id is not None:
+        handled = await run_on_inbound(
+            summary,
+            InboundContext(
+                tenant=tenant,
+                conversation_id=reply.conversation_id,
+                patient_wa_id=patient_wa,
+                inbound_body=reply.inbound_body,
+                waba_token=waba_token,
+                redis=redis,
+            ),
+        )
+        if handled:
+            return
+
     # Returning-patient resume/reset: act on the "quer continuar?" answer. The
     # offer itself went out via the greeting path; this handles the tap.
     if reply.reactivation is not None and flow_snapshot is not None:
@@ -755,19 +819,19 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                 ],
                 flow_state=FlowState.MENU,
             )
-            await _apply_flow_result(reply, result, patient_wa, redis=redis)
+            await _apply_flow_result(
+                reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+            )
             return
         # "Sim": re-render the deterministic step they were on. LLM-mode origins
         # (and any resume that has to delegate) fall through to the agent below,
         # which already has the full history.
         if reply.reactivation.origin != FlowState.LLM.value:
-            calendar = (
-                CalendarService.from_tenant_config(tenant_config)
-                if tenant_config
-                else None
-            )
+            calendar = CalendarService.from_tenant_config(tenant_config) if tenant_config else None
             result = await resume_bubbles(conv_snapshot, tenant_snapshot, calendar)
-            if await _apply_flow_result(reply, result, patient_wa, redis=redis):
+            if await _apply_flow_result(
+                reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+            ):
                 return
         # Skip the deterministic block so "Sim" isn't re-interpreted as input.
         flow_snapshot = None
@@ -777,8 +841,16 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     if flow_snapshot is not None:
         conv_snapshot, tenant_snapshot = flow_snapshot
         if await _run_flow(
-            reply, conv_snapshot, tenant_snapshot, tenant_config, patient_name, patient_wa,
-            upcoming_appointments=upcoming_appointments, redis=redis,
+            reply,
+            conv_snapshot,
+            tenant_snapshot,
+            tenant_config,
+            patient_name,
+            patient_wa,
+            upcoming_appointments=upcoming_appointments,
+            redis=redis,
+            tenant=tenant,
+            waba_token=waba_token,
         ):
             return
 
@@ -786,12 +858,14 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
         reply.inbound_body,
         context={"conversation_id": str(reply.conversation_id)},
         tenant_config=tenant_config,
+        extra_tools=agent_tools_for(summary),
+        redis=redis,
     )
 
     # A tool failed because the calendar is unreachable: tell the patient and
     # hand the conversation to a human secretary instead of faking success.
     if reply_text == CALENDAR_UNAVAILABLE_SENTINEL:
-        await _handle_calendar_unavailable(reply, redis=redis)
+        await _handle_calendar_unavailable(reply, redis=redis, tenant=tenant, waba_token=waba_token)
         return
 
     bubbles = parse(reply_text)
@@ -802,7 +876,7 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
         )
         return
 
-    await _dispatch_bubbles(reply, bubbles)
+    await _dispatch_bubbles(reply, bubbles, tenant=tenant, waba_token=waba_token)
 
 
 def _label_match_body(body: str | None, label: str) -> bool:
@@ -813,9 +887,7 @@ def _label_match_body(body: str | None, label: str) -> bool:
     )
 
 
-async def _load_upcoming_appointments(
-    session: AsyncSession, tenant_id, patient_id
-) -> list[dict]:
+async def _load_upcoming_appointments(session: AsyncSession, tenant_id, patient_id) -> list[dict]:
     """Future SCHEDULED appointments for a patient, oldest first.
 
     Returned as plain dicts (detached from the ORM) so the flow router can read
@@ -852,17 +924,18 @@ async def _run_flow(
     patient_wa: str | None,
     upcoming_appointments: list[dict] | None = None,
     redis=None,
+    tenant: Tenant | None = None,
+    waba_token: str | None = None,
 ) -> bool:
     """Run the deterministic flow router for this turn.
 
     `conv_snapshot`/`tenant_snapshot` are detached plain copies of the flow-
     relevant fields (the router does no DB I/O). Returns True when the turn was
     fully handled (bubbles sent, or handed off on a calendar outage); False to
-    fall through to the LLM agent.
+    fall through to the LLM agent. `tenant`/`waba_token` (already loaded by the
+    caller) are threaded through to whichever send path fires.
     """
-    calendar = (
-        CalendarService.from_tenant_config(tenant_config) if tenant_config else None
-    )
+    calendar = CalendarService.from_tenant_config(tenant_config) if tenant_config else None
     try:
         result = await route(
             conv_snapshot,
@@ -880,7 +953,9 @@ async def _run_flow(
         )
         return False
 
-    return await _apply_flow_result(reply, result, patient_wa, redis=redis)
+    return await _apply_flow_result(
+        reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+    )
 
 
 async def _apply_flow_result(
@@ -888,6 +963,8 @@ async def _apply_flow_result(
     result: FlowRouterResult,
     patient_wa: str | None,
     redis=None,
+    tenant: Tenant | None = None,
+    waba_token: str | None = None,
 ) -> bool:
     """Persist a FlowRouterResult (+ any appointment) and dispatch its bubbles.
 
@@ -897,6 +974,7 @@ async def _apply_flow_result(
     """
     # Persist the new flow state (+ any booked appointment) in one short txn.
     persisted = True
+    booked_appointment: Appointment | None = None
     try:
         async with async_session_factory() as session:
             async with session.begin():
@@ -908,16 +986,15 @@ async def _apply_flow_result(
                     conv.flow_selected_day = result.flow_selected_day
                     conv.flow_selected_slot = result.flow_selected_slot
                     if result.appointment:
-                        session.add(
-                            Appointment(
-                                tenant_id=conv.tenant_id,
-                                patient_id=conv.patient_id,
-                                conversation_id=conv.id,
-                                phone=patient_wa,
-                                status=AppointmentStatus.SCHEDULED,
-                                **result.appointment,
-                            )
+                        booked_appointment = Appointment(
+                            tenant_id=conv.tenant_id,
+                            patient_id=conv.patient_id,
+                            conversation_id=conv.id,
+                            phone=patient_wa,
+                            status=AppointmentStatus.SCHEDULED,
+                            **result.appointment,
                         )
+                        session.add(booked_appointment)
                     # Cancel/reschedule mirror the calendar action onto the
                     # platform row, scoped by tenant_id (google_event_id is
                     # indexed but not globally unique). Best-effort: the calendar
@@ -953,29 +1030,49 @@ async def _apply_flow_result(
             conversation_id=str(reply.conversation_id),
         )
 
+    # Fire-and-forget: enqueue post_booking plugin hooks off the hot path,
+    # mirroring ai/tools.py:_persist_appointment's agent-path enqueue — see
+    # plugins/post_booking.py. Only when the appointment row actually made it
+    # to the DB (never on a persist failure) and `tenant` is loaded (always
+    # true here — the flow engine only runs once `tenant` is resolved).
+    if booked_appointment is not None and persisted and tenant is not None:
+        await enqueue_post_booking_hooks(
+            redis, tenant.id, booked_appointment.id, source="flow"
+        )
+
     if result.action == "calendar_unavailable":
-        await _handle_calendar_unavailable(reply, redis=redis)
+        await _handle_calendar_unavailable(reply, redis=redis, tenant=tenant, waba_token=waba_token)
         return True
     # A booking was made on Google Calendar but recording it failed: do NOT
     # tell the patient it is confirmed. Hand off to a human to reconcile the
     # (now orphaned) event instead of claiming success or risking a re-book.
     if result.appointment is not None and not persisted:
-        await _handle_calendar_unavailable(reply, redis=redis)
+        await _handle_calendar_unavailable(reply, redis=redis, tenant=tenant, waba_token=waba_token)
         return True
     if result.action == "reply":
         if result.bubbles:
-            await _dispatch_bubbles(reply, result.bubbles)
+            await _dispatch_bubbles(reply, result.bubbles, tenant=tenant, waba_token=waba_token)
         return True
     return False  # delegate_llm
 
 
-async def _dispatch_bubbles(reply: _ReplyContext, bubbles: list) -> int:
+async def _dispatch_bubbles(
+    reply: _ReplyContext,
+    bubbles: list,
+    tenant: Tenant | None = None,
+    waba_token: str | None = None,
+) -> int:
     """Send each bubble in order, recording outbound messages. Returns count sent.
 
     MVP: no retry. A transient send failure stops the turn; bubbles already sent
     are recorded so the LLM history stays consistent on the next inbound.
+    `tenant`/`waba_token` select the per-tenant WhatsApp client (see
+    WhatsAppClient.for_tenant); `tenant=None` falls back to the single-tenant
+    env scaffold, same as before this parameter existed.
     """
-    client = WhatsAppClient()
+    client = (
+        WhatsAppClient.for_tenant(tenant, waba_token) if tenant is not None else WhatsAppClient()
+    )
     sent_count = 0
     for index, bubble in enumerate(bubbles):
         try:
@@ -1040,12 +1137,9 @@ async def _send_greeting(reply: _ReplyContext) -> None:
             # WhatsApp needs a unique id per button; the label drives the LLM,
             # so a positional id is enough (see extract_inbound_body).
             buttons = [
-                (f"greeting|{index}", label)
-                for index, label in enumerate(reply.greeting_buttons)
+                (f"greeting|{index}", label) for index, label in enumerate(reply.greeting_buttons)
             ]
-            result = await client.send_buttons(
-                to=reply.patient_wa_id, body=body, buttons=buttons
-            )
+            result = await client.send_buttons(to=reply.patient_wa_id, body=body, buttons=buttons)
         else:
             result = await client.send_text_message(to=reply.patient_wa_id, body=body)
     except Exception as exc:
@@ -1075,20 +1169,35 @@ async def _send_greeting(reply: _ReplyContext) -> None:
     logger.info("worker_greeting_sent", conversation_id=str(reply.conversation_id))
 
 
-async def _send_simple_text(to: str, body: str) -> None:
-    """Send a single plain-text message, swallowing send errors (MVP: no retry)."""
+async def _send_simple_text(to: str, body: str, client: WhatsAppClient | None = None) -> None:
+    """Send a single plain-text message, swallowing send errors (MVP: no retry).
+
+    `client=None` falls back to the single-tenant env scaffold (unchanged
+    default); pass a `WhatsAppClient.for_tenant(...)` instance to send on a
+    specific tenant's own WhatsApp number/token.
+    """
     try:
-        await WhatsAppClient().send_text_message(to=to, body=body)
+        await (client or WhatsAppClient()).send_text_message(to=to, body=body)
     except Exception as exc:
         logger.error("worker_simple_text_send_failed", error=str(exc), to=to)
 
 
-async def _handle_calendar_unavailable(reply: _ReplyContext, redis=None) -> None:
-    """Degrade gracefully on a calendar outage: notify patient + hand off + alert tenant."""
-    logger.error(
-        "worker_calendar_unavailable", conversation_id=str(reply.conversation_id)
-    )
-    tenant: Tenant | None = None
+async def _handle_calendar_unavailable(
+    reply: _ReplyContext,
+    redis=None,
+    tenant: Tenant | None = None,
+    waba_token: str | None = None,
+) -> None:
+    """Degrade gracefully on a calendar outage: notify patient + hand off + alert tenant.
+
+    `tenant`/`waba_token` (already loaded by the caller, if any) select the
+    per-tenant WhatsApp client for the patient-facing message below. The
+    clinic-owner alert further down always re-fetches its own tenant row
+    (inside the same transaction as the handover-state update) so it sees the
+    freshest `contact_email`, independent of what the caller passed in.
+    """
+    logger.error("worker_calendar_unavailable", conversation_id=str(reply.conversation_id))
+    alert_tenant: Tenant | None = None
     if reply.conversation_id is not None:
         try:
             async with async_session_factory() as session:
@@ -1096,7 +1205,7 @@ async def _handle_calendar_unavailable(reply: _ReplyContext, redis=None) -> None
                     conversation = await session.get(Conversation, reply.conversation_id)
                     if conversation is not None:
                         await HandoverManager(session).set_human_active(conversation)
-                        tenant = await session.get(Tenant, conversation.tenant_id)
+                        alert_tenant = await session.get(Tenant, conversation.tenant_id)
         except Exception as exc:
             logger.error(
                 "worker_calendar_unavailable_handover_failed",
@@ -1104,12 +1213,13 @@ async def _handle_calendar_unavailable(reply: _ReplyContext, redis=None) -> None
                 conversation_id=str(reply.conversation_id),
             )
 
-    await _send_simple_text(reply.patient_wa_id, CALENDAR_UNAVAILABLE_MESSAGE)
+    client = WhatsAppClient.for_tenant(tenant, waba_token) if tenant is not None else None
+    await _send_simple_text(reply.patient_wa_id, CALENDAR_UNAVAILABLE_MESSAGE, client=client)
 
     # Alert the clinic owner by email (at most once every CALENDAR_ALERT_SILENCE_SECONDS).
-    if tenant is not None and tenant.contact_email:
+    if alert_tenant is not None and alert_tenant.contact_email:
         settings = get_settings()
-        alert_key = f"calendar:alert:{tenant.id}"
+        alert_key = f"calendar:alert:{alert_tenant.id}"
         should_send = True
         if redis is not None:
             try:
@@ -1121,7 +1231,7 @@ async def _handle_calendar_unavailable(reply: _ReplyContext, redis=None) -> None
             except Exception as exc:
                 logger.warning("worker_calendar_alert_redis_failed", error=str(exc))
         if should_send:
-            await send_calendar_alert(tenant.contact_email, tenant.clinic_name)
+            await send_calendar_alert(alert_tenant.contact_email, alert_tenant.clinic_name)
 
 
 async def _send_bubble(
@@ -1181,11 +1291,15 @@ def _bubble_history_body(bubble: TextBubble | ButtonBubble | SlotsBubble | MenuB
 
 
 async def _handle_human_echoes(value: WebhookValue) -> None:
-    """Process `smb_message_echoes`: the human secretary replied from the app."""
+    """Process `smb_message_echoes`: the human secretary replied from the app.
+
+    Confirmed against the official Coexistence API documentation:
+    `smb_message_echoes` fires ONLY for messages sent from the WhatsApp
+    Business app / linked device, never for our own Cloud API sends, so no
+    bot-echo-loop guard is needed here. The patient wa_id comes from the
+    echo's `to` field, falling back to the contacts list.
+    """
     phone_number_id = value.metadata.phone_number_id if value.metadata else None
-    # TODO(coexistence): confirm the exact smb_message_echoes payload shape
-    #   against a real Coexistence webhook. The patient wa_id is taken from the
-    #   echo `to` field, falling back to the contacts list.
     fallback_wa_id = next((c.wa_id for c in value.contacts if c.wa_id), None)
 
     for echo in value.message_echoes:
@@ -1197,7 +1311,7 @@ async def _handle_human_echoes(value: WebhookValue) -> None:
             phone_number_id=phone_number_id,
             patient_wa_id=patient_wa_id,
             wam_id=echo.id,
-            body=extract_inbound_body(echo),
+            body=extract_echo_body(echo),
         )
 
 
@@ -1292,13 +1406,15 @@ async def _resolve_tenant(session: AsyncSession, phone_number_id: str | None) ->
     tenant = Tenant(
         clinic_name="MVP Clinic",
         phone_number_id=target,
-        access_token=settings.META_ACCESS_TOKEN,
         # The single-tenant MVP scaffold is live by definition; without this the
         # new is_active gate would silently block the validated dev flow.
         is_active=True,
     )
     session.add(tenant)
     await session.flush()
+    if settings.META_ACCESS_TOKEN:
+        # Encrypted at rest from the very first write — never a plaintext column.
+        await set_waba_token(session, tenant.id, settings.META_ACCESS_TOKEN)
     logger.info("worker_tenant_auto_provisioned", tenant_id=str(tenant.id))
     return tenant
 
@@ -1361,9 +1477,13 @@ async def send_patient_notification(ctx: dict, tenant_id: str, phone: str, messa
         if tenant is None:
             logger.error("send_patient_notification_tenant_not_found", tenant_id=tenant_id)
             return
+        # Decrypt inside the session (single seam); only the in-memory value travels.
+        waba_token = await get_waba_token(session, tenant.id)
 
     try:
-        await WhatsAppClient.from_tenant(tenant).send_text_message(to=phone, body=message)
+        await WhatsAppClient.for_tenant(tenant, waba_token).send_text_message(
+            to=phone, body=message
+        )
         logger.info(
             "send_patient_notification_sent",
             tenant_id=tenant_id,
@@ -1389,9 +1509,7 @@ async def check_handover_timeouts(ctx: dict) -> None:
     HANDOVER_TIMEOUT_MINUTES is flipped back to BOT_ACTIVE so the bot answers
     the patient's next message. Registered in arq_worker.WorkerSettings.
     """
-    cutoff = datetime.now(UTC) - timedelta(
-        minutes=get_settings().HANDOVER_TIMEOUT_MINUTES
-    )
+    cutoff = datetime.now(UTC) - timedelta(minutes=get_settings().HANDOVER_TIMEOUT_MINUTES)
     flipped = 0
     async with async_session_factory() as session:
         async with session.begin():

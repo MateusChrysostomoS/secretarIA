@@ -30,12 +30,14 @@ from secretaria.services.tenant_config import TenantRuntimeConfig  # noqa: E402
 GOOD_TOKEN = "test-admin-token"
 ENDPOINT = "/admin/tenants"
 
-# A sentinel that must NEVER appear in any response body.
+# A sentinel that must NEVER appear in any response body. The WABA token no longer
+# lives on the Tenant row (it is ciphertext in tenant_credentials), so the leak check
+# now guards the serialization path rather than a model column.
 SECRET_WA_TOKEN = "SUPER-SECRET-WA-TOKEN"
 
 
 def _make_tenant(**overrides: object) -> Tenant:
-    """A Tenant ORM instance with a plaintext access_token to catch leaks."""
+    """A Tenant ORM instance (config only — no secret columns exist on it)."""
     fields: dict[str, object] = {
         "id": uuid4(),
         "clinic_name": "Clinic A",
@@ -47,7 +49,6 @@ def _make_tenant(**overrides: object) -> Tenant:
         "precheck_enabled": False,
         "created_at": datetime(2026, 1, 1, tzinfo=UTC),
         "google_calendar_id": "primary",
-        "access_token": SECRET_WA_TOKEN,
     }
     fields.update(overrides)
     return Tenant(**fields)

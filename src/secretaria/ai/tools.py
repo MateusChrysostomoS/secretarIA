@@ -10,14 +10,23 @@ table is created/updated so the platform has a record independent of Google
 Calendar. This is wrapped so a DB hiccup never fails the calendar operation.
 """
 
+from collections.abc import Sequence
 from contextvars import ContextVar
+from dataclasses import replace
 from datetime import date, datetime
+from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 from uuid import UUID
 
 from langchain_core.tools import tool
 
+from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
 from secretaria.services.calendar import CalendarService
+from secretaria.services.precheck import HandoffOutcome, request_precheck_handoff
+
+if TYPE_CHECKING:
+    from secretaria.services.tenant_config import TenantRuntimeConfig
 
 logger = get_logger(__name__)
 
@@ -29,6 +38,23 @@ _calendar_ctx: ContextVar[CalendarService | None] = ContextVar("_calendar", defa
 # appointment rows. None in dev scripts that invoke the agent directly.
 _tenant_id_ctx: ContextVar[UUID | None] = ContextVar("_tenant_id", default=None)
 _conversation_id_ctx: ContextVar[UUID | None] = ContextVar("_conversation_id", default=None)
+
+# Per-async-task TenantRuntimeConfig. Set by graph.run_agent; read here (and by
+# plugin tools, e.g. plugins/multi_professional.py) to build a CalendarService
+# scoped to something other than the tenant's own calendar_id (see
+# `_calendar_for_calendar_id` below). Lives in this module (not graph.py) so a
+# plugin tool module can import it without reaching into graph.py.
+_tenant_config_ctx: ContextVar["TenantRuntimeConfig | None"] = ContextVar(
+    "_tenant_config", default=None
+)
+
+# Per-async-task arq Redis pool, used ONLY to fire-and-forget enqueue
+# `run_post_booking_hooks` after a successful booking (see
+# `_persist_appointment` below and plugins/post_booking.py). Set by
+# graph.run_agent from the `redis` it receives from workers/tasks.py;
+# `None` (dev scripts, or no arq pool reachable) makes the enqueue a silent
+# no-op rather than an error.
+_redis_ctx: ContextVar[Any | None] = ContextVar("_redis", default=None)
 
 # Note on calendar outages: a tool that hits CalendarUnavailableError simply
 # lets it propagate. LangGraph's ToolNode re-raises it out of the agent's
@@ -48,6 +74,42 @@ def _get_calendar() -> CalendarService:
     return cal
 
 
+def _calendar_for_calendar_id(google_calendar_id: str | None) -> CalendarService:
+    """Build a CalendarService scoped to a specific Google Calendar id.
+
+    Used by plugin tools that book against something other than the tenant's
+    own calendar (e.g. plugins/multi_professional.py's per-professional
+    calendars). `google_calendar_id=None` (or falsy) is a deliberate no-op —
+    the tenant's own calendar_id is kept, which is exactly the "falls back to
+    the tenant's calendar" behavior the multi_professional addon wants when a
+    professional has no calendar of their own configured.
+
+    Falls back to `_get_calendar()` (the base ContextVar) when no
+    TenantRuntimeConfig is set — same dev-script convenience as `_get_calendar`.
+    """
+    config = _tenant_config_ctx.get()
+    if config is None:
+        return _get_calendar()
+    if google_calendar_id:
+        config = replace(config, google_calendar_id=google_calendar_id)
+    return CalendarService.from_tenant_config(config)
+
+
+def _match_by_name(items: Sequence[Any], name: str) -> Any | None:
+    """Case-insensitive exact match of `name` against `item.name` in `items`.
+
+    Shared by plugin tools that resolve a professional/unit by the name the
+    LLM heard from the patient (plugins/multi_professional.py,
+    plugins/multi_unit.py). Returns None when nothing matches — callers build
+    their own "valid options" error message from the full `items` list.
+    """
+    target = name.strip().casefold()
+    for item in items:
+        if item.name.strip().casefold() == target:
+            return item
+    return None
+
+
 def _event_window(
     event: dict, fallback_start: datetime, fallback_end: datetime
 ) -> tuple[datetime, datetime]:
@@ -65,16 +127,42 @@ def _event_window(
         return fallback_start, fallback_end
 
 
+def _localize_window(start: str, end: str, cal: CalendarService) -> tuple[datetime, datetime]:
+    """Parse LLM-supplied ISO 8601 start/end and localize naive values to `cal`'s tz.
+
+    Shared by every create_event*-shaped tool (base `create_event` here, plus
+    plugins/multi_professional.py's `create_event_for_professional` and
+    plugins/multi_unit.py's `create_event_at_unit`) so a fallback persist still
+    gets tz-aware values for the TIMESTAMPTZ columns even if Google's response
+    is unexpectedly missing the authoritative window.
+    """
+    parsed_start = datetime.fromisoformat(start)
+    parsed_end = datetime.fromisoformat(end)
+    if parsed_start.tzinfo is None:
+        parsed_start = parsed_start.replace(tzinfo=cal.tzinfo)
+    if parsed_end.tzinfo is None:
+        parsed_end = parsed_end.replace(tzinfo=cal.tzinfo)
+    return parsed_start, parsed_end
+
+
 async def _persist_appointment(
     event: dict,
     fallback_start: datetime,
     fallback_end: datetime,
     appointment_type: str,
+    professional_id: UUID | None = None,
+    unit_id: UUID | None = None,
 ) -> None:
     """Record a bot-created appointment. Best-effort: never raises.
 
     Skipped silently when no tenant context is set (dev scripts). A DB failure
     is logged but does not undo the (already successful) Google Calendar event.
+
+    `professional_id`/`unit_id` are optional — set only by the
+    multi_professional/multi_unit plugin tools (plugins/multi_professional.py,
+    plugins/multi_unit.py); the base tools never pass them, so a plain
+    booking still gets NULL in both columns exactly as before this addon
+    support was added.
     """
     tenant_id = _tenant_id_ctx.get()
     if tenant_id is None:
@@ -85,6 +173,7 @@ async def _persist_appointment(
     from secretaria.core.database import async_session_factory
     from secretaria.models import Appointment, AppointmentStatus, Conversation, Patient
 
+    appointment: Any | None = None
     try:
         async with async_session_factory() as session:
             async with session.begin():
@@ -99,26 +188,37 @@ async def _persist_appointment(
                             if patient is not None:
                                 phone = patient.wa_id
                 start_at, end_at = _event_window(event, fallback_start, fallback_end)
-                session.add(
-                    Appointment(
-                        tenant_id=tenant_id,
-                        patient_id=patient_id,
-                        conversation_id=conversation_id,
-                        google_event_id=event.get("id") or "",
-                        google_event_link=event.get("htmlLink"),
-                        appointment_type=(appointment_type or "").strip()[:120] or None,
-                        start_at=start_at,
-                        end_at=end_at,
-                        phone=phone,
-                        status=AppointmentStatus.SCHEDULED,
-                    )
+                appointment = Appointment(
+                    tenant_id=tenant_id,
+                    patient_id=patient_id,
+                    conversation_id=conversation_id,
+                    google_event_id=event.get("id") or "",
+                    google_event_link=event.get("htmlLink"),
+                    appointment_type=(appointment_type or "").strip()[:120] or None,
+                    start_at=start_at,
+                    end_at=end_at,
+                    phone=phone,
+                    status=AppointmentStatus.SCHEDULED,
+                    professional_id=professional_id,
+                    unit_id=unit_id,
                 )
+                session.add(appointment)
         logger.info("tool_appointment_persisted", event_id=event.get("id"))
     except Exception as exc:
         # The calendar event already exists; a missing DB row is recoverable
         # and must not break the booking the patient just made.
-        logger.warning(
-            "tool_appointment_persist_failed", error=str(exc), event_id=event.get("id")
+        logger.warning("tool_appointment_persist_failed", error=str(exc), event_id=event.get("id"))
+        return
+
+    # Fire-and-forget: enqueue post_booking plugin hooks (EHR push, Pix
+    # deposit ask, analytics event, ...) off the hot path. Never awaited
+    # inline and never allowed to affect the booking reply — see
+    # plugins/post_booking.py.
+    if appointment is not None:
+        from secretaria.plugins.post_booking import enqueue_post_booking_hooks
+
+        await enqueue_post_booking_hooks(
+            _redis_ctx.get(), tenant_id, appointment.id, source="agent"
         )
 
 
@@ -150,9 +250,7 @@ async def _mark_appointment_cancelled(event_id: str) -> None:
                 )
         logger.info("tool_appointment_cancelled", event_id=event_id, rows=result.rowcount)
     except Exception as exc:
-        logger.warning(
-            "tool_appointment_cancel_persist_failed", error=str(exc), event_id=event_id
-        )
+        logger.warning("tool_appointment_cancel_persist_failed", error=str(exc), event_id=event_id)
 
 
 @tool
@@ -210,21 +308,13 @@ async def create_event(
         description: Notas adicionais (opcional).
     """
     cal = _get_calendar()
+    fallback_start, fallback_end = _localize_window(start, end, cal)
     event = await cal.create_event(
-        start=datetime.fromisoformat(start),
-        end=datetime.fromisoformat(end),
+        start=fallback_start,
+        end=fallback_end,
         summary=summary,
         description=description,
     )
-
-    # Localize the LLM-supplied (naive) times so a fallback persist still gets
-    # tz-aware values for the TIMESTAMPTZ columns.
-    fallback_start = datetime.fromisoformat(start)
-    fallback_end = datetime.fromisoformat(end)
-    if fallback_start.tzinfo is None:
-        fallback_start = fallback_start.replace(tzinfo=cal.tzinfo)
-    if fallback_end.tzinfo is None:
-        fallback_end = fallback_end.replace(tzinfo=cal.tzinfo)
     await _persist_appointment(event, fallback_start, fallback_end, summary)
 
     return {
@@ -244,3 +334,89 @@ async def cancel_event(event_id: str) -> dict:
     await _get_calendar().cancel_event(event_id)
     await _mark_appointment_cancelled(event_id)
     return {"status": "cancelled"}
+
+
+async def _resolve_patient_phone() -> str | None:
+    """Best-effort patient WhatsApp id (phone) for the current turn.
+
+    Mirrors `_persist_appointment`'s phone resolution: `_conversation_id_ctx`
+    (set by graph.run_agent) -> Conversation.patient_id -> Patient.wa_id.
+    Returns None when there is no conversation context (dev scripts) or
+    nothing resolves — callers must treat that as "can't proceed", not crash.
+    """
+    conversation_id = _conversation_id_ctx.get()
+    if conversation_id is None:
+        return None
+    # Imported lazily, same reason as _persist_appointment above.
+    from secretaria.core.database import async_session_factory
+    from secretaria.models import Conversation, Patient
+
+    async with async_session_factory() as session:
+        conversation = await session.get(Conversation, conversation_id)
+        if conversation is None or conversation.patient_id is None:
+            return None
+        patient = await session.get(Patient, conversation.patient_id)
+        return patient.wa_id if patient is not None else None
+
+
+# Precheck hand-off tool guidance text (PT-BR), one per `HandoffOutcome` plus
+# the "feature not configured for this clinic" pre-check. Kept as module
+# constants so the outcome->text mapping is easy to audit/test in one place.
+_PRECHECK_UNAVAILABLE_TEXT = (
+    "A pré-consulta ainda não está disponível para esta clínica no momento. "
+    "Você pode seguir normalmente com o agendamento."
+)
+_PRECHECK_NOT_ENTITLED_TEXT = "Esse recurso de pré-consulta não está disponível para esta clínica."
+_PRECHECK_CONFLICT_TEXT = (
+    "O paciente já tem uma pré-consulta em andamento no número da PreCheck. "
+    "Oriente-o a continuar por lá em vez de abrir uma nova conversa."
+)
+_PRECHECK_TEMPORARY_FAILURE_TEXT = (
+    "Não foi possível iniciar a pré-consulta agora (instabilidade temporária). "
+    "Tente novamente em alguns instantes."
+)
+
+
+@tool
+async def iniciar_pre_consulta() -> str:
+    """Inicia a pré-consulta (anamnese) do paciente desta clínica, encaminhando-o
+    por WhatsApp para o número da PreCheck. Use SOMENTE quando o paciente
+    precisar preencher o questionário de pré-consulta desta clínica antes da
+    consulta marcada — este recurso é restrito a essa tarefa específica desta
+    clínica (política da Meta), não é uma ferramenta de mensageria genérica.
+
+    Não recebe argumentos: o telefone do paciente e a clínica são resolvidos
+    automaticamente a partir da conversa atual.
+    """
+    settings = get_settings()
+    if not settings.PRECHECK_WHATSAPP_NUMBER:
+        return _PRECHECK_UNAVAILABLE_TEXT
+
+    tenant_id = _tenant_id_ctx.get()
+    if tenant_id is None:
+        # Dev scripts / no tenant context: nothing to check entitlement
+        # against, so behave exactly like "not configured for this clinic".
+        logger.warning("tool_precheck_handoff_no_tenant_context")
+        return _PRECHECK_UNAVAILABLE_TEXT
+
+    phone = await _resolve_patient_phone()
+    if not phone:
+        logger.warning("tool_precheck_handoff_no_patient_phone", tenant_id=str(tenant_id))
+        return _PRECHECK_TEMPORARY_FAILURE_TEXT
+
+    result = await request_precheck_handoff(tenant_id, phone)
+
+    if result.outcome in (HandoffOutcome.SEEDED, HandoffOutcome.ALREADY_ACTIVE):
+        link = (
+            f"https://wa.me/{settings.PRECHECK_WHATSAPP_NUMBER}"
+            f"?text={quote(settings.PRECHECK_HANDOFF_PREFILL)}"
+        )
+        return (
+            "Pré-consulta liberada para o paciente. Envie este link para que ele "
+            f"continue no WhatsApp da pré-consulta: {link}"
+        )
+    if result.outcome in (HandoffOutcome.NOT_ENTITLED, HandoffOutcome.NO_CLINIC):
+        return _PRECHECK_NOT_ENTITLED_TEXT
+    if result.outcome is HandoffOutcome.CONFLICT:
+        return _PRECHECK_CONFLICT_TEXT
+    return _PRECHECK_TEMPORARY_FAILURE_TEXT
