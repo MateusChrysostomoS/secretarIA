@@ -168,7 +168,9 @@ async def test_entitled_reply_flows_as_before(monkeypatch: pytest.MonkeyPatch, d
 
     run_agent_calls: list[dict] = []
 
-    async def _fake_run_agent(message, context, tenant_config=None, extra_tools=(), redis=None):
+    async def _fake_run_agent(
+        message, context, tenant_config=None, extra_tools=(), redis=None, **kwargs
+    ):
         run_agent_calls.append(
             {"message": message, "tenant_config": tenant_config, "extra_tools": extra_tools}
         )
@@ -284,7 +286,9 @@ async def test_reply_uses_whatsapp_client_for_tenant_with_decrypted_token(
     async def _fake_get_entitlements(tenant_id, redis):
         return _summary()
 
-    async def _fake_run_agent(message, context, tenant_config=None, extra_tools=(), redis=None):
+    async def _fake_run_agent(
+        message, context, tenant_config=None, extra_tools=(), redis=None, **kwargs
+    ):
         return "Oi!"
 
     monkeypatch.setattr(tasks, "get_entitlements", _fake_get_entitlements)
@@ -309,7 +313,9 @@ async def test_run_agent_receives_plugin_tools_for_entitled_addons(
 
     run_agent_calls: list[dict] = []
 
-    async def _fake_run_agent(message, context, tenant_config=None, extra_tools=(), redis=None):
+    async def _fake_run_agent(
+        message, context, tenant_config=None, extra_tools=(), redis=None, **kwargs
+    ):
         run_agent_calls.append({"extra_tools": extra_tools})
         return "Oi!"
 

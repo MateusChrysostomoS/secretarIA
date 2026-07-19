@@ -32,7 +32,12 @@ from secretaria.ai.formatter import (
     TextBubble,
     parse,
 )
-from secretaria.ai.graph import CALENDAR_UNAVAILABLE_SENTINEL, run_agent
+from secretaria.ai.graph import (
+    CALENDAR_UNAVAILABLE_SENTINEL,
+    SELECT_PROFESSIONAL_SENTINEL_PREFIX,
+    SHOW_MAIN_MENU_SENTINEL,
+    run_agent,
+)
 from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
@@ -67,6 +72,7 @@ from secretaria.services.entitlements_client import get_entitlements
 from secretaria.services.flow_router import (
     FlowRouterResult,
     MenuBubble,
+    _enter_professional_services,
     classify_yes_no,
     flows_enabled,
     manage_label,
@@ -793,10 +799,11 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     summary = None
     flow_snapshot: tuple[SimpleNamespace, SimpleNamespace] | None = None
     upcoming_appointments: list[dict] | None = None
-    # Multi-doctor flow context (only populated when flows are enabled):
-    # the active-professionals snapshot and, when the patient already picked
-    # a doctor, that professional's resolved calendar.
+    # Multi-doctor context: the active-professionals snapshot (the router's
+    # roster AND the run_agent prompt-context source), the selected
+    # professional's plain snapshot, and their resolved calendar.
     flow_professionals: list[SimpleNamespace] | None = None
+    selected_professional: SimpleNamespace | None = None
     flow_calendar: CalendarService | None = None
     patient_name = None
     patient_wa = reply.patient_wa_id
@@ -818,6 +825,49 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                     if patient is not None:
                         patient_name = patient.name
                         patient_wa = patient.wa_id or patient_wa
+                if tenant is not None:
+                    # Active-professionals snapshot (plain objects — the flow
+                    # router does no DB I/O). Loaded whenever a tenant
+                    # resolves, not only when flows are on: the agent's
+                    # professional context + sentinel hand-backs need it too.
+                    professional_rows = await list_active_professionals(session, tenant.id)
+                    flow_professionals = [
+                        SimpleNamespace(
+                            id=p.id,
+                            name=p.name,
+                            specialty=p.specialty,
+                            about=p.about,
+                            context_doctor_message=p.context_doctor_message,
+                            appointment_types=p.appointment_types,
+                        )
+                        for p in professional_rows
+                    ]
+                    selected_id = conversation.flow_selected_professional_id
+                    if selected_id is not None:
+                        selected_row = next(
+                            (p for p in professional_rows if p.id == selected_id), None
+                        )
+                        if selected_row is not None:
+                            selected_professional = next(
+                                p for p in flow_professionals if p.id == selected_id
+                            )
+                            # The selected doctor's own CalendarService, so the
+                            # flow's day/slot/booking hit THEIR agenda.
+                            try:
+                                flow_calendar = await resolve_professional_calendar(
+                                    session,
+                                    tenant,
+                                    selected_row,
+                                    tenant_config=tenant_config,
+                                )
+                            except Exception as exc:
+                                # The flow degrades to the LLM on a missing
+                                # professional calendar — never blocks the reply.
+                                logger.warning(
+                                    "worker_professional_calendar_failed",
+                                    error=str(exc),
+                                    professional_id=str(selected_id),
+                                )
                 if tenant is not None and flows_enabled(tenant):
                     flow_snapshot = (
                         SimpleNamespace(
@@ -841,43 +891,6 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                             insurances=tenant.insurances,
                         ),
                     )
-                    # Active-professionals snapshot for the router (plain
-                    # objects — the router does no DB I/O), plus, when the
-                    # patient already picked a doctor, THAT doctor's resolved
-                    # CalendarService so day/slot/booking hit their agenda.
-                    professional_rows = await list_active_professionals(session, tenant.id)
-                    flow_professionals = [
-                        SimpleNamespace(
-                            id=p.id,
-                            name=p.name,
-                            specialty=p.specialty,
-                            about=p.about,
-                            context_doctor_message=p.context_doctor_message,
-                            appointment_types=p.appointment_types,
-                        )
-                        for p in professional_rows
-                    ]
-                    selected_id = conversation.flow_selected_professional_id
-                    if selected_id is not None:
-                        selected_row = next(
-                            (p for p in professional_rows if p.id == selected_id), None
-                        )
-                        if selected_row is not None:
-                            try:
-                                flow_calendar = await resolve_professional_calendar(
-                                    session,
-                                    tenant,
-                                    selected_row,
-                                    tenant_config=tenant_config,
-                                )
-                            except Exception as exc:
-                                # Degrades to the tenant calendar / LLM below —
-                                # never blocks the reply.
-                                logger.warning(
-                                    "worker_professional_calendar_failed",
-                                    error=str(exc),
-                                    professional_id=str(selected_id),
-                                )
                     # Load the patient's future appointments only when the manage
                     # (cancel/reschedule) flow is active or being opened, so the
                     # router can list/resolve them without doing its own DB I/O.
@@ -990,12 +1003,34 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
         tenant_config=tenant_config,
         extra_tools=agent_tools_for(summary),
         redis=redis,
+        selected_professional=selected_professional,
     )
 
     # A tool failed because the calendar is unreachable: tell the patient and
     # hand the conversation to a human secretary instead of faking success.
     if reply_text == CALENDAR_UNAVAILABLE_SENTINEL:
         await _handle_calendar_unavailable(reply, redis=redis, tenant=tenant, waba_token=waba_token)
+        return
+
+    # The agent asked to hand the patient back to the deterministic flow:
+    # non-destructive menu return, or re-entry at a confirmed doctor's
+    # greeting + services. Mirrors the calendar sentinel short-circuit above.
+    if reply_text == SHOW_MAIN_MENU_SENTINEL:
+        await _handle_show_main_menu(
+            reply, tenant, flow_professionals, patient_wa, redis=redis, waba_token=waba_token
+        )
+        return
+    if reply_text.startswith(SELECT_PROFESSIONAL_SENTINEL_PREFIX):
+        await _handle_select_professional(
+            reply,
+            reply_text,
+            tenant,
+            flow_snapshot,
+            flow_professionals,
+            patient_wa,
+            redis=redis,
+            waba_token=waba_token,
+        )
         return
 
     bubbles = parse(reply_text)
@@ -1387,6 +1422,85 @@ async def _handle_calendar_unavailable(
                 logger.warning("worker_calendar_alert_redis_failed", error=str(exc))
         if should_send:
             await send_calendar_alert(alert_tenant.contact_email, alert_tenant.clinic_name)
+
+
+async def _handle_show_main_menu(
+    reply: _ReplyContext,
+    tenant: Tenant | None,
+    professionals: list | None,
+    patient_wa: str | None,
+    redis=None,
+    waba_token: str | None = None,
+) -> None:
+    """Non-destructive menu return (the agent's show_main_menu tool).
+
+    Unlike the dev-only /menu command, NOTHING is deleted: `_apply_flow_result`
+    resets the flow fields to MENU (its unconditional writes also clear
+    flow_selected_professional_id / flow_selected_insurance) and the effective
+    menu bubbles go out. History and the patient row stay untouched.
+    """
+    if tenant is None:
+        logger.warning(
+            "worker_show_main_menu_without_tenant",
+            conversation_id=str(reply.conversation_id),
+        )
+        return
+    result = FlowRouterResult(
+        action="reply",
+        bubbles=[
+            MenuBubble(
+                body=menu_label(tenant),
+                labels=menu_buttons_for(tenant, len(professionals or []) > 1),
+            )
+        ],
+        flow_state=FlowState.MENU,
+    )
+    await _apply_flow_result(
+        reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+    )
+
+
+async def _handle_select_professional(
+    reply: _ReplyContext,
+    reply_text: str,
+    tenant: Tenant | None,
+    flow_snapshot: tuple[SimpleNamespace, SimpleNamespace] | None,
+    professionals: list | None,
+    patient_wa: str | None,
+    redis=None,
+    waba_token: str | None = None,
+) -> None:
+    """LLM hand-back: re-enter the deterministic flow at the chosen doctor.
+
+    `select_professional_and_continue` already resolved the name against the
+    ACTIVE roster, so the id in the sentinel should re-resolve here; if it
+    doesn't (deactivated in the same instant, or a malformed sentinel), fall
+    back to the plain menu instead of dropping the turn.
+    """
+    raw_id = reply_text[len(SELECT_PROFESSIONAL_SENTINEL_PREFIX) :]
+    professional = None
+    try:
+        professional_id = UUID(raw_id)
+    except ValueError:
+        logger.error("worker_select_professional_bad_sentinel", raw=raw_id[:64])
+    else:
+        professional = next(
+            (p for p in professionals or [] if p.id == professional_id), None
+        )
+    tenant_snapshot = flow_snapshot[1] if flow_snapshot is not None else tenant
+    if professional is None or tenant_snapshot is None:
+        logger.warning(
+            "worker_select_professional_unresolved",
+            conversation_id=str(reply.conversation_id),
+        )
+        await _handle_show_main_menu(
+            reply, tenant, professionals, patient_wa, redis=redis, waba_token=waba_token
+        )
+        return
+    result = _enter_professional_services(professional, tenant_snapshot)
+    await _apply_flow_result(
+        reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+    )
 
 
 async def _send_bubble(

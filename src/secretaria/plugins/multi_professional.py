@@ -1,12 +1,16 @@
 """multi_professional plugin: professional-aware availability + booking.
 
-Entitlement-gated addon (`multi_professional`). Adds three agent tools on top
-of the base 4 (ai/tools.py): `list_professionals` (so the LLM can name the
-tenant's active professionals to the patient), and a professional-aware pair
-mirroring `list_free_slots` / `create_event` — `list_free_slots_for_professional`
-and `create_event_for_professional` — that resolve the professional BY NAME
+Entitlement-gated addon (`multi_professional`). Adds four agent tools on top
+of the base set (ai/tools.py): `list_professionals` (so the LLM can name the
+tenant's active professionals to the patient — with specialty/about for
+reasoning about fit), a professional-aware pair mirroring `list_free_slots` /
+`create_event` — `list_free_slots_for_professional` and
+`create_event_for_professional` — that resolve the professional BY NAME
 (case-insensitive, active only) instead of taking a professional_id, because
-the patient only ever gives the LLM a name in conversation.
+the patient only ever gives the LLM a name in conversation, and
+`select_professional_and_continue`, the hand-back that returns a confirmed
+choice to the deterministic button flow (exception->sentinel, see
+ai/tools.SelectProfessionalRequested).
 
 Design choice: rather than a stateful `set_professional` tool (which would
 need extra ContextVar plumbing and a "current professional" the LLM could
@@ -43,6 +47,7 @@ from uuid import UUID
 from langchain_core.tools import tool
 
 from secretaria.ai.tools import (
+    SelectProfessionalRequested,
     _calendar_for_professional,
     _localize_window,
     _match_by_name,
@@ -117,9 +122,11 @@ def _with_professional_context(result: dict, professional) -> dict:
 
 @tool
 async def list_professionals() -> dict:
-    """Lista os profissionais ativos da clínica disponíveis para agendamento.
-    Use para informar ao paciente quais profissionais existem, ou antes de
-    perguntar com qual profissional ele quer marcar.
+    """Lista os profissionais ativos da clínica disponíveis para agendamento,
+    com especialidade e descrição quando cadastradas. Use para informar ao
+    paciente quais profissionais existem, antes de perguntar com qual ele quer
+    marcar, ou para raciocinar sobre qual profissional atende melhor o que o
+    paciente descreveu (sintoma, motivo da consulta, necessidade).
     """
     tenant_id = _tenant_id_ctx.get()
     if tenant_id is None:
@@ -130,8 +137,37 @@ async def list_professionals() -> dict:
         entry = {"name": p.name}
         if p.specialty:
             entry["specialty"] = p.specialty
+        # `about` is the hub-editable, patient-facing bio — enough signal to
+        # reason about fit. context_doctor_message stays persona-only (never
+        # listed here, never used for matching).
+        if p.about:
+            entry["about"] = p.about
         out.append(entry)
     return {"professionals": out}
+
+
+@tool
+async def select_professional_and_continue(professional_name: str) -> dict:
+    """Confirma a escolha de UM profissional e devolve o paciente ao fluxo
+    guiado de botões (a saudação do profissional + a lista de serviços dele).
+    Use SOMENTE depois que o paciente confirmar com qual profissional quer
+    seguir — a partir daí o agendamento continua pelos botões, não pelo chat.
+
+    Args:
+        professional_name: Nome do profissional confirmado (ex: 'Dra. Ana').
+    """
+    tenant_id = _tenant_id_ctx.get()
+    if tenant_id is None:
+        return {"error": "Nenhum profissional configurado para esta clínica."}
+    professionals = await _active_professionals(tenant_id)
+    professional = _match_by_name(professionals, professional_name)
+    if professional is None:
+        # Same recoverable error shape as the other professional-aware tools,
+        # so the LLM can re-ask within the same turn.
+        return _unknown_professional_error(professional_name, professionals)
+    # Exception->sentinel hand-back (see ai/tools.SelectProfessionalRequested):
+    # the worker re-enters the deterministic flow at this doctor's greeting.
+    raise SelectProfessionalRequested(professional.id, professional.name)
 
 
 @tool
@@ -240,6 +276,7 @@ MULTI_PROFESSIONAL_SPEC = PluginSpec(
         list_professionals,
         list_free_slots_for_professional,
         create_event_for_professional,
+        select_professional_and_continue,
     ),
 )
 register(MULTI_PROFESSIONAL_SPEC)

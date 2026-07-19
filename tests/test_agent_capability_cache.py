@@ -81,6 +81,7 @@ def test_build_agent_base_tools_unchanged():
         "create_event",
         "cancel_event",
         "iniciar_pre_consulta",
+        "show_main_menu",
     }
 
 

@@ -65,6 +65,33 @@ _redis_ctx: ContextVar[Any | None] = ContextVar("_redis", default=None)
 # to run_agent.
 
 
+class ShowMainMenuRequested(Exception):
+    """Raised by the `show_main_menu` tool: the patient wants the button menu back.
+
+    Same exception->sentinel mechanism as CalendarUnavailableError (see the
+    note above): it propagates out of the LangGraph ToolNode and
+    graph.run_agent maps it to SHOW_MAIN_MENU_SENTINEL for workers/tasks.py
+    to act on. NOTHING is deleted — unlike the dev-only `/menu` command, the
+    worker only resets the conversation's flow fields to the menu; history
+    and the patient row stay untouched.
+    """
+
+
+class SelectProfessionalRequested(Exception):
+    """Raised by `select_professional_and_continue` (plugins/multi_professional.py).
+
+    Carries the ACTIVE professional the tool already resolved by name;
+    graph.run_agent maps it to the SELECT_PROFESSIONAL sentinel so
+    workers/tasks.py re-enters the deterministic flow at that doctor's
+    greeting + services (flow_router._enter_professional_services).
+    """
+
+    def __init__(self, professional_id: UUID, professional_name: str) -> None:
+        super().__init__(f"select professional {professional_name}")
+        self.professional_id = professional_id
+        self.professional_name = professional_name
+
+
 def _get_calendar() -> CalendarService:
     cal = _calendar_ctx.get()
     if cal is None:
@@ -364,6 +391,15 @@ async def cancel_event(event_id: str) -> dict:
     await _get_calendar().cancel_event(event_id)
     await _mark_appointment_cancelled(event_id)
     return {"status": "cancelled"}
+
+
+@tool
+async def show_main_menu() -> str:
+    """Volta a conversa para o menu inicial de botões da clínica. Use quando o
+    paciente quiser recomeçar, "voltar ao início", trocar de profissional ou
+    ver as opções de novo. Não apaga nada da conversa — apenas reabre o menu.
+    """
+    raise ShowMainMenuRequested()
 
 
 async def _resolve_patient_phone() -> str | None:

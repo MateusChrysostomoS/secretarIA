@@ -14,6 +14,7 @@ import re
 import ssl
 from collections.abc import Sequence
 from contextvars import ContextVar
+from dataclasses import replace
 from typing import Any
 from uuid import UUID
 
@@ -26,6 +27,8 @@ from sqlalchemy import select
 
 from secretaria.ai.prompts import secretary_system_prompt
 from secretaria.ai.tools import (
+    SelectProfessionalRequested,
+    ShowMainMenuRequested,
     _calendar_ctx,
     _conversation_id_ctx,
     _redis_ctx,
@@ -36,6 +39,7 @@ from secretaria.ai.tools import (
     create_event,
     iniciar_pre_consulta,
     list_free_slots,
+    show_main_menu,
 )
 from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
@@ -55,6 +59,15 @@ FALLBACK_REPLY = (
 # unreachable / the credentials were rejected. The worker turns this into a
 # patient-facing message and hands the conversation to a human secretary.
 CALENDAR_UNAVAILABLE_SENTINEL = "__CALENDAR_UNAVAILABLE__"
+# Returned by run_agent when the agent called the show_main_menu tool: the
+# worker resets the conversation's flow to the menu (non-destructively — the
+# opposite of the dev-only /menu wipe) and sends the effective menu bubbles.
+# Same exception->sentinel mechanism as CALENDAR_UNAVAILABLE above.
+SHOW_MAIN_MENU_SENTINEL = "__SHOW_MAIN_MENU__"
+# Prefix returned when the agent called select_professional_and_continue; the
+# resolved professional's UUID rides after the colon and the worker re-enters
+# the deterministic flow at that doctor's greeting + services.
+SELECT_PROFESSIONAL_SENTINEL_PREFIX = "__SELECT_PROFESSIONAL__:"
 
 # Per-async-task TenantRuntimeConfig, used by _prompt_with_today. Defined in
 # ai/tools.py (imported above as `_tenant_config_ctx`) rather than here, so a
@@ -104,6 +117,9 @@ _BASE_TOOLS = (
     create_event,
     cancel_event,
     iniciar_pre_consulta,
+    # Always available (not addon-gated): the non-destructive way back to the
+    # deterministic button menu.
+    show_main_menu,
 )
 
 # Compiled agent cache, keyed by the frozenset of tool NAMES the agent was
@@ -259,12 +275,40 @@ async def _load_history(conversation_id: UUID) -> list[BaseMessage]:
     return out
 
 
+def _config_with_selected_professional(
+    tenant_config: TenantRuntimeConfig | None, selected_professional
+) -> TenantRuntimeConfig | None:
+    """Overlay an explicitly-selected professional onto the runtime config.
+
+    `load_tenant_config` only carries professional context when the tenant has
+    EXACTLY ONE active professional — that behavior is relied on elsewhere and
+    stays untouched. For multi-professional tenants the deterministic flow
+    records the patient's pick on the conversation
+    (`flow_selected_professional_id`); the worker passes that professional's
+    snapshot here so the prompt's SOBRE O PROFISSIONAL block renders for THIS
+    turn exactly as it would for a single-professional tenant. Only the
+    prompt-facing fields are replaced — calendar resolution is untouched (the
+    base tools stay tenant-level; per-professional booking remains the
+    multi_professional plugin tools' job).
+    """
+    if tenant_config is None or selected_professional is None:
+        return tenant_config
+    return replace(
+        tenant_config,
+        professional_id=getattr(selected_professional, "id", None),
+        specialty=getattr(selected_professional, "specialty", None),
+        about=getattr(selected_professional, "about", None),
+        context_doctor_message=getattr(selected_professional, "context_doctor_message", None),
+    )
+
+
 async def run_agent(
     message: str,
     context: dict,
     tenant_config: TenantRuntimeConfig | None = None,
     extra_tools: Sequence = (),
     redis=None,
+    selected_professional=None,
 ) -> str:
     """arq-side entry point: build history + run agent + return reply text.
 
@@ -279,8 +323,12 @@ async def run_agent(
     (ai/tools.py:_persist_appointment) can fire-and-forget enqueue
     `run_post_booking_hooks` after a successful booking. `None` (dev scripts,
     tests) makes that enqueue a silent no-op.
+    `selected_professional` is the flow-selected professional's plain snapshot
+    (id/specialty/about/context_doctor_message), overlaid onto the prompt
+    config for this turn — see `_config_with_selected_professional`.
     """
     conversation_id = UUID(context["conversation_id"])
+    tenant_config = _config_with_selected_professional(tenant_config, selected_professional)
 
     # Build a per-tenant CalendarService and inject it via ContextVar so the
     # cached process-wide agent uses the right credentials for this call.
@@ -313,6 +361,18 @@ async def run_agent(
             conversation_id=str(conversation_id),
         )
         return CALENDAR_UNAVAILABLE_SENTINEL
+    except ShowMainMenuRequested:
+        # The agent chose to hand the patient back to the button menu — same
+        # propagation path as CalendarUnavailableError above.
+        logger.info("ai_run_agent_show_main_menu", conversation_id=str(conversation_id))
+        return SHOW_MAIN_MENU_SENTINEL
+    except SelectProfessionalRequested as exc:
+        logger.info(
+            "ai_run_agent_select_professional",
+            conversation_id=str(conversation_id),
+            professional_id=str(exc.professional_id),
+        )
+        return f"{SELECT_PROFESSIONAL_SENTINEL_PREFIX}{exc.professional_id}"
     except Exception as exc:
         logger.error(
             "ai_run_agent_failed",
