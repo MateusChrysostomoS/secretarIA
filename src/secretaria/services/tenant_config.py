@@ -18,6 +18,7 @@ itself is UNCHANGED (kept for its existing caller, api/hub/config.py); the
 professional-aware variant is additive.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -30,6 +31,7 @@ from secretaria.models import Tenant
 from secretaria.models.professional import Professional
 from secretaria.models.professional_credentials import ProfessionalCredentials
 from secretaria.models.tenant_credentials import TenantCredentials
+from secretaria.services.calendar import CalendarService
 
 # --------------------------------------------------------------------------
 # Runtime read-model (consumed by the agent, not by the API)
@@ -276,6 +278,88 @@ async def clear_professional_google_refresh_token(
     cred = await _get_professional_credentials(session, professional_id)
     if cred is not None:
         cred.google_refresh_token_encrypted = None
+
+
+# --------------------------------------------------------------------------
+# Shared professional resolution (both brains: flow router + LLM tools)
+# --------------------------------------------------------------------------
+
+
+async def list_active_professionals(session: AsyncSession, tenant_id: UUID) -> list[Professional]:
+    """Active professionals for `tenant_id`, ordered by name.
+
+    THE shared query behind every "which professionals can a patient book
+    with?" surface: plugins/multi_professional.py's agent tools and the
+    deterministic-flow snapshot in workers/tasks.py both resolve through
+    here, so the two brains can never disagree on the roster.
+    """
+    rows = await session.scalars(
+        select(Professional)
+        .where(Professional.tenant_id == tenant_id, Professional.is_active.is_(True))
+        .order_by(Professional.name)
+    )
+    return list(rows)
+
+
+async def resolve_professional_calendar(
+    session: AsyncSession,
+    tenant: Tenant | None,
+    professional: Professional,
+    *,
+    tenant_config: TenantRuntimeConfig | None = None,
+    calendar_factory: Callable[..., CalendarService] | None = None,
+) -> CalendarService:
+    """Resolve ONE professional's own config into a ready CalendarService.
+
+    THE single implementation of the professional -> tenant resolution chain
+    (contract v1 §10 item C), shared by both brains:
+
+      - refresh token: the professional's own encrypted credential
+        (`professional_credentials`) when connected, else the tenant's
+        (`tenant_config.google_refresh_token`; env-last inside CalendarService).
+      - hours/services: the professional's own JSON when set, else the
+        tenant's (`professional_business_hours` / `professional_appointment_types`).
+      - default slot duration: the first active RESOLVED service's
+        `duration_min`; when nothing resolves, None keeps the tenant default.
+      - calendar id: `professional.google_calendar_id`, else the tenant's
+        (CalendarService.for_professional's substitution semantics).
+
+    `tenant_config` is loaded via `load_tenant_config` when not passed —
+    callers that already hold one (workers/tasks.py's flow path, the plugin's
+    ContextVar) should pass it in to avoid a second decrypt.
+
+    `calendar_factory` is the construction seam, called with the resolved
+    keyword overrides (google_calendar_id / google_refresh_token /
+    business_hours / appointment_duration_min). None builds directly via
+    `CalendarService.for_professional(tenant_config, ...)` — the plain
+    flow-router path, no ContextVar involved. plugins/multi_professional.py
+    passes `ai.tools._calendar_for_professional` instead, keeping the LLM
+    tool path's ContextVar-scoped construction while sharing this resolution.
+    """
+    own_token = await get_professional_google_refresh_token(session, professional.id)
+    hours = professional_business_hours(professional, tenant) if tenant is not None else {}
+    resolved_types = (
+        professional_appointment_types(professional, tenant) if tenant is not None else []
+    )
+    duration = int(resolved_types[0]["duration_min"]) if resolved_types else None
+
+    if tenant_config is None and tenant is not None:
+        tenant_config = await load_tenant_config(session, tenant)
+    fallback_token = tenant_config.google_refresh_token if tenant_config is not None else None
+
+    overrides = dict(
+        google_calendar_id=professional.google_calendar_id,
+        google_refresh_token=own_token or fallback_token,
+        business_hours=hours,
+        appointment_duration_min=duration,
+    )
+    if calendar_factory is not None:
+        return calendar_factory(**overrides)
+    if tenant_config is None:
+        raise ValueError(
+            "resolve_professional_calendar needs a tenant_config (or a tenant row to load one)"
+        )
+    return CalendarService.for_professional(tenant_config, **overrides)
 
 
 # --------------------------------------------------------------------------

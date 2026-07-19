@@ -41,7 +41,6 @@ support existed.
 from uuid import UUID
 
 from langchain_core.tools import tool
-from sqlalchemy import select
 
 from secretaria.ai.tools import (
     _calendar_for_professional,
@@ -64,58 +63,38 @@ async def _active_professionals(tenant_id: UUID) -> list:
     # keeps this module importable without a DB/ORM in dev scripts, and avoids
     # an import cycle through models -> services.
     from secretaria.core.database import async_session_factory
-    from secretaria.models.professional import Professional
+    from secretaria.services.tenant_config import list_active_professionals
 
     async with async_session_factory() as session:
-        rows = await session.scalars(
-            select(Professional)
-            .where(Professional.tenant_id == tenant_id, Professional.is_active.is_(True))
-            .order_by(Professional.name)
-        )
-        return list(rows)
+        return await list_active_professionals(session, tenant_id)
 
 
 async def _professional_calendar(tenant_id: UUID, professional) -> "CalendarService":  # noqa: F821
     """Build a CalendarService using THIS professional's own config (contract v1 §10).
 
-    Resolution order (item C): the professional's own encrypted Google
-    refresh token -> the tenant's own (from the current TenantRuntimeConfig)
-    -> env (handled inside CalendarService itself). Business hours: the
-    professional's own JSON -> the tenant's (services/tenant_config.py's
-    `professional_business_hours`, already doing that fallback). Calendar id:
-    professional.google_calendar_id -> tenant's own (CalendarService.for_professional's
-    substitution semantics). Slot duration: the professional's OWN services
-    (`professional_appointment_types`, already sorted by sort_order then
-    name) — the FIRST active one's duration is used as this professional's
-    default slot length, so a professional whose own services run e.g. 45
-    minutes gets 45-minute slots instead of the tenant's default. None (no
-    services of their own) keeps the tenant's default duration, same as
-    before this addon existed.
+    Thin wrapper: the professional -> tenant -> env resolution chain (item C —
+    own credential/hours/services/calendar-id first, tenant second, env last,
+    with the first active resolved service's duration as the slot length)
+    lives in services/tenant_config.py::resolve_professional_calendar, shared
+    with the deterministic flow router's booking path (workers/tasks.py).
+    This wrapper only supplies the LLM-turn specifics: the ContextVar
+    TenantRuntimeConfig as the fallback-token source, and
+    ai.tools._calendar_for_professional as the construction seam, so the
+    ContextVar-scoped CalendarService construction stays exactly as before.
     """
     from secretaria.core.database import async_session_factory
     from secretaria.models import Tenant
-    from secretaria.services.tenant_config import (
-        get_professional_google_refresh_token,
-        professional_appointment_types,
-        professional_business_hours,
-    )
+    from secretaria.services.tenant_config import resolve_professional_calendar
 
     async with async_session_factory() as session:
         tenant = await session.get(Tenant, tenant_id)
-        own_token = await get_professional_google_refresh_token(session, professional.id)
-
-    tenant_config = _tenant_config_ctx.get()
-    hours = professional_business_hours(professional, tenant) if tenant is not None else {}
-    own_types = professional_appointment_types(professional, tenant) if tenant is not None else []
-    duration = int(own_types[0]["duration_min"]) if own_types else None
-    fallback_token = tenant_config.google_refresh_token if tenant_config is not None else None
-
-    return _calendar_for_professional(
-        google_calendar_id=professional.google_calendar_id,
-        google_refresh_token=own_token or fallback_token,
-        business_hours=hours,
-        appointment_duration_min=duration,
-    )
+        return await resolve_professional_calendar(
+            session,
+            tenant,
+            professional,
+            tenant_config=_tenant_config_ctx.get(),
+            calendar_factory=_calendar_for_professional,
+        )
 
 
 def _unknown_professional_error(name: str, professionals: list) -> dict:

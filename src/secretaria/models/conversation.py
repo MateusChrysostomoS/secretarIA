@@ -97,6 +97,16 @@ class Conversation(Base):
     flow_selected_day: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # ISO datetime of the slot the patient chose.
     flow_selected_slot: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    # Which professional the patient picked inside the multi-doctor
+    # SERVICE_CATALOG branch (services/flow_router.py). SET NULL so removing a
+    # professional never breaks an ongoing conversation row.
+    flow_selected_professional_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("professionals.id", ondelete="SET NULL"), nullable=True
+    )
+    # Convênio label picked (or typed) at the insurance step; copied onto the
+    # Appointment at booking time. Free text, not a FK — tenants.insurances is
+    # a JSON list of plan names, there is no Insurance table.
+    flow_selected_insurance: Mapped[str | None] = mapped_column(String(120), nullable=True)
     # Set while a returning patient is mid-"quer continuar?" prompt: holds the
     # FlowState value to resume to AND marks that the next inbound is the Sim/Não
     # answer. NULL whenever no reactivation prompt is pending.

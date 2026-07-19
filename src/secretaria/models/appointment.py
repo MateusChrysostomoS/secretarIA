@@ -71,6 +71,10 @@ class Appointment(Base):
     unit_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("units.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    # Convênio/insurance label the patient selected (or typed) during the
+    # deterministic booking flow. Informational only — never filters
+    # professionals or slots (clinic-wide fact, see tenants.insurances).
+    insurance: Mapped[str | None] = mapped_column(String(120), nullable=True)
     status: Mapped[AppointmentStatus] = mapped_column(
         # The Postgres `appointment_status` type stores the lowercase enum
         # *values* ("scheduled", ...) — see the c4d8e2f1a5b6 migration. Without
