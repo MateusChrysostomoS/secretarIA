@@ -78,11 +78,29 @@ def _validate_business_hours(value: dict[str, list[TimeWindow]]) -> dict[str, li
     return value
 
 
+class TenantAddress(BaseModel):
+    """Clinic's physical address (contract v1 §10). Every field optional —
+    a clinic may fill in only what it has (e.g. no `complement`)."""
+
+    line: str | None = Field(default=None, max_length=255)
+    complement: str | None = Field(default=None, max_length=255)
+    neighborhood: str | None = Field(default=None, max_length=120)
+    city: str | None = Field(default=None, max_length=120)
+    state: str | None = Field(default=None, max_length=60)
+    postal_code: str | None = Field(default=None, max_length=20)
+
+
 class TenantConfigUpdate(BaseModel):
     """PUT body. Every field is optional — only provided fields are updated.
 
     `business_hours` and `appointment_types` are replaced wholesale (the JSON
-    model edits the whole collection at once).
+    model edits the whole collection at once). CRITICAL invariant (contract
+    v1 §10): the can_activate gate below only fires when `is_active` is
+    EXPLICITLY `true` in the request body — a plain config save (this whole
+    class's purpose) that omits `is_active`, including one that only sets
+    `address`/`insurances`/`collect_insurance`, is ALWAYS allowed regardless
+    of whether the WhatsApp number is connected yet. See api/hub/config.py's
+    `update_config`.
     """
 
     greeting_message: str | None = Field(default=None, max_length=4000)
@@ -96,7 +114,24 @@ class TenantConfigUpdate(BaseModel):
     business_hours: dict[str, list[TimeWindow]] | None = None
     appointment_types: list[AppointmentType] | None = None
     initial_flows: dict | None = None
+    # Clinic physical address. NULL/omitted = leave untouched (or "not
+    # collected yet" on first save).
+    address: TenantAddress | None = None
+    # Accepted health-insurance plan names, e.g. ["Unimed", "Amil"].
+    insurances: list[str] | None = None
+    # Whether the bot should ask patients for their insurance during booking.
+    collect_insurance: bool | None = None
     is_active: bool | None = None
+
+    @field_validator("insurances")
+    @classmethod
+    def _check_insurances(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        cleaned = [v.strip() for v in value if v and v.strip()]
+        if len(cleaned) > 50:
+            raise ValueError("at most 50 insurance names allowed")
+        return cleaned
 
     @field_validator("initial_flows")
     @classmethod
@@ -201,6 +236,9 @@ class TenantConfigRead(BaseModel):
     business_hours: dict
     appointment_types: list
     initial_flows: dict
+    address: dict | None
+    insurances: list[str]
+    collect_insurance: bool
     is_active: bool
     # True when a Google Calendar refresh token is stored for this tenant.
     calendar_connected: bool

@@ -58,9 +58,10 @@ from secretaria.schemas.webhook import (
     WebhookValue,
     extract_echo_body,
     extract_inbound_body,
+    history_item_is_final,
 )
 from secretaria.services.calendar import CalendarService
-from secretaria.services.email import send_calendar_alert
+from secretaria.services.email import send_calendar_alert, send_transactional_email_message
 from secretaria.services.entitlements_client import get_entitlements
 from secretaria.services.flow_router import (
     FlowRouterResult,
@@ -273,6 +274,12 @@ async def process_webhook_event(ctx: dict, payload: dict) -> None:
             elif field == "smb_message_echoes":
                 # Coexistence: the human secretary replied from the app.
                 await _handle_human_echoes(value)
+            elif field == "history":
+                # Coexistence: chat-history sync (progress-only, no content).
+                await _handle_history(value)
+            elif field == "smb_app_state_sync":
+                # Coexistence: business contact list sync (counts only).
+                await _handle_smb_app_state_sync(value)
             else:
                 logger.info("worker_field_ignored", field=field)
 
@@ -1544,6 +1551,11 @@ async def _persist_human_echo(
                     logger.error("worker_tenant_unresolved", phone_number_id=phone_number_id)
                     return
 
+                # smb_message_echoes is one of the three signals that Coexistence
+                # mode resolved for this tenant (contract v1 §10) - see also
+                # _handle_history / _handle_smb_app_state_sync below.
+                _mark_mode_resolved(tenant)
+
                 patient = await _get_or_create_patient(session, tenant, patient_wa_id, None)
                 conversation = await _get_or_create_conversation(session, tenant, patient)
 
@@ -1559,6 +1571,91 @@ async def _persist_human_echo(
                 await HandoverManager(session).set_human_active(conversation)
         except IntegrityError:
             logger.info("worker_echo_duplicate_race", wam_id=wam_id)
+
+
+# --------------------------------------------------------------------------
+# Coexistence mode-resolution signals: history sync + business state sync
+# --------------------------------------------------------------------------
+#
+# Neither handler ingests message/contact content (LGPD - contract v1 §10):
+# only counts are ever logged, and only sync-progress / tenant timestamps are
+# ever written to the DB. Both signal that Coexistence mode resolved for the
+# tenant, exactly like `smb_message_echoes` above.
+
+
+def _mark_mode_resolved(tenant: Tenant) -> None:
+    """Set `mode_resolved_at=now` the first time ANY Coexistence signal arrives.
+
+    Shared by `_persist_human_echo` (smb_message_echoes), `_handle_history`
+    and `_handle_smb_app_state_sync`. A no-op once already set - Coexistence
+    mode resolution happens once per tenant, not on every subsequent event.
+    """
+    if tenant.mode_resolved_at is None:
+        tenant.mode_resolved_at = datetime.now(UTC)
+
+
+async def _handle_history(value: WebhookValue) -> None:
+    """Process the `history` field: WhatsApp Coexistence chat-history sync.
+
+    Meta streams the business's WhatsApp history in one or more chunks after
+    Coexistence connects. We NEVER ingest message content - only track sync
+    progress on the tenant row: `history_sync_status` flips to "in_progress"
+    on the first chunk ever observed, and to "done" (+ `history_synced_at`)
+    once any chunk signals completion (`history_item_is_final` - handles the
+    documented shape defensively, including an unknown/renamed variant).
+    """
+    phone_number_id = value.metadata.phone_number_id if value.metadata else None
+    chunk_count = len(value.history)
+    if chunk_count == 0:
+        logger.info("worker_history_empty_payload")
+        return
+
+    is_final = any(history_item_is_final(item) for item in value.history)
+
+    async with async_session_factory() as session:
+        async with session.begin():
+            tenant = await _resolve_tenant(session, phone_number_id)
+            if tenant is None:
+                logger.error("worker_history_tenant_unresolved")
+                return
+            tenant_id = tenant.id
+
+            if tenant.history_sync_status == "none":
+                tenant.history_sync_status = "in_progress"
+            if is_final:
+                tenant.history_sync_status = "done"
+                tenant.history_synced_at = datetime.now(UTC)
+            _mark_mode_resolved(tenant)
+
+    logger.info(
+        "worker_history_processed",
+        tenant_id=str(tenant_id),
+        chunks=chunk_count,
+        final=is_final,
+    )
+
+
+async def _handle_smb_app_state_sync(value: WebhookValue) -> None:
+    """Process `smb_app_state_sync`: business contact list sync (Coexistence).
+
+    Contact names/phone numbers ride in this payload but are NEVER read,
+    persisted, or logged (see schemas/webhook.py's `WebhookStateSyncItem`) -
+    this only records that Coexistence mode resolved for the tenant. Logs a
+    COUNT only.
+    """
+    phone_number_id = value.metadata.phone_number_id if value.metadata else None
+    sync_count = len(value.state_sync)
+
+    async with async_session_factory() as session:
+        async with session.begin():
+            tenant = await _resolve_tenant(session, phone_number_id)
+            if tenant is None:
+                logger.error("worker_state_sync_tenant_unresolved")
+                return
+            tenant_id = tenant.id
+            _mark_mode_resolved(tenant)
+
+    logger.info("worker_state_sync_processed", tenant_id=str(tenant_id), count=sync_count)
 
 
 # --------------------------------------------------------------------------
@@ -1582,22 +1679,53 @@ async def _event_already_processed(session: AsyncSession, event_id: str) -> bool
     return found is not None
 
 
+def _mark_connected(tenant: Tenant) -> Tenant:
+    """Best-effort `connected_at` backstop: any webhook resolving to a known
+    tenant implies its WhatsApp number is receiving live traffic.
+
+    The primary setter is the internal whatsapp-connection endpoint
+    (contract v1 §4 endpoint 2, api/internal_provisioning.py) - this only
+    fires when that path was somehow skipped (e.g. a dev-seeded tenant, or a
+    number reconnected by hand), so `connected_at` is never left NULL once
+    real traffic exists. A no-op once already set.
+    """
+    if tenant.connected_at is None:
+        tenant.connected_at = datetime.now(UTC)
+    return tenant
+
+
 async def _resolve_tenant(session: AsyncSession, phone_number_id: str | None) -> Tenant | None:
     """Find the tenant for an inbound event.
 
-    MVP single-tenant convenience: when no tenant row exists yet and the
-    incoming phone_number_id matches the configured one, auto-provision it
-    from environment settings so the system works end-to-end without a
-    manual seed step.
+    Primary path (always on): exact match on `phone_number_id`. This is
+    null-safe by construction against the now-NULLABLE `tenants.phone_number_id`
+    (onboarding creates a tenant row before its WhatsApp number is connected,
+    so several tenants may have a NULL phone_number_id at once) - the lookup
+    only runs when `phone_number_id` is truthy, and `Tenant.phone_number_id ==
+    <a non-empty string>` never matches a NULL column value in SQL, so a
+    NULL-phone tenant can never be adopted here.
+
+    MVP single-tenant scaffold (`settings.ALLOW_WEBHOOK_AUTOPROVISION`,
+    default False): when no tenant matches and the flag is on, fall back to
+    the configured META_PHONE_NUMBER_ID / auto-provision a tenant from env,
+    exactly as the single-tenant dev flow always has. Production/multi-tenant
+    deployments must leave this OFF - an unrecognized phone_number_id is then
+    simply dropped (returns None), never adopted or fabricated.
+
+    Every resolved tenant is passed through `_mark_connected` before it is
+    returned (see that function's docstring).
     """
     if phone_number_id:
         tenant = await session.scalar(
             select(Tenant).where(Tenant.phone_number_id == phone_number_id)
         )
         if tenant is not None:
-            return tenant
+            return _mark_connected(tenant)
 
     settings = get_settings()
+    if not settings.ALLOW_WEBHOOK_AUTOPROVISION:
+        return None
+
     configured = settings.META_PHONE_NUMBER_ID
     if phone_number_id and configured and phone_number_id != configured:
         # Unknown number - never auto-provision a foreign tenant.
@@ -1609,7 +1737,7 @@ async def _resolve_tenant(session: AsyncSession, phone_number_id: str | None) ->
 
     tenant = await session.scalar(select(Tenant).where(Tenant.phone_number_id == target))
     if tenant is not None:
-        return tenant
+        return _mark_connected(tenant)
 
     tenant = Tenant(
         clinic_name="MVP Clinic",
@@ -1624,7 +1752,7 @@ async def _resolve_tenant(session: AsyncSession, phone_number_id: str | None) ->
         # Encrypted at rest from the very first write — never a plaintext column.
         await set_waba_token(session, tenant.id, settings.META_ACCESS_TOKEN)
     logger.info("worker_tenant_auto_provisioned", tenant_id=str(tenant.id))
-    return tenant
+    return _mark_connected(tenant)
 
 
 async def _get_or_create_patient(
@@ -1703,6 +1831,25 @@ async def send_patient_notification(ctx: dict, tenant_id: str, phone: str, messa
             tenant_id=tenant_id,
             error=str(exc),
         )
+
+
+# --------------------------------------------------------------------------
+# Transactional email (onboarding lifecycle - contract v1 §4 endpoint 6)
+# --------------------------------------------------------------------------
+
+
+async def send_transactional_email(ctx: dict, template: str, to: str, variables: dict) -> None:
+    """arq job: render + send one onboarding transactional email.
+
+    Enqueued by `POST /internal/notifications/email`
+    (api/internal_provisioning.py). Never raises: `send_transactional_email_message`
+    already swallows every failure (disabled, unknown template, SMTP error)
+    and returns a bool - this wrapper just adapts arq's `(ctx, ...)` calling
+    convention and logs the outcome. Positional order (template BEFORE to)
+    matches the contract's function signature exactly.
+    """
+    sent = await send_transactional_email_message(to=to, template=template, variables=variables)
+    logger.info("worker_transactional_email_processed", template=template, sent=sent)
 
 
 # --------------------------------------------------------------------------

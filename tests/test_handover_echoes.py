@@ -188,6 +188,45 @@ async def test_text_echo_persists_message_and_flips_handover(db):
     assert conversation.last_human_message_at is not None
 
 
+async def test_text_echo_marks_mode_resolved_when_null(db):
+    """smb_message_echoes is one of the three Coexistence mode-resolution
+    signals (contract v1 §10) - a NULL mode_resolved_at flips to non-NULL."""
+    tenant = await _seed_tenant(db)
+    wa_id = "5521900000099"
+    value = _echo_value(
+        wa_id=wa_id,
+        echoes=[{"id": "wamid.text.mode", "to": wa_id, "type": "text", "text": {"body": "oi"}}],
+    )
+
+    await tasks._handle_human_echoes(value)
+
+    async with db() as session:
+        refreshed = await session.get(Tenant, tenant.id)
+    assert refreshed.mode_resolved_at is not None
+
+
+async def test_text_echo_does_not_overwrite_existing_mode_resolved_at(db):
+    tenant = await _seed_tenant(db)
+    fixed = datetime(2026, 1, 1, tzinfo=UTC)
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.mode_resolved_at = fixed
+        await session.commit()
+
+    wa_id = "5521900000098"
+    value = _echo_value(
+        wa_id=wa_id,
+        echoes=[{"id": "wamid.text.mode2", "to": wa_id, "type": "text", "text": {"body": "oi"}}],
+    )
+    await tasks._handle_human_echoes(value)
+
+    async with db() as session:
+        refreshed = await session.get(Tenant, tenant.id)
+    # SQLite round-trips DateTime as naive - compare the naive components
+    # (the point under test is "unchanged", not tz representation).
+    assert refreshed.mode_resolved_at.replace(tzinfo=UTC) == fixed
+
+
 async def test_edit_echo_persists_placeholder_body_and_flips_handover(db):
     await _seed_tenant(db)
     wa_id = "5521900000002"

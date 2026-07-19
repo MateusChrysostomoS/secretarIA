@@ -1,12 +1,27 @@
-"""Outbound email — operational alerts sent to clinic owners.
+"""Outbound email — operational alerts + onboarding transactional templates.
 
 Uses stdlib smtplib run in a thread pool so the async worker is never blocked.
-Fail-open: if SMTP is not configured or the send fails, a warning is logged
-and processing continues normally.
+Two independent send paths share the same SMTP connection plumbing
+(`_smtp_send`) but have separate settings/kill-switches:
+
+  * The ORIGINAL alert path (`send_calendar_alert` / `send_human_backup_alert`)
+    - fail-open, always-on whenever `SMTP_HOST` is set (SMTP_FROM_EMAIL /
+      SMTP_FROM_NAME identity). Unchanged behaviour.
+  * The onboarding TRANSACTIONAL path (`send_transactional_email_message`,
+    contract v1 §4 endpoint 6 / §10 / §12) - gated by its OWN `EMAIL_ENABLED`
+    switch (default off) even when SMTP_HOST is already configured for the
+    alerts above, with its own EMAIL_FROM_ADDRESS / EMAIL_FROM_NAME identity.
+    Called by the `send_transactional_email` arq task (workers/tasks.py),
+    itself enqueued by `POST /internal/notifications/email`.
+
+Both paths are fail-open: if SMTP is not configured/enabled or the send
+fails, a warning is logged and processing continues normally. NEITHER path
+ever raises into its caller.
 """
 
 import asyncio
 import smtplib
+from dataclasses import dataclass
 from email.message import EmailMessage
 
 import structlog
@@ -16,13 +31,15 @@ from secretaria.config import get_settings
 logger = structlog.get_logger(__name__)
 
 
-def _send_sync(to_email: str, subject: str, body: str) -> None:
-    """Blocking SMTP send — called via asyncio.to_thread."""
+def _smtp_send(to_email: str, subject: str, body: str, from_addr: str, from_name: str) -> None:
+    """Blocking SMTP send — called via asyncio.to_thread.
+
+    Shared connection/auth plumbing for both send paths in this module; only
+    the From address/name differ between them (each caller resolves its own).
+    """
     settings = get_settings()
     msg = EmailMessage()
     msg["Subject"] = subject
-    from_addr = settings.SMTP_FROM_EMAIL or settings.SMTP_USERNAME
-    from_name = settings.SMTP_FROM_NAME
     msg["From"] = f"{from_name} <{from_addr}>" if from_name else from_addr
     msg["To"] = to_email
     msg.set_content(body)
@@ -33,6 +50,18 @@ def _send_sync(to_email: str, subject: str, body: str) -> None:
         if settings.SMTP_USERNAME and settings.SMTP_PASSWORD:
             smtp.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
         smtp.send_message(msg)
+
+
+def _send_sync(to_email: str, subject: str, body: str) -> None:
+    """Blocking SMTP send for the operational-alert path — called via asyncio.to_thread.
+
+    NOTE: test_tasks_helpers.py asserts this exact function (by `__name__`)
+    is the one passed to `asyncio.to_thread` for the alert path — keep this
+    name and signature stable.
+    """
+    settings = get_settings()
+    from_addr = settings.SMTP_FROM_EMAIL or settings.SMTP_USERNAME
+    _smtp_send(to_email, subject, body, from_addr, settings.SMTP_FROM_NAME)
 
 
 async def send_calendar_alert(to_email: str, clinic_name: str) -> None:
@@ -102,3 +131,215 @@ async def send_human_backup_alert(to_email: str, clinic_name: str) -> None:
             to=to_email,
             clinic=clinic_name,
         )
+
+
+# ---------------------------------------------------------------------------
+# Onboarding transactional email (contract v1 §4 endpoint 6 / §10 / §12)
+# ---------------------------------------------------------------------------
+
+
+def _send_transactional_sync(to_email: str, subject: str, body: str) -> None:
+    """Blocking SMTP send for the transactional path — called via asyncio.to_thread.
+
+    Uses EMAIL_FROM_ADDRESS/EMAIL_FROM_NAME (falling back to the alert path's
+    SMTP_FROM_EMAIL/SMTP_FROM_NAME, then SMTP_USERNAME, when unset) so a
+    deployment that only ever configured the legacy alert settings still gets
+    a sane From identity for transactional email.
+    """
+    settings = get_settings()
+    from_addr = settings.EMAIL_FROM_ADDRESS or settings.SMTP_FROM_EMAIL or settings.SMTP_USERNAME
+    from_name = settings.EMAIL_FROM_NAME or settings.SMTP_FROM_NAME
+    _smtp_send(to_email, subject, body, from_addr, from_name)
+
+
+@dataclass(frozen=True)
+class EmailTemplate:
+    """One pt-BR transactional template: `str.format`-style subject + body."""
+
+    subject: str
+    body: str
+
+
+class _SafeDict(dict):
+    """`str.format_map` companion that leaves an unknown `{placeholder}` intact
+    instead of raising `KeyError`.
+
+    The `variables` dict for a template is supplied by a SIBLING service
+    (brain-api's onboarding/doctor endpoints, via `POST
+    /internal/notifications/email`) — this module has no control over, and
+    must never crash on, a caller that omits an expected key. A missing
+    variable renders as the literal `{name}` text rather than failing the
+    send outright (the module contract is "never raises into callers").
+    """
+
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
+# Variables used across templates below (a caller may omit any of these —
+# see `_SafeDict`): `clinic_name`, `name` (person being addressed), `link`
+# (a URL — invite/portal), `blocker_reason` (nudge templates only).
+_TEMPLATES: dict[str, EmailTemplate] = {
+    "professional_invite": EmailTemplate(
+        subject="Você foi convidado(a) para a equipe da {clinic_name} no SecretarIA",
+        body=(
+            "Olá, {name}!\n\n"
+            "Você foi adicionado(a) à equipe da {clinic_name} no SecretarIA, o assistente "
+            "de agendamento por WhatsApp da clínica.\n\n"
+            "Para definir sua senha e acessar o painel, clique no link abaixo:\n"
+            "{link}\n\n"
+            "Este link é de uso único e expira em 72 horas.\n\n"
+            "— Equipe SecretarIA"
+        ),
+    ),
+    "retry_nudge_atividade_insuficiente": EmailTemplate(
+        subject="Seu número no WhatsApp ainda está ganhando histórico",
+        body=(
+            "Olá!\n\n"
+            "Seu número do WhatsApp na {clinic_name} ainda está ganhando histórico — é "
+            "assim que o WhatsApp confirma que o número está realmente em uso antes de "
+            "liberar a ativação automática da SecretarIA.\n\n"
+            "Isso é normal e não exige nenhuma ação sua agora: continue usando o número "
+            "normalmente, mandando e recebendo mensagens, e tentaremos novamente em breve.\n\n"
+            "— Equipe SecretarIA"
+        ),
+    ),
+    "retry_nudge_numero_em_outro_bsp": EmailTemplate(
+        subject="Seu número precisa ser liberado de outro provedor",
+        body=(
+            "Olá!\n\n"
+            "Identificamos que o número informado para a {clinic_name} já está vinculado a "
+            "outro provedor de WhatsApp Business (BSP). Para conectar à SecretarIA, é "
+            "preciso primeiro liberá-lo do provedor atual.\n\n"
+            "Assim que o número estiver liberado, volte à tela de ativação e tente "
+            "novamente — vamos continuar tentando automaticamente também.\n\n"
+            "— Equipe SecretarIA"
+        ),
+    ),
+    "retry_nudge_sem_acesso_admin_waba": EmailTemplate(
+        subject="Precisamos de acesso de administrador à sua conta do WhatsApp Business",
+        body=(
+            "Olá!\n\n"
+            "Para concluir a ativação da {clinic_name} no SecretarIA, é necessário ter "
+            "acesso de administrador à conta do WhatsApp Business (WABA) vinculada à sua "
+            "página do Facebook.\n\n"
+            "Peça a quem administra a página para te conceder esse acesso e depois volte "
+            "à tela de ativação para tentar novamente.\n\n"
+            "— Equipe SecretarIA"
+        ),
+    ),
+    "retry_nudge_sem_pagina_facebook": EmailTemplate(
+        subject="Falta criar uma página no Facebook para ativar seu número",
+        body=(
+            "Olá!\n\n"
+            "Para ativar o WhatsApp Business da {clinic_name} é necessário ter uma página "
+            "no Facebook vinculada à conta. Ainda não encontramos uma página associada ao "
+            "seu cadastro.\n\n"
+            "Crie (ou vincule) uma página do Facebook e volte à tela de ativação para "
+            "tentar novamente.\n\n"
+            "— Equipe SecretarIA"
+        ),
+    ),
+    "retry_nudge_outro": EmailTemplate(
+        subject="Ainda não conseguimos ativar seu número no WhatsApp",
+        body=(
+            "Olá!\n\n"
+            "Ainda não conseguimos concluir a ativação do WhatsApp da {clinic_name} no "
+            "SecretarIA. Vamos continuar tentando automaticamente — mas se preferir, você "
+            "pode revisar os dados na tela de ativação e tentar novamente a qualquer "
+            "momento.\n\n"
+            "Se o problema persistir, responda este e-mail que nossa equipe ajuda a "
+            "resolver.\n\n"
+            "— Equipe SecretarIA"
+        ),
+    ),
+    "connection_success": EmailTemplate(
+        subject="Seu WhatsApp foi conectado à SecretarIA!",
+        body=(
+            "Boas notícias!\n\n"
+            "O número do WhatsApp da {clinic_name} foi conectado com sucesso à "
+            "SecretarIA. Nos próximos minutos finalizamos a sincronização e, assim que a "
+            "configuração (horários, serviços e agenda) estiver completa, sua secretária "
+            "virtual entra no ar automaticamente.\n\n"
+            "— Equipe SecretarIA"
+        ),
+    ),
+    "config_reminder_pre_connection": EmailTemplate(
+        subject="Falta pouco para sua secretária virtual entrar no ar",
+        body=(
+            "Olá!\n\n"
+            "Notamos que a configuração da {clinic_name} no SecretarIA ainda não está "
+            "completa (agenda, horários ou serviços) e o número do WhatsApp também ainda "
+            "não foi conectado.\n\n"
+            "Complete os dois passos no painel quando puder — assim que ambos estiverem "
+            "prontos, sua secretária virtual começa a atender automaticamente.\n\n"
+            "— Equipe SecretarIA"
+        ),
+    ),
+    "config_reminder_connected": EmailTemplate(
+        subject="Finalize a configuração da sua secretária virtual",
+        body=(
+            "Olá!\n\n"
+            "O WhatsApp da {clinic_name} já está conectado, mas a configuração (agenda do "
+            "Google, horários de atendimento ou serviços) ainda não está completa.\n\n"
+            "Finalize esses dados no painel para que sua secretária virtual comece a "
+            "atender os pacientes automaticamente.\n\n"
+            "— Equipe SecretarIA"
+        ),
+    ),
+    "closing_email": EmailTemplate(
+        subject="Estamos encerrando seu período de ativação",
+        body=(
+            "Olá!\n\n"
+            "Faz um bom tempo que não conseguimos concluir a ativação do WhatsApp da "
+            "{clinic_name} no SecretarIA, então vamos parar de enviar lembretes "
+            "automáticos por enquanto.\n\n"
+            "Se você ainda quiser ativar a secretária virtual, é só voltar à tela de "
+            "ativação no painel quando estiver pronto(a) — nada foi perdido, seus dados "
+            "continuam salvos.\n\n"
+            "— Equipe SecretarIA"
+        ),
+    ),
+}
+
+
+async def send_transactional_email_message(to: str, template: str, variables: dict) -> bool:
+    """Render `template` with `variables` and send it. NEVER raises.
+
+    Returns False (a clean no-op) when: `EMAIL_ENABLED` is off (default),
+    `SMTP_HOST` is empty, `template` is not a known id, rendering fails, or
+    the SMTP send itself fails. The caller (the `send_transactional_email`
+    arq task, workers/tasks.py) always gets a bool — never an exception —
+    so a misconfigured or blipping SMTP server can never turn an arq job
+    into a retry loop.
+    """
+    settings = get_settings()
+    if not settings.EMAIL_ENABLED or not settings.SMTP_HOST:
+        logger.info(
+            "transactional_email_noop",
+            template=template,
+            reason="disabled" if not settings.EMAIL_ENABLED else "smtp_unconfigured",
+        )
+        return False
+
+    tpl = _TEMPLATES.get(template)
+    if tpl is None:
+        logger.warning("transactional_email_unknown_template", template=template)
+        return False
+
+    safe_vars = _SafeDict(variables or {})
+    try:
+        subject = tpl.subject.format_map(safe_vars)
+        body = tpl.body.format_map(safe_vars)
+    except Exception as exc:
+        logger.warning("transactional_email_render_failed", template=template, error=str(exc))
+        return False
+
+    try:
+        await asyncio.to_thread(_send_transactional_sync, to, subject, body)
+    except Exception as exc:
+        logger.warning("transactional_email_send_failed", template=template, error=str(exc))
+        return False
+
+    logger.info("transactional_email_sent", template=template)
+    return True

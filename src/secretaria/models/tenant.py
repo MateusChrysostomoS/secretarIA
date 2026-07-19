@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Integer, String, Text, func, text
+from sqlalchemy import JSON, Boolean, DateTime, Index, Integer, String, Text, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from secretaria.core.database import Base
@@ -17,11 +17,30 @@ class Tenant(Base):
     """
 
     __tablename__ = "tenants"
+    __table_args__ = (
+        # Onboarding (brain-api-mediated) creates a tenant row BEFORE its
+        # WhatsApp number is connected, so phone_number_id is nullable and
+        # many tenants may simultaneously be NULL (not yet connected).
+        # Uniqueness therefore only applies to CONNECTED tenants - a plain
+        # UniqueConstraint would reject a second NULL. Both postgresql_where
+        # (prod/dev Postgres) and sqlite_where (the in-memory test engine,
+        # Base.metadata.create_all) are set so the partial index is honored
+        # on whichever dialect actually creates the table.
+        Index(
+            "uq_tenants_phone_number_id_not_null",
+            "phone_number_id",
+            unique=True,
+            postgresql_where=text("phone_number_id IS NOT NULL"),
+            sqlite_where=text("phone_number_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     clinic_name: Mapped[str] = mapped_column(String(255))
-    # The WhatsApp phone_number_id (NOT the phone number).
-    phone_number_id: Mapped[str] = mapped_column(String(64), unique=True)
+    # The WhatsApp phone_number_id (NOT the phone number). NULL until the
+    # tenant completes the embedded-signup/Coexistence connection step - see
+    # workers/tasks.py:_resolve_tenant, which never matches a NULL row.
+    phone_number_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     waba_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # The WhatsApp access token does NOT live here: it is Fernet-encrypted at rest as
     # `tenant_credentials.waba_token_encrypted` (tenant-secrets-encryption skill) and
@@ -95,5 +114,38 @@ class Tenant(Base):
     # logged in full (only tenant_id is logged around it), out of caution.
     # NULL = the `pix_whatsapp` addon's post_booking hook silently no-ops.
     pix_key: Mapped[str | None] = mapped_column(String(140), nullable=True)
+
+    # --- Onboarding / multi-professional (cross-service contract v1) ---
+    # When the WhatsApp number was connected (phone_number_id/waba_id set).
+    # NULL until then. Set by the brain-api-mediated onboarding bridge, not by
+    # this service directly.
+    connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When Coexistence mode was confirmed resolved (webhook `history` /
+    # `smb_app_state_sync` / `smb_message_echoes` field observed - see
+    # api/webhook.py's process_webhook_event). NULL until then.
+    mode_resolved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # "none" | "in_progress" | "done" - progress of the WhatsApp `history` sync
+    # sent once on Coexistence connect. Plain string (no native enum), same
+    # convention as the rest of this service's status-ish columns.
+    history_sync_status: Mapped[str] = mapped_column(
+        String(20), server_default="none", default="none"
+    )
+    history_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Clinic's physical address, e.g.
+    #   {"line": "...", "complement": "...", "neighborhood": "...",
+    #    "city": "...", "state": "...", "postal_code": "..."}
+    # NULL = not collected yet.
+    address: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Accepted health-insurance plan names, e.g. ["Unimed", "Amil"]. NULL/empty
+    # = the clinic does not take insurance, or hasn't configured the list yet.
+    insurances: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Whether the bot should ask patients for their insurance during booking.
+    collect_insurance: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false"), default=False
+    )
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

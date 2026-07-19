@@ -151,9 +151,66 @@ async def test_list_shape_is_whitelisted(
     response = await client.get(ENDPOINT)
     assert response.status_code == 200
     row = response.json()[0]
-    assert set(row.keys()) == {"id", "name", "google_calendar_id", "is_active", "created_at"}
+    assert set(row.keys()) == {
+        "id",
+        "name",
+        "google_calendar_id",
+        "is_active",
+        "created_at",
+        "specialty",
+        "about",
+        "context_doctor_message",
+        "business_hours",
+        "appointment_types",
+        "has_calendar",
+        "has_hours",
+        "has_services",
+        "complete",
+    }
     assert row["name"] == "Dra. Ana"
     assert row["google_calendar_id"] == "ana-cal"
+
+
+async def test_list_includes_onboarding_completeness(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(professionals_api, "get_entitlements", _never_called_fake)
+    await _seed_professional(db, tenant, name="Bare", google_calendar_id=None)
+
+    response = await client.get(ENDPOINT)
+    assert response.status_code == 200
+    row = response.json()[0]
+    # No calendar/hours/services configured anywhere -> incomplete on every axis.
+    assert row["has_calendar"] is False
+    assert row["has_hours"] is False
+    assert row["has_services"] is False
+    assert row["complete"] is False
+
+
+async def test_list_completeness_reflects_config(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from secretaria.services.tenant_config import set_google_refresh_token
+
+    monkeypatch.setattr(professionals_api, "get_entitlements", _never_called_fake)
+    await _seed_professional(
+        db,
+        tenant,
+        name="Configured",
+        business_hours={"monday": [{"start": "08:00", "end": "12:00"}]},
+        appointment_types=[{"name": "Consulta", "duration_min": 30, "is_active": True}],
+    )
+    async with db() as session:
+        await set_google_refresh_token(session, tenant.id, "tenant-refresh-token")
+        await session.commit()
+
+    response = await client.get(ENDPOINT)
+    assert response.status_code == 200
+    row = response.json()[0]
+    assert row["has_calendar"] is True  # tenant-level token covers it
+    assert row["has_hours"] is True
+    assert row["has_services"] is True
+    assert row["complete"] is True
 
 
 # --------------------------------------------------------------------------
@@ -301,4 +358,80 @@ async def test_patch_unknown_id_is_404(
 ) -> None:
     monkeypatch.setattr(professionals_api, "get_entitlements", _never_called_fake)
     response = await client.patch(f"{ENDPOINT}/{uuid4()}", json={"name": "Ghost"})
+    assert response.status_code == 404
+
+
+# --------------------------------------------------------------------------
+# PUT /{professional_id}/config — NEVER entitlement/limit gated
+# --------------------------------------------------------------------------
+
+
+async def test_put_config_updates_fields_and_is_never_entitlement_gated(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prof = await _seed_professional(db, tenant)
+    monkeypatch.setattr(professionals_api, "get_entitlements", _never_called_fake)
+
+    response = await client.put(
+        f"{ENDPOINT}/{prof.id}/config",
+        json={
+            "business_hours": {"monday": [{"start": "08:00", "end": "12:00"}]},
+            "appointment_types": [
+                {"name": "Consulta", "duration_min": 30, "is_active": True}
+            ],
+            "specialty": "Cardiologia",
+            "about": "Atende há 10 anos.",
+            "context_doctor_message": "Prefere retornos rápidos.",
+            "google_calendar_id": "ana-own-cal",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["specialty"] == "Cardiologia"
+    assert body["about"] == "Atende há 10 anos."
+    assert body["context_doctor_message"] == "Prefere retornos rápidos."
+    assert body["google_calendar_id"] == "ana-own-cal"
+    assert body["business_hours"] == {"monday": [{"start": "08:00", "end": "12:00"}]}
+    assert body["has_hours"] is True
+    assert body["has_services"] is True
+
+
+async def test_put_config_partial_update_leaves_other_fields_untouched(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prof = await _seed_professional(db, tenant, name="Original Name")
+    monkeypatch.setattr(professionals_api, "get_entitlements", _never_called_fake)
+
+    response = await client.put(f"{ENDPOINT}/{prof.id}/config", json={"specialty": "Pediatria"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["specialty"] == "Pediatria"
+    assert body["name"] == "Original Name"  # PUT /config never touches `name`
+
+
+async def test_put_config_rejects_overlapping_hours(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prof = await _seed_professional(db, tenant)
+    monkeypatch.setattr(professionals_api, "get_entitlements", _never_called_fake)
+
+    response = await client.put(
+        f"{ENDPOINT}/{prof.id}/config",
+        json={
+            "business_hours": {
+                "monday": [
+                    {"start": "08:00", "end": "12:00"},
+                    {"start": "11:00", "end": "14:00"},
+                ]
+            }
+        },
+    )
+    assert response.status_code == 422
+
+
+async def test_put_config_unknown_id_is_404(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(professionals_api, "get_entitlements", _never_called_fake)
+    response = await client.put(f"{ENDPOINT}/{uuid4()}/config", json={"specialty": "Ghost"})
     assert response.status_code == 404

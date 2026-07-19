@@ -101,6 +101,50 @@ class Settings(BaseSettings):
     # --- Handover (bot <-> human secretary) ---
     HANDOVER_TIMEOUT_MINUTES: int = 30
 
+    # --- Onboarding / multi-professional (cross-service contract v1) ---
+    # workers/tasks.py:_resolve_tenant's MVP single-tenant scaffold (fall back
+    # to META_PHONE_NUMBER_ID / auto-create a Tenant from env when no row
+    # matches the inbound phone_number_id). Off by default: production/
+    # multi-tenant deployments must never silently adopt or fabricate a
+    # tenant for an unrecognized WhatsApp number - an unknown phone_number_id
+    # is simply dropped. Only the exact phone_number_id match path (the real
+    # routing logic) is unaffected by this flag.
+    ALLOW_WEBHOOK_AUTOPROVISION: bool = False
+    # Threshold used by services/tenant_config.professional_completeness to
+    # decide the partial-activation rule: tenants with `total_active` active
+    # professionals at or below this value must have EVERY one of them fully
+    # configured (hours + services + calendar) before config_complete is
+    # True; above it, one fully-configured professional is enough (a large
+    # roster shouldn't block go-live on its slowest-to-configure member).
+    PARTIAL_ACTIVATION_THRESHOLD: int = 10
+
+    # --- Onboarding nudge crons (workers/onboarding_cron.py — contract v1 §11/§12) ---
+    # Local wall-clock window ("HH:MM-HH:MM") during which retry nudges, the
+    # D+60 closing email, and config reminders may actually be SENT. The D+30
+    # manual-review flag is NOT gated by this window (it sends no message, see
+    # workers/onboarding_cron.py). A tenant due outside this window simply
+    # waits for the next hourly tick that lands inside it.
+    NUDGE_SEND_WINDOW: str = "09:00-20:00"
+    # Fixed day-offsets (from onboarding_anchor_at) for the first retry
+    # nudges, e.g. [3, 7, 14, 21, 30]. Overriding via env expects a JSON array
+    # (pydantic-settings decodes list-typed settings as JSON), e.g.
+    # RETRY_CADENCE_DAYS=[3,7,14,21,30].
+    RETRY_CADENCE_DAYS: list[int] = [3, 7, 14, 21, 30]
+    # Recurring step (days) once RETRY_CADENCE_DAYS is exhausted (e.g. D+30 ->
+    # D+44 -> D+58 for the defaults below).
+    RETRY_BIWEEKLY_DAYS: int = 14
+    # Total days after onboarding_anchor_at the auto-retry population is
+    # nudged. Beyond this, next_retry_time() returns None (no more nudges) and
+    # the D+60 closing email fires once.
+    RETRY_WINDOW_TOTAL_DAYS: int = 60
+    # Fixed day-offsets (from config_reminder_anchor_at) for the first config
+    # reminders, e.g. [1, 3, 7]. Same JSON-array override format as above.
+    CONFIG_REMINDER_CADENCE_DAYS: list[int] = [1, 3, 7]
+    # Recurring step (days) once CONFIG_REMINDER_CADENCE_DAYS is exhausted.
+    # Uncapped — config reminders keep recurring until config_status becomes
+    # 'completa' (unlike the retry cadence, there is no total-days cutoff).
+    CONFIG_REMINDER_WEEKLY_DAYS: int = 7
+
     # --- Inbound rate limiting (per WhatsApp id, Redis-backed) ---
     # Caps how many inbound messages one wa_id may send in a sliding window
     # before the bot goes silent for them, protecting against floods that would
@@ -157,7 +201,7 @@ class Settings(BaseSettings):
 
     # --- Platform encryption (tenant secrets at rest) ---
     # Fernet key (urlsafe base64, 32 bytes). Generate one with the snippet in
-    # .env.example / docs/doctor-hub-backend.md. Needed before a Calendar connects.
+    # .env.example / docs/CHECKPOINT_onboarding_multiprofessional.md. Needed before a Calendar connects.
     ENCRYPTION_KEY: str = ""
 
     # --- Google Calendar OAuth (platform-level hub onboarding) ---
@@ -183,6 +227,19 @@ class Settings(BaseSettings):
     SMTP_USE_TLS: bool = True
     # How long to silence repeated calendar-unavailable alerts per tenant (seconds).
     CALENDAR_ALERT_SILENCE_SECONDS: int = 14400  # 4 hours
+
+    # --- Transactional email (onboarding lifecycle - contract v1 §4/§10/§12) ---
+    # A SEPARATE kill switch from the SMTP_* alert settings above (calendar-
+    # unavailable / human-backup emails, which are always-on whenever
+    # SMTP_HOST is set): the ten onboarding templates in services/email.py
+    # (professional invites, retry/config-reminder nudges, connection
+    # success, closing email) are off by default even when SMTP_HOST is
+    # already configured for the legacy alerts, so enabling this feature is
+    # a deliberate opt-in. Reuses SMTP_HOST/SMTP_PORT/SMTP_USERNAME/
+    # SMTP_PASSWORD above (same mail server) but has its own From identity.
+    EMAIL_ENABLED: bool = False
+    EMAIL_FROM_ADDRESS: str = ""
+    EMAIL_FROM_NAME: str = "SecretarIA"
 
     # --- Reminders plugin (bronze_1 tier / reactivation_pack addon) ---
     # Name of the pre-approved Meta utility (HSM) template used for reminders

@@ -2,7 +2,8 @@
 
 Secret-free by construction: the plaintext `Tenant.access_token`, the WABA token
 and the Google refresh token are all omitted. `phone_number_id` is an identifier
-(not a credential) and is safe to surface to the operator.
+(not a credential) and is safe to surface to the operator. It is nullable: a
+tenant provisioned by onboarding but not yet WhatsApp-connected has none yet.
 """
 
 from datetime import datetime
@@ -44,7 +45,7 @@ class TenantSummary(BaseModel):
 
     id: UUID
     clinic_name: str
-    phone_number_id: str
+    phone_number_id: str | None
     contact_email: str | None
     language: str
     timezone: str

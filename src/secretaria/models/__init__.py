@@ -12,6 +12,7 @@ from secretaria.models.message import Message, MessageDirection, MessageSender
 from secretaria.models.patient import Patient
 from secretaria.models.processed_event import ProcessedEvent
 from secretaria.models.professional import Professional
+from secretaria.models.professional_credentials import ProfessionalCredentials
 from secretaria.models.tenant import Tenant
 from secretaria.models.tenant_credentials import TenantCredentials
 from secretaria.models.unit import Unit
@@ -30,6 +31,7 @@ __all__ = [
     "Patient",
     "ProcessedEvent",
     "Professional",
+    "ProfessionalCredentials",
     "Tenant",
     "TenantCredentials",
     "Unit",

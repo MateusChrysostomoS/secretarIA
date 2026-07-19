@@ -32,6 +32,9 @@ _SCALAR_FIELDS = (
     "business_hours",
     "appointment_types",
     "initial_flows",
+    "address",
+    "insurances",
+    "collect_insurance",
 )
 
 
@@ -50,6 +53,9 @@ async def _read_model(session: AsyncSession, tenant: Tenant) -> TenantConfigRead
         business_hours=tenant.business_hours or {},
         appointment_types=tenant.appointment_types or [],
         initial_flows=tenant.initial_flows or {},
+        address=tenant.address,
+        insurances=tenant.insurances or [],
+        collect_insurance=tenant.collect_insurance,
         is_active=tenant.is_active,
         calendar_connected=connected,
     )

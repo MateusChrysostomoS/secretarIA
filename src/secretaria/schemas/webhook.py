@@ -87,6 +87,55 @@ class WebhookMessage(BaseModel):
     audio: WebhookAudio | None = None
 
 
+class WebhookHistoryMetadata(BaseModel):
+    """`history[].metadata` — chunk progress markers (Coexistence history sync).
+
+    Per Meta's Coexistence documentation, `phase` is `COMPLETE_CHUNK` while
+    more chunks remain and `COMPLETE` for the last one; `progress` is a 0-100
+    percentage. Both are read defensively (see `history_item_is_final`) so an
+    undocumented/renamed variant never crashes the webhook worker.
+    """
+
+    model_config = _PERMISSIVE
+
+    phase: str | None = None
+    chunk_order: int | None = None
+    progress: int | str | None = None
+
+
+class WebhookHistoryItem(BaseModel):
+    """One chunk of a WhatsApp Coexistence chat-history sync (`history` field).
+
+    `threads`/`errors` are deliberately left as raw dicts (never modeled or
+    read field-by-field): secretaria NEVER ingests message content from a
+    history sync (LGPD - see workers/tasks.py's `_handle_history`), so there
+    is nothing to type beyond "how many". `errors` is non-empty when the
+    business DECLINED history sharing from the WhatsApp Business App.
+    """
+
+    model_config = _PERMISSIVE
+
+    metadata: WebhookHistoryMetadata | None = None
+    threads: list[dict] = Field(default_factory=list)
+    errors: list[dict] = Field(default_factory=list)
+
+
+class WebhookStateSyncItem(BaseModel):
+    """One `smb_app_state_sync` entry — a business-contact add/update/removal.
+
+    The real payload's `contact` sub-object carries PII (full_name,
+    phone_number) and is deliberately NOT modeled here — this schema is
+    `extra="allow"` so it still parses without error, but our code only ever
+    reads `type`/`action` (never `contact`), so contact PII is never touched,
+    logged, or persisted (see workers/tasks.py's `_handle_smb_app_state_sync`).
+    """
+
+    model_config = _PERMISSIVE
+
+    type: str | None = None
+    action: str | None = None
+
+
 class WebhookValue(BaseModel):
     model_config = _PERMISSIVE
 
@@ -98,12 +147,45 @@ class WebhookValue(BaseModel):
     # Coexistence: echoes of messages the human secretary sent from the
     # WhatsApp mobile app (webhook field `smb_message_echoes`).
     message_echoes: list[WebhookMessage] = Field(default_factory=list)
+    # Coexistence: chat-history sync chunks (webhook field `history`).
+    history: list[WebhookHistoryItem] = Field(default_factory=list)
+    # Coexistence: business contact list sync (webhook field `smb_app_state_sync`).
+    state_sync: list[WebhookStateSyncItem] = Field(default_factory=list)
+
+
+def history_item_is_final(item: WebhookHistoryItem) -> bool:
+    """True when this `history` chunk signals the sync is FULLY complete.
+
+    Three independent signals, any of which finalizes the sync (accept
+    unknown variants gracefully rather than requiring one exact shape):
+      1. `metadata.phase == "COMPLETE"` (case-insensitive) — the documented
+         last-chunk marker. `COMPLETE_CHUNK` (more chunks still coming) does
+         NOT match this exact comparison, so it correctly stays in-progress.
+      2. `metadata.progress >= 100` — covers any variant that reports percent
+         completion without a literal "COMPLETE" phase string.
+      3. A non-empty `errors` list — the business DECLINED history sharing;
+         no further chunks will ever arrive, so the sync is over (with no
+         data), not "in progress" forever.
+    """
+    if item.errors:
+        return True
+    meta = item.metadata
+    if meta is None:
+        return False
+    if str(meta.phase or "").strip().upper() == "COMPLETE":
+        return True
+    try:
+        if meta.progress is not None and int(meta.progress) >= 100:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return False
 
 
 class WebhookChange(BaseModel):
     model_config = _PERMISSIVE
 
-    # e.g. "messages" or "smb_message_echoes"
+    # e.g. "messages", "smb_message_echoes", "history", "smb_app_state_sync"
     field: str | None = None
     value: WebhookValue | None = None
 

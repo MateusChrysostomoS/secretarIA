@@ -1,10 +1,16 @@
 """Doctor hub — professionals CRUD (multi_professional addon).
 
-GET   /tenants/me/professionals      - list (always allowed, even when the
-                                        addon is disabled — a tenant that lost
-                                        the addon can still see what it had).
-POST  /tenants/me/professionals      - create.
-PATCH /tenants/me/professionals/{id} - update (name, google_calendar_id, is_active).
+GET   /tenants/me/professionals        - list (always allowed, even when the
+                                          addon is disabled — a tenant that lost
+                                          the addon can still see what it had).
+                                          Rows include onboarding completeness
+                                          (contract v1 §10 item E).
+POST  /tenants/me/professionals        - create.
+PATCH /tenants/me/professionals/{id}   - update (name, google_calendar_id, is_active).
+PUT   /tenants/me/professionals/{id}/config
+                                        - per-professional config (business_hours,
+                                          appointment_types, specialty, about,
+                                          context_doctor_message, google_calendar_id).
 
 Entitlement + limit enforcement (brain-api is the source of truth, fetched
 fresh — `redis=None` — since this path is not hot):
@@ -13,9 +19,11 @@ fresh — `redis=None` — since this path is not hot):
   - Creating/activating an ACTIVE professional beyond `limits["professionals"]`
     is rejected with 409 {"detail": "professional_limit_reached"}.
   - A failed entitlement fetch (None) fails CLOSED: 503, never silently allowed.
-  - Renaming, changing the calendar id, or DEACTIVATING never touch
-    entitlements/limits at all — those are always allowed regardless of addon
-    state, so a downgraded tenant can still tidy up its existing rows.
+  - Renaming, changing the calendar id, DEACTIVATING, or saving the `/config`
+    body never touch entitlements/limits at all — those are always allowed
+    regardless of addon state, so a downgraded tenant can still tidy up its
+    existing rows (same "config save is never gated" principle as the
+    tenant-level PUT /tenants/me/config — see api/hub/config.py).
 """
 
 from uuid import UUID
@@ -29,8 +37,15 @@ from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
 from secretaria.models import Tenant
 from secretaria.models.professional import Professional
-from secretaria.schemas.professional import ProfessionalCreate, ProfessionalRead, ProfessionalUpdate
+from secretaria.schemas.professional import (
+    ProfessionalConfigUpdate,
+    ProfessionalCreate,
+    ProfessionalListItem,
+    ProfessionalRead,
+    ProfessionalUpdate,
+)
 from secretaria.services.entitlements_client import get_entitlements, is_entitled
+from secretaria.services.tenant_config import professional_completeness_item
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/tenants/me/professionals", tags=["hub-professionals"])
@@ -46,6 +61,28 @@ def _read_model(professional: Professional) -> ProfessionalRead:
         google_calendar_id=professional.google_calendar_id,
         is_active=professional.is_active,
         created_at=professional.created_at,
+    )
+
+
+async def _list_item(
+    session: AsyncSession, professional: Professional, tenant: Tenant
+) -> ProfessionalListItem:
+    completeness = await professional_completeness_item(session, professional, tenant)
+    return ProfessionalListItem(
+        id=str(professional.id),
+        name=professional.name,
+        google_calendar_id=professional.google_calendar_id,
+        is_active=professional.is_active,
+        created_at=professional.created_at,
+        specialty=professional.specialty,
+        about=professional.about,
+        context_doctor_message=professional.context_doctor_message,
+        business_hours=professional.business_hours or {},
+        appointment_types=professional.appointment_types or [],
+        has_calendar=completeness.has_calendar,
+        has_hours=completeness.has_hours,
+        has_services=completeness.has_services,
+        complete=completeness.complete,
     )
 
 
@@ -96,15 +133,15 @@ async def _require_entitled_within_limit(session: AsyncSession, tenant: Tenant) 
             raise HTTPException(status.HTTP_409_CONFLICT, "professional_limit_reached")
 
 
-@router.get("", response_model=list[ProfessionalRead])
+@router.get("", response_model=list[ProfessionalListItem])
 async def list_professionals(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_session),
-) -> list[ProfessionalRead]:
+) -> list[ProfessionalListItem]:
     rows = await session.scalars(
         select(Professional).where(Professional.tenant_id == tenant.id).order_by(Professional.name)
     )
-    return [_read_model(p) for p in rows]
+    return [await _list_item(session, p, tenant) for p in rows]
 
 
 @router.post("", response_model=ProfessionalRead, status_code=status.HTTP_201_CREATED)
@@ -158,3 +195,35 @@ async def update_professional(
         "hub_professional_updated", tenant_id=str(tenant.id), professional_id=str(professional.id)
     )
     return _read_model(professional)
+
+
+@router.put("/{professional_id}/config", response_model=ProfessionalListItem)
+async def update_professional_config(
+    professional_id: str,
+    body: ProfessionalConfigUpdate,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> ProfessionalListItem:
+    """Per-professional config save — NEVER gated by entitlements/limits/activation
+    (contract v1 §10 item E, same "config save is always allowed" principle as
+    the tenant-level PUT /tenants/me/config)."""
+    professional = await _get_professional(session, tenant, professional_id)
+    data = body.model_dump(exclude_unset=True)
+
+    for field_name in ("specialty", "about", "context_doctor_message", "google_calendar_id"):
+        if field_name in data:
+            setattr(professional, field_name, data[field_name])
+    if "business_hours" in data:
+        professional.business_hours = data["business_hours"]
+    if "appointment_types" in data:
+        professional.appointment_types = data["appointment_types"]
+
+    await session.commit()
+    await session.refresh(professional)
+    logger.info(
+        "hub_professional_config_updated",
+        tenant_id=str(tenant.id),
+        professional_id=str(professional.id),
+        fields=sorted(data.keys()),
+    )
+    return await _list_item(session, professional, tenant)

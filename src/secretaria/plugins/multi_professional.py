@@ -16,10 +16,19 @@ LLM passes `professional_name` on every call, same shape as the base tools'
 listing the valid (active) names instead of raising, so the LLM can recover
 within the same turn by asking the patient to pick again.
 
-Calendar resolution: a professional's OWN `google_calendar_id` is used when
-set; otherwise the tenant's own calendar is used (see
-`ai.tools._calendar_for_calendar_id`). This is exactly the CalendarService the
-base tools already build via TenantRuntimeConfig — no new credential path.
+Per-professional resolution (contract v1 §10 item C/D, via `_professional_calendar`
+below): calendar id, Google credential, business hours and default slot
+duration ALL resolve professional-first, tenant-second, env-last —
+`google_calendar_id`/business hours/services use the professional's own JSON
+when set (services/tenant_config.py's `professional_business_hours` /
+`professional_appointment_types`, already doing that fallback), the Google
+refresh token uses the professional's own encrypted credential
+(`professional_credentials`) when connected, else the tenant's. This is the
+SAME CalendarService machinery the base tools use (`CalendarService.for_professional`,
+via `ai.tools._calendar_for_professional`) — no separate credential path.
+Once a professional is resolved by name, its `context_doctor_message` (when
+set) rides along in the tool result under `professional_context` — this is
+how the LLM "loads" that professional's context for the rest of the turn.
 
 `create_event_for_professional` also accepts an optional `unit_name` (used
 only when the multi_unit addon is ALSO active for this tenant — see
@@ -35,10 +44,11 @@ from langchain_core.tools import tool
 from sqlalchemy import select
 
 from secretaria.ai.tools import (
-    _calendar_for_calendar_id,
+    _calendar_for_professional,
     _localize_window,
     _match_by_name,
     _persist_appointment,
+    _tenant_config_ctx,
     _tenant_id_ctx,
 )
 from secretaria.core.logging import get_logger
@@ -65,9 +75,65 @@ async def _active_professionals(tenant_id: UUID) -> list:
         return list(rows)
 
 
+async def _professional_calendar(tenant_id: UUID, professional) -> "CalendarService":  # noqa: F821
+    """Build a CalendarService using THIS professional's own config (contract v1 §10).
+
+    Resolution order (item C): the professional's own encrypted Google
+    refresh token -> the tenant's own (from the current TenantRuntimeConfig)
+    -> env (handled inside CalendarService itself). Business hours: the
+    professional's own JSON -> the tenant's (services/tenant_config.py's
+    `professional_business_hours`, already doing that fallback). Calendar id:
+    professional.google_calendar_id -> tenant's own (CalendarService.for_professional's
+    substitution semantics). Slot duration: the professional's OWN services
+    (`professional_appointment_types`, already sorted by sort_order then
+    name) — the FIRST active one's duration is used as this professional's
+    default slot length, so a professional whose own services run e.g. 45
+    minutes gets 45-minute slots instead of the tenant's default. None (no
+    services of their own) keeps the tenant's default duration, same as
+    before this addon existed.
+    """
+    from secretaria.core.database import async_session_factory
+    from secretaria.models import Tenant
+    from secretaria.services.tenant_config import (
+        get_professional_google_refresh_token,
+        professional_appointment_types,
+        professional_business_hours,
+    )
+
+    async with async_session_factory() as session:
+        tenant = await session.get(Tenant, tenant_id)
+        own_token = await get_professional_google_refresh_token(session, professional.id)
+
+    tenant_config = _tenant_config_ctx.get()
+    hours = professional_business_hours(professional, tenant) if tenant is not None else {}
+    own_types = professional_appointment_types(professional, tenant) if tenant is not None else []
+    duration = int(own_types[0]["duration_min"]) if own_types else None
+    fallback_token = tenant_config.google_refresh_token if tenant_config is not None else None
+
+    return _calendar_for_professional(
+        google_calendar_id=professional.google_calendar_id,
+        google_refresh_token=own_token or fallback_token,
+        business_hours=hours,
+        appointment_duration_min=duration,
+    )
+
+
 def _unknown_professional_error(name: str, professionals: list) -> dict:
     names = ", ".join(p.name for p in professionals) or "nenhum profissional cadastrado"
     return {"error": f"Profissional '{name}' não encontrado. Profissionais disponíveis: {names}."}
+
+
+def _with_professional_context(result: dict, professional) -> dict:
+    """Attach `professional_context` to a tool result once resolved by name.
+
+    This is how the LLM "loads" a professional's context_doctor_message once
+    it has resolved them (contract v1 §10 item D) — omitted entirely when the
+    professional has none set, so the tool output shape is unchanged for
+    professionals without one.
+    """
+    if professional.context_doctor_message:
+        result["professional_context"] = professional.context_doctor_message
+    return result
 
 
 @tool
@@ -80,7 +146,13 @@ async def list_professionals() -> dict:
     if tenant_id is None:
         return {"professionals": []}
     professionals = await _active_professionals(tenant_id)
-    return {"professionals": [p.name for p in professionals]}
+    out = []
+    for p in professionals:
+        entry = {"name": p.name}
+        if p.specialty:
+            entry["specialty"] = p.specialty
+        out.append(entry)
+    return {"professionals": out}
 
 
 @tool
@@ -107,11 +179,11 @@ async def list_free_slots_for_professional(
     if professional is None:
         return _unknown_professional_error(professional_name, professionals)
 
-    cal = _calendar_for_calendar_id(professional.google_calendar_id)
+    cal = await _professional_calendar(tenant_id, professional)
     target_day = date.fromisoformat(day)
     day_dt = datetime.combine(target_day, datetime.min.time())
     slots = await cal.list_free_slots(day=day_dt, max_slots=min(max(max_slots, 1), 10))
-    return {"slots": slots}
+    return _with_professional_context({"slots": slots}, professional)
 
 
 @tool
@@ -156,7 +228,7 @@ async def create_event_for_professional(
             return error
         unit_id = unit.id
 
-    cal = _calendar_for_calendar_id(professional.google_calendar_id)
+    cal = await _professional_calendar(tenant_id, professional)
     fallback_start, fallback_end = _localize_window(start, end, cal)
     event = await cal.create_event(
         start=fallback_start,
@@ -172,11 +244,14 @@ async def create_event_for_professional(
         professional_id=professional.id,
         unit_id=unit_id,
     )
-    return {
-        "id": event.get("id"),
-        "status": event.get("status"),
-        "htmlLink": event.get("htmlLink"),
-    }
+    return _with_professional_context(
+        {
+            "id": event.get("id"),
+            "status": event.get("status"),
+            "htmlLink": event.get("htmlLink"),
+        },
+        professional,
+    )
 
 
 MULTI_PROFESSIONAL_SPEC = PluginSpec(

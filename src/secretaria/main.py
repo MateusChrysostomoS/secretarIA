@@ -12,7 +12,7 @@ from arq.connections import RedisSettings
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from secretaria.api import health, internal, internal_privacy, webhook
+from secretaria.api import health, internal, internal_privacy, internal_provisioning, webhook
 from secretaria.api.admin import panel, tenants
 from secretaria.api.hub import (
     analytics,
@@ -80,6 +80,8 @@ def create_app() -> FastAPI:
     app.include_router(internal.router)
     # LGPD privacy endpoints (export/erase), same X-Internal-Api-Key gate.
     app.include_router(internal_privacy.router)
+    # Onboarding/provisioning endpoints (contract v1 §4), same X-Internal-Api-Key gate.
+    app.include_router(internal_provisioning.router)
     app.include_router(panel.router, tags=["admin"])
     # Admin fleet view: list tenants + per-tenant Google Calendar health (router self-tags).
     app.include_router(tenants.router)

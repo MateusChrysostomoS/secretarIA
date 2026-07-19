@@ -6,13 +6,13 @@ SecretarIA is a **multi-tenant SaaS** that drops a conversational appointment-bo
 
 Every tenant brings its own Google Calendar (OAuth), business hours, language, services catalogue and welcome pitch. The product is **sold by adapting all of those to the customer**.
 
-## The hardcoded "Eye Company" is placeholder test data
+## The "Eye Company" scaffold is gone — keep it that way
 
-`src/secretaria/ai/prompts.py` currently hardcodes an Eye Company / Dr. Mateus Chrysóstomo pitch, weekday 08-18 hours, 30-minute consults and Portuguese language. **That string belongs on the tenant row, not in code.** Same for hours, consult duration, services list, and language. Treat the current prompt as a single-tenant dev scaffold validated end-to-end, NOT the shipped behaviour.
+`src/secretaria/ai/prompts.py` used to hardcode an Eye Company / Dr. Mateus Chrysóstomo pitch, weekday 08-18 hours, 30-minute consults and Portuguese language. That's gone: `secretary_system_prompt(config: TenantRuntimeConfig)` renders every business-specific fact from the resolved tenant (and, when applicable, professional) config — see `services/tenant_config.py::load_tenant_config`.
 
-When extending the agent, do not add more hardcoded clinic-specific facts to `prompts.py`. Anything new that varies per business goes on the `Tenant` model.
+When extending the agent, do not add hardcoded clinic-specific facts back into `prompts.py`. Anything that varies per business goes on the `Tenant` model (or, when it varies per doctor within a clinic, the `Professional` model).
 
-## Per-tenant config (the rows we must grow)
+## Per-tenant config (what each clinic can configure)
 
 Shipped product configures each tenant with at minimum:
 
@@ -24,11 +24,11 @@ Shipped product configures each tenant with at minimum:
 - **Google Calendar**: encrypted `refresh_token` + `calendar_id` (per tenant, obtained via a hosted OAuth onboarding flow, not the dev `scripts/gcal_auth.py`)
 - **WhatsApp Coexistence**: `phone_number_id` + `access_token` (already on `tenants`)
 
-Today `Tenant` carries only the WhatsApp credentials. Everything above is open work: schema migration, onboarding flow, encryption at rest, and reads in `run_agent` / `secretary_system_prompt`.
+All of the above now lives on `Tenant` (and, for the professional-level fields — specialty/about/context message/business hours/services/Calendar credential — on `Professional`, one or more rows per tenant). The schema migration, onboarding flow, and encryption at rest are DONE; see `docs/CHECKPOINT_onboarding_multiprofessional.md` for the per-professional layer and `docs/CHECKPOINT_plugins.md` for the encryption-at-rest / multi-tenant round that came before it.
 
-## What the agent needs to become
+## What the agent became
 
-`secretary_system_prompt(tz)` (currently a pure function of timezone) must become `secretary_system_prompt(tenant)` and render every business-specific fact from the tenant row. `ai/graph.py:run_agent` already loads conversation history per `conversation_id`; it must also load the matching tenant row and thread it through to the prompt + tool config (e.g., per-tenant calendar credentials inside `services/calendar.py`).
+`secretary_system_prompt(config: TenantRuntimeConfig)` (`ai/prompts.py`) is a pure function of the resolved tenant config, not of a raw timezone. `ai/graph.py::run_agent` loads conversation history per `conversation_id` AND the matching tenant's resolved config (`services/tenant_config.py::load_tenant_config`), threading it through to the prompt and to per-tenant (or per-professional — contract v1 §10, `docs/CHECKPOINT_onboarding_multiprofessional.md`) Calendar credentials in `services/calendar.py`.
 
 ## Implementation status
 
@@ -36,6 +36,7 @@ Today `Tenant` carries only the WhatsApp credentials. Everything above is open w
 - **Fase B** (LangGraph ReAct agent inside the arq worker) — code complete and imports clean, end-to-end WhatsApp test pending.
 - **Multi-tenant adaptation** — LARGELY DONE (plugin round, docs/CHECKPOINT_plugins.md): per-tenant config/calendar/WhatsApp-token on the whole reply path, entitlement-gated bot + capability plugins (registry in `src/secretaria/plugins/`). Remaining: hosted OAuth onboarding polish + outbound rate limiter.
 - **Encryption at rest** — DONE. Both tenant secrets are Fernet ciphertext in `tenant_credentials` (`google_refresh_token_encrypted`, `waba_token_encrypted`); `Tenant` carries no secret column (migration `d7e8f9a0b1c2` moved + dropped `access_token`). Decryption happens ONLY in `services/tenant_config.py` (`get_google_refresh_token` / `get_waba_token`); structlog runs a `redact_secrets` processor. Requires `ENCRYPTION_KEY`.
+- **Onboarding + multi-professional config** — DONE (docs/CHECKPOINT_onboarding_multiprofessional.md): brain-api-mediated internal provisioning (`api/internal_provisioning.py`), per-professional config/completeness/partial-activation (`services/tenant_config.py`), per-professional Calendar OAuth + hub CRUD (`api/hub/oauth.py`, `api/hub/professionals.py`), Coexistence webhook signals (`history`/`smb_app_state_sync`), transactional onboarding email (`services/email.py`), and the onboarding-nudge + patient-usage-metering crons (`workers/onboarding_cron.py`). Onboarding STATE itself is owned by brain-api; this repo only reads/reports into it.
 
 ## Auxiliary scripts (Fase A scaffolding)
 

@@ -10,6 +10,7 @@ a worker thread with asyncio.to_thread to keep the event loop responsive.
 """
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -108,6 +109,46 @@ class CalendarService:
         instance._business_hours = config.business_hours or {}
         instance._default_slot_minutes = config.appointment_duration_min or 30
         return instance
+
+    @classmethod
+    def for_professional(
+        cls,
+        tenant_config: "TenantRuntimeConfig",
+        *,
+        google_calendar_id: str | None = None,
+        google_refresh_token: str | None = None,
+        business_hours: dict | None = None,
+        appointment_duration_min: int | None = None,
+    ) -> "CalendarService":
+        """CalendarService for professional X under tenant config Y (contract v1 §10).
+
+        Every keyword arg is an ALREADY-RESOLVED override (professional's own
+        value, or None to keep the tenant's) — this performs pure
+        substitution onto `tenant_config`, no fallback/decision logic of its
+        own. The professional -> tenant -> env resolution chain lives in the
+        caller: `services/tenant_config.py`'s per-professional helpers
+        resolve the JSON config (business_hours/appointment_types), and its
+        `get_professional_google_refresh_token` resolves the credential; the
+        env fallback (`GOOGLE_REFRESH_TOKEN`) is still handled by
+        `_build_service` itself when the resolved token is falsy, exactly
+        like `from_tenant_config`.
+
+        `google_calendar_id`/`google_refresh_token` falsy -> keep the
+        tenant's own value. `business_hours` falsy (None or `{}`) -> keep the
+        tenant's own (a professional with no hours of their own already
+        resolves to the tenant's via `professional_business_hours`, so this
+        is mostly a no-op safety net, not a second fallback layer).
+        """
+        resolved = replace(
+            tenant_config,
+            google_calendar_id=google_calendar_id or tenant_config.google_calendar_id,
+            google_refresh_token=google_refresh_token or tenant_config.google_refresh_token,
+            business_hours=business_hours if business_hours else tenant_config.business_hours,
+            appointment_duration_min=(
+                appointment_duration_min or tenant_config.appointment_duration_min
+            ),
+        )
+        return cls.from_tenant_config(resolved)
 
     def _build_service(self) -> Any:
         s = self._settings

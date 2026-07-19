@@ -95,6 +95,36 @@ def _calendar_for_calendar_id(google_calendar_id: str | None) -> CalendarService
     return CalendarService.from_tenant_config(config)
 
 
+def _calendar_for_professional(
+    *,
+    google_calendar_id: str | None,
+    google_refresh_token: str | None,
+    business_hours: dict | None,
+    appointment_duration_min: int | None = None,
+) -> CalendarService:
+    """Build a CalendarService for ONE professional's own config (contract v1 §10 item C).
+
+    `google_calendar_id`/`google_refresh_token`/`business_hours`/
+    `appointment_duration_min` are already resolved by the caller
+    (plugins/multi_professional.py) through the professional -> tenant
+    fallback chain (services/tenant_config.py); this only substitutes them
+    onto the CURRENT TenantRuntimeConfig via `CalendarService.for_professional`.
+    Falls back to `_calendar_for_calendar_id` (which itself falls back to
+    `_get_calendar()`) when no TenantRuntimeConfig is set — same dev-script
+    convenience as the rest of this module.
+    """
+    config = _tenant_config_ctx.get()
+    if config is None:
+        return _calendar_for_calendar_id(google_calendar_id)
+    return CalendarService.for_professional(
+        config,
+        google_calendar_id=google_calendar_id,
+        google_refresh_token=google_refresh_token,
+        business_hours=business_hours,
+        appointment_duration_min=appointment_duration_min,
+    )
+
+
 def _match_by_name(items: Sequence[Any], name: str) -> Any | None:
     """Case-insensitive exact match of `name` against `item.name` in `items`.
 

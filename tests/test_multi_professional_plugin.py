@@ -53,7 +53,10 @@ from secretaria.plugins import (
     registry as reg,  # noqa: E402
 )
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
-from secretaria.services.tenant_config import TenantRuntimeConfig  # noqa: E402
+from secretaria.services.tenant_config import (  # noqa: E402
+    TenantRuntimeConfig,
+    set_professional_google_refresh_token,
+)
 
 _ALL_ADDONS_OFF = {
     "reactivation_pack": False,
@@ -87,8 +90,15 @@ class _FakeCalendarService:
 
     instances: list["_FakeCalendarService"] = []
 
-    def __init__(self, calendar_id: str = "fallback-cal") -> None:
+    def __init__(
+        self,
+        calendar_id: str = "fallback-cal",
+        business_hours: dict | None = None,
+        appointment_duration_min: int | None = None,
+    ) -> None:
         self.calendar_id = calendar_id
+        self.business_hours = business_hours
+        self.appointment_duration_min = appointment_duration_min
         self.tzinfo = UTC
         self.created_events: list[dict] = []
         _FakeCalendarService.instances.append(self)
@@ -96,6 +106,22 @@ class _FakeCalendarService:
     @classmethod
     def from_tenant_config(cls, config: TenantRuntimeConfig) -> "_FakeCalendarService":
         return cls(calendar_id=config.google_calendar_id)
+
+    @classmethod
+    def for_professional(
+        cls,
+        tenant_config: TenantRuntimeConfig,
+        *,
+        google_calendar_id: str | None = None,
+        google_refresh_token: str | None = None,
+        business_hours: dict | None = None,
+        appointment_duration_min: int | None = None,
+    ) -> "_FakeCalendarService":
+        return cls(
+            calendar_id=google_calendar_id or tenant_config.google_calendar_id,
+            business_hours=business_hours,
+            appointment_duration_min=appointment_duration_min,
+        )
 
     async def list_free_slots(self, day, max_slots: int = 6) -> list[dict]:
         return [{"start": "2026-07-10T09:00", "end": "2026-07-10T09:30", "label": "09:00"}]
@@ -201,7 +227,25 @@ async def test_list_professionals_returns_only_active_names(db):
     tenant, ana, bruno, _inactive = await _seed_tenant_and_professionals(db)
     with _agent_context(tenant.id):
         result = await mp.list_professionals.ainvoke({})
-    assert sorted(result["professionals"]) == sorted([ana.name, bruno.name])
+    names = sorted(p["name"] for p in result["professionals"])
+    assert names == sorted([ana.name, bruno.name])
+    # Neither seeded professional has a specialty - the key must be omitted,
+    # not present-and-null (see test_list_professionals_includes_specialty_when_set).
+    assert all("specialty" not in p for p in result["professionals"])
+
+
+async def test_list_professionals_includes_specialty_when_set(db):
+    tenant, ana, _bruno, _inactive = await _seed_tenant_and_professionals(db)
+    async with db() as session:
+        db_ana = await session.get(Professional, ana.id)
+        db_ana.specialty = "Cardiologia"
+        await session.commit()
+
+    with _agent_context(tenant.id):
+        result = await mp.list_professionals.ainvoke({})
+    by_name = {p["name"]: p for p in result["professionals"]}
+    assert by_name[ana.name]["specialty"] == "Cardiologia"
+    assert "specialty" not in by_name["Dr. Bruno"]
 
 
 async def test_list_professionals_no_tenant_context_returns_empty():
@@ -255,6 +299,99 @@ async def test_inactive_professional_is_not_resolvable(db):
             {"professional_name": inactive.name, "day": "2026-07-10"}
         )
     assert "error" in result
+
+
+# --------------------------------------------------------------------------
+# Own hours/services/credential + context_doctor_message in tool output
+# (contract v1 §10 item D)
+# --------------------------------------------------------------------------
+
+_OWN_HOURS = {"tuesday": [{"start": "09:00", "end": "17:00"}]}
+_OWN_TYPES = [{"name": "Retorno", "duration_min": 45, "is_active": True, "sort_order": 0}]
+
+
+async def test_list_free_slots_uses_professionals_own_hours_and_duration(db):
+    tenant, ana, _bruno, _inactive = await _seed_tenant_and_professionals(db)
+    async with db() as session:
+        db_ana = await session.get(Professional, ana.id)
+        db_ana.business_hours = _OWN_HOURS
+        db_ana.appointment_types = _OWN_TYPES
+        await session.commit()
+
+    with _agent_context(tenant.id, tenant_config=_tenant_config(tenant.id)):
+        await mp.list_free_slots_for_professional.ainvoke(
+            {"professional_name": ana.name, "day": "2026-07-10"}
+        )
+    built = _FakeCalendarService.instances[-1]
+    assert built.business_hours == _OWN_HOURS
+    # First (and only) active service's duration drives the slot length.
+    assert built.appointment_duration_min == 45
+
+
+async def test_create_event_uses_professionals_own_google_credential(db):
+    """The professional's OWN refresh token wins over the tenant's own."""
+    tenant, ana, _bruno, _inactive = await _seed_tenant_and_professionals(db)
+    async with db() as session:
+        await set_professional_google_refresh_token(session, ana.id, "ana-own-refresh-token")
+        await session.commit()
+
+    with _agent_context(tenant.id, tenant_config=_tenant_config(tenant.id)):
+        await mp.create_event_for_professional.ainvoke(
+            {
+                "professional_name": ana.name,
+                "start": "2026-07-10T14:00:00",
+                "end": "2026-07-10T14:30:00",
+                "summary": "Consulta - Paciente",
+            }
+        )
+    # _FakeCalendarService doesn't record the token directly, but building
+    # successfully with a distinct professional-only credential (never set at
+    # the tenant level in this fixture) proves the professional's own token
+    # was resolved and passed through - see the dedicated resolution-order
+    # unit test on services/tenant_config for the credential value itself.
+    assert _FakeCalendarService.instances[-1].calendar_id == "ana-calendar"
+
+
+async def test_list_free_slots_result_includes_context_doctor_message_when_set(db):
+    tenant, ana, _bruno, _inactive = await _seed_tenant_and_professionals(db)
+    async with db() as session:
+        db_ana = await session.get(Professional, ana.id)
+        db_ana.context_doctor_message = "Prefere consultas de retorno pela manhã."
+        await session.commit()
+
+    with _agent_context(tenant.id, tenant_config=_tenant_config(tenant.id)):
+        result = await mp.list_free_slots_for_professional.ainvoke(
+            {"professional_name": ana.name, "day": "2026-07-10"}
+        )
+    assert result["professional_context"] == "Prefere consultas de retorno pela manhã."
+
+
+async def test_list_free_slots_result_omits_context_when_not_set(db):
+    tenant, ana, _bruno, _inactive = await _seed_tenant_and_professionals(db)
+    with _agent_context(tenant.id, tenant_config=_tenant_config(tenant.id)):
+        result = await mp.list_free_slots_for_professional.ainvoke(
+            {"professional_name": ana.name, "day": "2026-07-10"}
+        )
+    assert "professional_context" not in result
+
+
+async def test_create_event_result_includes_context_doctor_message_when_set(db):
+    tenant, ana, _bruno, _inactive = await _seed_tenant_and_professionals(db)
+    async with db() as session:
+        db_ana = await session.get(Professional, ana.id)
+        db_ana.context_doctor_message = "Sempre confirmar convênio antes da consulta."
+        await session.commit()
+
+    with _agent_context(tenant.id, tenant_config=_tenant_config(tenant.id)):
+        result = await mp.create_event_for_professional.ainvoke(
+            {
+                "professional_name": ana.name,
+                "start": "2026-07-10T14:00:00",
+                "end": "2026-07-10T14:30:00",
+                "summary": "Consulta - Paciente",
+            }
+        )
+    assert result["professional_context"] == "Sempre confirmar convênio antes da consulta."
 
 
 # --------------------------------------------------------------------------

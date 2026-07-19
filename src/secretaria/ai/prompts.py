@@ -53,6 +53,37 @@ def _format_appointment_types(types: list, default_duration: int) -> str:
     return "\n".join(lines)
 
 
+def _format_professional_context(config: TenantRuntimeConfig) -> str:
+    """Render the "SOBRE O PROFISSIONAL" block, or "" when nothing is set.
+
+    Only populated by `load_tenant_config` when the tenant has exactly one
+    active professional (contract v1 §10 item D) — a multi-professional
+    tenant's base prompt never carries a specific doctor's context (the
+    `multi_professional` plugin tools surface each professional's own
+    `context_doctor_message` individually instead, once the LLM resolves one
+    by name). Same "interpreted, not read verbatim" treatment as
+    persona_notes above: this is background the LLM should USE to personalize
+    tone/content, never a script to recite to the patient.
+    """
+    if not (config.context_doctor_message or config.specialty or config.about):
+        return ""
+    lines: list[str] = []
+    if config.specialty:
+        lines.append(f"Especialidade: {config.specialty}")
+    if config.about:
+        lines.append(config.about)
+    if config.context_doctor_message:
+        lines.append(config.context_doctor_message)
+    body = "\n".join(lines)
+    return (
+        "\n\n================ SOBRE O PROFISSIONAL ================\n"
+        "As informações abaixo são contexto sobre o profissional responsável pelo "
+        "atendimento. Use-as para personalizar o tom e o conteúdo das suas respostas "
+        "— NÃO as recite literalmente ao paciente:\n"
+        f"{body}"
+    )
+
+
 def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
     """Render the full system prompt for a specific tenant."""
     today = date.today().isoformat()
@@ -65,11 +96,12 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
     persona_section = (
         f"\n\nINSTRUÇÕES DE PERSONA:\n{config.persona_notes}" if config.persona_notes else ""
     )
+    professional_section = _format_professional_context(config)
 
     return (
         f"Você é a secretária virtual da {clinic}. Sua função é acolher pacientes "
         f"no WhatsApp e agendar, remarcar ou cancelar consultas no Google Calendar da clínica."
-        f"{persona_section}\n\n"
+        f"{persona_section}{professional_section}\n\n"
         "CONTEXTO OPERACIONAL:\n"
         f"- Hoje é {today} (timezone {tz}).\n"
         f"- Horário de atendimento:\n{hours_text}\n"

@@ -20,6 +20,7 @@ import hashlib
 import hmac
 import json
 import os
+from uuid import uuid4
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -45,7 +46,13 @@ from transcription_core import MediaFetchError, MediaTooLarge, TranscriptionResu
 from secretaria.api import webhook as webhook_api  # noqa: E402
 from secretaria.config import get_settings  # noqa: E402
 from secretaria.core.database import Base  # noqa: E402
-from secretaria.models import Message, MessageDirection, MessageSender, ProcessedEvent  # noqa: E402
+from secretaria.models import (  # noqa: E402
+    Message,
+    MessageDirection,
+    MessageSender,
+    ProcessedEvent,
+    Tenant,
+)
 from secretaria.schemas.webhook import WebhookValue, iter_audio_messages  # noqa: E402
 from secretaria.workers import tasks  # noqa: E402
 
@@ -458,6 +465,27 @@ async def test_handle_patient_messages_audio_without_media_id_falls_through(
 # --------------------------------------------------------------------------
 
 
+async def _seed_tenant(db) -> Tenant:
+    """A connected, active tenant matching PHONE_NUMBER_ID.
+
+    `_resolve_tenant` (workers/tasks.py) no longer auto-provisions a tenant
+    on an unrecognized number by default (settings.ALLOW_WEBHOOK_AUTOPROVISION
+    is off unless a test opts in) - these job tests exercise
+    `transcribe_audio_message` itself, not tenant resolution/auto-provision,
+    so they seed the tenant explicitly like the rest of the suite
+    (test_handover_echoes.py's `_seed_tenant`) instead of relying on that
+    scaffold.
+    """
+    async with db() as session:
+        tenant = Tenant(
+            id=uuid4(), clinic_name="Clinic", phone_number_id=PHONE_NUMBER_ID, is_active=True
+        )
+        session.add(tenant)
+        await session.commit()
+        await session.refresh(tenant)
+        return tenant
+
+
 def _spy_send_bot_reply(monkeypatch: pytest.MonkeyPatch) -> list:
     calls: list = []
 
@@ -481,6 +509,7 @@ def _spy_send_simple_text(monkeypatch: pytest.MonkeyPatch) -> list:
 async def test_happy_path_transcribes_and_persists_like_text(
     db, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    await _seed_tenant(db)
     transcribe_calls: list[dict] = []
 
     async def _fake_transcribe(media_id, access_token, *, api_version, config, http_client):
@@ -537,6 +566,8 @@ async def test_happy_path_transcribes_and_persists_like_text(
 async def test_low_confidence_sends_clarification_no_message_persisted(
     db, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    await _seed_tenant(db)
+
     async def _fake_transcribe(media_id, access_token, *, api_version, config, http_client):
         return TranscriptionResult(
             text="", provider_used="openai", is_low_confidence=True, char_count=0
@@ -605,6 +636,8 @@ async def test_idempotency_pre_processed_event_skips_transcription(
 async def test_media_too_large_sends_clarification_and_marks_processed(
     db, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    await _seed_tenant(db)
+
     async def _fake_transcribe(media_id, access_token, *, api_version, config, http_client):
         raise MediaTooLarge("audio is 20000000 bytes, exceeds max_bytes=16777216")
 
@@ -637,6 +670,8 @@ async def test_media_too_large_sends_clarification_and_marks_processed(
 async def test_transient_media_fetch_error_propagates_and_stays_unprocessed(
     db, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    await _seed_tenant(db)
+
     async def _fake_transcribe(media_id, access_token, *, api_version, config, http_client):
         raise MediaFetchError("WhatsApp media metadata fetch failed (status 503)")
 
