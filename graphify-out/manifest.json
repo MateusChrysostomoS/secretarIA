@@ -30,13 +30,13 @@
     "semantic_hash": "fe92ecbb6a15546267ab53b27b7716d8"
   },
   "src/secretaria/ai/graph.py": {
-    "mtime": 1784501064.9600303,
-    "ast_hash": "d7387fd83ba0c333a571a68bba2e98fc",
+    "mtime": 1784502851.2152164,
+    "ast_hash": "d5f2f423c46edbbc539dc1100e2bf774",
     "semantic_hash": ""
   },
   "src/secretaria/ai/tools.py": {
-    "mtime": 1784501064.9600303,
-    "ast_hash": "5ec9aec0ba77bb60b8e1d736bfb574c8",
+    "mtime": 1784502808.014855,
+    "ast_hash": "c3754b244764f9b642350019282b955b",
     "semantic_hash": ""
   },
   "src/secretaria/ai/__init__.py": {
@@ -150,8 +150,8 @@
     "semantic_hash": ""
   },
   "src/secretaria/workers/tasks.py": {
-    "mtime": 1784502401.8964813,
-    "ast_hash": "d2c2a33f79a61ec0a98c3c2db8d3534c",
+    "mtime": 1784502972.5594995,
+    "ast_hash": "e6ce6a02be6fa0095c6afb8eb5f041b7",
     "semantic_hash": ""
   },
   "src/secretaria/workers/__init__.py": {
@@ -210,8 +210,8 @@
     "semantic_hash": ""
   },
   "src/secretaria/ai/prompts.py": {
-    "mtime": 1784501064.9600303,
-    "ast_hash": "601ce09dd2d931abc0e30522b928d832",
+    "mtime": 1784502892.9730575,
+    "ast_hash": "093bf7ec011d51e02b098ce2feaf0aa7",
     "semantic_hash": ""
   },
   "src/secretaria/ai/formatter.py": {
@@ -565,8 +565,8 @@
     "semantic_hash": ""
   },
   "src/secretaria/plugins/multi_professional.py": {
-    "mtime": 1784501828.1860113,
-    "ast_hash": "99c8875d0aba07ebc133e5f70404ee75",
+    "mtime": 1784502884.8173988,
+    "ast_hash": "620874f1da391181fb310125509af2cd",
     "semantic_hash": ""
   },
   "src/secretaria/plugins/multi_unit.py": {
@@ -655,8 +655,8 @@
     "semantic_hash": ""
   },
   "tests/test_agent_capability_cache.py": {
-    "mtime": 1784501065.007761,
-    "ast_hash": "37c46cf6d32fee2c287e6640e29dda6c",
+    "mtime": 1784503177.6205559,
+    "ast_hash": "ba727b1237e22bdb46da347b1babeed7",
     "semantic_hash": ""
   },
   "tests/test_analytics_bi_plugin.py": {
@@ -665,9 +665,9 @@
     "semantic_hash": ""
   },
   "tests/test_bot_reply_gating.py": {
-    "mtime": 1784501065.007761,
-    "ast_hash": "68f0b4f7361a4bf0e9bbf2680e783f08",
-    "semantic_hash": "68f0b4f7361a4bf0e9bbf2680e783f08"
+    "mtime": 1784503025.3321638,
+    "ast_hash": "755d6d108b81a53f252ef82f084c8071",
+    "semantic_hash": ""
   },
   "tests/test_ehr_plugin.py": {
     "mtime": 1784501065.007761,
@@ -887,6 +887,16 @@
   "tests/test_professional_resolution.py": {
     "mtime": 1784501786.3897457,
     "ast_hash": "3ede7d4dd8bfb362f8095a7260620e02",
+    "semantic_hash": ""
+  },
+  "tests/test_agent_menu_tools.py": {
+    "mtime": 1784503179.8468642,
+    "ast_hash": "918bd23a8be98a31aad3ab9c00d9af99",
+    "semantic_hash": ""
+  },
+  "tests/test_flow_router_multiprofessional.py": {
+    "mtime": 1784502578.187246,
+    "ast_hash": "818ba0c527607ab8332438baff58b327",
     "semantic_hash": ""
   }
 }
