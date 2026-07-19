@@ -48,6 +48,7 @@ from secretaria.models import (
     MessageSender,
     Patient,
     ProcessedEvent,
+    Professional,
     Tenant,
 )
 from secretaria.plugins.base import InboundContext
@@ -69,7 +70,7 @@ from secretaria.services.flow_router import (
     classify_yes_no,
     flows_enabled,
     manage_label,
-    menu_buttons,
+    menu_buttons_for,
     menu_label,
     reactivation_choice_buttons,
     reactivation_continue_prompt,
@@ -79,7 +80,13 @@ from secretaria.services.flow_router import (
     route,
 )
 from secretaria.services.handover import HandoverManager
-from secretaria.services.tenant_config import get_waba_token, load_tenant_config, set_waba_token
+from secretaria.services.tenant_config import (
+    get_waba_token,
+    list_active_professionals,
+    load_tenant_config,
+    resolve_professional_calendar,
+    set_waba_token,
+)
 from secretaria.services.whatsapp import WhatsAppClient
 
 logger = get_logger(__name__)
@@ -457,6 +464,15 @@ async def _persist_inbound_message(
                     )
                     return None
 
+                # 2+ active professionals flips the effective menu to the
+                # multi-doctor trio (flow_router.menu_buttons_for) — only ever
+                # queried when flows are enabled, since only the menu uses it.
+                multi_professional = False
+                if flows_enabled(tenant):
+                    multi_professional = (
+                        await _count_active_professionals(session, tenant.id) > 1
+                    )
+
                 # A pending "quer continuar?" answer takes precedence over any
                 # greeting/offer: resume where they were, or reset to the menu.
                 if conversation.reactivation_origin is not None:
@@ -469,6 +485,8 @@ async def _persist_inbound_message(
                         conversation.flow_selected_type = None
                         conversation.flow_selected_day = None
                         conversation.flow_selected_slot = None
+                        conversation.flow_selected_professional_id = None
+                        conversation.flow_selected_insurance = None
                         return _ReplyContext(
                             conversation_id=conversation.id,
                             patient_wa_id=wa_id,
@@ -501,12 +519,20 @@ async def _persist_inbound_message(
                     and reactivation_enabled(tenant)
                 ):
                     offer = _reactivation_offer(
-                        conversation, tenant, patient, wa_id, body, last_activity_at
+                        conversation,
+                        tenant,
+                        patient,
+                        wa_id,
+                        body,
+                        last_activity_at,
+                        multi_professional=multi_professional,
                     )
                     if offer is not None:
                         return offer
 
-                greeting_buttons = _greeting_buttons_for(tenant, greeting_override)
+                greeting_buttons = _greeting_buttons_for(
+                    tenant, greeting_override, multi_professional
+                )
 
                 return _ReplyContext(
                     conversation_id=conversation.id,
@@ -541,18 +567,32 @@ def _select_greeting(
     return first or None
 
 
-def _greeting_buttons_for(tenant: Tenant, greeting_override: str | None) -> list[str]:
+def _greeting_buttons_for(
+    tenant: Tenant, greeting_override: str | None, multi_professional: bool = False
+) -> list[str]:
     """Buttons to attach to a greeting.
 
     When deterministic flows are enabled the greeting doubles as the menu, so
-    it carries the menu buttons (which the IDLE router then matches). Otherwise
-    the tenant's configured quick-reply labels are used. Empty without a greeting.
+    it carries the EFFECTIVE menu buttons (the multi-doctor trio for tenants
+    with 2+ active professionals — which the IDLE router then matches).
+    Otherwise the tenant's configured quick-reply labels are used. Empty
+    without a greeting.
     """
     if greeting_override is None:
         return []
     if flows_enabled(tenant):
-        return menu_buttons(tenant)
+        return menu_buttons_for(tenant, multi_professional)
     return [str(b) for b in (tenant.greeting_buttons or [])]
+
+
+async def _count_active_professionals(session: AsyncSession, tenant_id) -> int:
+    """How many active professionals this tenant has (multi-doctor menu gate)."""
+    count = await session.scalar(
+        select(func.count())
+        .select_from(Professional)
+        .where(Professional.tenant_id == tenant_id, Professional.is_active.is_(True))
+    )
+    return int(count or 0)
 
 
 def _as_utc(dt: datetime) -> datetime:
@@ -567,6 +607,7 @@ def _reactivation_offer(
     wa_id: str,
     body: str | None,
     last_activity_at: datetime | None,
+    multi_professional: bool = False,
 ) -> _ReplyContext | None:
     """Maybe offer a returning patient to resume, after a silence gap.
 
@@ -613,7 +654,7 @@ def _reactivation_offer(
         patient_wa_id=wa_id,
         inbound_body=body or "",
         greeting_override=greeting,
-        greeting_buttons=_greeting_buttons_for(tenant, greeting),
+        greeting_buttons=_greeting_buttons_for(tenant, greeting, multi_professional),
     )
 
 
@@ -697,7 +738,14 @@ async def _handle_menu_command(
                 # Send the first-contact greeting (the "initial" one), NOT the
                 # returning greeting - the whole point of deleting the patient.
                 greeting = (tenant.greeting_message or "").strip()
-                greeting_buttons = _greeting_buttons_for(tenant, greeting or None)
+                multi_professional = False
+                if flows_enabled(tenant):
+                    multi_professional = (
+                        await _count_active_professionals(session, tenant.id) > 1
+                    )
+                greeting_buttons = _greeting_buttons_for(
+                    tenant, greeting or None, multi_professional
+                )
         except IntegrityError:
             logger.info("worker_menu_duplicate_race", wam_id=wam_id)
             return
@@ -745,6 +793,11 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     summary = None
     flow_snapshot: tuple[SimpleNamespace, SimpleNamespace] | None = None
     upcoming_appointments: list[dict] | None = None
+    # Multi-doctor flow context (only populated when flows are enabled):
+    # the active-professionals snapshot and, when the patient already picked
+    # a doctor, that professional's resolved calendar.
+    flow_professionals: list[SimpleNamespace] | None = None
+    flow_calendar: CalendarService | None = None
     patient_name = None
     patient_wa = reply.patient_wa_id
     try:
@@ -773,6 +826,10 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                             flow_selected_type=conversation.flow_selected_type,
                             flow_selected_day=conversation.flow_selected_day,
                             flow_selected_slot=conversation.flow_selected_slot,
+                            flow_selected_professional_id=(
+                                conversation.flow_selected_professional_id
+                            ),
+                            flow_selected_insurance=conversation.flow_selected_insurance,
                             patient_id=conversation.patient_id,
                         ),
                         SimpleNamespace(
@@ -780,8 +837,47 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                             appointment_types=tenant.appointment_types,
                             appointment_duration_min=tenant.appointment_duration_min,
                             business_hours=tenant.business_hours,
+                            collect_insurance=tenant.collect_insurance,
+                            insurances=tenant.insurances,
                         ),
                     )
+                    # Active-professionals snapshot for the router (plain
+                    # objects — the router does no DB I/O), plus, when the
+                    # patient already picked a doctor, THAT doctor's resolved
+                    # CalendarService so day/slot/booking hit their agenda.
+                    professional_rows = await list_active_professionals(session, tenant.id)
+                    flow_professionals = [
+                        SimpleNamespace(
+                            id=p.id,
+                            name=p.name,
+                            specialty=p.specialty,
+                            about=p.about,
+                            context_doctor_message=p.context_doctor_message,
+                            appointment_types=p.appointment_types,
+                        )
+                        for p in professional_rows
+                    ]
+                    selected_id = conversation.flow_selected_professional_id
+                    if selected_id is not None:
+                        selected_row = next(
+                            (p for p in professional_rows if p.id == selected_id), None
+                        )
+                        if selected_row is not None:
+                            try:
+                                flow_calendar = await resolve_professional_calendar(
+                                    session,
+                                    tenant,
+                                    selected_row,
+                                    tenant_config=tenant_config,
+                                )
+                            except Exception as exc:
+                                # Degrades to the tenant calendar / LLM below —
+                                # never blocks the reply.
+                                logger.warning(
+                                    "worker_professional_calendar_failed",
+                                    error=str(exc),
+                                    professional_id=str(selected_id),
+                                )
                     # Load the patient's future appointments only when the manage
                     # (cancel/reschedule) flow is active or being opened, so the
                     # router can list/resolve them without doing its own DB I/O.
@@ -836,13 +932,15 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     if reply.reactivation is not None and flow_snapshot is not None:
         conv_snapshot, tenant_snapshot = flow_snapshot
         if reply.reactivation.kind == "reset":
-            # "Não": drop the saved flow and show a fresh menu.
+            # "Não": drop the saved flow and show a fresh (effective) menu.
             result = FlowRouterResult(
                 action="reply",
                 bubbles=[
                     MenuBubble(
                         body=menu_label(tenant_snapshot),
-                        labels=menu_buttons(tenant_snapshot),
+                        labels=menu_buttons_for(
+                            tenant_snapshot, len(flow_professionals or []) > 1
+                        ),
                     )
                 ],
                 flow_state=FlowState.MENU,
@@ -855,8 +953,10 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
         # (and any resume that has to delegate) fall through to the agent below,
         # which already has the full history.
         if reply.reactivation.origin != FlowState.LLM.value:
-            calendar = CalendarService.from_tenant_config(tenant_config) if tenant_config else None
-            result = await resume_bubbles(conv_snapshot, tenant_snapshot, calendar)
+            calendar = _flow_turn_calendar(conv_snapshot, tenant_config, flow_calendar)
+            result = await resume_bubbles(
+                conv_snapshot, tenant_snapshot, calendar, professionals=flow_professionals
+            )
             if await _apply_flow_result(
                 reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
             ):
@@ -879,6 +979,8 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
             redis=redis,
             tenant=tenant,
             waba_token=waba_token,
+            professionals=flow_professionals,
+            flow_calendar=flow_calendar,
         ):
             return
 
@@ -943,6 +1045,24 @@ async def _load_upcoming_appointments(session: AsyncSession, tenant_id, patient_
     ]
 
 
+def _flow_turn_calendar(
+    conv_snapshot: SimpleNamespace,
+    tenant_config,
+    flow_calendar: CalendarService | None,
+) -> CalendarService | None:
+    """The calendar the flow router should use for THIS turn.
+
+    With a professional selected, ONLY that professional's resolved calendar
+    counts: when its resolution failed (None), the router degrades to the LLM
+    (its calendar-needing steps delegate on None) instead of silently listing
+    or booking on the tenant-level agenda. Without a selection, the tenant
+    calendar is used exactly as before.
+    """
+    if getattr(conv_snapshot, "flow_selected_professional_id", None) is not None:
+        return flow_calendar
+    return CalendarService.from_tenant_config(tenant_config) if tenant_config else None
+
+
 async def _run_flow(
     reply: _ReplyContext,
     conv_snapshot: SimpleNamespace,
@@ -954,6 +1074,8 @@ async def _run_flow(
     redis=None,
     tenant: Tenant | None = None,
     waba_token: str | None = None,
+    professionals: list | None = None,
+    flow_calendar: CalendarService | None = None,
 ) -> bool:
     """Run the deterministic flow router for this turn.
 
@@ -962,8 +1084,10 @@ async def _run_flow(
     fully handled (bubbles sent, or handed off on a calendar outage); False to
     fall through to the LLM agent. `tenant`/`waba_token` (already loaded by the
     caller) are threaded through to whichever send path fires.
+    `professionals`/`flow_calendar` are the multi-doctor context loaded by
+    `_send_bot_reply` (active snapshot + the selected professional's calendar).
     """
-    calendar = CalendarService.from_tenant_config(tenant_config) if tenant_config else None
+    calendar = _flow_turn_calendar(conv_snapshot, tenant_config, flow_calendar)
     try:
         result = await route(
             conv_snapshot,
@@ -972,6 +1096,7 @@ async def _run_flow(
             reply.inbound_body,
             patient_name,
             upcoming_appointments=upcoming_appointments,
+            professionals=professionals,
         )
     except Exception as exc:
         logger.warning(
@@ -1013,6 +1138,8 @@ async def _apply_flow_result(
                     conv.flow_selected_type = result.flow_selected_type
                     conv.flow_selected_day = result.flow_selected_day
                     conv.flow_selected_slot = result.flow_selected_slot
+                    conv.flow_selected_professional_id = result.flow_selected_professional_id
+                    conv.flow_selected_insurance = result.flow_selected_insurance
                     if result.appointment:
                         booked_appointment = Appointment(
                             tenant_id=conv.tenant_id,
@@ -1285,11 +1412,12 @@ async def _send_bubble(
             ],
         )
     if isinstance(bubble, SlotsBubble):
+        # Rows are (id, title) or (id, title, description) — see SlotsBubble.
         return await client.send_list(
             to=to,
             body=bubble.body,
             button_label=bubble.button_label,
-            rows=[(rid, label, None) for rid, label in bubble.rows],
+            rows=[(row[0], row[1], row[2] if len(row) > 2 else None) for row in bubble.rows],
             section_title=bubble.section_title,
         )
     return await client.send_text_message(to=to, body=bubble.body)
@@ -1308,7 +1436,7 @@ def _bubble_history_body(bubble: TextBubble | ButtonBubble | SlotsBubble | MenuB
         labels = ", ".join(bubble.labels)
         return f"{bubble.body}\n(opções: {labels})" if labels else bubble.body
     if isinstance(bubble, SlotsBubble):
-        labels = ", ".join(label for _, label in bubble.rows)
+        labels = ", ".join(row[1] for row in bubble.rows)
         return f"{bubble.body}\n(opções: {labels})" if labels else bubble.body
     return bubble.body
 

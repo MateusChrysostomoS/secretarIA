@@ -331,6 +331,13 @@ def extract_inbound_body(msg: WebhookMessage) -> str | None:
     if payload_id.startswith("slot|"):
         iso = payload_id.split("|", 1)[1]
         return f"{title} ({iso})" if title else iso
+    # Professional-row taps mirror the slot contract: the id smuggles the
+    # professional's UUID ("Dra. Ana (uuid)") so the flow router resolves the
+    # exact row even when the 24-char row title truncated the name or two
+    # professionals share one.
+    if payload_id.startswith("prof|"):
+        professional_id = payload_id.split("|", 1)[1]
+        return f"{title} ({professional_id})" if title else professional_id
     return title or payload_id
 
 

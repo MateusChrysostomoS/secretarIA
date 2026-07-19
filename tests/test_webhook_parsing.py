@@ -63,6 +63,26 @@ def test_extract_list_reply_slot_includes_iso_in_body() -> None:
     assert "2026-05-29T15:00:00" in body
 
 
+def test_extract_list_reply_professional_includes_uuid_in_body() -> None:
+    msg = WebhookMessage.model_validate(
+        {
+            "id": "wamid.31",
+            "from": "5511999999999",
+            "type": "interactive",
+            "interactive": {
+                "type": "list_reply",
+                "list_reply": {
+                    "id": "prof|9f3c2ab4-7c1d-4b6e-9a70-1234567890ab",
+                    "title": "Dra. Ana",
+                    "description": "Cardiologia",
+                },
+            },
+        }
+    )
+    body = extract_inbound_body(msg)
+    assert body == "Dra. Ana (9f3c2ab4-7c1d-4b6e-9a70-1234567890ab)"
+
+
 def test_extract_list_reply_non_slot_id_falls_back_to_title() -> None:
     msg = WebhookMessage.model_validate(
         {

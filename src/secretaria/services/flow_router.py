@@ -21,13 +21,17 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
+from uuid import UUID
 
 from secretaria.ai.formatter import Bubble, ButtonBubble, SlotsBubble, TextBubble
 from secretaria.core.logging import get_logger
 from secretaria.models import FlowState
 from secretaria.services.calendar import CalendarService, CalendarUnavailableError
-from secretaria.services.tenant_config import active_appointment_types
+from secretaria.services.tenant_config import (
+    active_appointment_types,
+    professional_appointment_types,
+)
 
 if TYPE_CHECKING:
     from secretaria.models import Conversation, Tenant
@@ -46,6 +50,36 @@ DEFAULT_MENU_LABEL = "Como posso te ajudar?"
 # 20-char truncation aware) before the index-based menu mapping, so a tenant can
 # place it in any menu slot via initial_flows.buttons.
 LABEL_MANAGE = "Remarcar/Cancelar"
+
+# Multi-doctor menu (tenants with 2+ active professionals AND flows enabled):
+# the effective menu becomes exactly these 3 buttons, replacing the configured
+# ones. All <=20 chars — WhatsApp truncates reply-button titles at 20 and the
+# tap echoes the truncated label. The manage flow stays reachable by TYPING the
+# configured manage label (matched before the menu mapping, same as today);
+# WhatsApp's 3-buttons-per-message cap leaves no visible slot for it here.
+BTN_CHOOSE_PROFESSIONAL = "Escolher médico"
+BTN_FIND_PROFESSIONAL = "Procurar médico"
+LABEL_OTHER = "Outro"
+
+# Deterministic opener sent on a "Procurar médico" tap, right before the
+# conversation flips to sticky LLM mode — the recommendation itself is the
+# agent's job (list_professionals over specialty+about; see ai/prompts.py).
+FIND_PROFESSIONAL_OPENER = (
+    "Me conta o que você está sentindo ou o motivo da consulta, "
+    "que eu te indico o profissional certo."
+)
+
+# Convênio step fixed rows (row titles: <=24 chars) + the free-text prompt a
+# patient gets after tapping "Outro convênio".
+LABEL_INSURANCE_PARTICULAR = "Particular"
+LABEL_INSURANCE_OTHER = "Outro convênio"
+INSURANCE_PROMPT_OTHER = "Qual é o nome do seu convênio?"
+
+# WhatsApp caps interactive lists at 10 rows. Professionals beyond the cap are
+# dropped (with a warning) — pagination is out of scope this round. Insurance
+# plans keep 2 slots for the fixed Particular/Outro rows.
+MAX_PROFESSIONAL_ROWS = 10
+MAX_INSURANCE_PLAN_ROWS = 8
 
 # Reactivation ("welcome back" / resume) defaults. Overridable per tenant under
 # initial_flows.reactivation.
@@ -68,9 +102,13 @@ LABEL_BACK = "Voltar"
 LABEL_YES = "Sim"
 LABEL_NO = "Não"
 
-# flow_step values within SERVICE_CATALOG.
+# flow_step values within SERVICE_CATALOG. The two professional-branch steps
+# (multi-doctor tenants) sit AHEAD of the existing ones: professional -> service
+# -> service confirm -> [insurance] -> day -> slot -> confirm.
+STEP_AWAITING_PROFESSIONAL = "awaiting_professional"
 STEP_AWAITING_SERVICE = "awaiting_service"
 STEP_AWAITING_SERVICE_CONFIRM = "awaiting_service_confirm"
+STEP_AWAITING_INSURANCE = "awaiting_insurance"
 STEP_AWAITING_DAY = "awaiting_day"
 STEP_AWAITING_SLOT = "awaiting_slot"
 STEP_AWAITING_CONFIRMATION = "awaiting_confirmation"
@@ -117,6 +155,12 @@ class FlowRouterResult:
     flow_selected_type: str | None = None
     flow_selected_day: str | None = None
     flow_selected_slot: str | None = None
+    # Multi-doctor branch: the professional the patient picked, and the
+    # convênio label they chose/typed. Written unconditionally by the caller
+    # (like every field above), so any result that should keep them must carry
+    # them explicitly.
+    flow_selected_professional_id: UUID | None = None
+    flow_selected_insurance: str | None = None
     # When set, an event was created and the caller should persist a row.
     appointment: dict | None = None
     # When set, the matching appointment row should be flipped to CANCELLED.
@@ -152,6 +196,23 @@ def menu_buttons(tenant: Tenant) -> list[str]:
     """The up-to-3 menu button labels (falls back to the MVP defaults)."""
     buttons = (tenant.initial_flows or {}).get("buttons") or DEFAULT_MENU_BUTTONS
     return [str(b) for b in buttons][:3]
+
+
+def _is_multi_professional(professionals: list | None) -> bool:
+    """2+ active professionals -> the multi-doctor menu replaces the default."""
+    return len(professionals or []) > 1
+
+
+def menu_buttons_for(tenant: Tenant, multi_professional: bool) -> list[str]:
+    """Effective menu labels: the fixed multi-doctor trio, or the tenant's own.
+
+    Shared with workers/tasks.py (the greeting card doubles as the menu when
+    flows are enabled, and the reactivation-reset path re-renders it) so every
+    surface shows the same effective menu.
+    """
+    if multi_professional:
+        return [BTN_CHOOSE_PROFESSIONAL, BTN_FIND_PROFESSIONAL, LABEL_OTHER]
+    return menu_buttons(tenant)
 
 
 def menu_label(tenant: Tenant) -> str:
@@ -373,9 +434,20 @@ def _slot_iso_from_body(body: str | None) -> datetime | None:
         return None
 
 
-def _menu_bubbles(tenant: Tenant) -> list:
+def _menu_bubbles(tenant: Tenant, professionals: list | None = None) -> list:
     """The menu prompt rendered as a single reply-button card."""
-    return [MenuBubble(body=menu_label(tenant), labels=menu_buttons(tenant))]
+    labels = menu_buttons_for(tenant, _is_multi_professional(professionals))
+    return [MenuBubble(body=menu_label(tenant), labels=labels)]
+
+
+def _selected_professional_id(conversation: Conversation) -> UUID | None:
+    """The conversation's picked professional (getattr: snapshots may predate it)."""
+    return getattr(conversation, "flow_selected_professional_id", None)
+
+
+def _selected_insurance(conversation: Conversation) -> str | None:
+    """The conversation's stored convênio label (getattr: same rationale)."""
+    return getattr(conversation, "flow_selected_insurance", None)
 
 
 def _service_list_bubble(tenant: Tenant, services: list[dict]) -> Bubble:
@@ -399,6 +471,8 @@ def _preserve(conversation: Conversation, action: str) -> FlowRouterResult:
         flow_selected_type=conversation.flow_selected_type,
         flow_selected_day=conversation.flow_selected_day,
         flow_selected_slot=conversation.flow_selected_slot,
+        flow_selected_professional_id=_selected_professional_id(conversation),
+        flow_selected_insurance=_selected_insurance(conversation),
     )
 
 
@@ -414,6 +488,7 @@ async def route(
     inbound_body: str,
     patient_name: str | None = None,
     upcoming_appointments: list[dict] | None = None,
+    professionals: list | None = None,
 ) -> FlowRouterResult:
     """Decide the next deterministic step for this inbound turn.
 
@@ -422,28 +497,50 @@ async def route(
     without holding a session. `upcoming_appointments` is the patient's future
     SCHEDULED appointments (dicts: id, google_event_id, appointment_type,
     start_at, end_at), loaded by the worker only when the manage flow is active.
+
+    `professionals` is the tenant's ACTIVE professionals snapshot (plain
+    objects: id, name, specialty, about, appointment_types), loaded by the
+    worker when flows are enabled — same pattern as `upcoming_appointments`.
+    With 2+ entries the menu becomes the multi-doctor trio and the
+    professional-selection branch activates; None/0/1 keeps today's behavior
+    unchanged. When the conversation already has a selected professional, the
+    caller passes THAT professional's resolved CalendarService as `calendar`.
     """
     if not flows_enabled(tenant):
         return _preserve(conversation, "delegate_llm")
 
     state = conversation.flow_state
 
-    # Once in full LLM mode, stay there until a /menu reset.
+    # Once in full LLM mode, stay there until a /menu reset (or the agent's
+    # show_main_menu tool). The selected professional/insurance survive so the
+    # agent keeps that doctor's context across LLM turns.
     if state == FlowState.LLM:
-        return FlowRouterResult(action="delegate_llm", flow_state=FlowState.LLM)
+        return FlowRouterResult(
+            action="delegate_llm",
+            flow_state=FlowState.LLM,
+            flow_selected_professional_id=_selected_professional_id(conversation),
+            flow_selected_insurance=_selected_insurance(conversation),
+        )
 
     if state == FlowState.SERVICE_CATALOG:
-        return await _catalog_step(conversation, tenant, calendar, inbound_body, patient_name)
+        return await _catalog_step(
+            conversation, tenant, calendar, inbound_body, patient_name, professionals
+        )
 
     if state == FlowState.MANAGE_BOOKING:
         return await _manage_step(
-            conversation, tenant, calendar, inbound_body, upcoming_appointments or []
+            conversation, tenant, calendar, inbound_body, upcoming_appointments or [], professionals
         )
 
     # IDLE / MENU / BUSINESS_HOURS: interpret as a menu interaction. The manage
-    # label is matched first so a tenant can place it in any menu slot.
+    # label is matched first so a tenant can place it in any menu slot (and so
+    # it stays reachable by typing on the multi-doctor menu, which has no
+    # visible manage button).
     if _label_match(inbound_body, manage_label(tenant)):
-        return _enter_manage(tenant, upcoming_appointments or [])
+        return _enter_manage(tenant, upcoming_appointments or [], professionals)
+
+    if _is_multi_professional(professionals):
+        return _menu_choice_multi(conversation, tenant, inbound_body, professionals or [])
 
     index = _menu_index(tenant, inbound_body)
     if index is None:
@@ -455,6 +552,35 @@ async def route(
             action="reply", bubbles=_menu_bubbles(tenant), flow_state=FlowState.MENU
         )
     return await _enter_menu_choice(index, tenant, calendar)
+
+
+def _menu_choice_multi(
+    conversation: Conversation, tenant: Tenant, body: str, professionals: list
+) -> FlowRouterResult:
+    """Menu interaction for a multi-doctor tenant (fixed 3-button menu).
+
+    "Escolher médico" opens the tappable doctor list; "Procurar médico" sends
+    one deterministic opener and flips to sticky LLM mode (the agent does the
+    matching — see ai/prompts.py); "Outro" hands off exactly like today.
+    """
+    labels = menu_buttons_for(tenant, True)
+    if _label_match(body, labels[0]):
+        return _enter_professional_list(tenant, professionals)
+    if _label_match(body, labels[1]):
+        return FlowRouterResult(
+            action="reply",
+            bubbles=[TextBubble(body=FIND_PROFESSIONAL_OPENER)],
+            flow_state=FlowState.LLM,
+        )
+    if _label_match(body, labels[2]):
+        return FlowRouterResult(action="delegate_llm", flow_state=FlowState.LLM)
+    if conversation.flow_state == FlowState.MENU:
+        # Free text at the menu -> the patient wants something custom.
+        return FlowRouterResult(action="delegate_llm", flow_state=FlowState.LLM)
+    # IDLE/BUSINESS_HOURS: (re)present the effective menu.
+    return FlowRouterResult(
+        action="reply", bubbles=_menu_bubbles(tenant, professionals), flow_state=FlowState.MENU
+    )
 
 
 async def _enter_menu_choice(
@@ -489,15 +615,268 @@ async def _enter_menu_choice(
     return FlowRouterResult(action="delegate_llm", flow_state=FlowState.LLM)
 
 
+# --------------------------------------------------------------------------
+# Professional selection (multi-doctor branch of SERVICE_CATALOG)
+# --------------------------------------------------------------------------
+
+
+def _professional_id_from_body(body: str | None) -> UUID | None:
+    """Parse the professional UUID out of a list-row tap ("Dra. Ana (uuid)").
+
+    Mirrors `_slot_iso_from_body`: schemas.webhook.extract_inbound_body turns a
+    "prof|<uuid>" row id into "<title> (<uuid>)", so the UUID rides in the
+    trailing parentheses (or is the whole body when the row had no title).
+    """
+    if not body:
+        return None
+    match = re.search(r"\(([^)]+)\)\s*$", body)
+    raw = match.group(1).strip() if match else body.strip()
+    try:
+        return UUID(raw)
+    except ValueError:
+        return None
+
+
+def _find_professional_by_id(professionals: list | None, professional_id) -> Any | None:
+    if professional_id is None:
+        return None
+    for professional in professionals or []:
+        if professional.id == professional_id:
+            return professional
+    return None
+
+
+def _match_professional(professionals: list, body: str | None) -> Any | None:
+    """Resolve a tapped/typed professional: embedded UUID first, then name.
+
+    The name fallback (24-char list-title truncation aware, like
+    `_match_service`) covers a patient TYPING a doctor's name instead of
+    tapping the row. None -> the caller degrades to the LLM.
+    """
+    tapped_id = _professional_id_from_body(body)
+    if tapped_id is not None:
+        found = _find_professional_by_id(professionals, tapped_id)
+        if found is not None:
+            return found
+    target = _norm(body)
+    if not target:
+        return None
+    for professional in professionals:
+        name = str(professional.name)
+        if _norm(name[:24]) == target or _norm(name) == target:
+            return professional
+    return None
+
+
+def _enter_professional_list(tenant: Tenant, professionals: list) -> FlowRouterResult:
+    """Render the tappable doctor list ("Escolher médico").
+
+    Each row carries the professional's specialty as the WhatsApp list-row
+    description — the "apresentação dos médicos" made tappable. Capped at 10
+    rows (WhatsApp hard limit); beyond that we log and truncate, pagination is
+    explicitly out of scope this round.
+    """
+    if len(professionals) > MAX_PROFESSIONAL_ROWS:
+        logger.warning(
+            "flow_professional_list_truncated",
+            total=len(professionals),
+            shown=MAX_PROFESSIONAL_ROWS,
+        )
+    rows = [
+        (
+            f"prof|{professional.id}",
+            str(professional.name)[:24],
+            (getattr(professional, "specialty", None) or None),
+        )
+        for professional in professionals[:MAX_PROFESSIONAL_ROWS]
+    ]
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[
+            SlotsBubble(
+                body="Com qual profissional você gostaria de agendar?",
+                rows=rows,
+                button_label="Ver profissionais",
+                section_title="Profissionais",
+            )
+        ],
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=STEP_AWAITING_PROFESSIONAL,
+    )
+
+
+def _professional_greeting_body(professional: Any) -> str:
+    """v1 doctor greeting body: `specialty` (short line) then `about` verbatim.
+
+    Both fields are hub-editable; `about` is documented patient-facing on the
+    model. NEVER `context_doctor_message` here — that is LLM-internal persona
+    text (ai/prompts.py injects it with an explicit do-not-recite
+    instruction); reciting it would leak internal instructions to a patient.
+    Empty when neither field is set, so no empty card is ever sent.
+    """
+    parts = [
+        str(part).strip()
+        for part in (
+            getattr(professional, "specialty", None),
+            getattr(professional, "about", None),
+        )
+        if part and str(part).strip()
+    ]
+    return "\n\n".join(parts)
+
+
+def _enter_professional_services(professional: Any, tenant: Tenant) -> FlowRouterResult:
+    """The selected doctor's greeting + THEIR services list.
+
+    Factored out of the tap handler because the LLM hand-back tool
+    (`select_professional_and_continue`) re-enters the deterministic flow
+    through this exact sequence — see workers/tasks.py.
+    """
+    bubbles: list = []
+    greeting = _professional_greeting_body(professional)
+    if greeting:
+        bubbles.append(TextBubble(body=greeting))
+    services = professional_appointment_types(professional, tenant)
+    if not services:
+        bubbles.append(
+            TextBubble(body="No momento não há serviços disponíveis para agendamento.")
+        )
+        return FlowRouterResult(
+            action="reply",
+            bubbles=bubbles,
+            flow_state=FlowState.IDLE,
+            flow_selected_professional_id=professional.id,
+        )
+    bubbles.append(_service_list_bubble(tenant, services))
+    return FlowRouterResult(
+        action="reply",
+        bubbles=bubbles,
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=STEP_AWAITING_SERVICE,
+        flow_selected_professional_id=professional.id,
+    )
+
+
+# --------------------------------------------------------------------------
+# Convênio step (multi-doctor branch; informational only, by design)
+# --------------------------------------------------------------------------
+
+
+def _tenant_insurances(tenant: Tenant) -> list[str]:
+    return [str(plan) for plan in (getattr(tenant, "insurances", None) or []) if str(plan).strip()]
+
+
+def _wants_insurance_step(conversation: Conversation, tenant: Tenant) -> bool:
+    """Convênio step: professional branch only, when the clinic collects it.
+
+    Clinic-wide by design (tenants.insurances / collect_insurance) — it never
+    depends on WHICH doctor was picked and never filters doctors or slots.
+    Single-professional tenants keep today's flow untouched (no step).
+    """
+    return (
+        _selected_professional_id(conversation) is not None
+        and bool(getattr(tenant, "collect_insurance", False))
+        and bool(_tenant_insurances(tenant))
+    )
+
+
+def _match_insurance_plan(tenant: Tenant, body: str | None) -> str | None:
+    """Canonical plan (or "Particular") whose row title matches the tap/text."""
+    target = _norm(body)
+    if not target:
+        return None
+    if _label_match(body, LABEL_INSURANCE_PARTICULAR):
+        return LABEL_INSURANCE_PARTICULAR
+    for plan in _tenant_insurances(tenant):
+        # send_list caps row titles at 24 chars, so compare on that prefix too.
+        if _norm(plan[:24]) == target or _norm(plan) == target:
+            return plan
+    return None
+
+
+def _enter_insurance(conversation: Conversation, tenant: Tenant) -> FlowRouterResult:
+    """Render the convênio list: the clinic's plans + Particular + Outro."""
+    plans = _tenant_insurances(tenant)
+    if len(plans) > MAX_INSURANCE_PLAN_ROWS:
+        logger.warning(
+            "flow_insurance_list_truncated", total=len(plans), shown=MAX_INSURANCE_PLAN_ROWS
+        )
+    rows: list[tuple[str, str]] = [
+        (f"ins|{plan}", plan[:24]) for plan in plans[:MAX_INSURANCE_PLAN_ROWS]
+    ]
+    rows.append(("ins|particular", LABEL_INSURANCE_PARTICULAR))
+    rows.append(("ins|outro", LABEL_INSURANCE_OTHER))
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[
+            SlotsBubble(
+                body="Você vai usar convênio? Escolha uma opção:",
+                rows=rows,
+                button_label="Ver convênios",
+                section_title="Convênios",
+            )
+        ],
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=STEP_AWAITING_INSURANCE,
+        flow_selected_type=conversation.flow_selected_type,
+        flow_selected_professional_id=_selected_professional_id(conversation),
+    )
+
+
+def _handle_insurance(conversation: Conversation, tenant: Tenant, body: str) -> FlowRouterResult:
+    """Record the convênio answer, then ask the day. Informational only.
+
+    Tapping "Outro convênio" asks for the plan's name and stays on this step;
+    anything else — a listed plan's tap, "Particular", or free text — is
+    stored as-is (canonicalized to the full plan name when it matches one)
+    and copied onto the appointment at booking time. Never filters anything.
+    """
+    if _label_match(body, LABEL_INSURANCE_OTHER):
+        return FlowRouterResult(
+            action="reply",
+            bubbles=[TextBubble(body=INSURANCE_PROMPT_OTHER)],
+            flow_state=FlowState.SERVICE_CATALOG,
+            flow_step=STEP_AWAITING_INSURANCE,
+            flow_selected_type=conversation.flow_selected_type,
+            flow_selected_professional_id=_selected_professional_id(conversation),
+        )
+    stored = (_match_insurance_plan(tenant, body) or (body or "").strip())[:120] or None
+    result = _ask_day(conversation)
+    result.flow_selected_insurance = stored
+    return result
+
+
 async def _catalog_step(
     conversation: Conversation,
     tenant: Tenant,
     calendar: CalendarService | None,
     body: str,
     patient_name: str | None,
+    professionals: list | None = None,
 ) -> FlowRouterResult:
     step = conversation.flow_step
-    services = active_appointment_types(tenant)
+
+    # Multi-doctor branch: with a professional selected, every later step is
+    # scoped to THAT professional — their services here, their calendar via
+    # the `calendar` the worker resolved. A stale selection (deactivated /
+    # removed mid-flow) must never book against the wrong scope: degrade to
+    # the LLM instead.
+    selected_professional = _find_professional_by_id(
+        professionals, _selected_professional_id(conversation)
+    )
+    if _selected_professional_id(conversation) is not None and selected_professional is None:
+        return _preserve(conversation, "delegate_llm")
+    services = (
+        professional_appointment_types(selected_professional, tenant)
+        if selected_professional is not None
+        else active_appointment_types(tenant)
+    )
+
+    if step == STEP_AWAITING_PROFESSIONAL:
+        professional = _match_professional(professionals or [], body)
+        if professional is None:
+            return _preserve(conversation, "delegate_llm")
+        return _enter_professional_services(professional, tenant)
 
     if step == STEP_AWAITING_SERVICE:
         service = _match_service(services, body)
@@ -517,10 +896,13 @@ async def _catalog_step(
             flow_state=FlowState.SERVICE_CATALOG,
             flow_step=STEP_AWAITING_SERVICE_CONFIRM,
             flow_selected_type=name,
+            flow_selected_professional_id=_selected_professional_id(conversation),
         )
 
     if step == STEP_AWAITING_SERVICE_CONFIRM:
         if _norm(body) == _norm(LABEL_BOOK_SERVICE):
+            if _wants_insurance_step(conversation, tenant):
+                return _enter_insurance(conversation, tenant)
             return _ask_day(conversation)
         if _norm(body) == _norm(LABEL_OTHER_SERVICE):
             return FlowRouterResult(
@@ -528,26 +910,34 @@ async def _catalog_step(
                 bubbles=[_service_list_bubble(tenant, services)],
                 flow_state=FlowState.SERVICE_CATALOG,
                 flow_step=STEP_AWAITING_SERVICE,
+                flow_selected_professional_id=_selected_professional_id(conversation),
             )
         return _preserve(conversation, "delegate_llm")
 
+    if step == STEP_AWAITING_INSURANCE:
+        return _handle_insurance(conversation, tenant, body)
+
     if step == STEP_AWAITING_DAY:
-        return await _handle_day(conversation, tenant, calendar, body)
+        return await _handle_day(conversation, tenant, calendar, body, services)
 
     if step == STEP_AWAITING_SLOT:
         return _handle_slot(conversation, body)
 
     if step == STEP_AWAITING_CONFIRMATION:
-        return await _handle_confirmation(conversation, tenant, calendar, body, patient_name)
+        return await _handle_confirmation(
+            conversation, tenant, calendar, body, patient_name, services
+        )
 
     if step == STEP_AWAITING_RETRY:
         if _norm(body) == _norm(LABEL_RETRY_MENU):
             return FlowRouterResult(
-                action="reply", bubbles=_menu_bubbles(tenant), flow_state=FlowState.MENU
+                action="reply",
+                bubbles=_menu_bubbles(tenant, professionals),
+                flow_state=FlowState.MENU,
             )
         if _norm(body) == _norm(LABEL_RETRY_YES):
             return await _handle_day(
-                conversation, tenant, calendar, conversation.flow_selected_day or ""
+                conversation, tenant, calendar, conversation.flow_selected_day or "", services
             )
         return _preserve(conversation, "delegate_llm")
 
@@ -575,6 +965,8 @@ def _ask_day(conversation: Conversation) -> FlowRouterResult:
         flow_state=FlowState.SERVICE_CATALOG,
         flow_step=STEP_AWAITING_DAY,
         flow_selected_type=conversation.flow_selected_type,
+        flow_selected_professional_id=_selected_professional_id(conversation),
+        flow_selected_insurance=_selected_insurance(conversation),
     )
 
 
@@ -583,7 +975,14 @@ async def _handle_day(
     tenant: Tenant,
     calendar: CalendarService | None,
     body: str,
+    services: list[dict] | None = None,
 ) -> FlowRouterResult:
+    """List free slots for the parsed day.
+
+    `services` is the already-scoped catalog (the selected professional's own
+    when the multi-doctor branch is active, else the tenant's) — `calendar` is
+    scoped the same way by the caller, so slot listing and duration agree.
+    """
     if calendar is None:
         return _preserve(conversation, "delegate_llm")
     now = datetime.now(calendar.tzinfo)
@@ -592,9 +991,9 @@ async def _handle_day(
         # Could not understand the date deterministically; let the LLM try.
         return _preserve(conversation, "delegate_llm")
 
-    service = _match_service(
-        active_appointment_types(tenant), conversation.flow_selected_type
-    )
+    if services is None:
+        services = active_appointment_types(tenant)
+    service = _match_service(services, conversation.flow_selected_type)
     duration = _service_duration(service, tenant) if service else (
         tenant.appointment_duration_min or 30
     )
@@ -608,6 +1007,8 @@ async def _handle_day(
             flow_state=FlowState.SERVICE_CATALOG,
             flow_step=STEP_AWAITING_DAY,
             flow_selected_type=conversation.flow_selected_type,
+            flow_selected_professional_id=_selected_professional_id(conversation),
+            flow_selected_insurance=_selected_insurance(conversation),
         )
 
     day_iso = target.date().isoformat()
@@ -626,6 +1027,8 @@ async def _handle_day(
             flow_step=STEP_AWAITING_DAY,
             flow_selected_type=conversation.flow_selected_type,
             flow_selected_day=day_iso,
+            flow_selected_professional_id=_selected_professional_id(conversation),
+            flow_selected_insurance=_selected_insurance(conversation),
         )
 
     rows = [(f"slot|{s['start']}", s["label"]) for s in slots]
@@ -643,6 +1046,8 @@ async def _handle_day(
         flow_step=STEP_AWAITING_SLOT,
         flow_selected_type=conversation.flow_selected_type,
         flow_selected_day=day_iso,
+        flow_selected_professional_id=_selected_professional_id(conversation),
+        flow_selected_insurance=_selected_insurance(conversation),
     )
 
 
@@ -663,6 +1068,8 @@ def _handle_slot(conversation: Conversation, body: str) -> FlowRouterResult:
         flow_selected_type=conversation.flow_selected_type,
         flow_selected_day=conversation.flow_selected_day,
         flow_selected_slot=slot_iso,
+        flow_selected_professional_id=_selected_professional_id(conversation),
+        flow_selected_insurance=_selected_insurance(conversation),
     )
 
 
@@ -672,6 +1079,7 @@ async def _handle_confirmation(
     calendar: CalendarService | None,
     body: str,
     patient_name: str | None,
+    services: list[dict] | None = None,
 ) -> FlowRouterResult:
     if _norm(body) == _norm(LABEL_CANCEL):
         return FlowRouterResult(
@@ -687,6 +1095,8 @@ async def _handle_confirmation(
             flow_selected_type=conversation.flow_selected_type,
             flow_selected_day=conversation.flow_selected_day,
             flow_selected_slot=conversation.flow_selected_slot,
+            flow_selected_professional_id=_selected_professional_id(conversation),
+            flow_selected_insurance=_selected_insurance(conversation),
         )
     if _norm(body) != _norm(LABEL_CONFIRM):
         return _preserve(conversation, "delegate_llm")
@@ -694,7 +1104,9 @@ async def _handle_confirmation(
         return _preserve(conversation, "delegate_llm")
 
     service_type = conversation.flow_selected_type or "Consulta"
-    service = _match_service(active_appointment_types(tenant), service_type)
+    if services is None:
+        services = active_appointment_types(tenant)
+    service = _match_service(services, service_type)
     duration = _service_duration(service, tenant) if service else (
         tenant.appointment_duration_min or 30
     )
@@ -714,6 +1126,8 @@ async def _handle_confirmation(
             flow_selected_type=conversation.flow_selected_type,
             flow_selected_day=conversation.flow_selected_day,
             flow_selected_slot=conversation.flow_selected_slot,
+            flow_selected_professional_id=_selected_professional_id(conversation),
+            flow_selected_insurance=_selected_insurance(conversation),
         )
 
     appointment = {
@@ -723,6 +1137,15 @@ async def _handle_confirmation(
         "start_at": start,
         "end_at": end,
     }
+    # Multi-doctor branch: attach the selection to the booked row. Both keys
+    # are OMITTED (not None) outside that branch, so a single-professional
+    # tenant's appointment dict stays byte-identical to today's.
+    professional_id = _selected_professional_id(conversation)
+    if professional_id is not None:
+        appointment["professional_id"] = professional_id
+    insurance = _selected_insurance(conversation)
+    if insurance:
+        appointment["insurance"] = insurance
     confirmation = (
         "Pronto! Seu agendamento está confirmado. ✅\n\n"
         f"{service_type}\n{start.strftime('%d/%m/%Y às %H:%M')}"
@@ -792,14 +1215,16 @@ def _find_appt_by_id(appointments: list[dict], appt_id: str | None) -> dict | No
     return None
 
 
-def _enter_manage(tenant: Tenant, appointments: list[dict]) -> FlowRouterResult:
+def _enter_manage(
+    tenant: Tenant, appointments: list[dict], professionals: list | None = None
+) -> FlowRouterResult:
     """Open the cancel/reschedule flow: list the patient's future appointments."""
     if not appointments:
         return FlowRouterResult(
             action="reply",
             bubbles=[
                 TextBubble(body="Você não tem nenhuma consulta agendada no momento."),
-                MenuBubble(body=menu_label(tenant), labels=menu_buttons(tenant)),
+                *_menu_bubbles(tenant, professionals),
             ],
             flow_state=FlowState.MENU,
         )
@@ -839,6 +1264,7 @@ async def _manage_step(
     calendar: CalendarService | None,
     body: str,
     appointments: list[dict],
+    professionals: list | None = None,
 ) -> FlowRouterResult:
     step = conversation.flow_step
 
@@ -857,7 +1283,9 @@ async def _manage_step(
     if step == STEP_MANAGE_ACTION:
         if _norm(body) == _norm(LABEL_BACK):
             return FlowRouterResult(
-                action="reply", bubbles=_menu_bubbles(tenant), flow_state=FlowState.MENU
+                action="reply",
+                bubbles=_menu_bubbles(tenant, professionals),
+                flow_state=FlowState.MENU,
             )
         if _norm(body) == _norm(LABEL_CANCEL_APPT):
             appt = _find_appt_by_id(appointments, conversation.flow_selected_type)
@@ -889,7 +1317,9 @@ async def _manage_step(
         return _preserve(conversation, "delegate_llm")
 
     if step == STEP_MANAGE_CANCEL_CONFIRM:
-        return await _manage_cancel(conversation, tenant, calendar, body, appointments)
+        return await _manage_cancel(
+            conversation, tenant, calendar, body, appointments, professionals
+        )
 
     if step == STEP_MANAGE_DAY:
         return await _manage_handle_day(conversation, tenant, calendar, body, appointments)
@@ -898,7 +1328,9 @@ async def _manage_step(
         return _manage_handle_slot(conversation, appointments, body)
 
     if step == STEP_MANAGE_CONFIRM:
-        return await _manage_reschedule(conversation, tenant, calendar, body, appointments)
+        return await _manage_reschedule(
+            conversation, tenant, calendar, body, appointments, professionals
+        )
 
     # Unknown step -> let the LLM recover, keep state.
     return _preserve(conversation, "delegate_llm")
@@ -910,13 +1342,14 @@ async def _manage_cancel(
     calendar: CalendarService | None,
     body: str,
     appointments: list[dict],
+    professionals: list | None = None,
 ) -> FlowRouterResult:
     if _norm(body) == _norm(LABEL_NO):
         return FlowRouterResult(
             action="reply",
             bubbles=[
                 TextBubble(body="Tudo bem, sua consulta foi mantida."),
-                MenuBubble(body=menu_label(tenant), labels=menu_buttons(tenant)),
+                *_menu_bubbles(tenant, professionals),
             ],
             flow_state=FlowState.MENU,
         )
@@ -1043,10 +1476,13 @@ async def _manage_reschedule(
     calendar: CalendarService | None,
     body: str,
     appointments: list[dict],
+    professionals: list | None = None,
 ) -> FlowRouterResult:
     if _norm(body) == _norm(LABEL_CANCEL):
         return FlowRouterResult(
-            action="reply", bubbles=_menu_bubbles(tenant), flow_state=FlowState.MENU
+            action="reply",
+            bubbles=_menu_bubbles(tenant, professionals),
+            flow_state=FlowState.MENU,
         )
     if _norm(body) != _norm(LABEL_CONFIRM):
         return _preserve(conversation, "delegate_llm")
@@ -1110,6 +1546,8 @@ def _preserve_reply(
         flow_selected_type=conversation.flow_selected_type,
         flow_selected_day=conversation.flow_selected_day,
         flow_selected_slot=conversation.flow_selected_slot,
+        flow_selected_professional_id=_selected_professional_id(conversation),
+        flow_selected_insurance=_selected_insurance(conversation),
     )
 
 
@@ -1132,6 +1570,7 @@ async def resume_bubbles(
     conversation: Conversation,
     tenant: Tenant,
     calendar: CalendarService | None,
+    professionals: list | None = None,
 ) -> FlowRouterResult:
     """Re-emit the prompt for the conversation's CURRENT flow step.
 
@@ -1140,22 +1579,48 @@ async def resume_bubbles(
     stay unchanged. Falls back to the menu for MENU/unknown states, and to
     `delegate_llm` (via `_handle_day` / `_preserve`) when the calendar is needed
     but unavailable — the caller then degrades to the LLM with history intact.
+
+    `professionals`/`calendar` follow the same contract as `route()`: the
+    active-professionals snapshot, and a calendar already scoped to the
+    selected professional when the conversation has one.
     """
     state = conversation.flow_state
     step = conversation.flow_step
-    services = active_appointment_types(tenant)
+
+    def _menu_fallback() -> FlowRouterResult:
+        return FlowRouterResult(
+            action="reply",
+            bubbles=_menu_bubbles(tenant, professionals),
+            flow_state=FlowState.MENU,
+        )
 
     # MENU, or any state without a catalog step: re-present the menu.
     if state != FlowState.SERVICE_CATALOG or step is None:
-        return FlowRouterResult(
-            action="reply", bubbles=_menu_bubbles(tenant), flow_state=FlowState.MENU
-        )
+        return _menu_fallback()
+
+    # Multi-doctor branch: a stale selection can't be resumed — offer the menu.
+    selected_professional = _find_professional_by_id(
+        professionals, _selected_professional_id(conversation)
+    )
+    if _selected_professional_id(conversation) is not None and selected_professional is None:
+        return _menu_fallback()
+    services = (
+        professional_appointment_types(selected_professional, tenant)
+        if selected_professional is not None
+        else active_appointment_types(tenant)
+    )
+
+    if step == STEP_AWAITING_PROFESSIONAL:
+        if not _is_multi_professional(professionals):
+            return _menu_fallback()
+        return _enter_professional_list(tenant, professionals or [])
+
+    if step == STEP_AWAITING_INSURANCE:
+        return _enter_insurance(conversation, tenant)
 
     if step == STEP_AWAITING_SERVICE:
         if not services:
-            return FlowRouterResult(
-                action="reply", bubbles=_menu_bubbles(tenant), flow_state=FlowState.MENU
-            )
+            return _menu_fallback()
         return _preserve_reply(conversation, [_service_list_bubble(tenant, services)])
 
     if step == STEP_AWAITING_SERVICE_CONFIRM:
@@ -1183,7 +1648,7 @@ async def resume_bubbles(
     if step == STEP_AWAITING_SLOT:
         # Re-list fresh slots for the saved day (availability may have changed).
         return await _handle_day(
-            conversation, tenant, calendar, conversation.flow_selected_day or ""
+            conversation, tenant, calendar, conversation.flow_selected_day or "", services
         )
 
     if step == STEP_AWAITING_CONFIRMATION:
@@ -1207,6 +1672,4 @@ async def resume_bubbles(
         )
 
     # Unknown step: re-present the menu.
-    return FlowRouterResult(
-        action="reply", bubbles=_menu_bubbles(tenant), flow_state=FlowState.MENU
-    )
+    return _menu_fallback()

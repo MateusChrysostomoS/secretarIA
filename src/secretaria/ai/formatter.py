@@ -64,7 +64,11 @@ class ButtonBubble:
 @dataclass
 class SlotsBubble:
     body: str
-    rows: list[tuple[str, str]] = field(default_factory=list)
+    # Each row is (id, title) or (id, title, description) — the optional third
+    # element is the WhatsApp list-row subtitle (send_list caps it at 72 chars).
+    # 2-tuples remain the common case; senders must treat the description as
+    # absent when the tuple has only two elements.
+    rows: list[tuple] = field(default_factory=list)
     kind: Literal["slots"] = "slots"
     button_label: str = "Ver horários"
     section_title: str = "Horários livres"
