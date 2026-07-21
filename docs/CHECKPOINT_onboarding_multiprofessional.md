@@ -241,8 +241,13 @@ only by `SMTP_HOST`):
     `event_id="prof:{tenant}:{professional}:{YYYY-MM}"`, `feature=
     "active_professionals"`, counter `professionals_emitted`). Backs the
     R$80/professional metered Stripe price on brain-api's side; no
-    proration — active on any day of the month bills the full month, same
-    philosophy as the patient tally.
+    proration — active at ANY daily sweep during the month bills the full
+    month, same philosophy as the patient tally. This is a point-in-time
+    snapshot taken once per daily 03:30 UTC sweep, not continuous
+    observation: a professional created AND deactivated again between two
+    consecutive sweeps is never caught active by either one, so is never
+    billed for that month (accepted sub-day blind spot — do not rely on a
+    stronger guarantee than "active as of some sweep this month").
 - Both crons wrap **each tenant** in its own try/except (one bad tenant never
   aborts the sweep) and never log `owner_email`/`owner_name` — only
   `tenant_id` and event/template names.
