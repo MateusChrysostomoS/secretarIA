@@ -250,7 +250,6 @@
   "248": "_enter_professional_services",
   "249": "test_agent.py",
   "250": "_ctx",
-  "251": "test_professional_credentials_model_has_only_the_encrypted_column",
   "252": "PostBookingContext",
   "255": ".from_tenant_config",
   "256": "update_handover",

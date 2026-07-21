@@ -855,8 +855,8 @@
     "semantic_hash": ""
   },
   "src/secretaria/workers/onboarding_cron.py": {
-    "mtime": 1784501065.005755,
-    "ast_hash": "d0c2fe115ceb3c4966430205efe52117",
+    "mtime": 1784503521.239597,
+    "ast_hash": "c347d7c461796b90515a11e7dafda9a7",
     "semantic_hash": ""
   },
   "tests/test_brain_onboarding.py": {
@@ -870,13 +870,13 @@
     "semantic_hash": ""
   },
   "tests/test_onboarding_cron.py": {
-    "mtime": 1784501065.0214748,
-    "ast_hash": "80d9ea08acac9747417c83aa32d3281d",
+    "mtime": 1784503577.6893294,
+    "ast_hash": "2207d8bbf4a6f2094870d6d6e57648b9",
     "semantic_hash": ""
   },
   "docs/CHECKPOINT_onboarding_multiprofessional.md": {
-    "mtime": 1784501064.7087176,
-    "ast_hash": "5e25b06104df8f47a798699bb7f4f9b4",
+    "mtime": 1784503763.547865,
+    "ast_hash": "b13727462c56385836730a0a9d2e5289",
     "semantic_hash": ""
   },
   "migrations/versions/b3d9f2a1c8e7_multi_doctor_flow_columns.py": {
@@ -897,6 +897,11 @@
   "tests/test_flow_router_multiprofessional.py": {
     "mtime": 1784502578.187246,
     "ast_hash": "818ba0c527607ab8332438baff58b327",
+    "semantic_hash": ""
+  },
+  "docs/CHECKPOINT_multi_doctor_flow.md": {
+    "mtime": 1784503333.160413,
+    "ast_hash": "cc00d686ce9b3efc3c7350163c051dc5",
     "semantic_hash": ""
   }
 }
