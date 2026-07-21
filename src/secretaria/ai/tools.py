@@ -402,6 +402,70 @@ async def show_main_menu() -> str:
     raise ShowMainMenuRequested()
 
 
+_PATIENT_UNRESOLVED_TEXT = (
+    "Não consegui identificar o cadastro deste paciente nesta conversa. "
+    "NUNCA afirme que ele não tem consulta marcada — ofereça o menu "
+    "(show_main_menu) para ele verificar pelos botões."
+)
+
+
+@tool
+async def list_patient_appointments() -> dict:
+    """Lista as consultas FUTURAS já marcadas DESTE paciente nesta clínica.
+    Use para responder com dados reais a perguntas como "tenho consulta
+    marcada?" ou "quando é minha consulta?". Ferramenta SOMENTE-LEITURA: ela
+    informa, não marca, não cancela e não remarca. Quando o paciente quiser
+    remarcar ou cancelar uma consulta listada, chame show_main_menu para ele
+    seguir pelo fluxo de botões (Gerenciar consulta).
+
+    Não recebe argumentos: paciente e clínica são resolvidos automaticamente
+    a partir da conversa atual.
+    """
+    tenant_id = _tenant_id_ctx.get()
+    conversation_id = _conversation_id_ctx.get()
+    if tenant_id is None or conversation_id is None:
+        # Dev scripts / missing context: same rule as the opening gate — an
+        # unresolved patient must NEVER read as "no appointments".
+        logger.warning("tool_list_patient_appointments_no_context")
+        return {"error": _PATIENT_UNRESOLVED_TEXT}
+    # Imported lazily, same reason as _persist_appointment above.
+    from secretaria.core.database import async_session_factory
+    from secretaria.models import Conversation
+    from secretaria.services.patient_context import as_utc, load_upcoming_appointments
+
+    async with async_session_factory() as session:
+        conversation = await session.get(Conversation, conversation_id)
+        patient_id = conversation.patient_id if conversation is not None else None
+        if patient_id is None:
+            logger.warning(
+                "tool_list_patient_appointments_no_patient", tenant_id=str(tenant_id)
+            )
+            return {"error": _PATIENT_UNRESOLVED_TEXT}
+        rows = await load_upcoming_appointments(session, tenant_id, patient_id)
+
+    # Deliberately NO ids in the payload (not even google_event_id): this tool
+    # informs; acting on an appointment routes through show_main_menu, never
+    # through cancel_event on an id the model saw here.
+    tz = _get_calendar().tzinfo
+    appointments = [
+        {
+            "quando": as_utc(row["start_at"]).astimezone(tz).strftime("%d/%m/%Y às %H:%M"),
+            "tipo": row["appointment_type"] or "Consulta",
+        }
+        for row in rows
+    ]
+    logger.info(
+        "tool_list_patient_appointments",
+        tenant_id=str(tenant_id),
+        count=len(appointments),
+    )
+    return {
+        "appointments": appointments,
+        "count": len(appointments),
+        "nota": "Somente leitura — para remarcar ou cancelar, chame show_main_menu.",
+    }
+
+
 async def _resolve_patient_phone() -> str | None:
     """Best-effort patient WhatsApp id (phone) for the current turn.
 

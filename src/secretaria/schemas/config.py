@@ -107,6 +107,8 @@ class TenantConfigUpdate(BaseModel):
     returning_greeting_message: str | None = Field(default=None, max_length=4000)
     greeting_buttons: list[str] | None = None
     persona_notes: str | None = Field(default=None, max_length=4000)
+    post_consult_message: str | None = Field(default=None, max_length=4000)
+    post_consult_knowledge: str | None = Field(default=None, max_length=4000)
     language: str | None = Field(default=None, max_length=8)
     timezone: str | None = None
     google_calendar_id: str | None = Field(default=None, max_length=255)
@@ -229,6 +231,8 @@ class TenantConfigRead(BaseModel):
     returning_greeting_message: str | None
     greeting_buttons: list[str]
     persona_notes: str | None
+    post_consult_message: str | None
+    post_consult_knowledge: str | None
     language: str
     timezone: str
     google_calendar_id: str

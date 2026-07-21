@@ -39,6 +39,7 @@ from secretaria.ai.tools import (
     create_event,
     iniciar_pre_consulta,
     list_free_slots,
+    list_patient_appointments,
     show_main_menu,
 )
 from secretaria.config import get_settings
@@ -117,6 +118,9 @@ _BASE_TOOLS = (
     create_event,
     cancel_event,
     iniciar_pre_consulta,
+    # Read-only, patient-scoped: answers "tenho consulta marcada?" with DB
+    # truth. It never acts — reschedule/cancel route back via show_main_menu.
+    list_patient_appointments,
     # Always available (not addon-gated): the non-destructive way back to the
     # deterministic button menu.
     show_main_menu,
@@ -309,6 +313,7 @@ async def run_agent(
     extra_tools: Sequence = (),
     redis=None,
     selected_professional=None,
+    include_post_consult_knowledge: bool = False,
 ) -> str:
     """arq-side entry point: build history + run agent + return reply text.
 
@@ -326,9 +331,21 @@ async def run_agent(
     `selected_professional` is the flow-selected professional's plain snapshot
     (id/specialty/about/context_doctor_message), overlaid onto the prompt
     config for this turn — see `_config_with_selected_professional`.
+    `include_post_consult_knowledge` gates `tenant_config.post_consult_knowledge`
+    for THIS turn's prompt: False (the default) blanks it so the system prompt
+    stays turn-appropriate; the caller (workers/tasks.py's
+    `_should_inject_post_consult_knowledge`) decides when the turn qualifies.
     """
     conversation_id = UUID(context["conversation_id"])
     tenant_config = _config_with_selected_professional(tenant_config, selected_professional)
+    if (
+        tenant_config is not None
+        and not include_post_consult_knowledge
+        and tenant_config.post_consult_knowledge is not None
+    ):
+        # Turn-scoped injection: only a qualifying turn (see
+        # _should_inject_post_consult_knowledge) gets this in its prompt.
+        tenant_config = replace(tenant_config, post_consult_knowledge=None)
 
     # Build a per-tenant CalendarService and inject it via ContextVar so the
     # cached process-wide agent uses the right credentials for this call.

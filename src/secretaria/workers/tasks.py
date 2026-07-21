@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Literal
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import delete, func, select, update
@@ -86,6 +87,12 @@ from secretaria.services.flow_router import (
     route,
 )
 from secretaria.services.handover import HandoverManager
+from secretaria.services.patient_context import (
+    PatientOpeningContext,
+    PatientOpeningState,
+    load_upcoming_appointments,
+    resolve_patient_opening_state,
+)
 from secretaria.services.tenant_config import (
     get_waba_token,
     list_active_professionals,
@@ -109,6 +116,22 @@ CALENDAR_UNAVAILABLE_MESSAGE = (
 # Sent when a voice note can't be turned into a usable transcript (rejected
 # media, or a low-confidence/empty STT result) - see transcribe_audio_message.
 AUDIO_UNINTELLIGIBLE_MESSAGE = "Não consegui entender o áudio, pode repetir?"
+
+# Context-aware opening (MVP copy — final per-state wording lands in PROMPT 2).
+# Appended by _adapt_greeting_to_state to the tenant's verbatim greeting; the
+# RETURNING_NO_APPOINTMENT / NEW states keep the greeting untouched.
+UPCOMING_APPOINTMENT_GREETING_LINE = (
+    "Vi aqui que você já tem uma consulta marcada para {when}. "
+    "Se precisar remarcar ou cancelar, é só me falar."
+)
+# Neutral on purpose: a past appointment inside the window may still sit in
+# SCHEDULED/CONFIRMED (nobody marked the outcome), so this must NOT assert
+# the consult happened.
+JUST_HAD_CONSULT_NEUTRAL_LINE = (
+    "Vi que você teve uma consulta recentemente, posso ajudar em algo?"
+)
+# Presupposes attendance — used ONLY when the doctor explicitly set ATTENDED.
+JUST_HAD_CONSULT_ATTENDED_LINE = "Como foi sua consulta? Posso ajudar em algo?"
 
 # Slash commands the patient can type to reset the conversation. Matched
 # case-insensitively against the trimmed message body.
@@ -517,6 +540,20 @@ async def _persist_inbound_message(
                     tenant, patient, is_first_contact, is_returning_patient
                 )
 
+                # Context-aware opening (indexed reads, worker-side only): adapt
+                # the verbatim greeting to the patient's real appointment state.
+                # Same gate as the greeting itself — the conversation-opening
+                # message only. patient_id is always resolved here today (the
+                # Patient row is created/flushed above); the resolver's None
+                # guard is the safe degrade for any future call site.
+                if greeting_override is not None:
+                    opening_context = await resolve_patient_opening_state(
+                        session, tenant.id, patient.id
+                    )
+                    greeting_override = _adapt_greeting_to_state(
+                        greeting_override, opening_context, tenant
+                    )
+
                 # Returning after a silence gap (and not already greeting on first
                 # contact): offer to resume the prior workflow, or re-greet.
                 if (
@@ -589,6 +626,43 @@ def _greeting_buttons_for(
     if flows_enabled(tenant):
         return menu_buttons_for(tenant, multi_professional)
     return [str(b) for b in (tenant.greeting_buttons or [])]
+
+
+def _format_appointment_when(start_at: datetime, tz_name: str | None) -> str:
+    """Render an appointment start for greeting copy, in the tenant's timezone."""
+    tz = ZoneInfo(tz_name or "America/Sao_Paulo")
+    return _as_utc(start_at).astimezone(tz).strftime("%d/%m às %H:%M")
+
+
+def _adapt_greeting_to_state(
+    greeting: str, context: PatientOpeningContext | None, tenant: Tenant
+) -> str:
+    """Append the state-aware opening line to the verbatim greeting (MVP).
+
+    A None context (patient not resolved) and the RETURNING_NO_APPOINTMENT/NEW
+    states return the greeting unchanged — the safe degrade. JUST_HAD_CONSULT
+    only presupposes attendance when the doctor explicitly marked ATTENDED; a
+    past row still in SCHEDULED/CONFIRMED has an unknown outcome and gets the
+    neutral line.
+    """
+    if context is None:
+        return greeting
+    if context.state in (
+        PatientOpeningState.HAS_UPCOMING_SOON,
+        PatientOpeningState.HAS_UPCOMING,
+    ):
+        when = _format_appointment_when(
+            context.future_appointments[0]["start_at"], tenant.timezone
+        )
+        return f"{greeting}\n\n{UPCOMING_APPOINTMENT_GREETING_LINE.format(when=when)}"
+    if context.state is PatientOpeningState.JUST_HAD_CONSULT:
+        line = (
+            JUST_HAD_CONSULT_ATTENDED_LINE
+            if context.recent_past_appointments[0]["status"] == AppointmentStatus.ATTENDED
+            else JUST_HAD_CONSULT_NEUTRAL_LINE
+        )
+        return f"{greeting}\n\n{line}"
+    return greeting
 
 
 async def _count_active_professionals(session: AsyncSession, tenant_id) -> int:
@@ -807,10 +881,18 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     flow_calendar: CalendarService | None = None
     patient_name = None
     patient_wa = reply.patient_wa_id
+    # Post-consult-knowledge injection gate (see
+    # _should_inject_post_consult_knowledge below): the patient's derived
+    # opening state and the conversation's flow_state, captured as plain
+    # values inside the session below - both stay None when the
+    # conversation/tenant fails to resolve, or the check isn't needed this turn.
+    opening_state: PatientOpeningState | None = None
+    flow_state: FlowState | None = None
     try:
         async with async_session_factory() as session:
             conversation = await session.get(Conversation, reply.conversation_id)
             if conversation is not None:
+                flow_state = conversation.flow_state
                 tenant = await session.get(Tenant, conversation.tenant_id)
                 if tenant is not None:
                     tenant_config = await load_tenant_config(session, tenant)
@@ -820,6 +902,21 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                     # The ONE entitlement read for this inbound message
                     # (Redis-cached — see services/entitlements_client.py).
                     summary = await get_entitlements(tenant.id, redis)
+                    # Post-consult knowledge only needs the patient's derived
+                    # opening state when the turn doesn't already qualify via
+                    # flow_state == LLM (_should_inject_post_consult_knowledge) -
+                    # skips the extra appointment query on every other turn.
+                    if (
+                        (tenant.post_consult_knowledge or "").strip()
+                        and conversation.patient_id is not None
+                        and flow_state != FlowState.LLM
+                    ):
+                        opening_context = await resolve_patient_opening_state(
+                            session, tenant.id, conversation.patient_id
+                        )
+                        opening_state = (
+                            opening_context.state if opening_context is not None else None
+                        )
                 if conversation.patient_id is not None:
                     patient = await session.get(Patient, conversation.patient_id)
                     if patient is not None:
@@ -898,7 +995,7 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                         _label_match_body(reply.inbound_body, manage_label(tenant))
                     )
                     if wants_manage and conversation.patient_id is not None:
-                        upcoming_appointments = await _load_upcoming_appointments(
+                        upcoming_appointments = await load_upcoming_appointments(
                             session, tenant.id, conversation.patient_id
                         )
     except Exception as exc:
@@ -997,6 +1094,11 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
         ):
             return
 
+    # Reaching here with flow_snapshot set means _run_flow ran and returned
+    # False - the router explicitly delegated THIS turn to the LLM (e.g. the
+    # "Outro" tap) - one of the post-consult-knowledge qualifying conditions.
+    delegated_to_llm = flow_snapshot is not None
+
     reply_text = await run_agent(
         reply.inbound_body,
         context={"conversation_id": str(reply.conversation_id)},
@@ -1004,6 +1106,12 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
         extra_tools=agent_tools_for(summary),
         redis=redis,
         selected_professional=selected_professional,
+        include_post_consult_knowledge=_should_inject_post_consult_knowledge(
+            tenant_config.post_consult_knowledge if tenant_config is not None else None,
+            opening_state,
+            flow_state,
+            delegated_to_llm,
+        ),
     )
 
     # A tool failed because the calendar is unreachable: tell the patient and
@@ -1044,40 +1152,36 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     await _dispatch_bubbles(reply, bubbles, tenant=tenant, waba_token=waba_token)
 
 
+def _should_inject_post_consult_knowledge(
+    knowledge: str | None,
+    opening_state: PatientOpeningState | None,
+    flow_state: FlowState | None,
+    delegated_to_llm: bool,
+) -> bool:
+    """Whether THIS turn's system prompt should carry post_consult_knowledge.
+
+    Pure gate over already-resolved turn facts (see the orchestration in
+    `_send_bot_reply`) - does no I/O itself. `knowledge` blank/None always
+    wins (nothing to inject regardless of state). Otherwise the turn
+    qualifies when the patient just had a consult, the conversation is
+    already in full-LLM ("Outro") mode, or the deterministic router just
+    delegated this very turn to the LLM.
+    """
+    if not (knowledge or "").strip():
+        return False
+    return (
+        opening_state is PatientOpeningState.JUST_HAD_CONSULT
+        or flow_state is FlowState.LLM
+        or delegated_to_llm
+    )
+
+
 def _label_match_body(body: str | None, label: str) -> bool:
     """True when `body` equals `label` or its 20-char button truncation."""
     target = (body or "").strip().casefold()
     return bool(target) and (
         target == label.strip().casefold() or target == label[:20].strip().casefold()
     )
-
-
-async def _load_upcoming_appointments(session: AsyncSession, tenant_id, patient_id) -> list[dict]:
-    """Future SCHEDULED appointments for a patient, oldest first.
-
-    Returned as plain dicts (detached from the ORM) so the flow router can read
-    them after the session closes. Used by the cancel/reschedule flow.
-    """
-    rows = await session.scalars(
-        select(Appointment)
-        .where(
-            Appointment.patient_id == patient_id,
-            Appointment.tenant_id == tenant_id,
-            Appointment.status == AppointmentStatus.SCHEDULED,
-            Appointment.start_at >= datetime.now(UTC),
-        )
-        .order_by(Appointment.start_at)
-    )
-    return [
-        {
-            "id": str(appt.id),
-            "google_event_id": appt.google_event_id,
-            "appointment_type": appt.appointment_type,
-            "start_at": appt.start_at,
-            "end_at": appt.end_at,
-        }
-        for appt in rows
-    ]
 
 
 def _flow_turn_calendar(

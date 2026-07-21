@@ -47,7 +47,8 @@ reply) existed and works per tenant (`ai/graph.py`, `services/calendar.py`,
 | `multi_unit` | addon | `Unit` model; `list_units` / `create_event_at_unit` tools; optional `unit_name` on professional bookings; hub CRUD `/tenants/me/units` with `limits["units"]`. |
 | `ehr` | addon | post-booking push through the `services/ehr` provider seam (`Tenant.ehr_provider` selects; `iclinic` is a logged STUB — Doctoralia/Memed/Conexa are future providers). |
 | `pix_whatsapp` | addon | post-booking Pix deposit-charge message built from `Tenant.pix_key` + the appointment type's price (`services/payments/pix.py` — STUB PSP; the CONFIRMED-on-payment transition is a TODO for a real PSP webhook). No `pix_key` → silent no-op. |
-| `analytics_bi` | addon | records minimal non-personal `analytics_events` rows post-booking; hub `GET /tenants/me/analytics/summary` (bookings totals / last-30d / by type), 403 when not entitled. |
+| `analytics_bi` | addon `analytics_bi` OR `analytics_bi_advanced` | records minimal non-personal `analytics_events` rows post-booking (any-of gate so an advanced-only tenant still accumulates rows); hub `GET /tenants/me/analytics/summary` (bookings totals / last-30d / by type), 403 when not entitled, 503 on entitlement-fetch failure. |
+| `analytics_bi_advanced` | addon | hub `GET /tenants/me/analytics/advanced` — a superset of the summary over the SAME rows (90-day window, per-professional + per-source breakdowns, dense last-12-months trend). Fixed-price add-on; **distinct** key, does not grant the basic summary. 403 when not entitled, 503 on entitlement-fetch failure. No new plugin/recorder — the `analytics_bi` hook already records for this key too. |
 
 ## LGPD pieces that landed with this round
 

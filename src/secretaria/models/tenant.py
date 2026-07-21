@@ -65,6 +65,15 @@ class Tenant(Base):
     )
     # Tone/persona instructions injected into the system prompt (LLM interprets).
     persona_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Copy the secretary will send after a consult. Sending itself is wired by
+    # a later feature - this column is only persisted + surfaced (doctor hub)
+    # for now, no runtime use.
+    post_consult_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Free-text reference knowledge the LLM MAY consult to answer post-consult
+    # questions (recovery care, return-visit norms, how exam results are
+    # delivered). Injected into the system prompt only on qualifying turns -
+    # see ai/prompts.py::_format_post_consult_knowledge.
+    post_consult_knowledge: Mapped[str | None] = mapped_column(Text, nullable=True)
     language: Mapped[str] = mapped_column(String(8), server_default="pt-BR", default="pt-BR")
     timezone: Mapped[str] = mapped_column(
         String(64), server_default="America/Sao_Paulo", default="America/Sao_Paulo"

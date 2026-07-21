@@ -1,7 +1,9 @@
 """analytics_bi plugin: record a minimal booking event (post_booking).
 
-Entitlement-gated addon (`analytics_bi`). Every hook run records exactly ONE
-`AnalyticsEvent` row (event_type="appointment_booked") per booked
+Entitlement-gated addon: the hook runs for a tenant entitled to EITHER
+`analytics_bi` (basic summary) OR `analytics_bi_advanced` (advanced dashboard),
+so an advanced-only tenant still gets its rows recorded. Every hook run records
+exactly ONE `AnalyticsEvent` row (event_type="appointment_booked") per booked
 appointment, with a deliberately minimal, non-personal payload —
 `appointment_type`, `professional_id` (str or None) and `source`
 ("agent"|"flow") — see models/analytics_event.py's docstring for why. The
@@ -50,7 +52,14 @@ async def _post_booking(ctx: PostBookingContext) -> None:
     )
 
 
+# entitlement_keys is ANY-OF: record booking events for a tenant entitled to EITHER the
+# basic `analytics_bi` summary OR the `analytics_bi_advanced` dashboard, so an
+# advanced-only tenant still accumulates the rows both views read (an advanced dashboard
+# over an empty table would otherwise be permanently blank). Same multi-key shape as
+# reminders.py's ("bronze_1", "reactivation_pack").
 ANALYTICS_BI_SPEC = PluginSpec(
-    id="analytics_bi", entitlement_keys=("analytics_bi",), post_booking=_post_booking
+    id="analytics_bi",
+    entitlement_keys=("analytics_bi", "analytics_bi_advanced"),
+    post_booking=_post_booking,
 )
 register(ANALYTICS_BI_SPEC)

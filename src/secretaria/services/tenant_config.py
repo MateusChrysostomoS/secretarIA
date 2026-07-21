@@ -77,6 +77,11 @@ class TenantRuntimeConfig:
     context_doctor_message: str | None = None
     specialty: str | None = None
     about: str | None = None
+    # Tenant-level reference knowledge for post-consult questions (recovery
+    # care, return-visit norms, exam-result delivery). Blanked by run_agent
+    # on non-qualifying turns (ai/graph.py) so the prompt stays turn-
+    # appropriate - see ai/prompts.py::_format_post_consult_knowledge.
+    post_consult_knowledge: str | None = None
 
 
 def _filter_active_types(appointment_types: list | None) -> list[dict]:
@@ -618,4 +623,5 @@ async def load_tenant_config(session: AsyncSession, tenant: Tenant) -> TenantRun
         context_doctor_message=context_doctor_message,
         specialty=specialty,
         about=about,
+        post_consult_knowledge=tenant.post_consult_knowledge,
     )

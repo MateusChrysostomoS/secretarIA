@@ -84,6 +84,33 @@ def _format_professional_context(config: TenantRuntimeConfig) -> str:
     )
 
 
+def _format_post_consult_knowledge(config: TenantRuntimeConfig) -> str:
+    """Render the "CONHECIMENTO PÓS-CONSULTA" block, or "" when nothing is set.
+
+    `post_consult_knowledge` is tenant-level reference material for post-consult
+    questions (recovery care, return-visit norms, how exam results are
+    delivered) — unlike the rest of this prompt it is NOT unconditional: the
+    caller (ai/graph.py::run_agent's `include_post_consult_knowledge`, gated by
+    workers/tasks.py's `_should_inject_post_consult_knowledge`) blanks
+    `config.post_consult_knowledge` on turns that don't qualify, so this
+    function only ever sees a value on a qualifying turn. Same "interpreted,
+    not read verbatim" treatment as persona_notes/_format_professional_context
+    above: this is reference material the LLM should USE to answer what the
+    patient asked, never a script to recite unprompted.
+    """
+    if not config.post_consult_knowledge:
+        return ""
+    return (
+        "\n\n================ CONHECIMENTO PÓS-CONSULTA ================\n"
+        "O paciente passou recentemente por uma consulta (ou a conversa trata de um "
+        "atendimento já realizado). As informações abaixo são material de referência da "
+        "clínica para dúvidas pós-consulta (recuperação, retorno, resultados de exames). "
+        "Use-as QUANDO ajudarem a responder o que o paciente perguntou — NÃO as recite "
+        "literalmente nem as despeje sem pergunta:\n"
+        f"{config.post_consult_knowledge}"
+    )
+
+
 def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
     """Render the full system prompt for a specific tenant."""
     today = date.today().isoformat()
@@ -97,11 +124,12 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
         f"\n\nINSTRUÇÕES DE PERSONA:\n{config.persona_notes}" if config.persona_notes else ""
     )
     professional_section = _format_professional_context(config)
+    post_consult_section = _format_post_consult_knowledge(config)
 
     return (
         f"Você é a secretária virtual da {clinic}. Sua função é acolher pacientes "
         f"no WhatsApp e agendar, remarcar ou cancelar consultas no Google Calendar da clínica."
-        f"{persona_section}{professional_section}\n\n"
+        f"{persona_section}{professional_section}{post_consult_section}\n\n"
         "CONTEXTO OPERACIONAL:\n"
         f"- Hoje é {today} (timezone {tz}).\n"
         f"- Horário de atendimento:\n{hours_text}\n"
@@ -192,6 +220,13 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
         "início\", trocar de profissional ou ver as opções de novo, chame a "
         "ferramenta show_main_menu — NUNCA improvise botões ou um menu em "
         "texto.\n"
+        "- Quando o paciente perguntar sobre consultas JÁ MARCADAS (\"tenho "
+        "consulta marcada?\", \"quando é minha consulta?\"), chame "
+        "list_patient_appointments e responda com base no resultado — nunca "
+        "responda de memória. Essa ferramenta é SOMENTE-LEITURA: para "
+        "remarcar ou cancelar uma consulta existente, chame show_main_menu "
+        "para o paciente seguir pelos botões (Gerenciar consulta) — não "
+        "conduza remarcação/cancelamento de consulta já existente pelo chat.\n"
         "- Quando o paciente descrever um sintoma, uma necessidade ou "
         "perguntar qual profissional deve procurar, chame list_professionals "
         "e raciocine sobre a especialidade e a descrição de cada um. "

@@ -89,6 +89,40 @@ def test_persona_notes_and_professional_section_coexist_in_order():
     assert prompt.index("INSTRUÇÕES DE PERSONA") < prompt.index("SOBRE O PROFISSIONAL")
 
 
+def test_no_post_consult_knowledge_section_when_none():
+    prompt = secretary_system_prompt(_config())
+    assert "CONHECIMENTO PÓS-CONSULTA" not in prompt
+
+
+def test_post_consult_knowledge_section_present_when_set():
+    config = _config(
+        post_consult_knowledge="Retorno em 7 dias. Resultados de exame saem em 48h pelo portal."
+    )
+    prompt = secretary_system_prompt(config)
+    assert "CONHECIMENTO PÓS-CONSULTA" in prompt
+    assert "Retorno em 7 dias. Resultados de exame saem em 48h pelo portal." in prompt
+    assert "NÃO as recite" in prompt
+
+
+def test_persona_professional_and_post_consult_sections_coexist_in_order():
+    config = _config(
+        persona_notes="Seja bem-humorada.",
+        professional_id=uuid4(),
+        context_doctor_message="Fala pausadamente com pacientes idosos.",
+        post_consult_knowledge="Retorno em 7 dias.",
+    )
+    prompt = secretary_system_prompt(config)
+    assert "INSTRUÇÕES DE PERSONA" in prompt
+    assert "SOBRE O PROFISSIONAL" in prompt
+    assert "CONHECIMENTO PÓS-CONSULTA" in prompt
+    # persona -> professional -> post-consult (see secretary_system_prompt).
+    assert (
+        prompt.index("INSTRUÇÕES DE PERSONA")
+        < prompt.index("SOBRE O PROFISSIONAL")
+        < prompt.index("CONHECIMENTO PÓS-CONSULTA")
+    )
+
+
 def test_prompt_still_renders_business_hours_and_types_normally():
     """Sanity: the professional-context addition must not disturb the
     existing hours/types rendering."""

@@ -8,6 +8,11 @@
 > a tappable list (or describe a need and let the agent recommend one) — while
 > keeping 0/1-professional tenants byte-identical to before.
 
+> Follow-up (2026-07-21): the conversation-opening greeting became
+> appointment-state-aware and the agent gained a read-only
+> `list_patient_appointments` tool — see
+> `docs/CHECKPOINT_context_aware_opening.md`.
+
 Built 2026-07-19, in one session, as three commits on `main` on top of the
 baseline checkpoint commit (`dc09182`, which captured the previously
 uncommitted onboarding/multi-professional working tree and fast-forwarded

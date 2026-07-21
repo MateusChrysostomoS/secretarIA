@@ -429,6 +429,7 @@ async def test_load_tenant_config_zero_professionals_stays_tenant_level(session)
         business_hours=_TENANT_HOURS,
         appointment_types=_TENANT_TYPES,
         google_calendar_id="tenant-cal",
+        post_consult_knowledge="Retorno em 7 dias.",
     )
     await session.commit()
 
@@ -438,6 +439,8 @@ async def test_load_tenant_config_zero_professionals_stays_tenant_level(session)
     assert config.context_doctor_message is None
     assert config.business_hours == _TENANT_HOURS
     assert config.google_calendar_id == "tenant-cal"
+    # Straight passthrough from the tenant row - no professional resolution.
+    assert config.post_consult_knowledge == "Retorno em 7 dias."
 
 
 async def test_load_tenant_config_multiple_active_professionals_stays_tenant_level(session):

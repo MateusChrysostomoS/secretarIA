@@ -246,3 +246,126 @@ async def test_summary_scoped_to_tenant(
     response = await client.get(ENDPOINT)
     assert response.status_code == 200
     assert response.json()["bookings_total"] == 0
+
+
+# --------------------------------------------------------------------------
+# GET /tenants/me/analytics/advanced  (analytics_bi_advanced add-on)
+# --------------------------------------------------------------------------
+
+ADVANCED_ENDPOINT = "/tenants/me/analytics/advanced"
+
+
+async def _seed_event_full(
+    db,
+    tenant: Tenant,
+    *,
+    appointment_type: str,
+    professional_id: str | None,
+    source: str,
+    days_ago: int = 0,
+):
+    async with db() as session:
+        session.add(
+            AnalyticsEvent(
+                tenant_id=tenant.id,
+                event_type="appointment_booked",
+                payload={
+                    "appointment_type": appointment_type,
+                    "professional_id": professional_id,
+                    "source": source,
+                },
+                created_at=datetime.now(UTC) - timedelta(days=days_ago),
+            )
+        )
+        await session.commit()
+
+
+async def test_advanced_not_entitled_returns_403(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    # analytics_bi (basic) ON but analytics_bi_advanced OFF must still be denied — the
+    # keys are distinct, basic does not imply advanced.
+    monkeypatch.setattr(
+        analytics_api,
+        "get_entitlements",
+        _entitled_fake(addons={**_ALL_ADDONS_OFF, "analytics_bi": True}),
+    )
+    response = await client.get(ADVANCED_ENDPOINT)
+    assert response.status_code == 403
+    assert response.json()["detail"] == "analytics_advanced_not_entitled"
+
+
+async def test_advanced_entitlement_fetch_failure_fails_closed_503(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    async def _fake_none(tenant_id, redis=None):
+        return None
+
+    monkeypatch.setattr(analytics_api, "get_entitlements", _fake_none)
+    response = await client.get(ADVANCED_ENDPOINT)
+    assert response.status_code == 503
+
+
+async def test_advanced_entitled_computes_breakdowns(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        analytics_api,
+        "get_entitlements",
+        _entitled_fake(addons={**_ALL_ADDONS_OFF, "analytics_bi_advanced": True}),
+    )
+    prof = str(uuid4())
+    await _seed_event_full(
+        db, tenant, appointment_type="Primeira consulta", professional_id=prof,
+        source="agent", days_ago=1,
+    )
+    await _seed_event_full(
+        db, tenant, appointment_type="Primeira consulta", professional_id=prof,
+        source="flow", days_ago=40,
+    )
+    await _seed_event_full(
+        db, tenant, appointment_type="Retorno", professional_id=None,
+        source="agent", days_ago=100,
+    )
+
+    response = await client.get(ADVANCED_ENDPOINT)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["bookings_total"] == 3
+    assert body["bookings_last_30d"] == 1  # only the 1-day-old
+    assert body["bookings_last_90d"] == 2  # the 100-day-old is excluded
+    assert body["by_type"] == {"Primeira consulta": 2, "Retorno": 1}
+    assert body["by_professional"] == {prof: 2, "unassigned": 1}
+    assert body["by_source"] == {"agent": 2, "flow": 1}
+
+    months = [point["month"] for point in body["monthly"]]
+    assert len(months) == 12
+    assert months == sorted(months)  # chronological, oldest first
+    assert len(set(months)) == 12  # dense + unique
+    assert sum(point["count"] for point in body["monthly"]) == 3  # all within 12 months
+
+
+async def test_advanced_scoped_to_tenant(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        analytics_api,
+        "get_entitlements",
+        _entitled_fake(addons={**_ALL_ADDONS_OFF, "analytics_bi_advanced": True}),
+    )
+    other_tenant = Tenant(id=uuid4(), clinic_name="Other", phone_number_id=str(uuid4())[:12])
+    async with db() as session:
+        session.add(other_tenant)
+        await session.commit()
+    await _seed_event_full(
+        db, other_tenant, appointment_type="Should not count",
+        professional_id=None, source="agent",
+    )
+
+    response = await client.get(ADVANCED_ENDPOINT)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["bookings_total"] == 0
+    assert body["by_type"] == {}
+    assert body["by_professional"] == {}
+    assert body["by_source"] == {}

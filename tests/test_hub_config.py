@@ -98,6 +98,8 @@ async def test_get_config_includes_new_fields_with_defaults(client: AsyncClient)
     assert body["address"] is None
     assert body["insurances"] == []
     assert body["collect_insurance"] is False
+    assert body["post_consult_message"] is None
+    assert body["post_consult_knowledge"] is None
 
 
 # --------------------------------------------------------------------------
@@ -146,6 +148,60 @@ async def test_put_greeting_only_succeeds_while_disconnected(
 async def test_put_empty_body_is_a_no_op_success(client: AsyncClient) -> None:
     response = await client.put(CONFIG, json={})
     assert response.status_code == 200
+
+
+async def test_put_post_consult_fields_round_trip_while_disconnected(
+    client: AsyncClient, tenant
+) -> None:
+    """Both post-consult fields save and read back correctly on a tenant with
+    no phone_number_id and no Calendar connected - same disconnected-save
+    invariant as every other plain config field (contract v1 §10), no
+    entitlement check anywhere in sight."""
+    assert tenant.phone_number_id is None
+
+    response = await client.put(
+        CONFIG,
+        json={
+            "post_consult_message": "Como você está se sentindo após a consulta?",
+            "post_consult_knowledge": (
+                "Retorno em 7 dias. Resultados de exame saem em 48h pelo portal."
+            ),
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["post_consult_message"] == "Como você está se sentindo após a consulta?"
+    assert body["post_consult_knowledge"] == (
+        "Retorno em 7 dias. Resultados de exame saem em 48h pelo portal."
+    )
+
+    follow_up = await client.get(CONFIG)
+    follow_up_body = follow_up.json()
+    assert follow_up_body["post_consult_message"] == "Como você está se sentindo após a consulta?"
+    assert follow_up_body["post_consult_knowledge"] == (
+        "Retorno em 7 dias. Resultados de exame saem em 48h pelo portal."
+    )
+
+
+async def test_put_post_consult_message_only_leaves_knowledge_untouched(
+    client: AsyncClient,
+) -> None:
+    """Partial update (exclude_unset): saving only post_consult_message must
+    not clobber a previously-saved post_consult_knowledge."""
+    seed = await client.put(
+        CONFIG,
+        json={"post_consult_knowledge": "Levar exames anteriores no retorno."},
+    )
+    assert seed.status_code == 200
+
+    response = await client.put(
+        CONFIG,
+        json={"post_consult_message": "Esperamos que tenha corrido tudo bem!"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["post_consult_message"] == "Esperamos que tenha corrido tudo bem!"
+    assert body["post_consult_knowledge"] == "Levar exames anteriores no retorno."
 
 
 # --------------------------------------------------------------------------

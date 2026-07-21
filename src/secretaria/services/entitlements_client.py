@@ -11,7 +11,7 @@ Contract (brain-api, already implemented, do not change): GET
 {BRAIN_API_BASE_URL}/internal/tenants/{tenant_id}/entitlements, header
 X-Internal-Api-Key: <INTERNAL_API_KEY>. 200 response: {"tenant_id", "status",
 "active": bool, "secretaria_enabled": bool, "plan", "secretaria_tier":
-"ferro"|"bronze_1"|"bronze_2"|null, "addons": {<8 addon ids>: bool},
+"ferro"|"bronze_1"|"bronze_2"|null, "addons": {<9 addon ids>: bool},
 "limits": {<keys>: int}}. `addons` is a FULL keyset — plan-implied addons are
 already resolved to True by brain-api, we do not add fallback logic on top.
 
@@ -51,6 +51,8 @@ logger = get_logger(__name__)
 TIERS: tuple[str, ...] = ("ferro", "bronze_1", "bronze_2")
 
 # The fixed addon keyset brain-api resolves per tenant (see contract above).
+# MUST stay in sync with brain-api's catalog.ADDON_IDS — is_entitled() raises on any
+# key not listed here, so a gate on a missing key would crash instead of failing closed.
 ADDON_IDS: frozenset[str] = frozenset(
     {
         "reactivation_pack",
@@ -60,6 +62,7 @@ ADDON_IDS: frozenset[str] = frozenset(
         "ehr",
         "pix_whatsapp",
         "analytics_bi",
+        "analytics_bi_advanced",
         "human_backup_24_7",
     }
 )

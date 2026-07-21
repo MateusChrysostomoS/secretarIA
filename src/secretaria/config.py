@@ -101,6 +101,17 @@ class Settings(BaseSettings):
     # --- Handover (bot <-> human secretary) ---
     HANDOVER_TIMEOUT_MINUTES: int = 30
 
+    # --- Context-aware opening greeting (workers/tasks.py + services/patient_context.py) ---
+    # Hours ahead of now within which an upcoming appointment counts as "soon"
+    # (opening state HAS_UPCOMING_SOON vs HAS_UPCOMING).
+    UPCOMING_SOON_HOURS: int = 48
+    # Lookback hours behind now within which a non-cancelled past appointment
+    # counts as "just had a consult". Past rows older than this are IGNORED by
+    # the opening router: there is no auto-transition to attended/no_show (only
+    # the doctor sets status via the hub PATCH), so weeks-old rows stuck in
+    # SCHEDULED must never influence the greeting.
+    POST_CONSULT_WINDOW_HOURS: int = 48
+
     # --- Onboarding / multi-professional (cross-service contract v1) ---
     # workers/tasks.py:_resolve_tenant's MVP single-tenant scaffold (fall back
     # to META_PHONE_NUMBER_ID / auto-create a Tenant from env when no row
