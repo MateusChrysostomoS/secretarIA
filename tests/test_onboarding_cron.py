@@ -858,6 +858,56 @@ async def test_tally_null_professional_attributed_to_sole_active_professional(
     assert usage_calls[0]["event_id"] == f"bp:{tenant_id}:{prof_id}:{patient_id}:2026-07"
 
 
+async def test_tally_null_professional_fallback_does_not_double_emit(
+    db, monkeypatch: pytest.MonkeyPatch
+):
+    """One patient with TWO appointments this month: one directly attributed
+    to the tenant's sole active professional, one left NULL (which resolves
+    via the same sole-active-professional fallback to that SAME
+    professional). `pairs` sees two distinct SQL tuples - (prof_id,
+    patient_id) and (None, patient_id) - that collapse to the identical
+    event_id only after the fallback substitution. Without the `seen` guard
+    this would POST the same event_id twice in one sweep; with it, exactly
+    one event is emitted."""
+    tenant_id = uuid4()
+    tenant = await _make_tenant(db, tenant_id, timezone="UTC")
+    prof_id, patient_id = await _seed_professional_and_patient(db, tenant_id)
+    async with db() as session:
+        session.add(
+            Appointment(
+                id=uuid4(),
+                tenant_id=tenant_id,
+                patient_id=patient_id,
+                professional_id=prof_id,
+                google_event_id="direct",
+                start_at=datetime(2026, 7, 10, 9, 0, tzinfo=UTC),
+                end_at=datetime(2026, 7, 10, 9, 30, tzinfo=UTC),
+                status=AppointmentStatus.SCHEDULED,
+            )
+        )
+        session.add(
+            Appointment(
+                id=uuid4(),
+                tenant_id=tenant_id,
+                patient_id=patient_id,
+                professional_id=None,
+                google_event_id="null_attributed",
+                start_at=datetime(2026, 7, 12, 9, 0, tzinfo=UTC),
+                end_at=datetime(2026, 7, 12, 9, 30, tzinfo=UTC),
+                status=AppointmentStatus.SCHEDULED,
+            )
+        )
+        await session.commit()
+
+    usage_calls = _capture_usage(monkeypatch)
+    async with db() as session:
+        counts = await onboarding_cron._tally_tenant_month(session, tenant, FIXED_NOW)
+
+    assert counts["emitted"] == 1
+    assert len(usage_calls) == 1
+    assert usage_calls[0]["event_id"] == f"bp:{tenant_id}:{prof_id}:{patient_id}:2026-07"
+
+
 async def test_tally_null_professional_skipped_when_multiple_active_professionals(
     db, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1219,3 +1269,85 @@ async def test_metering_one_bad_tenant_does_not_abort_the_sweep(
     assert len(usage_calls) == 2
     assert all(c["tenant_id"] == str(good_id) for c in usage_calls)
     assert {c["feature"] for c in usage_calls} == {"billable_patients", "active_professionals"}
+
+
+# --------------------------------------------------------------------------
+# run_patient_usage_metering — the two tallies fail in independent domains
+# --------------------------------------------------------------------------
+
+
+async def _seed_active_tenant_with_appointment(db, tenant_id: UUID) -> tuple[UUID, UUID]:
+    """An active-entitlement-ready tenant with one active professional, one
+    patient, and one billable appointment - everything both tallies need."""
+    await _make_tenant(db, tenant_id, timezone="UTC")
+    prof_id, patient_id = await _seed_professional_and_patient(db, tenant_id)
+    async with db() as session:
+        session.add(
+            Appointment(
+                id=uuid4(),
+                tenant_id=tenant_id,
+                patient_id=patient_id,
+                professional_id=prof_id,
+                google_event_id="e1",
+                start_at=datetime.now(UTC),
+                end_at=datetime.now(UTC),
+                status=AppointmentStatus.SCHEDULED,
+            )
+        )
+        await session.commit()
+    return prof_id, patient_id
+
+
+async def test_sweep_professionals_tally_still_runs_when_patient_tally_raises(
+    db, monkeypatch: pytest.MonkeyPatch
+):
+    """The two tallies fail in independent domains: a raising
+    _tally_tenant_month must not suppress _tally_active_professionals_month
+    for the same tenant (each has its own inner try/except now)."""
+    tenant_id = uuid4()
+    await _seed_active_tenant_with_appointment(db, tenant_id)
+
+    usage_calls = _capture_usage(monkeypatch)
+
+    async def _active(tenant_id_arg, redis):
+        return _summary(active=True)
+
+    monkeypatch.setattr(onboarding_cron, "get_entitlements", _active)
+
+    async def _boom(session, tenant, now_local):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(onboarding_cron, "_tally_tenant_month", _boom)
+
+    await onboarding_cron.run_patient_usage_metering({"redis": None})  # must not raise
+
+    assert len(usage_calls) == 1
+    assert usage_calls[0]["feature"] == "active_professionals"
+    assert usage_calls[0]["tenant_id"] == str(tenant_id)
+
+
+async def test_sweep_patient_tally_still_runs_when_professionals_tally_raises(
+    db, monkeypatch: pytest.MonkeyPatch
+):
+    """And the reverse: a raising _tally_active_professionals_month must not
+    suppress _tally_tenant_month for the same tenant."""
+    tenant_id = uuid4()
+    await _seed_active_tenant_with_appointment(db, tenant_id)
+
+    usage_calls = _capture_usage(monkeypatch)
+
+    async def _active(tenant_id_arg, redis):
+        return _summary(active=True)
+
+    monkeypatch.setattr(onboarding_cron, "get_entitlements", _active)
+
+    async def _boom(session, tenant, month_key):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(onboarding_cron, "_tally_active_professionals_month", _boom)
+
+    await onboarding_cron.run_patient_usage_metering({"redis": None})  # must not raise
+
+    assert len(usage_calls) == 1
+    assert usage_calls[0]["feature"] == "billable_patients"
+    assert usage_calls[0]["tenant_id"] == str(tenant_id)

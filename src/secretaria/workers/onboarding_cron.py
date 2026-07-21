@@ -311,6 +311,14 @@ async def _tally_tenant_month(session, tenant: Tenant, now_local: datetime) -> C
     the query below — AppointmentStatus is exactly SCHEDULED/CANCELLED/
     RESCHEDULED/CONFIRMED/ATTENDED/NO_SHOW, so "no filter" already means
     "every status, cancelled included," with nothing left to enumerate.
+
+    A local `seen` set guards against double-POSTing the same event_id
+    within one call: the NULL-professional fallback can remap a (None,
+    patient_id) row onto the SAME professional_id as another row in `pairs`
+    that already named it directly — two distinct SQL tuples that collapse
+    to one (professional_id, patient_id) pair, and so to one event_id, only
+    after the fallback substitution. Harmless server-side (idempotent on
+    event_id) but wasteful, and would otherwise double-count "emitted".
     """
     counts: Counter = Counter()
     month_start_utc, month_end_utc, month_key = _month_bounds_utc(now_local)
@@ -348,6 +356,7 @@ async def _tally_tenant_month(session, tenant: Tenant, now_local: datetime) -> C
         if len(active_ids) == 1:
             fallback_professional_id = active_ids[0]
 
+    seen: set[str] = set()
     for professional_id, patient_id in pairs:
         if professional_id is None:
             if fallback_professional_id is None:
@@ -355,6 +364,9 @@ async def _tally_tenant_month(session, tenant: Tenant, now_local: datetime) -> C
                 continue
             professional_id = fallback_professional_id
         event_id = f"bp:{tenant.id}:{professional_id}:{patient_id}:{month_key}"
+        if event_id in seen:
+            continue
+        seen.add(event_id)
         recorded = await emit_usage_event(
             tenant_id=str(tenant.id),
             feature="billable_patients",
@@ -374,11 +386,18 @@ async def _tally_active_professionals_month(session, tenant: Tenant, month_key: 
     of `bp:`), same brain-api endpoint. This is about the professional
     EXISTING and being active — NOT about whether they saw any patients this
     month, so there is no join against Appointment here, unlike the patient
-    tally. No proration: active on any day of the month bills the full
-    month, the same philosophy the patient tally already follows. Counter key
-    ("professionals_emitted") is deliberately distinct from the patient
-    tally's "emitted" so the sweep log's merged totals (`usage_metering_swept`)
-    stay distinguishable.
+    tally. No proration: active at ANY daily sweep during the month bills
+    the full month, the same philosophy the patient tally already follows.
+
+    This is a POINT-IN-TIME snapshot taken once per daily 03:30 UTC run, not
+    a continuous observation of the row's history — a professional created
+    and deactivated again between two consecutive sweeps is never caught
+    active by either one, and so is never billed for that month. That
+    sub-day blind spot is accepted as-is; nothing here guarantees billing
+    for a professional that was active for only part of a day no sweep
+    landed on. Counter key ("professionals_emitted") is deliberately
+    distinct from the patient tally's "emitted" so the sweep log's merged
+    totals (`usage_metering_swept`) stay distinguishable.
     """
     counts: Counter = Counter()
     active_ids = (
@@ -415,11 +434,15 @@ async def run_patient_usage_metering(ctx: dict) -> None:
     get_entitlements -> EntitlementSummary.active), memoized once per tenant.
 
     Two tallies share this one sweep — same entitlement gate, same
-    tenant-local calendar month, same per-tenant try/except: billable
-    patients (`_tally_tenant_month`) and active professionals
-    (`_tally_active_professionals_month`). The latter deliberately has no
-    cron entry of its own; it piggybacks this job rather than registering a
-    second one.
+    tenant-local calendar month: billable patients (`_tally_tenant_month`)
+    and active professionals (`_tally_active_professionals_month`). The
+    latter deliberately has no cron entry of its own; it piggybacks this job
+    rather than registering a second one. The OUTER per-tenant try/except
+    below covers only get_entitlements + timezone resolution (a failure
+    there means neither tally can run at all). Each tally then gets its OWN
+    inner try/except, so one tally's failure (e.g. one poisoned Appointment
+    row) can never silently suppress the other for that same tenant — the
+    tenant still counts as `tenants_processed` either way.
     """
     redis = ctx.get("redis")
     totals: Counter = Counter()
@@ -433,9 +456,28 @@ async def run_patient_usage_metering(ctx: dict) -> None:
                     continue
 
                 now_local = datetime.now(UTC).astimezone(_tenant_zoneinfo(tenant))
-                totals.update(await _tally_tenant_month(session, tenant, now_local))
-                month_key = now_local.strftime("%Y-%m")
-                totals.update(await _tally_active_professionals_month(session, tenant, month_key))
+
+                try:
+                    totals.update(await _tally_tenant_month(session, tenant, now_local))
+                except Exception as exc:
+                    logger.warning(
+                        "usage_metering_patient_tally_failed",
+                        error=str(exc),
+                        tenant_id=str(tenant.id),
+                    )
+
+                try:
+                    month_key = now_local.strftime("%Y-%m")
+                    totals.update(
+                        await _tally_active_professionals_month(session, tenant, month_key)
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "usage_metering_professionals_tally_failed",
+                        error=str(exc),
+                        tenant_id=str(tenant.id),
+                    )
+
                 tenants_processed += 1
             except Exception as exc:
                 logger.warning(
