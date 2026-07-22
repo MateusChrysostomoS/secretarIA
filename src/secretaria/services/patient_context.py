@@ -91,6 +91,10 @@ async def load_upcoming_appointments(
             "appointment_type": appt.appointment_type,
             "start_at": appt.start_at,
             "end_at": appt.end_at,
+            # Which professional owns this booking (None = tenant-level) - lets
+            # the manage flow act on the owning calendar instead of a stale
+            # booking-flow selection (workers/tasks.py::_manage_owner_calendar_target).
+            "professional_id": str(appt.professional_id) if appt.professional_id else None,
         }
         for appt in rows
     ]

@@ -272,3 +272,100 @@ async def test_put_address_partial_fields_allowed(client: AsyncClient) -> None:
     response = await client.put(CONFIG, json={"address": {"city": "Recife"}})
     assert response.status_code == 200
     assert response.json()["address"] == {"city": "Recife"}
+
+
+# --------------------------------------------------------------------------
+# appointment_types[].requirements — pre-consult orientations
+# --------------------------------------------------------------------------
+
+
+async def test_put_appointment_type_requirements_round_trip(client: AsyncClient) -> None:
+    response = await client.put(
+        CONFIG,
+        json={
+            "appointment_types": [
+                {
+                    "name": "Consulta",
+                    "duration_min": 30,
+                    "is_active": True,
+                    "requirements": ["Jejum de 8 horas", "Trazer exames anteriores"],
+                }
+            ]
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["appointment_types"][0]["requirements"] == [
+        "Jejum de 8 horas",
+        "Trazer exames anteriores",
+    ]
+
+    follow_up = await client.get(CONFIG)
+    assert follow_up.json()["appointment_types"][0]["requirements"] == [
+        "Jejum de 8 horas",
+        "Trazer exames anteriores",
+    ]
+
+
+async def test_put_appointment_type_requirements_trims_and_drops_blank_entries(
+    client: AsyncClient,
+) -> None:
+    response = await client.put(
+        CONFIG,
+        json={
+            "appointment_types": [
+                {
+                    "name": "Consulta",
+                    "duration_min": 30,
+                    "requirements": ["  Jejum de 8 horas  ", "", "   "],
+                }
+            ]
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["appointment_types"][0]["requirements"] == ["Jejum de 8 horas"]
+
+
+async def test_put_appointment_type_requirements_over_limit_is_422(client: AsyncClient) -> None:
+    response = await client.put(
+        CONFIG,
+        json={
+            "appointment_types": [
+                {
+                    "name": "Consulta",
+                    "duration_min": 30,
+                    "requirements": [f"Item {i}" for i in range(21)],
+                }
+            ]
+        },
+    )
+    assert response.status_code == 422
+
+
+async def test_put_appointment_type_requirement_too_long_is_422(client: AsyncClient) -> None:
+    response = await client.put(
+        CONFIG,
+        json={
+            "appointment_types": [
+                {"name": "Consulta", "duration_min": 30, "requirements": ["x" * 301]}
+            ]
+        },
+    )
+    assert response.status_code == 422
+
+
+async def test_get_config_appointment_type_without_requirements_key_still_reads(
+    client: AsyncClient, db, tenant
+) -> None:
+    """Old rows stored before this field existed have no `requirements` key at
+    all - GET must not choke on that (raw JSON passthrough)."""
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.appointment_types = [{"name": "Consulta", "duration_min": 30, "is_active": True}]
+        await session.commit()
+
+    response = await client.get(CONFIG)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["appointment_types"][0]["name"] == "Consulta"
+    assert "requirements" not in body["appointment_types"][0]

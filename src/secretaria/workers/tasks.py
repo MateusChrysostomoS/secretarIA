@@ -35,10 +35,12 @@ from secretaria.ai.formatter import (
 )
 from secretaria.ai.graph import (
     CALENDAR_UNAVAILABLE_SENTINEL,
+    MANAGE_APPOINTMENT_SENTINEL_PREFIX,
     SELECT_PROFESSIONAL_SENTINEL_PREFIX,
     SHOW_MAIN_MENU_SENTINEL,
     run_agent,
 )
+from secretaria.ai.tools import manage_existing_appointment
 from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
@@ -71,10 +73,14 @@ from secretaria.services.calendar import CalendarService
 from secretaria.services.email import send_calendar_alert, send_transactional_email_message
 from secretaria.services.entitlements_client import get_entitlements
 from secretaria.services.flow_router import (
+    LABEL_CANCEL_APPT,
+    LABEL_OTHER,
+    LABEL_RESCHEDULE,
     FlowRouterResult,
     MenuBubble,
     _enter_professional_services,
     classify_yes_no,
+    enter_manage_action,
     flows_enabled,
     manage_label,
     menu_buttons_for,
@@ -94,9 +100,12 @@ from secretaria.services.patient_context import (
     resolve_patient_opening_state,
 )
 from secretaria.services.tenant_config import (
+    RuntimeAppointmentType,
+    active_appointment_types,
     get_waba_token,
     list_active_professionals,
     load_tenant_config,
+    professional_appointment_types,
     resolve_professional_calendar,
     set_waba_token,
 )
@@ -117,16 +126,30 @@ CALENDAR_UNAVAILABLE_MESSAGE = (
 # media, or a low-confidence/empty STT result) - see transcribe_audio_message.
 AUDIO_UNINTELLIGIBLE_MESSAGE = "Não consegui entender o áudio, pode repetir?"
 
-# Context-aware opening (MVP copy — final per-state wording lands in PROMPT 2).
-# Appended by _adapt_greeting_to_state to the tenant's verbatim greeting; the
-# RETURNING_NO_APPOINTMENT / NEW states keep the greeting untouched.
-UPCOMING_APPOINTMENT_GREETING_LINE = (
-    "Vi aqui que você já tem uma consulta marcada para {when}. "
-    "Se precisar remarcar ou cancelar, é só me falar."
+# Context-aware opening. Appended by _adapt_greeting_to_state to the tenant's
+# verbatim greeting; RETURNING_NO_APPOINTMENT / NEW states keep the greeting
+# untouched (the returning_greeting_message already covers that tone).
+# HAS_UPCOMING(_SOON) (PROMPT 2 final copy): the nearest appointment's detail
+# (when/doctor/service/price/description/pre-consult orientations), a brief
+# line per OTHER future appointment, and a closing action hint - see
+# _adapt_greeting_has_upcoming / _compose_upcoming_greeting_body below.
+GREETING_REQUIREMENTS_HEADER = "Orientações de pré-consulta:"
+GREETING_BRIEF_HEADER = "Suas próximas consultas:"
+GREETING_ACTION_HINT = (
+    "Se quiser, use os botões abaixo para remarcar ou cancelar — ou toque em "
+    '"Outro" para qualquer outra coisa.'
 )
+# WhatsApp's interactive body caps at 1024 chars (schemas.config.
+# MAX_GREETING_WITH_BUTTONS_CHARS); this leaves margin below that once the
+# tenant's own greeting is prepended to the blocks composed here.
+GREETING_DETAIL_MAX_CHARS = 1000
+# "The first few" lines/bullets kept when trimming for size - see
+# _compose_upcoming_greeting_body.
+GREETING_BRIEF_KEEP = 3
+GREETING_REQUIREMENTS_KEEP = 3
 # Neutral on purpose: a past appointment inside the window may still sit in
 # SCHEDULED/CONFIRMED (nobody marked the outcome), so this must NOT assert
-# the consult happened.
+# the consult happened. Still MVP copy - PROMPT 2 only finalized HAS_UPCOMING.
 JUST_HAD_CONSULT_NEUTRAL_LINE = (
     "Vi que você teve uma consulta recentemente, posso ajudar em algo?"
 )
@@ -516,6 +539,7 @@ async def _persist_inbound_message(
                         conversation.flow_selected_slot = None
                         conversation.flow_selected_professional_id = None
                         conversation.flow_selected_insurance = None
+                        conversation.flow_managing_appointment_id = None
                         return _ReplyContext(
                             conversation_id=conversation.id,
                             patient_wa_id=wa_id,
@@ -546,12 +570,30 @@ async def _persist_inbound_message(
                 # message only. patient_id is always resolved here today (the
                 # Patient row is created/flushed above); the resolver's None
                 # guard is the safe degrade for any future call site.
+                # `opening_context` also feeds `_greeting_buttons_for` below
+                # (HAS_UPCOMING(_SOON) swaps the manage-action trio in for the
+                # menu) - it stays None when there is no greeting to adapt.
+                opening_context = None
                 if greeting_override is not None:
                     opening_context = await resolve_patient_opening_state(
                         session, tenant.id, patient.id
                     )
+                    # HAS_UPCOMING(_SOON) needs a bit more than the resolver's
+                    # own indexed reads: the referenced professionals' display
+                    # names and the nearest appointment's catalog entry (for
+                    # price/description/orientações). Loaded here, in the same
+                    # open session, so `_adapt_greeting_to_state` itself stays
+                    # a pure composition function with no DB access of its own.
+                    upcoming_data = None
+                    if opening_context is not None and opening_context.state in (
+                        PatientOpeningState.HAS_UPCOMING_SOON,
+                        PatientOpeningState.HAS_UPCOMING,
+                    ):
+                        upcoming_data = await _load_upcoming_greeting_data(
+                            session, tenant, opening_context.future_appointments
+                        )
                     greeting_override = _adapt_greeting_to_state(
-                        greeting_override, opening_context, tenant
+                        greeting_override, opening_context, tenant, upcoming_data
                     )
 
                 # Returning after a silence gap (and not already greeting on first
@@ -574,7 +616,7 @@ async def _persist_inbound_message(
                         return offer
 
                 greeting_buttons = _greeting_buttons_for(
-                    tenant, greeting_override, multi_professional
+                    tenant, greeting_override, multi_professional, opening_context
                 )
 
                 return _ReplyContext(
@@ -611,7 +653,10 @@ def _select_greeting(
 
 
 def _greeting_buttons_for(
-    tenant: Tenant, greeting_override: str | None, multi_professional: bool = False
+    tenant: Tenant,
+    greeting_override: str | None,
+    multi_professional: bool = False,
+    opening_context: PatientOpeningContext | None = None,
 ) -> list[str]:
     """Buttons to attach to a greeting.
 
@@ -620,9 +665,28 @@ def _greeting_buttons_for(
     with 2+ active professionals — which the IDLE router then matches).
     Otherwise the tenant's configured quick-reply labels are used. Empty
     without a greeting.
+
+    WhatsApp caps interactive messages at 3 buttons. When the patient has a
+    live upcoming appointment (HAS_UPCOMING/_SOON, from `opening_context`),
+    the two most useful actions - Remarcar/Cancelar - win the two
+    deterministic slots in place of the menu, with "Outro" filling the third
+    for anything else; those labels are already live `route()` entries
+    (services/flow_router.py), so the tap needs no extra wiring here. This
+    only replaces the menu when flows are enabled (the greeting-as-menu
+    contract already in effect) AND there is a resolved future appointment to
+    act on - every other case (other states, flows disabled, no resolved
+    context) keeps today's behaviour unchanged.
     """
     if greeting_override is None:
         return []
+    if (
+        flows_enabled(tenant)
+        and opening_context is not None
+        and opening_context.state
+        in (PatientOpeningState.HAS_UPCOMING_SOON, PatientOpeningState.HAS_UPCOMING)
+        and opening_context.future_appointments
+    ):
+        return [LABEL_RESCHEDULE, LABEL_CANCEL_APPT, LABEL_OTHER]
     if flows_enabled(tenant):
         return menu_buttons_for(tenant, multi_professional)
     return [str(b) for b in (tenant.greeting_buttons or [])]
@@ -634,16 +698,179 @@ def _format_appointment_when(start_at: datetime, tz_name: str | None) -> str:
     return _as_utc(start_at).astimezone(tz).strftime("%d/%m às %H:%M")
 
 
-def _adapt_greeting_to_state(
-    greeting: str, context: PatientOpeningContext | None, tenant: Tenant
+@dataclass(frozen=True)
+class _UpcomingGreetingData:
+    """Plain data `_adapt_greeting_to_state` needs for HAS_UPCOMING(_SOON).
+
+    Loaded by `_load_upcoming_greeting_data` inside the open ingest session
+    (`_persist_inbound_message`) and passed in so the composition functions
+    below stay DB-free and directly unit-testable. Every other opening state
+    ignores this argument entirely.
+    """
+
+    # professional_id (str) -> stored display name (Professional.name,
+    # verbatim - no honorific logic), for every distinct professional
+    # referenced across `future_appointments`. Includes INACTIVE
+    # professionals: an appointment with a deactivated doctor still shows
+    # their name.
+    professional_names: dict[str, str] = field(default_factory=dict)
+    # Resolved catalog dict (name/price/description/long_description/
+    # requirements - see services/tenant_config.py) for the NEAREST
+    # appointment's service, matched by name (casefold, stripped) against the
+    # owning professional's own catalog, or the tenant's when the appointment
+    # has no owner. None when no match was found (stale/renamed service) -
+    # the detail block then degrades to date/doctor/service-name only.
+    nearest_service: dict | None = None
+
+
+def _appointment_doctor_name(
+    appointment: dict, professional_names: dict[str, str]
+) -> str | None:
+    """The stored professional name for one `future_appointments` dict, or None.
+
+    Verbatim from `Professional.name` - no "Dr(a)." honorific games, the
+    clinic's own stored name is used as-is. None when the appointment has no
+    `professional_id`, or (should not happen - see `_load_upcoming_greeting_data`)
+    the id wasn't resolved.
+    """
+    professional_id = appointment.get("professional_id")
+    return professional_names.get(professional_id) if professional_id else None
+
+
+def _compose_upcoming_greeting_body(
+    greeting: str,
+    intro: str,
+    description: str | None,
+    requirements: list[str],
+    brief_lines: list[str],
+    *,
+    max_chars: int = GREETING_DETAIL_MAX_CHARS,
 ) -> str:
-    """Append the state-aware opening line to the verbatim greeting (MVP).
+    """Pure compose + size-trim for the HAS_UPCOMING(_SOON) greeting body.
+
+    Assembles, in order: `greeting`, `intro` (the nearest appointment's
+    always-shown when/doctor/service/price lines, already rendered by the
+    caller), the optional `description` paragraph, the "Orientações de
+    pré-consulta" bullets (one per `requirements` item), the "Suas próximas
+    consultas" bullets (one per `brief_lines` entry - each already rendered
+    as "when — service[ — doctor]": date+service+doctor ONLY, no
+    price/description), and the closing action hint.
+
+    Pure string/list manipulation - no DB, no ORM types - so it is unit-tested
+    directly with plain args. Under-budget input is returned unmodified. Over
+    `max_chars`, drops content in order until it fits: (1) `description`,
+    (2) excess `brief_lines` (kept to the first `GREETING_BRIEF_KEEP`, with an
+    "… e mais N consultas" tail), (3) excess `requirements` bullets (kept to
+    the first `GREETING_REQUIREMENTS_KEEP`, with a "…" tail). If still over
+    budget after all three, the maximally-trimmed body is returned as-is
+    (best effort - the tenant's own greeting text is never touched).
+    """
+
+    def _assemble(
+        *, include_description: bool, brief_cap: int | None, requirements_cap: int | None
+    ) -> str:
+        parts = [greeting, intro]
+        if include_description and description:
+            parts.append(description)
+        if requirements:
+            shown = requirements if requirements_cap is None else requirements[:requirements_cap]
+            bullets = "\n".join(f"• {item}" for item in shown)
+            if requirements_cap is not None and len(requirements) > requirements_cap:
+                bullets += "\n…"
+            parts.append(f"{GREETING_REQUIREMENTS_HEADER}\n{bullets}")
+        if brief_lines:
+            shown = brief_lines if brief_cap is None else brief_lines[:brief_cap]
+            bullets = "\n".join(f"• {line}" for line in shown)
+            if brief_cap is not None and len(brief_lines) > brief_cap:
+                extra = len(brief_lines) - brief_cap
+                tail = "consulta" if extra == 1 else "consultas"
+                bullets += f"\n… e mais {extra} {tail}"
+            parts.append(f"{GREETING_BRIEF_HEADER}\n{bullets}")
+        parts.append(GREETING_ACTION_HINT)
+        return "\n\n".join(parts)
+
+    body = _assemble(include_description=True, brief_cap=None, requirements_cap=None)
+    if len(body) <= max_chars:
+        return body
+
+    body = _assemble(include_description=False, brief_cap=None, requirements_cap=None)
+    if len(body) <= max_chars:
+        return body
+
+    body = _assemble(
+        include_description=False, brief_cap=GREETING_BRIEF_KEEP, requirements_cap=None
+    )
+    if len(body) <= max_chars:
+        return body
+
+    return _assemble(
+        include_description=False,
+        brief_cap=GREETING_BRIEF_KEEP,
+        requirements_cap=GREETING_REQUIREMENTS_KEEP,
+    )
+
+
+def _adapt_greeting_has_upcoming(
+    greeting: str,
+    future_appointments: list[dict],
+    tenant: Tenant,
+    upcoming_data: _UpcomingGreetingData,
+) -> str:
+    """Render the HAS_UPCOMING(_SOON) greeting body (still a pure function).
+
+    `future_appointments` is `PatientOpeningContext.future_appointments`
+    (nearest first, guaranteed non-empty by the resolver for this state).
+    `upcoming_data` carries the plain data the call site resolved inside the
+    open DB session - see `_load_upcoming_greeting_data`.
+    """
+    nearest = future_appointments[0]
+    when = _format_appointment_when(nearest["start_at"], tenant.timezone)
+    doctor = _appointment_doctor_name(nearest, upcoming_data.professional_names)
+    service_name = nearest.get("appointment_type") or "Consulta"
+
+    header_line = f"Vi aqui que você já tem uma consulta marcada para {when}"
+    if doctor:
+        header_line += f", com {doctor}"
+    header_line += "."
+
+    service = upcoming_data.nearest_service
+    price = service.get("price") if service else None
+    service_line = f"{service_name} — {price}" if price else service_name
+    description = (
+        (service.get("long_description") or service.get("description")) if service else None
+    )
+    requirements = list(service.get("requirements") or []) if service else []
+
+    brief_lines = []
+    for appt in future_appointments[1:]:
+        appt_when = _format_appointment_when(appt["start_at"], tenant.timezone)
+        line = f"{appt_when} — {appt.get('appointment_type') or 'Consulta'}"
+        appt_doctor = _appointment_doctor_name(appt, upcoming_data.professional_names)
+        if appt_doctor:
+            line += f" — {appt_doctor}"
+        brief_lines.append(line)
+
+    intro = f"{header_line}\n{service_line}"
+    return _compose_upcoming_greeting_body(greeting, intro, description, requirements, brief_lines)
+
+
+def _adapt_greeting_to_state(
+    greeting: str,
+    context: PatientOpeningContext | None,
+    tenant: Tenant,
+    upcoming_data: _UpcomingGreetingData | None = None,
+) -> str:
+    """Append the state-aware opening content to the verbatim greeting.
 
     A None context (patient not resolved) and the RETURNING_NO_APPOINTMENT/NEW
-    states return the greeting unchanged — the safe degrade. JUST_HAD_CONSULT
-    only presupposes attendance when the doctor explicitly marked ATTENDED; a
-    past row still in SCHEDULED/CONFIRMED has an unknown outcome and gets the
-    neutral line.
+    states return the greeting unchanged — the safe degrade (the returning
+    greeting message already covers the "good to see you again" tone).
+    JUST_HAD_CONSULT only presupposes attendance when the doctor explicitly
+    marked ATTENDED; a past row still in SCHEDULED/CONFIRMED has an unknown
+    outcome and gets the neutral line. HAS_UPCOMING(_SOON) gets the full
+    detail/brief blocks (`_adapt_greeting_has_upcoming`); `upcoming_data`
+    defaults to empty so callers that don't resolve it (or don't need to,
+    for other states) still degrade gracefully rather than crash.
     """
     if context is None:
         return greeting
@@ -651,10 +878,12 @@ def _adapt_greeting_to_state(
         PatientOpeningState.HAS_UPCOMING_SOON,
         PatientOpeningState.HAS_UPCOMING,
     ):
-        when = _format_appointment_when(
-            context.future_appointments[0]["start_at"], tenant.timezone
+        return _adapt_greeting_has_upcoming(
+            greeting,
+            context.future_appointments,
+            tenant,
+            upcoming_data or _UpcomingGreetingData(),
         )
-        return f"{greeting}\n\n{UPCOMING_APPOINTMENT_GREETING_LINE.format(when=when)}"
     if context.state is PatientOpeningState.JUST_HAD_CONSULT:
         line = (
             JUST_HAD_CONSULT_ATTENDED_LINE
@@ -663,6 +892,56 @@ def _adapt_greeting_to_state(
         )
         return f"{greeting}\n\n{line}"
     return greeting
+
+
+async def _load_upcoming_greeting_data(
+    session: AsyncSession, tenant: Tenant, future_appointments: list[dict]
+) -> _UpcomingGreetingData:
+    """DB-side loads for the HAS_UPCOMING(_SOON) greeting detail (impure).
+
+    Called from `_persist_inbound_message`'s open ingest session, right after
+    `resolve_patient_opening_state`. Resolves (a) the display name for every
+    professional referenced across `future_appointments` (active or not - a
+    deactivated doctor's name must still show on an existing booking), and
+    (b) the catalog service dict for the NEAREST appointment (for
+    price/description/requirements enrichment). Returns plain data only (see
+    `_UpcomingGreetingData`) so `_adapt_greeting_to_state` and its helpers
+    stay DB-free. No appointment content is logged here - state/count
+    logging is already done by `resolve_patient_opening_state`.
+    """
+    professional_ids = {
+        pid for appt in future_appointments if (pid := appt.get("professional_id"))
+    }
+    professionals_by_id: dict[str, Professional] = {}
+    if professional_ids:
+        rows = await session.scalars(
+            select(Professional).where(
+                Professional.id.in_([UUID(pid) for pid in professional_ids])
+            )
+        )
+        professionals_by_id = {str(row.id): row for row in rows}
+
+    nearest = future_appointments[0]
+    owner_id = nearest.get("professional_id")
+    owner = professionals_by_id.get(owner_id) if owner_id else None
+    catalog = (
+        professional_appointment_types(owner, tenant)
+        if owner is not None
+        else active_appointment_types(tenant)
+    )
+    nearest_service = None
+    raw_type = nearest.get("appointment_type")
+    if raw_type:
+        target_name = raw_type.strip().casefold()
+        nearest_service = next(
+            (svc for svc in catalog if str(svc.get("name", "")).strip().casefold() == target_name),
+            None,
+        )
+
+    return _UpcomingGreetingData(
+        professional_names={pid: row.name for pid, row in professionals_by_id.items()},
+        nearest_service=nearest_service,
+    )
 
 
 async def _count_active_professionals(session: AsyncSession, tenant_id) -> int:
@@ -876,9 +1155,14 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     # Multi-doctor context: the active-professionals snapshot (the router's
     # roster AND the run_agent prompt-context source), the selected
     # professional's plain snapshot, and their resolved calendar.
+    professional_rows: list[Professional] | None = None
     flow_professionals: list[SimpleNamespace] | None = None
     selected_professional: SimpleNamespace | None = None
     flow_calendar: CalendarService | None = None
+    # The manage (cancel/reschedule) sub-flow's owning calendar for THIS turn
+    # (see `_manage_owner_calendar_target`) - a professional's own, or the
+    # tenant's, resolved independently of any stale booking-flow selection.
+    manage_calendar: CalendarService | None = None
     patient_name = None
     patient_wa = reply.patient_wa_id
     # Post-consult-knowledge injection gate (see
@@ -977,6 +1261,9 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                                 conversation.flow_selected_professional_id
                             ),
                             flow_selected_insurance=conversation.flow_selected_insurance,
+                            flow_managing_appointment_id=(
+                                conversation.flow_managing_appointment_id
+                            ),
                             patient_id=conversation.patient_id,
                         ),
                         SimpleNamespace(
@@ -988,15 +1275,56 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                             insurances=tenant.insurances,
                         ),
                     )
-                    # Load the patient's future appointments only when the manage
-                    # (cancel/reschedule) flow is active or being opened, so the
-                    # router can list/resolve them without doing its own DB I/O.
-                    wants_manage = conversation.flow_state == FlowState.MANAGE_BOOKING or (
-                        _label_match_body(reply.inbound_body, manage_label(tenant))
+                    # Load the patient's future appointments whenever THIS turn
+                    # might need them - no longer only the manage (cancel/
+                    # reschedule) flow: the manage flow being active or being
+                    # opened (classic manage_label, or a direct "Remarcar"/
+                    # "Cancelar" tap - see enter_manage_action), a conversation
+                    # already in (or entering) full LLM mode via "Outro" (see
+                    # _should_inject_appointment_context /
+                    # _appointment_context_text below) - so the router, the
+                    # manage_existing_appointment tool hand-back, and the LLM
+                    # prompt can list/resolve them without any of them doing
+                    # their own DB I/O.
+                    wants_upcoming_appointments = (
+                        conversation.flow_state in (FlowState.MANAGE_BOOKING, FlowState.LLM)
+                        or _label_match_body(reply.inbound_body, manage_label(tenant))
+                        or _label_match_body(reply.inbound_body, LABEL_RESCHEDULE)
+                        or _label_match_body(reply.inbound_body, LABEL_CANCEL_APPT)
+                        or _label_match_body(reply.inbound_body, LABEL_OTHER)
                     )
-                    if wants_manage and conversation.patient_id is not None:
+                    if wants_upcoming_appointments and conversation.patient_id is not None:
                         upcoming_appointments = await load_upcoming_appointments(
                             session, tenant.id, conversation.patient_id
+                        )
+                    # Owning-professional calendar for THIS manage turn: cancel/
+                    # reschedule must act on the agenda that actually owns the
+                    # appointment, never a stale booking-flow selection - see
+                    # `_manage_owner_calendar_target`.
+                    manage_target = _manage_owner_calendar_target(
+                        conversation.flow_state,
+                        conversation.flow_managing_appointment_id,
+                        upcoming_appointments,
+                        professional_rows,
+                    )
+                    if isinstance(manage_target, Professional):
+                        try:
+                            manage_calendar = await resolve_professional_calendar(
+                                session, tenant, manage_target, tenant_config=tenant_config
+                            )
+                        except Exception as exc:
+                            # Degrades to the LLM (manage_calendar stays None) -
+                            # never blocks the reply. Count-only logging.
+                            logger.warning(
+                                "worker_manage_calendar_failed",
+                                error=str(exc),
+                                professional_id=str(manage_target.id),
+                            )
+                    elif manage_target == "tenant":
+                        manage_calendar = (
+                            CalendarService.from_tenant_config(tenant_config)
+                            if tenant_config
+                            else None
                         )
     except Exception as exc:
         logger.warning(
@@ -1091,6 +1419,7 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
             waba_token=waba_token,
             professionals=flow_professionals,
             flow_calendar=flow_calendar,
+            manage_calendar=manage_calendar,
         ):
             return
 
@@ -1099,11 +1428,31 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     # "Outro" tap) - one of the post-consult-knowledge qualifying conditions.
     delegated_to_llm = flow_snapshot is not None
 
+    # Appointment-context injection (Outro -> LLM handoff): a rendered
+    # "consultas marcadas" block for THIS turn's prompt, only when the gate
+    # qualifies - see _should_inject_appointment_context / _appointment_context_text.
+    appointment_context_text = None
+    if _should_inject_appointment_context(upcoming_appointments, flow_state, delegated_to_llm):
+        professional_names = {str(p.id): p.name for p in (flow_professionals or [])}
+        appointment_context_text = _appointment_context_text(
+            upcoming_appointments or [],
+            tenant_config.timezone if tenant_config is not None else None,
+            professional_names,
+            tenant_config.appointment_types if tenant_config is not None else [],
+        )
+
     reply_text = await run_agent(
         reply.inbound_body,
         context={"conversation_id": str(reply.conversation_id)},
         tenant_config=tenant_config,
-        extra_tools=agent_tools_for(summary),
+        # manage_existing_appointment is exposed only for flow-enabled tenants
+        # (its sentinel hand-back re-enters the deterministic manage flow,
+        # which does not exist otherwise) - see _handle_manage_appointment.
+        extra_tools=(
+            [*agent_tools_for(summary), manage_existing_appointment]
+            if (tenant is not None and flows_enabled(tenant))
+            else agent_tools_for(summary)
+        ),
         redis=redis,
         selected_professional=selected_professional,
         include_post_consult_knowledge=_should_inject_post_consult_knowledge(
@@ -1112,6 +1461,7 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
             flow_state,
             delegated_to_llm,
         ),
+        appointment_context=appointment_context_text,
     )
 
     # A tool failed because the calendar is unreachable: tell the patient and
@@ -1134,6 +1484,18 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
             reply_text,
             tenant,
             flow_snapshot,
+            flow_professionals,
+            patient_wa,
+            redis=redis,
+            waba_token=waba_token,
+        )
+        return
+    if reply_text.startswith(MANAGE_APPOINTMENT_SENTINEL_PREFIX):
+        action = reply_text[len(MANAGE_APPOINTMENT_SENTINEL_PREFIX) :]
+        await _handle_manage_appointment(
+            reply,
+            action,
+            tenant,
             flow_professionals,
             patient_wa,
             redis=redis,
@@ -1176,6 +1538,95 @@ def _should_inject_post_consult_knowledge(
     )
 
 
+def _should_inject_appointment_context(
+    future_appointments: list[dict] | None,
+    flow_state: FlowState | None,
+    delegated_to_llm: bool,
+) -> bool:
+    """Whether THIS turn's system prompt should carry the appointment context block.
+
+    Pure gate over already-resolved turn facts (see the orchestration in
+    `_send_bot_reply`) - does no I/O itself. Mirrors
+    `_should_inject_post_consult_knowledge`'s shape: an empty/None
+    `future_appointments` always loses (nothing to render regardless of state
+    - see `_appointment_context_text`). Otherwise the turn qualifies when the
+    conversation is already in full-LLM ("Outro") mode, or the deterministic
+    router just delegated THIS turn to the LLM.
+    """
+    if not future_appointments:
+        return False
+    return flow_state is FlowState.LLM or delegated_to_llm
+
+
+def _appointment_context_text(
+    future_appointments: list[dict],
+    tz_name: str | None,
+    professional_names: dict[str, str],
+    appointment_types: list[RuntimeAppointmentType],
+) -> str | None:
+    """Render the per-turn "consultas marcadas" block for the LLM prompt.
+
+    Pure formatting over already-resolved data (see
+    `_should_inject_appointment_context` for the gate and `_send_bot_reply`
+    for the orchestration) - no DB access, and no appointment content is ever
+    logged from here (only counts are logged elsewhere, e.g.
+    `resolve_patient_opening_state`). Returns None (never "") when
+    `future_appointments` is empty, so the caller can tell "nothing to
+    inject" apart from "injected an empty string" the same way
+    `ai/prompts.py::_format_post_consult_knowledge` etc. do with a falsy check.
+
+    `future_appointments` must be nearest-first (see
+    `patient_context.load_upcoming_appointments`). The NEAREST one (index 0)
+    gets the fuller "Próxima consulta" line (service, doctor when resolvable,
+    price when its service matches a catalog entry) plus an "Orientações"
+    line when that matched entry has `requirements`. Every OTHER appointment
+    gets one brief "when — service[ — doctor]" line, mirroring the greeting's
+    own brief-list rendering (`_adapt_greeting_has_upcoming`).
+
+    `professional_names` is id -> display name, expected to be built from the
+    ACTIVE-professionals roster (`flow_professionals` in `_send_bot_reply`):
+    an appointment whose owner is no longer active simply renders with no
+    doctor name (`_appointment_doctor_name` degrades to None on a miss).
+    `appointment_types` is `TenantRuntimeConfig.appointment_types`, matched
+    against the nearest appointment's stored service name by casefold/strip.
+    """
+    if not future_appointments:
+        return None
+
+    nearest = future_appointments[0]
+    when = _format_appointment_when(nearest["start_at"], tz_name)
+    service_name = nearest.get("appointment_type") or "Consulta"
+    doctor = _appointment_doctor_name(nearest, professional_names)
+    matched = next(
+        (
+            t
+            for t in appointment_types
+            if t.name.strip().casefold() == service_name.strip().casefold()
+        ),
+        None,
+    )
+
+    nearest_line = f"Próxima consulta: {when} — {service_name}"
+    if doctor:
+        nearest_line += f" — {doctor}"
+    if matched and matched.price:
+        nearest_line += f" — {matched.price}"
+
+    lines = [nearest_line]
+    if matched and matched.requirements:
+        lines.append("Orientações: " + "; ".join(matched.requirements))
+
+    for appt in future_appointments[1:]:
+        appt_when = _format_appointment_when(appt["start_at"], tz_name)
+        line = f"{appt_when} — {appt.get('appointment_type') or 'Consulta'}"
+        appt_doctor = _appointment_doctor_name(appt, professional_names)
+        if appt_doctor:
+            line += f" — {appt_doctor}"
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
 def _label_match_body(body: str | None, label: str) -> bool:
     """True when `body` equals `label` or its 20-char button truncation."""
     target = (body or "").strip().casefold()
@@ -1202,6 +1653,49 @@ def _flow_turn_calendar(
     return CalendarService.from_tenant_config(tenant_config) if tenant_config else None
 
 
+def _manage_owner_calendar_target(
+    flow_state: FlowState | None,
+    flow_managing_appointment_id: UUID | None,
+    upcoming_appointments: list[dict] | None,
+    professional_rows: list[Professional] | None,
+) -> Professional | Literal["tenant"] | None:
+    """Whose calendar owns the appointment being managed this turn (pure, no I/O).
+
+    Resolves the conversation's manage-flow target (`flow_managing_appointment_id`)
+    against the `upcoming_appointments` dicts already loaded for this turn (see
+    `wants_upcoming_appointments` above - it guarantees they are loaded whenever
+    this matters) and the tenant's active-professional rows. Returns:
+
+      - the owning `Professional` ORM row, when the managed appointment's
+        `professional_id` matches one of `professional_rows`;
+      - the literal "tenant", when the managed appointment has no
+        `professional_id` (booked at the tenant level, not with a specific
+        doctor);
+      - None when this isn't a manage-with-target turn (not MANAGE_BOOKING, no
+        id set yet, or the id can't be resolved in `upcoming_appointments`) -
+        the caller falls back to its existing calendar resolution
+        (`_flow_turn_calendar`).
+
+    Deliberately ignores `flow_selected_professional_id` (the SERVICE_CATALOG
+    booking selection) - a stale doctor pick from an earlier booking flow must
+    never decide which agenda a cancel/reschedule acts on.
+    """
+    if flow_state != FlowState.MANAGE_BOOKING or flow_managing_appointment_id is None:
+        return None
+    target = str(flow_managing_appointment_id)
+    appt = next(
+        (a for a in (upcoming_appointments or []) if str(a.get("id")) == target), None
+    )
+    if appt is None:
+        return None
+    professional_id = appt.get("professional_id")
+    if not professional_id:
+        return "tenant"
+    return next(
+        (p for p in (professional_rows or []) if str(p.id) == str(professional_id)), None
+    )
+
+
 async def _run_flow(
     reply: _ReplyContext,
     conv_snapshot: SimpleNamespace,
@@ -1215,6 +1709,7 @@ async def _run_flow(
     waba_token: str | None = None,
     professionals: list | None = None,
     flow_calendar: CalendarService | None = None,
+    manage_calendar: CalendarService | None = None,
 ) -> bool:
     """Run the deterministic flow router for this turn.
 
@@ -1225,8 +1720,19 @@ async def _run_flow(
     caller) are threaded through to whichever send path fires.
     `professionals`/`flow_calendar` are the multi-doctor context loaded by
     `_send_bot_reply` (active snapshot + the selected professional's calendar).
+    `manage_calendar` is the manage (cancel/reschedule) sub-flow's owning
+    calendar (`_manage_owner_calendar_target`) - used INSTEAD of
+    `_flow_turn_calendar` whenever this turn is already inside MANAGE_BOOKING
+    with a target set, deliberately ignoring `flow_selected_professional_id`
+    (a stale booking-flow selection must never decide the manage agenda).
     """
-    calendar = _flow_turn_calendar(conv_snapshot, tenant_config, flow_calendar)
+    if (
+        getattr(conv_snapshot, "flow_state", None) == FlowState.MANAGE_BOOKING
+        and getattr(conv_snapshot, "flow_managing_appointment_id", None) is not None
+    ):
+        calendar = manage_calendar
+    else:
+        calendar = _flow_turn_calendar(conv_snapshot, tenant_config, flow_calendar)
     try:
         result = await route(
             conv_snapshot,
@@ -1279,6 +1785,7 @@ async def _apply_flow_result(
                     conv.flow_selected_slot = result.flow_selected_slot
                     conv.flow_selected_professional_id = result.flow_selected_professional_id
                     conv.flow_selected_insurance = result.flow_selected_insurance
+                    conv.flow_managing_appointment_id = result.flow_managing_appointment_id
                     if result.appointment:
                         booked_appointment = Appointment(
                             tenant_id=conv.tenant_id,
@@ -1602,6 +2109,63 @@ async def _handle_select_professional(
         )
         return
     result = _enter_professional_services(professional, tenant_snapshot)
+    await _apply_flow_result(
+        reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+    )
+
+
+async def _handle_manage_appointment(
+    reply: _ReplyContext,
+    action: str,
+    tenant: Tenant | None,
+    professionals: list | None,
+    patient_wa: str | None,
+    redis=None,
+    waba_token: str | None = None,
+) -> None:
+    """LLM hand-back: re-enter the deterministic manage (cancel/reschedule) flow.
+
+    `manage_existing_appointment` (ai/tools.py) already normalizes/validates
+    `action` to "reschedule"/"cancel" before raising ManageAppointmentRequested,
+    so an unrecognized suffix here means a malformed sentinel; fall back to the
+    plain menu instead of dropping the turn, mirroring
+    `_handle_select_professional`'s guard on a bad professional id. The tool
+    itself is only ever exposed to flow-enabled tenants (see the `extra_tools`
+    wiring in `_send_bot_reply`), so `tenant` being None or not
+    `flows_enabled` here should not normally happen - guarded defensively with
+    a count-only warning, same style as `_handle_show_main_menu`.
+
+    Re-loads the patient's upcoming appointments FRESH in its own session
+    (authoritative regardless of what this turn preloaded - the LLM may have
+    taken several tool-call turns since) before handing off to
+    `enter_manage_action`, the exact same deterministic entry a direct
+    "Remarcar"/"Cancelar" button tap uses.
+    """
+    if action not in ("reschedule", "cancel"):
+        logger.warning("worker_manage_appointment_bad_action", action=action[:32])
+        await _handle_show_main_menu(
+            reply, tenant, professionals, patient_wa, redis=redis, waba_token=waba_token
+        )
+        return
+    if tenant is None or not flows_enabled(tenant):
+        logger.warning(
+            "worker_manage_appointment_without_flows",
+            conversation_id=str(reply.conversation_id),
+        )
+        return
+
+    async with async_session_factory() as session:
+        conversation = await session.get(Conversation, reply.conversation_id)
+        patient_id = conversation.patient_id if conversation is not None else None
+        if patient_id is None:
+            logger.warning(
+                "worker_manage_appointment_no_patient",
+                conversation_id=str(reply.conversation_id),
+            )
+            return
+        appointments = await load_upcoming_appointments(session, tenant.id, patient_id)
+
+    result = enter_manage_action(action, tenant, appointments, professionals)
     await _apply_flow_result(
         reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
     )

@@ -19,7 +19,7 @@ professional-aware variant is additive.
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from uuid import UUID
 
 from sqlalchemy import select
@@ -47,6 +47,8 @@ class RuntimeAppointmentType:
     duration_min: int
     price: str | None = None
     long_description: str | None = None
+    # Pre-consult orientations shown to the patient, e.g. "Jejum de 8 horas".
+    requirements: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,12 @@ class TenantRuntimeConfig:
     # on non-qualifying turns (ai/graph.py) so the prompt stays turn-
     # appropriate - see ai/prompts.py::_format_post_consult_knowledge.
     post_consult_knowledge: str | None = None
+    # Per-turn rendered "consultas marcadas" block, set by the worker
+    # (workers/tasks.py::_appointment_context_text) via run_agent's
+    # `appointment_context` parameter for a qualifying turn (see
+    # ai/graph.py::run_agent, ai/prompts.py::_format_appointment_context) —
+    # NEVER loaded from DB, unlike every other field above.
+    appointment_context: str | None = None
 
 
 def _filter_active_types(appointment_types: list | None) -> list[dict]:
@@ -604,6 +612,8 @@ async def load_tenant_config(session: AsyncSession, tenant: Tenant) -> TenantRun
             duration_min=int(t.get("duration_min", tenant.appointment_duration_min)),
             price=t.get("price"),
             long_description=t.get("long_description"),
+            # Old stored dicts predate this field, so it may be absent entirely.
+            requirements=list(t.get("requirements") or []),
         )
         for t in active_types
     ]

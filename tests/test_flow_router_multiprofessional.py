@@ -7,7 +7,7 @@ there and must stay byte-identical; everything here uses 2+ professionals.
 
 import os
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -25,8 +25,10 @@ from secretaria.services.flow_router import (  # noqa: E402
     BTN_CHOOSE_PROFESSIONAL,
     BTN_FIND_PROFESSIONAL,
     FIND_PROFESSIONAL_OPENER,
+    LABEL_CANCEL_APPT,
     LABEL_INSURANCE_OTHER,
     LABEL_INSURANCE_PARTICULAR,
+    LABEL_RESCHEDULE,
     STEP_AWAITING_CONFIRMATION,
     STEP_AWAITING_DAY,
     STEP_AWAITING_INSURANCE,
@@ -34,6 +36,8 @@ from secretaria.services.flow_router import (  # noqa: E402
     STEP_AWAITING_SERVICE,
     STEP_AWAITING_SERVICE_CONFIRM,
     STEP_AWAITING_SLOT,
+    STEP_MANAGE_CANCEL_CONFIRM,
+    STEP_MANAGE_DAY,
     STEP_MANAGE_PICK,
     MenuBubble,
     menu_buttons_for,
@@ -95,6 +99,7 @@ def _conversation(**kw):
         flow_selected_slot=None,
         flow_selected_professional_id=None,
         flow_selected_insurance=None,
+        flow_managing_appointment_id=None,
         patient_id=None,
     )
     base.update(kw)
@@ -206,6 +211,57 @@ async def test_manage_label_still_typed_reachable_on_multi_menu():
     )
     assert res.flow_state == FlowState.MANAGE_BOOKING
     assert res.flow_step == STEP_MANAGE_PICK
+
+
+async def test_reschedule_label_wins_before_multi_doctor_menu_dispatch():
+    # "Remarcar" must resolve to the direct manage entry even on a multi-doctor
+    # tenant (whose effective menu has no visible manage button at all) - the
+    # label check in route() runs BEFORE _is_multi_professional's dispatch.
+    appt_id = str(uuid4())
+    res = await route(
+        _conversation(flow_state=FlowState.IDLE),
+        _tenant(),
+        _FakeCalendar(),
+        LABEL_RESCHEDULE,
+        upcoming_appointments=[
+            {
+                "id": appt_id,
+                "google_event_id": "evt-a1",
+                "appointment_type": "Consulta",
+                "start_at": datetime(2026, 8, 3, 14, 0, tzinfo=_TZ),
+                "end_at": datetime(2026, 8, 3, 14, 30, tzinfo=_TZ),
+            }
+        ],
+        professionals=_professionals(),
+    )
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.MANAGE_BOOKING
+    assert res.flow_step == STEP_MANAGE_DAY
+    assert res.flow_managing_appointment_id == UUID(appt_id)
+
+
+async def test_cancel_label_wins_before_multi_doctor_menu_dispatch():
+    appt_id = str(uuid4())
+    res = await route(
+        _conversation(flow_state=FlowState.IDLE),
+        _tenant(),
+        _FakeCalendar(),
+        LABEL_CANCEL_APPT,
+        upcoming_appointments=[
+            {
+                "id": appt_id,
+                "google_event_id": "evt-a1",
+                "appointment_type": "Consulta",
+                "start_at": datetime(2026, 8, 3, 14, 0, tzinfo=_TZ),
+                "end_at": datetime(2026, 8, 3, 14, 30, tzinfo=_TZ),
+            }
+        ],
+        professionals=_professionals(),
+    )
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.MANAGE_BOOKING
+    assert res.flow_step == STEP_MANAGE_CANCEL_CONFIRM
+    assert res.flow_managing_appointment_id == UUID(appt_id)
 
 
 # --------------------------------------------------------------------------

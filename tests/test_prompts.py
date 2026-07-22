@@ -12,7 +12,10 @@ os.environ.setdefault("META_VERIFY_TOKEN", "test-verify-token")
 os.environ.setdefault("META_ACCESS_TOKEN", "test-access-token")
 os.environ.setdefault("META_PHONE_NUMBER_ID", "1234567890")
 
-from secretaria.ai.prompts import secretary_system_prompt  # noqa: E402
+from secretaria.ai.prompts import (  # noqa: E402
+    _format_appointment_context,
+    secretary_system_prompt,
+)
 from secretaria.services.tenant_config import TenantRuntimeConfig  # noqa: E402
 
 
@@ -134,3 +137,55 @@ def test_prompt_still_renders_business_hours_and_types_normally():
     prompt = secretary_system_prompt(config)
     assert "Segunda" in prompt
     assert "08h" in prompt
+
+
+# --------------------------------------------------------------------------
+# Appointment context ("Outro" -> LLM handoff, PROMPT for existing appointments)
+# --------------------------------------------------------------------------
+
+_APPOINTMENT_CONTEXT_PAYLOAD = "Próxima consulta: 03/08 às 11:00 — Consulta Geral — Dra. Ana"
+
+
+def test_format_appointment_context_empty_when_unset():
+    assert _format_appointment_context(_config()) == ""
+
+
+def test_format_appointment_context_renders_payload_and_tool_names():
+    config = _config(appointment_context=_APPOINTMENT_CONTEXT_PAYLOAD)
+    section = _format_appointment_context(config)
+    assert "CONSULTAS MARCADAS" in section
+    assert _APPOINTMENT_CONTEXT_PAYLOAD in section
+    assert "manage_existing_appointment" in section
+    assert "show_main_menu" in section
+
+
+def test_no_appointment_context_section_when_unset():
+    prompt = secretary_system_prompt(_config())
+    assert "CONSULTAS MARCADAS" not in prompt
+
+
+def test_appointment_context_section_present_when_set():
+    config = _config(appointment_context=_APPOINTMENT_CONTEXT_PAYLOAD)
+    prompt = secretary_system_prompt(config)
+    assert "CONSULTAS MARCADAS" in prompt
+    assert _APPOINTMENT_CONTEXT_PAYLOAD in prompt
+    assert "manage_existing_appointment" in prompt
+
+
+def test_persona_professional_post_consult_and_appointment_context_coexist_in_order():
+    config = _config(
+        persona_notes="Seja bem-humorada.",
+        professional_id=uuid4(),
+        context_doctor_message="Fala pausadamente com pacientes idosos.",
+        post_consult_knowledge="Retorno em 7 dias.",
+        appointment_context=_APPOINTMENT_CONTEXT_PAYLOAD,
+    )
+    prompt = secretary_system_prompt(config)
+    # persona -> professional -> post-consult -> appointment context (see
+    # secretary_system_prompt).
+    assert (
+        prompt.index("INSTRUÇÕES DE PERSONA")
+        < prompt.index("SOBRE O PROFISSIONAL")
+        < prompt.index("CONHECIMENTO PÓS-CONSULTA")
+        < prompt.index("CONSULTAS MARCADAS")
+    )

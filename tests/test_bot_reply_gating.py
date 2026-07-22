@@ -21,6 +21,7 @@ os.environ.setdefault("META_ACCESS_TOKEN", "test-access-token")
 os.environ.setdefault("META_PHONE_NUMBER_ID", "1234567890")
 os.environ.setdefault("ENCRYPTION_KEY", "gBSpATEZoI21UX0_59nHvxdUDJ4drCttg2RAEaPJc1w=")
 
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest  # noqa: E402
@@ -33,7 +34,14 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from secretaria.core.database import Base  # noqa: E402
-from secretaria.models import Conversation, Patient, Tenant  # noqa: E402
+from secretaria.models import (  # noqa: E402
+    Appointment,
+    AppointmentStatus,
+    Conversation,
+    FlowState,
+    Patient,
+    Tenant,
+)
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
 from secretaria.workers import tasks  # noqa: E402
 
@@ -126,24 +134,54 @@ async def _fake_get_waba_token(session, tenant_id):
     return "decrypted-waba-token"
 
 
-async def _make_conversation(db, *, is_active: bool = True) -> tuple[Tenant, Patient, Conversation]:
+async def _make_conversation(
+    db,
+    *,
+    is_active: bool = True,
+    flows_enabled: bool = False,
+    flow_state: FlowState = FlowState.IDLE,
+) -> tuple[Tenant, Patient, Conversation]:
     async with db() as session:
         tenant = Tenant(
             id=uuid4(),
             clinic_name="Clinic",
             phone_number_id=str(uuid4())[:12],
             is_active=is_active,
-            initial_flows={},  # deterministic flow engine OFF -> always hits run_agent
+            # deterministic flow engine OFF (default) -> always hits run_agent
+            # directly, exactly as before this parameter existed. Passing
+            # flows_enabled=True turns it on with the MVP defaults (menu/
+            # manage/Outro labels), needed for the appointment-context wiring
+            # tests below (which need the "Outro"/LLM-mode path to run).
+            initial_flows=({"enabled": True} if flows_enabled else {}),
         )
         patient = Patient(id=uuid4(), tenant_id=tenant.id, wa_id="5511999999", name="Maria")
         session.add_all([tenant, patient])
         await session.flush()
-        conversation = Conversation(id=uuid4(), tenant_id=tenant.id, patient_id=patient.id)
+        conversation = Conversation(
+            id=uuid4(), tenant_id=tenant.id, patient_id=patient.id, flow_state=flow_state
+        )
         session.add(conversation)
         await session.commit()
         await session.refresh(tenant)
         await session.refresh(conversation)
         return tenant, patient, conversation
+
+
+async def _seed_future_appointment(db, tenant: Tenant, patient: Patient, *, start_at: datetime):
+    async with db() as session:
+        appt = Appointment(
+            tenant_id=tenant.id,
+            patient_id=patient.id,
+            google_event_id=f"evt-{uuid4()}",
+            appointment_type="Consulta Geral",
+            start_at=start_at,
+            end_at=start_at + timedelta(minutes=30),
+            status=AppointmentStatus.SCHEDULED,
+        )
+        session.add(appt)
+        await session.commit()
+        await session.refresh(appt)
+        return appt
 
 
 def _reply_context(conversation: Conversation, patient: Patient) -> tasks._ReplyContext:
@@ -326,3 +364,108 @@ async def test_run_agent_receives_plugin_tools_for_entitled_addons(
     await tasks._send_bot_reply(_reply_context(conversation, patient))
 
     assert run_agent_calls == [{"extra_tools": sentinel_tools}]
+
+
+# --------------------------------------------------------------------------
+# Appointment-context injection wiring ("Outro" -> LLM handoff)
+# --------------------------------------------------------------------------
+
+
+def _days_from_now(days: int) -> datetime:
+    return datetime.now(UTC) + timedelta(days=days)
+
+
+async def _run_send_bot_reply_capturing_run_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    conversation: Conversation,
+    patient: Patient,
+    inbound_body: str,
+) -> list[dict]:
+    async def _fake_get_entitlements(tenant_id, redis):
+        return _summary()
+
+    run_agent_calls: list[dict] = []
+
+    async def _fake_run_agent(message, context, **kwargs):
+        run_agent_calls.append(kwargs)
+        return "Claro, posso ajudar."
+
+    monkeypatch.setattr(tasks, "get_entitlements", _fake_get_entitlements)
+    monkeypatch.setattr(tasks, "run_agent", _fake_run_agent)
+
+    await tasks._send_bot_reply(
+        tasks._ReplyContext(
+            conversation_id=conversation.id,
+            patient_wa_id=patient.wa_id,
+            inbound_body=inbound_body,
+        )
+    )
+    return run_agent_calls
+
+
+async def test_run_agent_receives_appointment_context_on_outro_tap_with_upcoming_appointment(
+    monkeypatch: pytest.MonkeyPatch, db
+) -> None:
+    tenant, patient, conversation = await _make_conversation(db, flows_enabled=True)
+    await _seed_future_appointment(db, tenant, patient, start_at=_days_from_now(2))
+
+    calls = await _run_send_bot_reply_capturing_run_agent(
+        monkeypatch, conversation, patient, "Outro"
+    )
+
+    assert len(calls) == 1
+    appointment_context = calls[0]["appointment_context"]
+    assert appointment_context is not None
+    assert "Próxima consulta" in appointment_context
+    # The reschedule/cancel hand-back tool is only offered once the manage
+    # flow actually exists for this tenant (flows_enabled=True here).
+    assert "manage_existing_appointment" in {t.name for t in calls[0]["extra_tools"]}
+
+
+async def test_run_agent_receives_appointment_context_when_already_in_llm_mode(
+    monkeypatch: pytest.MonkeyPatch, db
+) -> None:
+    tenant, patient, conversation = await _make_conversation(
+        db, flows_enabled=True, flow_state=FlowState.LLM
+    )
+    await _seed_future_appointment(db, tenant, patient, start_at=_days_from_now(1))
+
+    calls = await _run_send_bot_reply_capturing_run_agent(
+        monkeypatch, conversation, patient, "quando é minha consulta?"
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["appointment_context"] is not None
+
+
+async def test_run_agent_receives_no_appointment_context_when_flows_disabled(
+    monkeypatch: pytest.MonkeyPatch, db
+) -> None:
+    # flows_enabled=False (default): the whole flows-enabled block - including
+    # the appointment load AND the manage_existing_appointment tool - never
+    # runs, even though the patient actually has an upcoming appointment.
+    tenant, patient, conversation = await _make_conversation(db)
+    await _seed_future_appointment(db, tenant, patient, start_at=_days_from_now(2))
+
+    calls = await _run_send_bot_reply_capturing_run_agent(
+        monkeypatch, conversation, patient, "oi, quero marcar"
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["appointment_context"] is None
+    assert "manage_existing_appointment" not in {t.name for t in calls[0]["extra_tools"]}
+
+
+async def test_run_agent_receives_no_appointment_context_for_new_patient_without_appointments(
+    monkeypatch: pytest.MonkeyPatch, db
+) -> None:
+    # Flows enabled and delegated to the LLM via "Outro", but this (new)
+    # patient has no upcoming appointments - the gate's non-empty check loses.
+    tenant, patient, conversation = await _make_conversation(db, flows_enabled=True)
+
+    calls = await _run_send_bot_reply_capturing_run_agent(
+        monkeypatch, conversation, patient, "Outro"
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["appointment_context"] is None

@@ -39,8 +39,20 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 from secretaria.api import webhook as webhook_api  # noqa: E402
 from secretaria.core import database as core_database  # noqa: E402
 from secretaria.core.database import Base  # noqa: E402
-from secretaria.models import Appointment, AppointmentStatus, Patient, Tenant  # noqa: E402
+from secretaria.models import (  # noqa: E402
+    Appointment,
+    AppointmentStatus,
+    Patient,
+    Professional,
+    Tenant,
+)
 from secretaria.services import patient_context  # noqa: E402
+from secretaria.services.flow_router import (  # noqa: E402
+    LABEL_CANCEL_APPT,
+    LABEL_OTHER,
+    LABEL_RESCHEDULE,
+    menu_buttons_for,
+)
 from secretaria.services.patient_context import (  # noqa: E402
     PatientOpeningContext,
     PatientOpeningState,
@@ -102,6 +114,7 @@ async def _add_appointment(
     start_at: datetime,
     end_at: datetime | None = None,
     appointment_type: str = "Consulta",
+    professional_id=None,
 ) -> Appointment:
     async with db() as session:
         appt = Appointment(
@@ -113,6 +126,7 @@ async def _add_appointment(
             start_at=start_at,
             end_at=end_at or (start_at + timedelta(minutes=30)),
             status=status,
+            professional_id=professional_id,
         )
         session.add(appt)
         await session.commit()
@@ -295,6 +309,343 @@ def test_just_had_consult_neutral_vs_attended_copy() -> None:
     )
     attended_result = tasks._adapt_greeting_to_state("Olá!", attended_context, tenant)
     assert "Como foi sua consulta" in attended_result
+
+
+# --------------------------------------------------------------------------
+# _adapt_greeting_to_state: HAS_UPCOMING(_SOON) full detail + brief blocks
+# --------------------------------------------------------------------------
+
+
+def _tz_when(start_at: datetime) -> str:
+    return start_at.astimezone(ZoneInfo("America/Sao_Paulo")).strftime("%d/%m às %H:%M")
+
+
+def _greeting_tenant(**kwargs) -> Tenant:
+    return Tenant(id=uuid4(), clinic_name="Clinic", timezone="America/Sao_Paulo", **kwargs)
+
+
+def test_upcoming_greeting_full_detail_single_appointment() -> None:
+    """One future appointment: full detail (when/doctor/service/price/description/
+    orientações) and NO brief block."""
+    tenant = _greeting_tenant()
+    start_at = NOW + timedelta(hours=24)
+    prof_id = str(uuid4())
+    context = PatientOpeningContext(
+        state=PatientOpeningState.HAS_UPCOMING_SOON,
+        future_appointments=[
+            {
+                "id": str(uuid4()),
+                "appointment_type": "Limpeza de Pele",
+                "start_at": start_at,
+                "professional_id": prof_id,
+            }
+        ],
+    )
+    data = tasks._UpcomingGreetingData(
+        professional_names={prof_id: "Dra. Ana Souza"},
+        nearest_service={
+            "name": "Limpeza de Pele",
+            "price": "R$ 250,00",
+            "description": "Sessão de limpeza profunda.",
+            "requirements": ["Jejum de 8 horas", "Trazer exames anteriores"],
+        },
+    )
+
+    result = tasks._adapt_greeting_to_state("Olá!", context, tenant, data)
+
+    assert result.startswith("Olá!")
+    assert _tz_when(start_at) in result
+    assert "com Dra. Ana Souza" in result
+    assert "Limpeza de Pele — R$ 250,00" in result
+    assert "Sessão de limpeza profunda." in result
+    assert tasks.GREETING_REQUIREMENTS_HEADER in result
+    assert "• Jejum de 8 horas" in result
+    assert "• Trazer exames anteriores" in result
+    assert tasks.GREETING_ACTION_HINT in result
+    assert tasks.GREETING_BRIEF_HEADER not in result
+
+
+def test_upcoming_greeting_brief_block_date_service_doctor_only() -> None:
+    """2+ future appointments: nearest gets the detail block, the others get ONE
+    brief line each — date + service + doctor ONLY (price/orientações appear
+    exactly once, in the detail block)."""
+    tenant = _greeting_tenant()
+    prof_id = str(uuid4())
+    nearest_start = NOW + timedelta(hours=24)
+    second_start = NOW + timedelta(hours=90)
+    third_start = NOW + timedelta(hours=200)
+    context = PatientOpeningContext(
+        state=PatientOpeningState.HAS_UPCOMING_SOON,
+        future_appointments=[
+            {
+                "appointment_type": "Consulta",
+                "start_at": nearest_start,
+                "professional_id": prof_id,
+            },
+            {
+                "appointment_type": "Retorno",
+                "start_at": second_start,
+                "professional_id": prof_id,
+            },
+            {
+                "appointment_type": "Avaliação",
+                "start_at": third_start,
+                "professional_id": None,
+            },
+        ],
+    )
+    data = tasks._UpcomingGreetingData(
+        professional_names={prof_id: "Dr. Bruno Lima"},
+        nearest_service={
+            "name": "Consulta",
+            "price": "R$ 300,00",
+            "requirements": ["Chegar 10 minutos antes"],
+        },
+    )
+
+    result = tasks._adapt_greeting_to_state("Olá!", context, tenant, data)
+
+    assert tasks.GREETING_BRIEF_HEADER in result
+    assert f"• {_tz_when(second_start)} — Retorno — Dr. Bruno Lima" in result
+    assert f"• {_tz_when(third_start)} — Avaliação" in result
+    assert result.count("R$ 300,00") == 1
+    assert result.count(tasks.GREETING_REQUIREMENTS_HEADER) == 1
+    assert result.count("Chegar 10 minutos antes") == 1
+
+
+def test_upcoming_greeting_degrades_without_catalog_match() -> None:
+    """No catalog match (stale/renamed service) and no doctor: the detail block
+    still renders when + service name, with no price/description/orientações."""
+    tenant = _greeting_tenant()
+    start_at = NOW + timedelta(hours=24)
+    context = PatientOpeningContext(
+        state=PatientOpeningState.HAS_UPCOMING,
+        future_appointments=[
+            {"appointment_type": "Consulta antiga", "start_at": start_at, "professional_id": None}
+        ],
+    )
+
+    result = tasks._adapt_greeting_to_state(
+        "Olá!", context, tenant, tasks._UpcomingGreetingData()
+    )
+
+    assert "Consulta antiga" in result
+    assert _tz_when(start_at) in result
+    assert ", com " not in result
+    assert "R$" not in result
+    assert tasks.GREETING_REQUIREMENTS_HEADER not in result
+    assert tasks.GREETING_ACTION_HINT in result
+
+
+# --------------------------------------------------------------------------
+# _compose_upcoming_greeting_body: assembly + size-trim order
+# --------------------------------------------------------------------------
+
+
+def test_compose_under_budget_untouched() -> None:
+    body = tasks._compose_upcoming_greeting_body(
+        "G", "I", "D", ["r1", "r2"], ["b1", "b2"], max_chars=10_000
+    )
+    assert body == (
+        "G\n\nI\n\nD\n\n"
+        f"{tasks.GREETING_REQUIREMENTS_HEADER}\n• r1\n• r2\n\n"
+        f"{tasks.GREETING_BRIEF_HEADER}\n• b1\n• b2\n\n"
+        f"{tasks.GREETING_ACTION_HINT}"
+    )
+
+
+def test_compose_trim_drops_description_first() -> None:
+    """First trim stage: only the description is dropped — brief lines and
+    orientações stay complete."""
+    without_description = tasks._compose_upcoming_greeting_body(
+        "G", "I", None, ["r1"], ["b1"], max_chars=10_000
+    )
+
+    body = tasks._compose_upcoming_greeting_body(
+        "G", "I", "DESCRIÇÃO " * 200, ["r1"], ["b1"], max_chars=len(without_description)
+    )
+
+    assert body == without_description
+    assert "DESCRIÇÃO" not in body
+
+
+def test_compose_trim_caps_brief_then_requirements_at_worst() -> None:
+    """Maximally trimmed: description gone, brief lines capped with the
+    '… e mais N' tail, orientações capped with the '…' tail."""
+    briefs = [f"linha {i}" for i in range(1, 7)]
+    reqs = [f"regra {i}" for i in range(1, 7)]
+
+    body = tasks._compose_upcoming_greeting_body(
+        "G", "I", "DESCRIÇÃO LONGA", reqs, briefs, max_chars=0
+    )
+
+    assert "DESCRIÇÃO" not in body
+    assert f"• linha {tasks.GREETING_BRIEF_KEEP}" in body
+    assert f"• linha {tasks.GREETING_BRIEF_KEEP + 1}" not in body
+    assert f"… e mais {len(briefs) - tasks.GREETING_BRIEF_KEEP} consultas" in body
+    assert f"• regra {tasks.GREETING_REQUIREMENTS_KEEP}\n…" in body
+    assert f"• regra {tasks.GREETING_REQUIREMENTS_KEEP + 1}" not in body
+
+    # Singular tail when exactly one brief line is dropped.
+    singular = tasks._compose_upcoming_greeting_body(
+        "G", "I", None, [], briefs[: tasks.GREETING_BRIEF_KEEP + 1], max_chars=0
+    )
+    assert "… e mais 1 consulta" in singular
+
+
+# --------------------------------------------------------------------------
+# _greeting_buttons_for: the three button sets
+# --------------------------------------------------------------------------
+
+
+def test_greeting_buttons_upcoming_trio_wins() -> None:
+    """HAS_UPCOMING(_SOON) + flows enabled: [Remarcar] [Cancelar] [Outro] —
+    on single- AND multi-doctor tenants alike."""
+    tenant = _greeting_tenant(initial_flows={"enabled": True})
+    trio = [LABEL_RESCHEDULE, LABEL_CANCEL_APPT, LABEL_OTHER]
+    for state in (PatientOpeningState.HAS_UPCOMING_SOON, PatientOpeningState.HAS_UPCOMING):
+        context = PatientOpeningContext(
+            state=state, future_appointments=[{"start_at": NOW + timedelta(hours=24)}]
+        )
+        assert tasks._greeting_buttons_for(tenant, "Olá!", False, context) == trio
+        assert tasks._greeting_buttons_for(tenant, "Olá!", True, context) == trio
+
+
+def test_greeting_buttons_other_states_keep_menu() -> None:
+    """NEW / RETURNING_NO_APPOINTMENT / JUST_HAD_CONSULT / no context: the
+    effective menu buttons, exactly as before."""
+    tenant = _greeting_tenant(initial_flows={"enabled": True})
+    menu = menu_buttons_for(tenant, False)
+    for context in (
+        PatientOpeningContext(state=PatientOpeningState.NEW),
+        PatientOpeningContext(state=PatientOpeningState.RETURNING_NO_APPOINTMENT, has_history=True),
+        PatientOpeningContext(
+            state=PatientOpeningState.JUST_HAD_CONSULT,
+            recent_past_appointments=[{"status": AppointmentStatus.ATTENDED}],
+        ),
+        None,
+    ):
+        assert tasks._greeting_buttons_for(tenant, "Olá!", False, context) == menu
+
+
+def test_greeting_buttons_flows_disabled_unchanged() -> None:
+    """Flow-less (pure LLM) tenants keep their configured quick replies even on
+    HAS_UPCOMING — the deterministic trio only exists where route() handles it."""
+    tenant = _greeting_tenant(initial_flows={}, greeting_buttons=["Agendar", "Falar com humano"])
+    context = PatientOpeningContext(
+        state=PatientOpeningState.HAS_UPCOMING_SOON,
+        future_appointments=[{"start_at": NOW + timedelta(hours=24)}],
+    )
+    assert tasks._greeting_buttons_for(tenant, "Olá!", False, context) == [
+        "Agendar",
+        "Falar com humano",
+    ]
+    assert tasks._greeting_buttons_for(tenant, None, False, context) == []
+
+
+# --------------------------------------------------------------------------
+# _load_upcoming_greeting_data: names (incl. inactive) + catalog resolution
+# --------------------------------------------------------------------------
+
+
+async def test_load_upcoming_greeting_data_professional_catalog_and_inactive_name(db) -> None:
+    """The owning professional's OWN catalog wins (matched casefold), and a
+    deactivated professional's name still resolves for display."""
+    tenant, patient = await _seed_tenant_and_patient(db)
+    prof_id = uuid4()
+    async with db() as session:
+        session.add(
+            Professional(
+                id=prof_id,
+                tenant_id=tenant.id,
+                name="Dra. Carla Nunes",
+                is_active=False,
+                appointment_types=[
+                    {
+                        "name": "Consulta",
+                        "duration_min": 30,
+                        "is_active": True,
+                        "sort_order": 0,
+                        "price": "R$ 400,00",
+                        "requirements": ["Jejum de 8 horas"],
+                    }
+                ],
+            )
+        )
+        await session.commit()
+    await _add_appointment(
+        db,
+        tenant.id,
+        patient.id,
+        status=AppointmentStatus.SCHEDULED,
+        start_at=NOW + timedelta(hours=24),
+        appointment_type="consulta",
+        professional_id=prof_id,
+    )
+
+    context = await _resolve(db, tenant.id, patient.id, now=NOW)
+    assert context.future_appointments[0]["professional_id"] == str(prof_id)
+
+    async with db() as session:
+        tenant_row = await session.get(Tenant, tenant.id)
+        data = await tasks._load_upcoming_greeting_data(
+            session, tenant_row, context.future_appointments
+        )
+
+    assert data.professional_names == {str(prof_id): "Dra. Carla Nunes"}
+    assert data.nearest_service is not None
+    assert data.nearest_service["price"] == "R$ 400,00"
+    assert data.nearest_service["requirements"] == ["Jejum de 8 horas"]
+
+
+async def test_load_upcoming_greeting_data_tenant_catalog_and_no_match(db) -> None:
+    """No owning professional: the tenant's own catalog resolves the nearest
+    service; an unknown service name yields None (graceful degrade)."""
+    tenant, patient = await _seed_tenant_and_patient(db)
+    async with db() as session:
+        tenant_row = await session.get(Tenant, tenant.id)
+        tenant_row.appointment_types = [
+            {
+                "name": "Avaliação",
+                "duration_min": 30,
+                "is_active": True,
+                "sort_order": 0,
+                "price": "R$ 150,00",
+            }
+        ]
+        await session.commit()
+    await _add_appointment(
+        db,
+        tenant.id,
+        patient.id,
+        status=AppointmentStatus.SCHEDULED,
+        start_at=NOW + timedelta(hours=24),
+        appointment_type="Avaliação",
+    )
+
+    context = await _resolve(db, tenant.id, patient.id, now=NOW)
+
+    async with db() as session:
+        tenant_row = await session.get(Tenant, tenant.id)
+        data = await tasks._load_upcoming_greeting_data(
+            session, tenant_row, context.future_appointments
+        )
+        assert data.professional_names == {}
+        assert data.nearest_service is not None
+        assert data.nearest_service["price"] == "R$ 150,00"
+
+        unmatched = await tasks._load_upcoming_greeting_data(
+            session,
+            tenant_row,
+            [
+                {
+                    "appointment_type": "Serviço removido",
+                    "start_at": NOW + timedelta(hours=24),
+                    "professional_id": None,
+                }
+            ],
+        )
+        assert unmatched.nearest_service is None
 
 
 # --------------------------------------------------------------------------

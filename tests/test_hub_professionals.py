@@ -409,6 +409,33 @@ async def test_put_config_partial_update_leaves_other_fields_untouched(
     assert body["name"] == "Original Name"  # PUT /config never touches `name`
 
 
+async def test_put_config_appointment_type_requirements_round_trip(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same requirements validation/round-trip as the tenant-level
+    PUT /tenants/me/config (test_hub_config.py) - schemas/config.py's
+    AppointmentType is shared, not reimplemented for professionals."""
+    prof = await _seed_professional(db, tenant)
+    monkeypatch.setattr(professionals_api, "get_entitlements", _never_called_fake)
+
+    response = await client.put(
+        f"{ENDPOINT}/{prof.id}/config",
+        json={
+            "appointment_types": [
+                {
+                    "name": "Consulta",
+                    "duration_min": 30,
+                    "is_active": True,
+                    "requirements": ["Jejum de 8 horas", "  Trazer exames  ", ""],
+                }
+            ]
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["appointment_types"][0]["requirements"] == ["Jejum de 8 horas", "Trazer exames"]
+
+
 async def test_put_config_rejects_overlapping_hours(
     client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:

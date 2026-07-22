@@ -103,6 +103,14 @@ class Conversation(Base):
     flow_selected_professional_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("professionals.id", ondelete="SET NULL"), nullable=True
     )
+    # The appointment currently being cancelled/rescheduled inside the
+    # MANAGE_BOOKING sub-flow (services/flow_router.py). Replaces the old
+    # flow_selected_type overload, which smuggled this UUID through the
+    # SERVICE_CATALOG appointment-type-name column. SET NULL so deleting the
+    # appointment never breaks an ongoing conversation row.
+    flow_managing_appointment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("appointments.id", ondelete="SET NULL"), nullable=True
+    )
     # Convênio label picked (or typed) at the insurance step; copied onto the
     # Appointment at booking time. Free text, not a FK — tenants.insurances is
     # a JSON list of plan names, there is no Insurance table.

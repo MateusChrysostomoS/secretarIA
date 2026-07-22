@@ -89,7 +89,8 @@ class Tenant(Base):
     )
     # Bookable reasons, e.g.
     #   [{"name": "Primeira consulta", "description": "...",
-    #     "duration_min": 40, "is_active": true, "sort_order": 0}, ...]
+    #     "duration_min": 40, "is_active": true, "sort_order": 0,
+    #     "requirements": ["Jejum de 8 horas"]}, ...]
     appointment_types: Mapped[list] = mapped_column(
         JSON, server_default=text("'[]'"), default=list
     )

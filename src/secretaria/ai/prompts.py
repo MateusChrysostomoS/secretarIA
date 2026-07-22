@@ -111,6 +111,42 @@ def _format_post_consult_knowledge(config: TenantRuntimeConfig) -> str:
     )
 
 
+def _format_appointment_context(config: TenantRuntimeConfig) -> str:
+    """Render the "CONSULTAS MARCADAS DESTE PACIENTE" block, or "" when unset.
+
+    `appointment_context` is a per-turn block rendered by the worker
+    (workers/tasks.py::_appointment_context_text — the patient's nearest
+    upcoming appointment plus a brief list of any others) and threaded in by
+    ai/graph.py::run_agent's `appointment_context` parameter for a turn that
+    qualifies (workers/tasks.py::_should_inject_appointment_context) — never
+    loaded from the DB, unlike post_consult_knowledge above. Same
+    "interpreted, not read verbatim" treatment as persona_notes/
+    _format_professional_context/_format_post_consult_knowledge, PLUS firm
+    routing rules: this data answers questions, but any reschedule/cancel/
+    new-booking action always hands back to the deterministic flow.
+    """
+    if not config.appointment_context:
+        return ""
+    return (
+        "\n\n================ CONSULTAS MARCADAS DESTE PACIENTE ================\n"
+        "As informações abaixo são as consultas JÁ MARCADAS deste paciente nesta "
+        "clínica (carregadas agora do banco — confie nelas, não no que a conversa "
+        "tenha dito antes). Use-as para responder perguntas como \"quando é minha "
+        "consulta?\" ou \"o que eu marquei mesmo?\":\n"
+        f"{config.appointment_context}\n\n"
+        "REGRAS OBRIGATÓRIAS:\n"
+        "- Para REMARCAR ou CANCELAR uma consulta já marcada, SEMPRE chame a "
+        "ferramenta manage_existing_appointment (com \"reschedule\" ou "
+        "\"cancel\") — NUNCA use check_availability/create_event/cancel_event "
+        "para mexer nessa consulta você mesma.\n"
+        "- Para marcar OUTRA consulta (nova, além dessa), devolva o paciente "
+        "ao fluxo guiado: chame show_main_menu (ou select_professional_and_"
+        "continue quando a clínica tiver múltiplos profissionais e o "
+        "profissional já estiver confirmado) — não conduza um novo "
+        "agendamento pelo chat."
+    )
+
+
 def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
     """Render the full system prompt for a specific tenant."""
     today = date.today().isoformat()
@@ -125,11 +161,13 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
     )
     professional_section = _format_professional_context(config)
     post_consult_section = _format_post_consult_knowledge(config)
+    appointment_context_section = _format_appointment_context(config)
 
     return (
         f"Você é a secretária virtual da {clinic}. Sua função é acolher pacientes "
         f"no WhatsApp e agendar, remarcar ou cancelar consultas no Google Calendar da clínica."
-        f"{persona_section}{professional_section}{post_consult_section}\n\n"
+        f"{persona_section}{professional_section}{post_consult_section}"
+        f"{appointment_context_section}\n\n"
         "CONTEXTO OPERACIONAL:\n"
         f"- Hoje é {today} (timezone {tz}).\n"
         f"- Horário de atendimento:\n{hours_text}\n"

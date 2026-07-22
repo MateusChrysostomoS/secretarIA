@@ -77,6 +77,23 @@ class ShowMainMenuRequested(Exception):
     """
 
 
+class ManageAppointmentRequested(Exception):
+    """Raised by `manage_existing_appointment`: the patient wants to reschedule
+    or cancel an EXISTING appointment.
+
+    Same exception->sentinel mechanism as ShowMainMenuRequested above: it
+    propagates out of the LangGraph ToolNode and graph.run_agent maps it to
+    MANAGE_APPOINTMENT_SENTINEL_PREFIX + `action` for workers/tasks.py to act
+    on (`_handle_manage_appointment`), re-entering the deterministic manage
+    (cancel/reschedule) flow via services/flow_router.py::enter_manage_action.
+    The LLM itself NEVER performs the reschedule/cancel — it only requests it.
+    """
+
+    def __init__(self, action: str) -> None:
+        super().__init__(f"manage appointment: {action}")
+        self.action = action
+
+
 class SelectProfessionalRequested(Exception):
     """Raised by `select_professional_and_continue` (plugins/multi_professional.py).
 
@@ -400,6 +417,32 @@ async def show_main_menu() -> str:
     ver as opções de novo. Não apaga nada da conversa — apenas reabre o menu.
     """
     raise ShowMainMenuRequested()
+
+
+@tool
+async def manage_existing_appointment(action: str) -> dict:
+    """Aciona o fluxo de remarcação/cancelamento de uma consulta JÁ MARCADA
+    deste paciente. Chame SEMPRE que o paciente quiser remarcar ou cancelar
+    uma consulta existente — NUNCA remarque ou cancele você mesma pelo chat
+    (não use check_availability/create_event/cancel_event para isso). Esta
+    ferramenta devolve o paciente ao fluxo guiado de botões, que identifica
+    qual consulta (quando houver mais de uma) e executa a ação com segurança.
+
+    Args:
+        action: "reschedule" (ou "remarcar") para remarcar, "cancel" (ou
+            "cancelar") para cancelar.
+    """
+    normalized = (action or "").strip().casefold()
+    if normalized in {"reschedule", "remarcar"}:
+        raise ManageAppointmentRequested("reschedule")
+    if normalized in {"cancel", "cancelar"}:
+        raise ManageAppointmentRequested("cancel")
+    return {
+        "error": (
+            f"Ação '{action}' não reconhecida. Use 'reschedule' para remarcar "
+            "ou 'cancel' para cancelar."
+        )
+    }
 
 
 _PATIENT_UNRESOLVED_TEXT = (

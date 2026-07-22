@@ -493,6 +493,36 @@ async def test_load_tenant_config_single_active_professional_resolves_through_it
     assert config.context_doctor_message == "Prefere retornos pela manhã."
     assert config.specialty == "Cardiologia"
     assert config.about == "15 anos de experiência."
+    # _PROF_TYPES predates the `requirements` field - a missing key must
+    # resolve to [], not raise/None.
+    assert config.appointment_types[0].requirements == []
+
+
+async def test_load_tenant_config_carries_appointment_type_requirements(session):
+    """`requirements` (pre-consult orientations) survives the dict ->
+    RuntimeAppointmentType conversion in `load_tenant_config`, same as
+    `description`/`price`/`long_description`."""
+    tenant = await _make_tenant(session, appointment_types=_TENANT_TYPES)
+    await _make_professional(
+        session,
+        tenant,
+        appointment_types=[
+            {
+                "name": "Retorno",
+                "duration_min": 45,
+                "is_active": True,
+                "requirements": ["Jejum de 8 horas", "Trazer exames anteriores"],
+            }
+        ],
+    )
+    await session.commit()
+
+    config = await load_tenant_config(session, tenant)
+
+    assert config.appointment_types[0].requirements == [
+        "Jejum de 8 horas",
+        "Trazer exames anteriores",
+    ]
 
 
 async def test_load_tenant_config_single_professional_falls_back_to_tenant_values(session):

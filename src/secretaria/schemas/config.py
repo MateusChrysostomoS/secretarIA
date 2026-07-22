@@ -64,6 +64,21 @@ class AppointmentType(BaseModel):
     price: str | None = Field(default=None, max_length=40)
     # Longer copy shown on the service detail step of the deterministic flow.
     long_description: str | None = Field(default=None, max_length=2000)
+    # Short pre-consult orientations shown to the patient, e.g. "Jejum de 8 horas".
+    requirements: list[str] = Field(default_factory=list)
+
+    @field_validator("requirements")
+    @classmethod
+    def _check_requirements(cls, value: list[str]) -> list[str]:
+        """Trim items, drop blanks, and cap count/length (same style as
+        TenantConfigUpdate._check_insurances below)."""
+        cleaned = [v.strip() for v in value if v and v.strip()]
+        for item in cleaned:
+            if len(item) > 300:
+                raise ValueError(f"requirement {item!r} exceeds 300 characters")
+        if len(cleaned) > 20:
+            raise ValueError("at most 20 requirements allowed")
+        return cleaned
 
 
 def _validate_business_hours(value: dict[str, list[TimeWindow]]) -> dict[str, list[TimeWindow]]:

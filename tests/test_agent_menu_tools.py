@@ -26,6 +26,7 @@ os.environ.setdefault("ENCRYPTION_KEY", "gBSpATEZoI21UX0_59nHvxdUDJ4drCttg2RAEaP
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 from contextlib import contextmanager  # noqa: E402
+from datetime import UTC, datetime, timedelta  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 from uuid import uuid4  # noqa: E402
 
@@ -43,6 +44,7 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 from secretaria.ai import graph, tools as ai_tools  # noqa: E402
 from secretaria.ai.formatter import SlotsBubble, TextBubble  # noqa: E402
 from secretaria.ai.graph import (  # noqa: E402
+    MANAGE_APPOINTMENT_SENTINEL_PREFIX,
     SELECT_PROFESSIONAL_SENTINEL_PREFIX,
     SHOW_MAIN_MENU_SENTINEL,
     _config_with_selected_professional,
@@ -50,13 +52,17 @@ from secretaria.ai.graph import (  # noqa: E402
 )
 from secretaria.ai.prompts import secretary_system_prompt  # noqa: E402
 from secretaria.ai.tools import (  # noqa: E402
+    ManageAppointmentRequested,
     SelectProfessionalRequested,
     ShowMainMenuRequested,
+    manage_existing_appointment,
     show_main_menu,
 )
 from secretaria.core import database as core_database  # noqa: E402
 from secretaria.core.database import Base  # noqa: E402
 from secretaria.models import (  # noqa: E402
+    Appointment,
+    AppointmentStatus,
     Conversation,
     FlowState,
     Message,
@@ -72,6 +78,8 @@ from secretaria.services.flow_router import (  # noqa: E402
     BTN_CHOOSE_PROFESSIONAL,
     BTN_FIND_PROFESSIONAL,
     STEP_AWAITING_SERVICE,
+    STEP_MANAGE_CANCEL_CONFIRM,
+    STEP_MANAGE_PICK_CANCEL,
     MenuBubble,
 )
 from secretaria.services.tenant_config import TenantRuntimeConfig  # noqa: E402
@@ -227,6 +235,47 @@ async def test_run_agent_maps_select_professional_to_sentinel(monkeypatch: pytes
     monkeypatch.setattr(graph, "_invoke_agent_with_retry", _raise)
     reply = await run_agent("oi", context={"conversation_id": str(uuid4())})
     assert reply == f"{SELECT_PROFESSIONAL_SENTINEL_PREFIX}{professional_id}"
+
+
+async def test_run_agent_maps_manage_appointment_to_sentinel(monkeypatch: pytest.MonkeyPatch):
+    async def _fake_history(conversation_id):
+        return [HumanMessage(content="quero cancelar minha consulta")]
+
+    async def _raise(messages, conversation_id):
+        raise ManageAppointmentRequested("cancel")
+
+    monkeypatch.setattr(graph, "_load_history", _fake_history)
+    monkeypatch.setattr(graph, "_invoke_agent_with_retry", _raise)
+    reply = await run_agent("oi", context={"conversation_id": str(uuid4())})
+    assert reply == f"{MANAGE_APPOINTMENT_SENTINEL_PREFIX}cancel"
+
+
+# --------------------------------------------------------------------------
+# manage_existing_appointment: normalize action, recoverable error
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw_action,canonical",
+    [
+        ("reschedule", "reschedule"),
+        ("Remarcar", "reschedule"),
+        ("  REMARCAR  ", "reschedule"),
+        ("cancel", "cancel"),
+        ("Cancelar", "cancel"),
+        (" CANCEL ", "cancel"),
+    ],
+)
+async def test_manage_existing_appointment_tool_raises_canonical_action(raw_action, canonical):
+    with pytest.raises(ManageAppointmentRequested) as exc_info:
+        await manage_existing_appointment.ainvoke({"action": raw_action})
+    assert exc_info.value.action == canonical
+
+
+async def test_manage_existing_appointment_tool_invalid_action_is_recoverable():
+    result = await manage_existing_appointment.ainvoke({"action": "excluir"})
+    assert "error" in result
+    assert "excluir" in result["error"]
 
 
 # --------------------------------------------------------------------------
@@ -426,6 +475,97 @@ async def test_handle_select_professional_unresolved_falls_back_to_menu(
 
     assert len(_captured_bubbles) == 1
     assert isinstance(_captured_bubbles[0], MenuBubble)
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.flow_state == FlowState.MENU
+
+
+# --------------------------------------------------------------------------
+# _handle_manage_appointment: LLM hand-back into the deterministic manage flow
+# --------------------------------------------------------------------------
+
+
+async def _seed_future_appointment(
+    db, tenant, patient, *, start_at, appointment_type="Consulta Geral"
+):
+    async with db() as session:
+        appt = Appointment(
+            tenant_id=tenant.id,
+            patient_id=patient.id,
+            google_event_id=f"evt-{uuid4()}",
+            appointment_type=appointment_type,
+            start_at=start_at,
+            end_at=start_at + timedelta(minutes=30),
+            status=AppointmentStatus.SCHEDULED,
+        )
+        session.add(appt)
+        await session.commit()
+        await session.refresh(appt)
+        return appt
+
+
+async def test_handle_manage_appointment_single_cancel_reaches_confirm_step(
+    db, _captured_bubbles
+):
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+    professionals = _snapshots([ana, bruno])
+    appt = await _seed_future_appointment(
+        db, tenant, patient, start_at=datetime.now(UTC) + timedelta(days=2)
+    )
+
+    await tasks._handle_manage_appointment(
+        _reply_ctx(conversation), "cancel", tenant, professionals, patient.wa_id
+    )
+
+    assert len(_captured_bubbles) == 1
+    bubble = _captured_bubbles[0]
+    assert isinstance(bubble, MenuBubble)
+    assert bubble.labels == ["Sim", "Não"]
+
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.flow_state == FlowState.MANAGE_BOOKING
+        assert conv.flow_step == STEP_MANAGE_CANCEL_CONFIRM
+        assert conv.flow_managing_appointment_id == appt.id
+
+
+async def test_handle_manage_appointment_multiple_reaches_disambiguation_pick(
+    db, _captured_bubbles
+):
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+    professionals = _snapshots([ana, bruno])
+    now = datetime.now(UTC)
+    await _seed_future_appointment(db, tenant, patient, start_at=now + timedelta(days=1))
+    await _seed_future_appointment(db, tenant, patient, start_at=now + timedelta(days=5))
+
+    await tasks._handle_manage_appointment(
+        _reply_ctx(conversation), "cancel", tenant, professionals, patient.wa_id
+    )
+
+    assert len(_captured_bubbles) == 1
+    bubble = _captured_bubbles[0]
+    assert isinstance(bubble, SlotsBubble)
+    assert len(bubble.rows) == 2
+
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.flow_state == FlowState.MANAGE_BOOKING
+        assert conv.flow_step == STEP_MANAGE_PICK_CANCEL
+
+
+async def test_handle_manage_appointment_no_appointments_sends_none_reply(
+    db, _captured_bubbles
+):
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+    professionals = _snapshots([ana, bruno])
+
+    await tasks._handle_manage_appointment(
+        _reply_ctx(conversation), "reschedule", tenant, professionals, patient.wa_id
+    )
+
+    assert isinstance(_captured_bubbles[0], TextBubble)
+    assert "não tem" in _captured_bubbles[0].body.lower()
+
     async with db() as session:
         conv = await session.get(Conversation, conversation.id)
         assert conv.flow_state == FlowState.MENU

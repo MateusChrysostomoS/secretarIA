@@ -80,6 +80,10 @@ INSURANCE_PROMPT_OTHER = "Qual é o nome do seu convênio?"
 # plans keep 2 slots for the fixed Particular/Outro rows.
 MAX_PROFESSIONAL_ROWS = 10
 MAX_INSURANCE_PLAN_ROWS = 8
+# Same hard WhatsApp limit for the manage flow's "pick an appointment" list
+# (_manage_pick_list_bubble). A patient with more upcoming appointments than
+# this is not expected in practice; extras are dropped (with a warning).
+MAX_MANAGE_APPOINTMENT_ROWS = 10
 
 # Reactivation ("welcome back" / resume) defaults. Overridable per tenant under
 # initial_flows.reactivation.
@@ -122,6 +126,11 @@ STEP_MANAGE_CANCEL_CONFIRM = "manage_cancel_confirm"
 STEP_MANAGE_DAY = "manage_day"
 STEP_MANAGE_SLOT = "manage_slot"
 STEP_MANAGE_CONFIRM = "manage_confirm"
+# Pick-list steps for the direct "Remarcar"/"Cancelar" entries
+# (`enter_manage_action`): same tappable list as STEP_MANAGE_PICK, but the tap
+# resolves straight into the picked intent instead of the neutral action card.
+STEP_MANAGE_PICK_RESCHEDULE = "manage_pick_reschedule"
+STEP_MANAGE_PICK_CANCEL = "manage_pick_cancel"
 
 _WEEKDAY_PT = {
     "monday": "Segunda",
@@ -161,6 +170,12 @@ class FlowRouterResult:
     # them explicitly.
     flow_selected_professional_id: UUID | None = None
     flow_selected_insurance: str | None = None
+    # The appointment being cancelled/rescheduled inside MANAGE_BOOKING
+    # (replaces the old flow_selected_type overload). Written unconditionally
+    # by the caller like every field above, so any manage-flow result that
+    # should keep it must carry it explicitly; non-manage results leave it
+    # None, and the completed cancel/reschedule results clear it on purpose.
+    flow_managing_appointment_id: UUID | None = None
     # When set, an event was created and the caller should persist a row.
     appointment: dict | None = None
     # When set, the matching appointment row should be flipped to CANCELLED.
@@ -450,6 +465,11 @@ def _selected_insurance(conversation: Conversation) -> str | None:
     return getattr(conversation, "flow_selected_insurance", None)
 
 
+def _selected_managing_appointment_id(conversation: Conversation) -> UUID | None:
+    """The conversation's in-progress manage-flow target (getattr: same rationale)."""
+    return getattr(conversation, "flow_managing_appointment_id", None)
+
+
 def _service_list_bubble(tenant: Tenant, services: list[dict]) -> Bubble:
     rows: list[tuple[str, str]] = [
         (f"svc|{s.get('name', '')}", str(s.get("name", ""))[:24]) for s in services
@@ -473,6 +493,7 @@ def _preserve(conversation: Conversation, action: str) -> FlowRouterResult:
         flow_selected_slot=conversation.flow_selected_slot,
         flow_selected_professional_id=_selected_professional_id(conversation),
         flow_selected_insurance=_selected_insurance(conversation),
+        flow_managing_appointment_id=_selected_managing_appointment_id(conversation),
     )
 
 
@@ -496,7 +517,8 @@ async def route(
     so this function performs no DB I/O and can run its calendar network calls
     without holding a session. `upcoming_appointments` is the patient's future
     SCHEDULED appointments (dicts: id, google_event_id, appointment_type,
-    start_at, end_at), loaded by the worker only when the manage flow is active.
+    start_at, end_at, professional_id), loaded by the worker only when the
+    manage flow is active.
 
     `professionals` is the tenant's ACTIVE professionals snapshot (plain
     objects: id, name, specialty, about, appointment_types), loaded by the
@@ -538,6 +560,30 @@ async def route(
     # visible manage button).
     if _label_match(inbound_body, manage_label(tenant)):
         return _enter_manage(tenant, upcoming_appointments or [], professionals)
+
+    # Direct "Remarcar"/"Cancelar" greeting-button taps: skip the neutral
+    # action card and go straight for the tapped intent (enter_manage_action).
+    # Checked before the multi-doctor dispatch so it wins on BOTH single- and
+    # multi-doctor tenants alike (the multi-doctor menu has no visible manage
+    # button, but these labels can still arrive via the greeting buttons).
+    # Safe against the booking flow's own "Cancelar"/"Confirmar": those only
+    # ever arrive while flow_state == SERVICE_CATALOG, dispatched above this
+    # block (state-based dispatch runs first - see the SERVICE_CATALOG/
+    # MANAGE_BOOKING branches earlier in this function).
+    if _label_match(inbound_body, LABEL_RESCHEDULE):
+        return enter_manage_action(
+            "reschedule", tenant, upcoming_appointments or [], professionals
+        )
+    if _label_match(inbound_body, LABEL_CANCEL_APPT):
+        return enter_manage_action("cancel", tenant, upcoming_appointments or [], professionals)
+
+    # "Outro" from the greeting trio must always reach the LLM, even on a
+    # single-doctor tenant whose configured menu buttons don't include it
+    # (the index-based mapping below only knows the configured labels). Same
+    # place-it-anywhere semantics as the manage label above; identical result
+    # to _enter_menu_choice's 3rd slot and _menu_choice_multi's labels[2].
+    if _label_match(inbound_body, LABEL_OTHER):
+        return FlowRouterResult(action="delegate_llm", flow_state=FlowState.LLM)
 
     if _is_multi_professional(professionals):
         return _menu_choice_multi(conversation, tenant, inbound_body, professionals or [])
@@ -1215,6 +1261,49 @@ def _find_appt_by_id(appointments: list[dict], appt_id: str | None) -> dict | No
     return None
 
 
+def _managing_appt_id_str(conversation: Conversation) -> str | None:
+    """The conversation's manage-flow target, as the string `_find_appt_by_id`
+    compares against (that helper deliberately keeps comparing strings)."""
+    managing_id = _selected_managing_appointment_id(conversation)
+    return str(managing_id) if managing_id is not None else None
+
+
+def _appt_uuid(appt: dict) -> UUID | None:
+    """UUID of `appt["id"]` (a string - see patient_context.load_upcoming_appointments)."""
+    try:
+        return UUID(str(appt.get("id")))
+    except (TypeError, ValueError):
+        return None
+
+
+def _manage_pick_list_bubble(appointments: list[dict], body: str) -> SlotsBubble:
+    """The tappable list of the patient's future appointments.
+
+    Factored out of `_enter_manage` so `enter_manage_action`'s multi-
+    appointment branch can reuse it with an intent-specific `body`. Capped at
+    MAX_MANAGE_APPOINTMENT_ROWS (WhatsApp's hard list-row limit) — beyond that
+    we log a COUNT-ONLY warning and truncate, mirroring `_enter_professional_list`.
+    Never logs appointment contents (dates, types).
+    """
+    valid = [appt for appt in appointments if isinstance(appt.get("start_at"), datetime)]
+    if len(valid) > MAX_MANAGE_APPOINTMENT_ROWS:
+        logger.warning(
+            "flow_manage_appointment_list_truncated",
+            total=len(valid),
+            shown=MAX_MANAGE_APPOINTMENT_ROWS,
+        )
+    rows = [
+        (f"slot|{appt['start_at'].isoformat()}", _appt_row_label(appt))
+        for appt in valid[:MAX_MANAGE_APPOINTMENT_ROWS]
+    ]
+    return SlotsBubble(
+        body=body,
+        rows=rows,
+        button_label="Ver consultas",
+        section_title="Suas consultas",
+    )
+
+
 def _enter_manage(
     tenant: Tenant, appointments: list[dict], professionals: list | None = None
 ) -> FlowRouterResult:
@@ -1228,23 +1317,53 @@ def _enter_manage(
             ],
             flow_state=FlowState.MENU,
         )
-    rows = [
-        (f"slot|{appt['start_at'].isoformat()}", _appt_row_label(appt))
-        for appt in appointments
-        if isinstance(appt.get("start_at"), datetime)
-    ]
     return FlowRouterResult(
         action="reply",
         bubbles=[
-            SlotsBubble(
-                body="Qual consulta você quer remarcar ou cancelar?",
-                rows=rows,
-                button_label="Ver consultas",
-                section_title="Suas consultas",
-            )
+            _manage_pick_list_bubble(appointments, "Qual consulta você quer remarcar ou cancelar?")
         ],
         flow_state=FlowState.MANAGE_BOOKING,
         flow_step=STEP_MANAGE_PICK,
+    )
+
+
+def enter_manage_action(
+    intent: Literal["reschedule", "cancel"],
+    tenant: Tenant,
+    appointments: list[dict],
+    professionals: list | None = None,
+) -> FlowRouterResult:
+    """Deterministic entry for a direct "Remarcar"/"Cancelar" tap at the menu.
+
+    Unlike `_enter_manage` (which always shows the neutral "o que você
+    gostaria de fazer?" action card after a pick), this goes straight for the
+    tapped intent:
+      - no appointments -> `_enter_manage`'s empty-list reply, reused as-is.
+      - exactly one -> begins that intent directly on it (NEAREST == only,
+        nothing to disambiguate).
+      - 2+ -> the same tappable pick-list `_enter_manage` shows, with an
+        intent-specific prompt; the tap resolves through
+        STEP_MANAGE_PICK_RESCHEDULE / STEP_MANAGE_PICK_CANCEL (`_manage_step`).
+    """
+    if not appointments:
+        return _enter_manage(tenant, appointments, professionals)
+    if len(appointments) == 1:
+        appt = appointments[0]
+        managing_id = _appt_uuid(appt)
+        if intent == "reschedule":
+            return _begin_reschedule(managing_id)
+        return _begin_cancel(managing_id, appt)
+    prompt = (
+        "Qual consulta você quer remarcar?"
+        if intent == "reschedule"
+        else "Qual consulta você quer cancelar?"
+    )
+    step = STEP_MANAGE_PICK_RESCHEDULE if intent == "reschedule" else STEP_MANAGE_PICK_CANCEL
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[_manage_pick_list_bubble(appointments, prompt)],
+        flow_state=FlowState.MANAGE_BOOKING,
+        flow_step=step,
     )
 
 
@@ -1256,6 +1375,51 @@ def _manage_action_card(appt: dict) -> list:
             labels=[LABEL_RESCHEDULE, LABEL_CANCEL_APPT, LABEL_BACK],
         )
     ]
+
+
+def _begin_reschedule(managing_id: UUID | None) -> FlowRouterResult:
+    """Ask for the new day, targeting `managing_id`.
+
+    Shared by STEP_MANAGE_ACTION's "Remarcar" branch and
+    `enter_manage_action`'s single-appointment shortcut - identical
+    patient-visible behavior to what STEP_MANAGE_ACTION always did.
+    """
+    # PROMPT 4 hook: when the payment lifecycle lands, carry the existing
+    # deposit onto the new slot (no refund, no re-charge), subject to
+    # reschedule_limit.
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[
+            TextBubble(body="Para quando você gostaria de remarcar? (ex: amanhã, sexta, 12/06)")
+        ],
+        flow_state=FlowState.MANAGE_BOOKING,
+        flow_step=STEP_MANAGE_DAY,
+        flow_managing_appointment_id=managing_id,
+    )
+
+
+def _begin_cancel(managing_id: UUID | None, appt: dict | None) -> FlowRouterResult:
+    """Ask Sim/Não to confirm cancelling `managing_id` (`appt` drives the summary text).
+
+    Shared by STEP_MANAGE_ACTION's "Cancelar" branch and
+    `enter_manage_action`'s single-appointment shortcut. `appt` may be None
+    (e.g. a stale pick no longer present in the loaded snapshot) - the
+    confirmation still proceeds with a generic summary, matching what
+    STEP_MANAGE_ACTION always did.
+    """
+    summary = _appt_summary(appt) if appt else "essa consulta"
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[
+            MenuBubble(
+                body=f"Confirmar o cancelamento?\n\n{summary}",
+                labels=[LABEL_YES, LABEL_NO],
+            )
+        ],
+        flow_state=FlowState.MANAGE_BOOKING,
+        flow_step=STEP_MANAGE_CANCEL_CONFIRM,
+        flow_managing_appointment_id=managing_id,
+    )
 
 
 async def _manage_step(
@@ -1277,8 +1441,20 @@ async def _manage_step(
             bubbles=_manage_action_card(appt),
             flow_state=FlowState.MANAGE_BOOKING,
             flow_step=STEP_MANAGE_ACTION,
-            flow_selected_type=str(appt.get("id")),
+            flow_managing_appointment_id=_appt_uuid(appt),
         )
+
+    if step == STEP_MANAGE_PICK_RESCHEDULE:
+        appt = _find_appt_by_iso(appointments, body)
+        if appt is None:
+            return _preserve(conversation, "delegate_llm")
+        return _begin_reschedule(_appt_uuid(appt))
+
+    if step == STEP_MANAGE_PICK_CANCEL:
+        appt = _find_appt_by_iso(appointments, body)
+        if appt is None:
+            return _preserve(conversation, "delegate_llm")
+        return _begin_cancel(_appt_uuid(appt), appt)
 
     if step == STEP_MANAGE_ACTION:
         if _norm(body) == _norm(LABEL_BACK):
@@ -1287,33 +1463,12 @@ async def _manage_step(
                 bubbles=_menu_bubbles(tenant, professionals),
                 flow_state=FlowState.MENU,
             )
+        managing_id = _selected_managing_appointment_id(conversation)
         if _norm(body) == _norm(LABEL_CANCEL_APPT):
-            appt = _find_appt_by_id(appointments, conversation.flow_selected_type)
-            summary = _appt_summary(appt) if appt else "essa consulta"
-            return FlowRouterResult(
-                action="reply",
-                bubbles=[
-                    MenuBubble(
-                        body=f"Confirmar o cancelamento?\n\n{summary}",
-                        labels=[LABEL_YES, LABEL_NO],
-                    )
-                ],
-                flow_state=FlowState.MANAGE_BOOKING,
-                flow_step=STEP_MANAGE_CANCEL_CONFIRM,
-                flow_selected_type=conversation.flow_selected_type,
-            )
+            appt = _find_appt_by_id(appointments, _managing_appt_id_str(conversation))
+            return _begin_cancel(managing_id, appt)
         if _norm(body) == _norm(LABEL_RESCHEDULE):
-            return FlowRouterResult(
-                action="reply",
-                bubbles=[
-                    TextBubble(
-                        body="Para quando você gostaria de remarcar? (ex: amanhã, sexta, 12/06)"
-                    )
-                ],
-                flow_state=FlowState.MANAGE_BOOKING,
-                flow_step=STEP_MANAGE_DAY,
-                flow_selected_type=conversation.flow_selected_type,
-            )
+            return _begin_reschedule(managing_id)
         return _preserve(conversation, "delegate_llm")
 
     if step == STEP_MANAGE_CANCEL_CONFIRM:
@@ -1344,6 +1499,8 @@ async def _manage_cancel(
     appointments: list[dict],
     professionals: list | None = None,
 ) -> FlowRouterResult:
+    # PROMPT 4 hook: deposit refund/retention on cancellation is Prompt 4's
+    # scope — nothing charged or refunded here.
     if _norm(body) == _norm(LABEL_NO):
         return FlowRouterResult(
             action="reply",
@@ -1356,7 +1513,7 @@ async def _manage_cancel(
     if _norm(body) != _norm(LABEL_YES):
         return _preserve(conversation, "delegate_llm")
 
-    appt = _find_appt_by_id(appointments, conversation.flow_selected_type)
+    appt = _find_appt_by_id(appointments, _managing_appt_id_str(conversation))
     if appt is None or calendar is None:
         return _preserve(conversation, "delegate_llm")
     event_id = str(appt.get("google_event_id") or "")
@@ -1370,7 +1527,7 @@ async def _manage_cancel(
             action="calendar_unavailable",
             flow_state=FlowState.MANAGE_BOOKING,
             flow_step=STEP_MANAGE_CANCEL_CONFIRM,
-            flow_selected_type=conversation.flow_selected_type,
+            flow_managing_appointment_id=_selected_managing_appointment_id(conversation),
         )
     return FlowRouterResult(
         action="reply",
@@ -1390,7 +1547,7 @@ async def _manage_handle_day(
 ) -> FlowRouterResult:
     if calendar is None:
         return _preserve(conversation, "delegate_llm")
-    appt = _find_appt_by_id(appointments, conversation.flow_selected_type)
+    appt = _find_appt_by_id(appointments, _managing_appt_id_str(conversation))
     if appt is None:
         return _preserve(conversation, "delegate_llm")
     now = datetime.now(calendar.tzinfo)
@@ -1398,6 +1555,7 @@ async def _manage_handle_day(
     if target is None:
         return _preserve(conversation, "delegate_llm")
 
+    managing_id = _selected_managing_appointment_id(conversation)
     duration = _appt_duration_minutes(appt, tenant)
     try:
         slots = await calendar.list_free_slots(
@@ -1408,7 +1566,7 @@ async def _manage_handle_day(
             action="calendar_unavailable",
             flow_state=FlowState.MANAGE_BOOKING,
             flow_step=STEP_MANAGE_DAY,
-            flow_selected_type=conversation.flow_selected_type,
+            flow_managing_appointment_id=managing_id,
         )
 
     day_iso = target.date().isoformat()
@@ -1425,7 +1583,7 @@ async def _manage_handle_day(
             ],
             flow_state=FlowState.MANAGE_BOOKING,
             flow_step=STEP_MANAGE_DAY,
-            flow_selected_type=conversation.flow_selected_type,
+            flow_managing_appointment_id=managing_id,
             flow_selected_day=day_iso,
         )
 
@@ -1442,7 +1600,7 @@ async def _manage_handle_day(
         ],
         flow_state=FlowState.MANAGE_BOOKING,
         flow_step=STEP_MANAGE_SLOT,
-        flow_selected_type=conversation.flow_selected_type,
+        flow_managing_appointment_id=managing_id,
         flow_selected_day=day_iso,
     )
 
@@ -1454,7 +1612,7 @@ def _manage_handle_slot(
     if start is None:
         return _preserve(conversation, "delegate_llm")
     slot_iso = start.replace(tzinfo=None).isoformat(timespec="minutes")
-    appt = _find_appt_by_id(appointments, conversation.flow_selected_type)
+    appt = _find_appt_by_id(appointments, _managing_appt_id_str(conversation))
     appt_type = str(appt.get("appointment_type") or "Consulta") if appt else "Consulta"
     recap = f"Remarcar para:\n{appt_type}\n{start.strftime('%d/%m/%Y às %H:%M')}"
     return FlowRouterResult(
@@ -1464,7 +1622,7 @@ def _manage_handle_slot(
         ],
         flow_state=FlowState.MANAGE_BOOKING,
         flow_step=STEP_MANAGE_CONFIRM,
-        flow_selected_type=conversation.flow_selected_type,
+        flow_managing_appointment_id=_selected_managing_appointment_id(conversation),
         flow_selected_day=conversation.flow_selected_day,
         flow_selected_slot=slot_iso,
     )
@@ -1478,6 +1636,9 @@ async def _manage_reschedule(
     appointments: list[dict],
     professionals: list | None = None,
 ) -> FlowRouterResult:
+    # PROMPT 4 hook: when the payment lifecycle lands, carry the existing
+    # deposit onto the new slot (no refund, no re-charge), subject to
+    # reschedule_limit.
     if _norm(body) == _norm(LABEL_CANCEL):
         return FlowRouterResult(
             action="reply",
@@ -1486,7 +1647,7 @@ async def _manage_reschedule(
         )
     if _norm(body) != _norm(LABEL_CONFIRM):
         return _preserve(conversation, "delegate_llm")
-    appt = _find_appt_by_id(appointments, conversation.flow_selected_type)
+    appt = _find_appt_by_id(appointments, _managing_appt_id_str(conversation))
     if appt is None or calendar is None or not conversation.flow_selected_slot:
         return _preserve(conversation, "delegate_llm")
     event_id = str(appt.get("google_event_id") or "")
@@ -1505,7 +1666,7 @@ async def _manage_reschedule(
             action="calendar_unavailable",
             flow_state=FlowState.MANAGE_BOOKING,
             flow_step=STEP_MANAGE_CONFIRM,
-            flow_selected_type=conversation.flow_selected_type,
+            flow_managing_appointment_id=_selected_managing_appointment_id(conversation),
             flow_selected_day=conversation.flow_selected_day,
             flow_selected_slot=conversation.flow_selected_slot,
         )
@@ -1548,6 +1709,7 @@ def _preserve_reply(
         flow_selected_slot=conversation.flow_selected_slot,
         flow_selected_professional_id=_selected_professional_id(conversation),
         flow_selected_insurance=_selected_insurance(conversation),
+        flow_managing_appointment_id=_selected_managing_appointment_id(conversation),
     )
 
 

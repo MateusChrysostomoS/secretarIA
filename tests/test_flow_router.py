@@ -15,6 +15,9 @@ from secretaria.ai.formatter import ButtonBubble, SlotsBubble, TextBubble  # noq
 from secretaria.models import FlowState  # noqa: E402
 from secretaria.services.calendar import CalendarUnavailableError  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
+    LABEL_CANCEL_APPT,
+    LABEL_OTHER,
+    LABEL_RESCHEDULE,
     STEP_AWAITING_CONFIRMATION,
     STEP_AWAITING_DAY,
     STEP_AWAITING_SERVICE,
@@ -25,8 +28,11 @@ from secretaria.services.flow_router import (  # noqa: E402
     STEP_MANAGE_CONFIRM,
     STEP_MANAGE_DAY,
     STEP_MANAGE_PICK,
+    STEP_MANAGE_PICK_CANCEL,
+    STEP_MANAGE_PICK_RESCHEDULE,
     STEP_MANAGE_SLOT,
     MenuBubble,
+    enter_manage_action,
     route,
 )
 
@@ -60,6 +66,7 @@ def _conversation(**kw):
         flow_selected_type=None,
         flow_selected_day=None,
         flow_selected_slot=None,
+        flow_managing_appointment_id=None,
         patient_id=None,
     )
     base.update(kw)
@@ -298,16 +305,20 @@ async def test_menu_matches_truncated_long_label():
 # Manage flow (cancel / reschedule)
 # --------------------------------------------------------------------------
 
-from datetime import datetime  # noqa: E402
+from datetime import datetime, timedelta  # noqa: E402
+from uuid import UUID, uuid4  # noqa: E402
 
 _TZ = ZoneInfo("America/Sao_Paulo")
 
+# Appointment ids are real UUIDs in production (Appointment.id is a UUID PK) -
+# flow_managing_appointment_id is a proper FK now, so fixtures need valid UUID
+# strings (the old flow_selected_type overload got away with "a1").
+_APPT_A1_ID = "11111111-1111-4111-8111-111111111111"
+
 
 def _appt_window(
-    appt_id="a1", event_id="evt-a1", start=None, minutes=40, type_="Primeira Consulta"
+    appt_id=_APPT_A1_ID, event_id="evt-a1", start=None, minutes=40, type_="Primeira Consulta"
 ):
-    from datetime import timedelta
-
     start = start or datetime(2026, 6, 20, 14, 0, tzinfo=_TZ)
     return {
         "id": appt_id,
@@ -356,7 +367,8 @@ async def test_manage_pick_shows_action_card():
     res = await route(conv, _tenant(), _FakeCalendar(), body, upcoming_appointments=[appt])
     assert res.action == "reply"
     assert res.flow_step == STEP_MANAGE_ACTION
-    assert res.flow_selected_type == "a1"  # appointment id stored
+    assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)  # appointment id stored
+    assert res.flow_selected_type is None  # never the overloaded column anymore
     assert isinstance(res.bubbles[0], MenuBubble)
     assert res.bubbles[0].labels == ["Remarcar", "Cancelar", "Voltar"]
 
@@ -367,22 +379,25 @@ async def test_manage_cancel_confirm_then_apply():
     conv = _conversation(
         flow_state=FlowState.MANAGE_BOOKING,
         flow_step=STEP_MANAGE_ACTION,
-        flow_selected_type="a1",
+        flow_managing_appointment_id=UUID(_APPT_A1_ID),
     )
     res = await route(conv, _tenant(), _FakeCalendar(), "Cancelar", upcoming_appointments=[appt])
     assert res.flow_step == STEP_MANAGE_CANCEL_CONFIRM
+    assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)
     assert isinstance(res.bubbles[0], MenuBubble)
 
     # CANCEL_CONFIRM -> "Sim" -> calls calendar + flags the row for cancel.
     conv2 = _conversation(
         flow_state=FlowState.MANAGE_BOOKING,
         flow_step=STEP_MANAGE_CANCEL_CONFIRM,
-        flow_selected_type="a1",
+        flow_managing_appointment_id=UUID(_APPT_A1_ID),
     )
     cal = _FakeCalendar()
     res2 = await route(conv2, _tenant(), cal, "Sim", upcoming_appointments=[appt])
     assert res2.action == "reply"
     assert res2.flow_state == FlowState.IDLE
+    assert res2.flow_managing_appointment_id is None  # cleared: cancel complete
+    assert res2.flow_selected_type is None
     assert res2.appointment_cancel_id == "evt-a1"
     assert cal.cancelled == ["evt-a1"]
 
@@ -391,7 +406,7 @@ async def test_manage_cancel_no_keeps_appointment():
     conv = _conversation(
         flow_state=FlowState.MANAGE_BOOKING,
         flow_step=STEP_MANAGE_CANCEL_CONFIRM,
-        flow_selected_type="a1",
+        flow_managing_appointment_id=UUID(_APPT_A1_ID),
     )
     res = await route(
         conv, _tenant(), _FakeCalendar(), "Não", upcoming_appointments=[_appt_window()]
@@ -405,7 +420,7 @@ async def test_manage_cancel_calendar_unavailable():
     conv = _conversation(
         flow_state=FlowState.MANAGE_BOOKING,
         flow_step=STEP_MANAGE_CANCEL_CONFIRM,
-        flow_selected_type="a1",
+        flow_managing_appointment_id=UUID(_APPT_A1_ID),
     )
     res = await route(
         conv,
@@ -415,6 +430,7 @@ async def test_manage_cancel_calendar_unavailable():
         upcoming_appointments=[_appt_window()],
     )
     assert res.action == "calendar_unavailable"
+    assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)  # carried for retry
 
 
 async def test_manage_reschedule_full_flow():
@@ -425,29 +441,31 @@ async def test_manage_reschedule_full_flow():
     conv = _conversation(
         flow_state=FlowState.MANAGE_BOOKING,
         flow_step=STEP_MANAGE_ACTION,
-        flow_selected_type="a1",
+        flow_managing_appointment_id=UUID(_APPT_A1_ID),
     )
     res = await route(conv, tenant, _FakeCalendar(), "Remarcar", upcoming_appointments=[appt])
     assert res.flow_step == STEP_MANAGE_DAY
+    assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)
 
     # DAY -> list new slots (40-min duration honoured).
     conv = _conversation(
         flow_state=FlowState.MANAGE_BOOKING,
         flow_step=STEP_MANAGE_DAY,
-        flow_selected_type="a1",
+        flow_managing_appointment_id=UUID(_APPT_A1_ID),
     )
     cal = _FakeCalendar(
         slots=[{"start": "2026-06-22T08:00", "end": "2026-06-22T08:40", "label": "08:00"}]
     )
     res = await route(conv, tenant, cal, "segunda", upcoming_appointments=[appt])
     assert res.flow_step == STEP_MANAGE_SLOT
+    assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)
     assert isinstance(res.bubbles[0], SlotsBubble)
 
     # SLOT -> recap confirmation card.
     conv = _conversation(
         flow_state=FlowState.MANAGE_BOOKING,
         flow_step=STEP_MANAGE_SLOT,
-        flow_selected_type="a1",
+        flow_managing_appointment_id=UUID(_APPT_A1_ID),
         flow_selected_day="2026-06-22",
     )
     res = await route(
@@ -455,19 +473,22 @@ async def test_manage_reschedule_full_flow():
     )
     assert res.flow_step == STEP_MANAGE_CONFIRM
     assert res.flow_selected_slot == "2026-06-22T08:00"
+    assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)
     assert isinstance(res.bubbles[0], ButtonBubble)
 
     # CONFIRM -> update_event with the original 40-min duration.
     conv = _conversation(
         flow_state=FlowState.MANAGE_BOOKING,
         flow_step=STEP_MANAGE_CONFIRM,
-        flow_selected_type="a1",
+        flow_managing_appointment_id=UUID(_APPT_A1_ID),
         flow_selected_slot="2026-06-22T08:00",
     )
     cal = _FakeCalendar()
     res = await route(conv, tenant, cal, "Confirmar", upcoming_appointments=[appt])
     assert res.action == "reply"
     assert res.flow_state == FlowState.IDLE
+    assert res.flow_managing_appointment_id is None  # cleared: reschedule complete
+    assert res.flow_selected_type is None
     assert res.appointment_reschedule["google_event_id"] == "evt-a1"
     event_id, start, end = cal.updated[0]
     assert event_id == "evt-a1"
@@ -475,9 +496,197 @@ async def test_manage_reschedule_full_flow():
 
 
 async def test_manage_freetext_delegates_preserving_state():
-    conv = _conversation(flow_state=FlowState.MANAGE_BOOKING, flow_step=STEP_MANAGE_PICK)
+    conv = _conversation(
+        flow_state=FlowState.MANAGE_BOOKING,
+        flow_step=STEP_MANAGE_PICK,
+        flow_managing_appointment_id=UUID(_APPT_A1_ID),
+    )
     res = await route(
         conv, _tenant(), _FakeCalendar(), "blá blá", upcoming_appointments=[_appt_window()]
     )
     assert res.action == "delegate_llm"
     assert res.flow_state == FlowState.MANAGE_BOOKING
+    assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)  # preserved, not lost
+
+
+# --------------------------------------------------------------------------
+# New pick steps (direct "Remarcar"/"Cancelar" entries with 2+ appointments)
+# --------------------------------------------------------------------------
+
+
+async def test_manage_pick_reschedule_step_resolves_to_begin_reschedule():
+    appt = _appt_window()
+    conv = _conversation(
+        flow_state=FlowState.MANAGE_BOOKING, flow_step=STEP_MANAGE_PICK_RESCHEDULE
+    )
+    body = f"20/06 14:00 ({appt['start_at'].isoformat()})"
+    res = await route(conv, _tenant(), _FakeCalendar(), body, upcoming_appointments=[appt])
+    assert res.action == "reply"
+    assert res.flow_step == STEP_MANAGE_DAY
+    assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)
+    assert isinstance(res.bubbles[0], TextBubble)
+
+
+async def test_manage_pick_cancel_step_resolves_to_begin_cancel():
+    appt = _appt_window()
+    conv = _conversation(flow_state=FlowState.MANAGE_BOOKING, flow_step=STEP_MANAGE_PICK_CANCEL)
+    body = f"20/06 14:00 ({appt['start_at'].isoformat()})"
+    res = await route(conv, _tenant(), _FakeCalendar(), body, upcoming_appointments=[appt])
+    assert res.action == "reply"
+    assert res.flow_step == STEP_MANAGE_CANCEL_CONFIRM
+    assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)
+    assert isinstance(res.bubbles[0], MenuBubble)
+
+
+async def test_manage_pick_reschedule_garbage_delegates_preserving_state():
+    conv = _conversation(
+        flow_state=FlowState.MANAGE_BOOKING, flow_step=STEP_MANAGE_PICK_RESCHEDULE
+    )
+    res = await route(
+        conv, _tenant(), _FakeCalendar(), "blá blá", upcoming_appointments=[_appt_window()]
+    )
+    assert res.action == "delegate_llm"
+    assert res.flow_state == FlowState.MANAGE_BOOKING
+    assert res.flow_step == STEP_MANAGE_PICK_RESCHEDULE
+
+
+async def test_manage_pick_cancel_garbage_delegates_preserving_state():
+    conv = _conversation(flow_state=FlowState.MANAGE_BOOKING, flow_step=STEP_MANAGE_PICK_CANCEL)
+    res = await route(
+        conv, _tenant(), _FakeCalendar(), "blá blá", upcoming_appointments=[_appt_window()]
+    )
+    assert res.action == "delegate_llm"
+    assert res.flow_state == FlowState.MANAGE_BOOKING
+    assert res.flow_step == STEP_MANAGE_PICK_CANCEL
+
+
+# --------------------------------------------------------------------------
+# enter_manage_action (new public entry)
+# --------------------------------------------------------------------------
+
+
+def test_enter_manage_action_empty_matches_enter_manage_empty_reply():
+    res = enter_manage_action("reschedule", _tenant(), [])
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.MENU
+    assert isinstance(res.bubbles[0], TextBubble)
+    assert "não tem" in res.bubbles[0].body.lower()
+
+    res_cancel = enter_manage_action("cancel", _tenant(), [])
+    assert res_cancel.flow_state == FlowState.MENU
+    assert isinstance(res_cancel.bubbles[0], TextBubble)
+
+
+def test_enter_manage_action_single_future_reschedule_begins_directly():
+    appt = _appt_window()
+    res = enter_manage_action("reschedule", _tenant(), [appt])
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.MANAGE_BOOKING
+    assert res.flow_step == STEP_MANAGE_DAY
+    assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)
+    assert isinstance(res.bubbles[0], TextBubble)
+
+
+def test_enter_manage_action_single_future_cancel_begins_directly():
+    appt = _appt_window()
+    res = enter_manage_action("cancel", _tenant(), [appt])
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.MANAGE_BOOKING
+    assert res.flow_step == STEP_MANAGE_CANCEL_CONFIRM
+    assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)
+    assert isinstance(res.bubbles[0], MenuBubble)
+    assert res.bubbles[0].labels == ["Sim", "Não"]
+
+
+def test_enter_manage_action_multiple_shows_intent_pick_list():
+    appts = [
+        _appt_window(appt_id=str(uuid4()), start=datetime(2026, 6, 20, 14, 0, tzinfo=_TZ)),
+        _appt_window(appt_id=str(uuid4()), start=datetime(2026, 6, 21, 9, 0, tzinfo=_TZ)),
+    ]
+    res = enter_manage_action("reschedule", _tenant(), appts)
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.MANAGE_BOOKING
+    assert res.flow_step == STEP_MANAGE_PICK_RESCHEDULE
+    assert isinstance(res.bubbles[0], SlotsBubble)
+    assert res.bubbles[0].body == "Qual consulta você quer remarcar?"
+    assert len(res.bubbles[0].rows) == 2
+
+    res_cancel = enter_manage_action("cancel", _tenant(), appts)
+    assert res_cancel.flow_step == STEP_MANAGE_PICK_CANCEL
+    assert res_cancel.bubbles[0].body == "Qual consulta você quer cancelar?"
+
+
+def test_enter_manage_action_caps_pick_list_at_ten():
+    appts = [
+        _appt_window(
+            appt_id=str(uuid4()),
+            start=datetime(2026, 6, 20, 8, 0, tzinfo=_TZ) + timedelta(hours=i),
+        )
+        for i in range(12)
+    ]
+    res = enter_manage_action("cancel", _tenant(), appts)
+    assert res.action == "reply"
+    assert len(res.bubbles[0].rows) == 10
+
+
+# --------------------------------------------------------------------------
+# route() at IDLE: direct "Remarcar"/"Cancelar" vs the classic manage_label
+# --------------------------------------------------------------------------
+
+
+async def test_route_idle_reschedule_label_enters_directly():
+    appt = _appt_window()
+    res = await route(
+        _conversation(flow_state=FlowState.IDLE),
+        _tenant(),
+        _FakeCalendar(),
+        LABEL_RESCHEDULE,
+        upcoming_appointments=[appt],
+    )
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.MANAGE_BOOKING
+    assert res.flow_step == STEP_MANAGE_DAY
+    assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)
+
+
+async def test_route_idle_cancel_label_enters_directly():
+    appt = _appt_window()
+    res = await route(
+        _conversation(flow_state=FlowState.IDLE),
+        _tenant(),
+        _FakeCalendar(),
+        LABEL_CANCEL_APPT,
+        upcoming_appointments=[appt],
+    )
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.MANAGE_BOOKING
+    assert res.flow_step == STEP_MANAGE_CANCEL_CONFIRM
+    assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)
+
+
+async def test_route_idle_outro_label_delegates_llm_even_off_menu():
+    """"Outro" from the greeting trio reaches the LLM even when the tenant's
+    configured single-doctor menu buttons don't include it — the index-based
+    menu mapping only knows the configured labels, so the explicit match must
+    win first (same place-it-anywhere semantics as the manage label)."""
+    tenant = _tenant()
+    tenant.initial_flows["buttons"] = ["Agendar", "Horários", "Falar com a equipe"]
+    res = await route(_conversation(flow_state=FlowState.IDLE), tenant, None, LABEL_OTHER)
+    assert res.action == "delegate_llm"
+    assert res.flow_state == FlowState.LLM
+
+
+async def test_route_manage_label_still_opens_classic_pick_then_action_card():
+    # manage_label ("Remarcar/Cancelar") keeps showing the neutral action card
+    # after a pick, unlike the direct LABEL_RESCHEDULE/LABEL_CANCEL_APPT taps.
+    appt = _appt_window()
+    res = await route(
+        _conversation(flow_state=FlowState.IDLE),
+        _tenant(),
+        _FakeCalendar(),
+        "Remarcar/Cancelar",
+        upcoming_appointments=[appt],
+    )
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.MANAGE_BOOKING
+    assert res.flow_step == STEP_MANAGE_PICK

@@ -27,6 +27,7 @@ from sqlalchemy import select
 
 from secretaria.ai.prompts import secretary_system_prompt
 from secretaria.ai.tools import (
+    ManageAppointmentRequested,
     SelectProfessionalRequested,
     ShowMainMenuRequested,
     _calendar_ctx,
@@ -69,6 +70,12 @@ SHOW_MAIN_MENU_SENTINEL = "__SHOW_MAIN_MENU__"
 # resolved professional's UUID rides after the colon and the worker re-enters
 # the deterministic flow at that doctor's greeting + services.
 SELECT_PROFESSIONAL_SENTINEL_PREFIX = "__SELECT_PROFESSIONAL__:"
+# Prefix returned when the agent called manage_existing_appointment; the
+# canonical action ("reschedule" or "cancel") rides after the colon and the
+# worker re-enters the deterministic manage (cancel/reschedule) flow via
+# services/flow_router.py::enter_manage_action instead of ever executing the
+# reschedule/cancel itself. Same exception->sentinel mechanism as the others.
+MANAGE_APPOINTMENT_SENTINEL_PREFIX = "__MANAGE_APPOINTMENT__:"
 
 # Per-async-task TenantRuntimeConfig, used by _prompt_with_today. Defined in
 # ai/tools.py (imported above as `_tenant_config_ctx`) rather than here, so a
@@ -314,6 +321,7 @@ async def run_agent(
     redis=None,
     selected_professional=None,
     include_post_consult_knowledge: bool = False,
+    appointment_context: str | None = None,
 ) -> str:
     """arq-side entry point: build history + run agent + return reply text.
 
@@ -335,6 +343,13 @@ async def run_agent(
     for THIS turn's prompt: False (the default) blanks it so the system prompt
     stays turn-appropriate; the caller (workers/tasks.py's
     `_should_inject_post_consult_knowledge`) decides when the turn qualifies.
+    `appointment_context` is the mirror image of that gate: a pre-rendered
+    "consultas marcadas" block (workers/tasks.py's `_appointment_context_text`,
+    gated by `_should_inject_appointment_context`) that this call should carry
+    for THIS turn's prompt — None (the default) leaves
+    `tenant_config.appointment_context` at its normal unset state, since unlike
+    post_consult_knowledge this field is NEVER populated by `load_tenant_config`
+    (see services/tenant_config.py::TenantRuntimeConfig.appointment_context).
     """
     conversation_id = UUID(context["conversation_id"])
     tenant_config = _config_with_selected_professional(tenant_config, selected_professional)
@@ -346,6 +361,11 @@ async def run_agent(
         # Turn-scoped injection: only a qualifying turn (see
         # _should_inject_post_consult_knowledge) gets this in its prompt.
         tenant_config = replace(tenant_config, post_consult_knowledge=None)
+    if tenant_config is not None and appointment_context is not None:
+        # Turn-scoped injection, filling rather than blanking (see the
+        # docstring above): only a qualifying turn (see
+        # _should_inject_appointment_context) ever passes a value here.
+        tenant_config = replace(tenant_config, appointment_context=appointment_context)
 
     # Build a per-tenant CalendarService and inject it via ContextVar so the
     # cached process-wide agent uses the right credentials for this call.
@@ -390,6 +410,16 @@ async def run_agent(
             professional_id=str(exc.professional_id),
         )
         return f"{SELECT_PROFESSIONAL_SENTINEL_PREFIX}{exc.professional_id}"
+    except ManageAppointmentRequested as exc:
+        # The agent chose to hand a reschedule/cancel request back to the
+        # deterministic manage flow — same propagation path as the sentinels
+        # above; it NEVER performs the action itself.
+        logger.info(
+            "ai_run_agent_manage_appointment",
+            conversation_id=str(conversation_id),
+            action=exc.action,
+        )
+        return f"{MANAGE_APPOINTMENT_SENTINEL_PREFIX}{exc.action}"
     except Exception as exc:
         logger.error(
             "ai_run_agent_failed",
