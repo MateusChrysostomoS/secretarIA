@@ -64,7 +64,7 @@ estorno. Never pretend a refund happened.
   gates the WHOLE lifecycle; `Tenant.pix_deposit_enabled` is the tenant-level switch —
   fail-closed both ways). Re-fetches rows in its own session (hook context is detached).
 - **Reminders** (`plugins/reminders.py`): now CORE — gate is `summary.active` +
-  `secretaria_enabled` only (see `CHECKPOINT_plugins.md` row + the ferro quota flag).
+  `secretaria_enabled` only (see `CHECKPOINT_plugins.md` row + the basico quota flag).
   PAID-deposit appointments get 3 buttons: inside the Meta 24h window →
   `send_buttons`; outside → `REMINDER_DEPOSIT_TEMPLATE_NAME` HSM with quick-reply
   payloads (`WhatsAppClient.send_template(button_payloads=...)`), falling back to the
@@ -111,10 +111,13 @@ estorno. Never pretend a refund happened.
 
 ## Flags / known gaps (deliberate, pending product decisions)
 
-- **ferro reminders quota**: ungating made reminders send for ferro-only tenants, but
-  brain-api's catalog still grants `limits["reminders"]=0` on `secretaria_ferro` —
-  usage accrues against 0. Left untouched on purpose (quota semantics must not change
-  silently); decide base grant vs metered price.
+- ~~**basico reminders quota**~~ — RESOLVED 2026-07-22, same day as the tier collapse:
+  `LIMIT_REMINDERS` is no longer a quota at all. It joined `billable_patients`/
+  `active_professionals` as a third metering-only dimension of the fully-metered
+  `secretaria_basico` plan (`STRIPE_METER_EVENT_REMINDERS`, companion price
+  `secretaria_basico_metered_reminders`) — every plan grants `limits["reminders"]=0`
+  (unlimited-by-quota) and each billable send is charged per-unit via the Stripe meter
+  instead. See brain-api's `CONTRACTS.md` §13.3/§13.5 for the wiring.
 - **RESCHEDULED is not remindable** (`_REMINDABLE_STATUSES` unchanged): after a
   reschedule, no further 24h/1h reminders fire — so the deposit's 3-button loop ends
   there. Pre-existing semantics, kept; revisit together with the hub-reschedule

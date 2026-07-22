@@ -66,7 +66,7 @@ def _summary(**overrides) -> EntitlementSummary:
         active=True,
         secretaria_enabled=True,
         plan="bronze",
-        secretaria_tier="bronze_1",
+        secretaria_tier="basico",
         addons=dict(_ALL_ADDONS_OFF),
         limits={},
     )
@@ -294,14 +294,15 @@ async def test_secretaria_disabled_is_silent_no_op(db, monkeypatch: pytest.Monke
     assert await _ledger_count(db, reminders._reminder_key("1h", appointment.id)) == 0
 
 
-async def test_ferro_tier_zero_addons_now_sends(db, monkeypatch: pytest.MonkeyPatch):
-    """The ungating's whole point: a bare ferro tenant with every addon off
-    (no bronze_1, no reactivation_pack — the OLD gate) still gets reminders."""
+async def test_basico_tier_zero_addons_now_sends(db, monkeypatch: pytest.MonkeyPatch):
+    """The ungating's whole point: a bare basico tenant with every addon off
+    (no bronze_1 tier, no reactivation_pack addon — the OLD gate, since retired)
+    still gets reminders."""
     tenant, patient, appointment = await _make_scenario(db, lead=timedelta(hours=1))
     monkeypatch.setattr(
         reminders,
         "get_entitlements",
-        _entitled_fake(secretaria_tier="ferro", addons=dict(_ALL_ADDONS_OFF)),
+        _entitled_fake(secretaria_tier="basico", addons=dict(_ALL_ADDONS_OFF)),
     )
 
     await reminders.send_appointment_reminders({"redis": None})

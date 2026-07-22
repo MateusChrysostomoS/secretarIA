@@ -11,9 +11,9 @@ Contract (brain-api, already implemented, do not change): GET
 {BRAIN_API_BASE_URL}/internal/tenants/{tenant_id}/entitlements, header
 X-Internal-Api-Key: <INTERNAL_API_KEY>. 200 response: {"tenant_id", "status",
 "active": bool, "secretaria_enabled": bool, "plan", "secretaria_tier":
-"ferro"|"bronze_1"|"bronze_2"|null, "addons": {<9 addon ids>: bool},
-"limits": {<keys>: int}}. `addons` is a FULL keyset — plan-implied addons are
-already resolved to True by brain-api, we do not add fallback logic on top.
+"basico"|null, "addons": {<9 addon ids>: bool}, "limits": {<keys>: int}}.
+`addons` is a FULL keyset — plan-implied addons are already resolved to True by
+brain-api, we do not add fallback logic on top.
 
 Caching (Redis-backed, bounds both brain-api call volume AND how fast a
 revocation actually locks the bot out):
@@ -46,9 +46,14 @@ from secretaria.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Subscription tiers, cheapest first. Cumulative: a tenant on a higher tier is
-# automatically entitled to every lower tier's tier-gated capability.
-TIERS: tuple[str, ...] = ("ferro", "bronze_1", "bronze_2")
+# Subscription tier(s), cheapest first. Cumulative: a tenant on a higher tier is
+# automatically entitled to every lower tier's tier-gated capability. Single-element
+# since the 2026-07-22 ferro/bronze_1/bronze_2 tier-ladder retirement (brain-api's
+# catalog collapsed to one fully-metered secretaria_basico plan) — kept as a tuple
+# rather than a bare constant so `is_entitled`'s generic tier-rank comparison needs no
+# special-casing if a second tier is ever reintroduced. MUST stay in sync with
+# brain-api's catalog.SECRETARIA_TIERS.
+TIERS: tuple[str, ...] = ("basico",)
 
 # The fixed addon keyset brain-api resolves per tenant (see contract above).
 # MUST stay in sync with brain-api's catalog.ADDON_IDS — is_entitled() raises on any
@@ -102,7 +107,7 @@ def is_entitled(summary: EntitlementSummary, key: str) -> bool:
 
     - An inactive tenant (`not summary.active`) is entitled to nothing.
     - A tier name is entitled iff the tenant's tier rank is >= that tier's
-      rank (cumulative — bronze_2 implies bronze_1 and ferro).
+      rank (cumulative — kept generic even though TIERS is single-element today).
     - An addon id is entitled iff `summary.addons.get(key) is True`.
     - Anything else is a caller bug (a plugin misconfigured its
       `entitlement_key`) -> raise loudly instead of silently returning False.

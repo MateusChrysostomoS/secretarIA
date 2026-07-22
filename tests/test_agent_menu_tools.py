@@ -335,7 +335,7 @@ def test_select_professional_tool_is_addon_gated():
             active=True,
             secretaria_enabled=True,
             plan="bronze",
-            secretaria_tier="bronze_1",
+            secretaria_tier="basico",
             addons=addons,
             limits={},
         )

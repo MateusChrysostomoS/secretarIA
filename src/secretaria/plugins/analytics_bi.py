@@ -55,8 +55,7 @@ async def _post_booking(ctx: PostBookingContext) -> None:
 # entitlement_keys is ANY-OF: record booking events for a tenant entitled to EITHER the
 # basic `analytics_bi` summary OR the `analytics_bi_advanced` dashboard, so an
 # advanced-only tenant still accumulates the rows both views read (an advanced dashboard
-# over an empty table would otherwise be permanently blank). Same multi-key shape as
-# reminders.py's ("bronze_1", "reactivation_pack").
+# over an empty table would otherwise be permanently blank).
 ANALYTICS_BI_SPEC = PluginSpec(
     id="analytics_bi",
     entitlement_keys=("analytics_bi", "analytics_bi_advanced"),

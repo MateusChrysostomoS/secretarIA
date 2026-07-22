@@ -5,10 +5,10 @@
 > (`_persist_inbound_message` / `_send_bot_reply`) via its own dedicated arq job.
 
 Validated 2026-07-02 (`uv run python -m pytest` → 350 passed). This is the record of
-the "add-ons as plugins" round: every capability beyond the ferro core is a plugin
+the "add-ons as plugins" round: every capability beyond the basico core is a plugin
 toggled by the tenant's LIVE entitlement in brain-api — nothing is always-on.
 
-## The core (tier "ferro") — was already real, now gated
+## The core (tier `basico`) — was already real, now gated
 
 The end-to-end loop (WhatsApp inbound → LangGraph agent → Google Calendar booking →
 reply) existed and works per tenant (`ai/graph.py`, `services/calendar.py`,
@@ -32,8 +32,9 @@ reply) existed and works per tenant (`ai/graph.py`, `services/calendar.py`,
   path).
 - `registry.py` — `enabled_plugins(summary)` / `agent_tools_for` / `run_on_inbound` /
   `run_post_booking`. Gating semantics mirror brain-api's `is_entitled` exactly
-  (status active/trialing; addon flag from the normalized full keyset; cumulative
-  tiers ferro < bronze_1 < bronze_2).
+  (status active/trialing; addon flag from the normalized full keyset; single tier
+  `basico` — the old cumulative `ferro < bronze_1 < bronze_2` ladder was retired
+  2026-07-22, see `services/entitlements_client.py`).
 - The agent is cached PER CAPABILITY SET (`ai/graph.py::_AGENTS` keyed by frozenset of
   tool names) — a disabled add-on contributes nothing and costs nothing.
 
@@ -41,7 +42,7 @@ reply) existed and works per tenant (`ai/graph.py`, `services/calendar.py`,
 
 | plugin | enabled by | what it does |
 |---|---|---|
-| `reminders` | **core** — any ACTIVE secretarIA subscription (`summary.active` + `secretaria_enabled`; UNGATED 2026-07-22, was tier `bronze_1` OR addon `reactivation_pack`) | arq cron (every 5 min) sends 24h + 1h appointment reminders. Idempotent per appointment per window (`ProcessedEvent` key `reminder:{kind}:{appointment_id}`). Free text inside the Meta 24h window; approved HSM template (`REMINDER_TEMPLATE_NAME`) outside it + fail-open usage event (`feature="reminders"`) to brain-api `POST /internal/usage-events`. Honors `Patient.reminder_opt_out`. Appointments with a PAID Pix deposit get the 3-button variant (Confirmar/Reagendar/Cancelar) — see `docs/CHECKPOINT_pix_deposit.md`. NOTE: quota semantics were deliberately NOT changed — `secretaria_ferro` still grants `limits["reminders"]=0` in brain-api's catalog, so usage now accrues against 0 for ferro-only tenants (flagged, pending product decision). |
+| `reminders` | **core** — any ACTIVE secretarIA subscription (`summary.active` + `secretaria_enabled`; UNGATED 2026-07-22, was tier `bronze_1` OR addon `reactivation_pack`) | arq cron (every 5 min) sends 24h + 1h appointment reminders. Idempotent per appointment per window (`ProcessedEvent` key `reminder:{kind}:{appointment_id}`). Free text inside the Meta 24h window; approved HSM template (`REMINDER_TEMPLATE_NAME`) outside it + fail-open usage event (`feature="reminders"`) to brain-api `POST /internal/usage-events`. Honors `Patient.reminder_opt_out`. Appointments with a PAID Pix deposit get the 3-button variant (Confirmar/Reagendar/Cancelar) — see `docs/CHECKPOINT_pix_deposit.md`. Billing: as of the 2026-07-22 tier collapse (`secretaria_ferro`/`bronze_1`/`bronze_2` → single `secretaria_basico`), `feature="reminders"` is a THIRD fully-metered Stripe dimension alongside `billable_patients`/`active_professionals` — every plan grants `limits["reminders"]=0` (metering-only, not a quota) and each billable send is charged per-unit via `STRIPE_METER_EVENT_REMINDERS`. |
 | `human_backup_24_7` | addon | inbound outside business hours → conversation flips to HUMAN_ACTIVE, ack text (`HUMAN_BACKUP_ACK_TEXT`), best-effort email alert. Empty business-hours config → never fires. |
 | `multi_professional` | addon | `Professional` model (own optional Google calendar id, falls back to the tenant's); agent tools `list_professionals` / `list_free_slots_for_professional` / `create_event_for_professional`; hub CRUD `/tenants/me/professionals` with `limits["professionals"]` enforcement (409 on exceeding, 403 when not entitled, only the "add active row" transition is gated). |
 | `multi_unit` | addon | `Unit` model; `list_units` / `create_event_at_unit` tools; optional `unit_name` on professional bookings; hub CRUD `/tenants/me/units` with `limits["units"]`. |

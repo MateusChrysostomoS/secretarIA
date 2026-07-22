@@ -163,7 +163,7 @@ def _summary(**overrides) -> EntitlementSummary:
         active=True,
         secretaria_enabled=True,
         plan="bronze",
-        secretaria_tier="bronze_1",
+        secretaria_tier="basico",
         addons={},
         limits={},
     )

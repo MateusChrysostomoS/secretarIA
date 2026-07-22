@@ -36,7 +36,7 @@ def _summary(**overrides) -> EntitlementSummary:
         active=True,
         secretaria_enabled=True,
         plan="bronze",
-        secretaria_tier="bronze_1",
+        secretaria_tier="basico",
         addons=dict(_ALL_ADDONS_OFF),
         limits={},
     )
@@ -116,11 +116,15 @@ def test_agent_tools_for_flattens_across_enabled_plugins():
 
 
 def test_tier_gated_plugin():
-    reg.register(PluginSpec(id="bronze_2_feature", entitlement_keys=("bronze_2",)))
-    bronze_1_tenant = _summary(secretaria_tier="bronze_1")
-    bronze_2_tenant = _summary(secretaria_tier="bronze_2")
-    assert reg.enabled_plugins(bronze_1_tenant) == []
-    assert [s.id for s in reg.enabled_plugins(bronze_2_tenant)] == ["bronze_2_feature"]
+    """Cumulative multi-tier ranking (a plugin gated on a HIGHER tier than the
+    tenant's) is retired along with the tier ladder (see
+    services/entitlements_client.py). What's left to assert: a plugin gated on the
+    one tier is enabled for a tenant on that tier, and not for a tenant with none."""
+    reg.register(PluginSpec(id="basico_feature", entitlement_keys=("basico",)))
+    basico_tenant = _summary(secretaria_tier="basico")
+    no_tier_tenant = _summary(secretaria_tier=None)
+    assert [s.id for s in reg.enabled_plugins(basico_tenant)] == ["basico_feature"]
+    assert reg.enabled_plugins(no_tier_tenant) == []
 
 
 def test_inactive_tenant_gets_no_plugins_even_if_addons_true():
@@ -130,20 +134,20 @@ def test_inactive_tenant_gets_no_plugins_even_if_addons_true():
 
 
 def test_any_of_entitlement_keys():
-    """A plugin gated by multiple keys is enabled when ANY of them is entitled
-    (bronze_1 tier OR reactivation_pack addon — the reminders plugin's shape)."""
-    reg.register(PluginSpec(id="reminders", entitlement_keys=("bronze_1", "reactivation_pack")))
+    """A plugin gated by multiple keys (a tier AND an addon) is enabled when ANY of
+    them is entitled — exercises the registry's any-of dispatch across both of
+    is_entitled's branches (tier rank vs addon flag). Not reminders' actual shape
+    anymore (reminders went core/ungated 2026-07-22) — just a generic mixed-key case."""
+    reg.register(PluginSpec(id="mixed", entitlement_keys=("basico", "reactivation_pack")))
 
-    via_tier = _summary(secretaria_tier="bronze_1", addons=dict(_ALL_ADDONS_OFF))
+    via_tier = _summary(secretaria_tier="basico", addons=dict(_ALL_ADDONS_OFF))
     via_addon = _summary(
-        secretaria_tier="ferro", addons={**_ALL_ADDONS_OFF, "reactivation_pack": True}
+        secretaria_tier=None, addons={**_ALL_ADDONS_OFF, "reactivation_pack": True}
     )
-    via_higher_tier = _summary(secretaria_tier="bronze_2", addons=dict(_ALL_ADDONS_OFF))
-    neither = _summary(secretaria_tier="ferro", addons=dict(_ALL_ADDONS_OFF))
+    neither = _summary(secretaria_tier=None, addons=dict(_ALL_ADDONS_OFF))
 
-    assert [s.id for s in reg.enabled_plugins(via_tier)] == ["reminders"]
-    assert [s.id for s in reg.enabled_plugins(via_addon)] == ["reminders"]
-    assert [s.id for s in reg.enabled_plugins(via_higher_tier)] == ["reminders"]
+    assert [s.id for s in reg.enabled_plugins(via_tier)] == ["mixed"]
+    assert [s.id for s in reg.enabled_plugins(via_addon)] == ["mixed"]
     assert reg.enabled_plugins(neither) == []
 
 

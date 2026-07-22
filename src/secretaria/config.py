@@ -252,7 +252,8 @@ class Settings(BaseSettings):
     EMAIL_FROM_ADDRESS: str = ""
     EMAIL_FROM_NAME: str = "SecretarIA"
 
-    # --- Reminders plugin (bronze_1 tier / reactivation_pack addon) ---
+    # --- Reminders plugin (CORE capability, billed per-send via the reminders
+    # Stripe meter outside the 24h window — see plugins/reminders.py) ---
     # Name of the pre-approved Meta utility (HSM) template used for reminders
     # sent OUTSIDE the 24h customer-service window. Must already be approved
     # on the tenant's WABA. "appointment_reminder" is a sandbox/dev-friendly

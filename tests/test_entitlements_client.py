@@ -48,7 +48,7 @@ def _summary(**overrides) -> EntitlementSummary:
         active=True,
         secretaria_enabled=True,
         plan="bronze",
-        secretaria_tier="bronze_1",
+        secretaria_tier="basico",
         addons={**_ALL_ADDONS_OFF, "reactivation_pack": True, "pix_deposit": True},
         limits={},
     )
@@ -62,11 +62,10 @@ def _summary(**overrides) -> EntitlementSummary:
 
 
 def test_inactive_tenant_entitled_to_nothing():
-    summary = _summary(active=False, secretaria_tier="bronze_2")
+    summary = _summary(active=False, secretaria_tier="basico")
     assert is_entitled(summary, "pix_deposit") is False
     assert is_entitled(summary, "reactivation_pack") is False
-    assert is_entitled(summary, "bronze_1") is False
-    assert is_entitled(summary, "ferro") is False
+    assert is_entitled(summary, "basico") is False
 
 
 def test_addon_flag_true_and_false():
@@ -76,23 +75,19 @@ def test_addon_flag_true_and_false():
 
 
 @pytest.mark.parametrize(
-    "tenant_tier,check_tier,expected",
+    "tenant_tier,expected",
     [
-        ("ferro", "ferro", True),
-        ("ferro", "bronze_1", False),
-        ("ferro", "bronze_2", False),
-        ("bronze_1", "ferro", True),
-        ("bronze_1", "bronze_1", True),
-        ("bronze_1", "bronze_2", False),
-        ("bronze_2", "ferro", True),
-        ("bronze_2", "bronze_1", True),
-        ("bronze_2", "bronze_2", True),
-        (None, "ferro", False),
+        ("basico", True),
+        (None, False),
     ],
 )
-def test_tier_cumulativity(tenant_tier, check_tier, expected):
+def test_tier_entitlement(tenant_tier, expected):
+    """Cumulative multi-tier ranking (ferro < bronze_1 < bronze_2) is retired along
+    with the tier ladder itself (see services/entitlements_client.py). What's left
+    to assert in the single-tier reality: a basico tenant is entitled to "basico";
+    a tenant with no tier is not."""
     summary = _summary(secretaria_tier=tenant_tier)
-    assert is_entitled(summary, check_tier) is expected
+    assert is_entitled(summary, "basico") is expected
 
 
 def test_unknown_key_raises():
@@ -170,7 +165,7 @@ def _body_for(tenant_id, **overrides) -> dict:
         active=True,
         secretaria_enabled=True,
         plan="bronze",
-        secretaria_tier="bronze_1",
+        secretaria_tier="basico",
         addons=dict(_ALL_ADDONS_OFF),
         limits={},
     )
@@ -215,14 +210,14 @@ async def test_fresh_fetch_parses_summary(monkeypatch: pytest.MonkeyPatch) -> No
         monkeypatch,
         status_code=200,
         body=_body_for(
-            tenant_id, secretaria_tier="bronze_2", addons={**_ALL_ADDONS_OFF, "ehr": True}
+            tenant_id, secretaria_tier=None, addons={**_ALL_ADDONS_OFF, "ehr": True}
         ),
     )
     summary = await get_entitlements(tenant_id, redis=None)
     assert summary is not None
     assert summary.tenant_id == str(tenant_id)
     assert summary.active is True
-    assert summary.secretaria_tier == "bronze_2"
+    assert summary.secretaria_tier is None
     assert summary.addons["ehr"] is True
 
 
