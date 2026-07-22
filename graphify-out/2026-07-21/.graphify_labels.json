@@ -264,18 +264,5 @@
   "262": "32e87fcf926b_tenant_post_consult_fields.py",
   "263": "_filter_active_types",
   "264": "RuntimeAppointmentType",
-  "265": "b3d9f2a1c8e7_multi_doctor_flow_columns.py",
-  "266": "TenantConfigUpdate",
-  "267": "create_deposit_charge",
-  "268": "AnalyticsEvent",
-  "269": "_ctx",
-  "270": "run_post_booking_hooks",
-  "271": "_FakeWhatsAppClient",
-  "272": "IClinicProvider",
-  "273": "google_oauth.py",
-  "274": "is_menu_command",
-  "275": "require_internal_api_key",
-  "276": "AppointmentType",
-  "277": "e51cd84e1959_conversation_flow_managing_appointment_id.py",
-  "278": "_confirmation_recap"
+  "265": "b3d9f2a1c8e7_multi_doctor_flow_columns.py"
 }
