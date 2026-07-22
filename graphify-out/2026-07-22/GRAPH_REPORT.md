@@ -1,16 +1,16 @@
-# Graph Report - secretarIA  (2026-07-22)
+# Graph Report - secretarIA  (2026-07-21)
 
 ## Corpus Check
-- 201 files · ~156,234 words
+- 183 files · ~133,160 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 3400 nodes · 8032 edges · 284 communities (184 shown, 100 thin omitted)
-- Extraction: 83% EXTRACTED · 17% INFERRED · 0% AMBIGUOUS · INFERRED: 1371 edges (avg confidence: 0.75)
+- 2984 nodes · 6868 edges · 279 communities (178 shown, 101 thin omitted)
+- Extraction: 83% EXTRACTED · 17% INFERRED · 0% AMBIGUOUS · INFERRED: 1146 edges (avg confidence: 0.75)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `8d54a3ec`
+- Built from commit: `99d2a637`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -153,7 +153,6 @@
 - [[_COMMUNITY_client fixture (ASGITransport)|client fixture (ASGITransport)]]
 - [[_COMMUNITY_A Tenant ORM instance with a plaintext access_token to catch leaks.|A Tenant ORM instance with a plaintext access_token to catch leaks.]]
 - [[_COMMUNITY__manage_action_card|_manage_action_card]]
-- [[_COMMUNITY_for_tenant|for_tenant]]
 - [[_COMMUNITY_HMAC signature tests|HMAC signature tests]]
 - [[_COMMUNITY_Webhook endpoint tests|Webhook endpoint tests]]
 - [[_COMMUNITY_TypedDict|TypedDict]]
@@ -235,23 +234,18 @@
 - [[_COMMUNITY_require_internal_api_key|require_internal_api_key]]
 - [[_COMMUNITY_AppointmentType|AppointmentType]]
 - [[_COMMUNITY__confirmation_recap|_confirmation_recap]]
-- [[_COMMUNITY__calendar_for_professional|_calendar_for_professional]]
-- [[_COMMUNITY_iniciar_pre_consulta|iniciar_pre_consulta]]
-- [[_COMMUNITY_payments_tasks.py|payments_tasks.py]]
-- [[_COMMUNITY_extract_patient_name|extract_patient_name]]
-- [[_COMMUNITY__transcription_config|_transcription_config]]
 
 ## God Nodes (most connected - your core abstractions)
-1. `Tenant` - 242 edges
-2. `Appointment` - 101 edges
-3. `Conversation` - 90 edges
-4. `route()` - 81 edges
-5. `get_settings()` - 67 edges
-6. `Patient` - 62 edges
-7. `PixDeposit` - 54 edges
-8. `Professional` - 54 edges
-9. `TextBubble` - 51 edges
-10. `_send_bot_reply()` - 47 edges
+1. `Tenant` - 212 edges
+2. `route()` - 81 edges
+3. `Conversation` - 78 edges
+4. `get_settings()` - 65 edges
+5. `Appointment` - 63 edges
+6. `Professional` - 52 edges
+7. `Patient` - 51 edges
+8. `_send_bot_reply()` - 46 edges
+9. `_make_tenant()` - 45 edges
+10. `TextBubble` - 44 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `main()` --calls--> `get_settings()`  [INFERRED]
@@ -276,23 +270,23 @@
 - **Entitlement-gated plugin catalog** — plugins_registry, plugins_reminders, plugins_human_backup, plugins_multi_professional, plugins_ehr [EXTRACTED 0.85]
 - **Per-tenant SaaS adaptation** — claudemd_tenant_config, claudemd_secretary_system_prompt, claudemd_encryption_at_rest, claudemd_coexistence_model [INFERRED 0.75]
 
-## Communities (284 total, 100 thin omitted)
+## Communities (279 total, 101 thin omitted)
 
 ### Community 0 - "route"
-Cohesion: 0.05
-Nodes (69): list_patient_appointments(), Lista as consultas FUTURAS já marcadas DESTE paciente nesta clínica.     Use pa, as_utc(), _load_recent_past_appointments(), load_upcoming_appointments(), PatientOpeningContext, PatientOpeningState, AsyncSession (+61 more)
+Cohesion: 0.07
+Nodes (49): _add_appointment(), db(), _FakeArqPool, _greeting_tenant(), _patch_session_factory(), datetime, MonkeyPatch, Tests for services/patient_context.py — the opening-state resolver + the shared (+41 more)
 
 ### Community 1 - "test_multi_professional_plugin.py"
-Cohesion: 0.15
-Nodes (25): _count_active(), create_professional(), _get_professional(), _list_item(), list_professionals(), AsyncSession, UUID, Doctor hub — professionals CRUD (multi_professional addon).  GET   /tenants/me (+17 more)
+Cohesion: 0.12
+Nodes (30): _count_active(), create_professional(), _get_professional(), _list_item(), list_professionals(), AsyncSession, UUID, Doctor hub — professionals CRUD (multi_professional addon).  GET   /tenants/me (+22 more)
 
 ### Community 2 - "tools.py"
-Cohesion: 0.14
-Nodes (22): _calendar_for_calendar_id(), cancel_event(), check_availability(), create_event(), _event_window(), _get_calendar(), list_free_slots(), _localize_window() (+14 more)
+Cohesion: 0.10
+Nodes (29): _calendar_for_calendar_id(), _calendar_for_professional(), cancel_event(), check_availability(), create_event(), _event_window(), _get_calendar(), iniciar_pre_consulta() (+21 more)
 
 ### Community 3 - "TenantConfigUpdate"
-Cohesion: 0.17
-Nodes (12): _enter_professional_list(), _label_match(), menu_buttons(), menu_buttons_for(), _menu_choice_multi(), _menu_index(), The up-to-3 menu button labels (falls back to the MVP defaults)., Effective menu labels: the fixed multi-doctor trio, or the tenant's own.      Sh (+4 more)
+Cohesion: 0.10
+Nodes (26): Tenant model - one clinic, with its own WhatsApp Business credentials., A clinic using SecretarIA.      The system is multi-tenant in the data model., Tenant, _enter_professional_list(), _label_match(), manage_label(), _match_insurance_plan(), menu_buttons() (+18 more)
 
 ### Community 4 - "CalendarUnavailableError"
 Cohesion: 0.25
@@ -303,52 +297,52 @@ Cohesion: 0.10
 Nodes (37): HandoffOutcome, HandoffResult, _log_outcome(), _phone_hash(), UUID, Precheck hand-off — asks brain-api (the mesh hub) to pre-seed a PreCheck conver, Result of asking brain-api to pre-seed a PreCheck session., The outcome of one `request_precheck_handoff` call. (+29 more)
 
 ### Community 6 - "_process_lead_window"
-Cohesion: 0.16
-Nodes (23): _as_utc(), _claim_reminder(), _emit_reminder_usage(), _last_inbound_at(), _meta_language_code(), _process_lead_window(), datetime, timedelta (+15 more)
+Cohesion: 0.19
+Nodes (19): _as_utc(), _claim_reminder(), _last_inbound_at(), _meta_language_code(), _process_lead_window(), datetime, timedelta, UUID (+11 more)
 
 ### Community 7 - "Patient"
-Cohesion: 0.05
-Nodes (126): _apply(), _demo(), FakeCalendar, main(), _print_bubbles(), SimpleNamespace, Terminal harness for the deterministic flow router (cancel/reschedule).  Unlike, Mirror the worker's _apply_flow_result against in-memory state. (+118 more)
+Cohesion: 0.17
+Nodes (46): Decide the next deterministic step for this inbound turn.      `patient_name` an, route(), _appt_window(), _conversation(), _FakeCalendar, Tests for the deterministic flow router (no DB / network)., Outro" from the greeting trio reaches the LLM even when the tenant's     configu, _tenant() (+38 more)
 
 ### Community 8 - "Conversation"
-Cohesion: 0.08
-Nodes (52): _appt_duration_minutes(), _appt_row_label(), _appt_summary(), _appt_uuid(), _begin_cancel(), _confirmation_recap(), _enter_manage(), enter_manage_action() (+44 more)
+Cohesion: 0.15
+Nodes (29): _appt_duration_minutes(), _find_appt_by_id(), _find_appt_by_iso(), _is_multi_professional(), _manage_cancel(), _manage_handle_day(), _manage_handle_slot(), _manage_reschedule() (+21 more)
 
 ### Community 9 - "test_post_booking_plugin.py"
-Cohesion: 0.09
-Nodes (39): PluginSpec, One optional capability, gated by ANY of a set of entitlement keys.      id: t, _clean_registry(), _fake_ehr_tool(), _fake_pix_tool(), Tests for plugins/base.py + plugins/registry.py — the plugin foundation., A plugin gated by multiple keys is enabled when ANY of them is entitled     (br, A fake tool standing in for a pix_deposit plugin capability. (+31 more)
+Cohesion: 0.08
+Nodes (40): PluginSpec, PluginSpec: the shape of one optional, entitlement-gated capability., One optional capability, gated by ANY of a set of entitlement keys.      id: t, _clean_registry(), _fake_ehr_tool(), _fake_pix_tool(), Tests for plugins/base.py + plugins/registry.py — the plugin foundation., A plugin gated by multiple keys is enabled when ANY of them is entitled     (br (+32 more)
 
 ### Community 10 - "test_subscription.py"
-Cohesion: 0.07
-Nodes (44): _cache_get(), _cache_key(), _cache_put(), Subscription-token verification — the doctor-hub auth seam.  =================, The result of validating a subscription token against brain-api.      tenant_i, Validate a bearer token against brain-api and return its claim, or None., SubscriptionClaim, verify_subscription_token() (+36 more)
+Cohesion: 0.09
+Nodes (34): _cache_get(), _cache_key(), _cache_put(), Subscription-token verification — the doctor-hub auth seam.  =================, The result of validating a subscription token against brain-api.      tenant_i, Validate a bearer token against brain-api and return its claim, or None., SubscriptionClaim, verify_subscription_token() (+26 more)
 
 ### Community 11 - "test_hub_units.py"
 Cohesion: 0.11
 Nodes (42): _count_active(), create_unit(), _get_unit(), list_units(), AsyncSession, UUID, Doctor hub — units CRUD (multi_unit addon).  GET   /tenants/me/units      - li, Gate an activate/create-active mutation. Raises HTTPException on failure. (+34 more)
 
 ### Community 12 - "test_hub_professionals.py"
-Cohesion: 0.18
-Nodes (37): RuntimeError, db(), _install_fake_client(), _install_fake_whatsapp(), AsyncSession, datetime, MonkeyPatch, Tests for services/payments/deposit_lifecycle.py — the Pix deposit money brain. (+29 more)
+Cohesion: 0.24
+Nodes (29): db(), _entitled_fake(), _never_called_fake(), AsyncClient, MonkeyPatch, Tests for api/hub/professionals.py — multi_professional CRUD + gating.  Uses t, Same requirements validation/round-trip as the tenant-level     PUT /tenants/me, _seed_professional() (+21 more)
 
 ### Community 13 - "SecretarIA"
 Cohesion: 0.09
 Nodes (21): 1. Install dependencies, 2. Create your .env, 3. Start Postgres + Redis, 4. Apply database migrations, 5. (optional) Seed a development tenant, 6. Run the API, 7. Run the worker (in a second terminal), Architecture (+13 more)
 
 ### Community 14 - "test_analytics_bi_plugin.py"
-Cohesion: 0.21
-Nodes (22): AnalyticsEvent, AnalyticsEvent model - minimal, non-personal usage events (analytics_bi addon)., One minimal, non-personal business event for a tenant., db(), _entitled_fake(), _patch_session_factory(), AsyncClient, MonkeyPatch (+14 more)
+Cohesion: 0.34
+Nodes (14): _entitled_fake(), _patch_session_factory(), AsyncClient, MonkeyPatch, Tests for plugins/analytics_bi.py (post_booking hook) and the doctor-hub GET /t, test_advanced_entitled_computes_breakdowns(), test_advanced_entitlement_fetch_failure_fails_closed_503(), test_advanced_not_entitled_returns_403() (+6 more)
 
 ### Community 15 - "test_audio_transcription.py"
 Cohesion: 0.10
 Nodes (39): ProcessedEvent, ProcessedEvent model - idempotency ledger for incoming webhook events., One row per Meta event id already handled.      The unique constraint on `event_, iter_audio_messages(), Yield one minimal dict per inbound WhatsApp voice-note audio message.      Mir, db(), _FakeArqPool, MonkeyPatch (+31 more)
 
 ### Community 16 - "tasks.py"
-Cohesion: 0.15
-Nodes (28): _config_with_selected_professional(), Overlay an explicitly-selected professional onto the runtime config.      `loa, _agent_context(), _captured_bubbles(), db(), _patch_session_factory(), MonkeyPatch, Tests for the LLM handoff round (PROMPT 3, multi-doctor flow).  Covers the two e (+20 more)
+Cohesion: 0.09
+Nodes (45): build_agent(), _config_with_selected_professional(), invoke_agent(), _invoke_agent_with_retry(), _load_history(), _looks_like_meta_output(), _prompt_with_today(), Any (+37 more)
 
 ### Community 17 - "test_reactivation.py"
-Cohesion: 0.10
-Nodes (47): classify_yes_no(), Re-emit the prompt for the conversation's CURRENT flow step.      Used when a re, True when this tenant offers a 'welcome back / continue?' prompt., Minutes of silence after which a returning patient is offered to resume., The question appended to the returning greeting (e.g. 'Quer continuar?')., The [yes, no] reply-button labels for the continue prompt (max 3)., Classify a continue-prompt answer as "yes", "no", or "other".      Matched again, reactivation_choice_buttons() (+39 more)
+Cohesion: 0.13
+Nodes (41): classify_yes_no(), Re-emit the prompt for the conversation's CURRENT flow step.      Used when a re, Minutes of silence after which a returning patient is offered to resume., The [yes, no] reply-button labels for the continue prompt (max 3)., Classify a continue-prompt answer as "yes", "no", or "other".      Matched again, reactivation_choice_buttons(), reactivation_gap_minutes(), resume_bubbles() (+33 more)
 
 ### Community 18 - "test_internal.py"
 Cohesion: 0.12
@@ -359,60 +353,60 @@ Cohesion: 0.09
 Nodes (31): _derived_health(), list_tenants(), _list_tenants_page(), _probe_config(), _probe_page(), AsyncSession, description, ge (+23 more)
 
 ### Community 20 - "test_handover_echoes.py"
-Cohesion: 0.06
-Nodes (75): extract_action_button(), extract_echo_body(), extract_inbound_body(), Return the human-readable text body of an inbound message.      Handles text m, Decode a reminder action-button reply into (action, appointment_id).      Two, Return the history body for a `smb_message_echoes` (Coexistence) event.      E, WebhookMessage, db() (+67 more)
+Cohesion: 0.11
+Nodes (37): extract_echo_body(), extract_inbound_body(), Return the human-readable text body of an inbound message.      Handles text m, Return the history body for a `smb_message_echoes` (Coexistence) event.      E, WebhookMessage, db(), _echo_value(), _load_conversation() (+29 more)
 
 ### Community 21 - "test_admin_tenants.py"
-Cohesion: 0.05
-Nodes (66): _format_appointment_context(), _format_appointment_types(), _format_business_hours(), _format_post_consult_knowledge(), _format_professional_context(), System prompts for the SecretarIA conversational agent.  Lives outside ai/grap, Render the "CONSULTAS MARCADAS DESTE PACIENTE" block, or "" when unset.      `, Render the full system prompt for a specific tenant. (+58 more)
+Cohesion: 0.06
+Nodes (72): _format_appointment_context(), _format_appointment_types(), _format_business_hours(), _format_post_consult_knowledge(), _format_professional_context(), System prompts for the SecretarIA conversational agent.  Lives outside ai/grap, Render the "CONSULTAS MARCADAS DESTE PACIENTE" block, or "" when unset.      `, Render the full system prompt for a specific tenant. (+64 more)
 
 ### Community 22 - "_make_scenario"
-Cohesion: 0.13
-Nodes (39): db(), _deposit_button_ids(), _entitled_fake(), _FailFirstTemplateClient, _fake_get_waba_token(), _fakes(), _FakeWhatsAppClient, _ledger_count() (+31 more)
+Cohesion: 0.19
+Nodes (25): db(), _entitled_fake(), _fake_get_waba_token(), _fakes(), _FakeWhatsAppClient, _ledger_count(), _make_scenario(), MonkeyPatch (+17 more)
 
 ### Community 23 - "test_tasks_helpers.py"
-Cohesion: 0.18
-Nodes (15): _manage_owner_calendar_target(), Whose calendar owns the appointment being managed this turn (pure, no I/O)., Substitute the `{{name}}` placeholder and tidy the spacing.      When the name, _render_greeting_template(), _professional_row(), Unit tests for worker helper functions (no DB / network)., A duck-typed stand-in for a `Professional` ORM row - the helper only     ever r, test_manage_owner_calendar_target_appointment_not_found_returns_none() (+7 more)
+Cohesion: 0.05
+Nodes (50): An active appointment type as the LLM should see it., RuntimeAppointmentType, _appointment_context_text(), _is_rate_limited(), _manage_owner_calendar_target(), Whether THIS turn's system prompt should carry the appointment context block., Render the per-turn "consultas marcadas" block for the LLM prompt.      Pure f, Whose calendar owns the appointment being managed this turn (pure, no I/O). (+42 more)
 
 ### Community 24 - "test_hub_conversations.py"
-Cohesion: 0.07
-Nodes (73): _bearer_token(), get_current_tenant(), AsyncSession, Shared FastAPI dependencies for the doctor hub.  `get_current_tenant` is the s, Extract the token from an Authorization header, tolerating a missing     'Beare, Load the claimed tenant, or the only tenant when the claim has no id.      A r, Authenticate the request and return the caller's Tenant row.      401 for a mi, _resolve_tenant() (+65 more)
+Cohesion: 0.09
+Nodes (42): _bearer_token(), get_current_tenant(), AsyncSession, Shared FastAPI dependencies for the doctor hub.  `get_current_tenant` is the s, Extract the token from an Authorization header, tolerating a missing     'Beare, Load the claimed tenant, or the only tenant when the claim has no id.      A r, Authenticate the request and return the caller's Tenant row.      401 for a mi, _resolve_tenant() (+34 more)
 
 ### Community 25 - "graph.py"
-Cohesion: 0.12
-Nodes (28): AsaasClient, AsaasError, _extract_code_hint(), Response, Thin async client for the Asaas v3 API (Pix deposit charges).  Each tenant suppl, POST /payments (billingType=PIX). `due_date` ("YYYY-MM-DD") is the         calle, GET /payments/{id}/pixQrCode -> {payload, encodedImage, expirationDate, ...}., POST /payments/{id}/refund. `value_cents=None` omits "value" entirely         (A (+20 more)
+Cohesion: 0.29
+Nodes (10): _item_from_dict(), list_onboarding_tenants(), _parse_dt(), post_onboarding_event(), datetime, UUID, Onboarding cron -> brain-api client (cross-service contract v1 §4 endpoints 7/8), Fetch the onboarding tenant list from brain-api.      Returns `None` on any am (+2 more)
 
 ### Community 26 - "list_tenant_appointments"
-Cohesion: 0.10
-Nodes (28): _internal_key_scheme, _appointment_dto(), list_tenant_appointments(), list_tenant_patients(), _patient_dto(), AsyncSession, description, ge (+20 more)
+Cohesion: 0.12
+Nodes (24): _appointment_dto(), list_tenant_appointments(), list_tenant_patients(), _patient_dto(), AsyncSession, description, ge, le (+16 more)
 
 ### Community 27 - "receive_webhook"
 Cohesion: 0.27
-Nodes (9): _filter_new_event_ids(), Request, Response, WhatsApp webhook endpoints.  GET  /webhook  - Meta verification handshake (ech, Meta verification handshake.      Meta calls this once when the webhook is con, Return the subset of `event_ids` not yet in `processed_events`.      Fail-open, Receive a webhook event.      GOLDEN RULE: return 200 in well under 5 seconds., receive_webhook() (+1 more)
+Nodes (9): Response, _filter_new_event_ids(), Request, WhatsApp webhook endpoints.  GET  /webhook  - Meta verification handshake (ech, Meta verification handshake.      Meta calls this once when the webhook is con, Return the subset of `event_ids` not yet in `processed_events`.      Fail-open, Receive a webhook event.      GOLDEN RULE: return 200 in well under 5 seconds., receive_webhook() (+1 more)
 
 ### Community 28 - "professionals.py"
-Cohesion: 0.06
-Nodes (62): history_item_is_final(), True when this `history` chunk signals the sync is FULLY complete.      Three, _fake_wipe(), AsyncClient, MonkeyPatch, Tests for the admin reset endpoint and the X-Admin-Token guard., Replace the destructive coroutine with a recorder.      Tests must never reach, test_current_token_still_accepted_when_previous_is_configured() (+54 more)
+Cohesion: 0.09
+Nodes (47): history_item_is_final(), True when this `history` chunk signals the sync is FULLY complete.      Three, _CapturingLogger, db(), _history_item(), _history_value(), MonkeyPatch, Tests for the `history` / `smb_app_state_sync` webhook fields (contract v1 §10): (+39 more)
 
 ### Community 29 - "tenant_config.py"
-Cohesion: 0.09
-Nodes (54): decrypt(), encrypt(), EncryptionError, _fernet(), Symmetric encryption for tenant secrets at rest (Fernet / AES-128-CBC + HMAC)., Raised when encryption/decryption cannot be performed., Build the process-wide Fernet from settings.ENCRYPTION_KEY.      Cached so we va, Encrypt `plaintext`, returning a urlsafe-base64 ciphertext string. (+46 more)
+Cohesion: 0.08
+Nodes (51): ProfessionalCredentials, decrypt(), encrypt(), EncryptionError, _fernet(), Symmetric encryption for tenant secrets at rest (Fernet / AES-128-CBC + HMAC)., Raised when encryption/decryption cannot be performed., Build the process-wide Fernet from settings.ENCRYPTION_KEY.      Cached so we va (+43 more)
 
 ### Community 30 - "WhatsAppClient"
 Cohesion: 0.11
-Nodes (17): _extract_message_id(), WhatsApp Cloud API client - sends outbound messages., Send an interactive reply-button message (max 3 buttons).          Args:, Pull the wamid from a Cloud API send response, tolerating bad shapes., Send a pre-approved WhatsApp utility template (HSM) message.          Required, Send an interactive list message (max 10 rows in one section).          Args:, Async client for the Meta WhatsApp Cloud API., Send a plain-text WhatsApp message.          Args:             to: recipient (+9 more)
+Nodes (16): _extract_message_id(), WhatsApp Cloud API client - sends outbound messages., Send an interactive reply-button message (max 3 buttons).          Args:, Pull the wamid from a Cloud API send response, tolerating bad shapes., Send a pre-approved WhatsApp utility template (HSM) message.          Required, Send an interactive list message (max 10 rows in one section).          Args:, Async client for the Meta WhatsApp Cloud API., Build a client for a tenant. The DECRYPTED token is injected by the caller. (+8 more)
 
 ### Community 31 - "test_professional_config.py"
-Cohesion: 0.08
-Nodes (55): ProfessionalCredentials, can_activate_professional_aware(), _filter_active_types(), load_tenant_config(), professional_appointment_types(), professional_business_hours(), professional_completeness(), Active appointment-type dicts for ONE professional.      The professional's ow (+47 more)
+Cohesion: 0.09
+Nodes (49): can_activate_professional_aware(), load_tenant_config(), professional_appointment_types(), professional_business_hours(), professional_completeness(), Active appointment-type dicts for ONE professional.      The professional's ow, Weekday -> non-empty window list for ONE professional.      The professional's, Per-active-professional completeness + the partial-activation verdict.      `h (+41 more)
 
 ### Community 32 - "test_resolve_tenant.py"
 Cohesion: 0.16
 Nodes (23): _all_tenants(), db(), MonkeyPatch, workers/tasks.py:_resolve_tenant - nullable phone_number_id + autoprovision gate, Even an event with no phone_number_id at all must not match a NULL row., Regression guard: this exact call used to silently auto-create a tenant., No metadata.phone_number_id on the event at all - still dropped, not adopted., A NULL-phone tenant already exists; autoprovision must create/target a real numb (+15 more)
 
 ### Community 33 - "AppointmentStatus"
-Cohesion: 0.14
-Nodes (17): AppointmentStatus, Appointment model - links a Google Calendar event to a patient + phone., PrivacyAppointment, PrivacyConsentEvent, PrivacyConversation, PrivacyEraseResult, PrivacyExportBundle, PrivacyMessage (+9 more)
+Cohesion: 0.08
+Nodes (30): AppointmentStatus, Appointment model - links a Google Calendar event to a patient + phone., AppointmentCancel, AppointmentCreate, AppointmentReschedule, AppointmentStatusUpdate, BlockCreate, CalendarEventRead (+22 more)
 
 ### Community 34 - "Tenant"
 Cohesion: 0.13
@@ -423,64 +417,64 @@ Cohesion: 0.24
 Nodes (14): _body_for(), _configured_settings(), _FakeRedis, _install_fake_client(), MonkeyPatch, Tests for services/entitlements_client.py — the plugin/tier gating seam.  `get, Minimal async Redis stub: get / setex / delete / exists, in memory., test_cache_hit_makes_one_http_call_for_two_reads() (+6 more)
 
 ### Community 36 - "EntitlementSummary"
-Cohesion: 0.18
-Nodes (19): EntitlementSummary, _fetch_entitlements(), _fresh_key(), get_entitlements(), UUID, Entitlement summary reader — the plugin/tier gating seam.  ===================, Direct (uncached) fetch from brain-api. None on any ambiguity (fail closed)., Redis-cached entitlement read. See module docstring for the cache contract. (+11 more)
+Cohesion: 0.20
+Nodes (18): EntitlementSummary, _fetch_entitlements(), _fresh_key(), get_entitlements(), UUID, Entitlement summary reader — the plugin/tier gating seam.  ===================, Direct (uncached) fetch from brain-api. None on any ambiguity (fail closed)., Redis-cached entitlement read. See module docstring for the cache contract. (+10 more)
 
 ### Community 37 - "test_agent_capability_cache.py"
 Cohesion: 0.14
 Nodes (14): _clean_agent_cache_and_fakes(), _empty_history(), _fake_tool_a(), _fake_tool_b(), _FakeCompiledAgent, MonkeyPatch, Tests for the capability-keyed agent cache in ai/graph.py.  Replaces the old p, A fake plugin tool A. (+6 more)
 
 ### Community 38 - "test_human_backup_plugin.py"
-Cohesion: 0.27
-Nodes (18): _ctx(), db(), _fakes(), _make_conversation(), MonkeyPatch, Tests for plugins/human_backup.py — the human_backup_24_7 on_inbound hook.  In, _summary(), test_addon_off_hook_never_runs() (+10 more)
+Cohesion: 0.20
+Nodes (19): _ctx(), db(), _fakes(), _FakeWhatsAppClient, _make_conversation(), MonkeyPatch, Tests for plugins/human_backup.py — the human_backup_24_7 on_inbound hook.  In, _summary() (+11 more)
 
 ### Community 39 - "calendar.py"
-Cohesion: 0.12
-Nodes (33): _appointment_read(), cancel_appointment(), create_appointment(), create_block(), _deposit_status_value(), _get_appointment(), _get_calendar(), list_events() (+25 more)
+Cohesion: 0.29
+Nodes (17): _appointment_read(), cancel_appointment(), create_appointment(), create_block(), _get_appointment(), _get_calendar(), list_events(), AsyncSession (+9 more)
 
 ### Community 40 - "enabled_plugins"
-Cohesion: 0.17
-Nodes (14): agent_tools_for(), enabled_plugins(), The plugin registry: id -> PluginSpec, filtered per tenant by entitlement.  St, Add (or replace) a plugin in the registry, keyed by `spec.id`., PluginSpecs this tenant is currently entitled to.      A disabled plugin (tena, Flatten `agent_tools` across every plugin this tenant is entitled to., Run `on_inbound` hooks for every plugin this tenant is entitled to.      Stops, Run `post_booking` hooks for every plugin this tenant is entitled to.      Unl (+6 more)
+Cohesion: 0.24
+Nodes (9): agent_tools_for(), enabled_plugins(), The plugin registry: id -> PluginSpec, filtered per tenant by entitlement.  St, Add (or replace) a plugin in the registry, keyed by `spec.id`., PluginSpecs this tenant is currently entitled to.      A disabled plugin (tena, Flatten `agent_tools` across every plugin this tenant is entitled to., Run `post_booking` hooks for every plugin this tenant is entitled to.      Unl, register() (+1 more)
 
 ### Community 41 - "BaseModel"
-Cohesion: 0.11
-Nodes (28): BaseModel, iter_event_ids(), Pydantic schemas for the Meta WhatsApp webhook payload.  The models are intent, `history[].metadata` — chunk progress markers (Coexistence history sync)., One chunk of a WhatsApp Coexistence chat-history sync (`history` field)., One `smb_app_state_sync` entry — a business-contact add/update/removal.      T, Yield every message / echo id in a raw webhook payload (light parsing).      U, Common shape for both `button_reply` and `list_reply` sub-objects. (+20 more)
+Cohesion: 0.13
+Nodes (23): BaseModel, iter_event_ids(), Pydantic schemas for the Meta WhatsApp webhook payload.  The models are intent, One chunk of a WhatsApp Coexistence chat-history sync (`history` field)., One `smb_app_state_sync` entry — a business-contact add/update/removal.      T, Yield every message / echo id in a raw webhook payload (light parsing).      U, Common shape for both `button_reply` and `list_reply` sub-objects., Container the patient sends back after tapping an interactive control.      `t (+15 more)
 
 ### Community 42 - "test_precheck_handoff_tool.py"
 Cohesion: 0.33
 Nodes (16): _agent_context(), db(), _fakes(), MonkeyPatch, Tests for ai/tools.py:iniciar_pre_consulta — the precheck hand-off agent tool., Tenant context set but no conversation (or no patient on it) -> can't     resol, _seed_tenant_patient_conversation(), _set_precheck_number() (+8 more)
 
 ### Community 43 - "CalendarService"
-Cohesion: 0.20
-Nodes (24): TextBubble, _begin_reschedule(), FlowRouterResult, Ask for the new day, targeting `managing_id`.      Shared by STEP_MANAGE_ACTION', The router's decision for one inbound turn.      action:         "reply", db(), _fakes(), _FakeWhatsAppClient (+16 more)
+Cohesion: 0.10
+Nodes (38): _print_bubbles(), ButtonBubble, _clean(), _finalise(), parse(), _parse_slot_rows(), _pop_preceding_text_for(), Bubble (+30 more)
 
 ### Community 44 - "test_admin.py"
-Cohesion: 0.08
-Nodes (14): DeclarativeBase, Base, Declarative base shared by every ORM model., PixDepositStatus, PixDeposit model - the sinal (deposit) payment lifecycle for a booked appointmen, _FakeCalendarService, _fakes(), _FakeWhatsAppClient (+6 more)
+Cohesion: 0.23
+Nodes (15): _fake_wipe(), AsyncClient, MonkeyPatch, Tests for the admin reset endpoint and the X-Admin-Token guard., Replace the destructive coroutine with a recorder.      Tests must never reach, test_current_token_still_accepted_when_previous_is_configured(), test_default_wipe_keeps_tenants(), test_endpoint_is_in_openapi_schema() (+7 more)
 
 ### Community 45 - "test_bot_reply_gating.py"
-Cohesion: 0.16
-Nodes (25): _days_from_now(), db(), _fake_get_waba_token(), _fakes(), _FakeWhatsAppClient, _make_conversation(), datetime, MonkeyPatch (+17 more)
+Cohesion: 0.23
+Nodes (24): _days_from_now(), db(), _fake_get_waba_token(), _fakes(), _make_conversation(), datetime, MonkeyPatch, Tests for the entitlement gate + per-tenant WhatsApp client wiring inside worke (+16 more)
 
 ### Community 46 - "oauth_callback"
 Cohesion: 0.10
-Nodes (32): Build a CalendarService using per-tenant credentials.          The OAuth app (, _apply_flow_result(), _bubble_history_body(), _dispatch_bubbles(), _extract_sent_wam_id(), _flow_turn_calendar(), _handle_calendar_unavailable(), _handle_manage_appointment() (+24 more)
+Nodes (35): InboundContext, What an `on_inbound` hook needs to decide + act on one inbound turn.      Hook, Run `on_inbound` hooks for every plugin this tenant is entitled to.      Stops, run_on_inbound(), flows_enabled(), True when this tenant uses the deterministic entry flows., _apply_flow_result(), _dispatch_bubbles() (+27 more)
 
 ### Community 47 - "verify_meta_signature"
 Cohesion: 0.23
 Nodes (13): Security helpers - Meta webhook HMAC-SHA256 signature validation.  Meta signs ev, Return True if `signature_header` is a valid HMAC of `raw_body`.      Args:, verify_meta_signature(), Tests for the Meta webhook HMAC-SHA256 signature validation., Build a valid `X-Hub-Signature-256` header value for `body`., _sign(), test_empty_app_secret_is_rejected(), test_invalid_signature_is_rejected() (+5 more)
 
 ### Community 48 - "test_multi_unit_plugin.py"
-Cohesion: 0.09
-Nodes (33): activate(), asaas_connection(), attach_professional(), config_status(), notifications_email(), provision_tenant(), AsyncSession, Request (+25 more)
+Cohesion: 0.10
+Nodes (29): activate(), attach_professional(), config_status(), notifications_email(), provision_tenant(), AsyncSession, Request, _TENANT_PATH (+21 more)
 
 ### Community 49 - "calendar.py"
 Cohesion: 0.22
 Nodes (17): Resolve ONE professional's own config into a ready CalendarService.      THE s, resolve_professional_calendar(), db(), _fake_calendar(), _FakeCalendarService, MonkeyPatch, Tests for the shared professional-resolution service (PROMPT 1, multi-doctor flo, A caller-supplied factory receives the resolved overrides verbatim. (+9 more)
 
 ### Community 51 - "config.py"
-Cohesion: 0.15
-Nodes (13): dtime, main(), Diagnose Fase A auth: what scopes does our refresh token actually carry?  A refr, _short(), main(), Generate a Google Calendar refresh token for Fase A (single tenant).  One-shot C, Application configuration loaded from environment variables / .env file., _is_outside_business_hours() (+5 more)
+Cohesion: 0.12
+Nodes (12): main(), Dev/test: store an INVALID Google Calendar refresh token for a tenant so the nex, main(), Diagnose Fase A auth: what scopes does our refresh token actually carry?  A refr, _short(), main(), Generate a Google Calendar refresh token for Fase A (single tenant).  One-shot C, Create a development tenant from environment settings.  Usage:     uv run pyt (+4 more)
 
 ### Community 52 - "SecretarIA"
 Cohesion: 0.14
@@ -495,28 +489,28 @@ Cohesion: 0.25
 Nodes (7): on_shutdown(), on_startup(), arq worker entry point.  Start the worker with:     arq secretaria.workers.ar, Run once when the worker process starts., Run once when the worker process stops., arq worker configuration.      arq reads these as plain class attributes, so `, WorkerSettings
 
 ### Community 55 - "setup_logging"
-Cohesion: 0.09
-Nodes (21): BoundLogger, EventDict, main(), _parse_args(), Namespace, Apply a JSON config file onto a tenant row (the doctor-hub columns).  This is th, Return a list of human-readable warnings (does not block the write)., _validate() (+13 more)
+Cohesion: 0.14
+Nodes (16): BoundLogger, EventDict, main(), _parse_args(), Namespace, Apply a JSON config file onto a tenant row (the doctor-hub columns).  This is th, Return a list of human-readable warnings (does not block the write)., _validate() (+8 more)
 
 ### Community 56 - "Appointment"
-Cohesion: 0.07
-Nodes (107): Appointment, Platform-side record of a clinic appointment.      Created whenever the platfo, apply_asaas_event(), _as_utc(), _asaas_client_for(), _deposit_request_text(), get_deposit_for_appointment(), maybe_create_deposit() (+99 more)
+Cohesion: 0.12
+Nodes (75): Appointment, Platform-side record of a clinic appointment.      Created whenever the platfo, _capture_email(), _capture_events(), _capture_usage(), db(), _fake_list(), _fakes() (+67 more)
 
 ### Community 57 - "main"
-Cohesion: 0.15
-Nodes (21): _connect_calendar(), db(), _FakeArqPool, _FakeCalendarService, _override(), AsyncClient, datetime, MonkeyPatch (+13 more)
+Cohesion: 0.18
+Nodes (37): _conv_at_service_confirm(), _conversation(), _FakeCalendar, _professionals(), Tests for the deterministic multi-doctor branch of the flow router.  Mirrors tes, The body a prof-row tap produces (see schemas.webhook.extract_inbound_body)., _tap(), _tenant() (+29 more)
 
 ### Community 58 - "get_waba_token"
-Cohesion: 0.11
-Nodes (22): BaseException, CalendarUnavailableError, HttpError, _raise_if_unavailable(), Google Calendar integration for the clinic.  Fase A (single tenant): credentia, Raised when Google Calendar cannot be reached or refused our credentials., Translate an outage/auth HttpError into CalendarUnavailableError.      Returns, _http_error() (+14 more)
+Cohesion: 0.12
+Nodes (21): BaseException, CalendarUnavailableError, HttpError, _raise_if_unavailable(), Raised when Google Calendar cannot be reached or refused our credentials., Translate an outage/auth HttpError into CalendarUnavailableError.      Returns, _http_error(), HttpError (+13 more)
 
 ### Community 59 - "_FakeAsyncClient"
 Cohesion: 0.20
 Nodes (4): _FakeAsyncClient, _FakeResponse, Exception, Records init kwargs + GET requests; returns a canned response or raises.
 
 ### Community 60 - "panel.py"
-Cohesion: 0.11
-Nodes (38): Conversation, A patient <-> clinic conversation and its handover state., Tenant model - one clinic, with its own WhatsApp Business credentials., A clinic using SecretarIA.      The system is multi-tenant in the data model., Tenant, _ask_day(), _catalog_step(), _enter_insurance() (+30 more)
+Cohesion: 0.17
+Nodes (29): Conversation, A patient <-> clinic conversation and its handover state., _ask_day(), _catalog_step(), _enter_insurance(), FlowRouterResult, _handle_confirmation(), _handle_day() (+21 more)
 
 ### Community 61 - "decrypt"
 Cohesion: 0.16
@@ -527,24 +521,24 @@ Cohesion: 0.11
 Nodes (26): dict, `str.format_map` companion that leaves an unknown `{placeholder}` intact     in, Render `template` with `variables` and send it. NEVER raises.      Returns Fal, _SafeDict, send_transactional_email_message(), arq job: render + send one onboarding transactional email.      Enqueued by `P, send_transactional_email(), _configured_settings() (+18 more)
 
 ### Community 63 - "wipe_data"
-Cohesion: 0.24
-Nodes (9): _admin_token_scheme, Security, Administrative endpoints (currently: data wipe).  Every route here is guarded, Reset the database. Requires `confirm: true` to actually run., FastAPI dependency: 403 unless `X-Admin-Token` matches the env token.      Use, require_admin(), reset_data(), ResetRequest (+1 more)
+Cohesion: 0.12
+Nodes (16): _admin_token_scheme, main(), _parse_args(), Namespace, Wipe dynamic data from the database for clean testing.  By default truncates the, Security, Administrative endpoints (currently: data wipe).  Every route here is guarded, Reset the database. Requires `confirm: true` to actually run. (+8 more)
 
 ### Community 64 - "test_entitlements_client.py"
 Cohesion: 0.31
 Nodes (9): is_entitled(), Ordinal rank of a tier name. Unknown/None ranks below every real tier., Whether `summary`'s tenant is entitled to `key`.      `key` is either an addon, _tier_rank(), _summary(), test_addon_flag_true_and_false(), test_inactive_tenant_entitled_to_nothing(), test_tier_cumulativity() (+1 more)
 
 ### Community 65 - "_ctx"
-Cohesion: 0.07
-Nodes (43): erase_subject(), export_subject(), _hash_wa_id(), AsyncSession, _TENANT_PATH, LGPD privacy endpoints — internal service-to-service (`/internal/privacy/*`)., SHA-256 hex digest of a wa_id — logged instead of the raw value, ever., ConsentEvent (+35 more)
+Cohesion: 0.19
+Nodes (13): erase_subject(), export_subject(), _hash_wa_id(), AsyncSession, _TENANT_PATH, LGPD privacy endpoints — internal service-to-service (`/internal/privacy/*`)., SHA-256 hex digest of a wa_id — logged instead of the raw value, ever., ConsentEvent (+5 more)
 
 ### Community 66 - "env.py"
 Cohesion: 0.29
 Nodes (7): Connection, _do_run_migrations(), Alembic environment - async (asyncpg) configuration., Run migrations in 'offline' mode (emit SQL, no live DB connection)., Run migrations in 'online' mode using an async engine., run_migrations_offline(), run_migrations_online()
 
 ### Community 67 - "test_pix_whatsapp_plugin.py"
-Cohesion: 0.15
-Nodes (29): Professional, Professional model - one bookable staff member within a tenant.  Multi-profess, A bookable professional (doctor, therapist, ...) belonging to a tenant., Aggregate, partial-activation-aware completeness for a tenant's active professio, TenantCompleteness, db(), _extract_state(), _fake_exchange() (+21 more)
+Cohesion: 0.19
+Nodes (26): has_google_refresh_token(), True when a (non-null) Calendar refresh token is stored for this tenant., db(), _extract_state(), _fake_exchange(), professional(), AsyncClient, MonkeyPatch (+18 more)
 
 ### Community 68 - "test_webhook.py"
 Cohesion: 0.39
@@ -559,8 +553,8 @@ Cohesion: 0.29
 Nodes (5): Protocol, EhrProvider, EhrProvider protocol: how post_booking pushes a booked appointment to a tenant', One external EHR/practice-management system's appointment push., Push a booked appointment to the external EHR.          Returns the external s
 
 ### Community 71 - "run_post_booking_hooks"
-Cohesion: 0.23
-Nodes (25): _agent_context(), db(), _fakes(), MonkeyPatch, Tests for plugins/multi_professional.py — professional-aware booking tools.  I, The professional's OWN refresh token wins over the tenant's own., _seed_tenant_and_professionals(), _summary() (+17 more)
+Cohesion: 0.11
+Nodes (21): _appt_row_label(), _appt_summary(), _appt_uuid(), _begin_cancel(), _begin_reschedule(), _enter_manage(), enter_manage_action(), _manage_action_card() (+13 more)
 
 ### Community 72 - "FastAPI"
 Cohesion: 0.09
@@ -575,228 +569,200 @@ Cohesion: 0.23
 Nodes (13): _agent_context(), db(), _FakeCalendarService, _fakes(), MonkeyPatch, Tests for plugins/multi_unit.py — unit-aware booking tools.  Same in-memory-sq, _seed_tenant_and_units(), _summary() (+5 more)
 
 ### Community 75 - "_FakeSession"
-Cohesion: 0.09
-Nodes (37): Counter, _item_from_dict(), list_onboarding_tenants(), OnboardingTenant, _parse_dt(), post_onboarding_event(), datetime, UUID (+29 more)
+Cohesion: 0.14
+Nodes (26): Counter, OnboardingTenant, One row of brain-api's `GET /internal/onboarding/tenants` response., emit_usage_event(), POST one usage event to brain-api. Returns the `recorded` flag, or False on any, _month_bounds_utc(), _process_config_reminder(), _process_retry_and_closing() (+18 more)
 
 ### Community 76 - "client"
 Cohesion: 0.40
 Nodes (4): client(), AsyncClient, Shared pytest fixtures and deterministic test environment., An httpx AsyncClient bound to the FastAPI app via ASGITransport.      The app
 
+### Community 77 - "require_internal_api_key"
+Cohesion: 0.33
+Nodes (6): active_business_hours(), can_activate(), _filter_active_hours(), Shared filter behind `active_business_hours` / `professional_business_hours`., Weekday -> non-empty window list. Days with no windows are dropped., Whether the tenant may be set `is_active=True`.      Returns (ok, reason). The
+
 ### Community 78 - "internal.py"
-Cohesion: 0.18
-Nodes (10): CalendarService, Any, datetime, Return events overlapping [start, end) on the clinic calendar.          Each i, Resolve the availability windows for `day_local` (clinic-local).          Uses, Return free [start, end) slots on `day` within business hours.          Walks, Create an event on the clinic's calendar. Returns the inserted event., Move an existing event to a new [start, end) window. Returns the updated event. (+2 more)
+Cohesion: 0.13
+Nodes (14): RuntimeError, CalendarService, Any, datetime, ZoneInfo, Google Calendar integration for the clinic.  Fase A (single tenant): credentia, The clinic-local timezone this service interprets naive times in., Return events overlapping [start, end) on the clinic calendar.          Each i (+6 more)
 
 ### Community 79 - "CHECKPOINT — Plugin architecture (entitlement-gated capabilities)"
 Cohesion: 0.25
 Nodes (7): CHECKPOINT — Plugin architecture (entitlement-gated capabilities), Honesty notes (sandbox vs production), LGPD pieces that landed with this round, Migrations added this round (chain), The core (tier "ferro") — was already real, now gated, The plugins, The registry (`src/secretaria/plugins/`)
 
 ### Community 80 - "is_menu_command"
-Cohesion: 0.21
-Nodes (22): PixDeposit, One Pix deposit (sinal) charge tied to exactly one appointment., ProcessedAsaasEvent, ProcessedAsaasEvent model - idempotency ledger for incoming Asaas webhook events, One row per Asaas event id already handled.      The unique constraint on `event, db(), Tests for api/webhook_asaas.py (the fast-ACK handler) and services/payments/depo, PAYMENT_DELETED only applies the EXPIRED transition when status==AWAITING. (+14 more)
+Cohesion: 0.16
+Nodes (20): as_utc(), _load_recent_past_appointments(), load_upcoming_appointments(), PatientOpeningContext, PatientOpeningState, AsyncSession, datetime, timedelta (+12 more)
 
 ### Community 92 - "CHECKPOINT — Inbound WhatsApp audio transcription"
 Cohesion: 0.33
 Nodes (5): CHECKPOINT — Inbound WhatsApp audio transcription, Config, Key design points, Pendências, What was built
 
 ### Community 99 - "analytics_summary"
-Cohesion: 0.12
-Nodes (26): RedirectResponse, calendar_disconnect(), oauth_callback(), oauth_start(), _owned_professional(), _portal_redirect(), professional_calendar_disconnect(), professional_oauth_start() (+18 more)
+Cohesion: 0.20
+Nodes (17): JSONResponse, RedirectResponse, calendar_disconnect(), oauth_callback(), _owned_professional(), _portal_redirect(), professional_calendar_disconnect(), professional_oauth_start() (+9 more)
 
 ### Community 113 - "active_business_hours"
 Cohesion: 0.22
 Nodes (8): CHECKPOINT — Multi-doctor WhatsApp workflow (deterministic doctor selection), Decisions made in-session (not pinned by the prompt doc), Deterministic flow (`services/flow_router.py`), LLM handoff (`ai/`, `plugins/multi_professional.py`, `workers/tasks.py`), Open follow-ups, Schema (migration `b3d9f2a1c8e7`, revises `f06e85b476f2`), Shared professional resolution (`services/tenant_config.py`), Testing
 
 ### Community 132 - "Conversation"
-Cohesion: 0.12
-Nodes (24): Enum, activate_tenant(), ConfigStatus, connect_asaas(), connect_whatsapp(), ConnectOutcome, create_or_attach_professional(), get_config_status() (+16 more)
+Cohesion: 0.16
+Nodes (18): Enum, activate_tenant(), ConfigStatus, connect_whatsapp(), ConnectOutcome, create_or_attach_professional(), get_config_status(), provision_tenant() (+10 more)
 
 ### Community 190 - "_manage_action_card"
-Cohesion: 0.15
-Nodes (12): get_config(), AsyncSession, Doctor hub — tenant configuration endpoints (authenticated).  GET  /tenants/me, _read_model(), update_config(), PUT body. Every field is optional — only provided fields are updated.      `bu, Light shape check for the deterministic-flow config blob., Trim labels, reject blanks/dupes and enforce WhatsApp's 3x20 limits. (+4 more)
-
-### Community 193 - "for_tenant"
-Cohesion: 0.15
-Nodes (18): cancellation_notice(), The honest pt-BR line to append after resolving a cancellation's money     outco, format_brl(), parse_brl_to_cents(), BRL free-text money parsing/formatting — no currency library, no network.  `appo, Parse free-text BRL into integer cents. Returns None, never raises.      None fo, Render integer cents as pt-BR currency text, e.g. 125050 -> "R$ 1.250,50"., Tests for services/payments/money.py — BRL free-text parsing/formatting.  `appoi (+10 more)
+Cohesion: 0.46
+Nodes (7): get_config(), AsyncSession, Doctor hub — tenant configuration endpoints (authenticated).  GET  /tenants/me, _read_model(), update_config(), GET/PUT response. Never includes secrets — only a `calendar_connected` flag., TenantConfigRead
 
 ### Community 198 - "ProfessionalCompletenessItem"
-Cohesion: 0.18
-Nodes (10): Exception, manage_existing_appointment(), ManageAppointmentRequested, Aciona o fluxo de remarcação/cancelamento de uma consulta JÁ MARCADA     deste, Raised by `manage_existing_appointment`: the patient wants to reschedule     or, Raised by `select_professional_and_continue` (plugins/multi_professional.py)., SelectProfessionalRequested, test_manage_existing_appointment_tool_raises_canonical_action() (+2 more)
+Cohesion: 0.12
+Nodes (16): Exception, manage_existing_appointment(), ManageAppointmentRequested, UUID, Volta a conversa para o menu inicial de botões da clínica. Use quando o     pac, Aciona o fluxo de remarcação/cancelamento de uma consulta JÁ MARCADA     deste, Raised by the `show_main_menu` tool: the patient wants the button menu back., Raised by `manage_existing_appointment`: the patient wants to reschedule     or (+8 more)
 
 ### Community 199 - "get_current_tenant"
 Cohesion: 0.18
 Nodes (13): _enter_menu_choice(), _enter_professional_services(), _find_professional_by_id(), format_business_hours(), _match_professional(), _professional_greeting_body(), Any, Bubble (+5 more)
 
 ### Community 200 - "test_admin_tenants.py"
-Cohesion: 0.13
-Nodes (16): FastAPI, health(), Health check endpoint., Liveness probe. Intentionally does not touch Postgres or Redis., _extract_event_fields(), JSONResponse, Request, Asaas payment webhook endpoint.  POST /webhooks/asaas - receives Pix payment lif (+8 more)
+Cohesion: 0.20
+Nodes (19): _make_config(), _make_tenant(), AsyncClient, MonkeyPatch, Tests for the admin fleet endpoints (GET /admin/tenants + calendar health).  T, A Tenant ORM instance (config only — no secret columns exist on it)., test_calendar_health_unknown_tenant_is_404(), test_empty_fleet() (+11 more)
 
 ### Community 201 - "_filter_active_types"
-Cohesion: 0.12
-Nodes (17): _handle_history(), _handle_human_echoes(), _handle_patient_messages(), _handle_smb_app_state_sync(), is_menu_command(), _mark_mode_resolved(), process_webhook_event(), True when the patient typed a `/menu`-style reset command. (+9 more)
+Cohesion: 0.15
+Nodes (19): WebhookValue, _handle_history(), _handle_human_echoes(), _handle_patient_messages(), _handle_smb_app_state_sync(), _mark_connected(), _mark_mode_resolved(), _persist_human_echo() (+11 more)
 
 ### Community 202 - "create_event_for_professional"
 Cohesion: 0.17
 Nodes (20): _match_by_name(), Any, Case-insensitive exact match of `name` against `item.name` in `items`.      Sh, _active_professionals(), create_event_for_professional(), list_free_slots_for_professional(), list_professionals(), _professional_calendar() (+12 more)
 
 ### Community 203 - "check_handover_timeouts"
-Cohesion: 0.07
-Nodes (27): BaseSettings, get_settings(), Strongly-typed settings. Values come from the environment or `.env`.      Real, Parse CORS_ALLOW_ORIGINS into a clean list of origins., Return a cached Settings instance (read once per process)., Settings, ZoneInfo, The clinic-local timezone this service interprets naive times in. (+19 more)
+Cohesion: 0.08
+Nodes (31): BaseSettings, dtime, get_settings(), Strongly-typed settings. Values come from the environment or `.env`.      Real, Parse CORS_ALLOW_ORIGINS into a clean list of origins., Return a cached Settings instance (read once per process)., Settings, _is_outside_business_hours() (+23 more)
 
 ### Community 204 - "test_professional_credentials_model_has_only_the_encrypted_column"
-Cohesion: 0.21
-Nodes (14): _agent_context(), db(), _FakeCalendarService, _fakes(), datetime, MonkeyPatch, Tests for ai/tools.py's Pix-deposit money hook on the LLM cancel path (PROMPT S3, Dev-script scaffolding (no tenant context) never crashes and never     issues a (+6 more)
+Cohesion: 0.22
+Nodes (11): _apply(), _demo(), FakeCalendar, main(), SimpleNamespace, Terminal harness for the deterministic flow router (cancel/reschedule).  Unlike, Mirror the worker's _apply_flow_result against in-memory state., Scripted run of the full cancel + reschedule flows (dynamic dates). (+3 more)
 
 ### Community 247 - "test_hub_config.py"
 Cohesion: 0.12
 Nodes (28): db(), AsyncClient, Tests for api/hub/config.py — PUT /tenants/me/config, focused on the contract v, The tenant fixture has phone_number_id=None and no Calendar connected -     a p, A completely unrelated config field (no address/insurance at all)     must also, Both post-consult fields save and read back correctly on a tenant with     no p, Partial update (exclude_unset): saving only post_consult_message must     not c, A clinic may fill in only what it has - the unset nested fields are     simply (+20 more)
 
 ### Community 248 - "_enter_professional_services"
-Cohesion: 0.16
-Nodes (16): analytics_advanced(), analytics_summary(), _as_aware_utc(), AsyncSession, datetime, Doctor hub — analytics endpoints.  - GET /tenants/me/analytics/summary  (basic, Normalize a stored `created_at` to an aware UTC datetime.      `AnalyticsEvent, The last `months` "YYYY-MM" keys ending at `now`, oldest first (dense). (+8 more)
+Cohesion: 0.07
+Nodes (35): FastAPI, health(), Health check endpoint., Liveness probe. Intentionally does not touch Postgres or Redis., analytics_advanced(), analytics_summary(), _as_aware_utc(), AsyncSession (+27 more)
 
 ### Community 249 - "test_agent.py"
 Cohesion: 0.33
 Nodes (14): db(), _headers(), AsyncClient, MonkeyPatch, Tests for api/internal_privacy.py — LGPD export/erase endpoints — and the conse, _seed_full_subject(), test_erase_counts_and_anonymizes_appointment_not_deletes(), test_erase_is_idempotent_repeat_returns_zero_counts() (+6 more)
 
 ### Community 250 - "_ctx"
-Cohesion: 0.12
-Nodes (15): Agent surface, Buttons by state, CHECKPOINT — Context-aware opening + read-only patient-appointments tool, Core rule, Greeting — HAS_UPCOMING(_SOON) final copy, Manage sub-flow — deterministic actions on the existing appointment, Outro → LLM handoff (appointment-aware agent mode), Pendências (+7 more)
+Cohesion: 0.22
+Nodes (8): Agent surface, CHECKPOINT — Context-aware opening + read-only patient-appointments tool, Core rule, Pendências, `services/patient_context.py` (new — the single source of truth), Settings, Tests (tests/test_patient_context.py + tests/test_list_patient_appointments_tool.py), `workers/tasks.py` (the opening router)
 
 ### Community 251 - "_config_with_selected_professional"
-Cohesion: 0.27
-Nodes (14): db(), _detached_ctx(), _make_rows(), _patch_session_factory(), MonkeyPatch, Tests for plugins/pix_deposit.py — the real Pix deposit post_booking hook.  In-m, A PostBookingContext carrying DETACHED copies (own session already     closed) —, maybe_create_deposit mutates rows but never commits (see its own     docstring) (+6 more)
+Cohesion: 0.22
+Nodes (10): _ctx(), _fakes(), _FakeWhatsAppClient, MonkeyPatch, Tests for plugins/pix_whatsapp.py and services/payments/pix.py., test_create_deposit_charge_includes_price_when_configured(), test_missing_pix_key_is_silent_noop(), test_no_patient_is_silent_noop() (+2 more)
 
 ### Community 252 - "PostBookingContext"
-Cohesion: 0.29
-Nodes (7): _enum_values(), MessageDirection, MessageSender, Enum, Message model - a single message inside a conversation., Relative to the clinic's WhatsApp number., Who authored the message.
+Cohesion: 0.22
+Nodes (10): DeclarativeBase, Base, Declarative base shared by every ORM model., _enum_values(), MessageDirection, MessageSender, Enum, Message model - a single message inside a conversation. (+2 more)
 
 ### Community 253 - "_send_greeting"
-Cohesion: 0.30
-Nodes (13): db(), AsyncClient, MonkeyPatch, Tests for POST /internal/tenants/{tenant_id}/asaas-connection.  Mirrors tests/te, _seed_tenant(), test_missing_key_is_unauthorized(), test_reconnect_upserts_same_credentials_row(), test_short_api_key_is_422() (+5 more)
+Cohesion: 0.33
+Nodes (6): professional_completeness_item(), _professional_missing_reasons(), ProfessionalCompletenessItem, One active professional's onboarding-completeness snapshot (contract §4 endpoint, Per-professional missing-config reasons, same tone/wording as `can_activate`., Completeness snapshot for ONE professional, regardless of is_active.      Used
 
 ### Community 254 - "MonkeyPatch"
 Cohesion: 0.29
 Nodes (6): CHECKPOINT — Post-consult tenant config fields, Pendências, Qualifying turns (`workers/tasks.py`), Testing, The injection seam (`post_consult_knowledge` only), What was built
 
 ### Community 255 - ".from_tenant_config"
-Cohesion: 0.15
-Nodes (20): _load_config(), main(), Terminal chat with the agent DRESSED by a real tenant's hub config.  Unlike scri, build_agent(), invoke_agent(), _invoke_agent_with_retry(), _load_history(), _looks_like_meta_output() (+12 more)
+Cohesion: 0.29
+Nodes (5): _load_config(), main(), Terminal chat with the agent DRESSED by a real tenant's hub config.  Unlike scri, CalendarService for professional X under tenant config Y (contract v1 §10)., Build a CalendarService using per-tenant credentials.          The OAuth app (
 
 ### Community 256 - "update_handover"
-Cohesion: 0.17
-Nodes (16): Whether THIS turn's system prompt should carry post_consult_knowledge.      Pu, _should_inject_post_consult_knowledge(), Unit tests for workers/tasks.py::_should_inject_post_consult_knowledge - the pur, Nothing to inject regardless of how "qualifying" the turn otherwise is., Conversation already in full-LLM ("Outro"/deviated) mode., The deterministic router just delegated THIS turn (e.g. the "Outro" tap)., opening_state unresolved (e.g. patient_id unknown), ordinary IDLE turn., RETURNING_NO_APPOINTMENT / HAS_UPCOMING(_SOON) are not post-consult states. (+8 more)
+Cohesion: 0.12
+Nodes (21): FlowState, _handover_values(), Enum, Conversation model - one ongoing thread between a patient and a clinic., Which deterministic (zero-LLM) flow the conversation is currently in.      IDL, Whether THIS turn's system prompt should carry post_consult_knowledge.      Pu, _should_inject_post_consult_knowledge(), Unit tests for workers/tasks.py::_should_inject_post_consult_knowledge - the pur (+13 more)
 
 ### Community 257 - "send_transactional_email"
-Cohesion: 0.08
-Nodes (38): Build a client for a tenant. The DECRYPTED token is injected by the caller., _adapt_greeting_has_upcoming(), _adapt_greeting_to_state(), _apply_deposit_awareness(), _appointment_doctor_name(), _as_utc(), _calendar_for_appointment(), _compose_upcoming_greeting_body() (+30 more)
+Cohesion: 0.07
+Nodes (46): _adapt_greeting_has_upcoming(), _adapt_greeting_to_state(), _appointment_doctor_name(), _as_utc(), _compose_upcoming_greeting_body(), _count_active_professionals(), _event_already_processed(), extract_patient_name() (+38 more)
 
 ### Community 258 - "_resolve_unit_or_error"
 Cohesion: 0.26
 Nodes (11): _active_units(), create_event_at_unit(), list_units(), UUID, multi_unit plugin: unit (physical location) awareness for booking.  Entitlemen, Cria uma consulta na agenda da clínica, associada a uma unidade     específica., Active units for `tenant_id`, ordered by name. Never raises., Resolve an active unit by name for `tenant_id`.      Returns (unit, None) on s (+3 more)
 
 ### Community 259 - "TenantConfigUpdate"
-Cohesion: 0.14
-Nodes (13): AppointmentType, _parse_hhmm(), Request/response schemas for the doctor-hub config endpoints.  All domain *sha, Parse an "HH:MM" string into a time, raising ValueError if out of range., A single availability window within a day (local clinic time)., A bookable reason for a consult, with its own duration., Trim items, drop blanks, and cap count/length (same style as         TenantConf, Reject unknown weekday keys and overlapping windows within a day. (+5 more)
+Cohesion: 0.20
+Nodes (10): _parse_hhmm(), Request/response schemas for the doctor-hub config endpoints.  All domain *sha, Parse an "HH:MM" string into a time, raising ValueError if out of range., A single availability window within a day (local clinic time)., Reject unknown weekday keys and overlapping windows within a day., Clinic's physical address (contract v1 §10). Every field optional —     a clini, TenantAddress, TimeWindow (+2 more)
 
 ### Community 260 - "test_atividade_insuficiente_template_matches_spec_copy"
 Cohesion: 0.18
-Nodes (8): _post_booking(), analytics_bi plugin: record a minimal booking event (post_booking).  Entitleme, PostBookingContext, What a `post_booking` hook needs to react to one freshly booked appointment., _post_booking(), ehr plugin: push a freshly booked appointment to the tenant's EHR (post_booking), _post_booking(), pix_deposit plugin: ask for a Pix deposit right after a booking (post_booking).
+Nodes (8): _post_booking(), analytics_bi plugin: record a minimal booking event (post_booking).  Entitleme, PostBookingContext, What a `post_booking` hook needs to react to one freshly booked appointment., _post_booking(), ehr plugin: push a freshly booked appointment to the tenant's EHR (post_booking), _post_booking(), pix_whatsapp plugin: ask for a Pix deposit right after a booking (post_booking).
 
 ### Community 261 - "test_agent.py"
 Cohesion: 0.40
 Nodes (5): main(), _print_tool_calls(), BaseMessage, Terminal agent loop for SecretarIA (Fase A smoke test).  Uses the SAME LangGra, Surface tool invocations so the dev can see what the LLM decided.
 
-### Community 263 - "_filter_active_types"
-Cohesion: 0.28
-Nodes (12): db(), AsyncClient, Tests for the six Pix-deposit policy fields on GET/PUT /tenants/me/config (api/h, tenant(), test_asaas_connected_flips_true_after_key_set(), test_get_config_exposes_six_fields_with_defaults(), test_put_accepts_boundary_values(), test_put_cannot_flip_asaas_connected() (+4 more)
-
 ### Community 264 - "RuntimeAppointmentType"
-Cohesion: 0.17
-Nodes (12): FlowState, Which deterministic (zero-LLM) flow the conversation is currently in.      IDL, Whether THIS turn's system prompt should carry the appointment context block., _should_inject_appointment_context(), The deterministic router just delegated THIS turn (e.g. the "Outro" tap)., flow_state unresolved (e.g. no tenant/conversation), ordinary turn., test_should_inject_appointment_context_delegated_this_turn_qualifies(), test_should_inject_appointment_context_empty_list_is_false() (+4 more)
+Cohesion: 0.27
+Nodes (9): oauth_start(), Return the Google consent URL (the frontend redirects the browser to it)., _b64decode(), _b64encode(), Opaque, signed, time-limited tokens (stdlib HMAC-SHA256).  Used for the Google O, Serialise `payload` (+ a timestamp) and append an HMAC signature., Return the original payload if `token` is authentic and fresh, else None.      N, sign() (+1 more)
 
 ### Community 266 - "TenantConfigUpdate"
-Cohesion: 0.26
-Nodes (12): An active appointment type as the LLM should see it., RuntimeAppointmentType, _appointment_context_text(), Render the per-turn "consultas marcadas" block for the LLM prompt.      Pure f, _appt(), professional_names is built from the ACTIVE roster only - an owner     absent f, test_appointment_context_text_brief_line_per_other_appointment(), test_appointment_context_text_inactive_owner_shows_no_name() (+4 more)
+Cohesion: 0.20
+Nodes (5): PUT body. Every field is optional — only provided fields are updated.      `bu, Light shape check for the deterministic-flow config blob., Trim labels, reject blanks/dupes and enforce WhatsApp's 3x20 limits., A greeting that carries buttons must fit WhatsApp's interactive body cap., TenantConfigUpdate
 
 ### Community 267 - "create_deposit_charge"
-Cohesion: 0.18
-Nodes (7): _is_rate_limited(), Sliding-window inbound rate limit per wa_id, backed by the arq Redis pool., _FakeRedis, Minimal async Redis stub covering the commands _is_rate_limited uses., test_rate_limit_allows_under_cap_then_silences(), test_rate_limit_disabled_without_redis(), test_rate_limit_is_per_sender()
+Cohesion: 0.27
+Nodes (9): create_deposit_charge(), PixCharge, _price_for_appointment(), Pix deposit-charge message rendering — STUB, not a payment integration.  `crea, A rendered (not real) deposit-request message., Best-effort price lookup from the matching appointment_type entry, by name., Render a pt-BR deposit-request message for a freshly booked appointment., _when_text() (+1 more)
 
 ### Community 268 - "AnalyticsEvent"
-Cohesion: 0.24
-Nodes (10): _FakeArqPool, AsyncClient, MonkeyPatch, Records every enqueue_job call; installed on app.state.arq_pool., test_enqueues_with_header_token(), test_event_id_fallback_when_id_missing(), test_extra_unknown_payload_fields_tolerated_end_to_end(), test_malformed_json_returns_200_ignored() (+2 more)
+Cohesion: 0.33
+Nodes (8): AnalyticsEvent, AnalyticsEvent model - minimal, non-personal usage events (analytics_bi addon)., One minimal, non-personal business event for a tenant., db(), _seed_event(), _seed_event_full(), tenant(), test_hook_records_minimal_non_personal_payload()
 
 ### Community 269 - "_ctx"
-Cohesion: 0.19
-Nodes (11): IClinicProvider, iClinic EHR provider — STUB.  TODO: real iClinic API integration (OAuth/API-ke, STUB `EhrProvider` for iClinic — logs and returns a fake record id., _ctx(), Tests for plugins/ehr.py (provider selection) and services/ehr/iclinic.py (the s, plugins/ehr.py itself does not try/except — registry.run_post_booking does., test_configured_provider_is_invoked(), test_iclinic_stub_returns_deterministic_fake_id_and_logs() (+3 more)
+Cohesion: 0.39
+Nodes (7): _ctx(), Tests for plugins/ehr.py (provider selection) and services/ehr/iclinic.py (the s, plugins/ehr.py itself does not try/except — registry.run_post_booking does., test_configured_provider_is_invoked(), test_no_provider_configured_is_noop(), test_provider_push_failure_propagates_to_registry_not_swallowed_here(), test_unknown_provider_is_noop()
 
 ### Community 270 - "run_post_booking_hooks"
 Cohesion: 0.38
 Nodes (6): enqueue_post_booking_hooks(), UUID, post_booking dispatch: react to a freshly committed appointment, off the hot pat, Fire-and-forget enqueue of `run_post_booking_hooks`. Never raises.      `redis, arq job: run every entitled plugin's `post_booking` hook for one appointment., run_post_booking_hooks()
 
-### Community 271 - "_FakeWhatsAppClient"
-Cohesion: 0.25
-Nodes (7): main(), _parse_args(), Namespace, Wipe dynamic data from the database for clean testing.  By default truncates the, Destructive admin operations shared by the CLI script and the API.  Single sourc, Truncate the conversation tables and optionally the tenants table.      Returns, wipe_data()
-
 ### Community 272 - "IClinicProvider"
-Cohesion: 0.28
-Nodes (7): _make_tenant(), WABA-token encryption at rest (tenant-secrets-encryption skill).  Covers the f, The load-bearing guarantee: no `access_token` (or any token) column on tenants., One credentials row per tenant: setting the WABA token must not duplicate it., test_tenant_model_has_no_plaintext_secret_column(), test_waba_upsert_shares_row_with_google_credential(), test_whatsapp_client_token_is_injected()
+Cohesion: 0.33
+Nodes (4): IClinicProvider, iClinic EHR provider — STUB.  TODO: real iClinic API integration (OAuth/API-ke, STUB `EhrProvider` for iClinic — logs and returns a fake record id., test_iclinic_stub_returns_deterministic_fake_id_and_logs()
 
 ### Community 273 - "google_oauth.py"
-Cohesion: 0.25
-Nodes (4): InboundContext, PluginSpec: the shape of one optional, entitlement-gated capability., What an `on_inbound` hook needs to decide + act on one inbound turn.      Hook, _FakeWhatsAppClient
+Cohesion: 0.33
+Nodes (5): build_authorization_url(), exchange_code_for_refresh_token(), Google Calendar OAuth helpers (platform-level hub onboarding).  A manual authori, Build the Google consent URL the doctor is redirected to., Exchange an authorization `code` for tokens; return the refresh_token.      Retu
 
 ### Community 274 - "is_menu_command"
-Cohesion: 0.25
-Nodes (8): Email the clinic owner when Google Calendar becomes unreachable.      No-ops s, send_calendar_alert(), When SMTP_HOST is empty the function returns without trying to connect., When SMTP_HOST is set, asyncio.to_thread is called with the right args., A send failure does not raise — it is logged and swallowed., test_calendar_alert_no_smtp_host_skips_silently(), test_calendar_alert_sends_when_smtp_configured(), test_calendar_alert_swallows_smtp_error()
+Cohesion: 0.40
+Nodes (5): is_menu_command(), True when the patient typed a `/menu`-style reset command., Tests for the /menu reset-command predicate., test_non_triggers(), test_recognised_triggers()
 
 ### Community 275 - "require_internal_api_key"
-Cohesion: 0.33
-Nodes (5): CHECKPOINT — Pix deposit (sinal) add-on + appointment payment lifecycle, External pendências (do NOT fabricate — nothing works end-to-end until these), Flags / known gaps (deliberate, pending product decisions), State machine (`PixDeposit.status`, SEPARATE from `AppointmentStatus`), Where everything lives
+Cohesion: 0.50
+Nodes (4): _internal_key_scheme, Security, Gate `/internal/*` on the `X-Internal-Api-Key` shared secret. Fail CLOSED., require_internal_api_key()
 
 ### Community 276 - "AppointmentType"
-Cohesion: 0.40
-Nodes (5): Volta a conversa para o menu inicial de botões da clínica. Use quando o     pac, Raised by the `show_main_menu` tool: the patient wants the button menu back., show_main_menu(), ShowMainMenuRequested, test_show_main_menu_tool_raises()
-
-### Community 279 - "_calendar_for_professional"
 Cohesion: 0.50
-Nodes (3): _calendar_for_professional(), Build a CalendarService for ONE professional's own config (contract v1 §10 item, CalendarService for professional X under tenant config Y (contract v1 §10).
-
-### Community 280 - "iniciar_pre_consulta"
-Cohesion: 0.50
-Nodes (4): iniciar_pre_consulta(), Best-effort patient WhatsApp id (phone) for the current turn.      Mirrors `_p, Inicia a pré-consulta (anamnese) do paciente desta clínica, encaminhando-o, _resolve_patient_phone()
-
-### Community 281 - "payments_tasks.py"
-Cohesion: 0.50
-Nodes (3): process_asaas_event(), arq job(s) for the Pix deposit (sinal) payment lifecycle.  Kept in its own modul, arq job: apply one Asaas webhook event. Enqueued by POST /webhooks/asaas.      A
-
-### Community 282 - "extract_patient_name"
-Cohesion: 0.67
-Nodes (3): extract_patient_name(), Best-effort patient name from an explicit self-introduction.      Returns a Ti, test_extract_patient_name()
-
-### Community 283 - "_transcription_config"
-Cohesion: 0.67
-Nodes (3): Build the transcription-core config from env settings.      Deliberately reads, _transcription_config(), TranscriptionConfig
+Nodes (3): AppointmentType, A bookable reason for a consult, with its own duration., Trim items, drop blanks, and cap count/length (same style as         TenantConf
 
 ## Knowledge Gaps
-- **118 isolated node(s):** `secretaria`, `Product vision`, `The "Eye Company" scaffold is gone — keep it that way`, `Per-tenant config (what each clinic can configure)`, `What the agent became` (+113 more)
+- **108 isolated node(s):** `secretaria`, `Product vision`, `The "Eye Company" scaffold is gone — keep it that way`, `Per-tenant config (what each clinic can configure)`, `What the agent became` (+103 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **100 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **101 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `Tenant` connect `panel.py` to `route`, `test_multi_professional_plugin.py`, `tools.py`, `TenantConfigUpdate`, `test_atividade_insuficiente_template_matches_spec_copy`, `Conversation`, `_process_lead_window`, `Patient`, `Conversation`, `send_transactional_email`, `_filter_active_types`, `test_hub_units.py`, `test_hub_professionals.py`, `_ctx`, `run_post_booking_hooks`, `test_analytics_bi_plugin.py`, `tasks.py`, `test_reactivation.py`, `test_audio_transcription.py`, `list_tenants`, `test_handover_echoes.py`, `test_admin_tenants.py`, `_make_scenario`, `IClinicProvider`, `test_hub_conversations.py`, `professionals.py`, `tenant_config.py`, `WhatsAppClient`, `test_professional_config.py`, `test_resolve_tenant.py`, `Tenant`, `test_human_backup_plugin.py`, `calendar.py`, `test_precheck_handoff_tool.py`, `CalendarService`, `test_admin.py`, `test_bot_reply_gating.py`, `oauth_callback`, `test_post_booking_plugin.py`, `test_multi_unit_plugin.py`, `calendar.py`, `test_subscription.py`, `setup_logging`, `Appointment`, `main`, `decrypt`, `_manage_action_card`, `_ctx`, `for_tenant`, `test_pix_whatsapp_plugin.py`, `get_current_tenant`, `run_post_booking_hooks`, `_filter_active_types`, `create_event_for_professional`, `_FakeSession`, `test_professional_credentials_model_has_only_the_encrypted_column`, `get_settings`, `is_menu_command`, `analytics_summary`, `test_hub_config.py`, `_enter_professional_services`, `test_agent.py`, `_config_with_selected_professional`, `_send_greeting`, `.from_tenant_config`?**
-  _High betweenness centrality (0.374) - this node is a cross-community bridge._
-- **Why does `get_settings()` connect `check_handover_timeouts` to `route`, `test_agent.py`, `_process_lead_window`, `test_precheck_handoff.py`, `test_subscription.py`, `create_deposit_charge`, `test_audio_transcription.py`, `is_menu_command`, `test_handover_echoes.py`, `iniciar_pre_consulta`, `graph.py`, `list_tenant_appointments`, `receive_webhook`, `_transcription_config`, `tenant_config.py`, `test_professional_config.py`, `test_resolve_tenant.py`, `EntitlementSummary`, `oauth_callback`, `config.py`, `setup_logging`, `PostBookingContext`, `wipe_data`, `_ctx`, `test_admin_tenants.py`, `_FakeSession`, `analytics_summary`, `.from_tenant_config`?**
-  _High betweenness centrality (0.084) - this node is a cross-community bridge._
-- **Why does `Base` connect `test_admin.py` to `route`, `RuntimeAppointmentType`, `test_hub_units.py`, `AnalyticsEvent`, `test_analytics_bi_plugin.py`, `test_audio_transcription.py`, `google_oauth.py`, `test_handover_echoes.py`, `test_admin_tenants.py`, `_make_scenario`, `test_hub_conversations.py`, `professionals.py`, `AppointmentStatus`, `Tenant`, `CalendarService`, `test_bot_reply_gating.py`, `calendar.py`, `Appointment`, `main`, `panel.py`, `decrypt`, `_ctx`, `test_pix_whatsapp_plugin.py`, `get_settings`, `test_professional_credentials_model_has_only_the_encrypted_column`, `is_menu_command`, `PostBookingContext`?**
-  _High betweenness centrality (0.082) - this node is a cross-community bridge._
-- **Are the 73 inferred relationships involving `Tenant` (e.g. with `main()` and `main()`) actually correct?**
-  _`Tenant` has 73 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 74 inferred relationships involving `Appointment` (e.g. with `_mark_appointment_cancelled()` and `_persist_appointment()`) actually correct?**
-  _`Appointment` has 74 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 47 inferred relationships involving `Conversation` (e.g. with `list_patient_appointments()` and `_persist_appointment()`) actually correct?**
-  _`Conversation` has 47 INFERRED edges - model-reasoned connections that need verification._
+- **Why does `Tenant` connect `TenantConfigUpdate` to `route`, `test_multi_professional_plugin.py`, `send_transactional_email`, `Conversation`, `_process_lead_window`, `Patient`, `RuntimeAppointmentType`, `Conversation`, `test_post_booking_plugin.py`, `test_hub_units.py`, `create_deposit_charge`, `AnalyticsEvent`, `run_post_booking_hooks`, `test_analytics_bi_plugin.py`, `tasks.py`, `test_reactivation.py`, `test_audio_transcription.py`, `list_tenants`, `_ctx`, `IClinicProvider`, `test_handover_echoes.py`, `test_admin_tenants.py`, `test_hub_conversations.py`, `_make_scenario`, `professionals.py`, `tenant_config.py`, `WhatsAppClient`, `test_professional_config.py`, `test_resolve_tenant.py`, `Tenant`, `test_human_backup_plugin.py`, `calendar.py`, `test_precheck_handoff_tool.py`, `test_bot_reply_gating.py`, `oauth_callback`, `test_multi_unit_plugin.py`, `calendar.py`, `config.py`, `setup_logging`, `Appointment`, `panel.py`, `decrypt`, `_manage_action_card`, `test_hub_professionals.py`, `test_pix_whatsapp_plugin.py`, `run_post_booking_hooks`, `get_current_tenant`, `_filter_active_types`, `create_event_for_professional`, `_FakeSession`, `check_handover_timeouts`, `require_internal_api_key`, `test_admin_tenants.py`, `get_settings`, `analytics_summary`, `test_hub_config.py`, `_enter_professional_services`, `test_agent.py`, `_config_with_selected_professional`, `PostBookingContext`, `_send_greeting`, `.from_tenant_config`?**
+  _High betweenness centrality (0.368) - this node is a cross-community bridge._
+- **Why does `_send_bot_reply()` connect `oauth_callback` to `update_handover`, `send_transactional_email`, `test_multi_professional_plugin.py`, `TenantConfigUpdate`, `Conversation`, `tasks.py`, `test_reactivation.py`, `test_tasks_helpers.py`, `tenant_config.py`, `test_professional_config.py`, `EntitlementSummary`, `enabled_plugins`, `CalendarService`, `calendar.py`, `panel.py`, `decrypt`, `ProfessionalCompletenessItem`, `_filter_active_types`, `check_handover_timeouts`, `is_menu_command`, `.from_tenant_config`?**
+  _High betweenness centrality (0.067) - this node is a cross-community bridge._
+- **Why does `get_settings()` connect `check_handover_timeouts` to `send_transactional_email`, `tools.py`, `test_agent.py`, `_process_lead_window`, `test_precheck_handoff.py`, `RuntimeAppointmentType`, `test_subscription.py`, `test_audio_transcription.py`, `tasks.py`, `google_oauth.py`, `require_internal_api_key`, `test_handover_echoes.py`, `test_tasks_helpers.py`, `graph.py`, `receive_webhook`, `tenant_config.py`, `test_professional_config.py`, `test_resolve_tenant.py`, `EntitlementSummary`, `config.py`, `setup_logging`, `PostBookingContext`, `wipe_data`, `_filter_active_types`, `_FakeSession`, `internal.py`, `is_menu_command`, `analytics_summary`, `_enter_professional_services`, `.from_tenant_config`?**
+  _High betweenness centrality (0.065) - this node is a cross-community bridge._
+- **Are the 62 inferred relationships involving `Tenant` (e.g. with `main()` and `main()`) actually correct?**
+  _`Tenant` has 62 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 60 inferred relationships involving `route()` (e.g. with `main()` and `_run_flow()`) actually correct?**
   _`route()` has 60 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 35 inferred relationships involving `Conversation` (e.g. with `list_patient_appointments()` and `_persist_appointment()`) actually correct?**
+  _`Conversation` has 35 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 62 inferred relationships involving `get_settings()` (e.g. with `main()` and `main()`) actually correct?**
+  _`get_settings()` has 62 INFERRED edges - model-reasoned connections that need verification._
