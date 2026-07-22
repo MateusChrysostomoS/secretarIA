@@ -62,3 +62,10 @@ class TenantListResponse(BaseModel):
     total: int = Field(description="Total tenants, ignoring limit/offset.")
     limit: int
     offset: int
+
+
+class TenantDeleteResponse(BaseModel):
+    """Confirmation that a single clinic (tenant) row was removed."""
+
+    deleted: bool = Field(description="True once the tenant row was removed.")
+    tenant_id: UUID

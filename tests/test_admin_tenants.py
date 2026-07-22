@@ -293,3 +293,105 @@ async def test_endpoints_in_openapi_schema(client: AsyncClient) -> None:
     get = schema["paths"][ENDPOINT]["get"]
     assert "admin-tenants" in get["tags"]
     assert f"{ENDPOINT}/{{tenant_id}}/calendar/health" in schema["paths"]
+    # The single-tenant delete route is registered on the same collection path.
+    assert "delete" in schema["paths"][f"{ENDPOINT}/{{tenant_id}}"]
+
+
+# --------------------------------------------------------------------------
+# Single-tenant delete (DELETE /admin/tenants/{id})
+# --------------------------------------------------------------------------
+#
+# Like the calendar-health 404 test, these override get_session with a fake so
+# nothing touches Postgres. The fake records what delete_tenant's service reads
+# (session.get + session.scalar counts) and does (session.delete + commit).
+
+
+class _FakeSession:
+    """Minimal AsyncSession stand-in for the delete path.
+
+    `tenant` is what `get` returns; `counts` are returned by successive `scalar`
+    calls (conversations, patients, appointments — in that order). Records the
+    deleted object and whether commit ran so tests can assert the effect.
+    """
+
+    def __init__(self, tenant: object, counts: tuple[int, ...] = (0, 0, 0)) -> None:
+        self._tenant = tenant
+        self._counts = list(counts)
+        self.deleted: object = None
+        self.committed = False
+
+    async def get(self, *args: object, **kwargs: object) -> object:
+        return self._tenant
+
+    async def scalar(self, *args: object, **kwargs: object) -> int:
+        return self._counts.pop(0)
+
+    async def delete(self, obj: object) -> None:
+        self.deleted = obj
+
+    async def commit(self) -> None:
+        self.committed = True
+
+
+def _override_session(session: _FakeSession):
+    """Context-managing helper: install/remove a get_session override."""
+    from secretaria.core.database import get_session
+    from secretaria.main import app
+
+    async def _fake_get_session():
+        yield session
+
+    app.dependency_overrides[get_session] = _fake_get_session
+    return get_session, app
+
+
+async def test_delete_tenant_missing_is_404(client: AsyncClient) -> None:
+    session = _FakeSession(tenant=None)
+    get_session, app = _override_session(session)
+    try:
+        response = await client.delete(
+            f"{ENDPOINT}/{uuid4()}", headers={"X-Admin-Token": GOOD_TOKEN}
+        )
+        assert response.status_code == 404
+        assert session.committed is False
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+
+
+async def test_delete_tenant_with_conversations_is_409(client: AsyncClient) -> None:
+    # A tenant that still has conversation history must be REFUSED, never wiped.
+    session = _FakeSession(tenant=_make_tenant(), counts=(3, 0, 0))
+    get_session, app = _override_session(session)
+    try:
+        response = await client.delete(
+            f"{ENDPOINT}/{uuid4()}", headers={"X-Admin-Token": GOOD_TOKEN}
+        )
+        assert response.status_code == 409
+        assert "tenant_has_conversation_data" in response.text
+        assert session.deleted is None  # nothing deleted
+        assert session.committed is False
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+
+
+async def test_delete_tenant_clean_succeeds(client: AsyncClient) -> None:
+    tenant = _make_tenant()
+    session = _FakeSession(tenant=tenant, counts=(0, 0, 0))
+    get_session, app = _override_session(session)
+    try:
+        response = await client.delete(
+            f"{ENDPOINT}/{tenant.id}", headers={"X-Admin-Token": GOOD_TOKEN}
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["deleted"] is True
+        assert body["tenant_id"] == str(tenant.id)
+        assert session.deleted is tenant  # the tenant row was removed
+        assert session.committed is True
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+
+
+async def test_delete_tenant_requires_admin_token(client: AsyncClient) -> None:
+    response = await client.delete(f"{ENDPOINT}/{uuid4()}")
+    assert response.status_code == 403

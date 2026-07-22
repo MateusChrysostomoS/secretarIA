@@ -31,9 +31,11 @@ from secretaria.models.tenant_credentials import TenantCredentials
 from secretaria.schemas.admin import (
     CalendarHealth,
     CalendarHealthStatus,
+    TenantDeleteResponse,
     TenantListResponse,
     TenantSummary,
 )
+from secretaria.services import admin as admin_service
 from secretaria.services.calendar import CalendarService, CalendarUnavailableError
 from secretaria.services.tenant_config import TenantRuntimeConfig, load_tenant_config
 
@@ -277,3 +279,42 @@ async def tenant_calendar_health(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown tenant.")
     config = await load_tenant_config(session, tenant)
     return await _probe_config(config, tenant.google_calendar_id)
+
+
+@router.delete(
+    "/{tenant_id}",
+    response_model=TenantDeleteResponse,
+    dependencies=[Depends(require_admin)],
+    summary="Delete a single clinic (tenant) — never its conversation history",
+    description=(
+        "Removes ONE tenant row (and the empty config that cascades from it). Used by "
+        "brain-api's 'delete clinic' flow. REFUSES with 409 if the tenant still has any "
+        "conversation, patient or appointment — that history is never deleted through "
+        "this route. Requires the X-Admin-Token header."
+    ),
+    responses={
+        **_ADMIN_RESPONSES,
+        404: {"description": "No tenant with that id."},
+        409: {"description": "Tenant still has conversation history; not deleted."},
+    },
+)
+async def delete_tenant(
+    tenant_id: Annotated[UUID, Path(description="Tenant UUID.")],
+    session: AsyncSession = Depends(get_session),
+) -> TenantDeleteResponse:
+    result = await admin_service.delete_tenant(session, tenant_id)
+    if result.outcome is admin_service.DeleteTenantOutcome.NOT_FOUND:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown tenant.")
+    if result.outcome is admin_service.DeleteTenantOutcome.HAS_DATA:
+        # Report the blocking counts so the operator knows why it was kept.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            (
+                "tenant_has_conversation_data: "
+                f"conversations={result.conversations}, patients={result.patients}, "
+                f"appointments={result.appointments}"
+            ),
+        )
+    await session.commit()
+    logger.warning("admin_tenant_deleted", tenant_id=str(tenant_id))
+    return TenantDeleteResponse(deleted=True, tenant_id=tenant_id)
