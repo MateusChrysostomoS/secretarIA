@@ -6,6 +6,11 @@
 
 FROM python:3.12-slim
 
+# git - needed by `uv sync` to fetch the transcription-core dependency, pinned to a tag
+# via a git source in pyproject.toml (python:3.12-slim has no git binary by default).
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 # uv - the Python package manager.
 # TODO(prod): pin uv to an explicit version tag instead of :latest.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
