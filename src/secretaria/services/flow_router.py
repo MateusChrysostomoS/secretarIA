@@ -1332,12 +1332,21 @@ def enter_manage_action(
     tenant: Tenant,
     appointments: list[dict],
     professionals: list | None = None,
+    preselected_id: UUID | None = None,
 ) -> FlowRouterResult:
     """Deterministic entry for a direct "Remarcar"/"Cancelar" tap at the menu.
 
     Unlike `_enter_manage` (which always shows the neutral "o que você
     gostaria de fazer?" action card after a pick), this goes straight for the
     tapped intent:
+      - `preselected_id` set AND found in `appointments` -> begins that intent
+        directly on IT, regardless of how many other appointments the patient
+        has (PROMPT S3: a reminder's action-button tap already names the exact
+        appointment - see workers/tasks.py::_handle_action_button - so the
+        normal 0/1/2+ disambiguation below would be actively wrong: it could
+        preselect the wrong one, or make the patient pick again for no
+        reason). Not found (stale/foreign/no-longer-upcoming) falls through
+        to the normal behavior below, as if no preselection had been given.
       - no appointments -> `_enter_manage`'s empty-list reply, reused as-is.
       - exactly one -> begins that intent directly on it (NEAREST == only,
         nothing to disambiguate).
@@ -1345,6 +1354,13 @@ def enter_manage_action(
         intent-specific prompt; the tap resolves through
         STEP_MANAGE_PICK_RESCHEDULE / STEP_MANAGE_PICK_CANCEL (`_manage_step`).
     """
+    if preselected_id is not None:
+        preselected = _find_appt_by_id(appointments, str(preselected_id))
+        if preselected is not None:
+            managing_id = _appt_uuid(preselected)
+            if intent == "reschedule":
+                return _begin_reschedule(managing_id)
+            return _begin_cancel(managing_id, preselected)
     if not appointments:
         return _enter_manage(tenant, appointments, professionals)
     if len(appointments) == 1:

@@ -296,21 +296,32 @@ async def _persist_appointment(
         )
 
 
-async def _mark_appointment_cancelled(event_id: str) -> None:
-    """Flip the matching appointment row(s) to CANCELLED. Best-effort."""
+async def _mark_appointment_cancelled(event_id: str) -> str | None:
+    """Flip the matching appointment row(s) to CANCELLED. Best-effort.
+
+    Returns the Pix deposit `cancellation_notice`
+    (services/payments/deposit_lifecycle.py) when a deposit existed and was
+    resolved by this cancellation, so `cancel_event` can relay honest
+    refund/retention info back to the patient through the agent; None when
+    there is nothing deposit-related to say (no deposit, or the lookup/hook
+    itself failed — never blocks the cancellation, which has already
+    happened by the time any of this runs).
+    """
     tenant_id = _tenant_id_ctx.get()
     if tenant_id is None:
         # No tenant context (dev scripts): skip rather than issue a
         # tenant-unscoped UPDATE that could touch other tenants' rows
         # (google_event_id is indexed but not globally unique).
-        return
+        return None
     if not event_id:
-        return
-    from sqlalchemy import update
+        return None
+    from sqlalchemy import select, update
 
     from secretaria.core.database import async_session_factory
-    from secretaria.models import Appointment, AppointmentStatus
+    from secretaria.models import Appointment, AppointmentStatus, Tenant
+    from secretaria.services.payments import deposit_lifecycle
 
+    notice: str | None = None
     try:
         async with async_session_factory() as session:
             async with session.begin():
@@ -322,9 +333,30 @@ async def _mark_appointment_cancelled(event_id: str) -> None:
                     )
                     .values(status=AppointmentStatus.CANCELLED)
                 )
+                appointment = await session.scalar(
+                    select(Appointment).where(
+                        Appointment.google_event_id == event_id,
+                        Appointment.tenant_id == tenant_id,
+                    )
+                )
+                if appointment is not None:
+                    tenant = await session.get(Tenant, tenant_id)
+                    if tenant is not None:
+                        outcome = await deposit_lifecycle.on_appointment_cancelled(
+                            session, tenant=tenant, appointment=appointment
+                        )
+                        if outcome is not None:
+                            deposit = await deposit_lifecycle.get_deposit_for_appointment(
+                                session, appointment.id
+                            )
+                            if deposit is not None:
+                                notice = deposit_lifecycle.cancellation_notice(
+                                    outcome, tenant, deposit
+                                )
         logger.info("tool_appointment_cancelled", event_id=event_id, rows=result.rowcount)
     except Exception as exc:
         logger.warning("tool_appointment_cancel_persist_failed", error=str(exc), event_id=event_id)
+    return notice
 
 
 @tool
@@ -400,14 +432,21 @@ async def create_event(
 
 @tool
 async def cancel_event(event_id: str) -> dict:
-    """Cancela (deleta) um evento existente pelo seu id.
+    """Cancela (deleta) um evento existente pelo seu id. Se o resultado trouxer
+    um campo "note", repasse essa frase ao paciente literalmente — é a
+    informação honesta sobre reembolso/retenção do sinal (Pix), quando houver.
 
     Args:
         event_id: ID do evento no Google Calendar.
     """
     await _get_calendar().cancel_event(event_id)
-    await _mark_appointment_cancelled(event_id)
-    return {"status": "cancelled"}
+    notice = await _mark_appointment_cancelled(event_id)
+    result: dict = {"status": "cancelled"}
+    if notice:
+        # Honest refund/retention info (Pix deposit) for the agent to relay
+        # verbatim to the patient — see _mark_appointment_cancelled.
+        result["note"] = notice
+    return result
 
 
 @tool

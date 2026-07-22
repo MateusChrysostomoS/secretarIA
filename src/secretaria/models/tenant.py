@@ -117,13 +117,46 @@ class Tenant(Base):
     # "iclinic") this tenant pushes booked appointments to. NULL = the `ehr`
     # addon's post_booking hook no-ops (no provider selected yet).
     ehr_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    # The clinic's OWN Pix key (email/phone/random key/CPF-CNPJ) used to
-    # receive deposit payments (plugins/pix_whatsapp.py). This is a PUBLIC
-    # payment address, not a secret credential — unlike the encrypted
-    # tenant_credentials columns, it lives here in plaintext. Still never
-    # logged in full (only tenant_id is logged around it), out of caution.
-    # NULL = the `pix_whatsapp` addon's post_booking hook silently no-ops.
+    # LEGACY STUB FIELD — retained, not read by any live code path. Used to be
+    # the clinic's own Pix key (email/phone/random key/CPF-CNPJ), embedded
+    # verbatim in the old message-only `pix_whatsapp` plugin's deposit-ask text
+    # (services/payments/pix.py, deleted). The real Pix deposit lifecycle
+    # (plugins/pix_deposit.py, services/payments/deposit_lifecycle.py) charges
+    # via Asaas instead and never reads this column. A PUBLIC payment address,
+    # not a secret credential — unlike the encrypted tenant_credentials
+    # columns, it lives here in plaintext (still never logged in full, out of
+    # caution, on the rare admin surface that might still display it).
     pix_key: Mapped[str | None] = mapped_column(String(140), nullable=True)
+
+    # --- Pix deposit (sinal) lifecycle config (services/payments/deposit_lifecycle.py) ---
+    # Master switch: whether maybe_create_deposit ever creates a real Asaas
+    # charge for this tenant. False = the whole feature no-ops.
+    pix_deposit_enabled: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false"), default=False
+    )
+    # Percent of the matched appointment_type's price charged as the deposit.
+    pix_deposit_percent: Mapped[int] = mapped_column(Integer, server_default="30", default=30)
+    # Hours before the appointment start within which a cancellation still
+    # gets a FULL refund (see deposit_lifecycle.on_appointment_cancelled).
+    pix_refund_window_hours: Mapped[int] = mapped_column(
+        Integer, server_default="24", default=24
+    )
+    # "total" (clinic keeps the whole deposit) | "partial" (see
+    # pix_partial_refund_percent) — applied when a cancellation lands OUTSIDE
+    # the refund window (i.e. too close to the appointment).
+    pix_retention_policy: Mapped[str] = mapped_column(
+        String(16), server_default="total", default="total"
+    )
+    # Percent of the deposit refunded when pix_retention_policy == "partial".
+    pix_partial_refund_percent: Mapped[int] = mapped_column(
+        Integer, server_default="50", default=50
+    )
+    # How many times an appointment WITH a live deposit may be rescheduled
+    # before register_reschedule starts refusing (0 = no reschedule allowed
+    # at all once a deposit exists).
+    pix_reschedule_limit: Mapped[int] = mapped_column(
+        Integer, server_default="2", default=2
+    )
 
     # --- Onboarding / multi-professional (cross-service contract v1) ---
     # When the WhatsApp number was connected (phone_number_id/waba_id set).

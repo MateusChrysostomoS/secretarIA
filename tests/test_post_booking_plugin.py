@@ -5,7 +5,7 @@ arq job that fans out to entitled plugins' hooks).
 Mirrors the in-memory-sqlite pattern established by test_reminders_plugin.py
 (a real DB, monkeypatched in place of the Postgres-backed
 `async_session_factory`). The plugin REGISTRY is monkeypatched to an empty
-dict per test so these tests never interact with the real ehr/pix_whatsapp/
+dict per test so these tests never interact with the real ehr/pix_deposit/
 analytics_bi plugins registered at import time.
 """
 
@@ -41,7 +41,7 @@ _ALL_ADDONS_OFF = {
     "multi_professional": False,
     "multi_unit": False,
     "ehr": False,
-    "pix_whatsapp": False,
+    "pix_deposit": False,
     "analytics_bi": False,
     "human_backup_24_7": False,
 }
@@ -72,7 +72,7 @@ def _ctx(**overrides) -> PostBookingContext:
 
 @pytest.fixture(autouse=True)
 def _empty_registry(monkeypatch: pytest.MonkeyPatch):
-    """Isolate the registry so real plugins (ehr, pix_whatsapp, ...) never run."""
+    """Isolate the registry so real plugins (ehr, pix_deposit, ...) never run."""
     monkeypatch.setattr(registry, "REGISTRY", {})
     yield
 
@@ -92,9 +92,9 @@ async def test_all_entitled_hooks_run_no_short_circuit():
         calls.append("b")
 
     registry.register(PluginSpec(id="a", entitlement_keys=("ehr",), post_booking=hook_a))
-    registry.register(PluginSpec(id="b", entitlement_keys=("pix_whatsapp",), post_booking=hook_b))
+    registry.register(PluginSpec(id="b", entitlement_keys=("pix_deposit",), post_booking=hook_b))
 
-    summary = _summary(addons={**_ALL_ADDONS_OFF, "ehr": True, "pix_whatsapp": True})
+    summary = _summary(addons={**_ALL_ADDONS_OFF, "ehr": True, "pix_deposit": True})
     await registry.run_post_booking(summary, _ctx())
 
     assert sorted(calls) == ["a", "b"]

@@ -10,6 +10,8 @@ from secretaria.models.consent_event import ConsentEvent
 from secretaria.models.conversation import Conversation, FlowState, HandoverState
 from secretaria.models.message import Message, MessageDirection, MessageSender
 from secretaria.models.patient import Patient
+from secretaria.models.pix_deposit import PixDeposit, PixDepositStatus
+from secretaria.models.processed_asaas_event import ProcessedAsaasEvent
 from secretaria.models.processed_event import ProcessedEvent
 from secretaria.models.professional import Professional
 from secretaria.models.professional_credentials import ProfessionalCredentials
@@ -29,6 +31,9 @@ __all__ = [
     "MessageDirection",
     "MessageSender",
     "Patient",
+    "PixDeposit",
+    "PixDepositStatus",
+    "ProcessedAsaasEvent",
     "ProcessedEvent",
     "Professional",
     "ProfessionalCredentials",

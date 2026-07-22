@@ -79,3 +79,14 @@ class AppointmentRead(BaseModel):
     status: AppointmentStatus
     created_at: datetime
     updated_at: datetime
+    # The PixDeposit status VALUE for this appointment (e.g. "confirmado_pago"),
+    # or None when there is no deposit at all — see models/pix_deposit.py's
+    # PixDepositStatus. Read-only: never set via a request body.
+    deposit_status: str | None = None
+    # The one-time deposit_lifecycle outcome ("voided"/"refunded"/
+    # "partial_refund"/"retained"/"refund_failed") of THIS request, populated
+    # only by POST /cancel and PATCH /status (CANCELLED/NO_SHOW) — every other
+    # endpoint (including a plain GET-shaped re-read) leaves it None. Not a
+    # persistent appointment attribute like `deposit_status` above; it exists
+    # purely so the hub can show what just happened to the money.
+    deposit_outcome: str | None = None

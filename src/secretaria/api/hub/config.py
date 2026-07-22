@@ -37,11 +37,18 @@ _SCALAR_FIELDS = (
     "address",
     "insurances",
     "collect_insurance",
+    "pix_deposit_enabled",
+    "pix_deposit_percent",
+    "pix_refund_window_hours",
+    "pix_retention_policy",
+    "pix_partial_refund_percent",
+    "pix_reschedule_limit",
 )
 
 
 async def _read_model(session: AsyncSession, tenant: Tenant) -> TenantConfigRead:
     connected = await cfg.has_google_refresh_token(session, tenant.id)
+    asaas_connected = await cfg.has_asaas_api_key(session, tenant.id)
     return TenantConfigRead(
         clinic_name=tenant.clinic_name,
         greeting_message=tenant.greeting_message,
@@ -62,6 +69,13 @@ async def _read_model(session: AsyncSession, tenant: Tenant) -> TenantConfigRead
         collect_insurance=tenant.collect_insurance,
         is_active=tenant.is_active,
         calendar_connected=connected,
+        pix_deposit_enabled=tenant.pix_deposit_enabled,
+        pix_deposit_percent=tenant.pix_deposit_percent,
+        pix_refund_window_hours=tenant.pix_refund_window_hours,
+        pix_retention_policy=tenant.pix_retention_policy,
+        pix_partial_refund_percent=tenant.pix_partial_refund_percent,
+        pix_reschedule_limit=tenant.pix_reschedule_limit,
+        asaas_connected=asaas_connected,
     )
 
 

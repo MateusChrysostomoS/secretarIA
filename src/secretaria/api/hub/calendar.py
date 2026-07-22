@@ -30,13 +30,19 @@ from secretaria.schemas.calendar import (
     CalendarEventRead,
 )
 from secretaria.services.calendar import CalendarService
+from secretaria.services.payments import deposit_lifecycle
 from secretaria.services.tenant_config import load_tenant_config
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/tenants/me/calendar", tags=["hub-calendar"])
 
 
-def _appointment_read(appt: Appointment) -> AppointmentRead:
+def _appointment_read(
+    appt: Appointment,
+    *,
+    deposit_status: str | None = None,
+    deposit_outcome: str | None = None,
+) -> AppointmentRead:
     return AppointmentRead(
         id=str(appt.id),
         tenant_id=str(appt.tenant_id),
@@ -51,7 +57,18 @@ def _appointment_read(appt: Appointment) -> AppointmentRead:
         status=appt.status,
         created_at=appt.created_at,
         updated_at=appt.updated_at,
+        deposit_status=deposit_status,
+        deposit_outcome=deposit_outcome,
     )
+
+
+async def _deposit_status_value(session: AsyncSession, appointment_id: UUID) -> str | None:
+    """The PixDeposit status VALUE for one appointment, or None when there is
+    no deposit at all. A single indexed lookup — every hub-calendar endpoint
+    acts on exactly ONE appointment, so this is trivially free of the N+1
+    concern a real list endpoint would have to guard against."""
+    deposit = await deposit_lifecycle.get_deposit_for_appointment(session, appointment_id)
+    return deposit.status.value if deposit is not None else None
 
 
 async def _get_calendar(session: AsyncSession, tenant: Tenant) -> CalendarService:
@@ -229,22 +246,47 @@ async def cancel_appointment(
 
     appt.status = AppointmentStatus.CANCELLED
     appt.updated_at = datetime.now(UTC)
+
+    # Money hook (PROMPT S3 section 4): resolve the deposit's outcome for
+    # this cancellation in the SAME transaction. waba_token=None — the
+    # lifecycle sends no message itself (see its docstring); this endpoint
+    # decides whether/how to notify via the existing custom_message path.
+    deposit_outcome = await deposit_lifecycle.on_appointment_cancelled(
+        session, tenant=tenant, appointment=appt, waba_token=None
+    )
+    notice: str | None = None
+    if deposit_outcome is not None:
+        deposit = await deposit_lifecycle.get_deposit_for_appointment(session, appt.id)
+        if deposit is not None:
+            notice = deposit_lifecycle.cancellation_notice(deposit_outcome, tenant, deposit)
+
     await session.commit()
     await session.refresh(appt)
 
     # Enqueue patient notification if we have a phone and a message to send.
-    if appt.phone and body.custom_message:
+    # The honest deposit notice (when any) rides along with a custom message
+    # — never sent on its own (this endpoint's notification path has always
+    # been opt-in via custom_message, and stays that way).
+    message_body = body.custom_message
+    if message_body and notice:
+        message_body = f"{message_body}\n\n{notice}"
+    if appt.phone and message_body:
         arq_pool = getattr(request.app.state, "arq_pool", None)
         if arq_pool:
             await arq_pool.enqueue_job(
                 "send_patient_notification",
                 str(tenant.id),
                 appt.phone,
-                body.custom_message,
+                message_body,
             )
 
-    logger.info("calendar_appointment_cancelled", appointment_id=str(appt.id))
-    return _appointment_read(appt)
+    logger.info(
+        "calendar_appointment_cancelled",
+        appointment_id=str(appt.id),
+        deposit_outcome=deposit_outcome,
+    )
+    deposit_status = await _deposit_status_value(session, appt.id)
+    return _appointment_read(appt, deposit_status=deposit_status, deposit_outcome=deposit_outcome)
 
 
 # ---------------------------------------------------------------------------
@@ -267,8 +309,21 @@ async def reschedule_appointment(
     cal = await _get_calendar(session, tenant)
     await cal.update_event(appt.google_event_id, body.new_start, body.new_end)
 
+    # BUGFIX (PROMPT S3): this endpoint moved the Calendar event but never
+    # mirrored the new window onto the platform row — start_at/end_at stayed
+    # stale forever after a doctor-initiated reschedule. Mirrors the
+    # deterministic flow's own reschedule persist (workers/tasks.py
+    # ::_apply_flow_result).
+    appt.start_at = body.new_start
+    appt.end_at = body.new_end
     appt.status = AppointmentStatus.RESCHEDULED
     appt.updated_at = datetime.now(UTC)
+    # Deliberately NOT calling deposit_lifecycle.register_reschedule here:
+    # this is a DOCTOR-initiated move (the hub), not a patient-initiated one
+    # — it must never consume the patient's own pix_reschedule_limit
+    # allowance. The existing deposit (if any) simply carries over untouched,
+    # exactly like every other reschedule (see models/pix_deposit.py's
+    # module docstring on why a reschedule never re-points the deposit's FK).
     await session.commit()
     await session.refresh(appt)
 
@@ -283,7 +338,8 @@ async def reschedule_appointment(
             )
 
     logger.info("calendar_appointment_rescheduled", appointment_id=str(appt.id))
-    return _appointment_read(appt)
+    deposit_status = await _deposit_status_value(session, appt.id)
+    return _appointment_read(appt, deposit_status=deposit_status)
 
 
 # ---------------------------------------------------------------------------
@@ -301,11 +357,28 @@ async def update_appointment_status(
     appt = await _get_appointment(session, tenant, appointment_id)
     appt.status = body.status
     appt.updated_at = datetime.now(UTC)
+
+    # Money hooks (PROMPT S3 section 4): PATCH doesn't touch Google Calendar
+    # today (unchanged) — but a CANCELLED/NO_SHOW status transition is still
+    # a real money event for a Pix deposit, exactly like the dedicated
+    # POST /cancel endpoint or a no-show marked from any other surface.
+    deposit_outcome: str | None = None
+    if body.status == AppointmentStatus.CANCELLED:
+        deposit_outcome = await deposit_lifecycle.on_appointment_cancelled(
+            session, tenant=tenant, appointment=appt, waba_token=None
+        )
+    elif body.status == AppointmentStatus.NO_SHOW:
+        deposit_outcome = await deposit_lifecycle.on_no_show(
+            session, tenant=tenant, appointment=appt
+        )
+
     await session.commit()
     await session.refresh(appt)
     logger.info(
         "calendar_appointment_status_updated",
         appointment_id=str(appt.id),
         status=body.status.value,
+        deposit_outcome=deposit_outcome,
     )
-    return _appointment_read(appt)
+    deposit_status = await _deposit_status_value(session, appt.id)
+    return _appointment_read(appt, deposit_status=deposit_status, deposit_outcome=deposit_outcome)

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 class PluginSpec:
     """One optional capability, gated by ANY of a set of entitlement keys.
 
-    id: the addon id (e.g. "pix_whatsapp") or tier name (e.g. "bronze_1")
+    id: the addon id (e.g. "pix_deposit") or tier name (e.g. "bronze_1")
         this plugin represents; also its key in `registry.REGISTRY`.
     entitlement_keys: what `services.entitlements_client.is_entitled` checks —
         ANY-OF semantics (`registry.enabled_plugins` enables the plugin when

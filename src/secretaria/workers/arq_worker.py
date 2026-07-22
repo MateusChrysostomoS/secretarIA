@@ -17,6 +17,7 @@ from secretaria.workers.onboarding_cron import (
     run_onboarding_nudges,
     run_patient_usage_metering,
 )
+from secretaria.workers.payments_tasks import process_asaas_event
 from secretaria.workers.tasks import (
     check_handover_timeouts,
     process_webhook_event,
@@ -69,6 +70,10 @@ class WorkerSettings:
         # by POST /internal/notifications/email. See workers/tasks.py and
         # services/email.py.
         send_transactional_email,
+        # Pix deposit (sinal) webhook processing, enqueued by
+        # POST /webhooks/asaas. See workers/payments_tasks.py and
+        # services/payments/deposit_lifecycle.py.
+        process_asaas_event,
     ]
     # Sweep stale human-handover conversations back to the bot every 15 min;
     # sweep upcoming appointments for due lead-window reminders every 5 min

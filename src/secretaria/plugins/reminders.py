@@ -1,15 +1,19 @@
 """reminders plugin: proactive appointment-reminder cron sweep.
 
-Entitlement-gated addon: `bronze_1` tier OR the `reactivation_pack` addon
-(any-of — `bronze_2` satisfies the tier leg too, via TIERS cumulativity in
-`services.entitlements_client.is_entitled`). Registered as a `PluginSpec`
-purely so `registry.enabled_plugins`/`is_entitled` gate it consistently with
-every other addon; nothing calls its `agent_tools` or `on_inbound` (both
-default to empty/None) — this plugin's only surface is the cron job below.
-
-The job body lives HERE (not workers/tasks.py) per the addon-plugin split:
-`workers/arq_worker.py` just imports and registers `send_appointment_reminders`
-as a cron job (see WorkerSettings.cron_jobs), every 5 minutes.
+CORE capability (PROMPT S3) — every active secretarIA tenant gets reminders,
+regardless of tier or addons. The cron sweep gates on the tenant's
+subscription being active + secretaria-enabled (`_process_lead_window`'s
+`summary.active`/`summary.secretaria_enabled` check), not on the plugin
+registry's entitlement-key gate. `REMINDERS_SPEC.entitlement_keys` is
+therefore `()` (no key is ever entitled to an empty tuple — see
+`registry.enabled_plugins`'s `any(...)` over it) and this plugin registers no
+`agent_tools`/`on_inbound`, so being permanently absent from
+`enabled_plugins()` costs it nothing; it stays registered purely to keep the
+plugin catalogue self-documenting. The job body lives HERE (not
+workers/tasks.py) per the addon-plugin split established before this
+capability went core: `workers/arq_worker.py` just imports and registers
+`send_appointment_reminders` as a cron job (see WorkerSettings.cron_jobs),
+every 5 minutes.
 
 Two lead windows per appointment: 24h and 1h ahead. Idempotency ledger
 (`ProcessedEvent`, event_id = f"reminder:{kind}:{appointment_id}") guarantees
@@ -26,6 +30,13 @@ event is emitted to brain-api (services/usage_events.py), FAIL-OPEN: an
 emission failure is logged (`usage_emit_failed`) but never blocks or reverts
 anything — the WhatsApp send already happened, and the ledger row (claimed
 before the send) is what actually prevents a resend on the next tick.
+
+Deposit-aware variant: an appointment with a PAID Pix deposit
+(services/payments/deposit_lifecycle.py) gets a 3-button reminder
+(Confirmar/Reagendar/Cancelar) instead of the plain text/template above —
+see `_send_deposit_aware_reminder`. The buttons carry `"<action>|<id>"`
+ids/payloads, decoded on reply by workers/tasks.py's
+`extract_action_button`/`_handle_action_button` (schemas/webhook.py).
 """
 
 from datetime import UTC, datetime, timedelta
@@ -45,16 +56,14 @@ from secretaria.models import (
     Message,
     MessageDirection,
     Patient,
+    PixDepositStatus,
     ProcessedEvent,
     Tenant,
 )
 from secretaria.plugins.base import PluginSpec
 from secretaria.plugins.registry import register
-from secretaria.services.entitlements_client import (
-    EntitlementSummary,
-    get_entitlements,
-    is_entitled,
-)
+from secretaria.services.entitlements_client import EntitlementSummary, get_entitlements
+from secretaria.services.payments import deposit_lifecycle
 from secretaria.services.tenant_config import get_waba_token
 from secretaria.services.usage_events import emit_usage_event
 from secretaria.services.whatsapp import WhatsAppClient
@@ -145,7 +154,94 @@ async def _last_inbound_at(session, tenant_id: UUID, patient_id: UUID) -> dateti
     )
 
 
+async def _emit_reminder_usage(kind: str, appointment_id, tenant_id) -> None:
+    """Best-effort usage-event emission for one billable (template) reminder send.
+
+    Shared by the plain and deposit-aware template branches so both count
+    identically toward the tenant's meter. FAIL-OPEN: an emission failure is
+    logged but never raised — see the module docstring.
+    """
+    event_id = _reminder_key(kind, appointment_id)
+    try:
+        recorded = await emit_usage_event(
+            tenant_id=str(tenant_id), feature="reminders", amount=1, event_id=event_id
+        )
+        if not recorded:
+            logger.warning("usage_emit_failed", event_id=event_id, tenant_id=str(tenant_id))
+    except Exception as exc:  # fail-open: the send already happened
+        logger.warning(
+            "usage_emit_failed", error=str(exc), event_id=event_id, tenant_id=str(tenant_id)
+        )
+
+
+# Button ids/payloads for the deposit-aware reminder variant: the
+# "<action>|<appointment_id>" data-carrying family (precedent: "slot|"/"prof|"
+# in schemas/webhook.py::extract_inbound_body). Decoded on reply by
+# workers/tasks.py::extract_action_button.
+_DEPOSIT_REMINDER_BUTTONS: tuple[tuple[str, str], ...] = (
+    ("apptconfirm", "Confirmar"),
+    ("apptresched", "Reagendar"),
+    ("apptcancel", "Cancelar"),
+)
+
+
+async def _send_deposit_aware_reminder(
+    kind: str,
+    appointment: Appointment,
+    tenant: Tenant,
+    patient: Patient,
+    client: WhatsAppClient,
+    text: str,
+    inside_window: bool,
+) -> None:
+    """The 3-button (Confirmar/Reagendar/Cancelar) reminder variant for an
+    appointment with a PAID Pix deposit. Inside the 24h window this is a free
+    interactive-button send (no usage emit, same rule as the plain free-text
+    branch); outside it, the deposit template (with quick-reply buttons) is
+    billable — same usage-emit rule as the plain template branch, including
+    when a not-yet-approved template forces the plain-template fallback.
+    """
+    buttons = [
+        (f"{action}|{appointment.id}", label) for action, label in _DEPOSIT_REMINDER_BUTTONS
+    ]
+
+    if inside_window:
+        await client.send_buttons(patient.wa_id, text, buttons)
+        return
+
+    settings = get_settings()
+    lang = _meta_language_code(tenant.language)
+    try:
+        await client.send_template(
+            to=patient.wa_id,
+            template=settings.REMINDER_DEPOSIT_TEMPLATE_NAME,
+            lang=lang,
+            variables=[text],
+            button_payloads=[bid for bid, _ in buttons],
+        )
+    except Exception as exc:
+        # The 3-button template needs external Meta approval - until then (or
+        # on any other send failure) a deposit tenant must never silently
+        # lose reminders: fall back to the plain template exactly like a
+        # non-deposit appointment would get.
+        logger.warning(
+            "deposit_template_fallback",
+            error=str(exc),
+            tenant_id=str(tenant.id),
+            appointment_id=str(appointment.id),
+        )
+        await client.send_template(
+            to=patient.wa_id,
+            template=settings.REMINDER_TEMPLATE_NAME,
+            lang=lang,
+            variables=[text],
+        )
+
+    await _emit_reminder_usage(kind, appointment.id, tenant.id)
+
+
 async def _send_one_reminder(
+    session,
     kind: str,
     appointment: Appointment,
     tenant: Tenant,
@@ -155,12 +251,25 @@ async def _send_one_reminder(
 ) -> None:
     """Send one reminder (free text inside the 24h window, template outside it)
     and, when billable, best-effort emit the usage event. Never raises — the
-    caller wraps every item so one bad send never kills the sweep."""
+    caller wraps every item so one bad send never kills the sweep.
+
+    An appointment with a PAID Pix deposit gets the 3-button variant instead
+    (`_send_deposit_aware_reminder`) — every other deposit state (none,
+    AWAITING, or already resolved/refunded/retained) is EXACTLY today's plain
+    behavior, unchanged.
+    """
     client = WhatsAppClient.for_tenant(tenant, waba_token)
     text = _render_reminder_text(tenant, appointment)
     inside_window = last_inbound_at is not None and datetime.now(UTC) - _as_utc(
         last_inbound_at
     ) < timedelta(hours=24)
+
+    deposit = await deposit_lifecycle.get_deposit_for_appointment(session, appointment.id)
+    if deposit is not None and deposit.status == PixDepositStatus.PAID:
+        await _send_deposit_aware_reminder(
+            kind, appointment, tenant, patient, client, text, inside_window
+        )
+        return
 
     if inside_window:
         await client.send_text_message(to=patient.wa_id, body=text)
@@ -173,18 +282,7 @@ async def _send_one_reminder(
         lang=_meta_language_code(tenant.language),
         variables=[text],
     )
-
-    event_id = _reminder_key(kind, appointment.id)
-    try:
-        recorded = await emit_usage_event(
-            tenant_id=str(tenant.id), feature="reminders", amount=1, event_id=event_id
-        )
-        if not recorded:
-            logger.warning("usage_emit_failed", event_id=event_id, tenant_id=str(tenant.id))
-    except Exception as exc:  # fail-open: the send already happened
-        logger.warning(
-            "usage_emit_failed", error=str(exc), event_id=event_id, tenant_id=str(tenant.id)
-        )
+    await _emit_reminder_usage(kind, appointment.id, tenant.id)
 
 
 async def _process_lead_window(
@@ -221,10 +319,8 @@ async def _process_lead_window(
                 if tenant.id not in entitlement_cache:
                     entitlement_cache[tenant.id] = await get_entitlements(tenant.id, redis)
                 summary = entitlement_cache[tenant.id]
-                if summary is None or not any(
-                    is_entitled(summary, key) for key in REMINDERS_SPEC.entitlement_keys
-                ):
-                    continue  # disabled addon (or unresolvable) = silent no-op
+                if summary is None or not summary.active or not summary.secretaria_enabled:
+                    continue  # inactive/disabled/unresolvable subscription = silent no-op
 
                 if not await _claim_reminder(kind, appointment.id):
                     continue  # already sent (this tick or a prior one)
@@ -232,7 +328,7 @@ async def _process_lead_window(
                 last_inbound = await _last_inbound_at(session, tenant.id, patient.id)
                 waba_token = await get_waba_token(session, tenant.id)
                 await _send_one_reminder(
-                    kind, appointment, tenant, patient, waba_token, last_inbound
+                    session, kind, appointment, tenant, patient, waba_token, last_inbound
                 )
             except Exception as exc:
                 logger.warning(
@@ -257,5 +353,10 @@ async def send_appointment_reminders(ctx: dict) -> None:
         await _process_lead_window(kind, lead, entitlement_cache, redis)
 
 
-REMINDERS_SPEC = PluginSpec(id="reminders", entitlement_keys=("bronze_1", "reactivation_pack"))
+# entitlement_keys=() deliberately: reminders are now a CORE capability (see
+# module docstring) - the cron sweep gates on subscription activity itself
+# (_process_lead_window), not on registry-driven entitlement gating. This
+# spec registers no hooks/tools, so never appearing in enabled_plugins()
+# costs nothing; it stays registered to keep the plugin catalogue complete.
+REMINDERS_SPEC = PluginSpec(id="reminders", entitlement_keys=())
 register(REMINDERS_SPEC)

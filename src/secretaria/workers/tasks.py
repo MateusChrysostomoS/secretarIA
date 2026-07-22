@@ -55,6 +55,7 @@ from secretaria.models import (
     MessageDirection,
     MessageSender,
     Patient,
+    PixDepositStatus,
     ProcessedEvent,
     Professional,
     Tenant,
@@ -65,6 +66,7 @@ from secretaria.plugins.registry import agent_tools_for, run_on_inbound
 from secretaria.schemas.webhook import (
     WebhookPayload,
     WebhookValue,
+    extract_action_button,
     extract_echo_body,
     extract_inbound_body,
     history_item_is_final,
@@ -76,6 +78,8 @@ from secretaria.services.flow_router import (
     LABEL_CANCEL_APPT,
     LABEL_OTHER,
     LABEL_RESCHEDULE,
+    STEP_MANAGE_CANCEL_CONFIRM,
+    STEP_MANAGE_DAY,
     FlowRouterResult,
     MenuBubble,
     _enter_professional_services,
@@ -99,6 +103,8 @@ from secretaria.services.patient_context import (
     load_upcoming_appointments,
     resolve_patient_opening_state,
 )
+from secretaria.services.payments import deposit_lifecycle
+from secretaria.services.payments.money import format_brl
 from secretaria.services.tenant_config import (
     RuntimeAppointmentType,
     active_appointment_types,
@@ -304,6 +310,12 @@ class _ReplyContext:
     # Set when this inbound is a returning patient's answer to the "quer
     # continuar?" prompt: drives resume-vs-reset in `_send_bot_reply`.
     reactivation: "_ReactivationDirective | None" = None
+    # Set when this inbound is a tap on a reminder's deposit-aware action
+    # button (schemas/webhook.py::extract_action_button): (action,
+    # appointment_id). Captured in `_persist_inbound_message` BEFORE the
+    # handover/flow/LLM gates (see that function) and handled by
+    # `_handle_action_button`, called first thing in `_send_bot_reply`.
+    action_button: tuple[str, str] | None = None
 
 
 async def process_webhook_event(ctx: dict, payload: dict) -> None:
@@ -381,6 +393,7 @@ async def _handle_patient_messages(value: WebhookValue, redis=None) -> None:
         contact = contacts.get(msg.from_)
         patient_name = contact.profile.name if contact and contact.profile else None
         body = extract_inbound_body(msg)
+        action_button = extract_action_button(msg)
 
         if is_menu_command(body):
             await _handle_menu_command(
@@ -397,6 +410,7 @@ async def _handle_patient_messages(value: WebhookValue, redis=None) -> None:
             patient_name=patient_name,
             wam_id=msg.id,
             body=body,
+            action_button=action_button,
         )
         if reply is not None:
             await _send_bot_reply(reply, redis=redis)
@@ -409,11 +423,20 @@ async def _persist_inbound_message(
     patient_name: str | None,
     wam_id: str,
     body: str | None,
+    action_button: tuple[str, str] | None = None,
 ) -> _ReplyContext | None:
     """Record an inbound message in its own transaction.
 
     Returns a `_ReplyContext` when the bot should reply, or None when the
     message is a duplicate, the tenant is unknown, or a human is active.
+
+    `action_button` (decoded by schemas/webhook.py::extract_action_button) is
+    captured and returned as-is on the `_ReplyContext`, BEFORE the
+    human-handover check below: a tap on a reminder's Confirmar/Reagendar/
+    Cancelar button is a structured, unambiguous command tied to one
+    appointment id, not a free-form conversational turn, so it is handled
+    (by `_handle_action_button`, dispatched from `_send_bot_reply`) even
+    while a human has taken the conversation over.
     """
     async with async_session_factory() as session:
         try:
@@ -506,6 +529,18 @@ async def _persist_inbound_message(
                         body=body,
                     )
                 )
+
+                # Reminder action-button tap: short-circuit BEFORE the
+                # handover/flow/LLM gates below (see this function's
+                # docstring) - `_handle_action_button` does its own
+                # tenant-scoped appointment lookup and reply.
+                if action_button is not None:
+                    return _ReplyContext(
+                        conversation_id=conversation.id,
+                        patient_wa_id=wa_id,
+                        inbound_body=body or "",
+                        action_button=action_button,
+                    )
 
                 handover = HandoverManager(session)
                 if not handover.is_bot_active(conversation):
@@ -1131,6 +1166,15 @@ async def _handle_menu_command(
 
 async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     """Generate a reply, split it into bubbles, send each, and record them."""
+    # Reminder action-button tap: a fully self-contained turn (its own
+    # tenant/appointment lookup, its own reply) - never falls through to the
+    # entitlement gate, deterministic flow, or LLM below. See
+    # `_persist_inbound_message`'s docstring for why this runs first.
+    if reply.action_button is not None:
+        action, appointment_id = reply.action_button
+        await _handle_action_button(reply, action, appointment_id, redis=redis)
+        return
+
     # Tenant bot not activated: one polite fallback, nothing else.
     if reply.service_unavailable:
         await _send_simple_text(reply.patient_wa_id, SERVICE_UNAVAILABLE_MESSAGE)
@@ -1696,6 +1740,404 @@ def _manage_owner_calendar_target(
     )
 
 
+# --------------------------------------------------------------------------
+# Pix deposit money hooks (PROMPT S3) — reminder action buttons + the
+# deterministic flow's own manage (cancel/reschedule) sub-flow.
+# --------------------------------------------------------------------------
+
+_APPOINTMENT_NOT_FOUND_TEXT = "Não encontrei essa consulta."
+
+
+def _pix_retention_warning_line(tenant: Tenant, deposit) -> str:
+    """The pt-BR retention-policy line for a cancellation landing inside the
+    refund window. Shared VERBATIM by the deterministic flow's cancel-confirm
+    question (`_apply_deposit_awareness`) and the reminder-button `apptcancel`
+    warn (`_handle_action_button`) - same wording, different surrounding
+    call-to-action text.
+    """
+    if tenant.pix_retention_policy == "partial":
+        partial_amount = round(deposit.amount_cents * tenant.pix_partial_refund_percent / 100)
+        return (
+            f"Cancelamentos com menos de {tenant.pix_refund_window_hours}h têm reembolso "
+            f"parcial de {tenant.pix_partial_refund_percent}% ({format_brl(partial_amount)})."
+        )
+    return (
+        f"Cancelamentos com menos de {tenant.pix_refund_window_hours}h de antecedência não "
+        "são reembolsáveis."
+    )
+
+
+def _hours_until_start(appointment: Appointment, now: datetime) -> float | None:
+    """Hours between `now` and `appointment.start_at`, or None when unknown.
+
+    Mirrors services/payments/deposit_lifecycle.py::on_appointment_cancelled's
+    own window computation exactly (None reads as "outside the window" on
+    both sides, same as that function) - duplicated locally rather than
+    imported, matching this codebase's existing convention of small
+    per-module `_as_utc`-adjacent helpers (see plugins/reminders.py).
+    """
+    if appointment.start_at is None:
+        return None
+    return (_as_utc(appointment.start_at) - now).total_seconds() / 3600
+
+
+async def _calendar_for_appointment(
+    session: AsyncSession,
+    tenant: Tenant,
+    tenant_config,
+    appointment: Appointment,
+) -> CalendarService | None:
+    """The calendar that owns `appointment`: the booking professional's own
+    resolved calendar, or the tenant-level one. Mirrors
+    `_manage_owner_calendar_target` + `resolve_professional_calendar`'s
+    resolution, but reads straight off the appointment ROW (no
+    upcoming-appointments dict lookup needed — the caller already holds it).
+
+    A booked-with professional that no longer resolves (deleted/deactivated)
+    returns None rather than silently falling back to the TENANT calendar —
+    mirroring `_manage_owner_calendar_target`'s own "don't guess, degrade"
+    rule. Guessing wrong here is worse than skipping: `cancel_event` treats a
+    404 as "already gone" (success), so calling it against the WRONG
+    calendar could silently no-op while the event still lives on the
+    professional's own agenda.
+    """
+    if appointment.professional_id is not None:
+        professional = await session.get(Professional, appointment.professional_id)
+        if professional is None:
+            return None
+        try:
+            return await resolve_professional_calendar(
+                session, tenant, professional, tenant_config=tenant_config
+            )
+        except Exception as exc:
+            logger.warning(
+                "action_button_professional_calendar_failed",
+                error=str(exc),
+                professional_id=str(appointment.professional_id),
+            )
+            return None
+    return CalendarService.from_tenant_config(tenant_config) if tenant_config else None
+
+
+async def _execute_appointment_cancel(
+    session: AsyncSession,
+    tenant: Tenant,
+    tenant_config,
+    appointment: Appointment,
+    waba_token: str | None,
+) -> str:
+    """Cancel `appointment` (Calendar delete + status + deposit outcome).
+
+    Mirrors flow_router._manage_cancel's happy path, for the button-driven
+    carrier (no flow_state involved). Returns the patient-facing reply text,
+    including the deposit `cancellation_notice` when there is one. The
+    Calendar delete is best-effort: the platform row is the source of truth
+    for a patient's cancel request even when Calendar is unreachable (same
+    philosophy as deposit_lifecycle's own best-effort Calendar deletes).
+    """
+    if appointment.google_event_id:
+        calendar = await _calendar_for_appointment(session, tenant, tenant_config, appointment)
+        if calendar is not None:
+            try:
+                await calendar.cancel_event(appointment.google_event_id)
+            except Exception as exc:
+                logger.warning(
+                    "action_button_calendar_cancel_failed",
+                    error=str(exc),
+                    appointment_id=str(appointment.id),
+                )
+
+    appointment.status = AppointmentStatus.CANCELLED
+    text = "Consulta cancelada."
+    try:
+        outcome = await deposit_lifecycle.on_appointment_cancelled(
+            session, tenant=tenant, appointment=appointment, waba_token=waba_token
+        )
+        if outcome is not None:
+            deposit = await deposit_lifecycle.get_deposit_for_appointment(session, appointment.id)
+            if deposit is not None:
+                notice = deposit_lifecycle.cancellation_notice(outcome, tenant, deposit)
+                if notice:
+                    text = f"{text} {notice}"
+    except Exception as exc:
+        logger.warning(
+            "action_button_deposit_cancel_hook_failed",
+            error=str(exc),
+            appointment_id=str(appointment.id),
+        )
+    return text
+
+
+async def _send_reschedule_limit_buttons(
+    client: WhatsAppClient, to: str | None, appointment_id, count: int, limit: int
+) -> None:
+    """The keep-or-cancel message sent once an appointment's deposit has hit
+    `pix_reschedule_limit`. Shared by the reminder-button `apptresched`
+    handler and the deterministic flow's own reschedule-entry pre-check
+    (`_apply_deposit_awareness`) so both surfaces say exactly the same thing
+    and use the same apptconfirm|/apptcancel| button ids.
+    """
+    body = (
+        f"Você já remarcou essa consulta {count}x — o limite com sinal é {limit}. "
+        "Prefere manter o horário ou cancelar?"
+    )
+    await client.send_buttons(
+        to,
+        body,
+        [
+            (f"apptconfirm|{appointment_id}", "Manter horário"),
+            (f"apptcancel|{appointment_id}", "Cancelar"),
+        ],
+    )
+
+
+async def _apply_deposit_awareness(
+    result: FlowRouterResult,
+    tenant: Tenant | None,
+    patient_wa: str | None,
+    waba_token: str | None,
+) -> FlowRouterResult:
+    """Fold Pix-deposit awareness into a manage-flow `FlowRouterResult`
+    BEFORE it is persisted/dispatched by `_apply_flow_result` (money hooks,
+    PROMPT S3 section 4). Two moments, both reached from every entry path
+    (direct menu tap, LLM sentinel hand-back, or a reminder-button
+    preselection) since they all funnel through `_apply_flow_result`:
+
+      - STEP_MANAGE_CANCEL_CONFIRM: prepend the retention-policy warning
+        (`_pix_retention_warning_line`, same wording as the reminder-button
+        `apptcancel` warn) to the Sim/Não question when the target has a PAID
+        deposit inside the refund window. The Sim/Não buttons themselves are
+        untouched — tapping "Sim" still runs `_manage_cancel`, which this
+        module's cancel-site hook (below, in `_apply_flow_result`) makes
+        deposit-aware too.
+      - a freshly-targeted STEP_MANAGE_DAY (a reschedule was just begun):
+        when the target is AT/OVER `pix_reschedule_limit`, replace the
+        day-ask with the SAME keep-or-cancel button message
+        (`_send_reschedule_limit_buttons`) the reminder's own blocked-
+        reschedule reply uses — sent directly here (no Bubble type carries
+        custom button ids) — and the flow is reset to MENU so those buttons
+        (routed by id, independent of flow_state — see
+        schemas/webhook.py::extract_action_button) are the only way forward.
+        Non-incrementing: this is a PRE-check, exactly like the button
+        carrier's own (`_handle_action_button`) — `register_reschedule` only
+        ever runs at actual completion (this module's reschedule-site hook).
+
+    Implemented HERE, not threaded into flow_router.py's pure functions:
+    that module's own docstring commits it to doing no DB I/O of its own —
+    this keeps that invariant at the cost of one extra short-lived
+    session/query for these two specific turns. Every other turn (including
+    STEP_MANAGE_DAY retries for an UNBLOCKED target — cheap, idempotent,
+    re-checked each time rather than tracked) returns `result` unchanged.
+    """
+    if (
+        result.action != "reply"
+        or tenant is None
+        or result.flow_managing_appointment_id is None
+        or result.flow_step not in (STEP_MANAGE_CANCEL_CONFIRM, STEP_MANAGE_DAY)
+    ):
+        return result
+
+    appointment_id = result.flow_managing_appointment_id
+    warning: str | None = None
+    limit_count: int | None = None
+    limit_value: int | None = None
+
+    async with async_session_factory() as session:
+        deposit = await deposit_lifecycle.get_deposit_for_appointment(session, appointment_id)
+
+        if result.flow_step == STEP_MANAGE_CANCEL_CONFIRM:
+            if deposit is None or deposit.status != PixDepositStatus.PAID:
+                return result
+            appointment = await session.get(Appointment, appointment_id)
+            if appointment is None:
+                return result
+            hours_until = _hours_until_start(appointment, datetime.now(UTC))
+            if hours_until is None or hours_until > tenant.pix_refund_window_hours:
+                return result
+            warning = _pix_retention_warning_line(tenant, deposit)
+        else:  # STEP_MANAGE_DAY
+            if deposit is None or deposit.reschedule_count < tenant.pix_reschedule_limit:
+                return result
+            limit_count = deposit.reschedule_count
+            limit_value = tenant.pix_reschedule_limit
+
+    if warning is not None:
+        if result.bubbles:
+            result.bubbles[0].body = f"{warning}\n\n{result.bubbles[0].body}"
+        return result
+
+    client = (
+        WhatsAppClient.for_tenant(tenant, waba_token) if tenant is not None else WhatsAppClient()
+    )
+    await _send_reschedule_limit_buttons(
+        client, patient_wa, appointment_id, limit_count, limit_value
+    )
+    result.bubbles = []
+    result.flow_state = FlowState.MENU
+    result.flow_step = None
+    result.flow_managing_appointment_id = None
+    return result
+
+
+async def _handle_action_button(
+    reply: _ReplyContext, action: str, appointment_id: str, redis=None
+) -> None:
+    """Handle a tap on a reminder's deposit-aware action button.
+
+    Runs before handover/flow/LLM routing (see `_persist_inbound_message`):
+    these are structured, unambiguous commands tied to one appointment id,
+    not a free-form conversational turn, so they fire even while a human has
+    taken the conversation over — and they leave `Conversation.flow_state`
+    untouched, except `apptresched`'s reschedule-entry branch, which sets its
+    own (mirroring a direct "Remarcar" tap).
+
+    Every lookup is scoped by the CALLER'S tenant_id (resolved from
+    `reply.conversation_id`, never from the payload); an appointment id that
+    resolves to nothing — or to another tenant's row — gets the same polite
+    miss as a stale/expired one. The payload's appointment id is NEVER
+    trusted on its own (see schemas/webhook.py::extract_action_button).
+    """
+    if reply.conversation_id is None:
+        return
+    try:
+        appt_uuid = UUID(appointment_id)
+    except ValueError:
+        return  # already validated by extract_action_button; defensive only
+
+    # Set only on the "enter the reschedule sub-flow" path (apptresched,
+    # under the limit) - handled AFTER this session closes, mirroring
+    # _handle_manage_appointment's own short-read-session-then-handoff shape.
+    reschedule_handoff: tuple[Tenant, list[dict], list, str | None] | None = None
+
+    async with async_session_factory() as session:
+        conversation = await session.get(Conversation, reply.conversation_id)
+        tenant = await session.get(Tenant, conversation.tenant_id) if conversation else None
+        if tenant is None:
+            return
+        waba_token = await get_waba_token(session, tenant.id)
+        client = WhatsAppClient.for_tenant(tenant, waba_token)
+
+        appointment = await session.scalar(
+            select(Appointment).where(
+                Appointment.id == appt_uuid, Appointment.tenant_id == tenant.id
+            )
+        )
+        if appointment is None:
+            await client.send_text_message(to=reply.patient_wa_id, body=_APPOINTMENT_NOT_FOUND_TEXT)
+            return
+
+        if action == "apptconfirm":
+            now = datetime.now(UTC)
+            is_future = appointment.start_at is not None and _as_utc(appointment.start_at) > now
+            if (
+                appointment.status in (AppointmentStatus.SCHEDULED, AppointmentStatus.CONFIRMED)
+                and is_future
+            ):
+                appointment.status = AppointmentStatus.CONFIRMED
+                when = _format_appointment_when(appointment.start_at, tenant.timezone)
+                text = f"Presença confirmada! Até {when}."
+            else:
+                text = "Essa consulta não está mais ativa."
+            await session.commit()
+            await client.send_text_message(to=reply.patient_wa_id, body=text)
+            return
+
+        if action == "apptcancel":
+            tenant_config = await load_tenant_config(session, tenant)
+            deposit = await deposit_lifecycle.get_deposit_for_appointment(session, appointment.id)
+            hours_until = _hours_until_start(appointment, datetime.now(UTC))
+            inside_window = (
+                deposit is not None
+                and deposit.status == PixDepositStatus.PAID
+                and hours_until is not None
+                and hours_until <= tenant.pix_refund_window_hours
+            )
+            if inside_window:
+                warning = _pix_retention_warning_line(tenant, deposit)
+                body = f"{warning} Cancelar mesmo assim ou prefere reagendar?"
+                await client.send_buttons(
+                    reply.patient_wa_id,
+                    body,
+                    [
+                        (f"apptcancelyes|{appointment.id}", "Cancelar mesmo assim"),
+                        (f"apptresched|{appointment.id}", "Reagendar"),
+                    ],
+                )
+                return
+            text = await _execute_appointment_cancel(
+                session, tenant, tenant_config, appointment, waba_token
+            )
+            await session.commit()
+            await client.send_text_message(to=reply.patient_wa_id, body=text)
+            return
+
+        if action == "apptcancelyes":
+            tenant_config = await load_tenant_config(session, tenant)
+            text = await _execute_appointment_cancel(
+                session, tenant, tenant_config, appointment, waba_token
+            )
+            await session.commit()
+            await client.send_text_message(to=reply.patient_wa_id, body=text)
+            return
+
+        if action == "apptresched":
+            deposit = await deposit_lifecycle.get_deposit_for_appointment(session, appointment.id)
+            if deposit is not None and deposit.reschedule_count >= tenant.pix_reschedule_limit:
+                await _send_reschedule_limit_buttons(
+                    client,
+                    reply.patient_wa_id,
+                    appointment.id,
+                    deposit.reschedule_count,
+                    tenant.pix_reschedule_limit,
+                )
+                return
+            if not flows_enabled(tenant):
+                # Patient self-service reschedule (deterministic OR
+                # LLM-mediated - see ai/tools.py's ManageAppointmentRequested)
+                # is a flow-only capability throughout this codebase; there is
+                # no non-flow equivalent to hand off to.
+                await client.send_text_message(
+                    to=reply.patient_wa_id,
+                    body="Para remarcar essa consulta, entre em contato com a nossa equipe.",
+                )
+                return
+            if appointment.patient_id is None:
+                await client.send_text_message(
+                    to=reply.patient_wa_id, body=_APPOINTMENT_NOT_FOUND_TEXT
+                )
+                return
+            appointments = await load_upcoming_appointments(
+                session, tenant.id, appointment.patient_id
+            )
+            professional_rows = await list_active_professionals(session, tenant.id)
+            professionals = [
+                SimpleNamespace(
+                    id=p.id,
+                    name=p.name,
+                    specialty=p.specialty,
+                    about=p.about,
+                    context_doctor_message=p.context_doctor_message,
+                    appointment_types=p.appointment_types,
+                )
+                for p in professional_rows
+            ]
+            reschedule_handoff = (tenant, appointments, professionals, waba_token)
+
+    if reschedule_handoff is not None:
+        handoff_tenant, appointments, professionals, handoff_waba_token = reschedule_handoff
+        result = enter_manage_action(
+            "reschedule", handoff_tenant, appointments, professionals, preselected_id=appt_uuid
+        )
+        await _apply_flow_result(
+            reply,
+            result,
+            reply.patient_wa_id,
+            redis=redis,
+            tenant=handoff_tenant,
+            waba_token=handoff_waba_token,
+        )
+
+
 async def _run_flow(
     reply: _ReplyContext,
     conv_snapshot: SimpleNamespace,
@@ -1766,13 +2208,22 @@ async def _apply_flow_result(
 ) -> bool:
     """Persist a FlowRouterResult (+ any appointment) and dispatch its bubbles.
 
-    Shared by the live flow router (`_run_flow`) and the returning-patient
-    resume/reset path. Returns True when the turn was fully handled (bubbles
-    sent, or handed off on a calendar outage); False for `delegate_llm`.
+    Shared by the live flow router (`_run_flow`), the returning-patient
+    resume/reset path, and every LLM-hand-back re-entry
+    (`_handle_show_main_menu`/`_handle_select_professional`/
+    `_handle_manage_appointment`) — i.e. the ONE seam every manage-flow
+    result passes through, which is why the Pix-deposit hooks below
+    (`_apply_deposit_awareness` up front, the cancel/reschedule money hooks
+    inside the persist txn) live HERE rather than in each individual caller.
+    Returns True when the turn was fully handled (bubbles sent, or handed off
+    on a calendar outage); False for `delegate_llm`.
     """
+    result = await _apply_deposit_awareness(result, tenant, patient_wa, waba_token)
+
     # Persist the new flow state (+ any booked appointment) in one short txn.
     persisted = True
     booked_appointment: Appointment | None = None
+    cancellation_note: str | None = None
     try:
         async with async_session_factory() as session:
             async with session.begin():
@@ -1809,6 +2260,34 @@ async def _apply_flow_result(
                             )
                             .values(status=AppointmentStatus.CANCELLED)
                         )
+                        # Money hook: resolve the deposit's outcome for this
+                        # cancellation and carry the honest notice through to
+                        # the reply dispatched below (PROMPT S3 section 4).
+                        if tenant is not None:
+                            cancelled_appt = await session.scalar(
+                                select(Appointment).where(
+                                    Appointment.google_event_id
+                                    == result.appointment_cancel_id,
+                                    Appointment.tenant_id == conv.tenant_id,
+                                )
+                            )
+                            if cancelled_appt is not None:
+                                outcome = await deposit_lifecycle.on_appointment_cancelled(
+                                    session,
+                                    tenant=tenant,
+                                    appointment=cancelled_appt,
+                                    waba_token=waba_token,
+                                )
+                                if outcome is not None:
+                                    cancelled_deposit = (
+                                        await deposit_lifecycle.get_deposit_for_appointment(
+                                            session, cancelled_appt.id
+                                        )
+                                    )
+                                    if cancelled_deposit is not None:
+                                        cancellation_note = deposit_lifecycle.cancellation_notice(
+                                            outcome, tenant, cancelled_deposit
+                                        )
                     if result.appointment_reschedule:
                         resched = result.appointment_reschedule
                         await session.execute(
@@ -1823,6 +2302,29 @@ async def _apply_flow_result(
                                 status=AppointmentStatus.RESCHEDULED,
                             )
                         )
+                        # Money hook: count this reschedule against the
+                        # deposit's limit. Non-crashing on a race (entry was
+                        # already pre-checked by _apply_deposit_awareness /
+                        # the button carrier's own check) — never unwind an
+                        # already-persisted reschedule over a counter race.
+                        if tenant is not None:
+                            resched_appt = await session.scalar(
+                                select(Appointment).where(
+                                    Appointment.google_event_id
+                                    == resched["google_event_id"],
+                                    Appointment.tenant_id == conv.tenant_id,
+                                )
+                            )
+                            if resched_appt is not None:
+                                allowed, _count = await deposit_lifecycle.register_reschedule(
+                                    session, tenant=tenant, appointment=resched_appt
+                                )
+                                if not allowed:
+                                    logger.warning(
+                                        "pix_reschedule_limit_race",
+                                        tenant_id=str(tenant.id),
+                                        appointment_id=str(resched_appt.id),
+                                    )
     except Exception as exc:
         persisted = False
         logger.error(
@@ -1852,6 +2354,8 @@ async def _apply_flow_result(
         return True
     if result.action == "reply":
         if result.bubbles:
+            if cancellation_note:
+                result.bubbles[-1].body = f"{result.bubbles[-1].body}\n\n{cancellation_note}"
             await _dispatch_bubbles(reply, result.bubbles, tenant=tenant, waba_token=waba_token)
         return True
     return False  # delegate_llm

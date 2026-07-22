@@ -323,7 +323,7 @@ def test_select_professional_tool_is_addon_gated():
         "multi_professional": False,
         "multi_unit": False,
         "ehr": False,
-        "pix_whatsapp": False,
+        "pix_deposit": False,
         "analytics_bi": False,
         "human_backup_24_7": False,
     }

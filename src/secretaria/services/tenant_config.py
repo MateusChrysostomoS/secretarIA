@@ -231,6 +231,69 @@ async def clear_waba_token(session: AsyncSession, tenant_id: UUID) -> None:
 
 
 # --------------------------------------------------------------------------
+# Encrypted credential helpers (tenant_credentials — Asaas / Pix deposit)
+# --------------------------------------------------------------------------
+#
+# Exact mirror of the WABA pair above, one row shared with it
+# (tenant_credentials, keyed by tenant_id — see _get_credentials).
+
+
+async def has_asaas_api_key(session: AsyncSession, tenant_id: UUID) -> bool:
+    """True when a (non-null) Asaas API key is stored for this tenant — an
+    EXISTENCE check, no decryption (mirrors has_waba_token)."""
+    cred = await _get_credentials(session, tenant_id)
+    return bool(cred and cred.asaas_api_key_encrypted)
+
+
+async def get_asaas_api_key(session: AsyncSession, tenant_id: UUID) -> str | None:
+    """Return the decrypted Asaas API key, or None when not provisioned.
+
+    THE single decrypt point for the Asaas API key (tenant-secrets-encryption).
+    Callers hand the value straight to AsaasClient, never to a response or a log.
+    """
+    cred = await _get_credentials(session, tenant_id)
+    if not cred or not cred.asaas_api_key_encrypted:
+        return None
+    return decrypt(cred.asaas_api_key_encrypted)
+
+
+async def set_asaas_api_key(session: AsyncSession, tenant_id: UUID, api_key: str) -> None:
+    """Encrypt and upsert the Asaas API key. Caller commits."""
+    encrypted = encrypt(api_key)
+    cred = await _get_credentials(session, tenant_id)
+    if cred is None:
+        session.add(TenantCredentials(tenant_id=tenant_id, asaas_api_key_encrypted=encrypted))
+    else:
+        cred.asaas_api_key_encrypted = encrypted
+
+
+async def get_asaas_webhook_token(session: AsyncSession, tenant_id: UUID) -> str | None:
+    """Return the decrypted Asaas webhook shared token, or None when not provisioned.
+
+    THE single decrypt point for the Asaas webhook token — compared
+    (constant-time) against the inbound `asaas-access-token` header by
+    services/payments/deposit_lifecycle.py::apply_asaas_event. Never logged
+    or returned by an API response.
+    """
+    cred = await _get_credentials(session, tenant_id)
+    if not cred or not cred.asaas_webhook_token_encrypted:
+        return None
+    return decrypt(cred.asaas_webhook_token_encrypted)
+
+
+async def set_asaas_webhook_token(session: AsyncSession, tenant_id: UUID, token: str) -> None:
+    """Encrypt and upsert the Asaas webhook shared token. Caller commits."""
+    encrypted = encrypt(token)
+    cred = await _get_credentials(session, tenant_id)
+    if cred is None:
+        session.add(
+            TenantCredentials(tenant_id=tenant_id, asaas_webhook_token_encrypted=encrypted)
+        )
+    else:
+        cred.asaas_webhook_token_encrypted = encrypted
+
+
+# --------------------------------------------------------------------------
 # Encrypted credential helpers (professional_credentials)
 # --------------------------------------------------------------------------
 #

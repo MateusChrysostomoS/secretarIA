@@ -27,6 +27,8 @@ from secretaria.core.logging import get_logger
 from secretaria.models import Tenant
 from secretaria.schemas.internal_provisioning import (
     ActivateOut,
+    AsaasConnectionIn,
+    AsaasConnectionOut,
     ConfigStatusOut,
     NotificationEmailIn,
     NotificationEmailOut,
@@ -116,6 +118,31 @@ async def whatsapp_connection(
         raise HTTPException(status.HTTP_409_CONFLICT, "phone_number_conflict")
     await session.commit()
     return WhatsappConnectionOut(connected=True)
+
+
+@router.post(
+    "/tenants/{tenant_id}/asaas-connection",
+    response_model=AsaasConnectionOut,
+    summary="Store a tenant's Asaas API key + webhook token (internal)",
+    description=(
+        "Encrypts and upserts both secrets (tenant_credentials.asaas_api_key_encrypted / "
+        "asaas_webhook_token_encrypted). Values are never echoed back or logged. "
+        "404 unknown tenant. Same internal auth as whatsapp-connection."
+    ),
+    responses=_NOT_FOUND_RESPONSES,
+)
+async def asaas_connection(
+    tenant_id: _TENANT_PATH,
+    body: AsaasConnectionIn,
+    session: AsyncSession = Depends(get_session),
+) -> AsaasConnectionOut:
+    connected = await provisioning.connect_asaas(
+        session, tenant_id=tenant_id, api_key=body.api_key, webhook_token=body.webhook_token
+    )
+    if not connected:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown tenant")
+    await session.commit()
+    return AsaasConnectionOut(status="ok", asaas_connected=True)
 
 
 @router.get(

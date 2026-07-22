@@ -12,7 +12,14 @@ from arq.connections import RedisSettings
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from secretaria.api import health, internal, internal_privacy, internal_provisioning, webhook
+from secretaria.api import (
+    health,
+    internal,
+    internal_privacy,
+    internal_provisioning,
+    webhook,
+    webhook_asaas,
+)
 from secretaria.api.admin import panel, tenants
 from secretaria.api.hub import (
     analytics,
@@ -75,6 +82,9 @@ def create_app() -> FastAPI:
     )
     app.include_router(health.router, tags=["health"])
     app.include_router(webhook.router, tags=["webhook"])
+    # Asaas Pix-deposit payment webhook (fast-ACK; auth+processing happen in
+    # the arq worker — see api/webhook_asaas.py's module docstring).
+    app.include_router(webhook_asaas.router, tags=["webhook"])
     # Internal-only service-to-service surface (brain-api -> appointments/patients),
     # guarded by X-Internal-Api-Key at the router level (self-tags "internal").
     app.include_router(internal.router)

@@ -60,7 +60,7 @@ ADDON_IDS: frozenset[str] = frozenset(
         "multi_professional",
         "multi_unit",
         "ehr",
-        "pix_whatsapp",
+        "pix_deposit",
         "analytics_bi",
         "analytics_bi_advanced",
         "human_backup_24_7",

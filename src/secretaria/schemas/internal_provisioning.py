@@ -39,6 +39,18 @@ class WhatsappConnectionOut(BaseModel):
     connected: bool
 
 
+class AsaasConnectionIn(BaseModel):
+    """POST /internal/tenants/{tenant_id}/asaas-connection body."""
+
+    api_key: str = Field(min_length=10)
+    webhook_token: str = Field(min_length=10)
+
+
+class AsaasConnectionOut(BaseModel):
+    status: str
+    asaas_connected: bool
+
+
 class ProfessionalStatusOut(BaseModel):
     """One professional entry in `GET .../config-status`'s `professionals` list."""
 

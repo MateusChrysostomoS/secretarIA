@@ -51,7 +51,7 @@ _ALL_ADDONS_OFF = {
     "multi_professional": False,
     "multi_unit": False,
     "ehr": False,
-    "pix_whatsapp": False,
+    "pix_deposit": False,
     "analytics_bi": False,
     "human_backup_24_7": False,
 }
@@ -347,7 +347,7 @@ async def test_run_agent_receives_plugin_tools_for_entitled_addons(
     sentinel_tools = ["sentinel-tool"]
 
     async def _fake_get_entitlements(tenant_id, redis):
-        return _summary(addons={**_ALL_ADDONS_OFF, "pix_whatsapp": True})
+        return _summary(addons={**_ALL_ADDONS_OFF, "pix_deposit": True})
 
     run_agent_calls: list[dict] = []
 

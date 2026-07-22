@@ -46,7 +46,7 @@ _ALL_ADDONS_OFF = {
     "multi_professional": False,
     "multi_unit": False,
     "ehr": False,
-    "pix_whatsapp": False,
+    "pix_deposit": False,
     "analytics_bi": False,
     "human_backup_24_7": False,
 }

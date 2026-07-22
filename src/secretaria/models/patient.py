@@ -32,4 +32,10 @@ class Patient(Base):
     reminder_opt_out: Mapped[bool] = mapped_column(
         Boolean, server_default=text("false"), default=False
     )
+    # The CLINIC's own Asaas customer id for this patient (Asaas accounts are
+    # per-tenant — see tenant_credentials.asaas_api_key_encrypted). Reused
+    # across deposits so a repeat patient doesn't get a duplicate Asaas
+    # customer on every booking. NOT a secret (a foreign-system foreign key,
+    # not a credential), so no `_encrypted` suffix.
+    asaas_customer_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -2,10 +2,12 @@
 
 Kept in a SEPARATE table from `tenants` (config) so secrets never ride along in
 config reads/responses and are easy to audit. Holds the Google Calendar refresh
-token (introduced by the OAuth callback) and the WhatsApp/WABA access token
-(provisioned via `services/tenant_config.set_waba_token`), both Fernet ciphertext
-(core.crypto). The `_encrypted` suffix is load-bearing: the structlog redactor and
-the *Out-schema whitelist convention key off it.
+token (introduced by the OAuth callback), the WhatsApp/WABA access token
+(provisioned via `services/tenant_config.set_waba_token`), and the tenant's own
+Asaas API key + webhook shared token (Pix deposit lifecycle - provisioned via
+`services/tenant_config.set_asaas_api_key` / `set_asaas_webhook_token`), all
+Fernet ciphertext (core.crypto). The `_encrypted` suffix is load-bearing: the
+structlog redactor and the *Out-schema whitelist convention key off it.
 """
 
 import uuid
@@ -33,6 +35,17 @@ class TenantCredentials(Base):
     # falls back to the single-tenant META_ACCESS_TOKEN env scaffold. NEVER logged,
     # NEVER returned by an API response.
     waba_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Fernet ciphertext of the tenant's OWN Asaas API key (per-clinic PSP
+    # account — the CLINIC receives the Pix deposit and pays Asaas' own fee,
+    # never the platform). NULL = Pix deposits are not provisioned for this
+    # tenant. NEVER logged, NEVER returned by an API response.
+    asaas_api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Fernet ciphertext of the shared secret Asaas echoes back on every
+    # webhook call (the `asaas-access-token` header), compared
+    # (constant-time) by services/payments/deposit_lifecycle.py::apply_asaas_event.
+    # NULL = webhook calls for this tenant are rejected (auth_failed) until
+    # provisioned. NEVER logged, NEVER returned by an API response.
+    asaas_webhook_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

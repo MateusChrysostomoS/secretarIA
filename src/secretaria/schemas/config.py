@@ -7,6 +7,7 @@ services/tenant_config.py instead.
 """
 
 from datetime import time
+from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -138,6 +139,13 @@ class TenantConfigUpdate(BaseModel):
     insurances: list[str] | None = None
     # Whether the bot should ask patients for their insurance during booking.
     collect_insurance: bool | None = None
+    # --- Pix deposit (sinal) policy — services/payments/deposit_lifecycle.py ---
+    pix_deposit_enabled: bool | None = None
+    pix_deposit_percent: int | None = Field(default=None, ge=1, le=100)
+    pix_refund_window_hours: int | None = Field(default=None, ge=0)
+    pix_retention_policy: Literal["total", "partial"] | None = None
+    pix_partial_refund_percent: int | None = Field(default=None, ge=1, le=100)
+    pix_reschedule_limit: int | None = Field(default=None, ge=0)
     is_active: bool | None = None
 
     @field_validator("insurances")
@@ -261,3 +269,15 @@ class TenantConfigRead(BaseModel):
     is_active: bool
     # True when a Google Calendar refresh token is stored for this tenant.
     calendar_connected: bool
+    # --- Pix deposit (sinal) policy — services/payments/deposit_lifecycle.py ---
+    pix_deposit_enabled: bool
+    pix_deposit_percent: int
+    pix_refund_window_hours: int
+    pix_retention_policy: str
+    pix_partial_refund_percent: int
+    pix_reschedule_limit: int
+    # True when an Asaas API key is stored for this tenant. Read-only/derived
+    # (from has_asaas_api_key) — NOT declared on TenantConfigUpdate, so a PUT
+    # can never flip it; it only ever changes via
+    # POST /internal/tenants/{id}/asaas-connection.
+    asaas_connected: bool

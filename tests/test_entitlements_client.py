@@ -35,7 +35,7 @@ _ALL_ADDONS_OFF = {
     "multi_professional": False,
     "multi_unit": False,
     "ehr": False,
-    "pix_whatsapp": False,
+    "pix_deposit": False,
     "analytics_bi": False,
     "human_backup_24_7": False,
 }
@@ -49,7 +49,7 @@ def _summary(**overrides) -> EntitlementSummary:
         secretaria_enabled=True,
         plan="bronze",
         secretaria_tier="bronze_1",
-        addons={**_ALL_ADDONS_OFF, "reactivation_pack": True, "pix_whatsapp": True},
+        addons={**_ALL_ADDONS_OFF, "reactivation_pack": True, "pix_deposit": True},
         limits={},
     )
     base.update(overrides)
@@ -63,7 +63,7 @@ def _summary(**overrides) -> EntitlementSummary:
 
 def test_inactive_tenant_entitled_to_nothing():
     summary = _summary(active=False, secretaria_tier="bronze_2")
-    assert is_entitled(summary, "pix_whatsapp") is False
+    assert is_entitled(summary, "pix_deposit") is False
     assert is_entitled(summary, "reactivation_pack") is False
     assert is_entitled(summary, "bronze_1") is False
     assert is_entitled(summary, "ferro") is False
@@ -71,7 +71,7 @@ def test_inactive_tenant_entitled_to_nothing():
 
 def test_addon_flag_true_and_false():
     summary = _summary()
-    assert is_entitled(summary, "pix_whatsapp") is True
+    assert is_entitled(summary, "pix_deposit") is True
     assert is_entitled(summary, "verified_identity") is False
 
 

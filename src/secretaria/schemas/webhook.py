@@ -7,6 +7,7 @@ https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/payload-example
 """
 
 from collections.abc import Iterator
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -73,6 +74,23 @@ class WebhookAudio(BaseModel):
     voice: bool | None = None
 
 
+class WebhookButtonReply(BaseModel):
+    """The `button` sub-object on a message of type "button".
+
+    Arrives when the patient taps a quick-reply button on a TEMPLATE (HSM)
+    message — the free-form `interactive.button_reply` above is what a reply
+    button on a plain/interactive send produces instead. Both carriers smuggle
+    the same "<action>|<id>" contract for action buttons (see
+    `extract_action_button`); `text` is the button's visible label, mirroring
+    `WebhookInteractiveReply.title`.
+    """
+
+    model_config = _PERMISSIVE
+
+    payload: str | None = None
+    text: str | None = None
+
+
 class WebhookMessage(BaseModel):
     model_config = _PERMISSIVE
 
@@ -85,6 +103,10 @@ class WebhookMessage(BaseModel):
     text: WebhookText | None = None
     interactive: WebhookInteractive | None = None
     audio: WebhookAudio | None = None
+    # Present on message type "button": a tap on a template's quick-reply
+    # button (see WebhookButtonReply's docstring for how this differs from
+    # `interactive.button_reply`).
+    button: WebhookButtonReply | None = None
 
 
 class WebhookHistoryMetadata(BaseModel):
@@ -339,6 +361,56 @@ def extract_inbound_body(msg: WebhookMessage) -> str | None:
         professional_id = payload_id.split("|", 1)[1]
         return f"{title} ({professional_id})" if title else professional_id
     return title or payload_id
+
+
+# Action-button id/payload prefixes (the "<action>|<appointment_id>"
+# data-carrying family — precedent: "slot|"/"prof|" above). Order matters:
+# "apptcancelyes|" must be checked before "apptcancel|" would ever be
+# (they don't collide since we match a full prefix incl. the trailing "|",
+# but keeping the more specific one explicit avoids relying on that subtlety).
+_ACTION_BUTTON_PREFIXES: tuple[str, ...] = (
+    "apptconfirm|",
+    "apptresched|",
+    "apptcancelyes|",
+    "apptcancel|",
+)
+
+
+def extract_action_button(msg: WebhookMessage) -> tuple[str, str] | None:
+    """Decode a reminder action-button reply into (action, appointment_id).
+
+    Two carriers arrive for the same kind of tap, depending on which the
+    reminder used (see plugins/reminders.py): a free-form interactive
+    reply-button (`interactive.button_reply.id`, sent inside the 24h
+    service window) or a template quick-reply's button payload
+    (`button.payload`, sent outside it — see WebhookButtonReply). Both
+    smuggle the same "<action>|<appointment_id>" id/payload contract as
+    `slot|`/`prof|` above.
+
+    Returns None (fall through to normal flow/LLM routing) when the id/payload
+    doesn't start with one of the known action prefixes, OR when it does but
+    the trailing part isn't a valid UUID — a malformed or tampered-with id
+    must never crash routing, and `action` alone (without a real appointment
+    id) is useless to the caller anyway.
+    """
+    raw: str | None = None
+    if msg.interactive is not None and msg.interactive.button_reply is not None:
+        raw = msg.interactive.button_reply.id
+    elif msg.button is not None:
+        raw = msg.button.payload
+    if not raw:
+        return None
+
+    for prefix in _ACTION_BUTTON_PREFIXES:
+        if raw.startswith(prefix):
+            action = prefix[:-1]  # drop the trailing "|"
+            appointment_id = raw[len(prefix) :]
+            try:
+                UUID(appointment_id)
+            except ValueError:
+                return None
+            return action, appointment_id
+    return None
 
 
 def extract_echo_body(msg: WebhookMessage) -> str | None:

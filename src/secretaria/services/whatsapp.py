@@ -137,6 +137,7 @@ class WhatsAppClient:
         template: str,
         lang: str,
         variables: list[str],
+        button_payloads: list[str] | None = None,
     ) -> dict:
         """Send a pre-approved WhatsApp utility template (HSM) message.
 
@@ -151,7 +152,29 @@ class WhatsAppClient:
             lang: Meta language code, e.g. "pt_BR" (NOT "pt-BR").
             variables: body parameter values, filling the template's
                 positional `{{1}}`, `{{2}}`, ... placeholders in order.
+            button_payloads: when the template has quick-reply buttons (e.g.
+                REMINDER_DEPOSIT_TEMPLATE_NAME's Confirmar/Reagendar/Cancelar
+                trio), one payload string per button, in the template's own
+                button order. None (default) omits the button components
+                entirely — backward compatible with every plain-text template
+                sent before this parameter existed.
         """
+        components = [
+            {
+                "type": "body",
+                "parameters": [{"type": "text", "text": v} for v in variables],
+            }
+        ]
+        if button_payloads:
+            components.extend(
+                {
+                    "type": "button",
+                    "sub_type": "quick_reply",
+                    "index": index,
+                    "parameters": [{"type": "payload", "payload": payload}],
+                }
+                for index, payload in enumerate(button_payloads)
+            )
         payload = {
             "messaging_product": "whatsapp",
             "to": to,
@@ -159,12 +182,7 @@ class WhatsAppClient:
             "template": {
                 "name": template,
                 "language": {"code": lang},
-                "components": [
-                    {
-                        "type": "body",
-                        "parameters": [{"type": "text", "text": v} for v in variables],
-                    }
-                ],
+                "components": components,
             },
         }
         return await self._post(payload, to=to)

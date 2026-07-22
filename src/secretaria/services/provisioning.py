@@ -24,6 +24,8 @@ from secretaria.services.tenant_config import (
     ProfessionalCompletenessItem,
     can_activate_professional_aware,
     professional_completeness,
+    set_asaas_api_key,
+    set_asaas_webhook_token,
     set_waba_token,
 )
 
@@ -33,6 +35,7 @@ __all__ = [
     "ConfigStatus",
     "ConnectOutcome",
     "activate_tenant",
+    "connect_asaas",
     "connect_whatsapp",
     "create_or_attach_professional",
     "get_config_status",
@@ -117,6 +120,23 @@ async def connect_whatsapp(
         await set_waba_token(session, tenant_id, access_token)
     logger.info("provisioning_whatsapp_connected", tenant_id=str(tenant_id))
     return ConnectOutcome.CONNECTED
+
+
+async def connect_asaas(
+    session: AsyncSession, *, tenant_id: UUID, api_key: str, webhook_token: str
+) -> bool:
+    """Store a tenant's Asaas credentials, encrypted (Pix deposit wave,
+    adjacent to connect_whatsapp above). Returns False when the tenant does
+    not exist (the API layer 404s), True once both secrets are stored.
+    Values are never logged. Caller commits.
+    """
+    tenant = await session.get(Tenant, tenant_id)
+    if tenant is None:
+        return False
+    await set_asaas_api_key(session, tenant_id, api_key)
+    await set_asaas_webhook_token(session, tenant_id, webhook_token)
+    logger.info("provisioning_asaas_connected", tenant_id=str(tenant_id))
+    return True
 
 
 @dataclass(frozen=True)

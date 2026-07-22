@@ -23,6 +23,6 @@ from secretaria.plugins import (  # noqa: F401
     human_backup,
     multi_professional,
     multi_unit,
-    pix_whatsapp,
+    pix_deposit,
     reminders,
 )

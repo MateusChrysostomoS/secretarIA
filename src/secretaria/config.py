@@ -274,6 +274,15 @@ class Settings(BaseSettings):
         "Recebi sua mensagem! Nossa equipe humana vai te responder em instantes."
     )
 
+    # --- Asaas / Pix deposit ---
+    ASAAS_BASE_URL: str = "https://api.asaas.com/v3"
+    ASAAS_TIMEOUT_SECONDS: float = 10.0
+    # Meta utility (HSM) template name for a deposit reminder with 3
+    # quick-reply buttons (wave S3 - not sent yet by this wave). The template
+    # itself needs external Meta approval before it can actually be used;
+    # this setting only names it ahead of time.
+    REMINDER_DEPOSIT_TEMPLATE_NAME: str = "appointment_reminder_deposit"
+
     # --- CORS (the Next.js doctor portal) ---
     # Comma-separated list of allowed origins for the hub API.
     CORS_ALLOW_ORIGINS: str = "http://localhost:3000"
