@@ -277,5 +277,10 @@
   "275": "require_internal_api_key",
   "276": "AppointmentType",
   "277": "e51cd84e1959_conversation_flow_managing_appointment_id.py",
-  "278": "_confirmation_recap"
+  "278": "_confirmation_recap",
+  "279": "_calendar_for_professional",
+  "280": "iniciar_pre_consulta",
+  "281": "payments_tasks.py",
+  "282": "extract_patient_name",
+  "283": "_transcription_config"
 }

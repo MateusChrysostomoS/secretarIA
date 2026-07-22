@@ -295,9 +295,9 @@
     "semantic_hash": ""
   },
   "src/secretaria/services/admin.py": {
-    "mtime": 1780365373.9972644,
-    "ast_hash": "22d01af12df4a1a1003ee243de4755f5",
-    "semantic_hash": "22d01af12df4a1a1003ee243de4755f5"
+    "mtime": 1784729373.4650245,
+    "ast_hash": "4c323e947412ba46fdc85eb915ad9b6a",
+    "semantic_hash": ""
   },
   "src/secretaria/services/google_oauth.py": {
     "mtime": 1780432031.0794356,
@@ -390,14 +390,14 @@
     "semantic_hash": "073966f52e74a647ed699a6c0480c0eb"
   },
   "src/secretaria/schemas/admin.py": {
-    "mtime": 1784501064.9899766,
-    "ast_hash": "b06e2265f1ea16df6054f4fcfa36cb13",
+    "mtime": 1784729379.8538935,
+    "ast_hash": "de91cf1eeffd1ef87251f07aac0ac25d",
     "semantic_hash": ""
   },
   "tests/test_admin_tenants.py": {
-    "mtime": 1784501065.007761,
-    "ast_hash": "83350929bcb48f6f74c6bffd8a252018",
-    "semantic_hash": "83350929bcb48f6f74c6bffd8a252018"
+    "mtime": 1784729421.7525203,
+    "ast_hash": "3d8375d64ca0ae3899d3bf83ab32e31f",
+    "semantic_hash": ""
   },
   "scripts/break_calendar.py": {
     "mtime": 1781212900.5178325,
@@ -425,9 +425,9 @@
     "semantic_hash": "551bd9d049f1e9a66a72aaaf27fe50a5"
   },
   "src/secretaria/api/admin/tenants.py": {
-    "mtime": 1782479228.1374872,
-    "ast_hash": "77a5c000efc90a45664d95de1b95b5a8",
-    "semantic_hash": "77a5c000efc90a45664d95de1b95b5a8"
+    "mtime": 1784729400.9877667,
+    "ast_hash": "902e28b110b3477306863bd73ca505c7",
+    "semantic_hash": ""
   },
   "src/secretaria/api/admin/__init__.py": {
     "mtime": 1782479228.1374872,
