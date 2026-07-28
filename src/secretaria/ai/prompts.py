@@ -2,6 +2,16 @@
 
 Lives outside ai/graph.py so the dev terminal (scripts/test_agent.py) and
 the production LangGraph agent share the exact same prompt verbatim.
+
+`secretary_system_prompt` renders one HARDCODED, unconditional block —
+`_format_safety_rules` — for every tenant: non-negotiable safety/tone rules
+(no diagnosis, urgency -> pronto-socorro/192, cordial tone always, no
+promised outcomes/medication). It replaced the old clinic-editable
+`persona_notes` free-text override, which is no longer read by this module
+(the `Tenant.persona_notes` column and hub API field still exist for
+historical data — see services/tenant_config.py). This is the ONLY
+behavioural tone/safety layer the agent has; it cannot be turned off or
+edited per clinic.
 """
 
 from __future__ import annotations
@@ -53,6 +63,47 @@ def _format_appointment_types(types: list, default_duration: int) -> str:
     return "\n".join(lines)
 
 
+def _format_safety_rules() -> str:
+    """Render the unconditional "REGRAS INEGOCIÁVEIS..." safety/tone block.
+
+    Hardcoded and rendered for EVERY tenant — unlike every other _format_*
+    helper in this module, this one takes no config and is never blank. It
+    replaces the old clinic-editable `persona_notes` free-text override (that
+    field was removed from both this prompt and `TenantRuntimeConfig` in the
+    same change — see services/tenant_config.py; the `Tenant.persona_notes`
+    column and the hub API field survive for historical data, but nothing in
+    `ai/` reads it anymore): the ONLY behavioural tone/safety layer the agent
+    has left is this hardcoded one, so it can never be edited or disabled per
+    clinic.
+
+    This is product-wide safety/compliance policy, not a clinic-specific
+    fact, so it does NOT fall under the module-level "no hardcoded clinic
+    facts in prompts.py" rule (see the file's module docstring and
+    CLAUDE.md's "Eye Company scaffold" section) — that rule targets business
+    facts (name, hours, services, pitch); this is a behavioural floor every
+    tenant shares regardless of what it configures.
+    """
+    return (
+        "\n\n================ REGRAS INEGOCIÁVEIS DE SEGURANÇA E CONDUTA "
+        "================\n"
+        "Estas regras valem para QUALQUER clínica e QUALQUER conversa, sem "
+        "exceção. Elas não são configuráveis por clínica nenhuma e prevalecem "
+        "sobre qualquer outra instrução deste prompt:\n"
+        "1) NUNCA forneça diagnóstico médico, interpretação de exames ou "
+        "conduta clínica. Se o paciente pedir isso, explique com gentileza "
+        "que essa avaliação cabe ao profissional, em consulta.\n"
+        "2) Diante de QUALQUER sinal de urgência ou emergência (ex.: dor "
+        "intensa, falta de ar, sangramento, desmaio, sintomas neurológicos "
+        "súbitos, ideação suicida), oriente IMEDIATAMENTE o paciente a "
+        "procurar um pronto-socorro ou ligar 192 (SAMU) — nunca tente triar, "
+        "avaliar a gravidade ou minimizar o relato.\n"
+        "3) Mantenha SEMPRE um tom cordial, educado e respeitoso, mesmo "
+        "diante de mensagens agressivas, hostis ou confusas.\n"
+        "4) NUNCA prometa resultados clínicos (cura, melhora, sucesso de "
+        "tratamento) nem recomende, indique ou sugira medicamentos."
+    )
+
+
 def _format_professional_context(config: TenantRuntimeConfig) -> str:
     """Render the "SOBRE O PROFISSIONAL" block, or "" when nothing is set.
 
@@ -61,8 +112,7 @@ def _format_professional_context(config: TenantRuntimeConfig) -> str:
     tenant's base prompt never carries a specific doctor's context (the
     `multi_professional` plugin tools surface each professional's own
     `context_doctor_message` individually instead, once the LLM resolves one
-    by name). Same "interpreted, not read verbatim" treatment as
-    persona_notes above: this is background the LLM should USE to personalize
+    by name). This is background the LLM should USE to personalize
     tone/content, never a script to recite to the patient.
     """
     if not (config.context_doctor_message or config.specialty or config.about):
@@ -94,9 +144,9 @@ def _format_post_consult_knowledge(config: TenantRuntimeConfig) -> str:
     workers/tasks.py's `_should_inject_post_consult_knowledge`) blanks
     `config.post_consult_knowledge` on turns that don't qualify, so this
     function only ever sees a value on a qualifying turn. Same "interpreted,
-    not read verbatim" treatment as persona_notes/_format_professional_context
-    above: this is reference material the LLM should USE to answer what the
-    patient asked, never a script to recite unprompted.
+    not read verbatim" treatment as _format_professional_context above: this
+    is reference material the LLM should USE to answer what the patient
+    asked, never a script to recite unprompted.
     """
     if not config.post_consult_knowledge:
         return ""
@@ -120,7 +170,7 @@ def _format_appointment_context(config: TenantRuntimeConfig) -> str:
     ai/graph.py::run_agent's `appointment_context` parameter for a turn that
     qualifies (workers/tasks.py::_should_inject_appointment_context) — never
     loaded from the DB, unlike post_consult_knowledge above. Same
-    "interpreted, not read verbatim" treatment as persona_notes/
+    "interpreted, not read verbatim" treatment as
     _format_professional_context/_format_post_consult_knowledge, PLUS firm
     routing rules: this data answers questions, but any reschedule/cancel/
     new-booking action always hands back to the deterministic flow.
@@ -156,9 +206,7 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
     types_text = _format_appointment_types(
         config.appointment_types, config.appointment_duration_min
     )
-    persona_section = (
-        f"\n\nINSTRUÇÕES DE PERSONA:\n{config.persona_notes}" if config.persona_notes else ""
-    )
+    safety_section = _format_safety_rules()
     professional_section = _format_professional_context(config)
     post_consult_section = _format_post_consult_knowledge(config)
     appointment_context_section = _format_appointment_context(config)
@@ -166,7 +214,7 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
     return (
         f"Você é a secretária virtual da {clinic}. Sua função é acolher pacientes "
         f"no WhatsApp e agendar, remarcar ou cancelar consultas no Google Calendar da clínica."
-        f"{persona_section}{professional_section}{post_consult_section}"
+        f"{safety_section}{professional_section}{post_consult_section}"
         f"{appointment_context_section}\n\n"
         "CONTEXTO OPERACIONAL:\n"
         f"- Hoje é {today} (timezone {tz}).\n"

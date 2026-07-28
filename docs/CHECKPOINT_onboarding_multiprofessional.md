@@ -96,11 +96,18 @@ open session and does not commit (API layer commits once).
   columns directly. Zero or multiple active professionals leave the base
   config at tenant-level, unchanged.
 - `ai/prompts.py::_format_professional_context` renders a "SOBRE O
-  PROFISSIONAL" block (specialty + about + context_doctor_message) that
-  `secretary_system_prompt` injects right after the persona-notes section —
+  PROFISSIONAL" block (specialty + about + context_doctor_message) —
   explicitly framed as context to use, not a script to recite. Empty when
   none of the three fields are set (multi-professional tenants get nothing
-  here; see below).
+  here; see below). **2026-07-22 corrections round:** `secretary_system_prompt`
+  now injects this right after the hardcoded, unconditional
+  `_format_safety_rules` block (heading "REGRAS INEGOCIÁVEIS DE SEGURANÇA E
+  CONDUTA") instead of a persona-notes section — the clinic-editable
+  `persona_notes` free-text override was removed from `TenantRuntimeConfig`
+  and from this prompt entirely (the `Tenant.persona_notes` column and the
+  hub `TenantConfigRead`/`Update` API field survive for historical data, but
+  nothing under `ai/` reads it anymore — see `services/tenant_config.py` and
+  `ai/prompts.py`'s module docstrings).
 - `plugins/multi_professional.py` (the addon itself predates this round —
   `docs/CHECKPOINT_plugins.md`) — `_professional_calendar` now resolves
   **per professional, not just per tenant**: own encrypted
@@ -193,7 +200,8 @@ only by `SMTP_HOST`):
   `retry_nudge_atividade_insuficiente`, `retry_nudge_numero_em_outro_bsp`,
   `retry_nudge_sem_acesso_admin_waba`, `retry_nudge_sem_pagina_facebook`,
   `retry_nudge_outro`, `connection_success`, `config_reminder_pre_connection`,
-  `config_reminder_connected`, `closing_email`.
+  `config_reminder_connected`, `closing_email`. **+1 since (2026-07-22
+  corrections round):** `test_window_expired` — see the Crons section below.
 
 ## Crons (`workers/onboarding_cron.py`, registered in `workers/arq_worker.py`)
 
@@ -216,6 +224,28 @@ only by `SMTP_HOST`):
     not `config_reminder_paused`), cadence `CONFIG_REMINDER_CADENCE_DAYS=[1,3,7]`
     then every `CONFIG_REMINDER_WEEKLY_DAYS=7`, **uncapped**. Template picked
     by state (`config_reminder_connected` vs `_pre_connection`).
+  - **Test-window expiry email (added 2026-07-22, corrections round "Task
+    2" — after this checkpoint was first written):** `_process_test_window`
+    sends the one-shot `test_window_expired` template when brain-api reports
+    `OnboardingTenant.test_window_email_due=True` — three new OPTIONAL item
+    fields on the same `GET /internal/onboarding/tenants` response
+    (`test_window_email_due: bool`, `test_window_days: int`,
+    `test_window_restart_url: str`), all `.get()`-defaulted
+    (`False`/`0`/`""`) in `services/brain_onboarding.py::_item_from_dict` so
+    an older brain-api that hasn't shipped them yet is a silent no-op, never
+    a parse failure. Unlike the retry/config-reminder families above, this
+    step does NOT re-derive eligibility from `onboarding_state`/
+    `blocker_reason`/`subscription_active` — it trusts brain-api's `due`
+    verdict outright, deliberately including when `subscription_active` is
+    already `False` (by the time the test window expires, brain-api has
+    typically already auto-cancelled the Stripe subscription, and the email
+    exists precisely to explain that). Still gated on the same `in_window`
+    business-hours check as every other outbound owner email here. Posts
+    `test_window_email_sent` back (one-shot server-side, same contract shape
+    as `closing_email_sent`/`manual_review_flagged`). The full cross-service
+    feature (brain-api's window computation, Stripe auto-cancel, restart
+    flow) is documented in brain-api's own `CHECKPOINT_test_window.md` — this
+    bullet covers only the secretaria-side send.
   - Every event send POSTs back to brain-api (`services/brain_onboarding.py::post_onboarding_event`,
     never raises) so brain-api's state machine advances `next_retry_at` /
     stamps the sent-at timestamps — this repo never derives or stores
@@ -303,3 +333,19 @@ multi-professional config) ← head.
   (`REMINDER_TEMPLATE_NAME` must be Meta-approved; EHR/Pix are stub seams;
   the outbound WhatsApp rate limiter is still a TODO) is unrelated to and
   unchanged by this round — not re-verified here, still applicable.
+- **2026-07-22 corrections round touched this checkpoint after the fact**
+  (two small, targeted secretaria-side deltas on top of the onboarding round
+  described above — this file was NOT rewritten for them, only amended
+  inline where they touch a fact already documented here):
+  - The clinic-editable `persona_notes` free-text prompt override was
+    removed from `ai/prompts.py`/`TenantRuntimeConfig` and replaced by one
+    hardcoded, unconditional safety/tone block
+    (`ai/prompts.py::_format_safety_rules` — no diagnosis, urgency routes to
+    pronto-socorro/192, cordial tone always, no promised outcomes/
+    medication). See the "Per-professional agent runtime" section above.
+  - The onboarding-nudges cron gained a third one-shot email step,
+    `_process_test_window` / template `test_window_expired`, gated on a new
+    brain-api-computed `test_window_email_due` flag (defensive parsing: an
+    older brain-api without the field is a silent no-op). See the "Crons"
+    section above; brain-api's `CHECKPOINT_test_window.md` is the main doc
+    for this feature end-to-end.

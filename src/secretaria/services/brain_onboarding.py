@@ -21,11 +21,23 @@ Contract (brain-api, already implemented, do not change):
        subscription_active}]}
   - POST {BRAIN_API_BASE_URL}/internal/onboarding/tenants/{tenant_id}/events
     body {"event": "retry_nudge_sent"|"config_reminder_sent"|
-       "closing_email_sent"|"manual_review_flagged", "at": <iso datetime>,
-       "next_retry_at": <iso datetime>|null} -> 200 {"applied": bool}
+       "closing_email_sent"|"manual_review_flagged"|"test_window_email_sent",
+       "at": <iso datetime>, "next_retry_at": <iso datetime>|null}
+    -> 200 {"applied": bool}
 
 Both header X-Internal-Api-Key: <INTERNAL_API_KEY> (same shared secret sent
 outbound by core/subscription.py / entitlements_client.py).
+
+Test-window expiry (corrections round "Task 2"): brain-api is being extended
+IN PARALLEL to add three OPTIONAL item fields — `test_window_email_due`
+(bool), `test_window_days` (int), `test_window_restart_url` (str) — signalling
+a tenant whose test window expired without WhatsApp activation (Meta never
+approved Coexistence) and whose Stripe subscription brain-api already
+auto-cancelled. `_item_from_dict` below defaults all three when absent
+(False/0/"") so an old brain-api that hasn't shipped them yet never breaks
+parsing — the cron simply never fires `_process_test_window` for anyone.
+`test_window_email_sent` is treated as ONE-SHOT server-side, same shape as
+`closing_email_sent`/`manual_review_flagged`.
 
 `list_onboarding_tenants` returns `None` on any ambiguity (unconfigured
 settings, network error, non-200, bad JSON/shape) so the cron can tell "the
@@ -77,6 +89,13 @@ class OnboardingTenant:
     owner_name: str | None
     clinic_name: str | None
     subscription_active: bool
+    # Test-window expiry (contract v1 §11 corrections round, "Task 2"):
+    # OPTIONAL fields, always `.get()`-defaulted below so an older brain-api
+    # that doesn't send them yet never breaks parsing — the cron simply never
+    # fires the new step (`test_window_email_due` defaults False).
+    test_window_email_due: bool = False
+    test_window_days: int = 0
+    test_window_restart_url: str = ""
 
 
 def _parse_dt(value: object) -> datetime | None:
@@ -113,6 +132,9 @@ def _item_from_dict(data: dict) -> OnboardingTenant:
         owner_name=data.get("owner_name"),
         clinic_name=data.get("clinic_name"),
         subscription_active=bool(data.get("subscription_active", False)),
+        test_window_email_due=bool(data.get("test_window_email_due", False)),
+        test_window_days=int(data.get("test_window_days") or 0),
+        test_window_restart_url=str(data.get("test_window_restart_url") or ""),
     )
 
 

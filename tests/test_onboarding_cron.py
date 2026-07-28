@@ -41,7 +41,7 @@ from secretaria.models import (  # noqa: E402
     Professional,
     Tenant,
 )
-from secretaria.services.brain_onboarding import OnboardingTenant  # noqa: E402
+from secretaria.services.brain_onboarding import OnboardingTenant, _item_from_dict  # noqa: E402
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
 from secretaria.workers import onboarding_cron  # noqa: E402
 
@@ -660,6 +660,135 @@ async def test_config_reminder_due_after_prior_send(db, monkeypatch: pytest.Monk
 
     assert len(email_calls) == 1
     assert len(event_calls) == 1
+
+
+# --------------------------------------------------------------------------
+# run_onboarding_nudges — test-window expiry email (corrections round "Task 2")
+# --------------------------------------------------------------------------
+
+
+async def test_test_window_due_and_in_window_sends_email_and_posts_event(
+    db, monkeypatch: pytest.MonkeyPatch
+):
+    tenant_id = uuid4()
+    await _make_tenant(db, tenant_id)
+    item = _item(
+        tenant_id=tenant_id,
+        onboarding_anchor_at=None,  # isolate: no retry-branch interference
+        config_status="completa",  # isolate: no config-reminder interference
+        test_window_email_due=True,
+        test_window_days=14,
+        test_window_restart_url="https://hub.secretaria.example/restart",
+    )
+    monkeypatch.setattr(onboarding_cron, "list_onboarding_tenants", _fake_list([item]))
+    email_calls = _capture_email(monkeypatch)
+    event_calls = _capture_events(monkeypatch)
+
+    await onboarding_cron.run_onboarding_nudges({})
+
+    assert len(email_calls) == 1
+    to, template, variables = email_calls[0]
+    assert to == "owner@example.com"
+    assert template == "test_window_expired"
+    assert variables == {
+        "clinic_name": "Clinic",
+        "days": "14",
+        "restart_url": "https://hub.secretaria.example/restart",
+    }
+
+    assert len(event_calls) == 1
+    tid, event, at, next_retry_at = event_calls[0]
+    assert tid == tenant_id
+    assert event == "test_window_email_sent"
+    assert next_retry_at is None
+
+
+async def test_test_window_due_but_outside_window_is_deferred(db, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(onboarding_cron, "within_send_window", lambda now_local, window: False)
+    tenant_id = uuid4()
+    await _make_tenant(db, tenant_id)
+    item = _item(
+        tenant_id=tenant_id,
+        onboarding_anchor_at=None,
+        config_status="completa",
+        test_window_email_due=True,
+        test_window_days=14,
+        test_window_restart_url="https://hub.secretaria.example/restart",
+    )
+    monkeypatch.setattr(onboarding_cron, "list_onboarding_tenants", _fake_list([item]))
+    email_calls = _capture_email(monkeypatch)
+    event_calls = _capture_events(monkeypatch)
+
+    await onboarding_cron.run_onboarding_nudges({})
+
+    assert email_calls == []
+    assert event_calls == []
+
+
+async def test_test_window_not_due_is_a_noop(db, monkeypatch: pytest.MonkeyPatch):
+    tenant_id = uuid4()
+    await _make_tenant(db, tenant_id)
+    item = _item(
+        tenant_id=tenant_id,
+        onboarding_anchor_at=None,
+        config_status="completa",
+        test_window_email_due=False,
+        test_window_days=14,
+        test_window_restart_url="https://hub.secretaria.example/restart",
+    )
+    monkeypatch.setattr(onboarding_cron, "list_onboarding_tenants", _fake_list([item]))
+    email_calls = _capture_email(monkeypatch)
+    event_calls = _capture_events(monkeypatch)
+
+    await onboarding_cron.run_onboarding_nudges({})
+
+    assert email_calls == []
+    assert event_calls == []
+
+
+async def test_test_window_fields_missing_from_raw_dict_default_and_noop(
+    db, monkeypatch: pytest.MonkeyPatch
+):
+    """An old brain-api that hasn't shipped the test-window fields yet sends an
+    item dict without them at all — `_item_from_dict` must default them
+    (False/0/"") rather than raise, and the cron must do nothing for this step
+    (it must still process the rest of the item normally; this raw dict is
+    also retry/config-reminder-inert by construction, isolating the assertion
+    to the test-window step)."""
+    tenant_id = uuid4()
+    await _make_tenant(db, tenant_id)
+    raw = {
+        "tenant_id": str(tenant_id),
+        "onboarding_state": "aquecimento",
+        "blocker_reason": None,
+        "config_status": "completa",
+        "onboarding_anchor_at": None,
+        "next_retry_at": None,
+        "retry_paused": False,
+        "config_reminder_paused": False,
+        "config_reminder_anchor_at": None,
+        "last_config_reminder_at": None,
+        "closing_email_sent_at": None,
+        "manual_review_flagged_at": None,
+        "owner_email": "owner@example.com",
+        "owner_name": "Owner",
+        "clinic_name": "Clinic",
+        "subscription_active": True,
+        # test_window_email_due / test_window_days / test_window_restart_url: ABSENT
+    }
+    item = _item_from_dict(raw)
+    assert item.test_window_email_due is False
+    assert item.test_window_days == 0
+    assert item.test_window_restart_url == ""
+
+    monkeypatch.setattr(onboarding_cron, "list_onboarding_tenants", _fake_list([item]))
+    email_calls = _capture_email(monkeypatch)
+    event_calls = _capture_events(monkeypatch)
+
+    await onboarding_cron.run_onboarding_nudges({})
+
+    assert email_calls == []
+    assert event_calls == []
 
 
 # --------------------------------------------------------------------------

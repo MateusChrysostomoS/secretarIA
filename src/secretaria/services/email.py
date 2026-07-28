@@ -178,7 +178,8 @@ class _SafeDict(dict):
 
 # Variables used across templates below (a caller may omit any of these —
 # see `_SafeDict`): `clinic_name`, `name` (person being addressed), `link`
-# (a URL — invite/portal), `blocker_reason` (nudge templates only).
+# (a URL — invite/portal), `blocker_reason` (nudge templates only), `days`
+# and `restart_url` (test_window_expired only).
 _TEMPLATES: dict[str, EmailTemplate] = {
     "professional_invite": EmailTemplate(
         subject="Você foi convidado(a) para a equipe da {clinic_name} no SecretarIA",
@@ -297,6 +298,22 @@ _TEMPLATES: dict[str, EmailTemplate] = {
             "Se você ainda quiser ativar a secretária virtual, é só voltar à tela de "
             "ativação no painel quando estiver pronto(a) — nada foi perdido, seus dados "
             "continuam salvos.\n\n"
+            "— Equipe SecretarIA"
+        ),
+    ),
+    "test_window_expired": EmailTemplate(
+        subject="Não conseguimos ativar seu WhatsApp no período de teste",
+        body=(
+            "Olá!\n\n"
+            "O período de teste da {clinic_name} chegou ao fim ({days} dias) e não "
+            "conseguimos concluir a ativação do seu número no WhatsApp — a causa mais "
+            "comum é a Meta ainda não ter aprovado o número para o WhatsApp "
+            "Coexistence, geralmente por atividade baixa nele.\n\n"
+            "Fique tranquilo(a): nada foi cobrado e sua assinatura foi cancelada "
+            "automaticamente.\n\n"
+            "Se quiser tentar de novo, é só reiniciar o período de teste por aqui:\n"
+            "{restart_url}\n\n"
+            "Se preferir, responda este e-mail que nossa equipe ajuda a resolver.\n\n"
             "— Equipe SecretarIA"
         ),
     ),

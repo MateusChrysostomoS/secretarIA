@@ -45,8 +45,11 @@ class Professional(Base):
     specialty: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Short bio surfaced by the doctor hub / patient-facing pitch.
     about: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Persona/instructions injected into the system prompt for THIS
-    # professional (mirrors tenants.persona_notes but scoped to one doctor).
+    # Free-text context/instructions injected into the system prompt for
+    # THIS professional (ai/prompts.py::_format_professional_context) —
+    # background the LLM personalizes tone/content with, never a script to
+    # recite. Not a persona/safety override: the hardcoded safety/tone rules
+    # in ai/prompts.py::_format_safety_rules apply regardless of this field.
     context_doctor_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Same shape as tenants.business_hours. NULL = fall back to the tenant's
     # own column (services/tenant_config.professional_business_hours) - the

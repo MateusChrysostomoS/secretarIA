@@ -1,6 +1,9 @@
-"""Tests for ai/prompts.py's per-professional "SOBRE O PROFISSIONAL" injection
-(contract v1 §10 item D) — only rendered when `load_tenant_config` populated
-the professional-context fields on `TenantRuntimeConfig`.
+"""Tests for ai/prompts.py: the hardcoded safety/tone block
+(`_format_safety_rules`, unconditional — replaces the old clinic-editable
+`persona_notes` override), the per-professional "SOBRE O PROFISSIONAL"
+injection (contract v1 §10 item D, only rendered when `load_tenant_config`
+populated the professional-context fields on `TenantRuntimeConfig`),
+post-consult knowledge, and appointment context.
 """
 
 import os
@@ -14,9 +17,12 @@ os.environ.setdefault("META_PHONE_NUMBER_ID", "1234567890")
 
 from secretaria.ai.prompts import (  # noqa: E402
     _format_appointment_context,
+    _format_safety_rules,
     secretary_system_prompt,
 )
 from secretaria.services.tenant_config import TenantRuntimeConfig  # noqa: E402
+
+_SAFETY_HEADING = "REGRAS INEGOCIÁVEIS DE SEGURANÇA E CONDUTA"
 
 
 def _config(**overrides) -> TenantRuntimeConfig:
@@ -24,7 +30,6 @@ def _config(**overrides) -> TenantRuntimeConfig:
         tenant_id=uuid4(),
         clinic_name="Clínica Teste",
         greeting_message=None,
-        persona_notes=None,
         language="pt-BR",
         timezone="America/Sao_Paulo",
         appointment_duration_min=30,
@@ -35,6 +40,79 @@ def _config(**overrides) -> TenantRuntimeConfig:
     )
     fields.update(overrides)
     return TenantRuntimeConfig(**fields)
+
+
+# --------------------------------------------------------------------------
+# Hardcoded safety/tone block (unconditional — no config field controls it)
+# --------------------------------------------------------------------------
+
+
+def test_format_safety_rules_contains_all_required_elements():
+    """Direct unit test of the pure helper: every non-negotiable rule from
+    the corrections-round spec must show up as a recognizable substring."""
+    block = _format_safety_rules()
+    assert _SAFETY_HEADING in block
+    assert "diagnóstico" in block
+    assert "pronto-socorro" in block
+    assert "192" in block
+    assert "cordial" in block
+
+
+def test_safety_rules_present_with_minimal_config():
+    """A bare-minimum tenant (no professional/persona/post-consult data at
+    all) still gets the full safety block — it is unconditional."""
+    prompt = secretary_system_prompt(_config())
+    assert _SAFETY_HEADING in prompt
+    assert "diagnóstico" in prompt
+    assert "pronto-socorro" in prompt
+    assert "192" in prompt
+    assert "cordial" in prompt
+
+
+def test_safety_rules_present_with_fully_populated_config():
+    """A fully-dressed tenant (professional context + post-consult knowledge
+    + appointment context all set) still renders the safety block verbatim —
+    presence never depends on any other field."""
+    config = _config(
+        professional_id=uuid4(),
+        context_doctor_message="Fala pausadamente com pacientes idosos.",
+        specialty="Cardiologia",
+        about="Atende há 15 anos na região.",
+        post_consult_knowledge="Retorno em 7 dias.",
+        appointment_context="Próxima consulta: 03/08 às 11:00.",
+        business_hours={"monday": [{"start": "08:00", "end": "12:00"}]},
+    )
+    prompt = secretary_system_prompt(config)
+    assert _SAFETY_HEADING in prompt
+    assert "diagnóstico" in prompt
+    assert "pronto-socorro" in prompt
+    assert "192" in prompt
+    assert "cordial" in prompt
+
+
+def test_safety_rules_do_not_depend_on_a_persona_notes_field():
+    """`TenantRuntimeConfig` no longer carries `persona_notes` at all — the
+    dataclass must accept none, and the removed "INSTRUÇÕES DE PERSONA"
+    heading must never appear."""
+    assert "persona_notes" not in TenantRuntimeConfig.__dataclass_fields__
+    prompt = secretary_system_prompt(_config())
+    assert "INSTRUÇÕES DE PERSONA" not in prompt
+
+
+def test_safety_rules_precede_professional_section():
+    config = _config(
+        professional_id=uuid4(),
+        context_doctor_message="Fala pausadamente com pacientes idosos.",
+    )
+    prompt = secretary_system_prompt(config)
+    assert _SAFETY_HEADING in prompt
+    assert "SOBRE O PROFISSIONAL" in prompt
+    assert prompt.index(_SAFETY_HEADING) < prompt.index("SOBRE O PROFISSIONAL")
+
+
+# --------------------------------------------------------------------------
+# Per-professional "SOBRE O PROFISSIONAL" section
+# --------------------------------------------------------------------------
 
 
 def test_no_professional_section_when_nothing_set():
@@ -79,19 +157,6 @@ def test_specialty_and_about_render_without_context_message():
     assert "Atende há 15 anos na região." in prompt
 
 
-def test_persona_notes_and_professional_section_coexist_in_order():
-    config = _config(
-        persona_notes="Seja bem-humorada.",
-        professional_id=uuid4(),
-        context_doctor_message="Fala pausadamente com pacientes idosos.",
-    )
-    prompt = secretary_system_prompt(config)
-    assert "INSTRUÇÕES DE PERSONA" in prompt
-    assert "SOBRE O PROFISSIONAL" in prompt
-    # Persona comes first (existing behaviour), professional context follows.
-    assert prompt.index("INSTRUÇÕES DE PERSONA") < prompt.index("SOBRE O PROFISSIONAL")
-
-
 def test_no_post_consult_knowledge_section_when_none():
     prompt = secretary_system_prompt(_config())
     assert "CONHECIMENTO PÓS-CONSULTA" not in prompt
@@ -107,20 +172,19 @@ def test_post_consult_knowledge_section_present_when_set():
     assert "NÃO as recite" in prompt
 
 
-def test_persona_professional_and_post_consult_sections_coexist_in_order():
+def test_safety_professional_and_post_consult_sections_coexist_in_order():
     config = _config(
-        persona_notes="Seja bem-humorada.",
         professional_id=uuid4(),
         context_doctor_message="Fala pausadamente com pacientes idosos.",
         post_consult_knowledge="Retorno em 7 dias.",
     )
     prompt = secretary_system_prompt(config)
-    assert "INSTRUÇÕES DE PERSONA" in prompt
+    assert _SAFETY_HEADING in prompt
     assert "SOBRE O PROFISSIONAL" in prompt
     assert "CONHECIMENTO PÓS-CONSULTA" in prompt
-    # persona -> professional -> post-consult (see secretary_system_prompt).
+    # safety -> professional -> post-consult (see secretary_system_prompt).
     assert (
-        prompt.index("INSTRUÇÕES DE PERSONA")
+        prompt.index(_SAFETY_HEADING)
         < prompt.index("SOBRE O PROFISSIONAL")
         < prompt.index("CONHECIMENTO PÓS-CONSULTA")
     )
@@ -172,19 +236,18 @@ def test_appointment_context_section_present_when_set():
     assert "manage_existing_appointment" in prompt
 
 
-def test_persona_professional_post_consult_and_appointment_context_coexist_in_order():
+def test_safety_professional_post_consult_and_appointment_context_coexist_in_order():
     config = _config(
-        persona_notes="Seja bem-humorada.",
         professional_id=uuid4(),
         context_doctor_message="Fala pausadamente com pacientes idosos.",
         post_consult_knowledge="Retorno em 7 dias.",
         appointment_context=_APPOINTMENT_CONTEXT_PAYLOAD,
     )
     prompt = secretary_system_prompt(config)
-    # persona -> professional -> post-consult -> appointment context (see
+    # safety -> professional -> post-consult -> appointment context (see
     # secretary_system_prompt).
     assert (
-        prompt.index("INSTRUÇÕES DE PERSONA")
+        prompt.index(_SAFETY_HEADING)
         < prompt.index("SOBRE O PROFISSIONAL")
         < prompt.index("CONHECIMENTO PÓS-CONSULTA")
         < prompt.index("CONSULTAS MARCADAS")

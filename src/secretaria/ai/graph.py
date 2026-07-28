@@ -161,7 +161,6 @@ def _prompt_with_today(state: dict) -> list[BaseMessage]:
                 tenant_id=None,  # type: ignore[arg-type]
                 clinic_name="Clínica",
                 greeting_message=None,
-                persona_notes=None,
                 language="pt-BR",
                 timezone=s.CLINIC_TIMEZONE,
                 appointment_duration_min=30,

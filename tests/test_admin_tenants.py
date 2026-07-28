@@ -59,7 +59,6 @@ def _make_config(refresh_token: str | None) -> TenantRuntimeConfig:
         tenant_id=uuid4(),
         clinic_name="Clinic",
         greeting_message=None,
-        persona_notes=None,
         language="pt-BR",
         timezone="America/Sao_Paulo",
         appointment_duration_min=30,

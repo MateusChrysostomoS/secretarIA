@@ -123,7 +123,6 @@ def _tenant_config(tenant_id) -> TenantRuntimeConfig:
         tenant_id=tenant_id,
         clinic_name="Clinic",
         greeting_message=None,
-        persona_notes=None,
         language="pt-BR",
         timezone="America/Sao_Paulo",
         appointment_duration_min=30,

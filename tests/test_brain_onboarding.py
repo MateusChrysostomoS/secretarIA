@@ -189,6 +189,43 @@ async def test_list_parses_full_item_shape(monkeypatch: pytest.MonkeyPatch):
     assert item.subscription_active is True
 
 
+async def test_list_parses_test_window_fields_when_present(monkeypatch: pytest.MonkeyPatch):
+    """Corrections round "Task 2": once brain-api ships the three test-window
+    fields, they parse through exactly like any other item field."""
+    raw = _raw_item(
+        test_window_email_due=True,
+        test_window_days=14,
+        test_window_restart_url="https://hub.secretaria.example/restart",
+    )
+    _install_fake_client(monkeypatch, status_code=200, body={"items": [raw]})
+
+    result = await bo.list_onboarding_tenants()
+
+    assert result is not None
+    item = result[0]
+    assert item.test_window_email_due is True
+    assert item.test_window_days == 14
+    assert item.test_window_restart_url == "https://hub.secretaria.example/restart"
+
+
+async def test_list_defaults_test_window_fields_when_absent(monkeypatch: pytest.MonkeyPatch):
+    """An older brain-api that hasn't shipped the test-window fields yet sends
+    an item dict without them at all — parsing must default rather than raise
+    (KeyError would otherwise skip the WHOLE item, contract v1 §11's "one bad
+    row must not blind the sweep")."""
+    raw = _raw_item()  # no test_window_* keys at all
+    assert "test_window_email_due" not in raw
+    _install_fake_client(monkeypatch, status_code=200, body={"items": [raw]})
+
+    result = await bo.list_onboarding_tenants()
+
+    assert result is not None
+    item = result[0]
+    assert item.test_window_email_due is False
+    assert item.test_window_days == 0
+    assert item.test_window_restart_url == ""
+
+
 async def test_list_malformed_item_is_skipped_others_still_parsed(monkeypatch: pytest.MonkeyPatch):
     good = _raw_item()
     bad = _raw_item(tenant_id="not-a-uuid")

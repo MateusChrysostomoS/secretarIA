@@ -58,7 +58,6 @@ class TenantRuntimeConfig:
     tenant_id: UUID
     clinic_name: str
     greeting_message: str | None
-    persona_notes: str | None
     language: str
     timezone: str
     appointment_duration_min: int
@@ -684,7 +683,6 @@ async def load_tenant_config(session: AsyncSession, tenant: Tenant) -> TenantRun
         tenant_id=tenant.id,
         clinic_name=tenant.clinic_name,
         greeting_message=tenant.greeting_message,
-        persona_notes=tenant.persona_notes,
         language=tenant.language,
         timezone=tenant.timezone,
         appointment_duration_min=tenant.appointment_duration_min,

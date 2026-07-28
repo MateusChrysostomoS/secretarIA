@@ -37,6 +37,7 @@ _REQUIRED_TEMPLATE_IDS = {
     "config_reminder_pre_connection",
     "config_reminder_connected",
     "closing_email",
+    "test_window_expired",
 }
 
 
@@ -71,7 +72,7 @@ def _patch_settings(**overrides):
 # --------------------------------------------------------------------------
 
 
-def test_all_ten_required_template_ids_exist():
+def test_all_eleven_required_template_ids_exist():
     assert _REQUIRED_TEMPLATE_IDS <= set(_TEMPLATES)
 
 
@@ -90,6 +91,39 @@ def test_atividade_insuficiente_template_matches_spec_copy():
     """The spec explicitly calls out this nudge's tone - "ganhando histórico"."""
     tpl = _TEMPLATES["retry_nudge_atividade_insuficiente"]
     assert "ganhando histórico" in tpl.body
+
+
+def test_test_window_expired_template_matches_spec_copy():
+    """Corrections round "Task 2": subject names the test window explicitly;
+    body explains the Meta/Coexistence cause, reassures nothing was charged
+    and the subscription auto-cancelled, and carries a clear restart link."""
+    tpl = _TEMPLATES["test_window_expired"]
+    assert "período de teste" in tpl.subject
+    assert "{clinic_name}" in tpl.body
+    assert "{days}" in tpl.body
+    assert "Coexistence" in tpl.body
+    assert "nada foi cobrado" in tpl.body.lower()
+    assert "cancelada automaticamente" in tpl.body
+    assert "{restart_url}" in tpl.body
+
+
+def test_test_window_expired_renders_with_variables():
+    rendered_subject = _TEMPLATES["test_window_expired"].subject.format_map(
+        _SafeDict({"clinic_name": "Clínica Teste"})
+    )
+    rendered_body = _TEMPLATES["test_window_expired"].body.format_map(
+        _SafeDict(
+            {
+                "clinic_name": "Clínica Teste",
+                "days": "14",
+                "restart_url": "https://hub.secretaria.example/restart",
+            }
+        )
+    )
+    assert "período de teste" in rendered_subject
+    assert "Clínica Teste" in rendered_body
+    assert "14 dias" in rendered_body
+    assert "https://hub.secretaria.example/restart" in rendered_body
 
 
 def test_safe_dict_leaves_unknown_placeholder_intact():

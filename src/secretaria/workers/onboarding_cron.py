@@ -1,6 +1,7 @@
 """Onboarding lifecycle crons (cross-service contract v1 §11): retry nudges,
-D+30 manual-review flag, D+60 closing email, config reminders, and monthly
-billable-patient + active-professional usage metering.
+D+30 manual-review flag, D+60 closing email, config reminders, test-window
+expiry email, and monthly billable-patient + active-professional usage
+metering.
 
 Registered in `workers/arq_worker.py` (own module, mirroring the
 `plugins/reminders.py` / `plugins/post_booking.py` split — these two jobs are
@@ -12,7 +13,10 @@ state/blocker/anchors/timestamps) lives on brain-api's `tenants` table — this
 service only READS the tenant list (`services/brain_onboarding.py`) and its
 OWN local `Tenant.timezone`, and WRITES nothing locally. Every cadence/due
 decision is delegated to the pure functions in `workers/onboarding_cadence.py`
-so they are unit-testable without a DB, network, or event loop.
+so they are unit-testable without a DB, network, or event loop — the one
+exception is `_process_test_window`, whose "is this tenant due?" decision is
+made entirely by brain-api (`OnboardingTenant.test_window_email_due`); this
+service just gates it on business hours and sends.
 
 `run_patient_usage_metering` is the one local-DB-heavy job: it tallies real
 Appointment rows (billable patients) AND active Professional rows (active
@@ -81,8 +85,15 @@ def _tenant_zoneinfo(tenant: Tenant) -> ZoneInfo:
         return ZoneInfo(_DEFAULT_TENANT_TIMEZONE)
 
 
-async def _send_onboarding_email(item: OnboardingTenant, template: str) -> bool:
-    """Send one onboarding template to the tenant owner. Never logs the address."""
+async def _send_onboarding_email(
+    item: OnboardingTenant, template: str, extra_variables: dict | None = None
+) -> bool:
+    """Send one onboarding template to the tenant owner. Never logs the address.
+
+    `extra_variables` (e.g. `test_window_expired`'s `days`/`restart_url`) are
+    merged on top of the always-present `clinic_name` — every existing caller
+    that omits it keeps sending exactly `{"clinic_name": ...}`, unchanged.
+    """
     if not item.owner_email:
         logger.warning(
             "onboarding_email_skipped_no_owner_email",
@@ -90,10 +101,13 @@ async def _send_onboarding_email(item: OnboardingTenant, template: str) -> bool:
             template=template,
         )
         return False
+    variables = {"clinic_name": item.clinic_name or ""}
+    if extra_variables:
+        variables.update(extra_variables)
     return await send_transactional_email_message(
         to=item.owner_email,
         template=template,
-        variables={"clinic_name": item.clinic_name or ""},
+        variables=variables,
     )
 
 
@@ -226,6 +240,49 @@ async def _process_config_reminder(
     return counts
 
 
+async def _process_test_window(
+    item: OnboardingTenant, now_utc: datetime, in_window: bool
+) -> Counter:
+    """Test-window expiry email for one tenant (corrections round "Task 2").
+
+    Unlike `_process_retry_and_closing`/`_process_config_reminder`, this step
+    does NOT re-derive eligibility from onboarding_state/blocker_reason/
+    subscription_active — `item.test_window_email_due` is brain-api's own
+    fully-computed verdict (elapsed days, window truly expired, not already
+    sent) and is trusted outright. In particular this is deliberately NOT
+    gated on `item.subscription_active`: by the time the test window expires
+    the Stripe subscription has typically ALREADY been auto-cancelled, so
+    requiring it active would suppress the very email meant to explain that.
+
+    Still gated on `in_window` — same business-hours courtesy as every other
+    outbound owner email in this module, even though this one is a one-shot
+    rather than a recurring nudge. `test_window_email_sent` is one-shot
+    server-side (contract mirrors closing_email_sent/manual_review_flagged),
+    so a retried tick is safe.
+    """
+    counts: Counter = Counter()
+    if not (item.test_window_email_due and in_window):
+        return counts
+
+    sent = await _send_onboarding_email(
+        item,
+        "test_window_expired",
+        extra_variables={
+            "days": str(item.test_window_days or ""),
+            "restart_url": item.test_window_restart_url,
+        },
+    )
+    applied = await post_onboarding_event(item.tenant_id, "test_window_email_sent", now_utc, None)
+    counts["test_window_email_sent"] += 1
+    logger.info(
+        "onboarding_test_window_email_processed",
+        tenant_id=str(item.tenant_id),
+        email_sent=sent,
+        event_applied=applied,
+    )
+    return counts
+
+
 async def run_onboarding_nudges(ctx: dict) -> None:
     """arq cron: hourly at :10 (contract v1 §11).
 
@@ -264,6 +321,7 @@ async def run_onboarding_nudges(ctx: dict) -> None:
                     await _process_retry_and_closing(item, settings, now_utc, in_window)
                 )
                 totals.update(await _process_config_reminder(item, settings, now_utc, in_window))
+                totals.update(await _process_test_window(item, now_utc, in_window))
                 tenants_processed += 1
             except Exception as exc:
                 logger.warning(
