@@ -24,6 +24,13 @@
       "output_tokens": 0,
       "files": 20,
       "mode": "update"
+    },
+    {
+      "date": "2026-07-23T01:31:42.086003+00:00",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "files": 145,
+      "note": "structural-only update (AST + markdown-structure pass); no LLM semantic subagents were available in this session's environment, so cross-file semantic/hyperedge extraction was NOT refreshed for this run"
     }
   ],
   "total_input_tokens": 385462,
