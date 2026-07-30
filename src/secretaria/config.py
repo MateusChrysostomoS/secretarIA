@@ -290,8 +290,24 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins(self) -> list[str]:
-        """Parse CORS_ALLOW_ORIGINS into a clean list of origins."""
-        return [o.strip() for o in self.CORS_ALLOW_ORIGINS.split(",") if o.strip()]
+        """Parse CORS_ALLOW_ORIGINS into a clean list of origins.
+
+        Trailing slashes are stripped because Starlette's CORSMiddleware matches
+        the request's `Origin` header EXACTLY, and an origin is scheme+host+port
+        by definition — a browser never sends the trailing slash. Configuring
+        `https://app.example.com/` would therefore reject every real browser
+        request with a 400 "Disallowed CORS origin" while looking correct to the
+        person who set it. Surrounding quotes are stripped for the same reason:
+        some deploy panels persist the value with the quotes included.
+        """
+        origins: list[str] = []
+        for raw in self.CORS_ALLOW_ORIGINS.split(","):
+            origin = raw.strip().strip("'\"").rstrip("/")
+            # "*" must survive verbatim — rstrip("/") leaves it untouched, but an
+            # empty entry (trailing comma, blank env var) is dropped.
+            if origin:
+                origins.append(origin)
+        return origins
 
     @property
     def is_production(self) -> bool:
