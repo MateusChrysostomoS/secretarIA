@@ -48,10 +48,10 @@ from secretaria.models import (  # noqa: E402
 )
 from secretaria.services import patient_context  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
+    LABEL_BOOK,
     LABEL_CANCEL_APPT,
     LABEL_OTHER,
     LABEL_RESCHEDULE,
-    menu_buttons_for,
 )
 from secretaria.services.patient_context import (  # noqa: E402
     PatientOpeningContext,
@@ -494,28 +494,30 @@ def test_compose_trim_caps_brief_then_requirements_at_worst() -> None:
 
 
 # --------------------------------------------------------------------------
-# _greeting_buttons_for: the three button sets
+# _greeting_buttons_for: the two button sets (fixed-greeting-buttons round —
+# see docs/CHECKPOINT_fixed_greeting_buttons.md)
 # --------------------------------------------------------------------------
 
 
 def test_greeting_buttons_upcoming_trio_wins() -> None:
     """HAS_UPCOMING(_SOON) + flows enabled: [Remarcar] [Cancelar] [Outro] —
-    on single- AND multi-doctor tenants alike."""
+    unchanged by the fixed-greeting-buttons round."""
     tenant = _greeting_tenant(initial_flows={"enabled": True})
     trio = [LABEL_RESCHEDULE, LABEL_CANCEL_APPT, LABEL_OTHER]
     for state in (PatientOpeningState.HAS_UPCOMING_SOON, PatientOpeningState.HAS_UPCOMING):
         context = PatientOpeningContext(
             state=state, future_appointments=[{"start_at": NOW + timedelta(hours=24)}]
         )
-        assert tasks._greeting_buttons_for(tenant, "Olá!", False, context) == trio
-        assert tasks._greeting_buttons_for(tenant, "Olá!", True, context) == trio
+        assert tasks._greeting_buttons_for(tenant, "Olá!", context) == trio
 
 
-def test_greeting_buttons_other_states_keep_menu() -> None:
+def test_greeting_buttons_other_states_get_fixed_trio() -> None:
     """NEW / RETURNING_NO_APPOINTMENT / JUST_HAD_CONSULT / no context: the
-    effective menu buttons, exactly as before."""
+    fixed [Agendar, Remarcar, Cancelar] trio — no more tenant-editable menu
+    on the greeting itself (menu_buttons_for still drives mid-conversation
+    re-presentation elsewhere, untouched)."""
     tenant = _greeting_tenant(initial_flows={"enabled": True})
-    menu = menu_buttons_for(tenant, False)
+    fixed_trio = [LABEL_BOOK, LABEL_RESCHEDULE, LABEL_CANCEL_APPT]
     for context in (
         PatientOpeningContext(state=PatientOpeningState.NEW),
         PatientOpeningContext(state=PatientOpeningState.RETURNING_NO_APPOINTMENT, has_history=True),
@@ -525,22 +527,36 @@ def test_greeting_buttons_other_states_keep_menu() -> None:
         ),
         None,
     ):
-        assert tasks._greeting_buttons_for(tenant, "Olá!", False, context) == menu
+        assert tasks._greeting_buttons_for(tenant, "Olá!", context) == fixed_trio
 
 
-def test_greeting_buttons_flows_disabled_unchanged() -> None:
-    """Flow-less (pure LLM) tenants keep their configured quick replies even on
-    HAS_UPCOMING — the deterministic trio only exists where route() handles it."""
+def test_greeting_buttons_flows_disabled_also_gets_fixed_trio() -> None:
+    """Flow-less (pure LLM) tenants now get the SAME fixed trio - a tap just
+    can't be dispatched by route() there, so `_persist_inbound_message`'s
+    greeting-button short-circuit degrades it to a fixed reply instead
+    (`_handle_greeting_button_unavailable`), never the LLM. Reverses the
+    pre-round behaviour (this tenant used to keep its own free-text
+    `greeting_buttons` here) - see docs/CHECKPOINT_fixed_greeting_buttons.md."""
     tenant = _greeting_tenant(initial_flows={}, greeting_buttons=["Agendar", "Falar com humano"])
     context = PatientOpeningContext(
         state=PatientOpeningState.HAS_UPCOMING_SOON,
         future_appointments=[{"start_at": NOW + timedelta(hours=24)}],
     )
-    assert tasks._greeting_buttons_for(tenant, "Olá!", False, context) == [
-        "Agendar",
-        "Falar com humano",
-    ]
-    assert tasks._greeting_buttons_for(tenant, None, False, context) == []
+    fixed_trio = [LABEL_BOOK, LABEL_RESCHEDULE, LABEL_CANCEL_APPT]
+    # HAS_UPCOMING doesn't win here either: that special case requires
+    # flows_enabled(tenant) too (see the function's own condition).
+    assert tasks._greeting_buttons_for(tenant, "Olá!", context) == fixed_trio
+    assert tasks._greeting_buttons_for(tenant, None, context) == []
+
+
+def test_greeting_buttons_never_reads_tenant_column() -> None:
+    """`tenant.greeting_buttons` (the orphaned DB column) is never consulted,
+    on any state/flows combination - only the FIXED, code-constant labels."""
+    poisoned = ["should never appear", "in any output", "ever"]
+    for enabled in (True, False):
+        tenant = _greeting_tenant(initial_flows={"enabled": enabled}, greeting_buttons=poisoned)
+        buttons = tasks._greeting_buttons_for(tenant, "Olá!", None)
+        assert not (set(buttons) & set(poisoned))
 
 
 # --------------------------------------------------------------------------

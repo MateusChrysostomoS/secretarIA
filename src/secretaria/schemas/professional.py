@@ -61,6 +61,19 @@ class ProfessionalConfigUpdate(BaseModel):
         return None if value is None else _validate_business_hours(value)
 
 
+class ProfessionalCalendarConnect(BaseModel):
+    """POST /tenants/me/professionals/{id}/calendar response (shared_account
+    mode, docs/CHECKPOINT_google_calendar_modes.md item 3).
+
+    `created=False` means the professional already had a `google_calendar_id`
+    and this call was an idempotent no-op (nothing was created or changed).
+    """
+
+    professional_id: str
+    google_calendar_id: str
+    created: bool
+
+
 class ProfessionalListItem(BaseModel):
     """GET /tenants/me/professionals row — full per-professional config + completeness.
 

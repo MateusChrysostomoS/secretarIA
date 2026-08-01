@@ -11,6 +11,19 @@ PUT   /tenants/me/professionals/{id}/config
                                         - per-professional config (business_hours,
                                           appointment_types, specialty, about,
                                           context_doctor_message, google_calendar_id).
+POST  /tenants/me/professionals/{id}/calendar
+                                        - shared_account mode only (contract in
+                                          docs/CHECKPOINT_google_calendar_modes.md):
+                                          idempotently create a secondary Google
+                                          Calendar for this professional under the
+                                          clinic's connected account and persist its
+                                          id onto google_calendar_id. Never gated by
+                                          entitlements (core platform wiring, not an
+                                          addon) — 422 `clinic_calendar_not_connected`
+                                          when the clinic has no Calendar connected,
+                                          409 `google_reconnect_required` when the
+                                          stored clinic token predates the
+                                          `calendar.app.created` scope.
 
 Entitlement + limit enforcement (brain-api is the source of truth, fetched
 fresh — `redis=None` — since this path is not hot):
@@ -38,14 +51,20 @@ from secretaria.core.logging import get_logger
 from secretaria.models import Tenant
 from secretaria.models.professional import Professional
 from secretaria.schemas.professional import (
+    ProfessionalCalendarConnect,
     ProfessionalConfigUpdate,
     ProfessionalCreate,
     ProfessionalListItem,
     ProfessionalRead,
     ProfessionalUpdate,
 )
+from secretaria.services.calendar import GoogleScopeInsufficientError
 from secretaria.services.entitlements_client import get_entitlements, is_entitled
-from secretaria.services.tenant_config import professional_completeness_item
+from secretaria.services.tenant_config import (
+    ClinicCalendarNotConnectedError,
+    ensure_professional_secondary_calendar,
+    professional_completeness_item,
+)
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/tenants/me/professionals", tags=["hub-professionals"])
@@ -227,3 +246,60 @@ async def update_professional_config(
         fields=sorted(data.keys()),
     )
     return await _list_item(session, professional, tenant)
+
+
+@router.post("/{professional_id}/calendar", response_model=ProfessionalCalendarConnect)
+async def create_professional_calendar(
+    professional_id: str,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> ProfessionalCalendarConnect:
+    """shared_account mode: idempotently create this professional's secondary
+    Google Calendar under the clinic's connected account (item 3 of
+    docs/CHECKPOINT_google_calendar_modes.md).
+
+    Never gated by entitlements/limits — same "config save is always
+    allowed" principle as `update_professional_config` above (this is core
+    platform wiring, not an addon). Ownership is enforced by `_get_professional`
+    (404 for an unknown id or one belonging to another tenant), exactly like
+    every other professional-scoped hub endpoint.
+    """
+    professional = await _get_professional(session, tenant, professional_id)
+    try:
+        result = await ensure_professional_secondary_calendar(session, tenant, professional)
+    except ClinicCalendarNotConnectedError:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "clinic_calendar_not_connected",
+                "message": (
+                    "A clínica ainda não conectou uma conta do Google Calendar. "
+                    "Conecte a agenda da clínica antes de criar agendas por profissional."
+                ),
+            },
+        ) from None
+    except GoogleScopeInsufficientError:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "google_reconnect_required",
+                "message": (
+                    "A conexão da clínica com o Google Calendar não tem mais a "
+                    "permissão necessária para criar agendas. Reconecte a conta "
+                    "Google da clínica para continuar."
+                ),
+            },
+        ) from None
+
+    await session.commit()
+    logger.info(
+        "hub_professional_secondary_calendar_ensured",
+        tenant_id=str(tenant.id),
+        professional_id=str(professional.id),
+        created=result.created,
+    )
+    return ProfessionalCalendarConnect(
+        professional_id=str(result.professional_id),
+        google_calendar_id=result.google_calendar_id,
+        created=result.created,
+    )

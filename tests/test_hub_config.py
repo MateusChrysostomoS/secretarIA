@@ -102,6 +102,16 @@ async def test_get_config_includes_new_fields_with_defaults(client: AsyncClient)
     assert body["post_consult_knowledge"] is None
 
 
+async def test_get_config_omits_greeting_buttons(client: AsyncClient) -> None:
+    """The greeting's buttons are now a fixed, product-defined set
+    (workers/tasks.py::_greeting_buttons_for), never hub-editable - the field
+    is gone from the response entirely, not just empty. See
+    docs/CHECKPOINT_fixed_greeting_buttons.md for the full contract change."""
+    response = await client.get(CONFIG)
+    assert response.status_code == 200
+    assert "greeting_buttons" not in response.json()
+
+
 # --------------------------------------------------------------------------
 # CRITICAL: plain config save is allowed while disconnected/not calendar-ready
 # --------------------------------------------------------------------------
@@ -147,6 +157,49 @@ async def test_put_greeting_only_succeeds_while_disconnected(
 
 async def test_put_empty_body_is_a_no_op_success(client: AsyncClient) -> None:
     response = await client.put(CONFIG, json={})
+    assert response.status_code == 200
+
+
+async def test_put_greeting_buttons_is_silently_ignored(
+    client: AsyncClient, db, tenant
+) -> None:
+    """PUT no longer accepts this field at all: an incoming `greeting_buttons`
+    is dropped like any other unrecognized key (pydantic's default `extra`
+    behaviour on TenantConfigUpdate, which no longer declares the field) -
+    never persisted, never echoed back, and the sibling `greeting_message` in
+    the same request still saves normally."""
+    response = await client.put(
+        CONFIG,
+        json={
+            "greeting_message": "Olá!",
+            "greeting_buttons": ["Isso não deveria ser salvo"],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["greeting_message"] == "Olá!"
+    assert "greeting_buttons" not in body
+
+    async with db() as session:
+        stored = await session.get(Tenant, tenant.id)
+        assert stored.greeting_buttons == []  # DB column untouched
+
+
+async def test_put_greeting_message_over_button_cap_rejected(client: AsyncClient) -> None:
+    """The greeting is now ALWAYS sent with the fixed action buttons attached
+    (no more "with buttons" vs "plain text" choice - see
+    docs/CHECKPOINT_fixed_greeting_buttons.md), so it must fit WhatsApp's
+    1024-char interactive-body cap unconditionally - no sibling
+    `greeting_buttons` field needed in the same request to trigger this
+    anymore (that field doesn't exist on the schema at all now)."""
+    response = await client.put(CONFIG, json={"greeting_message": "x" * 1025})
+    assert response.status_code == 422
+
+    response = await client.put(CONFIG, json={"returning_greeting_message": "x" * 1025})
+    assert response.status_code == 422
+
+    # Exactly at the cap still succeeds.
+    response = await client.put(CONFIG, json={"greeting_message": "x" * 1024})
     assert response.status_code == 200
 
 
@@ -352,6 +405,79 @@ async def test_put_appointment_type_requirement_too_long_is_422(client: AsyncCli
         },
     )
     assert response.status_code == 422
+
+
+
+# --------------------------------------------------------------------------
+# google_calendar_mode (docs/CHECKPOINT_google_calendar_modes.md)
+# --------------------------------------------------------------------------
+
+
+async def test_get_config_defaults_google_calendar_mode_to_per_professional(
+    client: AsyncClient,
+) -> None:
+    response = await client.get(CONFIG)
+    assert response.status_code == 200
+    assert response.json()["google_calendar_mode"] == "per_professional"
+
+
+async def test_put_google_calendar_mode_round_trips_to_shared_account(
+    client: AsyncClient,
+) -> None:
+    response = await client.put(CONFIG, json={"google_calendar_mode": "shared_account"})
+    assert response.status_code == 200
+    assert response.json()["google_calendar_mode"] == "shared_account"
+
+    follow_up = await client.get(CONFIG)
+    assert follow_up.json()["google_calendar_mode"] == "shared_account"
+
+
+async def test_put_google_calendar_mode_invalid_value_is_422(client: AsyncClient) -> None:
+    response = await client.put(CONFIG, json={"google_calendar_mode": "bogus"})
+    assert response.status_code == 422
+
+    # And the value is genuinely untouched.
+    follow_up = await client.get(CONFIG)
+    assert follow_up.json()["google_calendar_mode"] == "per_professional"
+
+
+async def test_put_google_calendar_mode_while_disconnected_succeeds(
+    client: AsyncClient, tenant
+) -> None:
+    """Same disconnected-save invariant as every other plain config field -
+    switching modes never depends on Calendar being connected or the tenant
+    being activatable."""
+    assert tenant.phone_number_id is None
+    response = await client.put(CONFIG, json={"google_calendar_mode": "shared_account"})
+    assert response.status_code == 200
+    assert response.json()["google_calendar_mode"] == "shared_account"
+
+
+async def test_switching_google_calendar_mode_is_non_destructive(
+    client: AsyncClient, db, tenant
+) -> None:
+    """Trocar de modo NÃO mexe em tokens nem em google_calendar_id - só qual
+    fluxo a UI oferece (item 6 of docs/CHECKPOINT_google_calendar_modes.md)."""
+    from secretaria.services.tenant_config import (
+        has_google_refresh_token,
+        set_google_refresh_token,
+    )
+
+    async with db() as session:
+        await set_google_refresh_token(session, tenant.id, "clinic-refresh-token")
+        row = await session.get(Tenant, tenant.id)
+        row.google_calendar_id = "clinic-primary-cal"
+        await session.commit()
+
+    response = await client.put(CONFIG, json={"google_calendar_mode": "shared_account"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["google_calendar_mode"] == "shared_account"
+    assert body["google_calendar_id"] == "clinic-primary-cal"  # untouched
+    assert body["calendar_connected"] is True  # token untouched
+
+    async with db() as session:
+        assert await has_google_refresh_token(session, tenant.id) is True
 
 
 async def test_get_config_appointment_type_without_requirements_key_still_reads(

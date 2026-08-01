@@ -49,6 +49,7 @@ from secretaria.models import (  # noqa: E402
 from secretaria.schemas.webhook import (  # noqa: E402
     WebhookMessage,
     extract_action_button,
+    extract_greeting_button,
     extract_inbound_body,
 )
 from secretaria.services.flow_router import STEP_MANAGE_DAY  # noqa: E402
@@ -596,3 +597,95 @@ async def test_action_button_bypasses_human_handover_end_to_end(db):
         conv = await session.get(Conversation, conversation.id)
         # Handover state itself is never touched by this path.
         assert conv.handover_state == HandoverState.HUMAN_ACTIVE
+
+
+# --------------------------------------------------------------------------
+# _persist_inbound_message wiring: greeting-button short-circuit
+# (fixed-greeting-buttons round - see docs/CHECKPOINT_fixed_greeting_buttons.md)
+# --------------------------------------------------------------------------
+
+
+def _greeting_button_msg(button_id: str, title: str = "x", wam_id: str = "wamid.g1"):
+    return WebhookMessage.model_validate(
+        {
+            "id": wam_id,
+            "from": "5511999999999",
+            "type": "interactive",
+            "interactive": {
+                "type": "button_reply",
+                "button_reply": {"id": button_id, "title": title},
+            },
+        }
+    )
+
+
+async def test_greeting_button_flows_disabled_short_circuits_end_to_end(db):
+    """flows_enabled=False (default `_seed`): a tap on the greeting's fixed
+    trio is caught BEFORE the normal dispatch and degrades to a fixed reply -
+    never route()'s unconditional LLM delegation."""
+    tenant, patient, conversation, _appt = await _seed(db)
+    msg = _greeting_button_msg("greeting|remarcar", title="Remarcar")
+
+    reply = await tasks._persist_inbound_message(
+        phone_number_id=tenant.phone_number_id,
+        wa_id=patient.wa_id,
+        patient_name=None,
+        wam_id=msg.id,
+        body=extract_inbound_body(msg),
+        greeting_button=extract_greeting_button(msg),
+    )
+    assert reply is not None
+    assert reply.greeting_button_unavailable == "remarcar"
+    assert reply.action_button is None
+
+    await tasks._send_bot_reply(reply)
+
+    client = _FakeWhatsAppClient.created[-1]
+    kind, to, body = client.sent[0]
+    assert kind == "text"
+    assert "remarcar sua consulta" in body
+    assert "entre em contato com a nossa equipe" in body.lower()
+
+
+async def test_greeting_button_flows_enabled_is_not_short_circuited(db):
+    """A flows-ENABLED tenant's tap is NOT caught here - `greeting_button` is
+    still extracted, but `greeting_button_unavailable` stays None so the
+    reply falls through to the normal (route()-backed, already
+    deterministic) dispatch below."""
+    tenant, patient, conversation, _appt = await _seed(db, with_flows=True)
+    msg = _greeting_button_msg("greeting|remarcar", title="Remarcar")
+
+    reply = await tasks._persist_inbound_message(
+        phone_number_id=tenant.phone_number_id,
+        wa_id=patient.wa_id,
+        patient_name=None,
+        wam_id=msg.id,
+        body=extract_inbound_body(msg),
+        greeting_button=extract_greeting_button(msg),
+    )
+    assert reply is not None
+    assert reply.greeting_button_unavailable is None
+    assert reply.inbound_body == "Remarcar"  # the label text, routed normally
+
+
+async def test_greeting_button_respects_human_handover(db):
+    """UNLIKE action_button, a greeting-button tap is not time/money-critical:
+    it respects an active human takeover exactly like any normal message
+    (see _persist_inbound_message's docstring)."""
+    tenant, patient, conversation, _appt = await _seed(db)
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        conv.handover_state = HandoverState.HUMAN_ACTIVE
+        await session.commit()
+
+    msg = _greeting_button_msg("greeting|cancelar", title="Cancelar")
+    reply = await tasks._persist_inbound_message(
+        phone_number_id=tenant.phone_number_id,
+        wa_id=patient.wa_id,
+        patient_name=None,
+        wam_id=msg.id,
+        body=extract_inbound_body(msg),
+        greeting_button=extract_greeting_button(msg),
+    )
+    assert reply is None
+    assert _FakeWhatsAppClient.created == []

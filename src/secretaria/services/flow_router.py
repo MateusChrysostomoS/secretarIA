@@ -106,6 +106,14 @@ LABEL_BACK = "Voltar"
 LABEL_YES = "Sim"
 LABEL_NO = "Não"
 
+# The greeting's fixed, product-defined action trio (workers/tasks.py's
+# _greeting_buttons_for - NEVER the clinic's own free text; see
+# docs/CHECKPOINT_fixed_greeting_buttons.md). LABEL_RESCHEDULE/LABEL_CANCEL_APPT
+# above are reused as-is; LABEL_BOOK is the new third slot. All three are
+# matched by `route()`'s IDLE dispatch below on BOTH single- and multi-doctor
+# tenants, exactly like the existing LABEL_RESCHEDULE/LABEL_CANCEL_APPT taps.
+LABEL_BOOK = "Agendar"
+
 # flow_step values within SERVICE_CATALOG. The two professional-branch steps
 # (multi-doctor tenants) sit AHEAD of the existing ones: professional -> service
 # -> service confirm -> [insurance] -> day -> slot -> confirm.
@@ -561,15 +569,18 @@ async def route(
     if _label_match(inbound_body, manage_label(tenant)):
         return _enter_manage(tenant, upcoming_appointments or [], professionals)
 
-    # Direct "Remarcar"/"Cancelar" greeting-button taps: skip the neutral
-    # action card and go straight for the tapped intent (enter_manage_action).
-    # Checked before the multi-doctor dispatch so it wins on BOTH single- and
-    # multi-doctor tenants alike (the multi-doctor menu has no visible manage
-    # button, but these labels can still arrive via the greeting buttons).
-    # Safe against the booking flow's own "Cancelar"/"Confirmar": those only
-    # ever arrive while flow_state == SERVICE_CATALOG, dispatched above this
-    # block (state-based dispatch runs first - see the SERVICE_CATALOG/
-    # MANAGE_BOOKING branches earlier in this function).
+    # Direct "Agendar"/"Remarcar"/"Cancelar" greeting-button taps: skip the
+    # neutral action card and go straight for the tapped intent
+    # (enter_booking/enter_manage_action). Checked before the multi-doctor
+    # dispatch so it wins on BOTH single- and multi-doctor tenants alike (the
+    # multi-doctor menu has no visible manage button, but these labels can
+    # still arrive via the greeting buttons). Safe against the booking flow's
+    # own "Cancelar"/"Confirmar": those only ever arrive while
+    # flow_state == SERVICE_CATALOG, dispatched above this block (state-based
+    # dispatch runs first - see the SERVICE_CATALOG/MANAGE_BOOKING branches
+    # earlier in this function).
+    if _label_match(inbound_body, LABEL_BOOK):
+        return enter_booking(tenant, professionals)
     if _label_match(inbound_body, LABEL_RESCHEDULE):
         return enter_manage_action(
             "reschedule", tenant, upcoming_appointments or [], professionals
@@ -659,6 +670,33 @@ async def _enter_menu_choice(
         )
     # "Outro" (or any 3rd button): hand to the LLM.
     return FlowRouterResult(action="delegate_llm", flow_state=FlowState.LLM)
+
+
+def enter_booking(tenant: Tenant, professionals: list | None = None) -> FlowRouterResult:
+    """Deterministic entry for a direct "Agendar" tap (fixed greeting button).
+
+    Mirrors `_enter_menu_choice`'s index-0 branch (single-doctor: straight to
+    the service catalog) and `_menu_choice_multi`'s "Escolher médico" branch
+    (multi-doctor: the tappable doctor list first) - same empty-state replies
+    as those existing paths, reused as-is. `route()`'s IDLE dispatch calls
+    this BEFORE the multi-doctor check (like LABEL_RESCHEDULE/LABEL_CANCEL_APPT
+    above), so "Agendar" works identically on single- and multi-doctor tenants.
+    """
+    if _is_multi_professional(professionals):
+        return _enter_professional_list(tenant, professionals or [])
+    services = active_appointment_types(tenant)
+    if not services:
+        return FlowRouterResult(
+            action="reply",
+            bubbles=[TextBubble(body="No momento não há serviços disponíveis para agendamento.")],
+            flow_state=FlowState.IDLE,
+        )
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[_service_list_bubble(tenant, services)],
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=STEP_AWAITING_SERVICE,
+    )
 
 
 # --------------------------------------------------------------------------

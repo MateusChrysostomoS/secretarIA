@@ -413,6 +413,42 @@ def extract_action_button(msg: WebhookMessage) -> tuple[str, str] | None:
     return None
 
 
+def extract_greeting_button(msg: WebhookMessage) -> str | None:
+    """Decode a tap on the greeting's id, when it carries the "greeting|" prefix.
+
+    Returns the raw suffix after "greeting|":
+      - a known semantic action ("agendar"/"remarcar"/"cancelar"/"outro" -
+        see workers/tasks.py's `_GREETING_ACTION_IDS`) for a tap on the
+        current, fixed, product-defined greeting buttons
+        (workers/tasks.py::_greeting_buttons_for);
+      - a bare digit ("0"/"1"/"2") for a LEGACY tap: a button sent before the
+        fixed-buttons deploy, back when the id was positional
+        (`f"greeting|{index}"`) and the buttons themselves were the clinic's
+        own free text (`tenant.greeting_buttons`, no longer read - see
+        docs/CHECKPOINT_fixed_greeting_buttons.md). Still tappable from an
+        old WhatsApp thread.
+
+    Returns None when this isn't a "greeting|"-prefixed tap at all - notably
+    including the reactivation "Sim"/"Não" prompt, which deliberately uses a
+    DIFFERENT id prefix ("reactivation|<index>", see
+    workers/tasks.py::_send_greeting) specifically so it is never confused
+    with a greeting-button tap here (that prompt is routed by body TEXT via
+    `flow_router.classify_yes_no`, never by id).
+
+    Only the `interactive.button_reply` carrier is checked: the greeting is
+    always sent as a free-form interactive message (`send_buttons`), never a
+    template, so the `button.payload` carrier (`extract_action_button`'s
+    other carrier, used by template quick-replies) does not apply here.
+    """
+    if msg.interactive is None or msg.interactive.button_reply is None:
+        return None
+    raw = (msg.interactive.button_reply.id or "").strip()
+    if not raw.startswith("greeting|"):
+        return None
+    suffix = raw[len("greeting|") :]
+    return suffix or None
+
+
 def extract_echo_body(msg: WebhookMessage) -> str | None:
     """Return the history body for a `smb_message_echoes` (Coexistence) event.
 

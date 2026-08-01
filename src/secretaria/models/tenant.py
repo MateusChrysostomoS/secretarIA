@@ -56,10 +56,13 @@ class Tenant(Base):
     # substituted with the patient's stored name (or "" when unknown). NULL =
     # returning patients fall through to the normal first-contact path.
     returning_greeting_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Optional quick-reply buttons appended to the first-contact greeting, e.g.
-    #   ["Agendar consulta", "Como funciona?", "Horários e valores"]
-    # Max 3 labels, <=20 chars each (WhatsApp reply-button limits). Empty list =
-    # plain-text greeting. The label the patient taps becomes their next message.
+    # ORPHANED as of the fixed-greeting-buttons round (see
+    # docs/CHECKPOINT_fixed_greeting_buttons.md) - no code reads or writes
+    # this column anymore. The greeting's buttons are now a FIXED,
+    # product-defined set (workers/tasks.py::_greeting_buttons_for), not the
+    # clinic's own free text; the hub PUT no longer accepts this field. Kept
+    # (not dropped) for a future cleanup migration only - do not reintroduce
+    # a read/write path onto it without re-reading that checkpoint doc.
     greeting_buttons: Mapped[list] = mapped_column(
         JSON, server_default=text("'[]'"), default=list
     )
@@ -96,6 +99,19 @@ class Tenant(Base):
     )
     google_calendar_id: Mapped[str] = mapped_column(
         String(255), server_default="primary", default="primary"
+    )
+    # Google Calendar integration mode (doctor hub `/tenants/me/config`):
+    #   "per_professional" (default) — existing behaviour, unchanged. Each
+    #     professional may connect their own Google account
+    #     (professional_credentials); falls back to the clinic's own token.
+    #   "shared_account" — the clinic connects ONE Google account and
+    #     secretarIA creates a secondary Google Calendar per professional
+    #     inside it (services/tenant_config.py::ensure_professional_secondary_calendar).
+    # Switching modes is NON-DESTRUCTIVE: it never touches tokens or
+    # professional.google_calendar_id, only which hub flow is offered — see
+    # docs/CHECKPOINT_google_calendar_modes.md for the full routing rule.
+    google_calendar_mode: Mapped[str] = mapped_column(
+        String(32), server_default="per_professional", default="per_professional"
     )
     # Gates whether the bot answers for this tenant. Cannot be true without a
     # connected Calendar + at least one active appointment type and window.

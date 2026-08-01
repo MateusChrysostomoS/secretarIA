@@ -68,6 +68,7 @@ from secretaria.schemas.webhook import (
     WebhookValue,
     extract_action_button,
     extract_echo_body,
+    extract_greeting_button,
     extract_inbound_body,
     history_item_is_final,
 )
@@ -75,6 +76,7 @@ from secretaria.services.calendar import CalendarService
 from secretaria.services.email import send_calendar_alert, send_transactional_email_message
 from secretaria.services.entitlements_client import get_entitlements
 from secretaria.services.flow_router import (
+    LABEL_BOOK,
     LABEL_CANCEL_APPT,
     LABEL_OTHER,
     LABEL_RESCHEDULE,
@@ -316,6 +318,16 @@ class _ReplyContext:
     # handover/flow/LLM gates (see that function) and handled by
     # `_handle_action_button`, called first thing in `_send_bot_reply`.
     action_button: tuple[str, str] | None = None
+    # Set when this inbound is a tap on one of the greeting's fixed action
+    # buttons (schemas/webhook.py::extract_greeting_button) AND this tenant
+    # has no deterministic flow to dispatch it to (flows disabled - see
+    # flow_router.flows_enabled). Holds the raw suffix ("agendar"/"remarcar"/
+    # "cancelar"/a legacy digit/anything else unrecognized). Handled by
+    # `_handle_greeting_button_unavailable`, called early in `_send_bot_reply`
+    # - see `_persist_inbound_message`'s greeting-button short-circuit for why
+    # a flows-ENABLED tenant's tap never sets this (it flows through the
+    # normal text-routed path instead, which route() already handles).
+    greeting_button_unavailable: str | None = None
 
 
 async def process_webhook_event(ctx: dict, payload: dict) -> None:
@@ -394,6 +406,7 @@ async def _handle_patient_messages(value: WebhookValue, redis=None) -> None:
         patient_name = contact.profile.name if contact and contact.profile else None
         body = extract_inbound_body(msg)
         action_button = extract_action_button(msg)
+        greeting_button = extract_greeting_button(msg)
 
         if is_menu_command(body):
             await _handle_menu_command(
@@ -411,6 +424,7 @@ async def _handle_patient_messages(value: WebhookValue, redis=None) -> None:
             wam_id=msg.id,
             body=body,
             action_button=action_button,
+            greeting_button=greeting_button,
         )
         if reply is not None:
             await _send_bot_reply(reply, redis=redis)
@@ -424,6 +438,7 @@ async def _persist_inbound_message(
     wam_id: str,
     body: str | None,
     action_button: tuple[str, str] | None = None,
+    greeting_button: str | None = None,
 ) -> _ReplyContext | None:
     """Record an inbound message in its own transaction.
 
@@ -437,6 +452,14 @@ async def _persist_inbound_message(
     appointment id, not a free-form conversational turn, so it is handled
     (by `_handle_action_button`, dispatched from `_send_bot_reply`) even
     while a human has taken the conversation over.
+
+    `greeting_button` (decoded by schemas/webhook.py::extract_greeting_button)
+    is checked AFTER the handover check (unlike `action_button` above - a
+    greeting-button tap is not time/money-sensitive, so it respects an active
+    human takeover like a normal message would): when set AND this tenant has
+    flows disabled, short-circuits to `greeting_button_unavailable` on the
+    returned context instead of falling through to the normal dispatch below
+    - see that field's docstring on `_ReplyContext`.
     """
     async with async_session_factory() as session:
         try:
@@ -551,13 +574,21 @@ async def _persist_inbound_message(
                     )
                     return None
 
-                # 2+ active professionals flips the effective menu to the
-                # multi-doctor trio (flow_router.menu_buttons_for) — only ever
-                # queried when flows are enabled, since only the menu uses it.
-                multi_professional = False
-                if flows_enabled(tenant):
-                    multi_professional = (
-                        await _count_active_professionals(session, tenant.id) > 1
+                # Greeting-button tap this tenant can't fulfil deterministically:
+                # flows are disabled for them, so route() would otherwise
+                # delegate straight to the LLM (see flow_router.route()'s
+                # top-of-function flows_enabled gate). A flows-ENABLED tenant's
+                # tap is NOT special-cased here - it falls through to the
+                # normal dispatch below, which route() already handles
+                # deterministically (LABEL_BOOK/LABEL_RESCHEDULE/
+                # LABEL_CANCEL_APPT, or a graceful "here's the menu again" for
+                # a stale/legacy label route() doesn't recognize).
+                if greeting_button is not None and not flows_enabled(tenant):
+                    return _ReplyContext(
+                        conversation_id=conversation.id,
+                        patient_wa_id=wa_id,
+                        inbound_body=body or "",
+                        greeting_button_unavailable=greeting_button,
                     )
 
                 # A pending "quer continuar?" answer takes precedence over any
@@ -645,14 +676,11 @@ async def _persist_inbound_message(
                         wa_id,
                         body,
                         last_activity_at,
-                        multi_professional=multi_professional,
                     )
                     if offer is not None:
                         return offer
 
-                greeting_buttons = _greeting_buttons_for(
-                    tenant, greeting_override, multi_professional, opening_context
-                )
+                greeting_buttons = _greeting_buttons_for(tenant, greeting_override, opening_context)
 
                 return _ReplyContext(
                     conversation_id=conversation.id,
@@ -690,27 +718,30 @@ def _select_greeting(
 def _greeting_buttons_for(
     tenant: Tenant,
     greeting_override: str | None,
-    multi_professional: bool = False,
     opening_context: PatientOpeningContext | None = None,
 ) -> list[str]:
-    """Buttons to attach to a greeting.
+    """Buttons to attach to a greeting: a FIXED, product-defined set.
 
-    When deterministic flows are enabled the greeting doubles as the menu, so
-    it carries the EFFECTIVE menu buttons (the multi-doctor trio for tenants
-    with 2+ active professionals — which the IDLE router then matches).
-    Otherwise the tenant's configured quick-reply labels are used. Empty
-    without a greeting.
+    NEVER the clinic's own free text: `tenant.greeting_buttons` is no longer
+    read here (nor anywhere else) - see docs/CHECKPOINT_fixed_greeting_buttons.md.
+    Every button this function can return has a deterministic route() entry
+    (flow_router.py's LABEL_BOOK/LABEL_RESCHEDULE/LABEL_CANCEL_APPT/
+    LABEL_OTHER matches) and never falls through to the LLM on its own tap.
 
     WhatsApp caps interactive messages at 3 buttons. When the patient has a
-    live upcoming appointment (HAS_UPCOMING/_SOON, from `opening_context`),
-    the two most useful actions - Remarcar/Cancelar - win the two
-    deterministic slots in place of the menu, with "Outro" filling the third
-    for anything else; those labels are already live `route()` entries
-    (services/flow_router.py), so the tap needs no extra wiring here. This
-    only replaces the menu when flows are enabled (the greeting-as-menu
-    contract already in effect) AND there is a resolved future appointment to
-    act on - every other case (other states, flows disabled, no resolved
-    context) keeps today's behaviour unchanged.
+    live upcoming appointment (HAS_UPCOMING/_SOON, from `opening_context`)
+    AND flows are enabled, the two most useful actions - Remarcar/Cancelar -
+    win the two deterministic slots, with "Outro" filling the third for
+    anything else (unchanged from before this round). Every other case -
+    including a flows-DISABLED tenant, which used to get its own free-text
+    `greeting_buttons` here - gets the same fixed [Agendar, Remarcar,
+    Cancelar] trio: for a flows-enabled tenant route() dispatches each label
+    deterministically (see above); for a flows-disabled one, a tap is caught
+    by `_persist_inbound_message`'s greeting-button short-circuit BEFORE it
+    would ever reach route()'s unconditional LLM delegation, and degrades to
+    a fixed "contact us" reply instead (`_handle_greeting_button_unavailable`)
+    - so no button offered here ever reaches the LLM either way. Empty
+    without a greeting.
     """
     if greeting_override is None:
         return []
@@ -722,9 +753,7 @@ def _greeting_buttons_for(
         and opening_context.future_appointments
     ):
         return [LABEL_RESCHEDULE, LABEL_CANCEL_APPT, LABEL_OTHER]
-    if flows_enabled(tenant):
-        return menu_buttons_for(tenant, multi_professional)
-    return [str(b) for b in (tenant.greeting_buttons or [])]
+    return [LABEL_BOOK, LABEL_RESCHEDULE, LABEL_CANCEL_APPT]
 
 
 def _format_appointment_when(start_at: datetime, tz_name: str | None) -> str:
@@ -979,16 +1008,6 @@ async def _load_upcoming_greeting_data(
     )
 
 
-async def _count_active_professionals(session: AsyncSession, tenant_id) -> int:
-    """How many active professionals this tenant has (multi-doctor menu gate)."""
-    count = await session.scalar(
-        select(func.count())
-        .select_from(Professional)
-        .where(Professional.tenant_id == tenant_id, Professional.is_active.is_(True))
-    )
-    return int(count or 0)
-
-
 def _as_utc(dt: datetime) -> datetime:
     """Treat a naive timestamp (e.g. from SQLite) as UTC; pass tz-aware through."""
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
@@ -1001,7 +1020,6 @@ def _reactivation_offer(
     wa_id: str,
     body: str | None,
     last_activity_at: datetime | None,
-    multi_professional: bool = False,
 ) -> _ReplyContext | None:
     """Maybe offer a returning patient to resume, after a silence gap.
 
@@ -1048,7 +1066,7 @@ def _reactivation_offer(
         patient_wa_id=wa_id,
         inbound_body=body or "",
         greeting_override=greeting,
-        greeting_buttons=_greeting_buttons_for(tenant, greeting, multi_professional),
+        greeting_buttons=_greeting_buttons_for(tenant, greeting),
     )
 
 
@@ -1132,14 +1150,7 @@ async def _handle_menu_command(
                 # Send the first-contact greeting (the "initial" one), NOT the
                 # returning greeting - the whole point of deleting the patient.
                 greeting = (tenant.greeting_message or "").strip()
-                multi_professional = False
-                if flows_enabled(tenant):
-                    multi_professional = (
-                        await _count_active_professionals(session, tenant.id) > 1
-                    )
-                greeting_buttons = _greeting_buttons_for(
-                    tenant, greeting or None, multi_professional
-                )
+                greeting_buttons = _greeting_buttons_for(tenant, greeting or None)
         except IntegrityError:
             logger.info("worker_menu_duplicate_race", wam_id=wam_id)
             return
@@ -1173,6 +1184,13 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     if reply.action_button is not None:
         action, appointment_id = reply.action_button
         await _handle_action_button(reply, action, appointment_id, redis=redis)
+        return
+
+    # Greeting-button tap this (flows-disabled) tenant can't fulfil
+    # deterministically: a fully self-contained degrade, same shape as
+    # action_button above - never falls through to the LLM.
+    if reply.greeting_button_unavailable is not None:
+        await _handle_greeting_button_unavailable(reply, reply.greeting_button_unavailable)
         return
 
     # Tenant bot not activated: one polite fallback, nothing else.
@@ -2138,6 +2156,47 @@ async def _handle_action_button(
         )
 
 
+# Fixed pt-BR degrade per known greeting-button action, for a tenant with
+# flows disabled (flow_router.flows_enabled) - see
+# _handle_greeting_button_unavailable. There is no non-flow equivalent to
+# hand these off to (same acknowledged limitation as _handle_action_button's
+# apptresched-while-flows-disabled branch above), so the reply is a fixed
+# "contact us" message, never the LLM. Any suffix not in this dict (a legacy
+# pre-deploy numeric id, or anything else `extract_greeting_button` didn't
+# recognize) gets the generic default below.
+_GREETING_ACTION_UNAVAILABLE_TEXT: dict[str, str] = {
+    "agendar": "Para agendar uma consulta, entre em contato com a nossa equipe.",
+    "remarcar": "Para remarcar sua consulta, entre em contato com a nossa equipe.",
+    "cancelar": "Para cancelar sua consulta, entre em contato com a nossa equipe.",
+}
+_GREETING_ACTION_UNAVAILABLE_DEFAULT = (
+    "Não consigo processar esse pedido automaticamente. "
+    "Entre em contato com a nossa equipe, por favor."
+)
+
+
+async def _handle_greeting_button_unavailable(reply: _ReplyContext, suffix: str) -> None:
+    """Deterministic degrade for a greeting-button tap a flows-disabled
+    tenant can't fulfil (see `_persist_inbound_message`'s greeting-button
+    short-circuit, which is the only place that sets
+    `reply.greeting_button_unavailable`). A fully self-contained turn (its
+    own tenant lookup, its own reply), mirroring `_handle_action_button`'s
+    shape: never falls through to the entitlement gate, deterministic flow,
+    or LLM.
+    """
+    if reply.conversation_id is None:
+        return
+    async with async_session_factory() as session:
+        conversation = await session.get(Conversation, reply.conversation_id)
+        tenant = await session.get(Tenant, conversation.tenant_id) if conversation else None
+        if tenant is None:
+            return
+        waba_token = await get_waba_token(session, tenant.id)
+        client = WhatsAppClient.for_tenant(tenant, waba_token)
+    text = _GREETING_ACTION_UNAVAILABLE_TEXT.get(suffix, _GREETING_ACTION_UNAVAILABLE_DEFAULT)
+    await _send_simple_text(reply.patient_wa_id, text, client=client)
+
+
 async def _run_flow(
     reply: _ReplyContext,
     conv_snapshot: SimpleNamespace,
@@ -2428,6 +2487,20 @@ async def _dispatch_bubbles(
     return sent_count
 
 
+# Semantic payload-id suffix for each of the greeting's FIXED, product-defined
+# action buttons (see _greeting_buttons_for) - used by _send_greeting below and
+# read back by schemas/webhook.py::extract_greeting_button. Deliberately only
+# covers those four code-constant labels; anything else (reactivation's
+# Sim/Não, tenant-configurable) is NOT in this map on purpose - see
+# _send_greeting's comment.
+_GREETING_ACTION_IDS: dict[str, str] = {
+    LABEL_BOOK: "agendar",
+    LABEL_RESCHEDULE: "remarcar",
+    LABEL_CANCEL_APPT: "cancelar",
+    LABEL_OTHER: "outro",
+}
+
+
 async def _send_greeting(reply: _ReplyContext) -> None:
     """Send the tenant's first-contact greeting as a single verbatim message.
 
@@ -2439,10 +2512,28 @@ async def _send_greeting(reply: _ReplyContext) -> None:
     client = WhatsAppClient()
     try:
         if reply.greeting_buttons:
-            # WhatsApp needs a unique id per button; the label drives the LLM,
-            # so a positional id is enough (see extract_inbound_body).
+            # The label still drives route()'s dispatch (as with every other
+            # deterministic tap - see extract_inbound_body), so the id itself
+            # doesn't have to. It carries semantic meaning anyway: a KNOWN
+            # fixed action label (_GREETING_ACTION_IDS - the current
+            # _greeting_buttons_for trio) gets a matching "greeting|<action>"
+            # id, which `extract_greeting_button` uses to give a flows-
+            # disabled tenant's tap a deterministic degrade instead of
+            # route()'s unconditional LLM delegation. Any OTHER label - e.g.
+            # the reactivation Sim/Não prompt, which is tenant-configurable
+            # free text - gets a positional "reactivation|<index>" id
+            # instead, deliberately never "greeting|<number>", so it can
+            # never be confused with a legacy pre-deploy greeting-button tap
+            # (which used exactly that numeric shape) by
+            # `extract_greeting_button`.
             buttons = [
-                (f"greeting|{index}", label) for index, label in enumerate(reply.greeting_buttons)
+                (
+                    f"greeting|{_GREETING_ACTION_IDS[label]}"
+                    if label in _GREETING_ACTION_IDS
+                    else f"reactivation|{index}",
+                    label,
+                )
+                for index, label in enumerate(reply.greeting_buttons)
             ]
             result = await client.send_buttons(to=reply.patient_wa_id, body=body, buttons=buttons)
         else:

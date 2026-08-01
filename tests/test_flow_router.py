@@ -15,6 +15,7 @@ from secretaria.ai.formatter import ButtonBubble, SlotsBubble, TextBubble  # noq
 from secretaria.models import FlowState  # noqa: E402
 from secretaria.services.calendar import CalendarUnavailableError  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
+    LABEL_BOOK,
     LABEL_CANCEL_APPT,
     LABEL_OTHER,
     LABEL_RESCHEDULE,
@@ -32,6 +33,7 @@ from secretaria.services.flow_router import (  # noqa: E402
     STEP_MANAGE_PICK_RESCHEDULE,
     STEP_MANAGE_SLOT,
     MenuBubble,
+    enter_booking,
     enter_manage_action,
     route,
 )
@@ -634,6 +636,44 @@ def test_enter_manage_action_caps_pick_list_at_ten():
 # --------------------------------------------------------------------------
 
 
+def test_enter_booking_single_professional_lists_services():
+    res = enter_booking(_tenant())
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.SERVICE_CATALOG
+    assert res.flow_step == STEP_AWAITING_SERVICE
+    assert isinstance(res.bubbles[0], SlotsBubble)
+
+
+def test_enter_booking_no_services_replies_deterministically():
+    tenant = _tenant()
+    tenant.appointment_types = []
+    res = enter_booking(tenant)
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.IDLE
+    assert isinstance(res.bubbles[0], TextBubble)
+    assert "não há serviços" in res.bubbles[0].body.lower()
+
+
+async def test_route_idle_book_label_enters_directly():
+    res = await route(_conversation(flow_state=FlowState.IDLE), _tenant(), None, LABEL_BOOK)
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.SERVICE_CATALOG
+    assert res.flow_step == STEP_AWAITING_SERVICE
+    assert isinstance(res.bubbles[0], SlotsBubble)
+
+
+async def test_route_idle_book_label_no_services_is_deterministic():
+    """Tapping "Agendar" with no active services configured must NEVER fall
+    back to the LLM for lack of data."""
+    tenant = _tenant()
+    tenant.appointment_types = []
+    res = await route(_conversation(flow_state=FlowState.IDLE), tenant, None, LABEL_BOOK)
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.IDLE
+    assert isinstance(res.bubbles[0], TextBubble)
+    assert "não há serviços" in res.bubbles[0].body.lower()
+
+
 async def test_route_idle_reschedule_label_enters_directly():
     appt = _appt_window()
     res = await route(
@@ -647,6 +687,25 @@ async def test_route_idle_reschedule_label_enters_directly():
     assert res.flow_state == FlowState.MANAGE_BOOKING
     assert res.flow_step == STEP_MANAGE_DAY
     assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)
+
+
+async def test_route_idle_reschedule_label_no_active_appointment_is_deterministic():
+    """Tapping "Remarcar" (the greeting's fixed trio) with NO active
+    appointment must NEVER fall back to the LLM for lack of data - a fixed
+    pt-BR reply + the menu, reusing enter_manage_action's existing empty-list
+    handling."""
+    res = await route(
+        _conversation(flow_state=FlowState.IDLE),
+        _tenant(),
+        _FakeCalendar(),
+        LABEL_RESCHEDULE,
+        upcoming_appointments=[],
+    )
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.MENU
+    assert isinstance(res.bubbles[0], TextBubble)
+    assert "não tem" in res.bubbles[0].body.lower()
+    assert isinstance(res.bubbles[1], MenuBubble)  # offers the (booking) menu right away
 
 
 async def test_route_idle_cancel_label_enters_directly():

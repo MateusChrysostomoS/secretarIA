@@ -25,6 +25,7 @@ from secretaria.services.flow_router import (  # noqa: E402
     BTN_CHOOSE_PROFESSIONAL,
     BTN_FIND_PROFESSIONAL,
     FIND_PROFESSIONAL_OPENER,
+    LABEL_BOOK,
     LABEL_CANCEL_APPT,
     LABEL_INSURANCE_OTHER,
     LABEL_INSURANCE_PARTICULAR,
@@ -262,6 +263,23 @@ async def test_cancel_label_wins_before_multi_doctor_menu_dispatch():
     assert res.flow_state == FlowState.MANAGE_BOOKING
     assert res.flow_step == STEP_MANAGE_CANCEL_CONFIRM
     assert res.flow_managing_appointment_id == UUID(appt_id)
+
+
+async def test_book_label_wins_before_multi_doctor_menu_dispatch():
+    # "Agendar" (the greeting's fixed trio) must resolve straight to the
+    # doctor list on a multi-doctor tenant, exactly like tapping "Escolher
+    # médico" - it is matched in route() BEFORE the multi-doctor menu's own
+    # dispatch, same place-it-anywhere precedent as Remarcar/Cancelar above.
+    res = await route(
+        _conversation(flow_state=FlowState.IDLE),
+        _tenant(),
+        None,
+        LABEL_BOOK,
+        professionals=_professionals(),
+    )
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.SERVICE_CATALOG
+    assert res.flow_step == STEP_AWAITING_PROFESSIONAL
 
 
 # --------------------------------------------------------------------------

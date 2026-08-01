@@ -128,6 +128,20 @@ async def test_tenant_oauth_start_returns_authorization_url(client: AsyncClient,
     assert state  # non-empty, opaque signed token
 
 
+async def test_tenant_oauth_start_requests_both_calendar_scopes(
+    client: AsyncClient, tenant
+) -> None:
+    """Reconnecting is how an existing tenant upgrades a token minted before
+    calendar.app.created existed (docs/CHECKPOINT_google_calendar_modes.md) -
+    /start must always request BOTH scopes, not just calendar.events."""
+    response = await client.get("/tenants/me/calendar/oauth/start")
+    assert response.status_code == 200
+    query = parse_qs(urlparse(response.json()["authorization_url"]).query)
+    scopes = query["scope"][0].split()
+    assert "https://www.googleapis.com/auth/calendar.events" in scopes
+    assert "https://www.googleapis.com/auth/calendar.app.created" in scopes
+
+
 # --------------------------------------------------------------------------
 # Per-professional start
 # --------------------------------------------------------------------------

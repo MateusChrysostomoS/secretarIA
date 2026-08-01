@@ -10,6 +10,7 @@ os.environ.setdefault("META_PHONE_NUMBER_ID", "1234567890")
 
 from secretaria.schemas.webhook import (  # noqa: E402
     WebhookMessage,
+    extract_greeting_button,
     extract_inbound_body,
 )
 
@@ -115,3 +116,54 @@ def test_empty_interactive_yields_none() -> None:
         }
     )
     assert extract_inbound_body(msg) is None
+
+
+# --------------------------------------------------------------------------
+# extract_greeting_button
+# --------------------------------------------------------------------------
+
+
+def _greeting_button_msg(button_id: str, title: str = "x") -> WebhookMessage:
+    return WebhookMessage.model_validate(
+        {
+            "id": "wamid.7",
+            "from": "5511999999999",
+            "type": "interactive",
+            "interactive": {
+                "type": "button_reply",
+                "button_reply": {"id": button_id, "title": title},
+            },
+        }
+    )
+
+
+def test_extract_greeting_button_known_action() -> None:
+    for action in ("agendar", "remarcar", "cancelar", "outro"):
+        assert extract_greeting_button(_greeting_button_msg(f"greeting|{action}")) == action
+
+
+def test_extract_greeting_button_legacy_numeric_id() -> None:
+    """A button sent before the fixed-buttons deploy: positional numeric id,
+    the clinic's own (now-unread) free-text label as the title."""
+    msg = _greeting_button_msg("greeting|0", title="Agendar consulta")
+    assert extract_greeting_button(msg) == "0"
+
+
+def test_extract_greeting_button_not_a_greeting_tap_returns_none() -> None:
+    assert extract_greeting_button(_greeting_button_msg("confirm_yes")) is None
+    assert extract_greeting_button(_greeting_button_msg("apptconfirm|123")) is None
+
+
+def test_extract_greeting_button_reactivation_prefix_returns_none() -> None:
+    """Reactivation's Sim/Não use a DISTINCT id prefix precisely so they are
+    never mistaken for a greeting-button tap here (see
+    workers/tasks.py::_send_greeting)."""
+    assert extract_greeting_button(_greeting_button_msg("reactivation|0")) is None
+    assert extract_greeting_button(_greeting_button_msg("reactivation|1")) is None
+
+
+def test_extract_greeting_button_no_button_at_all_returns_none() -> None:
+    msg = WebhookMessage.model_validate(
+        {"id": "wamid.8", "from": "5511999999999", "type": "text", "text": {"body": "oi"}}
+    )
+    assert extract_greeting_button(msg) is None

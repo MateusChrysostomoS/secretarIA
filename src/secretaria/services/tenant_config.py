@@ -360,6 +360,41 @@ async def clear_professional_google_refresh_token(
 # --------------------------------------------------------------------------
 
 
+def _professional_credential(
+    tenant: Tenant | None, own_token: str | None, clinic_token: str | None
+) -> str | None:
+    """Which refresh token to use for ONE professional's Calendar operations.
+
+    THE routing rule for `google_calendar_mode` (docs/CHECKPOINT_google_calendar_modes.md,
+    item 4): shared by every caller that resolves a professional's own
+    Calendar credential — `resolve_professional_calendar` below AND
+    `load_tenant_config`'s single-active-professional branch — so the two can
+    never disagree.
+
+    - **shared_account**: a professional's `google_calendar_id` (when set)
+      was created under the CLINIC's own connected Google account
+      (`ensure_professional_secondary_calendar`, `calendars.insert`) — it
+      does NOT exist under the professional's own account. Pairing the
+      professional's own token with it fails (Google rejects a calendarId
+      the token's account doesn't own). So in this mode the clinic's own
+      token is ALWAYS used for professional-scoped Calendar operations, even
+      when the professional also happens to have their own connected token
+      (e.g. a leftover per_professional connection, or a mode switch —
+      switching modes never clears tokens, see api/hub/config.py).
+    - **per_professional** (default, and any tenant this can't resolve a mode
+      for) — UNCHANGED from this feature's pre-existing behaviour: the
+      professional's own token wins when connected (paired with whatever
+      google_calendar_id it has, however that got configured — e.g. a doctor
+      who pasted in a secondary calendar id of their OWN account), else the
+      clinic's token is the fallback, exactly as before shared_account mode
+      existed.
+    """
+    mode = tenant.google_calendar_mode if tenant is not None else None
+    if mode == "shared_account":
+        return clinic_token
+    return own_token or clinic_token
+
+
 async def list_active_professionals(session: AsyncSession, tenant_id: UUID) -> list[Professional]:
     """Active professionals for `tenant_id`, ordered by name.
 
@@ -391,7 +426,11 @@ async def resolve_professional_calendar(
 
       - refresh token: the professional's own encrypted credential
         (`professional_credentials`) when connected, else the tenant's
-        (`tenant_config.google_refresh_token`; env-last inside CalendarService).
+        (`tenant_config.google_refresh_token`; env-last inside CalendarService) —
+        UNLESS the tenant is in `google_calendar_mode="shared_account"`, in
+        which case the clinic's token is always used (see `_professional_credential`
+        for why: a shared_account `google_calendar_id` only exists under the
+        clinic's own account).
       - hours/services: the professional's own JSON when set, else the
         tenant's (`professional_business_hours` / `professional_appointment_types`).
       - default slot duration: the first active RESOLVED service's
@@ -424,7 +463,7 @@ async def resolve_professional_calendar(
 
     overrides = dict(
         google_calendar_id=professional.google_calendar_id,
-        google_refresh_token=own_token or fallback_token,
+        google_refresh_token=_professional_credential(tenant, own_token, fallback_token),
         business_hours=hours,
         appointment_duration_min=duration,
     )
@@ -662,7 +701,14 @@ async def load_tenant_config(session: AsyncSession, tenant: Tenant) -> TenantRun
         active_types = professional_appointment_types(professional, tenant)
         google_calendar_id = professional.google_calendar_id or tenant.google_calendar_id
         own_token = await get_professional_google_refresh_token(session, professional.id)
-        refresh_token = own_token or refresh_token
+        # `refresh_token` on the right-hand side is still the RAW tenant-level
+        # token captured above (nothing has reassigned it yet) - exactly the
+        # "clinic token" _professional_credential needs, so this correctly
+        # forces it in shared_account mode instead of the professional's own
+        # (see the routing rule's docstring for why that combination is
+        # unsafe: a shared_account calendar_id only exists under the clinic's
+        # own account).
+        refresh_token = _professional_credential(tenant, own_token, refresh_token)
         context_doctor_message = professional.context_doctor_message
         specialty = professional.specialty
         about = professional.about
@@ -695,4 +741,98 @@ async def load_tenant_config(session: AsyncSession, tenant: Tenant) -> TenantRun
         specialty=specialty,
         about=about,
         post_consult_knowledge=tenant.post_consult_knowledge,
+    )
+
+
+# --------------------------------------------------------------------------
+# shared_account mode — per-professional secondary Calendar creation (item 3)
+# --------------------------------------------------------------------------
+
+
+class ClinicCalendarNotConnectedError(Exception):
+    """Raised by `ensure_professional_secondary_calendar` when the tenant has
+    no connected clinic-level Google account to create the secondary
+    calendar under. Mapped to a 4xx by the caller (api/hub/professionals.py) —
+    never a 500."""
+
+
+@dataclass(frozen=True)
+class SecondaryCalendarResult:
+    """Outcome of `ensure_professional_secondary_calendar` — a professional
+    id, its (possibly just-created) google_calendar_id, and whether THIS call
+    created it (False = idempotent no-op, it already had one)."""
+
+    professional_id: UUID
+    google_calendar_id: str
+    created: bool
+
+
+async def ensure_professional_secondary_calendar(
+    session: AsyncSession, tenant: Tenant, professional: Professional
+) -> SecondaryCalendarResult:
+    """Idempotently create a secondary Google Calendar for `professional`
+    under the CLINIC's connected Google account (shared_account mode, item 3
+    of docs/CHECKPOINT_google_calendar_modes.md).
+
+    - `professional` already has a `google_calendar_id` -> returned as-is,
+      `created=False`. NEVER calls `calendars.insert` twice for the same
+      professional (idempotency) — this is also why there is no
+      `calendars.delete` counterpart anywhere in this codebase: deactivating
+      a professional must not touch the calendar it already owns.
+    - Clinic has no connected Google account -> `ClinicCalendarNotConnectedError`.
+    - A stored clinic token that predates the `calendar.app.created` scope ->
+      `GoogleScopeInsufficientError` (raised by `CalendarService.create_secondary_calendar`,
+      propagates unchanged - the caller maps it to the hub's
+      `google_reconnect_required` error code).
+
+    Always uses the CLINIC's own credentials/calendar_id — deliberately NOT
+    `load_tenant_config` (which, for a tenant with exactly one active
+    professional, may resolve `google_refresh_token`/`google_calendar_id`
+    THROUGH that very professional; see `_professional_credential`). Reading
+    `tenant.google_calendar_id`/the clinic token straight off the DB row
+    sidesteps that substitution entirely, so the secondary calendar is always
+    created inside the clinic's account, never a professional's own, no
+    matter how many active professionals the tenant has.
+
+    Caller commits (same convention as `set_google_refresh_token` etc.) and
+    is responsible for tenant/professional ownership checks before calling
+    this (api/hub/professionals.py's existing `_get_professional`).
+    """
+    if professional.google_calendar_id:
+        return SecondaryCalendarResult(
+            professional_id=professional.id,
+            google_calendar_id=professional.google_calendar_id,
+            created=False,
+        )
+
+    clinic_token = await get_google_refresh_token(session, tenant.id)
+    if not clinic_token:
+        raise ClinicCalendarNotConnectedError("Clinic Google Calendar is not connected")
+
+    clinic_config = TenantRuntimeConfig(
+        tenant_id=tenant.id,
+        clinic_name=tenant.clinic_name,
+        greeting_message=None,
+        language=tenant.language,
+        timezone=tenant.timezone,
+        appointment_duration_min=tenant.appointment_duration_min,
+        appointment_types=[],
+        business_hours={},
+        google_calendar_id=tenant.google_calendar_id,
+        google_refresh_token=clinic_token,
+    )
+    summary = f"{professional.name} — {tenant.clinic_name}"
+    created_calendar = await CalendarService.from_tenant_config(
+        clinic_config
+    ).create_secondary_calendar(summary)
+    calendar_id = created_calendar.get("id")
+    if not calendar_id:
+        # Defensive only: calendars.insert always returns an id on success:
+        # `.execute()` raising HttpError is the actual failure path, already
+        # handled inside create_secondary_calendar.
+        raise RuntimeError("Google did not return a calendar id for the new secondary calendar")
+
+    professional.google_calendar_id = calendar_id
+    return SecondaryCalendarResult(
+        professional_id=professional.id, google_calendar_id=calendar_id, created=True
     )

@@ -498,6 +498,55 @@ async def test_load_tenant_config_single_active_professional_resolves_through_it
     assert config.appointment_types[0].requirements == []
 
 
+async def test_load_tenant_config_shared_account_mode_uses_clinic_token(session):
+    """docs/CHECKPOINT_google_calendar_modes.md item 4: the single-active-
+    professional shortcut in load_tenant_config must apply the SAME routing
+    rule as resolve_professional_calendar (test_professional_resolution.py) -
+    a shared_account google_calendar_id only exists under the clinic's own
+    account, so even here (the sole-doctor-clinic path most tenants hit) the
+    professional's own leftover token must never get paired with it."""
+    tenant = await _make_tenant(
+        session,
+        business_hours=_TENANT_HOURS,
+        appointment_types=_TENANT_TYPES,
+        google_calendar_id="tenant-cal",
+        google_calendar_mode="shared_account",
+    )
+    professional = await _make_professional(
+        session, tenant, google_calendar_id="secondary-under-clinic-account"
+    )
+    await set_professional_google_refresh_token(session, professional.id, "professional-own-token")
+    await set_google_refresh_token(session, tenant.id, "clinic-token")
+    await session.commit()
+
+    config = await load_tenant_config(session, tenant)
+
+    assert config.professional_id == professional.id
+    assert config.google_calendar_id == "secondary-under-clinic-account"
+    # The clinic's token, NOT the professional's own - see
+    # services/tenant_config.py::_professional_credential.
+    assert config.google_refresh_token == "clinic-token"
+
+
+async def test_load_tenant_config_per_professional_mode_explicit_uses_own_token(session):
+    """Regression guard, explicit rather than relying on the default: same
+    own-token-plus-own-calendar_id combination as
+    test_load_tenant_config_single_active_professional_resolves_through_it,
+    with google_calendar_mode="per_professional" set explicitly."""
+    tenant = await _make_tenant(session, google_calendar_mode="per_professional")
+    professional = await _make_professional(
+        session, tenant, google_calendar_id="professional-own-cal"
+    )
+    await set_professional_google_refresh_token(session, professional.id, SECRET)
+    await set_google_refresh_token(session, tenant.id, "clinic-token")
+    await session.commit()
+
+    config = await load_tenant_config(session, tenant)
+
+    assert config.google_calendar_id == "professional-own-cal"
+    assert config.google_refresh_token == SECRET
+
+
 async def test_load_tenant_config_carries_appointment_type_requirements(session):
     """`requirements` (pre-consult orientations) survives the dict ->
     RuntimeAppointmentType conversion in `load_tenant_config`, same as

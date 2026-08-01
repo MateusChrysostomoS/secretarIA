@@ -30,7 +30,14 @@ from secretaria.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
+SCOPES = [
+    "https://www.googleapis.com/auth/calendar.events",
+    # Covers calendars.insert AND full CRUD on events in calendars the app
+    # itself created (shared_account mode — create_secondary_calendar below).
+    # calendar.events (above) remains required for calendars the app did NOT
+    # create: the clinic's own primary, and professionals' own accounts.
+    "https://www.googleapis.com/auth/calendar.app.created",
+]
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 # Weekday index (date.weekday(): Mon=0) -> business_hours JSON key.
@@ -78,6 +85,58 @@ def _raise_if_unavailable(exc: HttpError) -> None:
     status = getattr(getattr(exc, "resp", None), "status", None)
     if status in _UNAVAILABLE_HTTP_STATUSES:
         raise CalendarUnavailableError(f"Google Calendar returned HTTP {status}") from exc
+
+
+class GoogleScopeInsufficientError(Exception):
+    """A 403 caused by a token that predates a scope this call needs.
+
+    Raised by `create_secondary_calendar` when a stored refresh token was
+    granted before the `calendar.app.created` scope existed for this tenant
+    (any clinic that connected before this feature shipped). Deliberately
+    DISTINCT from `CalendarUnavailableError`: the fix here is not "wait and
+    retry" or "hand off to a human" — it is "the doctor must reconnect the
+    clinic's Google account" (the OAuth consent screen re-issues a token with
+    the new scope). See api/hub/professionals.py's mapping to the hub's
+    `google_reconnect_required` error code.
+    """
+
+
+# Marker substrings Google has been observed to use for a scope-insufficient
+# 403, checked case-insensitively against the HttpError's reason/details/raw
+# content. Several are matched (rather than one exact shape) because the
+# Calendar API's classic `errors[].reason` error body and the newer
+# `status`/`message`-only body both occur in practice, and we cannot probe
+# the real API from this dev/test environment to pin down which one a given
+# Google backend revision returns — see docs/CHECKPOINT_google_calendar_modes.md.
+_SCOPE_INSUFFICIENT_MARKERS = (
+    "insufficientpermissions",
+    "access_token_scope_insufficient",
+    "insufficient authentication scopes",
+)
+
+
+def _raise_if_scope_insufficient(exc: HttpError) -> None:
+    """Translate a scope-insufficient 403 into GoogleScopeInsufficientError.
+
+    MUST be checked before `_raise_if_unavailable`: a plain 403 is normally
+    treated as a generic outage (token revoked, access denied), but a 403
+    caused specifically by a missing OAuth scope needs the more specific
+    "reconnect" signal instead — see `create_secondary_calendar`. Returns
+    normally (no raise) for anything that isn't a scope-insufficient 403, so
+    the caller falls through to its existing `_raise_if_unavailable` handling.
+    """
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    if status != 403:
+        return
+    content = exc.content
+    content_text = (
+        content.decode("utf-8", errors="ignore") if isinstance(content, bytes) else str(content)
+    )
+    haystack = f"{exc.reason} {exc.error_details} {content_text}".lower()
+    if any(marker in haystack for marker in _SCOPE_INSUFFICIENT_MARKERS):
+        raise GoogleScopeInsufficientError(
+            "Google rejected the request: insufficient OAuth scope"
+        ) from exc
 
 
 class CalendarService:
@@ -448,3 +507,41 @@ class CalendarService:
 
         await asyncio.to_thread(_delete)
         logger.info("calendar_event_cancelled", event_id=event_id)
+
+    async def create_secondary_calendar(self, summary: str) -> dict:
+        """Create a NEW secondary Google Calendar via `calendars.insert`.
+
+        shared_account mode (docs/CHECKPOINT_google_calendar_modes.md): the
+        caller builds this CalendarService with the CLINIC's own credentials
+        (`services/tenant_config.py::ensure_professional_secondary_calendar`)
+        so the new calendar is created inside the clinic's connected Google
+        account, where it shows up in that account's calendar sidebar. This
+        method itself does no tenant/professional resolution or persistence —
+        it is a pure Google API call, same layering as every other method
+        here; the orchestration (idempotency check, persisting the returned
+        id onto `Professional.google_calendar_id`) lives in
+        `services/tenant_config.py`.
+
+        Returns the inserted calendar resource (its `"id"` is the calendarId
+        to persist). Requires the `calendar.app.created` OAuth scope — a
+        token that predates it raises `GoogleScopeInsufficientError` (checked
+        BEFORE the generic outage mapping), never `CalendarUnavailableError`
+        nor an unhandled 500.
+        """
+        body = {"summary": summary, "timeZone": str(self._tz)}
+
+        def _insert() -> dict:
+            try:
+                return self._client().calendars().insert(body=body).execute()
+            except HttpError as exc:
+                logger.error("calendar_secondary_insert_http_error", error=str(exc))
+                _raise_if_scope_insufficient(exc)
+                _raise_if_unavailable(exc)
+                raise
+            except _NETWORK_ERRORS as exc:
+                logger.error("calendar_secondary_insert_network_error", error=str(exc))
+                raise CalendarUnavailableError("Google Calendar unreachable") from exc
+
+        calendar = await asyncio.to_thread(_insert)
+        logger.info("calendar_secondary_created", calendar_id=calendar.get("id"), summary=summary)
+        return calendar

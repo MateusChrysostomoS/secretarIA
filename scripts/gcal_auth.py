@@ -11,7 +11,10 @@ Pre-reqs in .env:
 Pre-reqs in Google Cloud Console (OAuth client of type "Web application"):
   - Authorized redirect URI: http://localhost:8080/
   - Calendar API enabled
-  - Consent screen scope: https://www.googleapis.com/auth/calendar.events
+  - Consent screen scopes: https://www.googleapis.com/auth/calendar.events
+    and https://www.googleapis.com/auth/calendar.app.created (the latter
+    covers calendars.insert + CRUD on app-created calendars - shared_account
+    mode, see docs/CHECKPOINT_google_calendar_modes.md)
   - Your Gmail added as a Test User while the consent screen is in "Testing"
     mode (refresh tokens issued in Testing mode expire after 7 days; publish
     the app for permanent refresh tokens).
@@ -24,7 +27,11 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 
 from secretaria.config import get_settings
 
-SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
+# Mirrors src/secretaria/services/calendar.py::SCOPES.
+SCOPES = [
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/calendar.app.created",
+]
 REDIRECT_URI = "http://localhost:8080/"
 
 

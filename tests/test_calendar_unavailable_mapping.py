@@ -34,8 +34,11 @@ from httplib2 import ServerNotFoundError  # noqa: E402
 
 from secretaria.services import calendar as calendar_mod  # noqa: E402
 from secretaria.services.calendar import (  # noqa: E402
+    SCOPES,
     CalendarService,
     CalendarUnavailableError,
+    GoogleScopeInsufficientError,
+    _raise_if_scope_insufficient,
     _raise_if_unavailable,
 )
 
@@ -164,3 +167,148 @@ async def test_network_failure_during_call_maps_to_unreachable(
     with pytest.raises(CalendarUnavailableError) as exc_info:
         await service.check_availability(now, now)
     assert "unreachable" in str(exc_info.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# Scopes — calendar.app.created added alongside calendar.events (shared_account
+# mode, docs/CHECKPOINT_google_calendar_modes.md).
+# ---------------------------------------------------------------------------
+
+
+def test_scopes_include_events_and_app_created() -> None:
+    assert "https://www.googleapis.com/auth/calendar.events" in SCOPES
+    assert "https://www.googleapis.com/auth/calendar.app.created" in SCOPES
+
+
+# ---------------------------------------------------------------------------
+# GoogleScopeInsufficientError — a 403 caused specifically by a missing OAuth
+# scope (calendar.app.created, on calendars.insert) must be distinguished
+# from the generic outage mapping above, and checked FIRST.
+# ---------------------------------------------------------------------------
+
+
+def _scope_insufficient_http_error() -> HttpError:
+    """Google's classic Calendar API error shape: a top-level `errors[]` list
+    whose `reason` names the specific problem."""
+    resp = SimpleNamespace(status=403, reason="Insufficient Permission")
+    content = (
+        b'{"error": {"errors": [{"domain": "global", "reason": "insufficientPermissions", '
+        b'"message": "Insufficient Permission"}], "code": 403, '
+        b'"message": "Insufficient Permission"}}'
+    )
+    return HttpError(resp=resp, content=content)
+
+
+def _scope_insufficient_http_error_alt_shape() -> HttpError:
+    """The alternate shape some Google backends use: no `errors[]` list, just
+    a `message` naming the missing scope directly (ACCESS_TOKEN_SCOPE_INSUFFICIENT-
+    style wording)."""
+    resp = SimpleNamespace(status=403, reason="Forbidden")
+    content = (
+        b'{"error": {"code": 403, "message": "Request had insufficient authentication '
+        b'scopes.", "status": "PERMISSION_DENIED"}}'
+    )
+    return HttpError(resp=resp, content=content)
+
+
+def test_scope_insufficient_403_classic_shape_maps_to_scope_error() -> None:
+    with pytest.raises(GoogleScopeInsufficientError):
+        _raise_if_scope_insufficient(_scope_insufficient_http_error())
+
+
+def test_scope_insufficient_403_alt_shape_maps_to_scope_error() -> None:
+    with pytest.raises(GoogleScopeInsufficientError):
+        _raise_if_scope_insufficient(_scope_insufficient_http_error_alt_shape())
+
+
+def test_generic_403_does_not_map_to_scope_error() -> None:
+    # No scope-related marker anywhere in the body -> returns normally, so the
+    # caller's _raise_if_unavailable keeps treating it as a generic outage,
+    # exactly as before this feature existed.
+    _raise_if_scope_insufficient(_http_error(403))
+
+
+@pytest.mark.parametrize("status", [401, 404, 409, 500])
+def test_non_403_status_never_maps_to_scope_error(status: int) -> None:
+    _raise_if_scope_insufficient(_http_error(status))
+
+
+# ---------------------------------------------------------------------------
+# create_secondary_calendar — the calendars.insert wrapper (shared_account
+# mode). Exercises the real method, not just the marker-matching helper above.
+# ---------------------------------------------------------------------------
+
+
+def _fake_calendars_service(insert_result_or_exc: object) -> object:
+    """A minimal fake of the googleapiclient `.calendars().insert(...).execute()`
+    chain. `insert_result_or_exc` is returned by `.execute()`, or raised if it
+    is an exception instance."""
+
+    class _Request:
+        def execute(self) -> dict:
+            if isinstance(insert_result_or_exc, BaseException):
+                raise insert_result_or_exc
+            return insert_result_or_exc
+
+    class _Calendars:
+        def insert(self, **kwargs: object) -> _Request:
+            self.body = kwargs.get("body")
+            return _Request()
+
+    class _FakeGoogleService:
+        def __init__(self) -> None:
+            self.calendars_stub = _Calendars()
+
+        def calendars(self) -> _Calendars:
+            return self.calendars_stub
+
+    return _FakeGoogleService()
+
+
+async def test_create_secondary_calendar_scope_insufficient_raises_scope_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = CalendarService(settings=_stub_settings())
+    fake = _fake_calendars_service(_scope_insufficient_http_error())
+    monkeypatch.setattr(service, "_service", fake)
+
+    with pytest.raises(GoogleScopeInsufficientError):
+        await service.create_secondary_calendar("Dra. Ana — Clinic")
+
+
+async def test_create_secondary_calendar_generic_403_still_raises_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard: a 403 without a scope marker still falls through to
+    the pre-existing generic outage mapping, unchanged by this feature."""
+    service = CalendarService(settings=_stub_settings())
+    fake = _fake_calendars_service(_http_error(403))
+    monkeypatch.setattr(service, "_service", fake)
+
+    with pytest.raises(CalendarUnavailableError):
+        await service.create_secondary_calendar("Dra. Ana — Clinic")
+
+
+async def test_create_secondary_calendar_network_failure_raises_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = CalendarService(settings=_stub_settings())
+    fake = _fake_calendars_service(OSError("timed out"))
+    monkeypatch.setattr(service, "_service", fake)
+
+    with pytest.raises(CalendarUnavailableError):
+        await service.create_secondary_calendar("Dra. Ana — Clinic")
+
+
+async def test_create_secondary_calendar_success_returns_inserted_calendar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inserted = {"id": "abc123@group.calendar.google.com", "summary": "Dra. Ana — Clinic"}
+    service = CalendarService(settings=_stub_settings())
+    fake = _fake_calendars_service(inserted)
+    monkeypatch.setattr(service, "_service", fake)
+
+    result = await service.create_secondary_calendar("Dra. Ana — Clinic")
+
+    assert result == inserted
+    assert fake.calendars_stub.body["summary"] == "Dra. Ana — Clinic"

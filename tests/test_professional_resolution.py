@@ -102,7 +102,7 @@ def _tenant_config(tenant_id, refresh_token="tenant-refresh-token") -> TenantRun
     )
 
 
-async def _seed(db, *, own_config: bool):
+async def _seed(db, *, own_config: bool, mode: str = "per_professional"):
     async with db() as session:
         tenant = Tenant(
             id=uuid4(),
@@ -110,6 +110,7 @@ async def _seed(db, *, own_config: bool):
             phone_number_id=str(uuid4())[:12],
             business_hours=_TENANT_HOURS,
             appointment_types=_TENANT_TYPES,
+            google_calendar_mode=mode,
         )
         session.add(tenant)
         await session.flush()
@@ -153,6 +154,20 @@ async def test_new_columns_default_null(db):
         assert conversation.flow_selected_professional_id is None
         assert conversation.flow_selected_insurance is None
         assert appointment.insurance is None
+
+
+async def test_google_calendar_mode_defaults_to_per_professional(db):
+    """A tenant row created without specifying google_calendar_mode (every
+    pre-existing tenant, and any new one the hub creates without touching
+    this field) reads back as "per_professional" - the migration's
+    server_default and the model's Python-side default must agree."""
+    async with db() as session:
+        tenant = Tenant(id=uuid4(), clinic_name="Clinic", phone_number_id="555000222")
+        session.add(tenant)
+        await session.commit()
+        await session.refresh(tenant)
+
+        assert tenant.google_calendar_mode == "per_professional"
 
 
 # --------------------------------------------------------------------------
@@ -233,6 +248,78 @@ async def test_resolver_loads_tenant_config_when_not_passed(db):
     assert call["tenant_config"].tenant_id == tenant.id
     assert call["google_refresh_token"] is None
     assert call["google_calendar_id"] == "ana-calendar"
+
+
+
+# --------------------------------------------------------------------------
+# google_calendar_mode routing rule (docs/CHECKPOINT_google_calendar_modes.md
+# item 4): shared_account ALWAYS uses the clinic's own token for a
+# professional-scoped Calendar operation, even when the professional also
+# has their own connected token - a shared_account google_calendar_id only
+# exists under the clinic's account, so pairing it with the professional's
+# own token would fail.
+# --------------------------------------------------------------------------
+
+
+async def test_shared_account_mode_uses_clinic_token_even_with_own_token(db):
+    tenant, ana = await _seed(db, own_config=True, mode="shared_account")
+    async with db() as session:
+        await set_professional_google_refresh_token(session, ana.id, "ana-own-refresh-token")
+        await session.commit()
+
+    config = _tenant_config(tenant.id, refresh_token="clinic-refresh-token")
+    async with db() as session:
+        await resolve_professional_calendar(session, tenant, ana, tenant_config=config)
+
+    call = _FakeCalendarService.last_call
+    assert call is not None
+    # The calendar id still passes through unchanged (it's the one created
+    # under the clinic's account)...
+    assert call["google_calendar_id"] == "ana-calendar"
+    # ...but paired with the CLINIC's token, never Ana's own.
+    assert call["google_refresh_token"] == "clinic-refresh-token"
+
+
+async def test_shared_account_mode_without_calendar_id_yet_still_uses_clinic_token(db):
+    """Before a secondary calendar has been created for this professional
+    (google_calendar_id still None), shared_account mode already stops using
+    any leftover own token - booking must land under the clinic's own
+    account (its own calendar_id, via for_professional's None-keeps-tenant's-
+    own substitution), never the professional's own account."""
+    tenant, ana = await _seed(db, own_config=False, mode="shared_account")
+    async with db() as session:
+        await set_professional_google_refresh_token(session, ana.id, "ana-own-refresh-token")
+        await session.commit()
+
+    config = _tenant_config(tenant.id, refresh_token="clinic-refresh-token")
+    async with db() as session:
+        await resolve_professional_calendar(session, tenant, ana, tenant_config=config)
+
+    call = _FakeCalendarService.last_call
+    assert call is not None
+    assert call["google_calendar_id"] is None  # not created yet -> tenant's own kept
+    assert call["google_refresh_token"] == "clinic-refresh-token"
+
+
+async def test_per_professional_mode_explicit_still_uses_own_token(db):
+    """Regression guard, explicit rather than relying on the default: with
+    google_calendar_mode="per_professional" set, the combination this
+    feature had to NOT break (own token + own, independently-configured
+    calendar_id) keeps behaving exactly as it did before shared_account mode
+    existed - same assertions as test_resolver_uses_professionals_own_config."""
+    tenant, ana = await _seed(db, own_config=True, mode="per_professional")
+    async with db() as session:
+        await set_professional_google_refresh_token(session, ana.id, "ana-own-refresh-token")
+        await session.commit()
+
+    config = _tenant_config(tenant.id, refresh_token="clinic-refresh-token")
+    async with db() as session:
+        await resolve_professional_calendar(session, tenant, ana, tenant_config=config)
+
+    call = _FakeCalendarService.last_call
+    assert call is not None
+    assert call["google_calendar_id"] == "ana-calendar"
+    assert call["google_refresh_token"] == "ana-own-refresh-token"
 
 
 async def test_resolver_calendar_factory_seam(db):

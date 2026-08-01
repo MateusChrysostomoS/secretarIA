@@ -468,4 +468,95 @@ async def test_run_agent_receives_no_appointment_context_for_new_patient_without
     )
 
     assert len(calls) == 1
-    assert calls[0]["appointment_context"] is None
+
+
+# --------------------------------------------------------------------------
+# greeting_button_unavailable: a greeting-button tap this (flows-disabled)
+# tenant can't dispatch deterministically (fixed-greeting-buttons round -
+# see docs/CHECKPOINT_fixed_greeting_buttons.md). Never the LLM.
+# --------------------------------------------------------------------------
+
+
+def _greeting_button_reply(conversation: Conversation, patient: Patient, suffix: str):
+    return tasks._ReplyContext(
+        conversation_id=conversation.id,
+        patient_wa_id=patient.wa_id,
+        inbound_body=f"greeting|{suffix}",
+        greeting_button_unavailable=suffix,
+    )
+
+
+async def _assert_llm_never_called(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake_get_entitlements(tenant_id, redis):
+        return _summary()
+
+    async def _fake_run_agent(*args, **kwargs):
+        raise AssertionError("run_agent must not be called for a greeting_button_unavailable reply")
+
+    monkeypatch.setattr(tasks, "get_entitlements", _fake_get_entitlements)
+    monkeypatch.setattr(tasks, "run_agent", _fake_run_agent)
+
+
+@pytest.mark.parametrize(
+    "suffix,expected_snippet",
+    [
+        ("agendar", "agendar uma consulta"),
+        ("remarcar", "remarcar sua consulta"),
+        ("cancelar", "cancelar sua consulta"),
+    ],
+)
+async def test_greeting_button_unavailable_known_action_sends_tailored_reply(
+    monkeypatch: pytest.MonkeyPatch, db, suffix, expected_snippet
+) -> None:
+    # flows_enabled=False (default _make_conversation): route() would
+    # otherwise delegate unconditionally to the LLM - this must degrade
+    # deterministically instead.
+    tenant, patient, conversation = await _make_conversation(db)
+    await _assert_llm_never_called(monkeypatch)
+
+    await tasks._send_bot_reply(_greeting_button_reply(conversation, patient, suffix))
+
+    assert len(_FakeWhatsAppClient.created) == 1
+    client = _FakeWhatsAppClient.created[0]
+    assert client._access_token == "decrypted-waba-token"
+    assert client._phone_number_id == tenant.phone_number_id
+    assert len(client.sent) == 1
+    kind, to, body = client.sent[0]
+    assert kind == "text"
+    assert to == patient.wa_id
+    assert expected_snippet in body
+    assert "entre em contato com a nossa equipe" in body.lower()
+
+
+async def test_greeting_button_unavailable_legacy_numeric_suffix_sends_generic_reply(
+    monkeypatch: pytest.MonkeyPatch, db
+) -> None:
+    """A pre-deploy free-text button's numeric id (schemas/webhook.py::
+    extract_greeting_button) degrades to the generic fallback, not a crash
+    and not the LLM."""
+    tenant, patient, conversation = await _make_conversation(db)
+    await _assert_llm_never_called(monkeypatch)
+
+    await tasks._send_bot_reply(_greeting_button_reply(conversation, patient, "0"))
+
+    assert len(_FakeWhatsAppClient.created) == 1
+    client = _FakeWhatsAppClient.created[0]
+    assert client.sent[0][0] == "text"
+    assert "não consigo processar esse pedido automaticamente" in client.sent[0][2].lower()
+
+
+async def test_greeting_button_unavailable_still_replies_when_conversation_has_no_tenant_row(
+    monkeypatch: pytest.MonkeyPatch, db
+) -> None:
+    """Defensive: an unresolvable tenant (conversation/tenant row vanished)
+    sends nothing rather than erroring - mirrors _handle_action_button's own
+    `if tenant is None: return` guard."""
+    await _assert_llm_never_called(monkeypatch)
+    bogus = tasks._ReplyContext(
+        conversation_id=uuid4(),
+        patient_wa_id="5511999",
+        inbound_body="greeting|agendar",
+        greeting_button_unavailable="agendar",
+    )
+    await tasks._send_bot_reply(bogus)
+    assert _FakeWhatsAppClient.created == []

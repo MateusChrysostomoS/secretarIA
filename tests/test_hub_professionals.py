@@ -462,3 +462,138 @@ async def test_put_config_unknown_id_is_404(
     monkeypatch.setattr(professionals_api, "get_entitlements", _never_called_fake)
     response = await client.put(f"{ENDPOINT}/{uuid4()}/config", json={"specialty": "Ghost"})
     assert response.status_code == 404
+
+
+# --------------------------------------------------------------------------
+# POST /{professional_id}/calendar — shared_account secondary Calendar
+# creation (docs/CHECKPOINT_google_calendar_modes.md item 3). Never gated by
+# entitlements (no monkeypatch of get_entitlements needed/asserted here -
+# these tests would fail loudly with a real brain-api call if the endpoint
+# ever grew one, same as PUT /config's tests never touching it either).
+# --------------------------------------------------------------------------
+
+
+class _FakeSecondaryCalendar:
+    """Stands in for CalendarService so these tests never call real Google
+    APIs. Monkeypatched onto services.tenant_config.CalendarService."""
+
+    calls: list[str] = []
+    raise_scope_error = False
+
+    def __init__(self, config) -> None:
+        self._config = config
+
+    async def create_secondary_calendar(self, summary: str) -> dict:
+        from secretaria.services.calendar import GoogleScopeInsufficientError
+
+        _FakeSecondaryCalendar.calls.append(summary)
+        if _FakeSecondaryCalendar.raise_scope_error:
+            raise GoogleScopeInsufficientError("insufficient scope")
+        return {"id": f"secondary-{len(_FakeSecondaryCalendar.calls)}@group.calendar.google.com"}
+
+
+class _FakeCalendarServiceFactory:
+    @staticmethod
+    def from_tenant_config(config):
+        return _FakeSecondaryCalendar(config)
+
+
+def _patch_calendar_service(
+    monkeypatch: pytest.MonkeyPatch, *, raise_scope_error: bool = False
+) -> None:
+    from secretaria.services import tenant_config as tc
+
+    _FakeSecondaryCalendar.calls = []
+    _FakeSecondaryCalendar.raise_scope_error = raise_scope_error
+    monkeypatch.setattr(tc, "CalendarService", _FakeCalendarServiceFactory)
+
+
+async def test_create_calendar_creates_and_persists_when_clinic_connected(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from secretaria.services.tenant_config import set_google_refresh_token
+
+    prof = await _seed_professional(db, tenant, name="Dra. Ana", google_calendar_id=None)
+    async with db() as session:
+        await set_google_refresh_token(session, tenant.id, "clinic-refresh-token")
+        await session.commit()
+    _patch_calendar_service(monkeypatch)
+
+    response = await client.post(f"{ENDPOINT}/{prof.id}/calendar")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["created"] is True
+    assert body["professional_id"] == str(prof.id)
+    assert body["google_calendar_id"] == "secondary-1@group.calendar.google.com"
+    assert _FakeSecondaryCalendar.calls == ["Dra. Ana — Clinic"]
+
+    async with db() as session:
+        refreshed = await session.get(Professional, prof.id)
+        assert refreshed.google_calendar_id == "secondary-1@group.calendar.google.com"
+
+
+async def test_create_calendar_is_idempotent_when_already_set(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prof = await _seed_professional(db, tenant, google_calendar_id="already-there")
+    _patch_calendar_service(monkeypatch)
+
+    response = await client.post(f"{ENDPOINT}/{prof.id}/calendar")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["created"] is False
+    assert body["google_calendar_id"] == "already-there"
+    assert _FakeSecondaryCalendar.calls == []  # calendars.insert never called
+
+
+async def test_create_calendar_clinic_not_connected_is_422_structured(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prof = await _seed_professional(db, tenant, google_calendar_id=None)
+    _patch_calendar_service(monkeypatch)
+
+    response = await client.post(f"{ENDPOINT}/{prof.id}/calendar")
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "clinic_calendar_not_connected"
+    assert _FakeSecondaryCalendar.calls == []
+
+
+async def test_create_calendar_scope_insufficient_maps_to_409_reconnect(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from secretaria.services.tenant_config import set_google_refresh_token
+
+    prof = await _seed_professional(db, tenant, google_calendar_id=None)
+    async with db() as session:
+        await set_google_refresh_token(session, tenant.id, "stale-refresh-token")
+        await session.commit()
+    _patch_calendar_service(monkeypatch, raise_scope_error=True)
+
+    response = await client.post(f"{ENDPOINT}/{prof.id}/calendar")
+    assert response.status_code == 409
+    body = response.json()
+    assert body["detail"]["code"] == "google_reconnect_required"
+    assert "Reconecte" in body["detail"]["message"]
+
+    async with db() as session:
+        refreshed = await session.get(Professional, prof.id)
+        assert refreshed.google_calendar_id is None  # untouched on failure
+
+
+async def test_create_calendar_unowned_professional_is_404(client: AsyncClient, db) -> None:
+    async with db() as session:
+        other_tenant = Tenant(id=uuid4(), clinic_name="Other", phone_number_id="other-num-3")
+        session.add(other_tenant)
+        await session.commit()
+        foreign = Professional(tenant_id=other_tenant.id, name="Foreign Doc", is_active=True)
+        session.add(foreign)
+        await session.commit()
+        await session.refresh(foreign)
+
+    response = await client.post(f"{ENDPOINT}/{foreign.id}/calendar")
+    assert response.status_code == 404
+
+
+async def test_create_calendar_unknown_id_is_404(client: AsyncClient) -> None:
+    response = await client.post(f"{ENDPOINT}/{uuid4()}/calendar")
+    assert response.status_code == 404

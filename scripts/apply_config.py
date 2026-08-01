@@ -43,7 +43,6 @@ _ALLOWED_FIELDS = (
     "contact_email",
     "greeting_message",
     "returning_greeting_message",
-    "greeting_buttons",
     "persona_notes",
     "language",
     "timezone",
@@ -79,10 +78,15 @@ def _validate(data: dict) -> list[str]:
             warnings.append(f"{label}: {len(buttons)} buttons; WhatsApp shows only the first 3.")
         for b in buttons:
             if isinstance(b, str) and len(b) > 20:
-                warnings.append(f"{label}: '{b}' is >20 chars; WhatsApp truncates reply-button titles.")
+                warnings.append(
+                    f"{label}: '{b}' is >20 chars; WhatsApp truncates reply-button titles."
+                )
 
-    if "greeting_buttons" in data:
-        _check_buttons("greeting_buttons", data["greeting_buttons"])
+    # NOTE: "greeting_buttons" is intentionally NOT in _ALLOWED_FIELDS anymore
+    # (the greeting's buttons are now a fixed, product-defined set - see
+    # docs/CHECKPOINT_fixed_greeting_buttons.md) - a config file that still
+    # sets it gets the generic "ignoring unknown keys" skip message below,
+    # not a dedicated check here.
     if isinstance(data.get("initial_flows"), dict) and "buttons" in data["initial_flows"]:
         _check_buttons("initial_flows.buttons", data["initial_flows"]["buttons"])
 

@@ -121,13 +121,16 @@ class TenantConfigUpdate(BaseModel):
 
     greeting_message: str | None = Field(default=None, max_length=4000)
     returning_greeting_message: str | None = Field(default=None, max_length=4000)
-    greeting_buttons: list[str] | None = None
     persona_notes: str | None = Field(default=None, max_length=4000)
     post_consult_message: str | None = Field(default=None, max_length=4000)
     post_consult_knowledge: str | None = Field(default=None, max_length=4000)
     language: str | None = Field(default=None, max_length=8)
     timezone: str | None = None
     google_calendar_id: str | None = Field(default=None, max_length=255)
+    # "per_professional" (default) | "shared_account" — see
+    # services/tenant_config.py's routing rule. Switching modes is
+    # non-destructive: never touches tokens or professional.google_calendar_id.
+    google_calendar_mode: Literal["per_professional", "shared_account"] | None = None
     appointment_duration_min: int | None = Field(default=None, gt=0, le=600)
     business_hours: dict[str, list[TimeWindow]] | None = None
     appointment_types: list[AppointmentType] | None = None
@@ -190,48 +193,25 @@ class TenantConfigUpdate(BaseModel):
     ) -> dict[str, list[TimeWindow]] | None:
         return None if value is None else _validate_business_hours(value)
 
-    @field_validator("greeting_buttons")
-    @classmethod
-    def _check_greeting_buttons(cls, value: list[str] | None) -> list[str] | None:
-        """Trim labels, reject blanks/dupes and enforce WhatsApp's 3x20 limits."""
-        if value is None:
-            return None
-        cleaned: list[str] = []
-        seen: set[str] = set()
-        for raw in value:
-            label = raw.strip()
-            if not label:
-                raise ValueError("greeting button labels cannot be blank")
-            if len(label) > MAX_BUTTON_LABEL_CHARS:
-                raise ValueError(
-                    f"greeting button label {label!r} exceeds "
-                    f"{MAX_BUTTON_LABEL_CHARS} characters"
-                )
-            key = label.casefold()
-            if key in seen:
-                raise ValueError(f"duplicate greeting button label {label!r}")
-            seen.add(key)
-            cleaned.append(label)
-        if len(cleaned) > MAX_GREETING_BUTTONS:
-            raise ValueError(f"at most {MAX_GREETING_BUTTONS} greeting buttons allowed")
-        return cleaned
-
     @model_validator(mode="after")
-    def _check_greeting_with_buttons(self) -> "TenantConfigUpdate":
-        """A greeting that carries buttons must fit WhatsApp's interactive body cap.
+    def _check_greeting_within_button_cap(self) -> "TenantConfigUpdate":
+        """The greeting always ships with fixed action buttons attached.
 
-        Only enforced when both fields arrive in the same request (the hub form
-        sends them together); a buttons-only update can't see the stored body.
+        Since the fixed-greeting-buttons round (see
+        docs/CHECKPOINT_fixed_greeting_buttons.md), `greeting_message` /
+        `returning_greeting_message` are ALWAYS sent with the product-defined
+        action buttons (workers/tasks.py::_greeting_buttons_for) whenever
+        either is configured at all - there is no more "buttons vs plain
+        text" choice for the hub to make. So each must unconditionally fit
+        WhatsApp's smaller interactive-body cap (1024 chars), not the plain
+        4096-char text cap the Field on its own allows.
         """
-        if (
-            self.greeting_buttons
-            and self.greeting_message is not None
-            and len(self.greeting_message) > MAX_GREETING_WITH_BUTTONS_CHARS
-        ):
-            raise ValueError(
-                f"a greeting with buttons must be at most "
-                f"{MAX_GREETING_WITH_BUTTONS_CHARS} characters"
-            )
+        for value in (self.greeting_message, self.returning_greeting_message):
+            if value is not None and len(value) > MAX_GREETING_WITH_BUTTONS_CHARS:
+                raise ValueError(
+                    f"greeting must be at most {MAX_GREETING_WITH_BUTTONS_CHARS} "
+                    f"characters (it is always sent with action buttons attached)"
+                )
         return self
 
     @field_validator("timezone")
@@ -247,18 +227,24 @@ class TenantConfigUpdate(BaseModel):
 
 
 class TenantConfigRead(BaseModel):
-    """GET/PUT response. Never includes secrets — only a `calendar_connected` flag."""
+    """GET/PUT response. Never includes secrets — only a `calendar_connected` flag.
+
+    `greeting_buttons` is INTENTIONALLY absent: the greeting's buttons are a
+    fixed, product-defined set (workers/tasks.py::_greeting_buttons_for), not
+    hub-editable, so there is nothing left for this response to report - see
+    docs/CHECKPOINT_fixed_greeting_buttons.md for the full contract change.
+    """
 
     clinic_name: str
     greeting_message: str | None
     returning_greeting_message: str | None
-    greeting_buttons: list[str]
     persona_notes: str | None
     post_consult_message: str | None
     post_consult_knowledge: str | None
     language: str
     timezone: str
     google_calendar_id: str
+    google_calendar_mode: str
     appointment_duration_min: int
     business_hours: dict
     appointment_types: list
