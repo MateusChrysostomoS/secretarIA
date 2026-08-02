@@ -50,6 +50,7 @@ from secretaria.services import patient_context  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
     LABEL_BOOK,
     LABEL_CANCEL_APPT,
+    LABEL_MANAGE_APPOINTMENT,
     LABEL_OTHER,
     LABEL_RESCHEDULE,
 )
@@ -513,11 +514,14 @@ def test_greeting_buttons_upcoming_trio_wins() -> None:
 
 def test_greeting_buttons_other_states_get_fixed_trio() -> None:
     """NEW / RETURNING_NO_APPOINTMENT / JUST_HAD_CONSULT / no context: the
-    fixed [Agendar, Remarcar, Cancelar] trio — no more tenant-editable menu
-    on the greeting itself (menu_buttons_for still drives mid-conversation
-    re-presentation elsewhere, untouched)."""
+    fixed [Agendar, Gerenciar consulta, Outro] trio — "Gerenciar consulta"
+    consolidates the old separate Remarcar/Cancelar slots into the shared
+    manage sub-flow, freeing the third slot for the explicit "Outro" LLM
+    escape (trio-gerenciar round). No tenant-editable menu on the greeting
+    itself (menu_buttons_for still drives mid-conversation re-presentation
+    elsewhere, untouched)."""
     tenant = _greeting_tenant(initial_flows={"enabled": True})
-    fixed_trio = [LABEL_BOOK, LABEL_RESCHEDULE, LABEL_CANCEL_APPT]
+    fixed_trio = [LABEL_BOOK, LABEL_MANAGE_APPOINTMENT, LABEL_OTHER]
     for context in (
         PatientOpeningContext(state=PatientOpeningState.NEW),
         PatientOpeningContext(state=PatientOpeningState.RETURNING_NO_APPOINTMENT, has_history=True),
@@ -531,18 +535,19 @@ def test_greeting_buttons_other_states_get_fixed_trio() -> None:
 
 
 def test_greeting_buttons_flows_disabled_also_gets_fixed_trio() -> None:
-    """Flow-less (pure LLM) tenants now get the SAME fixed trio - a tap just
-    can't be dispatched by route() there, so `_persist_inbound_message`'s
-    greeting-button short-circuit degrades it to a fixed reply instead
-    (`_handle_greeting_button_unavailable`), never the LLM. Reverses the
-    pre-round behaviour (this tenant used to keep its own free-text
-    `greeting_buttons` here) - see docs/CHECKPOINT_fixed_greeting_buttons.md."""
+    """Flow-less (pure LLM) tenants get the SAME fixed trio - an Agendar/
+    Gerenciar tap can't be dispatched by route() there, so
+    `_persist_inbound_message`'s greeting-button short-circuit degrades those
+    to a fixed reply (`_handle_greeting_button_unavailable`); "Outro" is
+    exempt on purpose and falls through to this cohort's normal all-LLM path
+    (exactly what that button promises). See
+    docs/CHECKPOINT_fixed_greeting_buttons.md + the trio-gerenciar round."""
     tenant = _greeting_tenant(initial_flows={}, greeting_buttons=["Agendar", "Falar com humano"])
     context = PatientOpeningContext(
         state=PatientOpeningState.HAS_UPCOMING_SOON,
         future_appointments=[{"start_at": NOW + timedelta(hours=24)}],
     )
-    fixed_trio = [LABEL_BOOK, LABEL_RESCHEDULE, LABEL_CANCEL_APPT]
+    fixed_trio = [LABEL_BOOK, LABEL_MANAGE_APPOINTMENT, LABEL_OTHER]
     # HAS_UPCOMING doesn't win here either: that special case requires
     # flows_enabled(tenant) too (see the function's own condition).
     assert tasks._greeting_buttons_for(tenant, "Olá!", context) == fixed_trio

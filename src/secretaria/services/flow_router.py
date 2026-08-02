@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from secretaria.ai.formatter import Bubble, ButtonBubble, SlotsBubble, TextBubble
+from secretaria.ai.scoped_help import run_professional_help, run_service_help
 from secretaria.core.logging import get_logger
 from secretaria.models import FlowState
 from secretaria.services.calendar import CalendarService, CalendarUnavailableError
@@ -77,8 +78,13 @@ INSURANCE_PROMPT_OTHER = "Qual é o nome do seu convênio?"
 
 # WhatsApp caps interactive lists at 10 rows. Professionals beyond the cap are
 # dropped (with a warning) — pagination is out of scope this round. Insurance
-# plans keep 2 slots for the fixed Particular/Outro rows.
+# plans keep 2 slots for the fixed Particular/Outro rows. The professional and
+# service lists both reserve their LAST row for the fixed "Não sei"
+# scoped-help entry, so real options cap at 9 there — without the reserve,
+# send_list's silent [:10] would drop the help row exactly when the catalog is
+# fullest.
 MAX_PROFESSIONAL_ROWS = 10
+MAX_CATALOG_OPTION_ROWS = MAX_PROFESSIONAL_ROWS - 1
 MAX_INSURANCE_PLAN_ROWS = 8
 # Same hard WhatsApp limit for the manage flow's "pick an appointment" list
 # (_manage_pick_list_bubble). A patient with more upcoming appointments than
@@ -106,13 +112,44 @@ LABEL_BACK = "Voltar"
 LABEL_YES = "Sim"
 LABEL_NO = "Não"
 
-# The greeting's fixed, product-defined action trio (workers/tasks.py's
+# The greeting's fixed, product-defined action trios (workers/tasks.py's
 # _greeting_buttons_for - NEVER the clinic's own free text; see
-# docs/CHECKPOINT_fixed_greeting_buttons.md). LABEL_RESCHEDULE/LABEL_CANCEL_APPT
-# above are reused as-is; LABEL_BOOK is the new third slot. All three are
-# matched by `route()`'s IDLE dispatch below on BOTH single- and multi-doctor
-# tenants, exactly like the existing LABEL_RESCHEDULE/LABEL_CANCEL_APPT taps.
+# docs/CHECKPOINT_fixed_greeting_buttons.md). The initial/generic greeting
+# sends [LABEL_BOOK, LABEL_MANAGE_APPOINTMENT, LABEL_OTHER]; the
+# returning-patient-with-upcoming-appointment greeting keeps its own
+# [LABEL_RESCHEDULE, LABEL_CANCEL_APPT, LABEL_OTHER] trio unchanged. Every one
+# of these labels is matched by `route()`'s IDLE dispatch below on BOTH
+# single- and multi-doctor tenants. LABEL_MANAGE_APPOINTMENT consolidates the
+# old separate Remarcar/Cancelar slots: it opens the SAME manage sub-flow
+# (_enter_manage - identify the appointment first, THEN ask
+# reschedule-or-cancel via _manage_action_card), freeing a slot for
+# LABEL_OTHER. 18 chars - under WhatsApp's 20-char button-title cap, so the
+# tap echoes it untruncated.
 LABEL_BOOK = "Agendar"
+LABEL_MANAGE_APPOINTMENT = "Gerenciar consulta"
+
+# Fixed last row appended to BOTH catalog lists (professional and service):
+# tapping it opens the matching scoped-help LLM node (STEP_PROFESSIONAL_HELP /
+# STEP_SERVICE_HELP below) instead of requiring the patient to pick blind.
+LABEL_DONT_KNOW = "Não sei"
+
+# Fixed, scope-specific openers each "Não sei" tap replies with (the LLM only
+# enters on the patient's ANSWER, one turn later). Deliberately two distinct
+# nodes with two distinct questions - "which professional fits my case" and
+# "which service fits my need" are different scopes, and neither is the
+# open-ended "Outro" hand-off (ai/scoped_help.py's module docstring).
+PROFESSIONAL_HELP_OPENER = (
+    "O que você está sentindo, ou o que você precisa? "
+    "Vou te ajudar a escolher o profissional certo."
+)
+SERVICE_HELP_OPENER = (
+    "Me conta o que você precisa, que eu te ajudo a escolher o serviço certo."
+)
+# Sent when a scoped-help node gives up (bounded at one clarifying question) -
+# the conversation is then flipped to human handover (action="handover").
+SCOPED_HELP_ESCALATE_MESSAGE = (
+    "Vou te conectar com alguém da nossa equipe para te ajudar. Só um momento. 🙏"
+)
 
 # flow_step values within SERVICE_CATALOG. The two professional-branch steps
 # (multi-doctor tenants) sit AHEAD of the existing ones: professional -> service
@@ -125,6 +162,14 @@ STEP_AWAITING_DAY = "awaiting_day"
 STEP_AWAITING_SLOT = "awaiting_slot"
 STEP_AWAITING_CONFIRMATION = "awaiting_confirmation"
 STEP_AWAITING_RETRY = "awaiting_retry_choice"
+# Scoped-help ("Não sei") steps, still within SERVICE_CATALOG. The *_FINAL
+# variant marks the last allowed exchange: entered after the node's single
+# clarifying question, and a clarify outcome there escalates instead - the
+# 1-2-exchange bound is enforced by this step machine, not by the prompt.
+STEP_PROFESSIONAL_HELP = "professional_help"
+STEP_PROFESSIONAL_HELP_FINAL = "professional_help_final"
+STEP_SERVICE_HELP = "service_help"
+STEP_SERVICE_HELP_FINAL = "service_help_final"
 
 # flow_step values within MANAGE_BOOKING. The reschedule day/slot/confirm steps
 # mirror the booking ones but persist via update_event instead of create_event.
@@ -163,9 +208,14 @@ class FlowRouterResult:
                                 flow-state fields are still written first.
         "calendar_unavailable"- the calendar refused/failed; the caller sends
                                 the unavailability message and hands off.
+        "handover"            - send `bubbles`, then flip the conversation to
+                                human handover (a scoped-help node escalated).
+                                No owner alert email - unlike a calendar
+                                outage, nothing is broken; the human secretary
+                                sees the chat in their own WhatsApp app.
     """
 
-    action: Literal["reply", "delegate_llm", "calendar_unavailable"]
+    action: Literal["reply", "delegate_llm", "calendar_unavailable", "handover"]
     bubbles: list = field(default_factory=list)
     flow_state: FlowState = FlowState.IDLE
     flow_step: str | None = None
@@ -479,9 +529,20 @@ def _selected_managing_appointment_id(conversation: Conversation) -> UUID | None
 
 
 def _service_list_bubble(tenant: Tenant, services: list[dict]) -> Bubble:
+    if len(services) > MAX_CATALOG_OPTION_ROWS:
+        logger.warning(
+            "flow_service_list_truncated",
+            total=len(services),
+            shown=MAX_CATALOG_OPTION_ROWS,
+        )
     rows: list[tuple[str, str]] = [
-        (f"svc|{s.get('name', '')}", str(s.get("name", ""))[:24]) for s in services
+        (f"svc|{s.get('name', '')}", str(s.get("name", ""))[:24])
+        for s in services[:MAX_CATALOG_OPTION_ROWS]
     ]
+    # Fixed last row: opens the scoped service-help node (STEP_SERVICE_HELP).
+    # The id prefix is NOT "svc|" on purpose - extract_inbound_body echoes the
+    # row TITLE for unknown prefixes, so the tap arrives as plain "Não sei".
+    rows.append(("svchelp|0", LABEL_DONT_KNOW))
     return SlotsBubble(
         body="Qual serviço você gostaria de agendar?",
         rows=rows,
@@ -569,10 +630,12 @@ async def route(
     if _label_match(inbound_body, manage_label(tenant)):
         return _enter_manage(tenant, upcoming_appointments or [], professionals)
 
-    # Direct "Agendar"/"Remarcar"/"Cancelar" greeting-button taps: skip the
-    # neutral action card and go straight for the tapped intent
-    # (enter_booking/enter_manage_action). Checked before the multi-doctor
-    # dispatch so it wins on BOTH single- and multi-doctor tenants alike (the
+    # Direct greeting-button taps: skip the neutral menu and go straight for
+    # the tapped intent. "Agendar"/"Gerenciar consulta"/"Outro" is the
+    # initial-greeting trio; "Remarcar"/"Cancelar" still arrive from the
+    # returning-patient-with-upcoming-appointment trio (unchanged - see
+    # _greeting_buttons_for). All checked before the multi-doctor dispatch so
+    # they win on BOTH single- and multi-doctor tenants alike (the
     # multi-doctor menu has no visible manage button, but these labels can
     # still arrive via the greeting buttons). Safe against the booking flow's
     # own "Cancelar"/"Confirmar": those only ever arrive while
@@ -581,6 +644,12 @@ async def route(
     # earlier in this function).
     if _label_match(inbound_body, LABEL_BOOK):
         return enter_booking(tenant, professionals)
+    # "Gerenciar consulta": the same manage sub-flow as the classic manage
+    # label - identify the appointment first (with _enter_manage's
+    # single-appointment shortcut), THEN ask reschedule-or-cancel via the
+    # existing _manage_action_card. Never re-asks doctor/service.
+    if _label_match(inbound_body, LABEL_MANAGE_APPOINTMENT):
+        return _enter_manage(tenant, upcoming_appointments or [], professionals)
     if _label_match(inbound_body, LABEL_RESCHEDULE):
         return enter_manage_action(
             "reschedule", tenant, upcoming_appointments or [], professionals
@@ -756,15 +825,16 @@ def _enter_professional_list(tenant: Tenant, professionals: list) -> FlowRouterR
     """Render the tappable doctor list ("Escolher médico").
 
     Each row carries the professional's specialty as the WhatsApp list-row
-    description — the "apresentação dos médicos" made tappable. Capped at 10
-    rows (WhatsApp hard limit); beyond that we log and truncate, pagination is
-    explicitly out of scope this round.
+    description — the "apresentação dos médicos" made tappable. Real options
+    cap at MAX_CATALOG_OPTION_ROWS (the 10-row WhatsApp hard limit minus the
+    reserved "Não sei" scoped-help row appended last); beyond that we log and
+    truncate, pagination is explicitly out of scope.
     """
-    if len(professionals) > MAX_PROFESSIONAL_ROWS:
+    if len(professionals) > MAX_CATALOG_OPTION_ROWS:
         logger.warning(
             "flow_professional_list_truncated",
             total=len(professionals),
-            shown=MAX_PROFESSIONAL_ROWS,
+            shown=MAX_CATALOG_OPTION_ROWS,
         )
     rows = [
         (
@@ -772,8 +842,13 @@ def _enter_professional_list(tenant: Tenant, professionals: list) -> FlowRouterR
             str(professional.name)[:24],
             (getattr(professional, "specialty", None) or None),
         )
-        for professional in professionals[:MAX_PROFESSIONAL_ROWS]
+        for professional in professionals[:MAX_CATALOG_OPTION_ROWS]
     ]
+    # Fixed last row: opens the scoped professional-help node
+    # (STEP_PROFESSIONAL_HELP). Not "prof|"-prefixed on purpose - the tap must
+    # arrive as the plain "Não sei" title (see extract_inbound_body), never as
+    # a pseudo-professional id.
+    rows.append(("profhelp|0", LABEL_DONT_KNOW, "Te ajudo a escolher"))
     return FlowRouterResult(
         action="reply",
         bubbles=[
@@ -930,6 +1005,119 @@ def _handle_insurance(conversation: Conversation, tenant: Tenant, body: str) -> 
     return result
 
 
+# --------------------------------------------------------------------------
+# Scoped-help nodes ("Não sei" on the professional / service lists)
+# --------------------------------------------------------------------------
+#
+# The "Não sei" tap itself is deterministic (a fixed scope-specific opener +
+# a step flip); the LLM only runs on the patient's ANSWER, via
+# ai/scoped_help.py — a single structured decision grounded on the exact
+# options snapshot this router is holding, never the full agent. Its pick is
+# re-validated here through the same matchers a direct tap uses
+# (_match_professional/_match_service), so the hand-back re-enters the flow
+# exactly like a tap would; anything unresolvable escalates to a human
+# (action="handover") instead of looping. An LLM/network failure degrades to
+# the general agent (delegate_llm), same as any other unhandled turn.
+
+
+def _enter_professional_help(conversation: Conversation) -> FlowRouterResult:
+    """Reply with the professional-scope opener; the LLM runs on the answer."""
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[TextBubble(body=PROFESSIONAL_HELP_OPENER)],
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=STEP_PROFESSIONAL_HELP,
+        flow_selected_insurance=_selected_insurance(conversation),
+    )
+
+
+def _enter_service_help(conversation: Conversation) -> FlowRouterResult:
+    """Reply with the service-scope opener; keeps the selected professional."""
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[TextBubble(body=SERVICE_HELP_OPENER)],
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=STEP_SERVICE_HELP,
+        flow_selected_professional_id=_selected_professional_id(conversation),
+        flow_selected_insurance=_selected_insurance(conversation),
+    )
+
+
+def _scoped_help_escalate() -> FlowRouterResult:
+    """Bounded exit: fixed message + human handover, flow reset to IDLE."""
+    return FlowRouterResult(
+        action="handover",
+        bubbles=[TextBubble(body=SCOPED_HELP_ESCALATE_MESSAGE)],
+        flow_state=FlowState.IDLE,
+        flow_step=None,
+    )
+
+
+async def _handle_professional_help(
+    conversation: Conversation, tenant: Tenant, body: str, professionals: list
+) -> FlowRouterResult:
+    final_round = conversation.flow_step == STEP_PROFESSIONAL_HELP_FINAL
+    try:
+        outcome = await run_professional_help(
+            conversation_id=getattr(conversation, "id", None),
+            professionals=professionals,
+            patient_message=body,
+            final_round=final_round,
+        )
+    except Exception as exc:
+        logger.warning("flow_professional_help_failed", error=str(exc))
+        return _preserve(conversation, "delegate_llm")
+    if outcome.kind == "pick":
+        professional = _match_professional(professionals, outcome.choice)
+        if professional is not None:
+            return _enter_professional_services(professional, tenant)
+        # A pick that doesn't resolve against the real roster (hallucinated /
+        # deactivated mid-exchange) must never be offered back to the patient.
+        logger.warning("flow_professional_help_pick_unresolved")
+        return _scoped_help_escalate()
+    if outcome.kind == "clarify" and not final_round:
+        return FlowRouterResult(
+            action="reply",
+            bubbles=[TextBubble(body=outcome.question or "")],
+            flow_state=FlowState.SERVICE_CATALOG,
+            flow_step=STEP_PROFESSIONAL_HELP_FINAL,
+            flow_selected_insurance=_selected_insurance(conversation),
+        )
+    return _scoped_help_escalate()
+
+
+async def _handle_service_help(
+    conversation: Conversation, tenant: Tenant, body: str, services: list[dict]
+) -> FlowRouterResult:
+    final_round = conversation.flow_step == STEP_SERVICE_HELP_FINAL
+    try:
+        outcome = await run_service_help(
+            conversation_id=getattr(conversation, "id", None),
+            services=services,
+            patient_message=body,
+            final_round=final_round,
+        )
+    except Exception as exc:
+        logger.warning("flow_service_help_failed", error=str(exc))
+        return _preserve(conversation, "delegate_llm")
+    if outcome.kind == "pick":
+        service = _match_service(services, outcome.choice)
+        if service is not None:
+            return _enter_service_detail(service, conversation, tenant)
+        logger.warning("flow_service_help_pick_unresolved")
+        return _scoped_help_escalate()
+    if outcome.kind == "clarify" and not final_round:
+        return FlowRouterResult(
+            action="reply",
+            bubbles=[TextBubble(body=outcome.question or "")],
+            flow_state=FlowState.SERVICE_CATALOG,
+            flow_step=STEP_SERVICE_HELP_FINAL,
+            flow_selected_professional_id=_selected_professional_id(conversation),
+            flow_selected_insurance=_selected_insurance(conversation),
+        )
+    return _scoped_help_escalate()
+
+
 async def _catalog_step(
     conversation: Conversation,
     tenant: Tenant,
@@ -957,31 +1145,26 @@ async def _catalog_step(
     )
 
     if step == STEP_AWAITING_PROFESSIONAL:
+        if _label_match(body, LABEL_DONT_KNOW):
+            return _enter_professional_help(conversation)
         professional = _match_professional(professionals or [], body)
         if professional is None:
             return _preserve(conversation, "delegate_llm")
         return _enter_professional_services(professional, tenant)
 
+    if step in (STEP_PROFESSIONAL_HELP, STEP_PROFESSIONAL_HELP_FINAL):
+        return await _handle_professional_help(conversation, tenant, body, professionals or [])
+
     if step == STEP_AWAITING_SERVICE:
+        if _label_match(body, LABEL_DONT_KNOW):
+            return _enter_service_help(conversation)
         service = _match_service(services, body)
         if service is None:
             return _preserve(conversation, "delegate_llm")
-        name = str(service.get("name", ""))
-        detail = _service_detail_text(service, tenant)
-        return FlowRouterResult(
-            action="reply",
-            bubbles=[
-                ButtonBubble(
-                    body=detail,
-                    confirm_label=LABEL_BOOK_SERVICE,
-                    cancel_label=LABEL_OTHER_SERVICE,
-                )
-            ],
-            flow_state=FlowState.SERVICE_CATALOG,
-            flow_step=STEP_AWAITING_SERVICE_CONFIRM,
-            flow_selected_type=name,
-            flow_selected_professional_id=_selected_professional_id(conversation),
-        )
+        return _enter_service_detail(service, conversation, tenant)
+
+    if step in (STEP_SERVICE_HELP, STEP_SERVICE_HELP_FINAL):
+        return await _handle_service_help(conversation, tenant, body, services)
 
     if step == STEP_AWAITING_SERVICE_CONFIRM:
         if _norm(body) == _norm(LABEL_BOOK_SERVICE):
@@ -1040,6 +1223,33 @@ def _service_detail_text(service: dict, tenant: Tenant) -> str:
         parts.append(str(long_description))
     parts.append("Deseja agendar esse serviço?")
     return "\n\n".join(parts)
+
+
+def _enter_service_detail(
+    service: dict, conversation: Conversation, tenant: Tenant
+) -> FlowRouterResult:
+    """The matched service's detail + Sim/Outro serviço confirm card.
+
+    Factored out of `_catalog_step`'s STEP_AWAITING_SERVICE branch because the
+    scoped service-help node (`_handle_service_help`) re-enters the
+    deterministic flow through this exact result after a validated pick —
+    mirroring how `_enter_professional_services` serves both the tap and the
+    LLM hand-backs.
+    """
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[
+            ButtonBubble(
+                body=_service_detail_text(service, tenant),
+                confirm_label=LABEL_BOOK_SERVICE,
+                cancel_label=LABEL_OTHER_SERVICE,
+            )
+        ],
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=STEP_AWAITING_SERVICE_CONFIRM,
+        flow_selected_type=str(service.get("name", "")),
+        flow_selected_professional_id=_selected_professional_id(conversation),
+    )
 
 
 def _ask_day(conversation: Conversation) -> FlowRouterResult:
@@ -1345,7 +1555,16 @@ def _manage_pick_list_bubble(appointments: list[dict], body: str) -> SlotsBubble
 def _enter_manage(
     tenant: Tenant, appointments: list[dict], professionals: list | None = None
 ) -> FlowRouterResult:
-    """Open the cancel/reschedule flow: list the patient's future appointments."""
+    """Open the cancel/reschedule flow: list the patient's future appointments.
+
+    Exactly ONE upcoming appointment skips the pick list and goes straight to
+    its action card (`_manage_action_card` - the same Remarcar/Cancelar/Voltar
+    question a pick would land on): a one-row "qual consulta?" list asks a
+    question whose answer the system already knows. Same shortcut precedent as
+    `enter_manage_action`'s single-appointment branch. Serves both entries
+    into this function - the greeting's "Gerenciar consulta" button and the
+    classic configurable manage label.
+    """
     if not appointments:
         return FlowRouterResult(
             action="reply",
@@ -1354,6 +1573,15 @@ def _enter_manage(
                 *_menu_bubbles(tenant, professionals),
             ],
             flow_state=FlowState.MENU,
+        )
+    if len(appointments) == 1:
+        appt = appointments[0]
+        return FlowRouterResult(
+            action="reply",
+            bubbles=_manage_action_card(appt),
+            flow_state=FlowState.MANAGE_BOOKING,
+            flow_step=STEP_MANAGE_ACTION,
+            flow_managing_appointment_id=_appt_uuid(appt),
         )
     return FlowRouterResult(
         action="reply",

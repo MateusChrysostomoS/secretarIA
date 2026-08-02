@@ -13,6 +13,12 @@
 > `list_patient_appointments` tool — see
 > `docs/CHECKPOINT_context_aware_opening.md`.
 
+> Follow-up (2026-08-02): the doctor list (and the service list) gained a fixed
+> "Não sei" last row that opens a scoped, grounded, bounded LLM helper node
+> (structured pick/clarify/escalate with a deterministic hand-back) — real
+> option rows now cap at 9 to reserve that slot. See
+> `docs/CHECKPOINT_trio_gerenciar_scoped_help.md`.
+
 Built 2026-07-19, in one session, as three commits on `main` on top of the
 baseline checkpoint commit (`dc09182`, which captured the previously
 uncommitted onboarding/multi-professional working tree and fast-forwarded

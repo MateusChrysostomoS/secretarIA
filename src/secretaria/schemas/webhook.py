@@ -417,9 +417,9 @@ def extract_greeting_button(msg: WebhookMessage) -> str | None:
     """Decode a tap on the greeting's id, when it carries the "greeting|" prefix.
 
     Returns the raw suffix after "greeting|":
-      - a known semantic action ("agendar"/"remarcar"/"cancelar"/"outro" -
-        see workers/tasks.py's `_GREETING_ACTION_IDS`) for a tap on the
-        current, fixed, product-defined greeting buttons
+      - a known semantic action ("agendar"/"gerenciar"/"remarcar"/"cancelar"/
+        "outro" - see workers/tasks.py's `_GREETING_ACTION_IDS`) for a tap on
+        the current, fixed, product-defined greeting buttons
         (workers/tasks.py::_greeting_buttons_for);
       - a bare digit ("0"/"1"/"2") for a LEGACY tap: a button sent before the
         fixed-buttons deploy, back when the id was positional

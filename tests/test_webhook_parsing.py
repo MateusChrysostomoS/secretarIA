@@ -138,7 +138,7 @@ def _greeting_button_msg(button_id: str, title: str = "x") -> WebhookMessage:
 
 
 def test_extract_greeting_button_known_action() -> None:
-    for action in ("agendar", "remarcar", "cancelar", "outro"):
+    for action in ("agendar", "gerenciar", "remarcar", "cancelar", "outro"):
         assert extract_greeting_button(_greeting_button_msg(f"greeting|{action}")) == action
 
 

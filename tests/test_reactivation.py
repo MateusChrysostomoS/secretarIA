@@ -27,8 +27,8 @@ from secretaria.services.flow_router import (  # noqa: E402
     DEFAULT_CONTINUE_PROMPT,
     DEFAULT_REACTIVATION_GAP_MINUTES,
     LABEL_BOOK,
-    LABEL_CANCEL_APPT,
-    LABEL_RESCHEDULE,
+    LABEL_MANAGE_APPOINTMENT,
+    LABEL_OTHER,
     STEP_AWAITING_CONFIRMATION,
     STEP_AWAITING_DAY,
     STEP_AWAITING_RETRY,
@@ -358,10 +358,11 @@ def test_offer_idle_sends_plain_greeting_and_menu_without_arming():
     assert offer is not None
     assert conv.reactivation_origin is None  # nothing to resume -> gate NOT armed
     assert offer.greeting_override == "Oi de novo, Ana!"
-    # Fixed greeting trio (fixed-greeting-buttons round), not the tenant's
-    # configured initial_flows.buttons menu anymore - see
+    # Fixed greeting trio (fixed-greeting-buttons round; consolidated to
+    # Agendar/Gerenciar consulta/Outro in the trio-gerenciar round), not the
+    # tenant's configured initial_flows.buttons menu anymore - see
     # docs/CHECKPOINT_fixed_greeting_buttons.md.
-    assert offer.greeting_buttons == [LABEL_BOOK, LABEL_RESCHEDULE, LABEL_CANCEL_APPT]
+    assert offer.greeting_buttons == [LABEL_BOOK, LABEL_MANAGE_APPOINTMENT, LABEL_OTHER]
 
 
 def test_offer_idle_without_any_greeting_returns_none():

@@ -127,11 +127,8 @@
   "125": "conversation.py",
   "126": "is_menu_command",
   "127": "client",
-  "128": "reactivation_choice_buttons",
   "129": "b06ff85998bf_pix_deposit_asaas.py",
   "130": "f06e85b476f2_onboarding_tenant_professional_config_.py",
-  "131": "iniciar_pre_consulta",
-  "132": "_reactivation_offer",
   "133": "payments_tasks.py",
   "134": "32e87fcf926b_tenant_post_consult_fields.py",
   "135": "6c590bc4ee75_initial_schema.py",
@@ -147,9 +144,6 @@
   "145": "e9f0a1b2c3d4_patient_reminder_opt_out.py",
   "146": "f1a2b3c4d5e6_multi_professional_multi_unit.py",
   "147": "f2b3c4d5e6a7_tenant_returning_greeting.py",
-  "148": "_FakeWhatsAppClient",
-  "149": "TenantCompleteness",
-  "150": "professional.py",
   "151": "__init__.py",
   "152": "__init__.py",
   "153": "__init__.py",
@@ -292,8 +286,5 @@
   "290": "HMAC signature tests",
   "291": "Webhook endpoint tests",
   "292": "TypedDict",
-  "293": "send_calendar_alert",
-  "294": "_calendar_for_appointment",
-  "295": "_filter_active_types",
-  "296": "_professional_missing_reasons"
+  "295": "_filter_active_types"
 }

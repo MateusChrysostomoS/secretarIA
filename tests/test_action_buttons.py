@@ -668,6 +668,54 @@ async def test_greeting_button_flows_enabled_is_not_short_circuited(db):
     assert reply.inbound_body == "Remarcar"  # the label text, routed normally
 
 
+async def test_greeting_button_gerenciar_flows_disabled_short_circuits(db):
+    """The consolidated "Gerenciar consulta" button (trio-gerenciar round)
+    degrades exactly like the actions it replaced: fixed reply, never the
+    LLM."""
+    tenant, patient, conversation, _appt = await _seed(db)
+    msg = _greeting_button_msg("greeting|gerenciar", title="Gerenciar consulta")
+
+    reply = await tasks._persist_inbound_message(
+        phone_number_id=tenant.phone_number_id,
+        wa_id=patient.wa_id,
+        patient_name=None,
+        wam_id=msg.id,
+        body=extract_inbound_body(msg),
+        greeting_button=extract_greeting_button(msg),
+    )
+    assert reply is not None
+    assert reply.greeting_button_unavailable == "gerenciar"
+
+    await tasks._send_bot_reply(reply)
+
+    client = _FakeWhatsAppClient.created[-1]
+    kind, _to, body = client.sent[0]
+    assert kind == "text"
+    assert "remarcar ou cancelar sua consulta" in body.lower()
+    assert "entre em contato com a nossa equipe" in body.lower()
+
+
+async def test_greeting_button_outro_flows_disabled_is_not_short_circuited(db):
+    """"Outro" is exempt from the flows-disabled short-circuit on purpose: it
+    promises the LLM, and this cohort's normal path below IS the LLM - so the
+    tap falls through as the plain "Outro" body instead of degrading to a
+    "contact us" reply."""
+    tenant, patient, conversation, _appt = await _seed(db)
+    msg = _greeting_button_msg("greeting|outro", title="Outro")
+
+    reply = await tasks._persist_inbound_message(
+        phone_number_id=tenant.phone_number_id,
+        wa_id=patient.wa_id,
+        patient_name=None,
+        wam_id=msg.id,
+        body=extract_inbound_body(msg),
+        greeting_button=extract_greeting_button(msg),
+    )
+    assert reply is not None
+    assert reply.greeting_button_unavailable is None
+    assert reply.inbound_body == "Outro"
+
+
 async def test_greeting_button_respects_human_handover(db):
     """UNLIKE action_button, a greeting-button tap is not time/money-critical:
     it respects an active human takeover exactly like any normal message

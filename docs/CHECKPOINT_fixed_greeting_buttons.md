@@ -1,5 +1,12 @@
 # CHECKPOINT — Fixed greeting buttons (product principle: LLM is the last resort)
 
+> **Superseded in part (2026-08-02)**: the initial-greeting trio described here
+> ([Agendar][Remarcar][Cancelar]) was consolidated to
+> **[Agendar][Gerenciar consulta][Outro]** — see
+> `CHECKPOINT_trio_gerenciar_scoped_help.md`. The HAS_UPCOMING(_SOON) trio, the
+> flows-disabled short-circuit mechanism, and the hub-contract removal below remain
+> accurate as described.
+
 Built 2026-08-01. Product principle from the owner (2026-08-01): **the LLM is the last
 resort, never the default** — conversation entry points must route deterministically
 whenever possible. This round implements that at the main entry point: the conversation-

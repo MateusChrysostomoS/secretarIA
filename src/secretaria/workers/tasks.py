@@ -78,6 +78,7 @@ from secretaria.services.entitlements_client import get_entitlements
 from secretaria.services.flow_router import (
     LABEL_BOOK,
     LABEL_CANCEL_APPT,
+    LABEL_MANAGE_APPOINTMENT,
     LABEL_OTHER,
     LABEL_RESCHEDULE,
     STEP_MANAGE_CANCEL_CONFIRM,
@@ -457,9 +458,10 @@ async def _persist_inbound_message(
     is checked AFTER the handover check (unlike `action_button` above - a
     greeting-button tap is not time/money-sensitive, so it respects an active
     human takeover like a normal message would): when set AND this tenant has
-    flows disabled, short-circuits to `greeting_button_unavailable` on the
-    returned context instead of falling through to the normal dispatch below
-    - see that field's docstring on `_ReplyContext`.
+    flows disabled AND it isn't the "outro" LLM-escape suffix, short-circuits
+    to `greeting_button_unavailable` on the returned context instead of
+    falling through to the normal dispatch below - see that field's docstring
+    on `_ReplyContext` and the inline comment at the check.
     """
     async with async_session_factory() as session:
         try:
@@ -580,10 +582,20 @@ async def _persist_inbound_message(
                 # top-of-function flows_enabled gate). A flows-ENABLED tenant's
                 # tap is NOT special-cased here - it falls through to the
                 # normal dispatch below, which route() already handles
-                # deterministically (LABEL_BOOK/LABEL_RESCHEDULE/
-                # LABEL_CANCEL_APPT, or a graceful "here's the menu again" for
-                # a stale/legacy label route() doesn't recognize).
-                if greeting_button is not None and not flows_enabled(tenant):
+                # deterministically (LABEL_BOOK/LABEL_MANAGE_APPOINTMENT/
+                # LABEL_RESCHEDULE/LABEL_CANCEL_APPT, or a graceful "here's
+                # the menu again" for a stale/legacy label route() doesn't
+                # recognize). "Outro" is exempt for BOTH cohorts: it IS the
+                # deliberate LLM hand-off, and for a flows-disabled tenant the
+                # normal path below already goes straight to the LLM - exactly
+                # what the button promises - so short-circuiting it to a
+                # "contact us" degrade would break the one button that works
+                # fine for them.
+                if (
+                    greeting_button is not None
+                    and greeting_button != _GREETING_LLM_ESCAPE_SUFFIX
+                    and not flows_enabled(tenant)
+                ):
                     return _ReplyContext(
                         conversation_id=conversation.id,
                         patient_wa_id=wa_id,
@@ -732,16 +744,22 @@ def _greeting_buttons_for(
     live upcoming appointment (HAS_UPCOMING/_SOON, from `opening_context`)
     AND flows are enabled, the two most useful actions - Remarcar/Cancelar -
     win the two deterministic slots, with "Outro" filling the third for
-    anything else (unchanged from before this round). Every other case -
-    including a flows-DISABLED tenant, which used to get its own free-text
-    `greeting_buttons` here - gets the same fixed [Agendar, Remarcar,
-    Cancelar] trio: for a flows-enabled tenant route() dispatches each label
-    deterministically (see above); for a flows-disabled one, a tap is caught
-    by `_persist_inbound_message`'s greeting-button short-circuit BEFORE it
-    would ever reach route()'s unconditional LLM delegation, and degrades to
-    a fixed "contact us" reply instead (`_handle_greeting_button_unavailable`)
-    - so no button offered here ever reaches the LLM either way. Empty
-    without a greeting.
+    anything else (unchanged - that trio needs no "Agendar" and so never had
+    the slot-space problem). Every other case - including a flows-DISABLED
+    tenant - gets the fixed [Agendar, Gerenciar consulta, Outro] trio:
+    "Gerenciar consulta" consolidates the old separate Remarcar/Cancelar
+    slots into the ONE manage sub-flow both shared anyway (identify the
+    appointment first, then ask reschedule-or-cancel - flow_router's
+    _enter_manage), freeing the third slot for "Outro", the explicit
+    one-tap LLM escape (previously only reachable by typing free text
+    twice). For a flows-enabled tenant route() dispatches each label
+    deterministically ("Outro" deliberately to the LLM); for a
+    flows-disabled one, Agendar/Gerenciar taps are caught by
+    `_persist_inbound_message`'s greeting-button short-circuit and degrade
+    to a fixed "contact us" reply (`_handle_greeting_button_unavailable`),
+    while "Outro" falls through to that tenant's normal all-LLM path - for
+    that cohort the LLM IS the product, so "anything else" belongs there.
+    Empty without a greeting.
     """
     if greeting_override is None:
         return []
@@ -753,7 +771,7 @@ def _greeting_buttons_for(
         and opening_context.future_appointments
     ):
         return [LABEL_RESCHEDULE, LABEL_CANCEL_APPT, LABEL_OTHER]
-    return [LABEL_BOOK, LABEL_RESCHEDULE, LABEL_CANCEL_APPT]
+    return [LABEL_BOOK, LABEL_MANAGE_APPOINTMENT, LABEL_OTHER]
 
 
 def _format_appointment_when(start_at: datetime, tz_name: str | None) -> str:
@@ -1314,6 +1332,11 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                 if tenant is not None and flows_enabled(tenant):
                     flow_snapshot = (
                         SimpleNamespace(
+                            # The conversation's id rides along so the scoped
+                            # help nodes (ai/scoped_help.py, called from
+                            # route()) can re-read recent history the same
+                            # stateless way run_agent does.
+                            id=conversation.id,
                             flow_state=conversation.flow_state,
                             flow_step=conversation.flow_step,
                             flow_selected_type=conversation.flow_selected_type,
@@ -1351,6 +1374,7 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                     wants_upcoming_appointments = (
                         conversation.flow_state in (FlowState.MANAGE_BOOKING, FlowState.LLM)
                         or _label_match_body(reply.inbound_body, manage_label(tenant))
+                        or _label_match_body(reply.inbound_body, LABEL_MANAGE_APPOINTMENT)
                         or _label_match_body(reply.inbound_body, LABEL_RESCHEDULE)
                         or _label_match_body(reply.inbound_body, LABEL_CANCEL_APPT)
                         or _label_match_body(reply.inbound_body, LABEL_OTHER)
@@ -2166,6 +2190,7 @@ async def _handle_action_button(
 # recognize) gets the generic default below.
 _GREETING_ACTION_UNAVAILABLE_TEXT: dict[str, str] = {
     "agendar": "Para agendar uma consulta, entre em contato com a nossa equipe.",
+    "gerenciar": "Para remarcar ou cancelar sua consulta, entre em contato com a nossa equipe.",
     "remarcar": "Para remarcar sua consulta, entre em contato com a nossa equipe.",
     "cancelar": "Para cancelar sua consulta, entre em contato com a nossa equipe.",
 }
@@ -2411,6 +2436,15 @@ async def _apply_flow_result(
     if result.appointment is not None and not persisted:
         await _handle_calendar_unavailable(reply, redis=redis, tenant=tenant, waba_token=waba_token)
         return True
+    # A scoped-help node escalated: flip to human handover FIRST (mirroring
+    # _handle_calendar_unavailable's order - if the send below fails, the
+    # human is already on it), then tell the patient. No owner email alert:
+    # nothing is broken, the secretary sees the chat in their WhatsApp app.
+    if result.action == "handover":
+        await _set_conversation_human_active(reply.conversation_id)
+        if result.bubbles:
+            await _dispatch_bubbles(reply, result.bubbles, tenant=tenant, waba_token=waba_token)
+        return True
     if result.action == "reply":
         if result.bubbles:
             if cancellation_note:
@@ -2490,15 +2524,23 @@ async def _dispatch_bubbles(
 # Semantic payload-id suffix for each of the greeting's FIXED, product-defined
 # action buttons (see _greeting_buttons_for) - used by _send_greeting below and
 # read back by schemas/webhook.py::extract_greeting_button. Deliberately only
-# covers those four code-constant labels; anything else (reactivation's
+# covers these five code-constant labels; anything else (reactivation's
 # Sim/Não, tenant-configurable) is NOT in this map on purpose - see
-# _send_greeting's comment.
+# _send_greeting's comment. LABEL_RESCHEDULE/LABEL_CANCEL_APPT stay: the
+# HAS_UPCOMING(_SOON) trio still sends them (and old threads keep their
+# buttons tappable long after the initial trio moved to "gerenciar").
 _GREETING_ACTION_IDS: dict[str, str] = {
     LABEL_BOOK: "agendar",
+    LABEL_MANAGE_APPOINTMENT: "gerenciar",
     LABEL_RESCHEDULE: "remarcar",
     LABEL_CANCEL_APPT: "cancelar",
     LABEL_OTHER: "outro",
 }
+
+# The one greeting-button suffix `_persist_inbound_message`'s flows-disabled
+# short-circuit deliberately lets through: "Outro" promises the LLM, and the
+# flows-disabled cohort's normal path IS the LLM.
+_GREETING_LLM_ESCAPE_SUFFIX = _GREETING_ACTION_IDS[LABEL_OTHER]
 
 
 async def _send_greeting(reply: _ReplyContext) -> None:
@@ -2576,6 +2618,30 @@ async def _send_simple_text(to: str, body: str, client: WhatsAppClient | None = 
         await (client or WhatsAppClient()).send_text_message(to=to, body=body)
     except Exception as exc:
         logger.error("worker_simple_text_send_failed", error=str(exc), to=to)
+
+
+async def _set_conversation_human_active(conversation_id: UUID | None) -> None:
+    """Flip one conversation to human handover, in its own short transaction.
+
+    The `_apply_flow_result` "handover" branch's seam (scoped-help
+    escalation). Same defensive shape as `_handle_calendar_unavailable`'s
+    handover block, minus the owner alert - a failure is logged, never
+    raised, so the escalation message still goes out.
+    """
+    if conversation_id is None:
+        return
+    try:
+        async with async_session_factory() as session:
+            async with session.begin():
+                conversation = await session.get(Conversation, conversation_id)
+                if conversation is not None:
+                    await HandoverManager(session).set_human_active(conversation)
+    except Exception as exc:
+        logger.error(
+            "worker_scoped_help_handover_failed",
+            error=str(exc),
+            conversation_id=str(conversation_id),
+        )
 
 
 async def _handle_calendar_unavailable(

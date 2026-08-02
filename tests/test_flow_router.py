@@ -12,13 +12,19 @@ os.environ.setdefault("META_PHONE_NUMBER_ID", "1234567890")
 from zoneinfo import ZoneInfo  # noqa: E402
 
 from secretaria.ai.formatter import ButtonBubble, SlotsBubble, TextBubble  # noqa: E402
+from secretaria.ai.scoped_help import ScopedHelpOutcome  # noqa: E402
 from secretaria.models import FlowState  # noqa: E402
+from secretaria.services import flow_router  # noqa: E402
 from secretaria.services.calendar import CalendarUnavailableError  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
     LABEL_BOOK,
     LABEL_CANCEL_APPT,
+    LABEL_DONT_KNOW,
+    LABEL_MANAGE_APPOINTMENT,
     LABEL_OTHER,
     LABEL_RESCHEDULE,
+    SCOPED_HELP_ESCALATE_MESSAGE,
+    SERVICE_HELP_OPENER,
     STEP_AWAITING_CONFIRMATION,
     STEP_AWAITING_DAY,
     STEP_AWAITING_SERVICE,
@@ -32,6 +38,8 @@ from secretaria.services.flow_router import (  # noqa: E402
     STEP_MANAGE_PICK_CANCEL,
     STEP_MANAGE_PICK_RESCHEDULE,
     STEP_MANAGE_SLOT,
+    STEP_SERVICE_HELP,
+    STEP_SERVICE_HELP_FINAL,
     MenuBubble,
     enter_booking,
     enter_manage_action,
@@ -332,7 +340,16 @@ def _appt_window(
 
 
 async def test_manage_entry_lists_appointments():
-    appts = [_appt_window()]
+    # 2+ appointments: there IS something to disambiguate, so the pick list
+    # shows (the single-appointment case shortcuts - see the test below).
+    appts = [
+        _appt_window(),
+        _appt_window(
+            appt_id=str(uuid4()),
+            event_id="evt-a2",
+            start=datetime(2026, 6, 21, 9, 0, tzinfo=_TZ),
+        ),
+    ]
     res = await route(
         _conversation(flow_state=FlowState.MENU),
         _tenant(),
@@ -346,6 +363,26 @@ async def test_manage_entry_lists_appointments():
     assert isinstance(res.bubbles[0], SlotsBubble)
     # The row id smuggles the start ISO so the tap round-trips to the appt.
     assert res.bubbles[0].rows[0][0] == "slot|2026-06-20T14:00:00-03:00"
+
+
+async def test_manage_entry_single_appointment_skips_pick_to_action_card():
+    """Exactly one upcoming appointment: `_enter_manage` skips the one-row
+    "qual consulta?" list (a question whose answer the system already knows)
+    and lands straight on that appointment's Remarcar/Cancelar/Voltar action
+    card - same shortcut precedent as enter_manage_action's single branch."""
+    res = await route(
+        _conversation(flow_state=FlowState.MENU),
+        _tenant(),
+        _FakeCalendar(),
+        "Remarcar/Cancelar",
+        upcoming_appointments=[_appt_window()],
+    )
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.MANAGE_BOOKING
+    assert res.flow_step == STEP_MANAGE_ACTION
+    assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)
+    assert isinstance(res.bubbles[0], MenuBubble)
+    assert res.bubbles[0].labels == ["Remarcar", "Cancelar", "Voltar"]
 
 
 async def test_manage_entry_empty_returns_menu():
@@ -736,16 +773,226 @@ async def test_route_idle_outro_label_delegates_llm_even_off_menu():
 
 
 async def test_route_manage_label_still_opens_classic_pick_then_action_card():
-    # manage_label ("Remarcar/Cancelar") keeps showing the neutral action card
-    # after a pick, unlike the direct LABEL_RESCHEDULE/LABEL_CANCEL_APPT taps.
-    appt = _appt_window()
+    # manage_label ("Remarcar/Cancelar") keeps the neutral pick -> action-card
+    # sequence (unlike the direct LABEL_RESCHEDULE/LABEL_CANCEL_APPT taps,
+    # which carry their intent); with 2+ appointments the pick list shows.
+    appts = [
+        _appt_window(),
+        _appt_window(
+            appt_id=str(uuid4()),
+            event_id="evt-a2",
+            start=datetime(2026, 6, 22, 10, 0, tzinfo=_TZ),
+        ),
+    ]
     res = await route(
         _conversation(flow_state=FlowState.IDLE),
         _tenant(),
         _FakeCalendar(),
         "Remarcar/Cancelar",
-        upcoming_appointments=[appt],
+        upcoming_appointments=appts,
     )
     assert res.action == "reply"
     assert res.flow_state == FlowState.MANAGE_BOOKING
     assert res.flow_step == STEP_MANAGE_PICK
+
+
+# --------------------------------------------------------------------------
+# "Gerenciar consulta" (trio-gerenciar round): the consolidated greeting slot
+# --------------------------------------------------------------------------
+
+
+async def test_route_idle_manage_appointment_single_goes_straight_to_action_card():
+    """One upcoming appointment: identify it implicitly and ask ONLY the cheap
+    binary question (the existing Remarcar/Cancelar/Voltar action card) -
+    never a one-row pick list, never doctor/service again."""
+    res = await route(
+        _conversation(flow_state=FlowState.IDLE),
+        _tenant(),
+        _FakeCalendar(),
+        LABEL_MANAGE_APPOINTMENT,
+        upcoming_appointments=[_appt_window()],
+    )
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.MANAGE_BOOKING
+    assert res.flow_step == STEP_MANAGE_ACTION
+    assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)
+    assert isinstance(res.bubbles[0], MenuBubble)
+    assert res.bubbles[0].labels == [LABEL_RESCHEDULE, LABEL_CANCEL_APPT, "Voltar"]
+    assert "O que você gostaria de fazer?" in res.bubbles[0].body
+
+
+async def test_route_idle_manage_appointment_multiple_shows_pick_list():
+    appts = [
+        _appt_window(),
+        _appt_window(
+            appt_id=str(uuid4()),
+            event_id="evt-b2",
+            start=datetime(2026, 6, 25, 11, 0, tzinfo=_TZ),
+        ),
+    ]
+    res = await route(
+        _conversation(flow_state=FlowState.IDLE),
+        _tenant(),
+        _FakeCalendar(),
+        LABEL_MANAGE_APPOINTMENT,
+        upcoming_appointments=appts,
+    )
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.MANAGE_BOOKING
+    assert res.flow_step == STEP_MANAGE_PICK
+    assert isinstance(res.bubbles[0], SlotsBubble)
+    assert len(res.bubbles[0].rows) == 2
+
+
+async def test_route_idle_manage_appointment_empty_is_deterministic():
+    """Tapping "Gerenciar consulta" with NO upcoming appointment must NEVER
+    fall to the LLM for lack of data - same empty-state reply as the classic
+    manage entry."""
+    res = await route(
+        _conversation(flow_state=FlowState.IDLE),
+        _tenant(),
+        _FakeCalendar(),
+        LABEL_MANAGE_APPOINTMENT,
+        upcoming_appointments=[],
+    )
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.MENU
+    assert isinstance(res.bubbles[0], TextBubble)
+    assert "não tem" in res.bubbles[0].body.lower()
+    assert isinstance(res.bubbles[1], MenuBubble)
+
+
+# --------------------------------------------------------------------------
+# Scoped service help ("Não sei" on the service list)
+# --------------------------------------------------------------------------
+
+
+async def test_service_list_offers_dont_know_last_row():
+    res = await route(_conversation(flow_state=FlowState.MENU), _tenant(), None, "Serviços e Custo")
+    rows = res.bubbles[0].rows
+    assert rows[-1] == ("svchelp|0", LABEL_DONT_KNOW)
+    # The help row never masquerades as a service row.
+    assert all(row[0].startswith("svc|") for row in rows[:-1])
+
+
+async def test_service_list_reserves_help_slot_at_whatsapp_cap():
+    """12 active services: 9 real rows + the reserved "Não sei" row = 10
+    (WhatsApp's hard cap) - without the reserve, send_list's silent cap
+    would drop the help row exactly when the catalog is fullest."""
+    tenant = _tenant()
+    tenant.appointment_types = [
+        {"name": f"Serviço {i:02d}", "duration_min": 30, "is_active": True, "sort_order": i}
+        for i in range(12)
+    ]
+    res = await route(_conversation(flow_state=FlowState.MENU), tenant, None, "Serviços e Custo")
+    rows = res.bubbles[0].rows
+    assert len(rows) == 10
+    assert rows[-1] == ("svchelp|0", LABEL_DONT_KNOW)
+
+
+async def test_service_dont_know_tap_asks_scoped_opener():
+    """The tap itself is deterministic: fixed service-scope question, step
+    flips to SERVICE_HELP. No LLM call on the tap."""
+    conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_AWAITING_SERVICE)
+    res = await route(conv, _tenant(), None, LABEL_DONT_KNOW)
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.SERVICE_CATALOG
+    assert res.flow_step == STEP_SERVICE_HELP
+    assert isinstance(res.bubbles[0], TextBubble)
+    assert res.bubbles[0].body == SERVICE_HELP_OPENER
+
+
+async def test_service_help_pick_hands_back_to_service_detail(monkeypatch):
+    """A validated pick re-enters the deterministic flow at the service's own
+    detail card - the same result a direct tap on that service produces."""
+    captured = {}
+
+    async def _fake_help(*, conversation_id, services, patient_message, final_round):
+        captured["services"] = services
+        captured["patient_message"] = patient_message
+        captured["final_round"] = final_round
+        return ScopedHelpOutcome(kind="pick", choice="Primeira Consulta")
+
+    monkeypatch.setattr(flow_router, "run_service_help", _fake_help)
+    conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_SERVICE_HELP)
+    res = await route(conv, _tenant(), None, "preciso de uma avaliação completa")
+    assert res.action == "reply"
+    assert res.flow_step == STEP_AWAITING_SERVICE_CONFIRM
+    assert res.flow_selected_type == "Primeira Consulta"
+    assert isinstance(res.bubbles[0], ButtonBubble)
+    assert "R$ 250" in res.bubbles[0].body
+    # Grounding: the node saw the tenant's real catalog and the round flag.
+    assert [s["name"] for s in captured["services"]] == ["Primeira Consulta"]
+    assert captured["patient_message"] == "preciso de uma avaliação completa"
+    assert captured["final_round"] is False
+
+
+async def test_service_help_pick_outside_catalog_escalates(monkeypatch):
+    """A pick that doesn't resolve against the real catalog is never offered
+    back to the patient - bounded escalation instead."""
+
+    async def _fake_help(**kwargs):
+        return ScopedHelpOutcome(kind="pick", choice="Serviço Inventado")
+
+    monkeypatch.setattr(flow_router, "run_service_help", _fake_help)
+    conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_SERVICE_HELP)
+    res = await route(conv, _tenant(), None, "qualquer coisa")
+    assert res.action == "handover"
+    assert res.flow_state == FlowState.IDLE
+    assert res.bubbles[0].body == SCOPED_HELP_ESCALATE_MESSAGE
+
+
+async def test_service_help_clarify_asks_once_then_final_step(monkeypatch):
+    async def _fake_help(**kwargs):
+        return ScopedHelpOutcome(kind="clarify", question="É a sua primeira vez na clínica?")
+
+    monkeypatch.setattr(flow_router, "run_service_help", _fake_help)
+    conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_SERVICE_HELP)
+    res = await route(conv, _tenant(), None, "não sei bem")
+    assert res.action == "reply"
+    assert res.flow_step == STEP_SERVICE_HELP_FINAL
+    assert res.bubbles[0].body == "É a sua primeira vez na clínica?"
+
+
+async def test_service_help_clarify_on_final_round_escalates(monkeypatch):
+    """The 1-2 exchange bound lives in the router: even if the node asks for
+    another clarification on the final step, the flow escalates."""
+    captured = {}
+
+    async def _fake_help(**kwargs):
+        captured["final_round"] = kwargs["final_round"]
+        return ScopedHelpOutcome(kind="clarify", question="Mais uma pergunta?")
+
+    monkeypatch.setattr(flow_router, "run_service_help", _fake_help)
+    conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_SERVICE_HELP_FINAL)
+    res = await route(conv, _tenant(), None, "continuo sem saber")
+    assert captured["final_round"] is True
+    assert res.action == "handover"
+    assert res.bubbles[0].body == SCOPED_HELP_ESCALATE_MESSAGE
+
+
+async def test_service_help_escalate_hands_over(monkeypatch):
+    async def _fake_help(**kwargs):
+        return ScopedHelpOutcome(kind="escalate")
+
+    monkeypatch.setattr(flow_router, "run_service_help", _fake_help)
+    conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_SERVICE_HELP)
+    res = await route(conv, _tenant(), None, "quero falar de outra coisa")
+    assert res.action == "handover"
+    assert res.flow_state == FlowState.IDLE
+    assert res.flow_step is None
+
+
+async def test_service_help_llm_failure_delegates_to_general_agent(monkeypatch):
+    """A scoped-node crash (network, provider outage) degrades to the general
+    agent with state preserved - never a dead end for the patient."""
+
+    async def _fake_help(**kwargs):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(flow_router, "run_service_help", _fake_help)
+    conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_SERVICE_HELP)
+    res = await route(conv, _tenant(), None, "dor de cabeça")
+    assert res.action == "delegate_llm"
+    assert res.flow_state == FlowState.SERVICE_CATALOG
+    assert res.flow_step == STEP_SERVICE_HELP

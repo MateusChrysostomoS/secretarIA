@@ -33,16 +33,22 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 )
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
+from secretaria.ai.formatter import TextBubble  # noqa: E402
 from secretaria.core.database import Base  # noqa: E402
 from secretaria.models import (  # noqa: E402
     Appointment,
     AppointmentStatus,
     Conversation,
     FlowState,
+    HandoverState,
     Patient,
     Tenant,
 )
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
+from secretaria.services.flow_router import (  # noqa: E402
+    SCOPED_HELP_ESCALATE_MESSAGE,
+    FlowRouterResult,
+)
 from secretaria.workers import tasks  # noqa: E402
 
 _ALL_ADDONS_OFF = {
@@ -501,6 +507,7 @@ async def _assert_llm_never_called(monkeypatch: pytest.MonkeyPatch) -> None:
     "suffix,expected_snippet",
     [
         ("agendar", "agendar uma consulta"),
+        ("gerenciar", "remarcar ou cancelar sua consulta"),
         ("remarcar", "remarcar sua consulta"),
         ("cancelar", "cancelar sua consulta"),
     ],
@@ -560,3 +567,43 @@ async def test_greeting_button_unavailable_still_replies_when_conversation_has_n
     )
     await tasks._send_bot_reply(bogus)
     assert _FakeWhatsAppClient.created == []
+
+
+# --------------------------------------------------------------------------
+# _apply_flow_result "handover": the scoped-help escalation seam
+# (trio-gerenciar round - flow_router's _scoped_help_escalate result)
+# --------------------------------------------------------------------------
+
+
+async def test_apply_flow_result_handover_flips_to_human_and_sends_message(db) -> None:
+    """action="handover": flow fields persisted, the escalation message sent,
+    and the conversation flipped to HUMAN_ACTIVE - so the bot goes quiet and
+    the human secretary (who sees the chat in their own WhatsApp app) takes
+    over. No LLM involved."""
+    tenant, patient, conversation = await _make_conversation(
+        db, flows_enabled=True, flow_state=FlowState.SERVICE_CATALOG
+    )
+    reply = tasks._ReplyContext(
+        conversation_id=conversation.id,
+        patient_wa_id=patient.wa_id,
+        inbound_body="não sei mesmo",
+    )
+    result = FlowRouterResult(
+        action="handover",
+        bubbles=[TextBubble(body=SCOPED_HELP_ESCALATE_MESSAGE)],
+        flow_state=FlowState.IDLE,
+        flow_step=None,
+    )
+
+    handled = await tasks._apply_flow_result(
+        reply, result, patient.wa_id, tenant=tenant, waba_token="tok"
+    )
+
+    assert handled is True
+    client = _FakeWhatsAppClient.created[-1]
+    assert client.sent == [("text", patient.wa_id, SCOPED_HELP_ESCALATE_MESSAGE)]
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.handover_state == HandoverState.HUMAN_ACTIVE
+        assert conv.flow_state == FlowState.IDLE
+        assert conv.flow_step is None
