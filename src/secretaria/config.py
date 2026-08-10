@@ -101,6 +101,39 @@ class Settings(BaseSettings):
     # --- Handover (bot <-> human secretary) ---
     HANDOVER_TIMEOUT_MINUTES: int = 30
 
+    # --- Coexistence test-window allowlist (workers/tasks.py) ---
+    # Comma-separated wa_ids allowed to reach the bot / be recorded as a
+    # Patient. In Coexistence, the webhook receives EVERY 1:1 message the
+    # linked number sends or receives - including the owner's personal
+    # contacts, not just clinic patients - plus an echo of everything the
+    # owner sends from the WhatsApp Business app. Empty (the default) means
+    # NO restriction: production behavior, unchanged. Set this only for a
+    # time-boxed Coexistence test with a real number, to stop random personal
+    # contacts from getting the clinic greeting and turning into Patient rows.
+    BOT_ALLOWLIST_WA_IDS: str = ""
+
+    @property
+    def bot_allowlist_wa_ids(self) -> frozenset[str]:
+        """Parse BOT_ALLOWLIST_WA_IDS into a set of digits-only wa_ids.
+
+        Meta always sends `wa_id`/`from` as digits only, but whoever configures
+        this env var is likely to paste a human-formatted number like
+        "+55 (11) 99999-8888" - so each entry is reduced to its digits before
+        comparison. Surrounding quotes are stripped first (some deploy panels
+        persist the value with the quotes included, same as CORS_ALLOW_ORIGINS
+        above), and empty entries are dropped.
+
+        An empty result means "no restriction" - callers must check for that
+        explicitly rather than treating an empty set as "allow nothing".
+        """
+        wa_ids: set[str] = set()
+        for raw in self.BOT_ALLOWLIST_WA_IDS.split(","):
+            cleaned = raw.strip().strip("'\"")
+            digits = "".join(filter(str.isdigit, cleaned))
+            if digits:
+                wa_ids.add(digits)
+        return frozenset(wa_ids)
+
     # --- Context-aware opening greeting (workers/tasks.py + services/patient_context.py) ---
     # Hours ahead of now within which an upcoming appointment counts as "soon"
     # (opening state HAS_UPCOMING_SOON vs HAS_UPCOMING).

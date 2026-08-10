@@ -149,6 +149,10 @@ open session and does not commit (API layer commits once).
 
 ## Webhook Coexistence signals (`workers/tasks.py`)
 
+> See also `docs/CHECKPOINT_coexistence.md` — the real-number test-window
+> allowlist (`BOT_ALLOWLIST_WA_IDS`) that guards `_persist_inbound_message`
+> and `_persist_human_echo` below landed later, on top of this section.
+
 - `_handle_history` (field `history`): tracks WhatsApp's Coexistence
   chat-history sync progress ONLY — `history_sync_status` flips
   `none→in_progress` on the first chunk, `→done` (+`history_synced_at`) once

@@ -5,10 +5,14 @@ POST /webhook  - receives events: validates HMAC, dedupes, enqueues to arq.
 
 WEBHOOK FIELDS TO SUBSCRIBE in Meta for Developers
 (App -> WhatsApp -> Configuration -> Webhook fields):
-  * messages            - inbound patient messages.
-  * smb_message_echoes  - echoes of messages sent by the human secretary
-                          from the WhatsApp mobile app. Required for the
-                          Coexistence handover logic.
+  * messages              - inbound patient messages.
+  * smb_message_echoes    - echoes of messages the human secretary sends
+                            from the WhatsApp Business app (Coexistence
+                            handover).
+  * history               - Coexistence chat-history sync chunks (progress
+                            only; content never ingested - LGPD).
+  * smb_app_state_sync    - Coexistence contact/app-state sync (signal
+                            only; content never ingested).
 """
 
 import json

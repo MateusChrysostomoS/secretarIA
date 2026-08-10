@@ -488,6 +488,24 @@ async def _persist_inbound_message(
                         service_unavailable=True,
                     )
 
+                # Coexistence test-window allowlist (config.py::bot_allowlist_wa_ids):
+                # an empty allowlist means no restriction (production default,
+                # untouched below). When non-empty, silently drop anyone not on
+                # it - no reply at all, not even service_unavailable, and no
+                # Patient/Conversation/ConsentEvent. The ProcessedEvent row added
+                # above is intentionally kept: this event WAS seen, it is being
+                # discarded on purpose, not lost to a retry.
+                allowlist = get_settings().bot_allowlist_wa_ids
+                if allowlist:
+                    digits_wa_id = "".join(filter(str.isdigit, wa_id))
+                    if digits_wa_id not in allowlist:
+                        logger.info(
+                            "worker_wa_id_not_allowlisted",
+                            wa_id_suffix=digits_wa_id[-4:],
+                            tenant_id=str(tenant.id),
+                        )
+                        return None
+
                 # A patient row that already existed means this person has
                 # contacted the clinic before (robust to /menu wiping history).
                 patient = await session.scalar(
@@ -558,7 +576,13 @@ async def _persist_inbound_message(
                 # Reminder action-button tap: short-circuit BEFORE the
                 # handover/flow/LLM gates below (see this function's
                 # docstring) - `_handle_action_button` does its own
-                # tenant-scoped appointment lookup and reply.
+                # tenant-scoped appointment lookup and reply. The
+                # allowlist guard above already covers this path too: it
+                # returns before `action_button` is ever attached to a
+                # `_ReplyContext`, so a non-allowlisted wa_id never reaches
+                # `_handle_action_button` (dispatched from `_send_bot_reply`,
+                # which only runs when `_persist_inbound_message` returns
+                # non-None).
                 if action_button is not None:
                     return _ReplyContext(
                         conversation_id=conversation.id,
@@ -3124,8 +3148,31 @@ async def _persist_human_echo(
 
                 # smb_message_echoes is one of the three signals that Coexistence
                 # mode resolved for this tenant (contract v1 §10) - see also
-                # _handle_history / _handle_smb_app_state_sync below.
+                # _handle_history / _handle_smb_app_state_sync below. This runs
+                # BEFORE the allowlist guard below on purpose: the echo is still
+                # proof that Coexistence resolved for this tenant even when the
+                # conversation itself gets discarded for being off-allowlist, so
+                # `mode_resolved_at` must be set either way. `session.begin()`
+                # commits on a clean exit from the `async with` block, including
+                # the early `return` below - the tenant mutation is not lost.
                 _mark_mode_resolved(tenant)
+
+                # Coexistence test-window allowlist (config.py::bot_allowlist_wa_ids):
+                # same rule as `_persist_inbound_message` - an empty allowlist
+                # means no restriction. When non-empty, drop echoes for a patient
+                # not on it: no Patient/Conversation, no Message. The
+                # ProcessedEvent added above stays (event seen, discarded on
+                # purpose).
+                allowlist = get_settings().bot_allowlist_wa_ids
+                if allowlist:
+                    digits_patient_wa_id = "".join(filter(str.isdigit, patient_wa_id))
+                    if digits_patient_wa_id not in allowlist:
+                        logger.info(
+                            "worker_wa_id_not_allowlisted",
+                            wa_id_suffix=digits_patient_wa_id[-4:],
+                            tenant_id=str(tenant.id),
+                        )
+                        return
 
                 patient = await _get_or_create_patient(session, tenant, patient_wa_id, None)
                 conversation = await _get_or_create_conversation(session, tenant, patient)

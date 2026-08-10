@@ -128,6 +128,13 @@ In [Meta for Developers](https://developers.facebook.com) → your App →
   - `messages` — inbound patient messages
   - `smb_message_echoes` — echoes of the human secretary's messages; this is
     the heart of Coexistence handover
+  - `history` — Coexistence chat-history sync chunks (progress only; content
+    never ingested — LGPD)
+  - `smb_app_state_sync` — Coexistence contact/app-state sync (signal only;
+    content never ingested)
+
+For a Coexistence test window with a real number, see
+`docs/CHECKPOINT_coexistence.md` (`BOT_ALLOWLIST_WA_IDS`).
 
 To test locally, expose the API with a tunnel (ngrok / cloudflared).
 

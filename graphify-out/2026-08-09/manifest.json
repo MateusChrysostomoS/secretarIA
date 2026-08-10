@@ -15,8 +15,8 @@
     "semantic_hash": "d22d63a12a1b9004ed5b6705706bb1d2"
   },
   "src/secretaria/config.py": {
-    "mtime": 1786321216.6826708,
-    "ast_hash": "ce1f4ad5b0383f22cc196f54c48e48ae",
+    "mtime": 1785370777.4487102,
+    "ast_hash": "caed8c98aa60b43a0bb44317e934f5f3",
     "semantic_hash": ""
   },
   "src/secretaria/main.py": {
@@ -50,9 +50,9 @@
     "semantic_hash": "165e4e67cbb64071cdfc1812fb6c360a"
   },
   "src/secretaria/api/webhook.py": {
-    "mtime": 1786321216.6826708,
-    "ast_hash": "7dc3bb8162c3cadd211c78d4c5a7acde",
-    "semantic_hash": ""
+    "mtime": 1784501064.9720888,
+    "ast_hash": "8d1867dcc4a36da532d26da75e270de1",
+    "semantic_hash": "8d1867dcc4a36da532d26da75e270de1"
   },
   "src/secretaria/api/__init__.py": {
     "mtime": 1779424135.5753796,
@@ -150,8 +150,8 @@
     "semantic_hash": "34ba04f475059284677157711b5ad1dc"
   },
   "src/secretaria/workers/tasks.py": {
-    "mtime": 1786321216.6826708,
-    "ast_hash": "e7b9753af6fa9ffa4a5dbcb63bdc213d",
+    "mtime": 1785594238.3987875,
+    "ast_hash": "d20c6280d0430df29248cdbe19bd10bf",
     "semantic_hash": ""
   },
   "src/secretaria/workers/__init__.py": {
@@ -190,9 +190,9 @@
     "semantic_hash": "8ed7a2a937b1c67c5ca234d7775d6f3d"
   },
   "README.md": {
-    "mtime": 1786321294.4128315,
-    "ast_hash": "e4a72687381c0bdd91ad8e559132eec0",
-    "semantic_hash": ""
+    "mtime": 1784501064.7087176,
+    "ast_hash": "20b338a4e0da313e5405ae6111025c05",
+    "semantic_hash": "20b338a4e0da313e5405ae6111025c05"
   },
   "scripts/check_scopes.py": {
     "mtime": 1779832328.0834248,
@@ -860,9 +860,9 @@
     "semantic_hash": "609f07b3ac9e91a4833265482b1fad4e"
   },
   "docs/CHECKPOINT_onboarding_multiprofessional.md": {
-    "mtime": 1786321298.347836,
-    "ast_hash": "8f5078961278861ad29bcc78658f5452",
-    "semantic_hash": ""
+    "mtime": 1784769726.57694,
+    "ast_hash": "58fc99f59052b6549ea9f18b0ccf8884",
+    "semantic_hash": "58fc99f59052b6549ea9f18b0ccf8884"
   },
   "migrations/versions/b3d9f2a1c8e7_multi_doctor_flow_columns.py": {
     "mtime": 1784501670.785625,
@@ -1062,21 +1062,6 @@
   "docs/CHECKPOINT_trio_gerenciar_scoped_help.md": {
     "mtime": 1785595490.4914134,
     "ast_hash": "4e67e524a4e6dbef5c9c7bdf74e15c09",
-    "semantic_hash": ""
-  },
-  "tests/test_bot_allowlist.py": {
-    "mtime": 1786321216.7311347,
-    "ast_hash": "2860edca1e885e73818602a7e537c796",
-    "semantic_hash": ""
-  },
-  "docs/CHECKPOINT_coexistence.md": {
-    "mtime": 1786321328.1858077,
-    "ast_hash": "ba75a351946a567c9f95504f3892458a",
-    "semantic_hash": ""
-  },
-  "docs/WORKFLOWS_SECRETARIA.html": {
-    "mtime": 1785597425.76973,
-    "ast_hash": "4a6e44b32a8642391f85b3d25a328fc4",
     "semantic_hash": ""
   }
 }
