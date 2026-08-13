@@ -1,5 +1,8 @@
 # CHECKPOINT — Trio [Agendar][Gerenciar consulta][Outro] + LLM escopada em médico/serviço
 
+> **Superado em parte (2026-08-13):** `flows_enabled` virou incondicional — não existe
+> mais cohort flows-desligado. Ver `CHECKPOINT_flows_unconditional.md`.
+
 Built 2026-08-01/02, direct continuation of `CHECKPOINT_fixed_greeting_buttons.md` (same
 product principle: **the LLM is the last resort, never the default** — but where an LLM
 step IS the right tool, it runs scoped, grounded, and bounded).

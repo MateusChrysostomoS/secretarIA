@@ -122,9 +122,23 @@ class _FakeCalendar:
         return {"id": event_id}
 
 
-async def test_disabled_flows_delegate_llm():
-    res = await route(_conversation(), _tenant(enabled=False), None, "oi")
-    assert res.action == "delegate_llm"
+async def test_flows_run_even_when_never_configured():
+    """The deterministic flows are unconditional now (flow_router.flows_enabled).
+
+    Regression guard for the gate coming back: a tenant carrying the MODEL DEFAULT
+    `initial_flows={}` — which is every clinic at provisioning time, since nothing
+    seeds the key and no hub screen writes it — must still be routed deterministically
+    instead of falling through to the LLM. `{"enabled": False}` is asserted alongside
+    it because an explicitly-stored false is exactly what a stale row would carry.
+    """
+    for initial_flows in ({}, {"enabled": False}):
+        tenant = _tenant()
+        tenant.initial_flows = initial_flows
+        res = await route(_conversation(), tenant, None, "oi")
+        assert res.action == "reply", initial_flows
+        assert res.flow_state == FlowState.MENU, initial_flows
+        # No configured buttons on these rows -> the router's own defaults.
+        assert res.bubbles[0].labels == ["Serviços e Custo", "Remarcar/Cancelar", "Outro"]
 
 
 async def test_idle_unmatched_shows_menu():

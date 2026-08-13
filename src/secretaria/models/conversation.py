@@ -24,8 +24,8 @@ class HandoverState(enum.StrEnum):
 class FlowState(enum.StrEnum):
     """Which deterministic (zero-LLM) flow the conversation is currently in.
 
-    IDLE            - no active flow; the next inbound opens the menu when
-                      the tenant has `initial_flows.enabled`.
+    IDLE            - no active flow; the next inbound opens the menu (for
+                      every tenant — see flow_router.flows_enabled).
     MENU            - the menu buttons were sent; awaiting a tap.
     SERVICE_CATALOG - patient is inside the multi-step service booking flow.
     MANAGE_BOOKING  - patient is inside the cancel/reschedule flow (pick an

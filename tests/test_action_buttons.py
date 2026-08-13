@@ -189,7 +189,6 @@ def _fakes(monkeypatch: pytest.MonkeyPatch, db):
 async def _seed(
     db,
     *,
-    with_flows: bool = False,
     appointment_start_at: datetime | None = None,
     appointment_status: AppointmentStatus = AppointmentStatus.SCHEDULED,
     pix_refund_window_hours: int = 24,
@@ -205,9 +204,9 @@ async def _seed(
             clinic_name="Clinic",
             phone_number_id=str(uuid4())[:12],
             is_active=True,
-            initial_flows=(
-                {"enabled": True, "menu_label": "Como posso ajudar?"} if with_flows else {}
-            ),
+            # Model default. The deterministic flows no longer read an on/off
+            # key (flow_router.flows_enabled), so there is nothing to switch here.
+            initial_flows={},
             pix_deposit_enabled=True,
             pix_refund_window_hours=pix_refund_window_hours,
             pix_retention_policy=pix_retention_policy,
@@ -482,7 +481,7 @@ async def test_apptresched_at_limit_sends_keep_or_cancel_and_leaves_flow_untouch
 
 
 async def test_apptresched_under_limit_enters_manage_flow_preselected(db):
-    tenant, patient, conversation, appt = await _seed(db, with_flows=True, pix_reschedule_limit=2)
+    tenant, patient, conversation, appt = await _seed(db, pix_reschedule_limit=2)
     await _seed_deposit(db, appt, status=PixDepositStatus.PAID, reschedule_count=0)
 
     await tasks._handle_action_button(_reply_ctx(conversation), "apptresched", str(appt.id))
@@ -501,7 +500,7 @@ async def test_apptresched_under_limit_enters_manage_flow_preselected(db):
 
 async def test_apptresched_without_deposit_and_flows_enters_manage_flow(db):
     """No deposit at all -> never blocked, straight into the day-ask."""
-    tenant, patient, conversation, appt = await _seed(db, with_flows=True)
+    tenant, patient, conversation, appt = await _seed(db)
 
     await tasks._handle_action_button(_reply_ctx(conversation), "apptresched", str(appt.id))
 
@@ -511,16 +510,22 @@ async def test_apptresched_without_deposit_and_flows_enters_manage_flow(db):
         assert conv.flow_managing_appointment_id == appt.id
 
 
-async def test_apptresched_without_flows_enabled_gets_polite_fallback(db):
-    tenant, patient, conversation, appt = await _seed(db, with_flows=False)
+async def test_apptresched_enters_manage_flow_on_an_unconfigured_tenant(db):
+    """Replaces the old polite-fallback case, whose premise is gone.
+
+    A clinic that never had `initial_flows` written (`_seed`'s default `{}` — the
+    model default every tenant is provisioned with) used to get "entre em contato
+    com a nossa equipe" here, because the reminder's Remarcar button had no manage
+    flow to enter. It now behaves exactly like the configured tenant above.
+    """
+    tenant, patient, conversation, appt = await _seed(db)
 
     await tasks._handle_action_button(_reply_ctx(conversation), "apptresched", str(appt.id))
 
-    body = _FakeWhatsAppClient.created[-1].sent[0][2]
-    assert "entre em contato" in body.lower()
     async with db() as session:
         conv = await session.get(Conversation, conversation.id)
-        assert conv.flow_state == FlowState.IDLE  # untouched
+        assert conv.flow_state == FlowState.MANAGE_BOOKING
+        assert conv.flow_managing_appointment_id == appt.id
 
 
 # --------------------------------------------------------------------------
@@ -619,41 +624,25 @@ def _greeting_button_msg(button_id: str, title: str = "x", wam_id: str = "wamid.
     )
 
 
-async def test_greeting_button_flows_disabled_short_circuits_end_to_end(db):
-    """flows_enabled=False (default `_seed`): a tap on the greeting's fixed
-    trio is caught BEFORE the normal dispatch and degrades to a fixed reply -
-    never route()'s unconditional LLM delegation."""
+@pytest.mark.parametrize(
+    ("suffix", "title"),
+    [("remarcar", "Remarcar"), ("gerenciar", "Gerenciar consulta")],
+)
+async def test_greeting_button_is_never_short_circuited(db, suffix: str, title: str):
+    """Every greeting-trio tap now falls through to the normal route()-backed
+    dispatch — `greeting_button_unavailable` stays None and the label text is
+    what gets routed.
+
+    These two labels used to have a second, opposite outcome: on a tenant whose
+    `initial_flows` lacked the `enabled` key (i.e. every tenant at provisioning
+    time), `_persist_inbound_message` caught the tap and degraded it to the fixed
+    "entre em contato com a nossa equipe" reply. That branch is unreachable since
+    flow_router.flows_enabled became unconditional — `_seed`'s default tenant,
+    which still carries `initial_flows={}`, is exactly the row that used to take
+    it, so this test doubles as the guard against the gate returning.
+    """
     tenant, patient, conversation, _appt = await _seed(db)
-    msg = _greeting_button_msg("greeting|remarcar", title="Remarcar")
-
-    reply = await tasks._persist_inbound_message(
-        phone_number_id=tenant.phone_number_id,
-        wa_id=patient.wa_id,
-        patient_name=None,
-        wam_id=msg.id,
-        body=extract_inbound_body(msg),
-        greeting_button=extract_greeting_button(msg),
-    )
-    assert reply is not None
-    assert reply.greeting_button_unavailable == "remarcar"
-    assert reply.action_button is None
-
-    await tasks._send_bot_reply(reply)
-
-    client = _FakeWhatsAppClient.created[-1]
-    kind, to, body = client.sent[0]
-    assert kind == "text"
-    assert "remarcar sua consulta" in body
-    assert "entre em contato com a nossa equipe" in body.lower()
-
-
-async def test_greeting_button_flows_enabled_is_not_short_circuited(db):
-    """A flows-ENABLED tenant's tap is NOT caught here - `greeting_button` is
-    still extracted, but `greeting_button_unavailable` stays None so the
-    reply falls through to the normal (route()-backed, already
-    deterministic) dispatch below."""
-    tenant, patient, conversation, _appt = await _seed(db, with_flows=True)
-    msg = _greeting_button_msg("greeting|remarcar", title="Remarcar")
+    msg = _greeting_button_msg(f"greeting|{suffix}", title=title)
 
     reply = await tasks._persist_inbound_message(
         phone_number_id=tenant.phone_number_id,
@@ -665,41 +654,13 @@ async def test_greeting_button_flows_enabled_is_not_short_circuited(db):
     )
     assert reply is not None
     assert reply.greeting_button_unavailable is None
-    assert reply.inbound_body == "Remarcar"  # the label text, routed normally
+    assert reply.action_button is None
+    assert reply.inbound_body == title  # the label text, routed normally
 
 
-async def test_greeting_button_gerenciar_flows_disabled_short_circuits(db):
-    """The consolidated "Gerenciar consulta" button (trio-gerenciar round)
-    degrades exactly like the actions it replaced: fixed reply, never the
-    LLM."""
-    tenant, patient, conversation, _appt = await _seed(db)
-    msg = _greeting_button_msg("greeting|gerenciar", title="Gerenciar consulta")
-
-    reply = await tasks._persist_inbound_message(
-        phone_number_id=tenant.phone_number_id,
-        wa_id=patient.wa_id,
-        patient_name=None,
-        wam_id=msg.id,
-        body=extract_inbound_body(msg),
-        greeting_button=extract_greeting_button(msg),
-    )
-    assert reply is not None
-    assert reply.greeting_button_unavailable == "gerenciar"
-
-    await tasks._send_bot_reply(reply)
-
-    client = _FakeWhatsAppClient.created[-1]
-    kind, _to, body = client.sent[0]
-    assert kind == "text"
-    assert "remarcar ou cancelar sua consulta" in body.lower()
-    assert "entre em contato com a nossa equipe" in body.lower()
-
-
-async def test_greeting_button_outro_flows_disabled_is_not_short_circuited(db):
-    """"Outro" is exempt from the flows-disabled short-circuit on purpose: it
-    promises the LLM, and this cohort's normal path below IS the LLM - so the
-    tap falls through as the plain "Outro" body instead of degrading to a
-    "contact us" reply."""
+async def test_greeting_button_outro_is_not_short_circuited(db):
+    """"Outro" was always exempt from the (now removed) short-circuit: it
+    promises the LLM, so the tap falls through as the plain "Outro" body."""
     tenant, patient, conversation, _appt = await _seed(db)
     msg = _greeting_button_msg("greeting|outro", title="Outro")
 

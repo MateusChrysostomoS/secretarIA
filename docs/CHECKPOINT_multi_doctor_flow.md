@@ -1,5 +1,8 @@
 # CHECKPOINT — Multi-doctor WhatsApp workflow (deterministic doctor selection)
 
+> **Superado em parte (2026-08-13):** `flows_enabled` virou incondicional — não existe
+> mais cohort flows-desligado. Ver `CHECKPOINT_flows_unconditional.md`.
+
 > Builds directly on `docs/CHECKPOINT_onboarding_multiprofessional.md` (the
 > per-professional config layer: `specialty`/`about`/`context_doctor_message`,
 > own hours/services/credential) and on `docs/CHECKPOINT_plugins.md` (the

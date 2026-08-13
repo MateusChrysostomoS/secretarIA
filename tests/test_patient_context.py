@@ -534,23 +534,27 @@ def test_greeting_buttons_other_states_get_fixed_trio() -> None:
         assert tasks._greeting_buttons_for(tenant, "Olá!", context) == fixed_trio
 
 
-def test_greeting_buttons_flows_disabled_also_gets_fixed_trio() -> None:
-    """Flow-less (pure LLM) tenants get the SAME fixed trio - an Agendar/
-    Gerenciar tap can't be dispatched by route() there, so
-    `_persist_inbound_message`'s greeting-button short-circuit degrades those
-    to a fixed reply (`_handle_greeting_button_unavailable`); "Outro" is
-    exempt on purpose and falls through to this cohort's normal all-LLM path
-    (exactly what that button promises). See
-    docs/CHECKPOINT_fixed_greeting_buttons.md + the trio-gerenciar round."""
+def test_greeting_buttons_upcoming_trio_wins_on_an_unconfigured_tenant() -> None:
+    """A tenant carrying the model-default `initial_flows={}` gets the
+    HAS_UPCOMING treatment like any other.
+
+    This case used to assert the opposite — the fixed [Agendar, Gerenciar, Outro]
+    trio — because `_greeting_buttons_for`'s upcoming-appointment branch also
+    required `flows_enabled(tenant)`, and an unwritten `initial_flows` failed it.
+    That predicate is unconditional now (flow_router.flows_enabled), so a patient
+    with a consult in 24h is offered the two actions they actually need.
+    """
     tenant = _greeting_tenant(initial_flows={}, greeting_buttons=["Agendar", "Falar com humano"])
     context = PatientOpeningContext(
         state=PatientOpeningState.HAS_UPCOMING_SOON,
         future_appointments=[{"start_at": NOW + timedelta(hours=24)}],
     )
-    fixed_trio = [LABEL_BOOK, LABEL_MANAGE_APPOINTMENT, LABEL_OTHER]
-    # HAS_UPCOMING doesn't win here either: that special case requires
-    # flows_enabled(tenant) too (see the function's own condition).
-    assert tasks._greeting_buttons_for(tenant, "Olá!", context) == fixed_trio
+    assert tasks._greeting_buttons_for(tenant, "Olá!", context) == [
+        LABEL_RESCHEDULE,
+        LABEL_CANCEL_APPT,
+        LABEL_OTHER,
+    ]
+    # Still nothing to attach when the tenant has no greeting to attach it to.
     assert tasks._greeting_buttons_for(tenant, None, context) == []
 
 

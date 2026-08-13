@@ -1,5 +1,8 @@
 # CHECKPOINT — Fixed greeting buttons (product principle: LLM is the last resort)
 
+> **Superado em parte (2026-08-13):** `flows_enabled` virou incondicional — não existe
+> mais cohort flows-desligado. Ver `CHECKPOINT_flows_unconditional.md`.
+
 > **Superseded in part (2026-08-02)**: the initial-greeting trio described here
 > ([Agendar][Remarcar][Cancelar]) was consolidated to
 > **[Agendar][Gerenciar consulta][Outro]** — see

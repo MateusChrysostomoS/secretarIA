@@ -261,8 +261,34 @@ class MenuBubble:
 
 
 def flows_enabled(tenant: Tenant) -> bool:
-    """True when this tenant uses the deterministic entry flows."""
-    return bool((tenant.initial_flows or {}).get("enabled"))
+    """ALWAYS True — the deterministic entry flows ARE the product.
+
+    Used to be an opt-in per-tenant switch (`initial_flows.enabled`), which made
+    every clinic start life on the all-LLM path: `Tenant.initial_flows` defaults to
+    `{}`, no hub screen ever wrote the key, and nothing in provisioning seeded it.
+    The visible symptom was a clinic whose greeting card rendered the fixed
+    [Agendar, Gerenciar consulta, Outro] trio (workers/tasks.py::_greeting_buttons
+    sends it regardless) but whose Agendar/Gerenciar taps then degraded to the
+    "contact us" reply in `_handle_greeting_button_unavailable` — the deterministic
+    booking flow looked broken because it had never been switched on.
+
+    The flow is not a per-clinic choice: it is the same flow for everyone, and it
+    already adapts itself to the clinic's own DATA (2+ active professionals swap the
+    menu for the multi-doctor trio and insert the choose-a-doctor step — see
+    `menu_buttons_for` / `_is_multi_professional`; `collect_insurance` inserts the
+    convênio step; the services catalog drives the options list). So "which flow"
+    is derived, never configured, and the gate had nothing left to gate.
+
+    `initial_flows` is NOT dead: `menu_label`, `buttons` and `reactivation` are still
+    read from it (see below). Only the on/off key is gone — including an explicitly
+    stored `{"enabled": false}`, which no longer disables anything.
+
+    Kept as a function (rather than deleting the ~8 call sites) so the flows-vs-LLM
+    decision keeps a single named home; the LLM stays reachable as the deliberate
+    last resort — the "Outro" button, `delegate_llm` fallbacks, and the scoped-help
+    "Não sei" rows — never as a silent default for a whole tenant.
+    """
+    return True
 
 
 def menu_buttons(tenant: Tenant) -> list[str]:

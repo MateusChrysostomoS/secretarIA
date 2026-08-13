@@ -144,7 +144,6 @@ async def _make_conversation(
     db,
     *,
     is_active: bool = True,
-    flows_enabled: bool = False,
     flow_state: FlowState = FlowState.IDLE,
 ) -> tuple[Tenant, Patient, Conversation]:
     async with db() as session:
@@ -153,12 +152,12 @@ async def _make_conversation(
             clinic_name="Clinic",
             phone_number_id=str(uuid4())[:12],
             is_active=is_active,
-            # deterministic flow engine OFF (default) -> always hits run_agent
-            # directly, exactly as before this parameter existed. Passing
-            # flows_enabled=True turns it on with the MVP defaults (menu/
-            # manage/Outro labels), needed for the appointment-context wiring
-            # tests below (which need the "Outro"/LLM-mode path to run).
-            initial_flows=({"enabled": True} if flows_enabled else {}),
+            # The MODEL DEFAULT, left deliberately empty: the deterministic flow
+            # engine is unconditional now (flow_router.flows_enabled), so there is
+            # no longer a flows-off cohort to simulate. Reaching run_agent from
+            # here therefore means going through the real escape hatch the product
+            # offers - the "Outro" tap / LLM flow state - not through an unset key.
+            initial_flows={},
         )
         patient = Patient(id=uuid4(), tenant_id=tenant.id, wa_id="5511999999", name="Maria")
         session.add_all([tenant, patient])
@@ -190,12 +189,25 @@ async def _seed_future_appointment(db, tenant: Tenant, patient: Patient, *, star
         return appt
 
 
-def _reply_context(conversation: Conversation, patient: Patient) -> tasks._ReplyContext:
+def _reply_context(
+    conversation: Conversation, patient: Patient, inbound_body: str = "oi, quero marcar"
+) -> tasks._ReplyContext:
+    """A turn to feed `_send_bot_reply`.
+
+    The default body is unmatched free text, which the router answers itself.
+    Tests that need to observe the LLM leg must pass `_LLM_ESCAPE` — since
+    flow_router.flows_enabled became unconditional, "Outro" (and an already-LLM
+    conversation) are the only ways a turn still reaches `run_agent`.
+    """
     return tasks._ReplyContext(
         conversation_id=conversation.id,
         patient_wa_id=patient.wa_id,
-        inbound_body="oi, quero marcar",
+        inbound_body=inbound_body,
     )
+
+
+# The "Outro" button — the product's deliberate, patient-initiated LLM hand-off.
+_LLM_ESCAPE = "Outro"
 
 
 # --------------------------------------------------------------------------
@@ -223,7 +235,7 @@ async def test_entitled_reply_flows_as_before(monkeypatch: pytest.MonkeyPatch, d
     monkeypatch.setattr(tasks, "get_entitlements", _fake_get_entitlements)
     monkeypatch.setattr(tasks, "run_agent", _fake_run_agent)
 
-    await tasks._send_bot_reply(_reply_context(conversation, patient))
+    await tasks._send_bot_reply(_reply_context(conversation, patient, _LLM_ESCAPE))
 
     assert len(run_agent_calls) == 1
     assert len(_FakeWhatsAppClient.created) == 1
@@ -367,9 +379,14 @@ async def test_run_agent_receives_plugin_tools_for_entitled_addons(
     monkeypatch.setattr(tasks, "run_agent", _fake_run_agent)
     monkeypatch.setattr(tasks, "agent_tools_for", lambda summary: sentinel_tools)
 
-    await tasks._send_bot_reply(_reply_context(conversation, patient))
+    await tasks._send_bot_reply(_reply_context(conversation, patient, _LLM_ESCAPE))
 
-    assert run_agent_calls == [{"extra_tools": sentinel_tools}]
+    # The entitled add-on's tools are threaded through. `manage_existing_appointment`
+    # rides along too — the hand-back tool is offered on every "Outro" delegation now
+    # that the manage flow exists for every tenant — so this asserts inclusion rather
+    # than an exact list; the hand-back tool has its own tests above.
+    assert len(run_agent_calls) == 1
+    assert "sentinel-tool" in run_agent_calls[0]["extra_tools"]
 
 
 # --------------------------------------------------------------------------
@@ -412,7 +429,7 @@ async def _run_send_bot_reply_capturing_run_agent(
 async def test_run_agent_receives_appointment_context_on_outro_tap_with_upcoming_appointment(
     monkeypatch: pytest.MonkeyPatch, db
 ) -> None:
-    tenant, patient, conversation = await _make_conversation(db, flows_enabled=True)
+    tenant, patient, conversation = await _make_conversation(db)
     await _seed_future_appointment(db, tenant, patient, start_at=_days_from_now(2))
 
     calls = await _run_send_bot_reply_capturing_run_agent(
@@ -423,8 +440,8 @@ async def test_run_agent_receives_appointment_context_on_outro_tap_with_upcoming
     appointment_context = calls[0]["appointment_context"]
     assert appointment_context is not None
     assert "Próxima consulta" in appointment_context
-    # The reschedule/cancel hand-back tool is only offered once the manage
-    # flow actually exists for this tenant (flows_enabled=True here).
+    # The reschedule/cancel hand-back tool is offered because the manage flow
+    # exists — which it now does for every tenant (flow_router.flows_enabled).
     assert "manage_existing_appointment" in {t.name for t in calls[0]["extra_tools"]}
 
 
@@ -432,7 +449,7 @@ async def test_run_agent_receives_appointment_context_when_already_in_llm_mode(
     monkeypatch: pytest.MonkeyPatch, db
 ) -> None:
     tenant, patient, conversation = await _make_conversation(
-        db, flows_enabled=True, flow_state=FlowState.LLM
+        db, flow_state=FlowState.LLM
     )
     await _seed_future_appointment(db, tenant, patient, start_at=_days_from_now(1))
 
@@ -444,12 +461,18 @@ async def test_run_agent_receives_appointment_context_when_already_in_llm_mode(
     assert calls[0]["appointment_context"] is not None
 
 
-async def test_run_agent_receives_no_appointment_context_when_flows_disabled(
+async def test_unmatched_free_text_never_reaches_the_llm(
     monkeypatch: pytest.MonkeyPatch, db
 ) -> None:
-    # flows_enabled=False (default): the whole flows-enabled block - including
-    # the appointment load AND the manage_existing_appointment tool - never
-    # runs, even though the patient actually has an upcoming appointment.
+    """Replaces the old `..._when_flows_disabled` case, whose premise is gone.
+
+    Free text that matches no flow label used to be the ordinary way into the
+    LLM, because a tenant with the default `initial_flows={}` had no flows at
+    all. Now the router owns the opening turn for everyone: the same message
+    comes back as the deterministic menu and `run_agent` is never called. This
+    is the invariant the whole "LLM as a last resort" design rests on, so it is
+    asserted directly rather than left implied by the tests above.
+    """
     tenant, patient, conversation = await _make_conversation(db)
     await _seed_future_appointment(db, tenant, patient, start_at=_days_from_now(2))
 
@@ -457,9 +480,9 @@ async def test_run_agent_receives_no_appointment_context_when_flows_disabled(
         monkeypatch, conversation, patient, "oi, quero marcar"
     )
 
-    assert len(calls) == 1
-    assert calls[0]["appointment_context"] is None
-    assert "manage_existing_appointment" not in {t.name for t in calls[0]["extra_tools"]}
+    assert calls == []
+    # ...and the patient did get a real answer - the menu, not silence.
+    assert _FakeWhatsAppClient.created[-1].sent
 
 
 async def test_run_agent_receives_no_appointment_context_for_new_patient_without_appointments(
@@ -467,7 +490,7 @@ async def test_run_agent_receives_no_appointment_context_for_new_patient_without
 ) -> None:
     # Flows enabled and delegated to the LLM via "Outro", but this (new)
     # patient has no upcoming appointments - the gate's non-empty check loses.
-    tenant, patient, conversation = await _make_conversation(db, flows_enabled=True)
+    tenant, patient, conversation = await _make_conversation(db)
 
     calls = await _run_send_bot_reply_capturing_run_agent(
         monkeypatch, conversation, patient, "Outro"
@@ -581,7 +604,7 @@ async def test_apply_flow_result_handover_flips_to_human_and_sends_message(db) -
     the human secretary (who sees the chat in their own WhatsApp app) takes
     over. No LLM involved."""
     tenant, patient, conversation = await _make_conversation(
-        db, flows_enabled=True, flow_state=FlowState.SERVICE_CATALOG
+        db, flow_state=FlowState.SERVICE_CATALOG
     )
     reply = tasks._ReplyContext(
         conversation_id=conversation.id,
