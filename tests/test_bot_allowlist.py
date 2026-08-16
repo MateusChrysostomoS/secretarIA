@@ -166,6 +166,41 @@ async def test_empty_allowlist_behaves_like_before(db, monkeypatch: pytest.Monke
     assert await _count(db, ProcessedEvent) == 1
 
 
+async def test_greeting_uses_tenant_whatsapp_credentials(
+    db, monkeypatch: pytest.MonkeyPatch
+):
+    _set_allowlist(monkeypatch, "")
+    tenant = await _seed_tenant(db)
+    reply = await tasks._persist_inbound_message(
+        phone_number_id=tenant.phone_number_id,
+        wa_id="5511988887777",
+        patient_name="Maria",
+        wam_id="wamid.greeting.tenant-client",
+        body="oi",
+    )
+    assert reply is not None
+
+    captured = {}
+
+    class _Client:
+        async def send_buttons(self, *, to, body, buttons):
+            captured.update(to=to, body=body, buttons=buttons)
+            return {"messages": [{"id": "wamid.sent.greeting"}]}
+
+    def _for_tenant(cls, selected_tenant, token):
+        captured.update(tenant=selected_tenant, token=token)
+        return _Client()
+
+    monkeypatch.setattr(tasks.WhatsAppClient, "for_tenant", classmethod(_for_tenant))
+
+    await tasks._send_greeting(reply, tenant=tenant, waba_token="tenant-token")
+
+    assert captured["tenant"].id == tenant.id
+    assert captured["token"] == "tenant-token"
+    assert captured["to"] == "5511988887777"
+    assert captured["body"] == tenant.greeting_message
+
+
 async def test_wa_id_off_allowlist_is_dropped_silently(db, monkeypatch: pytest.MonkeyPatch):
     _set_allowlist(monkeypatch, "5521900000000")  # a different number
     tenant = await _seed_tenant(db)

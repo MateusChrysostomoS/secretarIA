@@ -114,8 +114,16 @@ class _FakeCalendar:
 # --------------------------------------------------------------------------
 
 
-def test_reactivation_disabled_by_default():
-    assert reactivation_enabled(_tenant()) is False
+def test_returning_greeting_enables_reactivation_by_default():
+    assert reactivation_enabled(_tenant()) is True
+
+
+def test_reactivation_disabled_without_returning_greeting_or_explicit_config():
+    assert reactivation_enabled(_tenant(returning_greeting_message=None)) is False
+
+
+def test_reactivation_can_be_explicitly_disabled_with_returning_greeting():
+    assert reactivation_enabled(_tenant(reactivation={"enabled": False})) is False
 
 
 def test_reactivation_enabled_when_configured():

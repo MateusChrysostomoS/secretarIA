@@ -334,8 +334,16 @@ def _reactivation_config(tenant: Tenant) -> dict:
 
 
 def reactivation_enabled(tenant: Tenant) -> bool:
-    """True when this tenant offers a 'welcome back / continue?' prompt."""
-    return bool(_reactivation_config(tenant).get("enabled"))
+    """True when this tenant offers a 'welcome back / continue?' prompt.
+
+    A configured returning greeting is itself an opt-in from the hub UI. The
+    lower-level ``initial_flows.reactivation.enabled`` flag remains an explicit
+    override so internal provisioning can still disable or enable the behavior.
+    """
+    config = _reactivation_config(tenant)
+    if "enabled" in config:
+        return bool(config["enabled"])
+    return bool((getattr(tenant, "returning_greeting_message", None) or "").strip())
 
 
 def reactivation_gap_minutes(tenant: Tenant) -> int:

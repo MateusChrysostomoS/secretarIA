@@ -1219,6 +1219,7 @@ async def _handle_menu_command(
                 # returning greeting - the whole point of deleting the patient.
                 greeting = (tenant.greeting_message or "").strip()
                 greeting_buttons = _greeting_buttons_for(tenant, greeting or None)
+                waba_token = await get_waba_token(session, tenant.id)
         except IntegrityError:
             logger.info("worker_menu_duplicate_race", wam_id=wam_id)
             return
@@ -1238,7 +1239,9 @@ async def _handle_menu_command(
             inbound_body="",
             greeting_override=greeting,
             greeting_buttons=greeting_buttons,
-        )
+        ),
+        tenant=tenant,
+        waba_token=waba_token,
     )
     logger.info("worker_menu_reset", conversation_id=str(conversation_id))
 
@@ -1264,13 +1267,6 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     # Tenant bot not activated: one polite fallback, nothing else.
     if reply.service_unavailable:
         await _send_simple_text(reply.patient_wa_id, SERVICE_UNAVAILABLE_MESSAGE)
-        return
-
-    # First-contact greeting: deterministic, verbatim, single message. Skips the
-    # LLM and the bubble-splitter so the configured pitch arrives exactly as the
-    # clinic wrote it, in one WhatsApp message.
-    if reply.greeting_override is not None:
-        await _send_greeting(reply)
         return
 
     # Load per-tenant config + flow context (one short read). We snapshot the
@@ -1473,6 +1469,13 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
             tenant_id=str(tenant.id) if tenant is not None else None,
             status=summary.status if summary is not None else None,
         )
+        return
+
+    # First-contact/returning greeting: deterministic, verbatim and sent with
+    # this tenant's own WhatsApp number/token. This intentionally runs only
+    # after entitlement and tenant credentials have been resolved.
+    if reply.greeting_override is not None:
+        await _send_greeting(reply, tenant=tenant, waba_token=waba_token)
         return
 
     # Optional-addon inbound interception (e.g. human_backup_24_7's
@@ -2586,15 +2589,20 @@ _GREETING_ACTION_IDS: dict[str, str] = {
 _GREETING_LLM_ESCAPE_SUFFIX = _GREETING_ACTION_IDS[LABEL_OTHER]
 
 
-async def _send_greeting(reply: _ReplyContext) -> None:
-    """Send the tenant's first-contact greeting as a single verbatim message.
+async def _send_greeting(
+    reply: _ReplyContext,
+    *,
+    tenant: Tenant,
+    waba_token: str | None = None,
+) -> None:
+    """Send a tenant's initial or returning greeting as one verbatim message.
 
     With configured labels it goes out as an interactive reply-button message
     (the tapped label becomes the patient's next inbound); otherwise as plain
     text. The whole greeting is one WhatsApp message either way.
     """
     body = reply.greeting_override or ""
-    client = WhatsAppClient()
+    client = WhatsAppClient.for_tenant(tenant, waba_token)
     try:
         if reply.greeting_buttons:
             # The label still drives route()'s dispatch (as with every other
