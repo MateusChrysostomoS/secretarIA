@@ -193,6 +193,19 @@ _TEMPLATES: dict[str, EmailTemplate] = {
             "— Equipe SecretarIA"
         ),
     ),
+    "password_reset": EmailTemplate(
+        subject="Redefinição de senha — SecretarIA",
+        body=(
+            "Olá, {name}!\n\n"
+            "Recebemos um pedido para redefinir a senha da sua conta.\n\n"
+            "Para escolher uma nova senha, clique no link abaixo:\n"
+            "{link}\n\n"
+            "Este link é de uso único e expira em {ttl_minutes} minutos.\n\n"
+            "Se você não pediu essa redefinição, pode ignorar este e-mail — sua senha "
+            "continua a mesma.\n\n"
+            "— Equipe SecretarIA"
+        ),
+    ),
     "retry_nudge_atividade_insuficiente": EmailTemplate(
         subject="Seu número no WhatsApp ainda está ganhando histórico",
         body=(

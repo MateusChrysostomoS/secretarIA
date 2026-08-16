@@ -1298,11 +1298,17 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     # conversation/tenant fails to resolve, or the check isn't needed this turn.
     opening_state: PatientOpeningState | None = None
     flow_state: FlowState | None = None
+    # Captured alongside flow_state purely for the llm_activated accounting
+    # below: flow_state says WHICH state leaked to the model, flow_step says
+    # where inside it - together they name the node that still needs a
+    # deterministic answer.
+    flow_step: str | None = None
     try:
         async with async_session_factory() as session:
             conversation = await session.get(Conversation, reply.conversation_id)
             if conversation is not None:
                 flow_state = conversation.flow_state
+                flow_step = conversation.flow_step
                 tenant = await session.get(Tenant, conversation.tenant_id)
                 if tenant is not None:
                     tenant_config = await load_tenant_config(session, tenant)
@@ -1573,6 +1579,20 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
             tenant_config.appointment_types if tenant_config is not None else [],
         )
 
+    # Every LLM turn is either a deliberate escape hatch ("Outro") or a gap in
+    # the deterministic flow. Emitted at INFO so the gaps are countable in
+    # production without raising LOG_LEVEL - carries no message body, phone or
+    # patient name.
+    logger.info(
+        "llm_activated",
+        reason=_llm_activation_reason(flow_state, delegated_to_llm),
+        flow_state=flow_state.value if flow_state is not None else None,
+        flow_step=flow_step,
+        delegated=delegated_to_llm,
+        conversation_id=str(reply.conversation_id),
+        tenant_id=str(tenant.id) if tenant is not None else None,
+    )
+
     reply_text = await run_agent(
         reply.inbound_body,
         context={"conversation_id": str(reply.conversation_id)},
@@ -1644,6 +1664,35 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
         return
 
     await _dispatch_bubbles(reply, bubbles, tenant=tenant, waba_token=waba_token)
+
+
+def _llm_activation_reason(
+    flow_state: FlowState | None,
+    delegated_to_llm: bool,
+) -> str:
+    """Why THIS turn is about to spend a full LangGraph agent call.
+
+    The deterministic router is the product; the model is the last resort. So
+    every activation is worth naming, and the names are chosen to be acted on:
+
+    - `sticky_llm_mode`: the conversation is already parked in FlowState.LLM
+      (the patient tapped "Outro" earlier and nothing handed them back). A high
+      count here means the hand-backs (`show_main_menu`, select-professional,
+      manage-appointment) are not firing often enough.
+    - `router_delegated`: the router saw this turn and gave up on it. This is
+      the number to drive to zero - each one is a flow node that needs a
+      deterministic answer. Pair with `flow_state`/`flow_step` to find it.
+    - `no_deterministic_flow`: the router never ran at all for this turn (no
+      flow snapshot could be built - e.g. tenant/config resolution came back
+      empty). Not a flow gap; a data/config problem.
+
+    Pure function over already-resolved turn facts, like the gate below.
+    """
+    if flow_state is FlowState.LLM:
+        return "sticky_llm_mode"
+    if delegated_to_llm:
+        return "router_delegated"
+    return "no_deterministic_flow"
 
 
 def _should_inject_post_consult_knowledge(

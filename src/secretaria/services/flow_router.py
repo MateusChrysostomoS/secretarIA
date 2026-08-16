@@ -1091,6 +1091,15 @@ async def _handle_professional_help(
     conversation: Conversation, tenant: Tenant, body: str, professionals: list
 ) -> FlowRouterResult:
     final_round = conversation.flow_step == STEP_PROFESSIONAL_HELP_FINAL
+    # Scoped help IS an LLM call (a single grounded decision, not a free chat).
+    # Counted here so "how often do we fall back to the model?" has one honest
+    # answer across every entry point - see workers/tasks.py::_llm_activation_reason.
+    logger.info(
+        "llm_activated",
+        reason="scoped_help_professional",
+        conversation_id=str(getattr(conversation, "id", None)),
+        final_round=final_round,
+    )
     try:
         outcome = await run_professional_help(
             conversation_id=getattr(conversation, "id", None),
@@ -1124,6 +1133,13 @@ async def _handle_service_help(
     conversation: Conversation, tenant: Tenant, body: str, services: list[dict]
 ) -> FlowRouterResult:
     final_round = conversation.flow_step == STEP_SERVICE_HELP_FINAL
+    # Same accounting as _handle_professional_help above.
+    logger.info(
+        "llm_activated",
+        reason="scoped_help_service",
+        conversation_id=str(getattr(conversation, "id", None)),
+        final_round=final_round,
+    )
     try:
         outcome = await run_service_help(
             conversation_id=getattr(conversation, "id", None),
