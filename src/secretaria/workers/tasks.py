@@ -115,6 +115,7 @@ from secretaria.services.tenant_config import (
     list_active_professionals,
     load_tenant_config,
     professional_appointment_types,
+    professional_business_hours,
     resolve_professional_calendar,
     set_waba_token,
 )
@@ -798,6 +799,31 @@ def _greeting_buttons_for(
     return [LABEL_BOOK, LABEL_MANAGE_APPOINTMENT, LABEL_OTHER]
 
 
+def _flow_tenant_snapshot(tenant: Tenant, professionals: list[Professional]) -> SimpleNamespace:
+    """Build the tenant-shaped config consumed by the deterministic router.
+
+    A single active professional is the effective clinic config, matching
+    ``load_tenant_config``. Multi-professional flows select a professional
+    before reading that professional's catalog, so they keep tenant defaults
+    on the initial snapshot.
+    """
+    appointment_types = tenant.appointment_types
+    business_hours = tenant.business_hours
+    if len(professionals) == 1:
+        professional = professionals[0]
+        appointment_types = professional_appointment_types(professional, tenant)
+        business_hours = professional_business_hours(professional, tenant)
+
+    return SimpleNamespace(
+        initial_flows=tenant.initial_flows,
+        appointment_types=appointment_types,
+        appointment_duration_min=tenant.appointment_duration_min,
+        business_hours=business_hours,
+        collect_insurance=tenant.collect_insurance,
+        insurances=tenant.insurances,
+    )
+
+
 def _format_appointment_when(start_at: datetime, tz_name: str | None) -> str:
     """Render an appointment start for greeting copy, in the tenant's timezone."""
     tz = ZoneInfo(tz_name or "America/Sao_Paulo")
@@ -1375,14 +1401,7 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                             ),
                             patient_id=conversation.patient_id,
                         ),
-                        SimpleNamespace(
-                            initial_flows=tenant.initial_flows,
-                            appointment_types=tenant.appointment_types,
-                            appointment_duration_min=tenant.appointment_duration_min,
-                            business_hours=tenant.business_hours,
-                            collect_insurance=tenant.collect_insurance,
-                            insurances=tenant.insurances,
-                        ),
+                        _flow_tenant_snapshot(tenant, professional_rows),
                     )
                     # Load the patient's future appointments whenever THIS turn
                     # might need them - no longer only the manage (cancel/

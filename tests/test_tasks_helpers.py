@@ -20,12 +20,66 @@ from secretaria.services.email import send_calendar_alert  # noqa: E402
 from secretaria.services.tenant_config import RuntimeAppointmentType  # noqa: E402
 from secretaria.workers.tasks import (  # noqa: E402
     _appointment_context_text,
+    _flow_tenant_snapshot,
     _is_rate_limited,
     _manage_owner_calendar_target,
     _render_greeting_template,
     _should_inject_appointment_context,
     extract_patient_name,
 )
+
+# ---------------------------------------------------------------------------
+# Deterministic-flow config resolution (_flow_tenant_snapshot)
+# ---------------------------------------------------------------------------
+
+
+def _flow_tenant(**overrides):
+    values = {
+        "initial_flows": {},
+        "appointment_types": [{"name": "Tenant service", "duration_min": 30}],
+        "appointment_duration_min": 30,
+        "business_hours": {"monday": [{"start": "08:00", "end": "12:00"}]},
+        "collect_insurance": False,
+        "insurances": [],
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_flow_snapshot_resolves_single_professional_config():
+    tenant = _flow_tenant()
+    professional = SimpleNamespace(
+        appointment_types=[{"name": "Professional service", "duration_min": 50, "is_active": True}],
+        business_hours={"tuesday": [{"start": "14:00", "end": "18:00"}]},
+    )
+
+    snapshot = _flow_tenant_snapshot(tenant, [professional])
+
+    assert [item["name"] for item in snapshot.appointment_types] == ["Professional service"]
+    assert snapshot.business_hours == {"tuesday": [{"start": "14:00", "end": "18:00"}]}
+
+
+def test_flow_snapshot_single_professional_falls_back_to_tenant_config():
+    tenant = _flow_tenant()
+    professional = SimpleNamespace(appointment_types=[], business_hours={})
+
+    snapshot = _flow_tenant_snapshot(tenant, [professional])
+
+    assert snapshot.appointment_types == tenant.appointment_types
+    assert snapshot.business_hours == tenant.business_hours
+
+
+def test_flow_snapshot_multi_professional_keeps_tenant_defaults_until_selection():
+    tenant = _flow_tenant()
+    professionals = [
+        SimpleNamespace(appointment_types=[{"name": "A"}], business_hours={}),
+        SimpleNamespace(appointment_types=[{"name": "B"}], business_hours={}),
+    ]
+
+    snapshot = _flow_tenant_snapshot(tenant, professionals)
+
+    assert snapshot.appointment_types == tenant.appointment_types
+    assert snapshot.business_hours == tenant.business_hours
 
 
 @pytest.mark.parametrize(
