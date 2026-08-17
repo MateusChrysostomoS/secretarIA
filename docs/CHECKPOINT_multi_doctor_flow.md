@@ -160,7 +160,10 @@ active-professionals snapshot** the worker passes into `route()` (new
   `CalendarUnavailableError`); `workers/tasks.py::_handle_show_main_menu`
   resets the flow fields to MENU via `_apply_flow_result` (which also clears
   both new selections) and sends the effective menu. **Nothing is deleted** —
-  history and the patient row stay, unlike the dev-only `/menu` wipe.
+  history and the patient row stay. Since PROMPT_FIX_18 the `/menu` command
+  goes through this exact same handler (`source="command"`); the destructive
+  wipe it used to trigger now lives behind `/dangerously-remove-context` —
+  see `docs/CHECKPOINT_menu_rename_waba_lgpd.md`.
 - **`select_professional_and_continue`** (plugin, addon-gated like its
   siblings): resolves the confirmed name via `_match_by_name` (unknown name →
   the same recoverable "valid options are…" error dict), then raises

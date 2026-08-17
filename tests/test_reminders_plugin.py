@@ -265,6 +265,59 @@ async def test_cancelled_appointment_is_skipped(db, monkeypatch: pytest.MonkeyPa
     assert await _ledger_count(db, reminders._reminder_key("1h", appointment.id)) == 0
 
 
+@pytest.mark.parametrize("lead", [timedelta(hours=24), timedelta(hours=1)])
+async def test_rescheduled_appointment_is_still_reminded(
+    db, monkeypatch: pytest.MonkeyPatch, lead: timedelta
+):
+    """PROMPT_FIX_16: a reschedule MOVES this row to a new window - it must be
+    reminded at the NEW time. Excluding RESCHEDULED meant the patient stopped
+    getting reminders the moment they rescheduled, which is exactly when a
+    reminder matters most."""
+    kind = "24h" if lead == timedelta(hours=24) else "1h"
+    tenant, patient, appointment = await _make_scenario(
+        db, lead=lead, status=AppointmentStatus.RESCHEDULED
+    )
+    monkeypatch.setattr(reminders, "get_entitlements", _entitled_fake())
+
+    await reminders.send_appointment_reminders({"redis": None})
+
+    assert len(_FakeWhatsAppClient.created) == 1
+    assert await _ledger_count(db, reminders._reminder_key(kind, appointment.id)) == 1
+
+
+async def test_rescheduled_reminder_is_not_duplicated_by_a_second_sweep(
+    db, monkeypatch: pytest.MonkeyPatch
+):
+    """Exactly one reminder, however many times the cron ticks."""
+    tenant, patient, appointment = await _make_scenario(
+        db,
+        lead=timedelta(hours=24),
+        status=AppointmentStatus.RESCHEDULED,
+        last_inbound_ago=timedelta(hours=1),
+    )
+    monkeypatch.setattr(reminders, "get_entitlements", _entitled_fake())
+
+    await reminders.send_appointment_reminders({"redis": None})
+    await reminders.send_appointment_reminders({"redis": None})
+
+    assert len(_FakeWhatsAppClient.created) == 1  # not 2
+    assert await _ledger_count(db, reminders._reminder_key("24h", appointment.id)) == 1
+
+
+@pytest.mark.parametrize("status", [AppointmentStatus.ATTENDED, AppointmentStatus.NO_SHOW])
+async def test_terminal_statuses_are_never_reminded(
+    db, monkeypatch: pytest.MonkeyPatch, status: AppointmentStatus
+):
+    """Regression guard for the other half of the taxonomy."""
+    tenant, patient, appointment = await _make_scenario(db, lead=timedelta(hours=1), status=status)
+    monkeypatch.setattr(reminders, "get_entitlements", _entitled_fake())
+
+    await reminders.send_appointment_reminders({"redis": None})
+
+    assert _FakeWhatsAppClient.created == []
+    assert await _ledger_count(db, reminders._reminder_key("1h", appointment.id)) == 0
+
+
 # --------------------------------------------------------------------------
 # Entitlement gating (silent no-op) + opt-out
 # --------------------------------------------------------------------------

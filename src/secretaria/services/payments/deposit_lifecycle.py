@@ -30,6 +30,7 @@ from secretaria.models import Appointment, AppointmentStatus, Patient, Professio
 from secretaria.models.pix_deposit import PixDeposit, PixDepositStatus
 from secretaria.models.processed_asaas_event import ProcessedAsaasEvent
 from secretaria.services import tenant_config as cfg
+from secretaria.services.appointment_status import SOURCE_SYSTEM, log_status_transition
 from secretaria.services.calendar import CalendarService
 from secretaria.services.payments.asaas import AsaasClient
 from secretaria.services.payments.money import format_brl, parse_brl_to_cents
@@ -612,7 +613,19 @@ async def apply_asaas_event(
                 deposit.resolved_at = datetime.now(UTC)
                 expired_appointment = await session.get(Appointment, deposit.appointment_id)
                 if expired_appointment is not None:
+                    previous_status = expired_appointment.status
                     expired_appointment.status = AppointmentStatus.CANCELLED
+                    log_status_transition(
+                        appointment_id=expired_appointment.id,
+                        tenant_id=tenant.id,
+                        old_status=previous_status,
+                        new_status=AppointmentStatus.CANCELLED,
+                        source=SOURCE_SYSTEM,
+                        # The Asaas event id is the real replay guard here (see
+                        # the ProcessedAsaasEvent claim above); reusing it keeps
+                        # this line joinable to that ledger.
+                        idempotency_key=f"asaas:{event_id}",
+                    )
                     slot_freed = True
                 outcome = "expired"
         elif event_type == "PAYMENT_REFUNDED":

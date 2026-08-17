@@ -122,11 +122,11 @@ def _set_allowlist(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
 
 async def _seed_tenant(db, **kwargs) -> Tenant:
     async with db() as session:
+        kwargs.setdefault("is_active", True)
         tenant = Tenant(
             id=uuid4(),
             clinic_name="Clinic",
             phone_number_id=PHONE_NUMBER_ID,
-            is_active=True,
             greeting_message="Olá! Bem-vindo à Clínica.",
             **kwargs,
         )
@@ -239,6 +239,54 @@ async def test_wa_id_on_allowlist_flows_normally(db, monkeypatch: pytest.MonkeyP
     assert await _count(db, Patient) == 1
     assert await _count(db, Conversation) == 1
     assert await _count(db, ConsentEvent) == 1
+
+
+async def test_allowlist_blocks_even_the_inactive_tenant_fallback(
+    db, monkeypatch: pytest.MonkeyPatch
+):
+    """Ordering fix (PROMPT_FIX_21): the allowlist runs BEFORE the
+    tenant-active gate.
+
+    The inactive-tenant branch returns a `service_unavailable` context, which
+    IS an outbound message. Evaluating it first meant an off-allowlist number
+    could still make the platform send during the restricted Coexistence test
+    window, just by talking to a tenant that happened to be inactive.
+    """
+    _set_allowlist(monkeypatch, "5521900000000")  # a different number
+    tenant = await _seed_tenant(db, is_active=False)
+
+    reply = await tasks._persist_inbound_message(
+        phone_number_id=tenant.phone_number_id,
+        wa_id="5511988887777",
+        patient_name="Maria",
+        wam_id="wamid.allow.inactive",
+        body="oi",
+    )
+
+    assert reply is None  # NOT a service_unavailable context
+    assert await _count(db, Patient) == 0
+    assert await _count(db, ProcessedEvent) == 1  # the event WAS seen
+
+
+async def test_inactive_tenant_on_allowlist_still_gets_the_fallback(
+    db, monkeypatch: pytest.MonkeyPatch
+):
+    """The reorder must not silence the legitimate case."""
+    _set_allowlist(monkeypatch, "5511988887777")
+    tenant = await _seed_tenant(db, is_active=False)
+
+    reply = await tasks._persist_inbound_message(
+        phone_number_id=tenant.phone_number_id,
+        wa_id="5511988887777",
+        patient_name="Maria",
+        wam_id="wamid.allow.inactive.ok",
+        body="oi",
+    )
+
+    assert reply is not None
+    assert reply.service_unavailable is True
+    # The tenant rides along so the fallback goes out on ITS credentials.
+    assert reply.tenant_id == tenant.id
 
 
 async def test_duplicate_event_off_allowlist_is_still_deduped(

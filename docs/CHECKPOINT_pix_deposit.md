@@ -118,10 +118,12 @@ estorno. Never pretend a refund happened.
   `secretaria_basico_metered_reminders`) — every plan grants `limits["reminders"]=0`
   (unlimited-by-quota) and each billable send is charged per-unit via the Stripe meter
   instead. See brain-api's `CONTRACTS.md` §13.3/§13.5 for the wiring.
-- **RESCHEDULED is not remindable** (`_REMINDABLE_STATUSES` unchanged): after a
-  reschedule, no further 24h/1h reminders fire — so the deposit's 3-button loop ends
-  there. Pre-existing semantics, kept; revisit together with the hub-reschedule
-  status model.
+- ~~**RESCHEDULED is not remindable**~~ — **SUPERSEDED by PROMPT_FIX_16.** That
+  "revisit together with the hub-reschedule status model" happened: RESCHEDULED is
+  now a LIVE status, so a moved booking IS reminded at its new 24h/1h windows and
+  the deposit's 3-button loop continues. `_REMINDABLE_STATUSES` is the shared
+  `LIVE_APPOINTMENT_STATUSES` from `models/appointment.py`. See
+  `docs/CHECKPOINT_appointment_status_taxonomy.md`.
 - Hub `PATCH /status` → CANCELLED still does NOT touch Google Calendar (pre-existing).
 - QR code IMAGE is not sent (no media-send method on `WhatsAppClient`) — copia-e-cola
   only, which is sufficient for payment; QR image is future polish.

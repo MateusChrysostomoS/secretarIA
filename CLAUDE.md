@@ -74,6 +74,31 @@ When you restructure, do it as a dedicated change (move files + fix imports in `
 - All env config goes through `config.py::Settings` (pydantic-settings). Never read `os.environ` directly elsewhere.
 - Per-tenant secrets are decrypted exactly once, in `services/tenant_config.py::load_tenant_config`. Never log or return them from the API.
 
+## Deploy — a API e o worker são DOIS serviços (regra obrigatória)
+
+`secretaria_api` e `secretaria-worker` são dois serviços separados no EasyPanel,
+implantados **manualmente**, sem auto-deploy. Nada garante que rodem o mesmo
+commit — e o worker é quem responde: a API só faz fast-ACK do webhook, quem
+compõe e envia toda mensagem é o job `process_webhook_event`.
+
+**Regra: todo push que toca `src/secretaria/workers/` OU
+`src/secretaria/services/flow_router.py` exige deploy do `secretaria-worker`,
+não só do `secretaria_api`.** Habilitar auto-deploy nos dois serviços a partir
+de `main` aposenta esta regra — é a solução preferida.
+
+Isto não é hipotético: em 2026-08-16 o worker ficou um commit atrás e todo
+greeting saiu de código velho enquanto a API parecia saudável. O sintoma leu
+como "a personalização quebrou"; a causa era um clique.
+
+Como provar, sem abrir `Environment`: `GET /build` na API responde a identidade
+dela e a última que o worker anunciou, mais o veredito `deploy_parity`
+(`match` | `divergent` | `unknown` — **`unknown` nunca significa paridade**). O
+worker prova pela própria linha `worker_started`, que carrega os mesmos campos
+mais os nomes dos jobs e crons registrados. Divergência emite
+`deploy_sha_divergence` (WARNING) no arranque dos dois processos e de hora em
+hora no worker. Ver `core/build_info.py` e a seção "Deploy both services, or
+neither" do `README.md`.
+
 ## Documentação — manter em dia (obrigatório)
 
 Os arquivos em `docs/` são a **fonte de verdade pra entender o projeto** — o objetivo é que uma

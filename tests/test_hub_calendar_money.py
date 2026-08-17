@@ -37,10 +37,12 @@ from secretaria.core.database import Base, get_session  # noqa: E402
 from secretaria.models import (  # noqa: E402
     Appointment,
     AppointmentStatus,
+    Patient,
     PixDeposit,
     PixDepositStatus,
     Tenant,
 )
+from secretaria.services.patient_context import load_upcoming_appointments  # noqa: E402
 from secretaria.services.tenant_config import set_google_refresh_token  # noqa: E402
 
 CALENDAR = "/tenants/me/calendar"
@@ -354,6 +356,46 @@ async def test_post_reschedule_updates_window_and_does_not_increment_count(
         # Doctor-initiated (hub) reschedule must NEVER consume the patient's
         # own pix_reschedule_limit allowance.
         assert deposit.reschedule_count == 0
+
+
+async def test_hub_rescheduled_appointment_stays_upcoming_for_the_patient(
+    client: AsyncClient, db, tenant
+):
+    """PROMPT_FIX_16: the hub and the patient-facing readers must agree.
+
+    A doctor-initiated move used to leave the row in RESCHEDULED, which
+    `load_upcoming_appointments` (the ONE query behind the manage flow, the
+    greeting opening state and `list_patient_appointments`) treated as gone —
+    so the patient could no longer manage the very booking the doctor had just
+    moved for them.
+    """
+    await _connect_calendar(db, tenant)
+    appt = await _seed_appointment(db, tenant, start_at=datetime.now(UTC) + timedelta(days=2))
+    # A patient-owned booking (the hub's own seed is a block slot).
+    async with db() as session:
+        patient = Patient(tenant_id=tenant.id, wa_id="5511999999999", name="Maria")
+        session.add(patient)
+        await session.flush()
+        row = await session.get(Appointment, appt.id)
+        row.patient_id = patient.id
+        await session.commit()
+        patient_id = patient.id
+
+    new_start = datetime.now(UTC) + timedelta(days=5)
+    response = await client.post(
+        f"{CALENDAR}/appointments/{appt.id}/reschedule",
+        json={
+            "new_start": new_start.isoformat(),
+            "new_end": (new_start + timedelta(minutes=30)).isoformat(),
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "rescheduled"
+
+    async with db() as session:
+        upcoming = await load_upcoming_appointments(session, tenant.id, patient_id)
+
+    assert [row["id"] for row in upcoming] == [str(appt.id)]
 
 
 # --------------------------------------------------------------------------

@@ -31,6 +31,11 @@ from secretaria.api.hub import (
     units,
 )
 from secretaria.config import get_settings
+from secretaria.core.build_info import (
+    build_identity,
+    check_deploy_parity,
+    publish_build_identity,
+)
 from secretaria.core.logging import get_logger, setup_logging
 
 setup_logging()
@@ -44,15 +49,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     The pool is stored on `app.state.arq_pool` so the webhook handler can
     enqueue jobs. If Redis is unreachable the API still starts (so /health
     works); POST /webhook then returns 503 until the queue is back.
+
+    Startup also announces this process's build identity and compares it with
+    the worker's (FIX_01 §5.1/§5.2): the API and the worker are deployed
+    manually and separately, so "deployed one, forgot the other" must be
+    visible here instead of surfacing days later as broken personalisation.
+    Both calls are fail-open — with no pool they are silent no-ops.
     """
     settings = get_settings()
-    logger.info("api_starting", env=settings.APP_ENV)
+    identity = build_identity("api")
+    logger.info("api_starting", env=settings.APP_ENV, **identity.as_dict())
     try:
         app.state.arq_pool = await create_pool(RedisSettings.from_dsn(settings.REDIS_URL))
         logger.info("api_arq_pool_connected")
     except Exception as exc:
         app.state.arq_pool = None
         logger.error("api_arq_pool_connect_failed", error=str(exc))
+
+    await publish_build_identity(app.state.arq_pool, identity)
+    await check_deploy_parity(app.state.arq_pool, identity)
 
     try:
         yield

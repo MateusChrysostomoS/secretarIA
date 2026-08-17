@@ -179,9 +179,14 @@ open session and does not commit (API layer commits once).
   skipped.
 - Admin summaries (`api/admin/tenants.py`) and the outbound sending path
   (`services/whatsapp.py::WhatsAppClient.for_tenant`) were spot-checked:
-  both already treat `phone_number_id` as `Optional`/fall back to the
-  `META_PHONE_NUMBER_ID` env scaffold when `None`, so neither needed a
-  behavioral change for the new nullability.
+  both already treat `phone_number_id` as `Optional`.
+  **SUPERSEDED (PROMPT_FIX_21):** the sending path no longer falls back to the
+  `META_PHONE_NUMBER_ID` / `META_ACCESS_TOKEN` env scaffold when `None` — that
+  fallback could send one clinic's message from another clinic's WABA.
+  `for_tenant` now raises `TenantWhatsAppCredentialMissing` before any HTTP
+  call; the env scaffold survives only behind the explicit
+  `WhatsAppClient.for_dev_scaffold()`. See
+  `docs/CHECKPOINT_menu_rename_waba_lgpd.md`.
 
 ## Email (`services/email.py`)
 

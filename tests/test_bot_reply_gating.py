@@ -593,6 +593,91 @@ async def test_greeting_button_unavailable_still_replies_when_conversation_has_n
 
 
 # --------------------------------------------------------------------------
+# service_unavailable: the inactive-tenant fallback (PROMPT_FIX_21)
+# --------------------------------------------------------------------------
+
+
+async def test_inactive_tenant_fallback_uses_that_tenants_own_credentials(
+    monkeypatch: pytest.MonkeyPatch, db
+) -> None:
+    """It used to build a bare `WhatsAppClient()` and answer from the global env
+    scaffold - i.e. possibly from another clinic's WhatsApp number - with no
+    entitlement check at all. It has no conversation to resolve a tenant from,
+    so the tenant id now rides on the `_ReplyContext`."""
+    tenant, patient, _conversation = await _make_conversation(db, is_active=False)
+    await _assert_llm_never_called(monkeypatch)
+
+    seen: list = []
+
+    async def _fake_get_entitlements(tenant_id, redis):
+        seen.append(tenant_id)
+        return _summary()
+
+    # After `_assert_llm_never_called`, which installs its own entitled stub.
+    monkeypatch.setattr(tasks, "get_entitlements", _fake_get_entitlements)
+
+    await tasks._send_bot_reply(
+        tasks._ReplyContext(
+            conversation_id=None,
+            tenant_id=tenant.id,
+            patient_wa_id=patient.wa_id,
+            inbound_body="",
+            service_unavailable=True,
+        )
+    )
+
+    assert seen == [tenant.id]  # the entitlement gate ran, for THIS tenant
+    assert len(_FakeWhatsAppClient.created) == 1
+    client = _FakeWhatsAppClient.created[0]
+    assert client._phone_number_id == tenant.phone_number_id
+    assert client._access_token == "decrypted-waba-token"
+    assert client.sent == [("text", patient.wa_id, tasks.SERVICE_UNAVAILABLE_MESSAGE)]
+
+
+async def test_inactive_tenant_fallback_is_entitlement_gated(
+    monkeypatch: pytest.MonkeyPatch, db
+) -> None:
+    """Fails closed like every other outbound: an unentitled tenant gets no
+    message at all, not even this one."""
+    tenant, patient, _conversation = await _make_conversation(db, is_active=False)
+    await _assert_llm_never_called(monkeypatch)
+
+    async def _unentitled(tenant_id, redis):
+        return _summary(active=False, status="past_due")
+
+    # After `_assert_llm_never_called`, which installs its own entitled stub.
+    monkeypatch.setattr(tasks, "get_entitlements", _unentitled)
+
+    await tasks._send_bot_reply(
+        tasks._ReplyContext(
+            conversation_id=None,
+            tenant_id=tenant.id,
+            patient_wa_id=patient.wa_id,
+            inbound_body="",
+            service_unavailable=True,
+        )
+    )
+
+    assert _FakeWhatsAppClient.created == []
+
+
+async def test_dispatch_bubbles_sends_nothing_without_a_tenant(db) -> None:
+    """`_dispatch_bubbles` used to fall back to the global env scaffold when
+    `tenant` was None. It now sends zero bubbles instead."""
+    _tenant, patient, conversation = await _make_conversation(db)
+    reply = tasks._ReplyContext(
+        conversation_id=conversation.id,
+        patient_wa_id=patient.wa_id,
+        inbound_body="oi",
+    )
+
+    sent = await tasks._dispatch_bubbles(reply, [TextBubble(body="olá")], tenant=None)
+
+    assert sent == 0
+    assert _FakeWhatsAppClient.created == []
+
+
+# --------------------------------------------------------------------------
 # _apply_flow_result "handover": the scoped-help escalation seam
 # (trio-gerenciar round - flow_router's _scoped_help_escalate result)
 # --------------------------------------------------------------------------

@@ -108,15 +108,19 @@ async def _on_inbound(ctx: InboundContext) -> bool:
         return False
 
     settings = get_settings()
-    client = WhatsAppClient.for_tenant(tenant, ctx.waba_token)
     try:
+        # Inside the try on purpose (PROMPT_FIX_21): `for_tenant` now FAILS
+        # CLOSED on a missing tenant credential rather than falling back to the
+        # global env scaffold, and this hook runs inside the inbound turn - an
+        # escaping exception would fail the whole arq job and retry forever.
+        # The handover already happened (a human will see the conversation in
+        # the app regardless), so a missing ack is logged, not fatal.
+        client = WhatsAppClient.for_tenant(tenant, ctx.waba_token)
         await client.send_text_message(to=ctx.patient_wa_id, body=settings.HUMAN_BACKUP_ACK_TEXT)
     except Exception as exc:
-        # The handover already happened (a human will see the conversation in
-        # the app regardless) - a failed ack send is logged, not fatal.
         logger.error(
             "human_backup_ack_send_failed",
-            error=str(exc),
+            error_type=type(exc).__name__,
             conversation_id=str(ctx.conversation_id),
         )
 

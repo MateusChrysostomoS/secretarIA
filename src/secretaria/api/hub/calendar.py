@@ -29,6 +29,7 @@ from secretaria.schemas.calendar import (
     BlockCreate,
     CalendarEventRead,
 )
+from secretaria.services.appointment_status import SOURCE_HUB, log_status_transition
 from secretaria.services.calendar import CalendarService
 from secretaria.services.payments import deposit_lifecycle
 from secretaria.services.tenant_config import load_tenant_config
@@ -244,8 +245,17 @@ async def cancel_appointment(
     cal = await _get_calendar(session, tenant)
     await cal.cancel_event(appt.google_event_id)
 
+    previous_status = appt.status
     appt.status = AppointmentStatus.CANCELLED
     appt.updated_at = datetime.now(UTC)
+    log_status_transition(
+        appointment_id=appt.id,
+        tenant_id=tenant.id,
+        old_status=previous_status,
+        new_status=AppointmentStatus.CANCELLED,
+        source=SOURCE_HUB,
+        idempotency_key=f"cancel:{appt.id}",
+    )
 
     # Money hook (PROMPT S3 section 4): resolve the deposit's outcome for
     # this cancellation in the SAME transaction. waba_token=None — the
@@ -316,8 +326,21 @@ async def reschedule_appointment(
     # ::_apply_flow_result).
     appt.start_at = body.new_start
     appt.end_at = body.new_end
+    # The SAME booking, moved - RESCHEDULED is a LIVE status, not a tombstone
+    # (PROMPT_FIX_16, taxonomy on models/appointment.py). The row keeps its id,
+    # its google_event_id and its deposit, so it stays upcoming, manageable and
+    # remindable at the NEW window.
+    previous_status = appt.status
     appt.status = AppointmentStatus.RESCHEDULED
     appt.updated_at = datetime.now(UTC)
+    log_status_transition(
+        appointment_id=appt.id,
+        tenant_id=tenant.id,
+        old_status=previous_status,
+        new_status=AppointmentStatus.RESCHEDULED,
+        source=SOURCE_HUB,
+        idempotency_key=f"resched:{appt.google_event_id}:{body.new_start.isoformat()}",
+    )
     # Deliberately NOT calling deposit_lifecycle.register_reschedule here:
     # this is a DOCTOR-initiated move (the hub), not a patient-initiated one
     # — it must never consume the patient's own pix_reschedule_limit
@@ -355,8 +378,17 @@ async def update_appointment_status(
     session: AsyncSession = Depends(get_session),
 ) -> AppointmentRead:
     appt = await _get_appointment(session, tenant, appointment_id)
+    previous_status = appt.status
     appt.status = body.status
     appt.updated_at = datetime.now(UTC)
+    log_status_transition(
+        appointment_id=appt.id,
+        tenant_id=tenant.id,
+        old_status=previous_status,
+        new_status=body.status,
+        source=SOURCE_HUB,
+        idempotency_key=f"status:{appt.id}:{body.status.value}",
+    )
 
     # Money hooks (PROMPT S3 section 4): PATCH doesn't touch Google Calendar
     # today (unchanged) — but a CANCELLED/NO_SHOW status transition is still

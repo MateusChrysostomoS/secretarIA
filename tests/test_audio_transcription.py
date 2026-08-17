@@ -53,11 +53,19 @@ from secretaria.models import (  # noqa: E402
     ProcessedEvent,
     Tenant,
 )
-from secretaria.schemas.webhook import WebhookValue, iter_audio_messages  # noqa: E402
+from secretaria.schemas.webhook import (  # noqa: E402
+    WebhookValue,
+    iter_audio_messages,
+    minimal_event_payload,
+)
+from secretaria.services.tenant_config import set_waba_token  # noqa: E402
 from secretaria.workers import tasks  # noqa: E402
 
 PHONE_NUMBER_ID = "1234567890"  # matches META_PHONE_NUMBER_ID above
 WA_ID = "5511999990000"
+# Deliberately DIFFERENT from META_ACCESS_TOKEN: the audio path must use the
+# tenant's own decrypted token, never the global env scaffold (PROMPT_FIX_21).
+TENANT_WABA_TOKEN = "tenant-waba-token"
 
 
 # --------------------------------------------------------------------------
@@ -307,7 +315,9 @@ async def test_webhook_enqueues_audio_job_with_minimal_payload(client, monkeypat
     audio_calls = [c for c in fake_pool.calls if c[0] == "transcribe_audio_message"]
 
     assert len(process_calls) == 1
-    assert process_calls[0][1] == (payload,)  # the FULL body, positional
+    # The MINIMAL envelope, positional - never the raw Meta body
+    # (PROMPT_FIX_21). Same key names, so the worker parses it unchanged.
+    assert process_calls[0][1] == (minimal_event_payload(payload),)
     assert process_calls[0][2] == {}
 
     assert len(audio_calls) == 1
@@ -475,12 +485,20 @@ async def _seed_tenant(db) -> Tenant:
     so they seed the tenant explicitly like the rest of the suite
     (test_handover_echoes.py's `_seed_tenant`) instead of relying on that
     scaffold.
+
+    The tenant's own WABA token is stored too: the audio path is fail-closed
+    per tenant now (PROMPT_FIX_21) and no longer falls back to the global
+    META_ACCESS_TOKEN for either the Graph media download or the clarification
+    reply. See `test_missing_tenant_token_skips_transcription` for the
+    no-token case.
     """
     async with db() as session:
         tenant = Tenant(
             id=uuid4(), clinic_name="Clinic", phone_number_id=PHONE_NUMBER_ID, is_active=True
         )
         session.add(tenant)
+        await session.flush()
+        await set_waba_token(session, tenant.id, TENANT_WABA_TOKEN)
         await session.commit()
         await session.refresh(tenant)
         return tenant
@@ -698,6 +716,67 @@ async def test_transient_media_fetch_error_propagates_and_stays_unprocessed(
         )
         # Retry-safe: NOT marked processed, so arq's redelivery will try again.
         assert processed is None
+
+
+async def test_uses_the_tenant_token_not_the_global_env(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Graph media download authenticates with the TENANT's own token."""
+    await _seed_tenant(db)
+    seen: dict = {}
+
+    async def _fake_transcribe(media_id, access_token, *, api_version, config, http_client):
+        seen["access_token"] = access_token
+        return TranscriptionResult(
+            text="quero marcar", provider_used="openai", char_count=12, is_low_confidence=False
+        )
+
+    monkeypatch.setattr(tasks, "transcribe_whatsapp_media", _fake_transcribe)
+    _spy_send_bot_reply(monkeypatch)
+
+    await tasks.transcribe_audio_message(
+        {},
+        media_id="MEDIA1",
+        phone_number_id=PHONE_NUMBER_ID,
+        wa_id=WA_ID,
+        message_id="wamid.AUDIO.token",
+        patient_name="Ana",
+    )
+
+    assert seen["access_token"] == TENANT_WABA_TOKEN
+    assert seen["access_token"] != get_settings().META_ACCESS_TOKEN
+
+
+async def test_missing_tenant_token_skips_transcription(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail closed (PROMPT_FIX_21): no tenant token -> no Graph download, no
+    STT spend, no reply. It must NOT fall back to META_ACCESS_TOKEN."""
+    async with db() as session:
+        tenant = Tenant(
+            id=uuid4(), clinic_name="Clinic", phone_number_id=PHONE_NUMBER_ID, is_active=True
+        )
+        session.add(tenant)
+        await session.commit()  # deliberately no WABA token
+
+    async def _explode(*args, **kwargs):
+        raise AssertionError("STT was attempted without the tenant's own token")
+
+    monkeypatch.setattr(tasks, "transcribe_whatsapp_media", _explode)
+    simple_calls = _spy_send_simple_text(monkeypatch)
+    send_bot_calls = _spy_send_bot_reply(monkeypatch)
+
+    await tasks.transcribe_audio_message(
+        {},
+        media_id="MEDIA1",
+        phone_number_id=PHONE_NUMBER_ID,
+        wa_id=WA_ID,
+        message_id="wamid.AUDIO.notoken",
+        patient_name="Ana",
+    )
+
+    assert simple_calls == []
+    assert send_bot_calls == []
 
 
 # --------------------------------------------------------------------------

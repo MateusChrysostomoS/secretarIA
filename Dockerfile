@@ -34,6 +34,22 @@ COPY alembic.ini ./
 COPY migrations ./migrations
 RUN uv sync --frozen --no-dev
 
+# 3. Build identity (FIX_01 §5.1). Deliberately the LAST layer before CMD: a
+# new SHA must not invalidate the dependency or install layers above.
+#
+# Passed by the build, e.g.
+#   docker build --build-arg BUILD_SHA=$(git rev-parse --short HEAD) \
+#                --build-arg BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ) .
+# `.git` is NOT in this image and must never be read at runtime. A builder
+# that passes neither (Easypanel's plain Dockerfile build does not) is still
+# fine: `source_fingerprint` in core/build_info.py hashes the shipped sources,
+# so API/worker parity stays provable with no pipeline support at all. Setting
+# these as runtime env vars in the deploy panel also works — same Settings.
+ARG BUILD_SHA=""
+ARG BUILT_AT=""
+ENV BUILD_SHA=${BUILD_SHA} \
+    BUILT_AT=${BUILT_AT}
+
 EXPOSE 8000
 
 # Default command = API service.

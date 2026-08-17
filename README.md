@@ -182,6 +182,60 @@ REDIS_URL=redis://secretaria-redis:6379/0
 Run `alembic upgrade head` once after each deploy that adds migrations
 (Easypanel one-off command or a release step).
 
+### Deploy both services, or neither
+
+The two services are deployed **manually and separately**, and nothing forces
+them onto the same commit. On 2026-08-16 the worker was left one commit behind:
+every WhatsApp greeting came from stale code while the API looked perfectly
+healthy. The symptom read as "the personalisation broke"; the cause was one
+missing click, and it cost hours to find.
+
+**Rule: any push that touches `src/secretaria/workers/` or
+`src/secretaria/services/flow_router.py` requires deploying `secretaria-worker`,
+not only the API.** Those paths *are* the reply path — the API only fast-ACKs
+the webhook, the worker composes and sends every message. Enabling auto-deploy
+on both services from `main` retires this rule entirely, and is preferred.
+
+Prove the two agree without opening `Environment`:
+
+```sh
+curl -s https://<api-host>/build
+```
+
+```json
+{
+  "service": "api",
+  "build_sha": "39a472d",
+  "built_at": "2026-08-16T11:20:00Z",
+  "alembic_head": "c9a1e2f4b6d8",
+  "source_fingerprint": "9f2c41ab77de",
+  "worker": {
+    "service": "worker",
+    "build_sha": "39a472d",
+    "built_at": "2026-08-16T11:20:00Z",
+    "alembic_head": "c9a1e2f4b6d8",
+    "source_fingerprint": "9f2c41ab77de",
+    "reported_at": "2026-08-16T14:03:11+00:00"
+  },
+  "deploy_parity": "match"
+}
+```
+
+`deploy_parity` is `match`, `divergent` or `unknown`. **`unknown` never means
+agreement** — it means the worker has not announced itself (Redis unreachable,
+or it is still running code from before this endpoint existed). The worker's
+own half of the proof is its `worker_started` log line, carrying the same
+fields plus the registered job and cron names.
+
+A divergence also announces itself: both processes emit `deploy_sha_divergence`
+(WARNING) at startup, and the worker re-checks hourly.
+
+`build_sha` / `built_at` come from the build (`docker build --build-arg
+BUILD_SHA=$(git rev-parse --short HEAD) --build-arg BUILT_AT=$(date -u
++%Y-%m-%dT%H:%M:%SZ) .`) and read `unknown` when nothing passes them — which is
+fine: `source_fingerprint` hashes the sources shipped in the image and proves
+parity on its own, with no pipeline support.
+
 ## Project layout
 
 ```

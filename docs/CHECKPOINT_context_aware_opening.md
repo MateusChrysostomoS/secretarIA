@@ -36,8 +36,11 @@ All derivation lives in ONE place:
   1. `HAS_UPCOMING_SOON` — nearest future appointment starts within
      `UPCOMING_SOON_HOURS`;
   2. `HAS_UPCOMING` — future appointment(s), none inside the soon window;
-  3. `JUST_HAD_CONSULT` — no future, but a non-cancelled/non-rescheduled
-     appointment STARTED within `POST_CONSULT_WINDOW_HOURS`;
+  3. `JUST_HAD_CONSULT` — no future, but a non-cancelled appointment STARTED
+     within `POST_CONSULT_WINDOW_HOURS`. (PROMPT_FIX_16: RESCHEDULED is no
+     longer excluded here — a reschedule MOVES the row's `start_at`, so a past
+     `start_at` on a rescheduled booking means it really did just happen. Only
+     CANCELLED is excluded.)
   4. `RETURNING_NO_APPOINTMENT` — no future/recent, but ≥1 past appointment
      of any status;
   5. `NEW` — patient with no appointment history.

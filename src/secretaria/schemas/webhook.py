@@ -322,6 +322,167 @@ def iter_audio_messages(payload: dict) -> Iterator[dict]:
                 }
 
 
+def _minimal_message(msg: dict, *, keep_to: bool) -> dict | None:
+    """One inbound message / echo reduced to the fields the worker reads.
+
+    `keep_to` is True only for `smb_message_echoes`, where `to` IS the patient
+    (see workers/tasks.py::_handle_human_echoes); on an inbound `messages`
+    entry `to` is the clinic's own number and nothing reads it.
+    """
+    if not isinstance(msg, dict) or not msg.get("id"):
+        return None
+
+    out: dict = {"id": msg["id"]}
+    for key in ("from", "type"):
+        if msg.get(key):
+            out[key] = msg[key]
+    if keep_to and msg.get("to"):
+        out["to"] = msg["to"]
+
+    text = msg.get("text")
+    if isinstance(text, dict) and text.get("body") is not None:
+        out["text"] = {"body": text["body"]}
+
+    interactive = msg.get("interactive")
+    if isinstance(interactive, dict):
+        reduced_interactive: dict = {}
+        if interactive.get("type"):
+            reduced_interactive["type"] = interactive["type"]
+        for kind in ("button_reply", "list_reply"):
+            sub = interactive.get(kind)
+            if isinstance(sub, dict):
+                # `description` is never read — only the id (routing contract:
+                # "slot|"/"prof|"/"greeting|"/action prefixes) and the title.
+                reduced_interactive[kind] = {"id": sub.get("id"), "title": sub.get("title")}
+        if reduced_interactive:
+            out["interactive"] = reduced_interactive
+
+    audio = msg.get("audio")
+    if isinstance(audio, dict) and audio.get("id"):
+        # Only the media id: the dedicated transcribe job re-fetches the media.
+        out["audio"] = {"id": audio["id"]}
+
+    button = msg.get("button")
+    if isinstance(button, dict):
+        out["button"] = {"payload": button.get("payload"), "text": button.get("text")}
+
+    return out
+
+
+def minimal_event_payload(payload: dict) -> dict:
+    """Reduce a raw Meta webhook body to ONLY what the arq worker reads.
+
+    The job argument is serialized into Redis, so whatever is enqueued is
+    whatever gets stored outside the database (PROMPT_FIX_21). The full Meta
+    body carries a great deal the worker never touches, and some of it is
+    personal data: `statuses[].recipient_id` (a full phone number on every
+    delivery receipt), `metadata.display_phone_number`, the `contact`
+    sub-object on `smb_app_state_sync` (full_name + phone_number), and the
+    `history[].threads` chat backlog. None of that is emitted here.
+
+    The output uses the SAME key names as the input, so
+    `WebhookPayload.model_validate` parses it unchanged — this shrinks what
+    travels, it does not introduce a second wire format. Per field:
+
+      * `messages`           -> metadata.phone_number_id, contacts (wa_id +
+                                profile.name), and each message reduced by
+                                `_minimal_message`. The message `id` is the
+                                idempotency key and is always preserved.
+      * `smb_message_echoes` -> same, plus each echo's `to` (the patient).
+      * `history`            -> per chunk: `metadata.phase`/`progress` and an
+                                `errors` list of the right LENGTH with empty
+                                entries. `history_item_is_final` only tests
+                                truthiness/count; `threads` is dropped whole.
+      * `smb_app_state_sync` -> `type`/`action` per item, never `contact`.
+      * anything else        -> the field name with an empty value, so the
+                                worker still logs `worker_field_ignored`.
+
+    Defensive throughout (isinstance checks, never raises on a malformed
+    payload), exactly like `iter_event_ids` / `iter_audio_messages`.
+    """
+    if not isinstance(payload, dict):
+        return {"entry": []}
+
+    entries: list[dict] = []
+    for entry in payload.get("entry") or []:
+        if not isinstance(entry, dict):
+            continue
+        changes: list[dict] = []
+        for change in entry.get("changes") or []:
+            if not isinstance(change, dict):
+                continue
+            field = change.get("field")
+            raw_value = change.get("value")
+            value = raw_value if isinstance(raw_value, dict) else {}
+
+            reduced: dict = {}
+            metadata = value.get("metadata")
+            if isinstance(metadata, dict) and metadata.get("phone_number_id"):
+                # NOT display_phone_number — that one is a real phone number.
+                reduced["metadata"] = {"phone_number_id": metadata["phone_number_id"]}
+
+            if field in ("messages", "smb_message_echoes"):
+                contacts: list[dict] = []
+                for contact in value.get("contacts") or []:
+                    if not isinstance(contact, dict) or not contact.get("wa_id"):
+                        continue
+                    profile = contact.get("profile")
+                    contacts.append(
+                        {
+                            "wa_id": contact["wa_id"],
+                            "profile": {
+                                "name": profile.get("name") if isinstance(profile, dict) else None
+                            },
+                        }
+                    )
+                if contacts:
+                    reduced["contacts"] = contacts
+
+                key = "messages" if field == "messages" else "message_echoes"
+                messages = []
+                for msg in value.get(key) or []:
+                    minimal = _minimal_message(msg, keep_to=key == "message_echoes")
+                    if minimal is not None:
+                        messages.append(minimal)
+                if messages:
+                    reduced[key] = messages
+
+            elif field == "history":
+                chunks: list[dict] = []
+                for item in value.get("history") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    chunk: dict = {}
+                    meta = item.get("metadata")
+                    if isinstance(meta, dict):
+                        chunk["metadata"] = {
+                            "phase": meta.get("phase"),
+                            "progress": meta.get("progress"),
+                        }
+                    errors = item.get("errors")
+                    if isinstance(errors, list) and errors:
+                        # Count/truthiness only — the error bodies are dropped.
+                        chunk["errors"] = [{} for _ in errors]
+                    chunks.append(chunk)
+                if chunks:
+                    reduced["history"] = chunks
+
+            elif field == "smb_app_state_sync":
+                state_sync = []
+                for item in value.get("state_sync") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    # `contact` (full_name + phone_number) is never carried.
+                    state_sync.append({"type": item.get("type"), "action": item.get("action")})
+                if state_sync:
+                    reduced["state_sync"] = state_sync
+
+            changes.append({"field": field, "value": reduced})
+        entries.append({"changes": changes})
+
+    return {"entry": entries}
+
+
 def extract_inbound_body(msg: WebhookMessage) -> str | None:
     """Return the human-readable text body of an inbound message.
 

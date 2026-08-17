@@ -71,9 +71,15 @@ class ShowMainMenuRequested(Exception):
     Same exception->sentinel mechanism as CalendarUnavailableError (see the
     note above): it propagates out of the LangGraph ToolNode and
     graph.run_agent maps it to SHOW_MAIN_MENU_SENTINEL for workers/tasks.py
-    to act on. NOTHING is deleted — unlike the dev-only `/menu` command, the
-    worker only resets the conversation's flow fields to the menu; history
-    and the patient row stay untouched.
+    to act on. NOTHING is deleted — the worker only resets the conversation's
+    flow fields to the menu; history and the patient row stay untouched.
+
+    Since PROMPT_FIX_18 this is the SAME seam the `/menu` command uses
+    (`workers/tasks.py::_handle_show_main_menu`, `source="agent_tool"` here vs
+    `source="command"` there), so both surfaces render the identical effective
+    menu and perform the identical state write. The destructive reset `/menu`
+    used to trigger now lives behind the exact literal
+    `/dangerously-remove-context` and is unreachable from this tool.
     """
 
 
