@@ -10,6 +10,7 @@ concurrently without interference.
 """
 
 import asyncio
+import hashlib
 import re
 import ssl
 from collections.abc import Sequence
@@ -117,6 +118,23 @@ _META_TEXT_PATTERNS = [
 
 def _looks_like_meta_output(text: str) -> bool:
     return any(p.search(text) for p in _META_TEXT_PATTERNS)
+
+
+def _meta_output_reason(text: str) -> str | None:
+    """Which pattern rejected the reply, as a stable index — never the text.
+
+    Enough to tune the prompt against ("pattern 2 keeps firing") without the
+    model's own words, which quote the patient, reaching a log (PROMPT_FIX_21).
+    """
+    for index, pattern in enumerate(_META_TEXT_PATTERNS):
+        if pattern.search(text):
+            return f"meta_pattern_{index}"
+    return None
+
+
+def _body_digest(text: str) -> str:
+    """Short SHA-256 prefix of a rejected reply — correlates repeats, leaks nothing."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
 
 _BASE_TOOLS = (
@@ -445,7 +463,11 @@ async def run_agent(
         logger.error(
             "ai_run_agent_meta_output_rejected",
             conversation_id=str(conversation_id),
-            rejected_body=reply[:500],
+            # Length + digest + which pattern matched. NEVER the reply itself:
+            # the model's narration quotes the patient back (PROMPT_FIX_21).
+            rejected_len=len(reply),
+            rejected_sha256=_body_digest(reply),
+            reason=_meta_output_reason(reply),
         )
         return FALLBACK_REPLY
     return reply

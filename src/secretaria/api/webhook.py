@@ -26,7 +26,11 @@ from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.core.security import verify_meta_signature
 from secretaria.models.processed_event import ProcessedEvent
-from secretaria.schemas.webhook import iter_audio_messages, iter_event_ids
+from secretaria.schemas.webhook import (
+    iter_audio_messages,
+    iter_event_ids,
+    minimal_event_payload,
+)
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -103,7 +107,7 @@ async def receive_webhook(request: Request) -> Response:
     if event_ids:
         new_ids = await _filter_new_event_ids(event_ids)
         if not new_ids:
-            logger.info("webhook_duplicate_skipped", event_ids=event_ids)
+            logger.info("webhook_duplicate_skipped", event_count=len(event_ids))
             return JSONResponse({"status": "duplicate"}, status_code=200)
 
     # 5. Enqueue for async processing on the arq worker.
@@ -113,7 +117,24 @@ async def receive_webhook(request: Request) -> Response:
         # 503 -> Meta retries once the queue is reachable again.
         return JSONResponse({"status": "unavailable"}, status_code=503)
 
-    await arq_pool.enqueue_job("process_webhook_event", payload)
+    # LGPD: the job argument lands in Redis, so only the fields the worker
+    # actually reads are enqueued - never the raw Meta body, which carries
+    # delivery-receipt phone numbers, the business' own display number and the
+    # smb_app_state_sync contact book (see schemas/webhook.py's
+    # `minimal_event_payload`). Same key names, so the worker parses it with
+    # the unchanged `WebhookPayload`; the message ids (the idempotency keys)
+    # ride along untouched.
+    job_payload = minimal_event_payload(payload)
+    await arq_pool.enqueue_job("process_webhook_event", job_payload)
+    logger.info(
+        "webhook_job_enqueued",
+        job="process_webhook_event",
+        event_count=len(event_ids),
+        # Size of what we enqueue vs. what Meta sent - the reduction is the
+        # point of this path, so it stays measurable in production.
+        payload_bytes=len(json.dumps(job_payload)),
+        source_bytes=len(raw_body),
+    )
 
     # Voice notes get their own dedicated job with a minimal payload (never
     # the full body) - the download + STT work happens there, off this
@@ -123,9 +144,7 @@ async def receive_webhook(request: Request) -> Response:
         await arq_pool.enqueue_job("transcribe_audio_message", **audio_ref)
         audio_count += 1
     if audio_count:
-        logger.info("webhook_audio_enqueued", count=audio_count)
-
-    logger.info("webhook_enqueued", event_count=len(event_ids))
+        logger.info("webhook_job_enqueued", job="transcribe_audio_message", count=audio_count)
 
     # 6. Fast 200 ack.
     return JSONResponse({"status": "ok"}, status_code=200)

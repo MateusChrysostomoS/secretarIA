@@ -1,12 +1,37 @@
-"""WhatsApp Cloud API client - sends outbound messages."""
+"""WhatsApp Cloud API client - sends outbound messages.
+
+FAIL-CLOSED per tenant (PROMPT_FIX_21). Every tenant-scoped send resolves its
+OWN `phone_number_id` + decrypted WABA token; a missing value raises
+`TenantWhatsAppCredentialMissing` BEFORE any HTTP request is made. There is no
+implicit fallback to the global `META_*` env scaffold: falling back would mean
+sending one clinic's message from another clinic's WhatsApp number. The env
+scaffold survives only behind `for_dev_scaffold()`, which a caller has to ask
+for by name.
+"""
+
+from uuid import UUID
 
 import httpx
 
 from secretaria.config import Settings, get_settings
-from secretaria.core.logging import get_logger
+from secretaria.core.logging import get_logger, wa_suffix
 from secretaria.models.tenant import Tenant
 
 logger = get_logger(__name__)
+
+
+class TenantWhatsAppCredentialMissing(RuntimeError):
+    """A tenant-scoped send was attempted without that tenant's credentials.
+
+    Carries the FIELD NAMES that were missing ("phone_number_id" /
+    "access_token"), never a value — this exception's string ends up in logs
+    and operational alerts.
+    """
+
+    def __init__(self, tenant_id: UUID | str | None, missing: tuple[str, ...]) -> None:
+        self.tenant_id = str(tenant_id) if tenant_id is not None else None
+        self.missing = tuple(missing)
+        super().__init__(f"missing tenant WhatsApp credential: {', '.join(self.missing)}")
 
 
 def _extract_message_id(response_data: dict) -> str | None:
@@ -17,20 +42,50 @@ def _extract_message_id(response_data: dict) -> str | None:
         return None
 
 
+def _meta_error_code(response: httpx.Response) -> str | None:
+    """Meta's NUMERIC error code/subcode from an error body, or None.
+
+    Deliberately allowlisted to the two integer fields: `error.message` and
+    `error.error_user_msg` routinely echo the recipient's phone number and the
+    message text back at us, so the raw body must never reach a log.
+    """
+    try:
+        error = response.json().get("error") or {}
+    except Exception:
+        return None
+    code = error.get("code")
+    subcode = error.get("error_subcode")
+    if not isinstance(code, int):
+        return None
+    return f"{code}/{subcode}" if isinstance(subcode, int) else str(code)
+
+
+def _status_class(status_code: int) -> str:
+    """A "4xx"/"5xx"-style bucket — enough to alert on, carries no content."""
+    return f"{status_code // 100}xx"
+
+
 class WhatsAppClient:
-    """Async client for the Meta WhatsApp Cloud API."""
+    """Async client for the Meta WhatsApp Cloud API.
+
+    Both credentials are REQUIRED and explicit. Build one with `for_tenant`
+    (production) or `for_dev_scaffold` (single-tenant dev only).
+    """
 
     def __init__(
         self,
+        *,
+        phone_number_id: str,
+        access_token: str,
         settings: Settings | None = None,
-        phone_number_id: str | None = None,
-        access_token: str | None = None,
+        tenant_id: UUID | str | None = None,
     ) -> None:
         self._settings = settings or get_settings()
         self._base_url = f"https://graph.facebook.com/{self._settings.META_GRAPH_API_VERSION}"
-        # Per-tenant override: when provided, these take precedence over settings.
-        self._phone_number_id = phone_number_id or self._settings.META_PHONE_NUMBER_ID
-        self._access_token = access_token or self._settings.META_ACCESS_TOKEN
+        self._phone_number_id = phone_number_id
+        self._access_token = access_token
+        # Internal id only, for log correlation. Never a phone number.
+        self._tenant_id = str(tenant_id) if tenant_id is not None else None
 
     @classmethod
     def for_tenant(cls, tenant: Tenant, access_token: str | None) -> "WhatsAppClient":
@@ -38,10 +93,56 @@ class WhatsAppClient:
 
         The token no longer lives on the Tenant row — it is Fernet ciphertext in
         `tenant_credentials`, decrypted ONLY by `services/tenant_config.get_waba_token`
-        (the single decrypt seam). `None` falls back to the single-tenant
-        META_ACCESS_TOKEN env scaffold via the constructor.
+        (the single decrypt seam).
+
+        Raises:
+            TenantWhatsAppCredentialMissing: when this tenant has no
+                `phone_number_id` or no token. It does NOT fall back to the
+                global env scaffold — that would send this clinic's message
+                from whatever WABA the process happens to be configured with.
+                Fail closed, before any HTTP call.
         """
-        return cls(phone_number_id=tenant.phone_number_id, access_token=access_token)
+        missing = []
+        phone_number_id = (tenant.phone_number_id or "").strip()
+        token = (access_token or "").strip()
+        if not phone_number_id:
+            missing.append("phone_number_id")
+        if not token:
+            missing.append("access_token")
+        if missing:
+            # Emitted HERE so the event fires on every path, including callers
+            # that let the exception propagate rather than degrading.
+            logger.error(
+                "whatsapp_credential_missing",
+                tenant_id=str(tenant.id) if tenant.id is not None else None,
+                missing=",".join(missing),
+            )
+            raise TenantWhatsAppCredentialMissing(tenant.id, tuple(missing))
+        return cls(phone_number_id=phone_number_id, access_token=token, tenant_id=tenant.id)
+
+    @classmethod
+    def for_dev_scaffold(cls, settings: Settings | None = None) -> "WhatsAppClient":
+        """The single-tenant `META_*` env scaffold, requested BY NAME.
+
+        Development only: it sends from whatever number the process env points
+        at, which is meaningless (and dangerous) once more than one tenant
+        exists. Nothing on the webhook/worker reply path may call this — those
+        paths all resolve a tenant first and use `for_tenant`.
+        """
+        resolved = settings or get_settings()
+        missing = []
+        if not (resolved.META_PHONE_NUMBER_ID or "").strip():
+            missing.append("phone_number_id")
+        if not (resolved.META_ACCESS_TOKEN or "").strip():
+            missing.append("access_token")
+        if missing:
+            logger.error("whatsapp_credential_missing", tenant_id=None, missing=",".join(missing))
+            raise TenantWhatsAppCredentialMissing(None, tuple(missing))
+        return cls(
+            phone_number_id=resolved.META_PHONE_NUMBER_ID,
+            access_token=resolved.META_ACCESS_TOKEN,
+            settings=resolved,
+        )
 
     async def _post(self, payload: dict, to: str) -> dict:
         # TODO(rate-limit): WhatsApp Coexistence caps outbound traffic at
@@ -52,28 +153,53 @@ class WhatsAppClient:
             "Authorization": f"Bearer {self._access_token}",
             "Content-Type": "application/json",
         }
+        payload_type = payload.get("type")
+        # LGPD: the recipient is reduced to its last four digits, and the
+        # message body never appears at all. Same rule on every branch below.
+        to_suffix = wa_suffix(to)
+        logger.info(
+            "whatsapp_send_attempt",
+            tenant_id=self._tenant_id,
+            to_suffix=to_suffix,
+            payload_type=payload_type,
+        )
         async with httpx.AsyncClient(timeout=15.0) as client:
             try:
                 response = await client.post(url, headers=headers, json=payload)
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:
                 logger.error(
-                    "whatsapp_send_http_error",
+                    "whatsapp_send_result",
+                    outcome="http_error",
+                    tenant_id=self._tenant_id,
+                    to_suffix=to_suffix,
+                    payload_type=payload_type,
                     status_code=exc.response.status_code,
-                    response=exc.response.text,
-                    to=to,
-                    payload_type=payload.get("type"),
+                    status_class=_status_class(exc.response.status_code),
+                    # Numeric Meta code only — NEVER `exc.response.text`.
+                    meta_error_code=_meta_error_code(exc.response),
                 )
                 raise
             except httpx.HTTPError as exc:
-                logger.error("whatsapp_send_connection_error", error=str(exc), to=to)
+                logger.error(
+                    "whatsapp_send_result",
+                    outcome="connection_error",
+                    tenant_id=self._tenant_id,
+                    to_suffix=to_suffix,
+                    payload_type=payload_type,
+                    error_type=type(exc).__name__,
+                )
                 raise
         data = response.json()
         logger.info(
-            "whatsapp_message_sent",
-            to=to,
+            "whatsapp_send_result",
+            outcome="sent",
+            tenant_id=self._tenant_id,
+            to_suffix=to_suffix,
+            payload_type=payload_type,
+            status_code=response.status_code,
+            status_class=_status_class(response.status_code),
             message_id=_extract_message_id(data),
-            payload_type=payload.get("type"),
         )
         return data
 

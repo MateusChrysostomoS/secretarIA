@@ -30,16 +30,82 @@ _SECRET_HINTS = (
 )
 _REDACTED = "***REDACTED***"
 
+# LGPD defence in depth (PROMPT_FIX_21). Personal data and conversation content
+# must be stripped AT THE CALL SITE — a phone number or a message body should
+# never be handed to the logger in the first place. This set is the backstop
+# for the one that slips through (or gets reintroduced later).
+#
+# Matched EXACTLY, never as a substring, so the identifiers we depend on
+# operationally survive: `phone_number_id` is Meta's opaque WABA id (not a
+# phone), and `wa_id_suffix` / `to_suffix` / `wa_id_sha256` are the sanctioned
+# reduced forms. Add the raw name here and log the reduced form instead.
+_PII_KEYS = frozenset(
+    {
+        # Who — phone numbers and identities.
+        "wa_id",
+        "waid",
+        "wa_ids",
+        "patient_wa_id",
+        "from",
+        "from_",
+        "to",
+        "recipient",
+        "phone",
+        "phone_number",
+        "display_phone_number",
+        "msisdn",
+        "contact",
+        "contacts",
+        "full_name",
+        "patient_name",
+        # What — conversation/clinical content and raw provider payloads.
+        "body",
+        "text",
+        "message",
+        "content",
+        "inbound_body",
+        "reply",
+        "rejected_body",
+        "prompt",
+        "transcript",
+        "response",
+        "response_text",
+        "payload",
+    }
+)
+
+
+def wa_suffix(value: str | None, size: int = 4) -> str | None:
+    """Last `size` DIGITS of a phone/wa_id — the only form allowed in a log.
+
+    Returns None for an empty value, so a caller never has to guard. Digits
+    only, so formatting ("+55 11 ...") cannot smuggle extra characters in.
+    """
+    if not value:
+        return None
+    digits = "".join(filter(str.isdigit, value))
+    return digits[-size:] or None
+
 
 def redact_secrets(
     _logger: object, _method: str, event_dict: structlog.types.EventDict
 ) -> structlog.types.EventDict:
-    """Blank any structured value whose key ends in `_encrypted` or looks secret-bearing."""
+    """Blank secret-bearing keys AND personal-data/content keys before rendering.
+
+    Two independent rules:
+      * secrets — key ends in `_encrypted` or contains a `_SECRET_HINTS` hint
+        (SUBSTRING match: `waba_token_encrypted`, `authorization`, ...);
+      * personal data / content — key is EXACTLY one of `_PII_KEYS`.
+    """
     for key in list(event_dict):
         low = key.lower()
         if low == "event":
             continue  # the event NAME is never a secret; never blank it
-        if low.endswith("_encrypted") or any(hint in low for hint in _SECRET_HINTS):
+        if (
+            low.endswith("_encrypted")
+            or any(hint in low for hint in _SECRET_HINTS)
+            or low in _PII_KEYS
+        ):
             event_dict[key] = _REDACTED
     return event_dict
 

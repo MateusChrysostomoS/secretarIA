@@ -5,7 +5,7 @@ Covers the four properties the round must guarantee:
 2. The credential helpers round-trip through Fernet ciphertext — what persists is
    ciphertext, what returns is the original value, decrypted at the single seam.
 3. WhatsAppClient receives the token by INJECTION (caller decrypts via the seam);
-   `None` falls back to the single-tenant META_ACCESS_TOKEN env scaffold.
+   `None` FAILS CLOSED — never the single-tenant META_ACCESS_TOKEN env scaffold.
 4. The structlog redactor blanks secret-bearing keys before any renderer runs.
 
 Uses in-memory aiosqlite; ENCRYPTION_KEY comes from conftest's deterministic env.
@@ -13,6 +13,7 @@ Uses in-memory aiosqlite; ENCRYPTION_KEY comes from conftest's deterministic env
 
 from uuid import uuid4
 
+import pytest
 import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -28,7 +29,7 @@ from secretaria.services.tenant_config import (
     has_waba_token,
     set_waba_token,
 )
-from secretaria.services.whatsapp import WhatsAppClient
+from secretaria.services.whatsapp import TenantWhatsAppCredentialMissing, WhatsAppClient
 
 SECRET = "EAAG-super-secret-waba-token"
 
@@ -114,9 +115,23 @@ async def test_whatsapp_client_token_is_injected(session):
     assert client._access_token == SECRET
     assert client._phone_number_id == tenant.phone_number_id
 
-    # None -> single-tenant env scaffold (conftest sets META_ACCESS_TOKEN).
-    fallback = WhatsAppClient.for_tenant(tenant, None)
-    assert fallback._access_token == "test-access-token"
+
+async def test_missing_tenant_token_fails_closed_not_global_scaffold(session):
+    """The inverted invariant (PROMPT_FIX_21).
+
+    This test used to assert the opposite: that `for_tenant(tenant, None)` fell
+    back to the single-tenant `META_ACCESS_TOKEN` env scaffold. That fallback IS
+    the multi-tenancy bug - it would send THIS clinic's message from whatever
+    WABA the process env happens to point at. A tenant without its own token
+    must now fail closed instead, before any HTTP call.
+    """
+    tenant = await _make_tenant(session)  # no token stored
+
+    with pytest.raises(TenantWhatsAppCredentialMissing) as exc_info:
+        WhatsAppClient.for_tenant(tenant, None)
+    assert exc_info.value.missing == ("access_token",)
+    # The exception message names the FIELD, never a value.
+    assert "test-access-token" not in str(exc_info.value)
 
 
 def test_redactor_blanks_secret_bearing_keys():
