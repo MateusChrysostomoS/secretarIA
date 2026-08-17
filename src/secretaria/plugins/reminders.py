@@ -50,8 +50,8 @@ from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import (
+    LIVE_APPOINTMENT_STATUSES,
     Appointment,
-    AppointmentStatus,
     Conversation,
     Message,
     MessageDirection,
@@ -76,9 +76,14 @@ LEAD_WINDOWS: tuple[tuple[str, timedelta], ...] = (
     ("1h", timedelta(hours=1)),
 )
 
-# Appointments in any other status (CANCELLED, RESCHEDULED, ATTENDED, NO_SHOW)
-# are never reminded.
-_REMINDABLE_STATUSES = (AppointmentStatus.SCHEDULED, AppointmentStatus.CONFIRMED)
+# Remindable = LIVE (SCHEDULED / CONFIRMED / RESCHEDULED), the shared taxonomy
+# from models/appointment.py rather than a tuple spelled out here.
+# RESCHEDULED belongs (PROMPT_FIX_16): a reschedule MOVES this row to a new
+# window, so the moved booking must get its reminders at the NEW times. It used
+# to be excluded, which meant a patient stopped being reminded the moment they
+# rescheduled - exactly when a reminder matters most. TERMINAL statuses
+# (CANCELLED / ATTENDED / NO_SHOW) are never reminded.
+_REMINDABLE_STATUSES = LIVE_APPOINTMENT_STATUSES
 
 # Meta Cloud API language codes for templates. Today's only shipped locale is
 # pt-BR (see CLAUDE.md's "Eye Company" note — language is real per-tenant

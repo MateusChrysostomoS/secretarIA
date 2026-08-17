@@ -19,17 +19,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
-from secretaria.models import Appointment, AppointmentStatus
+from secretaria.models import LIVE_APPOINTMENT_STATUSES, Appointment, AppointmentStatus
 
 logger = get_logger(__name__)
 
-# A live upcoming booking. CONFIRMED counts alongside SCHEDULED: a confirmed
-# appointment is still upcoming and still manageable (cancel/reschedule).
-UPCOMING_STATUSES = (AppointmentStatus.SCHEDULED, AppointmentStatus.CONFIRMED)
+# A live upcoming booking — the shared taxonomy, never a local tuple
+# (models/appointment.py). CONFIRMED counts alongside SCHEDULED: a confirmed
+# appointment is still upcoming and still manageable. So does RESCHEDULED
+# (PROMPT_FIX_16): a reschedule MOVES this very row to a new window, so a
+# booking that was moved once is every bit as upcoming as one that never was.
+# Leaving it out is what made a rescheduled consult vanish from the manage
+# flow, the greeting and `list_patient_appointments`.
+UPCOMING_STATUSES = LIVE_APPOINTMENT_STATUSES
 
-# Excluded from "recent past": a cancelled/rescheduled row never means the
-# patient just had (or missed) a consult.
-_RECENT_PAST_EXCLUDED = (AppointmentStatus.CANCELLED, AppointmentStatus.RESCHEDULED)
+# Excluded from "recent past": a cancelled row never means the patient just had
+# (or missed) a consult. RESCHEDULED is NOT excluded any more - the row's
+# `start_at` was moved to the new window, so a past `start_at` on a rescheduled
+# booking means that booking really did just happen.
+_RECENT_PAST_EXCLUDED = (AppointmentStatus.CANCELLED,)
 
 
 def as_utc(dt: datetime) -> datetime:
@@ -66,7 +73,10 @@ class PatientOpeningContext:
 async def load_upcoming_appointments(
     session: AsyncSession, tenant_id, patient_id, *, now: datetime | None = None
 ) -> list[dict]:
-    """Future SCHEDULED/CONFIRMED appointments for a patient, nearest first.
+    """Future LIVE appointments for a patient, nearest first.
+
+    "Live" is SCHEDULED / CONFIRMED / RESCHEDULED — see UPCOMING_STATUSES above
+    and the taxonomy on models/appointment.py.
 
     Extracted from workers/tasks.py so the manage flow, the opening-state
     resolver and the `list_patient_appointments` agent tool share ONE query.
