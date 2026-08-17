@@ -58,12 +58,12 @@ from secretaria.schemas.professional import (
     ProfessionalRead,
     ProfessionalUpdate,
 )
+from secretaria.services import hub_configuration as hubcfg
 from secretaria.services.calendar import GoogleScopeInsufficientError
 from secretaria.services.entitlements_client import get_entitlements, is_entitled
 from secretaria.services.tenant_config import (
     ClinicCalendarNotConnectedError,
     ensure_professional_secondary_calendar,
-    professional_completeness_item,
 )
 
 logger = get_logger(__name__)
@@ -83,43 +83,25 @@ def _read_model(professional: Professional) -> ProfessionalRead:
     )
 
 
+# Both thin wrappers below delegate to services/hub_configuration.py, which is
+# also what PUT /tenants/me/configuration uses. Sharing the implementation is
+# the point: the transactional endpoint and these legacy ones must agree on
+# what a professional row looks like and on who is allowed to reach it.
+
+
 async def _list_item(
     session: AsyncSession, professional: Professional, tenant: Tenant
 ) -> ProfessionalListItem:
-    completeness = await professional_completeness_item(session, professional, tenant)
-    return ProfessionalListItem(
-        id=str(professional.id),
-        name=professional.name,
-        google_calendar_id=professional.google_calendar_id,
-        is_active=professional.is_active,
-        created_at=professional.created_at,
-        specialty=professional.specialty,
-        about=professional.about,
-        context_doctor_message=professional.context_doctor_message,
-        business_hours=professional.business_hours or {},
-        appointment_types=professional.appointment_types or [],
-        has_calendar=completeness.has_calendar,
-        has_hours=completeness.has_hours,
-        has_services=completeness.has_services,
-        complete=completeness.complete,
-    )
+    return await hubcfg.professional_list_item(session, professional, tenant)
 
 
 async def _get_professional(
     session: AsyncSession, tenant: Tenant, professional_id: str
 ) -> Professional:
     try:
-        prof_uuid = UUID(professional_id)
-    except ValueError:
+        return await hubcfg.resolve_professional(session, tenant, professional_id)
+    except hubcfg.ProfessionalNotFound:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Professional not found") from None
-    professional = await session.scalar(
-        select(Professional).where(
-            Professional.id == prof_uuid, Professional.tenant_id == tenant.id
-        )
-    )
-    if professional is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Professional not found")
-    return professional
 
 
 async def _count_active(session: AsyncSession, tenant_id: UUID) -> int:
@@ -225,17 +207,17 @@ async def update_professional_config(
 ) -> ProfessionalListItem:
     """Per-professional config save — NEVER gated by entitlements/limits/activation
     (contract v1 §10 item E, same "config save is always allowed" principle as
-    the tenant-level PUT /tenants/me/config)."""
+    the tenant-level PUT /tenants/me/config).
+
+    LEGACY single-scope save. A screen that edits the tenant and a professional
+    together should use PUT /tenants/me/configuration instead, which commits
+    both in one transaction rather than leaving a half-saved state behind when
+    the second request fails.
+    """
     professional = await _get_professional(session, tenant, professional_id)
     data = body.model_dump(exclude_unset=True)
 
-    for field_name in ("specialty", "about", "context_doctor_message", "google_calendar_id"):
-        if field_name in data:
-            setattr(professional, field_name, data[field_name])
-    if "business_hours" in data:
-        professional.business_hours = data["business_hours"]
-    if "appointment_types" in data:
-        professional.appointment_types = data["appointment_types"]
+    hubcfg.apply_professional_config(professional, data)
 
     await session.commit()
     await session.refresh(professional)

@@ -23,6 +23,17 @@ class Settings(BaseSettings):
     APP_ENV: str = "dev"
     LOG_LEVEL: str = "INFO"
 
+    # --- Build identity (core/build_info.py — deploy parity, FIX_01 §5.1) ---
+    # Injected by the BUILD, as `ARG`/`ENV` in the Dockerfile — never read from
+    # `.git`, which does not exist inside the image. Both are non-secret
+    # metadata and are the only settings this process is allowed to echo back
+    # over HTTP (`GET /build`) or into a log line.
+    # Empty is legitimate: a build that passes neither still proves parity via
+    # `source_fingerprint` (a hash of the shipped sources), which needs no
+    # pipeline support at all. See core/build_info.py's module docstring.
+    BUILD_SHA: str = ""
+    BUILT_AT: str = ""
+
     # --- Infrastructure ---
     DATABASE_URL: str = "postgresql+asyncpg://secretaria:secretaria@localhost:5432/secretaria"
     REDIS_URL: str = "redis://localhost:6379/0"
