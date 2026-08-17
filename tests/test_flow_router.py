@@ -9,6 +9,7 @@ os.environ.setdefault("META_VERIFY_TOKEN", "test-verify-token")
 os.environ.setdefault("META_ACCESS_TOKEN", "test-access-token")
 os.environ.setdefault("META_PHONE_NUMBER_ID", "1234567890")
 
+from datetime import timedelta as _timedelta  # noqa: E402
 from zoneinfo import ZoneInfo  # noqa: E402
 
 from secretaria.ai.formatter import ButtonBubble, SlotsBubble, TextBubble  # noqa: E402
@@ -84,12 +85,23 @@ def _conversation(**kw):
 
 
 class _FakeCalendar:
-    def __init__(self, slots=None, unavailable=False):
+    """Stand-in for CalendarService.
+
+    `days` pins exactly which days `list_available_days` reports (the day
+    picker's input); left None, every day of the requested window is free,
+    which is the simplest shape for tests that only care about later steps.
+    `day_scans` records the calls so "one availability read per picker" is
+    testable.
+    """
+
+    def __init__(self, slots=None, unavailable=False, days=None):
         self._slots = slots or []
         self._unavailable = unavailable
+        self._days = days
         self.tzinfo = ZoneInfo("America/Sao_Paulo")
         self.created: list = []
         self.listed_days: list = []
+        self.day_scans: list = []
         self.cancelled: list = []
         self.updated: list = []
 
@@ -98,6 +110,15 @@ class _FakeCalendar:
             raise CalendarUnavailableError("down")
         self.listed_days.append(day.date() if hasattr(day, "date") else day)
         return self._slots
+
+    async def list_available_days(self, start_day, days, slot_minutes=None):
+        if self._unavailable:
+            raise CalendarUnavailableError("down")
+        self.day_scans.append((start_day, days, slot_minutes))
+        if self._days is not None:
+            return list(self._days)
+        base = start_day.replace(hour=0, minute=0, second=0, microsecond=0)
+        return [base + _timedelta(days=offset) for offset in range(days)]
 
     async def create_event(self, start, end, summary, description=""):
         if self._unavailable:
@@ -195,15 +216,22 @@ async def test_unmatched_service_delegates_preserving_state():
     assert res.flow_step == STEP_AWAITING_SERVICE
 
 
-async def test_service_confirm_asks_day():
+async def test_service_confirm_opens_the_day_picker():
     conv = _conversation(
         flow_state=FlowState.SERVICE_CATALOG,
         flow_step=STEP_AWAITING_SERVICE_CONFIRM,
         flow_selected_type="Primeira Consulta",
     )
-    res = await route(conv, _tenant(), None, "Sim")
+    cal = _FakeCalendar()
+    res = await route(conv, _tenant(), cal, "Sim")
     assert res.action == "reply"
     assert res.flow_step == STEP_AWAITING_DAY
+    # A tappable day list, not the old free-text "Para quando você gostaria?".
+    bubble = res.bubbles[0]
+    assert isinstance(bubble, SlotsBubble)
+    assert bubble.rows[0][0].startswith("day|")
+    # The service's own 40 minutes drive which days count as having room.
+    assert cal.day_scans[0][2] == 40
 
 
 async def test_day_with_slots_lists_them():
@@ -573,11 +601,16 @@ async def test_manage_pick_reschedule_step_resolves_to_begin_reschedule():
         flow_state=FlowState.MANAGE_BOOKING, flow_step=STEP_MANAGE_PICK_RESCHEDULE
     )
     body = f"20/06 14:00 ({appt['start_at'].isoformat()})"
-    res = await route(conv, _tenant(), _FakeCalendar(), body, upcoming_appointments=[appt])
+    cal = _FakeCalendar()
+    res = await route(conv, _tenant(), cal, body, upcoming_appointments=[appt])
     assert res.action == "reply"
     assert res.flow_step == STEP_MANAGE_DAY
     assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)
-    assert isinstance(res.bubbles[0], TextBubble)
+    # The reschedule opens the SAME tappable day picker the first booking uses.
+    assert isinstance(res.bubbles[0], SlotsBubble)
+    assert res.bubbles[0].rows[0][0].startswith("day|")
+    # ...slotted on the ORIGINAL appointment's own 40-minute length.
+    assert cal.day_scans[0][2] == 40
 
 
 async def test_manage_pick_cancel_step_resolves_to_begin_cancel():
@@ -618,31 +651,41 @@ async def test_manage_pick_cancel_garbage_delegates_preserving_state():
 # --------------------------------------------------------------------------
 
 
-def test_enter_manage_action_empty_matches_enter_manage_empty_reply():
-    res = enter_manage_action("reschedule", _tenant(), [])
+async def test_enter_manage_action_empty_matches_enter_manage_empty_reply():
+    res = await enter_manage_action("reschedule", _tenant(), [])
     assert res.action == "reply"
     assert res.flow_state == FlowState.MENU
     assert isinstance(res.bubbles[0], TextBubble)
     assert "não tem" in res.bubbles[0].body.lower()
 
-    res_cancel = enter_manage_action("cancel", _tenant(), [])
+    res_cancel = await enter_manage_action("cancel", _tenant(), [])
     assert res_cancel.flow_state == FlowState.MENU
     assert isinstance(res_cancel.bubbles[0], TextBubble)
 
 
-def test_enter_manage_action_single_future_reschedule_begins_directly():
+async def test_enter_manage_action_single_future_reschedule_begins_directly():
     appt = _appt_window()
-    res = enter_manage_action("reschedule", _tenant(), [appt])
+    res = await enter_manage_action("reschedule", _tenant(), [appt], calendar=_FakeCalendar())
     assert res.action == "reply"
     assert res.flow_state == FlowState.MANAGE_BOOKING
     assert res.flow_step == STEP_MANAGE_DAY
     assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)
-    assert isinstance(res.bubbles[0], TextBubble)
+    assert isinstance(res.bubbles[0], SlotsBubble)
 
 
-def test_enter_manage_action_single_future_cancel_begins_directly():
+async def test_enter_manage_action_reschedule_without_calendar_is_never_the_llm():
+    """No agenda in hand (resolution failed, or the appointment's owner could
+    not be identified) must hand to a human - never let the model improvise
+    availability, and never quietly list the tenant's calendar instead."""
+    res = await enter_manage_action("reschedule", _tenant(), [_appt_window()], calendar=None)
+    assert res.action == "calendar_unavailable"
+    assert res.flow_step == STEP_MANAGE_DAY
+    assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)
+
+
+async def test_enter_manage_action_single_future_cancel_begins_directly():
     appt = _appt_window()
-    res = enter_manage_action("cancel", _tenant(), [appt])
+    res = await enter_manage_action("cancel", _tenant(), [appt])
     assert res.action == "reply"
     assert res.flow_state == FlowState.MANAGE_BOOKING
     assert res.flow_step == STEP_MANAGE_CANCEL_CONFIRM
@@ -651,12 +694,12 @@ def test_enter_manage_action_single_future_cancel_begins_directly():
     assert res.bubbles[0].labels == ["Sim", "Não"]
 
 
-def test_enter_manage_action_multiple_shows_intent_pick_list():
+async def test_enter_manage_action_multiple_shows_intent_pick_list():
     appts = [
         _appt_window(appt_id=str(uuid4()), start=datetime(2026, 6, 20, 14, 0, tzinfo=_TZ)),
         _appt_window(appt_id=str(uuid4()), start=datetime(2026, 6, 21, 9, 0, tzinfo=_TZ)),
     ]
-    res = enter_manage_action("reschedule", _tenant(), appts)
+    res = await enter_manage_action("reschedule", _tenant(), appts)
     assert res.action == "reply"
     assert res.flow_state == FlowState.MANAGE_BOOKING
     assert res.flow_step == STEP_MANAGE_PICK_RESCHEDULE
@@ -664,12 +707,12 @@ def test_enter_manage_action_multiple_shows_intent_pick_list():
     assert res.bubbles[0].body == "Qual consulta você quer remarcar?"
     assert len(res.bubbles[0].rows) == 2
 
-    res_cancel = enter_manage_action("cancel", _tenant(), appts)
+    res_cancel = await enter_manage_action("cancel", _tenant(), appts)
     assert res_cancel.flow_step == STEP_MANAGE_PICK_CANCEL
     assert res_cancel.bubbles[0].body == "Qual consulta você quer cancelar?"
 
 
-def test_enter_manage_action_caps_pick_list_at_ten():
+async def test_enter_manage_action_caps_pick_list_at_ten():
     appts = [
         _appt_window(
             appt_id=str(uuid4()),
@@ -677,7 +720,7 @@ def test_enter_manage_action_caps_pick_list_at_ten():
         )
         for i in range(12)
     ]
-    res = enter_manage_action("cancel", _tenant(), appts)
+    res = await enter_manage_action("cancel", _tenant(), appts)
     assert res.action == "reply"
     assert len(res.bubbles[0].rows) == 10
 
@@ -711,6 +754,33 @@ async def test_route_idle_book_label_enters_directly():
     assert res.flow_state == FlowState.SERVICE_CATALOG
     assert res.flow_step == STEP_AWAITING_SERVICE
     assert isinstance(res.bubbles[0], SlotsBubble)
+
+
+async def test_single_professional_agendar_adds_no_intermediate_card():
+    """Non-regression for the extra turn (PROMPT_FEAT_32 §4.4).
+
+    The multi-doctor menu now offers "Escolher médico" / "Escolher serviço".
+    A clinic with ONE professional must NOT get that fork: with a single
+    doctor it would be a card with one real option — a dead turn costing a
+    round-trip, latency and noise to tell the patient something the system
+    already knows. "Agendar" goes straight to the service list, in ONE bubble.
+    """
+    professional = SimpleNamespace(
+        id=uuid4(), name="Dra. Ana", specialty="Cardiologia", about=None, appointment_types=None
+    )
+    res = await route(
+        _conversation(flow_state=FlowState.IDLE),
+        _tenant(),
+        None,
+        LABEL_BOOK,
+        professionals=[professional],
+    )
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.SERVICE_CATALOG
+    assert res.flow_step == STEP_AWAITING_SERVICE
+    assert len(res.bubbles) == 1
+    assert isinstance(res.bubbles[0], SlotsBubble)
+    assert res.bubbles[0].rows[0][0].startswith("svc|")
 
 
 async def test_route_idle_book_label_no_services_is_deterministic():

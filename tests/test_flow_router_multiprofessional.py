@@ -15,7 +15,7 @@ os.environ.setdefault("META_VERIFY_TOKEN", "test-verify-token")
 os.environ.setdefault("META_ACCESS_TOKEN", "test-access-token")
 os.environ.setdefault("META_PHONE_NUMBER_ID", "1234567890")
 
-from datetime import datetime  # noqa: E402
+from datetime import datetime, timedelta  # noqa: E402
 from zoneinfo import ZoneInfo  # noqa: E402
 
 from secretaria.ai.formatter import SlotsBubble, TextBubble  # noqa: E402
@@ -25,8 +25,7 @@ from secretaria.services import flow_router  # noqa: E402
 from secretaria.services.calendar import CalendarUnavailableError  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
     BTN_CHOOSE_PROFESSIONAL,
-    BTN_FIND_PROFESSIONAL,
-    FIND_PROFESSIONAL_OPENER,
+    BTN_CHOOSE_SERVICE,
     LABEL_BOOK,
     LABEL_CANCEL_APPT,
     LABEL_DONT_KNOW,
@@ -117,18 +116,29 @@ def _conversation(**kw):
 
 
 class _FakeCalendar:
-    def __init__(self, slots=None, unavailable=False):
+    def __init__(self, slots=None, unavailable=False, days=None):
         self._slots = slots or []
         self._unavailable = unavailable
+        self._days = days
         self.tzinfo = _TZ
         self.created: list = []
         self.listed: list = []
+        self.day_scans: list = []
 
     async def list_free_slots(self, day, slot_minutes=None, max_slots=6):
         if self._unavailable:
             raise CalendarUnavailableError("down")
         self.listed.append((day.date() if hasattr(day, "date") else day, slot_minutes))
         return self._slots
+
+    async def list_available_days(self, start_day, days, slot_minutes=None):
+        if self._unavailable:
+            raise CalendarUnavailableError("down")
+        self.day_scans.append((start_day, days, slot_minutes))
+        if self._days is not None:
+            return list(self._days)
+        base = start_day.replace(hour=0, minute=0, second=0, microsecond=0)
+        return [base + timedelta(days=offset) for offset in range(days)]
 
     async def create_event(self, start, end, summary, description=""):
         if self._unavailable:
@@ -158,7 +168,7 @@ async def test_multi_menu_replaces_buttons():
     assert res.action == "reply"
     assert res.flow_state == FlowState.MENU
     assert isinstance(res.bubbles[0], MenuBubble)
-    assert res.bubbles[0].labels == [BTN_CHOOSE_PROFESSIONAL, BTN_FIND_PROFESSIONAL, "Outro"]
+    assert res.bubbles[0].labels == [BTN_CHOOSE_PROFESSIONAL, BTN_CHOOSE_SERVICE, "Outro"]
     # Labels must survive WhatsApp's 20-char button-title cap untruncated.
     assert all(len(label) <= 20 for label in res.bubbles[0].labels)
 
@@ -172,7 +182,7 @@ async def test_single_professional_keeps_configured_menu():
 def test_menu_buttons_for_helper():
     assert menu_buttons_for(_tenant(), True) == [
         BTN_CHOOSE_PROFESSIONAL,
-        BTN_FIND_PROFESSIONAL,
+        BTN_CHOOSE_SERVICE,
         "Outro",
     ]
     assert menu_buttons_for(_tenant(), False) == ["Serviços e Custo", "Horários", "Outro"]
@@ -319,7 +329,11 @@ async def test_choose_doctor_lists_professionals_with_specialty_description():
     assert bubble.rows[1] == (f"prof|{profs[1].id}", "Dr. Bruno", None)
 
 
-async def test_professional_tap_sends_greeting_then_own_services():
+async def test_professional_tap_folds_presentation_into_the_service_card():
+    """ONE message, not two: the doctor's presentation heads the service list
+    instead of costing its own WhatsApp message. Same information, same
+    order - the patient confirms the doctor and picks the service on one
+    screen."""
     profs = _professionals()
     conv = _conversation(
         flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_AWAITING_PROFESSIONAL
@@ -328,15 +342,18 @@ async def test_professional_tap_sends_greeting_then_own_services():
     assert res.action == "reply"
     assert res.flow_selected_professional_id == profs[0].id
     assert res.flow_step == STEP_AWAITING_SERVICE
-    greeting, services = res.bubbles
-    assert isinstance(greeting, TextBubble)
-    assert greeting.body == "Cardiologia\n\nAtendo com foco em prevenção."
+    assert len(res.bubbles) == 1
+    services = res.bubbles[0]
     assert isinstance(services, SlotsBubble)
+    assert services.body == (
+        "Dra. Ana\n\nCardiologia\n\nAtendo com foco em prevenção."
+        "\n\nQual serviço você gostaria de agendar?"
+    )
     # The selected professional's OWN services, not the tenant's.
     assert services.rows[0][1] == "Consulta Cardio"
 
 
-async def test_professional_without_profile_skips_greeting_bubble():
+async def test_professional_without_profile_still_gets_one_card():
     profs = _professionals()
     conv = _conversation(
         flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_AWAITING_PROFESSIONAL
@@ -344,6 +361,8 @@ async def test_professional_without_profile_skips_greeting_bubble():
     res = await route(conv, _tenant(), None, _tap(profs[1]), professionals=profs)
     assert len(res.bubbles) == 1
     assert isinstance(res.bubbles[0], SlotsBubble)
+    # No specialty/about to fold in — just the name and the question.
+    assert res.bubbles[0].body == "Dr. Bruno\n\nQual serviço você gostaria de agendar?"
     # Falls back to the tenant-wide services.
     assert res.bubbles[0].rows[0][1] == "Consulta Geral"
     assert res.flow_selected_professional_id == profs[1].id
@@ -379,22 +398,125 @@ async def test_stale_selected_professional_delegates_llm():
 
 
 # --------------------------------------------------------------------------
-# "Procurar médico": deterministic opener -> sticky LLM
+# "Escolher serviço": clinic-wide catalog -> the service narrows the doctors
+# (replaces the old "Procurar médico", which was a sticky-LLM door)
 # --------------------------------------------------------------------------
 
 
-async def test_find_doctor_sends_opener_and_enters_llm():
+async def test_choose_service_lists_the_clinics_unified_catalog():
+    """The union of every active doctor's services, deduplicated - and NOT a
+    hand-off to the model, which is what this menu slot used to be."""
     res = await route(
         _conversation(flow_state=FlowState.MENU),
         _tenant(),
         None,
-        BTN_FIND_PROFESSIONAL,
+        BTN_CHOOSE_SERVICE,
         professionals=_professionals(),
     )
     assert res.action == "reply"
-    assert res.flow_state == FlowState.LLM
+    assert res.flow_state == FlowState.SERVICE_CATALOG
+    assert res.flow_step == flow_router.STEP_AWAITING_CATALOG_SERVICE
+    bubble = res.bubbles[0]
+    assert isinstance(bubble, SlotsBubble)
+    # Ana's own "Consulta Cardio" + Bruno's tenant-fallback "Consulta Geral".
+    assert [row[1] for row in bubble.rows] == ["Consulta Cardio", "Consulta Geral"]
+
+
+async def test_choose_service_deduplicates_a_shared_service():
+    profs = _professionals()
+    profs[1].appointment_types = [
+        {"name": "Consulta Cardio", "duration_min": 30, "is_active": True, "sort_order": 0}
+    ]
+    res = await route(
+        _conversation(flow_state=FlowState.MENU),
+        _tenant(),
+        None,
+        BTN_CHOOSE_SERVICE,
+        professionals=profs,
+    )
+    assert [row[1] for row in res.bubbles[0].rows] == ["Consulta Cardio"]
+
+
+async def test_catalog_service_with_one_professional_selects_them_and_confirms():
+    """Exactly one doctor offers it: nothing left to ask, so the flow goes
+    straight to that service's own detail card with the doctor already
+    selected - the same card the doctor-first branch reaches."""
+    profs = _professionals()
+    conv = _conversation(
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=flow_router.STEP_AWAITING_CATALOG_SERVICE,
+    )
+    res = await route(conv, _tenant(), None, "Consulta Cardio", professionals=profs)
+    assert res.action == "reply"
+    assert res.flow_step == STEP_AWAITING_SERVICE_CONFIRM
+    assert res.flow_selected_type == "Consulta Cardio"
+    assert res.flow_selected_professional_id == profs[0].id
+
+
+async def test_catalog_service_with_two_professionals_asks_which_one():
+    profs = _professionals()
+    profs[1].appointment_types = [
+        {"name": "Consulta Cardio", "duration_min": 30, "is_active": True, "sort_order": 0}
+    ]
+    conv = _conversation(
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=flow_router.STEP_AWAITING_CATALOG_SERVICE,
+    )
+    res = await route(conv, _tenant(), None, "Consulta Cardio", professionals=profs)
+    assert res.action == "reply"
+    assert res.flow_step == flow_router.STEP_AWAITING_SERVICE_PROFESSIONAL
+    assert res.flow_selected_type == "Consulta Cardio"  # kept for the next step
+    assert [row[1] for row in res.bubbles[0].rows] == ["Dra. Ana", "Dr. Bruno"]
+
+    # ...and the doctor tap lands on the detail card, NOT back on a service list.
+    conv2 = _conversation(
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=flow_router.STEP_AWAITING_SERVICE_PROFESSIONAL,
+        flow_selected_type="Consulta Cardio",
+    )
+    picked = await route(conv2, _tenant(), None, _tap(profs[1]), professionals=profs)
+    assert picked.flow_step == STEP_AWAITING_SERVICE_CONFIRM
+    assert picked.flow_selected_professional_id == profs[1].id
+    assert picked.flow_selected_type == "Consulta Cardio"
+
+
+async def test_catalog_service_with_no_professional_is_deterministic(monkeypatch):
+    """Defensive branch: a service that resolves against the rendered catalog
+    but that nobody turns out to offer (the roster changed underneath) answers
+    with a fixed reply plus the menu - never the LLM, and never a booking with
+    no owner. Forced here, because a CONSISTENT roster cannot produce it: the
+    union is built from the very professionals it is then filtered by."""
+    monkeypatch.setattr(flow_router, "_professionals_offering", lambda *a, **k: [])
+    conv = _conversation(
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=flow_router.STEP_AWAITING_CATALOG_SERVICE,
+    )
+    res = await route(conv, _tenant(), None, "Consulta Cardio", professionals=_professionals())
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.MENU
     assert isinstance(res.bubbles[0], TextBubble)
-    assert res.bubbles[0].body == FIND_PROFESSIONAL_OPENER
+    assert "não está disponível" in res.bubbles[0].body.lower()
+    assert isinstance(res.bubbles[1], MenuBubble)
+
+
+async def test_choose_service_without_any_catalog_is_deterministic():
+    profs = _professionals()
+    for professional in profs:
+        professional.appointment_types = []
+    tenant = _tenant()
+    tenant.appointment_types = []
+    res = await route(
+        _conversation(flow_state=FlowState.MENU),
+        tenant,
+        None,
+        BTN_CHOOSE_SERVICE,
+        professionals=profs,
+    )
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.MENU
+    assert isinstance(res.bubbles[0], TextBubble)
+    assert "não há serviços" in res.bubbles[0].body.lower()
+    assert isinstance(res.bubbles[1], MenuBubble)
 
 
 async def test_llm_mode_preserves_selected_professional():
@@ -444,9 +566,15 @@ async def test_service_confirm_skips_insurance_when_not_collected():
     assert res.flow_step == STEP_AWAITING_DAY
 
 
-async def test_single_professional_flow_never_asks_insurance():
-    # Even with collect_insurance on, the tenant-level (no selected
-    # professional) flow keeps today's behavior: straight to the day question.
+async def test_tenant_level_flow_also_asks_insurance():
+    # `collect_insurance`/`insurances` are CLINIC-wide settings, so the step
+    # follows the CONFIGURATION, not the topology: a tenant-level flow (no
+    # selected professional) gets the same question the multi-doctor branch
+    # does. This used to assert the opposite - the step required a selection
+    # only a multi-doctor tenant ever makes, so a clinic with one professional
+    # could enable the toggle in the hub and never be asked. The full
+    # on/off x empty/filled x 0/1/many table lives in
+    # tests/test_flow_router_insurance.py.
     tenant = _tenant(collect_insurance=True, insurances=["Unimed"])
     conv = _conversation(
         flow_state=FlowState.SERVICE_CATALOG,
@@ -454,7 +582,8 @@ async def test_single_professional_flow_never_asks_insurance():
         flow_selected_type="Consulta Geral",
     )
     res = await route(conv, tenant, None, "Sim")
-    assert res.flow_step == STEP_AWAITING_DAY
+    assert res.flow_step == STEP_AWAITING_INSURANCE
+    assert res.flow_selected_professional_id is None  # nothing invented
 
 
 async def test_insurance_tap_records_and_asks_day():
@@ -577,7 +706,7 @@ async def test_retry_menu_shows_multi_menu():
     )
     res = await route(conv, _tenant(), _FakeCalendar(), "Menu principal", professionals=profs)
     assert res.flow_state == FlowState.MENU
-    assert res.bubbles[0].labels == [BTN_CHOOSE_PROFESSIONAL, BTN_FIND_PROFESSIONAL, "Outro"]
+    assert res.bubbles[0].labels == [BTN_CHOOSE_PROFESSIONAL, BTN_CHOOSE_SERVICE, "Outro"]
 
 
 # --------------------------------------------------------------------------
@@ -712,8 +841,8 @@ async def test_professional_help_pick_hands_back_to_doctor_greeting_and_services
     monkeypatch,
 ):
     """A validated pick re-enters the deterministic flow EXACTLY like a tap on
-    that doctor's row: greeting bubble + THEIR services list + the selection
-    persisted on the conversation."""
+    that doctor's row: their presentation heading THEIR services list, in one
+    card, with the selection persisted on the conversation."""
     profs = _professionals()
     captured = {}
 
@@ -729,9 +858,10 @@ async def test_professional_help_pick_hands_back_to_doctor_greeting_and_services
     assert res.flow_state == FlowState.SERVICE_CATALOG
     assert res.flow_step == STEP_AWAITING_SERVICE
     assert res.flow_selected_professional_id == profs[0].id
-    assert isinstance(res.bubbles[0], TextBubble)  # specialty/about greeting
-    assert isinstance(res.bubbles[1], SlotsBubble)  # HER services
-    assert res.bubbles[1].rows[0][0] == "svc|Consulta Cardio"
+    assert len(res.bubbles) == 1
+    assert isinstance(res.bubbles[0], SlotsBubble)  # HER services...
+    assert res.bubbles[0].body.startswith("Dra. Ana\n\nCardiologia")  # ...under HER header
+    assert res.bubbles[0].rows[0][0] == "svc|Consulta Cardio"
     # Grounding: the node saw the router's own roster snapshot.
     assert captured["professionals"] is profs
     assert captured["final_round"] is False
