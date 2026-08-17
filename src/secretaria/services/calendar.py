@@ -65,6 +65,14 @@ _NETWORK_ERRORS: tuple[type[BaseException], ...] = (
 # being wrong: auth expired/revoked (401/403) and Google-side outages (5xx).
 _UNAVAILABLE_HTTP_STATUSES = frozenset({401, 403, 500, 502, 503, 504})
 
+# events.list page size for a single-day question (the unchanged default) vs
+# the multi-week scan `list_available_days` runs. 50 is plenty for one day and
+# keeps every existing caller's payload small; a 20-day window at a busy clinic
+# easily exceeds it, and a truncated busy list would advertise days that are
+# actually full. 2500 is the Calendar API's own per-page maximum.
+DEFAULT_MAX_EVENTS = 50
+DAY_SCAN_MAX_EVENTS = 2500
+
 
 class CalendarUnavailableError(Exception):
     """Raised when Google Calendar cannot be reached or refused our credentials.
@@ -252,7 +260,9 @@ class CalendarService:
     def _ensure_tz(self, dt: datetime) -> datetime:
         return dt if dt.tzinfo else dt.replace(tzinfo=self._tz)
 
-    async def check_availability(self, start: datetime, end: datetime) -> list[dict]:
+    async def check_availability(
+        self, start: datetime, end: datetime, max_results: int = DEFAULT_MAX_EVENTS
+    ) -> list[dict]:
         """Return events overlapping [start, end) on the clinic calendar.
 
         Each item: {"id", "summary", "start", "end"} with RFC3339 strings.
@@ -263,6 +273,11 @@ class CalendarService:
         calendar.readonly / calendar / calendar.events.freebusy). Sticking to
         events.list keeps the grant narrow AND surfaces real summaries to the
         LLM, which it can quote back to the patient.
+
+        `max_results` sizes the single events.list page. The default suits a
+        one-day question; a multi-day window must raise it (see
+        `list_available_days`) or the busy list silently truncates and free
+        time gets reported where there is none.
         """
         start_iso = self._ensure_tz(start).isoformat()
         end_iso = self._ensure_tz(end).isoformat()
@@ -279,7 +294,7 @@ class CalendarService:
                         timeMax=end_iso,
                         singleEvents=True,
                         orderBy="startTime",
-                        maxResults=50,
+                        maxResults=max_results,
                     )
                     .execute()
                 )
@@ -349,43 +364,32 @@ class CalendarService:
                 windows.append((start, end))
         return sorted(windows)
 
-    async def list_free_slots(
-        self,
-        day: datetime,
-        slot_minutes: int | None = None,
-        open_hour: int = 8,
-        close_hour: int = 18,
-        max_slots: int = 6,
-    ) -> list[dict]:
-        """Return free [start, end) slots on `day` within business hours.
-
-        Walks each availability window for the weekday (per-tenant
-        business_hours when set, else a fixed 08-18 fallback) in `slot_minutes`
-        increments and keeps slots that do not overlap with any busy event on
-        the calendar. Returns up to `max_slots` slots so the UI list message
-        stays under WhatsApp's 10-row cap. `slot_minutes` defaults to the
-        tenant's configured appointment duration.
-        """
-        day_local = self._ensure_tz(day)
-        windows = self._windows_for_day(day_local, open_hour, close_hour)
-        if not windows:
-            return []
-
-        span_start = windows[0][0]
-        span_end = windows[-1][1]
-        busy = await self.check_availability(span_start, span_end)
-        busy_ranges: list[tuple[datetime, datetime]] = []
-        for ev in busy:
+    def _busy_ranges(self, events: list[dict]) -> list[tuple[datetime, datetime]]:
+        """Turn `check_availability` items into clinic-local [start, end) pairs."""
+        ranges: list[tuple[datetime, datetime]] = []
+        for ev in events:
             try:
                 bs = datetime.fromisoformat(ev["start"])
                 be = datetime.fromisoformat(ev["end"])
             except (KeyError, ValueError):
                 continue
-            busy_ranges.append((self._ensure_tz(bs), self._ensure_tz(be)))
+            ranges.append((self._ensure_tz(bs), self._ensure_tz(be)))
+        return ranges
 
-        delta = timedelta(minutes=slot_minutes or self._default_slot_minutes)
-        # Never offer a slot that has already started (matters for "hoje").
-        now = datetime.now(self._tz)
+    def _walk_free_slots(
+        self,
+        windows: list[tuple[datetime, datetime]],
+        busy_ranges: list[tuple[datetime, datetime]],
+        delta: timedelta,
+        now: datetime,
+        max_slots: int,
+    ) -> list[dict]:
+        """Free slots inside `windows`, given an already-fetched busy list.
+
+        Pure (no I/O) so the same walk answers both "which times are free on
+        this day?" (`list_free_slots`) and "does this day have ANY free time?"
+        (`list_available_days`, with max_slots=1) off ONE calendar read.
+        """
         slots: list[dict] = []
         for window_start, window_end in windows:
             cursor = window_start
@@ -409,6 +413,82 @@ class CalendarService:
             if len(slots) >= max_slots:
                 break
         return slots
+
+    async def list_free_slots(
+        self,
+        day: datetime,
+        slot_minutes: int | None = None,
+        open_hour: int = 8,
+        close_hour: int = 18,
+        max_slots: int = 6,
+    ) -> list[dict]:
+        """Return free [start, end) slots on `day` within business hours.
+
+        Walks each availability window for the weekday (per-tenant
+        business_hours when set, else a fixed 08-18 fallback) in `slot_minutes`
+        increments and keeps slots that do not overlap with any busy event on
+        the calendar. Returns up to `max_slots` slots so the UI list message
+        stays under WhatsApp's 10-row cap. `slot_minutes` defaults to the
+        tenant's configured appointment duration.
+        """
+        day_local = self._ensure_tz(day)
+        windows = self._windows_for_day(day_local, open_hour, close_hour)
+        if not windows:
+            return []
+
+        busy = await self.check_availability(windows[0][0], windows[-1][1])
+        return self._walk_free_slots(
+            windows,
+            self._busy_ranges(busy),
+            timedelta(minutes=slot_minutes or self._default_slot_minutes),
+            # Never offer a slot that has already started (matters for "hoje").
+            datetime.now(self._tz),
+            max_slots,
+        )
+
+    async def list_available_days(
+        self,
+        start_day: datetime,
+        days: int,
+        slot_minutes: int | None = None,
+        open_hour: int = 8,
+        close_hour: int = 18,
+    ) -> list[datetime]:
+        """Days in [start_day, start_day + `days`) with at least one free slot.
+
+        Returns clinic-local midnight datetimes, in chronological order, ready
+        to hand straight back to `list_free_slots(day=...)`. Days the clinic is
+        closed on, and days whose every slot is taken or already past, are
+        absent — which is exactly what makes a tappable day list honest.
+
+        Costs ONE events.list call for the WHOLE window (`DAY_SCAN_MAX_EVENTS`
+        page size), never one per day: the per-day walk afterwards is pure
+        arithmetic on that single busy list. A day-at-a-time implementation
+        would turn one patient turn into ~20 Google round-trips.
+        """
+        delta = timedelta(minutes=slot_minutes or self._default_slot_minutes)
+        first = self._ensure_tz(start_day).replace(hour=0, minute=0, second=0, microsecond=0)
+        day_windows: list[tuple[datetime, list[tuple[datetime, datetime]]]] = []
+        for offset in range(max(days, 0)):
+            day_local = first + timedelta(days=offset)
+            windows = self._windows_for_day(day_local, open_hour, close_hour)
+            if windows:
+                day_windows.append((day_local, windows))
+        if not day_windows:
+            return []
+
+        busy = await self.check_availability(
+            day_windows[0][1][0][0],
+            day_windows[-1][1][-1][1],
+            max_results=DAY_SCAN_MAX_EVENTS,
+        )
+        busy_ranges = self._busy_ranges(busy)
+        now = datetime.now(self._tz)
+        return [
+            day_local
+            for day_local, windows in day_windows
+            if self._walk_free_slots(windows, busy_ranges, delta, now, max_slots=1)
+        ]
 
     async def create_event(
         self,

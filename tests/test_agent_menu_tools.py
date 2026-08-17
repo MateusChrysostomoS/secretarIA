@@ -76,7 +76,7 @@ from secretaria.plugins import multi_professional as mp, registry as reg  # noqa
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
     BTN_CHOOSE_PROFESSIONAL,
-    BTN_FIND_PROFESSIONAL,
+    BTN_CHOOSE_SERVICE,
     STEP_AWAITING_SERVICE,
     STEP_MANAGE_CANCEL_CONFIRM,
     STEP_MANAGE_PICK_CANCEL,
@@ -422,7 +422,7 @@ async def test_handle_show_main_menu_resets_flow_without_deleting(db, _captured_
     assert len(_captured_bubbles) == 1
     menu = _captured_bubbles[0]
     assert isinstance(menu, MenuBubble)
-    assert menu.labels == [BTN_CHOOSE_PROFESSIONAL, BTN_FIND_PROFESSIONAL, "Outro"]
+    assert menu.labels == [BTN_CHOOSE_PROFESSIONAL, BTN_CHOOSE_SERVICE, "Outro"]
 
     async with db() as session:
         conv = await session.get(Conversation, conversation.id)
@@ -448,10 +448,14 @@ async def test_handle_select_professional_reenters_flow_at_doctor(db, _captured_
         _reply_ctx(conversation), sentinel, tenant, None, professionals, patient.wa_id
     )
 
-    greeting, services = _captured_bubbles
-    assert isinstance(greeting, TextBubble)
-    assert greeting.body == "Cardiologia\n\nAtendo com foco em prevenção."
+    # ONE card: the doctor's presentation heads their service list instead of
+    # spending a separate WhatsApp message on it.
+    (services,) = _captured_bubbles
     assert isinstance(services, SlotsBubble)
+    assert services.body == (
+        "Dra. Ana\n\nCardiologia\n\nAtendo com foco em prevenção."
+        "\n\nQual serviço você gostaria de agendar?"
+    )
     assert services.rows[0][1] == "Consulta Geral"  # tenant fallback services
 
     async with db() as session:

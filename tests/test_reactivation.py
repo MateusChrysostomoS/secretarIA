@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo  # noqa: E402
 
 import pytest  # noqa: E402
 
-from secretaria.ai.formatter import ButtonBubble, SlotsBubble, TextBubble  # noqa: E402
+from secretaria.ai.formatter import ButtonBubble, SlotsBubble  # noqa: E402
 from secretaria.models import FlowState  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
     DEFAULT_CONTINUE_PROMPT,
@@ -107,6 +107,10 @@ class _FakeCalendar:
 
     async def list_free_slots(self, day, slot_minutes=None, max_slots=6):
         return self._slots
+
+    async def list_available_days(self, start_day, days, slot_minutes=None):
+        base = start_day.replace(hour=0, minute=0, second=0, microsecond=0)
+        return [base + timedelta(days=offset) for offset in range(days)]
 
 
 # --------------------------------------------------------------------------
@@ -236,15 +240,31 @@ async def test_resume_service_confirm_unknown_type_falls_back_to_list():
     assert isinstance(result.bubbles[0], SlotsBubble)
 
 
-async def test_resume_awaiting_day_reasks():
+async def test_resume_awaiting_day_rerenders_the_picker():
+    conv = _conversation(
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=STEP_AWAITING_DAY,
+        flow_selected_type=SERVICE_NAME,
+    )
+    result = await resume_bubbles(conv, _tenant(), _FakeCalendar())
+    assert result.flow_step == STEP_AWAITING_DAY
+    # Rebuilt from scratch: a resumed conversation is exactly when availability
+    # has had time to move.
+    assert isinstance(result.bubbles[0], SlotsBubble)
+    assert result.bubbles[0].rows[0][0].startswith("day|")
+
+
+async def test_resume_awaiting_day_without_calendar_hands_off():
+    """No agenda: hand to a human. Never the old silent `delegate_llm`, which
+    let the model answer "when are you free?" with nothing to answer from."""
     conv = _conversation(
         flow_state=FlowState.SERVICE_CATALOG,
         flow_step=STEP_AWAITING_DAY,
         flow_selected_type=SERVICE_NAME,
     )
     result = await resume_bubbles(conv, _tenant(), None)
+    assert result.action == "calendar_unavailable"
     assert result.flow_step == STEP_AWAITING_DAY
-    assert isinstance(result.bubbles[0], TextBubble)
 
 
 async def test_resume_awaiting_slot_relists_fresh_slots():
@@ -260,7 +280,7 @@ async def test_resume_awaiting_slot_relists_fresh_slots():
     assert isinstance(result.bubbles[0], SlotsBubble)
 
 
-async def test_resume_awaiting_slot_without_calendar_delegates():
+async def test_resume_awaiting_slot_without_calendar_hands_off():
     conv = _conversation(
         flow_state=FlowState.SERVICE_CATALOG,
         flow_step=STEP_AWAITING_SLOT,
@@ -268,7 +288,7 @@ async def test_resume_awaiting_slot_without_calendar_delegates():
         flow_selected_day="2026-06-15",
     )
     result = await resume_bubbles(conv, _tenant(), None)
-    assert result.action == "delegate_llm"
+    assert result.action == "calendar_unavailable"
 
 
 async def test_resume_awaiting_confirmation_reshows_recap():
@@ -290,9 +310,9 @@ async def test_resume_awaiting_confirmation_without_slot_reasks_day():
         flow_selected_type=SERVICE_NAME,
         flow_selected_slot=None,
     )
-    result = await resume_bubbles(conv, _tenant(), None)
+    result = await resume_bubbles(conv, _tenant(), _FakeCalendar())
     assert result.flow_step == STEP_AWAITING_DAY
-    assert isinstance(result.bubbles[0], TextBubble)
+    assert isinstance(result.bubbles[0], SlotsBubble)
 
 
 async def test_resume_awaiting_retry_reshows_choice():
@@ -366,11 +386,12 @@ def test_offer_idle_sends_plain_greeting_and_menu_without_arming():
     assert offer is not None
     assert conv.reactivation_origin is None  # nothing to resume -> gate NOT armed
     assert offer.greeting_override == "Oi de novo, Ana!"
-    # Fixed greeting trio (fixed-greeting-buttons round; consolidated to
-    # Agendar/Gerenciar consulta/Outro in the trio-gerenciar round), not the
-    # tenant's configured initial_flows.buttons menu anymore - see
-    # docs/CHECKPOINT_fixed_greeting_buttons.md.
-    assert offer.greeting_buttons == [LABEL_BOOK, LABEL_MANAGE_APPOINTMENT, LABEL_OTHER]
+    # Fixed greeting buttons, not the tenant's configured initial_flows.buttons
+    # menu - see docs/CHECKPOINT_fixed_greeting_buttons.md. "Gerenciar consulta"
+    # is no longer offered to a patient with nothing booked (it could only reach
+    # a dead end), leaving the [Agendar, Outro] pair.
+    assert offer.greeting_buttons == [LABEL_BOOK, LABEL_OTHER]
+    assert LABEL_MANAGE_APPOINTMENT not in offer.greeting_buttons
 
 
 def test_offer_idle_without_any_greeting_returns_none():

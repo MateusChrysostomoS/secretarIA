@@ -31,6 +31,7 @@ from secretaria.ai.tools import (
     ManageAppointmentRequested,
     SelectProfessionalRequested,
     ShowMainMenuRequested,
+    _booking_topology_ctx,
     _calendar_ctx,
     _conversation_id_ctx,
     _redis_ctx,
@@ -48,6 +49,10 @@ from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import Message, MessageSender
+from secretaria.services.booking_scope import (
+    BOOKING_TOPOLOGY_MULTI,
+    BOOKING_TOPOLOGY_UNKNOWN,
+)
 from secretaria.services.calendar import CalendarService, CalendarUnavailableError
 from secretaria.services.tenant_config import TenantRuntimeConfig
 
@@ -137,19 +142,55 @@ def _body_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
 
-_BASE_TOOLS = (
+# Tenant-level calendar tools: they act on (or read) the CLINIC's own agenda,
+# with no professional in the loop. Correct for a tenant whose bookings have
+# exactly one possible owner (or none); wrong — and unfixable by prompting —
+# for a multi-professional clinic, where `create_event`/`cancel_event` would
+# write to the wrong agenda and `check_availability`/`list_free_slots` would
+# report the wrong one (the former also hands the model real event ids and
+# titles from an agenda this turn has no business reading).
+_TENANT_LEVEL_CALENDAR_TOOLS = (
     check_availability,
     list_free_slots,
     create_event,
     cancel_event,
+)
+
+# Scope-independent tools: nothing here touches a calendar, so they are safe
+# on every topology. `list_patient_appointments` reads only THIS patient's own
+# rows and deliberately exposes no ids (see its docstring); `show_main_menu`
+# is the way back to the deterministic flow and must never be taken away —
+# it is what a degraded turn falls back to.
+_SCOPE_FREE_TOOLS = (
     iniciar_pre_consulta,
-    # Read-only, patient-scoped: answers "tenho consulta marcada?" with DB
-    # truth. It never acts — reschedule/cancel route back via show_main_menu.
     list_patient_appointments,
-    # Always available (not addon-gated): the non-destructive way back to the
-    # deterministic button menu.
     show_main_menu,
 )
+
+# The historical base set, unchanged: what a tenant-level turn still gets.
+_BASE_TOOLS = (*_TENANT_LEVEL_CALENDAR_TOOLS, *_SCOPE_FREE_TOOLS)
+
+
+def base_tools_for(topology: str) -> tuple:
+    """The base tools a turn on `topology` may use (services/booking_scope.py).
+
+    Capability is decided by the tenant's REAL shape, not by an entitlement
+    and not by the prompt. A multi-professional clinic gets the scope-free
+    tools ONLY: booking, cancelling and availability there require a resolved
+    professional, which the `multi_professional` plugin tools provide
+    (plugins/multi_professional.py, appended as `extra_tools`).
+
+    That is deliberately independent of entitlements: a multi-professional
+    tenant WITHOUT the addon loses the professional-aware tools and gains
+    nothing back, so the agent's only remaining moves are `show_main_menu`
+    (the deterministic flow, which handles multi-doctor booking natively) and
+    the read-only tools. Failing closed to the button flow is the point — the
+    old behaviour degraded to the tenant-level agenda instead, which is
+    precisely the wrong agenda.
+    """
+    if topology == BOOKING_TOPOLOGY_MULTI:
+        return _SCOPE_FREE_TOOLS
+    return _BASE_TOOLS
 
 # Compiled agent cache, keyed by the frozenset of tool NAMES the agent was
 # built with (base tools + whatever plugins a tenant is entitled to). Replaces
@@ -191,15 +232,17 @@ def _prompt_with_today(state: dict) -> list[BaseMessage]:
     return [SystemMessage(content=content), *state["messages"]]
 
 
-def build_agent(extra_tools: Sequence = ()) -> Any:
-    """Compile (or fetch from cache) the ReAct agent for base tools + extra_tools.
+def build_agent(extra_tools: Sequence = (), topology: str = BOOKING_TOPOLOGY_UNKNOWN) -> Any:
+    """Compile (or fetch from cache) the ReAct agent for THIS turn's capabilities.
 
-    Cached per distinct capability set, keyed by tool NAME (see `_AGENTS`
-    above) so the process can serve tenants with different plugin
-    entitlements concurrently without rebuilding the graph on every call.
-    The base tools are always included and unchanged.
+    The capability set is `base_tools_for(topology)` + `extra_tools` (the
+    tenant's entitled plugin tools). Cached per distinct set, keyed by tool
+    NAME (see `_AGENTS` above) — the key therefore describes the EFFECTIVE set
+    exactly, so two tenants that differ in topology, in entitlements, or in
+    both can never share a graph: a multi-professional tenant's key simply has
+    no `create_event` in it.
     """
-    tools = [*_BASE_TOOLS, *extra_tools]
+    tools = [*base_tools_for(topology), *extra_tools]
     key = frozenset(getattr(t, "name", str(t)) for t in tools)
     cached = _AGENTS.get(key)
     if cached is not None:
@@ -237,11 +280,14 @@ async def invoke_agent(messages: list[BaseMessage]) -> str:
     """Run the agent on a message list, return the last assistant reply.
 
     Shared by the dev terminal (scripts/test_agent.py) and run_agent below.
-    Reads `_extra_tools_ctx` (set by run_agent) rather than taking extra_tools
-    as a parameter, so this function's signature — and every existing test
-    that monkeypatches it with a `(messages)`-only fake — stays unchanged.
+    Reads `_extra_tools_ctx` and `_booking_topology_ctx` (both set by
+    run_agent) rather than taking them as parameters, so this function's
+    signature — and every existing test that monkeypatches it with a
+    `(messages)`-only fake — stays unchanged.
     """
-    result = await build_agent(_extra_tools_ctx.get()).ainvoke({"messages": messages})
+    result = await build_agent(_extra_tools_ctx.get(), _booking_topology_ctx.get()).ainvoke(
+        {"messages": messages}
+    )
     last = result["messages"][-1]
     return (getattr(last, "content", "") or "").strip()
 
@@ -339,6 +385,7 @@ async def run_agent(
     selected_professional=None,
     include_post_consult_knowledge: bool = False,
     appointment_context: str | None = None,
+    booking_topology: str = BOOKING_TOPOLOGY_UNKNOWN,
 ) -> str:
     """arq-side entry point: build history + run agent + return reply text.
 
@@ -360,6 +407,12 @@ async def run_agent(
     for THIS turn's prompt: False (the default) blanks it so the system prompt
     stays turn-appropriate; the caller (workers/tasks.py's
     `_should_inject_post_consult_knowledge`) decides when the turn qualifies.
+    `booking_topology` is the tenant's real shape (services/booking_scope.py),
+    computed by the worker from the ACTIVE professionals roster it already
+    loaded. It decides the capability set for this turn (`base_tools_for`) and
+    rides in a ContextVar so each tool can also refuse defensively — the
+    default UNKNOWN keeps the historical tenant-level behaviour for dev
+    scripts and direct callers.
     `appointment_context` is the mirror image of that gate: a pre-rendered
     "consultas marcadas" block (workers/tasks.py's `_appointment_context_text`,
     gated by `_should_inject_appointment_context`) that this call should carry
@@ -397,6 +450,22 @@ async def run_agent(
     tok_tid = _tenant_id_ctx.set(tenant_config.tenant_id if tenant_config else None)
     tok_tools = _extra_tools_ctx.set(extra_tools)
     tok_redis = _redis_ctx.set(redis)
+    tok_topology = _booking_topology_ctx.set(booking_topology)
+
+    capabilities = [
+        getattr(t, "name", str(t)) for t in (*base_tools_for(booking_topology), *extra_tools)
+    ]
+    logger.info(
+        "agent_capabilities_resolved",
+        conversation_id=str(conversation_id),
+        tenant_id=str(tenant_config.tenant_id) if tenant_config is not None else None,
+        topology=booking_topology,
+        # Tool NAMES are product surface, not tenant data — safe to log, and
+        # the only way to prove after the fact which set a turn actually ran
+        # with. Nothing from the prompt or the arguments is included.
+        capabilities=sorted(capabilities),
+        capability_count=len(capabilities),
+    )
 
     try:
         history = await _load_history(conversation_id)
@@ -452,6 +521,7 @@ async def run_agent(
         _tenant_id_ctx.reset(tok_tid)
         _extra_tools_ctx.reset(tok_tools)
         _redis_ctx.reset(tok_redis)
+        _booking_topology_ctx.reset(tok_topology)
 
     if not reply:
         logger.warning("ai_run_agent_empty_reply", conversation_id=str(conversation_id))

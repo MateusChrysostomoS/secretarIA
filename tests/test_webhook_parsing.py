@@ -84,6 +84,48 @@ def test_extract_list_reply_professional_includes_uuid_in_body() -> None:
     assert body == "Dra. Ana (9f3c2ab4-7c1d-4b6e-9a70-1234567890ab)"
 
 
+def _list_reply(row_id: str, title: str) -> WebhookMessage:
+    return WebhookMessage.model_validate(
+        {
+            "id": "wamid.32",
+            "from": "5511999999999",
+            "type": "interactive",
+            "interactive": {
+                "type": "list_reply",
+                "list_reply": {"id": row_id, "title": title},
+            },
+        }
+    )
+
+
+def test_extract_list_reply_day_includes_the_iso_date_in_body() -> None:
+    """The row title is "Seg, 01/03" — no year, and "01/03" alone is ambiguous
+    DMY free text. The id carries the resolved date (and the page the row was
+    listed on) so the router never has to re-guess it."""
+    assert extract_inbound_body(_list_reply("day|2027-03-01|0", "Seg, 01/03")) == (
+        "Seg, 01/03 (2027-03-01|0)"
+    )
+
+
+def test_extract_list_reply_day_picker_controls_carry_their_cursor() -> None:
+    """Pagination state lives in the tap, not in a new conversations column."""
+    assert extract_inbound_body(_list_reply("daymore|2", "Ver mais dias")) == (
+        "Ver mais dias (2)"
+    )
+    assert extract_inbound_body(_list_reply("dayagain|2", "Escolher outro dia")) == (
+        "Escolher outro dia (2)"
+    )
+    assert extract_inbound_body(_list_reply("dayback|service", "Voltar")) == (
+        "Voltar (service)"
+    )
+
+
+def test_extract_list_reply_day_escape_row_stays_a_plain_label() -> None:
+    """The bounded free-text escape must arrive as the plain "Outro" the
+    router already dispatches — hence an id OUTSIDE the payload family."""
+    assert extract_inbound_body(_list_reply("dayescape|0", "Outro")) == "Outro"
+
+
 def test_extract_list_reply_non_slot_id_falls_back_to_title() -> None:
     msg = WebhookMessage.model_validate(
         {

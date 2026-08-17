@@ -21,6 +21,7 @@ from secretaria.models.processed_asaas_event import ProcessedAsaasEvent
 from secretaria.models.processed_event import ProcessedEvent
 from secretaria.models.professional import Professional
 from secretaria.models.professional_credentials import ProfessionalCredentials
+from secretaria.models.service import Service
 from secretaria.models.tenant import Tenant
 from secretaria.models.tenant_credentials import TenantCredentials
 from secretaria.models.unit import Unit
@@ -46,6 +47,7 @@ __all__ = [
     "ProcessedEvent",
     "Professional",
     "ProfessionalCredentials",
+    "Service",
     "Tenant",
     "TenantCredentials",
     "Unit",

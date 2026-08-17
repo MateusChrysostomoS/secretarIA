@@ -18,7 +18,7 @@ itself is UNCHANGED (kept for its existing caller, api/hub/config.py); the
 professional-aware variant is additive.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from uuid import UUID
 
@@ -32,6 +32,7 @@ from secretaria.models.professional import Professional
 from secretaria.models.professional_credentials import ProfessionalCredentials
 from secretaria.models.tenant_credentials import TenantCredentials
 from secretaria.services.calendar import CalendarService
+from secretaria.services.service_catalog import load_service_catalog, resolve_entries
 
 # --------------------------------------------------------------------------
 # Runtime read-model (consumed by the agent, not by the API)
@@ -102,9 +103,15 @@ def _filter_active_hours(business_hours: dict | None) -> dict:
     return {day: windows for day, windows in (business_hours or {}).items() if windows}
 
 
-def active_appointment_types(tenant: Tenant) -> list[dict]:
-    """Active appointment-type dicts, sorted by sort_order then name."""
-    return _filter_active_types(tenant.appointment_types)
+def active_appointment_types(tenant: Tenant, services: Sequence | None = None) -> list[dict]:
+    """Active appointment-type dicts, sorted by sort_order then name.
+
+    `services` is the tenant's canonical catalog (services/service_catalog.py).
+    Passing it resolves each entry to the clinic's ONE spelling and descriptive
+    copy; omitting it (the default, and every pre-catalog caller) keeps the raw
+    stored entries exactly as before.
+    """
+    return _filter_active_types(resolve_entries(tenant.appointment_types, services))
 
 
 def active_business_hours(tenant: Tenant) -> dict:
@@ -112,14 +119,26 @@ def active_business_hours(tenant: Tenant) -> dict:
     return _filter_active_hours(tenant.business_hours)
 
 
-def professional_appointment_types(professional: Professional, tenant: Tenant) -> list[dict]:
+def professional_appointment_types(
+    professional: Professional, tenant: Tenant, services: Sequence | None = None
+) -> list[dict]:
     """Active appointment-type dicts for ONE professional.
 
     The professional's own `appointment_types` JSON when set (non-empty),
     else the tenant's (the legacy single-professional column) - same
     filtering semantics as `active_appointment_types`.
+
+    `services` is the clinic's canonical catalog. With it, the returned entries
+    carry the CLINIC's spelling and descriptive copy while keeping THIS
+    professional's price/duration/offered flag — which is what makes two
+    doctors' "Limpeza" provably the same service (services/service_catalog.py).
+    Without it the raw stored entries come back unchanged, which is what every
+    caller did before the catalog existed and what a not-yet-backfilled tenant
+    still needs.
     """
-    return _filter_active_types(professional.appointment_types or tenant.appointment_types)
+    return _filter_active_types(
+        resolve_entries(professional.appointment_types or tenant.appointment_types, services)
+    )
 
 
 def professional_business_hours(professional: Professional, tenant: Tenant) -> dict:
@@ -452,8 +471,13 @@ async def resolve_professional_calendar(
     """
     own_token = await get_professional_google_refresh_token(session, professional.id)
     hours = professional_business_hours(professional, tenant) if tenant is not None else {}
+    # Resolved through the canonical catalog so a service the CLINIC retired
+    # can no longer drive this professional's default slot length.
+    services = await load_service_catalog(session, tenant.id) if tenant is not None else []
     resolved_types = (
-        professional_appointment_types(professional, tenant) if tenant is not None else []
+        professional_appointment_types(professional, tenant, services)
+        if tenant is not None
+        else []
     )
     duration = int(resolved_types[0]["duration_min"]) if resolved_types else None
 
@@ -680,7 +704,11 @@ async def load_tenant_config(session: AsyncSession, tenant: Tenant) -> TenantRun
     refresh_token = await get_google_refresh_token(session, tenant.id)
     business_hours = active_business_hours(tenant)
     google_calendar_id = tenant.google_calendar_id
-    active_types = active_appointment_types(tenant)
+    # THE read of the clinic's canonical catalog for this config. Empty for a
+    # tenant not backfilled yet, which makes every resolution below a no-op —
+    # the pre-catalog behaviour, unchanged (services/service_catalog.py).
+    services = await load_service_catalog(session, tenant.id)
+    active_types = active_appointment_types(tenant, services)
 
     professional_id: UUID | None = None
     context_doctor_message: str | None = None
@@ -698,7 +726,7 @@ async def load_tenant_config(session: AsyncSession, tenant: Tenant) -> TenantRun
         professional = active_professionals[0]
         professional_id = professional.id
         business_hours = professional_business_hours(professional, tenant)
-        active_types = professional_appointment_types(professional, tenant)
+        active_types = professional_appointment_types(professional, tenant, services)
         google_calendar_id = professional.google_calendar_id or tenant.google_calendar_id
         own_token = await get_professional_google_refresh_token(session, professional.id)
         # `refresh_token` on the right-hand side is still the RAW tenant-level

@@ -1,5 +1,11 @@
 # CHECKPOINT — Multi-doctor WhatsApp workflow (deterministic doctor selection)
 
+> **Superado em parte (2026-08-17):** o cartão de saudação de quem NÃO tem consulta
+> futura passou a `[Agendar][Outro]`, o menu multi-médico passou a
+> `[Escolher médico][Escolher serviço][Outro]`, e a pergunta de dia em texto livre virou
+> um seletor tappável reaproveitado por todos os fluxos de agendamento — ver
+> `CHECKPOINT_day_picker_entry_buttons.md`.
+
 > **Superado em parte (2026-08-13):** `flows_enabled` virou incondicional — não existe
 > mais cohort flows-desligado. Ver `CHECKPOINT_flows_unconditional.md`.
 

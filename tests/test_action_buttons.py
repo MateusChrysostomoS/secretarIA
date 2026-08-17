@@ -22,6 +22,7 @@ os.environ.setdefault("ENCRYPTION_KEY", "gBSpATEZoI21UX0_59nHvxdUDJ4drCttg2RAEaP
 
 from datetime import UTC, datetime, timedelta  # noqa: E402
 from uuid import uuid4  # noqa: E402
+from zoneinfo import ZoneInfo  # noqa: E402
 
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
@@ -156,6 +157,10 @@ class _FakeWhatsAppClient:
 
     async def send_template(self, to, template, lang, variables, button_payloads=None):
         self.sent.append(("template", to, template, lang, variables, button_payloads))
+        return {"messages": [{"id": "wamid.test"}]}
+
+    async def send_list(self, to, body, button_label, rows, section_title="Opções"):
+        self.sent.append(("list", to, body, button_label, rows, section_title))
         return {"messages": [{"id": "wamid.test"}]}
 
 
@@ -480,9 +485,34 @@ async def test_apptresched_at_limit_sends_keep_or_cancel_and_leaves_flow_untouch
         assert conv.flow_state == FlowState.IDLE  # untouched
 
 
-async def test_apptresched_under_limit_enters_manage_flow_preselected(db):
+class _RescheduleDayCalendar:
+    """Minimal calendar for the reminder-button reschedule hand-off.
+
+    `_handle_action_button` now resolves the appointment's OWN agenda before
+    handing to `enter_manage_action`, because that opens the tappable day
+    picker inside the same turn.
+    """
+
+    tzinfo = ZoneInfo("America/Sao_Paulo")
+
+    async def list_available_days(self, start_day, days, slot_minutes=None):
+        base = start_day.replace(hour=0, minute=0, second=0, microsecond=0)
+        return [base + timedelta(days=offset) for offset in range(days)]
+
+
+def _async_return(value):
+    async def _call(*args, **kwargs):
+        return value
+
+    return _call
+
+
+async def test_apptresched_under_limit_enters_manage_flow_preselected(db, monkeypatch):
     tenant, patient, conversation, appt = await _seed(db, pix_reschedule_limit=2)
     await _seed_deposit(db, appt, status=PixDepositStatus.PAID, reschedule_count=0)
+    monkeypatch.setattr(
+        tasks, "_appointment_calendar", _async_return(_RescheduleDayCalendar())
+    )
 
     await tasks._handle_action_button(_reply_ctx(conversation), "apptresched", str(appt.id))
 
@@ -493,9 +523,24 @@ async def test_apptresched_under_limit_enters_manage_flow_preselected(db):
         assert conv.flow_managing_appointment_id == appt.id
 
     client = _FakeWhatsAppClient.created[-1]
-    assert any(
-        entry[0] == "text" and "remarcar" in entry[2].lower() for entry in client.sent
-    )
+    # The tappable day picker, built on THIS appointment's own agenda.
+    kind, _to, body, _button_label, rows, _section = client.sent[0]
+    assert kind == "list"
+    assert "remarcar" in body.lower()
+    assert rows[0][0].startswith("day|")
+
+
+async def test_apptresched_without_a_resolvable_calendar_hands_off(db, monkeypatch):
+    """No agenda for the appointment (owner gone, or the build failed): hand to
+    a human. Never a day list off some other calendar, never the LLM."""
+    tenant, patient, conversation, appt = await _seed(db, pix_reschedule_limit=2)
+    monkeypatch.setattr(tasks, "_appointment_calendar", _async_return(None))
+
+    await tasks._handle_action_button(_reply_ctx(conversation), "apptresched", str(appt.id))
+
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.handover_state == HandoverState.HUMAN_ACTIVE
 
 
 async def test_apptresched_without_deposit_and_flows_enters_manage_flow(db):

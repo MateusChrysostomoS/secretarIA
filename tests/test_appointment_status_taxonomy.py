@@ -303,6 +303,29 @@ async def test_rescheduled_booking_drives_the_greeting_opening_state(db) -> None
     assert [a["id"] for a in context.future_appointments] == [str(seeded["appointment"].id)]
 
 
+async def test_rescheduled_booking_still_gets_the_manage_trio(db) -> None:
+    """The hard prerequisite for dropping "Gerenciar consulta" from the
+    no-appointment greeting (PROMPT_FEAT_32 §2).
+
+    That button was the ONLY way a patient whose booking looked "gone" could
+    still reach the manage flow. Before FIX_16 a RESCHEDULED row read as "no
+    upcoming appointment", so removing the button first would have left exactly
+    those patients — the ones who had just moved a consultation — with
+    [Agendar, Outro] and no way to touch it. This asserts the two changes are
+    in the safe order: a moved booking produces the Remarcar/Cancelar trio.
+    """
+    seeded = await _seed(db, status=AppointmentStatus.RESCHEDULED)
+
+    async with db() as session:
+        context = await resolve_patient_opening_state(
+            session, seeded["tenant"].id, seeded["patient"].id, now=NOW
+        )
+
+    buttons = tasks._greeting_buttons_for(seeded["tenant"], "Olá!", context)
+    assert buttons == ["Remarcar", "Cancelar", "Outro"]
+    assert "Agendar" not in buttons
+
+
 async def test_rescheduled_booking_reaches_the_llm_tool(db, monkeypatch) -> None:
     """`list_patient_appointments` reads the same query — the agent must not
     tell a patient they have no appointment right after moving one."""

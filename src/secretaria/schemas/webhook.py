@@ -483,6 +483,32 @@ def minimal_event_payload(payload: dict) -> dict:
     return {"entry": entries}
 
 
+# List-row id prefixes whose payload must survive into the message body,
+# because the row's visible title alone cannot identify what was tapped:
+#
+#   slot|<iso datetime>  -> "15:00 (2026-05-29T15:00)"     a free time slot
+#   prof|<uuid>          -> "Dra. Ana (uuid)"              a professional row
+#                           (two doctors can share a 24-char truncated name)
+#   day|<iso date>       -> "Seg, 18/08 (2026-08-18)"      a day-picker row
+#                           (the label has no year, and "18/08" alone is
+#                            ambiguous DMY free text)
+#   daymore|<page>       -> "Ver mais dias (1)"            day-picker paging
+#   dayagain|<page>      -> "Escolher outro dia (1)"       slot list -> day list
+#   dayback|<target>     -> "Voltar (service)"             day/slot list -> back
+#
+# The last three carry the day picker's cursor/destination so pagination needs
+# no extra conversation column: the tap itself says where it came from and
+# where it goes (services/flow_router.py's reusable day/time branch).
+_PAYLOAD_ROW_PREFIXES: tuple[str, ...] = (
+    "slot|",
+    "prof|",
+    "day|",
+    "daymore|",
+    "dayagain|",
+    "dayback|",
+)
+
+
 def extract_inbound_body(msg: WebhookMessage) -> str | None:
     """Return the human-readable text body of an inbound message.
 
@@ -509,18 +535,12 @@ def extract_inbound_body(msg: WebhookMessage) -> str | None:
     if not title and not payload_id:
         return None
 
-    # Slot taps carry both a human label and the ISO datetime in the id, so
-    # the agent sees a self-describing string: "15:00 (2026-05-29T15:00)".
-    if payload_id.startswith("slot|"):
-        iso = payload_id.split("|", 1)[1]
-        return f"{title} ({iso})" if title else iso
-    # Professional-row taps mirror the slot contract: the id smuggles the
-    # professional's UUID ("Dra. Ana (uuid)") so the flow router resolves the
-    # exact row even when the 24-char row title truncated the name or two
-    # professionals share one.
-    if payload_id.startswith("prof|"):
-        professional_id = payload_id.split("|", 1)[1]
-        return f"{title} ({professional_id})" if title else professional_id
+    # Data-carrying list rows: the id smuggles what the row's own title cannot
+    # express, and the body becomes self-describing — "<title> (<payload>)".
+    for prefix in _PAYLOAD_ROW_PREFIXES:
+        if payload_id.startswith(prefix):
+            payload = payload_id[len(prefix) :]
+            return f"{title} ({payload})" if title else payload
     return title or payload_id
 
 

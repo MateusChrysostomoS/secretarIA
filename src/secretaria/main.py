@@ -28,6 +28,7 @@ from secretaria.api.hub import (
     conversations,
     oauth,
     professionals,
+    services,
     units,
 )
 from secretaria.config import get_settings
@@ -114,6 +115,10 @@ def create_app() -> FastAPI:
     app.include_router(config.router)
     app.include_router(oauth.router)
     app.include_router(calendar.router)
+    # The clinic's canonical service catalog — the ONE place a service's name
+    # and copy are edited; professionals reference its ids. Core wiring, never
+    # entitlement-gated (see api/hub/services.py).
+    app.include_router(services.router)
     # Addon CRUD: multi_professional / multi_unit (entitlement + limit gated
     # in the routers themselves; see api/hub/professionals.py, api/hub/units.py).
     app.include_router(professionals.router)

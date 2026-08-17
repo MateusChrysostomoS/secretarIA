@@ -80,6 +80,7 @@ from secretaria.services.appointment_status import (
     SOURCE_FLOW,
     log_status_transition,
 )
+from secretaria.services.booking_scope import booking_topology, sole_active_professional
 from secretaria.services.calendar import CalendarService
 from secretaria.services.email import send_calendar_alert, send_transactional_email_message
 from secretaria.services.entitlements_client import get_entitlements
@@ -91,6 +92,8 @@ from secretaria.services.flow_router import (
     LABEL_RESCHEDULE,
     STEP_MANAGE_CANCEL_CONFIRM,
     STEP_MANAGE_DAY,
+    STEP_MANAGE_DAY_ESCAPE,
+    STEP_MANAGE_DAY_RETRY,
     FlowRouterResult,
     MenuBubble,
     _enter_professional_services,
@@ -116,6 +119,11 @@ from secretaria.services.patient_context import (
 )
 from secretaria.services.payments import deposit_lifecycle
 from secretaria.services.payments.money import format_brl
+from secretaria.services.service_catalog import (
+    load_service_catalog,
+    normalize as normalize_service_name,
+    resolve_entries,
+)
 from secretaria.services.tenant_config import (
     RuntimeAppointmentType,
     active_appointment_types,
@@ -867,22 +875,27 @@ def _greeting_buttons_for(
     live upcoming appointment (HAS_UPCOMING/_SOON, from `opening_context`)
     AND flows are enabled, the two most useful actions - Remarcar/Cancelar -
     win the two deterministic slots, with "Outro" filling the third for
-    anything else (unchanged - that trio needs no "Agendar" and so never had
-    the slot-space problem). Every other case - including a flows-DISABLED
-    tenant - gets the fixed [Agendar, Gerenciar consulta, Outro] trio:
-    "Gerenciar consulta" consolidates the old separate Remarcar/Cancelar
-    slots into the ONE manage sub-flow both shared anyway (identify the
-    appointment first, then ask reschedule-or-cancel - flow_router's
-    _enter_manage), freeing the third slot for "Outro", the explicit
-    one-tap LLM escape (previously only reachable by typing free text
-    twice). For a flows-enabled tenant route() dispatches each label
-    deterministically ("Outro" deliberately to the LLM); for a
-    flows-disabled one, Agendar/Gerenciar taps are caught by
-    `_persist_inbound_message`'s greeting-button short-circuit and degrade
-    to a fixed "contact us" reply (`_handle_greeting_button_unavailable`),
-    while "Outro" falls through to that tenant's normal all-LLM path - for
-    that cohort the LLM IS the product, so "anything else" belongs there.
-    Empty without a greeting.
+    anything else (unchanged). Every other case - including a flows-DISABLED
+    tenant - gets [Agendar, Outro].
+
+    That pair used to be a trio, with "Gerenciar consulta" in the middle. It
+    is gone from THIS branch on purpose: this branch is precisely the patient
+    with nothing booked, for whom the button could only ever reach
+    `_enter_manage`'s dead end ("Você não tem nenhuma consulta agendada no
+    momento.") - a card offering an action the system already knows is
+    impossible. The patient who DOES have something booked never saw it
+    either: they get the Remarcar/Cancelar trio above. Nothing became
+    unreachable - `route()` still dispatches the label from an older thread's
+    button or from typed text, which is also why LABEL_MANAGE_APPOINTMENT
+    stays in `_GREETING_ACTION_IDS`.
+
+    For a flows-enabled tenant route() dispatches each label deterministically
+    ("Outro" deliberately to the LLM); for a flows-disabled one, an Agendar
+    tap is caught by `_persist_inbound_message`'s greeting-button
+    short-circuit and degrades to a fixed "contact us" reply
+    (`_handle_greeting_button_unavailable`), while "Outro" falls through to
+    that tenant's normal all-LLM path - for that cohort the LLM IS the
+    product, so "anything else" belongs there. Empty without a greeting.
     """
     if greeting_override is None:
         return []
@@ -894,22 +907,39 @@ def _greeting_buttons_for(
         and opening_context.future_appointments
     ):
         return [LABEL_RESCHEDULE, LABEL_CANCEL_APPT, LABEL_OTHER]
-    return [LABEL_BOOK, LABEL_MANAGE_APPOINTMENT, LABEL_OTHER]
+    return [LABEL_BOOK, LABEL_OTHER]
 
 
-def _flow_tenant_snapshot(tenant: Tenant, professionals: list[Professional]) -> SimpleNamespace:
+def _flow_tenant_snapshot(
+    tenant: Tenant, professionals: list[Professional], services: list | None = None
+) -> SimpleNamespace:
     """Build the tenant-shaped config consumed by the deterministic router.
 
     A single active professional is the effective clinic config, matching
     ``load_tenant_config``. Multi-professional flows select a professional
     before reading that professional's catalog, so they keep tenant defaults
     on the initial snapshot.
+
+    The "exactly one" rule comes from `services/booking_scope.py`, the same
+    one `resolve_booking_owner_id` applies to the ROSTER this snapshot travels
+    with (``route(professionals=...)``) — so whoever's catalog is rendered
+    here is provably whoever owns the booking that follows. `collect_insurance`
+    / `insurances` stay tenant-level on purpose: they are clinic-wide settings
+    and the convênio step asks them regardless of topology (see
+    `flow_router._insurance_step_skip_reason`).
+
+    `services` is the clinic's canonical catalog (services/service_catalog.py),
+    loaded by the caller because the router itself does no DB I/O. Resolving
+    HERE is what keeps `flow_router` a pure function while still showing the
+    patient one spelling per service: the router receives entries that are
+    already canonical and filters them exactly as before. An empty catalog (a
+    tenant not backfilled yet) resolves to the raw stored entries.
     """
-    appointment_types = tenant.appointment_types
+    appointment_types = resolve_entries(tenant.appointment_types, services)
     business_hours = tenant.business_hours
-    if len(professionals) == 1:
-        professional = professionals[0]
-        appointment_types = professional_appointment_types(professional, tenant)
+    professional = sole_active_professional(professionals)
+    if professional is not None:
+        appointment_types = professional_appointment_types(professional, tenant, services)
         business_hours = professional_business_hours(professional, tenant)
 
     return SimpleNamespace(
@@ -1154,17 +1184,21 @@ async def _load_upcoming_greeting_data(
     nearest = future_appointments[0]
     owner_id = nearest.get("professional_id")
     owner = professionals_by_id.get(owner_id) if owner_id else None
+    # Resolved through the clinic's canonical catalog so a historical
+    # `appointment_type` whose spelling drifted still finds its service (and
+    # therefore its price/description) — historical rows are never rewritten.
+    services = await load_service_catalog(session, tenant.id)
     catalog = (
-        professional_appointment_types(owner, tenant)
+        professional_appointment_types(owner, tenant, services)
         if owner is not None
-        else active_appointment_types(tenant)
+        else active_appointment_types(tenant, services)
     )
     nearest_service = None
     raw_type = nearest.get("appointment_type")
     if raw_type:
-        target_name = raw_type.strip().casefold()
+        target_name = normalize_service_name(raw_type)
         nearest_service = next(
-            (svc for svc in catalog if str(svc.get("name", "")).strip().casefold() == target_name),
+            (svc for svc in catalog if normalize_service_name(svc.get("name")) == target_name),
             None,
         )
 
@@ -1540,7 +1574,10 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     # The manage (cancel/reschedule) sub-flow's owning calendar for THIS turn
     # (see `_manage_owner_calendar_target`) - a professional's own, or the
     # tenant's, resolved independently of any stale booking-flow selection.
+    # The paired flag says an owner was IDENTIFIED, so a failed build stays a
+    # None the router degrades on instead of falling back to the wrong agenda.
     manage_calendar: CalendarService | None = None
+    manage_calendar_owned = False
     patient_name = None
     patient_wa = reply.patient_wa_id
     # Post-consult-knowledge injection gate (see
@@ -1596,6 +1633,16 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                     # resolves, not only when flows are on: the agent's
                     # professional context + sentinel hand-backs need it too.
                     professional_rows = await list_active_professionals(session, tenant.id)
+                    # ONE read of the clinic's canonical catalog per turn. Each
+                    # professional's entries are resolved through it HERE, so
+                    # the pure router downstream sees the clinic's single
+                    # spelling per service without ever touching the DB. An
+                    # empty catalog (tenant not backfilled) leaves the stored
+                    # entries exactly as they are today. `None` is preserved as
+                    # `None`, not flattened to `[]`, because that is what makes
+                    # `professional_appointment_types` fall back to the
+                    # tenant's legacy list for a professional with no services.
+                    service_catalog = await load_service_catalog(session, tenant.id)
                     flow_professionals = [
                         SimpleNamespace(
                             id=p.id,
@@ -1603,7 +1650,11 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                             specialty=p.specialty,
                             about=p.about,
                             context_doctor_message=p.context_doctor_message,
-                            appointment_types=p.appointment_types,
+                            appointment_types=(
+                                resolve_entries(p.appointment_types, service_catalog)
+                                if p.appointment_types
+                                else p.appointment_types
+                            ),
                         )
                         for p in professional_rows
                     ]
@@ -1655,7 +1706,7 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                             ),
                             patient_id=conversation.patient_id,
                         ),
-                        _flow_tenant_snapshot(tenant, professional_rows),
+                        _flow_tenant_snapshot(tenant, professional_rows, service_catalog),
                     )
                     # Load the patient's future appointments whenever THIS turn
                     # might need them - no longer only the manage (cancel/
@@ -1689,7 +1740,9 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                         conversation.flow_managing_appointment_id,
                         upcoming_appointments,
                         professional_rows,
+                        reply.inbound_body,
                     )
+                    manage_calendar_owned = manage_target is not None
                     if isinstance(manage_target, Professional):
                         try:
                             manage_calendar = await resolve_professional_calendar(
@@ -1831,6 +1884,7 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
             professionals=flow_professionals,
             flow_calendar=flow_calendar,
             manage_calendar=manage_calendar,
+            manage_calendar_owned=manage_calendar_owned,
         ):
             return
 
@@ -1880,6 +1934,14 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
         ),
         redis=redis,
         selected_professional=selected_professional,
+        # The tenant's REAL shape decides which tools the agent is given at
+        # all (ai/graph.py::base_tools_for): a multi-professional clinic never
+        # receives the tenant-level calendar tools, and a single-professional
+        # one lets the base booking tool resolve its owner. `professional_rows`
+        # is None only when the roster load itself failed (already logged) -
+        # booking_topology maps that to "unknown", which keeps today's tool
+        # set rather than silently disarming a working clinic.
+        booking_topology=booking_topology(professional_rows),
         include_post_consult_knowledge=_should_inject_post_consult_knowledge(
             tenant_config.post_consult_knowledge if tenant_config is not None else None,
             opening_state,
@@ -2107,39 +2169,16 @@ def _flow_turn_calendar(
     return CalendarService.from_tenant_config(tenant_config) if tenant_config else None
 
 
-def _manage_owner_calendar_target(
-    flow_state: FlowState | None,
-    flow_managing_appointment_id: UUID | None,
-    upcoming_appointments: list[dict] | None,
-    professional_rows: list[Professional] | None,
+def _appointment_calendar_target(
+    appt: dict | None, professional_rows: list[Professional] | None
 ) -> Professional | Literal["tenant"] | None:
-    """Whose calendar owns the appointment being managed this turn (pure, no I/O).
+    """Whose calendar owns ONE appointment dict (pure, no I/O).
 
-    Resolves the conversation's manage-flow target (`flow_managing_appointment_id`)
-    against the `upcoming_appointments` dicts already loaded for this turn (see
-    `wants_upcoming_appointments` above - it guarantees they are loaded whenever
-    this matters) and the tenant's active-professional rows. Returns:
-
-      - the owning `Professional` ORM row, when the managed appointment's
-        `professional_id` matches one of `professional_rows`;
-      - the literal "tenant", when the managed appointment has no
-        `professional_id` (booked at the tenant level, not with a specific
-        doctor);
-      - None when this isn't a manage-with-target turn (not MANAGE_BOOKING, no
-        id set yet, or the id can't be resolved in `upcoming_appointments`) -
-        the caller falls back to its existing calendar resolution
-        (`_flow_turn_calendar`).
-
-    Deliberately ignores `flow_selected_professional_id` (the SERVICE_CATALOG
-    booking selection) - a stale doctor pick from an earlier booking flow must
-    never decide which agenda a cancel/reschedule acts on.
+    The owning `Professional` row when the appointment names one on the active
+    roster; the literal "tenant" when it names none (booked at the tenant
+    level); None when there is no appointment, or its `professional_id` no
+    longer resolves - the caller must then NOT guess an agenda.
     """
-    if flow_state != FlowState.MANAGE_BOOKING or flow_managing_appointment_id is None:
-        return None
-    target = str(flow_managing_appointment_id)
-    appt = next(
-        (a for a in (upcoming_appointments or []) if str(a.get("id")) == target), None
-    )
     if appt is None:
         return None
     professional_id = appt.get("professional_id")
@@ -2150,12 +2189,92 @@ def _manage_owner_calendar_target(
     )
 
 
+async def _appointment_calendar(
+    session, tenant: Tenant, target: "Professional | Literal['tenant'] | None"
+) -> CalendarService | None:
+    """Build the CalendarService for an owner `_appointment_calendar_target` found.
+
+    Used by the two entries that open the reschedule day picker WITHOUT a
+    conversation snapshot to hang it off (a reminder button tap, and the LLM's
+    manage-appointment hand-back). None in -> None out, and a build failure is
+    logged count-only and answered with None too: the day picker then replies
+    `calendar_unavailable`, which is the honest answer, rather than listing
+    days off whichever agenda happened to be at hand.
+    """
+    if target is None:
+        return None
+    try:
+        tenant_config = await load_tenant_config(session, tenant)
+        if isinstance(target, Professional):
+            return await resolve_professional_calendar(
+                session, tenant, target, tenant_config=tenant_config
+            )
+        return CalendarService.from_tenant_config(tenant_config) if tenant_config else None
+    except Exception as exc:
+        logger.warning("worker_appointment_calendar_failed", error=str(exc))
+        return None
+
+
+def _manage_owner_calendar_target(
+    flow_state: FlowState | None,
+    flow_managing_appointment_id: UUID | None,
+    upcoming_appointments: list[dict] | None,
+    professional_rows: list[Professional] | None,
+    inbound_body: str | None = None,
+) -> Professional | Literal["tenant"] | None:
+    """Whose calendar this turn's manage action acts on (pure, no I/O).
+
+    Two turns need it, and both are resolved BEFORE `route()` runs because the
+    router does no DB I/O of its own:
+
+      - a turn already INSIDE the manage flow with a target set: resolve
+        `flow_managing_appointment_id` against the `upcoming_appointments`
+        dicts already loaded for this turn (see `wants_upcoming_appointments`
+        above - it guarantees they are loaded whenever this matters);
+      - the ENTRY turn of a direct "Remarcar" tap, which is still IDLE/MENU
+        here yet opens the day picker inside this very turn
+        (`enter_manage_action`'s single-appointment shortcut). Exactly one
+        upcoming appointment is unambiguous; with 2+ the router shows a pick
+        list and needs no calendar at all, so None is correct there.
+
+    Returns None for every other turn - the caller falls back to its existing
+    calendar resolution (`_flow_turn_calendar`).
+
+    Deliberately ignores `flow_selected_professional_id` (the SERVICE_CATALOG
+    booking selection) - a stale doctor pick from an earlier booking flow must
+    never decide which agenda a cancel/reschedule acts on.
+    """
+    if flow_state == FlowState.MANAGE_BOOKING and flow_managing_appointment_id is not None:
+        target = str(flow_managing_appointment_id)
+        appt = next(
+            (a for a in (upcoming_appointments or []) if str(a.get("id")) == target), None
+        )
+        return _appointment_calendar_target(appt, professional_rows)
+    if _label_match_body(inbound_body, LABEL_RESCHEDULE) and len(upcoming_appointments or []) == 1:
+        return _appointment_calendar_target(
+            (upcoming_appointments or [])[0], professional_rows
+        )
+    return None
+
+
 # --------------------------------------------------------------------------
 # Pix deposit money hooks (PROMPT S3) — reminder action buttons + the
 # deterministic flow's own manage (cancel/reschedule) sub-flow.
 # --------------------------------------------------------------------------
 
 _APPOINTMENT_NOT_FOUND_TEXT = "Não encontrei essa consulta."
+
+# Steps `_apply_deposit_awareness` inspects. The day-picker retry/escape
+# renders are the SAME step of the flow as STEP_MANAGE_DAY, just re-drawn
+# after an unreadable free-text date, so the reschedule-limit pre-check has to
+# recognise them too — otherwise a blocked target could slip past the gate by
+# mistyping a date once.
+_RESCHEDULE_PRECHECK_STEPS = (
+    STEP_MANAGE_CANCEL_CONFIRM,
+    STEP_MANAGE_DAY,
+    STEP_MANAGE_DAY_RETRY,
+    STEP_MANAGE_DAY_ESCAPE,
+)
 
 
 def _pix_retention_warning_line(tenant: Tenant, deposit) -> str:
@@ -2352,7 +2471,7 @@ async def _apply_deposit_awareness(
         result.action != "reply"
         or tenant is None
         or result.flow_managing_appointment_id is None
-        or result.flow_step not in (STEP_MANAGE_CANCEL_CONFIRM, STEP_MANAGE_DAY)
+        or result.flow_step not in _RESCHEDULE_PRECHECK_STEPS
     ):
         return result
 
@@ -2374,7 +2493,7 @@ async def _apply_deposit_awareness(
             if hours_until is None or hours_until > tenant.pix_refund_window_hours:
                 return result
             warning = _pix_retention_warning_line(tenant, deposit)
-        else:  # STEP_MANAGE_DAY
+        else:  # any STEP_MANAGE_DAY* render
             if deposit is None or deposit.reschedule_count < tenant.pix_reschedule_limit:
                 return result
             limit_count = deposit.reschedule_count
@@ -2559,12 +2678,40 @@ async def _handle_action_button(
                 )
                 for p in professional_rows
             ]
-            reschedule_handoff = (tenant, appointments, professionals, waba_token)
+            # The reschedule opens the day picker in this very turn, so it
+            # needs THIS appointment's own agenda resolved here, inside the
+            # session. A failure leaves it None and the picker answers
+            # `calendar_unavailable` - never a day list off the wrong calendar.
+            reschedule_calendar = await _appointment_calendar(
+                session,
+                tenant,
+                _appointment_calendar_target(
+                    {"professional_id": appointment.professional_id}, professional_rows
+                ),
+            )
+            reschedule_handoff = (
+                tenant,
+                appointments,
+                professionals,
+                waba_token,
+                reschedule_calendar,
+            )
 
     if reschedule_handoff is not None:
-        handoff_tenant, appointments, professionals, handoff_waba_token = reschedule_handoff
-        result = enter_manage_action(
-            "reschedule", handoff_tenant, appointments, professionals, preselected_id=appt_uuid
+        (
+            handoff_tenant,
+            appointments,
+            professionals,
+            handoff_waba_token,
+            reschedule_calendar,
+        ) = reschedule_handoff
+        result = await enter_manage_action(
+            "reschedule",
+            handoff_tenant,
+            appointments,
+            professionals,
+            preselected_id=appt_uuid,
+            calendar=reschedule_calendar,
         )
         await _apply_flow_result(
             reply,
@@ -2634,6 +2781,7 @@ async def _run_flow(
     professionals: list | None = None,
     flow_calendar: CalendarService | None = None,
     manage_calendar: CalendarService | None = None,
+    manage_calendar_owned: bool = False,
 ) -> bool:
     """Run the deterministic flow router for this turn.
 
@@ -2645,18 +2793,22 @@ async def _run_flow(
     `professionals`/`flow_calendar` are the multi-doctor context loaded by
     `_send_bot_reply` (active snapshot + the selected professional's calendar).
     `manage_calendar` is the manage (cancel/reschedule) sub-flow's owning
-    calendar (`_manage_owner_calendar_target`) - used INSTEAD of
-    `_flow_turn_calendar` whenever this turn is already inside MANAGE_BOOKING
-    with a target set, deliberately ignoring `flow_selected_professional_id`
+    calendar and `manage_calendar_owned` says an owner was identified for this
+    turn at all (`_manage_owner_calendar_target`) - together they replace
+    `_flow_turn_calendar`, deliberately ignoring `flow_selected_professional_id`
     (a stale booking-flow selection must never decide the manage agenda).
     """
-    if (
-        getattr(conv_snapshot, "flow_state", None) == FlowState.MANAGE_BOOKING
-        and getattr(conv_snapshot, "flow_managing_appointment_id", None) is not None
-    ):
-        calendar = manage_calendar
-    else:
-        calendar = _flow_turn_calendar(conv_snapshot, tenant_config, flow_calendar)
+    # A turn that acts on an EXISTING appointment must use that appointment's
+    # own agenda and no other. `manage_calendar_owned` says the caller
+    # identified such an owner (`_manage_owner_calendar_target`); the calendar
+    # itself may still be None because building it failed, and that must stay
+    # a None the router degrades on - never a silent fallback to the tenant
+    # agenda, which would cancel or reschedule on the wrong calendar.
+    calendar = (
+        manage_calendar
+        if manage_calendar_owned
+        else _flow_turn_calendar(conv_snapshot, tenant_config, flow_calendar)
+    )
     try:
         result = await route(
             conv_snapshot,
@@ -2677,6 +2829,38 @@ async def _run_flow(
 
     return await _apply_flow_result(
         reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+    )
+
+
+def _log_booking_scope(appointment: Appointment, tenant_id: UUID, *, source: str) -> None:
+    """Emit the two booking-scope facts for one committed appointment.
+
+    Ids and enums only — never the patient, the phone, the event title or the
+    service description. `booking_owner_resolved` answers "did this booking
+    get an owner, and does the tenant even have one to give?"; the paired
+    event in ai/tools.py::_persist_appointment does the same for the LLM path,
+    so both surfaces are countable with one query. `has_owner=False` on a
+    single-professional tenant is exactly the regression this round fixed.
+    """
+    logger.info(
+        "booking_owner_resolved",
+        tenant_id=str(tenant_id),
+        appointment_id=str(appointment.id),
+        professional_id=(
+            str(appointment.professional_id) if appointment.professional_id else None
+        ),
+        has_owner=appointment.professional_id is not None,
+        source=source,
+    )
+    logger.info(
+        "booking_service_resolved",
+        tenant_id=str(tenant_id),
+        appointment_id=str(appointment.id),
+        professional_id=(
+            str(appointment.professional_id) if appointment.professional_id else None
+        ),
+        has_type=bool(appointment.appointment_type),
+        source=source,
     )
 
 
@@ -2860,6 +3044,7 @@ async def _apply_flow_result(
     # to the DB (never on a persist failure) and `tenant` is loaded (always
     # true here — the flow engine only runs once `tenant` is resolved).
     if booked_appointment is not None and persisted and tenant is not None:
+        _log_booking_scope(booked_appointment, tenant.id, source=SOURCE_FLOW)
         await enqueue_post_booking_hooks(
             redis, tenant.id, booked_appointment.id, source="flow"
         )
@@ -3388,8 +3573,22 @@ async def _handle_manage_appointment(
             )
             return
         appointments = await load_upcoming_appointments(session, tenant.id, patient_id)
+        # Only the single-appointment reschedule opens the day picker in this
+        # turn; every other branch (cancel, or 2+ appointments to pick from)
+        # needs no agenda at all, so nothing is built for them.
+        manage_calendar = None
+        if action == "reschedule" and len(appointments) == 1:
+            manage_calendar = await _appointment_calendar(
+                session,
+                tenant,
+                _appointment_calendar_target(
+                    appointments[0], await list_active_professionals(session, tenant.id)
+                ),
+            )
 
-    result = enter_manage_action(action, tenant, appointments, professionals)
+    result = await enter_manage_action(
+        action, tenant, appointments, professionals, calendar=manage_calendar
+    )
     await _apply_flow_result(
         reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
     )

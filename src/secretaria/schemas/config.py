@@ -39,6 +39,25 @@ def _parse_hhmm(value: str) -> time:
     return time(int(hour_str), int(minute_str))
 
 
+def clean_requirements(value: list[str]) -> list[str]:
+    """Trim items, drop blanks, and cap count/length.
+
+    ONE rule, shared by every surface that accepts pre-consult orientations:
+    the per-professional/tenant `AppointmentType` below and the canonical
+    catalog's `ServiceCreate`/`ServiceUpdate` (schemas/service.py). They
+    describe the same field and must not drift apart — same reasoning as
+    `schemas/professional.py` importing `AppointmentType` rather than
+    redeclaring it.
+    """
+    cleaned = [v.strip() for v in value if v and v.strip()]
+    for item in cleaned:
+        if len(item) > 300:
+            raise ValueError(f"requirement {item!r} exceeds 300 characters")
+    if len(cleaned) > 20:
+        raise ValueError("at most 20 requirements allowed")
+    return cleaned
+
+
 class TimeWindow(BaseModel):
     """A single availability window within a day (local clinic time)."""
 
@@ -71,15 +90,7 @@ class AppointmentType(BaseModel):
     @field_validator("requirements")
     @classmethod
     def _check_requirements(cls, value: list[str]) -> list[str]:
-        """Trim items, drop blanks, and cap count/length (same style as
-        TenantConfigUpdate._check_insurances below)."""
-        cleaned = [v.strip() for v in value if v and v.strip()]
-        for item in cleaned:
-            if len(item) > 300:
-                raise ValueError(f"requirement {item!r} exceeds 300 characters")
-        if len(cleaned) > 20:
-            raise ValueError("at most 20 requirements allowed")
-        return cleaned
+        return clean_requirements(value)
 
 
 def _validate_business_hours(value: dict[str, list[TimeWindow]]) -> dict[str, list[TimeWindow]]:

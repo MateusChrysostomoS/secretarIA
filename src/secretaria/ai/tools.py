@@ -22,6 +22,13 @@ from langchain_core.tools import tool
 
 from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
+from secretaria.services.booking_scope import (
+    BOOKING_TOPOLOGY_MULTI,
+    BOOKING_TOPOLOGY_SOLE,
+    BOOKING_TOPOLOGY_UNKNOWN,
+    canonical_service_name,
+    service_names,
+)
 from secretaria.services.calendar import CalendarService
 from secretaria.services.precheck import HandoffOutcome, request_precheck_handoff
 
@@ -55,6 +62,28 @@ _tenant_config_ctx: ContextVar["TenantRuntimeConfig | None"] = ContextVar(
 # `None` (dev scripts, or no arq pool reachable) makes the enqueue a silent
 # no-op rather than an error.
 _redis_ctx: ContextVar[Any | None] = ContextVar("_redis", default=None)
+
+# Per-async-task booking topology (services/booking_scope.py): how many ACTIVE
+# professionals the tenant of the current turn books with. Set by
+# graph.run_agent from the roster the worker already loaded, and read here for
+# two decisions no prompt may be trusted with:
+#
+#   - a MULTI turn must not reach a tenant-level calendar tool at all. The
+#     tool set the agent is built with already excludes them
+#     (graph.base_tools_for), and the guards below are the second lock: an
+#     invocation that arrives anyway fails closed WITHOUT calling Google.
+#   - a SOLE turn resolves its booking owner from `TenantRuntimeConfig.
+#     professional_id`, which `load_tenant_config` populates exactly when the
+#     tenant has one active professional. On any other topology that field may
+#     have been overlaid with a flow-selected doctor (graph.
+#     _config_with_selected_professional), so it is NOT an owner for a
+#     tenant-level tool and is ignored.
+#
+# UNKNOWN (the default: dev scripts, direct tests, a roster load that failed)
+# keeps the pre-existing tenant-level behaviour and claims no owner.
+_booking_topology_ctx: ContextVar[str] = ContextVar(
+    "_booking_topology", default=BOOKING_TOPOLOGY_UNKNOWN
+)
 
 # Note on calendar outages: a tool that hits CalendarUnavailableError simply
 # lets it propagate. LangGraph's ToolNode re-raises it out of the agent's
@@ -175,6 +204,124 @@ def _calendar_for_professional(
     )
 
 
+# Structured reasons for `agent_tool_blocked` (see `_blocked_tenant_level` and
+# `_canonical_appointment_type`). Enums only — never the tool arguments, which
+# carry the patient's own words.
+TOOL_BLOCK_WRONG_TOPOLOGY = "wrong_topology"
+TOOL_BLOCK_UNKNOWN_SERVICE = "unknown_service"
+TOOL_BLOCK_AMBIGUOUS_SERVICE = "ambiguous_service"
+
+_MULTI_PROFESSIONAL_TOOL_ERROR = (
+    "Esta clínica tem vários profissionais, então esta ferramenta não pode ser "
+    "usada: toda consulta pertence à agenda de UM profissional. Use "
+    "list_professionals e as ferramentas *_for_professional, ou chame "
+    "show_main_menu para o paciente escolher pelos botões."
+)
+
+
+def _blocked_tenant_level(tool_name: str) -> dict | None:
+    """Fail-closed guard for the tenant-level calendar tools. None = allowed.
+
+    Defence in depth, not the primary control: on a multi-professional tenant
+    these tools are never handed to the agent in the first place
+    (ai/graph.py::base_tools_for). This catches the paths a tool set cannot —
+    a stale cached graph, a hand-rolled invocation, a future caller — and it
+    returns BEFORE any Google call or DB write, so a blocked attempt can never
+    land an event on the clinic-level calendar or an ownerless Appointment.
+    """
+    if _booking_topology_ctx.get() != BOOKING_TOPOLOGY_MULTI:
+        return None
+    tenant_id = _tenant_id_ctx.get()
+    logger.warning(
+        "agent_tool_blocked",
+        tool=tool_name,
+        reason=TOOL_BLOCK_WRONG_TOPOLOGY,
+        topology=BOOKING_TOPOLOGY_MULTI,
+        tenant_id=str(tenant_id) if tenant_id else None,
+    )
+    return {"error": _MULTI_PROFESSIONAL_TOOL_ERROR}
+
+
+def _sole_professional_id() -> UUID | None:
+    """The single active professional owning THIS turn's bookings, or None.
+
+    Non-None only on a `sole` turn — see `_booking_topology_ctx`'s note for
+    why `TenantRuntimeConfig.professional_id` alone is not enough.
+    """
+    if _booking_topology_ctx.get() != BOOKING_TOPOLOGY_SOLE:
+        return None
+    config = _tenant_config_ctx.get()
+    return getattr(config, "professional_id", None)
+
+
+def _effective_service_catalog() -> list:
+    """The catalog THIS turn books from: the resolved tenant/professional one.
+
+    `TenantRuntimeConfig.appointment_types` is already the EFFECTIVE catalog —
+    `load_tenant_config` resolves it through the single active professional's
+    own services when there is one (contract v1 §10 item D), falling back to
+    the tenant's. Empty for dev scripts with no config in context.
+    """
+    config = _tenant_config_ctx.get()
+    return list(getattr(config, "appointment_types", None) or [])
+
+
+def _canonical_appointment_type(
+    candidate: str, tool_name: str, catalog: list | None = None
+) -> tuple[str | None, dict | None]:
+    """Resolve `candidate` to a catalog service name. Returns (name, error).
+
+    `Appointment.appointment_type` is read downstream as a CATALOG KEY (the
+    Pix deposit prices a booking by exact name — see
+    services/payments/deposit_lifecycle.py::_price_text_for_appointment), so a
+    free-text title must never be stored there:
+
+      - a name that matches an active service resolves to the catalog's own
+        spelling;
+      - an unmatched name is refused (the tool errors, listing the valid
+        options, and the model can correct itself inside the same turn)
+        rather than booking something unpriceable;
+      - an OMITTED name is derived only when the catalog leaves no room for
+        doubt — exactly one active service. With several, the model must say
+        which one;
+      - a clinic with NO active services has nothing to prove a type against,
+        so the booking proceeds with no type at all. NULL is honest; the free
+        Calendar title would not be.
+
+    `catalog` defaults to the current turn's effective catalog; the
+    professional-aware tools pass the resolved professional's own instead
+    (plugins/multi_professional.py), so each tool validates against exactly
+    the catalog it books from.
+    """
+    catalog = _effective_service_catalog() if catalog is None else catalog
+    names = service_names(catalog)
+    text = (candidate or "").strip()
+    if not names:
+        return None, None
+    if not text:
+        if len(names) == 1:
+            return names[0], None
+        logger.info(
+            "agent_tool_blocked", tool=tool_name, reason=TOOL_BLOCK_AMBIGUOUS_SERVICE
+        )
+        return None, {
+            "error": (
+                "Informe appointment_type com o nome EXATO de um dos serviços da "
+                f"clínica: {', '.join(names)}."
+            )
+        }
+    canonical = canonical_service_name(catalog, text)
+    if canonical is None:
+        logger.info("agent_tool_blocked", tool=tool_name, reason=TOOL_BLOCK_UNKNOWN_SERVICE)
+        return None, {
+            "error": (
+                f"Serviço '{text}' não existe nesta clínica. Serviços "
+                f"disponíveis: {', '.join(names)}."
+            )
+        }
+    return canonical, None
+
+
 def _match_by_name(items: Sequence[Any], name: str) -> Any | None:
     """Case-insensitive exact match of `name` against `item.name` in `items`.
 
@@ -229,20 +376,27 @@ async def _persist_appointment(
     event: dict,
     fallback_start: datetime,
     fallback_end: datetime,
-    appointment_type: str,
+    appointment_type: str | None,
     professional_id: UUID | None = None,
     unit_id: UUID | None = None,
+    source: str = "agent",
 ) -> None:
     """Record a bot-created appointment. Best-effort: never raises.
 
     Skipped silently when no tenant context is set (dev scripts). A DB failure
     is logged but does not undo the (already successful) Google Calendar event.
 
-    `professional_id`/`unit_id` are optional — set only by the
-    multi_professional/multi_unit plugin tools (plugins/multi_professional.py,
-    plugins/multi_unit.py); the base tools never pass them, so a plain
-    booking still gets NULL in both columns exactly as before this addon
-    support was added.
+    `appointment_type` must ALREADY be a canonical catalog name (or None when
+    the clinic has no catalog to prove one against) — callers resolve it via
+    `_canonical_appointment_type` / `services/booking_scope.canonical_service_name`.
+    It is never the Google event title: that is `summary`, a different
+    concept, and everything downstream reads this column as a catalog key.
+
+    `professional_id` is the booking's owner: the resolved single active
+    professional for the base tools (`_sole_professional_id`), the named one
+    for the multi_professional plugin tools. `unit_id` is set only by the
+    multi_unit plugin tool. `source` names the surface for the structured
+    logs below and never reaches the DB.
     """
     tenant_id = _tenant_id_ctx.get()
     if tenant_id is None:
@@ -297,6 +451,25 @@ async def _persist_appointment(
     if appointment is not None:
         from secretaria.plugins.post_booking import enqueue_post_booking_hooks
 
+        # Ids and enums only (mirrors workers/tasks.py::_log_booking_scope for
+        # the deterministic flow, so both surfaces answer "did this booking
+        # get an owner and a real service?" with one query).
+        logger.info(
+            "booking_owner_resolved",
+            tenant_id=str(tenant_id),
+            appointment_id=str(appointment.id),
+            professional_id=str(professional_id) if professional_id else None,
+            has_owner=professional_id is not None,
+            source=source,
+        )
+        logger.info(
+            "booking_service_resolved",
+            tenant_id=str(tenant_id),
+            appointment_id=str(appointment.id),
+            professional_id=str(professional_id) if professional_id else None,
+            has_type=bool(appointment.appointment_type),
+            source=source,
+        )
         await enqueue_post_booking_hooks(
             _redis_ctx.get(), tenant_id, appointment.id, source="agent"
         )
@@ -376,6 +549,9 @@ async def check_availability(start: str, end: str) -> dict:
         start: Início da janela em ISO 8601 (ex: 2026-05-27T14:00:00).
         end: Fim da janela em ISO 8601.
     """
+    blocked = _blocked_tenant_level("check_availability")
+    if blocked is not None:
+        return blocked
     busy = await _get_calendar().check_availability(
         datetime.fromisoformat(start),
         datetime.fromisoformat(end),
@@ -394,6 +570,9 @@ async def list_free_slots(day: str, max_slots: int = 6) -> dict:
         day: Dia no formato YYYY-MM-DD (ex: 2026-05-29).
         max_slots: Quantidade máxima de slots a retornar (default 6, máx 10).
     """
+    blocked = _blocked_tenant_level("list_free_slots")
+    if blocked is not None:
+        return blocked
     target_day = date.fromisoformat(day)
     day_dt = datetime.combine(target_day, datetime.min.time())
     slots = await _get_calendar().list_free_slots(
@@ -409,6 +588,7 @@ async def create_event(
     end: str,
     summary: str,
     description: str = "",
+    appointment_type: str = "",
 ) -> dict:
     """Cria um evento (consulta) no calendário da clínica. Use SOMENTE depois
     de check_availability E confirmação explícita do paciente.
@@ -416,9 +596,25 @@ async def create_event(
     Args:
         start: Início em ISO 8601 (ex: 2026-05-27T14:00:00).
         end: Fim em ISO 8601.
-        summary: Título do evento, ex: 'Consulta - João Silva'.
+        summary: Título do evento no Google Agenda, ex: 'Consulta - João
+            Silva'. É só o título da agenda — NÃO use este campo para dizer
+            qual é o serviço.
         description: Notas adicionais (opcional).
+        appointment_type: Nome EXATO do serviço da clínica que está sendo
+            agendado (um dos "Tipos de consulta disponíveis" do seu contexto,
+            ex: 'Primeira Consulta'). Não invente, não traduza e não misture
+            com o nome do paciente. Se a clínica tiver só um serviço, pode
+            deixar em branco.
     """
+    blocked = _blocked_tenant_level("create_event")
+    if blocked is not None:
+        return blocked
+    # Resolved BEFORE the calendar call: an unprovable service must not leave
+    # an orphan Google event behind.
+    canonical_type, error = _canonical_appointment_type(appointment_type, "create_event")
+    if error is not None:
+        return error
+
     cal = _get_calendar()
     fallback_start, fallback_end = _localize_window(start, end, cal)
     event = await cal.create_event(
@@ -427,7 +623,13 @@ async def create_event(
         summary=summary,
         description=description,
     )
-    await _persist_appointment(event, fallback_start, fallback_end, summary)
+    await _persist_appointment(
+        event,
+        fallback_start,
+        fallback_end,
+        canonical_type,
+        professional_id=_sole_professional_id(),
+    )
 
     return {
         "id": event.get("id"),
@@ -445,6 +647,9 @@ async def cancel_event(event_id: str) -> dict:
     Args:
         event_id: ID do evento no Google Calendar.
     """
+    blocked = _blocked_tenant_level("cancel_event")
+    if blocked is not None:
+        return blocked
     await _get_calendar().cancel_event(event_id)
     notice = await _mark_appointment_cancelled(event_id)
     result: dict = {"status": "cancelled"}
@@ -504,7 +709,7 @@ async def list_patient_appointments() -> dict:
     marcada?" ou "quando é minha consulta?". Ferramenta SOMENTE-LEITURA: ela
     informa, não marca, não cancela e não remarca. Quando o paciente quiser
     remarcar ou cancelar uma consulta listada, chame show_main_menu para ele
-    seguir pelo fluxo de botões (Gerenciar consulta).
+    seguir pelo fluxo de botões do menu.
 
     Não recebe argumentos: paciente e clínica são resolvidos automaticamente
     a partir da conversa atual.

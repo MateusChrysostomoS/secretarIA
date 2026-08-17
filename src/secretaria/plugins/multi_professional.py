@@ -49,6 +49,7 @@ from langchain_core.tools import tool
 from secretaria.ai.tools import (
     SelectProfessionalRequested,
     _calendar_for_professional,
+    _canonical_appointment_type,
     _localize_window,
     _match_by_name,
     _persist_appointment,
@@ -72,6 +73,26 @@ async def _active_professionals(tenant_id: UUID) -> list:
 
     async with async_session_factory() as session:
         return await list_active_professionals(session, tenant_id)
+
+
+async def _professional_services(tenant_id: UUID, professional) -> list[dict]:
+    """THIS professional's effective service catalog (own JSON, else tenant's).
+
+    Same resolution `_professional_calendar` uses for hours/duration, exposed
+    on its own because `create_event_for_professional` must prove the service
+    it is asked to book actually exists in the catalog it books from — see
+    services/booking_scope.py for why `Appointment.appointment_type` may never
+    hold a free-text title.
+    """
+    from secretaria.core.database import async_session_factory
+    from secretaria.models import Tenant
+    from secretaria.services.tenant_config import professional_appointment_types
+
+    async with async_session_factory() as session:
+        tenant = await session.get(Tenant, tenant_id)
+        if tenant is None:
+            return []
+        return professional_appointment_types(professional, tenant)
 
 
 async def _professional_calendar(tenant_id: UUID, professional) -> "CalendarService":  # noqa: F821
@@ -209,6 +230,7 @@ async def create_event_for_professional(
     summary: str,
     description: str = "",
     unit_name: str = "",
+    appointment_type: str = "",
 ) -> dict:
     """Cria uma consulta na agenda de UM profissional específico. Use SOMENTE
     depois de list_free_slots_for_professional (ou check_availability) E
@@ -218,10 +240,15 @@ async def create_event_for_professional(
         professional_name: Nome do profissional (ex: 'Dra. Ana').
         start: Início em ISO 8601 (ex: 2026-05-27T14:00:00).
         end: Fim em ISO 8601.
-        summary: Título do evento, ex: 'Consulta - João Silva'.
+        summary: Título do evento no Google Agenda, ex: 'Consulta - João
+            Silva'. É só o título da agenda — NÃO use este campo para dizer
+            qual é o serviço.
         description: Notas adicionais (opcional).
         unit_name: Nome da unidade/local, se a clínica tiver mais de uma
             (opcional — deixe em branco se não houver múltiplas unidades).
+        appointment_type: Nome EXATO do serviço DESTE profissional que está
+            sendo agendado. Não invente e não use o nome do paciente. Se o
+            profissional tiver só um serviço, pode deixar em branco.
     """
     tenant_id = _tenant_id_ctx.get()
     if tenant_id is None:
@@ -231,6 +258,16 @@ async def create_event_for_professional(
     professional = _match_by_name(professionals, professional_name)
     if professional is None:
         return _unknown_professional_error(professional_name, professionals)
+
+    # Proven against THIS professional's own catalog, before anything is
+    # created: the resolved name is what the Pix deposit will price.
+    canonical_type, service_error = _canonical_appointment_type(
+        appointment_type,
+        "create_event_for_professional",
+        await _professional_services(tenant_id, professional),
+    )
+    if service_error is not None:
+        return service_error
 
     unit_id: UUID | None = None
     if unit_name.strip():
@@ -255,9 +292,10 @@ async def create_event_for_professional(
         event,
         fallback_start,
         fallback_end,
-        summary,
+        canonical_type,
         professional_id=professional.id,
         unit_id=unit_id,
+        source="agent_professional",
     )
     return _with_professional_context(
         {

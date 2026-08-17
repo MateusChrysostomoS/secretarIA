@@ -31,9 +31,11 @@ from secretaria.models.pix_deposit import PixDeposit, PixDepositStatus
 from secretaria.models.processed_asaas_event import ProcessedAsaasEvent
 from secretaria.services import tenant_config as cfg
 from secretaria.services.appointment_status import SOURCE_SYSTEM, log_status_transition
+from secretaria.services.booking_scope import canonical_service_name
 from secretaria.services.calendar import CalendarService
 from secretaria.services.payments.asaas import AsaasClient
 from secretaria.services.payments.money import format_brl, parse_brl_to_cents
+from secretaria.services.service_catalog import load_service_catalog, service_by_name
 from secretaria.services.tenant_config import load_tenant_config
 from secretaria.services.whatsapp import WhatsAppClient
 
@@ -57,6 +59,39 @@ def _as_utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
+# Structured reasons for a skipped deposit. Each one keeps its historical
+# event name (`pix_deposit_skipped_<reason>`) AND carries `reason` as a field,
+# so the existing alerts keep matching while the whole family stays groupable
+# by one key. `no_service` used to be lumped into `unparseable_price`: it is
+# the interesting one — the booking named a service the effective catalog does
+# not have, which is a configuration/ownership problem, not a pricing one.
+DEPOSIT_SKIP_DISABLED = "disabled"
+DEPOSIT_SKIP_NO_PATIENT = "no_patient"
+DEPOSIT_SKIP_NO_API_KEY = "no_api_key"
+DEPOSIT_SKIP_NO_SERVICE = "no_service"
+DEPOSIT_SKIP_UNPARSEABLE_PRICE = "unparseable_price"
+DEPOSIT_SKIP_ZERO_AMOUNT = "zero_amount"
+
+
+def _log_deposit_skip(tenant: Tenant, appointment: Appointment, reason: str) -> None:
+    """One sanitized line per skipped deposit: ids and an enum, nothing else.
+
+    Never the price, the service name, the patient or the phone — a skip is
+    diagnosed from tenant + appointment + owner + reason, and those are enough
+    to find the row in the hub.
+    """
+    logger.debug(
+        f"pix_deposit_skipped_{reason}",
+        reason=reason,
+        tenant_id=str(tenant.id),
+        appointment_id=str(appointment.id),
+        professional_id=(
+            str(appointment.professional_id) if appointment.professional_id else None
+        ),
+        has_owner=appointment.professional_id is not None,
+    )
+
+
 async def get_deposit_for_appointment(
     session: AsyncSession, appointment_id: UUID
 ) -> PixDeposit | None:
@@ -71,29 +106,61 @@ async def get_deposit_for_appointment(
 # --------------------------------------------------------------------------
 
 
-async def _price_text_for_appointment(
+async def _resolve_service_and_price(
     session: AsyncSession, tenant: Tenant, appointment: Appointment
-) -> str | None:
-    """Best-effort free-text price lookup, honoring a professional-level
-    catalog override. Mirrors the matching logic of the old
-    services/payments/pix.py stub's `_price_for_appointment` (match by exact
-    `appointment_type` name), but resolves through the OWNING professional's
-    own appointment_types when the appointment has one, falling back to the
-    tenant's — exactly like `services/tenant_config.professional_appointment_types`.
+) -> tuple[str | None, str | None]:
+    """(canonical service name, free-text price) for one appointment.
+
+    Resolves through the OWNING professional's own `appointment_types` when
+    the appointment has one, falling back to the tenant's — exactly like
+    `services/tenant_config.professional_appointment_types`. That fallback is
+    the reason `Appointment.professional_id` must be populated even for a
+    clinic with a single professional: without it this looked the price up in
+    the tenant's LEGACY catalog, which is empty on every clinic that
+    configures its services per professional (see services/booking_scope.py).
+
+    The name itself is matched through the shared rule
+    (`booking_scope.canonical_service_name`), so a stored type resolves here
+    exactly as the booking surface canonicalised it. A `None` name means "no
+    such active service"; a `None` price with a real name means the service
+    exists but carries no readable price — two different skip reasons.
     """
     if not appointment.appointment_type:
-        return None
-    catalog = cfg.active_appointment_types(tenant)
+        return None, None
+    # The clinic's canonical catalog: with it, a historical `appointment_type`
+    # stored under a different spelling still resolves to the right service
+    # (services/service_catalog.py normalizes for identity) — which is what
+    # "the price stops depending on an exactly-typed string" means. Empty for
+    # a tenant not backfilled yet -> the pre-catalog exact-name behaviour.
+    services = await load_service_catalog(session, tenant.id)
+    catalog = cfg.active_appointment_types(tenant, services)
     if appointment.professional_id is not None:
         professional = await session.get(Professional, appointment.professional_id)
         if professional is not None:
-            catalog = cfg.professional_appointment_types(professional, tenant)
+            catalog = cfg.professional_appointment_types(professional, tenant, services)
+    canonical = canonical_service_name(catalog, appointment.appointment_type)
+    if canonical is None:
+        # Historical rows keep whatever text was stored at booking time and are
+        # NEVER rewritten (contract: no data migration on `appointments`), so
+        # fall back to catalog identity — normalize the stored text, find the
+        # canonical service, and price under its own name.
+        service = service_by_name(services, appointment.appointment_type)
+        canonical = service.name if service is not None else None
+    if canonical is None:
+        return None, None
     for entry in catalog:
-        if entry.get("name") == appointment.appointment_type:
+        if entry.get("name") == canonical:
             price = entry.get("price")
-            if price:
-                return str(price)
-    return None
+            return canonical, (str(price) if price else None)
+    return canonical, None
+
+
+async def _price_text_for_appointment(
+    session: AsyncSession, tenant: Tenant, appointment: Appointment
+) -> str | None:
+    """Best-effort free-text price for one appointment (see `_resolve_service_and_price`)."""
+    _name, price = await _resolve_service_and_price(session, tenant, appointment)
+    return price
 
 
 def _deposit_request_text(
@@ -148,34 +215,34 @@ async def maybe_create_deposit(
     itself, which is already committed by the time this runs.
     """
     if not tenant.pix_deposit_enabled:
-        logger.debug("pix_deposit_skipped_disabled", tenant_id=str(tenant.id))
+        _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_DISABLED)
         return None
     if patient is None:
-        logger.debug("pix_deposit_skipped_no_patient", tenant_id=str(tenant.id))
+        _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_NO_PATIENT)
         return None
 
     api_key = await cfg.get_asaas_api_key(session, tenant.id)
     if not api_key:
-        logger.debug("pix_deposit_skipped_no_api_key", tenant_id=str(tenant.id))
+        _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_NO_API_KEY)
         return None
 
-    price_text = await _price_text_for_appointment(session, tenant, appointment)
+    service_name, price_text = await _resolve_service_and_price(session, tenant, appointment)
     price_cents = parse_brl_to_cents(price_text)
     if price_cents is None:
-        logger.debug(
-            "pix_deposit_skipped_unparseable_price",
-            tenant_id=str(tenant.id),
-            appointment_id=str(appointment.id),
+        # Either the stored `appointment_type` names no active service in the
+        # effective catalog, or that service carries no readable price. Both
+        # mean the amount is UNPROVEN, so no charge is created — the booking
+        # itself already happened and is untouched.
+        _log_deposit_skip(
+            tenant,
+            appointment,
+            DEPOSIT_SKIP_UNPARSEABLE_PRICE if service_name else DEPOSIT_SKIP_NO_SERVICE,
         )
         return None
 
     amount_cents = round(price_cents * tenant.pix_deposit_percent / 100)
     if amount_cents <= 0:
-        logger.debug(
-            "pix_deposit_skipped_zero_amount",
-            tenant_id=str(tenant.id),
-            appointment_id=str(appointment.id),
-        )
+        _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_ZERO_AMOUNT)
         return None
 
     client = _asaas_client_for(api_key)

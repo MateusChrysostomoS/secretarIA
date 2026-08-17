@@ -512,16 +512,19 @@ def test_greeting_buttons_upcoming_trio_wins() -> None:
         assert tasks._greeting_buttons_for(tenant, "Olá!", context) == trio
 
 
-def test_greeting_buttons_other_states_get_fixed_trio() -> None:
-    """NEW / RETURNING_NO_APPOINTMENT / JUST_HAD_CONSULT / no context: the
-    fixed [Agendar, Gerenciar consulta, Outro] trio — "Gerenciar consulta"
-    consolidates the old separate Remarcar/Cancelar slots into the shared
-    manage sub-flow, freeing the third slot for the explicit "Outro" LLM
-    escape (trio-gerenciar round). No tenant-editable menu on the greeting
-    itself (menu_buttons_for still drives mid-conversation re-presentation
-    elsewhere, untouched)."""
+def test_greeting_buttons_without_an_appointment_offer_only_what_works() -> None:
+    """NEW / RETURNING_NO_APPOINTMENT / JUST_HAD_CONSULT / no context: the fixed
+    [Agendar, Outro] pair.
+
+    "Gerenciar consulta" used to sit between them, and for exactly this cohort
+    it could only ever reach `_enter_manage`'s "Você não tem nenhuma consulta
+    agendada no momento." — a button whose one outcome the system already knew
+    was a dead end. The patient who DOES have something booked is served by
+    the Remarcar/Cancelar trio above, so nothing was lost by dropping it. No
+    tenant-editable menu on the greeting itself (menu_buttons_for still drives
+    mid-conversation re-presentation elsewhere, untouched)."""
     tenant = _greeting_tenant(initial_flows={"enabled": True})
-    fixed_trio = [LABEL_BOOK, LABEL_MANAGE_APPOINTMENT, LABEL_OTHER]
+    fixed_pair = [LABEL_BOOK, LABEL_OTHER]
     for context in (
         PatientOpeningContext(state=PatientOpeningState.NEW),
         PatientOpeningContext(state=PatientOpeningState.RETURNING_NO_APPOINTMENT, has_history=True),
@@ -531,7 +534,9 @@ def test_greeting_buttons_other_states_get_fixed_trio() -> None:
         ),
         None,
     ):
-        assert tasks._greeting_buttons_for(tenant, "Olá!", context) == fixed_trio
+        buttons = tasks._greeting_buttons_for(tenant, "Olá!", context)
+        assert buttons == fixed_pair
+        assert LABEL_MANAGE_APPOINTMENT not in buttons
 
 
 def test_greeting_buttons_upcoming_trio_wins_on_an_unconfigured_tenant() -> None:

@@ -31,6 +31,8 @@ from langchain_core.tools import tool
 from sqlalchemy import select
 
 from secretaria.ai.tools import (
+    _blocked_tenant_level,
+    _canonical_appointment_type,
     _get_calendar,
     _localize_window,
     _match_by_name,
@@ -100,6 +102,7 @@ async def create_event_at_unit(
     end: str,
     summary: str,
     description: str = "",
+    appointment_type: str = "",
 ) -> dict:
     """Cria uma consulta na agenda da clínica, associada a uma unidade
     específica. Use SOMENTE depois de check_availability E confirmação
@@ -109,9 +112,23 @@ async def create_event_at_unit(
         unit_name: Nome da unidade/local (ex: 'Unidade Centro').
         start: Início em ISO 8601 (ex: 2026-05-27T14:00:00).
         end: Fim em ISO 8601.
-        summary: Título do evento, ex: 'Consulta - João Silva'.
+        summary: Título do evento no Google Agenda, ex: 'Consulta - João
+            Silva'. É só o título da agenda — NÃO use este campo para dizer
+            qual é o serviço.
         description: Notas adicionais (opcional).
+        appointment_type: Nome EXATO do serviço da clínica que está sendo
+            agendado. Não invente e não use o nome do paciente. Se a clínica
+            tiver só um serviço, pode deixar em branco.
     """
+    # This books on the CLINIC's own calendar with no professional in the
+    # loop, so it is a tenant-level mutation exactly like the base
+    # `create_event` — and just as wrong for a multi-professional tenant.
+    # Entitlements only ADD tools, so a tenant holding multi_unit could reach
+    # the wrong agenda through here; the shared guard refuses before any
+    # Google call (ai/tools.py::_blocked_tenant_level).
+    blocked = _blocked_tenant_level("create_event_at_unit")
+    if blocked is not None:
+        return blocked
     tenant_id = _tenant_id_ctx.get()
     if tenant_id is None:
         return {"error": "Nenhuma unidade configurada para esta clínica."}
@@ -119,6 +136,12 @@ async def create_event_at_unit(
     unit, error = await _resolve_unit_or_error(tenant_id, unit_name)
     if error is not None:
         return error
+
+    canonical_type, service_error = _canonical_appointment_type(
+        appointment_type, "create_event_at_unit"
+    )
+    if service_error is not None:
+        return service_error
 
     cal = _get_calendar()
     fallback_start, fallback_end = _localize_window(start, end, cal)
@@ -128,7 +151,14 @@ async def create_event_at_unit(
         summary=summary,
         description=description,
     )
-    await _persist_appointment(event, fallback_start, fallback_end, summary, unit_id=unit.id)
+    await _persist_appointment(
+        event,
+        fallback_start,
+        fallback_end,
+        canonical_type,
+        unit_id=unit.id,
+        source="agent_unit",
+    )
     return {
         "id": event.get("id"),
         "status": event.get("status"),
