@@ -43,8 +43,9 @@ from secretaria.ai.graph import (
 from secretaria.ai.tools import manage_existing_appointment
 from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
-from secretaria.core.logging import get_logger
+from secretaria.core.logging import get_logger, wa_suffix
 from secretaria.models import (
+    AnalyticsEvent,
     Appointment,
     AppointmentStatus,
     ConsentEvent,
@@ -55,10 +56,12 @@ from secretaria.models import (
     MessageDirection,
     MessageSender,
     Patient,
+    PixDeposit,
     PixDepositStatus,
     ProcessedEvent,
     Professional,
     Tenant,
+    is_live_status,
 )
 from secretaria.plugins.base import InboundContext
 from secretaria.plugins.post_booking import enqueue_post_booking_hooks
@@ -71,6 +74,11 @@ from secretaria.schemas.webhook import (
     extract_greeting_button,
     extract_inbound_body,
     history_item_is_final,
+)
+from secretaria.services.appointment_status import (
+    SOURCE_BUTTON,
+    SOURCE_FLOW,
+    log_status_transition,
 )
 from secretaria.services.calendar import CalendarService
 from secretaria.services.email import send_calendar_alert, send_transactional_email_message
@@ -119,7 +127,7 @@ from secretaria.services.tenant_config import (
     resolve_professional_calendar,
     set_waba_token,
 )
-from secretaria.services.whatsapp import WhatsAppClient
+from secretaria.services.whatsapp import TenantWhatsAppCredentialMissing, WhatsAppClient
 
 logger = get_logger(__name__)
 
@@ -166,16 +174,40 @@ JUST_HAD_CONSULT_NEUTRAL_LINE = (
 # Presupposes attendance — used ONLY when the doctor explicitly set ATTENDED.
 JUST_HAD_CONSULT_ATTENDED_LINE = "Como foi sua consulta? Posso ajudar em algo?"
 
-# Slash commands the patient can type to reset the conversation. Matched
+# Slash commands the patient can type to go back to the main menu. Matched
 # case-insensitively against the trimmed message body.
+#
+# These are NON-DESTRUCTIVE (PROMPT_FIX_18). They used to route to a "dev
+# reset" that deleted the patient row, their conversation, every message and
+# their appointments — off a word a patient types by accident. That handler
+# still exists, but only behind `REMOVE_CONTEXT_COMMAND` below; `/menu` and
+# friends now do exactly what `ai/tools.py::show_main_menu` does: reset the
+# transient flow fields and re-render the menu, touching nothing else.
 _MENU_COMMANDS = frozenset({"/menu", "/reset", "/recomecar", "/recomeçar", "/inicio", "/início"})
 
 
 def is_menu_command(body: str | None) -> bool:
-    """True when the patient typed a `/menu`-style reset command."""
+    """True when the patient typed a `/menu`-style (non-destructive) command."""
     if not body:
         return False
     return body.strip().lower() in _MENU_COMMANDS
+
+
+# The DESTRUCTIVE reset. Deliberately long, literal and self-describing: it is
+# the one command nobody types by accident, so reaching it is unambiguously a
+# deliberate operator gesture.
+REMOVE_CONTEXT_COMMAND = "/dangerously-remove-context"
+
+
+def is_remove_context_command(body: str | None) -> bool:
+    """True ONLY for the exact `/dangerously-remove-context` string.
+
+    EXACT match on purpose (PROMPT_FIX_18): no aliases, no case folding, no
+    whitespace trimming, no prefix matching. The literal string IS the safety
+    mechanism — accepting variations is what made `/menu` dangerous in the
+    first place, and would hand the accident right back.
+    """
+    return body == REMOVE_CONTEXT_COMMAND
 
 
 # Strong, low-false-positive openers a patient uses to state their name. We do
@@ -276,7 +308,9 @@ async def _is_rate_limited(redis, phone_number_id: str | None, wa_id: str) -> bo
             await redis.setex(silence_key, settings.RATE_LIMIT_SILENCE_SECONDS, "1")
             return True
     except Exception as exc:
-        logger.warning("worker_rate_limit_check_failed", error=str(exc), wa_id=wa_id)
+        logger.warning(
+            "worker_rate_limit_check_failed", error=str(exc), wa_id_suffix=wa_suffix(wa_id)
+        )
         return False
     return False
 
@@ -302,6 +336,11 @@ class _ReplyContext:
     conversation_id: UUID | None
     patient_wa_id: str
     inbound_body: str
+    # The tenant this turn resolved to. Carried explicitly because the
+    # `service_unavailable` degrade below has NO conversation to look it up
+    # from, and every outbound send must still go out on this tenant's own
+    # WhatsApp number/token — never a global env fallback (PROMPT_FIX_21).
+    tenant_id: UUID | None = None
     # When set, this is the tenant's verbatim first-contact (or returning)
     # greeting: it is sent as a single message and the LLM is NOT invoked.
     greeting_override: str | None = None
@@ -330,6 +369,12 @@ class _ReplyContext:
     # a flows-ENABLED tenant's tap never sets this (it flows through the
     # normal text-routed path instead, which route() already handles).
     greeting_button_unavailable: str | None = None
+    # Set when this inbound is a `/menu`-style command (see `is_menu_command`):
+    # a NON-DESTRUCTIVE request to go back to the main menu. Handled by
+    # `_handle_show_main_menu` from `_send_bot_reply`, i.e. only AFTER the
+    # allowlist, tenant-active, handover, entitlement and plugin gates have
+    # all been cleared like any other turn (PROMPT_FIX_18).
+    menu_requested: bool = False
 
 
 async def process_webhook_event(ctx: dict, payload: dict) -> None:
@@ -401,7 +446,7 @@ async def _handle_patient_messages(value: WebhookValue, redis=None) -> None:
         # Silence is intentional - replying would reward the spammer and still
         # cost an outbound send.
         if await _is_rate_limited(redis, phone_number_id, msg.from_):
-            logger.info("worker_rate_limited", wa_id=msg.from_)
+            logger.info("worker_rate_limited", wa_id_suffix=wa_suffix(msg.from_))
             continue
 
         contact = contacts.get(msg.from_)
@@ -410,12 +455,19 @@ async def _handle_patient_messages(value: WebhookValue, redis=None) -> None:
         action_button = extract_action_button(msg)
         greeting_button = extract_greeting_button(msg)
 
-        if is_menu_command(body):
-            await _handle_menu_command(
+        # The ONE command that still bypasses the normal turn: the explicit,
+        # exact-match destructive reset (PROMPT_FIX_18). `/menu` and its
+        # aliases deliberately do NOT short-circuit here any more — they flow
+        # through `_persist_inbound_message` like every other message, so the
+        # allowlist / tenant-active / handover / entitlement gates all apply
+        # to them, and the menu itself is rendered by `_handle_show_main_menu`.
+        if is_remove_context_command(body):
+            await _handle_remove_context_command(
                 phone_number_id=phone_number_id,
                 wa_id=msg.from_,
                 patient_name=patient_name,
                 wam_id=msg.id,
+                redis=redis,
             )
             continue
 
@@ -477,18 +529,6 @@ async def _persist_inbound_message(
                     logger.error("worker_tenant_unresolved", phone_number_id=phone_number_id)
                     return None
 
-                # Bot not activated for this tenant (Calendar/types/hours not
-                # set up): send a single polite fallback and do NOT create a
-                # conversation, persist the message, or invoke the LLM.
-                if not tenant.is_active:
-                    logger.info("worker_bot_not_active", tenant_id=str(tenant.id))
-                    return _ReplyContext(
-                        conversation_id=None,
-                        patient_wa_id=wa_id,
-                        inbound_body="",
-                        service_unavailable=True,
-                    )
-
                 # Coexistence test-window allowlist (config.py::bot_allowlist_wa_ids):
                 # an empty allowlist means no restriction (production default,
                 # untouched below). When non-empty, silently drop anyone not on
@@ -496,16 +536,38 @@ async def _persist_inbound_message(
                 # Patient/Conversation/ConsentEvent. The ProcessedEvent row added
                 # above is intentionally kept: this event WAS seen, it is being
                 # discarded on purpose, not lost to a retry.
+                #
+                # Checked BEFORE the tenant-active gate below (PROMPT_FIX_21):
+                # the allowlist is the hard boundary of the Coexistence test
+                # window, so it must not be possible to get ANY outbound
+                # message - not even the "em configuração" fallback - by
+                # talking to a tenant that happens to be inactive.
                 allowlist = get_settings().bot_allowlist_wa_ids
                 if allowlist:
                     digits_wa_id = "".join(filter(str.isdigit, wa_id))
                     if digits_wa_id not in allowlist:
                         logger.info(
                             "worker_wa_id_not_allowlisted",
-                            wa_id_suffix=digits_wa_id[-4:],
+                            wa_id_suffix=wa_suffix(digits_wa_id),
                             tenant_id=str(tenant.id),
                         )
                         return None
+
+                # Bot not activated for this tenant (Calendar/types/hours not
+                # set up): send a single polite fallback and do NOT create a
+                # conversation, persist the message, or invoke the LLM. The
+                # tenant id rides along so the fallback still goes out on THIS
+                # tenant's own WhatsApp credentials (there is no conversation
+                # to resolve it from) - see `_handle_service_unavailable`.
+                if not tenant.is_active:
+                    logger.info("worker_bot_not_active", tenant_id=str(tenant.id))
+                    return _ReplyContext(
+                        conversation_id=None,
+                        tenant_id=tenant.id,
+                        patient_wa_id=wa_id,
+                        inbound_body="",
+                        service_unavailable=True,
+                    )
 
                 # A patient row that already existed means this person has
                 # contacted the clinic before (robust to /menu wiping history).
@@ -600,6 +662,42 @@ async def _persist_inbound_message(
                         conversation_id=str(conversation.id),
                     )
                     return None
+
+                # `/menu` (and /reset, /recomeçar, /inicio): a NON-DESTRUCTIVE
+                # request to go back to the main menu (PROMPT_FIX_18). Nothing
+                # is deleted: the patient row, their history, appointments,
+                # consent events, Pix deposits and Google Calendar events are
+                # all untouched. Only the transient flow fields move, and
+                # `_apply_flow_result` (reached via `_handle_show_main_menu`)
+                # does that write.
+                #
+                # Placed HERE deliberately:
+                #   * AFTER the handover check, so an active human is NOT
+                #     silently pre-empted - while a human owns the
+                #     conversation, `/menu` is recorded like any other message
+                #     and IGNORED by the bot (the return above already
+                #     happened). It is never a way to take the bot back.
+                #   * BEFORE the greeting / reactivation branches, so it is
+                #     idempotent: two deliveries of `/menu` produce the same
+                #     menu, never a greeting on one and a menu on the other.
+                # The pending reactivation gate, if any, is consumed here too -
+                # an explicit "take me to the menu" answers the "quer
+                # continuar?" question by superseding it.
+                if is_menu_command(body):
+                    conversation.reactivation_origin = None
+                    logger.info(
+                        "conversation_menu_requested",
+                        conversation_id=str(conversation.id),
+                        tenant_id=str(tenant.id),
+                        source="command",
+                    )
+                    return _ReplyContext(
+                        conversation_id=conversation.id,
+                        tenant_id=tenant.id,
+                        patient_wa_id=wa_id,
+                        inbound_body=body or "",
+                        menu_requested=True,
+                    )
 
                 # Greeting-button tap this tenant can't fulfil deterministically:
                 # flows are disabled for them, so route() would otherwise
@@ -1138,48 +1236,114 @@ def _reactivation_offer(
     )
 
 
-async def _handle_menu_command(
+# Sent before the fresh greeting when the reset had to leave bookings behind
+# (see `_handle_remove_context_command`). Only ever sent when the count is
+# non-zero, so a clean slate still looks exactly like a brand-new first contact.
+REMOVE_CONTEXT_PRESERVED_MESSAGE = (
+    "Contexto removido. {count} agendamento(s) foram PRESERVADOS: eles continuam "
+    "na agenda do Google, então não foram apagados aqui para os dois não "
+    "divergirem. Use o menu para remarcar ou cancelar."
+)
+
+
+async def _handle_remove_context_command(
     *,
     phone_number_id: str | None,
     wa_id: str,
     patient_name: str | None,
     wam_id: str,
+    redis=None,
 ) -> None:
-    """Dev reset: delete the patient who sent /menu, then greet them as new.
+    """`/dangerously-remove-context`: wipe this number's conversational trail.
 
-    DELETES the patient row for this number and everything tied to it - their
-    conversation, every message, and their appointment records - so the number
-    is treated as a brand-new first contact. A fresh, empty patient +
-    conversation is then created and the tenant's *first-contact* greeting
-    (`greeting_message`) is sent, NOT the returning greeting.
+    Deletes the patient row for this number, their conversation(s) and every
+    message, then recreates an empty patient + conversation and sends the
+    tenant's *first-contact* greeting (`greeting_message`), so the number is
+    treated as a brand-new first contact. This is the old `/menu` "dev reset",
+    unchanged in intent and renamed to a string nobody types by accident
+    (PROMPT_FIX_18) - `/menu` itself is now non-destructive.
 
-    This is a development-only convenience for retesting the new-patient flow
-    from a clean slate; it is not part of the shipped patient experience. It
-    removes the local appointment rows but does NOT delete the underlying Google
-    Calendar events. The `/menu` event itself is not persisted as conversation
-    content - it is a control command.
+    WHAT IT DELIBERATELY DOES **NOT** DELETE (the orphan fix):
+
+      * **Appointments.** `appointments.google_event_id` is NOT NULL, so every
+        appointment row mirrors a live Google Calendar event. Deleting the row
+        would leave the database saying "no consultation" while Google still
+        shows one and the doctor shows up for a slot the system forgot - the
+        two silently diverging, which is exactly the failure this must not
+        cause. So appointments are PRESERVED and DETACHED
+        (`patient_id`/`conversation_id` set to NULL, explicitly rather than via
+        FK cascade so Postgres and the SQLite test engine agree). `phone`,
+        `status`, `start_at`/`end_at` and `google_event_id` are untouched: the
+        booking stays a complete, actionable clinic record, and Google is never
+        called from a chat command. The count is reported back to the sender.
+      * **Pix deposits.** `pix_deposits.appointment_id` is ON DELETE CASCADE,
+        so deleting an appointment would take a PAID deposit's record with it,
+        leaving money with no owner. Because the appointment survives, so does
+        the deposit; only its `patient_id` pointer is cleared. Refund/retention
+        stays governed by the deposit lifecycle, never by this command.
+      * **Consent events.** The LGPD ledger is append-only here.
+
+    True erasure remains the job of the authorized privacy process
+    (`api/internal_privacy.py::erase_subject`), never a chat command.
+
+    GATES: rate limit (in `_handle_patient_messages`), tenant resolution,
+    allowlist and - for the outbound only - entitlement, i.e. the same policy
+    as any other turn. `tenant.is_active` is deliberately NOT required: it is a
+    product-readiness flag ("has this clinic finished setup"), not a security
+    boundary, and this command exists precisely to reset test context on a
+    tenant that is still being set up. Everything it can reach is scoped to the
+    resolved tenant, and to the sender's own data within it.
+
+    Every invocation writes a durable, sanitized audit row (`analytics_events`,
+    `event_type="context_removed"`): tenant, conversation, per-type counts and
+    a timestamp - never the phone number and never any deleted content.
     """
     async with async_session_factory() as session:
         try:
             async with session.begin():
                 if await _event_already_processed(session, wam_id):
-                    logger.info("worker_menu_duplicate", wam_id=wam_id)
+                    logger.info("worker_remove_context_duplicate", wam_id=wam_id)
                     return
                 session.add(ProcessedEvent(event_id=wam_id))
 
                 tenant = await _resolve_tenant(session, phone_number_id)
                 if tenant is None:
                     logger.error(
-                        "worker_menu_tenant_unresolved",
+                        "worker_remove_context_tenant_unresolved",
                         phone_number_id=phone_number_id,
                     )
                     return
 
-                # Wipe the existing patient and all data hanging off them. Done
-                # as explicit ordered deletes (not relying on DB cascade) so it
-                # behaves identically on Postgres and the SQLite test engine.
-                # We select only the id, so no stale ORM object lingers in the
-                # identity map after the row is deleted.
+                # Same allowlist boundary as a normal turn
+                # (`_persist_inbound_message`): during the restricted
+                # Coexistence window an off-allowlist number must not be able
+                # to make the platform do ANYTHING - including recreating a
+                # Patient/Conversation and sending it a greeting. The
+                # ProcessedEvent claimed above is kept on purpose: the event
+                # WAS seen, and is being discarded deliberately.
+                allowlist = get_settings().bot_allowlist_wa_ids
+                if allowlist:
+                    digits_wa_id = "".join(filter(str.isdigit, wa_id))
+                    if digits_wa_id not in allowlist:
+                        logger.info(
+                            "worker_wa_id_not_allowlisted",
+                            wa_id_suffix=wa_suffix(digits_wa_id),
+                            tenant_id=str(tenant.id),
+                        )
+                        return
+
+                # Wipe the conversational trail. Explicit ordered statements
+                # (not DB cascade) so this behaves identically on Postgres and
+                # the SQLite test engine. We select only the id, so no stale
+                # ORM object lingers in the identity map after the delete.
+                counts = {
+                    "patients": 0,
+                    "conversations": 0,
+                    "messages": 0,
+                    "appointments_preserved": 0,
+                    "deposits_preserved": 0,
+                }
+                removed_conversation_id = None
                 existing_id = await session.scalar(
                     select(Patient.id).where(
                         Patient.tenant_id == tenant.id,
@@ -1192,22 +1356,54 @@ async def _handle_menu_command(
                             select(Conversation.id).where(Conversation.patient_id == existing_id)
                         )
                     ).all()
-                    # Appointments first (FK -> patients/conversations). The
-                    # schema would SET NULL and keep them; for a dev reset we
-                    # remove the rows so the number leaves zero local trace.
-                    await session.execute(
-                        delete(Appointment).where(Appointment.patient_id == existing_id)
+                    # The conversation being DESTROYED - the id every earlier
+                    # log line for this thread carries, so the audit trail
+                    # joins up. The replacement's id is recorded separately.
+                    removed_conversation_id = conv_ids[0] if conv_ids else None
+
+                    # Bookings + money: DETACH, never delete (see docstring).
+                    deposits = await session.execute(
+                        update(PixDeposit)
+                        .where(
+                            PixDeposit.tenant_id == tenant.id,
+                            PixDeposit.patient_id == existing_id,
+                        )
+                        .values(patient_id=None)
                     )
+                    counts["deposits_preserved"] = deposits.rowcount or 0
+                    appointments = await session.execute(
+                        update(Appointment)
+                        .where(
+                            Appointment.tenant_id == tenant.id,
+                            Appointment.patient_id == existing_id,
+                        )
+                        .values(patient_id=None, conversation_id=None)
+                    )
+                    counts["appointments_preserved"] = appointments.rowcount or 0
                     if conv_ids:
+                        # Bookings made from a conversation this patient no
+                        # longer owns (already detached by an earlier run):
+                        # clear the dangling conversation pointer too, so the
+                        # DELETE below can never orphan a live booking.
                         await session.execute(
+                            update(Appointment)
+                            .where(
+                                Appointment.tenant_id == tenant.id,
+                                Appointment.conversation_id.in_(conv_ids),
+                            )
+                            .values(conversation_id=None)
+                        )
+                        messages = await session.execute(
                             delete(Message).where(Message.conversation_id.in_(conv_ids))
                         )
-                        await session.execute(
+                        counts["messages"] = messages.rowcount or 0
+                        conversations = await session.execute(
                             delete(Conversation).where(Conversation.id.in_(conv_ids))
                         )
+                        counts["conversations"] = conversations.rowcount or 0
                     await session.execute(delete(Patient).where(Patient.id == existing_id))
+                    counts["patients"] = 1
                     await session.flush()
-                    logger.info("worker_menu_patient_deleted", wa_id=wa_id)
 
                 # Recreate a clean patient + conversation. A fresh conversation
                 # already defaults to BOT_ACTIVE + flow IDLE, so there is no
@@ -1215,19 +1411,73 @@ async def _handle_menu_command(
                 patient = await _get_or_create_patient(session, tenant, wa_id, patient_name)
                 conversation = await _get_or_create_conversation(session, tenant, patient)
                 conversation_id = conversation.id
+                preserved = counts["appointments_preserved"]
+
+                # Durable, sanitized audit record - this is what makes keeping a
+                # destructive chat command defensible. Internal ids and counts
+                # only: no wa_id, no phone, no deleted content. `created_at` is
+                # the table's server-side timestamp. `analytics_events` is
+                # queried strictly by `event_type` (api/hub/analytics.py reads
+                # only "appointment_booked"), so this row is invisible to the
+                # doctor hub, and the LGPD export never touches this table.
+                audit_payload = {
+                    "conversation_id": (
+                        str(removed_conversation_id) if removed_conversation_id else None
+                    ),
+                    "replacement_conversation_id": str(conversation_id),
+                    **counts,
+                }
+                session.add(
+                    AnalyticsEvent(
+                        tenant_id=tenant.id,
+                        event_type="context_removed",
+                        payload=audit_payload,
+                    )
+                )
+
                 # Send the first-contact greeting (the "initial" one), NOT the
                 # returning greeting - the whole point of deleting the patient.
                 greeting = (tenant.greeting_message or "").strip()
                 greeting_buttons = _greeting_buttons_for(tenant, greeting or None)
                 waba_token = await get_waba_token(session, tenant.id)
         except IntegrityError:
-            logger.info("worker_menu_duplicate_race", wam_id=wam_id)
+            logger.info("worker_remove_context_duplicate_race", wam_id=wam_id)
             return
+
+    logger.warning("conversation_context_removed", tenant_id=str(tenant.id), **audit_payload)
+
+    # Same entitlement policy as every other outbound: the wipe itself is the
+    # operator acting on their own tenant's data (already committed and
+    # audited above), but an unentitled tenant sends NOTHING - a send costs
+    # money and the gate is server-side, never negotiable per surface.
+    summary = await get_entitlements(tenant.id, redis)
+    if summary is None or not (summary.active and summary.secretaria_enabled):
+        logger.warning(
+            "bot_reply_suppressed_unentitled",
+            tenant_id=str(tenant.id),
+            status=summary.status if summary is not None else None,
+        )
+        return
+
+    client = _tenant_client(tenant, waba_token)
+    if client is None:
+        # Fail closed: the local wipe already committed (and is audited), but
+        # nothing goes out on someone else's WhatsApp number.
+        return
+
+    if preserved:
+        # Say what was left behind, so the operator never mistakes a partial
+        # reset for a clean slate and gets surprised by a live Google event.
+        await _send_simple_text(
+            wa_id,
+            REMOVE_CONTEXT_PRESERVED_MESSAGE.format(count=preserved),
+            client=client,
+        )
 
     if not greeting:
         # No first-contact greeting configured: the slate is clean and the next
         # patient message will get the LLM's improvised opener. Nothing to send.
-        logger.info("worker_menu_reset_no_greeting", conversation_id=str(conversation_id))
+        logger.info("worker_remove_context_no_greeting", conversation_id=str(conversation_id))
         return
 
     # Send the first-contact greeting verbatim (one message, with the configured
@@ -1235,6 +1485,7 @@ async def _handle_menu_command(
     await _send_greeting(
         _ReplyContext(
             conversation_id=conversation_id,
+            tenant_id=tenant.id,
             patient_wa_id=wa_id,
             inbound_body="",
             greeting_override=greeting,
@@ -1243,7 +1494,6 @@ async def _handle_menu_command(
         tenant=tenant,
         waba_token=waba_token,
     )
-    logger.info("worker_menu_reset", conversation_id=str(conversation_id))
 
 
 async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
@@ -1264,9 +1514,11 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
         await _handle_greeting_button_unavailable(reply, reply.greeting_button_unavailable)
         return
 
-    # Tenant bot not activated: one polite fallback, nothing else.
+    # Tenant bot not activated: one polite fallback, nothing else - sent on
+    # that tenant's OWN credentials and behind the same entitlement gate as
+    # every other outbound (PROMPT_FIX_21).
     if reply.service_unavailable:
-        await _send_simple_text(reply.patient_wa_id, SERVICE_UNAVAILABLE_MESSAGE)
+        await _handle_service_unavailable(reply, redis=redis)
         return
 
     # Load per-tenant config + flow context (one short read). We snapshot the
@@ -1502,6 +1754,27 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
         )
         if handled:
             return
+
+    # `/menu` & aliases: the non-destructive menu return (PROMPT_FIX_18).
+    # Reached only here, so it has already cleared the exact same gates as any
+    # other turn - allowlist and handover (in `_persist_inbound_message`),
+    # entitlement, and the addon inbound hooks just above. It reuses
+    # `_handle_show_main_menu`, the very seam the agent's `show_main_menu` tool
+    # goes through, so both surfaces produce the identical effective menu and
+    # the identical flow-state write. Placed BEFORE the reactivation/flow
+    # blocks so the command is never re-interpreted as input to whatever step
+    # the patient was on.
+    if reply.menu_requested:
+        await _handle_show_main_menu(
+            reply,
+            tenant,
+            flow_professionals,
+            patient_wa,
+            redis=redis,
+            waba_token=waba_token,
+            source="command",
+        )
+        return
 
     # Returning-patient resume/reset: act on the "quer continuar?" answer. The
     # offer itself went out via the greeting path; this handles the tap.
@@ -1984,7 +2257,16 @@ async def _execute_appointment_cancel(
                     appointment_id=str(appointment.id),
                 )
 
+    previous_status = appointment.status
     appointment.status = AppointmentStatus.CANCELLED
+    log_status_transition(
+        appointment_id=appointment.id,
+        tenant_id=tenant.id,
+        old_status=previous_status,
+        new_status=AppointmentStatus.CANCELLED,
+        source=SOURCE_BUTTON,
+        idempotency_key=f"apptcancel:{appointment.id}",
+    )
     text = "Consulta cancelada."
     try:
         outcome = await deposit_lifecycle.on_appointment_cancelled(
@@ -2103,9 +2385,13 @@ async def _apply_deposit_awareness(
             result.bubbles[0].body = f"{warning}\n\n{result.bubbles[0].body}"
         return result
 
-    client = (
-        WhatsAppClient.for_tenant(tenant, waba_token) if tenant is not None else WhatsAppClient()
-    )
+    client = _tenant_client(tenant, waba_token)
+    if client is None:
+        # Fail closed (PROMPT_FIX_21): without this tenant's own credentials
+        # the keep-or-cancel card cannot be sent, so leave the flow result
+        # untouched rather than resetting to MENU with nothing delivered.
+        logger.error("worker_reschedule_limit_no_credential", appointment_id=str(appointment_id))
+        return result
     await _send_reschedule_limit_buttons(
         client, patient_wa, appointment_id, limit_count, limit_value
     )
@@ -2152,7 +2438,13 @@ async def _handle_action_button(
         if tenant is None:
             return
         waba_token = await get_waba_token(session, tenant.id)
-        client = WhatsAppClient.for_tenant(tenant, waba_token)
+        # Fail closed (PROMPT_FIX_21): the tap is already deduped by its
+        # ProcessedEvent, so raising here would just retry a configuration
+        # problem forever. The patient simply gets no answer to the tap.
+        client = _tenant_client(tenant, waba_token)
+        if client is None:
+            logger.error("worker_action_button_no_credential", tenant_id=str(tenant.id))
+            return
 
         appointment = await session.scalar(
             select(Appointment).where(
@@ -2166,11 +2458,20 @@ async def _handle_action_button(
         if action == "apptconfirm":
             now = datetime.now(UTC)
             is_future = appointment.start_at is not None and _as_utc(appointment.start_at) > now
-            if (
-                appointment.status in (AppointmentStatus.SCHEDULED, AppointmentStatus.CONFIRMED)
-                and is_future
-            ):
+            # LIVE, not a hand-written pair (PROMPT_FIX_16): a booking the
+            # patient already rescheduled is still theirs to confirm - it used
+            # to answer "essa consulta não está mais ativa" instead.
+            if is_live_status(appointment.status) and is_future:
+                previous_status = appointment.status
                 appointment.status = AppointmentStatus.CONFIRMED
+                log_status_transition(
+                    appointment_id=appointment.id,
+                    tenant_id=tenant.id,
+                    old_status=previous_status,
+                    new_status=AppointmentStatus.CONFIRMED,
+                    source=SOURCE_BUTTON,
+                    idempotency_key=f"apptconfirm:{appointment.id}",
+                )
                 when = _format_appointment_when(appointment.start_at, tenant.timezone)
                 text = f"Presença confirmada! Até {when}."
             else:
@@ -2312,7 +2613,9 @@ async def _handle_greeting_button_unavailable(reply: _ReplyContext, suffix: str)
         if tenant is None:
             return
         waba_token = await get_waba_token(session, tenant.id)
-        client = WhatsAppClient.for_tenant(tenant, waba_token)
+        client = _tenant_client(tenant, waba_token)
+    if client is None:
+        return  # fail closed - never on the global scaffold (PROMPT_FIX_21)
     text = _GREETING_ACTION_UNAVAILABLE_TEXT.get(suffix, _GREETING_ACTION_UNAVAILABLE_DEFAULT)
     await _send_simple_text(reply.patient_wa_id, text, client=client)
 
@@ -2431,6 +2734,18 @@ async def _apply_flow_result(
                     # indexed but not globally unique). Best-effort: the calendar
                     # is the source of truth, so a stale row never blocks the reply.
                     if result.appointment_cancel_id:
+                        # Read BEFORE the write so the transition log can name
+                        # the status we came from; the row is then reused by
+                        # the money hook below instead of re-selected.
+                        cancelled_appt = await session.scalar(
+                            select(Appointment).where(
+                                Appointment.google_event_id == result.appointment_cancel_id,
+                                Appointment.tenant_id == conv.tenant_id,
+                            )
+                        )
+                        previous_status = (
+                            cancelled_appt.status if cancelled_appt is not None else None
+                        )
                         await session.execute(
                             update(Appointment)
                             .where(
@@ -2439,17 +2754,19 @@ async def _apply_flow_result(
                             )
                             .values(status=AppointmentStatus.CANCELLED)
                         )
+                        if cancelled_appt is not None:
+                            log_status_transition(
+                                appointment_id=cancelled_appt.id,
+                                tenant_id=conv.tenant_id,
+                                old_status=previous_status,
+                                new_status=AppointmentStatus.CANCELLED,
+                                source=SOURCE_FLOW,
+                                idempotency_key=f"cancel:{result.appointment_cancel_id}",
+                            )
                         # Money hook: resolve the deposit's outcome for this
                         # cancellation and carry the honest notice through to
                         # the reply dispatched below (PROMPT S3 section 4).
                         if tenant is not None:
-                            cancelled_appt = await session.scalar(
-                                select(Appointment).where(
-                                    Appointment.google_event_id
-                                    == result.appointment_cancel_id,
-                                    Appointment.tenant_id == conv.tenant_id,
-                                )
-                            )
                             if cancelled_appt is not None:
                                 outcome = await deposit_lifecycle.on_appointment_cancelled(
                                     session,
@@ -2469,6 +2786,23 @@ async def _apply_flow_result(
                                         )
                     if result.appointment_reschedule:
                         resched = result.appointment_reschedule
+                        # Read BEFORE the write (same reason as the cancel
+                        # branch above) and reuse the row for the money hook.
+                        resched_appt = await session.scalar(
+                            select(Appointment).where(
+                                Appointment.google_event_id == resched["google_event_id"],
+                                Appointment.tenant_id == conv.tenant_id,
+                            )
+                        )
+                        previous_status = (
+                            resched_appt.status if resched_appt is not None else None
+                        )
+                        # The SAME row moves to the new window and stays LIVE -
+                        # RESCHEDULED is not a tombstone (PROMPT_FIX_16, see the
+                        # taxonomy on models/appointment.py). Its id,
+                        # google_event_id and PixDeposit all carry over, which
+                        # is exactly why every reader must keep counting it as
+                        # upcoming and remindable.
                         await session.execute(
                             update(Appointment)
                             .where(
@@ -2481,19 +2815,27 @@ async def _apply_flow_result(
                                 status=AppointmentStatus.RESCHEDULED,
                             )
                         )
+                        if resched_appt is not None:
+                            log_status_transition(
+                                appointment_id=resched_appt.id,
+                                tenant_id=conv.tenant_id,
+                                old_status=previous_status,
+                                new_status=AppointmentStatus.RESCHEDULED,
+                                source=SOURCE_FLOW,
+                                # The moved window makes a REPLAY of this exact
+                                # reschedule recognisable; re-running it is a
+                                # no-op write, never a second move.
+                                idempotency_key=(
+                                    f"resched:{resched['google_event_id']}"
+                                    f":{resched['start_at'].isoformat()}"
+                                ),
+                            )
                         # Money hook: count this reschedule against the
                         # deposit's limit. Non-crashing on a race (entry was
                         # already pre-checked by _apply_deposit_awareness /
                         # the button carrier's own check) — never unwind an
                         # already-persisted reschedule over a counter race.
                         if tenant is not None:
-                            resched_appt = await session.scalar(
-                                select(Appointment).where(
-                                    Appointment.google_event_id
-                                    == resched["google_event_id"],
-                                    Appointment.tenant_id == conv.tenant_id,
-                                )
-                            )
                             if resched_appt is not None:
                                 allowed, _count = await deposit_lifecycle.register_reschedule(
                                     session, tenant=tenant, appointment=resched_appt
@@ -2559,13 +2901,19 @@ async def _dispatch_bubbles(
 
     MVP: no retry. A transient send failure stops the turn; bubbles already sent
     are recorded so the LLM history stays consistent on the next inbound.
-    `tenant`/`waba_token` select the per-tenant WhatsApp client (see
-    WhatsAppClient.for_tenant); `tenant=None` falls back to the single-tenant
-    env scaffold, same as before this parameter existed.
+    `tenant`/`waba_token` select the per-tenant WhatsApp client. FAIL-CLOSED
+    (PROMPT_FIX_21): a missing tenant or missing credentials sends NOTHING and
+    returns 0 - it never falls back to the global env scaffold, which would
+    answer this clinic's patient from another clinic's number.
     """
-    client = (
-        WhatsAppClient.for_tenant(tenant, waba_token) if tenant is not None else WhatsAppClient()
-    )
+    client = _tenant_client(tenant, waba_token)
+    if client is None:
+        logger.error(
+            "worker_bot_reply_no_credential",
+            conversation_id=str(reply.conversation_id),
+            bubbles=len(bubbles),
+        )
+        return 0
     sent_count = 0
     for index, bubble in enumerate(bubbles):
         try:
@@ -2651,7 +2999,17 @@ async def _send_greeting(
     text. The whole greeting is one WhatsApp message either way.
     """
     body = reply.greeting_override or ""
-    client = WhatsAppClient.for_tenant(tenant, waba_token)
+    # Fail closed (PROMPT_FIX_21) rather than letting the credential error
+    # escape into the arq job, which would retry the whole turn forever on
+    # what is a configuration problem, not a transient one.
+    client = _tenant_client(tenant, waba_token)
+    if client is None:
+        logger.error(
+            "worker_greeting_no_credential",
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(tenant.id),
+        )
+        return
     try:
         if reply.greeting_buttons:
             # The label still drives route()'s dispatch (as with every other
@@ -2707,17 +3065,82 @@ async def _send_greeting(
     logger.info("worker_greeting_sent", conversation_id=str(reply.conversation_id))
 
 
-async def _send_simple_text(to: str, body: str, client: WhatsAppClient | None = None) -> None:
+async def _handle_service_unavailable(reply: _ReplyContext, redis=None) -> None:
+    """The "bot not activated yet" degrade, on the RIGHT sender (PROMPT_FIX_21).
+
+    This path has no conversation (none is created for an inactive tenant), so
+    it used to build a bare `WhatsAppClient()` and answer from the global env
+    scaffold - i.e. potentially from another clinic's WhatsApp number, and
+    without the entitlement gate every other outbound passes. It now resolves
+    the tenant carried on the `_ReplyContext`, applies the same fail-closed
+    entitlement check as `_send_bot_reply`, and sends on that tenant's own
+    credentials or not at all.
+
+    The allowlist was already applied upstream, before this context was ever
+    built (see `_persist_inbound_message`).
+    """
+    if reply.tenant_id is None:
+        logger.error("whatsapp_credential_missing", tenant_id=None, missing="tenant")
+        return
+
+    async with async_session_factory() as session:
+        tenant = await session.get(Tenant, reply.tenant_id)
+        if tenant is None:
+            logger.error("whatsapp_credential_missing", tenant_id=None, missing="tenant")
+            return
+        waba_token = await get_waba_token(session, tenant.id)
+
+    summary = await get_entitlements(tenant.id, redis)
+    if summary is None or not (summary.active and summary.secretaria_enabled):
+        # Fails closed exactly like the main reply path: an unentitled tenant
+        # gets no outbound at all, not even this fallback.
+        logger.warning(
+            "bot_reply_suppressed_unentitled",
+            tenant_id=str(tenant.id),
+            status=summary.status if summary is not None else None,
+        )
+        return
+
+    client = _tenant_client(tenant, waba_token)
+    if client is None:
+        return
+    await _send_simple_text(reply.patient_wa_id, SERVICE_UNAVAILABLE_MESSAGE, client=client)
+
+
+def _tenant_client(tenant: Tenant | None, waba_token: str | None) -> WhatsAppClient | None:
+    """This tenant's WhatsApp client, or None when it cannot be built.
+
+    The single fail-closed seam for every worker send (PROMPT_FIX_21). There is
+    NO fallback to the global `META_*` env scaffold: without this tenant's own
+    `phone_number_id` + decrypted token the message would go out from another
+    clinic's WhatsApp number, so it does not go out at all. `for_tenant` emits
+    `whatsapp_credential_missing` before raising, so the outcome is always
+    visible in the logs; callers just degrade quietly.
+    """
+    if tenant is None:
+        logger.error("whatsapp_credential_missing", tenant_id=None, missing="tenant")
+        return None
+    try:
+        return WhatsAppClient.for_tenant(tenant, waba_token)
+    except TenantWhatsAppCredentialMissing:
+        return None
+
+
+async def _send_simple_text(to: str, body: str, *, client: WhatsAppClient) -> None:
     """Send a single plain-text message, swallowing send errors (MVP: no retry).
 
-    `client=None` falls back to the single-tenant env scaffold (unchanged
-    default); pass a `WhatsAppClient.for_tenant(...)` instance to send on a
-    specific tenant's own WhatsApp number/token.
+    `client` is REQUIRED and must be tenant-scoped (`_tenant_client` /
+    `WhatsAppClient.for_tenant`): there is no implicit global-scaffold default
+    any more, so no caller can accidentally send from the wrong WABA.
     """
     try:
-        await (client or WhatsAppClient()).send_text_message(to=to, body=body)
+        await client.send_text_message(to=to, body=body)
     except Exception as exc:
-        logger.error("worker_simple_text_send_failed", error=str(exc), to=to)
+        logger.error(
+            "worker_simple_text_send_failed",
+            error_type=type(exc).__name__,
+            to_suffix=wa_suffix(to),
+        )
 
 
 async def _set_conversation_human_active(conversation_id: UUID | None) -> None:
@@ -2775,8 +3198,12 @@ async def _handle_calendar_unavailable(
                 conversation_id=str(reply.conversation_id),
             )
 
-    client = WhatsAppClient.for_tenant(tenant, waba_token) if tenant is not None else None
-    await _send_simple_text(reply.patient_wa_id, CALENDAR_UNAVAILABLE_MESSAGE, client=client)
+    # Fail closed (PROMPT_FIX_21): the handover above already happened, so a
+    # human still sees the conversation even when the patient-facing notice
+    # can't be sent on this tenant's own credentials.
+    client = _tenant_client(tenant, waba_token)
+    if client is not None:
+        await _send_simple_text(reply.patient_wa_id, CALENDAR_UNAVAILABLE_MESSAGE, client=client)
 
     # Alert the clinic owner by email (at most once every CALENDAR_ALERT_SILENCE_SECONDS).
     if alert_tenant is not None and alert_tenant.contact_email:
@@ -2803,18 +3230,31 @@ async def _handle_show_main_menu(
     patient_wa: str | None,
     redis=None,
     waba_token: str | None = None,
+    source: str = "agent_tool",
 ) -> None:
-    """Non-destructive menu return (the agent's show_main_menu tool).
+    """Non-destructive menu return. The ONE way back to the menu.
 
-    Unlike the dev-only /menu command, NOTHING is deleted: `_apply_flow_result`
-    resets the flow fields to MENU (its unconditional writes also clear
-    flow_selected_professional_id / flow_selected_insurance) and the effective
-    menu bubbles go out. History and the patient row stay untouched.
+    Shared by the agent's `show_main_menu` tool (`source="agent_tool"`), the
+    `/menu` family of commands (`source="command"`, PROMPT_FIX_18) and the
+    malformed-sentinel fallbacks (`source="sentinel_fallback"`), so every
+    surface produces the same effective menu and the same state write.
+
+    NOTHING is deleted: `_apply_flow_result` resets the flow fields to MENU
+    (its unconditional writes also clear flow_selected_professional_id /
+    flow_selected_insurance) and the effective menu bubbles go out. History,
+    the patient row, appointments, deposits and Google Calendar events all stay
+    untouched - contrast `_handle_remove_context_command`, which is the only
+    destructive path and is reachable only by its own exact literal command.
+
+    Idempotent by construction: it consumes no input and derives the menu from
+    the tenant + roster, so running it twice sends the same menu twice and
+    leaves the same state.
     """
     if tenant is None:
         logger.warning(
             "worker_show_main_menu_without_tenant",
             conversation_id=str(reply.conversation_id),
+            source=source,
         )
         return
     result = FlowRouterResult(
@@ -2827,8 +3267,19 @@ async def _handle_show_main_menu(
         ],
         flow_state=FlowState.MENU,
     )
-    await _apply_flow_result(
+    rendered = await _apply_flow_result(
         reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+    )
+    logger.info(
+        "conversation_menu_rendered",
+        conversation_id=str(reply.conversation_id),
+        tenant_id=str(tenant.id),
+        source=source,
+        # The bot was active for this turn by construction (handover is checked
+        # in `_persist_inbound_message`); recorded so the pairing with
+        # `conversation_menu_requested` stays unambiguous in the logs.
+        handover="bot_active",
+        rendered=rendered,
     )
 
 
@@ -2866,7 +3317,13 @@ async def _handle_select_professional(
             conversation_id=str(reply.conversation_id),
         )
         await _handle_show_main_menu(
-            reply, tenant, professionals, patient_wa, redis=redis, waba_token=waba_token
+            reply,
+            tenant,
+            professionals,
+            patient_wa,
+            redis=redis,
+            waba_token=waba_token,
+            source="sentinel_fallback",
         )
         return
     result = _enter_professional_services(professional, tenant_snapshot)
@@ -2905,7 +3362,13 @@ async def _handle_manage_appointment(
     if action not in ("reschedule", "cancel"):
         logger.warning("worker_manage_appointment_bad_action", action=action[:32])
         await _handle_show_main_menu(
-            reply, tenant, professionals, patient_wa, redis=redis, waba_token=waba_token
+            reply,
+            tenant,
+            professionals,
+            patient_wa,
+            redis=redis,
+            waba_token=waba_token,
+            source="sentinel_fallback",
         )
         return
     if tenant is None or not flows_enabled(tenant):
@@ -3061,7 +3524,7 @@ async def transcribe_audio_message(
     # audio messages entirely (see the guard added there), so this is the
     # only place an audio message's inbound rate limit is counted/checked.
     if await _is_rate_limited(ctx.get("redis"), phone_number_id, wa_id):
-        logger.info("worker_audio_rate_limited", wa_id=wa_id)
+        logger.info("worker_audio_rate_limited", wa_id_suffix=wa_suffix(wa_id))
         return
 
     async with async_session_factory() as session:
@@ -3079,7 +3542,6 @@ async def transcribe_audio_message(
             # (expire_on_commit=False makes this safe for already-loaded
             # attributes too, but explicit snapshots keep intent obvious).
             tenant_is_active = tenant.is_active
-            tenant_phone_number_id = tenant.phone_number_id
             # Decrypt inside the session (single seam); only the in-memory
             # value travels from here on - never logged, never returned.
             waba_token = await get_waba_token(session, tenant.id)
@@ -3098,21 +3560,20 @@ async def transcribe_audio_message(
             await _send_bot_reply(reply, redis=ctx.get("redis"))
         return
 
-    token = waba_token or get_settings().META_ACCESS_TOKEN
-    if not token:
+    # Fail closed (PROMPT_FIX_21): the tenant's OWN decrypted token, never the
+    # global META_ACCESS_TOKEN. It authenticates BOTH the Graph media download
+    # and the clarification reply, so a missing credential must stop the job
+    # before either - which also means zero STT spend on an unusable turn.
+    reply_client = _tenant_client(tenant, waba_token)
+    if reply_client is None:
         logger.error("worker_audio_no_token", tenant_id=str(tenant.id), wam_id=message_id)
         return
+    token = waba_token
 
     # A ValueError here means TranscriptionConfig rejected the configured STT
     # model/provider combo - a misconfiguration, not a per-message failure.
     # Deliberately left to propagate loudly into the arq error logs.
     config = _transcription_config()
-
-    # Built once, reused by whichever clarification path (if any) fires below.
-    reply_client = WhatsAppClient(
-        phone_number_id=phone_number_id or tenant_phone_number_id,
-        access_token=token,
-    )
 
     client = ctx.get("http_client")
     owns_client = client is None
