@@ -19,17 +19,41 @@ def register(spec: PluginSpec) -> None:
     REGISTRY[spec.id] = spec
 
 
+def _spec_enabled(summary: EntitlementSummary, spec: PluginSpec) -> bool:
+    """Whether `spec`'s hooks/tools run for this tenant.
+
+    Two cases:
+
+    - `entitlement_keys` non-empty -> ANY-OF over `is_entitled`, unchanged.
+    - `entitlement_keys` EMPTY -> a CORE capability: no addon, no tier, sold to
+      nobody because everybody has it. Enabled whenever the subscription is
+      active.
+
+    The empty case used to fall out of `any(())` being False, which silently
+    disabled the plugin — the exact opposite of what an author writing
+    `entitlement_keys=()` means, and a trap for every future core plugin.
+    `plugins/professional_notification.py` is the first to actually register a
+    HOOK this way; `plugins/reminders.py` declares `()` too but is dispatched
+    by its own cron and registers no hooks or tools, so it never hit this and
+    its behaviour is unchanged either way.
+
+    `summary.active` is still respected: `is_entitled` denies everything to an
+    inactive tenant, and being core is not a reason to break that one rule —
+    a lapsed clinic should not keep sending mail on the platform's behalf.
+    """
+    if not spec.entitlement_keys:
+        return summary.active
+    return any(is_entitled(summary, key) for key in spec.entitlement_keys)
+
+
 def enabled_plugins(summary: EntitlementSummary) -> list[PluginSpec]:
     """PluginSpecs this tenant is currently entitled to.
 
-    A disabled plugin (tenant not entitled to ANY of its `entitlement_keys`)
+    A disabled plugin (tenant not entitled to ANY of its `entitlement_keys`,
+    or a core plugin on an inactive subscription — see `_spec_enabled`)
     contributes nothing — it is simply absent from the returned list.
     """
-    return [
-        spec
-        for spec in REGISTRY.values()
-        if any(is_entitled(summary, key) for key in spec.entitlement_keys)
-    ]
+    return [spec for spec in REGISTRY.values() if _spec_enabled(summary, spec)]
 
 
 def agent_tools_for(summary: EntitlementSummary) -> list:

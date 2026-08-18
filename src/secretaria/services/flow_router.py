@@ -40,6 +40,7 @@ from secretaria.services.booking_scope import (
     resolve_booking_owner_id,
 )
 from secretaria.services.calendar import CalendarService, CalendarUnavailableError
+from secretaria.services.service_catalog import normalize, professionals_offering
 from secretaria.services.tenant_config import (
     active_appointment_types,
     professional_appointment_types,
@@ -325,6 +326,11 @@ class FlowRouterResult:
     flow_managing_appointment_id: UUID | None = None
     # When set, an event was created and the caller should persist a row.
     appointment: dict | None = None
+    # When set, the patient stated WHY they will not rebook after their doctor
+    # cancelled; the caller writes one `RebookingDecline` row. Business data,
+    # not a log line — see models/rebooking_decline.py.
+    # {"appointment_id": UUID, "reason_code": str, "reason_text": str | None}
+    decline_reason: dict | None = None
     # When set, the matching appointment row should be flipped to CANCELLED.
     appointment_cancel_id: str | None = None
     # When set, the matching appointment row should be moved (RESCHEDULED):
@@ -818,6 +824,14 @@ async def route(
             flow_selected_professional_id=_selected_professional_id(conversation),
             flow_selected_insurance=_selected_insurance(conversation),
         )
+
+    # Why-not-rebooking (FEAT_34 §8). Keyed on the STEP rather than a state of
+    # its own: it is a single question with a single answer, and inventing a
+    # FlowState for one turn would add a mode every other branch must reason
+    # about. Checked before the state branches so the answer is never
+    # reinterpreted as a menu tap.
+    if conversation.flow_step == STEP_DECLINE_REASON:
+        return _handle_decline_reason(conversation, inbound_body)
 
     if state == FlowState.SERVICE_CATALOG:
         return await _catalog_step(
@@ -3032,3 +3046,246 @@ async def resume_bubbles(
 
     # Unknown step: re-present the menu.
     return _menu_fallback()
+
+
+# --------------------------------------------------------------------------
+# Rebooking after the DOCTOR cancelled (FEAT_34 §4)
+# --------------------------------------------------------------------------
+#
+# Entered from a tap on the cancellation notice's buttons, decoded by
+# schemas/webhook.py::extract_action_button and dispatched in
+# workers/tasks.py::_handle_action_button. Both destinations land in the SHARED
+# day/time branch (`enter_day_picker`, BOOKING_DAY_BRANCH) rather than growing
+# a parallel one — the same rule that collapsed the reschedule duplicate.
+#
+# Nothing here reaches the LLM: every branch either renders a deterministic
+# list or answers with a fixed line. The cancelled appointment is NOT reopened
+# (it stays CANCELLED); confirming produces a brand-new booking, which is what
+# the normal booking tail already does.
+
+REBOOK_NO_OTHER_PROFESSIONAL = (
+    "No momento não há outro profissional disponível para agendar. "
+    "Se preferir, escolha um novo horário com o mesmo profissional."
+)
+
+# Shown when NOBODY else offers the cancelled service, so the full roster is
+# offered instead. Deterministic and explicit: an unexplained short list reads
+# as a bug, and an empty one reads as the clinic being closed.
+REBOOK_SERVICE_UNAVAILABLE_PREFIX = (
+    "Nenhum outro profissional atende esse serviço. "
+    "Veja os profissionais disponíveis:"
+)
+
+
+def _rebooking_duration(tenant: Tenant, service_name: str | None) -> int:
+    """Slot length for the rebooked service, falling back to the tenant default.
+
+    Resolved through the catalog rather than by trusting the stored string, so
+    a service renamed since the cancelled booking still sizes its own slot.
+    """
+    for service in active_appointment_types(tenant):
+        if normalize(service.get("name")) == normalize(service_name):
+            return _service_duration(service, tenant)
+    return tenant.appointment_duration_min
+
+
+def rebooking_candidates(
+    tenant: Tenant,
+    professionals: list,
+    *,
+    cancelled_professional_id: UUID | None,
+    service_name: str | None,
+    services: list | None = None,
+) -> tuple[list, str | None]:
+    """Who the patient may rebook with, and the line explaining a fallback.
+
+    Split out from `enter_rebooking` because the caller must resolve the
+    CALENDAR of whoever ends up selected, and when exactly one candidate
+    remains that choice is made here — the caller cannot know which agenda to
+    open until it has this answer.
+
+    * Everyone EXCEPT the one who cancelled: offering them back is the single
+      option the patient just declined.
+    * Narrowed to those who actually offer the same service, resolved through
+      the catalog (`professionals_offering`) rather than by comparing the
+      stored string — "Limpeza" and "limpeza dental" are the same service and
+      a raw comparison would silently hide half the roster.
+    * Nobody else offers it -> the FULL roster plus a fixed explanatory line.
+      Never a silently short list, never an empty one.
+    """
+    others = [p for p in professionals if p.id != cancelled_professional_id]
+    if not others:
+        return [], None
+    offering = (
+        professionals_offering(service_name, others, tenant, services) if service_name else []
+    )
+    if offering:
+        return offering, None
+    return others, REBOOK_SERVICE_UNAVAILABLE_PREFIX
+
+
+async def enter_rebooking(
+    conversation: Conversation,
+    tenant: Tenant,
+    calendar: CalendarService | None,
+    *,
+    professionals: list,
+    cancelled_professional_id: UUID | None,
+    service_name: str | None,
+    same_professional: bool,
+    candidates: list | None = None,
+    prefix: str | None = None,
+) -> FlowRouterResult:
+    """Deterministic destination for both rebooking buttons.
+
+    `same_professional=True` is "Outro horário": keep the doctor and the
+    service and go straight to the day picker — the patient chose both a
+    moment ago, and asking again would be the flow forgetting what it just did.
+
+    `same_professional=False` is "Outro médico", over the `candidates` the
+    caller resolved with `rebooking_candidates`: exactly one skips the choice
+    and opens their days, several render the tappable doctor list, none
+    answers with a fixed line.
+
+    The service rides along in EVERY branch, so the patient never re-picks it.
+    Nothing here reaches the LLM.
+    """
+    duration = _rebooking_duration(tenant, service_name)
+
+    if same_professional:
+        result = await enter_day_picker(
+            conversation,
+            tenant,
+            calendar,
+            duration_minutes=duration,
+            branch=BOOKING_DAY_BRANCH,
+            professionals=professionals,
+        )
+        # enter_day_picker knows nothing about who or what is being booked, and
+        # these fields are written unconditionally by the caller — so a result
+        # that should keep them must carry them explicitly (FlowRouterResult).
+        result.flow_selected_professional_id = cancelled_professional_id
+        result.flow_selected_type = service_name
+        return result
+
+    pool = candidates or []
+    if not pool:
+        return FlowRouterResult(
+            action="reply",
+            bubbles=[TextBubble(body=REBOOK_NO_OTHER_PROFESSIONAL)],
+            flow_state=FlowState.MENU,
+        )
+
+    if len(pool) == 1:
+        # One candidate: a one-row list is ceremony, not a choice.
+        result = await enter_day_picker(
+            conversation,
+            tenant,
+            calendar,
+            duration_minutes=duration,
+            branch=BOOKING_DAY_BRANCH,
+            professionals=professionals,
+            prefix=prefix,
+            back_target=BACK_TARGET_SERVICE,
+        )
+        result.flow_selected_professional_id = pool[0].id
+        result.flow_selected_type = service_name
+        return result
+
+    result = _enter_professional_list(tenant, pool)
+    if prefix:
+        result.bubbles.insert(0, TextBubble(body=prefix))
+    # Keep the service so the doctor is the ONLY thing still to choose.
+    result.flow_selected_type = service_name
+    return result
+
+
+# --------------------------------------------------------------------------
+# "Cancelar" on the rebooking offer — and why (FEAT_34 §8)
+# --------------------------------------------------------------------------
+
+STEP_DECLINE_REASON = "decline_reason"
+
+# (code, label). The CODE is what gets stored and grouped on; the label is
+# only what the patient reads, so rewording it later never invalidates the
+# history. Four rows plus nothing else, well inside the 10-row list cap.
+DECLINE_REASONS: tuple[tuple[str, str], ...] = (
+    ("other_clinic", "Vou procurar outra clínica"),
+    ("no_longer_needed", "Não preciso mais"),
+    ("reschedule_later", "Prefiro remarcar depois"),
+    ("other", "Outro motivo"),
+)
+
+DECLINE_REASON_QUESTION = (
+    "Tudo bem, não vamos remarcar. Só para entendermos melhor: "
+    "por que você prefere não seguir agora?"
+)
+DECLINE_THANKS = "Obrigado por avisar! Se mudar de ideia, é só chamar por aqui. 🙏"
+# Free text is a first-class answer, not a fallback for a failed match — the
+# list cannot enumerate every reason and the spec asks for both.
+DECLINE_FREE_TEXT_CODE = "free_text"
+
+
+def enter_decline_reasons(appointment_id: UUID) -> FlowRouterResult:
+    """Ask why, deterministically, after the patient declined to rebook.
+
+    Never handed to the LLM: this is a fixed question with a fixed option list
+    (the spec is explicit that the bot must not "conversar" about the reason),
+    and the answer is a business record rather than a conversational turn.
+
+    `flow_managing_appointment_id` carries the cancelled appointment through to
+    the next turn — the answer arrives as a bare list tap with no id of its own.
+    """
+    rows = [(f"declreason|{code}", label) for code, label in DECLINE_REASONS]
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[
+            SlotsBubble(
+                body=DECLINE_REASON_QUESTION[:MAX_LIST_BODY_CHARS],
+                rows=rows,
+                button_label="Escolher motivo",
+                section_title="Motivos",
+            )
+        ],
+        flow_state=FlowState.MENU,
+        flow_step=STEP_DECLINE_REASON,
+        flow_managing_appointment_id=appointment_id,
+    )
+
+
+def _handle_decline_reason(conversation: Conversation, body: str | None) -> FlowRouterResult:
+    """Record the answer and close the conversation politely.
+
+    A tapped row matches one of `DECLINE_REASONS` by label (the row prefix is
+    deliberately NOT one of the payload-carrying ones, so the tap arrives as
+    the plain title — same trick the "Não sei" row uses). Anything else is
+    kept verbatim as free text.
+
+    The appointment id comes from the conversation, never from the message: a
+    patient cannot address somebody else's booking by typing.
+    """
+    appointment_id = _selected_managing_appointment_id(conversation)
+    text = (body or "").strip()
+
+    reason_code = DECLINE_FREE_TEXT_CODE
+    reason_text: str | None = text or None
+    for code, label in DECLINE_REASONS:
+        if _label_match(body, label):
+            reason_code = code
+            # A tapped option is fully described by its code; storing the label
+            # too would just duplicate it, and "Outro motivo" carries no text.
+            reason_text = None
+            break
+
+    result = FlowRouterResult(
+        action="reply",
+        bubbles=[TextBubble(body=DECLINE_THANKS)],
+        flow_state=FlowState.MENU,
+    )
+    if appointment_id is not None:
+        result.decline_reason = {
+            "appointment_id": appointment_id,
+            "reason_code": reason_code,
+            "reason_text": reason_text,
+        }
+    return result

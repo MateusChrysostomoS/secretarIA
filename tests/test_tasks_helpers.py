@@ -60,13 +60,33 @@ def test_flow_snapshot_resolves_single_professional_config():
 
 
 def test_flow_snapshot_single_professional_falls_back_to_tenant_config():
+    """NULL — and only NULL — is what inherits the clinic's legacy columns."""
     tenant = _flow_tenant()
-    professional = SimpleNamespace(appointment_types=[], business_hours={})
+    professional = SimpleNamespace(appointment_types=None, business_hours=None)
 
     snapshot = _flow_tenant_snapshot(tenant, [professional])
 
     assert snapshot.appointment_types == tenant.appointment_types
     assert snapshot.business_hours == tenant.business_hours
+
+
+def test_flow_snapshot_single_professional_empty_own_config_does_not_fall_back():
+    """This test used to assert the OPPOSITE, and that was the bug.
+
+    A clinic that closed every day, or removed every service, for its only
+    professional was silently served the tenant's old hours and catalog by the
+    deterministic router. `{}` / `[]` is an own override now: the router offers
+    nothing, which is what the clinic actually configured.
+    """
+    tenant = _flow_tenant()
+    professional = SimpleNamespace(appointment_types=[], business_hours={})
+
+    snapshot = _flow_tenant_snapshot(tenant, [professional])
+
+    assert snapshot.appointment_types == []
+    assert snapshot.business_hours == {}
+    assert snapshot.appointment_types != tenant.appointment_types
+    assert snapshot.business_hours != tenant.business_hours
 
 
 def test_flow_snapshot_multi_professional_keeps_tenant_defaults_until_selection():

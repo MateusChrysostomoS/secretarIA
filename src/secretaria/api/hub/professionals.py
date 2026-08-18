@@ -213,6 +213,11 @@ async def update_professional_config(
     together should use PUT /tenants/me/configuration instead, which commits
     both in one transaction rather than leaving a half-saved state behind when
     the second request fails.
+
+    `business_hours` / `appointment_types` are three-state: absent leaves them
+    alone, explicit `null` goes back to inheriting the clinic's legacy column,
+    and `{}` / `[]` writes an empty OWN override that inherits nothing (see
+    ProfessionalConfigUpdate).
     """
     professional = await _get_professional(session, tenant, professional_id)
     data = body.model_dump(exclude_unset=True)
@@ -226,6 +231,10 @@ async def update_professional_config(
         tenant_id=str(tenant.id),
         professional_id=str(professional.id),
         fields=sorted(data.keys()),
+        # Categorical: which side each field now resolves from, AFTER the save.
+        # Makes "this save turned inheritance into an empty override" legible
+        # without logging a single hour or service name.
+        **hubcfg.config_source_fields(professional),
     )
     return await _list_item(session, professional, tenant)
 

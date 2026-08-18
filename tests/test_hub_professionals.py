@@ -161,8 +161,18 @@ async def test_list_shape_is_whitelisted(
         "about",
         "context_doctor_message",
         "business_hours",
+        # Additive since the null/empty round: says whether the (possibly empty)
+        # value above is inheritance or an own override. Asserted here on
+        # purpose — this exact-key-set check is what keeps a frontend type from
+        # inventing a property the backend never sends.
+        "business_hours_inherited",
         "appointment_types",
+        "appointment_types_inherited",
         "has_calendar",
+        # Additive: whose Calendar credential covers this row. Same anti-drift
+        # reason as the two flags above — a frontend type may only declare keys
+        # this set contains.
+        "calendar_source",
         "has_hours",
         "has_services",
         "complete",

@@ -201,16 +201,26 @@ class CalendarService:
         like `from_tenant_config`.
 
         `google_calendar_id`/`google_refresh_token` falsy -> keep the
-        tenant's own value. `business_hours` falsy (None or `{}`) -> keep the
-        tenant's own (a professional with no hours of their own already
-        resolves to the tenant's via `professional_business_hours`, so this
-        is mostly a no-op safety net, not a second fallback layer).
+        tenant's own value.
+
+        `business_hours` is the one argument where `None` and `{}` mean
+        DIFFERENT things, and conflating them was a real bug:
+          - `None` -> "no opinion", keep the tenant's own hours. That is what
+            the caller passes when there is no tenant row to resolve against.
+          - `{}`   -> the professional resolved to genuinely NO hours (their own
+            override is empty, or closes every weekday). Honoured verbatim:
+            substituting the clinic's hours here would resurrect exactly the
+            legacy config the clinic deliberately emptied, on the
+            patient-facing slot path. See the NULL-versus-EMPTY note in
+            services/tenant_config.py.
         """
         resolved = replace(
             tenant_config,
             google_calendar_id=google_calendar_id or tenant_config.google_calendar_id,
             google_refresh_token=google_refresh_token or tenant_config.google_refresh_token,
-            business_hours=business_hours if business_hours else tenant_config.business_hours,
+            business_hours=(
+                tenant_config.business_hours if business_hours is None else business_hours
+            ),
             appointment_duration_min=(
                 appointment_duration_min or tenant_config.appointment_duration_min
             ),

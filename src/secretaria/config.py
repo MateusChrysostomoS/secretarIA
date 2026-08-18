@@ -295,6 +295,20 @@ class Settings(BaseSettings):
     EMAIL_ENABLED: bool = False
     EMAIL_FROM_ADDRESS: str = ""
     EMAIL_FROM_NAME: str = "SecretarIA"
+    # FULL URL of the doctor-facing agenda screen, linked from the
+    # "nova consulta marcada" email (plugins/professional_notification.py).
+    #
+    # A full URL rather than a base plus a path hardcoded here, because the
+    # path is NOT the same on the two frontends this platform ships:
+    # brain-frontend serves it at /secretaria/agenda, the newer
+    # secretarIA-frontend at /agenda. Composing `{base}/secretaria/agenda`
+    # would silently produce a 404 link for every clinic on the second one.
+    # Whoever configures a deployment knows which frontend it serves; this
+    # setting just records the answer.
+    #
+    # Empty (the default) omits the link line from the email entirely — a mail
+    # with no link is fine, a mail with a broken link is not.
+    DOCTOR_AGENDA_URL: str = ""
 
     # --- Reminders plugin (CORE capability, billed per-send via the reminders
     # Stripe meter outside the 24h window — see plugins/reminders.py) ---
@@ -305,6 +319,22 @@ class Settings(BaseSettings):
     # their own reviewed-and-approved template (name it honestly per
     # environment, do not assume the sandbox name carries over to prod).
     REMINDER_TEMPLATE_NAME: str = "appointment_reminder"
+
+    # --- Doctor-initiated cancellation notice (api/hub/calendar.py::cancel) ---
+    #
+    # Approved Meta template used ONLY when the patient is outside the 24h
+    # window, where WhatsApp refuses free-form text and bills every template
+    # send as a conversation. Inside the window the notice goes as a free
+    # interactive message and this name is never read.
+    CANCEL_TEMPLATE_NAME: str = "appointment_cancelled"
+    # What one such send costs the clinic, shown in the hub before the doctor
+    # authorises it. A STRING, and empty by default, deliberately: Meta's
+    # per-conversation price varies by country and category and this product
+    # does not compute it — an unset value makes the hub say "custo por
+    # conversa" instead of inventing a number. Never render it as exact; see
+    # CANCEL_TEMPLATE_COST_IS_ESTIMATE.
+    CANCEL_TEMPLATE_COST_BRL: str = ""
+    CANCEL_TEMPLATE_COST_IS_ESTIMATE: bool = True
     # Lookback (minutes) added behind each lead-time window when the reminder
     # cron scans for due appointments, so a missed/delayed tick still catches
     # appointments that drifted past the exact lead time. Must be >= the cron

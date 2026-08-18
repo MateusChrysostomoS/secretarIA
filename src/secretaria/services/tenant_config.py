@@ -27,12 +27,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.config import get_settings
 from secretaria.core.crypto import decrypt, encrypt
+from secretaria.core.logging import get_logger
 from secretaria.models import Tenant
 from secretaria.models.professional import Professional
 from secretaria.models.professional_credentials import ProfessionalCredentials
 from secretaria.models.tenant_credentials import TenantCredentials
 from secretaria.services.calendar import CalendarService
 from secretaria.services.service_catalog import load_service_catalog, resolve_entries
+
+logger = get_logger(__name__)
 
 # --------------------------------------------------------------------------
 # Runtime read-model (consumed by the agent, not by the API)
@@ -119,14 +122,51 @@ def active_business_hours(tenant: Tenant) -> dict:
     return _filter_active_hours(tenant.business_hours)
 
 
+# --------------------------------------------------------------------------
+# NULL versus EMPTY on a professional's own config
+# --------------------------------------------------------------------------
+# `Professional.business_hours` / `Professional.appointment_types` are NULLABLE
+# JSON columns with THREE distinct states, and the two resolvers below are the
+# only place allowed to collapse them:
+#
+#   NULL      -> inherit the tenant's legacy single-professional column
+#   {} / []   -> an OWN override that happens to be empty: closed all week, or
+#                offering nothing. Inherits NOTHING.
+#   non-empty -> an OWN override with content.
+#
+# These resolvers used to test truthiness (`professional.business_hours or
+# tenant.business_hours`), which merged the first two states: a clinic that
+# closed every day, or removed every service, silently got the tenant's OLD
+# hours and services back on the patient-facing path. `is not None` is
+# load-bearing here, not a style preference — an empty override is a decision
+# the clinic made, and the runtime must honour it even when honouring it means
+# offering nothing at all (which `professional_completeness` then reports as
+# incomplete, so activation says so out loud instead of pretending).
+#
+# `professional_inherits_*` exist so the API response flags, the completeness
+# computation and any future consumer read the SAME definition of "inherited"
+# instead of each re-deriving `is None` and drifting apart.
+
+
+def professional_inherits_business_hours(professional: Professional) -> bool:
+    """True when this professional has no hours of their own (NULL = inherit)."""
+    return professional.business_hours is None
+
+
+def professional_inherits_appointment_types(professional: Professional) -> bool:
+    """True when this professional has no service list of their own (NULL = inherit)."""
+    return professional.appointment_types is None
+
+
 def professional_appointment_types(
     professional: Professional, tenant: Tenant, services: Sequence | None = None
 ) -> list[dict]:
     """Active appointment-type dicts for ONE professional.
 
-    The professional's own `appointment_types` JSON when set (non-empty),
-    else the tenant's (the legacy single-professional column) - same
-    filtering semantics as `active_appointment_types`.
+    The professional's own `appointment_types` JSON whenever they have one;
+    NULL, and only NULL, inherits the tenant's legacy single-professional
+    column - same filtering semantics as `active_appointment_types`. An own
+    `[]` resolves to `[]`; see the NULL-versus-EMPTY note above.
 
     `services` is the clinic's canonical catalog. With it, the returned entries
     carry the CLINIC's spelling and descriptive copy while keeping THIS
@@ -136,19 +176,29 @@ def professional_appointment_types(
     caller did before the catalog existed and what a not-yet-backfilled tenant
     still needs.
     """
-    return _filter_active_types(
-        resolve_entries(professional.appointment_types or tenant.appointment_types, services)
+    entries = (
+        tenant.appointment_types
+        if professional_inherits_appointment_types(professional)
+        else professional.appointment_types
     )
+    return _filter_active_types(resolve_entries(entries, services))
 
 
 def professional_business_hours(professional: Professional, tenant: Tenant) -> dict:
     """Weekday -> non-empty window list for ONE professional.
 
-    The professional's own `business_hours` JSON when set (non-empty), else
-    the tenant's (the legacy single-professional column) - same filtering
-    semantics as `active_business_hours`.
+    The professional's own `business_hours` JSON whenever they have one; NULL,
+    and only NULL, inherits the tenant's legacy single-professional column -
+    same filtering semantics as `active_business_hours`. An own `{}` — or an own
+    dict whose every weekday is closed — resolves to `{}`; see the
+    NULL-versus-EMPTY note above.
     """
-    return _filter_active_hours(professional.business_hours or tenant.business_hours)
+    hours = (
+        tenant.business_hours
+        if professional_inherits_business_hours(professional)
+        else professional.business_hours
+    )
+    return _filter_active_hours(hours)
 
 
 def can_activate(tenant: Tenant, calendar_connected: bool) -> tuple[bool, str | None]:
@@ -450,8 +500,11 @@ async def resolve_professional_calendar(
         which case the clinic's token is always used (see `_professional_credential`
         for why: a shared_account `google_calendar_id` only exists under the
         clinic's own account).
-      - hours/services: the professional's own JSON when set, else the
-        tenant's (`professional_business_hours` / `professional_appointment_types`).
+      - hours/services: the professional's own JSON whenever they have one,
+        else — NULL only — the tenant's (`professional_business_hours` /
+        `professional_appointment_types`). An own EMPTY override stays empty and
+        is forwarded as `{}`, which `CalendarService.for_professional` honours
+        verbatim rather than substituting the clinic's hours back in.
       - default slot duration: the first active RESOLVED service's
         `duration_min`; when nothing resolves, None keeps the tenant default.
       - calendar id: `professional.google_calendar_id`, else the tenant's
@@ -470,7 +523,11 @@ async def resolve_professional_calendar(
     tool path's ContextVar-scoped construction while sharing this resolution.
     """
     own_token = await get_professional_google_refresh_token(session, professional.id)
-    hours = professional_business_hours(professional, tenant) if tenant is not None else {}
+    # `None` (no tenant row to resolve against) means "no opinion — keep the
+    # tenant_config's hours"; `{}` means "resolved to genuinely no hours". The
+    # two must stay distinguishable all the way into
+    # `CalendarService.for_professional`, which is why this is None and not {}.
+    hours = professional_business_hours(professional, tenant) if tenant is not None else None
     # Resolved through the canonical catalog so a service the CLINIC retired
     # can no longer drive this professional's default slot length.
     services = await load_service_catalog(session, tenant.id) if tenant is not None else []
@@ -579,6 +636,38 @@ async def professional_completeness_item(
     return await _completeness_item(session, professional, tenant, tenant_calendar)
 
 
+async def professional_calendar_source(
+    session: AsyncSession, professional: Professional, tenant: Tenant
+) -> str:
+    """WHOSE Calendar credential covers this professional: the professional's own,
+    the clinic's, or nobody's.
+
+    `"professional"` | `"tenant"` | `"none"`, and the invariant that makes it
+    safe to ship next to the existing boolean is exact:
+
+        has_calendar == (calendar_source != "none")
+
+    It exists because `has_calendar` answers "is a Calendar available?" and the
+    UI also needs "did THIS doctor connect one?". Overloading the boolean was
+    how `/doctor/perfil` came to offer "Reconectar agenda" to a doctor who had
+    never connected anything — the clinic's connection was doing the work.
+
+    Deliberately NOT the shared_account routing rule (`_professional_credential`
+    forces the clinic's token in that mode regardless of any own credential):
+    this stays exactly consistent with `has_calendar` so the two can never
+    contradict each other, and the shared_account screens already branch on
+    `google_calendar_mode` + `google_calendar_id` instead of on either of these.
+
+    Returns a category, never a credential: no token, no calendar id, no Google
+    account is read into the result.
+    """
+    if await has_professional_google_refresh_token(session, professional.id):
+        return "professional"
+    if await has_google_refresh_token(session, tenant.id):
+        return "tenant"
+    return "none"
+
+
 async def professional_completeness(session: AsyncSession, tenant: Tenant) -> TenantCompleteness:
     """Per-active-professional completeness + the partial-activation verdict.
 
@@ -634,6 +723,28 @@ async def professional_completeness(session: AsyncSession, tenant: Tenant) -> Te
                 "At least one professional must have a connected Google Calendar, "
                 "an active appointment type, and an availability window."
             )
+
+    # Honest alert, no mutation: an ACTIVE professional that resolves to zero
+    # hours or zero services will offer a patient nothing. Since `is None` is
+    # now the only inheritance test, that state is reachable two ways — an empty
+    # OWN override, or inheritance from a tenant whose own legacy column is
+    # empty too — and the counts below say which without naming anybody.
+    # Deliberately carries NO tenant/professional id, no weekday, no service
+    # name and no price: counts and categories are enough to notice a clinic
+    # went quiet, and the actionable per-name detail already reaches the clinic
+    # itself through `reasons` on its own authenticated response.
+    without_hours = sum(1 for item in items if not item.has_hours)
+    without_services = sum(1 for item in items if not item.has_services)
+    if without_hours or without_services:
+        logger.warning(
+            "professional_config_resolves_empty",
+            total_active=total_active,
+            without_hours=without_hours,
+            without_services=without_services,
+            inheriting_hours=sum(1 for p in rows if professional_inherits_business_hours(p)),
+            inheriting_services=sum(1 for p in rows if professional_inherits_appointment_types(p)),
+            tenant_is_active=tenant.is_active,
+        )
 
     return TenantCompleteness(
         professionals=items,

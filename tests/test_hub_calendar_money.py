@@ -235,9 +235,19 @@ async def test_post_cancel_without_deposit_returns_none_outcome(client: AsyncCli
     assert body["deposit_status"] is None
 
 
-async def test_post_cancel_appends_deposit_notice_to_custom_message(
+async def test_post_cancel_passes_deposit_notice_to_the_cancellation_job(
     client: AsyncClient, db, tenant
 ):
+    """The deposit notice still rides along with the cancellation — it just
+    rides on the composed notice now, not on a doctor-typed body.
+
+    Was `..._appends_deposit_notice_to_custom_message`, asserting the old
+    opt-in contract: `custom_message` WAS the whole message and no message
+    meant no notification at all. That field is gone (schemas/calendar.py
+    explains why), the notice is composed server-side, and the enqueue is
+    unconditional — so this now checks the deposit line is handed to the job
+    rather than concatenated here.
+    """
     from secretaria.main import app
 
     await _connect_calendar(db, tenant)
@@ -246,16 +256,25 @@ async def test_post_cancel_appends_deposit_notice_to_custom_message(
 
     response = await client.post(
         f"{CALENDAR}/appointments/{appt.id}/cancel",
-        json={"confirm": True, "custom_message": "Sua consulta foi cancelada pela clínica."},
+        json={"confirm": True, "justification": "Imprevisto do médico"},
     )
     assert response.status_code == 200
 
     pool: _FakeArqPool = app.state.arq_pool
     assert len(pool.calls) == 1
-    name, tenant_id_arg, phone_arg, message_arg = pool.calls[0]
-    assert name == "send_patient_notification"
-    assert "Sua consulta foi cancelada pela clínica." in message_arg
-    assert "retido pela clínica" in message_arg  # deposit notice rides along
+    (
+        name,
+        _tenant_id_arg,
+        _appointment_id_arg,
+        _professional_name,
+        justification,
+        extra_notice,
+        allow_paid,
+    ) = pool.calls[0]
+    assert name == "send_cancellation_notice"
+    assert justification == "Imprevisto do médico"
+    assert "retido pela clínica" in extra_notice  # deposit notice rides along
+    assert allow_paid is False  # not authorised => never the paid path
 
 
 # --------------------------------------------------------------------------

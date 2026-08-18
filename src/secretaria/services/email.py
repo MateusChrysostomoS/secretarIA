@@ -330,6 +330,30 @@ _TEMPLATES: dict[str, EmailTemplate] = {
             "— Equipe SecretarIA"
         ),
     ),
+    # The one template that is NOT about onboarding/account lifecycle: it tells
+    # a professional that a patient just booked with them.
+    #
+    # Deliberately minimal. SMTP is cleartext-in-transit into a mailbox this
+    # product does not control, so the body carries only what the doctor needs
+    # to RECOGNISE the appointment and open the agenda — never the patient's
+    # phone number, never a price, never anything clinical. `insurance_line`
+    # and `agenda_line` arrive PRE-RENDERED from the caller (empty string when
+    # there is nothing to say) rather than being conditionalised here, because
+    # `EmailTemplate` is a flat `str.format_map` pair with no branching.
+    "appointment_booked_professional": EmailTemplate(
+        subject="Nova consulta marcada — {when}",
+        body=(
+            "Olá, {professional_name}!\n\n"
+            "Uma nova consulta foi marcada com você pela SecretarIA:\n\n"
+            "Paciente: {patient_name}\n"
+            "Serviço: {service}\n"
+            "Quando: {when}\n"
+            "{insurance_line}"
+            "\n"
+            "{agenda_line}"
+            "— Equipe SecretarIA"
+        ),
+    ),
 }
 
 

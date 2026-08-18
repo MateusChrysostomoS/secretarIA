@@ -27,6 +27,7 @@ from secretaria.workers.payments_tasks import process_asaas_event
 from secretaria.workers.tasks import (
     check_handover_timeouts,
     process_webhook_event,
+    send_cancellation_notice,
     send_patient_notification,
     send_transactional_email,
     transcribe_audio_message,
@@ -95,6 +96,7 @@ class WorkerSettings:
 
     functions = [
         process_webhook_event,
+        send_cancellation_notice,
         send_patient_notification,
         # Dedicated voice-note job, enqueued directly by the webhook handler
         # alongside process_webhook_event (not dispatched from within it).

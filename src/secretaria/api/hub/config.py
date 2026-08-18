@@ -183,6 +183,12 @@ async def update_configuration(
         # belong in a log line.
         tenant_fields=sorted(tenant_data.keys()),
         professional_fields=sorted(professional_data.keys()),
+        # Categorical: which side the professional's hours/services resolve
+        # from AFTER the commit, so a save that replaced inheritance with an
+        # empty override is legible without logging any config value. Omitted
+        # entirely for a tenant-only save; never computed on a rollback path,
+        # where the ORM instance is expired.
+        **(hubcfg.config_source_fields(professional) if professional is not None else {}),
         outcome="committed",
         duration_ms=round((time.perf_counter() - started) * 1000, 1),
     )

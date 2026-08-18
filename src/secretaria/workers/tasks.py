@@ -60,6 +60,7 @@ from secretaria.models import (
     PixDepositStatus,
     ProcessedEvent,
     Professional,
+    RebookingDecline,
     Tenant,
     is_live_status,
 )
@@ -75,6 +76,7 @@ from secretaria.schemas.webhook import (
     extract_inbound_body,
     history_item_is_final,
 )
+from secretaria.services import cancellation_notice
 from secretaria.services.appointment_status import (
     SOURCE_BUTTON,
     SOURCE_FLOW,
@@ -98,7 +100,9 @@ from secretaria.services.flow_router import (
     MenuBubble,
     _enter_professional_services,
     classify_yes_no,
+    enter_decline_reasons,
     enter_manage_action,
+    enter_rebooking,
     flows_enabled,
     manage_label,
     menu_buttons_for,
@@ -107,6 +111,7 @@ from secretaria.services.flow_router import (
     reactivation_continue_prompt,
     reactivation_enabled,
     reactivation_gap_minutes,
+    rebooking_candidates,
     resume_bubbles,
     route,
 )
@@ -135,6 +140,7 @@ from secretaria.services.tenant_config import (
     resolve_professional_calendar,
     set_waba_token,
 )
+from secretaria.services.usage_events import emit_usage_event
 from secretaria.services.whatsapp import TenantWhatsAppCredentialMissing, WhatsAppClient
 
 logger = get_logger(__name__)
@@ -920,6 +926,13 @@ def _flow_tenant_snapshot(
     before reading that professional's catalog, so they keep tenant defaults
     on the initial snapshot.
 
+    Resolution goes through ``professional_appointment_types`` /
+    ``professional_business_hours``, so the sole professional's EMPTY own
+    config stays empty here: a clinic that closed every day or removed every
+    service has the deterministic router offer nothing, rather than quietly
+    falling back to the tenant's legacy columns (see the NULL-versus-EMPTY note
+    in services/tenant_config.py).
+
     The "exactly one" rule comes from `services/booking_scope.py`, the same
     one `resolve_booking_owner_id` applies to the ROSTER this snapshot travels
     with (``route(professionals=...)``) — so whoever's catalog is rendered
@@ -1639,9 +1652,11 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                     # spelling per service without ever touching the DB. An
                     # empty catalog (tenant not backfilled) leaves the stored
                     # entries exactly as they are today. `None` is preserved as
-                    # `None`, not flattened to `[]`, because that is what makes
-                    # `professional_appointment_types` fall back to the
-                    # tenant's legacy list for a professional with no services.
+                    # `None`, not flattened to `[]`, because that is the ONLY
+                    # thing that makes `professional_appointment_types` fall
+                    # back to the tenant's legacy list — a professional whose
+                    # own list is `[]` offers nothing, and flattening here would
+                    # silently turn that into the clinic's old catalog.
                     service_catalog = await load_service_catalog(session, tenant.id)
                     flow_professionals = [
                         SimpleNamespace(
@@ -2550,6 +2565,11 @@ async def _handle_action_button(
     # under the limit) - handled AFTER this session closes, mirroring
     # _handle_manage_appointment's own short-read-session-then-handoff shape.
     reschedule_handoff: tuple[Tenant, list[dict], list, str | None] | None = None
+    # FEAT_34 §4: a tap on the cancellation notice's rebooking buttons. Same
+    # shape as the reschedule handoff — resolved inside the session, acted on
+    # after it closes.
+    rebooking_handoff: tuple | None = None
+    decline_handoff: tuple | None = None
 
     async with async_session_factory() as session:
         conversation = await session.get(Conversation, reply.conversation_id)
@@ -2637,6 +2657,76 @@ async def _handle_action_button(
             await client.send_text_message(to=reply.patient_wa_id, body=text)
             return
 
+        if action == "rebookno":
+            # The patient does not want to rebook. Ask WHY — deterministically,
+            # with a fixed option list — because "vou procurar outra clínica"
+            # and "não preciso mais" are the same tap and mean opposite things
+            # commercially (FEAT_34 §8). Never handed to the LLM.
+            #
+            # Handed off like the branches below rather than answered here:
+            # `_apply_flow_result` opens its OWN session, and calling it while
+            # this one is still open nests two sessions on the same engine.
+            decline_handoff = (tenant, waba_token, appointment.id)
+
+        if action in ("rebooksame", "rebookother"):
+            # Rebooking after the DOCTOR cancelled. The cancelled appointment
+            # stays CANCELLED and is NOT reopened (FEAT_34 §4.3) — confirming
+            # produces a new booking through the normal tail.
+            if not flows_enabled(tenant):
+                await client.send_text_message(
+                    to=reply.patient_wa_id,
+                    body="Para remarcar, entre em contato com a nossa equipe.",
+                )
+                return
+            professional_rows = await list_active_professionals(session, tenant.id)
+            professionals = [
+                SimpleNamespace(
+                    id=p.id,
+                    name=p.name,
+                    specialty=p.specialty,
+                    about=p.about,
+                    context_doctor_message=p.context_doctor_message,
+                    appointment_types=p.appointment_types,
+                )
+                for p in professional_rows
+            ]
+            same = action == "rebooksame"
+            service_name = appointment.appointment_type
+            candidates: list = []
+            prefix = None
+            if same:
+                target_id = appointment.professional_id
+            else:
+                services = await load_service_catalog(session, tenant.id)
+                candidates, prefix = rebooking_candidates(
+                    tenant,
+                    professionals,
+                    cancelled_professional_id=appointment.professional_id,
+                    service_name=service_name,
+                    services=services,
+                )
+                # Only a single candidate fixes the agenda in advance; with a
+                # list the patient still picks, and their own calendar is
+                # resolved when they do.
+                target_id = candidates[0].id if len(candidates) == 1 else None
+            rebook_calendar = await _appointment_calendar(
+                session,
+                tenant,
+                _appointment_calendar_target({"professional_id": target_id}, professional_rows),
+            )
+            rebooking_handoff = (
+                tenant,
+                conversation,
+                professionals,
+                waba_token,
+                rebook_calendar,
+                same,
+                appointment.professional_id,
+                service_name,
+                candidates,
+                prefix,
+            )
+
         if action == "apptresched":
             deposit = await deposit_lifecycle.get_deposit_for_appointment(session, appointment.id)
             if deposit is not None and deposit.reschedule_count >= tenant.pix_reschedule_limit:
@@ -2696,6 +2786,52 @@ async def _handle_action_button(
                 waba_token,
                 reschedule_calendar,
             )
+
+    if decline_handoff is not None:
+        dh_tenant, dh_waba_token, dh_appointment_id = decline_handoff
+        await _apply_flow_result(
+            reply,
+            enter_decline_reasons(dh_appointment_id),
+            reply.patient_wa_id,
+            redis=redis,
+            tenant=dh_tenant,
+            waba_token=dh_waba_token,
+        )
+        return
+
+    if rebooking_handoff is not None:
+        (
+            rb_tenant,
+            rb_conversation,
+            rb_professionals,
+            rb_waba_token,
+            rb_calendar,
+            rb_same,
+            rb_cancelled_professional_id,
+            rb_service_name,
+            rb_candidates,
+            rb_prefix,
+        ) = rebooking_handoff
+        result = await enter_rebooking(
+            rb_conversation,
+            rb_tenant,
+            rb_calendar,
+            professionals=rb_professionals,
+            cancelled_professional_id=rb_cancelled_professional_id,
+            service_name=rb_service_name,
+            same_professional=rb_same,
+            candidates=rb_candidates,
+            prefix=rb_prefix,
+        )
+        await _apply_flow_result(
+            reply,
+            result,
+            reply.patient_wa_id,
+            redis=redis,
+            tenant=rb_tenant,
+            waba_token=rb_waba_token,
+        )
+        return
 
     if reschedule_handoff is not None:
         (
@@ -2968,6 +3104,29 @@ async def _apply_flow_result(
                                         cancellation_note = deposit_lifecycle.cancellation_notice(
                                             outcome, tenant, cancelled_deposit
                                         )
+                    if result.decline_reason:
+                        # Business data (churn signal), written in the SAME txn
+                        # as the flow state so an answer can never be recorded
+                        # without the conversation having moved past the
+                        # question. Tenant comes from the conversation, never
+                        # from the message. The free text is patient content:
+                        # it goes in this row and is never logged.
+                        decline = result.decline_reason
+                        owns_appointment = await session.scalar(
+                            select(Appointment.id).where(
+                                Appointment.id == decline["appointment_id"],
+                                Appointment.tenant_id == conv.tenant_id,
+                            )
+                        )
+                        if owns_appointment is not None:
+                            session.add(
+                                RebookingDecline(
+                                    tenant_id=conv.tenant_id,
+                                    appointment_id=decline["appointment_id"],
+                                    reason_code=decline["reason_code"],
+                                    reason_text=decline["reason_text"],
+                                )
+                            )
                     if result.appointment_reschedule:
                         resched = result.appointment_reschedule
                         # Read BEFORE the write (same reason as the cancel
@@ -4185,6 +4344,185 @@ async def send_patient_notification(ctx: dict, tenant_id: str, phone: str, messa
             tenant_id=tenant_id,
             error=str(exc),
         )
+
+
+async def send_cancellation_notice(
+    ctx: dict,
+    tenant_id: str,
+    appointment_id: str,
+    professional_name: str | None,
+    justification: str | None,
+    extra_notice: str | None,
+    allow_paid: bool,
+) -> None:
+    """arq job: tell a patient their doctor cancelled, and offer a way back.
+
+    Split out from `send_patient_notification` rather than bolted onto it,
+    because a cancellation is the one notice that must not be fire-and-forget
+    text:
+
+    * It carries REBOOKING BUTTONS, so it is an interactive send, not a text one.
+    * Outside Meta's 24h window it is a BILLED template — and only with the
+      doctor's explicit authorisation (`allow_paid`), collected in the hub with
+      the price shown. Without it the job deliberately sends nothing and says
+      so; the hub offers a free `wa.me` link instead.
+    * It must never go out twice. A duplicate is not just inbox noise here —
+      outside the window it is a second charge. Claimed through the same
+      `processed_events` ledger the webhook pipeline uses, key
+      `cancelnotice:<appointment_id>`.
+
+    A claim whose send then FAILS is RELEASED, so a retry can still reach the
+    patient; a transient SMTP-style blip must not silently swallow the one
+    message telling somebody their consultation is gone. Same shape as
+    `plugins/professional_notification.py`.
+
+    Never logs a phone number, the justification, or any patient content.
+    """
+    key = f"cancelnotice:{appointment_id}"
+
+    async with async_session_factory() as session:
+        tenant = await session.get(Tenant, UUID(tenant_id))
+        if tenant is None:
+            logger.error("cancellation_notice_tenant_not_found", tenant_id=tenant_id)
+            return
+        appointment = await session.get(Appointment, UUID(appointment_id))
+        if appointment is None or appointment.tenant_id != tenant.id:
+            # Tenant mismatch is the isolation guard, not a formality.
+            logger.error(
+                "cancellation_notice_appointment_not_found",
+                tenant_id=tenant_id,
+                appointment_id=appointment_id,
+            )
+            return
+
+        to = None
+        last_inbound = None
+        if appointment.patient_id is not None:
+            patient = await session.get(Patient, appointment.patient_id)
+            if patient is not None:
+                to = patient.wa_id
+                last_inbound = await cancellation_notice.last_inbound_at(
+                    session, tenant.id, patient.id
+                )
+        to = to or appointment.phone
+        waba_token = await get_waba_token(session, tenant.id)
+
+    if not to:
+        logger.info(
+            "cancellation_notice_skipped", reason="no_number", appointment_id=appointment_id
+        )
+        return
+
+    inside = cancellation_notice.is_inside_window(last_inbound)
+    if not inside and not allow_paid:
+        # The doctor declined the paid send (or the client never offered it).
+        # Saying nothing is correct here — but it must be VISIBLE, because the
+        # patient has not been told.
+        logger.warning(
+            "cancellation_notice_not_sent",
+            reason="outside_window_not_authorised",
+            appointment_id=appointment_id,
+            tenant_id=tenant_id,
+        )
+        return
+
+    if not await _claim_event(key):
+        logger.info(
+            "cancellation_notice_skipped", reason="already_sent", appointment_id=appointment_id
+        )
+        return
+
+    body = cancellation_notice.build_cancellation_text(professional_name, justification)
+    if extra_notice:
+        body = cancellation_notice.join_blocks(body, extra_notice)
+
+    client = WhatsAppClient.for_tenant(tenant, waba_token)
+    settings = get_settings()
+    try:
+        if inside:
+            await client.send_buttons(
+                to=to,
+                body=cancellation_notice.join_blocks(
+                    body, cancellation_notice.rebooking_invitation()
+                ),
+                buttons=cancellation_notice.rebook_buttons(appointment_id),
+            )
+        else:
+            # Outside the window: only an approved template is accepted, and it
+            # is billed. Its quick-reply buttons carry the same ids the flow
+            # router routes on, so tapping one both reopens the window and
+            # lands in the deterministic rebooking branch.
+            await client.send_template(
+                to=to,
+                template=settings.CANCEL_TEMPLATE_NAME,
+                lang=cancellation_notice.meta_language_code(tenant.language),
+                variables=[body],
+                button_payloads=cancellation_notice.rebook_payloads(appointment_id),
+            )
+            await _emit_cancellation_usage(appointment_id, tenant.id)
+    except Exception as exc:
+        await _release_event(key)
+        logger.error(
+            "cancellation_notice_failed",
+            tenant_id=tenant_id,
+            appointment_id=appointment_id,
+            inside_window=inside,
+            error=str(exc),
+        )
+        return
+
+    logger.info(
+        "cancellation_notice_sent",
+        tenant_id=tenant_id,
+        appointment_id=appointment_id,
+        inside_window=inside,
+    )
+
+
+async def _emit_cancellation_usage(appointment_id: str, tenant_id) -> None:
+    """Best-effort meter tick for one BILLED (outside-window) cancellation send.
+
+    Fail-open, like `plugins/reminders.py::_emit_reminder_usage`: the message
+    already went out, so a metering hiccup must not raise and trigger a retry
+    that would send — and charge — a second time.
+    """
+    try:
+        recorded = await emit_usage_event(
+            tenant_id=str(tenant_id),
+            feature="reminders",
+            amount=1,
+            event_id=f"cancelnotice:{appointment_id}",
+        )
+        if not recorded:
+            logger.warning("usage_emit_failed", event_id=f"cancelnotice:{appointment_id}")
+    except Exception as exc:
+        logger.warning("usage_emit_failed", error=str(exc), appointment_id=appointment_id)
+
+
+async def _claim_event(key: str) -> bool:
+    """Insert `key` into the ProcessedEvent ledger. True iff THIS call claimed it."""
+    async with async_session_factory() as session:
+        try:
+            async with session.begin():
+                existing = await session.scalar(
+                    select(ProcessedEvent.id).where(ProcessedEvent.event_id == key)
+                )
+                if existing is not None:
+                    return False
+                session.add(ProcessedEvent(event_id=key))
+        except IntegrityError:
+            return False
+    return True
+
+
+async def _release_event(key: str) -> None:
+    """Undo a claim whose send did not happen, so a retry may try again."""
+    try:
+        async with async_session_factory() as session:
+            async with session.begin():
+                await session.execute(delete(ProcessedEvent).where(ProcessedEvent.event_id == key))
+    except Exception as exc:
+        logger.warning("cancellation_notice_release_failed", key=key, error=str(exc))
 
 
 # --------------------------------------------------------------------------

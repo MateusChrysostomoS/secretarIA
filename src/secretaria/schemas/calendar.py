@@ -10,12 +10,29 @@ from secretaria.models.appointment import AppointmentStatus
 
 
 class CalendarEventRead(BaseModel):
-    """A Google Calendar event as returned by the agenda view."""
+    """A Google Calendar event as returned by the agenda view.
+
+    `id` is GOOGLE's event id. It is NOT accepted by the write endpoints
+    (cancel / reschedule), which key on the local `Appointment.id` — that
+    mismatch is exactly why the agenda's cancel button sat disabled: the read
+    model handed the UI an id no write endpoint would take.
+
+    `appointment_id` closes it. `None` means "this event has no local
+    Appointment row" — a block, or something the doctor typed straight into
+    Google Calendar. The UI must keep the write actions disabled for those
+    rather than guessing, because a wrong id here would cancel the wrong
+    consultation and the Google deletion is irreversible.
+
+    Typed `str` rather than `UUID` to match `AppointmentRead.id`, which is what
+    the frontend sends straight back in the cancel/reschedule URL path. Both
+    serialise identically over JSON; the difference would only ever be a trap.
+    """
 
     id: str
     summary: str | None
     start: str
     end: str
+    appointment_id: str | None = None
 
 
 class AppointmentCreate(BaseModel):
@@ -41,12 +58,50 @@ class BlockCreate(BaseModel):
 
 
 class AppointmentCancel(BaseModel):
-    """POST /appointments/{id}/cancel."""
+    """POST /appointments/{id}/cancel.
+
+    `custom_message` is GONE, replaced by `justification` — deliberately a
+    replacement and not a second field beside it, because the two would have
+    read as synonyms while meaning opposite things: the old one WAS the whole
+    body the patient received, the new one is a fragment quoted inside a
+    standard sentence the server composes. Two fields, one of which silently
+    suppresses the other's wording, is the kind of ambiguity that ships a
+    cancellation saying the wrong thing.
+
+    Safe to drop outright rather than deprecate: the only client is the hub
+    agenda, whose "Cancelar consulta" button had never been enabled (its modal
+    was never mounted), so nothing in production ever sent this field.
+    """
 
     # Explicit confirmation guard — the frontend must send true.
     confirm: bool
-    # Optional override for the notification message sent to the patient.
-    custom_message: str | None = Field(default=None, max_length=4000)
+    # The doctor's REASON, quoted into the standard notice. None/blank simply
+    # omits the justification line; the patient is notified either way.
+    justification: str | None = Field(default=None, max_length=4000)
+    # Authorises the PAID template send when the patient is outside Meta's 24h
+    # window. Defaults False so the expensive path is never taken by accident:
+    # a client that does not know about the cost cannot incur it. Ignored
+    # inside the window, where the notice is free.
+    notify_outside_window: bool = False
+
+
+class CancelPreviewRead(BaseModel):
+    """GET /appointments/{id}/cancel-preview — what cancelling would cost.
+
+    Read BEFORE the doctor confirms, so the modal can offer the §3.1 choice
+    with real numbers instead of asking them to guess. Purely informational:
+    it mutates nothing and sends nothing.
+    """
+
+    # False = Meta will not accept free-form text; notifying costs a template.
+    inside_window: bool
+    # Name rendered into "O médico {name} desmarcou a sua consulta!".
+    professional_name: str | None
+    # Empty string when unconfigured — the UI must then avoid quoting a price.
+    template_cost_brl: str
+    cost_is_estimate: bool
+    # `https://wa.me/...` so the doctor can write from their own phone for free.
+    whatsapp_link: str | None
 
 
 class AppointmentReschedule(BaseModel):

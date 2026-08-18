@@ -554,6 +554,12 @@ _ACTION_BUTTON_PREFIXES: tuple[str, ...] = (
     "apptresched|",
     "apptcancelyes|",
     "apptcancel|",
+    # Rebooking after the DOCTOR cancelled (services/cancellation_notice.py).
+    # Same carrier, same tenant-scoped validation — so a tap on the notice's
+    # buttons lands in the deterministic branch instead of the LLM.
+    "rebooksame|",
+    "rebookother|",
+    "rebookno|",
 )
 
 

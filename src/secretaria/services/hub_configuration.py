@@ -207,10 +207,47 @@ def apply_professional_config(professional: Professional, data: dict) -> None:
     Never gated by entitlements, limits or activation — the same "a config save
     is always allowed" principle the tenant-level save follows, so a tenant
     that lost the multi_professional addon can still tidy up the rows it has.
+
+    `data` must come from `model_dump(exclude_unset=True)`, which is what makes
+    the three-state contract on `business_hours` / `appointment_types` work:
+    an ABSENT key leaves the column alone, an explicit `null` writes NULL (back
+    to inheriting the clinic's legacy column), and `{}` / `[]` writes an empty
+    OWN override. `setattr` with `None` is therefore a deliberate,
+    contract-visible operation here, not a bug — see ProfessionalConfigUpdate's
+    docstring and the NULL-versus-EMPTY note in services/tenant_config.py.
     """
     for field_name in PROFESSIONAL_CONFIG_FIELDS:
         if field_name in data:
             setattr(professional, field_name, data[field_name])
+
+
+# ---------------------------------------------------------------------------
+# Observability — categorical only
+# ---------------------------------------------------------------------------
+
+
+def config_source_fields(professional: Professional) -> dict[str, str]:
+    """Where this professional's hours/services resolve FROM, for a log line.
+
+    `"tenant"` means inherited (the column is NULL), `"professional"` means an
+    own value — including an own EMPTY one, which is the whole point: a save
+    that empties a professional's hours is visible in the logs as
+    `professional`, not as a silent return to the clinic's legacy config.
+
+    Two fixed enum values and nothing else. No weekday, no service name, no
+    price, no count of anything a patient said — the values themselves are the
+    clinic's configuration and never belong in a log.
+    """
+    return {
+        "business_hours_source": (
+            "tenant" if cfg.professional_inherits_business_hours(professional) else "professional"
+        ),
+        "appointment_types_source": (
+            "tenant"
+            if cfg.professional_inherits_appointment_types(professional)
+            else "professional"
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -265,9 +302,16 @@ async def professional_list_item(
         specialty=professional.specialty,
         about=professional.about,
         context_doctor_message=professional.context_doctor_message,
+        # The stored OWN value, flattened for older clients, PLUS the flag that
+        # says whether that flatness is inheritance or an empty override. Both
+        # flags come from the same predicates the runtime resolvers use, so the
+        # wire can never claim one thing while the bot does another.
         business_hours=professional.business_hours or {},
+        business_hours_inherited=cfg.professional_inherits_business_hours(professional),
         appointment_types=professional.appointment_types or [],
+        appointment_types_inherited=cfg.professional_inherits_appointment_types(professional),
         has_calendar=completeness.has_calendar,
+        calendar_source=await cfg.professional_calendar_source(session, professional, tenant),
         has_hours=completeness.has_hours,
         has_services=completeness.has_services,
         complete=completeness.complete,

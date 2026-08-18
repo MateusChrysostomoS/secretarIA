@@ -12,9 +12,12 @@ the tenant's own `google_calendar_id`;
 services/calendar.py:CalendarService.from_tenant_config) and, separately, its
 own encrypted Google refresh token (models/professional_credentials.py).
 `business_hours`/`appointment_types` mirror the tenant's own columns and fall
-back to them when NULL (services/tenant_config.py:
+back to them ONLY when NULL (services/tenant_config.py:
 `professional_business_hours` / `professional_appointment_types`) - this is
-the "legacy single-professional config still applies" path.
+the "legacy single-professional config still applies" path. An EMPTY value
+(`{}` / `[]`) is not that path: it is an own override that offers nothing, and
+the resolvers honour it verbatim. See the NULL-versus-EMPTY note in
+services/tenant_config.py for the full table and why the distinction matters.
 """
 
 import uuid
@@ -51,12 +54,18 @@ class Professional(Base):
     # recite. Not a persona/safety override: the hardcoded safety/tone rules
     # in ai/prompts.py::_format_safety_rules apply regardless of this field.
     context_doctor_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Same shape as tenants.business_hours. NULL = fall back to the tenant's
-    # own column (services/tenant_config.professional_business_hours) - the
-    # legacy single-professional behaviour.
+    # Same shape as tenants.business_hours, with THREE meaningful states:
+    #   NULL      -> inherit the tenant's own column (the legacy
+    #                single-professional behaviour)
+    #   {}        -> an OWN override that is empty: closed all week. Inherits
+    #                NOTHING.
+    #   non-empty -> an OWN override with content.
+    # Resolved by services/tenant_config.professional_business_hours, which
+    # tests `is None` and nothing else.
     business_hours: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    # Same shape as tenants.appointment_types. NULL = fall back to the
-    # tenant's own column (services/tenant_config.professional_appointment_types).
+    # Same shape as tenants.appointment_types, same three states as
+    # `business_hours` above (`[]` = offers nothing, and inherits nothing).
+    # Resolved by services/tenant_config.professional_appointment_types.
     appointment_types: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
