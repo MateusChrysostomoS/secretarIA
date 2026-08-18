@@ -15,14 +15,14 @@
     "semantic_hash": "d22d63a12a1b9004ed5b6705706bb1d2"
   },
   "src/secretaria/config.py": {
-    "mtime": 1786930476.2204854,
-    "ast_hash": "90db0ac41584634508ebfb22a8a391bc",
+    "mtime": 1786321216.6826708,
+    "ast_hash": "ce1f4ad5b0383f22cc196f54c48e48ae",
     "semantic_hash": ""
   },
   "src/secretaria/main.py": {
-    "mtime": 1786996390.4012494,
-    "ast_hash": "bd8db9681a2a8479703951088984ea68",
-    "semantic_hash": ""
+    "mtime": 1784687926.2888486,
+    "ast_hash": "6a849ab028d28aed5555546107e37a08",
+    "semantic_hash": "6a849ab028d28aed5555546107e37a08"
   },
   "src/secretaria/__init__.py": {
     "mtime": 1779424055.5896142,
@@ -30,14 +30,14 @@
     "semantic_hash": "fe92ecbb6a15546267ab53b27b7716d8"
   },
   "src/secretaria/ai/graph.py": {
-    "mtime": 1786978335.2694225,
-    "ast_hash": "42c36b4d9b44e72efb9b44b79a1bad14",
-    "semantic_hash": ""
+    "mtime": 1784768956.791787,
+    "ast_hash": "547a2b02f19ea72a7636e800ee1e8c6d",
+    "semantic_hash": "547a2b02f19ea72a7636e800ee1e8c6d"
   },
   "src/secretaria/ai/tools.py": {
-    "mtime": 1787004961.3420193,
-    "ast_hash": "2a62f521c32757c1dce51fb043d39959",
-    "semantic_hash": ""
+    "mtime": 1784690002.9449718,
+    "ast_hash": "24605fd306d07acc232e8fa48c7aa297",
+    "semantic_hash": "24605fd306d07acc232e8fa48c7aa297"
   },
   "src/secretaria/ai/__init__.py": {
     "mtime": 1779424182.9126582,
@@ -45,13 +45,13 @@
     "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "src/secretaria/api/health.py": {
-    "mtime": 1786930513.1244464,
-    "ast_hash": "115847d5b6b61afa6372a114a13c459f",
-    "semantic_hash": ""
+    "mtime": 1779424136.3365636,
+    "ast_hash": "165e4e67cbb64071cdfc1812fb6c360a",
+    "semantic_hash": "165e4e67cbb64071cdfc1812fb6c360a"
   },
   "src/secretaria/api/webhook.py": {
-    "mtime": 1786904248.3471587,
-    "ast_hash": "3e32d5d8483fe36fe89a7eabb47e4d98",
+    "mtime": 1786321216.6826708,
+    "ast_hash": "7dc3bb8162c3cadd211c78d4c5a7acde",
     "semantic_hash": ""
   },
   "src/secretaria/api/__init__.py": {
@@ -65,9 +65,9 @@
     "semantic_hash": "74e3faf492bf32e37b8076802012bbe1"
   },
   "src/secretaria/core/logging.py": {
-    "mtime": 1786904097.0458224,
-    "ast_hash": "40486b4a9200d94f5d4d10fc09c3eab7",
-    "semantic_hash": ""
+    "mtime": 1784501064.9720888,
+    "ast_hash": "3186afbeb2501ec2ddaf3d4056e894ed",
+    "semantic_hash": "3186afbeb2501ec2ddaf3d4056e894ed"
   },
   "src/secretaria/core/security.py": {
     "mtime": 1779424072.3773417,
@@ -80,9 +80,9 @@
     "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "src/secretaria/models/conversation.py": {
-    "mtime": 1786641834.108727,
-    "ast_hash": "c114caf4f8936c079aa38eff07658574",
-    "semantic_hash": ""
+    "mtime": 1784664280.321955,
+    "ast_hash": "21b8e8e691b29ab94064bc096facad31",
+    "semantic_hash": "21b8e8e691b29ab94064bc096facad31"
   },
   "src/secretaria/models/message.py": {
     "mtime": 1779424469.2132032,
@@ -105,13 +105,13 @@
     "semantic_hash": ""
   },
   "src/secretaria/models/__init__.py": {
-    "mtime": 1786995810.3125455,
-    "ast_hash": "004d7af424b77e314099f33f03fb6122",
-    "semantic_hash": ""
+    "mtime": 1784687926.2888486,
+    "ast_hash": "31574a81774d71279b23533dc6f384ab",
+    "semantic_hash": "31574a81774d71279b23533dc6f384ab"
   },
   "src/secretaria/schemas/webhook.py": {
-    "mtime": 1787002235.1131454,
-    "ast_hash": "f67c2a8e94f94d159d0f7e537c17e462",
+    "mtime": 1785594245.5399044,
+    "ast_hash": "03032745c6944269c2154a3c3b0df339",
     "semantic_hash": ""
   },
   "src/secretaria/schemas/__init__.py": {
@@ -120,8 +120,8 @@
     "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "src/secretaria/services/calendar.py": {
-    "mtime": 1787002191.7215087,
-    "ast_hash": "dbf8a91cc12f7380d698d4daf0d0e939",
+    "mtime": 1785553849.1249416,
+    "ast_hash": "3610b275549136373a8fabb16b619d58",
     "semantic_hash": ""
   },
   "src/secretaria/services/handover.py": {
@@ -135,9 +135,9 @@
     "semantic_hash": "d00cc46ca1470e7b1af87e2d7726dada"
   },
   "src/secretaria/services/whatsapp.py": {
-    "mtime": 1786904036.8730934,
-    "ast_hash": "512fc3007a7140f60090ec50f64c1ab8",
-    "semantic_hash": ""
+    "mtime": 1784689501.6357117,
+    "ast_hash": "fe45aa333c45776b5f26680a28f900a4",
+    "semantic_hash": "fe45aa333c45776b5f26680a28f900a4"
   },
   "src/secretaria/services/__init__.py": {
     "mtime": 1779424168.35006,
@@ -145,13 +145,13 @@
     "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "src/secretaria/workers/arq_worker.py": {
-    "mtime": 1786930612.7101147,
-    "ast_hash": "79d03f52db25e3f842e625f28855f4f8",
-    "semantic_hash": ""
+    "mtime": 1784687926.2918587,
+    "ast_hash": "34ba04f475059284677157711b5ad1dc",
+    "semantic_hash": "34ba04f475059284677157711b5ad1dc"
   },
   "src/secretaria/workers/tasks.py": {
-    "mtime": 1787004997.3580966,
-    "ast_hash": "990f0dc331cef7c14d9479b2743aef2d",
+    "mtime": 1786321216.6826708,
+    "ast_hash": "e7b9753af6fa9ffa4a5dbcb63bdc213d",
     "semantic_hash": ""
   },
   "src/secretaria/workers/__init__.py": {
@@ -180,9 +180,9 @@
     "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "CLAUDE.md": {
-    "mtime": 1786930994.0173337,
-    "ast_hash": "29d2da7f13e79e9c0b4d18cd9a7632cc",
-    "semantic_hash": ""
+    "mtime": 1784691426.8945696,
+    "ast_hash": "78c9a0302307d2b9e7933660734d6dfd",
+    "semantic_hash": "78c9a0302307d2b9e7933660734d6dfd"
   },
   "docker-compose.yml": {
     "mtime": 1779424046.3093185,
@@ -190,8 +190,8 @@
     "semantic_hash": "8ed7a2a937b1c67c5ca234d7775d6f3d"
   },
   "README.md": {
-    "mtime": 1786930972.0145507,
-    "ast_hash": "431fda035cdd390df3b4b011f62983d1",
+    "mtime": 1786321294.4128315,
+    "ast_hash": "e4a72687381c0bdd91ad8e559132eec0",
     "semantic_hash": ""
   },
   "scripts/check_scopes.py": {
@@ -210,9 +210,9 @@
     "semantic_hash": "735fcc70a4ab5142b10bf4b72edd6323"
   },
   "src/secretaria/ai/prompts.py": {
-    "mtime": 1787004950.3956797,
-    "ast_hash": "cdd917fc62148c0358eeaa9aa66d182c",
-    "semantic_hash": ""
+    "mtime": 1784768951.0776837,
+    "ast_hash": "37a144e07fa150674ee22f32e8e111b6",
+    "semantic_hash": "37a144e07fa150674ee22f32e8e111b6"
   },
   "src/secretaria/ai/formatter.py": {
     "mtime": 1784501980.763429,
@@ -225,8 +225,8 @@
     "semantic_hash": "6744146775cd0ba5323ce65b1663b506"
   },
   "tests/test_webhook_parsing.py": {
-    "mtime": 1787004646.5914621,
-    "ast_hash": "878e53e5d2097d54a0b9f29bbb40adfe",
+    "mtime": 1785594619.0569415,
+    "ast_hash": "e5e81f6deafc73ac4db5ccc2ab327635",
     "semantic_hash": ""
   },
   "migrations/versions/b2f1a7c9d3e4_tenant_config_and_credentials.py": {
@@ -275,9 +275,9 @@
     "semantic_hash": "bf8c865ac26bf9a56071b51069b3ef1c"
   },
   "src/secretaria/models/appointment.py": {
-    "mtime": 1786907903.3765802,
-    "ast_hash": "d65a6ba1501b86eff557c53e7e3e7c73",
-    "semantic_hash": ""
+    "mtime": 1784501828.1860113,
+    "ast_hash": "2eef44d2b76a4a434f2a6eca82361528",
+    "semantic_hash": "2eef44d2b76a4a434f2a6eca82361528"
   },
   "src/secretaria/models/tenant_credentials.py": {
     "mtime": 1782964952.9530172,
@@ -290,8 +290,8 @@
     "semantic_hash": "9e97c61afb0a4bd6244d2547234c85ad"
   },
   "src/secretaria/schemas/config.py": {
-    "mtime": 1786996262.0377429,
-    "ast_hash": "54ea21146dfb3fbbbd455db95af357bc",
+    "mtime": 1785559762.5219102,
+    "ast_hash": "88c53f30c61abb0a3dc7423b9329f68e",
     "semantic_hash": ""
   },
   "src/secretaria/services/admin.py": {
@@ -305,8 +305,8 @@
     "semantic_hash": ""
   },
   "src/secretaria/services/tenant_config.py": {
-    "mtime": 1786995989.0091558,
-    "ast_hash": "93f217d80af5b49bd99319d69d063b2f",
+    "mtime": 1785553953.29438,
+    "ast_hash": "f2c8540c12051481277ee96e887c3d42",
     "semantic_hash": ""
   },
   "tests/test_admin.py": {
@@ -320,9 +320,9 @@
     "semantic_hash": "fbd6dd99703ce5bbff4c6d2fbded9acc"
   },
   "tests/test_menu_command.py": {
-    "mtime": 1786905058.135037,
-    "ast_hash": "1526328ec0b09c028111a48ef8c6c685",
-    "semantic_hash": ""
+    "mtime": 1780363061.387493,
+    "ast_hash": "eeb289d675dbad3a409acdbe43a43e37",
+    "semantic_hash": "eeb289d675dbad3a409acdbe43a43e37"
   },
   "migrations/versions/d5e9f3a2b7c8_greeting_buttons.py": {
     "mtime": 1780934860.4316866,
@@ -355,19 +355,19 @@
     "semantic_hash": ""
   },
   "src/secretaria/services/flow_router.py": {
-    "mtime": 1787005004.832661,
-    "ast_hash": "d5e13c129dae4335d7a509bd8202c886",
+    "mtime": 1785594132.3497767,
+    "ast_hash": "575294c4ae91b83933baf6cd61c5bc6a",
     "semantic_hash": ""
   },
   "tests/test_flow_router.py": {
-    "mtime": 1787004557.89468,
-    "ast_hash": "532fb47d88d3f9e03ec85a7ce0071a09",
+    "mtime": 1785595074.1431108,
+    "ast_hash": "fe85b331bf86d6ae1cb1498caaad9742",
     "semantic_hash": ""
   },
   "tests/test_tasks_helpers.py": {
-    "mtime": 1786839168.4255273,
-    "ast_hash": "b9266b92602e75c89570bceffca9cd21",
-    "semantic_hash": ""
+    "mtime": 1784677306.5491996,
+    "ast_hash": "48da703a4d84caa4acad69b3e302c38a",
+    "semantic_hash": "48da703a4d84caa4acad69b3e302c38a"
   },
   "migrations/versions/b1c2d3e4f5a6_conversation_reactivation_origin.py": {
     "mtime": 1781128263.3389785,
@@ -380,13 +380,13 @@
     "semantic_hash": "dbf62afbfee62cbaa10277c7d12e0521"
   },
   "src/secretaria/services/email.py": {
-    "mtime": 1786758200.9845586,
-    "ast_hash": "4e09c08a969c1a63aaadfa7ba05b47ee",
-    "semantic_hash": ""
+    "mtime": 1784769063.6853967,
+    "ast_hash": "9bfcedcf360425e553cc217cca7e53f5",
+    "semantic_hash": "9bfcedcf360425e553cc217cca7e53f5"
   },
   "tests/test_reactivation.py": {
-    "mtime": 1787004850.6362312,
-    "ast_hash": "338ddeb949ff9b018538c1e7180ab510",
+    "mtime": 1785594406.8016264,
+    "ast_hash": "e55c3b4be161587691f127d1797c9575",
     "semantic_hash": ""
   },
   "src/secretaria/schemas/admin.py": {
@@ -435,13 +435,13 @@
     "semantic_hash": "4af89995cc8802f454e8b8325129fdc6"
   },
   "src/secretaria/api/hub/calendar.py": {
-    "mtime": 1786908191.9990733,
-    "ast_hash": "fa21e64f9174588804af39667df0dcb8",
-    "semantic_hash": ""
+    "mtime": 1784690092.0356739,
+    "ast_hash": "1a15aad05ce511bc7d21437c5d4da457",
+    "semantic_hash": "1a15aad05ce511bc7d21437c5d4da457"
   },
   "src/secretaria/api/hub/config.py": {
-    "mtime": 1786908388.0022025,
-    "ast_hash": "e1641f2af61b531d258708363a224ae3",
+    "mtime": 1785559774.4520009,
+    "ast_hash": "319dda15608b8c20b3c4166b9a139226",
     "semantic_hash": ""
   },
   "src/secretaria/api/hub/deps.py": {
@@ -485,9 +485,9 @@
     "semantic_hash": "f285bd459f7c7262857729e3b969462a"
   },
   "tests/test_waba_encryption.py": {
-    "mtime": 1786904795.93821,
-    "ast_hash": "8f1d091aa6f150844645c1cccdf07452",
-    "semantic_hash": ""
+    "mtime": 1784501065.0214748,
+    "ast_hash": "f1063c45b22428f5d3456be0664c763f",
+    "semantic_hash": "f1063c45b22428f5d3456be0664c763f"
   },
   "migrations/versions/a4b5c6d7e8f9_ehr_pix_analytics_consent.py": {
     "mtime": 1784501064.9422123,
@@ -515,8 +515,8 @@
     "semantic_hash": "93e30142b42aa1c88a130001437184ee"
   },
   "src/secretaria/api/hub/professionals.py": {
-    "mtime": 1786908021.7163484,
-    "ast_hash": "6c870bbe638885b1c226aaf04b7b3916",
+    "mtime": 1785553999.6879609,
+    "ast_hash": "bf85a6c3d299c385182a97a8dfc9d29a",
     "semantic_hash": ""
   },
   "src/secretaria/api/hub/units.py": {
@@ -560,19 +560,19 @@
     "semantic_hash": "5aaa71f34c0e8915ae3f34587bae8da2"
   },
   "src/secretaria/plugins/human_backup.py": {
-    "mtime": 1786904678.3734498,
-    "ast_hash": "5e60574115ec596cbb15807bdb1c292d",
-    "semantic_hash": ""
+    "mtime": 1784501064.9830544,
+    "ast_hash": "c6d30bf1c5345991fd3cded4b916e902",
+    "semantic_hash": "c6d30bf1c5345991fd3cded4b916e902"
   },
   "src/secretaria/plugins/multi_professional.py": {
-    "mtime": 1786978393.8404446,
-    "ast_hash": "8b60bfabac916f42d6df4260bbe60e1d",
-    "semantic_hash": ""
+    "mtime": 1784502884.8173988,
+    "ast_hash": "620874f1da391181fb310125509af2cd",
+    "semantic_hash": "620874f1da391181fb310125509af2cd"
   },
   "src/secretaria/plugins/multi_unit.py": {
-    "mtime": 1786978460.0025792,
-    "ast_hash": "15b1d13ddc973f7485fcfb72d3ab3506",
-    "semantic_hash": ""
+    "mtime": 1784501064.9879713,
+    "ast_hash": "2dc6dd4c2ca1454f084aff2bba8de7f0",
+    "semantic_hash": "2dc6dd4c2ca1454f084aff2bba8de7f0"
   },
   "src/secretaria/plugins/post_booking.py": {
     "mtime": 1784501064.9879713,
@@ -585,9 +585,9 @@
     "semantic_hash": "b612c933a485220a1090b0ab51c0d8f7"
   },
   "src/secretaria/plugins/reminders.py": {
-    "mtime": 1786908028.203411,
-    "ast_hash": "dbadf16adea097d9d6ddc4338b4bdd69",
-    "semantic_hash": ""
+    "mtime": 1784689566.6781847,
+    "ast_hash": "5ba76c95bb7210dbb9559263d3131cea",
+    "semantic_hash": "5ba76c95bb7210dbb9559263d3131cea"
   },
   "src/secretaria/plugins/__init__.py": {
     "mtime": 1784689391.069095,
@@ -655,8 +655,8 @@
     "semantic_hash": "4bb203066ab0c04fef3f141bba315aed"
   },
   "tests/test_bot_reply_gating.py": {
-    "mtime": 1786905782.7880733,
-    "ast_hash": "96e3093af05cf80a4605c1018d03a8d8",
+    "mtime": 1785594603.5013576,
+    "ast_hash": "5193dabc81294dbd5d5b863ab2ded061",
     "semantic_hash": ""
   },
   "tests/test_ehr_plugin.py": {
@@ -710,9 +710,9 @@
     "semantic_hash": "ee288a9ead22fd1568594a4984196a98"
   },
   "tests/test_reminders_plugin.py": {
-    "mtime": 1786908698.6038513,
-    "ast_hash": "2db9ac7e7050f283c4c46af4b060078f",
-    "semantic_hash": ""
+    "mtime": 1784734386.0511937,
+    "ast_hash": "48ea7620cc9a218eba0cd5fbf0ba5ab7",
+    "semantic_hash": "48ea7620cc9a218eba0cd5fbf0ba5ab7"
   },
   "tests/test_whatsapp_template.py": {
     "mtime": 1784501065.0214748,
@@ -760,9 +760,9 @@
     "semantic_hash": "ba64c3fd336504b43fe0f48b25819afc"
   },
   "tests/test_audio_transcription.py": {
-    "mtime": 1786905654.177526,
-    "ast_hash": "811e6fbb2c6cff9c4a7bc409be97a82a",
-    "semantic_hash": ""
+    "mtime": 1784501065.007761,
+    "ast_hash": "9d0e28b14ff8b236eec2b99103e89d49",
+    "semantic_hash": "9d0e28b14ff8b236eec2b99103e89d49"
   },
   "docs/CHECKPOINT_audio_transcricao.md": {
     "mtime": 1784501064.7087176,
@@ -860,8 +860,8 @@
     "semantic_hash": "609f07b3ac9e91a4833265482b1fad4e"
   },
   "docs/CHECKPOINT_onboarding_multiprofessional.md": {
-    "mtime": 1786906151.1026142,
-    "ast_hash": "6cce3d42ca9b881261bfbe702c7b3f18",
+    "mtime": 1786321298.347836,
+    "ast_hash": "8f5078961278861ad29bcc78658f5452",
     "semantic_hash": ""
   },
   "migrations/versions/b3d9f2a1c8e7_multi_doctor_flow_columns.py": {
@@ -875,24 +875,24 @@
     "semantic_hash": ""
   },
   "tests/test_agent_menu_tools.py": {
-    "mtime": 1787003758.477381,
-    "ast_hash": "0e2e288942a8d079780fe724ea3a4ca4",
-    "semantic_hash": ""
+    "mtime": 1784768965.9358509,
+    "ast_hash": "97ccfb7d4e20d80a5d4520fde3e8db31",
+    "semantic_hash": "97ccfb7d4e20d80a5d4520fde3e8db31"
   },
   "tests/test_flow_router_multiprofessional.py": {
-    "mtime": 1787003313.1743076,
-    "ast_hash": "7e04352753468dae749ab96b7d5f015f",
+    "mtime": 1785595074.1431108,
+    "ast_hash": "d62f34b3affb0ec6911ec7586279f6b0",
     "semantic_hash": ""
   },
   "docs/CHECKPOINT_multi_doctor_flow.md": {
-    "mtime": 1787005411.865893,
-    "ast_hash": "031e7b288d21b813c295eeee15713074",
+    "mtime": 1785595512.6315188,
+    "ast_hash": "ec03fc37f5a7abe6ca1c890033b93ca5",
     "semantic_hash": ""
   },
   "src/secretaria/services/patient_context.py": {
-    "mtime": 1786907990.7065868,
-    "ast_hash": "e63644c01562ae903f7cb2c92d365fae",
-    "semantic_hash": ""
+    "mtime": 1784664285.590818,
+    "ast_hash": "2ed5ee62950803c7388e9c00d3fbb614",
+    "semantic_hash": "2ed5ee62950803c7388e9c00d3fbb614"
   },
   "tests/test_list_patient_appointments_tool.py": {
     "mtime": 1784768968.5050383,
@@ -900,8 +900,8 @@
     "semantic_hash": "68ca148f52230e8e22cc086ebbe077d6"
   },
   "tests/test_patient_context.py": {
-    "mtime": 1787003794.1662009,
-    "ast_hash": "f0e11f5bb5ba3b885c1e6fd5f9fc3d7f",
+    "mtime": 1785594381.139299,
+    "ast_hash": "8d98dc492eb800e481730de3cec2845f",
     "semantic_hash": ""
   },
   "migrations/versions/32e87fcf926b_tenant_post_consult_fields.py": {
@@ -915,9 +915,9 @@
     "semantic_hash": "ebbb439bad7867d507a8fff702a970df"
   },
   "docs/CHECKPOINT_context_aware_opening.md": {
-    "mtime": 1786909441.945101,
-    "ast_hash": "e6ac89f747f5d1680df066ca7873d5f5",
-    "semantic_hash": ""
+    "mtime": 1784677958.3199437,
+    "ast_hash": "9a64f89bbe05b2990be8c2317c7d1cc9",
+    "semantic_hash": "9a64f89bbe05b2990be8c2317c7d1cc9"
   },
   "docs/CHECKPOINT_post_consult_config.md": {
     "mtime": 1784661339.845754,
@@ -960,9 +960,9 @@
     "semantic_hash": "2a58f03c9f86edece42247125bf19d9d"
   },
   "src/secretaria/services/payments/deposit_lifecycle.py": {
-    "mtime": 1786996803.9938443,
-    "ast_hash": "f453fe25290c1e1065addf160d231c0b",
-    "semantic_hash": ""
+    "mtime": 1784688035.6437209,
+    "ast_hash": "c56e17a676999ea12c9dd2a66da5390b",
+    "semantic_hash": "c56e17a676999ea12c9dd2a66da5390b"
   },
   "src/secretaria/services/payments/money.py": {
     "mtime": 1784687263.761496,
@@ -975,8 +975,8 @@
     "semantic_hash": "daa4b092b3d67b171931f2e55876c613"
   },
   "tests/test_action_buttons.py": {
-    "mtime": 1787003709.1054678,
-    "ast_hash": "510ca164539a84454500196e46f9675b",
+    "mtime": 1785594539.1129997,
+    "ast_hash": "177e8e2a6c0da9ede45ad80930a061c6",
     "semantic_hash": ""
   },
   "tests/test_ai_tools_cancel_money.py": {
@@ -1005,9 +1005,9 @@
     "semantic_hash": "3f2e1d1857ee0c73870dde12e01ed1a7"
   },
   "tests/test_hub_calendar_money.py": {
-    "mtime": 1786909111.5096536,
-    "ast_hash": "04c0225a6b95ce8707bf8a226cd2e39f",
-    "semantic_hash": ""
+    "mtime": 1784690776.0212972,
+    "ast_hash": "8feb881e0fceb38490066ca432313e95",
+    "semantic_hash": "8feb881e0fceb38490066ca432313e95"
   },
   "tests/test_hub_config_pix.py": {
     "mtime": 1784687746.4371698,
@@ -1030,9 +1030,9 @@
     "semantic_hash": "8c5760d0e73ad8cfffb559df801cc255"
   },
   "docs/CHECKPOINT_pix_deposit.md": {
-    "mtime": 1786909426.862687,
-    "ast_hash": "55144c95dede5c4405c90073916acbf3",
-    "semantic_hash": ""
+    "mtime": 1784735320.2939174,
+    "ast_hash": "f7034f7429e0a37af32c090ba654bbfc",
+    "semantic_hash": "f7034f7429e0a37af32c090ba654bbfc"
   },
   "migrations/versions/c9a1e2f4b6d8_tenant_google_calendar_mode.py": {
     "mtime": 1785553800.9945345,
@@ -1045,8 +1045,8 @@
     "semantic_hash": ""
   },
   "docs/CHECKPOINT_fixed_greeting_buttons.md": {
-    "mtime": 1787005411.865893,
-    "ast_hash": "1b3ecf2839de98781de31efec98aa90e",
+    "mtime": 1785595501.4859478,
+    "ast_hash": "c4ab4ad0aa5e49bcbd51dc8d7d22d0ae",
     "semantic_hash": ""
   },
   "src/secretaria/ai/scoped_help.py": {
@@ -1060,13 +1060,13 @@
     "semantic_hash": ""
   },
   "docs/CHECKPOINT_trio_gerenciar_scoped_help.md": {
-    "mtime": 1787005411.8607924,
-    "ast_hash": "503383587ade606dbeff907f7ea1797b",
+    "mtime": 1785595490.4914134,
+    "ast_hash": "4e67e524a4e6dbef5c9c7bdf74e15c09",
     "semantic_hash": ""
   },
   "tests/test_bot_allowlist.py": {
-    "mtime": 1786905610.2459342,
-    "ast_hash": "7d88692f25ab1042be1a59b2939f5ae3",
+    "mtime": 1786321216.7311347,
+    "ast_hash": "2860edca1e885e73818602a7e537c796",
     "semantic_hash": ""
   },
   "docs/CHECKPOINT_coexistence.md": {
@@ -1075,163 +1075,8 @@
     "semantic_hash": ""
   },
   "docs/WORKFLOWS_SECRETARIA.html": {
-    "mtime": 1786906124.4111254,
-    "ast_hash": "d9f5419a6b223c4842cc5ac7b9bfbb44",
-    "semantic_hash": ""
-  },
-  "migrations/versions/d1c2b3a4e5f6_service_catalog.py": {
-    "mtime": 1786996161.5403025,
-    "ast_hash": "250074fd4dafcd38d19f4d0928537763",
-    "semantic_hash": ""
-  },
-  "scripts/backfill_service_catalog.py": {
-    "mtime": 1786996482.624063,
-    "ast_hash": "a80f2db2a89bf044550f05597d5b4970",
-    "semantic_hash": ""
-  },
-  "scripts/report_ownerless_appointments.py": {
-    "mtime": 1786979260.7107062,
-    "ast_hash": "b29940c406163a5f63506f9dc27e9d8f",
-    "semantic_hash": ""
-  },
-  "src/secretaria/api/hub/services.py": {
-    "mtime": 1786996363.6260304,
-    "ast_hash": "70b560538adf4b46f6158897f532390d",
-    "semantic_hash": ""
-  },
-  "src/secretaria/core/build_info.py": {
-    "mtime": 1786931016.1609547,
-    "ast_hash": "1ff8461144e418a5c3590811f1831848",
-    "semantic_hash": ""
-  },
-  "src/secretaria/models/service.py": {
-    "mtime": 1786995780.7665794,
-    "ast_hash": "a5d249956865c62b05fc13d829af5906",
-    "semantic_hash": ""
-  },
-  "src/secretaria/schemas/hub_configuration.py": {
-    "mtime": 1786907915.1101332,
-    "ast_hash": "9e4bcd9b9916f56004919abbcaa4e4f6",
-    "semantic_hash": ""
-  },
-  "src/secretaria/schemas/service.py": {
-    "mtime": 1786996292.9730475,
-    "ast_hash": "fddd446e1c1596822192c9856d0d3925",
-    "semantic_hash": ""
-  },
-  "src/secretaria/services/appointment_status.py": {
-    "mtime": 1786907958.1767206,
-    "ast_hash": "3716d30a9c94b39fb140e5305682a8af",
-    "semantic_hash": ""
-  },
-  "src/secretaria/services/booking_scope.py": {
-    "mtime": 1786977967.4832108,
-    "ast_hash": "a2e6ca99d031980f483e63ad9a2ab02d",
-    "semantic_hash": ""
-  },
-  "src/secretaria/services/hub_configuration.py": {
-    "mtime": 1786908274.2515917,
-    "ast_hash": "e6c8595a305a9dd35a6f53279b33e4af",
-    "semantic_hash": ""
-  },
-  "src/secretaria/services/service_catalog.py": {
-    "mtime": 1786995918.1882837,
-    "ast_hash": "d1d795977225ca27a6cdf8b80df376df",
-    "semantic_hash": ""
-  },
-  "src/secretaria/workers/deploy_parity.py": {
-    "mtime": 1786930577.353693,
-    "ast_hash": "b4b8970518e5f83ca506e2317b29d60d",
-    "semantic_hash": ""
-  },
-  "tests/test_agent_tool_enforcement.py": {
-    "mtime": 1786979298.5648613,
-    "ast_hash": "952b45738ffa70766f393a13d090bbc1",
-    "semantic_hash": ""
-  },
-  "tests/test_appointment_status_taxonomy.py": {
-    "mtime": 1787004547.4425545,
-    "ast_hash": "46445b5b98da5d4eec513d5d888b1cae",
-    "semantic_hash": ""
-  },
-  "tests/test_booking_owner_persistence.py": {
-    "mtime": 1786979298.5648613,
-    "ast_hash": "86ce670946bb3a3f71e4bc6c0f58f71f",
-    "semantic_hash": ""
-  },
-  "tests/test_booking_scope.py": {
-    "mtime": 1786978794.9281688,
-    "ast_hash": "cf1bf5c87dfbfaebc2f4551890806617",
-    "semantic_hash": ""
-  },
-  "tests/test_build_identity.py": {
-    "mtime": 1786930801.4461994,
-    "ast_hash": "8329503eefdd68a21b0e19883d4ebdce",
-    "semantic_hash": ""
-  },
-  "tests/test_flow_day_picker.py": {
-    "mtime": 1787004431.4245503,
-    "ast_hash": "0003185588a3f5bf34ccb5f25a93588c",
-    "semantic_hash": ""
-  },
-  "tests/test_flow_router_insurance.py": {
-    "mtime": 1787003423.680992,
-    "ast_hash": "502ae6154bf73e12a6959d61f82fa13d",
-    "semantic_hash": ""
-  },
-  "tests/test_hub_configuration.py": {
-    "mtime": 1786908743.5714238,
-    "ast_hash": "ad24105cdbc4c8684c74e2e42041f7cd",
-    "semantic_hash": ""
-  },
-  "tests/test_remove_context_command.py": {
-    "mtime": 1786906656.4491262,
-    "ast_hash": "409d7b27bd340686a44ee3a9bc959c1d",
-    "semantic_hash": ""
-  },
-  "tests/test_service_catalog.py": {
-    "mtime": 1786996740.2702913,
-    "ast_hash": "9788110333b7da00304b237678b5e1b4",
-    "semantic_hash": ""
-  },
-  "tests/test_waba_fail_closed.py": {
-    "mtime": 1786905424.9042642,
-    "ast_hash": "50ba31fcf889328c5e192d3967b7a998",
-    "semantic_hash": ""
-  },
-  "tests/test_webhook_minimal_payload.py": {
-    "mtime": 1786905548.5337634,
-    "ast_hash": "20aae3d9907418dd343d6885c3747861",
-    "semantic_hash": ""
-  },
-  "docs/CHECKPOINT_appointment_status_taxonomy.md": {
-    "mtime": 1786909518.853923,
-    "ast_hash": "cb47cb5ca04be72cc71af776b3dcac31",
-    "semantic_hash": ""
-  },
-  "docs/CHECKPOINT_booking_ownership.md": {
-    "mtime": 1786979492.4923174,
-    "ast_hash": "bcd5c98f03a6808ea641525c34546bb1",
-    "semantic_hash": ""
-  },
-  "docs/CHECKPOINT_day_picker_entry_buttons.md": {
-    "mtime": 1787005388.3192337,
-    "ast_hash": "6c3860993e3daeb300392d7b4f5478eb",
-    "semantic_hash": ""
-  },
-  "docs/CHECKPOINT_flows_unconditional.md": {
-    "mtime": 1786641891.6572008,
-    "ast_hash": "c3a90404c56fe28dd63c362d5f15a643",
-    "semantic_hash": ""
-  },
-  "docs/CHECKPOINT_menu_rename_waba_lgpd.md": {
-    "mtime": 1786906829.0290668,
-    "ast_hash": "22e135d2bb599237ff65b6e60848e3f8",
-    "semantic_hash": ""
-  },
-  "docs/CHECKPOINT_service_catalog.md": {
-    "mtime": 1786996944.5482495,
-    "ast_hash": "9c641b027062eca2994e87254da71657",
+    "mtime": 1785597425.76973,
+    "ast_hash": "4a6e44b32a8642391f85b3d25a328fc4",
     "semantic_hash": ""
   }
 }
