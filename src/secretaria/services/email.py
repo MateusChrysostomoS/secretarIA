@@ -23,6 +23,7 @@ import asyncio
 import smtplib
 from dataclasses import dataclass
 from email.message import EmailMessage
+from enum import StrEnum
 
 import structlog
 
@@ -129,6 +130,59 @@ async def send_human_backup_alert(to_email: str, clinic_name: str) -> None:
             "human_backup_alert_email_failed",
             error=str(exc),
             to=to_email,
+            clinic=clinic_name,
+        )
+
+
+async def send_cancellation_escalation_alert(
+    to_email: str, clinic_name: str, whatsapp_link: str | None
+) -> None:
+    """Email the clinic when a patient could NOT be told their consultation was cancelled.
+
+    The last resort of `workers/tasks.py::send_cancellation_notice`: every
+    retry inside the notice's validity window has been spent and WhatsApp is
+    still refusing the send. Somebody is going to turn up to a consultation
+    that no longer exists unless a human tells them, so this failure has to
+    leave the server — an ERROR line in a log nobody is watching is not
+    "handled".
+
+    Carries the `wa.me` deep link the hub already offers for the free path, so
+    the doctor can write from their own phone in one tap. That link contains
+    the patient's number, which is why it goes in the BODY and never into a
+    log line (see the `logger.info` below — clinic name and nothing else).
+
+    Fail-open and silent when SMTP_HOST is not configured, exactly like the
+    two alerts above: this is the escalation, it cannot itself become a new
+    failure to escalate.
+    """
+    settings = get_settings()
+    if not settings.SMTP_HOST:
+        return
+
+    subject = f"[SecretarIA] Paciente NÃO avisado do cancelamento — {clinic_name}"
+    link_block = (
+        f"Fale com o paciente por aqui:\n{whatsapp_link}\n\n"
+        if whatsapp_link
+        else "Não há um número de WhatsApp registrado para este paciente.\n\n"
+    )
+    body = (
+        f"Olá,\n\n"
+        f"Uma consulta de '{clinic_name}' foi cancelada, mas a SecretarIA NÃO "
+        f"conseguiu avisar o paciente pelo WhatsApp — todas as tentativas "
+        f"falharam.\n\n"
+        f"O paciente não sabe que a consulta foi desmarcada. Avise-o "
+        f"manualmente.\n\n"
+        f"{link_block}"
+        f"— Equipe SecretarIA"
+    )
+
+    try:
+        await asyncio.to_thread(_send_sync, to_email, subject, body)
+        logger.info("cancellation_escalation_email_sent", clinic=clinic_name)
+    except Exception as exc:
+        logger.warning(
+            "cancellation_escalation_email_failed",
+            error=str(exc),
             clinic=clinic_name,
         )
 
@@ -357,6 +411,72 @@ _TEMPLATES: dict[str, EmailTemplate] = {
 }
 
 
+class EmailOutcome(StrEnum):
+    """WHY a transactional send did or did not happen.
+
+    The bool `send_transactional_email_message` returns cannot tell "the
+    mailer is switched off" from "SMTP just blipped", and a caller that wants
+    to RETRY must not retry the first one: no number of attempts turns
+    `EMAIL_ENABLED=false` into a delivered email, and treating a deliberate
+    kill-switch as a failure would raise an alarm on every booking of every
+    clinic that has not enabled mail.
+
+    Only `SEND_FAILED` is worth retrying. `DISABLED` is a configuration
+    choice; `UNKNOWN_TEMPLATE` and `RENDER_FAILED` are code defects that will
+    reproduce identically on every attempt — they escalate, they do not retry.
+    """
+
+    SENT = "sent"
+    DISABLED = "disabled"
+    UNKNOWN_TEMPLATE = "unknown_template"
+    RENDER_FAILED = "render_failed"
+    SEND_FAILED = "send_failed"
+
+    @property
+    def is_transient(self) -> bool:
+        """True iff trying the exact same send again could plausibly succeed."""
+        return self is EmailOutcome.SEND_FAILED
+
+
+async def send_transactional_email_result(to: str, template: str, variables: dict) -> EmailOutcome:
+    """Render `template` with `variables` and send it. NEVER raises.
+
+    Same work as `send_transactional_email_message`, but reports WHICH of the
+    non-send paths was taken — see `EmailOutcome`. Callers that only need
+    "did it go out?" should keep using the bool wrapper below.
+    """
+    settings = get_settings()
+    if not settings.EMAIL_ENABLED or not settings.SMTP_HOST:
+        logger.info(
+            "transactional_email_noop",
+            template=template,
+            reason="disabled" if not settings.EMAIL_ENABLED else "smtp_unconfigured",
+        )
+        return EmailOutcome.DISABLED
+
+    tpl = _TEMPLATES.get(template)
+    if tpl is None:
+        logger.warning("transactional_email_unknown_template", template=template)
+        return EmailOutcome.UNKNOWN_TEMPLATE
+
+    safe_vars = _SafeDict(variables or {})
+    try:
+        subject = tpl.subject.format_map(safe_vars)
+        body = tpl.body.format_map(safe_vars)
+    except Exception as exc:
+        logger.warning("transactional_email_render_failed", template=template, error=str(exc))
+        return EmailOutcome.RENDER_FAILED
+
+    try:
+        await asyncio.to_thread(_send_transactional_sync, to, subject, body)
+    except Exception as exc:
+        logger.warning("transactional_email_send_failed", template=template, error=str(exc))
+        return EmailOutcome.SEND_FAILED
+
+    logger.info("transactional_email_sent", template=template)
+    return EmailOutcome.SENT
+
+
 async def send_transactional_email_message(to: str, template: str, variables: dict) -> bool:
     """Render `template` with `variables` and send it. NEVER raises.
 
@@ -366,34 +486,9 @@ async def send_transactional_email_message(to: str, template: str, variables: di
     arq task, workers/tasks.py) always gets a bool — never an exception —
     so a misconfigured or blipping SMTP server can never turn an arq job
     into a retry loop.
+
+    Thin wrapper over `send_transactional_email_result`, for the callers that
+    genuinely have nothing different to do per failure reason.
     """
-    settings = get_settings()
-    if not settings.EMAIL_ENABLED or not settings.SMTP_HOST:
-        logger.info(
-            "transactional_email_noop",
-            template=template,
-            reason="disabled" if not settings.EMAIL_ENABLED else "smtp_unconfigured",
-        )
-        return False
-
-    tpl = _TEMPLATES.get(template)
-    if tpl is None:
-        logger.warning("transactional_email_unknown_template", template=template)
-        return False
-
-    safe_vars = _SafeDict(variables or {})
-    try:
-        subject = tpl.subject.format_map(safe_vars)
-        body = tpl.body.format_map(safe_vars)
-    except Exception as exc:
-        logger.warning("transactional_email_render_failed", template=template, error=str(exc))
-        return False
-
-    try:
-        await asyncio.to_thread(_send_transactional_sync, to, subject, body)
-    except Exception as exc:
-        logger.warning("transactional_email_send_failed", template=template, error=str(exc))
-        return False
-
-    logger.info("transactional_email_sent", template=template)
-    return True
+    outcome = await send_transactional_email_result(to, template, variables)
+    return outcome is EmailOutcome.SENT

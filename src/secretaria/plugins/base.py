@@ -104,3 +104,10 @@ class PostBookingContext:
     appointment: "Appointment"
     waba_token: str | None
     source: Literal["agent", "flow"]
+    # The arq pool (`ctx["redis"]` of the dispatching job), so a hook can
+    # ENQUEUE follow-up work of its own. It needs to: `registry.run_post_booking`
+    # contains every hook's exceptions by design, so raising is not a way to
+    # ask for a retry — a hook that wants one has to schedule a real job. None
+    # (unit tests, a dev script with no Redis) means no retry can be scheduled,
+    # which the hook must then say out loud rather than assume.
+    redis: Any = None

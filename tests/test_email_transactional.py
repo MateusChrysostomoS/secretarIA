@@ -20,8 +20,11 @@ import pytest  # noqa: E402
 
 from secretaria.services.email import (  # noqa: E402
     _TEMPLATES,
+    EmailOutcome,
     _SafeDict,
+    send_cancellation_escalation_alert,
     send_transactional_email_message,
+    send_transactional_email_result,
 )
 from secretaria.workers import tasks  # noqa: E402
 from secretaria.workers.arq_worker import WorkerSettings  # noqa: E402
@@ -276,3 +279,136 @@ async def test_arq_task_never_raises_when_service_returns_false(monkeypatch: pyt
 
 def test_send_transactional_email_registered_in_worker_functions():
     assert tasks.send_transactional_email in WorkerSettings.functions
+
+
+# --------------------------------------------------------------------------
+# EmailOutcome - WHY a send did not happen (FIX 32)
+# --------------------------------------------------------------------------
+
+
+async def test_disabled_and_failed_are_different_answers():
+    """The bool wrapper collapses both to False. A caller deciding whether to
+    RETRY needs them apart: retrying a kill-switch is retrying a decision, and
+    it would alarm on every booking of every clinic without mail."""
+    patcher = _patch_settings(EMAIL_ENABLED=False)
+    try:
+        with patch("asyncio.to_thread", new_callable=AsyncMock):
+            disabled = await send_transactional_email_result(
+                to="doctor@example.com", template="connection_success", variables={}
+            )
+    finally:
+        patcher.stop()
+
+    patcher = _patch_settings()
+    try:
+        with patch(
+            "asyncio.to_thread", new_callable=AsyncMock, side_effect=OSError("conn refused")
+        ):
+            failed = await send_transactional_email_result(
+                to="doctor@example.com", template="connection_success", variables={}
+            )
+    finally:
+        patcher.stop()
+
+    assert disabled is EmailOutcome.DISABLED
+    assert failed is EmailOutcome.SEND_FAILED
+    assert not disabled.is_transient
+    assert failed.is_transient
+
+
+async def test_an_unknown_template_is_permanent_not_transient():
+    """Our bug, not an outage: the next attempt fails identically."""
+    patcher = _patch_settings()
+    try:
+        with patch("asyncio.to_thread", new_callable=AsyncMock) as mock_thread:
+            outcome = await send_transactional_email_result(
+                to="doctor@example.com", template="does_not_exist", variables={}
+            )
+            mock_thread.assert_not_called()
+    finally:
+        patcher.stop()
+
+    assert outcome is EmailOutcome.UNKNOWN_TEMPLATE
+    assert not outcome.is_transient
+
+
+async def test_the_bool_wrapper_still_answers_exactly_as_before():
+    """Three call sites still take the bool. It must keep meaning "sent"."""
+    patcher = _patch_settings()
+    try:
+        with patch("asyncio.to_thread", new_callable=AsyncMock):
+            assert (
+                await send_transactional_email_message(
+                    to="doctor@example.com", template="connection_success", variables={}
+                )
+                is True
+            )
+    finally:
+        patcher.stop()
+
+
+# --------------------------------------------------------------------------
+# The cancellation escalation alert (FIX 32)
+# --------------------------------------------------------------------------
+
+
+async def test_escalation_carries_the_whatsapp_link_so_a_human_can_act():
+    """The patient has NOT been told and every retry is spent. The clinic needs
+    the one thing that fixes it: a tap-to-write link to that patient."""
+    patcher = _patch_settings()
+    try:
+        with patch("asyncio.to_thread", new_callable=AsyncMock) as mock_thread:
+            await send_cancellation_escalation_alert(
+                "contato@clinica.example", "Clinica Teste", "https://wa.me/5511988887777"
+            )
+            mock_thread.assert_called_once()
+            subject = mock_thread.call_args.args[2]
+            body = mock_thread.call_args.args[3]
+    finally:
+        patcher.stop()
+
+    assert "NÃO avisado" in subject
+    assert "https://wa.me/5511988887777" in body
+    assert "Clinica Teste" in body
+
+
+async def test_escalation_without_a_number_says_so_instead_of_printing_none():
+    patcher = _patch_settings()
+    try:
+        with patch("asyncio.to_thread", new_callable=AsyncMock) as mock_thread:
+            await send_cancellation_escalation_alert(
+                "contato@clinica.example", "Clinica Teste", None
+            )
+            body = mock_thread.call_args.args[3]
+    finally:
+        patcher.stop()
+
+    assert "None" not in body
+    assert "não há um número" in body.lower()
+
+
+async def test_escalation_never_raises_when_smtp_breaks():
+    """It is the end of the line: a failed alert must not become an unhandled
+    exception in the worker."""
+    patcher = _patch_settings()
+    try:
+        with patch(
+            "asyncio.to_thread", new_callable=AsyncMock, side_effect=OSError("conn refused")
+        ):
+            await send_cancellation_escalation_alert(
+                "contato@clinica.example", "Clinica Teste", None
+            )
+    finally:
+        patcher.stop()
+
+
+async def test_escalation_is_silent_when_smtp_is_unconfigured():
+    patcher = _patch_settings(SMTP_HOST="")
+    try:
+        with patch("asyncio.to_thread", new_callable=AsyncMock) as mock_thread:
+            await send_cancellation_escalation_alert(
+                "contato@clinica.example", "Clinica Teste", None
+            )
+            mock_thread.assert_not_called()
+    finally:
+        patcher.stop()

@@ -22,18 +22,34 @@ created without an invite has no linked user and therefore no address — this
 hook is then a logged no-op for them, which is honest, and which the
 professionals screen of both frontends now says out loud.
 
-**Exactly one email per appointment.** `run_post_booking_hooks` is an arq job
-and arq retries jobs; a second "nova consulta marcada" is direct noise in a
-doctor's inbox. Claimed through `ProcessedEvent` — the same durable ledger the
-webhook pipeline and `plugins/reminders.py` already use, namespaced
-`profnotif:<appointment_id>` — with one addition reminders does not need: a
-claim whose send then FAILS is RELEASED, so a retry can try again. Reminders
-can afford "claimed means done" (a missed reminder beats a duplicate); here an
-SMTP outage must not permanently swallow the mail.
+**Exactly one email per appointment.** Claimed through `ProcessedEvent` — the
+same durable ledger the webhook pipeline and `plugins/reminders.py` already
+use, namespaced `profnotif:<appointment_id>`. Reminders can afford "claimed
+means done" (a missed reminder beats a duplicate); here an SMTP outage must
+not permanently swallow the mail, so a claim whose send did not happen is
+given back.
+
+**A retry that actually exists.** Giving the key back is not, by itself, a
+retry — and this module used to treat it as one. Nothing re-runs a
+`post_booking` hook: `registry.run_post_booking` wraps every hook in its own
+try/except by design (see below), so a hook cannot even ask for one by
+raising, and the outer `run_post_booking_hooks` job returns normally either
+way. A released key with nothing scheduled behind it is just a lost email
+with a log line. So a transient failure ENQUEUES a job of its own —
+`retry_professional_notification`, below, registered in
+`workers/arq_worker.py` — which raises `arq.Retry` and therefore really does
+run again. The key is released only AFTER that job is on the queue, never
+before.
+
+Only TRANSIENT failures are worth that. `EMAIL_ENABLED=false` is a
+configuration choice, not an outage: no number of attempts turns it into a
+delivered email, so it stays a logged no-op. `services/email.py::EmailOutcome`
+is what draws that line.
 
 Failure is contained by construction: `registry.run_post_booking` wraps each
 hook in its own try/except, so SMTP being down cannot disturb the already-
-committed booking nor stop `pix_deposit` running in the same sweep.
+committed booking nor stop `pix_deposit` running in the same sweep. That
+containment is precisely why the retry has to be a separate job.
 
 Never logs an email address, a phone number, or any patient content — only
 ids, counts and a reason string.
@@ -43,17 +59,18 @@ from datetime import UTC, datetime
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
+from arq import Retry
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
-from secretaria.models import ProcessedEvent, Professional
+from secretaria.models import Appointment, Patient, ProcessedEvent, Professional, Tenant
 from secretaria.plugins.base import PluginSpec, PostBookingContext
 from secretaria.plugins.registry import register
 from secretaria.services.brain_professionals import fetch_professional_emails
-from secretaria.services.email import send_transactional_email_message
+from secretaria.services.email import EmailOutcome, send_transactional_email_result
 
 logger = get_logger(__name__)
 
@@ -115,14 +132,20 @@ async def _claim(appointment_id: UUID) -> bool:
 
 
 async def _release(appointment_id: UUID) -> None:
-    """Undo a claim whose send did not go out, so a retry may try again.
+    """Give the ledger row back. States one fact: the send did NOT happen.
 
     The half of idempotency reminders does not implement: there, "claimed"
     means "done, never repeat". Here a claim is only a lock, and a send that
-    returned False (SMTP down, email disabled, unknown template) never
-    happened — leaving the row would turn a transient outage into a
-    permanently lost notification. Best-effort: a failure to release is logged
-    and swallowed, since the caller is already on its failure path.
+    never left the process never consumed it — leaving the row would turn a
+    transient outage into a permanently lost notification.
+
+    What it is NOT is a retry. It schedules nothing. Whoever calls it is
+    responsible for saying what happens next, and on the transient path that
+    means enqueueing `retry_professional_notification` FIRST and releasing
+    only once it is on the queue.
+
+    Best-effort: a failure to release is logged and swallowed, since the
+    caller is already on its failure path.
     """
     key = _ledger_key(appointment_id)
     try:
@@ -160,9 +183,34 @@ def _skip(appointment_id, reason: str) -> None:
     )
 
 
-async def _post_booking(ctx: PostBookingContext) -> None:
-    """Email the appointment's owning professional. Best-effort, exactly once."""
-    appointment = ctx.appointment
+# How hard the resend tries before giving up, and how long the attempt stays
+# worth making. Justified in `_retry_decision`.
+RETRY_MAX_TRIES = 5
+RETRY_DEFER_S = 300
+RETRY_VALIDITY_S = 60 * 60
+
+# What `_deliver` reports back. Not an enum: three call sites, all in this
+# module, and the strings are what the log field carries anyway.
+_SENT = "sent"
+_SKIPPED = "skipped"
+_TRANSIENT = "transient"
+
+RETRY_JOB_NAME = "retry_professional_notification"
+
+
+async def _deliver(tenant: Tenant, patient: Patient | None, appointment: Appointment) -> str:
+    """Resolve the address and send the mail. Returns _SENT / _SKIPPED / _TRANSIENT.
+
+    The whole body of the notification, shared by the `post_booking` hook and
+    by the retry job so a resend is the same email — including the
+    `ProcessedEvent` claim, which is what makes a retry safe to run against an
+    appointment somebody already got mail for.
+
+    _TRANSIENT is returned with the claim still HELD on purpose. Releasing it
+    is the caller's job, and only AFTER it has actually scheduled the retry
+    that will re-claim it: release-then-fail-to-schedule is the exact shape
+    this module is being fixed for.
+    """
     professional_id = appointment.professional_id
     if professional_id is None:
         # No owner to address. Since the booking-ownership round this only
@@ -170,27 +218,34 @@ async def _post_booking(ctx: PostBookingContext) -> None:
         # explicit selection (services/booking_scope.resolve_booking_owner_id);
         # the common single-professional clinic now always resolves an owner.
         _skip(appointment.id, "no_professional")
-        return
+        return _SKIPPED
 
-    professional = await _load_professional(ctx.tenant.id, professional_id)
+    professional = await _load_professional(tenant.id, professional_id)
     if professional is None:
         # Either deleted between booking and this job, or — the reason the
         # tenant filter exists — not this clinic's to notify.
         _skip(appointment.id, "professional_not_found")
-        return
+        return _SKIPPED
 
-    emails = await fetch_professional_emails(ctx.tenant.id)
+    emails = await fetch_professional_emails(tenant.id)
     if emails is None:
-        _skip(appointment.id, "email_lookup_failed")
-        return
+        # brain-api could not answer. "We do not know" is not "nobody", and it
+        # is usually a blip — worth another look. No claim has been taken yet,
+        # so there is nothing to give back here.
+        logger.warning(
+            "professional_notification_lookup_failed",
+            appointment_id=str(appointment.id),
+            tenant_id=str(tenant.id),
+        )
+        return _TRANSIENT
     to_email = emails.get(str(professional_id))
     if not to_email:
         _skip(appointment.id, "professional_without_email")
-        return
+        return _SKIPPED
 
     if not await _claim(appointment.id):
         _skip(appointment.id, "already_notified")
-        return
+        return _SKIPPED
 
     settings = get_settings()
     agenda_url = (settings.DOCTOR_AGENDA_URL or "").strip()
@@ -199,36 +254,210 @@ async def _post_booking(ctx: PostBookingContext) -> None:
         "professional_name": professional.name,
         # `patient` is None for a booking with no patient row (a hub-created
         # block). The appointment is still real, so the mail still goes.
-        "patient_name": (ctx.patient.name if ctx.patient else None) or _UNKNOWN_PATIENT,
+        "patient_name": (patient.name if patient else None) or _UNKNOWN_PATIENT,
         "service": appointment.appointment_type or _UNKNOWN_SERVICE,
-        "when": _local_when(appointment.start_at, ctx.tenant.timezone),
+        "when": _local_when(appointment.start_at, tenant.timezone),
         # Pre-rendered lines: empty when there is nothing to say, so the
         # template itself needs no conditionals (see services/email.py).
         "insurance_line": f"Convênio: {insurance}\n" if insurance else "",
         "agenda_line": f"Ver na agenda:\n{agenda_url}\n\n" if agenda_url else "",
     }
 
-    sent = await send_transactional_email_message(
+    outcome = await send_transactional_email_result(
         to=to_email, template=TEMPLATE_ID, variables=variables
     )
-    if not sent:
-        # Disabled, misconfigured, or a transient SMTP failure — that module's
-        # contract is to return False rather than raise, and it already logged
-        # which. Give the claim back so a retry is still possible.
-        await _release(appointment.id)
+    if outcome is EmailOutcome.SENT:
         logger.info(
-            "professional_notification_not_sent",
+            "professional_notification_sent",
             appointment_id=str(appointment.id),
+            tenant_id=str(tenant.id),
+            professional_id=str(professional_id),
+        )
+        return _SENT
+
+    if outcome.is_transient:
+        # Claim deliberately NOT released here — see this function's docstring.
+        return _TRANSIENT
+
+    # Everything else is permanent: the mailer is switched off, or the
+    # template/render is broken. Retrying changes nothing, so the key is
+    # simply given back and nothing is scheduled.
+    await _release(appointment.id)
+    if outcome is EmailOutcome.DISABLED:
+        _skip(appointment.id, "email_disabled")
+    else:
+        # A template id or a placeholder that does not exist is OUR bug, and it
+        # silently costs every doctor their booking mail until somebody
+        # notices. Stable alarm field so an ops filter can.
+        logger.error(
+            "professional_notification_undeliverable",
+            alarm="professional_notification_undelivered",
+            reason=outcome.value,
+            appointment_id=str(appointment.id),
+            tenant_id=str(tenant.id),
+        )
+    return _SKIPPED
+
+
+async def _schedule_retry(redis, tenant_id: UUID, appointment_id: UUID) -> bool:
+    """Put `retry_professional_notification` on the queue. True iff one is now pending.
+
+    Deterministic `_job_id` so a booking can only ever have ONE retry chain:
+    arq refuses a second enqueue under a job id already in flight, which is the
+    cheap guard against two chains racing to claim the same ledger key. A
+    refused duplicate still means "a retry exists", hence True.
+
+    `redis is None` (unit tests, a dev script without Redis) is not an error,
+    but it IS the difference between a scheduled resend and a lost one, so it
+    returns False and the caller says so out loud.
+    """
+    if redis is None:
+        return False
+    try:
+        await redis.enqueue_job(
+            RETRY_JOB_NAME,
+            str(tenant_id),
+            str(appointment_id),
+            _job_id=f"profnotifretry:{appointment_id}",
+            _defer_by=RETRY_DEFER_S,
+        )
+        return True
+    except Exception as exc:
+        logger.warning(
+            "professional_notification_retry_enqueue_failed",
+            appointment_id=str(appointment_id),
+            error=str(exc),
+        )
+        return False
+
+
+def _retry_decision(ctx: dict) -> int | None:
+    """Seconds to wait before the next attempt, or None to stop trying.
+
+    Two bounds:
+
+    * ATTEMPTS — `RETRY_MAX_TRIES` in total, matching arq's own default
+      `max_tries` (5, `arq.worker.Worker`; `workers/arq_worker.py` sets no
+      override) so this budget is the one that runs out, with an explicit
+      alarm, rather than arq's, which logs "max retries exceeded" and drops
+      the job.
+    * VALIDITY — `RETRY_VALIDITY_S` from the original enqueue (arq preserves
+      `enqueue_time` across retries). Generous compared with a cancellation
+      notice, and deliberately: a doctor reading "a patient booked with you"
+      forty minutes late has lost nothing, whereas a patient hearing about a
+      cancellation late may already have travelled. An hour still bounds it,
+      because a booking mail arriving the next morning is confusing rather
+      than useful — the agenda is the source of truth by then.
+
+    That is 5 attempts, 5 minutes apart, all inside one hour.
+
+    An empty `ctx` — a direct call from a test — reads as "first attempt, no
+    deadline known" and gets a retry.
+    """
+    job_try = ctx.get("job_try") or 1
+    if job_try >= RETRY_MAX_TRIES:
+        return None
+
+    enqueued_at = ctx.get("enqueue_time")
+    if isinstance(enqueued_at, datetime):
+        age = (datetime.now(UTC) - _as_utc(enqueued_at)).total_seconds()
+        if age + RETRY_DEFER_S >= RETRY_VALIDITY_S:
+            return None
+
+    return RETRY_DEFER_S
+
+
+async def retry_professional_notification(ctx: dict, tenant_id: str, appointment_id: str) -> None:
+    """arq job: try the "nova consulta marcada" email again.
+
+    Registered in `workers/arq_worker.py` and enqueued only by `_post_booking`
+    below, on a transient failure. Exists because the hook itself cannot ask
+    for a retry — `registry.run_post_booking` contains hook exceptions by
+    contract, so raising in there is swallowed and the surrounding job still
+    finishes successfully.
+
+    Reloads the rows by id rather than trusting anything serialised into the
+    job, and goes through the same `_deliver` (hence the same `ProcessedEvent`
+    claim), so a mail that did get out in the meantime is skipped rather than
+    duplicated.
+
+    Raises `arq.Retry` while there is budget left — the one exception arq
+    re-runs a job for. When the budget is gone it logs a stable alarm and
+    stops: a doctor's booking mail is worth several attempts, not an infinite
+    queue.
+    """
+    async with async_session_factory() as session:
+        appointment = await session.get(Appointment, UUID(appointment_id))
+        if appointment is None or str(appointment.tenant_id) != tenant_id:
+            # Deleted meanwhile, or — the isolation guard — not this clinic's.
+            _skip(appointment_id, "appointment_not_found")
+            return
+        tenant = await session.get(Tenant, UUID(tenant_id))
+        if tenant is None:
+            _skip(appointment_id, "tenant_not_found")
+            return
+        patient = (
+            await session.get(Patient, appointment.patient_id)
+            if appointment.patient_id is not None
+            else None
+        )
+
+    result = await _deliver(tenant, patient, appointment)
+    if result != _TRANSIENT:
+        return
+
+    defer = _retry_decision(ctx)
+    # Released either way: the send did not happen, so the key was not
+    # consumed. When `defer` is set, THIS job is the retry and re-claims it on
+    # the next run — nothing else has to be scheduled.
+    await _release(appointment.id)
+    if defer is None:
+        logger.error(
+            "professional_notification_abandoned",
+            alarm="professional_notification_undelivered",
+            appointment_id=appointment_id,
+            tenant_id=tenant_id,
+        )
+        return
+    logger.warning(
+        "professional_notification_retrying",
+        appointment_id=appointment_id,
+        tenant_id=tenant_id,
+        retry_in_s=defer,
+    )
+    raise Retry(defer=defer)
+
+
+async def _post_booking(ctx: PostBookingContext) -> None:
+    """Email the appointment's owning professional. Best-effort, exactly once.
+
+    A transient failure does not end here: it schedules
+    `retry_professional_notification` and only then gives the ledger key back.
+    """
+    result = await _deliver(ctx.tenant, ctx.patient, ctx.appointment)
+    if result != _TRANSIENT:
+        return
+
+    scheduled = await _schedule_retry(ctx.redis, ctx.tenant.id, ctx.appointment.id)
+    # Order matters: the retry has to be on the queue BEFORE the key is free,
+    # or a crash in between leaves a released key with nothing behind it.
+    await _release(ctx.appointment.id)
+    if scheduled:
+        logger.warning(
+            "professional_notification_retry_scheduled",
+            appointment_id=str(ctx.appointment.id),
             tenant_id=str(ctx.tenant.id),
         )
         return
-
-    logger.info(
-        "professional_notification_sent",
-        appointment_id=str(appointment.id),
+    # No pool, or the enqueue failed. The mail is lost and nothing will pick it
+    # up — which is exactly the outcome this module used to produce silently,
+    # so it is said out loud with the same alarm the retry job uses.
+    logger.error(
+        "professional_notification_not_sent",
+        alarm="professional_notification_undelivered",
+        reason="no_retry_scheduled",
+        appointment_id=str(ctx.appointment.id),
         tenant_id=str(ctx.tenant.id),
-        professional_id=str(professional_id),
-        source=ctx.source,
     )
 
 

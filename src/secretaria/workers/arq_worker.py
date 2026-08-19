@@ -17,6 +17,7 @@ from secretaria.core.build_info import (
 from secretaria.core.database import engine
 from secretaria.core.logging import get_logger, setup_logging
 from secretaria.plugins.post_booking import run_post_booking_hooks
+from secretaria.plugins.professional_notification import retry_professional_notification
 from secretaria.plugins.reminders import send_appointment_reminders
 from secretaria.workers.deploy_parity import check_deploy_parity_cron
 from secretaria.workers.onboarding_cron import (
@@ -106,6 +107,11 @@ class WorkerSettings:
         # enqueued off both booking commit points, never run inline. See
         # plugins/post_booking.py.
         run_post_booking_hooks,
+        # Resend of the professional's "nova consulta marcada" email after a
+        # transient failure. A separate job because run_post_booking_hooks
+        # cannot retry a single hook: registry.run_post_booking contains hook
+        # exceptions by contract. See plugins/professional_notification.py.
+        retry_professional_notification,
         # Onboarding transactional email (contract v1 §4 endpoint 6), enqueued
         # by POST /internal/notifications/email. See workers/tasks.py and
         # services/email.py.

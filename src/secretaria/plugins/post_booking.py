@@ -115,5 +115,10 @@ async def run_post_booking_hooks(
             appointment=appointment,
             waba_token=waba_token,
             source=source,  # type: ignore[arg-type]
+            # Handed down so a hook can enqueue its OWN follow-up job — see
+            # PostBookingContext.redis. `registry.run_post_booking` swallows
+            # hook exceptions on purpose, so this pool is the only way a hook
+            # can ask for another attempt at anything.
+            redis=redis,
         ),
     )

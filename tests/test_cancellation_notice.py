@@ -27,6 +27,7 @@ from uuid import uuid4  # noqa: E402
 
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
+from arq import Retry  # noqa: E402
 from httpx import AsyncClient  # noqa: E402
 from sqlalchemy import event  # noqa: E402
 from sqlalchemy.ext.asyncio import (  # noqa: E402
@@ -56,6 +57,8 @@ from secretaria.workers import tasks  # noqa: E402
 
 CALENDAR = "/tenants/me/calendar"
 PATIENT_WA = "5511988887777"
+# Where an abandoned notice escalates to. Must never appear in a log line.
+CLINIC_EMAIL = "contato@clinica.example"
 
 
 # ---------------------------------------------------------------------------
@@ -626,21 +629,157 @@ async def test_a_paid_send_is_never_charged_twice(db, tenant, wa, metered):
     assert len(metered) == 1
 
 
-async def test_a_failed_send_stays_retryable(db, tenant, wa, metered):
-    """A claim is a lock, not a receipt: a WhatsApp blip must not permanently
-    swallow the one message telling somebody their consultation is gone."""
+async def test_a_failed_send_raises_so_arq_really_retries(db, tenant, wa, metered):
+    """A claim is a lock, not a receipt — but giving the lock back is only half
+    of it, and this job used to stop there.
+
+    arq re-runs a job for `arq.Retry` and nothing else (arq.worker: a plain
+    exception is logged as a permanent failure, and a job that RETURNS is
+    finished). So the old `except: release; log; return` handed the key back to
+    a retry that was never going to happen, and the patient was simply never
+    told their consultation was cancelled."""
     appt = await _seed(db, tenant, last_inbound=datetime.now(UTC) - timedelta(hours=2))
 
     wa.explode = True
-    await _run(appt)
+    with pytest.raises(Retry):
+        await _run(appt)
     assert wa.buttons == []
 
+    # arq now re-runs the same job: the key is free, so the claim succeeds.
     wa.explode = False
     await _run(appt)
     assert len(wa.buttons) == 1  # the retry got through
 
     await _run(appt)
     assert len(wa.buttons) == 1  # ...and now it IS a receipt
+
+
+async def test_a_failed_paid_send_retries_and_is_charged_exactly_once(db, tenant, wa, metered):
+    """Outside the 24h window every send is billed, so the retry path is the one
+    place a duplicate costs the clinic real money.
+
+    This is also the case that failed CONSTANTLY before the template was
+    approved on Meta's side: outside the window, an unapproved
+    `appointment_cancelled` means every single notice took this branch."""
+    appt = await _seed(db, tenant, last_inbound=datetime.now(UTC) - timedelta(hours=40))
+
+    wa.explode = True
+    with pytest.raises(Retry):
+        await _run(appt, allow_paid=True)
+    assert wa.templates == []
+    assert metered == []  # nothing sent, nothing billed
+
+    wa.explode = False
+    await _run(appt, allow_paid=True)
+    assert len(wa.templates) == 1
+    assert len(metered) == 1
+
+    # A late duplicate of the same job must not buy a second template.
+    await _run(appt, allow_paid=True)
+    assert len(wa.templates) == 1
+    assert len(metered) == 1
+
+
+async def test_metering_can_never_trigger_a_second_billed_send(db, tenant, wa, monkeypatch):
+    """The message already went out. A metering blip must not reach the retry
+    path, because that retry would send — and charge — again.
+
+    Guaranteed structurally: `_emit_cancellation_usage` sits OUTSIDE the try
+    that catches send failures. This drives the nastier version of the same
+    thing, a metering call that raises outright."""
+    appt = await _seed(db, tenant, last_inbound=datetime.now(UTC) - timedelta(hours=40))
+
+    async def _boom(**kwargs):
+        raise RuntimeError("meter down")
+
+    monkeypatch.setattr(tasks, "emit_usage_event", _boom)
+
+    await _run(appt, allow_paid=True)  # must not raise Retry
+
+    assert len(wa.templates) == 1
+
+
+async def test_the_retry_gives_up_and_tells_the_clinic(db, tenant, wa, metered, monkeypatch):
+    """Past the budget the patient still has not been told, and nobody is
+    reading the worker log. A patient who does not know will travel to a
+    consultation that no longer exists — so the failure leaves the machine and
+    reaches the clinic, with the free `wa.me` link the hub already offers."""
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.contact_email = CLINIC_EMAIL
+        await session.commit()
+
+    appt = await _seed(db, tenant, last_inbound=datetime.now(UTC) - timedelta(hours=2))
+
+    alerts: list[dict] = []
+
+    async def _alert(to_email, clinic_name, whatsapp_link):
+        alerts.append({"to": to_email, "clinic": clinic_name, "link": whatsapp_link})
+
+    monkeypatch.setattr(tasks, "send_cancellation_escalation_alert", _alert)
+
+    wa.explode = True
+    # Last permitted attempt: no budget left, so it must NOT raise.
+    await tasks.send_cancellation_notice(
+        {"job_try": tasks.CANCEL_NOTICE_MAX_TRIES},
+        str(appt.tenant_id),
+        str(appt.id),
+        "Dra. Ana",
+        None,
+        None,
+        False,
+    )
+
+    assert wa.buttons == []
+    assert len(alerts) == 1
+    assert alerts[0]["to"] == CLINIC_EMAIL
+    assert PATIENT_WA in (alerts[0]["link"] or "")  # the doctor can write in one tap
+
+
+async def test_the_retry_stops_once_the_notice_is_too_late_to_help(db, tenant, wa, metered):
+    """A cancellation notice landing hours later reaches somebody who has
+    already left. Past the validity window the job stops trying rather than
+    delivering something worse than nothing."""
+    appt = await _seed(db, tenant, last_inbound=datetime.now(UTC) - timedelta(hours=2))
+
+    wa.explode = True
+    await tasks.send_cancellation_notice(
+        {
+            "job_try": 1,
+            "enqueue_time": datetime.now(UTC)
+            - timedelta(seconds=tasks.CANCEL_NOTICE_VALIDITY_S),
+        },
+        str(appt.tenant_id),
+        str(appt.id),
+        "Dra. Ana",
+        None,
+        None,
+        False,
+    )
+
+    assert wa.buttons == []
+
+
+async def test_giving_up_is_never_silent(db, tenant, wa, metered, capsys):
+    """Even with no clinic email on file, the abandonment carries a stable alarm
+    field an ops filter can key on."""
+    appt = await _seed(db, tenant, last_inbound=datetime.now(UTC) - timedelta(hours=2))
+
+    wa.explode = True
+    await tasks.send_cancellation_notice(
+        {"job_try": tasks.CANCEL_NOTICE_MAX_TRIES},
+        str(appt.tenant_id),
+        str(appt.id),
+        "Dra. Ana",
+        None,
+        None,
+        False,
+    )
+
+    logged = capsys.readouterr().out
+    assert "cancellation_notice_abandoned" in logged
+    assert "cancellation_notice_undelivered" in logged
+    assert PATIENT_WA not in logged
 
 
 async def test_the_deposit_notice_rides_along_rather_than_arriving_separately(
@@ -684,7 +823,8 @@ async def test_the_job_never_logs_a_phone_or_the_justification(db, tenant, wa, m
     # suite's WARNING log level) and it is where context tends to get dumped
     # "just to help debugging" — exactly the leak this guards against.
     wa.explode = True
-    await _run(appt, justification="Fui chamado para uma cirurgia")
+    with pytest.raises(Retry):
+        await _run(appt, justification="Fui chamado para uma cirurgia")
 
     logged = capsys.readouterr().out
     assert "cancellation_notice_failed" in logged, "nothing was logged — assertions below are void"

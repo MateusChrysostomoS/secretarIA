@@ -98,9 +98,20 @@ e o `plugins/reminders.py` usam, com chave namespaced. Aqui a chave é
 
 **Uma diferença deliberada em relação ao `reminders`:** lá, "claimed" significa "feito,
 nunca repetir" (lembrete perdido é melhor que duplicado). Aqui o claim é **só uma
-tranca** — um envio que retorna `False` (SMTP fora, e-mail desligado) **devolve** o claim,
-senão uma queda transitória viraria uma notificação perdida para sempre, e ligar o mailer
-depois encontraria todo booking antigo já marcado como "enviado".
+tranca** — um envio que não aconteceu **devolve** o claim, senão uma queda transitória
+viraria uma notificação perdida para sempre, e ligar o mailer depois encontraria todo
+booking antigo já marcado como "enviado".
+
+> **Corrigido depois, pelo `PROMPT_FIX_32` (2026-08-18):** devolver o claim **não era**
+> um retry, e esta seção afirmava que era. Nada reexecuta um hook de `post_booking` —
+> `registry.run_post_booking` contém as exceções de cada hook por contrato, então o hook
+> não consegue nem pedir retry levantando, e o job externo termina com sucesso de
+> qualquer jeito. Chave devolvida sem nada agendado atrás = e-mail perdido com uma linha
+> de log. Hoje uma falha **transitória** enfileira o job próprio
+> `retry_professional_notification` (que levanta `arq.Retry`, a única coisa que faz o arq
+> reexecutar um job) e só **depois** devolve a chave. E `EMAIL_ENABLED=false` deixou de
+> ser tratado como falha: `services/email.py::EmailOutcome` separa "desligado" de "SMTP
+> caiu agora". Ver `docs/CHECKPOINT_fix32_retry_idempotencia.md`.
 
 ## Contenção
 
