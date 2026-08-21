@@ -44,6 +44,7 @@ from secretaria.services.flow_router import (  # noqa: E402
     DAY_PICKER_PAGE_SIZE,
     DAY_PICKER_WINDOW_DAYS,
     LABEL_ANOTHER_DAY,
+    LABEL_ANOTHER_SERVICE,
     LABEL_BACK,
     LABEL_MORE_DAYS,
     LABEL_OTHER,
@@ -330,7 +331,7 @@ async def test_day_picker_shows_a_full_page_plus_its_two_controls():
         "Dom, 07/03",
         "Seg, 08/03",
     ]
-    assert labels[-2:] == [LABEL_MORE_DAYS, LABEL_BACK]
+    assert labels[-2:] == [LABEL_MORE_DAYS, LABEL_ANOTHER_SERVICE]
 
 
 async def test_day_picker_hides_ver_mais_on_the_last_page():
@@ -343,7 +344,7 @@ async def test_day_picker_hides_ver_mais_on_the_last_page():
     )
     labels = _row_labels(result.bubbles[0])
     assert LABEL_MORE_DAYS not in labels
-    assert labels[-1] == LABEL_BACK
+    assert labels[-1] == LABEL_ANOTHER_SERVICE
 
 
 async def test_day_picker_only_lists_days_the_calendar_reported_free():
@@ -452,7 +453,7 @@ async def test_voltar_preserves_service_professional_and_insurance():
         conv,
         tenant,
         calendar,
-        _control_tap(picker.bubbles[0], LABEL_BACK),
+        _control_tap(picker.bubbles[0], LABEL_ANOTHER_SERVICE),
         professionals=profs,
     )
     assert result.action == "reply"
@@ -481,7 +482,7 @@ async def test_voltar_from_the_slot_list_preserves_the_same_fields():
         conv,
         tenant,
         calendar,
-        _control_tap(slots.bubbles[0], LABEL_BACK),
+        _control_tap(slots.bubbles[0], LABEL_ANOTHER_SERVICE),
         professionals=profs,
     )
     assert result.flow_step == STEP_AWAITING_SERVICE

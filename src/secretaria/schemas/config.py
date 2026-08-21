@@ -12,6 +12,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from secretaria.core.whatsapp_limits import (
+    MAX_BUTTON_LABEL_CHARS,
+    MAX_BUTTONS_PER_MESSAGE as MAX_GREETING_BUTTONS,
+    MAX_INTERACTIVE_BODY_CHARS,
+)
+
 # Convention: lowercase English weekday names, Monday-first.
 WEEKDAYS: tuple[str, ...] = (
     "monday",
@@ -25,12 +31,16 @@ WEEKDAYS: tuple[str, ...] = (
 
 _HHMM = r"^\d{2}:\d{2}$"
 
-# WhatsApp reply-button limits: at most 3 buttons, 20-char titles. An interactive
-# message body caps at 1024 chars (a plain text message allows 4096), so a
-# greeting that carries buttons must stay within the smaller limit.
-MAX_GREETING_BUTTONS = 3
-MAX_BUTTON_LABEL_CHARS = 20
-MAX_GREETING_WITH_BUTTONS_CHARS = 1024
+# Re-exported under this module's historical names so hub validation and its
+# tests keep importing from here, while core/whatsapp_limits.py stays the ONE
+# place the numbers are written down (and the one the send path reads).
+MAX_GREETING_WITH_BUTTONS_CHARS = MAX_INTERACTIVE_BODY_CHARS
+
+__all__ = [
+    "MAX_BUTTON_LABEL_CHARS",
+    "MAX_GREETING_BUTTONS",
+    "MAX_GREETING_WITH_BUTTONS_CHARS",
+]
 
 
 def _parse_hhmm(value: str) -> time:

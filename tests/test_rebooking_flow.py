@@ -312,7 +312,8 @@ async def test_a_solo_clinic_gets_a_fixed_line_not_an_empty_list():
 
 
 async def test_the_single_candidate_day_list_offers_a_way_back():
-    """§4.2's `Voltar` — the FEAT_32 back_target, not a bespoke mechanism."""
+    """§4.2's "Escolher outro Serviço" — the FEAT_32 back_target, not a bespoke
+    mechanism."""
     ana, bruno = _professional("Dra. Ana"), _professional("Dr. Bruno")
 
     result = await _rebook(
@@ -324,7 +325,7 @@ async def test_the_single_candidate_day_list_offers_a_way_back():
         professionals=[ana, bruno],
     )
 
-    assert any(fr.LABEL_BACK in str(r[1]) for r in _rows(result))
+    assert any(fr.LABEL_ANOTHER_SERVICE in str(r[1]) for r in _rows(result))
 
 
 # ---------------------------------------------------------------------------

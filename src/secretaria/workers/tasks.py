@@ -46,6 +46,7 @@ from secretaria.ai.tools import manage_existing_appointment, start_guided_bookin
 from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger, wa_suffix
+from secretaria.core.whatsapp_limits import truncate_button_label
 from secretaria.models import (
     AnalyticsEvent,
     Appointment,
@@ -2256,7 +2257,8 @@ def _label_match_body(body: str | None, label: str) -> bool:
     """True when `body` equals `label` or its 20-char button truncation."""
     target = (body or "").strip().casefold()
     return bool(target) and (
-        target == label.strip().casefold() or target == label[:20].strip().casefold()
+        target == label.strip().casefold()
+        or target == truncate_button_label(label).strip().casefold()
     )
 
 

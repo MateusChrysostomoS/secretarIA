@@ -17,6 +17,7 @@ os.environ.setdefault("META_VERIFY_TOKEN", "test-verify-token")
 os.environ.setdefault("META_ACCESS_TOKEN", "test-access-token")
 os.environ.setdefault("META_PHONE_NUMBER_ID", "1234567890")
 
+from secretaria.core.whatsapp_limits import truncate_list_row_title  # noqa: E402
 from secretaria.services.booking_scope import (  # noqa: E402
     BOOKING_TOPOLOGY_MULTI,
     BOOKING_TOPOLOGY_NONE,
@@ -136,10 +137,26 @@ def test_canonical_service_name_returns_the_catalogs_own_spelling():
 
 
 def test_canonical_service_name_matches_the_whatsapp_row_truncation():
-    # send_list caps row titles at 24 chars, so a tap echoes the truncated
-    # title — it must still resolve to the full catalog name.
+    # send_list caps row titles at MAX_LIST_ROW_TITLE_CHARS, so a tap echoes the
+    # truncated title — it must still resolve to the full catalog name. Both
+    # sides go through `truncate_list_row_title`, the same helper the row was
+    # rendered with, so this asserts the round-trip rather than a hardcoded cut.
     name = "Consulta de Acompanhamento Prolongada"
-    assert canonical_service_name([{"name": name}], name[:24]) == name
+    tapped = truncate_list_row_title(name)
+    assert tapped != name  # guard: this name must actually need truncating
+    assert canonical_service_name([{"name": name}], tapped) == name
+
+
+def test_canonical_service_name_keeps_prefix_heavy_services_apart():
+    # Two services sharing a long prefix must resolve to THEMSELVES, not to
+    # whichever sits first in the catalogue. This is the failure a
+    # word-boundary truncation would introduce (both would render as
+    # "Consulta de rotina"), and it books the wrong service silently.
+    adulto = "Consulta de rotina adulto"
+    infantil = "Consulta de rotina infantil"
+    catalog = [{"name": adulto}, {"name": infantil}]
+    assert canonical_service_name(catalog, truncate_list_row_title(adulto)) == adulto
+    assert canonical_service_name(catalog, truncate_list_row_title(infantil)) == infantil
 
 
 def test_canonical_service_name_works_on_runtime_appointment_types():

@@ -33,6 +33,8 @@ from collections.abc import Sequence
 from typing import Any
 from uuid import UUID
 
+from secretaria.core.whatsapp_limits import truncate_list_row_title
+
 # --------------------------------------------------------------------------
 # Topology: how many active professionals this tenant books with
 # --------------------------------------------------------------------------
@@ -137,7 +139,9 @@ def canonical_service_name(services: Sequence[Any] | None, candidate: str | None
 
     Case- and whitespace-insensitive. The 24-character prefix comparison is
     the WhatsApp list-row contract (`send_list` caps row titles at 24, so a
-    tap echoes the truncated title) — harmless for the non-tap callers, and it
+    tap echoes the truncated title, cut by `truncate_list_row_title` — the SAME
+    helper the row was RENDERED with, so the two can never drift) — harmless
+    for the non-tap callers, and it
     keeps a tapped row and a typed name resolving to the same entry.
 
     None means "this clinic has no such active service". Callers must treat
@@ -152,7 +156,7 @@ def canonical_service_name(services: Sequence[Any] | None, candidate: str | None
         name = service_entry_name(entry)
         if not name:
             continue
-        if _norm(name) == target or _norm(name[:24]) == target:
+        if _norm(name) == target or _norm(truncate_list_row_title(name)) == target:
             return name
     return None
 

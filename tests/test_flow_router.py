@@ -205,7 +205,23 @@ async def test_select_service_shows_detail_with_price():
     assert res.flow_step == STEP_AWAITING_SERVICE_CONFIRM
     assert res.flow_selected_type == "Primeira Consulta"
     assert isinstance(res.bubbles[0], ButtonBubble)
-    assert "R$ 250" in res.bubbles[0].body
+    # Adjacent, no separator dash: "Primeira Consulta" + "R$ 250", not
+    # "Primeira Consulta — R$ 250".
+    assert "Primeira Consulta R$ 250" in res.bubbles[0].body
+
+
+def test_service_detail_text_prefixes_a_bare_price_with_reais():
+    service = {"name": "Cirurgia de Coluna", "price": "20000"}
+    assert flow_router._service_detail_text(service, _tenant()) == (
+        "Cirurgia de Coluna R$20000\n\nDeseja agendar esse serviço?"
+    )
+
+
+def test_service_detail_text_does_not_double_prefix_an_already_priced_value():
+    service = {"name": "Primeira Consulta", "price": "R$ 250"}
+    text = flow_router._service_detail_text(service, _tenant())
+    assert "Primeira Consulta R$ 250" in text
+    assert "R$R$" not in text
 
 
 async def test_unmatched_service_delegates_preserving_state():
@@ -1038,7 +1054,7 @@ async def test_service_help_pick_hands_back_to_service_detail(monkeypatch):
     assert res.flow_step == STEP_AWAITING_SERVICE_CONFIRM
     assert res.flow_selected_type == "Primeira Consulta"
     assert isinstance(res.bubbles[0], ButtonBubble)
-    assert "R$ 250" in res.bubbles[0].body
+    assert "Primeira Consulta R$ 250" in res.bubbles[0].body
     # Grounding: the node saw the tenant's real catalog and the round flag.
     assert [s["name"] for s in captured["services"]] == ["Primeira Consulta"]
     assert captured["patient_message"] == "preciso de uma avaliação completa"

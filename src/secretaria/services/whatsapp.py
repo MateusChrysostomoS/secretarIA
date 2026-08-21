@@ -15,6 +15,19 @@ import httpx
 
 from secretaria.config import Settings, get_settings
 from secretaria.core.logging import get_logger, wa_suffix
+from secretaria.core.whatsapp_limits import (
+    MAX_BUTTONS_PER_MESSAGE,
+    MAX_INTERACTIVE_BODY_CHARS,
+    MAX_LIST_OPEN_BUTTON_CHARS,
+    MAX_LIST_ROW_DESCRIPTION_CHARS,
+    MAX_LIST_ROW_ID_CHARS,
+    MAX_LIST_ROW_TITLE_CHARS,
+    MAX_LIST_ROWS,
+    MAX_LIST_SECTION_TITLE_CHARS,
+    truncate_button_label,
+    truncate_list_row_title,
+    truncate_plain,
+)
 from secretaria.models.tenant import Tenant
 
 logger = get_logger(__name__)
@@ -236,13 +249,20 @@ class WhatsAppClient:
         Args:
             to: recipient wa_id.
             body: message body (max 1024 chars).
-            buttons: list of (id, title) pairs. WhatsApp caps title at 20 chars
-                and the list at 3 entries; extra entries are dropped silently
-                so the LLM never blocks a send by over-listing.
+            buttons: list of (id, title) pairs. WhatsApp caps title at
+                MAX_BUTTON_LABEL_CHARS and the list at MAX_BUTTONS_PER_MESSAGE
+                entries; extra entries are dropped silently so the LLM never
+                blocks a send by over-listing.
         """
         capped = [
-            {"type": "reply", "reply": {"id": bid[:256], "title": title[:20]}}
-            for bid, title in buttons[:3]
+            {
+                "type": "reply",
+                "reply": {
+                    "id": bid[:256],
+                    "title": truncate_button_label(title),
+                },
+            }
+            for bid, title in buttons[:MAX_BUTTONS_PER_MESSAGE]
         ]
         payload = {
             "messaging_product": "whatsapp",
@@ -251,7 +271,7 @@ class WhatsAppClient:
             "type": "interactive",
             "interactive": {
                 "type": "button",
-                "body": {"text": body[:1024]},
+                "body": {"text": truncate_plain(body, MAX_INTERACTIVE_BODY_CHARS)},
                 "action": {"buttons": capped},
             },
         }
@@ -326,16 +346,25 @@ class WhatsAppClient:
         Args:
             to: recipient wa_id.
             body: message body (max 1024 chars).
-            button_label: text on the button that opens the list (max 20 chars).
-            rows: list of (id, title, description) tuples. Title max 24 chars,
-                description max 72 chars, id max 200 chars. Extras dropped.
-            section_title: label above the rows in the picker (max 24 chars).
+            button_label: text on the button that opens the list
+                (MAX_LIST_OPEN_BUTTON_CHARS).
+            rows: list of (id, title, description) tuples, capped at
+                MAX_LIST_ROWS. Titles go through `truncate_list_row_title` -
+                the SAME cut the callers render with and the matchers compare
+                against (services/booking_scope.py), so re-applying it here is
+                a no-op for a title that already fits and a last line of
+                defence for one built anywhere else.
+            section_title: label above the rows in the picker
+                (MAX_LIST_SECTION_TITLE_CHARS).
         """
         capped_rows = []
-        for rid, title, desc in rows[:10]:
-            row = {"id": rid[:200], "title": title[:24]}
+        for rid, title, desc in rows[:MAX_LIST_ROWS]:
+            row = {
+                "id": rid[:MAX_LIST_ROW_ID_CHARS],
+                "title": truncate_list_row_title(title, MAX_LIST_ROW_TITLE_CHARS),
+            }
             if desc:
-                row["description"] = desc[:72]
+                row["description"] = truncate_plain(desc, MAX_LIST_ROW_DESCRIPTION_CHARS)
             capped_rows.append(row)
         payload = {
             "messaging_product": "whatsapp",
@@ -344,10 +373,15 @@ class WhatsAppClient:
             "type": "interactive",
             "interactive": {
                 "type": "list",
-                "body": {"text": body[:1024]},
+                "body": {"text": truncate_plain(body, MAX_INTERACTIVE_BODY_CHARS)},
                 "action": {
-                    "button": button_label[:20],
-                    "sections": [{"title": section_title[:24], "rows": capped_rows}],
+                    "button": truncate_plain(button_label, MAX_LIST_OPEN_BUTTON_CHARS),
+                    "sections": [
+                        {
+                            "title": truncate_plain(section_title, MAX_LIST_SECTION_TITLE_CHARS),
+                            "rows": capped_rows,
+                        }
+                    ],
                 },
             },
         }

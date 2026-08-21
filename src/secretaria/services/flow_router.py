@@ -34,6 +34,10 @@ from secretaria.ai.formatter import (
 )
 from secretaria.ai.scoped_help import run_professional_help, run_service_help
 from secretaria.core.logging import get_logger
+from secretaria.core.whatsapp_limits import (
+    truncate_button_label,
+    truncate_list_row_title,
+)
 from secretaria.models import FlowState
 from secretaria.services.booking_scope import (
     canonical_service_name,
@@ -248,11 +252,13 @@ _WEEKDAY_SHORT_PT = ("Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom")
 # How far ahead the day scan looks, and how many days one page shows. The
 # window is a SEARCH bound; what limits the screen is the page size, because
 # WhatsApp allows at most MAX_LIST_ROWS(10) rows per list message. 8 days
-# leaves exactly two control slots ("Ver mais dias" + "Voltar"/"Outro"), so a
-# page is always <= 10 rows whatever combination of controls applies.
+# leaves exactly two control slots ("Ver mais dias" + "Escolher outro
+# Serviço"/"Outro"), so a page is always <= 10 rows whatever combination of
+# controls applies.
 DAY_PICKER_WINDOW_DAYS = 20
 DAY_PICKER_PAGE_SIZE = 8
-# Slots per day page: same reserve, for "Escolher outro dia" + "Voltar".
+# Slots per day page: same reserve, for "Escolher outro dia" + "Escolher
+# outro Serviço".
 SLOT_PICKER_MAX_SLOTS = 8
 
 # List-row id prefixes for the picker. The payload rides back in the body as
@@ -266,15 +272,30 @@ ROW_DAY_BACK_PREFIX = "dayback|"
 
 LABEL_MORE_DAYS = "Ver mais dias"
 LABEL_ANOTHER_DAY = "Escolher outro dia"
+LABEL_ANOTHER_SERVICE = "Escolher outro Serviço"
 
-# Where a `Voltar` row goes back to. Passed into `enter_day_picker` by whoever
-# opens it and echoed in the row id, so the tap is self-describing:
+# Where the picker's back-control row goes back to. Passed into
+# `enter_day_picker` by whoever opens it and echoed in the row id, so the tap
+# is self-describing:
 #   - "service": the service list (the booking flow's own previous step);
 #   - "professional": the doctor list (what a rebooking-after-cancellation
 #     flow needs, since the patient may want a different doctor entirely).
-# None renders no `Voltar` row at all.
+# None renders no back-control row at all.
 BACK_TARGET_SERVICE = "service"
 BACK_TARGET_PROFESSIONAL = "professional"
+
+
+def _day_back_label(back_target: str | None) -> str:
+    """The back-control row's title for a given `back_target`.
+
+    "Escolher outro Serviço" for the only destination anything currently
+    wires up (`BACK_TARGET_SERVICE`); the historical "Voltar" otherwise, so
+    the not-yet-triggered `BACK_TARGET_PROFESSIONAL` destination (a rebooking
+    row that would actually return to the DOCTOR list) never gets mislabeled
+    as a service choice.
+    """
+    return LABEL_ANOTHER_SERVICE if back_target == BACK_TARGET_SERVICE else LABEL_BACK
+
 
 DAY_PICKER_BODY = "Para quando você gostaria? Escolha um dia:"
 DAY_PICKER_RESCHEDULE_BODY = "Para quando você gostaria de remarcar? Escolha um dia:"
@@ -574,9 +595,9 @@ def classify_yes_no(body: str | None, tenant: Tenant) -> str:
     yes_label = buttons[0] if buttons else DEFAULT_REACTIVATION_BUTTONS[0]
     no_label = buttons[1] if len(buttons) > 1 else DEFAULT_REACTIVATION_BUTTONS[1]
     target = _norm(body)
-    if target and (target == _norm(no_label) or target == _norm(no_label[:20])):
+    if target and (target == _norm(no_label) or target == _norm(truncate_button_label(no_label))):
         return "no"
-    if target and (target == _norm(yes_label) or target == _norm(yes_label[:20])):
+    if target and (target == _norm(yes_label) or target == _norm(truncate_button_label(yes_label))):
         return "yes"
     return "other"
 
@@ -605,7 +626,9 @@ def _norm(text: str | None) -> str:
 def _label_match(body: str | None, label: str) -> bool:
     """True when `body` equals `label` (or its 20-char button truncation)."""
     target = _norm(body)
-    return bool(target) and (target == _norm(label) or target == _norm(label[:20]))
+    return bool(target) and (
+        target == _norm(label) or target == _norm(truncate_button_label(label))
+    )
 
 
 def _menu_index(tenant: Tenant, body: str | None) -> int | None:
@@ -616,7 +639,7 @@ def _menu_index(tenant: Tenant, body: str | None) -> int | None:
     for index, label in enumerate(menu_buttons(tenant)):
         # send_buttons caps titles at 20 chars, so the tap echoes the truncated
         # label; match on both the full and truncated forms.
-        if _norm(label) == target or _norm(label[:20]) == target:
+        if _norm(label) == target or _norm(truncate_button_label(label)) == target:
             return index
     return None
 
@@ -779,7 +802,7 @@ def _service_list_bubble(
             shown=MAX_CATALOG_OPTION_ROWS,
         )
     rows: list[tuple[str, str]] = [
-        (f"svc|{s.get('name', '')}", str(s.get("name", ""))[:24])
+        (f"svc|{s.get('name', '')}", truncate_list_row_title(str(s.get("name", ""))))
         for s in services[:MAX_CATALOG_OPTION_ROWS]
     ]
     # Fixed last row: opens the scoped service-help node (STEP_SERVICE_HELP).
@@ -1072,7 +1095,7 @@ def _match_professional(professionals: list, body: str | None) -> Any | None:
         return None
     for professional in professionals:
         name = str(professional.name)
-        if _norm(name[:24]) == target or _norm(name) == target:
+        if _norm(truncate_list_row_title(name)) == target or _norm(name) == target:
             return professional
     return None
 
@@ -1095,7 +1118,7 @@ def _enter_professional_list(tenant: Tenant, professionals: list) -> FlowRouterR
     rows = [
         (
             f"prof|{professional.id}",
-            str(professional.name)[:24],
+            truncate_list_row_title(str(professional.name)),
             (getattr(professional, "specialty", None) or None),
         )
         for professional in professionals[:MAX_CATALOG_OPTION_ROWS]
@@ -1187,7 +1210,7 @@ def _enter_clinic_service_catalog(tenant: Tenant, professionals: list) -> FlowRo
             shown=MAX_PROFESSIONAL_ROWS,
         )
     rows = [
-        (f"svc|{s.get('name', '')}", str(s.get("name", ""))[:24])
+        (f"svc|{s.get('name', '')}", truncate_list_row_title(str(s.get("name", ""))))
         for s in services[:MAX_PROFESSIONAL_ROWS]
     ]
     return FlowRouterResult(
@@ -1217,7 +1240,7 @@ def _enter_service_professional_list(
     rows = [
         (
             f"prof|{professional.id}",
-            str(professional.name)[:24],
+            truncate_list_row_title(str(professional.name)),
             (getattr(professional, "specialty", None) or None),
         )
         for professional in professionals[:MAX_PROFESSIONAL_ROWS]
@@ -1422,7 +1445,7 @@ def _match_insurance_plan(tenant: Tenant, body: str | None) -> str | None:
         return LABEL_INSURANCE_PARTICULAR
     for plan in _tenant_insurances(tenant):
         # send_list caps row titles at 24 chars, so compare on that prefix too.
-        if _norm(plan[:24]) == target or _norm(plan) == target:
+        if _norm(truncate_list_row_title(plan)) == target or _norm(plan) == target:
             return plan
     return None
 
@@ -1435,7 +1458,7 @@ def _enter_insurance(conversation: Conversation, tenant: Tenant) -> FlowRouterRe
             "flow_insurance_list_truncated", total=len(plans), shown=MAX_INSURANCE_PLAN_ROWS
         )
     rows: list[tuple[str, str]] = [
-        (f"ins|{plan}", plan[:24]) for plan in plans[:MAX_INSURANCE_PLAN_ROWS]
+        (f"ins|{plan}", truncate_list_row_title(plan)) for plan in plans[:MAX_INSURANCE_PLAN_ROWS]
     ]
     rows.append(("ins|particular", LABEL_INSURANCE_PARTICULAR))
     rows.append(("ins|outro", LABEL_INSURANCE_OTHER))
@@ -1770,7 +1793,10 @@ def _service_detail_text(service: dict, tenant: Tenant) -> str:
     long_description = service.get("long_description") or service.get("description")
     parts = [name]
     if price:
-        parts[0] = f"{name} — {price}"
+        price_text = str(price).strip()
+        if not price_text.upper().startswith("R$"):
+            price_text = f"R${price_text}"
+        parts[0] = f"{name} {price_text}"
     if long_description:
         parts.append(str(long_description))
     parts.append("Deseja agendar esse serviço?")
@@ -1833,7 +1859,7 @@ def _row_payload(body: str | None) -> str | None:
 
     Mirrors `_slot_iso_from_body`/`_professional_id_from_body`, but returns
     None (rather than the whole body) when there are no trailing parentheses,
-    so a TYPED "Voltar" is distinguishable from a tapped one.
+    so a TYPED "Escolher outro Serviço" is distinguishable from a tapped one.
     """
     if not body:
         return None
@@ -1844,11 +1870,12 @@ def _row_payload(body: str | None) -> str | None:
 def _control_match(body: str | None, label: str) -> bool:
     """`_label_match`, but for the picker's payload-carrying control rows.
 
-    "Voltar" arrives as "Voltar (service)" and "Ver mais dias" as "Ver mais
-    dias (2)" — the cursor/destination rides in the row id precisely so the
-    picker needs no stored state. Matching therefore has to look past that
-    suffix; a typed "Voltar" (no suffix) still matches the plain form. Scoped
-    to these fixed labels, never used for free text.
+    "Escolher outro Serviço" arrives as "Escolher outro Serviço (service)"
+    and "Ver mais dias" as "Ver mais dias (2)" — the cursor/destination rides
+    in the row id precisely so the picker needs no stored state. Matching
+    therefore has to look past that suffix; a typed "Escolher outro Serviço"
+    (no suffix) still matches the plain form. Scoped to these fixed labels,
+    never used for free text.
     """
     return _label_match(body, label) or _label_match(_ROW_PAYLOAD_RE.sub("", body or ""), label)
 
@@ -1936,9 +1963,11 @@ async def enter_day_picker(
     (`CalendarService.list_available_days`), never one per day. Rows:
 
         <= DAY_PICKER_PAGE_SIZE(8) day rows
-        + "Ver mais dias"          when the window holds more
-        + "Voltar"                 when `back_target` is set,
-          replaced by "Outro"      once the free-text escape is being offered
+        + "Ver mais dias"            when the window holds more
+        + the back-control row       when `back_target` is set — labelled via
+                                      `_day_back_label` ("Escolher outro
+                                      Serviço" for the service destination)
+          replaced by "Outro"        once the free-text escape is being offered
 
     which is at most MAX_LIST_ROWS(10) in every combination — the API's hard
     cap, and the reason the original "17 dias úteis + Outro" idea could not be
@@ -1982,13 +2011,14 @@ async def enter_day_picker(
         rows.append((f"{ROW_DAY_MORE_PREFIX}{page + 1}", LABEL_MORE_DAYS))
     escape = step == branch.day_escape_step
     if escape:
-        # The escape row takes the last control slot, displacing "Voltar":
-        # once we have failed to read the patient twice, getting them to a
-        # human matters more than one step back. Its id deliberately carries
-        # NO payload prefix so the tap arrives as the plain "Outro" label.
+        # The escape row takes the last control slot, displacing the
+        # back-control row: once we have failed to read the patient twice,
+        # getting them to a human matters more than one step back. Its id
+        # deliberately carries NO payload prefix so the tap arrives as the
+        # plain "Outro" label.
         rows.append(("dayescape|0", LABEL_OTHER))
     elif back_target:
-        rows.append((f"{ROW_DAY_BACK_PREFIX}{back_target}", LABEL_BACK))
+        rows.append((f"{ROW_DAY_BACK_PREFIX}{back_target}", _day_back_label(back_target)))
 
     body = f"{prefix} {branch.day_body}" if prefix else branch.day_body
     if escape:
@@ -2052,7 +2082,7 @@ async def _enter_slot_picker(
     rows: list[tuple[str, str]] = [(f"slot|{s['start']}", s["label"]) for s in slots]
     rows.append((f"{ROW_DAY_AGAIN_PREFIX}{page}", LABEL_ANOTHER_DAY))
     if back_target:
-        rows.append((f"{ROW_DAY_BACK_PREFIX}{back_target}", LABEL_BACK))
+        rows.append((f"{ROW_DAY_BACK_PREFIX}{back_target}", _day_back_label(back_target)))
     return FlowRouterResult(
         action="reply",
         bubbles=[
@@ -2077,7 +2107,8 @@ def _handle_day_back(
     professionals: list | None,
     target: str | None,
 ) -> FlowRouterResult:
-    """The `Voltar` row: one step back, with every earlier answer preserved.
+    """The picker's back-control row: one step back, with every earlier
+    answer preserved.
 
     "service" re-renders the service list, "professional" the doctor list;
     anything else (or an unusable target) falls back to the menu. Whatever the
@@ -2125,7 +2156,7 @@ async def _handle_day_step(
     to the patient, and logged under its own `flow_step` — reaches the model.
     """
     step = conversation.flow_step or branch.day_step
-    if _control_match(body, LABEL_BACK):
+    if _control_match(body, _day_back_label(back_target)):
         return _handle_day_back(
             conversation, tenant, services, professionals, _row_payload(body) or back_target
         )
@@ -2200,7 +2231,7 @@ async def _handle_slot_controls(
     professionals: list | None,
 ) -> FlowRouterResult | None:
     """The slot list's two non-slot rows, or None when this isn't one of them."""
-    if _control_match(body, LABEL_BACK):
+    if _control_match(body, _day_back_label(back_target)):
         return _handle_day_back(
             conversation, tenant, services, professionals, _row_payload(body) or back_target
         )
@@ -2493,7 +2524,7 @@ def _appt_row_label(appt: dict) -> str:
     start = appt.get("start_at")
     when = start.strftime("%d/%m %H:%M") if isinstance(start, datetime) else "?"
     appt_type = str(appt.get("appointment_type") or "Consulta")
-    return f"{when} {appt_type}"[:24]
+    return truncate_list_row_title(f"{when} {appt_type}")
 
 
 def _appt_summary(appt: dict) -> str:
