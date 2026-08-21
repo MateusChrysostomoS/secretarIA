@@ -510,3 +510,36 @@ def test_multi_professional_tools_present_only_when_entitled():
     }
     assert expected <= entitled_names
     assert expected.isdisjoint(not_entitled_names)
+
+
+async def test_create_event_for_professional_returns_the_patient_link_too(db):
+    """On a multi-professional tenant this is the ONLY booking tool the agent
+    gets, so the patient's add-to-calendar link has to come from here.
+
+    Without it the prompt's rule ("send patient_calendar_link, NEVER htmlLink,
+    and no link at all if it is missing") would leave precisely the clinics
+    paying for this addon with no link — the very bug the round set out to fix.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    tenant, ana, _bruno, _inactive = await _seed_tenant_and_professionals(db)
+
+    with _agent_context(tenant.id, tenant_config=_tenant_config(tenant.id)):
+        result = await mp.create_event_for_professional.ainvoke(
+            {
+                "professional_name": ana.name,
+                "start": "2026-07-10T14:00:00",
+                "end": "2026-07-10T14:30:00",
+                "summary": "Consulta - Paciente",
+            }
+        )
+
+    assert result["htmlLink"] == "https://calendar.example/evt"
+    link = result["patient_calendar_link"]
+    assert link != result["htmlLink"]
+    query = parse_qs(urlparse(link).query)
+    assert urlparse(link).netloc == "calendar.google.com"
+    assert query["action"] == ["TEMPLATE"]
+    assert query["text"] == ["Consulta - Paciente"]
+    # The fake calendar runs in UTC, so the window round-trips unshifted.
+    assert query["dates"] == ["20260710T140000Z/20260710T143000Z"]

@@ -294,6 +294,40 @@ async def test_confirmation_books_and_resets():
     assert summary == "Primeira Consulta - João"
 
 
+async def test_confirmation_sends_the_patient_an_add_to_calendar_link():
+    """The confirmation bubble carries the PUBLIC template link.
+
+    Regression guard for the bug this replaced: the deterministic flow used to
+    send no link at all, and the LLM path sent `htmlLink` — the event on the
+    clinic's own calendar, which opens a permission error for a patient. The
+    private link must still be persisted (the doctor's hub and the booking
+    email open it); it must simply never be the one in the patient's message.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    conv = _conversation(
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=STEP_AWAITING_CONFIRMATION,
+        flow_selected_type="Primeira Consulta",
+        flow_selected_slot="2026-06-15T08:00",
+    )
+    res = await route(conv, _tenant(), _FakeCalendar(), "Confirmar", patient_name="João")
+
+    body = res.bubbles[0].body
+    assert "Adicionar à sua agenda:" in body
+    # The private event link is stored, never sent.
+    assert res.appointment["google_event_link"] == "https://cal/evt123"
+    assert "https://cal/evt123" not in body
+
+    link = body.rsplit("\n", 1)[-1]
+    query = parse_qs(urlparse(link).query)
+    assert urlparse(link).netloc == "calendar.google.com"
+    assert query["action"] == ["TEMPLATE"]
+    assert query["text"] == ["Primeira Consulta - João"]
+    # 08:00-08:40 in America/Sao_Paulo (the 40-min service) == 11:00-11:40Z.
+    assert query["dates"] == ["20260615T110000Z/20260615T114000Z"]
+
+
 async def test_confirmation_cancel_offers_retry():
     conv = _conversation(
         flow_state=FlowState.SERVICE_CATALOG,

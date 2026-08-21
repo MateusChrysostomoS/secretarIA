@@ -229,3 +229,31 @@ def test_multi_unit_tools_present_only_when_entitled():
     expected = {mu.list_units.name, mu.create_event_at_unit.name}
     assert expected <= entitled_names
     assert expected.isdisjoint(not_entitled_names)
+
+
+async def test_create_event_at_unit_returns_the_patient_link_too(db):
+    """The sole booking tool for a tenant with multi_unit and no
+    multi_professional, so the patient's add-to-calendar link has to come from
+    here as well — see the sibling test in test_multi_professional_plugin.py."""
+    from urllib.parse import parse_qs, urlparse
+
+    tenant, _centro, _zona_sul, _inactive = await _seed_tenant_and_units(db)
+    with _agent_context(tenant.id, calendar=_FakeCalendarService()):
+        result = await mu.create_event_at_unit.ainvoke(
+            {
+                "unit_name": "Unidade Centro",
+                "start": "2026-07-10T14:00:00",
+                "end": "2026-07-10T14:30:00",
+                "summary": "Consulta - Paciente",
+            }
+        )
+
+    link = result["patient_calendar_link"]
+    assert link != result["htmlLink"]
+    query = parse_qs(urlparse(link).query)
+    assert urlparse(link).netloc == "calendar.google.com"
+    assert query["action"] == ["TEMPLATE"]
+    assert query["dates"] == ["20260710T140000Z/20260710T143000Z"]
+    # NOT the unit's address: see build_patient_calendar_link on why there is
+    # no `location` at all.
+    assert "location" not in query

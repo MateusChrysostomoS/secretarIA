@@ -28,6 +28,7 @@ from sqlalchemy import select
 
 from secretaria.ai.prompts import secretary_system_prompt
 from secretaria.ai.tools import (
+    GuidedBookingRequested,
     ManageAppointmentRequested,
     SelectProfessionalRequested,
     ShowMainMenuRequested,
@@ -82,6 +83,14 @@ SELECT_PROFESSIONAL_SENTINEL_PREFIX = "__SELECT_PROFESSIONAL__:"
 # services/flow_router.py::enter_manage_action instead of ever executing the
 # reschedule/cancel itself. Same exception->sentinel mechanism as the others.
 MANAGE_APPOINTMENT_SENTINEL_PREFIX = "__MANAGE_APPOINTMENT__:"
+# Prefix returned when the agent called start_guided_booking; the CANONICAL
+# service name rides after the colon (empty when the clinic has no catalog)
+# and the worker re-enters the deterministic booking flow at the step that
+# follows the service choice — convênio or the day picker, decided by
+# services/flow_router.py::enter_guided_booking. Same exception->sentinel
+# mechanism as the others; unlike them it is an OPTIONAL hand-back the model
+# offers, not a request it is obliged to make.
+START_GUIDED_BOOKING_SENTINEL_PREFIX = "__START_GUIDED_BOOKING__:"
 
 # Per-async-task TenantRuntimeConfig, used by _prompt_with_today. Defined in
 # ai/tools.py (imported above as `_tenant_config_ctx`) rather than here, so a
@@ -506,6 +515,18 @@ async def run_agent(
             action=exc.action,
         )
         return f"{MANAGE_APPOINTMENT_SENTINEL_PREFIX}{exc.action}"
+    except GuidedBookingRequested as exc:
+        # The agent chose to hand the BOOKING itself to the button flow —
+        # same propagation path as the sentinels above. The service name is
+        # already canonical (the tool proved it against the catalog), so only
+        # its presence is logged: WHICH service this patient is booking is not
+        # something the count-only observability here needs.
+        logger.info(
+            "ai_run_agent_start_guided_booking",
+            conversation_id=str(conversation_id),
+            has_type=exc.appointment_type is not None,
+        )
+        return f"{START_GUIDED_BOOKING_SENTINEL_PREFIX}{exc.appointment_type or ''}"
     except Exception as exc:
         logger.error(
             "ai_run_agent_failed",

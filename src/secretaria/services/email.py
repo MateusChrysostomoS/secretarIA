@@ -390,10 +390,22 @@ _TEMPLATES: dict[str, EmailTemplate] = {
     # Deliberately minimal. SMTP is cleartext-in-transit into a mailbox this
     # product does not control, so the body carries only what the doctor needs
     # to RECOGNISE the appointment and open the agenda — never the patient's
-    # phone number, never a price, never anything clinical. `insurance_line`
-    # and `agenda_line` arrive PRE-RENDERED from the caller (empty string when
-    # there is nothing to say) rather than being conditionalised here, because
-    # `EmailTemplate` is a flat `str.format_map` pair with no branching.
+    # phone number, never a price, never anything clinical.
+    #
+    # TWO agenda links, deliberately, because they open different things:
+    # `agenda_line` is this product's own agenda screen (`DOCTOR_AGENDA_URL`,
+    # whichever frontend the installation serves) and `calendar_line` is the
+    # event itself on the clinic's Google Calendar (`Appointment.
+    # google_event_link`, Google's private `htmlLink`). The second is only
+    # ever right for someone who OWNS that calendar — which the professional
+    # does and a patient does not (patients get
+    # services/calendar.py::build_patient_calendar_link instead). Either can
+    # be missing, so both are optional lines.
+    #
+    # `insurance_line`, `agenda_line` and `calendar_line` all arrive
+    # PRE-RENDERED from the caller (empty string when there is nothing to say)
+    # rather than being conditionalised here, because `EmailTemplate` is a
+    # flat `str.format_map` pair with no branching.
     "appointment_booked_professional": EmailTemplate(
         subject="Nova consulta marcada — {when}",
         body=(
@@ -405,6 +417,7 @@ _TEMPLATES: dict[str, EmailTemplate] = {
             "{insurance_line}"
             "\n"
             "{agenda_line}"
+            "{calendar_line}"
             "— Equipe SecretarIA"
         ),
     ),

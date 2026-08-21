@@ -261,6 +261,18 @@ async def _deliver(tenant: Tenant, patient: Patient | None, appointment: Appoint
         # template itself needs no conditionals (see services/email.py).
         "insurance_line": f"Convênio: {insurance}\n" if insurance else "",
         "agenda_line": f"Ver na agenda:\n{agenda_url}\n\n" if agenda_url else "",
+        # The event on the clinic's own Google Calendar. Here — unlike the
+        # patient-facing link (services/calendar.py::build_patient_calendar_link)
+        # — the PRIVATE `htmlLink` is exactly right: the professional owns that
+        # agenda, so it opens for them. NULL for a booking made while no
+        # calendar was connected, and for rows that predate the column; same
+        # "empty string when there is nothing to say" shape as the two lines
+        # above, so the flat template needs no conditional.
+        "calendar_line": (
+            f"Ver no Google Agenda:\n{appointment.google_event_link}\n\n"
+            if appointment.google_event_link
+            else ""
+        ),
     }
 
     outcome = await send_transactional_email_result(

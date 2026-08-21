@@ -65,6 +65,9 @@ from secretaria.services.entitlements_client import EntitlementSummary  # noqa: 
 PATIENT_WA_ID = "5511988887777"
 PATIENT_PHONE = "+55 11 98888-7777"
 DOCTOR_EMAIL = "ana@clinica.example"
+# Google's own `htmlLink` shape: the event on the CLINIC's calendar. Right for
+# the professional, wrong for the patient — see the tests near `calendar_line`.
+EVENT_LINK = "https://www.google.com/calendar/event?eid=ZXZ0LTE"
 
 _ALL_ADDONS_OFF = {
     "reactivation_pack": False,
@@ -251,6 +254,7 @@ async def _make_rows(
     with_professional: bool = True,
     insurance: str | None = None,
     with_patient: bool = True,
+    google_event_link: str | None = None,
 ):
     async with db() as session:
         tenant = Tenant(
@@ -283,6 +287,10 @@ async def _make_rows(
             patient_id=patient_id,
             professional_id=professional_id,
             google_event_id="evt-1",
+            # None by default: most tests here predate the link, and the
+            # "no http in the body" assertion of
+            # test_agenda_link_is_omitted_when_unconfigured depends on it.
+            google_event_link=google_event_link,
             appointment_type="Primeira consulta",
             # 17:00 UTC == 14:00 in America/Sao_Paulo (UTC-3).
             start_at=datetime(2026, 8, 3, 17, 0, tzinfo=UTC),
@@ -414,6 +422,57 @@ async def test_agenda_link_is_omitted_when_unconfigured(db, monkeypatch, mailer)
 
     assert "Ver na agenda" not in mailer.bodies[0]
     assert "http" not in mailer.bodies[0]
+
+
+async def test_the_google_event_link_appears_when_the_booking_has_one(db, monkeypatch, mailer):
+    """The doctor OWNS the clinic's calendar, so the private `htmlLink` is the
+    right link for them — the opposite of the patient, who gets the public
+    template link (services/calendar.py::build_patient_calendar_link). Both
+    exist on purpose and are not interchangeable."""
+    tenant, patient, appointment, professional = await _make_rows(
+        db, google_event_link=EVENT_LINK
+    )
+    _patch_lookup(monkeypatch, {str(professional.id): DOCTOR_EMAIL})
+
+    await notif._post_booking(_ctx(tenant, patient, appointment))
+
+    body = mailer.bodies[0]
+    assert "Ver no Google Agenda:" in body
+    assert EVENT_LINK in body
+
+
+async def test_the_google_event_link_is_omitted_when_there_is_none(db, monkeypatch, mailer):
+    """NULL for a booking made while no calendar was connected, and for rows
+    that predate the column. The line disappears; no raw placeholder is left
+    behind by the flat `str.format_map` template."""
+    tenant, patient, appointment, professional = await _make_rows(db)
+    assert appointment.google_event_link is None
+    _patch_lookup(monkeypatch, {str(professional.id): DOCTOR_EMAIL})
+
+    await notif._post_booking(_ctx(tenant, patient, appointment))
+
+    body = mailer.bodies[0]
+    assert "Ver no Google Agenda" not in body
+    assert "calendar_line" not in body
+
+
+async def test_the_two_agenda_links_coexist(db, monkeypatch, mailer):
+    """`agenda_line` (this product's agenda screen) and `calendar_line` (the
+    Google event) answer different questions, so one must not displace the
+    other when both are available."""
+    tenant, patient, appointment, professional = await _make_rows(
+        db, google_event_link=EVENT_LINK
+    )
+    _patch_lookup(monkeypatch, {str(professional.id): DOCTOR_EMAIL})
+    _patch_agenda_url(monkeypatch, "https://app.example/agenda")
+
+    await notif._post_booking(_ctx(tenant, patient, appointment))
+
+    body = mailer.bodies[0]
+    assert "https://app.example/agenda" in body
+    assert EVENT_LINK in body
+    # Order preserved: paciente -> servico -> quando -> convenio -> agenda(s).
+    assert body.index("https://app.example/agenda") < body.index(EVENT_LINK)
 
 
 # --------------------------------------------------------------------------

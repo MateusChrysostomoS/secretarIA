@@ -1,6 +1,10 @@
 # CHECKPOINT — E-mail ao profissional quando uma consulta é marcada
 
-> Estado: **BUILT + suítes verdes, NÃO commitado, NÃO deployado** (2026-08-17).
+> Estado: **COMMITADO no `secretarIA` (`1029ce5`, "FEAT 33 & 34"), NÃO deployado**
+> (status corrigido em 2026-08-20 — este cabeçalho ainda dizia "NÃO commitado", de
+> 2026-08-17, e o `git log` do `plugins/professional_notification.py` desmente).
+> O `calendar_line` adicionado em 2026-08-20 (ver "Os dois links" abaixo) é a única
+> parte **ainda não commitada**. Estado dos outros três repos não reverificado.
 > Escopo: `secretarIA` (backend), `brain-api` (endpoint interno), `brain-frontend` e
 > `secretarIA-frontend` (indicação de profissional sem e-mail).
 > **Sem migração** — ver "Idempotência" abaixo.
@@ -70,7 +74,34 @@ item vendável.
 
 **Conteúdo** (template `appointment_booked_professional`, inserido no FIM de `_TEMPLATES`
 para não mexer na posição do `password_reset`): paciente, serviço, data/hora **no
-timezone do tenant**, convênio quando houver, e o link da agenda.
+timezone do tenant**, convênio quando houver, e **dois** links de agenda.
+
+### Os dois links — por que são diferentes (2026-08-20)
+
+`agenda_line` e `calendar_line` respondem perguntas diferentes, então um não substitui o
+outro. Ambos são opcionais e chegam **pré-renderizados** (string vazia quando não há o que
+dizer), porque `EmailTemplate` é um par plano de `str.format_map`, sem condicional.
+
+| linha | de onde vem | o que abre |
+|---|---|---|
+| `agenda_line` | `DOCTOR_AGENDA_URL` (env) | a tela de agenda **do produto** — do frontend que aquela instalação serve |
+| `calendar_line` | `Appointment.google_event_link` | **o evento em si** no Google Calendar da clínica |
+
+`calendar_line` é o `htmlLink` **privado** que o Google devolve no `create_event`. Aqui ele
+é exatamente o link certo — o profissional **é dono** daquela agenda, então ele abre. Para
+o **paciente** o mesmo link dá erro de permissão, e é por isso que o paciente recebe outra
+coisa: a URL pública de template do Google
+(`services/calendar.py::build_patient_calendar_link`, ver
+`docs/CHECKPOINT_patient_calendar_link.md`). Os dois existem de propósito e **não** são
+intercambiáveis.
+
+`google_event_link` é NULL para uma consulta marcada sem calendário conectado e para linhas
+anteriores à coluna — a linha simplesmente some, sem exceção e sem placeholder cru.
+
+> Isto era a única pendência funcional registrada nesta feature e foi **feita** em
+> 2026-08-20 (`plugins/professional_notification.py::_deliver` +
+> `services/email.py::_TEMPLATES`, mais 3 testes em
+> `tests/test_professional_notification.py`). Sem migração: a coluna já existia.
 
 **Nunca**: telefone do paciente, preço, nada clínico. SMTP trafega em claro para uma
 caixa que o produto não controla — o médico precisa reconhecer a consulta e abrir a
@@ -131,7 +162,8 @@ segue sendo tratado (clínica com zero ou 2+ profissionais e nenhuma seleção).
 
 ## Pendências
 
-- **Commit + deploy.** Nada commitado. `plugins/` roda no **worker**: vale a regra do
+- **Deploy** (o commit do slice do `secretarIA` já foi — `1029ce5`; falta commitar só o
+  `calendar_line` de 2026-08-20). `plugins/` roda no **worker**: vale a regra do
   `README.md`/`CLAUDE.md` — todo push que toca `workers/` ou os plugins exige deploy do
   `secretaria-worker`, não só do `secretaria_api`. E o brain-api precisa subir **antes**,
   senão o lookup responde 404 e o hook vira no-op logado (fail-soft, sem quebrar nada).

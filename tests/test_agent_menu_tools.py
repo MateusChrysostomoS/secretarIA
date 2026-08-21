@@ -26,9 +26,11 @@ os.environ.setdefault("ENCRYPTION_KEY", "gBSpATEZoI21UX0_59nHvxdUDJ4drCttg2RAEaP
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 from contextlib import contextmanager  # noqa: E402
+from dataclasses import replace  # noqa: E402
 from datetime import UTC, datetime, timedelta  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 from uuid import uuid4  # noqa: E402
+from zoneinfo import ZoneInfo  # noqa: E402
 
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
@@ -47,16 +49,19 @@ from secretaria.ai.graph import (  # noqa: E402
     MANAGE_APPOINTMENT_SENTINEL_PREFIX,
     SELECT_PROFESSIONAL_SENTINEL_PREFIX,
     SHOW_MAIN_MENU_SENTINEL,
+    START_GUIDED_BOOKING_SENTINEL_PREFIX,
     _config_with_selected_professional,
     run_agent,
 )
 from secretaria.ai.prompts import secretary_system_prompt  # noqa: E402
 from secretaria.ai.tools import (  # noqa: E402
+    GuidedBookingRequested,
     ManageAppointmentRequested,
     SelectProfessionalRequested,
     ShowMainMenuRequested,
     manage_existing_appointment,
     show_main_menu,
+    start_guided_booking,
 )
 from secretaria.core import database as core_database  # noqa: E402
 from secretaria.core.database import Base  # noqa: E402
@@ -73,16 +78,26 @@ from secretaria.models import (  # noqa: E402
     Tenant,
 )
 from secretaria.plugins import multi_professional as mp, registry as reg  # noqa: E402
+from secretaria.services.booking_scope import (  # noqa: E402
+    BOOKING_TOPOLOGY_MULTI,
+    BOOKING_TOPOLOGY_SOLE,
+    BOOKING_TOPOLOGY_UNKNOWN,
+)
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
     BTN_CHOOSE_PROFESSIONAL,
     BTN_CHOOSE_SERVICE,
+    STEP_AWAITING_DAY,
+    STEP_AWAITING_INSURANCE,
     STEP_AWAITING_SERVICE,
     STEP_MANAGE_CANCEL_CONFIRM,
     STEP_MANAGE_PICK_CANCEL,
     MenuBubble,
 )
-from secretaria.services.tenant_config import TenantRuntimeConfig  # noqa: E402
+from secretaria.services.tenant_config import (  # noqa: E402
+    RuntimeAppointmentType,
+    TenantRuntimeConfig,
+)
 from secretaria.workers import tasks  # noqa: E402
 
 
@@ -572,3 +587,472 @@ async def test_handle_manage_appointment_no_appointments_sends_none_reply(
     async with db() as session:
         conv = await session.get(Conversation, conversation.id)
         assert conv.flow_state == FlowState.MENU
+
+
+# --------------------------------------------------------------------------
+# start_guided_booking: the OPTIONAL hand-back that resumes the booking itself
+# --------------------------------------------------------------------------
+#
+# The other three hand-backs answer "the patient wants something else". This
+# one answers "the free-text conversation got as far as naming the service, and
+# buttons should take it from here" — an offer the model makes, never a step it
+# owes. What it must not do is skip anything the button flow would have asked.
+
+
+@contextmanager
+def _booking_context(
+    tenant_id, *, services=("Consulta Geral",), topology=BOOKING_TOPOLOGY_SOLE
+):
+    """Agent context with a catalog to validate `appointment_type` against."""
+    config = replace(
+        _tenant_config(tenant_id),
+        appointment_types=[
+            RuntimeAppointmentType(name=name, description=None, duration_min=30)
+            for name in services
+        ],
+    )
+    tok_tid = ai_tools._tenant_id_ctx.set(tenant_id)
+    tok_cfg = ai_tools._tenant_config_ctx.set(config)
+    tok_top = ai_tools._booking_topology_ctx.set(topology)
+    try:
+        yield
+    finally:
+        ai_tools._booking_topology_ctx.reset(tok_top)
+        ai_tools._tenant_config_ctx.reset(tok_cfg)
+        ai_tools._tenant_id_ctx.reset(tok_tid)
+
+
+async def test_start_guided_booking_raises_with_the_catalogs_own_spelling():
+    """The service is proven against the catalog BEFORE the hand-back: it lands
+    on `Appointment.appointment_type`, which is read downstream as a catalog
+    key (the Pix deposit prices a booking by exact name), never as free text."""
+    with _booking_context(uuid4()):
+        with pytest.raises(GuidedBookingRequested) as excinfo:
+            await start_guided_booking.ainvoke({"appointment_type": "consulta geral"})
+    assert excinfo.value.appointment_type == "Consulta Geral"
+
+
+async def test_start_guided_booking_refuses_a_service_the_clinic_does_not_have():
+    """Recoverable, not raised: the model can correct itself in the same turn
+    instead of parking the patient in a flow scoped to a phantom service."""
+    with _booking_context(uuid4(), services=("Consulta Geral", "Retorno")):
+        result = await start_guided_booking.ainvoke({"appointment_type": "Botox"})
+    assert "Botox" in result["error"]
+    assert "Consulta Geral" in result["error"]
+    assert "Retorno" in result["error"]
+
+
+async def test_start_guided_booking_refuses_an_ambiguous_omission():
+    with _booking_context(uuid4(), services=("Consulta Geral", "Retorno")):
+        result = await start_guided_booking.ainvoke({"appointment_type": ""})
+    assert "Consulta Geral" in result["error"]
+
+
+async def test_start_guided_booking_derives_the_only_service():
+    with _booking_context(uuid4()):
+        with pytest.raises(GuidedBookingRequested) as excinfo:
+            await start_guided_booking.ainvoke({"appointment_type": ""})
+    assert excinfo.value.appointment_type == "Consulta Geral"
+
+
+async def test_start_guided_booking_carries_no_type_when_there_is_no_catalog():
+    """A clinic with nothing to prove a service against books typeless, the
+    same honest NULL the rest of the codebase settles for."""
+    with _booking_context(uuid4(), services=()):
+        with pytest.raises(GuidedBookingRequested) as excinfo:
+            await start_guided_booking.ainvoke({"appointment_type": "qualquer coisa"})
+    assert excinfo.value.appointment_type is None
+
+
+async def test_start_guided_booking_fails_closed_on_a_multi_professional_turn():
+    """Second lock. The day picker it opens would read availability off the
+    CLINIC-level agenda, not the chosen doctor's — so a multi-doctor tenant
+    never gets this tool (`tasks._flow_handback_tools`), and an invocation that
+    arrives anyway is refused before any hand-back."""
+    with _booking_context(uuid4(), topology=BOOKING_TOPOLOGY_MULTI):
+        result = await start_guided_booking.ainvoke(
+            {"appointment_type": "Consulta Geral"}
+        )
+    assert "error" in result
+    assert "show_main_menu" in result["error"]
+
+
+async def test_run_agent_maps_start_guided_booking_to_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def _fake_history(conversation_id):
+        return [HumanMessage(content="quero marcar uma consulta geral")]
+
+    async def _raise(messages, conversation_id):
+        raise GuidedBookingRequested("Consulta Geral")
+
+    monkeypatch.setattr(graph, "_load_history", _fake_history)
+    monkeypatch.setattr(graph, "_invoke_agent_with_retry", _raise)
+    reply = await run_agent("oi", context={"conversation_id": str(uuid4())})
+    assert reply == f"{START_GUIDED_BOOKING_SENTINEL_PREFIX}Consulta Geral"
+
+
+async def test_run_agent_sentinel_survives_a_clinic_with_no_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def _fake_history(conversation_id):
+        return [HumanMessage(content="quero marcar")]
+
+    async def _raise(messages, conversation_id):
+        raise GuidedBookingRequested(None)
+
+    monkeypatch.setattr(graph, "_load_history", _fake_history)
+    monkeypatch.setattr(graph, "_invoke_agent_with_retry", _raise)
+    reply = await run_agent("oi", context={"conversation_id": str(uuid4())})
+    assert reply == START_GUIDED_BOOKING_SENTINEL_PREFIX
+
+
+# --------------------------------------------------------------------------
+# Which tenants are even offered the tool
+# --------------------------------------------------------------------------
+
+
+def _handback_names(tenant, topology, plugin_tools=()):
+    return [
+        getattr(t, "name", str(t))
+        for t in tasks._flow_handback_tools(tenant, topology, list(plugin_tools))
+    ]
+
+
+@pytest.mark.parametrize("topology", [BOOKING_TOPOLOGY_SOLE, BOOKING_TOPOLOGY_UNKNOWN])
+def test_a_tenant_level_tenant_is_offered_the_guided_booking_tool(topology):
+    tenant = SimpleNamespace(initial_flows={"enabled": True})
+    assert "start_guided_booking" in _handback_names(tenant, topology)
+    assert "manage_existing_appointment" in _handback_names(tenant, topology)
+
+
+def test_a_multi_professional_tenant_is_not():
+    """First lock, and the reason the flow never has to guess an agenda: on
+    these tenants the way back into the button flow is
+    select_professional_and_continue, which re-enters at a doctor whose
+    calendar IS resolved."""
+    tenant = SimpleNamespace(initial_flows={"enabled": True})
+    names = _handback_names(tenant, BOOKING_TOPOLOGY_MULTI)
+    assert "start_guided_booking" not in names
+    # ...while the manage hand-back, which opens no picker, still is.
+    assert "manage_existing_appointment" in names
+
+
+def test_plugin_tools_are_preserved_alongside_the_handbacks():
+    tenant = SimpleNamespace(initial_flows={"enabled": True})
+    names = _handback_names(
+        tenant, BOOKING_TOPOLOGY_MULTI, [mp.select_professional_and_continue]
+    )
+    assert names[0] == mp.select_professional_and_continue.name
+
+
+# --------------------------------------------------------------------------
+# The handler: where the conversation actually lands
+# --------------------------------------------------------------------------
+
+
+class _StubCalendar:
+    """Every day of the window is free; records the durations it was asked for."""
+
+    def __init__(self):
+        self.tzinfo = ZoneInfo("America/Sao_Paulo")
+        self.day_scans: list = []
+
+    async def list_available_days(self, start_day, days, slot_minutes=None):
+        self.day_scans.append(slot_minutes)
+        base = start_day.replace(hour=0, minute=0, second=0, microsecond=0)
+        return [base + timedelta(days=offset) for offset in range(min(days, 3))]
+
+
+@pytest.fixture
+def _stub_calendar(monkeypatch: pytest.MonkeyPatch) -> _StubCalendar:
+    """Replace the worker's calendar-resolution seam; no Google, no credentials."""
+    calendar = _StubCalendar()
+
+    async def _fake(session, tenant, target):
+        return calendar
+
+    monkeypatch.setattr(tasks, "_appointment_calendar", _fake)
+    return calendar
+
+
+async def _seed_sole(db, **kw):
+    """The `_seed` clinic reduced to ONE active professional (a SOLE tenant)."""
+    tenant, ana, bruno, patient, conversation = await _seed(db, **kw)
+    async with db() as session:
+        row = await session.get(Professional, bruno.id)
+        row.is_active = False
+        await session.commit()
+    return tenant, ana, patient, conversation
+
+
+async def test_handle_start_guided_booking_opens_the_day_picker(
+    db, _captured_bubbles, _stub_calendar
+):
+    """The common case: the clinic does not collect convênio, so the hand-back
+    lands exactly where the "Sim, agendar" tap would — the tappable day list,
+    with the service the LLM resolved carried forward."""
+    tenant, ana, patient, conversation = await _seed_sole(db)
+    sentinel = f"{START_GUIDED_BOOKING_SENTINEL_PREFIX}Consulta Geral"
+
+    await tasks._handle_start_guided_booking(
+        _reply_ctx(conversation), sentinel, tenant, _snapshots([ana]), patient.wa_id
+    )
+
+    (days,) = _captured_bubbles
+    assert isinstance(days, SlotsBubble)
+    assert len(days.rows) >= 1
+    # Slotted on the service's own duration, not a guess.
+    assert _stub_calendar.day_scans == [30]
+
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.flow_state == FlowState.SERVICE_CATALOG
+        assert conv.flow_step == STEP_AWAITING_DAY
+        assert conv.flow_selected_type == "Consulta Geral"
+
+
+async def test_handle_start_guided_booking_asks_convenio_first_when_configured(
+    db, _captured_bubbles, _stub_calendar
+):
+    """The literal ask was "open the day list". Doing that unconditionally
+    would drop the convênio a clinic switched on in the hub, for no reason
+    other than this patient arriving through the LLM — so the step the button
+    flow would have shown is shown here too, and the calendar is not even read.
+    """
+    tenant, ana, patient, conversation = await _seed_sole(db)
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.collect_insurance = True
+        row.insurances = ["Unimed", "Amil"]
+        await session.commit()
+        await session.refresh(row)
+        tenant = row
+    sentinel = f"{START_GUIDED_BOOKING_SENTINEL_PREFIX}Consulta Geral"
+
+    await tasks._handle_start_guided_booking(
+        _reply_ctx(conversation), sentinel, tenant, _snapshots([ana]), patient.wa_id
+    )
+
+    (insurance,) = _captured_bubbles
+    assert isinstance(insurance, SlotsBubble)
+    assert [title for _id, title in insurance.rows][:2] == ["Unimed", "Amil"]
+    assert _stub_calendar.day_scans == []
+
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.flow_step == STEP_AWAITING_INSURANCE
+        # The service survives the detour — the day picker needs it next.
+        assert conv.flow_selected_type == "Consulta Geral"
+
+
+async def test_handle_start_guided_booking_keeps_an_answered_convenio(
+    db, _captured_bubbles, _stub_calendar
+):
+    """A convênio already on the conversation rides through the day picker
+    instead of being cleared by the unconditional field writes."""
+    tenant, ana, patient, conversation = await _seed_sole(db, insurance="Unimed")
+    sentinel = f"{START_GUIDED_BOOKING_SENTINEL_PREFIX}Consulta Geral"
+
+    await tasks._handle_start_guided_booking(
+        _reply_ctx(conversation), sentinel, tenant, _snapshots([ana]), patient.wa_id
+    )
+
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.flow_step == STEP_AWAITING_DAY
+        assert conv.flow_selected_insurance == "Unimed"
+
+
+async def test_handle_start_guided_booking_without_a_type_still_reaches_the_picker(
+    db, _captured_bubbles, _stub_calendar
+):
+    """The empty suffix (a clinic with no catalog): the booking proceeds
+    typeless on the tenant's default duration rather than being dropped."""
+    tenant, ana, patient, conversation = await _seed_sole(db)
+
+    await tasks._handle_start_guided_booking(
+        _reply_ctx(conversation),
+        START_GUIDED_BOOKING_SENTINEL_PREFIX,
+        tenant,
+        _snapshots([ana]),
+        patient.wa_id,
+    )
+
+    assert isinstance(_captured_bubbles[0], SlotsBubble)
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.flow_step == STEP_AWAITING_DAY
+        assert conv.flow_selected_type is None
+
+
+async def test_handle_start_guided_booking_without_a_tenant_is_a_logged_noop(
+    db, _captured_bubbles, _stub_calendar
+):
+    tenant, ana, patient, conversation = await _seed_sole(db)
+
+    await tasks._handle_start_guided_booking(
+        _reply_ctx(conversation),
+        f"{START_GUIDED_BOOKING_SENTINEL_PREFIX}Consulta Geral",
+        None,
+        _snapshots([ana]),
+        patient.wa_id,
+    )
+
+    assert _captured_bubbles == []
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.flow_state == FlowState.LLM
+
+
+async def test_handle_start_guided_booking_hands_off_when_the_agenda_is_unknown(
+    db, _captured_bubbles, monkeypatch: pytest.MonkeyPatch
+):
+    """A selection that no longer resolves yields no calendar. The picker then
+    answers `calendar_unavailable` — a human, never a guessed day list."""
+    tenant, ana, patient, conversation = await _seed_sole(db)
+
+    async def _no_calendar(session, tenant, target):
+        return None
+
+    monkeypatch.setattr(tasks, "_appointment_calendar", _no_calendar)
+    handed_off: list = []
+
+    async def _fake_unavailable(reply, redis=None, tenant=None, waba_token=None):
+        handed_off.append(reply.conversation_id)
+
+    monkeypatch.setattr(tasks, "_handle_calendar_unavailable", _fake_unavailable)
+
+    await tasks._handle_start_guided_booking(
+        _reply_ctx(conversation),
+        f"{START_GUIDED_BOOKING_SENTINEL_PREFIX}Consulta Geral",
+        tenant,
+        _snapshots([ana]),
+        patient.wa_id,
+    )
+
+    assert handed_off == [conversation.id]
+    assert _captured_bubbles == []
+
+
+async def test_the_next_tap_after_the_handback_actually_advances(
+    db, _captured_bubbles, _stub_calendar
+):
+    """The state the hand-back persists must be one `route()` can CONTINUE from.
+
+    Landing on the right `flow_step` is only half the contract: the row also has
+    to carry everything the next step reads. `_apply_flow_result` writes every
+    flow_* field unconditionally, so a result that forgot one would CLEAR it and
+    the following tap would quietly fall through to the LLM. This taps a real day
+    row out of the bubble the hand-back just produced and asserts the flow moves
+    on to the slot picker with the service intact.
+    """
+    from secretaria.services import flow_router
+
+    tenant, ana, patient, conversation = await _seed_sole(db)
+
+    await tasks._handle_start_guided_booking(
+        _reply_ctx(conversation),
+        f"{START_GUIDED_BOOKING_SENTINEL_PREFIX}Consulta Geral",
+        tenant,
+        _snapshots([ana]),
+        patient.wa_id,
+    )
+
+    # Tap the first day exactly as WhatsApp delivers it: "<title> (<payload>)".
+    (days,) = _captured_bubbles
+    row_id, row_title = days.rows[0]
+    assert row_id.startswith("day|")
+    tap = f"{row_title} ({row_id.split('|', 1)[1]})"
+
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+
+    class _WithSlots(_StubCalendar):
+        async def list_free_slots(self, day, slot_minutes=None, max_slots=6):
+            iso = day.date().isoformat()
+            return [{"start": f"{iso}T08:00", "end": f"{iso}T08:30", "label": "08:00"}]
+
+    res = await flow_router.route(conv, tenant, _WithSlots(), tap)
+
+    assert res.action == "reply", res.action
+    assert res.flow_step == flow_router.STEP_AWAITING_SLOT
+    # The service the LLM resolved is still riding along, one step later.
+    assert res.flow_selected_type == "Consulta Geral"
+
+
+async def test_handle_start_guided_booking_slots_on_the_sole_doctors_own_duration(
+    db, _captured_bubbles, _stub_calendar
+):
+    """The clinic shape this repo calls "the tenant that broke": the legacy
+    `tenants.appointment_types` column is EMPTY and every service lives on the
+    single active professional.
+
+    The deterministic router never sees the raw Tenant row — it sees
+    `_flow_tenant_snapshot`, which substitutes the sole professional's own
+    catalog. A hand-back that read the ORM row instead would find no services,
+    fall back to `tenant.appointment_duration_min`, and offer the patient days
+    sliced at the wrong length. 50 != 30 is what makes that visible.
+    """
+    tenant, ana, patient, conversation = await _seed_sole(db)
+    async with db() as session:
+        t = await session.get(Tenant, tenant.id)
+        t.appointment_types = []  # legacy column empty — everything is per-doctor
+        t.appointment_duration_min = 30
+        prof = await session.get(Professional, ana.id)
+        prof.appointment_types = [
+            {"name": "Consulta Longa", "duration_min": 50, "is_active": True}
+        ]
+        await session.commit()
+        await session.refresh(t)
+        tenant = t
+
+    await tasks._handle_start_guided_booking(
+        _reply_ctx(conversation),
+        f"{START_GUIDED_BOOKING_SENTINEL_PREFIX}Consulta Longa",
+        tenant,
+        _snapshots([ana]),
+        patient.wa_id,
+    )
+
+    assert isinstance(_captured_bubbles[0], SlotsBubble)
+    # The doctor's own 50 minutes, not the clinic's 30-minute default.
+    assert _stub_calendar.day_scans == [50]
+
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.flow_step == STEP_AWAITING_DAY
+        assert conv.flow_selected_type == "Consulta Longa"
+
+
+async def test_handle_start_guided_booking_turns_a_multi_doctor_clinic_away(
+    db, _captured_bubbles, _stub_calendar
+):
+    """Second lock on the topology.
+
+    `_flow_handback_tools` withholds the tool from a multi tenant, but it judges
+    by the roster THAT TURN loaded — and a failed roster load maps to UNKNOWN,
+    which hands the tool over. The handler re-reads the roster, so a clinic that
+    really has 2+ active doctors gets the menu instead of a day picker built on
+    the clinic-level agenda, which is nobody's real availability.
+    """
+    # `_seed` (not `_seed_sole`) leaves BOTH professionals active.
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+
+    await tasks._handle_start_guided_booking(
+        _reply_ctx(conversation),
+        f"{START_GUIDED_BOOKING_SENTINEL_PREFIX}Consulta Geral",
+        tenant,
+        _snapshots([ana, bruno]),
+        patient.wa_id,
+    )
+
+    # The menu, not a day list — and the calendar was never even read.
+    (menu,) = _captured_bubbles
+    assert isinstance(menu, MenuBubble)
+    assert _stub_calendar.day_scans == []
+
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.flow_state == FlowState.MENU
+        assert conv.flow_step is None

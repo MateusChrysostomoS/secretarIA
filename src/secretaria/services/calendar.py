@@ -11,8 +11,9 @@ a worker thread with asyncio.to_thread to keep the event loop responsive.
 
 import asyncio
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
@@ -145,6 +146,85 @@ def _raise_if_scope_insufficient(exc: HttpError) -> None:
         raise GoogleScopeInsufficientError(
             "Google rejected the request: insufficient OAuth scope"
         ) from exc
+
+
+# Google Calendar's PUBLIC "create event" screen. It names no existing event:
+# the appointment travels in the querystring and the page opens pre-filled on
+# whatever Google account taps it. See `build_patient_calendar_link`.
+PATIENT_CALENDAR_TEMPLATE_URL = "https://calendar.google.com/calendar/render"
+
+# That URL's own datetime dialect: basic ISO 8601 (no separators), UTC.
+_PATIENT_LINK_STAMP_FORMAT = "%Y%m%dT%H%M%SZ"
+
+
+def _patient_link_stamp(value: datetime, tz: ZoneInfo | None) -> str:
+    """One half of the `dates=` pair, e.g. `20260529T170000Z`."""
+    if value.tzinfo is None:
+        if tz is None:
+            raise ValueError(
+                "build_patient_calendar_link: a naive datetime has no knowable "
+                "instant — pass tz=<the clinic's CalendarService.tzinfo>"
+            )
+        value = value.replace(tzinfo=tz)
+    return value.astimezone(UTC).strftime(_PATIENT_LINK_STAMP_FORMAT)
+
+
+def build_patient_calendar_link(
+    start: datetime,
+    end: datetime,
+    summary: str,
+    description: str = "",
+    *,
+    tz: ZoneInfo | None = None,
+) -> str:
+    """The "adicionar à minha agenda" link to send the PATIENT. Pure, no I/O.
+
+    NOT `event["htmlLink"]`, which is the event ON THE CLINIC'S CALENDAR and
+    only opens for an account that already has access to it. A patient tapping
+    that one gets a permission error — the exact bug this replaces. Both links
+    now exist side by side and are not interchangeable: `htmlLink` stays the
+    right one for whoever owns the agenda (it is what `Appointment.
+    google_event_link` stores, what the doctor's hub opens, and what the
+    booking email shows the professional), and THIS one is the right one for
+    the patient.
+
+    Costs nothing: no attendee, no invite, no patient email address, and no
+    second Google API call — the appointment is already in `start`/`end`/
+    `summary`, so this is string formatting. Adding the patient as a real
+    `attendees` entry was the alternative and is worse: SecretarIA holds a
+    WhatsApp number, not an email, and inviting anyone would turn a private
+    clinic calendar into a shared one.
+
+    Times go out in UTC (`...Z`), never clinic-local plus `&ctz=`. Google
+    accepts both, but the local form is only correct while `ctz` is honoured —
+    drop or ignore that one parameter and the same digits are read in the
+    VIEWER's timezone, silently moving the appointment by whole hours for any
+    patient whose Google account is not set to the clinic's zone. A `Z`
+    instant cannot be misread; Google still renders it in the viewer's own
+    timezone, which is what a calendar is for.
+
+    `tz` localizes NAIVE `start`/`end` (pass the clinic's
+    `CalendarService.tzinfo`); already-aware values ignore it and are simply
+    converted. Naive with no `tz` raises rather than assuming UTC and shipping
+    a link that is off by the clinic's offset.
+
+    No `location`: the clinic's address is not on `TenantRuntimeConfig`, so the
+    LLM booking path could not fill one, and for a tenant running the
+    multi_unit addon the true address is the UNIT's rather than the clinic's.
+    A plausible-but-wrong address sitting in the patient's own calendar is
+    worse than no address at all.
+    """
+    params = {
+        "action": "TEMPLATE",
+        "text": summary,
+        "dates": f"{_patient_link_stamp(start, tz)}/{_patient_link_stamp(end, tz)}",
+    }
+    if description:
+        params["details"] = description
+    # quote (not the default quote_plus) so spaces are %20 and the `/` joining
+    # the two stamps stays literal — the form Google's own docs show.
+    query = urlencode(params, quote_via=quote, safe="/")
+    return f"{PATIENT_CALENDAR_TEMPLATE_URL}?{query}"
 
 
 class CalendarService:

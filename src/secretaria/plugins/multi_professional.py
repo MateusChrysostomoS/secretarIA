@@ -59,6 +59,7 @@ from secretaria.ai.tools import (
 from secretaria.core.logging import get_logger
 from secretaria.plugins.base import PluginSpec
 from secretaria.plugins.registry import register
+from secretaria.services.calendar import build_patient_calendar_link
 
 logger = get_logger(__name__)
 
@@ -301,7 +302,20 @@ async def create_event_for_professional(
         {
             "id": event.get("id"),
             "status": event.get("status"),
+            # The event on the professional's own calendar — right for whoever
+            # owns that agenda, a permission error for the patient.
             "htmlLink": event.get("htmlLink"),
+            # The link the PATIENT gets, same as the base `create_event`. It
+            # has to be here too: on a multi-professional tenant this tool is
+            # the ONLY booking tool the agent receives (ai/graph.py::
+            # base_tools_for withholds the tenant-level ones, and
+            # start_guided_booking is withheld as well), so without it the
+            # prompt's "send patient_calendar_link, never htmlLink" rule would
+            # leave exactly the clinics paying for this addon with no link at
+            # all. See services/calendar.py::build_patient_calendar_link.
+            "patient_calendar_link": build_patient_calendar_link(
+                fallback_start, fallback_end, summary, description, tz=cal.tzinfo
+            ),
         },
         professional,
     )

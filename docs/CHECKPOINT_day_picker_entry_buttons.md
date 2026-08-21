@@ -201,6 +201,7 @@ disponibilidade seria inventada.
 | primeiro agendamento | `_ask_day` (depois de serviço/convênio) | `service` |
 | remarcação pelo paciente | `_begin_reschedule` (consolidado — `_manage_handle_day` deixou de existir) | nenhum |
 | rebooking após cancelamento do médico (`PROMPT_FEAT_34`, **ainda não construído**) | `enter_day_picker(back_target=BACK_TARGET_PROFESSIONAL)` | `professional` |
+| hand-back da LLM com o serviço já resolvido (2026-08-20) | `enter_guided_booking` → o MESMO `_ask_day` (ou o convênio antes, quando a clínica coleta) — ver `docs/CHECKPOINT_patient_calendar_link.md` | `service` |
 
 O terceiro fluxo ainda não existe; o que já existe e está testado é o **mecanismo** que ele
 vai usar (`_handle_day_back` com destino `professional`, preservando serviço e convênio).

@@ -29,7 +29,7 @@ from secretaria.services.booking_scope import (
     canonical_service_name,
     service_names,
 )
-from secretaria.services.calendar import CalendarService
+from secretaria.services.calendar import CalendarService, build_patient_calendar_link
 from secretaria.services.precheck import HandoffOutcome, request_precheck_handoff
 
 if TYPE_CHECKING:
@@ -129,6 +129,28 @@ class ManageAppointmentRequested(Exception):
         self.action = action
 
 
+class GuidedBookingRequested(Exception):
+    """Raised by `start_guided_booking`: hand the BOOKING to the button flow.
+
+    Same exception->sentinel mechanism as the two above: it propagates out of
+    the LangGraph ToolNode and graph.run_agent maps it to
+    START_GUIDED_BOOKING_SENTINEL_PREFIX + the canonical service name, which
+    workers/tasks.py turns into a re-entry through
+    services/flow_router.py::enter_guided_booking.
+
+    Carries the service because that is the ONLY thing the free-text
+    conversation resolved that the deterministic flow would otherwise have to
+    ask for again — the same reason SelectProfessionalRequested carries a
+    professional. It is already canonical (the tool validates it against the
+    tenant's catalog BEFORE raising); None means the clinic has no catalog to
+    prove one against, which the flow handles exactly as it does elsewhere.
+    """
+
+    def __init__(self, appointment_type: str | None) -> None:
+        super().__init__("start guided booking")
+        self.appointment_type = appointment_type
+
+
 class SelectProfessionalRequested(Exception):
     """Raised by `select_professional_and_continue` (plugins/multi_professional.py).
 
@@ -224,10 +246,17 @@ def _blocked_tenant_level(tool_name: str) -> dict | None:
 
     Defence in depth, not the primary control: on a multi-professional tenant
     these tools are never handed to the agent in the first place
-    (ai/graph.py::base_tools_for). This catches the paths a tool set cannot —
+    (ai/graph.py::base_tools_for, and workers/tasks.py::_flow_handback_tools
+    for `start_guided_booking`). This catches the paths a tool set cannot —
     a stale cached graph, a hand-rolled invocation, a future caller — and it
     returns BEFORE any Google call or DB write, so a blocked attempt can never
     land an event on the clinic-level calendar or an ownerless Appointment.
+
+    `start_guided_booking` is guarded by this too even though it books
+    nothing: what it OPENS is the tenant-level day picker, whose availability
+    would be read off the clinic-level agenda rather than the chosen doctor's.
+    Offering a multi-doctor clinic's patient days that no doctor actually has
+    free is the same class of wrong, one step earlier.
     """
     if _booking_topology_ctx.get() != BOOKING_TOPOLOGY_MULTI:
         return None
@@ -634,7 +663,21 @@ async def create_event(
     return {
         "id": event.get("id"),
         "status": event.get("status"),
+        # The event on the CLINIC's calendar. Kept because it is what
+        # `_persist_appointment` stores on `Appointment.google_event_link`,
+        # which the doctor's hub and the booking email open — and it is
+        # exactly the WRONG link to hand a patient, who has no access to that
+        # agenda. The prompt is explicit about which of the two to send.
         "htmlLink": event.get("htmlLink"),
+        # The public "add to my calendar" link, the one that goes to the
+        # PATIENT — see services/calendar.py::build_patient_calendar_link.
+        "patient_calendar_link": build_patient_calendar_link(
+            fallback_start,
+            fallback_end,
+            summary,
+            description,
+            tz=cal.tzinfo,
+        ),
     }
 
 
@@ -693,6 +736,44 @@ async def manage_existing_appointment(action: str) -> dict:
             "ou 'cancel' para cancelar."
         )
     }
+
+
+@tool
+async def start_guided_booking(appointment_type: str) -> dict:
+    """Entrega o agendamento ao fluxo guiado de botões, abrindo direto a lista
+    de dias disponíveis (ou a pergunta de convênio, quando a clínica pede).
+    A partir daí o fluxo de botões conduz dia, horário e confirmação — você
+    para de marcar pelo chat.
+
+    OPCIONAL, por sua iniciativa: NÃO é um passo obrigatório do agendamento.
+    Continuar perguntando dia e horário em texto e chamar create_event no fim
+    também é válido. Use esta ferramenta quando o paciente já disse QUAL
+    serviço quer e quer ver horários — os botões são mais rápidos e não erram
+    horário. Se o paciente já pediu um dia específico ("tem horário sexta?"),
+    prefira list_free_slots; se ele estiver aberto ("quando tem vaga?"),
+    prefira esta.
+
+    Args:
+        appointment_type: Nome EXATO do serviço da clínica que será agendado
+            (um dos "Tipos de consulta disponíveis" do seu contexto, ex:
+            'Primeira Consulta'). Não invente, não traduza e não misture com
+            o nome do paciente.
+    """
+    blocked = _blocked_tenant_level("start_guided_booking")
+    if blocked is not None:
+        return blocked
+    # Validated BEFORE the hand-back for the same reason create_event does it:
+    # the deterministic flow would carry this straight into
+    # `Appointment.appointment_type`, which is read downstream as a CATALOG
+    # KEY. An unmatched name errors recoverably here (the model can correct
+    # itself inside the same turn) instead of parking the patient in a button
+    # flow scoped to a service the clinic does not sell.
+    canonical_type, error = _canonical_appointment_type(
+        appointment_type, "start_guided_booking"
+    )
+    if error is not None:
+        return error
+    raise GuidedBookingRequested(canonical_type)
 
 
 _PATIENT_UNRESOLVED_TEXT = (

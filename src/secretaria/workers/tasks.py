@@ -39,9 +39,10 @@ from secretaria.ai.graph import (
     MANAGE_APPOINTMENT_SENTINEL_PREFIX,
     SELECT_PROFESSIONAL_SENTINEL_PREFIX,
     SHOW_MAIN_MENU_SENTINEL,
+    START_GUIDED_BOOKING_SENTINEL_PREFIX,
     run_agent,
 )
-from secretaria.ai.tools import manage_existing_appointment
+from secretaria.ai.tools import manage_existing_appointment, start_guided_booking
 from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger, wa_suffix
@@ -83,7 +84,11 @@ from secretaria.services.appointment_status import (
     SOURCE_FLOW,
     log_status_transition,
 )
-from secretaria.services.booking_scope import booking_topology, sole_active_professional
+from secretaria.services.booking_scope import (
+    BOOKING_TOPOLOGY_MULTI,
+    booking_topology,
+    sole_active_professional,
+)
 from secretaria.services.calendar import CalendarService
 from secretaria.services.email import (
     send_calendar_alert,
@@ -106,6 +111,7 @@ from secretaria.services.flow_router import (
     _enter_professional_services,
     classify_yes_no,
     enter_decline_reasons,
+    enter_guided_booking,
     enter_manage_action,
     enter_rebooking,
     flows_enabled,
@@ -1940,18 +1946,19 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
         tenant_id=str(tenant.id) if tenant is not None else None,
     )
 
+    # The tenant's REAL shape for THIS turn, resolved once: it decides both
+    # the capability set (below, and ai/graph.py::base_tools_for) and which
+    # hand-back tools the agent may be offered (_flow_handback_tools).
+    turn_topology = booking_topology(professional_rows)
+
     reply_text = await run_agent(
         reply.inbound_body,
         context={"conversation_id": str(reply.conversation_id)},
         tenant_config=tenant_config,
-        # manage_existing_appointment is exposed only for flow-enabled tenants
-        # (its sentinel hand-back re-enters the deterministic manage flow,
-        # which does not exist otherwise) - see _handle_manage_appointment.
-        extra_tools=(
-            [*agent_tools_for(summary), manage_existing_appointment]
-            if (tenant is not None and flows_enabled(tenant))
-            else agent_tools_for(summary)
-        ),
+        # The deterministic-flow hand-back tools ride along with the plugin
+        # ones, gated on the flow existing at all (and, for
+        # start_guided_booking, on the topology) - see _flow_handback_tools.
+        extra_tools=_flow_handback_tools(tenant, turn_topology, agent_tools_for(summary)),
         redis=redis,
         selected_professional=selected_professional,
         # The tenant's REAL shape decides which tools the agent is given at
@@ -1961,7 +1968,7 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
         # is None only when the roster load itself failed (already logged) -
         # booking_topology maps that to "unknown", which keeps today's tool
         # set rather than silently disarming a working clinic.
-        booking_topology=booking_topology(professional_rows),
+        booking_topology=turn_topology,
         include_post_consult_knowledge=_should_inject_post_consult_knowledge(
             tenant_config.post_consult_knowledge if tenant_config is not None else None,
             opening_state,
@@ -2002,6 +2009,17 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
         await _handle_manage_appointment(
             reply,
             action,
+            tenant,
+            flow_professionals,
+            patient_wa,
+            redis=redis,
+            waba_token=waba_token,
+        )
+        return
+    if reply_text.startswith(START_GUIDED_BOOKING_SENTINEL_PREFIX):
+        await _handle_start_guided_booking(
+            reply,
+            reply_text,
             tenant,
             flow_professionals,
             patient_wa,
@@ -2169,6 +2187,34 @@ def _label_match_body(body: str | None, label: str) -> bool:
     return bool(target) and (
         target == label.strip().casefold() or target == label[:20].strip().casefold()
     )
+
+
+def _flow_handback_tools(
+    tenant: Tenant | None, topology: str, plugin_tools: list
+) -> list:
+    """This turn's `extra_tools`: the plugin set + the flow hand-back tools.
+
+    Both hand-backs re-enter the deterministic flow through a sentinel, so
+    neither means anything to a tenant that has no such flow — hence the
+    `flows_enabled` gate they have always shared (unconditional since the flows
+    became the product, kept because it is the file's pattern and the switch
+    could come back).
+
+    `start_guided_booking` carries one gate the other does not: it is withheld
+    from a MULTI-professional tenant. The day picker it opens would read
+    availability off the clinic-level agenda, not the chosen doctor's, so on
+    those tenants the way back into the flow is `select_professional_and_continue`
+    (which re-enters at a doctor whose calendar IS resolved) or the menu. Same
+    two-lock shape the calendar tools use: withheld from the tool set here,
+    and refused again inside the tool by `_blocked_tenant_level` if it ever
+    arrives anyway.
+    """
+    if tenant is None or not flows_enabled(tenant):
+        return list(plugin_tools)
+    handbacks = [manage_existing_appointment]
+    if topology != BOOKING_TOPOLOGY_MULTI:
+        handbacks.append(start_guided_booking)
+    return [*plugin_tools, *handbacks]
 
 
 def _flow_turn_calendar(
@@ -3752,6 +3798,130 @@ async def _handle_manage_appointment(
 
     result = await enter_manage_action(
         action, tenant, appointments, professionals, calendar=manage_calendar
+    )
+    await _apply_flow_result(
+        reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+    )
+
+
+async def _handle_start_guided_booking(
+    reply: _ReplyContext,
+    reply_text: str,
+    tenant: Tenant | None,
+    professionals: list | None,
+    patient_wa: str | None,
+    redis=None,
+    waba_token: str | None = None,
+) -> None:
+    """LLM hand-back: resume the booking in the button flow, service in hand.
+
+    The agent's OPTIONAL offer (ai/tools.py::start_guided_booking) — it decided
+    the free-text conversation had got as far as naming the service and that
+    buttons should take it from there. Where the flow resumes is
+    `services/flow_router.py::enter_guided_booking`'s decision, not this
+    function's: convênio when the clinic collects it, the day picker when it
+    does not, exactly as the "Sim, agendar" tap behaves. This orchestrates —
+    it re-reads state, builds the right calendar, and pipes the result to
+    `_apply_flow_result` like the other three hand-back handlers.
+
+    Everything is re-read FRESH in its own session, the same reason
+    `_handle_manage_appointment` gives: the model may have spent several
+    tool-call turns since whatever this turn preloaded, and the roster/selection
+    it saw could be stale.
+
+    WHOSE agenda the day picker reads is the one thing worth getting right.
+    `_appointment_calendar_target` answers it with the machinery the manage
+    flow already uses: the conversation's selected professional when it still
+    resolves, the tenant calendar when no doctor was ever picked (on a clinic
+    with a single active professional `load_tenant_config` has already resolved
+    THEIR credentials into it), and None when a selection no longer resolves —
+    which makes the picker reply `calendar_unavailable` instead of listing days
+    off whichever agenda happened to be at hand.
+
+    A multi-professional tenant is turned away here rather than served. The
+    tool is already withheld from it (`_flow_handback_tools`), but that gate
+    judges by the roster THIS TURN loaded, and a failed roster load maps to
+    UNKNOWN and hands the tool over anyway — so the roster re-read above is
+    also the second lock, and a clinic that turns out to be multi-doctor gets
+    the menu instead of a picker built on the clinic-level agenda.
+    """
+    appointment_type = reply_text[len(START_GUIDED_BOOKING_SENTINEL_PREFIX) :].strip() or None
+    if tenant is None or not flows_enabled(tenant):
+        # The tool is only ever exposed to flow-enabled tenants, so this is a
+        # defensive count-only warning, same style as _handle_manage_appointment.
+        logger.warning(
+            "worker_start_guided_booking_without_flows",
+            conversation_id=str(reply.conversation_id),
+        )
+        return
+
+    async with async_session_factory() as session:
+        conversation = await session.get(Conversation, reply.conversation_id)
+        selected_id = (
+            conversation.flow_selected_professional_id if conversation is not None else None
+        )
+        selected_insurance = (
+            conversation.flow_selected_insurance if conversation is not None else None
+        )
+        professional_rows = await list_active_professionals(session, tenant.id)
+        service_catalog = await load_service_catalog(session, tenant.id)
+        booking_calendar = await _appointment_calendar(
+            session,
+            tenant,
+            _appointment_calendar_target({"professional_id": selected_id}, professional_rows),
+        )
+
+    # The topology decided on the FRESH roster, not on whatever this turn saw.
+    # `_flow_handback_tools` withholds the tool from a multi tenant, but it
+    # judges by the roster the turn loaded — and that load can fail, which maps
+    # to UNKNOWN and hands the tool over anyway. A clinic that is really
+    # multi-doctor would then open a picker built on the CLINIC-level agenda:
+    # days no individual doctor may have free. The menu is the honest answer,
+    # and it is where a multi-doctor booking is supposed to start.
+    if booking_topology(professional_rows) == BOOKING_TOPOLOGY_MULTI:
+        logger.warning(
+            "worker_start_guided_booking_multi_professional",
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(tenant.id),
+        )
+        await _handle_show_main_menu(
+            reply,
+            tenant,
+            professionals,
+            patient_wa,
+            redis=redis,
+            waba_token=waba_token,
+            source="sentinel_fallback",
+        )
+        return
+
+    # The SAME tenant-shaped snapshot `route()` always receives — never the raw
+    # ORM row. It is what resolves the clinic's canonical catalog AND, on a
+    # clinic with one active professional, substitutes THAT professional's own
+    # services (see `_flow_tenant_snapshot`). Passing the row instead would
+    # read the legacy `tenants.appointment_types` column, which is empty on
+    # exactly the clinics that configure everything per-professional — the day
+    # picker would then slot on the clinic default instead of the service's own
+    # duration, and offer the patient the wrong lengths.
+    tenant_snapshot = _flow_tenant_snapshot(tenant, professional_rows, service_catalog)
+
+    result = await enter_guided_booking(
+        tenant_snapshot,
+        booking_calendar,
+        appointment_type,
+        conversation_id=reply.conversation_id,
+        professional_id=selected_id,
+        insurance=selected_insurance,
+        professionals=professionals,
+    )
+    logger.info(
+        "conversation_guided_booking_entered",
+        conversation_id=str(reply.conversation_id),
+        tenant_id=str(tenant.id),
+        # Enums and flags only: whether a service came through and which step
+        # the flow resumed at. Never the service name, never the convênio.
+        has_type=appointment_type is not None,
+        flow_step=result.flow_step,
     )
     await _apply_flow_result(
         reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token

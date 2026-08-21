@@ -443,6 +443,71 @@ async def test_base_create_event_persists_owner_and_canonical_type(db):
         assert appointment.appointment_type != "Consulta - Maria"
 
 
+async def test_base_create_event_returns_both_links_and_they_are_different(db):
+    """The tool hands back TWO links, for two different readers.
+
+    `htmlLink` is the event on the clinic's calendar — what gets persisted on
+    `Appointment.google_event_link`, what the doctor's hub and the booking
+    email open, and a permission error for anybody else. `patient_calendar_link`
+    is the public add-to-calendar template, the only one safe to send a
+    patient. Collapsing them into one key is exactly the bug this guards.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    clinic = await _seed_sole_professional_clinic(db)
+    config = await _tenant_runtime_config(db, clinic.tenant)
+    with _agent_context(
+        clinic.tenant.id,
+        tenant_config=config,
+        conversation_id=clinic.conversation.id,
+        topology=BOOKING_TOPOLOGY_SOLE,
+        calendar=_FakeCalendar(),
+    ):
+        result = await ai_tools.create_event.ainvoke(
+            {
+                "start": "2026-08-03T08:00:00",
+                "end": "2026-08-03T08:30:00",
+                "summary": "Consulta - Maria",
+                "appointment_type": _SERVICE,
+            }
+        )
+
+    assert result["htmlLink"] == "https://cal/evt"
+    link = result["patient_calendar_link"]
+    assert link != result["htmlLink"]
+    query = parse_qs(urlparse(link).query)
+    assert urlparse(link).netloc == "calendar.google.com"
+    assert query["action"] == ["TEMPLATE"]
+    assert query["text"] == ["Consulta - Maria"]
+    # 08:00-08:30 in America/Sao_Paulo == 11:00-11:30Z.
+    assert query["dates"] == ["20260803T110000Z/20260803T113000Z"]
+    # ...and the private one is still what lands on the row.
+    async with db() as session:
+        appointment = (await session.scalars(select(Appointment))).one()
+        assert appointment.google_event_link == "https://cal/evt"
+
+
+async def test_base_create_event_passes_the_description_into_the_patient_link(db):
+    clinic = await _seed_sole_professional_clinic(db)
+    config = await _tenant_runtime_config(db, clinic.tenant)
+    with _agent_context(
+        clinic.tenant.id,
+        tenant_config=config,
+        topology=BOOKING_TOPOLOGY_SOLE,
+        calendar=_FakeCalendar(),
+    ):
+        result = await ai_tools.create_event.ainvoke(
+            {
+                "start": "2026-08-03T08:00:00",
+                "end": "2026-08-03T08:30:00",
+                "summary": "Consulta - Maria",
+                "description": "Trazer exames",
+                "appointment_type": _SERVICE,
+            }
+        )
+    assert "details=Trazer%20exames" in result["patient_calendar_link"]
+
+
 async def test_base_create_event_derives_the_type_when_the_catalog_is_unambiguous(db):
     clinic = await _seed_sole_professional_clinic(db)
     config = await _tenant_runtime_config(db, clinic.tenant)

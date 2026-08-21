@@ -183,6 +183,13 @@ active-professionals snapshot** the worker passes into `route()` (new
 - `secretary_system_prompt` gained a "MENU E ESCOLHA DE PROFISSIONAL" section
   teaching both tools (and noting the professional tools only exist for
   entitled clinics). `context_doctor_message` is never used for matching.
+- **Later additions on this same exception→sentinel seam** (not part of this
+  round, listed so the mechanism has one place that names all four users):
+  `manage_existing_appointment` → `enter_manage_action`
+  (`docs/CHECKPOINT_trio_gerenciar_scoped_help.md`) and `start_guided_booking`
+  → `enter_guided_booking`, the OPTIONAL hand-back of the booking itself,
+  withheld from multi-professional tenants precisely because the day picker it
+  opens is tenant-level — see `docs/CHECKPOINT_patient_calendar_link.md`.
 - **Session decision**: the worker now loads the active-professionals
   snapshot for **every resolved tenant** (not only flows-enabled ones) — the
   agent's professional context and the sentinel handlers work for

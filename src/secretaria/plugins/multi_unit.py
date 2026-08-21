@@ -42,6 +42,7 @@ from secretaria.ai.tools import (
 from secretaria.core.logging import get_logger
 from secretaria.plugins.base import PluginSpec
 from secretaria.plugins.registry import register
+from secretaria.services.calendar import build_patient_calendar_link
 
 logger = get_logger(__name__)
 
@@ -162,7 +163,16 @@ async def create_event_at_unit(
     return {
         "id": event.get("id"),
         "status": event.get("status"),
+        # The event on the clinic's calendar (right for the clinic) and the
+        # public add-to-calendar link (the only one the PATIENT can open).
+        # This tool is the sole booking tool for a tenant with multi_unit but
+        # no multi_professional, so omitting the second one would leave those
+        # clinics with no link at all — see
+        # services/calendar.py::build_patient_calendar_link.
         "htmlLink": event.get("htmlLink"),
+        "patient_calendar_link": build_patient_calendar_link(
+            fallback_start, fallback_end, summary, description, tz=cal.tzinfo
+        ),
     }
 
 

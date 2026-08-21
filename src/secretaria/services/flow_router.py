@@ -39,7 +39,11 @@ from secretaria.services.booking_scope import (
     canonical_service_name,
     resolve_booking_owner_id,
 )
-from secretaria.services.calendar import CalendarService, CalendarUnavailableError
+from secretaria.services.calendar import (
+    CalendarService,
+    CalendarUnavailableError,
+    build_patient_calendar_link,
+)
 from secretaria.services.service_catalog import normalize, professionals_offering
 from secretaria.services.tenant_config import (
     active_appointment_types,
@@ -2217,6 +2221,74 @@ async def _ask_day(
     )
 
 
+async def enter_guided_booking(
+    tenant: Tenant,
+    calendar: CalendarService | None,
+    appointment_type: str | None,
+    *,
+    conversation_id: UUID | None = None,
+    professional_id: UUID | None = None,
+    insurance: str | None = None,
+    services: list[dict] | None = None,
+    professionals: list | None = None,
+) -> FlowRouterResult:
+    """LLM hand-back entry: resume the booking AFTER the service was chosen.
+
+    The deterministic twin of tapping "Sim, agendar" on a service card — see
+    `_catalog_step`'s STEP_AWAITING_SERVICE_CONFIRM branch, whose two outcomes,
+    order and `insurance_step_skipped` log this reproduces on purpose. The
+    free-text conversation resolved the service; everything after it (convênio,
+    day, time, confirmation, the booking itself) is the button flow's again.
+
+    **It deliberately does NOT jump straight to the day picker.** The literal
+    ask was "open the day list", but `collect_insurance` is a clinic-wide
+    setting the hub saved on purpose, and `_insurance_step_skip_reason` is the
+    single place that decides whether it applies. Skipping it here would mean a
+    booking loses information the clinic asked for on every OTHER booking,
+    purely because this patient happened to arrive through the LLM — an
+    invariant break invisible until a receptionist notices a blank convênio.
+    So: convênio when the clinic collects it, day picker when it does not, and
+    the day picker is one tap further in exactly the case where it already was.
+
+    Takes the conversation's state as plain arguments rather than a
+    Conversation: the caller (workers/tasks.py::_handle_start_guided_booking)
+    holds no live row by then, the same situation `enter_manage_action` is in.
+    `_DayPickerState` is the carrier that exists for it, so the chosen service
+    is applied to a throwaway snapshot and NOTHING here mutates a row —
+    `_apply_flow_result` persists whatever the returned result carries, as it
+    does for every other transition.
+
+    `tenant` is the SAME tenant-shaped snapshot `route()` receives
+    (`workers/tasks.py::_flow_tenant_snapshot`), never the raw ORM row: on a
+    clinic with one active professional that snapshot already carries THAT
+    professional's own catalog, which is what the slot length is read from.
+    `services` may name a catalog explicitly; omitted, it is derived from the
+    snapshot, which is what every button-flow caller relies on.
+
+    `appointment_type` arrives canonical (ai/tools.py::start_guided_booking
+    validated it against the catalog before the hand-back); None means the
+    clinic has no catalog, and the booking proceeds typeless exactly as it
+    does elsewhere. `calendar` is the agenda to read availability from — None
+    makes the picker answer `calendar_unavailable` rather than invent days.
+    """
+    state = _DayPickerState(
+        id=conversation_id,
+        flow_selected_type=appointment_type,
+        flow_selected_professional_id=professional_id,
+        flow_selected_insurance=insurance,
+    )
+    skip_reason = _insurance_step_skip_reason(tenant)
+    if skip_reason is None:
+        return _enter_insurance(state, tenant)
+    logger.info(
+        "insurance_step_skipped",
+        reason=skip_reason,
+        conversation_id=str(conversation_id),
+        professional_count=len(professionals or []),
+    )
+    return await _ask_day(state, tenant, calendar, services, professionals)
+
+
 async def _relist_stored_day(
     conversation: Conversation,
     tenant: Tenant,
@@ -2356,9 +2428,18 @@ async def _handle_confirmation(
     insurance = _selected_insurance(conversation)
     if insurance:
         appointment["insurance"] = insurance
+    # ONE bubble, not two: the patient keeps a single message they can
+    # screenshot or forward, and it costs one WhatsApp send instead of two.
+    # The labelled blank line is what separates the link from the confirmation
+    # text. The link is the PUBLIC add-to-calendar one — `event["htmlLink"]`
+    # (stored above as `google_event_link`, and the right link for the clinic)
+    # would open a permission error for the patient. See
+    # services/calendar.py::build_patient_calendar_link.
     confirmation = (
         "Pronto! Seu agendamento está confirmado. ✅\n\n"
-        f"{service_type}\n{start.strftime('%d/%m/%Y às %H:%M')}"
+        f"{service_type}\n{start.strftime('%d/%m/%Y às %H:%M')}\n\n"
+        "Adicionar à sua agenda:\n"
+        f"{build_patient_calendar_link(start, end, summary, tz=calendar.tzinfo)}"
     )
     return FlowRouterResult(
         action="reply",
