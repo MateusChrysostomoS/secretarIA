@@ -117,6 +117,15 @@ errado; documentar depois garante que o doc descreve o que realmente está no ar
 - Cite âncoras estáveis (nome de função/módulo), não números de linha frágeis, quando possível.
 - Mantenha o `CHECKPOINT_*` da feature em dia até ela ser 100% concluída/encerrada; aí vira histórico.
 
+## Prompts de correção pendentes (`.claude/prompts/`)
+
+Gerados por uma sessão de auditoria (2026-08-21) a partir de uma lista de bugs já reportados pelo usuário. Cada arquivo é autossuficiente (causa raiz já investigada, arquivo/linha citados) para rodar em uma sessão nova. Use quando for resolver o problema correspondente — releia o arquivo primeiro, os números de linha citados podem ter mudado desde a auditoria.
+
+- **`PROMPT_01_llm_flow_reentry_gap.md`** — conversas presas em modo LLM sem retorno ao fluxo determinístico quando a tenant não tem `returning_greeting_message` configurado. A transição LLM→fluxo em si já é tratada (4 ferramentas de hand-back em `ai/tools.py`/`plugins/multi_professional.py`); o gap é a ausência de expiração para quem não tem reativação configurada.
+- **`PROMPT_02_specialty_leak_deploy_parity.md`** — mensagem solta com a especialidade do médico ao selecioná-lo (ex.: "Geriatria" sozinha). **Já corrigido em `main`** (commit `64d1af8`); sintoma ao vivo é provável recorrência de paridade de deploy API/worker — o prompt manda checar `GET /build`/`deploy_parity` antes de tocar em código.
+- **`PROMPT_03_back_buttons_ambiguity.md`** — botões "Voltar" e "Escolher outro dia" na tela de horário. **Achado importante: não são idênticos hoje** ("Voltar" vai para lista de serviços, "Escolher outro dia" vai para lista de dias) — o prompt exige confirmar com o usuário qual comportamento manter antes de implementar.
+- **`PROMPT_04_list_row_truncation.md`** — nomes longos (médico/serviço) truncados nas listas do WhatsApp. Truncamento de 24 caracteres já existe no backend, mas é um literal mágico duplicado em 8+ lugares (sem constante nomeada, ao contrário do limite de botão) e corta no meio da palavra; frontend (`InviteTeamMemberModal.tsx`) não tem `maxLength`. **Decisão do usuário (2026-08-21):** `maxLength` rígido + erro visível no campo + ícone de interrogação com tooltip explicando o limite de 24 caracteres por política do WhatsApp; backend mantido como rede de segurança.
+
 ## graphify
 
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.

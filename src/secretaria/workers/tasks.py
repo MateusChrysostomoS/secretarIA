@@ -115,6 +115,7 @@ from secretaria.services.flow_router import (
     enter_manage_action,
     enter_rebooking,
     flows_enabled,
+    llm_state_ttl_minutes,
     manage_label,
     menu_buttons_for,
     menu_label,
@@ -840,6 +841,20 @@ async def _persist_inbound_message(
                     if offer is not None:
                         return offer
 
+                # Universal floor on how long full LLM mode may last. The offer
+                # above bounds it only for tenants that opted into a returning
+                # greeting; this catches everyone else, silently (see
+                # `_expire_stale_llm_state`). Placed after the offer so an
+                # opted-in tenant's "quer continuar?" always wins, and after the
+                # pending-answer gate so a resume in progress is never wiped.
+                if _expire_stale_llm_state(conversation, tenant, last_activity_at):
+                    logger.info(
+                        "conversation_llm_state_expired",
+                        conversation_id=str(conversation.id),
+                        tenant_id=str(tenant.id),
+                        ttl_minutes=llm_state_ttl_minutes(tenant),
+                    )
+
                 greeting_buttons = _greeting_buttons_for(tenant, greeting_override, opening_context)
 
                 return _ReplyContext(
@@ -1292,6 +1307,62 @@ def _reactivation_offer(
         greeting_override=greeting,
         greeting_buttons=_greeting_buttons_for(tenant, greeting),
     )
+
+
+def _expire_stale_llm_state(
+    conversation: Conversation,
+    tenant: Tenant,
+    last_activity_at: datetime | None,
+) -> bool:
+    """Drop a long-idle full-LLM flow state so the next turn re-opens the menu.
+
+    THE GAP THIS CLOSES. `route()` keeps a conversation in `FlowState.LLM`
+    until something explicitly resets it, and every reset is initiated by the
+    patient or by the agent itself: `/menu` (and its aliases), or one of the
+    four hand-back tools (`show_main_menu`, `start_guided_booking`,
+    `select_professional_and_continue`, `manage_existing_appointment`). Those
+    work, and are untouched here — but none of them is GUARANTEED to happen.
+    `_reactivation_offer` above is the only time-based exit, and it runs only
+    when `reactivation_enabled(tenant)` is true, i.e. when the clinic filled in
+    `returning_greeting_message` in the hub (or set the explicit
+    `initial_flows.reactivation.enabled` flag). A default tenant has neither —
+    `initial_flows` defaults to `{}` and the column to NULL — so for them
+    NOTHING bounded the stay, and `Conversation` is one row per patient forever
+    (`uq_conversations_tenant_patient`), so no "new conversation" ever starts
+    clean either. One "Outro" tap left that patient answering into the free LLM
+    on every future contact, weeks later included.
+
+    THE FLOOR. After `llm_state_ttl_minutes` of silence the flow state is
+    simply dropped, so the CURRENT inbound routes from `IDLE` and `route()`
+    re-presents the menu. Deliberately silent: no extra message is sent, no
+    history/appointment/consent row is touched — only the transient `flow_*`
+    fields move, the same set the "Não" answer to the resume prompt clears.
+    Runs AFTER the offer above, so an opted-in tenant's "quer continuar?" still
+    wins and this only ever catches the cohort the offer skips.
+
+    SCOPE. `FlowState.LLM` only. A stale `SERVICE_CATALOG`/`MANAGE_BOOKING`
+    conversation is left alone on purpose: those steps re-prompt deterministically
+    on unexpected input, so they self-correct — full LLM mode is the one state
+    with no deterministic way back.
+
+    Returns True when the state was expired (the caller logs it).
+    """
+    if conversation.flow_state != FlowState.LLM:
+        return False
+    if last_activity_at is None:
+        return False
+    gap = datetime.now(UTC) - _as_utc(last_activity_at)
+    if gap < timedelta(minutes=llm_state_ttl_minutes(tenant)):
+        return False
+    conversation.flow_state = FlowState.IDLE
+    conversation.flow_step = None
+    conversation.flow_selected_type = None
+    conversation.flow_selected_day = None
+    conversation.flow_selected_slot = None
+    conversation.flow_selected_professional_id = None
+    conversation.flow_selected_insurance = None
+    conversation.flow_managing_appointment_id = None
+    return True
 
 
 # Sent before the fresh greeting when the reset had to leave bookings behind

@@ -523,6 +523,35 @@ def reactivation_gap_minutes(tenant: Tenant) -> int:
         return DEFAULT_REACTIVATION_GAP_MINUTES
 
 
+def llm_state_ttl_minutes(tenant: Tenant) -> int:
+    """Minutes a conversation may sit in ``FlowState.LLM`` before it is dropped.
+
+    Full LLM mode is sticky BY DESIGN (see ``route()``'s first branch and
+    ``FlowState.LLM``'s docstring): mid-conversation every turn has to keep
+    reaching the agent, or a patient halfway through an answer would be yanked
+    back to the menu. What it must not be is PERMANENT — and it was. Every exit
+    is patient- or agent-initiated (``/menu``, or one of the four hand-back
+    tools: ``show_main_menu``, ``start_guided_booking``,
+    ``select_professional_and_continue``, ``manage_existing_appointment``), plus
+    the returning-patient offer — which only runs for tenants where
+    ``reactivation_enabled`` is true, i.e. those who filled in
+    ``returning_greeting_message`` in the hub. Default tenants have
+    ``initial_flows == {}`` and that column NULL, so nothing bounded the stay at
+    all, and ``Conversation`` is ONE row per patient forever
+    (``uq_conversations_tenant_patient``) — there is no next conversation that
+    would start clean. One "Outro" tap parked a patient on the free LLM for
+    every future contact.
+
+    The threshold is deliberately the SAME silence gap as the returning-patient
+    offer: "long enough that the next inbound is a fresh contact" is a single
+    notion in this product, and it already has a name and a per-tenant knob
+    (``initial_flows.reactivation.gap_minutes``). Kept as its own function so
+    the LLM-expiry policy kept a single named home should the two ever need to
+    diverge — the same reason ``flows_enabled`` survives as a function.
+    """
+    return reactivation_gap_minutes(tenant)
+
+
 def reactivation_continue_prompt(tenant: Tenant) -> str:
     """The question appended to the returning greeting (e.g. 'Quer continuar?')."""
     return str(_reactivation_config(tenant).get("continue_prompt") or DEFAULT_CONTINUE_PROMPT)

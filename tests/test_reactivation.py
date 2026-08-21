@@ -37,14 +37,17 @@ from secretaria.services.flow_router import (  # noqa: E402
     STEP_AWAITING_SLOT,
     MenuBubble,
     classify_yes_no,
+    llm_state_ttl_minutes,
     reactivation_choice_buttons,
     reactivation_continue_prompt,
     reactivation_enabled,
     reactivation_gap_minutes,
     resume_bubbles,
+    route,
 )
 from secretaria.workers.tasks import (  # noqa: E402
     _as_utc,
+    _expire_stale_llm_state,
     _reactivation_offer,
 )
 
@@ -403,3 +406,138 @@ def test_offer_idle_without_any_greeting_returns_none():
     conv = _conversation(flow_state=FlowState.IDLE)
     stale = datetime.now(UTC) - timedelta(hours=10)
     assert _reactivation_offer(conv, tenant, _patient(), "5511999", "oi", stale) is None
+
+
+# --------------------------------------------------------------------------
+# _expire_stale_llm_state - the universal floor on full LLM mode
+#
+# `route()` keeps FlowState.LLM until an explicit reset (/menu or one of the
+# four agent hand-back tools), and `_reactivation_offer` only bounds it for
+# tenants that opted in via `returning_greeting_message`. These cover the
+# cohort the offer skips - the default one.
+# --------------------------------------------------------------------------
+
+
+def _plain_tenant(**overrides):
+    """A default tenant: no returning greeting, no reactivation config.
+
+    `reactivation_enabled` is False for this shape, so `_reactivation_offer` is
+    never even called for it (see `_persist_inbound_message`) - it is exactly
+    the cohort that had no time-based exit from LLM mode at all.
+    """
+    base = dict(returning_greeting_message=None, greeting_message="Olá!")
+    base.update(overrides)
+    tenant = _tenant(**base)
+    tenant.initial_flows.pop("reactivation", None)
+    return tenant
+
+
+def _llm_conversation(**kw):
+    base = dict(
+        flow_state=FlowState.LLM,
+        flow_step=None,
+        flow_selected_professional_id=uuid4(),
+        flow_selected_insurance="Unimed",
+        flow_managing_appointment_id=None,
+    )
+    base.update(kw)
+    return _conversation(**base)
+
+
+def test_default_tenant_has_reactivation_disabled_but_still_gets_a_ttl():
+    tenant = _plain_tenant()
+    assert reactivation_enabled(tenant) is False
+    assert llm_state_ttl_minutes(tenant) == DEFAULT_REACTIVATION_GAP_MINUTES
+
+
+def test_stale_llm_state_expires_for_a_tenant_without_reactivation():
+    tenant = _plain_tenant()
+    conv = _llm_conversation()
+    stale = datetime.now(UTC) - timedelta(minutes=DEFAULT_REACTIVATION_GAP_MINUTES + 1)
+    assert _expire_stale_llm_state(conv, tenant, stale) is True
+    # Dropped to IDLE so the CURRENT inbound routes as a menu interaction.
+    assert conv.flow_state == FlowState.IDLE
+    # Everything transient goes with it - same set the "Não" answer clears.
+    assert conv.flow_selected_professional_id is None
+    assert conv.flow_selected_insurance is None
+    assert conv.flow_step is None
+    # The gate is NOT armed: this path sends nothing, it only re-anchors.
+    assert conv.reactivation_origin is None
+
+
+def test_llm_state_survives_while_the_conversation_is_still_active():
+    conv = _llm_conversation()
+    professional_id = conv.flow_selected_professional_id
+    recent = datetime.now(UTC) - timedelta(minutes=5)
+    assert _expire_stale_llm_state(conv, _plain_tenant(), recent) is False
+    # Mid-conversation stickiness is the whole point of FlowState.LLM.
+    assert conv.flow_state == FlowState.LLM
+    assert conv.flow_selected_professional_id == professional_id
+
+
+def test_expiry_ignores_non_llm_states():
+    stale = datetime.now(UTC) - timedelta(days=30)
+    for state in (
+        FlowState.IDLE,
+        FlowState.MENU,
+        FlowState.SERVICE_CATALOG,
+        FlowState.MANAGE_BOOKING,
+        FlowState.BUSINESS_HOURS,
+    ):
+        conv = _conversation(flow_state=state, flow_step=STEP_AWAITING_DAY)
+        assert _expire_stale_llm_state(conv, _plain_tenant(), stale) is False
+        assert conv.flow_state == state
+        assert conv.flow_step == STEP_AWAITING_DAY
+
+
+def test_expiry_noop_without_prior_activity():
+    conv = _llm_conversation()
+    assert _expire_stale_llm_state(conv, _plain_tenant(), None) is False
+    assert conv.flow_state == FlowState.LLM
+
+
+def test_expiry_honours_the_tenant_gap_override():
+    tenant = _tenant(
+        reactivation={"gap_minutes": 30},
+        returning_greeting_message=None,
+        greeting_message="Olá!",
+    )
+    # No "enabled" key and no returning greeting -> still the skipped cohort.
+    assert reactivation_enabled(tenant) is False
+    assert llm_state_ttl_minutes(tenant) == 30
+    conv = _llm_conversation()
+    assert _expire_stale_llm_state(conv, tenant, datetime.now(UTC) - timedelta(minutes=20)) is False
+    assert _expire_stale_llm_state(conv, tenant, datetime.now(UTC) - timedelta(minutes=40)) is True
+    assert conv.flow_state == FlowState.IDLE
+
+
+def test_expiry_accepts_a_naive_timestamp():
+    """Postgres can hand back a naive datetime - _as_utc normalises it."""
+    conv = _llm_conversation()
+    naive = (datetime.now(UTC) - timedelta(days=2)).replace(tzinfo=None)
+    assert _expire_stale_llm_state(conv, _plain_tenant(), naive) is True
+    assert conv.flow_state == FlowState.IDLE
+
+
+async def test_expired_llm_conversation_reopens_the_menu_on_this_same_turn():
+    """End-to-end intent: the reset makes the CURRENT inbound land on the menu.
+
+    Free text at IDLE re-presents the menu (route() -> _menu_choice); the same
+    text at LLM would have been delegated straight back to the agent.
+    """
+    tenant = _plain_tenant()
+    conv = _llm_conversation()
+    stale = datetime.now(UTC) - timedelta(days=7)
+    assert _expire_stale_llm_state(conv, tenant, stale) is True
+    result = await route(conv, tenant, None, "bom dia", patient_name="Maria")
+    assert result.action == "reply"
+    assert result.flow_state == FlowState.MENU
+    assert isinstance(result.bubbles[0], MenuBubble)
+
+
+async def test_without_the_reset_the_same_turn_would_stay_in_llm_mode():
+    """The regression guard: proves the branch above is what changes the outcome."""
+    conv = _llm_conversation()
+    result = await route(conv, _plain_tenant(), None, "bom dia", patient_name="Maria")
+    assert result.action == "delegate_llm"
+    assert result.flow_state == FlowState.LLM
