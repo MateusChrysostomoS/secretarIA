@@ -1,14 +1,17 @@
 # CHECKPOINT — Limites de texto do WhatsApp (constante única + corte marcado + trava no hub)
 
-Built 2026-08-21. Resposta ao `PROMPT_04_list_row_truncation.md` ("nome do médico aparece
+Duas rodadas. Resposta ao `PROMPT_04_list_row_truncation.md` ("nome do médico aparece
 cortado na lista"). Toca **dois repos**: `secretarIA` (rede de segurança) e
 `secretarIA-frontend` (a correção de verdade).
 
-Suite state backend: **1744 passed** (`uv run python -m pytest -q`), incluindo 20 testes
-novos. `ruff check` limpo em todos os arquivos tocados. Frontend: **225 passed**
-(`npm test`, 13 novos), `tsc --noEmit` limpo, `npm run build` verde.
+- **2026-08-21 (§1-§3)** — a infraestrutura + o nome do profissional.
+  COMMITADO: `secretarIA` `ef8f6dd`, `secretarIA-frontend` `00f343d`.
+- **2026-08-22 (§4)** — nome de serviço, convênio, e o limite dito à própria LLM.
+  **NÃO COMMITADO.**
 
-**Status: NÃO COMMITADO, NÃO DEPLOYADO.** Sem migração. Ver "Pendências".
+Estado atual das suítes: backend **1753 passed**, frontend **242 passed**,
+`tsc --noEmit` limpo, `npm run build` verde. Sem migração em nenhuma das rodadas.
+Ver "Pendências".
 
 ## O problema (e o que o relato original errava)
 
@@ -119,8 +122,8 @@ no navegador: o modal de secretária sai com `maxLength: -1` e zero ícones de a
   qualquer corte; o id é o que torna o toque inequívoco.
 - **`ProfessionalCreate.name` continua `max_length=255`.** O cap do cliente é UX, não a
   fronteira de segurança.
-- **Nome de serviço (`ServiceCard.tsx`) não ganhou cap de input.** Fica só com a rede do
-  backend, conforme o escopo decidido — é a segunda porta conhecida, listada abaixo.
+- **Nome de serviço (`ServiceCard.tsx`) não ganhou cap de input NESTA rodada.** Ficou só
+  com a rede do backend — fechado depois, na §4.
 
 ## Validação
 
@@ -137,6 +140,100 @@ no navegador: o modal de secretária sai com `maxLength: -1` e zero ícones de a
 `npm run lint` **não é um gate neste repo** — `next lint` abre o assistente interativo de
 criação de config ESLint (não existe config aqui). Ver `CLAUDE.md` e a skill `front-brain`.
 
+## §4 — Segunda rodada (2026-08-22): os outros campos, e a própria LLM
+
+A primeira rodada capou UM campo. Esta fecha os outros dois e tira a LLM da
+dependência do corte silencioso. Backend **1753 passed** (+9), frontend
+**242 passed** (+12).
+
+### O que a varredura achou: são TRÊS campos, não dois
+
+Todo texto escrito pela clínica que vira título de linha de lista:
+
+| Linha | Origem | Campo no hub | Estado |
+|---|---|---|---|
+| `prof\|` | `professional.name` | `InviteTeamMemberModal` | capado na 1ª rodada (bloqueia submit) |
+| `svc\|` | nome do serviço | `ServiceCard.tsx` | **capado agora** (avisa, não bloqueia) |
+| `ins\|` | plano de convênio | `ContextSection.tsx` "Convênios aceitos" | **capado agora** (avisa, não bloqueia) |
+
+Convênio não estava previsto em lugar nenhum — tem render em
+`flow_router.py::_enter_insurance_step` e matcher próprio logo acima, exatamente
+a mesma classe de problema.
+
+### Por que estes dois AVISAM em vez de BLOQUEAR
+
+O modal de convite envia uma coisa só; recusá-lo não custa nada à clínica.
+`/configuracao` salva oito seções atrás de UM "Salvar configuração". Bloquear
+esse botão por causa de um nome longo — quase certamente gravado antes do cap
+existir, possivelmente nunca digitado por quem está na tela — sequestraria a
+saudação, os horários e a política de Pix junto. Os dois campos mostram a
+mensagem e continuam salváveis; a rede do backend mantém a linha legível.
+
+### Convênio: o cap é por ITEM, e `maxLength` não serve
+
+Um input, N planos separados por vírgula. Um `maxLength` no campo proibiria três
+planos curtos perfeitamente legais. A validação roda sobre
+`toWireInsurances(csv)` — a **mesma** função que monta o PUT — então o aviso e o
+payload não podem discordar sobre onde termina um plano. A mensagem nomeia o
+plano culpado em vez de dizer "algum nome está longo".
+
+### UI: nada novo foi desenhado
+
+`ServiceCard` é uma linha compacta sem label visível (só `aria-label`), então o
+"?" ficou logo depois do input em vez de num label — o `HelpTip` já era usado
+exatamente assim em `AvailabilitySection.tsx` ("Horário semanal"), como filho
+direto de uma flex row. A mensagem ocupa linha própria abaixo da row inteira,
+porque a row já quebra em viewport estreito e um texto espremido entre o nome e
+a duração seria a primeira coisa a virar sopa. Convênio já tinha `<Field tip=…>`;
+só o texto do tooltip cresceu.
+
+### A LLM agora sabe o número
+
+`ai/prompts.py`, bloco B, dizia só "rótulo curto" — instrução que o modelo não
+tem como cumprir. Agora interpola `MAX_LIST_ROW_TITLE_CHARS` (importado, não
+digitado) e diz a consequência:
+
+    <iso_datetime>|<rótulo de no máximo 24 caracteres>
+    O rótulo é o que o paciente TOCA, e o WhatsApp corta qualquer rótulo acima
+    de 24 caracteres — escreva só a hora ("14:00") ou hora + uma palavra
+    ("14:00 Retorno"), nunca uma frase.
+
+`test_prompts.py` renderiza o prompt com a constante monkeypatchada para 99 e
+exige ver "99" — é a única forma de provar que o texto lê a constante em vez de
+trazer um "24" solto.
+
+`_parse_slot_rows` (`ai/formatter.py`) agora aplica `truncate_list_row_title` no
+**parse**, não só no `send_list`. Seguro porque `slot|` está em
+`_PAYLOAD_ROW_PREFIXES`: o toque chega como "<rótulo> (<iso>)" e o ISO é a
+chave, então o rótulo não é chave de nada. Ganho: um rótulo estourado nunca
+percorre o resto da pipeline nem entra em log com o tamanho cheio.
+
+### `[CONFIRM]` não precisou de nada — e isso está fixado em teste
+
+`ButtonBubble.confirm_label`/`cancel_label` são `"Confirmar"`/`"Cancelar"`,
+**fixos no código**; a LLM só escreve o CORPO do card. O limite de botão (20)
+nunca passa pela mão dela. `test_confirm_block_needs_no_limit_because_its_labels_are_fixed`
+existe para impedir que alguém "conserte" isso adicionando um cap que o modelo
+não tem como violar.
+
+### Bônus: um QUARTO literal mágico
+
+`ai/formatter.py` declarava o próprio `MAX_LIST_ROWS = 10`, ao lado da cópia em
+`core/whatsapp_limits.py` que `flow_router` e o cliente já liam — e
+`tests/test_flow_day_picker.py` importava a de `formatter`. Agora é re-export,
+então o import antigo continua funcionando e existe um lugar só para mudar.
+`test_row_cap_is_the_shared_constant_not_a_local_copy` fixa isso.
+
+### Validação da 2ª rodada
+
+| Gate | Resultado |
+|---|---|
+| `uv run python -m pytest -q` | **1753 passed** |
+| `ruff check` (arquivos tocados) | limpo |
+| `ruff format --check` | `formatter.py`/`prompts.py`/`test_formatter.py` já estavam fora de forma **no HEAD**; as linhas novas conferem com o que o ruff quer |
+| frontend `tsc --noEmit` / `npm test` / `npm run build` | limpo / **242 passed** / verde |
+| navegador | convênio verificado ao vivo (tooltip com o número, erro nomeando só o plano culpado, Save segue habilitado). **ServiceCard não foi verificado no navegador** — "Adicionar serviço" fica desabilitado sem backend (guarda fail-closed de hidratação), então nenhum card renderiza offline |
+
 ## Pendências
 
 1. **Commit + deploy dos dois serviços.** `flow_router.py`, `whatsapp.py` e
@@ -148,7 +245,11 @@ criação de config ESLint (não existe config aqui). Ver `CLAUDE.md` e a skill 
    `POST /doctor/professionals/self`, que deriva o nome do usuário do brain-api — ou seja,
    do `/cadastro` e do "Meu Perfil" no `brain-frontend`. Esses campos não têm cap. Só a
    rede do backend cobre esse caminho hoje.
-4. **Nome de serviço** (`ServicesSection`/`ServiceCard`) segue sem cap de input.
+4. ~~**Nome de serviço** segue sem cap de input.~~ **Feito na 2ª rodada**, junto
+   com convênio (§4).
+5. **`ServiceCard` não foi visto rodando.** O caminho está coberto por teste e o
+   `HelpTip` tem precedente idêntico em `AvailabilitySection`, mas ninguém olhou
+   o card com o "?" na tela — precisa de um hub com backend de verdade.
 
 Padrão generalizado na skill `third-party-text-limits`
 (`TECH/.claude/skills/third-party-text-limits/SKILL.md`).

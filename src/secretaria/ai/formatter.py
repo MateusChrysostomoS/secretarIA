@@ -29,12 +29,21 @@ import re
 from dataclasses import dataclass, field
 from typing import Literal
 
-# Limits we cap at to stay inside the WhatsApp Cloud API contract.
+from secretaria.core.whatsapp_limits import MAX_LIST_ROWS, truncate_list_row_title
+
+# Product caps on how much WE choose to send per turn. These are ours, not
+# Meta's, which is why they live here: a text message may carry 4096 characters
+# but a wall of text is a bad answer, so a bubble stops at 1024.
 MAX_BUBBLES_PER_TURN = 4
 MAX_TEXT_BUBBLE_CHARS = 1024
 MAX_BUTTON_BODY_CHARS = 1024
 MAX_LIST_BODY_CHARS = 1024
-MAX_LIST_ROWS = 10
+
+# `MAX_LIST_ROWS` is NOT one of ours - it is Meta's hard cap, and it used to be
+# re-declared here as a second `= 10` beside the copy in core/whatsapp_limits.py
+# that flow_router and the WhatsApp client already read. Re-exported instead of
+# redefined so `from secretaria.ai.formatter import MAX_LIST_ROWS` keeps working
+# (tests/test_flow_day_picker.py) while there is only one place to change it.
 
 # Deterministic IDs the webhook parser maps back to plain text.
 BUTTON_ID_CONFIRM = "confirm_yes"
@@ -154,7 +163,19 @@ def _clean(text: str) -> str:
 
 
 def _parse_slot_rows(block: str) -> list[tuple[str, str]]:
-    """Each non-empty line is `<id>|<label>`; malformed lines are skipped."""
+    """Each non-empty line is `<id>|<label>`; malformed lines are skipped.
+
+    The label is cut to MAX_LIST_ROW_TITLE_CHARS here, at the parse, rather than
+    left for `WhatsAppClient.send_list` to cut at the very end. The system
+    prompt now states the limit outright (ai/prompts.py, block B), so this is
+    the backstop for a model that ignores it - and cutting on the way in means
+    an over-long label never travels the rest of the pipeline, never reaches a
+    log line, and never lands in a bubble some other caller renders.
+
+    Safe to truncate because the label is NOT the key: `slot|` is in
+    `_PAYLOAD_ROW_PREFIXES` (schemas/webhook.py), so a tap arrives as
+    "<label> (<iso datetime>)" and the ISO is what identifies the slot.
+    """
     rows: list[tuple[str, str]] = []
     for raw_line in block.splitlines():
         line = raw_line.strip()
@@ -164,7 +185,7 @@ def _parse_slot_rows(block: str) -> list[tuple[str, str]]:
             continue
         slot_id, _, label = line.partition("|")
         slot_id = slot_id.strip()
-        label = label.strip()
+        label = truncate_list_row_title(label)
         if not slot_id or not label:
             continue
         rows.append((f"{SLOT_ID_PREFIX}{slot_id}", label))

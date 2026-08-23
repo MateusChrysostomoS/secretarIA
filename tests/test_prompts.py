@@ -20,6 +20,7 @@ from secretaria.ai.prompts import (  # noqa: E402
     _format_safety_rules,
     secretary_system_prompt,
 )
+from secretaria.core.whatsapp_limits import MAX_LIST_ROW_TITLE_CHARS  # noqa: E402
 from secretaria.services.tenant_config import TenantRuntimeConfig  # noqa: E402
 
 _SAFETY_HEADING = "REGRAS INEGOCIÁVEIS DE SEGURANÇA E CONDUTA"
@@ -252,3 +253,55 @@ def test_safety_professional_post_consult_and_appointment_context_coexist_in_ord
         < prompt.index("CONHECIMENTO PÓS-CONSULTA")
         < prompt.index("CONSULTAS MARCADAS")
     )
+
+
+# --------------------------------------------------------------------------
+# [SLOTS] row-title limit stated to the model
+# --------------------------------------------------------------------------
+
+
+def test_slots_instruction_states_the_row_title_limit_as_a_number():
+    # The block used to say only "rotulo curto", which the model cannot act on.
+    # The number has to reach the prompt, and it has to come from the shared
+    # constant - a hand-typed "24" here would be the fourth copy of it.
+    prompt = secretary_system_prompt(_config())
+    slots_block = prompt.split("B) LISTA DE HOR")[1].split("=========")[0]
+    assert str(MAX_LIST_ROW_TITLE_CHARS) in slots_block
+    assert "caracteres" in slots_block
+
+
+def test_slots_instruction_says_what_happens_past_the_limit():
+    # Stating a number without a consequence reads as a style note. The model
+    # is told the label is cut, so a long one is a real failure, not a nit.
+    prompt = secretary_system_prompt(_config())
+    slots_block = prompt.split("B) LISTA DE HOR")[1].split("=========")[0]
+    assert "corta" in slots_block
+
+
+def test_slots_instruction_does_not_hardcode_the_limit():
+    # If someone re-inlines the number, bumping MAX_LIST_ROW_TITLE_CHARS would
+    # leave the prompt lying to the model. Rendering with a patched constant is
+    # the only way to prove the prompt actually reads it.
+    import secretaria.ai.prompts as prompts_module
+
+    original = prompts_module.MAX_LIST_ROW_TITLE_CHARS
+    try:
+        prompts_module.MAX_LIST_ROW_TITLE_CHARS = 99
+        patched = secretary_system_prompt(_config())
+        block = patched.split("B) LISTA DE HOR")[1].split("=========")[0]
+        assert "99" in block
+    finally:
+        prompts_module.MAX_LIST_ROW_TITLE_CHARS = original
+
+
+def test_confirm_block_needs_no_limit_because_its_labels_are_fixed():
+    # ButtonBubble hardcodes confirm_label/cancel_label ("Confirmar"/"Cancelar"),
+    # both well under MAX_BUTTON_LABEL_CHARS, and the model only writes the CARD
+    # BODY. Pinned so nobody "fixes" the [CONFIRM] block by adding a cap the
+    # model has no way to violate.
+    from secretaria.ai.formatter import ButtonBubble
+    from secretaria.core.whatsapp_limits import MAX_BUTTON_LABEL_CHARS
+
+    bubble = ButtonBubble(body="qualquer coisa")
+    assert len(bubble.confirm_label) <= MAX_BUTTON_LABEL_CHARS
+    assert len(bubble.cancel_label) <= MAX_BUTTON_LABEL_CHARS

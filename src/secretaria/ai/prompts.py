@@ -19,6 +19,8 @@ from __future__ import annotations
 from datetime import date
 from typing import TYPE_CHECKING
 
+from secretaria.core.whatsapp_limits import MAX_LIST_ROW_TITLE_CHARS
+
 if TYPE_CHECKING:
     from secretaria.services.tenant_config import TenantRuntimeConfig
 
@@ -259,7 +261,7 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
         "específico ou quando o slot pedido estiver ocupado e você quer "
         "oferecer alternativas):\n"
         "   [SLOTS]\n"
-        "   <iso_datetime>|<rótulo curto>\n"
+        f"   <iso_datetime>|<rótulo de no máximo {MAX_LIST_ROW_TITLE_CHARS} caracteres>\n"
         "   ...\n"
         "   [/SLOTS]\n\n"
         "   Ex.:\n"
@@ -268,6 +270,10 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
         "   2026-05-29T15:00:00|15:00\n"
         "   2026-05-29T16:30:00|16:30\n"
         "   [/SLOTS]\n\n"
+        "   O rótulo é o que o paciente TOCA, e o WhatsApp corta "
+        f"qualquer rótulo acima de {MAX_LIST_ROW_TITLE_CHARS} caracteres "
+        "— escreva só a hora (\"14:00\") ou hora + uma palavra "
+        "(\"14:00 Retorno\"), nunca uma frase.\n"
         "   No máximo 10 linhas. Antes do bloco escreva um balão curto tipo "
         "\"Estes são os horários livres em 29/05:\" — ele vira o cabeçalho "
         "da lista. Quando o paciente tocar uma opção, o body que chega é "

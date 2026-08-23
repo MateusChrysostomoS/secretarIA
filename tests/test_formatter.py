@@ -10,10 +10,16 @@ os.environ.setdefault("META_ACCESS_TOKEN", "test-access-token")
 os.environ.setdefault("META_PHONE_NUMBER_ID", "1234567890")
 
 from secretaria.ai.formatter import (  # noqa: E402
+    MAX_LIST_ROWS,
     ButtonBubble,
     SlotsBubble,
     TextBubble,
     parse,
+)
+from secretaria.core.whatsapp_limits import (  # noqa: E402
+    MAX_LIST_ROW_TITLE_CHARS,
+    TRUNCATION_MARK,
+    truncate_list_row_title,
 )
 
 
@@ -139,3 +145,57 @@ def test_excess_triple_newlines_are_normalised() -> None:
     bubble = parse("Primeira linha.\n\n\n\nSegunda linha.")
     assert len(bubble) == 1
     assert "\n\n\n" not in bubble[0].body
+
+
+# ---------------------------------------------------------------------------
+# Row-title limit - the LLM writes these labels itself, so the parse is the
+# first place we can hold it to the WhatsApp cap. See ai/prompts.py block B,
+# which now states the number instead of only asking for a "rotulo curto".
+# ---------------------------------------------------------------------------
+
+
+def test_slot_label_over_the_limit_is_truncated_at_parse() -> None:
+    # A model that ignores the instruction must not put an over-long title on
+    # the wire; send_list would cut it anyway, but by then it has travelled the
+    # whole pipeline and been logged at full length.
+    long_label = "Quinta-feira as 14:00 com a Dra. Mariana"
+    assert len(long_label) > MAX_LIST_ROW_TITLE_CHARS
+    bubbles = parse(f"[SLOTS]\n2026-05-29T14:00:00|{long_label}\n[/SLOTS]")
+    assert len(bubbles) == 1
+    bubble = bubbles[0]
+    assert isinstance(bubble, SlotsBubble)
+    (_, title) = bubble.rows[0]
+    assert len(title) <= MAX_LIST_ROW_TITLE_CHARS
+    assert title.endswith(TRUNCATION_MARK)
+    assert title == truncate_list_row_title(long_label)
+
+
+def test_slot_label_within_the_limit_is_untouched() -> None:
+    # The normal case by far: "14:00" must not grow a mark or lose a character.
+    bubbles = parse("[SLOTS]\n2026-05-29T14:00:00|14:00\n[/SLOTS]")
+    bubble = bubbles[0]
+    assert isinstance(bubble, SlotsBubble)
+    assert bubble.rows[0] == ("slot|2026-05-29T14:00:00", "14:00")
+
+
+def test_slot_label_exactly_at_the_limit_keeps_every_character() -> None:
+    label = "a" * MAX_LIST_ROW_TITLE_CHARS
+    bubbles = parse(f"[SLOTS]\n2026-05-29T14:00:00|{label}\n[/SLOTS]")
+    bubble = bubbles[0]
+    assert isinstance(bubble, SlotsBubble)
+    assert bubble.rows[0][1] == label
+
+
+def test_whitespace_only_label_is_still_dropped_after_truncation() -> None:
+    # truncate_list_row_title strips, so it replaces the old `label.strip()`.
+    # A line whose label is only spaces must stay malformed, not become "".
+    assert parse("[SLOTS]\n2026-05-29T14:00:00|   \n[/SLOTS]") == []
+
+
+def test_row_cap_is_the_shared_constant_not_a_local_copy() -> None:
+    # formatter.py used to declare its own `MAX_LIST_ROWS = 10` beside the one
+    # in core/whatsapp_limits.py. Re-exported now, so this asserts they are the
+    # same value rather than two numbers that happen to agree today.
+    from secretaria.core import whatsapp_limits
+
+    assert MAX_LIST_ROWS is whatsapp_limits.MAX_LIST_ROWS
