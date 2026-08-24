@@ -22,6 +22,7 @@ from uuid import uuid4  # noqa: E402
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
 from httpx import AsyncClient  # noqa: E402
+from sqlalchemy import select  # noqa: E402
 from sqlalchemy.ext.asyncio import (  # noqa: E402
     AsyncSession,
     async_sessionmaker,
@@ -607,3 +608,264 @@ async def test_create_calendar_unowned_professional_is_404(client: AsyncClient, 
 async def test_create_calendar_unknown_id_is_404(client: AsyncClient) -> None:
     response = await client.post(f"{ENDPOINT}/{uuid4()}/calendar")
     assert response.status_code == 404
+
+
+# --------------------------------------------------------------------------
+# POST /calendars - the BULK secondary-calendar run (shared_account mode).
+#
+# The gap these cover: flipping a clinic to "Conta unica" and saving used to
+# create nothing at all, because the only trigger was one button per doctor.
+# --------------------------------------------------------------------------
+
+BULK_ENDPOINT = f"{ENDPOINT}/calendars"
+
+
+async def _connect_clinic(db, tenant, token: str = "clinic-refresh-token") -> None:
+    from secretaria.services.tenant_config import set_google_refresh_token
+
+    async with db() as session:
+        await set_google_refresh_token(session, tenant.id, token)
+        await session.commit()
+
+
+async def test_bulk_creates_one_calendar_per_active_professional(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _seed_professional(db, tenant, name="Dra. Ana")
+    await _seed_professional(db, tenant, name="Dr. Bruno")
+    await _connect_clinic(db, tenant)
+    _patch_calendar_service(monkeypatch)
+
+    response = await client.post(BULK_ENDPOINT)
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["created"], body["already"], body["failed"]) == (2, 0, 0)
+    assert {item["name"] for item in body["items"]} == {"Dra. Ana", "Dr. Bruno"}
+    assert all(item["google_calendar_id"] for item in body["items"])
+    assert sorted(_FakeSecondaryCalendar.calls) == [
+        "Dr. Bruno \u2014 Clinic",
+        "Dra. Ana \u2014 Clinic",
+    ]
+
+    async with db() as session:
+        rows = list(await session.scalars(select(Professional)))
+        assert all(row.google_calendar_id for row in rows)
+
+
+async def test_bulk_skips_inactive_professionals(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _seed_professional(db, tenant, name="Dra. Ana")
+    retired = await _seed_professional(db, tenant, name="Dr. Antigo", is_active=False)
+    await _connect_clinic(db, tenant)
+    _patch_calendar_service(monkeypatch)
+
+    response = await client.post(BULK_ENDPOINT)
+    assert response.status_code == 200
+    assert response.json()["created"] == 1
+    assert _FakeSecondaryCalendar.calls == ["Dra. Ana \u2014 Clinic"]
+
+    async with db() as session:
+        assert (await session.get(Professional, retired.id)).google_calendar_id is None
+
+
+async def test_bulk_is_idempotent_and_only_fills_the_gaps(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-running is safe: a doctor who already has one is never sent twice."""
+    await _seed_professional(db, tenant, name="Dra. Ana", google_calendar_id="ana-already")
+    await _seed_professional(db, tenant, name="Dr. Bruno")
+    await _connect_clinic(db, tenant)
+    _patch_calendar_service(monkeypatch)
+
+    first = (await client.post(BULK_ENDPOINT)).json()
+    assert (first["created"], first["already"], first["failed"]) == (1, 1, 0)
+    assert _FakeSecondaryCalendar.calls == ["Dr. Bruno \u2014 Clinic"]
+
+    second = (await client.post(BULK_ENDPOINT)).json()
+    assert (second["created"], second["already"], second["failed"]) == (0, 2, 0)
+    # No SECOND insert for anybody - the whole point of idempotency.
+    assert _FakeSecondaryCalendar.calls == ["Dr. Bruno \u2014 Clinic"]
+
+
+async def test_bulk_without_a_connected_clinic_is_422_and_creates_nothing(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _seed_professional(db, tenant, name="Dra. Ana")
+    _patch_calendar_service(monkeypatch)
+
+    response = await client.post(BULK_ENDPOINT)
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "clinic_calendar_not_connected"
+    assert _FakeSecondaryCalendar.calls == []
+
+    async with db() as session:
+        rows = list(await session.scalars(select(Professional)))
+        assert all(row.google_calendar_id is None for row in rows)
+
+
+async def test_bulk_scope_error_is_409_but_keeps_what_already_succeeded(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A calendar Google already created must not be orphaned by the 409.
+
+    The scope failure is a property of the CLINIC's token, so it aborts the
+    run - but only after committing the rows that got a real calendar, which
+    exist inside Google whether or not this response is an error.
+    """
+    await _seed_professional(db, tenant, name="Dra. Ana")
+    await _seed_professional(db, tenant, name="Dr. Bruno")
+    await _connect_clinic(db, tenant)
+    _patch_calendar_service(monkeypatch)
+
+    # Fail on the SECOND professional only.
+    original = _FakeSecondaryCalendar.create_secondary_calendar
+
+    async def _fail_after_first(self, summary: str) -> dict:
+        from secretaria.services.calendar import GoogleScopeInsufficientError
+
+        if _FakeSecondaryCalendar.calls:
+            raise GoogleScopeInsufficientError("insufficient scope")
+        return await original(self, summary)
+
+    monkeypatch.setattr(_FakeSecondaryCalendar, "create_secondary_calendar", _fail_after_first)
+
+    response = await client.post(BULK_ENDPOINT)
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "google_reconnect_required"
+
+    async with db() as session:
+        rows = list(await session.scalars(select(Professional).order_by(Professional.created_at)))
+        assert rows[0].google_calendar_id is not None  # committed despite the 409
+        assert rows[1].google_calendar_id is None
+
+
+async def test_bulk_reports_a_single_row_failure_and_keeps_going(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One doctor's outage must not cost the others their calendars."""
+    from secretaria.services.calendar import CalendarUnavailableError
+
+    await _seed_professional(db, tenant, name="Dra. Ana")
+    await _seed_professional(db, tenant, name="Dr. Bruno")
+    await _connect_clinic(db, tenant)
+    _patch_calendar_service(monkeypatch)
+
+    original = _FakeSecondaryCalendar.create_secondary_calendar
+
+    async def _fail_for_ana(self, summary: str) -> dict:
+        if summary.startswith("Dra. Ana"):
+            _FakeSecondaryCalendar.calls.append(summary)
+            raise CalendarUnavailableError("Google Calendar unreachable")
+        return await original(self, summary)
+
+    monkeypatch.setattr(_FakeSecondaryCalendar, "create_secondary_calendar", _fail_for_ana)
+
+    response = await client.post(BULK_ENDPOINT)
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["created"], body["failed"]) == (1, 1)
+    failed_row = next(item for item in body["items"] if item["name"] == "Dra. Ana")
+    assert failed_row["error"] == "calendar_unavailable"
+    assert failed_row["google_calendar_id"] is None
+    # A CODE, never Google's own message - an error body can carry the
+    # clinic's account details.
+    assert "unreachable" not in str(body)
+
+    async with db() as session:
+        bruno = next(
+            row for row in await session.scalars(select(Professional)) if row.name == "Dr. Bruno"
+        )
+        assert bruno.google_calendar_id is not None
+
+
+async def test_bulk_with_an_empty_roster_is_a_clean_no_op(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _connect_clinic(db, tenant)
+    _patch_calendar_service(monkeypatch)
+
+    response = await client.post(BULK_ENDPOINT)
+    assert response.status_code == 200
+    assert response.json() == {"created": 0, "already": 0, "failed": 0, "items": []}
+
+
+async def test_bulk_route_does_not_shadow_the_per_professional_one(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`/calendars` and `/{id}/calendar` are different routes, not a collision."""
+    prof = await _seed_professional(db, tenant, name="Dra. Ana")
+    await _connect_clinic(db, tenant)
+    _patch_calendar_service(monkeypatch)
+
+    single = await client.post(f"{ENDPOINT}/{prof.id}/calendar")
+    assert single.status_code == 200
+    assert single.json()["professional_id"] == str(prof.id)
+
+
+# --------------------------------------------------------------------------
+# A professional who JOINS a shared_account clinic gets their agenda too.
+# --------------------------------------------------------------------------
+
+
+async def _shared_account(db, tenant) -> None:
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.google_calendar_mode = "shared_account"
+        await session.commit()
+    tenant.google_calendar_mode = "shared_account"
+
+
+def _allow_multi_professional(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        professionals_api, "get_entitlements", _entitled_fake(addons={"multi_professional": True})
+    )
+    monkeypatch.setattr(professionals_api, "is_entitled", lambda summary, key: True)
+
+
+async def test_creating_a_professional_in_shared_account_mode_creates_their_calendar(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _shared_account(db, tenant)
+    await _connect_clinic(db, tenant)
+    _patch_calendar_service(monkeypatch)
+    _allow_multi_professional(monkeypatch)
+
+    response = await client.post(ENDPOINT, json={"name": "Dr. Novo"})
+    assert response.status_code == 201
+    assert _FakeSecondaryCalendar.calls == ["Dr. Novo \u2014 Clinic"]
+
+    async with db() as session:
+        created = next(iter(await session.scalars(select(Professional))))
+        assert created.google_calendar_id is not None
+
+
+async def test_creating_a_professional_in_per_professional_mode_creates_no_calendar(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default mode is untouched: nobody's Google account is written to."""
+    await _connect_clinic(db, tenant)
+    _patch_calendar_service(monkeypatch)
+    _allow_multi_professional(monkeypatch)
+
+    response = await client.post(ENDPOINT, json={"name": "Dr. Novo"})
+    assert response.status_code == 201
+    assert _FakeSecondaryCalendar.calls == []
+
+
+async def test_a_google_failure_never_blocks_creating_the_professional(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The row is real regardless of Google's mood; the retries are idempotent."""
+    await _shared_account(db, tenant)
+    # Deliberately NO clinic token: the common mid-onboarding state.
+    _patch_calendar_service(monkeypatch)
+    _allow_multi_professional(monkeypatch)
+
+    response = await client.post(ENDPOINT, json={"name": "Dr. Novo"})
+    assert response.status_code == 201
+
+    async with db() as session:
+        created = next(iter(await session.scalars(select(Professional))))
+        assert created.name == "Dr. Novo"
+        assert created.google_calendar_id is None

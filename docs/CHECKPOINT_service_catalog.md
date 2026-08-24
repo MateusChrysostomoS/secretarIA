@@ -193,3 +193,86 @@ clínicas.
 5. **Rollback**: `alembic downgrade -1` derruba a tabela. Sem perda enquanto o
    backfill não tiver rodado; depois dele, o `downgrade` perde o catálogo mas
    **não** as listas por profissional, que continuam intactas.
+
+---
+
+## 7. Entrega 2 — a UI, e o que ela obrigou a mudar no backend (2026-08-24)
+
+Feita nesta sessão. Suíte: **1772 passed** (baseline 1753 no HEAD anterior — +19,
+zero regressão). `ruff check` limpo em todos os arquivos tocados. `ruff format`
+continua acusando os mesmos 3 arquivos que **já estavam fora de formato no HEAD**
+(`schemas/config.py`, `tests/test_hub_professionals.py`,
+`tests/test_service_catalog.py`) — pré-existente, ver a nota de `make lint` no
+CLAUDE.md.
+
+**Status: NÃO COMMITADO / NÃO DEPLOYADO.** A migração `d1c2b3a4e5f6` (tabela
+`services`) continua pendente em produção, e o backfill continua sem rodar.
+
+### 7.1 O bug que travava tudo: `service_id` era descartado em silêncio
+
+`schemas/config.py::AppointmentType` **não tinha o campo `service_id`**. Pydantic
+usa `extra="ignore"` por padrão, então um cliente que mandasse o id no
+`appointment_types` via a chave ser apagada sem nenhum erro, e o save caía de
+volta no casamento por nome. Ou seja: **o catálogo era inalcançável pelo hub** —
+a entrega 1 estava completa e inerte.
+
+Corrigido adicionando `service_id: str | None` ao `AppointmentType` (portanto aos
+dois lados, tenant e profissional, que importam o mesmo modelo). Tipado como
+`str`, não `UUID`: o valor trafega por uma coluna JSON e
+`service_catalog.entry_service_id` já o interpreta de forma tolerante.
+
+### 7.2 Um `service_id` que não é da clínica agora é recusado
+
+`services/hub_configuration.py::check_appointment_type_service_ids` (+
+`UnknownServiceIds`) valida, **antes de qualquer mutação**, que todo `service_id`
+enviado pertence ao catálogo deste tenant. Chamado pelos três caminhos de escrita:
+`PUT /tenants/me/config`, `PUT /tenants/me/configuration` e
+`PUT /tenants/me/professionals/{id}/config`.
+
+Sem isso, um id pendurado **não falha alto**: `resolve_entries` casa por id, não
+acha, e degrada para o nome — exatamente o estado pré-catálogo. O profissional
+acreditaria estar oferecendo a "Limpeza" da clínica enquanto carrega uma string
+solta que nenhuma troca de médico consegue casar.
+
+Erro: `422 {"code": "unknown_service_ids", "message": ..., "service_ids": [...]}`.
+
+### 7.3 `ServiceRead.professional_ids` — quem oferece o quê
+
+Novo campo em `schemas/service.py::ServiceRead`, calculado por
+`services/service_catalog.py::offering_map(services, professionals, tenant)` — o
+plural de `professionals_offering`, em uma passada só. Devolvido por `GET`, `POST`
+e `PATCH` de `/tenants/me/services`.
+
+Só profissionais **ativos**. Ids, nunca nomes: a UI já tem o roster e o payload do
+catálogo não é lugar para duplicar pessoas.
+
+É o que sustenta duas coisas na UI: a linha "também oferecido por" e o aviso antes
+de um rename/aposentadoria — que muda o que **todos** os médicos ligados àquela
+linha oferecem, porque ninguém guarda o nome.
+
+Detalhe que vale saber: o `POST` também calcula. Uma clínica cujos profissionais
+ainda carregam a string solta "Limpeza" vê esses médicos aparecerem como
+oferecendo a linha nova **no instante em que ela é criada**, por casamento de nome
+normalizado, sem nenhuma escrita nos profissionais.
+
+### 7.4 A UI (secretarIA-frontend)
+
+Ver `secretarIA-frontend/docs/CHECKPOINT_catalogo_servicos_ui.md`. Em uma linha:
+a Seção 06 deixou de ser "herdar da clínica / configuração própria" e virou o
+catálogo da clínica com checkbox por serviço, preço e duração por profissional.
+
+Uma consequência de contrato: `appointment_types` do profissional agora é
+**sempre um array**, nunca `null`. `null` significa "herdar a lista legada da
+clínica", e a tela não oferece mais isso. `business_hours` **mantém** os três
+estados — a herança de horários não mudou.
+
+### 7.5 Pendências que continuam abertas
+
+1. **Backfill** (`scripts/backfill_service_catalog.py`): `--report` em produção,
+   revisar `[VARIANTS]`/`[LOOK-ALIKE]` com o dono da clínica, depois `--apply`.
+   A UI **não depende** dele para funcionar (publica o que falta ao salvar), mas
+   ele é o que consolida grafias divergentes de uma vez.
+2. **Entrega 3**: remover `name`/`description`/`long_description`/`requirements`
+   duplicados das entradas JSON, agora que a UI escreve `service_id`.
+3. **Deploy**: API **e** worker no mesmo SHA (regra do CLAUDE.md — isto toca
+   `services/`). Migração é passo manual.

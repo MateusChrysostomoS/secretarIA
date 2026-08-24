@@ -224,6 +224,49 @@ def professionals_offering(
     return out
 
 
+def offering_map(
+    services: Sequence[Service] | None,
+    professionals: Sequence[Any] | None,
+    tenant: Any,
+) -> dict[str, list[str]]:
+    """`{service id -> [professional id, ...]}` for a whole catalog, one pass.
+
+    The plural of `professionals_offering`, and the answer the hub needs to
+    render "who else offers this?" next to every service at once — calling the
+    singular per row would re-resolve every professional's entries once per
+    service.
+
+    Ids come back as STRINGS, because the only consumer is a JSON payload and
+    stringifying at the boundary keeps `schemas/service.py` free of UUID
+    coercion. Order follows `professionals`, so the caller's ordering (roster
+    order) is what the clinic reads.
+
+    A service nobody offers maps to `[]` — present and empty, never absent, so
+    the caller never has to tell "no one" apart from "not computed".
+    """
+    by_key: dict[str, str] = {}
+    out: dict[str, list[str]] = {}
+    for service in services or []:
+        key = service.normalized_name or normalize(service.name)
+        by_key[key] = str(service.id)
+        out[str(service.id)] = []
+
+    for professional in professionals or []:
+        entries = getattr(professional, "appointment_types", None) or getattr(
+            tenant, "appointment_types", None
+        )
+        seen: set[str] = set()
+        for entry in resolve_entries(entries, services):
+            if not entry.get("is_active", True):
+                continue
+            service_id = by_key.get(normalize(entry.get("name")))
+            if service_id is None or service_id in seen:
+                continue
+            seen.add(service_id)
+            out[service_id].append(str(professional.id))
+    return out
+
+
 async def load_service_catalog(session: AsyncSession, tenant_id: UUID) -> list[Service]:
     """Every catalog row for one tenant, ordered the way a clinic reads it.
 

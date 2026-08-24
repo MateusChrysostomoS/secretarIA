@@ -26,6 +26,7 @@ the same "a config save is always allowed" principle the tenant-level PUT and
 the professionals router follow applies here (api/hub/config.py).
 """
 
+from collections.abc import Sequence
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -35,20 +36,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from secretaria.api.hub.deps import get_current_tenant
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
-from secretaria.models import Tenant
+from secretaria.models import Professional, Tenant
 from secretaria.models.service import Service
 from secretaria.schemas.service import ServiceCreate, ServiceRead, ServiceUpdate
 from secretaria.services.service_catalog import (
     find_near_duplicates,
     load_service_catalog,
     normalize,
+    offering_map,
 )
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/tenants/me/services", tags=["hub-services"])
 
 
-def _read_model(service: Service) -> ServiceRead:
+def _read_model(service: Service, offering: dict[str, list[str]] | None = None) -> ServiceRead:
+    """One catalog row on the wire.
+
+    `offering` is the whole-catalog `{service id -> professional ids}` map when
+    the caller computed one. Omitting it yields `[]` — used by the 409 bodies,
+    where the payload exists to identify the clashing service, not to report
+    its roster.
+    """
     return ServiceRead(
         id=str(service.id),
         name=service.name,
@@ -58,7 +67,28 @@ def _read_model(service: Service) -> ServiceRead:
         is_active=service.is_active,
         sort_order=service.sort_order,
         created_at=service.created_at,
+        professional_ids=(offering or {}).get(str(service.id), []),
     )
+
+
+async def _offering(
+    session: AsyncSession, tenant: Tenant, catalog: Sequence[Service]
+) -> dict[str, list[str]]:
+    """Who offers what, across this clinic's whole catalog.
+
+    Active professionals only: an inactive one is nobody a patient can be sent
+    to, so listing them under "também oferecido por" would overstate the
+    coverage a rename is about to disturb. Roster order is the clinic's own
+    (`Professional.created_at`), so the hub renders names in a stable order.
+    """
+    professionals = list(
+        await session.scalars(
+            select(Professional)
+            .where(Professional.tenant_id == tenant.id, Professional.is_active.is_(True))
+            .order_by(Professional.created_at)
+        )
+    )
+    return offering_map(catalog, professionals, tenant)
 
 
 async def _resolve(session: AsyncSession, tenant: Tenant, service_id: str) -> Service:
@@ -116,7 +146,9 @@ async def list_services(
     booking surfaces filter them out on their own
     (services/service_catalog.py::resolve_entries).
     """
-    return [_read_model(row) for row in await load_service_catalog(session, tenant.id)]
+    catalog = await load_service_catalog(session, tenant.id)
+    offering = await _offering(session, tenant, catalog)
+    return [_read_model(row, offering) for row in catalog]
 
 
 @router.post("", response_model=ServiceRead, status_code=status.HTTP_201_CREATED)
@@ -168,7 +200,11 @@ async def create_service(
         service_id=str(service.id),
         forced=force,
     )
-    return _read_model(service)
+    # Not always empty: a clinic whose professionals still carry the unlinked
+    # string "Limpeza" has them resolve to this row by normalized name the
+    # instant it exists, so the hub can say "these doctors already offer it"
+    # without waiting for a backfill.
+    return _read_model(service, await _offering(session, tenant, [*catalog, service]))
 
 
 @router.patch("/{service_id}", response_model=ServiceRead)
@@ -217,4 +253,5 @@ async def update_service(
         service_id=str(service.id),
         renamed="name" in data,
     )
-    return _read_model(service)
+    catalog = await load_service_catalog(session, tenant.id)
+    return _read_model(service, await _offering(session, tenant, catalog))

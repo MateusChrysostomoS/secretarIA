@@ -64,6 +64,15 @@ class ServiceRead(BaseModel):
     `normalized_name` is deliberately NOT exposed: it is an internal identity
     key derived from `name`, and surfacing it would invite a client to send it
     back as if it were editable.
+
+    `professional_ids` is who currently offers this service — the answer the
+    hub needs to render "também oferecido por" beside each row, and to warn
+    before a rename or a retirement that CHANGES WHAT OTHER DOCTORS OFFER
+    (every professional references the id, so a rename here renames it for all
+    of them at once). Ids only, never names: the roster the hub already holds
+    maps them, and a catalog payload is no place to start duplicating people.
+    Empty means nobody offers it — a real state for a service that was just
+    created, never "not computed".
     """
 
     id: str
@@ -74,3 +83,4 @@ class ServiceRead(BaseModel):
     is_active: bool
     sort_order: int
     created_at: datetime
+    professional_ids: list[str] = Field(default_factory=list)

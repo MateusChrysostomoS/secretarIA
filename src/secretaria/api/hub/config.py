@@ -70,6 +70,24 @@ async def update_config(
     # dumped values are already plain dicts/lists, ready to store as JSON.
     data = body.model_dump(exclude_unset=True)
 
+    # Before any mutation: a `service_id` this clinic does not own would not
+    # fail loudly later, it would silently fall back to name matching — see
+    # hub_configuration.check_appointment_type_service_ids.
+    try:
+        await hubcfg.check_appointment_type_service_ids(session, tenant, data)
+    except hubcfg.UnknownServiceIds as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "unknown_service_ids",
+                "message": (
+                    "Um ou mais serviços selecionados não existem mais no catálogo "
+                    "da clínica. Recarregue a página e escolha de novo."
+                ),
+                "service_ids": exc.service_ids,
+            },
+        ) from None
+
     try:
         await hubcfg.apply_tenant_config(session, tenant, data)
     except hubcfg.ActivationBlocked as exc:
@@ -139,6 +157,30 @@ async def update_configuration(
             )
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Professional not found") from None
         professional_id = str(professional.id)
+
+    # --- 1b. Catalog ownership: still a read, still before any mutation ----
+    try:
+        await hubcfg.check_appointment_type_service_ids(
+            session, tenant, tenant_data, professional_data
+        )
+    except hubcfg.UnknownServiceIds as exc:
+        logger.info(
+            "hub_configuration_rejected",
+            tenant_id=tenant_id,
+            reason="unknown_service_ids",
+            stage="validate",
+        )
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "unknown_service_ids",
+                "message": (
+                    "Um ou mais serviços selecionados não existem mais no catálogo "
+                    "da clínica. Recarregue a página e escolha de novo."
+                ),
+                "service_ids": exc.service_ids,
+            },
+        ) from None
 
     # --- 2. Mutate both scopes, then commit exactly once -------------------
     try:

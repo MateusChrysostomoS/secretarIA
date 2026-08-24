@@ -334,3 +334,100 @@ touches `shared_account` doesn't need to reconnect *for this feature*, since it 
 - `CLAUDE.md`'s "Doctor hub / CRM... this cluster has crossed the threshold, group it into
   `api/hub/` next time it is touched" note is stale (already done) — cosmetic doc fix, not
   addressed this session (out of scope, no code/behaviour impact).
+
+---
+
+## 9. Criação em lote — "Conta única" passou a fazer alguma coisa (2026-08-24)
+
+### O problema, relatado pelo usuário
+
+> "veja se está implementado corretamente a troca da configuração para o Google
+> Calendar quando vai de 'Por profissional' para 'Conta única' e vice-versa de
+> modo que quando esta em contas única, tem que criar uma agenda interna para
+> cada médico na conta do google e testei e isso não ocorreu"
+
+**Não era um bug — era uma parte que nunca foi construída.** O item 6 acima
+descreve o `PUT` de modo como deliberadamente inerte ("estruturalmente não
+destrutivo"), e o item 3 entrega a criação como um `POST` **por profissional**.
+Nada ligava as duas coisas. Trocar o modo e salvar criava exatamente zero
+agendas, por design — e do lado de quem usa, isso é indistinguível de quebrado.
+
+### O que entrou
+
+**`POST /tenants/me/professionals/calendars`** (`api/hub/professionals.py::
+create_professional_calendars`): cria a agenda secundária de **todo profissional
+ativo que ainda não tem uma**, dentro da conta Google da clínica. Reusa
+`ensure_professional_secondary_calendar` sem mudá-la — mesma idempotência, mesmo
+`calendars.insert`, mesmo `summary`.
+
+Resposta `200` com relatório por linha
+(`ProfessionalCalendarBulkResult`): `created`, `already`, `failed`, e `items[]`
+com `professional_id`, `name`, `google_calendar_id`, `created`, `error`.
+
+**Por que 200 com relatório em vez de um status só:** as agendas que deram certo
+**já existem no Google**. Transformar a corrida inteira em erro por causa de uma
+linha jogaria fora ids de agendas reais, e o usuário precisa ver exatamente quais
+médicos ainda faltam.
+
+**Duas condições são da CLÍNICA, não de um profissional**, e por isso derrubam a
+requisição inteira em vez de repetir o mesmo erro em cada linha:
+
+| Situação | Status | `code` | Commit? |
+|---|---|---|---|
+| Clínica sem conta Google conectada | 422 | `clinic_calendar_not_connected` | Não — nada foi criado (a checagem roda antes da primeira chamada ao Google) |
+| Token da clínica anterior ao escopo `calendar.app.created` | 409 | `google_reconnect_required` | **Sim** — commita o que já tinha dado certo antes de abortar |
+
+Esse `await session.commit()` antes do 409 é deliberado e tem teste próprio
+(`test_bulk_scope_error_is_409_but_keeps_what_already_succeeded`): sem ele, uma
+agenda que o Google já criou ficaria órfã, sem id em lugar nenhum.
+
+Qualquer outra falha (indisponibilidade do Google no meio) fica na linha, com um
+**código** — nunca o texto da exceção, que pode carregar dados da conta da
+clínica.
+
+**Não é gated no modo**: o hub chama isto logo depois do save que grava o modo, e
+recusar com base num valor que o mesmo cliente acabou de escrever é uma corrida
+sem ganho nenhum. Uma agenda secundária é inerte em `per_professional` de todo
+jeito — quem decide se `google_calendar_id` é pareado com a credencial da clínica
+é a regra de roteamento do item 4.
+
+### Profissional que ENTRA numa clínica em `shared_account`
+
+`_ensure_calendar_for_new_professional`, chamado no fim de `POST
+/tenants/me/professionals`. **Best effort, depois do commit do profissional**: a
+linha é real independente do humor do Google, e os dois caminhos de retentativa
+(o lote e o botão por linha) são idempotentes. Toda falha é logada e engolida —
+inclusive "a clínica não conectou o Google", que para um tenant em onboarding é o
+caso normal, não um erro.
+
+Armadilha encontrada na execução, vale registrar: `session.rollback()` **expira
+todas as instâncias da sessão**, então ler `professional.name` depois dele dispara
+IO preguiçoso e estoura `MissingGreenlet` dentro do handler de exceção. Os ids são
+capturados **antes** do `try`, e o rollback é seguido de um `session.refresh` —
+o caller ainda precisa serializar a linha. É a mesma armadilha que
+`api/hub/config.py` já documenta.
+
+### O lado do frontend
+
+O hub chama o lote **depois** de um save bem-sucedido cujo modo é
+`shared_account` (`configuracao/lib/save.ts::ensureCalendars`). Ordem testada:
+`put` e só então `calendars` — criar agendas para um modo que o servidor recusou
+deixaria a conta Google da clínica com agendas de uma configuração que nunca
+entrou em vigor. Uma falha do Google **nunca** transforma um save bem-sucedido em
+erro: a configuração já está gravada, e mandar o usuário salvar de novo o que já
+está no ar é pior que o silêncio. O que aparece é o número de agendas criadas (ou
+que faltaram) no toast.
+
+O botão "Criar agenda do profissional" por linha continua existindo, como
+retentativa.
+
+### Testes
+
+12 novos em `tests/test_hub_professionals.py`: cria uma por profissional ativo;
+ignora inativo; idempotência (segunda corrida não chama `calendars.insert` de
+novo para ninguém); 422 sem clínica conectada e **nada** criado; o 409 que
+preserva o que já deu certo; falha de uma linha sem custar as outras (e sem vazar
+a mensagem do Google); roster vazio; `/calendars` não colide com
+`/{id}/calendar`; e os três casos do profissional que entra (cria em
+`shared_account`, não cria em `per_professional`, falha do Google não impede a
+criação da linha).

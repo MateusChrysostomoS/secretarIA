@@ -41,6 +41,7 @@ from secretaria.models.professional import Professional
 from secretaria.schemas.config import TenantConfigRead
 from secretaria.schemas.professional import ProfessionalListItem
 from secretaria.services import tenant_config as cfg
+from secretaria.services.service_catalog import entry_service_id, load_service_catalog
 
 # ---------------------------------------------------------------------------
 # Domain errors — routers translate these to HTTP, this module never imports
@@ -68,6 +69,18 @@ class ActivationBlocked(Exception):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+class UnknownServiceIds(Exception):
+    """An `appointment_types` patch referenced catalog ids this clinic has none of.
+
+    Carries the offending ids so the router can name them in the 422. Raised
+    before any mutation, like every other check in this module.
+    """
+
+    def __init__(self, service_ids: list[str]) -> None:
+        super().__init__(", ".join(service_ids))
+        self.service_ids = service_ids
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +122,44 @@ PROFESSIONAL_CONFIG_FIELDS: tuple[str, ...] = (
     "business_hours",
     "appointment_types",
 )
+
+
+async def check_appointment_type_service_ids(
+    session: AsyncSession, tenant: Tenant, *patches: dict | None
+) -> None:
+    """Every `service_id` in these patches must name a service THIS clinic owns.
+
+    Rejecting an unknown id matters more than it looks. `resolve_entries`
+    matches by id first and falls back to the normalized NAME, so a dangling id
+    does not fail loudly — it silently degrades to the pre-catalog behaviour,
+    which is precisely the state the catalog exists to end. The professional
+    would believe they are offering the clinic's "Limpeza" while actually
+    carrying an unlinked string that no doctor-swap can match.
+
+    Accepts several patches so the aggregate endpoint can validate the tenant
+    and professional halves together, before it mutates either. Entries with no
+    `service_id` are the pre-backfill norm and pass untouched; a malformed one
+    reads as absent, exactly as `entry_service_id` treats it everywhere else.
+
+    Raises `UnknownServiceIds`. Reads only — the caller still owns the
+    transaction.
+    """
+    wanted: list[str] = []
+    for patch in patches:
+        for entry in (patch or {}).get("appointment_types") or []:
+            if not isinstance(entry, dict):
+                continue
+            service_id = entry_service_id(entry)
+            if service_id is not None:
+                wanted.append(str(service_id))
+    if not wanted:
+        return
+
+    catalog = await load_service_catalog(session, tenant.id)
+    known = {str(row.id) for row in catalog}
+    unknown = sorted({sid for sid in wanted if sid not in known})
+    if unknown:
+        raise UnknownServiceIds(unknown)
 
 
 # ---------------------------------------------------------------------------

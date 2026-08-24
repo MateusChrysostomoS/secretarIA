@@ -82,9 +82,23 @@ class TimeWindow(BaseModel):
 
 
 class AppointmentType(BaseModel):
-    """A bookable reason for a consult, with its own duration."""
+    """A bookable reason for a consult, with its own duration.
+
+    `service_id` is what makes two professionals' "Limpeza" provably the SAME
+    service (models/service.py, services/service_catalog.py). Optional, because
+    every entry written before the catalog existed lacks one and still resolves
+    by normalized name — but a client that sends it is the only way the link is
+    ever written, so it must survive validation. Without this field Pydantic
+    would drop it silently (`extra="ignore"` is the default) and the catalog
+    could never be reached from the hub at all.
+
+    Kept as `str`, not `UUID`: the value round-trips through a JSON column, and
+    `service_catalog.entry_service_id` already parses it tolerantly so a
+    malformed one reads as "not linked" rather than exploding a booking.
+    """
 
     name: str = Field(min_length=1, max_length=120)
+    service_id: str | None = Field(default=None, max_length=64)
     description: str | None = None
     duration_min: int = Field(gt=0, le=600)
     is_active: bool = True

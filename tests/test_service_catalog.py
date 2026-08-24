@@ -578,6 +578,9 @@ async def test_create_returns_the_catalog_row(client: AsyncClient):
         "is_active",
         "sort_order",
         "created_at",
+        # Who offers it — the hub renders "também oferecido por" from this and
+        # warns before a rename that would change it for other doctors too.
+        "professional_ids",
     }
     # The internal identity key is never exposed as if it were editable.
     assert "normalized_name" not in body
@@ -710,3 +713,221 @@ async def test_another_clinics_service_is_not_reachable(client: AsyncClient, db)
 async def test_an_unparseable_id_is_a_plain_404(client: AsyncClient):
     response = await client.patch(f"{ENDPOINT}/not-a-uuid", json={"name": "X"})
     assert response.status_code == 404
+
+
+# --------------------------------------------------------------------------
+# 9. Entrega 2 wiring - the link the hub writes, and who offers what.
+#
+# Until `service_id` survived validation, the catalog was unreachable from the
+# hub: Pydantic dropped the key (extra="ignore"), so every save fell back to
+# name matching and the link was never actually written.
+# --------------------------------------------------------------------------
+
+
+async def _catalog_row(client: AsyncClient, name: str) -> dict:
+    response = await client.post(ENDPOINT, json={"name": name}, params={"force": "true"})
+    assert response.status_code == 201
+    return response.json()
+
+
+async def test_a_professional_save_persists_the_service_id(client: AsyncClient, db, tenant):
+    """The whole point of entrega 2: picking from the catalog writes the link."""
+    service = await _catalog_row(client, "Limpeza")
+    async with db() as session:
+        prof = Professional(tenant_id=tenant.id, name="Dra. Ana", is_active=True)
+        session.add(prof)
+        await session.commit()
+        await session.refresh(prof)
+
+    response = await client.put(
+        f"/tenants/me/professionals/{prof.id}/config",
+        json={
+            "appointment_types": [
+                _entry("qualquer coisa", service_id=service["id"], duration_min=45)
+            ]
+        },
+    )
+    assert response.status_code == 200
+
+    async with db() as session:
+        stored = await session.get(Professional, prof.id)
+        assert stored.appointment_types[0]["service_id"] == service["id"]
+        # Price/duration stay the PROFESSIONAL's.
+        assert stored.appointment_types[0]["duration_min"] == 45
+
+    # ...and the catalog's spelling is what the resolver hands downstream,
+    # whatever the client happened to type in `name`.
+    async with db() as session:
+        catalog = await load_service_catalog(session, tenant.id)
+        stored = await session.get(Professional, prof.id)
+        assert resolve_entries(stored.appointment_types, catalog)[0]["name"] == "Limpeza"
+
+
+async def test_a_service_id_from_another_clinic_is_refused(client: AsyncClient, db, tenant):
+    """A dangling id would silently degrade to name matching - the exact state
+    the catalog exists to end - so it is rejected instead of stored."""
+    async with db() as session:
+        other = Tenant(id=uuid4(), clinic_name="Outra", phone_number_id=str(uuid4())[:12])
+        session.add(other)
+        await session.commit()
+        foreign = Service(
+            id=uuid4(),
+            tenant_id=other.id,
+            name="Limpeza",
+            normalized_name=normalize("Limpeza"),
+        )
+        session.add(foreign)
+        await session.commit()
+        prof = Professional(tenant_id=tenant.id, name="Dra. Ana", is_active=True)
+        session.add(prof)
+        await session.commit()
+        await session.refresh(prof)
+        foreign_id = str(foreign.id)
+
+    response = await client.put(
+        f"/tenants/me/professionals/{prof.id}/config",
+        json={"appointment_types": [_entry("Limpeza", service_id=foreign_id)]},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "unknown_service_ids"
+    assert response.json()["detail"]["service_ids"] == [foreign_id]
+
+    async with db() as session:
+        stored = await session.get(Professional, prof.id)
+        assert stored.appointment_types is None  # nothing was written
+
+
+async def test_entries_without_a_service_id_still_save(client: AsyncClient, db, tenant):
+    """Pre-catalog payloads keep working - that is what lets this ship before
+    the backfill."""
+    async with db() as session:
+        prof = Professional(tenant_id=tenant.id, name="Dra. Ana", is_active=True)
+        session.add(prof)
+        await session.commit()
+        await session.refresh(prof)
+
+    response = await client.put(
+        f"/tenants/me/professionals/{prof.id}/config",
+        json={"appointment_types": [_entry("Limpeza")]},
+    )
+    assert response.status_code == 200
+
+
+async def test_the_catalog_reports_which_professionals_offer_each_service(
+    client: AsyncClient, db, tenant
+):
+    limpeza = await _catalog_row(client, "Limpeza")
+    clareamento = await _catalog_row(client, "Clareamento")
+
+    async with db() as session:
+        ana = Professional(
+            tenant_id=tenant.id,
+            name="Dra. Ana",
+            is_active=True,
+            appointment_types=[_entry("Limpeza", service_id=limpeza["id"])],
+        )
+        bruno = Professional(
+            tenant_id=tenant.id,
+            name="Dr. Bruno",
+            is_active=True,
+            appointment_types=[
+                _entry("Limpeza", service_id=limpeza["id"]),
+                _entry("Clareamento", service_id=clareamento["id"]),
+            ],
+        )
+        session.add_all([ana, bruno])
+        await session.commit()
+        await session.refresh(ana)
+        await session.refresh(bruno)
+        ana_id, bruno_id = str(ana.id), str(bruno.id)
+
+    rows = {row["name"]: row for row in (await client.get(ENDPOINT)).json()}
+    assert sorted(rows["Limpeza"]["professional_ids"]) == sorted([ana_id, bruno_id])
+    assert rows["Clareamento"]["professional_ids"] == [bruno_id]
+
+
+async def test_an_inactive_professional_is_not_counted_as_offering(
+    client: AsyncClient, db, tenant
+):
+    """"Tambem oferecido por" must not name someone no patient can reach."""
+    limpeza = await _catalog_row(client, "Limpeza")
+    async with db() as session:
+        session.add(
+            Professional(
+                tenant_id=tenant.id,
+                name="Dr. Antigo",
+                is_active=False,
+                appointment_types=[_entry("Limpeza", service_id=limpeza["id"])],
+            )
+        )
+        await session.commit()
+
+    rows = (await client.get(ENDPOINT)).json()
+    assert rows[0]["professional_ids"] == []
+
+
+async def test_a_professional_who_turned_the_service_off_does_not_offer_it(
+    client: AsyncClient, db, tenant
+):
+    limpeza = await _catalog_row(client, "Limpeza")
+    async with db() as session:
+        session.add(
+            Professional(
+                tenant_id=tenant.id,
+                name="Dra. Ana",
+                is_active=True,
+                appointment_types=[
+                    _entry("Limpeza", service_id=limpeza["id"], is_active=False)
+                ],
+            )
+        )
+        await session.commit()
+
+    rows = (await client.get(ENDPOINT)).json()
+    assert rows[0]["professional_ids"] == []
+
+
+async def test_an_unlinked_legacy_entry_still_counts_as_offering(client: AsyncClient, db, tenant):
+    """A clinic that has not been backfilled still gets a truthful answer -
+    which is what makes the rename warning trustworthy before the backfill."""
+    async with db() as session:
+        ana = Professional(
+            tenant_id=tenant.id,
+            name="Dra. Ana",
+            is_active=True,
+            appointment_types=[_entry("  limpeza  ")],  # no service_id, odd spelling
+        )
+        session.add(ana)
+        await session.commit()
+        await session.refresh(ana)
+        ana_id = str(ana.id)
+
+    created = await _catalog_row(client, "Limpeza")
+    # Reported the moment the catalog row exists, with no write to the
+    # professional at all.
+    assert created["professional_ids"] == [ana_id]
+    assert (await client.get(ENDPOINT)).json()[0]["professional_ids"] == [ana_id]
+
+
+async def test_renaming_keeps_reporting_the_same_professionals(client: AsyncClient, db, tenant):
+    """A rename is a one-row write that changes what every linked doctor
+    offers - so the response has to keep naming them."""
+    limpeza = await _catalog_row(client, "Limpeza")
+    async with db() as session:
+        ana = Professional(
+            tenant_id=tenant.id,
+            name="Dra. Ana",
+            is_active=True,
+            appointment_types=[_entry("Limpeza", service_id=limpeza["id"])],
+        )
+        session.add(ana)
+        await session.commit()
+        await session.refresh(ana)
+        ana_id = str(ana.id)
+
+    response = await client.patch(
+        f"{ENDPOINT}/{limpeza['id']}", json={"name": "Limpeza Profunda"}
+    )
+    assert response.status_code == 200
+    assert response.json()["name"] == "Limpeza Profunda"
+    assert response.json()["professional_ids"] == [ana_id]

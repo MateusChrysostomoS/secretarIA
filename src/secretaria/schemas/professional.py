@@ -89,6 +89,38 @@ class ProfessionalCalendarConnect(BaseModel):
     created: bool
 
 
+class ProfessionalCalendarBulkItem(BaseModel):
+    """One professional's outcome inside a bulk secondary-calendar run.
+
+    `error` is a machine-readable code (never a stack, never a Google message)
+    for the rows that could not be created while OTHERS succeeded — the whole
+    reason this endpoint answers 200 with a per-row report instead of a single
+    status: the successes are already committed and the clinic must be able to
+    see exactly which doctors still need one.
+    """
+
+    professional_id: str
+    name: str
+    google_calendar_id: str | None
+    created: bool
+    error: str | None = None
+
+
+class ProfessionalCalendarBulkResult(BaseModel):
+    """POST /tenants/me/professionals/calendars response.
+
+    Counts first, because that is what the UI puts in a toast; `items` carries
+    the per-professional detail for the roster it repaints afterwards.
+    `already` counts the idempotent no-ops (a professional that already had a
+    calendar), which is why re-running this is always safe.
+    """
+
+    created: int
+    already: int
+    failed: int
+    items: list[ProfessionalCalendarBulkItem]
+
+
 class ProfessionalListItem(BaseModel):
     """GET /tenants/me/professionals row — full per-professional config + completeness.
 
