@@ -268,7 +268,12 @@ class Settings(BaseSettings):
     OAUTH_STATE_SECRET: str = ""
     # Max age (seconds) of a `state` token between /start and /callback.
     OAUTH_STATE_MAX_AGE: int = 600
-    # Where to send the doctor's browser after the OAuth callback completes.
+    # Where to send the doctor's browser after the OAuth callback completes:
+    # the secretarIA-frontend app's own /calendar/connected page (NOT
+    # brain-frontend — that copy of the page was a pre-domain-split leftover
+    # and is no longer the intended target). In production this must be an
+    # absolute URL on the secretarIA-frontend origin, e.g.
+    # https://<secretaria-frontend-domain>/calendar/connected.
     PORTAL_POST_OAUTH_REDIRECT: str = "http://localhost:3000/calendar/connected"
 
     # --- SMTP (operational alerts to tenants) ---
