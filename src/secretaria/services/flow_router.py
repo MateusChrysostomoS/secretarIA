@@ -535,6 +535,29 @@ def reactivation_enabled(tenant: Tenant) -> bool:
     return bool((getattr(tenant, "returning_greeting_message", None) or "").strip())
 
 
+def reactivation_prompt_enabled(tenant: Tenant) -> bool:
+    """True when the returning "quer continuar?" prompt may be offered.
+
+    Universal by default, unlike ``reactivation_enabled``. This prompt ships a
+    product default text (``DEFAULT_CONTINUE_PROMPT``), so it needs no
+    per-tenant config to work, and it is the visible half of a SAFETY exit: a
+    returning patient must never be silently rerouted just because their clinic
+    left a hub field blank. Gating it on a filled-in column is precisely the
+    anti-pattern that once left default tenants with no time-based exit from
+    ``FlowState.LLM`` at all (see ``llm_state_ttl_minutes``).
+
+    ``initial_flows.reactivation.enabled`` stays an explicit override so
+    internal provisioning can still turn the prompt OFF for one tenant - config
+    TUNES this, it does not ENABLE it. Turning it off stays safe because the
+    silent floor (``workers/tasks.py::_expire_stale_llm_state``) runs BEFORE the
+    prompt and is what actually bounds the stay.
+    """
+    config = _reactivation_config(tenant)
+    if "enabled" in config:
+        return bool(config["enabled"])
+    return True
+
+
 def reactivation_gap_minutes(tenant: Tenant) -> int:
     """Minutes of silence after which a returning patient is offered to resume."""
     try:

@@ -42,6 +42,7 @@ from secretaria.services.flow_router import (  # noqa: E402
     reactivation_continue_prompt,
     reactivation_enabled,
     reactivation_gap_minutes,
+    reactivation_prompt_enabled,
     resume_bubbles,
     route,
 )
@@ -352,20 +353,32 @@ def _offer_tenant():
 
 def test_offer_none_when_no_prior_activity():
     conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_AWAITING_DAY)
-    assert _reactivation_offer(conv, _offer_tenant(), _patient(), "5511999", "oi", None) is None
+    assert (
+        _reactivation_offer(
+            conv, _offer_tenant(), _patient(), "5511999", "oi", None, conv.flow_state
+        )
+        is None
+    )
 
 
 def test_offer_none_when_gap_below_threshold():
     conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_AWAITING_DAY)
     recent = datetime.now(UTC) - timedelta(minutes=5)
-    assert _reactivation_offer(conv, _offer_tenant(), _patient(), "5511999", "oi", recent) is None
+    assert (
+        _reactivation_offer(
+            conv, _offer_tenant(), _patient(), "5511999", "oi", recent, conv.flow_state
+        )
+        is None
+    )
     assert conv.reactivation_origin is None  # gate NOT armed
 
 
 def test_offer_arms_gate_and_builds_prompt_for_resumable_state():
     conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_AWAITING_DAY)
     stale = datetime.now(UTC) - timedelta(hours=10)
-    offer = _reactivation_offer(conv, _offer_tenant(), _patient("Maria"), "5511999", "oi", stale)
+    offer = _reactivation_offer(
+        conv, _offer_tenant(), _patient("Maria"), "5511999", "oi", stale, conv.flow_state
+    )
     assert offer is not None
     assert conv.reactivation_origin == FlowState.SERVICE_CATALOG.value  # gate armed
     assert "Oi de novo, Maria!" in offer.greeting_override
@@ -377,7 +390,9 @@ def test_offer_arms_gate_and_builds_prompt_for_resumable_state():
 def test_offer_arms_gate_for_llm_origin():
     conv = _conversation(flow_state=FlowState.LLM)
     stale = datetime.now(UTC) - timedelta(hours=10)
-    offer = _reactivation_offer(conv, _offer_tenant(), _patient(), "5511999", "oi", stale)
+    offer = _reactivation_offer(
+        conv, _offer_tenant(), _patient(), "5511999", "oi", stale, conv.flow_state
+    )
     assert offer is not None
     assert conv.reactivation_origin == FlowState.LLM.value
 
@@ -385,7 +400,9 @@ def test_offer_arms_gate_for_llm_origin():
 def test_offer_idle_sends_plain_greeting_and_menu_without_arming():
     conv = _conversation(flow_state=FlowState.IDLE)
     stale = datetime.now(UTC) - timedelta(hours=10)
-    offer = _reactivation_offer(conv, _offer_tenant(), _patient("Ana"), "5511999", "oi", stale)
+    offer = _reactivation_offer(
+        conv, _offer_tenant(), _patient("Ana"), "5511999", "oi", stale, conv.flow_state
+    )
     assert offer is not None
     assert conv.reactivation_origin is None  # nothing to resume -> gate NOT armed
     assert offer.greeting_override == "Oi de novo, Ana!"
@@ -405,7 +422,75 @@ def test_offer_idle_without_any_greeting_returns_none():
     )
     conv = _conversation(flow_state=FlowState.IDLE)
     stale = datetime.now(UTC) - timedelta(hours=10)
-    assert _reactivation_offer(conv, tenant, _patient(), "5511999", "oi", stale) is None
+    assert (
+        _reactivation_offer(conv, tenant, _patient(), "5511999", "oi", stale, conv.flow_state)
+        is None
+    )
+
+
+# --------------------------------------------------------------------------
+# The prompt is UNIVERSAL (2026-08-25). It used to be gated on
+# `reactivation_enabled` — true only for clinics that filled in
+# `returning_greeting_message` — so a default tenant's returning patient was
+# silently rerouted instead of asked. Two halves now differ deliberately:
+# the resume PROMPT is universal (product default text, safety-adjacent), the
+# IDLE re-greeting stays opt-in (it re-sends the clinic's own welcome pitch).
+# --------------------------------------------------------------------------
+
+
+def _bare_tenant():
+    """A DEFAULT tenant: no returning greeting, no reactivation config at all."""
+    return _tenant(returning_greeting_message=None)
+
+
+def test_offer_prompts_a_default_tenant_with_no_reactivation_config():
+    conv = _conversation(flow_state=FlowState.LLM)
+    stale = datetime.now(UTC) - timedelta(hours=10)
+    offer = _reactivation_offer(
+        conv, _bare_tenant(), _patient(), "5511999", "oi", stale, conv.flow_state
+    )
+    assert offer is not None
+    assert conv.reactivation_origin == FlowState.LLM.value
+    # Bare question: the clinic's welcome pitch is NOT re-sent to this cohort.
+    assert offer.greeting_override == DEFAULT_CONTINUE_PROMPT
+    assert offer.greeting_buttons == ["Sim", "Não"]
+
+
+def test_offer_reads_the_captured_origin_not_the_live_column():
+    """The state is expired BEFORE the prompt is built, so the column is IDLE.
+
+    Reading `conversation.flow_state` here would make a just-expired LLM
+    conversation look like it had nothing to resume, and the patient would be
+    silently rerouted — the exact behaviour the universal prompt replaced.
+    """
+    conv = _conversation(flow_state=FlowState.IDLE)  # already dropped this turn
+    stale = datetime.now(UTC) - timedelta(hours=10)
+    offer = _reactivation_offer(
+        conv, _bare_tenant(), _patient(), "5511999", "oi", stale, FlowState.LLM
+    )
+    assert offer is not None
+    assert conv.reactivation_origin == FlowState.LLM.value  # armed from the ORIGIN
+    assert DEFAULT_CONTINUE_PROMPT in offer.greeting_override
+
+
+def test_idle_regreeting_stays_opt_in_for_a_default_tenant():
+    """The other half: no pitch blasted at every returning patient every 6h."""
+    conv = _conversation(flow_state=FlowState.IDLE)
+    stale = datetime.now(UTC) - timedelta(hours=10)
+    assert (
+        _reactivation_offer(
+            conv, _bare_tenant(), _patient(), "5511999", "oi", stale, conv.flow_state
+        )
+        is None
+    )
+
+
+def test_prompt_enabled_by_default_but_an_explicit_false_still_wins():
+    assert reactivation_prompt_enabled(_bare_tenant()) is True
+    assert reactivation_prompt_enabled(_tenant(reactivation={"enabled": False})) is False
+    assert reactivation_prompt_enabled(_tenant(reactivation={"gap_minutes": 30})) is True
+    # The OLD gate stays message-driven — the two are deliberately different.
+    assert reactivation_enabled(_bare_tenant()) is False
 
 
 # --------------------------------------------------------------------------
@@ -457,10 +542,17 @@ def test_stale_llm_state_expires_for_a_tenant_without_reactivation():
     assert _expire_stale_llm_state(conv, tenant, stale) is True
     # Dropped to IDLE so the CURRENT inbound routes as a menu interaction.
     assert conv.flow_state == FlowState.IDLE
-    # Everything transient goes with it - same set the "Não" answer clears.
-    assert conv.flow_selected_professional_id is None
-    assert conv.flow_selected_insurance is None
+    # The in-progress booking scratch goes with it...
     assert conv.flow_step is None
+    assert conv.flow_selected_day is None
+    assert conv.flow_selected_slot is None
+    # ...but NOT who the patient was dealing with. Since 2026-08-25 this expiry
+    # runs BEFORE the "quer continuar?" prompt, so clearing these would make a
+    # "Sim" resume forget the patient's doctor. Only the "Não" answer wipes the
+    # full set. Nothing leaks: `_apply_flow_result` rewrites every flow field
+    # from the next result.
+    assert conv.flow_selected_professional_id is not None
+    assert conv.flow_selected_insurance is not None
     # The gate is NOT armed: this path sends nothing, it only re-anchors.
     assert conv.reactivation_origin is None
 

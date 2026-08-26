@@ -124,6 +124,7 @@ from secretaria.services.flow_router import (
     reactivation_continue_prompt,
     reactivation_enabled,
     reactivation_gap_minutes,
+    reactivation_prompt_enabled,
     rebooking_candidates,
     resume_bubbles,
     route,
@@ -824,12 +825,38 @@ async def _persist_inbound_message(
                         greeting_override, opening_context, tenant, upcoming_data
                     )
 
-                # Returning after a silence gap (and not already greeting on first
-                # contact): offer to resume the prior workflow, or re-greet.
+                # Universal floor on how long full LLM mode may last (see
+                # `_expire_stale_llm_state`). Runs BEFORE the offer below, and
+                # THAT ORDER IS LOAD-BEARING: the state must already be dropped
+                # when "quer continuar?" goes out, so a patient who simply never
+                # answers it still leaves LLM mode. Ask first and the prompt
+                # becomes the only time-based exit again - the exact hole this
+                # floor was added to close, just with a question instead of
+                # silence. The pre-expiry state is captured first so the offer
+                # can still arm the right resume origin, and "Sim" puts it back
+                # (see the reactivation directive in `_send_bot_reply`). Still
+                # after the pending-answer gate, so a resume in progress is
+                # never wiped.
+                resumable_origin = conversation.flow_state
+                if _expire_stale_llm_state(conversation, tenant, last_activity_at):
+                    logger.info(
+                        "conversation_llm_state_expired",
+                        conversation_id=str(conversation.id),
+                        tenant_id=str(tenant.id),
+                        ttl_minutes=llm_state_ttl_minutes(tenant),
+                    )
+
+                # Returning after a silence gap (and not already greeting on
+                # first contact): offer to resume the prior workflow, or
+                # re-greet. NO LONGER gated on `reactivation_enabled` - the
+                # resume prompt has a product default text, so it works for
+                # every tenant, while `reactivation_prompt_enabled` still
+                # honours an explicit `initial_flows.reactivation.enabled`
+                # of false.
                 if (
                     greeting_override is None
                     and is_returning_patient
-                    and reactivation_enabled(tenant)
+                    and reactivation_prompt_enabled(tenant)
                 ):
                     offer = _reactivation_offer(
                         conversation,
@@ -838,23 +865,10 @@ async def _persist_inbound_message(
                         wa_id,
                         body,
                         last_activity_at,
+                        resumable_origin,
                     )
                     if offer is not None:
                         return offer
-
-                # Universal floor on how long full LLM mode may last. The offer
-                # above bounds it only for tenants that opted into a returning
-                # greeting; this catches everyone else, silently (see
-                # `_expire_stale_llm_state`). Placed after the offer so an
-                # opted-in tenant's "quer continuar?" always wins, and after the
-                # pending-answer gate so a resume in progress is never wiped.
-                if _expire_stale_llm_state(conversation, tenant, last_activity_at):
-                    logger.info(
-                        "conversation_llm_state_expired",
-                        conversation_id=str(conversation.id),
-                        tenant_id=str(tenant.id),
-                        ttl_minutes=llm_state_ttl_minutes(tenant),
-                    )
 
                 greeting_buttons = _greeting_buttons_for(tenant, greeting_override, opening_context)
 
@@ -1260,6 +1274,7 @@ def _reactivation_offer(
     wa_id: str,
     body: str | None,
     last_activity_at: datetime | None,
+    origin: FlowState,
 ) -> _ReplyContext | None:
     """Maybe offer a returning patient to resume, after a silence gap.
 
@@ -1269,6 +1284,13 @@ def _reactivation_offer(
     question, with Sim/Não buttons. For an IDLE conversation there is nothing to
     resume, so it sends just the returning greeting + menu. Returns None to fall
     through to normal dispatch (gap not reached yet, or nothing to say).
+
+    `origin` is the flow state as it was BEFORE `_expire_stale_llm_state` ran
+    earlier in the same turn - NOT `conversation.flow_state`, which by now may
+    already have been dropped to IDLE. Reading the live column here would make a
+    just-expired LLM conversation look like it had nothing to resume, and the
+    patient would be silently rerouted instead of asked. The caller passes it
+    explicitly for exactly that reason.
     """
     if last_activity_at is None:
         return None
@@ -1276,18 +1298,24 @@ def _reactivation_offer(
     if gap < timedelta(minutes=reactivation_gap_minutes(tenant)):
         return None
 
-    returning = (tenant.returning_greeting_message or "").strip() or (
-        tenant.greeting_message or ""
-    ).strip()
+    returning = (tenant.returning_greeting_message or "").strip()
+    if not returning and reactivation_enabled(tenant):
+        # Pre-existing fallback, deliberately kept for the OPTED-IN cohort ONLY:
+        # a tenant that switched reactivation on without writing a returning
+        # greeting still reuses its welcome pitch. NOT extended to the universal
+        # cohort - re-pitching the clinic at every 6h return is a lot of message
+        # for a question that stands perfectly well on its own, and the pitch is
+        # the one part of this that has no sensible product default.
+        returning = (tenant.greeting_message or "").strip()
     greeting = _render_greeting_template(returning, patient.name) if returning else ""
 
-    if conversation.flow_state in (
+    if origin in (
         FlowState.MENU,
         FlowState.SERVICE_CATALOG,
         FlowState.LLM,
     ):
         # Resumable: arm the gate and ask whether to continue.
-        conversation.reactivation_origin = conversation.flow_state.value
+        conversation.reactivation_origin = origin.value
         prompt = reactivation_continue_prompt(tenant)
         body_text = f"{greeting}\n\n{prompt}".strip() if greeting else prompt
         return _ReplyContext(
@@ -1298,8 +1326,13 @@ def _reactivation_offer(
             greeting_buttons=reactivation_choice_buttons(tenant),
         )
 
-    # IDLE / nothing to resume: a plain returning greeting + menu, if configured.
-    if not greeting:
+    # IDLE / nothing to resume: a plain returning greeting + menu. THIS half
+    # stays opt-in, unlike the resume prompt above: it re-sends the clinic's OWN
+    # greeting text - which is the welcome pitch (see CLAUDE.md) - so making it
+    # universal would blast a marketing paragraph at every returning patient
+    # every 6h. There is no sensible product default for someone else's pitch,
+    # and nothing about a conversation sitting IDLE needs bounding.
+    if not greeting or not reactivation_enabled(tenant):
         return None
     return _ReplyContext(
         conversation_id=conversation.id,
@@ -1360,9 +1393,16 @@ def _expire_stale_llm_state(
     conversation.flow_selected_type = None
     conversation.flow_selected_day = None
     conversation.flow_selected_slot = None
-    conversation.flow_selected_professional_id = None
-    conversation.flow_selected_insurance = None
     conversation.flow_managing_appointment_id = None
+    # `flow_selected_professional_id` / `flow_selected_insurance` are NOT
+    # cleared here, unlike the "Não" answer which drops everything. They say WHO
+    # the patient is dealing with, not where they were in a form, and the agent
+    # reads the professional to overlay its config (`selected_professional` ->
+    # `run_agent`). Since this expiry now runs BEFORE the "quer continuar?"
+    # prompt, clearing them would make a "Sim" resume into a conversation that
+    # had silently forgotten the patient's doctor. Nothing leaks from keeping
+    # them: `_apply_flow_result` rewrites every flow field from the next result,
+    # so the very next routed turn overwrites both.
     return True
 
 
@@ -1952,7 +1992,30 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
         # "Sim": re-render the deterministic step they were on. LLM-mode origins
         # (and any resume that has to delegate) fall through to the agent below,
         # which already has the full history.
-        if reply.reactivation.origin != FlowState.LLM.value:
+        if reply.reactivation.origin == FlowState.LLM.value:
+            # `_expire_stale_llm_state` already dropped the state to IDLE before
+            # the prompt was sent, so that an UNANSWERED prompt still exits LLM
+            # mode. "Sim" is the answer that undoes that, so it has to write the
+            # state back - through `_apply_flow_result`, the one persistence
+            # seam, never by hand. `delegate_llm` writes the flow fields and
+            # returns False, so the turn falls straight through to the agent.
+            await _apply_flow_result(
+                reply,
+                FlowRouterResult(
+                    action="delegate_llm",
+                    flow_state=FlowState.LLM,
+                    # Carried EXPLICITLY: `_apply_flow_result` writes every flow
+                    # field from the result, so a resume that does not name
+                    # these drops the patient's doctor on the way back in.
+                    flow_selected_professional_id=conv_snapshot.flow_selected_professional_id,
+                    flow_selected_insurance=conv_snapshot.flow_selected_insurance,
+                ),
+                patient_wa,
+                redis=redis,
+                tenant=tenant,
+                waba_token=waba_token,
+            )
+        else:
             calendar = _flow_turn_calendar(conv_snapshot, tenant_config, flow_calendar)
             result = await resume_bubbles(
                 conv_snapshot, tenant_snapshot, calendar, professionals=flow_professionals

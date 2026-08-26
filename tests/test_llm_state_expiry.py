@@ -46,7 +46,11 @@ from secretaria.models import (  # noqa: E402
     Patient,
     Tenant,
 )
-from secretaria.services.flow_router import DEFAULT_REACTIVATION_GAP_MINUTES  # noqa: E402
+from secretaria.services.flow_router import (  # noqa: E402
+    DEFAULT_CONTINUE_PROMPT,
+    DEFAULT_REACTIVATION_GAP_MINUTES,
+    FlowRouterResult,
+)
 from secretaria.workers import tasks  # noqa: E402
 
 PHONE_NUMBER_ID = "1234567890"
@@ -140,7 +144,14 @@ async def _inbound(wam_id: str = "wamid.new.1", body: str = "bom dia"):
 
 
 async def test_default_tenant_stale_llm_conversation_is_released(db):
-    """The bug: nothing used to bound this cohort's stay in LLM mode."""
+    """The bug: nothing used to bound this cohort's stay in LLM mode.
+
+    The release itself is the invariant and is unchanged. What changed on
+    2026-08-25 is that this cohort is now ASKED rather than silently rerouted —
+    the prompt stopped being gated on `reactivation_enabled`. Both facts are
+    asserted together on purpose: the prompt must never be the thing that keeps
+    the state alive.
+    """
     _, conversation = await _seed(
         db,
         flow_state=FlowState.LLM,
@@ -150,12 +161,17 @@ async def test_default_tenant_stale_llm_conversation_is_released(db):
     reply = await _inbound()
 
     assert reply is not None
-    assert reply.greeting_override is None  # nothing extra is sent
-    assert reply.reactivation is None  # and no "quer continuar?" prompt
     conv = await _flow_state(db, conversation.id)
-    assert conv.flow_state == FlowState.IDLE  # this turn now routes to the menu
-    assert conv.flow_selected_insurance is None
-    assert conv.reactivation_origin is None
+    # RELEASED — the floor ran before the prompt was built.
+    assert conv.flow_state == FlowState.IDLE
+    # ...but WHO they were dealing with survives, because the prompt they are
+    # about to get offers to resume exactly that. Only "Não" drops it.
+    assert conv.flow_selected_insurance == "Unimed"
+    # ...and ASKED, with the product default text and the gate armed so "Sim"
+    # can still put them back where they were.
+    assert reply.greeting_override == DEFAULT_CONTINUE_PROMPT
+    assert reply.greeting_buttons == ["Sim", "Não"]
+    assert conv.reactivation_origin == FlowState.LLM.value
 
 
 async def test_default_tenant_active_llm_conversation_is_left_alone(db):
@@ -171,6 +187,28 @@ async def test_default_tenant_active_llm_conversation_is_left_alone(db):
     conv = await _flow_state(db, conversation.id)
     assert conv.flow_state == FlowState.LLM
     assert conv.flow_selected_insurance == "Unimed"
+
+
+async def test_a_no_answer_still_drops_everything(db):
+    """The expiry keeps the selection; the explicit "Não" is what wipes it."""
+    _, conversation = await _seed(
+        db,
+        flow_state=FlowState.LLM,
+        silent_for=timedelta(days=7),
+    )
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        conv.reactivation_origin = FlowState.LLM.value  # prompt already sent
+        await session.commit()
+
+    reply = await _inbound(wam_id="wamid.new.no", body="Não")
+
+    assert reply is not None
+    assert reply.reactivation is not None
+    assert reply.reactivation.kind == "reset"
+    conv = await _flow_state(db, conversation.id)
+    assert conv.flow_state == FlowState.IDLE
+    assert conv.flow_selected_insurance is None  # "Não" drops it all
 
 
 async def test_default_tenant_stale_non_llm_state_is_left_alone(db):
@@ -193,7 +231,15 @@ async def test_default_tenant_stale_non_llm_state_is_left_alone(db):
 
 
 async def test_reactivation_tenant_still_gets_the_resume_prompt_first(db):
-    """A configured returning greeting means the offer wins; nothing is expired."""
+    """A configured returning greeting still leads the prompt — but is not a stay.
+
+    This cohort's MESSAGE is unchanged (their returning greeting + the
+    question). What changed is that the state is now dropped before the question
+    goes out, for them too. It used to be preserved "so a Sim can resume it",
+    which quietly made the prompt the only time-based exit — a patient who never
+    answered stayed in LLM mode forever, the very hole the floor exists to
+    close. "Sim" now restores the state instead (see `_send_bot_reply`).
+    """
     _, conversation = await _seed(
         db,
         flow_state=FlowState.LLM,
@@ -206,7 +252,96 @@ async def test_reactivation_tenant_still_gets_the_resume_prompt_first(db):
     assert reply is not None
     assert reply.greeting_override is not None
     assert "Oi de novo, Maria!" in reply.greeting_override
+    assert DEFAULT_CONTINUE_PROMPT in reply.greeting_override
     conv = await _flow_state(db, conversation.id)
-    # State PRESERVED so a "Sim" can resume it, and the gate is armed.
-    assert conv.flow_state == FlowState.LLM
-    assert conv.reactivation_origin == FlowState.LLM.value
+    assert conv.flow_state == FlowState.IDLE  # released, NOT parked
+    assert conv.reactivation_origin == FlowState.LLM.value  # "Sim" can undo it
+
+
+async def test_an_explicit_disable_still_releases_silently(db):
+    """`enabled: false` turns the QUESTION off, never the floor underneath it."""
+    _, conversation = await _seed(
+        db,
+        flow_state=FlowState.LLM,
+        silent_for=timedelta(days=7),
+        initial_flows={"reactivation": {"enabled": False}},
+    )
+
+    reply = await _inbound()
+
+    assert reply is not None
+    assert reply.greeting_override is None  # no question
+    conv = await _flow_state(db, conversation.id)
+    assert conv.flow_state == FlowState.IDLE  # but still released
+    assert conv.reactivation_origin is None
+
+
+async def test_delegate_llm_result_writes_the_state_back_and_delegates(db):
+    """The seam "Sim" leans on to undo the expiry.
+
+    The prompt is only safe to send AFTER the state is dropped, which means the
+    "Sim" answer has to write `FlowState.LLM` back. It does that by handing a
+    `delegate_llm` result to `_apply_flow_result` rather than touching
+    `conv.flow_*` by hand — the one persistence seam. This pins the two
+    properties that branch depends on: the flow fields ARE persisted, and the
+    call still returns False so the turn falls through to the agent.
+
+    (The `_send_bot_reply` branch that makes the call is not exercised here —
+    it needs the full WhatsApp/redis send path. This covers the contract it
+    relies on.)
+    """
+    _, conversation = await _seed(
+        db,
+        flow_state=FlowState.IDLE,  # as the expiry left it
+        silent_for=timedelta(days=7),
+    )
+    reply = tasks._ReplyContext(
+        conversation_id=conversation.id,
+        patient_wa_id=WA_ID,
+        inbound_body="Sim",
+    )
+
+    handled = await tasks._apply_flow_result(
+        reply,
+        FlowRouterResult(action="delegate_llm", flow_state=FlowState.LLM),
+        WA_ID,
+    )
+
+    assert handled is False  # falls through to the agent
+    conv = await _flow_state(db, conversation.id)
+    assert conv.flow_state == FlowState.LLM  # ...with the state put back
+    # And the trap this seam sets: EVERY flow field is written from the result,
+    # so a resume that does not name the selection drops it. The real caller in
+    # `_send_bot_reply` carries both forward from `conv_snapshot` for exactly
+    # this reason.
+    assert conv.flow_selected_insurance is None  # not named -> wiped
+
+    handled = await tasks._apply_flow_result(
+        reply,
+        FlowRouterResult(
+            action="delegate_llm",
+            flow_state=FlowState.LLM,
+            flow_selected_insurance="Unimed",
+        ),
+        WA_ID,
+    )
+    assert handled is False
+    conv = await _flow_state(db, conversation.id)
+    assert conv.flow_selected_insurance == "Unimed"  # named -> kept
+
+
+async def test_a_stale_menu_state_is_asked_but_not_expired(db):
+    """Only LLM is expired. MENU re-prompts on its own, so it is left intact."""
+    _, conversation = await _seed(
+        db,
+        flow_state=FlowState.MENU,
+        silent_for=timedelta(days=7),
+    )
+
+    reply = await _inbound()
+
+    assert reply is not None
+    assert reply.greeting_override == DEFAULT_CONTINUE_PROMPT
+    conv = await _flow_state(db, conversation.id)
+    assert conv.flow_state == FlowState.MENU  # untouched by the floor
+    assert conv.reactivation_origin == FlowState.MENU.value
