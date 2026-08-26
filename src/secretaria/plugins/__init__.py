@@ -24,6 +24,7 @@ from secretaria.plugins import (  # noqa: F401
     multi_professional,
     multi_unit,
     pix_deposit,
+    precheck_handoff,
     professional_notification,
     reminders,
 )
