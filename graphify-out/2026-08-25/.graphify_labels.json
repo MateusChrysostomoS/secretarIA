@@ -360,7 +360,9 @@
   "358": "_ExplodingHttpClient",
   "359": "logging.py",
   "360": "ShowMainMenuRequested",
+  "361": "test_redis_failure_never_propagates",
   "362": "iniciar_pre_consulta",
   "363": "a7b8c9d0e1f2_rebooking_declines.py",
-  "364": "_transcription_config"
+  "364": "_transcription_config",
+  "365": "test_calendar_alert_sends_when_smtp_configured"
 }
