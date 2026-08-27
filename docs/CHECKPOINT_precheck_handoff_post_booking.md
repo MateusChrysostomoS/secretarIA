@@ -6,7 +6,8 @@
 > - **P0, o gatilho automático** (2026-08-25) — commit `4c62021`. Origem:
 >   `z_prompts/debug_secretaria_producao/PROMPT_FEAT_36_PRECHECK_HANDOFF_POST_BOOKING.md`.
 > - **P1, o contexto do agendamento** (2026-08-26, FEAT 39) — nome do paciente + serviço
->   agendado passam a viajar no handoff. Estado: **BUILT, verde, UNCOMMITTED, NÃO DEPLOYADO.**
+>   agendado passam a viajar no handoff. Commit `3325b7e` (+ `f44b2d3`, refresh do graphify),
+>   **pushed** pra `origin/main`. Estado: **COMMITTED + PUSHED, NÃO DEPLOYADO.**
 >   Ver "Fatia P1", no fim.
 
 ## O que existia, e o que faltava
@@ -185,3 +186,9 @@ serviço — não pelo código local:
 O hook roda no **worker** (`plugins/post_booking.py::run_post_booking_hooks`). Vale a regra dos
 dois serviços do `CLAUDE.md`: deployar só a `secretaria_api` não move este código. Confirme o
 `secretaria-worker` à parte, e cheque `GET /build` → `deploy_parity`.
+
+Estado do ar em 2026-08-27T01:07Z, **antes** deste deploy: `deploy_parity: match`, os dois
+serviços em `source_fingerprint f9de5eda56f9` — que reproduzido dos blobs do git é `54c1563`.
+Ou seja: paridade sim, atualidade não. `main` estava 3 commits à frente, e o P0 (`4c62021`)
+**nunca chegou a rodar em produção**. O próximo deploy da secretarIA liga o gatilho automático
+e o contexto do agendamento de uma vez só — não é um deploy incremental.
