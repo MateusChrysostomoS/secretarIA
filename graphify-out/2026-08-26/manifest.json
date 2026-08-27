@@ -130,9 +130,9 @@
     "semantic_hash": "dd994c6efadf3a1a89c311a3c74dc90b"
   },
   "src/secretaria/services/precheck.py": {
-    "mtime": 1787794725.44716,
-    "ast_hash": "4c54c187357e91f661657d7e4d587387",
-    "semantic_hash": ""
+    "mtime": 1784501064.9960635,
+    "ast_hash": "d00cc46ca1470e7b1af87e2d7726dada",
+    "semantic_hash": "d00cc46ca1470e7b1af87e2d7726dada"
   },
   "src/secretaria/services/whatsapp.py": {
     "mtime": 1787324569.0328925,
@@ -150,8 +150,8 @@
     "semantic_hash": ""
   },
   "src/secretaria/workers/tasks.py": {
-    "mtime": 1787712105.2146277,
-    "ast_hash": "a62abf3a34516a0e66777268eccf9444",
+    "mtime": 1787709351.5343175,
+    "ast_hash": "2935c57bbca5ff47a3b5dcdf959440fc",
     "semantic_hash": ""
   },
   "src/secretaria/workers/__init__.py": {
@@ -355,8 +355,8 @@
     "semantic_hash": ""
   },
   "src/secretaria/services/flow_router.py": {
-    "mtime": 1787712112.300341,
-    "ast_hash": "b4b9acaa2a879a093aed61c59e6603b0",
+    "mtime": 1787324604.9881094,
+    "ast_hash": "8cbbebbbd7822f4a0d606f5915a26587",
     "semantic_hash": ""
   },
   "tests/test_flow_router.py": {
@@ -385,8 +385,8 @@
     "semantic_hash": ""
   },
   "tests/test_reactivation.py": {
-    "mtime": 1787712152.3158748,
-    "ast_hash": "5b3787e6facd3db0d8046b639accaa06",
+    "mtime": 1787287694.8734334,
+    "ast_hash": "b8b0fe4cf016625863a5f508795ff6c8",
     "semantic_hash": ""
   },
   "src/secretaria/schemas/admin.py": {
@@ -725,9 +725,9 @@
     "semantic_hash": ""
   },
   "tests/test_precheck_handoff.py": {
-    "mtime": 1787794886.08109,
-    "ast_hash": "129e5852608d4ef9d6c535881c725476",
-    "semantic_hash": ""
+    "mtime": 1784501065.0214748,
+    "ast_hash": "bf62fa944cb6968c57df1f68017b030f",
+    "semantic_hash": "bf62fa944cb6968c57df1f68017b030f"
   },
   "tests/test_precheck_handoff_tool.py": {
     "mtime": 1784501065.0214748,
@@ -1320,18 +1320,18 @@
     "semantic_hash": ""
   },
   "src/secretaria/plugins/precheck_handoff.py": {
-    "mtime": 1787794725.44716,
-    "ast_hash": "10ef172941e6b6a36a24fd9daf2e0851",
+    "mtime": 1787709400.434245,
+    "ast_hash": "86a78388e54dffdb247326ed882b0469",
     "semantic_hash": ""
   },
   "tests/test_llm_state_expiry.py": {
-    "mtime": 1787712152.3158748,
-    "ast_hash": "9c55f9ecbb19cb5848fb64080a85cb71",
+    "mtime": 1787287647.6037626,
+    "ast_hash": "4266900f90fa3e1a2f702121f1d6e74a",
     "semantic_hash": ""
   },
   "tests/test_precheck_handoff_plugin.py": {
-    "mtime": 1787795114.8865561,
-    "ast_hash": "154d2410e9665824cbb0dae93c6869ee",
+    "mtime": 1787709673.77163,
+    "ast_hash": "a48bfad30c316921f08e1a5c4c69b6bc",
     "semantic_hash": ""
   },
   "tests/test_whatsapp_limits.py": {
@@ -1340,8 +1340,8 @@
     "semantic_hash": ""
   },
   "docs/CHECKPOINT_precheck_handoff_post_booking.md": {
-    "mtime": 1787795276.4672291,
-    "ast_hash": "e681b76634c999e5588b9eb4809c6ffd",
+    "mtime": 1787710086.0613744,
+    "ast_hash": "df5a8cfbb46caba680c46c1e9bd620b2",
     "semantic_hash": ""
   },
   "docs/CHECKPOINT_whatsapp_text_limits.md": {
