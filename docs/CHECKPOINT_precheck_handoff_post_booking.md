@@ -1,9 +1,13 @@
 # CHECKPOINT — PreCheck oferecido automaticamente logo depois do agendamento
 
-> Feature checkpoint (padrão do `CLAUDE.md`). Esta é a **perna da secretarIA** de uma feature de 3
-> repos — `brain-api` e `PreCheck` **não foram tocados** nesta rodada (ver "Fatia P1", abaixo).
-> Data: 2026-08-25. Estado: **BUILT, verde, UNCOMMITTED, NÃO DEPLOYADO.**
-> Origem: `z_prompts/debug_secretaria_producao/PROMPT_FEAT_36_PRECHECK_HANDOFF_POST_BOOKING.md`.
+> Feature checkpoint (padrão do `CLAUDE.md`). Perna da **secretarIA** de uma feature de 3 repos.
+> Duas rodadas até aqui:
+>
+> - **P0, o gatilho automático** (2026-08-25) — commit `4c62021`. Origem:
+>   `z_prompts/debug_secretaria_producao/PROMPT_FEAT_36_PRECHECK_HANDOFF_POST_BOOKING.md`.
+> - **P1, o contexto do agendamento** (2026-08-26, FEAT 39) — nome do paciente + serviço
+>   agendado passam a viajar no handoff. Estado: **BUILT, verde, UNCOMMITTED, NÃO DEPLOYADO.**
+>   Ver "Fatia P1", no fim.
 
 ## O que existia, e o que faltava
 
@@ -85,21 +89,35 @@ erro da Meta devolve o número do destinatário e o texto da mensagem para dentr
 Há teste que **falha** se o telefone completo, o nome do paciente ou a URL vazarem para o corpo ou
 para o log, em todos os desfechos.
 
+A FEAT 39 mexeu na premissa desse parágrafo sem mexer na conclusão: o módulo agora **envia** o
+nome do paciente. Enviar e logar são atos diferentes, e só o primeiro mudou — nenhuma linha de
+log ganhou o nome, nem aqui nem em `services/precheck.py`, inclusive nos caminhos de falha (que
+carregam `error_type` / hash do telefone / status code e nada mais). A garantia deixou de valer
+**por acidente** (o módulo não tinha o dado) e passou a valer **por teste**: a varredura de
+vazamento agora cobre os seis desfechos e roda também no nível do serviço, sobre os quatro
+caminhos de falha em que o log é mais tentador (exceção renderizada, JSON inválido, status
+inesperado, erro de rede).
+
 ## Testes
 
-`tests/test_precheck_handoff_plugin.py` — 20 funções, 27 casos. Suíte cheia: **1798 passed**
-(baseline antes desta rodada: 1771; a única falha, `test_human_backup_plugin.py::test_on_inbound_inside_hours_returns_false`,
-é o flake conhecido de UTC entre 00:00 e 03:00, pré-existente).
+`tests/test_precheck_handoff_plugin.py` — 25 funções, 35 casos (20/27 no P0).
+`tests/test_precheck_handoff.py` — 24 funções, 34 casos, que é onde mora a forma do corpo HTTP.
+
+Suíte cheia depois da FEAT 39: **1832 passed, 1 failed** — a falha é
+`test_human_backup_plugin.py::test_on_inbound_inside_hours_returns_false`, o flake conhecido de
+UTC entre 00:00 e 03:00 (a execução foi às 01:45 UTC), pré-existente e sem nenhuma referência a
+`precheck`/`handoff` no arquivo.
 
 Sem migração: `processed_events` e o modelo já existem.
 
 ## Pendências (nada disso é código)
 
-1. **O GRANT do `precheckv2`** — `PreCheck/docs/migration_precheckv2_handoff_grant.sql` **não foi
-   rodado**. Sem ele o `INSERT` em `sessions` falha, a brain-api devolve 502, a secretarIA lê
-   `UNAVAILABLE` e o hook **não manda nada, em silêncio** — exatamente para o caso comum (paciente
-   sem sessão ativa). É o bloqueio nº 1 desta feature.
-   Procedimento seguro: `z_prompts/debug_secretaria_producao/PROMPT_INVESTIGATE_03_PRECHECK_PRODUCTION_GRANT.md`.
+1. ~~**O GRANT do `precheckv2`**~~ — **RESOLVIDO em 2026-08-26**: confirmado
+   `SELECT`/`INSERT`/`UPDATE` em `precheckv2.sessions` para a role real lida de
+   `PRECHECKV2_DATABASE_URL`. Era o bloqueio nº 1: sem ele o `INSERT` falhava, a brain-api
+   devolvia 502, a secretarIA lia `UNAVAILABLE` e o hook não mandava nada **em silêncio** —
+   exatamente no caso comum. Fica registrado porque é o modelo exato do modo de falha que a
+   ordem de deploy da FEAT 39 existe para evitar.
 2. **Entitlement do tenant** na brain-api: `status` ativo **E** `products.precheck`.
 3. **`Clinic.brain_tenant_id`** setado do lado do PreCheck, senão `404 no_clinic_for_tenant`.
 4. **Envs**: `PRECHECK_WHATSAPP_NUMBER`, `BRAIN_API_BASE_URL`, `INTERNAL_API_KEY` (secretarIA);
@@ -108,10 +126,62 @@ Sem migração: `processed_events` e o modelo já existem.
    worker atrasado faz a feature parecer quebrada sem ter bug nenhum — ver a seção de deploy do
    `CLAUDE.md`. Em 2026-08-25 o `GET /build` ao vivo respondia `deploy_parity: divergent`.
 
-## Fatia P1 (contexto do paciente) — investigada, NÃO implementada
+## Fatia P1 (contexto do agendamento) — IMPLEMENTADA (FEAT 39, 2026-08-26)
 
-Proposta escrita em `z_prompts/debug_secretaria_producao/PROPOSTA_FEAT_36_P1_CONTEXTO_PACIENTE.md`,
-aguardando decisão. Resumo do achado: o nome **não é** coluna de `sessions` — é a resposta da
-pergunta nº 1, hardcoded no n8n, atrás do portão de LGPD. Levar o nome exige coluna nova em
-`precheckv2` (DDL manual, sem Alembic), edição de condutor n8n e mudança de contrato nos 3 repos —
-sendo que `PrecheckHandoffIn` da brain-api é `extra="forbid"`, então a ordem de deploy é requisito.
+A proposta original está em
+`z_prompts/debug_secretaria_producao/PROPOSTA_FEAT_36_P1_CONTEXTO_PACIENTE.md`. O achado que a
+motivou continua valendo: o nome **não é** coluna de `sessions` — é a resposta da pergunta nº 1,
+hardcoded no n8n, atrás do portão de LGPD. Levar o nome exigiu coluna nova em `precheckv2` (DDL
+manual, sem Alembic) e mudança de contrato nos 3 repos. Decisão do produto: nome **e** serviço
+juntos, sem pedir confirmação, serviço **cru**.
+
+### O que mudou nesta perna
+
+`services/precheck.py::request_precheck_handoff` ganhou `patient_name` e `booked_service`, os
+dois `str | None = None` e **keyword-only**. Keyword-only não é estilo: são dois `str | None`
+adjacentes sem forma que os distinga, então uma troca posicional mandaria o nome do paciente
+como o serviço agendado e nada em lugar nenhum levantaria.
+
+Cada campo entra no corpo **só quando sobra texto depois do `.strip()`** — vazio e ausente
+colapsam na mesma coisa, e a chave é **omitida**, nunca enviada como `null`. A consequência é o
+ponto: uma chamada que não conhece nenhum dos dois (a tool `iniciar_pre_consulta`, um
+agendamento sem tipo) produz **exatamente** o corpo de duas chaves de antes da FEAT 39. Há teste
+fixando isso — `test_a_call_without_booking_context_sends_todays_exact_payload`.
+
+`plugins/precheck_handoff.py::_post_booking` passa `ctx.patient.name` e
+`ctx.appointment.appointment_type` **crus**, sem heurística. Não é preguiça: `Patient.name` quase
+sempre é o nome de perfil do WhatsApp (`workers/tasks.py::_handle_patient_messages`, de
+`contact.profile.name`), e não existe coluna hoje que separe isso de um nome digitado — qualquer
+teste de "isso é um nome de verdade?" aqui só poderia chutar. `None` nos dois é o caso ordinário
+(bloqueio de agenda, agendamento sem tipo), não um erro.
+
+Limite de tamanho: os dois campos são `max_length=255` do lado da brain-api, e as duas colunas de
+origem já cabem — `Patient.name` é `String(255)` e `Appointment.appointment_type` é `String(120)`.
+Por isso **não** há truncamento nesta perna; se alguma dessas colunas crescer, este parágrafo
+vira um bug.
+
+### A ordem de deploy é a parte perigosa
+
+`brain_api/src/brain_api/schemas/internal.py::PrecheckHandoffIn` é `extra="forbid"`. Um nome de
+campo que ela ainda não conhece **não é ignorado**: 422 no corpo inteiro. E
+`request_precheck_handoff` falha fechado em `UNAVAILABLE` para qualquer resposta que não seja
+200/403/404/409 — ou seja, o 422 volta **indistinguível de uma queda**, e derrubaria o gatilho
+automático do P0, que já está em produção e não usa nenhum dos dois campos novos. Ver a skill
+`frozen-contract-migration`.
+
+Ordem obrigatória: DDL → PreCheck (FEAT 37) → brain-api (FEAT 38) → **secretarIA (FEAT 39)**.
+
+Verificado ao vivo em 2026-08-26, antes de liberar esta perna, pelo OpenAPI publicado de cada
+serviço — não pelo código local:
+
+- `https://precheckv2-precheck-api.cpux9k.easypanel.host/openapi.json` →
+  `PrecheckHandoffRequest` tem `patient_name` e `booked_service`.
+- `https://secretaria-brain-api.cpux9k.easypanel.host/openapi.json` → `PrecheckHandoffIn` tem os
+  dois, com `additionalProperties: false` intacto (a mudança ampliou o conjunto de nomes
+  conhecidos, não relaxou a validação).
+
+### Deploy desta perna
+
+O hook roda no **worker** (`plugins/post_booking.py::run_post_booking_hooks`). Vale a regra dos
+dois serviços do `CLAUDE.md`: deployar só a `secretaria_api` não move este código. Confirme o
+`secretaria-worker` à parte, e cheque `GET /build` → `deploy_parity`.

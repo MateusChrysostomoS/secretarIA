@@ -20,7 +20,11 @@ those). What IS this file's subject is the hook's own responsibilities:
   - a failure here — including the real client's fail-closed credential check —
     cannot stop another post_booking hook in the same sweep;
   - no phone number and no patient name ever reaches the message body or a log
-    line.
+    line - which had to survive FEAT 39 giving this hook a reason to HANDLE
+    the name: it now forwards it, plus the booked service, to brain-api so
+    PreCheck opens the questionnaire already knowing who booked what;
+  - that forwarding takes whatever `ctx` has, including None, and never turns
+    a missing optional value into a failure.
 """
 
 import os
@@ -58,6 +62,10 @@ from secretaria.services.precheck import HandoffOutcome, HandoffResult  # noqa: 
 PATIENT_WA_ID = "5511988887777"
 PATIENT_PHONE = "+55 11 98888-7777"
 PATIENT_NAME = "Maria Silva"
+# The clinic's own appointment type, as `Appointment.appointment_type` stores
+# it. Unlike the name this is not PII - the tests below only care that it
+# reaches brain-api unchanged.
+BOOKED_SERVICE = "Primeira consulta"
 # The PLATFORM's PreCheck number — shared by every tenant, and the one thing
 # here that is allowed to appear in the message.
 PRECHECK_NUMBER = "551140028922"
@@ -135,17 +143,32 @@ def _unset_precheck_number(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class _Handoff:
-    """Stands in for `request_precheck_handoff`: records asks, replays one outcome."""
+    """Stands in for `request_precheck_handoff`: records asks, replays one outcome.
+
+    The booking context (FEAT 39) is keyword-only here because it is
+    keyword-only on the real function - see
+    `test_the_real_handoff_accepts_exactly_what_this_hook_passes`, which is what
+    stops this fake from quietly accepting a call shape brain-api would 422.
+    """
 
     def __init__(self, outcome: HandoffOutcome = HandoffOutcome.SEEDED, explode: bool = False):
         self.outcome = outcome
         self.explode = explode
         self.calls: list[tuple] = []
+        self.context: list[dict] = []
 
-    async def __call__(self, tenant_id, phone_number):
+    async def __call__(
+        self,
+        tenant_id,
+        phone_number,
+        *,
+        patient_name: str | None = None,
+        booked_service: str | None = None,
+    ):
         if self.explode:
             raise RuntimeError("brain-api down")
         self.calls.append((tenant_id, phone_number))
+        self.context.append({"patient_name": patient_name, "booked_service": booked_service})
         return HandoffResult(self.outcome)
 
 
@@ -236,7 +259,14 @@ async def _claimed(db, appointment_id) -> bool:
     return row is not None
 
 
-async def _make_rows(db, *, with_patient: bool = True, phone_number_id: str | None = None):
+async def _make_rows(
+    db,
+    *,
+    with_patient: bool = True,
+    phone_number_id: str | None = None,
+    patient_name: str | None = PATIENT_NAME,
+    appointment_type: str | None = BOOKED_SERVICE,
+):
     async with db() as session:
         tenant = Tenant(
             id=uuid4(),
@@ -252,7 +282,7 @@ async def _make_rows(db, *, with_patient: bool = True, phone_number_id: str | No
         patient_id = None
         if with_patient:
             patient = Patient(
-                id=uuid4(), tenant_id=tenant.id, wa_id=PATIENT_WA_ID, name=PATIENT_NAME
+                id=uuid4(), tenant_id=tenant.id, wa_id=PATIENT_WA_ID, name=patient_name
             )
             patient_id = patient.id
             session.add(patient)
@@ -261,7 +291,7 @@ async def _make_rows(db, *, with_patient: bool = True, phone_number_id: str | No
             tenant_id=tenant.id,
             patient_id=patient_id,
             google_event_id="evt-1",
-            appointment_type="Primeira consulta",
+            appointment_type=appointment_type,
             start_at=datetime(2026, 8, 3, 17, 0, tzinfo=UTC),
             end_at=datetime(2026, 8, 3, 17, 30, tzinfo=UTC),
             phone=PATIENT_PHONE,
@@ -544,6 +574,7 @@ async def test_no_phone_or_patient_name_in_the_message_body(db, handoff, whatsap
     "outcome",
     [
         HandoffOutcome.SEEDED,
+        HandoffOutcome.ALREADY_ACTIVE,
         HandoffOutcome.NOT_ENTITLED,
         HandoffOutcome.NO_CLINIC,
         HandoffOutcome.CONFLICT,
@@ -574,6 +605,103 @@ async def test_a_failed_send_logs_no_phone_and_no_body(db, monkeypatch, handoff,
     assert PATIENT_WA_ID not in log.text
     assert PATIENT_NAME not in log.text
     assert "wa.me" not in log.text
+
+
+# --------------------------------------------------------------------------
+# Booking context (FEAT 39): what the hook hands brain-api
+# --------------------------------------------------------------------------
+
+
+async def test_the_patient_name_and_booked_service_reach_the_handoff(db, handoff, whatsapp):
+    """The feature itself: PreCheck should open the questionnaire already knowing
+    who booked and what they booked, instead of asking for a name the clinic
+    already has."""
+    tenant, patient, appointment = await _make_rows(db)
+
+    await ph._post_booking(_ctx(tenant, patient, appointment))
+
+    assert handoff.context == [{"patient_name": PATIENT_NAME, "booked_service": BOOKED_SERVICE}]
+
+
+async def test_the_context_is_forwarded_raw(db, handoff, whatsapp):
+    """No heuristic, no filtering, no canonicalisation - the product decision.
+
+    `Patient.name` is usually the WhatsApp PROFILE name rather than one the
+    patient typed, and no column today tells those apart, so any "is this a real
+    name?" test here could only guess. A service name with the punctuation and
+    casing the clinic chose goes over exactly as the clinic wrote it.
+    """
+    messy_name = "maria DA silva-JUNIOR"
+    messy_service = "Consulta - Retorno (pos-operatorio)"
+    tenant, patient, appointment = await _make_rows(
+        db, patient_name=messy_name, appointment_type=messy_service
+    )
+
+    await ph._post_booking(_ctx(tenant, patient, appointment))
+
+    assert handoff.context == [{"patient_name": messy_name, "booked_service": messy_service}]
+
+
+@pytest.mark.parametrize(
+    ("patient_name", "appointment_type"),
+    [
+        (None, BOOKED_SERVICE),
+        (PATIENT_NAME, None),
+        (None, None),
+    ],
+)
+async def test_a_missing_optional_value_is_not_a_failure(
+    db, handoff, whatsapp, log, patient_name, appointment_type
+):
+    """Both columns are nullable and both are routinely null: a patient whose
+    profile name Meta never sent, an appointment booked without a type. That is
+    the ordinary case, not an error - the hand-off still happens, the invitation
+    still goes out, nothing warns, and the value travels as None (which
+    `request_precheck_handoff` turns into an omitted key, never a null).
+    """
+    tenant, patient, appointment = await _make_rows(
+        db, patient_name=patient_name, appointment_type=appointment_type
+    )
+
+    await ph._post_booking(_ctx(tenant, patient, appointment))
+
+    assert handoff.context == [{"patient_name": patient_name, "booked_service": appointment_type}]
+    assert len(whatsapp.calls) == 1
+    assert log.at("warning") == []
+
+
+async def test_a_booking_with_no_patient_never_reaches_the_handoff(db, handoff):
+    """The one path where `ctx.patient` is None - a block slot from the doctor
+    hub. It returns BEFORE the hand-off, so reading `ctx.patient.name` for the
+    new field cannot be what raises here."""
+    tenant, _patient, appointment = await _make_rows(db, with_patient=False)
+
+    await ph._post_booking(_ctx(tenant, None, appointment))
+
+    assert handoff.calls == []
+    assert handoff.context == []
+
+
+async def test_the_real_handoff_accepts_exactly_what_this_hook_passes():
+    """Guards the seam this whole file fakes.
+
+    `_Handoff` above would happily accept keywords `request_precheck_handoff`
+    does not have, and every test here would stay green while production raised
+    a TypeError - or worse, while brain-api 422'd a body carrying a key name it
+    does not know, and the failure came back as an UNAVAILABLE indistinguishable
+    from an outage. So bind the hook's real call shape against the real
+    signature.
+    """
+    import inspect
+
+    from secretaria.services.precheck import request_precheck_handoff
+
+    inspect.signature(request_precheck_handoff).bind(
+        uuid4(),
+        PATIENT_WA_ID,
+        patient_name=PATIENT_NAME,
+        booked_service=BOOKED_SERVICE,
+    )
 
 
 # --------------------------------------------------------------------------

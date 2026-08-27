@@ -59,9 +59,23 @@ answers `already_active` instead of duplicating the session), but the WhatsApp
 SEND is not: without the claim, an arq retry of the post_booking job would hand
 the same patient the same link twice.
 
-Never logs a phone number, a patient name, or the message body — only ids and
+Never LOGS a phone number, a patient name, or the message body — only ids and
 an outcome string. `services/precheck.py` hashes the phone before logging it;
 this module simply never has a reason to mention one.
+
+That promise survived this module starting to SEND the patient's name (FEAT
+39: `patient_name` + `booked_service` go out in the hand-off body so PreCheck
+can open the questionnaire already knowing who booked what). Sending and
+logging are different acts and only the first one changed: no log line here or
+in `services/precheck.py` takes either value, including the failure paths,
+which record `error_type` / a hashed phone / a status code and nothing else.
+The two values are read straight off the detached `ctx` rows and passed
+through with no filtering — deliberately. `Patient.name` is usually the
+WhatsApp profile name rather than a name the patient typed — it is filled from
+`contact.profile.name` on the inbound webhook
+(workers/tasks.py::_handle_patient_messages) — and no column today tells those
+two apart, so a heuristic here could only guess; the product decision was to
+forward what we have, raw, or nothing at all.
 """
 
 from urllib.parse import quote
@@ -204,7 +218,17 @@ async def _post_booking(ctx: PostBookingContext) -> None:
         return
 
     try:
-        result = await request_precheck_handoff(ctx.tenant.id, phone)
+        result = await request_precheck_handoff(
+            ctx.tenant.id,
+            phone,
+            # Both may be None — a patient row with no name yet, an
+            # appointment booked without a type. That is the ordinary case,
+            # not a failure: `request_precheck_handoff` simply leaves the key
+            # out of the body, and the hand-off proceeds exactly as it did
+            # before FEAT 39.
+            patient_name=ctx.patient.name,
+            booked_service=ctx.appointment.appointment_type,
+        )
         outcome = result.outcome
     except Exception as exc:
         # `request_precheck_handoff` fails closed into UNAVAILABLE by contract
