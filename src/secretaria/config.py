@@ -287,6 +287,13 @@ class Settings(BaseSettings):
     SMTP_USE_TLS: bool = True
     # How long to silence repeated calendar-unavailable alerts per tenant (seconds).
     CALENDAR_ALERT_SILENCE_SECONDS: int = 14400  # 4 hours
+    # Same idea for the per-professional "this doctor cannot be booked at all"
+    # alert, but a SEPARATE window and a separate Redis key
+    # (`professional_config:alert:{tenant}:{professional}:{gap}`). Sharing the
+    # calendar one would let a Google outage silence a config gap for four
+    # hours, and vice versa - two unrelated incidents masking each other is
+    # exactly the failure this alert exists to end.
+    PROFESSIONAL_CONFIG_ALERT_SILENCE_SECONDS: int = 14400  # 4 hours
 
     # --- Transactional email (onboarding lifecycle - contract v1 §4/§10/§12) ---
     # A SEPARATE kill switch from the SMTP_* alert settings above (calendar-

@@ -94,6 +94,7 @@ from secretaria.services.calendar import CalendarService
 from secretaria.services.email import (
     send_calendar_alert,
     send_cancellation_escalation_alert,
+    send_professional_config_incomplete_alert,
     send_transactional_email_message,
 )
 from secretaria.services.entitlements_client import get_entitlements
@@ -1793,6 +1794,13 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                                 if p.appointment_types
                                 else p.appointment_types
                             ),
+                            # Verbatim, NULL and all — no catalog to resolve
+                            # against, and the NULL-versus-EMPTY distinction is
+                            # exactly what `professional_business_hours` reads
+                            # to tell "inherits the clinic's hours" from "has
+                            # none at all", which is what the day picker's
+                            # config-gap check now turns on.
+                            business_hours=p.business_hours,
                         )
                         for p in professional_rows
                     ]
@@ -2874,6 +2882,12 @@ async def _handle_action_button(
                     about=p.about,
                     context_doctor_message=p.context_doctor_message,
                     appointment_types=p.appointment_types,
+                    # Verbatim, NULL and all: the router reads it through
+                    # `professional_business_hours`, whose whole contract is
+                    # that NULL inherits the clinic's hours and `{}` does not.
+                    # Flattening it here would erase that distinction and make
+                    # an inheriting doctor look unbookable.
+                    business_hours=p.business_hours,
                 )
                 for p in professional_rows
             ]
@@ -2952,6 +2966,12 @@ async def _handle_action_button(
                     about=p.about,
                     context_doctor_message=p.context_doctor_message,
                     appointment_types=p.appointment_types,
+                    # Verbatim, NULL and all: the router reads it through
+                    # `professional_business_hours`, whose whole contract is
+                    # that NULL inherits the clinic's hours and `{}` does not.
+                    # Flattening it here would erase that distinction and make
+                    # an inheriting doctor look unbookable.
+                    business_hours=p.business_hours,
                 )
                 for p in professional_rows
             ]
@@ -3404,6 +3424,16 @@ async def _apply_flow_result(
     if result.appointment is not None and not persisted:
         await _handle_calendar_unavailable(reply, redis=redis, tenant=tenant, waba_token=waba_token)
         return True
+    # The professional the patient reached cannot be booked at all because
+    # THEIR static config is incomplete. Tell the patient, then alert the
+    # clinic AND that doctor. No handover: the other doctors are fine, and a
+    # human secretary cannot conjure a schedule either - what is missing is a
+    # config change, which is exactly what the email asks for.
+    if result.action == "professional_config_incomplete":
+        await _handle_professional_config_incomplete(
+            reply, result, redis=redis, tenant=tenant, waba_token=waba_token
+        )
+        return True
     # A scoped-help node escalated: flip to human handover FIRST (mirroring
     # _handle_calendar_unavailable's order - if the send below fails, the
     # human is already on it), then tell the patient. No owner email alert:
@@ -3752,6 +3782,135 @@ async def _handle_calendar_unavailable(
                 logger.warning("worker_calendar_alert_redis_failed", error=str(exc))
         if should_send:
             await send_calendar_alert(alert_tenant.contact_email, alert_tenant.clinic_name)
+
+
+async def _handle_professional_config_incomplete(
+    reply: _ReplyContext,
+    result: FlowRouterResult,
+    redis=None,
+    tenant: Tenant | None = None,
+    waba_token: str | None = None,
+) -> None:
+    """A patient reached a doctor nobody can book: tell them, then alert the humans.
+
+    Deliberately shaped after `_handle_calendar_unavailable` above — patient
+    message first, then a debounced owner email — with three differences that
+    are the whole point of this handler:
+
+      * NO handover. A calendar outage breaks the entire clinic and a human
+        secretary can take over; a doctor with no configured hours breaks only
+        that doctor, and no human in the chat can invent a schedule. What is
+        needed is a config change, which is what the email asks for.
+      * TWO recipients: the clinic (`tenants.contact_email`) and the doctor
+        themselves (`professionals.email`), each only when set. Either may be
+        NULL — `professionals.email` is NULL for every row until a clinic fills
+        it in — and neither being set is a no-op, never an error: the patient
+        has already been answered, so there is nothing left to fail.
+      * Its OWN Redis key and silence window. Sharing
+        `calendar:alert:{tenant}` would let a Google outage mute a config gap
+        for four hours; the key is scoped per tenant AND professional AND gap
+        so one broken doctor never silences the alert for another, and a
+        missing-hours alert never suppresses a missing-services one.
+
+    The patient's name and number are read here and passed to the email BODY.
+    They are never logged: the `logger.info` below carries ids and the gap
+    category only, matching the rule in services/email.py.
+    """
+    gap = result.professional_config_gap or "unknown"
+    logger.info(
+        "worker_professional_config_incomplete",
+        conversation_id=str(reply.conversation_id),
+        professional_id=str(result.flow_selected_professional_id),
+        gap=gap,
+    )
+
+    # Tell the patient first, on this tenant's own credentials (fail-closed:
+    # `_dispatch_bubbles` sends nothing rather than fall back to a global
+    # scaffold). The alert below still runs if this send fails — the clinic
+    # needs to know either way.
+    if result.bubbles:
+        await _dispatch_bubbles(reply, result.bubbles, tenant=tenant, waba_token=waba_token)
+
+    if reply.conversation_id is None or result.flow_selected_professional_id is None:
+        return
+
+    # One short read-only txn for everything the email needs. Re-fetched here
+    # (rather than trusting what the caller passed) for the same reason
+    # `_handle_calendar_unavailable` re-fetches its tenant: `contact_email` may
+    # have changed since this turn started.
+    alert_tenant: Tenant | None = None
+    professional: Professional | None = None
+    patient_name: str | None = None
+    try:
+        async with async_session_factory() as session:
+            conversation = await session.get(Conversation, reply.conversation_id)
+            if conversation is None:
+                return
+            alert_tenant = await session.get(Tenant, conversation.tenant_id)
+            professional = await session.get(Professional, result.flow_selected_professional_id)
+            patient = await session.get(Patient, conversation.patient_id)
+            patient_name = patient.name if patient is not None else None
+    except Exception as exc:
+        logger.error(
+            "worker_professional_config_alert_load_failed",
+            error=str(exc),
+            conversation_id=str(reply.conversation_id),
+        )
+        return
+
+    if alert_tenant is None or professional is None:
+        return
+    # A professional row from ANOTHER tenant could only arrive through a bug,
+    # but mailing one clinic about another's doctor is not a mistake worth
+    # risking - the check is one comparison.
+    if professional.tenant_id != alert_tenant.id:
+        return
+
+    # Both addresses, deduped, each only when actually set. Nobody to write to
+    # is a normal outcome (a clinic that never filled either in), not a
+    # failure: the patient has already been answered.
+    recipients: list[str] = []
+    for candidate in (alert_tenant.contact_email, professional.email):
+        address = (candidate or "").strip()
+        if address and address not in recipients:
+            recipients.append(address)
+    if not recipients:
+        logger.info(
+            "worker_professional_config_alert_no_recipient",
+            tenant_id=str(alert_tenant.id),
+            professional_id=str(professional.id),
+            gap=gap,
+        )
+        return
+
+    # Debounce AFTER resolving recipients, so a clinic with no address on file
+    # does not burn a four-hour silence window on an email nobody received.
+    settings = get_settings()
+    alert_key = f"professional_config:alert:{alert_tenant.id}:{professional.id}:{gap}"
+    should_send = True
+    if redis is not None:
+        try:
+            already_sent = await redis.exists(alert_key)
+            if already_sent:
+                should_send = False
+            else:
+                await redis.setex(
+                    alert_key, settings.PROFESSIONAL_CONFIG_ALERT_SILENCE_SECONDS, "1"
+                )
+        except Exception as exc:
+            logger.warning("worker_professional_config_alert_redis_failed", error=str(exc))
+    if not should_send:
+        return
+
+    for address in recipients:
+        await send_professional_config_incomplete_alert(
+            address,
+            alert_tenant.clinic_name,
+            professional.name,
+            gap,
+            patient_name=patient_name,
+            patient_phone=reply.patient_wa_id,
+        )
 
 
 async def _handle_show_main_menu(

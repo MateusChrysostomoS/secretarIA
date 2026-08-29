@@ -177,6 +177,10 @@ async def test_list_shape_is_whitelisted(
         "has_hours",
         "has_services",
         "complete",
+        # Additive: where THIS doctor's own config-gap alert is mailed, next to
+        # the clinic-wide tenants.contact_email. Hub-authenticated response
+        # only — it must never appear on an /internal or public surface.
+        "email",
     }
     assert row["name"] == "Dra. Ana"
     assert row["google_calendar_id"] == "ana-cal"
@@ -316,6 +320,57 @@ async def test_patch_deactivate_skips_entitlement_check(
     response = await client.patch(f"{ENDPOINT}/{prof.id}", json={"is_active": False})
     assert response.status_code == 200
     assert response.json()["is_active"] is False
+
+
+async def test_patch_stores_and_returns_the_alert_email(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FEAT 41: where THIS doctor's config-gap alert is mailed.
+
+    Contact data, so it is never gated by entitlements — the same rule
+    renaming and deactivating already follow."""
+    prof = await _seed_professional(db, tenant, is_active=True)
+    monkeypatch.setattr(professionals_api, "get_entitlements", _never_called_fake)
+
+    response = await client.patch(
+        f"{ENDPOINT}/{prof.id}", json={"email": "dra.ana@example.com"}
+    )
+    assert response.status_code == 200
+    assert response.json()["email"] == "dra.ana@example.com"
+
+    # ...and it survives to the list view the Configuração screen prefills from.
+    listed = await client.get(ENDPOINT)
+    assert listed.json()[0]["email"] == "dra.ana@example.com"
+
+
+async def test_patch_can_clear_the_alert_email(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Explicit null clears it; a partial PATCH that omits it leaves it alone."""
+    prof = await _seed_professional(db, tenant, email="dra.ana@example.com")
+    monkeypatch.setattr(professionals_api, "get_entitlements", _never_called_fake)
+
+    untouched = await client.patch(f"{ENDPOINT}/{prof.id}", json={"name": "Dra. Ana Paula"})
+    assert untouched.json()["email"] == "dra.ana@example.com"
+
+    cleared = await client.patch(f"{ENDPOINT}/{prof.id}", json={"email": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["email"] is None
+
+
+async def test_a_professional_without_an_email_serves_normally(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NULL is the state EVERY pre-existing row is in — there is no backfill.
+
+    It must stay a plain absent value on every surface, never a required field
+    and never an error: the alert simply falls back to the clinic's address."""
+    await _seed_professional(db, tenant, name="Dra. Sem Email")
+    monkeypatch.setattr(professionals_api, "get_entitlements", _never_called_fake)
+
+    listed = await client.get(ENDPOINT)
+    assert listed.status_code == 200
+    assert listed.json()[0]["email"] is None
 
 
 async def test_patch_activate_not_entitled_returns_403(

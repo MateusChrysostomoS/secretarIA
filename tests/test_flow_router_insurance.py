@@ -66,6 +66,11 @@ def _professionals(count):
             specialty=None,
             about=None,
             appointment_types=None,
+            # NULL on both config columns = inherit the clinic's, which is the
+            # state the real row is in until someone gives this doctor their
+            # own. `business_hours` matters because the day picker now refuses
+            # to open for a professional with no window anywhere.
+            business_hours=None,
         )
         for index in range(count)
     ]

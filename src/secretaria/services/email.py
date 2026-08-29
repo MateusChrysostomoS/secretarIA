@@ -187,6 +187,93 @@ async def send_cancellation_escalation_alert(
         )
 
 
+# WHAT each gap code means, in the doctor's own words. Two fixed strings, not a
+# message assembled at the call site, so the email cannot drift from the two
+# values `FlowRouterResult.professional_config_gap` is allowed to carry.
+_CONFIG_GAP_CAUSE: dict[str, str] = {
+    "hours": "não há nenhum horário de atendimento configurado para esse profissional",
+    "services": "não há nenhum serviço configurado para esse profissional",
+}
+_CONFIG_GAP_FIX: dict[str, str] = {
+    "hours": (
+        "Abra o painel da SecretarIA, vá em Configuração > Disponibilidade e defina os "
+        "dias e horários de atendimento desse profissional."
+    ),
+    "services": (
+        "Abra o painel da SecretarIA, vá em Configuração > Serviços e marque quais "
+        "serviços esse profissional atende."
+    ),
+}
+
+
+async def send_professional_config_incomplete_alert(
+    to_email: str,
+    clinic_name: str,
+    professional_name: str,
+    gap: str,
+    patient_name: str | None = None,
+    patient_phone: str | None = None,
+) -> None:
+    """Email the clinic and/or the doctor that a patient just hit an unbookable doctor.
+
+    The gap the deterministic flow detected is STATIC (no availability window,
+    or no service on this professional) — never "the agenda happens to be
+    full", which is normal and fixes itself. So this is always something a
+    human has to go and configure, and the body says WHICH thing rather than
+    just "algo deu errado": the whole point of the alert is that today the
+    clinic learns nothing at all when a patient walks into that wall.
+
+    Named for the sender's convenience, not the recipient's: the caller
+    (`workers/tasks.py::_handle_professional_config_incomplete`) sends the SAME
+    body to `tenants.contact_email` and to `professionals.email`, each only
+    when set. Personalising per recipient would mean two templates to keep in
+    step for no gain — the doctor and the clinic both need the same four facts.
+
+    The patient's name and number are the reason this email is useful (somebody
+    can call them back), and they are also PII: they go in the BODY and NEVER
+    into a log line — the same rule `send_cancellation_escalation_alert`
+    follows for its `wa.me` link, which is why the `logger.info` below names
+    the clinic and the gap category and nothing else.
+
+    Fail-open and silent when SMTP_HOST is not configured, exactly like the
+    three alerts above. NEVER raises into its caller.
+    """
+    settings = get_settings()
+    if not settings.SMTP_HOST:
+        return
+
+    cause = _CONFIG_GAP_CAUSE.get(gap, "a configuração desse profissional está incompleta")
+    fix = _CONFIG_GAP_FIX.get(
+        gap, "Abra o painel da SecretarIA e finalize a configuração desse profissional."
+    )
+    who = (patient_name or "").strip() or "Um paciente"
+    phone = (patient_phone or "").strip()
+    contact_line = f"{who} (WhatsApp {phone}) tentou agendar" if phone else f"{who} tentou agendar"
+
+    subject = f"[SecretarIA] Paciente não conseguiu agendar com {professional_name}"
+    body = (
+        f"Olá,\n\n"
+        f"{contact_line} com {professional_name} na '{clinic_name}', mas a SecretarIA "
+        f"não conseguiu oferecer nenhum agendamento: {cause}.\n\n"
+        f"O paciente recebeu uma mensagem avisando que a equipe já foi notificada.\n\n"
+        f"O que fazer:\n{fix}\n\n"
+        f"Enquanto isso não for ajustado, nenhum paciente conseguirá marcar com "
+        f"{professional_name}.\n\n"
+        f"— Equipe SecretarIA"
+    )
+
+    try:
+        await asyncio.to_thread(_send_sync, to_email, subject, body)
+        logger.info("professional_config_alert_email_sent", clinic=clinic_name, gap=gap)
+    except Exception as exc:
+        logger.warning(
+            "professional_config_alert_email_failed",
+            error=str(exc),
+            clinic=clinic_name,
+            gap=gap,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Onboarding transactional email (contract v1 §4 endpoint 6 / §10 / §12)
 # ---------------------------------------------------------------------------

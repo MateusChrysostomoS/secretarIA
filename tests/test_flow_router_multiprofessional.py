@@ -89,6 +89,7 @@ def _professionals():
         appointment_types=[
             {"name": "Consulta Cardio", "duration_min": 45, "is_active": True, "sort_order": 0}
         ],
+        business_hours=None,  # falls back to the tenant's hours
     )
     bruno = SimpleNamespace(
         id=uuid4(),
@@ -96,6 +97,7 @@ def _professionals():
         specialty=None,
         about=None,
         appointment_types=None,  # falls back to the tenant's services
+        business_hours=None,  # ...and to the tenant's hours
     )
     return [ana, bruno]
 
@@ -813,6 +815,7 @@ async def test_professional_list_reserves_help_slot_at_whatsapp_cap():
             specialty=None,
             about=None,
             appointment_types=None,
+            business_hours=None,
         )
         for i in range(12)
     ]

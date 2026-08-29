@@ -158,6 +158,14 @@ async def _seed(db, *, flow_state=FlowState.LLM, selected=None, insurance=None):
             appointment_types=[
                 {"name": "Consulta Geral", "duration_min": 30, "is_active": True}
             ],
+            # A clinic that can actually take a booking. Both professionals
+            # below inherit these (their own column is NULL), which is what
+            # keeps the day picker reachable: it now refuses to open for a
+            # professional with no availability window anywhere, clinic or own.
+            business_hours={
+                day: [{"start": "08:00", "end": "18:00"}]
+                for day in ("monday", "tuesday", "wednesday", "thursday", "friday")
+            },
         )
         session.add(tenant)
         await session.flush()
@@ -208,6 +216,10 @@ def _snapshots(professionals):
             about=p.about,
             context_doctor_message=p.context_doctor_message,
             appointment_types=p.appointment_types,
+            # Mirrors what `workers/tasks.py` really builds. It has to: the day
+            # picker refuses to open for a professional with no configured
+            # hours, and a snapshot that omits the column could not be judged.
+            business_hours=p.business_hours,
         )
         for p in professionals
     ]

@@ -13,6 +13,7 @@ class ProfessionalCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     google_calendar_id: str | None = Field(default=None, max_length=255)
     is_active: bool = True
+    email: str | None = Field(default=None, max_length=254)
 
 
 class ProfessionalUpdate(BaseModel):
@@ -21,6 +22,7 @@ class ProfessionalUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     google_calendar_id: str | None = Field(default=None, max_length=255)
     is_active: bool | None = None
+    email: str | None = Field(default=None, max_length=254)
 
 
 class ProfessionalRead(BaseModel):
@@ -28,6 +30,14 @@ class ProfessionalRead(BaseModel):
 
     Returned by POST/PATCH unchanged (existing hub consumers keep working) —
     see `ProfessionalListItem` below for the richer GET-list row.
+
+    `email` rides here (and on `ProfessionalListItem`) because the hub's own
+    Configuração screen has to prefill the field it just saved. That is the
+    ONLY boundary it may cross: every model in this file is consumed
+    exclusively by `api/hub/*` — the clinic's own authenticated session — and
+    never by an `/internal` or public response. The internal completeness
+    surface (`GET /internal/tenants/{id}/config-status`) reports
+    has_hours/has_services/complete and carries no address at all.
     """
 
     id: str
@@ -35,6 +45,7 @@ class ProfessionalRead(BaseModel):
     google_calendar_id: str | None
     is_active: bool
     created_at: datetime
+    email: str | None
 
 
 class ProfessionalConfigUpdate(BaseModel):
@@ -67,6 +78,12 @@ class ProfessionalConfigUpdate(BaseModel):
     about: str | None = Field(default=None, max_length=4000)
     context_doctor_message: str | None = Field(default=None, max_length=4000)
     google_calendar_id: str | None = Field(default=None, max_length=255)
+    # Also settable through PATCH /tenants/me/professionals/{id}. It lives on
+    # BOTH bodies on purpose: the PATCH is the roster-level edit, while this is
+    # the body the Configuração card actually sends, so the address saves in
+    # the SAME transaction as the specialty/about it sits next to on screen
+    # rather than needing a second request that could fail on its own.
+    email: str | None = Field(default=None, max_length=254)
 
     @field_validator("business_hours")
     @classmethod
@@ -169,3 +186,8 @@ class ProfessionalListItem(BaseModel):
     has_hours: bool
     has_services: bool
     complete: bool
+    # Additive, same hub-only boundary as `ProfessionalRead.email` above. The
+    # completeness trio right above it is what FEAT 42 reads to render "este
+    # profissional não pode ser agendado"; this is who gets told about it by
+    # email when a patient actually hits that wall.
+    email: str | None

@@ -52,6 +52,7 @@ from secretaria.services.service_catalog import normalize, professionals_offerin
 from secretaria.services.tenant_config import (
     active_appointment_types,
     professional_appointment_types,
+    professional_business_hours,
 )
 
 if TYPE_CHECKING:
@@ -311,6 +312,42 @@ NO_AVAILABLE_DAYS_MESSAGE = (
     "Escolha uma opção abaixo e a gente te ajuda."
 )
 
+# --------------------------------------------------------------------------
+# "This professional cannot be booked AT ALL" (FEAT 41)
+# --------------------------------------------------------------------------
+#
+# Two situations that look identical to a patient and are nothing alike to the
+# clinic:
+#
+#   * the agenda is genuinely full in the window we look at -> normal, fixes
+#     itself, NO_AVAILABLE_DAYS_MESSAGE above, nobody is alerted;
+#   * the professional has no availability window (or no service) configured at
+#     all -> nothing will ever come free, and only a human can fix it.
+#
+# Before this, both fell into the first branch: the patient got a polite "não
+# encontrei horários" and the clinic learned nothing. So the second case now
+# gets its own detection (STATIC config, read before any calendar call), its
+# own copy, and its own `action` so the worker can alert whoever can fix it.
+#
+# Gap codes carried by `FlowRouterResult.professional_config_gap`.
+PROFESSIONAL_GAP_SERVICES = "services"
+PROFESSIONAL_GAP_HOURS = "hours"
+
+# Patient-facing copy for the HOURS gap. Deliberately NOT
+# NO_AVAILABLE_DAYS_MESSAGE — keeping that string reserved for a genuinely full
+# agenda is what stops the two cases collapsing back into one.
+PROFESSIONAL_NO_HOURS_MESSAGE = (
+    "No momento não é possível agendar com {name}. "
+    "Nossa equipe já foi avisada e vai regularizar em breve."
+)
+# Same message for a professional with no display name worth showing (`name` is
+# NOT NULL in practice; this is the belt-and-braces branch).
+PROFESSIONAL_NO_HOURS_FALLBACK = (
+    "No momento não é possível agendar. Nossa equipe já foi avisada e vai regularizar em breve."
+)
+# The SERVICES gap keeps the wording it already had — only the signalling is new.
+PROFESSIONAL_NO_SERVICES_MESSAGE = "No momento não há serviços disponíveis para agendamento."
+
 
 @dataclass
 class FlowRouterResult:
@@ -328,9 +365,26 @@ class FlowRouterResult:
                                 No owner alert email - unlike a calendar
                                 outage, nothing is broken; the human secretary
                                 sees the chat in their own WhatsApp app.
+        "professional_config_incomplete"
+                              - the professional the patient reached cannot be
+                                booked at all: their STATIC config is missing
+                                hours or services (never "the agenda is full",
+                                which stays a plain "reply"). The caller sends
+                                `bubbles` and alerts the clinic AND that doctor
+                                by email, debounced. No handover: nothing is
+                                broken for the OTHER doctors, and a human
+                                secretary cannot conjure a schedule either -
+                                what is needed is a config change, which is
+                                exactly what the email asks for.
     """
 
-    action: Literal["reply", "delegate_llm", "calendar_unavailable", "handover"]
+    action: Literal[
+        "reply",
+        "delegate_llm",
+        "calendar_unavailable",
+        "handover",
+        "professional_config_incomplete",
+    ]
     bubbles: list = field(default_factory=list)
     flow_state: FlowState = FlowState.IDLE
     flow_step: str | None = None
@@ -343,6 +397,12 @@ class FlowRouterResult:
     # them explicitly.
     flow_selected_professional_id: UUID | None = None
     flow_selected_insurance: str | None = None
+    # WHICH static config the professional is missing, on an
+    # action="professional_config_incomplete" result and nowhere else. WHO it
+    # is missing rides on `flow_selected_professional_id` above rather than in
+    # a parallel field: that column already means "the professional this turn
+    # is about", and the empty-services branch has always written it.
+    professional_config_gap: Literal["services", "hours"] | None = None
     # The appointment being cancelled/rescheduled inside MANAGE_BOOKING
     # (replaces the old flow_selected_type overload). Written unconditionally
     # by the caller like every field above, so any manage-flow result that
@@ -1388,6 +1448,39 @@ def _professional_card_header(professional: Any) -> str:
     return "\n\n".join(parts)
 
 
+def _professional_config_incomplete(
+    professional: Any, gap: str, *, bubbles: list | None = None
+) -> FlowRouterResult:
+    """THE result for "this doctor cannot be booked at all" — both gaps.
+
+    Pure, like every other builder here: it decides and describes, it does not
+    alert anyone. Sending the email (and debouncing it) is the worker's half,
+    keyed on the `action`/`gap`/`flow_selected_professional_id` this carries —
+    see workers/tasks.py::_handle_professional_config_incomplete.
+
+    Lands on `FlowState.IDLE`, matching what the empty-services branch has
+    always done: there is no next step to offer, so leaving the patient parked
+    mid-booking would only make their next message land on a step that cannot
+    move. `bubbles` lets the services gap keep the wording (and the doctor's
+    presentation) it already had; the hours gap composes its own.
+    """
+    name = str(getattr(professional, "name", "") or "").strip()
+    if bubbles is None:
+        body = (
+            PROFESSIONAL_NO_HOURS_MESSAGE.format(name=name)
+            if name
+            else PROFESSIONAL_NO_HOURS_FALLBACK
+        )
+        bubbles = [TextBubble(body=body)]
+    return FlowRouterResult(
+        action="professional_config_incomplete",
+        bubbles=bubbles,
+        flow_state=FlowState.IDLE,
+        flow_selected_professional_id=getattr(professional, "id", None),
+        professional_config_gap=gap,
+    )
+
+
 def _enter_professional_services(professional: Any, tenant: Tenant) -> FlowRouterResult:
     """The selected doctor's services list, headed by their own presentation.
 
@@ -1403,18 +1496,18 @@ def _enter_professional_services(professional: Any, tenant: Tenant) -> FlowRoute
     """
     services = professional_appointment_types(professional, tenant)
     if not services:
+        # Same bubbles as ever — what changed is that the turn now SAYS why it
+        # is a dead end, so the worker can tell the clinic (FEAT 41). This
+        # check was already the non-ambiguous one: `professional_appointment_
+        # types` is pure stored config, so an empty list can only mean nobody
+        # configured a service, never a transient calendar condition.
         bubbles: list = []
         greeting = _professional_greeting_body(professional)
         if greeting:
             bubbles.append(TextBubble(body=greeting))
-        bubbles.append(
-            TextBubble(body="No momento não há serviços disponíveis para agendamento.")
-        )
-        return FlowRouterResult(
-            action="reply",
-            bubbles=bubbles,
-            flow_state=FlowState.IDLE,
-            flow_selected_professional_id=professional.id,
+        bubbles.append(TextBubble(body=PROFESSIONAL_NO_SERVICES_MESSAGE))
+        return _professional_config_incomplete(
+            professional, PROFESSIONAL_GAP_SERVICES, bubbles=bubbles
         )
     return FlowRouterResult(
         action="reply",
@@ -2285,6 +2378,26 @@ def _booking_duration(
     return _service_duration(service, tenant)
 
 
+def _booking_professional(conversation: Conversation, professionals: list | None) -> Any | None:
+    """WHOSE agenda the booking branch is about to read.
+
+    The doctor the patient picked, when there is one. On a clinic with a SINGLE
+    active professional nothing ever picks one — `_enter_professional_services`
+    is the only writer of `flow_selected_professional_id`, and that clinic never
+    shows a doctor list — yet that sole row IS the clinic's effective config
+    (`workers/tasks.py::_flow_tenant_snapshot` resolves the whole snapshot
+    through it), so it is unambiguously the professional this booking belongs
+    to. None when the roster is empty (a tenant with no professional rows at
+    all) or holds several with none selected, because then there is no single
+    doctor to name in a message or alert.
+    """
+    selected = _find_professional_by_id(professionals, _selected_professional_id(conversation))
+    if selected is not None:
+        return selected
+    rows = professionals or []
+    return rows[0] if len(rows) == 1 else None
+
+
 async def _ask_day(
     conversation: Conversation,
     tenant: Tenant,
@@ -2292,7 +2405,26 @@ async def _ask_day(
     services: list[dict] | None = None,
     professionals: list | None = None,
 ) -> FlowRouterResult:
-    """Open the booking branch's day picker (the step after service/convênio)."""
+    """Open the booking branch's day picker (the step after service/convênio).
+
+    THE choke point for the static "this doctor has no hours at all" check, and
+    the reason it lives here rather than back on the service-confirm tap: every
+    first entry into the booking day picker funnels through this one function
+    — the tap (`_catalog_step`'s STEP_AWAITING_SERVICE_CONFIRM), the convênio
+    answer (`_handle_insurance`), the LLM hand-back (`enter_guided_booking`)
+    and a resumed conversation (`resume_bubbles`) — so a fifth caller cannot be
+    added that skips it. `enter_day_picker` itself stays free of the check
+    because the manage/reschedule branch shares it and has its own remedy.
+
+    The check is STATIC (`professional_business_hours`, pure stored config) and
+    runs BEFORE any calendar call, which is exactly what separates it from
+    `enter_day_picker`'s `if not days:` branch: that one fires both for "no
+    hours configured" and for "configured but fully booked", and only the first
+    is somebody's mistake.
+    """
+    professional = _booking_professional(conversation, professionals)
+    if professional is not None and not professional_business_hours(professional, tenant):
+        return _professional_config_incomplete(professional, PROFESSIONAL_GAP_HOURS)
     return await enter_day_picker(
         conversation,
         tenant,

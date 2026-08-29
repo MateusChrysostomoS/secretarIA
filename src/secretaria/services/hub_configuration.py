@@ -121,6 +121,10 @@ PROFESSIONAL_CONFIG_FIELDS: tuple[str, ...] = (
     "google_calendar_id",
     "business_hours",
     "appointment_types",
+    # Contact data, not config the bot reads — but it is edited on the same
+    # card as `specialty`, so it saves through the same patch and the same
+    # single commit rather than a second request that could fail alone.
+    "email",
 )
 
 
@@ -366,4 +370,8 @@ async def professional_list_item(
         has_hours=completeness.has_hours,
         has_services=completeness.has_services,
         complete=completeness.complete,
+        # The completeness trio above is the signal FEAT 42 renders; this is
+        # who gets mailed when a patient actually walks into that gap. Hub
+        # response only — see the boundary note on ProfessionalRead.
+        email=professional.email,
     )
