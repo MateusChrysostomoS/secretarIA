@@ -1,9 +1,10 @@
 # CHECKPOINT — alerta de profissional com configuração incompleta (FEAT 41 + FIX 34)
 
-**Estado:** FEAT 41 no ar desde 2026-08-29 (`c1d76c2`, deploy provado). **FIX 34 BUILT e
-testado (1856 verdes + 318 no frontend), não commitado, não deployado** — remove a coluna
+**Estado:** FEAT 41 no ar desde 2026-08-29 (`c1d76c2`, deploy provado). **FIX 34 commitado,
+pushed e deployado em 2026-08-29/30** — `43fc58f` na secretarIA e `e195f91` no
+`secretarIA-frontend`, ambos os repos limpos e em sincronia com o remoto. Remove a coluna
 `professionals.email` que o FEAT 41 criou e passa a resolver o endereço do médico pelo
-brain-api. Ver §4 (reescrita), §5 e a ordem obrigatória em §9.
+brain-api. Ver §4 (reescrita), §5 e §9 (o que ainda falta confirmar).
 **Origem:** incidente do tenant "Chrysostomo For Eyes" (2026-08-28) — dois profissionais
 ativos com configuração incompleta; o paciente batia numa parede e ninguém ficava sabendo.
 **Prompts:** `TECH/BRAIN/z_prompts/debug_secretaria_producao/PROMPT_FEAT_41_PROFESSIONAL_CONFIG_GAP_ALERT_BACKEND.md`
@@ -151,7 +152,18 @@ uma segunda cópia.
 
 Não precisa de substituto. O `linked_user_email` — que o `ProfessionalsSection.tsx` já
 exibia ao lado das chips de completude **antes** do FEAT 41, vindo do brain-api — mostra o
-endereço real, e diz "Sem e-mail vinculado" quando não existe.
+endereço real, e avisa quando não existe.
+
+**Uma linha de copy mudou junto (2026-08-30).** Aquele aviso existe pra tornar visível uma
+consequência que não aparece em lugar nenhum, e depois do FIX 34 passaram a ser **duas**:
+os dois e-mails que a secretarIA manda pro médico resolvem o endereço pelo mesmo caminho
+(`fetch_professional_emails`), então um profissional sem usuário vinculado não recebe
+**nenhum** dos dois. O texto agora nomeia os dois:
+
+> Sem e-mail vinculado — não recebe aviso de nova consulta nem de configuração pendente
+
+Antes dizia só "não recebe aviso de nova consulta", o que era verdade no FEAT 41 (o alerta
+de config-gap vinha da coluna local) e virou meia-verdade quando a coluna saiu.
 
 **Ordem de deploy backend↔frontend é livre**, e isso foi verificado, não presumido:
 `ProfessionalConfigUpdate` não tem `model_config`, então o default permissivo do Pydantic
@@ -215,31 +227,32 @@ apenas herda os horários da clínica parecer inagendável.
 
 ## 9. Pendências
 
-O FEAT 41 foi commitado e deployado em `c1d76c2` **com** a coluna. O `FIX 34` a remove, e a
-ORDEM abaixo é obrigatória — remover uma coluna de ORM é o INVERSO de acrescentar uma.
+O FEAT 41 foi deployado em `c1d76c2` **com** a coluna; o FIX 34 (`43fc58f` + `e195f91`) a
+remove do código e já está no ar. O que sobra é a metade operacional.
 
-- [ ] Commit + push do `FIX 34` (secretarIA + secretarIA-frontend).
-- [ ] **Deploy do código novo na API E no worker.** Os dois mapeiam `Professional`, e são
-      dois serviços EasyPanel de deploy manual e independente. Confirmar os DOIS por
-      `GET /build` / `source_fingerprint` — "commitou" não é prova.
-- [ ] **Só então** rodar `alembic upgrade head` (migração `b4c2e8f1a9d3`, `DROP COLUMN`).
-      Se rodar antes, qualquer serviço no código velho quebra em **toda** leitura de
-      profissional com `column professionals.email does not exist` — o produto inteiro pra
-      quem usa profissionais, não só o alerta. O SQLAlchemy monta a lista de colunas
-      explicitamente; não existe `SELECT *` que salve.
-- [ ] Deploy do `secretarIA-frontend` (campo removido) — ordem livre em relação à API,
-      ver §5.
-- [ ] `SMTP_HOST` precisa estar configurado no EasyPanel pro alerta sair — sem ele a
-      função é um no-op silencioso, por design. **Continua pendente do FEAT 41.**
+- [x] Commit + push do FIX 34 — `43fc58f` (secretarIA) e `e195f91` (frontend).
+- [x] Deploy do código novo na API, no worker e no frontend.
+- [ ] **`alembic upgrade head` (migração `b4c2e8f1a9d3`, `DROP COLUMN`) — confirmar se
+      rodou.** O `Dockerfile` não roda alembic; é passo manual. **Não é urgente e não
+      quebra nada se ainda não rodou:** com o código novo no ar ninguém mapeia a coluna,
+      então ela fica lá sem ser lida — inofensiva. A ordem perigosa era a inversa (dropar
+      antes do código), e essa janela já passou.
+- [ ] `SMTP_HOST` no EasyPanel — **continua pendente desde o FEAT 41**, e é o que de fato
+      bloqueia o alerta: sem ele a função é um no-op silencioso, por design. Enquanto isso
+      não for configurado, nenhum e-mail sai, nem pro médico nem pra clínica.
 - [ ] Smoke: profissional ativo com config incompleta + mensagem de paciente de teste num
       tenant real; confirmar que o e-mail chega no endereço verdadeiro do médico (via
-      brain-api) e no `contact_email` da clínica.
-- [x] ~~Rodar a migração `f3a9c1d7b2e4`~~ — superseded: se ainda não rodou, `alembic
-      upgrade head` aplica as duas em sequência (add + drop) e o resultado é o mesmo.
-- [x] `FEAT 42` (banner nos frontends) — no ar desde 2026-08-29.
+      brain-api) e no `contact_email` da clínica. Depende do `SMTP_HOST` acima.
 
-**Rollback:** antes do `DROP COLUMN`, reverter o código basta (a coluna continua lá,
-inofensiva). Depois dele, reverter só o código não basta — voltar a ler a coluna exigiria
+**Ordem, pra referência histórica:** remover uma coluna de ORM é o INVERSO de acrescentar
+uma. O `DROP COLUMN` só podia rodar DEPOIS que API e worker estivessem os dois no código
+novo — o SQLAlchemy monta a lista de colunas explicitamente, então um serviço no código
+velho quebraria em **toda** leitura de profissional, não só no alerta. Essa sequência foi
+respeitada. A regra ficou registrada na skill `frozen-contract-migration`, seção "The
+database sibling".
+
+**Rollback:** enquanto o `DROP COLUMN` não rodar, reverter o código basta (a coluna continua
+lá, inofensiva). Depois dele, reverter só o código não basta — voltar a ler a coluna exigiria
 uma migração nova de `ADD COLUMN`, e ela voltaria vazia. Como a coluna nunca foi uma fonte
 confiável, o rollback realista é pra frente: corrigir o código que lê
 `fetch_professional_emails`.
