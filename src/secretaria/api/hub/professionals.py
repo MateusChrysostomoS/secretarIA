@@ -6,22 +6,17 @@ GET   /tenants/me/professionals        - list (always allowed, even when the
                                           Rows include onboarding completeness
                                           (contract v1 §10 item E).
 POST  /tenants/me/professionals        - create.
-PATCH /tenants/me/professionals/{id}   - update (name, google_calendar_id, is_active,
-                                          email).
+PATCH /tenants/me/professionals/{id}   - update (name, google_calendar_id, is_active).
 PUT   /tenants/me/professionals/{id}/config
                                         - per-professional config (business_hours,
                                           appointment_types, specialty, about,
-                                          context_doctor_message, google_calendar_id,
-                                          email).
+                                          context_doctor_message, google_calendar_id).
 
-`email` is reachable from BOTH of those on purpose: the PATCH is the roster-level
-edit, the /config PUT is the body the Configuração card already sends, so the
-address saves in the same transaction as the specialty it sits beside on screen.
-It is the address the worker mails when a patient reaches this doctor and cannot
-book because their configuration is incomplete (workers/tasks.py::
-_handle_professional_config_incomplete), alongside the clinic-wide
-`tenants.contact_email`. Hub-authenticated responses only — it never appears on
-an `/internal` or public surface.
+NO professional email is written or returned by any route here. That address
+belongs to brain-api (`users.email`, written by the invite flow) and is read per
+use through services/brain_professionals.py — the alert worker asks for it
+rather than holding a copy that would drift. A screen that wants to display it
+reads brain-api's `linked_user_email` from `GET /doctor/professionals`.
 POST  /tenants/me/professionals/calendars
                                         - shared_account mode: the same thing for
                                           EVERY active professional that has no
@@ -106,7 +101,6 @@ def _read_model(professional: Professional) -> ProfessionalRead:
         google_calendar_id=professional.google_calendar_id,
         is_active=professional.is_active,
         created_at=professional.created_at,
-        email=professional.email,
     )
 
 
@@ -186,7 +180,6 @@ async def create_professional(
         name=body.name,
         google_calendar_id=body.google_calendar_id,
         is_active=body.is_active,
-        email=body.email,
     )
     session.add(professional)
     await session.commit()
@@ -266,11 +259,6 @@ async def update_professional(
         professional.google_calendar_id = data["google_calendar_id"]
     if "is_active" in data:
         professional.is_active = data["is_active"]
-    # Where this doctor's own config-gap alert goes. Partial like every field
-    # above (absent = leave alone, explicit null = clear it), and never gated
-    # by entitlements/limits — it is contact data, not an addon feature.
-    if "email" in data:
-        professional.email = data["email"]
 
     await session.commit()
     await session.refresh(professional)

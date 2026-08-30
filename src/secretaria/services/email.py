@@ -225,9 +225,10 @@ async def send_professional_config_incomplete_alert(
 
     Named for the sender's convenience, not the recipient's: the caller
     (`workers/tasks.py::_handle_professional_config_incomplete`) sends the SAME
-    body to `tenants.contact_email` and to `professionals.email`, each only
-    when set. Personalising per recipient would mean two templates to keep in
-    step for no gain — the doctor and the clinic both need the same four facts.
+    body to `tenants.contact_email` and to the doctor's own address (asked of
+    brain-api, never stored here), each only when known. Personalising per
+    recipient would mean two templates to keep in step for no gain — the doctor
+    and the clinic both need the same four facts.
 
     The patient's name and number are the reason this email is useful (somebody
     can call them back), and they are also PII: they go in the BODY and NEVER

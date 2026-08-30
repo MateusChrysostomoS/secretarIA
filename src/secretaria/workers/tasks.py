@@ -90,6 +90,7 @@ from secretaria.services.booking_scope import (
     booking_topology,
     sole_active_professional,
 )
+from secretaria.services.brain_professionals import fetch_professional_emails
 from secretaria.services.calendar import CalendarService
 from secretaria.services.email import (
     send_calendar_alert,
@@ -3802,10 +3803,14 @@ async def _handle_professional_config_incomplete(
         that doctor, and no human in the chat can invent a schedule. What is
         needed is a config change, which is what the email asks for.
       * TWO recipients: the clinic (`tenants.contact_email`) and the doctor
-        themselves (`professionals.email`), each only when set. Either may be
-        NULL — `professionals.email` is NULL for every row until a clinic fills
-        it in — and neither being set is a no-op, never an error: the patient
-        has already been answered, so there is nothing left to fail.
+        themselves, each only when KNOWN. The doctor's address is asked of
+        brain-api per alert (services/brain_professionals.py), never stored
+        here: brain-api is the single writer of identity, so `users.email` is
+        the only copy, and a local column would keep mailing the old address
+        the day a doctor changed it. Either half may be missing — a clinic that
+        never set `contact_email`, a doctor with no linked user — and neither
+        being present is a no-op, never an error: the patient has already been
+        answered, so there is nothing left to fail.
       * Its OWN Redis key and silence window. Sharing
         `calendar:alert:{tenant}` would let a Google outage mute a config gap
         for four hours; the key is scoped per tenant AND professional AND gap
@@ -3866,11 +3871,31 @@ async def _handle_professional_config_incomplete(
     if professional.tenant_id != alert_tenant.id:
         return
 
-    # Both addresses, deduped, each only when actually set. Nobody to write to
-    # is a normal outcome (a clinic that never filled either in), not a
-    # failure: the patient has already been answered.
+    # The doctor's own address, asked AFTER the session above closes — a
+    # network call has no business holding a DB connection open. Exactly the
+    # three-way read plugins/professional_notification.py does:
+    #   None       -> brain-api could not answer. "We do not know" is not
+    #                 "nobody", so it earns a warning; the clinic still hears
+    #                 about it, which is the half that can act on the gap.
+    #   key absent -> this doctor has no linked user, so there is no address to
+    #                 reach them at. Silent and honest, not a failure.
+    professional_email: str | None = None
+    emails = await fetch_professional_emails(alert_tenant.id)
+    if emails is None:
+        logger.warning(
+            "worker_professional_config_alert_lookup_failed",
+            tenant_id=str(alert_tenant.id),
+            professional_id=str(professional.id),
+            gap=gap,
+        )
+    else:
+        professional_email = emails.get(str(professional.id))
+
+    # Both addresses, deduped, each only when actually known. Nobody to write
+    # to is a normal outcome (no clinic address, and a doctor brain-api cannot
+    # place), not a failure: the patient has already been answered.
     recipients: list[str] = []
-    for candidate in (alert_tenant.contact_email, professional.email):
+    for candidate in (alert_tenant.contact_email, professional_email):
         address = (candidate or "").strip()
         if address and address not in recipients:
             recipients.append(address)

@@ -177,10 +177,11 @@ async def test_list_shape_is_whitelisted(
         "has_hours",
         "has_services",
         "complete",
-        # Additive: where THIS doctor's own config-gap alert is mailed, next to
-        # the clinic-wide tenants.contact_email. Hub-authenticated response
-        # only — it must never appear on an /internal or public surface.
-        "email",
+        # No address of any kind. A professional's email belongs to brain-api
+        # (`users.email`) and is read per use through
+        # services/brain_professionals.py — FIX 34 removed the column FEAT 41
+        # had briefly added here. A screen that wants to show one reads
+        # brain-api's own `linked_user_email`.
     }
     assert row["name"] == "Dra. Ana"
     assert row["google_calendar_id"] == "ana-cal"
@@ -322,55 +323,36 @@ async def test_patch_deactivate_skips_entitlement_check(
     assert response.json()["is_active"] is False
 
 
-async def test_patch_stores_and_returns_the_alert_email(
+async def test_no_route_here_stores_a_professional_address(
     client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """FEAT 41: where THIS doctor's config-gap alert is mailed.
+    """FIX 34: there is no `email` on this resource, and sending one is inert.
 
-    Contact data, so it is never gated by entitlements — the same rule
-    renaming and deactivating already follow."""
+    brain-api is the single writer of identity — a professional's address is
+    `users.email` there, read per use through services/brain_professionals.py.
+    FEAT 41 briefly added a column here; a second copy has no propagation path,
+    so the day a doctor changed their address in brain-api this one would keep
+    mailing the old one forever.
+
+    A hub still running the FEAT 41 frontend keeps sending the key, so this
+    also pins the shape of that overlap: `ProfessionalUpdate` is not
+    `extra="forbid"` (only the `HubConfigurationUpdate` envelope is), so the
+    field is IGNORED rather than 422-ing the whole save. That is what makes the
+    frontend and backend deploys of this fix orderable in either direction."""
     prof = await _seed_professional(db, tenant, is_active=True)
     monkeypatch.setattr(professionals_api, "get_entitlements", _never_called_fake)
 
     response = await client.patch(
-        f"{ENDPOINT}/{prof.id}", json={"email": "dra.ana@example.com"}
+        f"{ENDPOINT}/{prof.id}", json={"name": "Dra. Ana Paula", "email": "dra.ana@example.com"}
     )
     assert response.status_code == 200
-    assert response.json()["email"] == "dra.ana@example.com"
-
-    # ...and it survives to the list view the Configuração screen prefills from.
-    listed = await client.get(ENDPOINT)
-    assert listed.json()[0]["email"] == "dra.ana@example.com"
-
-
-async def test_patch_can_clear_the_alert_email(
-    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Explicit null clears it; a partial PATCH that omits it leaves it alone."""
-    prof = await _seed_professional(db, tenant, email="dra.ana@example.com")
-    monkeypatch.setattr(professionals_api, "get_entitlements", _never_called_fake)
-
-    untouched = await client.patch(f"{ENDPOINT}/{prof.id}", json={"name": "Dra. Ana Paula"})
-    assert untouched.json()["email"] == "dra.ana@example.com"
-
-    cleared = await client.patch(f"{ENDPOINT}/{prof.id}", json={"email": None})
-    assert cleared.status_code == 200
-    assert cleared.json()["email"] is None
-
-
-async def test_a_professional_without_an_email_serves_normally(
-    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """NULL is the state EVERY pre-existing row is in — there is no backfill.
-
-    It must stay a plain absent value on every surface, never a required field
-    and never an error: the alert simply falls back to the clinic's address."""
-    await _seed_professional(db, tenant, name="Dra. Sem Email")
-    monkeypatch.setattr(professionals_api, "get_entitlements", _never_called_fake)
+    assert "email" not in response.json()
+    # The rest of the patch still landed — the unknown key was dropped, not fatal.
+    assert response.json()["name"] == "Dra. Ana Paula"
 
     listed = await client.get(ENDPOINT)
     assert listed.status_code == 200
-    assert listed.json()[0]["email"] is None
+    assert "email" not in listed.json()[0]
 
 
 async def test_patch_activate_not_entitled_returns_403(

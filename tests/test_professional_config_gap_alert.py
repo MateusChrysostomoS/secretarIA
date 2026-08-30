@@ -20,6 +20,14 @@ Two layers, per the `conversation-flow-state` convention:
     silence window. That layer matters most: the debounce and the recipient
     resolution live in the guard, and a router-only test walks straight past
     them.
+
+The doctor's half of "both addresses" is ASKED of brain-api per alert
+(`services/brain_professionals.fetch_professional_emails`), never stored on
+`Professional` — brain-api is the single writer of identity, and FIX 34 removed
+the column FEAT 41 had briefly added. `_Lookup` below stands in for that answer,
+so all three of its outcomes are exercised: a dict WITH this doctor, a dict
+WITHOUT them (no linked user — silent), and `None` (brain-api could not say —
+warned, and the clinic is still told).
 """
 
 import os
@@ -287,6 +295,48 @@ def _wire_db(monkeypatch: pytest.MonkeyPatch, db):
     yield
 
 
+class _Lookup:
+    """Stands in for brain-api's "where do we reach this tenant's doctors?".
+
+    `answer` is the literal return of `fetch_professional_emails`: a dict of
+    `{professional_id: address}`, or `None` when brain-api could not say. Keys
+    are strings, matching the real client's wire shape.
+
+    `tenants` records who was asked. Asserting on it is what pins the fix: a
+    handler that went back to reading a stored column would still send the
+    right email in most of these tests, and only an empty `tenants` would give
+    it away.
+    """
+
+    def __init__(self) -> None:
+        self.answer: dict[str, str] | None = {}
+        self.tenants: list[str] = []
+
+    def link(self, professionals, address: str | None) -> None:
+        """Say brain-api can place these professionals at `address`.
+
+        `None` means the opposite — they stay ABSENT from the dict, which is
+        exactly how brain-api reports a professional with no linked user. A
+        test that already set `answer = None` (brain-api cannot say anything at
+        all) is left alone: there is no dict to add anybody to.
+        """
+        if address is None or not isinstance(self.answer, dict):
+            return
+        for professional in professionals:
+            self.answer[str(professional.id)] = address
+
+
+@pytest.fixture
+def lookup(monkeypatch: pytest.MonkeyPatch) -> _Lookup:
+    async def _fetch(tenant_id):
+        state.tenants.append(str(tenant_id))
+        return state.answer
+
+    state = _Lookup()
+    monkeypatch.setattr(tasks, "fetch_professional_emails", _fetch)
+    return state
+
+
 class _FakeRedis:
     """Minimal async stub covering the two commands the debounce uses."""
 
@@ -365,11 +415,18 @@ def log(monkeypatch: pytest.MonkeyPatch) -> _LogRecorder:
 
 async def _seed(
     db,
+    lookup: _Lookup,
     *,
     contact_email: str | None = CLINIC_EMAIL,
     professional_email: str | None = DOCTOR_EMAIL,
     professionals: int = 1,
 ) -> tuple[Tenant, list[Professional], Patient, Conversation]:
+    """A clinic, its doctors, and what brain-api says about reaching them.
+
+    `professional_email` is NOT written to the DB — there is no column to write
+    it to. It is what brain-api answers for these rows, and `None` means "no
+    linked user", the state every doctor created without an invite is in.
+    """
     async with db() as session:
         tenant = Tenant(
             id=uuid4(),
@@ -380,12 +437,7 @@ async def _seed(
         session.add(tenant)
         await session.flush()
         rows = [
-            Professional(
-                tenant_id=tenant.id,
-                name=f"Dra. Ana {index}",
-                is_active=True,
-                email=professional_email,
-            )
+            Professional(tenant_id=tenant.id, name=f"Dra. Ana {index}", is_active=True)
             for index in range(professionals)
         ]
         patient = Patient(tenant_id=tenant.id, wa_id=PATIENT_WA, name=PATIENT_NAME)
@@ -398,6 +450,7 @@ async def _seed(
         await session.commit()
         for obj in (tenant, patient, conversation, *rows):
             await session.refresh(obj)
+        lookup.link(rows, professional_email)
         return tenant, rows, patient, conversation
 
 
@@ -420,14 +473,17 @@ def _result(professional, gap: str = "hours") -> FlowRouterResult:
     )
 
 
-async def test_alerts_both_addresses_with_the_patient_in_the_body(db, sent):
-    tenant, (ana,), _patient, conversation = await _seed(db)
+async def test_alerts_both_addresses_with_the_patient_in_the_body(db, sent, lookup):
+    tenant, (ana,), _patient, conversation = await _seed(db, lookup)
 
     await tasks._handle_professional_config_incomplete(
         _reply(conversation), _result(ana), redis=_FakeRedis(), tenant=tenant
     )
 
     assert sorted(call["to"] for call in sent) == sorted([CLINIC_EMAIL, DOCTOR_EMAIL])
+    # ...and the doctor's half came from brain-api, asked for THIS tenant. The
+    # column that used to hold it is gone; this is the only source there is.
+    assert lookup.tenants == [str(tenant.id)]
     for call in sent:
         assert call["clinic"] == "Chrysostomo For Eyes"
         assert call["professional"] == ana.name
@@ -445,18 +501,20 @@ async def test_alerts_both_addresses_with_the_patient_in_the_body(db, sent):
         (None, DOCTOR_EMAIL, [DOCTOR_EMAIL]),
         (None, None, []),
         # Whitespace is not an address. A clinic that "cleared" the field by
-        # blanking it must not produce a send to "   ".
+        # blanking it must not produce a send to "   ". Only the clinic half
+        # can realistically be blank — `fetch_professional_emails` already
+        # strips and drops empty rows — but the guard covers both.
         ("   ", "   ", []),
         # The same address on both rows is one recipient, not two emails.
         (CLINIC_EMAIL, CLINIC_EMAIL, [CLINIC_EMAIL]),
     ],
 )
 async def test_recipients_are_whichever_addresses_exist(
-    db, sent, contact_email, professional_email, expected
+    db, sent, lookup, contact_email, professional_email, expected
 ):
     """Either may be absent; neither present is a no-op, never a failure."""
     tenant, (ana,), _patient, conversation = await _seed(
-        db, contact_email=contact_email, professional_email=professional_email
+        db, lookup, contact_email=contact_email, professional_email=professional_email
     )
 
     # Must not raise even with nobody to write to — the patient has already
@@ -468,9 +526,51 @@ async def test_recipients_are_whichever_addresses_exist(
     assert sorted(call["to"] for call in sent) == sorted(expected)
 
 
-async def test_the_patient_is_answered_even_when_nobody_can_be_alerted(db, sent, _no_whatsapp):
+async def test_brain_api_silence_still_alerts_the_clinic_and_warns(db, sent, lookup, log):
+    """`None` from the lookup is "we do not know", which is not "nobody".
+
+    The clinic still hears about the gap — it is the half that can go and fix
+    the configuration — and the miss is logged, because an unreachable brain-api
+    is a real condition somebody should see. Contrast with the silent case
+    below: only ONE of the two outcomes deserves a warning."""
+    lookup.answer = None
+    tenant, (ana,), _patient, conversation = await _seed(db, lookup)
+
+    await tasks._handle_professional_config_incomplete(
+        _reply(conversation), _result(ana), redis=_FakeRedis(), tenant=tenant
+    )
+
+    assert [call["to"] for call in sent] == [CLINIC_EMAIL]
+    assert any(
+        level == "warning" and event == "worker_professional_config_alert_lookup_failed"
+        for level, event, _fields in log.records
+    ), log.text
+
+
+async def test_a_doctor_with_no_linked_user_is_a_silent_skip(db, sent, lookup, log):
+    """brain-api answered, and this doctor simply has no address anywhere.
+
+    The normal state of a professional created without an invite, and of every
+    clinic that predates the invite flow — nothing is wrong, so nothing is
+    warned about. Pinning the ABSENCE of a warning is the point: treating this
+    as an error would fill the logs with an alarm nobody can act on."""
+    tenant, (ana,), _patient, conversation = await _seed(db, lookup, professional_email=None)
+    assert lookup.answer == {}, "brain-api answered; this doctor is just not in it"
+
+    await tasks._handle_professional_config_incomplete(
+        _reply(conversation), _result(ana), redis=_FakeRedis(), tenant=tenant
+    )
+
+    assert [call["to"] for call in sent] == [CLINIC_EMAIL]
+    assert lookup.tenants == [str(tenant.id)], "it still asked — it just got no row back"
+    assert not [record for record in log.records if record[0] in ("warning", "error")], log.text
+
+
+async def test_the_patient_is_answered_even_when_nobody_can_be_alerted(
+    db, sent, lookup, _no_whatsapp
+):
     tenant, (ana,), _patient, conversation = await _seed(
-        db, contact_email=None, professional_email=None
+        db, lookup, contact_email=None, professional_email=None
     )
 
     await tasks._handle_professional_config_incomplete(
@@ -481,12 +581,12 @@ async def test_the_patient_is_answered_even_when_nobody_can_be_alerted(db, sent,
     assert [b.body for b in _no_whatsapp] == ["No momento não é possível agendar."]
 
 
-async def test_second_patient_within_the_window_does_not_resend(db, sent):
+async def test_second_patient_within_the_window_does_not_resend(db, sent, lookup):
     """The debounce is per (tenant, professional, gap) — NOT per patient.
 
     Two different people hitting the same broken doctor is one incident, and
     the clinic must not get an email per patient."""
-    tenant, (ana,), _patient, conversation = await _seed(db)
+    tenant, (ana,), _patient, conversation = await _seed(db, lookup)
     redis = _FakeRedis()
 
     await tasks._handle_professional_config_incomplete(
@@ -509,13 +609,13 @@ async def test_second_patient_within_the_window_does_not_resend(db, sent):
     assert len(sent) == 2  # ...and nothing more
 
 
-async def test_a_different_professional_or_gap_does_resend(db, sent):
+async def test_a_different_professional_or_gap_does_resend(db, sent, lookup):
     """Proof the key is scoped per professional AND per gap, not per tenant.
 
     A tenant-wide key would mean one doctor's missing hours silenced every
     other doctor's alert for four hours — the failure mode that made the
     original incident invisible in the first place."""
-    tenant, (ana, bruno), _patient, conversation = await _seed(db, professionals=2)
+    tenant, (ana, bruno), _patient, conversation = await _seed(db, lookup, professionals=2)
     redis = _FakeRedis()
     reply = _reply(conversation)
 
@@ -538,10 +638,10 @@ async def test_a_different_professional_or_gap_does_resend(db, sent):
     assert not any(key.startswith("calendar:alert:") for key in redis.store)
 
 
-async def test_without_redis_every_turn_alerts(db, sent):
+async def test_without_redis_every_turn_alerts(db, sent, lookup):
     """No Redis means no debounce, not no alert: the same fail-open choice
     `_handle_calendar_unavailable` makes."""
-    tenant, (ana,), _patient, conversation = await _seed(db)
+    tenant, (ana,), _patient, conversation = await _seed(db, lookup)
     reply = _reply(conversation)
 
     await tasks._handle_professional_config_incomplete(reply, _result(ana), tenant=tenant)
@@ -550,24 +650,27 @@ async def test_without_redis_every_turn_alerts(db, sent):
     assert len(sent) == 4
 
 
-async def test_a_professional_from_another_tenant_is_never_mailed(db, sent):
+async def test_a_professional_from_another_tenant_is_never_mailed(db, sent, lookup):
     """Mailing one clinic about another's doctor is not a mistake worth risking."""
-    tenant, (_ana,), _patient, conversation = await _seed(db)
-    _other_tenant, (stranger,), _p2, _c2 = await _seed(db)
+    tenant, (_ana,), _patient, conversation = await _seed(db, lookup)
+    _other_tenant, (stranger,), _p2, _c2 = await _seed(db, lookup)
 
     await tasks._handle_professional_config_incomplete(
         _reply(conversation), _result(stranger), redis=_FakeRedis(), tenant=tenant
     )
 
     assert sent == []
+    # The tenant check runs BEFORE the lookup, so a cross-tenant row does not
+    # even cost brain-api a request.
+    assert lookup.tenants == []
 
 
-async def test_no_log_line_carries_the_patient_or_the_recipients(db, sent, log):
+async def test_no_log_line_carries_the_patient_or_the_recipients(db, sent, lookup, log):
     """The body is where the PII goes; a log line is not.
 
     `send_*` receives the name and number (asserted above) — this pins that
     nothing on the way there writes them, or the addresses, into structlog."""
-    tenant, (ana,), _patient, conversation = await _seed(db)
+    tenant, (ana,), _patient, conversation = await _seed(db, lookup)
 
     await tasks._handle_professional_config_incomplete(
         _reply(conversation), _result(ana), redis=_FakeRedis(), tenant=tenant

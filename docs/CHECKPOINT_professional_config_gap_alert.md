@@ -1,9 +1,13 @@
-# CHECKPOINT — alerta de profissional com configuração incompleta (FEAT 41)
+# CHECKPOINT — alerta de profissional com configuração incompleta (FEAT 41 + FIX 34)
 
-**Estado:** BUILT, testado (1857 testes verdes), **não commitado, não deployado**.
+**Estado:** FEAT 41 no ar desde 2026-08-29 (`c1d76c2`, deploy provado). **FIX 34 BUILT e
+testado (1856 verdes + 318 no frontend), não commitado, não deployado** — remove a coluna
+`professionals.email` que o FEAT 41 criou e passa a resolver o endereço do médico pelo
+brain-api. Ver §4 (reescrita), §5 e a ordem obrigatória em §9.
 **Origem:** incidente do tenant "Chrysostomo For Eyes" (2026-08-28) — dois profissionais
 ativos com configuração incompleta; o paciente batia numa parede e ninguém ficava sabendo.
-**Prompt:** `TECH/BRAIN/z_prompts/debug_secretaria_producao/PROMPT_FEAT_41_PROFESSIONAL_CONFIG_GAP_ALERT_BACKEND.md`
+**Prompts:** `TECH/BRAIN/z_prompts/debug_secretaria_producao/PROMPT_FEAT_41_PROFESSIONAL_CONFIG_GAP_ALERT_BACKEND.md`
+e `.../PROMPT_FIX_34_PROFESSIONAL_EMAIL_DUPLICATE_SOURCE.md`
 
 ---
 
@@ -58,9 +62,11 @@ dentro de `enter_day_picker`, que continua existindo e continua servindo a agend
        humana assume; um médico sem horário quebra só aquele médico, e nenhum humano no
        chat inventa uma agenda. O que falta é uma mudança de configuração — que é
        exatamente o que o e-mail pede.
-    2. **Dois destinatários**, cada um só se existir: `tenants.contact_email` (a clínica) e
-       `professionals.email` (o médico). Nenhum dos dois preenchido é um no-op normal, nunca
-       um erro — o paciente já foi respondido.
+    2. **Dois destinatários**, cada um só se for CONHECIDO: `tenants.contact_email` (a
+       clínica) e o endereço do próprio médico — este **perguntado ao brain-api** a cada
+       alerta (`services/brain_professionals.py::fetch_professional_emails`), nunca
+       guardado aqui (ver §4). Nenhum dos dois é um no-op normal, nunca um erro — o
+       paciente já foi respondido.
     3. **Chave Redis e janela de silêncio próprias.**
 
 - **`services/email.py`** — `send_professional_config_incomplete_alert(...)`, fail-open e
@@ -85,37 +91,73 @@ problema gerem um só.
 O debounce é resolvido **depois** dos destinatários: uma clínica sem nenhum endereço no
 cadastro não queima uma janela de silêncio de 4h com um e-mail que ninguém recebeu.
 
-## 4. `professionals.email` — coluna nova
+## 4. O endereço do médico — o brain-api é dono (corrigido pelo FIX 34)
 
-Migração `f3a9c1d7b2e4` (revises `a7b8c9d0e1f2`): `VARCHAR(254) NULL`, sem `server_default`
-e **sem backfill** — a clínica é a única parte que conhece o endereço de um médico, então
-toda linha existente nasce `NULL` e todo consumidor trata `NULL` como "não há pra quem
-mandar aqui", caindo no endereço da clínica.
+> **Esta seção foi reescrita.** A implementação original do FEAT 41 criou uma coluna
+> `professionals.email` (migração `f3a9c1d7b2e4`). Era uma **segunda cópia** de um dado que
+> o `brain-api` já possui, e que os dois repos já proibiam POR ESCRITO. O `FIX 34` desfez
+> isso; o texto abaixo descreve o estado atual.
 
-Editável por **dois** caminhos, de propósito:
-- `PATCH /tenants/me/professionals/{id}` — a edição de roster.
-- `PUT /tenants/me/professionals/{id}/config` (e o agregado `PUT /tenants/me/configuration`)
-  — que é o corpo que a tela **Configuração** já manda, então o endereço grava na MESMA
-  transação da especialidade que fica ao lado dele na tela, em vez de exigir um segundo
-  request que poderia falhar sozinho.
+O endereço de um profissional mora em `users.email` do `brain-api` (ligado por
+`users.professional_id`, escrito pelo fluxo de convite). O `brain-api` é o **único escritor
+de identidade**, e diz isso na docstring de
+`api/internal.py::internal_professional_emails`: *"secretarIA has no email column on
+`professionals` and deliberately will not get one, because a second copy would drift the
+moment a doctor changed their address."* O módulo `services/brain_professionals.py` deste
+repo repete a regra desde o FEAT 33.
 
-**Fronteira de segredo:** `email` aparece em `ProfessionalRead` e `ProfessionalListItem`, e
-esses dois modelos são consumidos **exclusivamente** por `api/hub/*` — a sessão autenticada
-da própria clínica. Nenhuma superfície `/internal` ou pública carrega o campo;
-`GET /internal/tenants/{id}/config-status` continua reportando só
-`has_hours`/`has_services`/`complete`, sem endereço nenhum.
+O handler resolve o endereço pelo cliente que já existia:
 
-## 5. Frontend (`secretarIA-frontend`) — escopo mínimo
+```
+fetch_professional_emails(tenant_id) -> dict[str, str] | None
+```
 
-Um campo "E-mail do profissional (avisos)" no card do profissional em `/configuracao`,
-na segunda coluna do grid que já existia (a de "Especialidade"), pelo mesmo caminho de
-save. Plumbing: `ProfessionalProfile.email` (`lib/types.ts`),
-`applyWireProfessionalProfile`/`buildProfessionalConfigPayload` (`lib/hub-mapping.ts`),
-`ProfessionalWire.email` + `ProfessionalConfigUpdatePayload.email` (`lib/secretaria-hub.ts`).
+Três respostas, três comportamentos — os mesmos de
+`plugins/professional_notification.py`, que usa esse cliente desde o FEAT 33:
 
-`ProfessionalWire.email` é **opcional** no tipo: um backend anterior a esta feature não
-manda a chave, e `undefined` significa "esse backend não sabe me dizer", nunca "o médico
-não tem endereço" — mesma regra dos flags `*_inherited`/`calendar_source`.
+| resposta | significado | o que o alerta faz |
+|---|---|---|
+| `dict` com a chave | médico tem usuário vinculado | manda pros DOIS endereços |
+| `dict` **sem** a chave | médico sem usuário vinculado (criado sem convite) | só a clínica, **em silêncio** — é o estado normal, não um erro |
+| `None` | brain-api não soube responder (rede, não-200, settings) | só a clínica, **com `logger.warning`** — "não sabemos" não é "não tem" |
+
+A chamada acontece **depois** que a sessão do banco fecha: uma chamada de rede não segura
+uma conexão de DB aberta. E acontece **depois** do check de tenant cruzado, então uma linha
+de outro tenant nem custa um request ao brain-api.
+
+**Por que a coluna era um defeito e não só uma redundância:** ela nascia `NULL` em toda
+clínica pré-existente e não tinha backfill possível por si mesma — o alerta chegava só ao
+`contact_email` da clínica e **nunca ao médico**, embora o brain-api soubesse o endereço o
+tempo todo. E as duas cópias divergiriam no instante em que alguém editasse uma das duas
+telas. Com o `fetch_professional_emails` o backfill é implícito e imediato: toda clínica
+cujos médicos entraram por convite passa a receber o alerta sem preencher nada.
+
+**Migração:** `b4c2e8f1a9d3` (revises `f3a9c1d7b2e4`) dá `op.drop_column`. A original foi
+**preservada**, não editada — pode já estar aplicada em produção. Ordem de deploy é o risco
+central: ver §9.
+
+**Fronteira:** nenhuma rota de `api/hub/*` escreve ou devolve endereço de profissional.
+A tela que quer exibir um lê o `linked_user_email` do próprio brain-api
+(`GET /doctor/professionals`), que é o que o `secretarIA-frontend` já fazia antes do FEAT 41.
+
+## 5. Frontend (`secretarIA-frontend`) — nada a fazer
+
+O FEAT 41 acrescentou um campo "E-mail do profissional (avisos)" no card de
+`/configuracao`. O `FIX 34` **removeu** esse campo e todo o seu plumbing
+(`ProfessionalProfile.email`, `applyWireProfessionalProfile` /
+`buildProfessionalConfigPayload`, `ProfessionalWire.email`,
+`ProfessionalConfigUpdatePayload.email`): não havia o que ele pudesse gravar que não fosse
+uma segunda cópia.
+
+Não precisa de substituto. O `linked_user_email` — que o `ProfessionalsSection.tsx` já
+exibia ao lado das chips de completude **antes** do FEAT 41, vindo do brain-api — mostra o
+endereço real, e diz "Sem e-mail vinculado" quando não existe.
+
+**Ordem de deploy backend↔frontend é livre**, e isso foi verificado, não presumido:
+`ProfessionalConfigUpdate` não tem `model_config`, então o default permissivo do Pydantic
+v2 vale; o `extra="forbid"` está só no envelope `HubConfigurationUpdate`, e `email` viajava
+aninhado dentro dele. Um frontend antigo mandando a chave removida é **ignorado**, não um
+422 que derrubaria o save inteiro da Configuração.
 
 ## 6. Para o FEAT 42 (banner) — o sinal JÁ existe, sem endpoint novo
 
@@ -137,7 +179,7 @@ passar a carregar: a lista já responde, e duplicar o cálculo é como duas font
 
 ## 7. Testes
 
-`tests/test_professional_config_gap_alert.py` (21 casos), nos dois níveis da skill
+`tests/test_professional_config_gap_alert.py` (23 casos), nos dois níveis da skill
 `conversation-flow-state`:
 
 - **Router puro:** gap de horário dispara com `action`/`gap` certos e **sem tocar o
@@ -145,9 +187,15 @@ passar a carregar: a lista já responde, e duplicar o cálculo é como duas font
   cheia continua no `NO_AVAILABLE_DAYS_MESSAGE` e chega a consultar o calendário;
   **regressão** — profissional completo continua chegando no day picker; multi-médico julga
   só o selecionado; gap de serviço mantém as bolhas de sempre.
-- **Call site (sqlite in-memory + Redis fake):** os dois endereços recebem; as 6 combinações
-  de destinatário (ambos / só um / nenhum / whitespace / duplicado); nenhum destinatário não
-  levanta e o paciente é respondido do mesmo jeito; **um segundo paciente no mesmo
+- **Call site (sqlite in-memory + Redis fake + `_Lookup`, o dublê do brain-api):** os dois
+  endereços recebem, **e o do médico veio do brain-api** — `lookup.tenants == [tenant.id]`
+  é o que prende o FIX 34, porque um handler que voltasse a ler uma coluna ainda mandaria o
+  e-mail certo em quase todo teste e só um `tenants` vazio o denunciaria; as 3 respostas
+  possíveis do lookup, cada uma num teste (dict COM a entrada / dict SEM a chave = sem
+  vínculo, silencioso e **sem warning** / `None` = brain-api fora, **com warning** e a
+  clínica ainda avisada); as 6 combinações de destinatário (ambos / só um / nenhum /
+  whitespace / duplicado); nenhum destinatário não levanta e o paciente é respondido do
+  mesmo jeito; **um segundo paciente no mesmo
   (profissional, gap) dentro da janela NÃO reenvia**; profissional ou gap diferente
   reenvia; sem Redis alerta sempre (fail-open); profissional de outro tenant nunca é
   notificado; nenhuma linha de log carrega nome/telefone do paciente nem os endereços.
@@ -167,12 +215,31 @@ apenas herda os horários da clínica parecer inagendável.
 
 ## 9. Pendências
 
-- [ ] Commit + push.
-- [ ] **Deploy do `secretaria-worker`** — obrigatório e separado da API (o handler novo
-      roda no worker; ver a regra de deploy no `CLAUDE.md` deste repo). Confirmar por
-      `GET /build` / `source_fingerprint`, não só `deploy_parity: match`.
-- [ ] Rodar a migração `f3a9c1d7b2e4` em produção.
-- [ ] Deploy do `secretarIA-frontend` (campo de e-mail).
+O FEAT 41 foi commitado e deployado em `c1d76c2` **com** a coluna. O `FIX 34` a remove, e a
+ORDEM abaixo é obrigatória — remover uma coluna de ORM é o INVERSO de acrescentar uma.
+
+- [ ] Commit + push do `FIX 34` (secretarIA + secretarIA-frontend).
+- [ ] **Deploy do código novo na API E no worker.** Os dois mapeiam `Professional`, e são
+      dois serviços EasyPanel de deploy manual e independente. Confirmar os DOIS por
+      `GET /build` / `source_fingerprint` — "commitou" não é prova.
+- [ ] **Só então** rodar `alembic upgrade head` (migração `b4c2e8f1a9d3`, `DROP COLUMN`).
+      Se rodar antes, qualquer serviço no código velho quebra em **toda** leitura de
+      profissional com `column professionals.email does not exist` — o produto inteiro pra
+      quem usa profissionais, não só o alerta. O SQLAlchemy monta a lista de colunas
+      explicitamente; não existe `SELECT *` que salve.
+- [ ] Deploy do `secretarIA-frontend` (campo removido) — ordem livre em relação à API,
+      ver §5.
 - [ ] `SMTP_HOST` precisa estar configurado no EasyPanel pro alerta sair — sem ele a
-      função é um no-op silencioso, por design.
-- [ ] `FEAT 42` (banner nos frontends) — ler §6 acima antes de começar.
+      função é um no-op silencioso, por design. **Continua pendente do FEAT 41.**
+- [ ] Smoke: profissional ativo com config incompleta + mensagem de paciente de teste num
+      tenant real; confirmar que o e-mail chega no endereço verdadeiro do médico (via
+      brain-api) e no `contact_email` da clínica.
+- [x] ~~Rodar a migração `f3a9c1d7b2e4`~~ — superseded: se ainda não rodou, `alembic
+      upgrade head` aplica as duas em sequência (add + drop) e o resultado é o mesmo.
+- [x] `FEAT 42` (banner nos frontends) — no ar desde 2026-08-29.
+
+**Rollback:** antes do `DROP COLUMN`, reverter o código basta (a coluna continua lá,
+inofensiva). Depois dele, reverter só o código não basta — voltar a ler a coluna exigiria
+uma migração nova de `ADD COLUMN`, e ela voltaria vazia. Como a coluna nunca foi uma fonte
+confiável, o rollback realista é pra frente: corrigir o código que lê
+`fetch_professional_emails`.

@@ -42,16 +42,16 @@ class Professional(Base):
     # None -> falls back to the tenant's own calendar (google_calendar_id).
     google_calendar_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"), default=True)
-    # Where THIS professional's operational alerts go, alongside the clinic-wide
-    # `Tenant.contact_email` - workers/tasks.py::
-    # _handle_professional_config_incomplete mails BOTH, each only when set, so
-    # "the doctor whose own config is broken" and "whoever runs the clinic" both
-    # hear about a patient who could not book. NULL for every pre-existing row,
-    # and there is no backfill possible: the clinic is the only party that knows
-    # this address, so it arrives through the hub or not at all. Contact data,
-    # not a secret - but still PII, so it belongs in an email BODY and never in
-    # a log line (see the alert handler).
-    email: Mapped[str | None] = mapped_column(String(254), nullable=True)
+    # NO email column here, deliberately, and this is the second time one was
+    # added and removed. brain-api is the single writer of identity: a
+    # professional's address lives on its `users.email` (linked by
+    # `users.professional_id`) and is read per use through
+    # services/brain_professionals.py::fetch_professional_emails. A copy here
+    # would have no propagation path - the day a doctor changed their address
+    # in brain-api, secretarIA would mail the old one, silently and forever.
+    # Both alert paths ask instead of storing: plugins/professional_notification
+    # (new booking) and workers/tasks.py::_handle_professional_config_incomplete
+    # (config gap).
 
     # --- Per-professional config (onboarding/multi-professional contract v1) ---
     # Free-text specialty label shown to patients, e.g. "Cardiologia".
