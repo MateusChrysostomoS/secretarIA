@@ -46,7 +46,12 @@ from secretaria.ai.tools import manage_existing_appointment, start_guided_bookin
 from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger, wa_suffix
-from secretaria.core.whatsapp_limits import strip_decoration, truncate_button_label
+from secretaria.core.whatsapp_limits import (
+    MAX_INTERACTIVE_BODY_CHARS,
+    strip_decoration,
+    truncate_button_label,
+    truncate_plain,
+)
 from secretaria.models import (
     AnalyticsEvent,
     Appointment,
@@ -131,6 +136,14 @@ from secretaria.services.flow_router import (
     resume_bubbles,
     route,
 )
+from secretaria.services.greeting_template import (
+    CONSENT_ACCEPTED_MESSAGE,
+    CONSENT_BUTTON_LABEL,
+    CONSENT_EVENT_KIND,
+    LGPD_CONSENT_MESSAGE,
+    clinic_description_budget,
+    render_greeting,
+)
 from secretaria.services.handover import HandoverManager
 from secretaria.services.patient_context import (
     PatientOpeningContext,
@@ -198,9 +211,7 @@ GREETING_REQUIREMENTS_KEEP = 3
 # Neutral on purpose: a past appointment inside the window may still sit in
 # SCHEDULED/CONFIRMED (nobody marked the outcome), so this must NOT assert
 # the consult happened. Still MVP copy - PROMPT 2 only finalized HAS_UPCOMING.
-JUST_HAD_CONSULT_NEUTRAL_LINE = (
-    "Vi que você teve uma consulta recentemente, posso ajudar em algo?"
-)
+JUST_HAD_CONSULT_NEUTRAL_LINE = "Vi que você teve uma consulta recentemente, posso ajudar em algo?"
 # Presupposes attendance — used ONLY when the doctor explicitly set ATTENDED.
 JUST_HAD_CONSULT_ATTENDED_LINE = "Como foi sua consulta? Posso ajudar em algo?"
 
@@ -213,7 +224,29 @@ JUST_HAD_CONSULT_ATTENDED_LINE = "Como foi sua consulta? Posso ajudar em algo?"
 # still exists, but only behind `REMOVE_CONTEXT_COMMAND` below; `/menu` and
 # friends now do exactly what `ai/tools.py::show_main_menu` does: reset the
 # transient flow fields and re-render the menu, touching nothing else.
-_MENU_COMMANDS = frozenset({"/menu", "/reset", "/recomecar", "/recomeçar", "/inicio", "/início"})
+# The bare (slash-less) variants were added with the greeting frame, and are
+# not cosmetic: the frame tells every patient "Errou? Digite *voltar* a
+# qualquer momento para recomeçar", and before this the ONLY menu commands
+# were slash-prefixed — something no patient types. The promise would have
+# been dead copy. Matching stays whole-body and case-insensitive (see
+# `is_menu_command`), so "voltar" mid-booking means the main menu, while
+# "quero voltar na segunda" is untouched and still routes normally.
+_MENU_COMMANDS = frozenset(
+    {
+        "/menu",
+        "/reset",
+        "/recomecar",
+        "/recomeçar",
+        "/inicio",
+        "/início",
+        "menu",
+        "voltar",
+        "recomecar",
+        "recomeçar",
+        "inicio",
+        "início",
+    }
+)
 
 
 def is_menu_command(body: str | None) -> bool:
@@ -221,6 +254,18 @@ def is_menu_command(body: str | None) -> bool:
     if not body:
         return False
     return body.strip().lower() in _MENU_COMMANDS
+
+
+def _is_consent_acceptance(body: str | None) -> bool:
+    """True for a tap on (or a typed match of) the LGPD "Concordo" button.
+
+    Compared through `strip_decoration` so the rendered "✅ Concordo", a bare
+    "Concordo" and a typed "concordo" all match — the same normalisation every
+    other decorated label goes through, so the emoji stays a render concern.
+    """
+    if not body:
+        return False
+    return strip_decoration(body).casefold() == strip_decoration(CONSENT_BUTTON_LABEL).casefold()
 
 
 # The DESTRUCTIVE reset. Deliberately long, literal and self-describing: it is
@@ -377,6 +422,11 @@ class _ReplyContext:
     # Optional quick-reply labels rendered as buttons on the greeting. The label
     # the patient taps comes back as their next message body.
     greeting_buttons: list[str] = field(default_factory=list)
+    # When True, the LGPD terms notice goes out as a SECOND message right after
+    # the greeting, carrying the "✅ Concordo" button. Set only for a subject
+    # with no prior `terms_accepted` ConsentEvent, so it is asked once per
+    # (tenant, wa_id) and never re-asked on later conversations.
+    send_consent_notice: bool = False
     # When True, the tenant's bot is not activated: send a single polite
     # fallback and do nothing else (no conversation, no LLM).
     service_unavailable: bool = False
@@ -713,6 +763,55 @@ async def _persist_inbound_message(
                 # The pending reactivation gate, if any, is consumed here too -
                 # an explicit "take me to the menu" answers the "quer
                 # continuar?" question by superseding it.
+                # LGPD consent tap, sitting just above `/menu` for the same
+                # reason `/menu` sits above the greeting: it is a structured
+                # tap on a message WE sent, and it must be recognised before
+                # any branch that could re-greet. Matched through
+                # `strip_decoration` like every other decorated label (FEAT 44),
+                # so a patient who types "concordo" instead of tapping is
+                # honoured too. Deliberately NOT a gate: nothing downstream
+                # checks for this event before serving the patient. A blocking
+                # `AWAITING_CONSENT` state would be a non-IDLE state whose only
+                # exit is the patient choosing it — the exact shape that
+                # permanently parked conversations before (see
+                # `_expire_stale_llm_state`), and here it would lock a patient
+                # out of booking forever for never tapping a button.
+                if _is_consent_acceptance(body):
+                    already = await session.scalar(
+                        select(func.count())
+                        .select_from(ConsentEvent)
+                        .where(
+                            ConsentEvent.tenant_id == tenant.id,
+                            ConsentEvent.wa_id == wa_id,
+                            ConsentEvent.kind == CONSENT_EVENT_KIND,
+                        )
+                    )
+                    if not already:
+                        session.add(
+                            ConsentEvent(
+                                tenant_id=tenant.id,
+                                wa_id=wa_id,
+                                kind=CONSENT_EVENT_KIND,
+                                legal_basis=(
+                                    "consentimento (art. 7º, I) — aceite explícito dos "
+                                    "Termos de Uso e Política de Privacidade no WhatsApp"
+                                ),
+                            )
+                        )
+                        logger.info(
+                            "conversation_terms_accepted",
+                            conversation_id=str(conversation.id),
+                            tenant_id=str(tenant.id),
+                        )
+                    return _ReplyContext(
+                        conversation_id=conversation.id,
+                        tenant_id=tenant.id,
+                        patient_wa_id=wa_id,
+                        inbound_body=body or "",
+                        greeting_override=CONSENT_ACCEPTED_MESSAGE,
+                        greeting_buttons=_greeting_buttons_for(tenant, CONSENT_ACCEPTED_MESSAGE),
+                    )
+
                 if is_menu_command(body):
                     conversation.reactivation_origin = None
                     logger.info(
@@ -874,12 +973,31 @@ async def _persist_inbound_message(
 
                 greeting_buttons = _greeting_buttons_for(tenant, greeting_override, opening_context)
 
+                # The LGPD notice rides along with the greeting and only with
+                # the greeting: asked once per subject, keyed on the absence of
+                # a `terms_accepted` event rather than on "is this a new
+                # Patient row", so a patient whose row predates this round (or
+                # survived a `/menu`) is still asked exactly once.
+                send_consent_notice = False
+                if greeting_override is not None:
+                    accepted = await session.scalar(
+                        select(func.count())
+                        .select_from(ConsentEvent)
+                        .where(
+                            ConsentEvent.tenant_id == tenant.id,
+                            ConsentEvent.wa_id == wa_id,
+                            ConsentEvent.kind == CONSENT_EVENT_KIND,
+                        )
+                    )
+                    send_consent_notice = not accepted
+
                 return _ReplyContext(
                     conversation_id=conversation.id,
                     patient_wa_id=wa_id,
                     inbound_body=body or "",
                     greeting_override=greeting_override,
                     greeting_buttons=greeting_buttons,
+                    send_consent_notice=send_consent_notice,
                 )
         except IntegrityError:
             # A concurrent worker already claimed this event id.
@@ -893,18 +1011,39 @@ def _select_greeting(
     is_first_contact: bool,
     is_returning_patient: bool,
 ) -> str | None:
-    """Pick the verbatim greeting to send on first contact, or None.
+    """Pick the greeting to send on first contact, or None.
 
-    Returning patients (seen before) get `returning_greeting_message` with the
-    `{{name}}` placeholder filled; otherwise the first-contact greeting is used.
+    Returning patients (seen before) still get their clinic's own
+    `returning_greeting_message` with the `{{name}}` placeholder filled — that
+    one is a short "good to see you again" line and stays clinic-authored.
+
+    Everyone else gets the PRODUCT FRAME (services/greeting_template.py),
+    which is why this branch can no longer return None: the frame carries the
+    automated-assistant disclosure, the no-medical-advice line and the
+    emergency escape, so a clinic that configured nothing must still send it.
+    Before this round it returned None for exactly that clinic and the LLM
+    improvised an opener carrying none of those obligations.
     """
     if not is_first_contact:
         return None
     returning = (tenant.returning_greeting_message or "").strip()
     if is_returning_patient and returning:
         return _render_greeting_template(returning, patient.name)
-    first = (tenant.greeting_message or "").strip()
-    return first or None
+    return render_greeting(tenant.clinic_name, _fit_clinic_description(tenant))
+
+
+def _fit_clinic_description(tenant: Tenant) -> str:
+    """The clinic's description, cut to what still fits for THIS clinic.
+
+    `services/tenant_config.py` already refuses an over-budget description on
+    save, so this is normally a no-op. It is not redundant: the budget shrinks
+    when `clinic_name` GROWS, and renaming a clinic goes through a different
+    path that never revalidates the description. Without this, a rename could
+    push the rendered greeting past 1024 chars — and `send_buttons` does not
+    truncate, so Meta 400s and the patient receives NOTHING.
+    """
+    description = (tenant.clinic_description or "").strip()
+    return truncate_plain(description, clinic_description_budget(tenant.clinic_name))
 
 
 def _greeting_buttons_for(
@@ -1039,9 +1178,7 @@ class _UpcomingGreetingData:
     nearest_service: dict | None = None
 
 
-def _appointment_doctor_name(
-    appointment: dict, professional_names: dict[str, str]
-) -> str | None:
+def _appointment_doctor_name(appointment: dict, professional_names: dict[str, str]) -> str | None:
     """The stored professional name for one `future_appointments` dict, or None.
 
     Verbatim from `Professional.name` - no "Dr(a)." honorific games, the
@@ -1225,15 +1362,11 @@ async def _load_upcoming_greeting_data(
     stay DB-free. No appointment content is logged here - state/count
     logging is already done by `resolve_patient_opening_state`.
     """
-    professional_ids = {
-        pid for appt in future_appointments if (pid := appt.get("professional_id"))
-    }
+    professional_ids = {pid for appt in future_appointments if (pid := appt.get("professional_id"))}
     professionals_by_id: dict[str, Professional] = {}
     if professional_ids:
         rows = await session.scalars(
-            select(Professional).where(
-                Professional.id.in_([UUID(pid) for pid in professional_ids])
-            )
+            select(Professional).where(Professional.id.in_([UUID(pid) for pid in professional_ids]))
         )
         professionals_by_id = {str(row.id): row for row in rows}
 
@@ -1609,7 +1742,12 @@ async def _handle_remove_context_command(
 
                 # Send the first-contact greeting (the "initial" one), NOT the
                 # returning greeting - the whole point of deleting the patient.
-                greeting = (tenant.greeting_message or "").strip()
+                # Since the greeting-frame round this is the rendered product
+                # frame, so it is ALWAYS non-empty: the "no greeting configured"
+                # degrade below is now unreachable for a tenant with a name, and
+                # this command is once again a faithful rehearsal of what a
+                # brand-new patient sees.
+                greeting = render_greeting(tenant.clinic_name, _fit_clinic_description(tenant))
                 greeting_buttons = _greeting_buttons_for(tenant, greeting or None)
                 waba_token = await get_waba_token(session, tenant.id)
         except IntegrityError:
@@ -1934,6 +2072,8 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     # after entitlement and tenant credentials have been resolved.
     if reply.greeting_override is not None:
         await _send_greeting(reply, tenant=tenant, waba_token=waba_token)
+        if reply.send_consent_notice:
+            await _send_consent_notice(reply, tenant=tenant, waba_token=waba_token)
         return
 
     # Optional-addon inbound interception (e.g. human_backup_24_7's
@@ -1987,9 +2127,7 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                 bubbles=[
                     MenuBubble(
                         body=menu_label(tenant_snapshot),
-                        labels=menu_buttons_for(
-                            tenant_snapshot, len(flow_professionals or []) > 1
-                        ),
+                        labels=menu_buttons_for(tenant_snapshot, len(flow_professionals or []) > 1),
                     )
                 ],
                 flow_state=FlowState.MENU,
@@ -2341,9 +2479,7 @@ def _label_match_body(body: str | None, label: str) -> bool:
     )
 
 
-def _flow_handback_tools(
-    tenant: Tenant | None, topology: str, plugin_tools: list
-) -> list:
+def _flow_handback_tools(tenant: Tenant | None, topology: str, plugin_tools: list) -> list:
     """This turn's `extra_tools`: the plugin set + the flow hand-back tools.
 
     Both hand-backs re-enter the deterministic flow through a sentinel, so
@@ -2402,9 +2538,7 @@ def _appointment_calendar_target(
     professional_id = appt.get("professional_id")
     if not professional_id:
         return "tenant"
-    return next(
-        (p for p in (professional_rows or []) if str(p.id) == str(professional_id)), None
-    )
+    return next((p for p in (professional_rows or []) if str(p.id) == str(professional_id)), None)
 
 
 async def _appointment_calendar(
@@ -2464,14 +2598,10 @@ def _manage_owner_calendar_target(
     """
     if flow_state == FlowState.MANAGE_BOOKING and flow_managing_appointment_id is not None:
         target = str(flow_managing_appointment_id)
-        appt = next(
-            (a for a in (upcoming_appointments or []) if str(a.get("id")) == target), None
-        )
+        appt = next((a for a in (upcoming_appointments or []) if str(a.get("id")) == target), None)
         return _appointment_calendar_target(appt, professional_rows)
     if _label_match_body(inbound_body, LABEL_RESCHEDULE) and len(upcoming_appointments or []) == 1:
-        return _appointment_calendar_target(
-            (upcoming_appointments or [])[0], professional_rows
-        )
+        return _appointment_calendar_target((upcoming_appointments or [])[0], professional_rows)
     return None
 
 
@@ -3197,9 +3327,7 @@ def _log_booking_scope(appointment: Appointment, tenant_id: UUID, *, source: str
         "booking_owner_resolved",
         tenant_id=str(tenant_id),
         appointment_id=str(appointment.id),
-        professional_id=(
-            str(appointment.professional_id) if appointment.professional_id else None
-        ),
+        professional_id=(str(appointment.professional_id) if appointment.professional_id else None),
         has_owner=appointment.professional_id is not None,
         source=source,
     )
@@ -3207,9 +3335,7 @@ def _log_booking_scope(appointment: Appointment, tenant_id: UUID, *, source: str
         "booking_service_resolved",
         tenant_id=str(tenant_id),
         appointment_id=str(appointment.id),
-        professional_id=(
-            str(appointment.professional_id) if appointment.professional_id else None
-        ),
+        professional_id=(str(appointment.professional_id) if appointment.professional_id else None),
         has_type=bool(appointment.appointment_type),
         source=source,
     )
@@ -3352,9 +3478,7 @@ async def _apply_flow_result(
                                 Appointment.tenant_id == conv.tenant_id,
                             )
                         )
-                        previous_status = (
-                            resched_appt.status if resched_appt is not None else None
-                        )
+                        previous_status = resched_appt.status if resched_appt is not None else None
                         # The SAME row moves to the new window and stays LIVE -
                         # RESCHEDULED is not a tombstone (PROMPT_FIX_16, see the
                         # taxonomy on models/appointment.py). Its id,
@@ -3419,9 +3543,7 @@ async def _apply_flow_result(
     # true here — the flow engine only runs once `tenant` is resolved).
     if booked_appointment is not None and persisted and tenant is not None:
         _log_booking_scope(booked_appointment, tenant.id, source=SOURCE_FLOW)
-        await enqueue_post_booking_hooks(
-            redis, tenant.id, booked_appointment.id, source="flow"
-        )
+        await enqueue_post_booking_hooks(redis, tenant.id, booked_appointment.id, source="flow")
 
     if result.action == "calendar_unavailable":
         await _handle_calendar_unavailable(reply, redis=redis, tenant=tenant, waba_token=waba_token)
@@ -3568,6 +3690,16 @@ async def _send_greeting(
     text. The whole greeting is one WhatsApp message either way.
     """
     body = reply.greeting_override or ""
+    if reply.greeting_buttons:
+        # LAST line of defence on the interactive-body cap, in the same spirit
+        # as send_list's re-application of truncate_list_row_title: a no-op for
+        # a body that already fits. It matters because the body reaching here
+        # is a SUM — the product frame (~843 chars) plus the clinic's
+        # description plus whatever `_adapt_greeting_to_state` appended for a
+        # patient with upcoming appointments — and `send_buttons` does NOT
+        # truncate. One char over and Meta 400s, the except below logs it, and
+        # the patient's first-ever message goes unanswered.
+        body = truncate_plain(body, MAX_INTERACTIVE_BODY_CHARS)
     # Fail closed (PROMPT_FIX_21) rather than letting the credential error
     # escape into the arq job, which would retry the whole turn forever on
     # what is a configuration problem, not a transient one.
@@ -3632,6 +3764,69 @@ async def _send_greeting(
             if conversation is not None:
                 conversation.last_bot_message_at = datetime.now(UTC)
     logger.info("worker_greeting_sent", conversation_id=str(reply.conversation_id))
+
+
+async def _send_consent_notice(
+    reply: _ReplyContext,
+    *,
+    tenant: Tenant,
+    waba_token: str | None = None,
+) -> None:
+    """Send the LGPD terms notice as the SECOND first-contact message.
+
+    Separate from the greeting on purpose rather than appended to it: the
+    greeting is already near WhatsApp's 1024-char interactive cap, and the
+    notice needs its own button (`✅ Concordo`) — a single message cannot carry
+    both the action trio and the consent button.
+
+    Best-effort, exactly like `_send_greeting`: a failure here is logged and
+    dropped, never retried. The greeting has already gone out and the patient's
+    turn is already served, so raising would make arq replay the whole turn and
+    re-send the greeting. The subject is simply asked again on their next
+    first contact, since nothing recorded an acceptance.
+    """
+    client = _tenant_client(tenant, waba_token)
+    if client is None:
+        logger.error(
+            "worker_consent_notice_no_credential",
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(tenant.id),
+        )
+        return
+    try:
+        result = await client.send_buttons(
+            to=reply.patient_wa_id,
+            body=LGPD_CONSENT_MESSAGE,
+            # The id is semantic (not positional) so it can never be confused
+            # with a `greeting|N` tap by `extract_greeting_button`; the LABEL is
+            # still what `_is_consent_acceptance` matches on, since
+            # `extract_inbound_body` hands back a plain button's title.
+            buttons=[("consent|accept", CONSENT_BUTTON_LABEL)],
+        )
+    except Exception as exc:
+        logger.error(
+            "worker_consent_notice_send_failed",
+            error=str(exc),
+            conversation_id=str(reply.conversation_id),
+        )
+        return
+
+    if reply.conversation_id is not None:
+        async with async_session_factory() as session:
+            async with session.begin():
+                session.add(
+                    Message(
+                        conversation_id=reply.conversation_id,
+                        direction=MessageDirection.OUTBOUND,
+                        sender=MessageSender.BOT,
+                        wam_id=_extract_sent_wam_id(result),
+                        body=LGPD_CONSENT_MESSAGE,
+                    )
+                )
+                conversation = await session.get(Conversation, reply.conversation_id)
+                if conversation is not None:
+                    conversation.last_bot_message_at = datetime.now(UTC)
+    logger.info("worker_consent_notice_sent", conversation_id=str(reply.conversation_id))
 
 
 async def _handle_service_unavailable(reply: _ReplyContext, redis=None) -> None:
@@ -4029,9 +4224,7 @@ async def _handle_select_professional(
     except ValueError:
         logger.error("worker_select_professional_bad_sentinel", raw=raw_id[:64])
     else:
-        professional = next(
-            (p for p in professionals or [] if p.id == professional_id), None
-        )
+        professional = next((p for p in professionals or [] if p.id == professional_id), None)
     tenant_snapshot = flow_snapshot[1] if flow_snapshot is not None else tenant
     if professional is None or tenant_snapshot is None:
         logger.warning(

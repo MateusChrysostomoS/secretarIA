@@ -65,7 +65,7 @@ async def tenant(db) -> Tenant:
             id=uuid4(),
             clinic_name="Clinic A",
             phone_number_id=None,
-            greeting_message="antes",
+            clinic_description="antes",
         )
         session.add(t)
         await session.commit()
@@ -148,7 +148,7 @@ async def test_saves_tenant_and_professional_in_one_call(
     response = await client.put(
         CONFIGURATION,
         json={
-            "tenant": {"greeting_message": "depois", "collect_insurance": True},
+            "tenant": {"clinic_description": "depois", "collect_insurance": True},
             "professional_id": str(professional.id),
             "professional": {"specialty": "depois", "business_hours": HOURS_B},
         },
@@ -156,11 +156,11 @@ async def test_saves_tenant_and_professional_in_one_call(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["tenant"]["greeting_message"] == "depois"
+    assert body["tenant"]["clinic_description"] == "depois"
     assert body["professional"]["specialty"] == "depois"
 
     t, p = await _reload(db, tenant.id, professional.id)
-    assert t.greeting_message == "depois"
+    assert t.clinic_description == "depois"
     assert t.collect_insurance is True
     assert p.specialty == "depois"
     assert p.business_hours == HOURS_B
@@ -170,7 +170,7 @@ async def test_response_matches_a_later_get(client: AsyncClient, db, tenant, pro
     """The PUT response is built by the same readers the GETs use, so a client
     can hydrate straight from it without a follow-up round trip."""
     payload = {
-        "tenant": {"greeting_message": "depois"},
+        "tenant": {"clinic_description": "depois"},
         "professional_id": str(professional.id),
         "professional": {"specialty": "depois"},
     }
@@ -185,12 +185,12 @@ async def test_response_matches_a_later_get(client: AsyncClient, db, tenant, pro
 
 
 async def test_tenant_only_patch_returns_null_professional(client: AsyncClient, db, tenant) -> None:
-    response = await client.put(CONFIGURATION, json={"tenant": {"greeting_message": "só tenant"}})
+    response = await client.put(CONFIGURATION, json={"tenant": {"clinic_description": "só tenant"}})
     assert response.status_code == 200
     assert response.json()["professional"] is None
 
     t, _ = await _reload(db, tenant.id)
-    assert t.greeting_message == "só tenant"
+    assert t.clinic_description == "só tenant"
 
 
 async def test_professional_only_patch_leaves_tenant_alone(
@@ -207,7 +207,7 @@ async def test_professional_only_patch_leaves_tenant_alone(
 
     t, p = await _reload(db, tenant.id, professional.id)
     assert p.specialty == "só profissional"
-    assert t.greeting_message == "antes"  # untouched
+    assert t.clinic_description == "antes"  # untouched
 
 
 async def test_repeating_the_same_payload_converges(
@@ -216,7 +216,7 @@ async def test_repeating_the_same_payload_converges(
     """PUT is idempotent: a double click, or a retry after a timed-out
     response, must not produce a second, different state."""
     payload = {
-        "tenant": {"greeting_message": "mesmo", "appointment_duration_min": 45},
+        "tenant": {"clinic_description": "mesmo", "appointment_duration_min": 45},
         "professional_id": str(professional.id),
         "professional": {"specialty": "mesmo", "business_hours": HOURS_B},
     }
@@ -227,7 +227,7 @@ async def test_repeating_the_same_payload_converges(
     assert first.json() == second.json()
 
     t, p = await _reload(db, tenant.id, professional.id)
-    assert (t.greeting_message, t.appointment_duration_min) == ("mesmo", 45)
+    assert (t.clinic_description, t.appointment_duration_min) == ("mesmo", 45)
     assert (p.specialty, p.business_hours) == ("mesmo", HOURS_B)
 
     # And exactly one professional row still exists for this tenant.
@@ -249,7 +249,7 @@ async def test_unknown_professional_leaves_tenant_unchanged(
     response = await client.put(
         CONFIGURATION,
         json={
-            "tenant": {"greeting_message": "NAO DEVE SER GRAVADO"},
+            "tenant": {"clinic_description": "NAO DEVE SER GRAVADO"},
             "professional_id": str(uuid4()),
             "professional": {"specialty": "x"},
         },
@@ -257,7 +257,7 @@ async def test_unknown_professional_leaves_tenant_unchanged(
     assert response.status_code == 404
 
     t, _ = await _reload(db, tenant.id)
-    assert t.greeting_message == "antes"
+    assert t.clinic_description == "antes"
 
 
 async def test_foreign_professional_is_404_and_changes_nothing(
@@ -268,7 +268,7 @@ async def test_foreign_professional_is_404_and_changes_nothing(
     response = await client.put(
         CONFIGURATION,
         json={
-            "tenant": {"greeting_message": "NAO DEVE SER GRAVADO"},
+            "tenant": {"clinic_description": "NAO DEVE SER GRAVADO"},
             "professional_id": str(other_tenant_professional.id),
             "professional": {"specialty": "invadido"},
         },
@@ -276,7 +276,7 @@ async def test_foreign_professional_is_404_and_changes_nothing(
     assert response.status_code == 404
 
     t, p = await _reload(db, tenant.id, other_tenant_professional.id)
-    assert t.greeting_message == "antes"
+    assert t.clinic_description == "antes"
     assert p.specialty is None  # the other clinic's row is untouched too
 
 
@@ -284,7 +284,7 @@ async def test_malformed_professional_id_is_404_not_500(client: AsyncClient, db,
     response = await client.put(
         CONFIGURATION,
         json={
-            "tenant": {"greeting_message": "NAO DEVE SER GRAVADO"},
+            "tenant": {"clinic_description": "NAO DEVE SER GRAVADO"},
             "professional_id": "not-a-uuid",
             "professional": {"specialty": "x"},
         },
@@ -292,7 +292,7 @@ async def test_malformed_professional_id_is_404_not_500(client: AsyncClient, db,
     assert response.status_code == 404
 
     t, _ = await _reload(db, tenant.id)
-    assert t.greeting_message == "antes"
+    assert t.clinic_description == "antes"
 
 
 async def test_invalid_professional_patch_rejects_whole_request(
@@ -303,7 +303,7 @@ async def test_invalid_professional_patch_rejects_whole_request(
     response = await client.put(
         CONFIGURATION,
         json={
-            "tenant": {"greeting_message": "NAO DEVE SER GRAVADO"},
+            "tenant": {"clinic_description": "NAO DEVE SER GRAVADO"},
             "professional_id": str(professional.id),
             "professional": {"business_hours": {"monday": [{"start": "18:00", "end": "08:00"}]}},
         },
@@ -311,7 +311,7 @@ async def test_invalid_professional_patch_rejects_whole_request(
     assert response.status_code == 422
 
     t, p = await _reload(db, tenant.id, professional.id)
-    assert t.greeting_message == "antes"
+    assert t.clinic_description == "antes"
     assert p.business_hours == HOURS_A
 
 
@@ -345,7 +345,7 @@ async def test_blocked_activation_also_discards_the_scalars_sent_with_it(
     response = await client.put(
         CONFIGURATION,
         json={
-            "tenant": {"greeting_message": "NAO DEVE SER GRAVADO", "is_active": True},
+            "tenant": {"clinic_description": "NAO DEVE SER GRAVADO", "is_active": True},
             "professional_id": str(professional.id),
             "professional": {"specialty": "NAO DEVE SER GRAVADO"},
         },
@@ -353,7 +353,7 @@ async def test_blocked_activation_also_discards_the_scalars_sent_with_it(
     assert response.status_code == 422
 
     t, p = await _reload(db, tenant.id, professional.id)
-    assert t.greeting_message == "antes"
+    assert t.clinic_description == "antes"
     assert t.is_active is False
     assert p.specialty == "antes"
 
@@ -381,9 +381,7 @@ async def test_activation_succeeds_when_the_same_request_supplies_prerequisites(
         json={
             "tenant": {
                 "business_hours": HOURS_A,
-                "appointment_types": [
-                    {"name": "Consulta", "duration_min": 30, "is_active": True}
-                ],
+                "appointment_types": [{"name": "Consulta", "duration_min": 30, "is_active": True}],
                 "is_active": True,
             },
             "professional_id": str(professional.id),
@@ -415,14 +413,14 @@ async def test_failure_between_validation_and_commit_rolls_both_back(
         await client.put(
             CONFIGURATION,
             json={
-                "tenant": {"greeting_message": "NAO DEVE SER GRAVADO"},
+                "tenant": {"clinic_description": "NAO DEVE SER GRAVADO"},
                 "professional_id": str(professional.id),
                 "professional": {"specialty": "NAO DEVE SER GRAVADO"},
             },
         )
 
     t, p = await _reload(db, tenant.id, professional.id)
-    assert t.greeting_message == "antes"
+    assert t.clinic_description == "antes"
     assert p.specialty == "antes"
 
 
@@ -434,7 +432,7 @@ async def test_failure_between_validation_and_commit_rolls_both_back(
 async def test_unknown_top_level_key_is_rejected(client: AsyncClient, tenant) -> None:
     response = await client.put(
         CONFIGURATION,
-        json={"tenant": {"greeting_message": "x"}, "professionalId": "camelCase"},
+        json={"tenant": {"clinic_description": "x"}, "professionalId": "camelCase"},
     )
     assert response.status_code == 422
 
@@ -444,12 +442,12 @@ async def test_professional_id_without_patch_is_rejected(
 ) -> None:
     response = await client.put(
         CONFIGURATION,
-        json={"tenant": {"greeting_message": "x"}, "professional_id": str(professional.id)},
+        json={"tenant": {"clinic_description": "x"}, "professional_id": str(professional.id)},
     )
     assert response.status_code == 422
 
     t, _ = await _reload(db, tenant.id)
-    assert t.greeting_message == "antes"
+    assert t.clinic_description == "antes"
 
 
 async def test_professional_patch_without_id_is_rejected(client: AsyncClient, tenant) -> None:
@@ -471,11 +469,11 @@ async def test_empty_body_is_rejected_rather_than_a_fake_success(
 
 
 async def test_legacy_tenant_put_still_saves(client: AsyncClient, db, tenant) -> None:
-    response = await client.put("/tenants/me/config", json={"greeting_message": "legado"})
+    response = await client.put("/tenants/me/config", json={"clinic_description": "legado"})
     assert response.status_code == 200
 
     t, _ = await _reload(db, tenant.id)
-    assert t.greeting_message == "legado"
+    assert t.clinic_description == "legado"
 
 
 async def test_legacy_and_aggregate_share_the_activation_gate(client: AsyncClient, tenant) -> None:

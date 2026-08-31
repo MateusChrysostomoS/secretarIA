@@ -154,7 +154,18 @@ class TenantConfigUpdate(BaseModel):
     `update_config`.
     """
 
-    greeting_message: str | None = Field(default=None, max_length=4000)
+    # The ONE clinic-authored slot in the first-contact greeting frame (see
+    # services/greeting_template.py). `greeting_message` is INTENTIONALLY gone
+    # from this payload, exactly as `greeting_buttons` went before it: the
+    # first-contact greeting is now product copy, not clinic free text. A PUT
+    # that still sends it is ignored silently rather than rejected, so an older
+    # frontend build cannot 422 on save mid-deploy.
+    #
+    # The 4000 here is only the coarse Pydantic floor. The REAL cap is
+    # per-clinic — it shrinks as `clinic_name` grows — so it cannot be
+    # expressed on the field: it is enforced in services/tenant_config.py,
+    # the layer that actually has the tenant row.
+    clinic_description: str | None = Field(default=None, max_length=4000)
     returning_greeting_message: str | None = Field(default=None, max_length=4000)
     persona_notes: str | None = Field(default=None, max_length=4000)
     post_consult_message: str | None = Field(default=None, max_length=4000)
@@ -208,8 +219,7 @@ class TenantConfigUpdate(BaseModel):
         if buttons is not None:
             if not isinstance(buttons, list) or len(buttons) > MAX_GREETING_BUTTONS:
                 raise ValueError(
-                    f"initial_flows.buttons must be a list of at most "
-                    f"{MAX_GREETING_BUTTONS} labels"
+                    f"initial_flows.buttons must be a list of at most {MAX_GREETING_BUTTONS} labels"
                 )
             for label in buttons:
                 if not isinstance(label, str) or not label.strip():
@@ -233,15 +243,21 @@ class TenantConfigUpdate(BaseModel):
         """The greeting always ships with fixed action buttons attached.
 
         Since the fixed-greeting-buttons round (see
-        docs/CHECKPOINT_fixed_greeting_buttons.md), `greeting_message` /
-        `returning_greeting_message` are ALWAYS sent with the product-defined
-        action buttons (workers/tasks.py::_greeting_buttons_for) whenever
-        either is configured at all - there is no more "buttons vs plain
-        text" choice for the hub to make. So each must unconditionally fit
-        WhatsApp's smaller interactive-body cap (1024 chars), not the plain
-        4096-char text cap the Field on its own allows.
+        docs/CHECKPOINT_fixed_greeting_buttons.md), the greeting is ALWAYS
+        sent with the product-defined action buttons
+        (workers/tasks.py::_greeting_buttons_for) - there is no more "buttons
+        vs plain text" choice for the hub to make. So it must unconditionally
+        fit WhatsApp's smaller interactive-body cap (1024 chars), not the
+        plain 4096-char text cap the Field on its own allows.
+
+        Only `returning_greeting_message` is checked here now. The
+        first-contact greeting is no longer a field on this payload at all
+        (it is the rendered frame), and its clinic-authored slot,
+        `clinic_description`, needs the tenant's own `clinic_name` to know
+        its budget - a value this schema does not have. That check therefore
+        lives in services/tenant_config.py::apply_tenant_config.
         """
-        for value in (self.greeting_message, self.returning_greeting_message):
+        for value in (self.returning_greeting_message,):
             if value is not None and len(value) > MAX_GREETING_WITH_BUTTONS_CHARS:
                 raise ValueError(
                     f"greeting must be at most {MAX_GREETING_WITH_BUTTONS_CHARS} "
@@ -271,7 +287,20 @@ class TenantConfigRead(BaseModel):
     """
 
     clinic_name: str
-    greeting_message: str | None
+    # The clinic's own slot in the greeting frame, plus everything the hub UI
+    # needs to show the clinic exactly what its patients will receive WITHOUT
+    # re-typing the frame in TypeScript. `greeting_preview_template` is the
+    # real message (same function the worker sends) with the clinic's slot
+    # replaced by `greeting_template.PREVIEW_PLACEHOLDER`, so the hub can
+    # interpolate what the clinic is TYPING and show a live preview. Serving a
+    # fully-rendered string instead would force the frontend to re-type 800+
+    # characters of frame copy, which guarantees preview and reality drift
+    # apart the first time either is edited. `clinic_description_max` is this
+    # clinic's remaining budget, which shrinks as `clinic_name` grows. Both are
+    # DERIVED and read-only; a PUT that sends them is ignored.
+    clinic_description: str | None
+    greeting_preview_template: str
+    clinic_description_max: int
     returning_greeting_message: str | None
     persona_notes: str | None
     post_consult_message: str | None

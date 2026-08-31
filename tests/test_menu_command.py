@@ -87,6 +87,15 @@ WA_ID = "5511988887777"
         "/recomeçar",
         "/inicio",
         "/início",
+        # Slash-less variants, added with the greeting frame. Not cosmetic: the
+        # frame tells every patient "Errou? Digite *voltar*", and no patient
+        # types a slash command — the promise was dead copy without these.
+        "menu",
+        "voltar",
+        "VOLTAR",
+        "  voltar  ",
+        "recomeçar",
+        "início",
     ],
 )
 def test_recognised_menu_triggers(body: str) -> None:
@@ -96,7 +105,11 @@ def test_recognised_menu_triggers(body: str) -> None:
 @pytest.mark.parametrize(
     "body",
     [
-        "menu",
+        # The bare words match only as the WHOLE body, so ordinary sentences
+        # that merely contain them keep routing normally.
+        "quero voltar na segunda",
+        "posso voltar depois?",
+        "menu de serviços",
         "/menus",
         "/menu agora",
         "olá /menu",
@@ -472,9 +485,7 @@ async def test_no_delete_statement_is_reachable_from_the_webhook(
 # --------------------------------------------------------------------------
 
 
-async def test_menu_is_ignored_while_a_human_is_active(
-    db, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_menu_is_ignored_while_a_human_is_active(db, monkeypatch: pytest.MonkeyPatch) -> None:
     """Explicit contract: with a human on the line `/menu` is recorded and
     IGNORED. It is never a way for the patient to take the bot back."""
     _set_allowlist(monkeypatch, "")

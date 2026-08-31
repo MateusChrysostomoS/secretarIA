@@ -49,7 +49,27 @@ class Tenant(Base):
     precheck_enabled: Mapped[bool] = mapped_column(default=False)
 
     # --- Tenant config (edited via the doctor hub; all non-sensitive) ---
-    # Literal first-contact greeting (sent verbatim, not improvised by the LLM).
+    # The ONE clinic-authored slot in the first-contact greeting: what this
+    # clinic offers, its values, a differentiator. Rendered INTO the fixed
+    # product frame (services/greeting_template.py::GREETING_FRAME), which
+    # supplies everything around it - the automated-assistant disclosure, the
+    # "no medical advice here" line, the button guidance, the emergency
+    # escape. Deliberately short: the greeting always ships with action
+    # buttons, so the WHOLE rendered message must fit WhatsApp's 1024-char
+    # interactive body, leaving ~180 chars here. The per-clinic budget is
+    # computed by greeting_template.clinic_description_budget (it shrinks as
+    # clinic_name grows) and enforced in services/tenant_config.py, which is
+    # where the tenant row - and therefore the name - is actually available.
+    clinic_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ORPHANED as of the greeting-frame round (migration c1f4a8b6d2e9) - no
+    # code reads or writes this column anymore. The first-contact greeting is
+    # now the product frame above, not clinic free text, for the same reason
+    # `greeting_buttons` below stopped being clinic free text: the
+    # obligations it carries cannot be optional per clinic. NOT reused as the
+    # description slot on purpose - it holds WHOLE greetings today, and
+    # rendering one inside a frame that already opens the same way is exactly
+    # the duplicated opener that round removed. Kept (not dropped) for a
+    # future cleanup migration only.
     greeting_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Greeting sent to a patient who has contacted the clinic before (a known
     # patient starting a fresh conversation). Supports a `{{name}}` placeholder
@@ -63,9 +83,7 @@ class Tenant(Base):
     # clinic's own free text; the hub PUT no longer accepts this field. Kept
     # (not dropped) for a future cleanup migration only - do not reintroduce
     # a read/write path onto it without re-reading that checkpoint doc.
-    greeting_buttons: Mapped[list] = mapped_column(
-        JSON, server_default=text("'[]'"), default=list
-    )
+    greeting_buttons: Mapped[list] = mapped_column(JSON, server_default=text("'[]'"), default=list)
     # Tone/persona instructions injected into the system prompt (LLM interprets).
     persona_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Copy the secretary will send after a consult. Sending itself is wired by
@@ -82,21 +100,15 @@ class Tenant(Base):
         String(64), server_default="America/Sao_Paulo", default="America/Sao_Paulo"
     )
     # Fallback consult duration used when no appointment type applies.
-    appointment_duration_min: Mapped[int] = mapped_column(
-        Integer, server_default="30", default=30
-    )
+    appointment_duration_min: Mapped[int] = mapped_column(Integer, server_default="30", default=30)
     # Per-weekday availability windows, e.g.
     #   {"monday": [{"start": "08:00", "end": "12:00"}, ...], "tuesday": [...], ...}
-    business_hours: Mapped[dict] = mapped_column(
-        JSON, server_default=text("'{}'"), default=dict
-    )
+    business_hours: Mapped[dict] = mapped_column(JSON, server_default=text("'{}'"), default=dict)
     # Bookable reasons, e.g.
     #   [{"name": "Primeira consulta", "description": "...",
     #     "duration_min": 40, "is_active": true, "sort_order": 0,
     #     "requirements": ["Jejum de 8 horas"]}, ...]
-    appointment_types: Mapped[list] = mapped_column(
-        JSON, server_default=text("'[]'"), default=list
-    )
+    appointment_types: Mapped[list] = mapped_column(JSON, server_default=text("'[]'"), default=list)
     google_calendar_id: Mapped[str] = mapped_column(
         String(255), server_default="primary", default="primary"
     )
@@ -115,16 +127,12 @@ class Tenant(Base):
     )
     # Gates whether the bot answers for this tenant. Cannot be true without a
     # connected Calendar + at least one active appointment type and window.
-    is_active: Mapped[bool] = mapped_column(
-        Boolean, server_default=text("false"), default=False
-    )
+    is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("false"), default=False)
     # Deterministic (zero-LLM) entry flows configuration. Shape, e.g.:
     #   {"enabled": true, "menu_label": "Como posso te ajudar?",
     #    "buttons": ["Serviços e Custo", "Horários", "Outro"]}
     # Empty dict / "enabled" false = the legacy full-LLM path is used.
-    initial_flows: Mapped[dict] = mapped_column(
-        JSON, server_default=text("'{}'"), default=dict
-    )
+    initial_flows: Mapped[dict] = mapped_column(JSON, server_default=text("'{}'"), default=dict)
 
     # Optional email address for operational alerts (e.g. calendar access lost).
     contact_email: Mapped[str | None] = mapped_column(String(254), nullable=True)
@@ -154,9 +162,7 @@ class Tenant(Base):
     pix_deposit_percent: Mapped[int] = mapped_column(Integer, server_default="30", default=30)
     # Hours before the appointment start within which a cancellation still
     # gets a FULL refund (see deposit_lifecycle.on_appointment_cancelled).
-    pix_refund_window_hours: Mapped[int] = mapped_column(
-        Integer, server_default="24", default=24
-    )
+    pix_refund_window_hours: Mapped[int] = mapped_column(Integer, server_default="24", default=24)
     # "total" (clinic keeps the whole deposit) | "partial" (see
     # pix_partial_refund_percent) — applied when a cancellation lands OUTSIDE
     # the refund window (i.e. too close to the appointment).
@@ -170,9 +176,7 @@ class Tenant(Base):
     # How many times an appointment WITH a live deposit may be rescheduled
     # before register_reschedule starts refusing (0 = no reschedule allowed
     # at all once a deposit exists).
-    pix_reschedule_limit: Mapped[int] = mapped_column(
-        Integer, server_default="2", default=2
-    )
+    pix_reschedule_limit: Mapped[int] = mapped_column(Integer, server_default="2", default=2)
 
     # --- Onboarding / multi-professional (cross-service contract v1) ---
     # When the WhatsApp number was connected (phone_number_id/waba_id set).

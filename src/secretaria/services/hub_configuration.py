@@ -41,6 +41,10 @@ from secretaria.models.professional import Professional
 from secretaria.schemas.config import TenantConfigRead
 from secretaria.schemas.professional import ProfessionalListItem
 from secretaria.services import tenant_config as cfg
+from secretaria.services.greeting_template import (
+    clinic_description_budget,
+    greeting_preview_template,
+)
 from secretaria.services.service_catalog import entry_service_id, load_service_catalog
 
 # ---------------------------------------------------------------------------
@@ -71,6 +75,23 @@ class ActivationBlocked(Exception):
         self.reason = reason
 
 
+class ClinicDescriptionTooLong(ActivationBlocked):
+    """`clinic_description` does not fit this clinic's slot in the greeting.
+
+    A SUBCLASS of ActivationBlocked purely so both PUT handlers
+    (api/hub/config.py) catch it through their existing `except` and produce
+    the same 422-plus-rollback they already produce — the rollback is what
+    keeps an over-budget description out of the database, since
+    `apply_tenant_config` assigns before it validates. The only cost is that
+    `hub_configuration_rolled_back` logs `reason="activation_blocked"` for
+    this case too; the 422 the clinic actually sees is precise.
+
+    It cannot be a plain Pydantic `max_length` on the field: the budget is
+    per-clinic (it shrinks as `clinic_name` grows), so only this layer, which
+    holds the tenant row, can compute it.
+    """
+
+
 class UnknownServiceIds(Exception):
     """An `appointment_types` patch referenced catalog ids this clinic has none of.
 
@@ -90,7 +111,11 @@ class UnknownServiceIds(Exception):
 # Tenant config fields a PUT can set directly. `is_active` is NOT here: it is
 # gated by the activation rule and handled separately in apply_tenant_config.
 TENANT_SCALAR_FIELDS: tuple[str, ...] = (
-    "greeting_message",
+    # `greeting_message` was REMOVED here by the greeting-frame round, the same
+    # way `greeting_buttons` was removed by the fixed-buttons round: the
+    # first-contact greeting is product copy now, and the clinic writes only
+    # the description slot below. The column still exists but nothing writes it.
+    "clinic_description",
     "returning_greeting_message",
     "persona_notes",
     "post_consult_message",
@@ -243,6 +268,19 @@ async def apply_tenant_config(session: AsyncSession, tenant: Tenant, data: dict)
         if field_name in data:
             setattr(tenant, field_name, data[field_name])
 
+    # Budget check for the greeting's clinic slot. Runs on the PATCHED tenant
+    # so a PUT that changes `clinic_name` and `clinic_description` together is
+    # judged against the name it is actually saving, not the stored one.
+    if "clinic_description" in data:
+        budget = clinic_description_budget(tenant.clinic_name)
+        typed = len((tenant.clinic_description or "").strip())
+        if typed > budget:
+            raise ClinicDescriptionTooLong(
+                f"A descrição da clínica precisa ter no máximo {budget} caracteres "
+                f"(tem {typed}). A primeira mensagem do WhatsApp já usa o restante "
+                "do limite de 1024 caracteres com o texto padrão."
+            )
+
     # Gate reads the patched tenant. Deactivation is never gated.
     await check_tenant_activation(session, tenant, data)
 
@@ -312,7 +350,13 @@ async def tenant_read_model(session: AsyncSession, tenant: Tenant) -> TenantConf
     asaas_connected = await cfg.has_asaas_api_key(session, tenant.id)
     return TenantConfigRead(
         clinic_name=tenant.clinic_name,
-        greeting_message=tenant.greeting_message,
+        clinic_description=tenant.clinic_description,
+        # Rendered SERVER-SIDE, by the same function the worker sends, so the
+        # preview the clinic approves in the hub and the message the patient
+        # receives cannot drift. The alternative — re-typing the frame in the
+        # frontend — guarantees they eventually do.
+        greeting_preview_template=greeting_preview_template(tenant.clinic_name),
+        clinic_description_max=clinic_description_budget(tenant.clinic_name),
         returning_greeting_message=tenant.returning_greeting_message,
         persona_notes=tenant.persona_notes,
         post_consult_message=tenant.post_consult_message,

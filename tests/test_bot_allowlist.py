@@ -48,6 +48,7 @@ from secretaria.models import (  # noqa: E402
     ProcessedEvent,
     Tenant,
 )
+from secretaria.services.greeting_template import render_greeting  # noqa: E402
 from secretaria.workers import tasks  # noqa: E402
 
 PHONE_NUMBER_ID = "1234567890"
@@ -105,6 +106,7 @@ async def db():
 @pytest.fixture(autouse=True)
 def _wire_db(monkeypatch: pytest.MonkeyPatch, db):
     monkeypatch.setattr(tasks, "async_session_factory", db)
+
     # The greeting-adaptation path does its own indexed reads; stub it out
     # exactly like test_patient_context.py's opening-router test so these
     # tests exercise only the allowlist guard, not opening-state resolution.
@@ -159,16 +161,14 @@ async def test_empty_allowlist_behaves_like_before(db, monkeypatch: pytest.Monke
     )
 
     assert reply is not None
-    assert reply.greeting_override == tenant.greeting_message
+    assert reply.greeting_override == render_greeting(tenant.clinic_name, tenant.clinic_description)
     assert await _count(db, Patient) == 1
     assert await _count(db, Conversation) == 1
     assert await _count(db, ConsentEvent) == 1
     assert await _count(db, ProcessedEvent) == 1
 
 
-async def test_greeting_uses_tenant_whatsapp_credentials(
-    db, monkeypatch: pytest.MonkeyPatch
-):
+async def test_greeting_uses_tenant_whatsapp_credentials(db, monkeypatch: pytest.MonkeyPatch):
     _set_allowlist(monkeypatch, "")
     tenant = await _seed_tenant(db)
     reply = await tasks._persist_inbound_message(
@@ -198,7 +198,10 @@ async def test_greeting_uses_tenant_whatsapp_credentials(
     assert captured["tenant"].id == tenant.id
     assert captured["token"] == "tenant-token"
     assert captured["to"] == "5511988887777"
-    assert captured["body"] == tenant.greeting_message
+    # The first-contact body is the rendered product frame now, not the
+    # tenant's own `greeting_message` (which this round orphaned) — see
+    # services/greeting_template.py.
+    assert captured["body"] == render_greeting(tenant.clinic_name, tenant.clinic_description)
 
 
 async def test_wa_id_off_allowlist_is_dropped_silently(db, monkeypatch: pytest.MonkeyPatch):
@@ -235,7 +238,7 @@ async def test_wa_id_on_allowlist_flows_normally(db, monkeypatch: pytest.MonkeyP
     )
 
     assert reply is not None
-    assert reply.greeting_override == tenant.greeting_message
+    assert reply.greeting_override == render_greeting(tenant.clinic_name, tenant.clinic_description)
     assert await _count(db, Patient) == 1
     assert await _count(db, Conversation) == 1
     assert await _count(db, ConsentEvent) == 1
@@ -289,9 +292,7 @@ async def test_inactive_tenant_on_allowlist_still_gets_the_fallback(
     assert reply.tenant_id == tenant.id
 
 
-async def test_duplicate_event_off_allowlist_is_still_deduped(
-    db, monkeypatch: pytest.MonkeyPatch
-):
+async def test_duplicate_event_off_allowlist_is_still_deduped(db, monkeypatch: pytest.MonkeyPatch):
     """A redelivery of an already-dropped event hits the pre-existing
     idempotency fast path (`_event_already_processed`), same as any other
     event - the allowlist guard does not interfere with dedup."""

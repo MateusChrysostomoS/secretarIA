@@ -256,7 +256,14 @@ async def test_sends_the_first_contact_greeting(db) -> None:
     await tasks._handle_patient_messages(_value(COMMAND, wam_id="wamid.wipe.greeting"))
 
     bodies = [call[2] for call in _FakeWhatsAppClient.sent]
-    assert "Olá! Bem-vindo à Clínica." in bodies
+    # Since the greeting-frame round the first-contact message is the rendered
+    # product frame, not the tenant's own `greeting_message`. Asserted by its
+    # obligation lines rather than the whole literal: this test is about the
+    # command replaying a real first contact, and pinning the full copy here
+    # would make every future wording tweak fail an unrelated test (the frame
+    # itself is pinned in tests/test_greeting_template.py).
+    assert any("assistente virtual automatizado" in body for body in bodies)
+    assert any("Em emergência, não use este canal" in body for body in bodies)
 
 
 # --------------------------------------------------------------------------

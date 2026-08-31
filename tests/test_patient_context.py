@@ -54,6 +54,7 @@ from secretaria.services.flow_router import (  # noqa: E402
     LABEL_OTHER,
     LABEL_RESCHEDULE,
 )
+from secretaria.services.greeting_template import render_greeting  # noqa: E402
 from secretaria.services.patient_context import (  # noqa: E402
     PatientOpeningContext,
     PatientOpeningState,
@@ -426,9 +427,7 @@ def test_upcoming_greeting_degrades_without_catalog_match() -> None:
         ],
     )
 
-    result = tasks._adapt_greeting_to_state(
-        "Olá!", context, tenant, tasks._UpcomingGreetingData()
-    )
+    result = tasks._adapt_greeting_to_state("Olá!", context, tenant, tasks._UpcomingGreetingData())
 
     assert "Consulta antiga" in result
     assert _tz_when(start_at) in result
@@ -718,7 +717,9 @@ async def test_opening_router_only_on_opening_message(db, monkeypatch: pytest.Mo
     )
     assert calls == [(tenant.id, patient.id)]
     assert reply1 is not None
-    assert reply1.greeting_override == tenant.greeting_message
+    assert reply1.greeting_override == render_greeting(
+        tenant.clinic_name, tenant.clinic_description
+    )
 
     reply2 = await tasks._persist_inbound_message(
         phone_number_id=tenant.phone_number_id,

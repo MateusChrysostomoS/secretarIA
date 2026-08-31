@@ -29,7 +29,17 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from secretaria.api.hub.deps import get_current_tenant  # noqa: E402
 from secretaria.core.database import Base, get_session  # noqa: E402
+from secretaria.core.whatsapp_limits import MAX_INTERACTIVE_BODY_CHARS  # noqa: E402
 from secretaria.models import Tenant  # noqa: E402
+from secretaria.services.greeting_template import (  # noqa: E402
+    PREVIEW_PLACEHOLDER,
+    clinic_description_budget,
+)
+
+# The seeded clinic name. Named because the greeting budget DEPENDS on it:
+# a longer name leaves the clinic fewer characters, so the cap test has to
+# compute its bound from this exact value.
+TENANT_CLINIC_NAME = "Clinic"
 
 CONFIG = "/tenants/me/config"
 
@@ -53,7 +63,7 @@ async def tenant(db) -> Tenant:
     """A tenant with NO phone_number_id (not connected) and NO Calendar -
     the exact state the "plain save must still work" regression guards."""
     async with db() as session:
-        t = Tenant(id=uuid4(), clinic_name="Clinic", phone_number_id=None)
+        t = Tenant(id=uuid4(), clinic_name=TENANT_CLINIC_NAME, phone_number_id=None)
         session.add(t)
         await session.commit()
         await session.refresh(t)
@@ -145,14 +155,12 @@ async def test_put_address_and_insurances_succeeds_while_disconnected(
     assert body["is_active"] is False  # untouched
 
 
-async def test_put_greeting_only_succeeds_while_disconnected(
-    client: AsyncClient, tenant
-) -> None:
+async def test_put_greeting_only_succeeds_while_disconnected(client: AsyncClient, tenant) -> None:
     """A completely unrelated config field (no address/insurance at all)
     must also never be blocked by the disconnected state."""
-    response = await client.put(CONFIG, json={"greeting_message": "Olá! Bem-vindo."})
+    response = await client.put(CONFIG, json={"clinic_description": "Oftalmologia geral."})
     assert response.status_code == 200
-    assert response.json()["greeting_message"] == "Olá! Bem-vindo."
+    assert response.json()["clinic_description"] == "Oftalmologia geral."
 
 
 async def test_put_empty_body_is_a_no_op_success(client: AsyncClient) -> None:
@@ -160,24 +168,22 @@ async def test_put_empty_body_is_a_no_op_success(client: AsyncClient) -> None:
     assert response.status_code == 200
 
 
-async def test_put_greeting_buttons_is_silently_ignored(
-    client: AsyncClient, db, tenant
-) -> None:
+async def test_put_greeting_buttons_is_silently_ignored(client: AsyncClient, db, tenant) -> None:
     """PUT no longer accepts this field at all: an incoming `greeting_buttons`
     is dropped like any other unrecognized key (pydantic's default `extra`
     behaviour on TenantConfigUpdate, which no longer declares the field) -
-    never persisted, never echoed back, and the sibling `greeting_message` in
-    the same request still saves normally."""
+    never persisted, never echoed back, and the sibling `clinic_description`
+    in the same request still saves normally."""
     response = await client.put(
         CONFIG,
         json={
-            "greeting_message": "Olá!",
+            "clinic_description": "Oftalmologia.",
             "greeting_buttons": ["Isso não deveria ser salvo"],
         },
     )
     assert response.status_code == 200
     body = response.json()
-    assert body["greeting_message"] == "Olá!"
+    assert body["clinic_description"] == "Oftalmologia."
     assert "greeting_buttons" not in body
 
     async with db() as session:
@@ -186,21 +192,39 @@ async def test_put_greeting_buttons_is_silently_ignored(
 
 
 async def test_put_greeting_message_over_button_cap_rejected(client: AsyncClient) -> None:
-    """The greeting is now ALWAYS sent with the fixed action buttons attached
-    (no more "with buttons" vs "plain text" choice - see
+    """The greeting is ALWAYS sent with the fixed action buttons attached (no
+    more "with buttons" vs "plain text" choice - see
     docs/CHECKPOINT_fixed_greeting_buttons.md), so it must fit WhatsApp's
-    1024-char interactive-body cap unconditionally - no sibling
-    `greeting_buttons` field needed in the same request to trigger this
-    anymore (that field doesn't exist on the schema at all now)."""
-    response = await client.put(CONFIG, json={"greeting_message": "x" * 1025})
+    1024-char interactive-body cap unconditionally.
+
+    Since the greeting-frame round the FIRST-CONTACT half of that budget is
+    spent by the product frame, so the clinic's slot is what gets checked, and
+    against a per-clinic budget rather than a flat 1024 - see
+    services/greeting_template.py::clinic_description_budget. Asserted against
+    the computed budget, never a hardcoded number: the frame's copy will be
+    edited, and a literal here would pin a stale budget and pass while
+    production overflowed.
+    """
+    budget = clinic_description_budget(TENANT_CLINIC_NAME)
+
+    response = await client.put(CONFIG, json={"clinic_description": "x" * (budget + 1)})
     assert response.status_code == 422
 
     response = await client.put(CONFIG, json={"returning_greeting_message": "x" * 1025})
     assert response.status_code == 422
 
-    # Exactly at the cap still succeeds.
-    response = await client.put(CONFIG, json={"greeting_message": "x" * 1024})
+    # Exactly at the budget still succeeds, and the whole rendered greeting
+    # lands exactly on WhatsApp's cap rather than one char over it.
+    response = await client.put(CONFIG, json={"clinic_description": "x" * budget})
     assert response.status_code == 200
+    # The wire carries the frame as a TEMPLATE (the clinic's slot replaced by
+    # a token) so the hub can preview what it is typing; rendering the accepted
+    # description back into it must land exactly on WhatsApp's cap.
+    body = response.json()
+    template = body["greeting_preview_template"]
+    assert PREVIEW_PLACEHOLDER in template
+    rendered = template.replace(PREVIEW_PLACEHOLDER, body["clinic_description"])
+    assert len(rendered) == MAX_INTERACTIVE_BODY_CHARS
 
 
 async def test_put_post_consult_fields_round_trip_while_disconnected(
@@ -284,9 +308,7 @@ async def test_put_activate_succeeds_once_prerequisites_met(
         CONFIG,
         json={
             "business_hours": {"monday": [{"start": "08:00", "end": "12:00"}]},
-            "appointment_types": [
-                {"name": "Consulta", "duration_min": 30, "is_active": True}
-            ],
+            "appointment_types": [{"name": "Consulta", "duration_min": 30, "is_active": True}],
             "is_active": True,
         },
     )
@@ -306,9 +328,7 @@ async def test_put_is_active_false_is_never_gated(client: AsyncClient) -> None:
 
 
 async def test_put_insurances_trims_and_drops_blank_entries(client: AsyncClient) -> None:
-    response = await client.put(
-        CONFIG, json={"insurances": ["  Unimed  ", "", "   ", "Amil"]}
-    )
+    response = await client.put(CONFIG, json={"insurances": ["  Unimed  ", "", "   ", "Amil"]})
     assert response.status_code == 200
     assert response.json()["insurances"] == ["Unimed", "Amil"]
 
@@ -405,7 +425,6 @@ async def test_put_appointment_type_requirement_too_long_is_422(client: AsyncCli
         },
     )
     assert response.status_code == 422
-
 
 
 # --------------------------------------------------------------------------
