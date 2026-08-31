@@ -46,7 +46,7 @@ from secretaria.ai.tools import manage_existing_appointment, start_guided_bookin
 from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger, wa_suffix
-from secretaria.core.whatsapp_limits import truncate_button_label
+from secretaria.core.whatsapp_limits import strip_decoration, truncate_button_label
 from secretaria.models import (
     AnalyticsEvent,
     Appointment,
@@ -2326,11 +2326,18 @@ def _appointment_context_text(
 
 
 def _label_match_body(body: str | None, label: str) -> bool:
-    """True when `body` equals `label` or its 20-char button truncation."""
-    target = (body or "").strip().casefold()
+    """True when `body` equals `label` or its 20-char button truncation.
+
+    Normalises through `strip_decoration` on both sides, exactly as
+    flow_router's and booking_scope's `_norm` do: the greeting card this matches
+    renders LABEL_CANCEL_APPT as "❌ Cancelar", and without the strip a patient
+    who typed "cancelar" - or tapped a greeting sent before FEAT 44 - would stop
+    reaching the manage flow.
+    """
+    target = strip_decoration(body).casefold()
     return bool(target) and (
-        target == label.strip().casefold()
-        or target == truncate_button_label(label).strip().casefold()
+        target == strip_decoration(label).casefold()
+        or target == strip_decoration(truncate_button_label(label)).casefold()
     )
 
 

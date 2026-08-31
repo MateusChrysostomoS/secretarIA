@@ -357,7 +357,7 @@ async def test_professional_tap_folds_presentation_into_the_service_card():
         "\n\nQual serviço você gostaria de agendar?"
     )
     # The selected professional's OWN services, not the tenant's.
-    assert services.rows[0][1] == "Consulta Cardio"
+    assert services.rows[0][1] == "🏥 Consulta Cardio"
 
 
 async def test_professional_without_profile_still_gets_one_card():
@@ -371,7 +371,7 @@ async def test_professional_without_profile_still_gets_one_card():
     # No specialty/about to fold in — just the name and the question.
     assert res.bubbles[0].body == "Dr. Bruno\n\nQual serviço você gostaria de agendar?"
     # Falls back to the tenant-wide services.
-    assert res.bubbles[0].rows[0][1] == "Consulta Geral"
+    assert res.bubbles[0].rows[0][1] == "🏥 Consulta Geral"
     assert res.flow_selected_professional_id == profs[1].id
 
 
@@ -426,7 +426,7 @@ async def test_choose_service_lists_the_clinics_unified_catalog():
     bubble = res.bubbles[0]
     assert isinstance(bubble, SlotsBubble)
     # Ana's own "Consulta Cardio" + Bruno's tenant-fallback "Consulta Geral".
-    assert [row[1] for row in bubble.rows] == ["Consulta Cardio", "Consulta Geral"]
+    assert [row[1] for row in bubble.rows] == ["🏥 Consulta Cardio", "🏥 Consulta Geral"]
 
 
 async def test_choose_service_deduplicates_a_shared_service():
@@ -441,7 +441,7 @@ async def test_choose_service_deduplicates_a_shared_service():
         BTN_CHOOSE_SERVICE,
         professionals=profs,
     )
-    assert [row[1] for row in res.bubbles[0].rows] == ["Consulta Cardio"]
+    assert [row[1] for row in res.bubbles[0].rows] == ["🏥 Consulta Cardio"]
 
 
 async def test_catalog_service_with_one_professional_selects_them_and_confirms():

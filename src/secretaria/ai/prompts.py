@@ -19,7 +19,11 @@ from __future__ import annotations
 from datetime import date
 from typing import TYPE_CHECKING
 
-from secretaria.core.whatsapp_limits import MAX_LIST_ROW_TITLE_CHARS
+from secretaria.core.whatsapp_limits import (
+    EMOJI_SCHEDULE,
+    MAX_LIST_ROW_TITLE_CHARS,
+    decorated_text_budget,
+)
 
 if TYPE_CHECKING:
     from secretaria.services.tenant_config import TenantRuntimeConfig
@@ -208,6 +212,13 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
     types_text = _format_appointment_types(
         config.appointment_types, config.appointment_duration_min
     )
+    # What a [SLOTS] label may actually contain. ai/formatter.py::_parse_slot_rows
+    # prepends the calendar emoji itself, so the model writes against a budget
+    # three characters smaller than the raw row cap - the calendar emoji carries
+    # an invisible U+FE0F on top of its separating space. Read at RENDER time,
+    # not at import, so the number the model is told still tracks
+    # MAX_LIST_ROW_TITLE_CHARS if that cap ever moves.
+    slot_label_chars = decorated_text_budget(EMOJI_SCHEDULE, MAX_LIST_ROW_TITLE_CHARS)
     safety_section = _format_safety_rules()
     professional_section = _format_professional_context(config)
     post_consult_section = _format_post_consult_knowledge(config)
@@ -261,7 +272,7 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
         "específico ou quando o slot pedido estiver ocupado e você quer "
         "oferecer alternativas):\n"
         "   [SLOTS]\n"
-        f"   <iso_datetime>|<rótulo de no máximo {MAX_LIST_ROW_TITLE_CHARS} caracteres>\n"
+        f"   <iso_datetime>|<rótulo de no máximo {slot_label_chars} caracteres>\n"
         "   ...\n"
         "   [/SLOTS]\n\n"
         "   Ex.:\n"
@@ -270,8 +281,9 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
         "   2026-05-29T15:00:00|15:00\n"
         "   2026-05-29T16:30:00|16:30\n"
         "   [/SLOTS]\n\n"
-        "   O rótulo é o que o paciente TOCA, e o WhatsApp corta "
-        f"qualquer rótulo acima de {MAX_LIST_ROW_TITLE_CHARS} caracteres "
+        "   O rótulo é o que o paciente TOCA. NÃO escreva emoji nele: o "
+        "sistema prepende 🗓️ a cada linha sozinho. O WhatsApp corta "
+        f"qualquer rótulo acima de {slot_label_chars} caracteres "
         "— escreva só a hora (\"14:00\") ou hora + uma palavra "
         "(\"14:00 Retorno\"), nunca uma frase.\n"
         "   No máximo 10 linhas. Antes do bloco escreva um balão curto tipo "

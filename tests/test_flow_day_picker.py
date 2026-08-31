@@ -307,7 +307,8 @@ async def test_day_picker_never_exceeds_the_whatsapp_row_cap(day_count, back_tar
     bubble = result.bubbles[0]
     assert isinstance(bubble, SlotsBubble)
     assert 1 <= len(bubble.rows) <= MAX_LIST_ROWS
-    # Row titles must survive the 24-char cap untruncated ("Seg, 01/03").
+    # Row titles must survive the 24-char cap untruncated ("🗓️ Seg, 01/03"):
+    # the emoji costs three of the budget and the format spends ten, so 13.
     assert all(len(title) <= 24 for title in _row_labels(bubble))
 
 
@@ -321,17 +322,22 @@ async def test_day_picker_shows_a_full_page_plus_its_two_controls():
     )
     labels = _row_labels(result.bubbles[0])
     assert len(labels) == MAX_LIST_ROWS
+    # Every DAY row carries the calendar emoji; the two CONTROL rows below do
+    # not - "Ver mais dias" pages forward through the same list rather than
+    # naming a day, and the back row wears the arrow instead.
     assert labels[:DAY_PICKER_PAGE_SIZE] == [
-        "Seg, 01/03",
-        "Ter, 02/03",
-        "Qua, 03/03",
-        "Qui, 04/03",
-        "Sex, 05/03",
-        "Sáb, 06/03",
-        "Dom, 07/03",
-        "Seg, 08/03",
+        "🗓️ Seg, 01/03",
+        "🗓️ Ter, 02/03",
+        "🗓️ Qua, 03/03",
+        "🗓️ Qui, 04/03",
+        "🗓️ Sex, 05/03",
+        "🗓️ Sáb, 06/03",
+        "🗓️ Dom, 07/03",
+        "🗓️ Seg, 08/03",
     ]
     assert labels[-2:] == [LABEL_MORE_DAYS, LABEL_ANOTHER_SERVICE]
+    assert LABEL_MORE_DAYS == "Ver mais dias"
+    assert LABEL_ANOTHER_SERVICE == "⬅️ Outro serviço"
 
 
 async def test_day_picker_hides_ver_mais_on_the_last_page():
@@ -393,14 +399,14 @@ async def test_ver_mais_dias_pages_forward_and_the_next_page_still_books():
         _conversation(), tenant, calendar, _control_tap(first.bubbles[0], LABEL_MORE_DAYS)
     )
     labels = _row_labels(second.bubbles[0])
-    assert labels[0] == "Ter, 09/03"  # page 2 starts where page 1 stopped
+    assert labels[0] == "🗓️ Ter, 09/03"  # page 2 starts where page 1 stopped
     assert second.flow_step == STEP_AWAITING_DAY
     assert LABEL_MORE_DAYS in labels  # 20 days -> a third page exists
 
     third = await route(
         _conversation(), tenant, calendar, _control_tap(second.bubbles[0], LABEL_MORE_DAYS)
     )
-    assert _row_labels(third.bubbles[0])[0] == "Qua, 17/03"
+    assert _row_labels(third.bubbles[0])[0] == "🗓️ Qua, 17/03"
     assert LABEL_MORE_DAYS not in _row_labels(third.bubbles[0])  # last page
 
     # A day tapped on the last page books like any other.
@@ -426,14 +432,14 @@ async def test_escolher_outro_dia_returns_to_the_page_it_came_from():
         _control_tap(slots.bubbles[0], LABEL_ANOTHER_DAY),
     )
     assert back_to_days.flow_step == STEP_AWAITING_DAY
-    assert _row_labels(back_to_days.bubbles[0])[0] == "Ter, 09/03"  # page 2 again
+    assert _row_labels(back_to_days.bubbles[0])[0] == "🗓️ Ter, 09/03"  # page 2 again
 
 
 async def test_a_stale_page_cursor_restarts_instead_of_showing_nothing():
     result = await enter_day_picker(
         _conversation(), _tenant(), _Calendar(day_count=3), duration_minutes=30, page=7
     )
-    assert _row_labels(result.bubbles[0])[0] == "Seg, 01/03"
+    assert _row_labels(result.bubbles[0])[0] == "🗓️ Seg, 01/03"
 
 
 # --- Voltar -----------------------------------------------------------------

@@ -170,7 +170,7 @@ async def test_default_tenant_stale_llm_conversation_is_released(db):
     # ...and ASKED, with the product default text and the gate armed so "Sim"
     # can still put them back where they were.
     assert reply.greeting_override == DEFAULT_CONTINUE_PROMPT
-    assert reply.greeting_buttons == ["Sim", "Não"]
+    assert reply.greeting_buttons == ["✅ Sim", "❌ Não"]
     assert conv.reactivation_origin == FlowState.LLM.value
 
 

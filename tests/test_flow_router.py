@@ -474,7 +474,7 @@ async def test_manage_entry_single_appointment_skips_pick_to_action_card():
     assert res.flow_step == STEP_MANAGE_ACTION
     assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)
     assert isinstance(res.bubbles[0], MenuBubble)
-    assert res.bubbles[0].labels == ["Remarcar", "Cancelar", "Voltar"]
+    assert res.bubbles[0].labels == ["Remarcar", "❌ Cancelar", "Voltar"]
 
 
 async def test_manage_entry_empty_returns_menu():
@@ -501,7 +501,7 @@ async def test_manage_pick_shows_action_card():
     assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)  # appointment id stored
     assert res.flow_selected_type is None  # never the overloaded column anymore
     assert isinstance(res.bubbles[0], MenuBubble)
-    assert res.bubbles[0].labels == ["Remarcar", "Cancelar", "Voltar"]
+    assert res.bubbles[0].labels == ["Remarcar", "❌ Cancelar", "Voltar"]
 
 
 async def test_manage_cancel_confirm_then_apply():
@@ -741,7 +741,7 @@ async def test_enter_manage_action_single_future_cancel_begins_directly():
     assert res.flow_step == STEP_MANAGE_CANCEL_CONFIRM
     assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)
     assert isinstance(res.bubbles[0], MenuBubble)
-    assert res.bubbles[0].labels == ["Sim", "Não"]
+    assert res.bubbles[0].labels == ["✅ Sim", "❌ Não"]
 
 
 async def test_enter_manage_action_multiple_shows_intent_pick_list():

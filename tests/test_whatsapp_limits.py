@@ -12,9 +12,20 @@ These tests exist to pin the two properties the rest of the flow depends on:
 """
 
 from secretaria.core.whatsapp_limits import (
+    DECORATION_EMOJI,
+    EMOJI_AFFIRMATIVE,
+    EMOJI_BACK,
+    EMOJI_NEGATIVE,
+    EMOJI_SCHEDULE,
+    EMOJI_SERVICE,
     MAX_BUTTON_LABEL_CHARS,
     MAX_LIST_ROW_TITLE_CHARS,
     TRUNCATION_MARK,
+    decorate,
+    decorate_and_truncate,
+    decorate_if_fits,
+    decorated_text_budget,
+    strip_decoration,
     truncate_button_label,
     truncate_list_row_title,
     truncate_plain,
@@ -133,3 +144,118 @@ def test_plain_truncation_has_no_mark_and_no_trim():
     # slice — including whatever whitespace the caller passed in.
     assert truncate_plain(" abcdef ", 4) == " abc"
     assert truncate_plain(None, 10) == ""
+
+
+# ---------------------------------------------------------------------------
+# Emoji decoration (FEAT 44) — the budget, and the inverse the matcher needs
+# ---------------------------------------------------------------------------
+
+
+def test_the_two_emoji_costs_are_not_the_same():
+    # The whole reason the budget is computed instead of assumed. The calendar
+    # and arrow carry an invisible U+FE0F variation selector, so they cost one
+    # MORE than the hospital/check/cross. A hand-written "minus 2" would put
+    # "⬅️ …" one character over the row cap - and the send path would then cut
+    # a fixed label the matcher compares against in full.
+    assert decorated_text_budget(EMOJI_SERVICE) == MAX_LIST_ROW_TITLE_CHARS - 2
+    assert decorated_text_budget(EMOJI_AFFIRMATIVE) == MAX_LIST_ROW_TITLE_CHARS - 2
+    assert decorated_text_budget(EMOJI_NEGATIVE) == MAX_LIST_ROW_TITLE_CHARS - 2
+    assert decorated_text_budget(EMOJI_SCHEDULE) == MAX_LIST_ROW_TITLE_CHARS - 3
+    assert decorated_text_budget(EMOJI_BACK) == MAX_LIST_ROW_TITLE_CHARS - 3
+
+
+def test_decorate_if_fits_decorates_a_name_that_fits():
+    assert decorate_if_fits(EMOJI_SERVICE, "Retorno") == "🏥 Retorno"
+
+
+def test_decorate_if_fits_lands_exactly_on_the_cap_at_the_budget():
+    name = "a" * decorated_text_budget(EMOJI_SERVICE)
+    result = decorate_if_fits(EMOJI_SERVICE, name)
+    assert result == f"{EMOJI_SERVICE} {name}"
+    assert len(result) == MAX_LIST_ROW_TITLE_CHARS
+
+
+def test_decorate_if_fits_yields_the_emoji_one_character_past_the_budget():
+    # The conservative rule: the emoji is a nicety, the name's distinguishing
+    # tail is not. One character too long and the row goes bare rather than
+    # spending two more of the name on decoration.
+    name = "a" * (decorated_text_budget(EMOJI_SERVICE) + 1)
+    result = decorate_if_fits(EMOJI_SERVICE, name)
+    assert result == name
+    assert EMOJI_SERVICE not in result
+
+
+def test_decorate_if_fits_never_makes_truncation_worse_than_it_already_was():
+    # Acceptance criterion: no name may end up MORE prone to a truncation
+    # collision than it was before the emoji existed. Undecorated names must
+    # come back byte-identical to what the old render produced.
+    for name in (
+        "Consulta de rotina adulto",
+        "Consulta de rotina infantil",
+        "Dr. Mateus Chrysostomo Neto",
+        "a" * 60,
+    ):
+        assert decorate_if_fits(EMOJI_SERVICE, name) == truncate_list_row_title(name)
+
+
+def test_prefix_heavy_names_keep_their_full_tail_through_decoration():
+    # The collision test above, re-run with the emoji in play. Both of these
+    # are past the budget, so both stay bare and keep every character of tail
+    # the cut left them - the decoration cannot shorten a name it declines.
+    adulto = decorate_if_fits(EMOJI_SERVICE, "Consulta de rotina adulto")
+    infantil = decorate_if_fits(EMOJI_SERVICE, "Consulta de rotina infantil")
+    assert adulto != infantil
+    assert adulto == "Consulta de rotina adul" + TRUNCATION_MARK
+    assert infantil == "Consulta de rotina infa" + TRUNCATION_MARK
+
+
+def test_two_short_names_that_differ_only_late_survive_decoration():
+    # The decorated case of the same property: when both names DO fit, the
+    # prefix is added to both and cannot merge them.
+    a = decorate_if_fits(EMOJI_SERVICE, "Retorno adulto")
+    b = decorate_if_fits(EMOJI_SERVICE, "Retorno infantil")
+    assert a != b
+    assert a.startswith(EMOJI_SERVICE) and b.startswith(EMOJI_SERVICE)
+    assert max(len(a), len(b)) <= MAX_LIST_ROW_TITLE_CHARS
+
+
+def test_decorate_and_truncate_always_decorates_and_never_overflows():
+    # The opposite trade, for labels that are NOT keys (slot rows). The emoji
+    # always appears; the text pays for it.
+    long_label = "Quinta-feira as 14:00 com a Dra. Mariana"
+    result = decorate_and_truncate(EMOJI_SCHEDULE, long_label)
+    assert result.startswith(EMOJI_SCHEDULE)
+    assert result.endswith(TRUNCATION_MARK)
+    assert len(result) <= MAX_LIST_ROW_TITLE_CHARS
+
+
+def test_strip_decoration_is_the_inverse_of_decorate():
+    for emoji in DECORATION_EMOJI:
+        assert strip_decoration(decorate(emoji, "Consulta")) == "Consulta"
+
+
+def test_strip_decoration_leaves_an_undecorated_string_alone():
+    # The forms that keep arriving forever: a typed answer, and a tap on a card
+    # rendered before FEAT 44 shipped.
+    assert strip_decoration("Sim") == "Sim"
+    assert strip_decoration("  cancelar  ") == "cancelar"
+    assert strip_decoration(None) == ""
+
+
+def test_strip_decoration_keeps_an_emoji_a_clinic_chose_itself():
+    # Only OUR five prefixes are undone. A clinic that named a service
+    # "🦷 Limpeza" meant the tooth as part of the name; normalising it away
+    # would make that row unresolvable against its own catalog entry.
+    assert strip_decoration("🦷 Limpeza") == "🦷 Limpeza"
+
+
+def test_strip_decoration_removes_at_most_one_prefix():
+    # We never render two, and stripping greedily would eat a clinic's own
+    # leading emoji that happened to follow ours.
+    assert strip_decoration("✅ 🏥 Consulta") == "🏥 Consulta"
+
+
+def test_decoration_helpers_handle_blank_input():
+    assert decorate(EMOJI_SERVICE, "") == ""
+    assert decorate_if_fits(EMOJI_SERVICE, None) == ""
+    assert decorate_and_truncate(EMOJI_SCHEDULE, "   ") == ""

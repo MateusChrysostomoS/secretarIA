@@ -33,7 +33,7 @@ from collections.abc import Sequence
 from typing import Any
 from uuid import UUID
 
-from secretaria.core.whatsapp_limits import truncate_list_row_title
+from secretaria.core.whatsapp_limits import strip_decoration, truncate_list_row_title
 
 # --------------------------------------------------------------------------
 # Topology: how many active professionals this tenant books with
@@ -162,4 +162,14 @@ def canonical_service_name(services: Sequence[Any] | None, candidate: str | None
 
 
 def _norm(text: str | None) -> str:
-    return (text or "").strip().casefold()
+    """The catalog-resolution key, decoration-insensitive.
+
+    A `svc|` row now renders as "🏥 <name>" when the name is short enough
+    (flow_router's `_service_row_title`), and `svc|` is deliberately NOT in
+    `_PAYLOAD_ROW_PREFIXES`, so that decorated title IS what a tap sends here.
+    Stripping the prefix on both sides means the row still resolves to its
+    catalog entry, and so do the undecorated forms that keep arriving: a typed
+    service name, an LLM tool call, and a tap on a list rendered before the
+    emoji shipped.
+    """
+    return strip_decoration(text).casefold()

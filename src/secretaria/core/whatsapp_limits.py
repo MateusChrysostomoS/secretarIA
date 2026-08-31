@@ -127,3 +127,151 @@ def truncate_plain(text: str | None, limit: int) -> str:
     spending a character on the ellipsis.
     """
     return (text or "")[:limit]
+
+
+# --------------------------------------------------------------------------
+# Emoji decoration (FEAT 44)
+# --------------------------------------------------------------------------
+#
+# The conversation's visual language: an affirmative button carries a check, a
+# negative one a cross, a service row a hospital, a day/time row a calendar,
+# and a "go back one step" row an arrow. PreCheck (the n8n conductor this
+# borrows the look from) can hardcode "✅ Sim" in six places because none of
+# its labels are DATA - they are all fixed microcopy. Ours are not: a service
+# row title is a clinic-authored name that already flirts with the 24-char cap
+# this module exists to police, so the prefix has to be budgeted, not pasted.
+#
+# TWO COSTS, NOT ONE
+# ------------------
+# Everything here counts in Python code units (`len()` over `str`), the same
+# unit MAX_LIST_ROW_TITLE_CHARS is written in. That is NOT one per emoji:
+#
+#     "🏥 " / "✅ " / "❌ "  -> 2   (one codepoint + the space)
+#     "🗓️ " / "⬅️ "         -> 3   (codepoint + U+FE0F variation selector
+#                                    + the space)
+#
+# The variation selector is invisible and free to forget, which is exactly why
+# the budget is computed from `len(emoji)` at every call site below rather than
+# from a constant someone would have to remember to keep at 2 or 3.
+#
+# WHY THE MATCHER GETS AN INVERSE
+# -------------------------------
+# Decorating a label changes what a TAP echoes back ("✅ Sim", not "Sim"), and
+# for `svc|` rows the echoed title IS the lookup key (see this module's
+# docstring). Two things would break if render were the only side taught about
+# the prefix:
+#
+#   * a patient who TYPES "sim" instead of tapping - the overwhelmingly common
+#     case for a yes/no question - would stop matching LABEL_YES;
+#   * a tap on a card rendered BEFORE this shipped, still sitting in the
+#     patient's thread, would arrive undecorated.
+#
+# So `strip_decoration` is applied inside each layer's `_norm` (flow_router,
+# booking_scope, workers/tasks), which every label comparison already funnels
+# through. Decorated and plain forms then normalise to the same key, and the
+# comparison keeps working in both directions without a single call site
+# learning about emoji.
+EMOJI_AFFIRMATIVE = "✅"
+EMOJI_NEGATIVE = "❌"
+EMOJI_SERVICE = "🏥"
+EMOJI_SCHEDULE = "🗓️"
+EMOJI_BACK = "⬅️"
+
+# Every prefix `strip_decoration` knows how to undo. Deliberately OUR five and
+# not "any leading emoji": a clinic that named a service "🦷 Limpeza" means the
+# tooth as part of the name, and normalising it away would make that row
+# unresolvable against its own catalog entry.
+DECORATION_EMOJI: tuple[str, ...] = (
+    EMOJI_AFFIRMATIVE,
+    EMOJI_NEGATIVE,
+    EMOJI_SERVICE,
+    EMOJI_SCHEDULE,
+    EMOJI_BACK,
+)
+
+
+def decorate(emoji: str, text: str | None) -> str:
+    """`emoji` + space + `text`, with no budget check.
+
+    For FIXED labels defined in code, where the total is provably under the
+    surface's cap once and forever (a test asserts it). Never for a name that
+    arrives from a clinic, a calendar or the model - those go through
+    `decorate_if_fits` or `decorate_and_truncate`, which know what to spend.
+    """
+    value = (text or "").strip()
+    return f"{emoji} {value}" if value else ""
+
+
+def decorate_if_fits(emoji: str, text: str | None, limit: int = MAX_LIST_ROW_TITLE_CHARS) -> str:
+    """Prefix `text` only when the WHOLE of it still fits inside `limit`.
+
+    The conservative rule for a title that DOUBLES AS A KEY - the `svc|` row.
+    A name long enough to need cutting keeps every character of budget it has
+    today and goes undecorated:
+
+        "Retorno"                     -> "🏥 Retorno"
+        "Consulta de rotina adulto"   -> "Consulta de rotina adul…"
+        "Consulta de rotina infantil" -> "Consulta de rotina infa…"
+
+    Spending two characters on the emoji there would shorten the very tail that
+    keeps those last two rows one-to-one with their catalog entries - the
+    prefix-heavy collision this module's docstring exists to describe, and the
+    one that once booked the wrong service. The emoji is a nicety; a service
+    resolving to itself is not, so the nicety yields.
+
+    Falls back to `truncate_list_row_title`, so this is a drop-in replacement
+    for it at a decorated render site rather than a second cut layered on top.
+    """
+    value = (text or "").strip()
+    if not value:
+        return ""
+    if len(emoji) + 1 + len(value) <= limit:
+        return f"{emoji} {value}"
+    return truncate_list_row_title(value, limit)
+
+
+def decorated_text_budget(emoji: str, limit: int = MAX_LIST_ROW_TITLE_CHARS) -> int:
+    """How many characters of TEXT still fit beside `emoji` inside `limit`.
+
+    The one place the "emoji + a space" arithmetic is written down, so the
+    render helper below and ai/prompts.py - which has to TELL the model the
+    budget it is writing against - can never disagree about whether the arrow
+    costs two characters or three.
+    """
+    return limit - len(emoji) - 1
+
+
+def decorate_and_truncate(
+    emoji: str, text: str | None, limit: int = MAX_LIST_ROW_TITLE_CHARS
+) -> str:
+    """Always prefix; `text` absorbs the cost by being cut that much harder.
+
+    The opposite trade from `decorate_if_fits`, and correct only where the
+    label is NOT a key - the `slot|` rows, whose tap arrives as
+    "<label> (<iso datetime>)" with the ISO doing the identifying
+    (`_PAYLOAD_ROW_PREFIXES`, schemas/webhook.py). Nothing resolves by the
+    visible text, so consistency wins over the tail and every row gets its
+    calendar emoji even when the model writes a long one.
+    """
+    value = (text or "").strip()
+    if not value:
+        return ""
+    return f"{emoji} {truncate_list_row_title(value, decorated_text_budget(emoji, limit))}"
+
+
+def strip_decoration(text: str | None) -> str:
+    """Undo one leading `decorate*` prefix - the matcher's half of the pair.
+
+    Called from every layer's `_norm`, so "✅ Sim", "Sim" and a typed "sim" all
+    normalise to the same key and no individual comparison has to know whether
+    the label it was built from carries an emoji. See this section's header for
+    why both directions have to keep working.
+
+    Strips at most one prefix, and only from the five WE render: a clinic's own
+    leading emoji is part of its name and stays.
+    """
+    value = (text or "").strip()
+    for emoji in DECORATION_EMOJI:
+        if value.startswith(emoji):
+            return value[len(emoji) :].lstrip()
+    return value

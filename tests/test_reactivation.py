@@ -159,10 +159,12 @@ def test_continue_prompt_default_and_custom():
 
 
 def test_choice_buttons_default_and_truncate():
-    assert reactivation_choice_buttons(_tenant()) == ["Sim", "Não"]
+    assert reactivation_choice_buttons(_tenant()) == ["✅ Sim", "❌ Não"]
     buttons = reactivation_choice_buttons(
         _tenant(reactivation={"buttons": ["A", "B", "C", "D"]})
     )
+    # A tenant that wrote its OWN buttons keeps them verbatim: the emoji belongs
+    # to the DEFAULT copy we ship, not to whatever a clinic typed into the hub.
     assert buttons == ["A", "B", "C"]  # capped at 3
 
 
@@ -383,7 +385,7 @@ def test_offer_arms_gate_and_builds_prompt_for_resumable_state():
     assert conv.reactivation_origin == FlowState.SERVICE_CATALOG.value  # gate armed
     assert "Oi de novo, Maria!" in offer.greeting_override
     assert DEFAULT_CONTINUE_PROMPT in offer.greeting_override
-    assert offer.greeting_buttons == ["Sim", "Não"]
+    assert offer.greeting_buttons == ["✅ Sim", "❌ Não"]
     assert offer.reactivation is None  # the OFFER reuses the greeting path
 
 
@@ -453,7 +455,7 @@ def test_offer_prompts_a_default_tenant_with_no_reactivation_config():
     assert conv.reactivation_origin == FlowState.LLM.value
     # Bare question: the clinic's welcome pitch is NOT re-sent to this cohort.
     assert offer.greeting_override == DEFAULT_CONTINUE_PROMPT
-    assert offer.greeting_buttons == ["Sim", "Não"]
+    assert offer.greeting_buttons == ["✅ Sim", "❌ Não"]
 
 
 def test_offer_reads_the_captured_origin_not_the_live_column():

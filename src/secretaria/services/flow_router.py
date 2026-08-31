@@ -35,6 +35,14 @@ from secretaria.ai.formatter import (
 from secretaria.ai.scoped_help import run_professional_help, run_service_help
 from secretaria.core.logging import get_logger
 from secretaria.core.whatsapp_limits import (
+    EMOJI_AFFIRMATIVE,
+    EMOJI_BACK,
+    EMOJI_NEGATIVE,
+    EMOJI_SCHEDULE,
+    EMOJI_SERVICE,
+    decorate,
+    decorate_if_fits,
+    strip_decoration,
     truncate_button_label,
     truncate_list_row_title,
 )
@@ -120,22 +128,41 @@ MAX_MANAGE_APPOINTMENT_ROWS = 10
 # initial_flows.reactivation.
 DEFAULT_REACTIVATION_GAP_MINUTES = 360  # 6h of silence => treat as returning.
 DEFAULT_CONTINUE_PROMPT = "Você quer continuar com a nossa última conversa?"
-DEFAULT_REACTIVATION_BUTTONS = ["Sim", "Não"]
+DEFAULT_REACTIVATION_BUTTONS = [
+    decorate(EMOJI_AFFIRMATIVE, "Sim"),
+    decorate(EMOJI_NEGATIVE, "Não"),
+]
 
 # Button labels used inside the catalog flow (also the text taps come back as).
-LABEL_BOOK_SERVICE = "Sim"
-LABEL_OTHER_SERVICE = "Outro serviço"
-LABEL_CONFIRM = "Confirmar"
-LABEL_CANCEL = "Cancelar"
+#
+# The ✅/❌ pairing is SEMANTIC, not literal: "Confirmar"/"Cancelar" and
+# "Sim"/"Outro serviço" are the same affirm/decline choice as "Sim"/"Não" wearing
+# different words, and PreCheck - the conductor this look is borrowed from - marks
+# them the same way ("✅ Concordo", "✅ Terminei!"). Marking only the two literal
+# Sim/Não pairs would have left a patient reading a checked "Sim" on one screen
+# and a bare "Confirmar" on the next for no reason they could see.
+#
+# Every label here is matched through `_norm`, which strips the prefix, so a
+# patient who TYPES "sim" or "cancelar" - or taps a card rendered before this
+# shipped - still resolves. See core/whatsapp_limits.py's decoration section.
+LABEL_BOOK_SERVICE = decorate(EMOJI_AFFIRMATIVE, "Sim")
+LABEL_OTHER_SERVICE = decorate(EMOJI_NEGATIVE, "Outro serviço")
+LABEL_CONFIRM = decorate(EMOJI_AFFIRMATIVE, "Confirmar")
+LABEL_CANCEL = decorate(EMOJI_NEGATIVE, "Cancelar")
+# The retry card these two belong to is being replaced wholesale by FEAT 45
+# (`_handle_confirmation` / STEP_AWAITING_RETRY), which decides its own
+# formatting - decorating them here would be work thrown away twice.
 LABEL_RETRY_YES = "Sim"
 LABEL_RETRY_MENU = "Menu principal"
 
 # Button labels used inside the manage (cancel/reschedule) flow.
+# "Remarcar" and "Voltar" stay bare: neither is an affirm/decline, and the
+# request scoped the arrow to the picker's back ROWS, not to buttons.
 LABEL_RESCHEDULE = "Remarcar"
-LABEL_CANCEL_APPT = "Cancelar"
+LABEL_CANCEL_APPT = decorate(EMOJI_NEGATIVE, "Cancelar")
 LABEL_BACK = "Voltar"
-LABEL_YES = "Sim"
-LABEL_NO = "Não"
+LABEL_YES = decorate(EMOJI_AFFIRMATIVE, "Sim")
+LABEL_NO = decorate(EMOJI_NEGATIVE, "Não")
 
 # The greeting's fixed, product-defined action sets (workers/tasks.py's
 # _greeting_buttons_for - NEVER the clinic's own free text; see
@@ -271,9 +298,18 @@ ROW_DAY_MORE_PREFIX = "daymore|"
 ROW_DAY_AGAIN_PREFIX = "dayagain|"
 ROW_DAY_BACK_PREFIX = "dayback|"
 
+# "Ver mais dias" stays bare on purpose: it moves FORWARD through the same list,
+# so wearing the back arrow would point the wrong way, and it is not a day.
 LABEL_MORE_DAYS = "Ver mais dias"
-LABEL_ANOTHER_DAY = "Escolher outro dia"
-LABEL_ANOTHER_SERVICE = "Escolher outro Serviço"
+# Shortened from "Escolher outro dia" / "Escolher outro Serviço" to make room for
+# the arrow. This is not cosmetic: "⬅️ " costs THREE characters (the arrow carries
+# a U+FE0F variation selector), and "⬅️ Escolher outro Serviço" is 25 - one over
+# MAX_LIST_ROW_TITLE_CHARS. send_list would have cut it to "⬅️ Escolher outro
+# Servi…", which `_control_match` compares against the full constant and would no
+# longer recognise: the back row would render fine and then do nothing when
+# tapped. Both labels are kept parallel and short so neither can drift back over.
+LABEL_ANOTHER_DAY = decorate(EMOJI_BACK, "Outro dia")
+LABEL_ANOTHER_SERVICE = decorate(EMOJI_BACK, "Outro serviço")
 
 # Where the picker's back-control row goes back to. Passed into
 # `enter_day_picker` by whoever opens it and echoed in the row id, so the tap
@@ -289,7 +325,7 @@ BACK_TARGET_PROFESSIONAL = "professional"
 def _day_back_label(back_target: str | None) -> str:
     """The back-control row's title for a given `back_target`.
 
-    "Escolher outro Serviço" for the only destination anything currently
+    "⬅️ Outro serviço" for the only destination anything currently
     wires up (`BACK_TARGET_SERVICE`); the historical "Voltar" otherwise, so
     the not-yet-triggered `BACK_TARGET_PROFESSIONAL` destination (a rebooking
     row that would actually return to the DOCTOR list) never gets mislabeled
@@ -703,7 +739,22 @@ def format_business_hours(hours: dict) -> str:
 
 
 def _norm(text: str | None) -> str:
-    return (text or "").strip().casefold()
+    """The comparison key for every label/name match in this module.
+
+    `strip_decoration` runs FIRST so a label and the tap it produces share a key
+    even though only one of them carries an emoji. Every comparison below is
+    `_norm(body) == _norm(LABEL_X)`, i.e. the strip applies to BOTH sides, which
+    is what makes the decoration invisible to all ~20 of them at once:
+
+        _norm("✅ Sim") == _norm("Sim") == _norm("sim")
+
+    All three forms reach the router in practice - the tap, a card rendered
+    before FEAT 44 shipped and still sitting in the patient's thread, and the
+    patient who simply types "sim" instead of tapping. That last one is the
+    common case for a yes/no question, and it is the one a naive
+    `LABEL_YES = "✅ Sim"` would have silently broken.
+    """
+    return strip_decoration(text).casefold()
 
 
 def _label_match(body: str | None, label: str) -> bool:
@@ -866,6 +917,25 @@ def _selected_managing_appointment_id(conversation: Conversation) -> UUID | None
     return getattr(conversation, "flow_managing_appointment_id", None)
 
 
+def _service_row_title(name: str | None) -> str:
+    """A `svc|` row's visible title: "🏥 <name>" when the name fits, else the cut.
+
+    The ONE place the service emoji is decided, shared by both catalog renders
+    (`_service_list_bubble`, the doctor-first list; `_enter_clinic_service_catalog`,
+    the clinic-wide one) so the two screens cannot show the same service
+    differently.
+
+    Conditional, not unconditional: a `svc|` tap arrives as the displayed title
+    and nothing else, so this string is the lookup key `canonical_service_name`
+    resolves. Spending the emoji's two characters on a name already long enough
+    to be cut would shorten the distinguishing tail that keeps
+    "Consulta de rotina adulto" and "…infantil" from collapsing into one row -
+    the exact failure core/whatsapp_limits.py was written to prevent. Long names
+    therefore keep the budget they have today and go undecorated.
+    """
+    return decorate_if_fits(EMOJI_SERVICE, str(name or ""))
+
+
 def _service_list_bubble(
     tenant: Tenant, services: list[dict], header: str | None = None
 ) -> Bubble:
@@ -885,7 +955,7 @@ def _service_list_bubble(
             shown=MAX_CATALOG_OPTION_ROWS,
         )
     rows: list[tuple[str, str]] = [
-        (f"svc|{s.get('name', '')}", truncate_list_row_title(str(s.get("name", ""))))
+        (f"svc|{s.get('name', '')}", _service_row_title(s.get("name")))
         for s in services[:MAX_CATALOG_OPTION_ROWS]
     ]
     # Fixed last row: opens the scoped service-help node (STEP_SERVICE_HELP).
@@ -1293,7 +1363,7 @@ def _enter_clinic_service_catalog(tenant: Tenant, professionals: list) -> FlowRo
             shown=MAX_PROFESSIONAL_ROWS,
         )
     rows = [
-        (f"svc|{s.get('name', '')}", truncate_list_row_title(str(s.get("name", ""))))
+        (f"svc|{s.get('name', '')}", _service_row_title(s.get("name")))
         for s in services[:MAX_PROFESSIONAL_ROWS]
     ]
     return FlowRouterResult(
@@ -1963,8 +2033,13 @@ def _enter_service_detail(
 
 
 def _day_row_label(day: datetime) -> str:
-    """A day-picker row title: "Seg, 18/08" (WhatsApp caps titles at 24)."""
-    return f"{_WEEKDAY_SHORT_PT[day.weekday()]}, {day.strftime('%d/%m')}"
+    """A day-picker row title: "🗓️ Seg, 18/08" (WhatsApp caps titles at 24).
+
+    Unconditionally decorated, unlike a service row: the format is fixed at 10
+    characters, so 13 with the calendar emoji is nowhere near the cap, and the
+    row's identity rides in its `day|` id rather than in this text.
+    """
+    return decorate(EMOJI_SCHEDULE, f"{_WEEKDAY_SHORT_PT[day.weekday()]}, {day.strftime('%d/%m')}")
 
 
 _ROW_PAYLOAD_RE = re.compile(r"\s*\(([^)]*)\)\s*$")
@@ -2195,7 +2270,11 @@ async def _enter_slot_picker(
             professionals=professionals,
         )
 
-    rows: list[tuple[str, str]] = [(f"slot|{s['start']}", s["label"]) for s in slots]
+    # `s["label"]` is CalendarService's fixed "%H:%M" (5 chars), so the calendar
+    # emoji is free here; the slot's identity is the ISO in the `slot|` id.
+    rows: list[tuple[str, str]] = [
+        (f"slot|{s['start']}", decorate(EMOJI_SCHEDULE, s["label"])) for s in slots
+    ]
     rows.append((f"{ROW_DAY_AGAIN_PREFIX}{page}", LABEL_ANOTHER_DAY))
     if back_target:
         rows.append((f"{ROW_DAY_BACK_PREFIX}{back_target}", _day_back_label(back_target)))

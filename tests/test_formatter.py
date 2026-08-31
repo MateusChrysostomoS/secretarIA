@@ -17,9 +17,12 @@ from secretaria.ai.formatter import (  # noqa: E402
     parse,
 )
 from secretaria.core.whatsapp_limits import (  # noqa: E402
+    EMOJI_SCHEDULE,
     MAX_LIST_ROW_TITLE_CHARS,
     TRUNCATION_MARK,
-    truncate_list_row_title,
+    decorate,
+    decorate_and_truncate,
+    decorated_text_budget,
 )
 
 
@@ -76,10 +79,13 @@ def test_slots_block_consumes_preceding_text_as_header() -> None:
     slot = bubbles[0]
     assert isinstance(slot, SlotsBubble)
     assert "horários livres" in slot.body
+    # Every row wears the calendar emoji: _parse_slot_rows applies it itself, so
+    # an LLM-built slot list is indistinguishable from the deterministic
+    # picker's rather than depending on the model remembering to type it.
     assert slot.rows == [
-        ("slot|2026-05-29T14:00:00", "14:00"),
-        ("slot|2026-05-29T15:00:00", "15:00"),
-        ("slot|2026-05-29T16:30:00", "16:30"),
+        ("slot|2026-05-29T14:00:00", decorate(EMOJI_SCHEDULE, "14:00")),
+        ("slot|2026-05-29T15:00:00", decorate(EMOJI_SCHEDULE, "15:00")),
+        ("slot|2026-05-29T16:30:00", decorate(EMOJI_SCHEDULE, "16:30")),
     ]
 
 
@@ -105,7 +111,10 @@ def test_malformed_slot_lines_are_dropped() -> None:
     assert len(bubbles) == 1
     slot = bubbles[0]
     assert isinstance(slot, SlotsBubble)
-    assert [label for _, label in slot.rows] == ["14:00", "16:30"]
+    assert [label for _, label in slot.rows] == [
+        decorate(EMOJI_SCHEDULE, "14:00"),
+        decorate(EMOJI_SCHEDULE, "16:30"),
+    ]
 
 
 def test_slots_block_caps_at_10_rows() -> None:
@@ -165,9 +174,13 @@ def test_slot_label_over_the_limit_is_truncated_at_parse() -> None:
     bubble = bubbles[0]
     assert isinstance(bubble, SlotsBubble)
     (_, title) = bubble.rows[0]
+    # The emoji is added AND the row still respects Meta's cap: the label
+    # absorbs the prefix's cost instead of pushing the row over it. Correct here
+    # only because a slot label is not a key - the ISO in the `slot|` id is.
     assert len(title) <= MAX_LIST_ROW_TITLE_CHARS
+    assert title.startswith(EMOJI_SCHEDULE)
     assert title.endswith(TRUNCATION_MARK)
-    assert title == truncate_list_row_title(long_label)
+    assert title == decorate_and_truncate(EMOJI_SCHEDULE, long_label)
 
 
 def test_slot_label_within_the_limit_is_untouched() -> None:
@@ -175,15 +188,25 @@ def test_slot_label_within_the_limit_is_untouched() -> None:
     bubbles = parse("[SLOTS]\n2026-05-29T14:00:00|14:00\n[/SLOTS]")
     bubble = bubbles[0]
     assert isinstance(bubble, SlotsBubble)
-    assert bubble.rows[0] == ("slot|2026-05-29T14:00:00", "14:00")
+    assert bubble.rows[0] == (
+        "slot|2026-05-29T14:00:00",
+        decorate(EMOJI_SCHEDULE, "14:00"),
+    )
 
 
-def test_slot_label_exactly_at_the_limit_keeps_every_character() -> None:
-    label = "a" * MAX_LIST_ROW_TITLE_CHARS
+def test_slot_label_exactly_at_the_budget_keeps_every_character() -> None:
+    # The budget is the row cap MINUS what the calendar emoji costs, and that
+    # cost is THREE, not two: the emoji carries an invisible U+FE0F on top of
+    # its separating space. A label written to the budget survives whole, and
+    # the finished row lands exactly on the cap rather than one over it.
+    label = "a" * decorated_text_budget(EMOJI_SCHEDULE, MAX_LIST_ROW_TITLE_CHARS)
     bubbles = parse(f"[SLOTS]\n2026-05-29T14:00:00|{label}\n[/SLOTS]")
     bubble = bubbles[0]
     assert isinstance(bubble, SlotsBubble)
-    assert bubble.rows[0][1] == label
+    title = bubble.rows[0][1]
+    assert title == decorate(EMOJI_SCHEDULE, label)
+    assert TRUNCATION_MARK not in title
+    assert len(title) == MAX_LIST_ROW_TITLE_CHARS
 
 
 def test_whitespace_only_label_is_still_dropped_after_truncation() -> None:

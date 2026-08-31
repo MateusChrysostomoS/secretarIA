@@ -483,7 +483,7 @@ async def test_handle_select_professional_reenters_flow_at_doctor(db, _captured_
         "Dra. Ana\n\nCardiologia\n\nAtendo com foco em prevenção."
         "\n\nQual serviço você gostaria de agendar?"
     )
-    assert services.rows[0][1] == "Consulta Geral"  # tenant fallback services
+    assert services.rows[0][1] == "🏥 Consulta Geral"  # tenant fallback services
 
     async with db() as session:
         conv = await session.get(Conversation, conversation.id)
@@ -550,7 +550,7 @@ async def test_handle_manage_appointment_single_cancel_reaches_confirm_step(
     assert len(_captured_bubbles) == 1
     bubble = _captured_bubbles[0]
     assert isinstance(bubble, MenuBubble)
-    assert bubble.labels == ["Sim", "Não"]
+    assert bubble.labels == ["✅ Sim", "❌ Não"]
 
     async with db() as session:
         conv = await session.get(Conversation, conversation.id)

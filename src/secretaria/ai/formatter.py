@@ -29,7 +29,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Literal
 
-from secretaria.core.whatsapp_limits import MAX_LIST_ROWS, truncate_list_row_title
+from secretaria.core.whatsapp_limits import (
+    EMOJI_SCHEDULE,
+    MAX_LIST_ROWS,
+    decorate_and_truncate,
+)
 
 # Product caps on how much WE choose to send per turn. These are ours, not
 # Meta's, which is why they live here: a text message may carry 4096 characters
@@ -175,6 +179,15 @@ def _parse_slot_rows(block: str) -> list[tuple[str, str]]:
     Safe to truncate because the label is NOT the key: `slot|` is in
     `_PAYLOAD_ROW_PREFIXES` (schemas/webhook.py), so a tap arrives as
     "<label> (<iso datetime>)" and the ISO is what identifies the slot.
+
+    The calendar emoji is applied HERE too, not asked of the model. The system
+    prompt states the shape and the shorter budget (block B), but a slot list is
+    the one screen the LLM can build itself, and a screen that looks different
+    depending on which brain drew it is exactly the inconsistency FEAT 44 set
+    out to remove. Same "code guarantees it, the model does not have to
+    remember" reasoning as the cut itself - and the label's non-key status is
+    what lets `decorate_and_truncate` spend the emoji's three characters out of
+    the label instead of dropping the emoji on a long one.
     """
     rows: list[tuple[str, str]] = []
     for raw_line in block.splitlines():
@@ -185,7 +198,7 @@ def _parse_slot_rows(block: str) -> list[tuple[str, str]]:
             continue
         slot_id, _, label = line.partition("|")
         slot_id = slot_id.strip()
-        label = truncate_list_row_title(label)
+        label = decorate_and_truncate(EMOJI_SCHEDULE, label)
         if not slot_id or not label:
             continue
         rows.append((f"{SLOT_ID_PREFIX}{slot_id}", label))

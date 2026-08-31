@@ -322,7 +322,7 @@ async def test_rescheduled_booking_still_gets_the_manage_trio(db) -> None:
         )
 
     buttons = tasks._greeting_buttons_for(seeded["tenant"], "Olá!", context)
-    assert buttons == ["Remarcar", "Cancelar", "Outro"]
+    assert buttons == ["Remarcar", "❌ Cancelar", "Outro"]
     assert "Agendar" not in buttons
 
 

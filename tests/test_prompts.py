@@ -20,7 +20,11 @@ from secretaria.ai.prompts import (  # noqa: E402
     _format_safety_rules,
     secretary_system_prompt,
 )
-from secretaria.core.whatsapp_limits import MAX_LIST_ROW_TITLE_CHARS  # noqa: E402
+from secretaria.core.whatsapp_limits import (  # noqa: E402
+    EMOJI_SCHEDULE,
+    MAX_LIST_ROW_TITLE_CHARS,
+    decorated_text_budget,
+)
 from secretaria.services.tenant_config import TenantRuntimeConfig  # noqa: E402
 
 _SAFETY_HEADING = "REGRAS INEGOCIÁVEIS DE SEGURANÇA E CONDUTA"
@@ -266,7 +270,11 @@ def test_slots_instruction_states_the_row_title_limit_as_a_number():
     # constant - a hand-typed "24" here would be the fourth copy of it.
     prompt = secretary_system_prompt(_config())
     slots_block = prompt.split("B) LISTA DE HOR")[1].split("=========")[0]
-    assert str(MAX_LIST_ROW_TITLE_CHARS) in slots_block
+    # Not the raw row cap: _parse_slot_rows prepends the calendar emoji, so what
+    # the model may WRITE is the cap minus what that prefix costs. Telling it 24
+    # would be quoting the parser's cut point, not the model's own budget.
+    budget = decorated_text_budget(EMOJI_SCHEDULE, MAX_LIST_ROW_TITLE_CHARS)
+    assert str(budget) in slots_block
     assert "caracteres" in slots_block
 
 
@@ -289,7 +297,12 @@ def test_slots_instruction_does_not_hardcode_the_limit():
         prompts_module.MAX_LIST_ROW_TITLE_CHARS = 99
         patched = secretary_system_prompt(_config())
         block = patched.split("B) LISTA DE HOR")[1].split("=========")[0]
-        assert "99" in block
+        # 96, not 99: the budget is DERIVED from the patched cap at render time.
+        # Reading 99 here would mean someone froze the emoji's cost into a
+        # literal; reading 21 would mean the whole thing was snapshotted at
+        # import and no longer tracks the constant at all.
+        assert str(decorated_text_budget(EMOJI_SCHEDULE, 99)) in block
+        assert "99" not in block
     finally:
         prompts_module.MAX_LIST_ROW_TITLE_CHARS = original
 

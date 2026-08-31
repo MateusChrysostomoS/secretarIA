@@ -234,6 +234,90 @@ então o import antigo continua funcionando e existe um lugar só para mudar.
 | frontend `tsc --noEmit` / `npm test` / `npm run build` | limpo / **242 passed** / verde |
 | navegador | convênio verificado ao vivo (tooltip com o número, erro nomeando só o plano culpado, Save segue habilitado). **ServiceCard não foi verificado no navegador** — "Adicionar serviço" fica desabilitado sem backend (guarda fail-closed de hidratação), então nenhum card renderiza offline |
 
+## §5 — Terceira rodada (2026-08-30): emoji nos botões e nas listas (FEAT 44)
+
+O pedido era estético — "que a secretarIA fique mais dinâmica, expondo emojis nos botões
+como o PreCheck faz". Ele caiu direto em cima deste módulo porque **um prefixo consome o
+mesmo orçamento que o corte**, e porque em `svc|` o título exibido É a chave de busca.
+
+### Duas descobertas que mudaram a implementação
+
+1. **Emoji não custa todos o mesmo.** Contado em code units (a unidade em que
+   `MAX_LIST_ROW_TITLE_CHARS` está escrito), `"🏥 "`/`"✅ "`/`"❌ "` custam **2**, mas
+   `"🗓️ "`/`"⬅️ "` custam **3** — o seletor de variação `U+FE0F` é invisível e fácil de
+   esquecer. Por isso o orçamento é calculado (`decorated_text_budget`), nunca digitado.
+
+2. **`"⬅️ Escolher outro Serviço"` dá 25 — um a mais que o cap de 24.** O `send_list`
+   cortaria para `"⬅️ Escolher outro Servi…"`, e o `_control_match` compara contra a
+   constante INTEIRA: a linha de voltar renderizaria bonita e não faria nada ao ser
+   tocada. Por isso os dois rótulos de voltar encurtaram para **`"⬅️ Outro dia"`** e
+   **`"⬅️ Outro serviço"`** (12 e 16), em vez de aceitarem o corte. Há teste fixando que
+   nenhum rótulo fixo é cortado pelo caminho de envio.
+
+### A armadilha maior: o matcher, não o render
+
+Decorar a constante muda o que o TAP devolve, e três formas continuam chegando para
+sempre: o toque decorado, o toque num card renderizado ANTES desta rodada (ainda na
+conversa do paciente), e — o caso comum numa pergunta sim/não — a resposta **digitada**.
+Um `LABEL_YES = "✅ Sim"` ingênuo passa em todo teste de render e quebra `"sim"` em
+silêncio.
+
+A solução foi um inverso, `strip_decoration`, aplicado dentro do `_norm` de **cada
+camada** (`flow_router`, `booking_scope`, `workers/tasks::_label_match_body`). Como toda
+comparação é `_norm(body) == _norm(LABEL_X)`, o strip vale para os **dois lados** e as três
+formas normalizam para a mesma chave — ~20 call sites cobertos por uma mudança só, sem
+nenhum deles saber que emoji existe. Ele desfaz **um** prefixo e só os **nossos cinco**:
+uma clínica que chamou o serviço de `"🦷 Limpeza"` quis o dente como parte do nome.
+
+### A regra do 🏥 é condicional, e é o critério de aceite nº2
+
+`_service_row_title` (uma função, usada pelos DOIS construtores de catálogo) só prefixa
+quando o nome INTEIRO ainda cabe. Um nome que já é truncado hoje fica **sem** emoji e sem
+corte adicional — gastar dois caracteres ali encurtaria justamente a cauda que separa
+`"Consulta de rotina adulto"` de `"…infantil"`, que é o bug do §1 de novo. Fixado em
+teste: para todo nome não decorado, `decorate_if_fits(...) == truncate_list_row_title(...)`
+byte a byte.
+
+### Onde o emoji aparece
+
+| Superfície | Emoji |
+|---|---|
+| `LABEL_YES`, `LABEL_BOOK_SERVICE`, `LABEL_CONFIRM` | ✅ |
+| `LABEL_NO`, `LABEL_CANCEL`, `LABEL_CANCEL_APPT`, `LABEL_OTHER_SERVICE` | ❌ |
+| linha `svc\|` cujo nome cabe | 🏥 |
+| linha `day\|` e linha `slot\|` (inclusive as montadas pela LLM) | 🗓️ |
+| `LABEL_ANOTHER_DAY`, `LABEL_ANOTHER_SERVICE` | ⬅️ |
+| `LABEL_DONT_KNOW`, `LABEL_MORE_DAYS`, `LABEL_RESCHEDULE`, `LABEL_BACK`, `LABEL_OTHER` | nenhum |
+
+O par ✅/❌ é **semântico, não literal**: só 2 dos 7 pares de botão eram "Sim"/"Não" ao pé
+da letra, e o PreCheck também marca por semântica (`"✅ Concordo"`, `"✅ Terminei!"`).
+Decisão do usuário entre três opções apresentadas.
+
+`LABEL_RETRY_YES`/`LABEL_RETRY_MENU` ficaram **de fora de propósito**: o card deles
+(`_handle_confirmation` / `STEP_AWAITING_RETRY`) é substituído inteiro pelo `FEAT 45`, que
+decide a própria formatação.
+
+### Modo LLM
+
+O bloco `[SLOTS]` pode ser montado pela própria LLM. `_parse_slot_rows` **sempre** prefixa
+🗓️ no parse (`decorate_and_truncate`) em vez de pedir isso ao modelo — mesmo padrão
+"o código garante, a LLM não precisa acertar" já usado para o corte. Seguro porque `slot|`
+está em `_PAYLOAD_ROW_PREFIXES`: o ISO no id identifica o horário, o rótulo é decoração.
+`ai/prompts.py` passou a informar o orçamento **reduzido** (21, derivado em tempo de
+render) e a mandar o modelo não escrever emoji.
+
+### Validação da 3ª rodada
+
+`uv run python -m pytest` → **1910 passando**, 1 falha pré-existente
+(`test_human_backup_plugin::test_on_inbound_inside_hours_returns_false`, flake de fuso
+00:00-03:00 UTC — o módulo não importa nada tocado aqui). `ruff check .` e
+`ruff format --check .` de volta na linha de base do HEAD (8 erros / 65 arquivos), e os
+arquivos tocados passam limpos nos dois.
+
+Testes novos: `tests/test_emoji_decoration.py` (41 casos: o mapeamento pedido, o round-trip
+render↔match nas três formas, e a ponta a ponta) + 13 casos de aritmética do orçamento em
+`tests/test_whatsapp_limits.py`.
+
 ## Pendências
 
 1. **Commit + deploy dos dois serviços.** `flow_router.py`, `whatsapp.py` e
@@ -247,7 +331,10 @@ então o import antigo continua funcionando e existe um lugar só para mudar.
    rede do backend cobre esse caminho hoje.
 4. ~~**Nome de serviço** segue sem cap de input.~~ **Feito na 2ª rodada**, junto
    com convênio (§4).
-5. **`ServiceCard` não foi visto rodando.** O caminho está coberto por teste e o
+5. **FEAT 44 (§5) não foi commitado nem deployado.** Toca `flow_router.py`,
+   `workers/tasks.py`, `ai/formatter.py`, `ai/prompts.py` e `booking_scope.py` → exige
+   deploy do **`secretaria-worker`**, não só do `secretaria_api`.
+6. **`ServiceCard` não foi visto rodando.** O caminho está coberto por teste e o
    `HelpTip` tem precedente idêntico em `AvailabilitySection`, mas ninguém olhou
    o card com o "?" na tela — precisa de um hub com backend de verdade.
 
