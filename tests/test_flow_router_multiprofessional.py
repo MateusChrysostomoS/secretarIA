@@ -331,9 +331,9 @@ async def test_choose_doctor_lists_professionals_with_specialty_description():
     assert res.flow_step == STEP_AWAITING_PROFESSIONAL
     bubble = res.bubbles[0]
     assert isinstance(bubble, SlotsBubble)
-    assert bubble.rows[0] == (f"prof|{profs[0].id}", "Dra. Ana", "Cardiologia")
+    assert bubble.rows[0] == (f"prof|{profs[0].id}", "🥼 Dra. Ana", "Cardiologia")
     # No specialty -> no row description.
-    assert bubble.rows[1] == (f"prof|{profs[1].id}", "Dr. Bruno", None)
+    assert bubble.rows[1] == (f"prof|{profs[1].id}", "🥼 Dr. Bruno", None)
 
 
 async def test_professional_tap_folds_presentation_into_the_service_card():
@@ -473,7 +473,7 @@ async def test_catalog_service_with_two_professionals_asks_which_one():
     assert res.action == "reply"
     assert res.flow_step == flow_router.STEP_AWAITING_SERVICE_PROFESSIONAL
     assert res.flow_selected_type == "Consulta Cardio"  # kept for the next step
-    assert [row[1] for row in res.bubbles[0].rows] == ["Dra. Ana", "Dr. Bruno"]
+    assert [row[1] for row in res.bubbles[0].rows] == ["🥼 Dra. Ana", "🥼 Dr. Bruno"]
 
     # ...and the doctor tap lands on the detail card, NOT back on a service list.
     conv2 = _conversation(
@@ -729,7 +729,7 @@ async def test_resume_rerenders_professional_list():
     res = await resume_bubbles(conv, _tenant(), None, professionals=profs)
     assert res.flow_step == STEP_AWAITING_PROFESSIONAL
     assert isinstance(res.bubbles[0], SlotsBubble)
-    assert res.bubbles[0].rows[0][1] == "Dra. Ana"
+    assert res.bubbles[0].rows[0][1] == "🥼 Dra. Ana"
 
 
 async def test_resume_rerenders_insurance_list():

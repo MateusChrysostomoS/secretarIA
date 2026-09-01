@@ -176,8 +176,9 @@ EMOJI_NEGATIVE = "❌"
 EMOJI_SERVICE = "🏥"
 EMOJI_SCHEDULE = "🗓️"
 EMOJI_BACK = "⬅️"
+EMOJI_DOCTOR = "🥼"
 
-# Every prefix `strip_decoration` knows how to undo. Deliberately OUR five and
+# Every prefix `strip_decoration` knows how to undo. Deliberately OUR six and
 # not "any leading emoji": a clinic that named a service "🦷 Limpeza" means the
 # tooth as part of the name, and normalising it away would make that row
 # unresolvable against its own catalog entry.
@@ -187,6 +188,7 @@ DECORATION_EMOJI: tuple[str, ...] = (
     EMOJI_SERVICE,
     EMOJI_SCHEDULE,
     EMOJI_BACK,
+    EMOJI_DOCTOR,
 )
 
 

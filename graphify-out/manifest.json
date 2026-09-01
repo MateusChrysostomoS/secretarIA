@@ -1348,5 +1348,1440 @@
     "mtime": 1787417592.7296746,
     "ast_hash": "7fd890179329438a6268b55c7e95c1b4",
     "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\.claude\\settings.local.json": {
+    "mtime": 1788015062.523662,
+    "ast_hash": "c7b50aef053d80dcff5844c64818ade5",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\env.py": {
+    "mtime": 1779424322.2010672,
+    "ast_hash": "936b84ff96973a7c44e4f1178d834e7b",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\32e87fcf926b_tenant_post_consult_fields.py": {
+    "mtime": 1784660663.4709578,
+    "ast_hash": "f32942f9fc97ca997d4898d3b91cf163",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\6c590bc4ee75_initial_schema.py": {
+    "mtime": 1779424674.7033248,
+    "ast_hash": "3ac87640df571b86ad58b90c19ca5e46",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\a3c4d5e6f7b8_flow_engine.py": {
+    "mtime": 1781031307.7949655,
+    "ast_hash": "b7f33e92ad077ede5022f2aeca5b2673",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\a4b5c6d7e8f9_ehr_pix_analytics_consent.py": {
+    "mtime": 1784501064.9422123,
+    "ast_hash": "cdbee90c8f67ec057e10f9b1a418bfd3",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\a7b8c9d0e1f2_rebooking_declines.py": {
+    "mtime": 1787079367.4267218,
+    "ast_hash": "71676821177e50f69d71e7bac23d2101",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\b06ff85998bf_pix_deposit_asaas.py": {
+    "mtime": 1784687248.166201,
+    "ast_hash": "b8bffdb099379c74a99505d70731065c",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\b1c2d3e4f5a6_conversation_reactivation_origin.py": {
+    "mtime": 1781128263.3389785,
+    "ast_hash": "5fa74c286bebfc230be7c3b1040aba82",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\b2f1a7c9d3e4_tenant_config_and_credentials.py": {
+    "mtime": 1780431983.532346,
+    "ast_hash": "53044036a7d2cc914785d4de27096592",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\b3d9f2a1c8e7_multi_doctor_flow_columns.py": {
+    "mtime": 1784501670.785625,
+    "ast_hash": "09ee8a5834f654c2e82c278bd6891633",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\b4c2e8f1a9d3_drop_professional_email.py": {
+    "mtime": 1788048675.1536894,
+    "ast_hash": "47aadab8906a616c3ac26b058a831929",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\c1f4a8b6d2e9_tenant_clinic_description.py": {
+    "mtime": 1788188022.3433967,
+    "ast_hash": "5d04654bcf457db28646209f440e3b5f",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\c4d8e2f1a5b6_appointments_table.py": {
+    "mtime": 1780796826.1682458,
+    "ast_hash": "4e9f70ade2a820a9b938c3a6a954aec0",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\c5d6e7f8a9b0_tenant_contact_email.py": {
+    "mtime": 1781117600.963371,
+    "ast_hash": "dbf62afbfee62cbaa10277c7d12e0521",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\c9a1e2f4b6d8_tenant_google_calendar_mode.py": {
+    "mtime": 1785553800.9945345,
+    "ast_hash": "867313ece9f0eb573d0409a599cbed7f",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\d1c2b3a4e5f6_service_catalog.py": {
+    "mtime": 1786996161.5403025,
+    "ast_hash": "250074fd4dafcd38d19f4d0928537763",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\d2a5b9c7e3f1_patient_lgpd_accepted_at.py": {
+    "mtime": 1788215512.125728,
+    "ast_hash": "eced55276d0ed50cd5908d463742978e",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\d5e9f3a2b7c8_greeting_buttons.py": {
+    "mtime": 1780934860.4316866,
+    "ast_hash": "255d915137773d645403d1787d005ef8",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\d7e8f9a0b1c2_encrypt_waba_token.py": {
+    "mtime": 1784501064.9422123,
+    "ast_hash": "f285bd459f7c7262857729e3b969462a",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\e1a2b3c4d5e6_appointment_detail_columns.py": {
+    "mtime": 1781031289.341344,
+    "ast_hash": "ebdc309efeb3a646c838caa279788751",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\e3b7c1d5a9f2_drop_tenant_greeting_message.py": {
+    "mtime": 1788218201.3074856,
+    "ast_hash": "8a493d0cbdb31bae4905cbb342371cf9",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\e51cd84e1959_conversation_flow_managing_appointment_id.py": {
+    "mtime": 1784664273.9071329,
+    "ast_hash": "25c7c2e0e15ddee3414ada336693da83",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\e9f0a1b2c3d4_patient_reminder_opt_out.py": {
+    "mtime": 1784501064.9422123,
+    "ast_hash": "49e76a4de14497ff9529bae1c78d10fc",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\f06e85b476f2_onboarding_tenant_professional_config_.py": {
+    "mtime": 1784501064.9561436,
+    "ast_hash": "d499d37b279998cbd5f0e4b590c5d631",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\f1a2b3c4d5e6_multi_professional_multi_unit.py": {
+    "mtime": 1784501064.9561436,
+    "ast_hash": "8120e5f08111ac62ead67d1274654ad4",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\f2b3c4d5e6a7_tenant_returning_greeting.py": {
+    "mtime": 1781031297.9751334,
+    "ast_hash": "2828ee4cac61782439c858877c5dbcd9",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\f3a9c1d7b2e4_professional_email.py": {
+    "mtime": 1787973076.2671278,
+    "ast_hash": "c85da20a20edf4feaa673d23c5c6c7d8",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\scripts\\apply_config.py": {
+    "mtime": 1788218141.0679946,
+    "ast_hash": "9ceba42c5a53c89e890e728ef30ef1ed",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\scripts\\audit_professional_config_nullness.py": {
+    "mtime": 1787010156.913715,
+    "ast_hash": "8948c9171580b1f23785aa7abc614004",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\scripts\\backfill_service_catalog.py": {
+    "mtime": 1786996482.624063,
+    "ast_hash": "a80f2db2a89bf044550f05597d5b4970",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\scripts\\break_calendar.py": {
+    "mtime": 1781212900.5178325,
+    "ast_hash": "9852dc90d2d0184a2042a8c5d2454b26",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\scripts\\chat_tenant.py": {
+    "mtime": 1780748434.1387246,
+    "ast_hash": "1903341192177207fd7e0f93bfa6d89f",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\scripts\\check_scopes.py": {
+    "mtime": 1779832328.0834248,
+    "ast_hash": "37b6316dcd48438da2a86e8cc7838fa5",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\scripts\\gcal_auth.py": {
+    "mtime": 1785553874.0837214,
+    "ast_hash": "adf31f2c7286a64f965dff9bee114d09",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\scripts\\report_ownerless_appointments.py": {
+    "mtime": 1786979260.7107062,
+    "ast_hash": "b29940c406163a5f63506f9dc27e9d8f",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\scripts\\reset_db.py": {
+    "mtime": 1780365430.5929403,
+    "ast_hash": "965fffd8ea2c12a8c98d30ad034c87e5",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\scripts\\seed_calendar_credential.py": {
+    "mtime": 1780748422.5328574,
+    "ast_hash": "67f7fd3c123d8cae1b27bc098daeb655",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\scripts\\seed_dev.py": {
+    "mtime": 1784501064.9600303,
+    "ast_hash": "d22d63a12a1b9004ed5b6705706bb1d2",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\scripts\\test_agent.py": {
+    "mtime": 1784501064.9600303,
+    "ast_hash": "735fcc70a4ab5142b10bf4b72edd6323",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\scripts\\test_flow.py": {
+    "mtime": 1781748293.4514952,
+    "ast_hash": "ba6f0c126c9880fb5b5e5efa05644638",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\scripts\\configs\\clinica-psi-infantil.json": {
+    "mtime": 1788218157.9868243,
+    "ast_hash": "08ef1535f26879f892c24eb8c541cdbf",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\config.py": {
+    "mtime": 1787973191.3241801,
+    "ast_hash": "a3d32274dd4eadc863085969e4f603f7",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\main.py": {
+    "mtime": 1786996390.4012494,
+    "ast_hash": "bd8db9681a2a8479703951088984ea68",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\__init__.py": {
+    "mtime": 1779424055.5896142,
+    "ast_hash": "fe92ecbb6a15546267ab53b27b7716d8",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\ai\\formatter.py": {
+    "mtime": 1788139209.599069,
+    "ast_hash": "2c264048f01233f085eba64d7182580c",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\ai\\graph.py": {
+    "mtime": 1788218520.7113588,
+    "ast_hash": "f66080c651ff8f93d357b8b9782e7271",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\ai\\prompts.py": {
+    "mtime": 1788139620.7063894,
+    "ast_hash": "c98830192d280d12bbca31ceb7439eaf",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\ai\\scoped_help.py": {
+    "mtime": 1785593978.1020443,
+    "ast_hash": "3d3acd65d7f95f681ab453c45216465f",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\ai\\tools.py": {
+    "mtime": 1787275645.0189948,
+    "ast_hash": "716a0a1c712410ed9a259f9afff67b97",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\ai\\__init__.py": {
+    "mtime": 1779424182.9126582,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\api\\health.py": {
+    "mtime": 1786930513.1244464,
+    "ast_hash": "115847d5b6b61afa6372a114a13c459f",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\api\\internal.py": {
+    "mtime": 1784501064.9600303,
+    "ast_hash": "befd03745e454a7316576dda5fb4ddf6",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\api\\internal_privacy.py": {
+    "mtime": 1784501064.9720888,
+    "ast_hash": "0d2132cded927465b304e66146bd335c",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\api\\internal_provisioning.py": {
+    "mtime": 1784687926.2868433,
+    "ast_hash": "d6463b228aeb068383e38fd7a3e96dfd",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\api\\webhook.py": {
+    "mtime": 1786904248.3471587,
+    "ast_hash": "3e32d5d8483fe36fe89a7eabb47e4d98",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\api\\webhook_asaas.py": {
+    "mtime": 1784687557.438363,
+    "ast_hash": "c199cbaba2f6b25e904781f15749a02a",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\api\\__init__.py": {
+    "mtime": 1779424135.5753796,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\api\\admin\\panel.py": {
+    "mtime": 1784501064.9600303,
+    "ast_hash": "551bd9d049f1e9a66a72aaaf27fe50a5",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\api\\admin\\tenants.py": {
+    "mtime": 1784729400.9877667,
+    "ast_hash": "902e28b110b3477306863bd73ca505c7",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\api\\admin\\__init__.py": {
+    "mtime": 1782479228.1374872,
+    "ast_hash": "4af89995cc8802f454e8b8325129fdc6",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\api\\hub\\analytics.py": {
+    "mtime": 1784660836.747256,
+    "ast_hash": "93e30142b42aa1c88a130001437184ee",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\api\\hub\\calendar.py": {
+    "mtime": 1787079891.2205615,
+    "ast_hash": "a056dca561c6e00e67d564bbd33b7256",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\api\\hub\\config.py": {
+    "mtime": 1787586785.9856403,
+    "ast_hash": "46918dee23c42741707e87a446842060",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\api\\hub\\conversations.py": {
+    "mtime": 1784501064.9600303,
+    "ast_hash": "2794f9bc51dce092604b239a97b784d0",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\api\\hub\\deps.py": {
+    "mtime": 1784501064.9600303,
+    "ast_hash": "733ff29bcfcb1dacd4eac0c9a80c81b1",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\api\\hub\\oauth.py": {
+    "mtime": 1784501064.9600303,
+    "ast_hash": "7da849f49da62483368555560ce70916",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\api\\hub\\professionals.py": {
+    "mtime": 1788048656.6140957,
+    "ast_hash": "bb10a83a7cc662fb6be86c1c81791fd8",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\api\\hub\\services.py": {
+    "mtime": 1787586785.9964945,
+    "ast_hash": "f19a2d1f39a210bf6c33dd79b402a22e",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\api\\hub\\units.py": {
+    "mtime": 1784501064.9600303,
+    "ast_hash": "878a7dc0aeae7391701750d348af9dae",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\api\\hub\\__init__.py": {
+    "mtime": 1782479228.1374872,
+    "ast_hash": "002eb4d6a8dcbc11385a8b7d6eb50bdd",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\core\\build_info.py": {
+    "mtime": 1786931016.1609547,
+    "ast_hash": "1ff8461144e418a5c3590811f1831848",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\core\\crypto.py": {
+    "mtime": 1780431932.7126,
+    "ast_hash": "45a46abcc1486c85b2ae125438f3e30f",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\core\\database.py": {
+    "mtime": 1779424068.687765,
+    "ast_hash": "74e3faf492bf32e37b8076802012bbe1",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\core\\logging.py": {
+    "mtime": 1786904097.0458224,
+    "ast_hash": "40486b4a9200d94f5d4d10fc09c3eab7",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\core\\security.py": {
+    "mtime": 1779424072.3773417,
+    "ast_hash": "5693b4852c6701d3daa73b19480736c3",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\core\\signing.py": {
+    "mtime": 1780432171.6997128,
+    "ast_hash": "ef55737c8feedafaced83eeb004647bc",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\core\\subscription.py": {
+    "mtime": 1784501064.9720888,
+    "ast_hash": "bf8c865ac26bf9a56071b51069b3ef1c",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\core\\whatsapp_limits.py": {
+    "mtime": 1788298988.8748932,
+    "ast_hash": "ef3567cd4dfa7026749610daef6f27d7",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\core\\__init__.py": {
+    "mtime": 1779424059.7611208,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\models\\analytics_event.py": {
+    "mtime": 1784501064.9720888,
+    "ast_hash": "5bd502276a147c3b23f2d758808c1b68",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\models\\appointment.py": {
+    "mtime": 1786907903.3765802,
+    "ast_hash": "d65a6ba1501b86eff557c53e7e3e7c73",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\models\\consent_event.py": {
+    "mtime": 1784501064.9720888,
+    "ast_hash": "d134768179cf4386aff4cd2280e0c654",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\models\\conversation.py": {
+    "mtime": 1786641834.108727,
+    "ast_hash": "c114caf4f8936c079aa38eff07658574",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\models\\message.py": {
+    "mtime": 1779424469.2132032,
+    "ast_hash": "bdae5a13e6dab3e8030e6458afab49eb",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\models\\patient.py": {
+    "mtime": 1788215466.5071983,
+    "ast_hash": "6bd87b75b938f81219f157b9c442b125",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\models\\pix_deposit.py": {
+    "mtime": 1784687177.306765,
+    "ast_hash": "3a5b7d679cd6fdbd8d43d87f2d42a792",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\models\\processed_asaas_event.py": {
+    "mtime": 1784687183.1440518,
+    "ast_hash": "9feb06be803a6f5f2c50a51b4bbd0ff9",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\models\\processed_event.py": {
+    "mtime": 1779424109.6300838,
+    "ast_hash": "8da5fb2e8dc98f78565885665e5d4dd5",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\models\\professional.py": {
+    "mtime": 1788048640.5537374,
+    "ast_hash": "76d4aa9217c7009b262d92e318d2ed9e",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\models\\professional_credentials.py": {
+    "mtime": 1784501064.9720888,
+    "ast_hash": "64f5b7ad206cbbd6970ed163f7fbfaad",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\models\\rebooking_decline.py": {
+    "mtime": 1787079285.9862576,
+    "ast_hash": "8d469a9478992e3b0e54d367c7e24d34",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\models\\service.py": {
+    "mtime": 1786995780.7665794,
+    "ast_hash": "a5d249956865c62b05fc13d829af5906",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\models\\tenant.py": {
+    "mtime": 1788218141.057929,
+    "ast_hash": "edccced5c6e74a1407fa806e85bc4f7f",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\models\\tenant_credentials.py": {
+    "mtime": 1784687926.2888486,
+    "ast_hash": "0fde0ce72ea4b2ee4f4851d4f7b63a51",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\models\\unit.py": {
+    "mtime": 1784501064.9830544,
+    "ast_hash": "7ca6acf37ba0d7aed1f34f04efef38fe",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\models\\__init__.py": {
+    "mtime": 1787079891.2185454,
+    "ast_hash": "ab25136ef32d3306dc228fe7f7cb9619",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\plugins\\analytics_bi.py": {
+    "mtime": 1784733522.0452116,
+    "ast_hash": "f71452caeb0aa55cca3884ac9d703d6e",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\plugins\\base.py": {
+    "mtime": 1787102012.2546933,
+    "ast_hash": "3aaa639784a929d1360a8a2f962ab127",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\plugins\\ehr.py": {
+    "mtime": 1784501064.9830544,
+    "ast_hash": "5aaa71f34c0e8915ae3f34587bae8da2",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\plugins\\human_backup.py": {
+    "mtime": 1786904678.3734498,
+    "ast_hash": "5e60574115ec596cbb15807bdb1c292d",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\plugins\\multi_professional.py": {
+    "mtime": 1787276838.9665802,
+    "ast_hash": "9d676f29f02e2d17af15b15a0d849ee0",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\plugins\\multi_unit.py": {
+    "mtime": 1787276879.9261217,
+    "ast_hash": "265be6f75b91e46cc897e48c71121a6a",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\plugins\\pix_deposit.py": {
+    "mtime": 1784689385.2008586,
+    "ast_hash": "62e58789742f10e36401fd3f2c762cb4",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\plugins\\post_booking.py": {
+    "mtime": 1787102012.2546933,
+    "ast_hash": "18643f18fdaa84fd7154ccf09ae505de",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\plugins\\precheck_handoff.py": {
+    "mtime": 1787794725.44716,
+    "ast_hash": "10ef172941e6b6a36a24fd9daf2e0851",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\plugins\\professional_notification.py": {
+    "mtime": 1787275645.020007,
+    "ast_hash": "d7bd6353b891aa7fef27995483e14cfe",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\plugins\\registry.py": {
+    "mtime": 1787014201.749548,
+    "ast_hash": "ec32d0e178b4909a41c1464d61585ead",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\plugins\\reminders.py": {
+    "mtime": 1786908028.203411,
+    "ast_hash": "dbadf16adea097d9d6ddc4338b4bdd69",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\plugins\\__init__.py": {
+    "mtime": 1787709409.4535518,
+    "ast_hash": "072bf8c65fa648cc4c494f7a832482f8",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\schemas\\admin.py": {
+    "mtime": 1784729379.8538935,
+    "ast_hash": "de91cf1eeffd1ef87251f07aac0ac25d",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\schemas\\analytics.py": {
+    "mtime": 1784660804.6739008,
+    "ast_hash": "f00c9f93d1f16fc511aeb37c30b3719f",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\schemas\\calendar.py": {
+    "mtime": 1787077276.5165088,
+    "ast_hash": "b9aaccad6e3806d10ffaffbfb29423fe",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\schemas\\config.py": {
+    "mtime": 1788205332.1933973,
+    "ast_hash": "c228ac7798262d863b27306c89e30993",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\schemas\\conversation.py": {
+    "mtime": 1784501064.9899766,
+    "ast_hash": "21c65adcb2779e86d86038cadf1ed081",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\schemas\\hub_configuration.py": {
+    "mtime": 1786907915.1101332,
+    "ast_hash": "9e4bcd9b9916f56004919abbcaa4e4f6",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\schemas\\internal.py": {
+    "mtime": 1782483649.2784472,
+    "ast_hash": "b0ae4c0b047a45ce4498504861590137",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\schemas\\internal_provisioning.py": {
+    "mtime": 1784687926.2908537,
+    "ast_hash": "714c475ed3200cc29b57745464fbc0b6",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\schemas\\privacy.py": {
+    "mtime": 1784501064.9899766,
+    "ast_hash": "7a18c383ab0ac9cb52d187279f55e76f",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\schemas\\professional.py": {
+    "mtime": 1788048640.558026,
+    "ast_hash": "f6a965e7f6b48eadc93f8d6899c1ae80",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\schemas\\service.py": {
+    "mtime": 1787586786.0093794,
+    "ast_hash": "224dfa7a6c01906f92c1c544333ba16c",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\schemas\\unit.py": {
+    "mtime": 1784501064.9899766,
+    "ast_hash": "d515359e0652614d1e791e6c62038449",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\schemas\\webhook.py": {
+    "mtime": 1787078726.4313734,
+    "ast_hash": "207ef5c71b4e1e12c03edb97440df680",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\schemas\\__init__.py": {
+    "mtime": 1779424130.0465767,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\admin.py": {
+    "mtime": 1784729373.4650245,
+    "ast_hash": "4c323e947412ba46fdc85eb915ad9b6a",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\appointment_status.py": {
+    "mtime": 1786907958.1767206,
+    "ast_hash": "3716d30a9c94b39fb140e5305682a8af",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\booking_scope.py": {
+    "mtime": 1788139136.0091994,
+    "ast_hash": "84186c26b2e1bdd1dc9d3bf62bc4a425",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\brain_onboarding.py": {
+    "mtime": 1784769037.6899838,
+    "ast_hash": "80d66797357405edf88116d9df7801ac",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\brain_professionals.py": {
+    "mtime": 1787014251.1471927,
+    "ast_hash": "cea33cb3aca9e5ef286932a8f799f1e3",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\calendar.py": {
+    "mtime": 1787275645.021008,
+    "ast_hash": "c15f2d5a15519148bfe7a901f4091e3e",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\cancellation_notice.py": {
+    "mtime": 1787078702.146896,
+    "ast_hash": "2bd3d2ab99813c06fe91b0e407ad6ec7",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\email.py": {
+    "mtime": 1788048682.5704122,
+    "ast_hash": "5e142d66255ece1a64f9743d79144c42",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\entitlements_client.py": {
+    "mtime": 1784733505.8877778,
+    "ast_hash": "58b834469cb5f6a338b53fe75c134b71",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\flow_router.py": {
+    "mtime": 1788299034.604783,
+    "ast_hash": "069e952712800bf847927ab6a938ab3e",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\google_oauth.py": {
+    "mtime": 1785553866.2756615,
+    "ast_hash": "8ec6e851187b3b954b3096d7ada72984",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\greeting_template.py": {
+    "mtime": 1788215549.388117,
+    "ast_hash": "5048204973069b38d60ce9a3e04d6a2b",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\handover.py": {
+    "mtime": 1784501064.9960635,
+    "ast_hash": "dd994c6efadf3a1a89c311a3c74dc90b",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\hub_configuration.py": {
+    "mtime": 1788205332.1951125,
+    "ast_hash": "6e9689cea195a774759ff71f8d547cfb",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\patient_context.py": {
+    "mtime": 1786907990.7065868,
+    "ast_hash": "e63644c01562ae903f7cb2c92d365fae",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\precheck.py": {
+    "mtime": 1787794725.44716,
+    "ast_hash": "4c54c187357e91f661657d7e4d587387",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\provisioning.py": {
+    "mtime": 1784687926.2918587,
+    "ast_hash": "01bfc1896fd19990c6c28c03fce8ddfa",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\service_catalog.py": {
+    "mtime": 1787586786.018217,
+    "ast_hash": "46242ada93f7753564ac73d97a649db2",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\tenant_config.py": {
+    "mtime": 1788218520.7113588,
+    "ast_hash": "03b9332eb8578d245145d06041100daa",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\usage_events.py": {
+    "mtime": 1784501065.0037472,
+    "ast_hash": "dd21a6ccf98807bb51fa4b6edfab6d35",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\whatsapp.py": {
+    "mtime": 1787324569.0328925,
+    "ast_hash": "aacaf9113fd341fafab14301889a6352",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\__init__.py": {
+    "mtime": 1779424168.35006,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\ehr\\base.py": {
+    "mtime": 1784501064.9960635,
+    "ast_hash": "321c24a4b7ccd01e833b672f35fe7f3f",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\ehr\\iclinic.py": {
+    "mtime": 1784501064.9960635,
+    "ast_hash": "0270a7f7cd160c2afd3866e63b9a5156",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\ehr\\__init__.py": {
+    "mtime": 1784501064.9960635,
+    "ast_hash": "b97f5fc3c0adb3a6167dc4c34abc6d97",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\payments\\asaas.py": {
+    "mtime": 1784687314.8932319,
+    "ast_hash": "2a58f03c9f86edece42247125bf19d9d",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\payments\\deposit_lifecycle.py": {
+    "mtime": 1786996803.9938443,
+    "ast_hash": "f453fe25290c1e1065addf160d231c0b",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\payments\\money.py": {
+    "mtime": 1784687263.761496,
+    "ast_hash": "767027018a63087eb482bae41a01f489",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\services\\payments\\__init__.py": {
+    "mtime": 1784689362.1646297,
+    "ast_hash": "947c94f573efa4fafa8ec1d24d7d64fe",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\workers\\arq_worker.py": {
+    "mtime": 1787102012.2546933,
+    "ast_hash": "23852674c5fc131cf563b32c03216a62",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\workers\\deploy_parity.py": {
+    "mtime": 1786930577.353693,
+    "ast_hash": "b4b8970518e5f83ca506e2317b29d60d",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\workers\\onboarding_cadence.py": {
+    "mtime": 1784501065.005755,
+    "ast_hash": "c23d6e96dfbc59a24e0bcdfc020e7035",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\workers\\onboarding_cron.py": {
+    "mtime": 1784769141.685241,
+    "ast_hash": "0cc483a6ffca5922dd8c070fe074dfb7",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\workers\\payments_tasks.py": {
+    "mtime": 1784687565.9540176,
+    "ast_hash": "daa4b092b3d67b171931f2e55876c613",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\workers\\tasks.py": {
+    "mtime": 1788232280.1322503,
+    "ast_hash": "b33a2c529ec5a20107001449f61187bb",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\workers\\__init__.py": {
+    "mtime": 1779424236.0045598,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\conftest.py": {
+    "mtime": 1784501065.007761,
+    "ast_hash": "ae195f341072e605f8df029ab2504d17",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_action_buttons.py": {
+    "mtime": 1787003709.1054678,
+    "ast_hash": "510ca164539a84454500196e46f9675b",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_admin.py": {
+    "mtime": 1784501065.007761,
+    "ast_hash": "08341aa5a201e1c4ac2787312682cfe0",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_admin_tenants.py": {
+    "mtime": 1788218223.6746733,
+    "ast_hash": "e8788ed298cf4ccc357b9ef7bd9f1b5e",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_agent_capability_cache.py": {
+    "mtime": 1784660270.772605,
+    "ast_hash": "50104e1b32a2eb4dfdd68caa388349d6",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_agent_menu_tools.py": {
+    "mtime": 1788218223.6831195,
+    "ast_hash": "4fee17b7cad8a1437fcbe9d40fe60fc6",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_agent_retry.py": {
+    "mtime": 1781033972.6178632,
+    "ast_hash": "fbd6dd99703ce5bbff4c6d2fbded9acc",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_agent_tool_enforcement.py": {
+    "mtime": 1788218223.6831195,
+    "ast_hash": "2446fa66c7fcfd121490e9866f943773",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_ai_tools_cancel_money.py": {
+    "mtime": 1784690627.8418183,
+    "ast_hash": "5b20e8cfb2e71b6a22cfcc6fde88f3cc",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_analytics_bi_plugin.py": {
+    "mtime": 1784734370.8368635,
+    "ast_hash": "4bb203066ab0c04fef3f141bba315aed",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_appointment_status_taxonomy.py": {
+    "mtime": 1788139956.7729237,
+    "ast_hash": "11aff76d0d0fc18e1c78119f43859279",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_asaas_client.py": {
+    "mtime": 1784688098.906749,
+    "ast_hash": "ad5b459269b68f5c093a1815b5b7400c",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_asaas_webhook.py": {
+    "mtime": 1784688110.4953296,
+    "ast_hash": "d13ea5fa1b7f527b1f1fca6949660d8a",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_audio_transcription.py": {
+    "mtime": 1786905654.177526,
+    "ast_hash": "811e6fbb2c6cff9c4a7bc409be97a82a",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_booking_owner_persistence.py": {
+    "mtime": 1787275645.0295308,
+    "ast_hash": "4df90c902b1fe5d80a19c114fad9540f",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_booking_scope.py": {
+    "mtime": 1787324377.1719038,
+    "ast_hash": "8e9d77fe1258b62c5eaa7fa9e5bd1be6",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_bot_allowlist.py": {
+    "mtime": 1788218223.6831195,
+    "ast_hash": "ddd74779df5138901117f34fde6d4627",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_bot_reply_gating.py": {
+    "mtime": 1788187003.8552117,
+    "ast_hash": "96e3093af05cf80a4605c1018d03a8d8",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_brain_onboarding.py": {
+    "mtime": 1784769228.9889889,
+    "ast_hash": "b21604ddddb2125546c516e60d17db71",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_brain_professionals_client.py": {
+    "mtime": 1787015281.1564333,
+    "ast_hash": "8561a4469053851a24ebad0f1259438d",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_build_identity.py": {
+    "mtime": 1787102012.2546933,
+    "ast_hash": "14b0d1be234ac055ca17107c9c6de6e2",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_calendar_patient_link.py": {
+    "mtime": 1787275051.639057,
+    "ast_hash": "ccc58c849e72f39375da6bd9364a91bd",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_calendar_unavailable_mapping.py": {
+    "mtime": 1785554233.8036528,
+    "ast_hash": "cdac89cdbd118e7900a227bb246760a8",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_cancellation_notice.py": {
+    "mtime": 1787102012.2546933,
+    "ast_hash": "c63d2932bec97024da7554d58981309b",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_deposit_lifecycle.py": {
+    "mtime": 1784688093.5300293,
+    "ast_hash": "66bd7f9db94808282ff0a38384f05ad7",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_ehr_plugin.py": {
+    "mtime": 1784501065.007761,
+    "ast_hash": "c796230927759c46e532bbcd000fc3ff",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_email_transactional.py": {
+    "mtime": 1787102012.2546933,
+    "ast_hash": "8c81efdd759ad832365efcccf3e956d3",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_emoji_decoration.py": {
+    "mtime": 1788140757.1133173,
+    "ast_hash": "bfc815030fb6b14f8228b840491f66c0",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_entitlements_client.py": {
+    "mtime": 1784734398.1764417,
+    "ast_hash": "b31c97692e1ed93dbf021d567282509e",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_flow_cancel_money.py": {
+    "mtime": 1784690770.9405458,
+    "ast_hash": "3f2e1d1857ee0c73870dde12e01ed1a7",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_flow_day_picker.py": {
+    "mtime": 1788139905.7931824,
+    "ast_hash": "f9c4291844eb44c4aea447774a81b2cb",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_flow_router.py": {
+    "mtime": 1788139956.7603996,
+    "ast_hash": "3f1cddbb115786a63502f3a855c6e229",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_flow_router_insurance.py": {
+    "mtime": 1787973549.2215595,
+    "ast_hash": "321e6c374a112465793099a79e366cf3",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_flow_router_multiprofessional.py": {
+    "mtime": 1788299116.2288797,
+    "ast_hash": "25c7cf1f9e365dcf1a901ba08809db29",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_formatter.py": {
+    "mtime": 1788139787.5147226,
+    "ast_hash": "ff32a216655ce0baa3828c9c33f28ba9",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_greeting_template.py": {
+    "mtime": 1788205649.4999025,
+    "ast_hash": "d728e8ffb6fb89f526ac58ac49a4c732",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_handover_echoes.py": {
+    "mtime": 1784501065.007761,
+    "ast_hash": "80dea6405d6006f5f7e76c445fde5c39",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_hub_calendar_money.py": {
+    "mtime": 1787077686.5986125,
+    "ast_hash": "a2781443e9ccddffe7919a7ac180a502",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_hub_config.py": {
+    "mtime": 1788205342.8461242,
+    "ast_hash": "26dd19ad761f8cc81d085d98601eba47",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_hub_configuration.py": {
+    "mtime": 1788205139.7291784,
+    "ast_hash": "d2d7b5b2fb15d93e3e3f7b9f5a7d09eb",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_hub_config_pix.py": {
+    "mtime": 1784687746.4371698,
+    "ast_hash": "7c9ff4a50f7683b812c55c791fdd3bdf",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_hub_conversations.py": {
+    "mtime": 1784501065.007761,
+    "ast_hash": "ba64c3fd336504b43fe0f48b25819afc",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_hub_deps.py": {
+    "mtime": 1784501065.007761,
+    "ast_hash": "b3cb601e6c2008858d0cb6cd0e70860d",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_hub_oauth.py": {
+    "mtime": 1785554274.207348,
+    "ast_hash": "2e3f838a7edd1ad63189952a0244cb02",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_hub_professionals.py": {
+    "mtime": 1788048828.721833,
+    "ast_hash": "260cb8c87143e8f3cd177eb0104f2a79",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_hub_units.py": {
+    "mtime": 1784734373.3555796,
+    "ast_hash": "c65d2e93471b07a3d67e7e8cb0f4744a",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_human_backup_plugin.py": {
+    "mtime": 1784734374.489674,
+    "ast_hash": "0a0f986cffc8480bef7a1fb1ea0b9e03",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_internal.py": {
+    "mtime": 1784501065.007761,
+    "ast_hash": "8f6fe68405730fd1b573b2dad8a54a16",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_internal_asaas_connection.py": {
+    "mtime": 1784687697.3721912,
+    "ast_hash": "7b7c43b238b1787bb161e9fb8a1e6f01",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_internal_privacy.py": {
+    "mtime": 1784501065.0194635,
+    "ast_hash": "9ec0345f62c91508fe4ccc38e0156be9",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_internal_provisioning.py": {
+    "mtime": 1784501065.0194635,
+    "ast_hash": "cb3f40fe8da4e95493a2f894841e800f",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_lgpd_consent_gate.py": {
+    "mtime": 1788232405.2813816,
+    "ast_hash": "8dc4adcee2384c8c6344f9dd3c0a2632",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_list_patient_appointments_tool.py": {
+    "mtime": 1788218223.6831195,
+    "ast_hash": "01b853267ac762183ec16fd69e99f5ed",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_llm_state_expiry.py": {
+    "mtime": 1788218362.3045921,
+    "ast_hash": "dde28aaa7309151f6e41458c314fb1dc",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_menu_command.py": {
+    "mtime": 1788218223.6831195,
+    "ast_hash": "b2f5a77360415d9c0dc3cc39a4d57f78",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_multi_professional_plugin.py": {
+    "mtime": 1788218223.6949363,
+    "ast_hash": "1f0b52a81b7d368ff7b61c4913ce69b1",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_multi_unit_plugin.py": {
+    "mtime": 1787277039.4387004,
+    "ast_hash": "dca4f036b35c1adf0fa41d54b0f3c556",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_onboarding_cadence.py": {
+    "mtime": 1784501065.0214748,
+    "ast_hash": "6ce4862896343d0e9cf654a13fea668a",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_onboarding_cron.py": {
+    "mtime": 1784769216.958081,
+    "ast_hash": "609f07b3ac9e91a4833265482b1fad4e",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_patient_context.py": {
+    "mtime": 1788218223.6969495,
+    "ast_hash": "2bdc2cc6d257247a6fc08a343ffc7d1b",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_payments_money.py": {
+    "mtime": 1784687296.585528,
+    "ast_hash": "aadca3b2305b15f5c223058bd67bc54b",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_pix_deposit_plugin.py": {
+    "mtime": 1784734379.5848162,
+    "ast_hash": "8c5760d0e73ad8cfffb559df801cc255",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_plugin_registry.py": {
+    "mtime": 1784734408.7187576,
+    "ast_hash": "fe32bd23201eba9a300dc448a08c52ad",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_post_booking_plugin.py": {
+    "mtime": 1784734378.1185052,
+    "ast_hash": "ee288a9ead22fd1568594a4984196a98",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_post_consult_injection.py": {
+    "mtime": 1784661654.0909834,
+    "ast_hash": "ebbb439bad7867d507a8fff702a970df",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_precheck_handoff.py": {
+    "mtime": 1787794886.08109,
+    "ast_hash": "129e5852608d4ef9d6c535881c725476",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_precheck_handoff_plugin.py": {
+    "mtime": 1787795114.8865561,
+    "ast_hash": "154d2410e9665824cbb0dae93c6869ee",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_precheck_handoff_tool.py": {
+    "mtime": 1784501065.0214748,
+    "ast_hash": "bc325289065580e64b8ef9462696ce81",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_professional_calendar_wire.py": {
+    "mtime": 1787010884.1491504,
+    "ast_hash": "7f50bcaa20dbb3a2524757d54da14362",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_professional_config.py": {
+    "mtime": 1785554303.1207833,
+    "ast_hash": "b0fb5c0a3a2b36b20912b7f4afc376e3",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_professional_config_gap_alert.py": {
+    "mtime": 1788048976.9495032,
+    "ast_hash": "4546cc9db87662f6f9ee119fbb68bd03",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_professional_notification.py": {
+    "mtime": 1787275645.0315416,
+    "ast_hash": "b8ccd8c0eea646afb5752dc160dc200b",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_professional_null_vs_empty.py": {
+    "mtime": 1787010716.4484687,
+    "ast_hash": "35309912676f8893236ab9d5010dac2c",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_professional_resolution.py": {
+    "mtime": 1788218223.69946,
+    "ast_hash": "cdc348dc66085aa1787cb739ad1375f3",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_prompts.py": {
+    "mtime": 1788218223.6997893,
+    "ast_hash": "ce69311631210d5cda83438db6f05b2b",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_reactivation.py": {
+    "mtime": 1788218520.7113588,
+    "ast_hash": "a77801516f8ac1c517de7109514cfbe0",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_rebooking_flow.py": {
+    "mtime": 1787323953.3723335,
+    "ast_hash": "466806b4c1d765e894074b7519260d0a",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_reminders_plugin.py": {
+    "mtime": 1786908698.6038513,
+    "ast_hash": "2db9ac7e7050f283c4c46af4b060078f",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_remove_context_command.py": {
+    "mtime": 1788232429.6697798,
+    "ast_hash": "1baca146b20aebee01dba0bb26300b93",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_resolve_tenant.py": {
+    "mtime": 1784501065.0214748,
+    "ast_hash": "8ea3ea89adfe4ef46a50a4cc55a47c7c",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_scoped_help.py": {
+    "mtime": 1785594882.0559874,
+    "ast_hash": "8e11b4098f48d722980fc584cf3e3b03",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_security.py": {
+    "mtime": 1779424346.6034315,
+    "ast_hash": "d4657326186a9d796f9216fa8ae4a600",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_service_catalog.py": {
+    "mtime": 1787586786.0294263,
+    "ast_hash": "b3544a796c5f35a7fc3f410ba5dcbb13",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_subscription.py": {
+    "mtime": 1784501065.0214748,
+    "ast_hash": "49a5f2e73cc0615f2e7dab0390f935bb",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_tasks_helpers.py": {
+    "mtime": 1787010232.9100788,
+    "ast_hash": "58971440b579eb0b779bb2c7a75594c7",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_waba_encryption.py": {
+    "mtime": 1786904795.93821,
+    "ast_hash": "8f1d091aa6f150844645c1cccdf07452",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_waba_fail_closed.py": {
+    "mtime": 1786905424.9042642,
+    "ast_hash": "50ba31fcf889328c5e192d3967b7a998",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_webhook.py": {
+    "mtime": 1779424349.9754887,
+    "ast_hash": "75b5603dc26ae51a1194054f15146e06",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_webhook_history_sync.py": {
+    "mtime": 1784501065.0214748,
+    "ast_hash": "ea83c095833700c7e783508d0b6b49ce",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_webhook_minimal_payload.py": {
+    "mtime": 1786905548.5337634,
+    "ast_hash": "20aae3d9907418dd343d6885c3747861",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_webhook_parsing.py": {
+    "mtime": 1787004646.5914621,
+    "ast_hash": "878e53e5d2097d54a0b9f29bbb40adfe",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_whatsapp_limits.py": {
+    "mtime": 1788140757.1133173,
+    "ast_hash": "6d6e4f3aed776e6e29a6e8ae19c842a1",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_whatsapp_template.py": {
+    "mtime": 1784501065.0214748,
+    "ast_hash": "f36b43767be50ba4928cd36e9515183e",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\__init__.py": {
+    "mtime": 1779424340.3213036,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\CLAUDE.md": {
+    "mtime": 1788141252.78415,
+    "ast_hash": "e64d63abc903864bcf374f08669a0c53",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docker-compose.yml": {
+    "mtime": 1779424046.3093185,
+    "ast_hash": "8ed7a2a937b1c67c5ca234d7775d6f3d",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\README.md": {
+    "mtime": 1786930972.0145507,
+    "ast_hash": "431fda035cdd390df3b4b011f62983d1",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\.claude\\prompts\\PROMPT_01_llm_flow_reentry_gap.md": {
+    "mtime": 1787285636.913438,
+    "ast_hash": "d629be5c6ccffd066bfb9bf435f5f910",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\.claude\\prompts\\PROMPT_02_specialty_leak_deploy_parity.md": {
+    "mtime": 1787285696.5424616,
+    "ast_hash": "a6444f47dbafbaf7a3e040eb7e9647d4",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\.claude\\prompts\\PROMPT_03_back_buttons_ambiguity.md": {
+    "mtime": 1787285753.525274,
+    "ast_hash": "d4d2dfc7a83817a6e667b2e6959713ed",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\.claude\\prompts\\PROMPT_04B_list_row_limits_remaining_surfaces.md": {
+    "mtime": 1787330919.9956884,
+    "ast_hash": "0824477a6d1e49bedfc2c177d57b50e1",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\.claude\\prompts\\PROMPT_04_list_row_truncation.md": {
+    "mtime": 1787286299.9774106,
+    "ast_hash": "3784584d85f0f9dffed322887fcd42d9",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_appointment_status_taxonomy.md": {
+    "mtime": 1786909518.853923,
+    "ast_hash": "cb47cb5ca04be72cc71af776b3dcac31",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_audio_transcricao.md": {
+    "mtime": 1784501064.7087176,
+    "ast_hash": "a4db3e1a3de91ef6b9729d16873fffd6",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_booking_ownership.md": {
+    "mtime": 1786979492.4923174,
+    "ast_hash": "bcd5c98f03a6808ea641525c34546bb1",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_coexistence.md": {
+    "mtime": 1786321328.1858077,
+    "ast_hash": "ba75a351946a567c9f95504f3892458a",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_context_aware_opening.md": {
+    "mtime": 1786909441.945101,
+    "ast_hash": "e6ac89f747f5d1680df066ca7873d5f5",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_day_picker_entry_buttons.md": {
+    "mtime": 1787276140.8520293,
+    "ast_hash": "f3f05fcabd4a6756bbbb28bee4606796",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_fix32_retry_idempotencia.md": {
+    "mtime": 1787102188.7107973,
+    "ast_hash": "0965fa2bcc86a74c6f5485ea714c1dfb",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_fixed_greeting_buttons.md": {
+    "mtime": 1787005411.865893,
+    "ast_hash": "1b3ecf2839de98781de31efec98aa90e",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_flows_unconditional.md": {
+    "mtime": 1786641891.6572008,
+    "ast_hash": "c3a90404c56fe28dd63c362d5f15a643",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_google_calendar_modes.md": {
+    "mtime": 1787586785.9751878,
+    "ast_hash": "b8bdfb80b0e0daad8319059eaa3bb73c",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_greeting_frame_lgpd.md": {
+    "mtime": 1788232679.7390027,
+    "ast_hash": "4ecec75662a1098d7cc0a365bcb7e966",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_menu_rename_waba_lgpd.md": {
+    "mtime": 1788187003.780539,
+    "ast_hash": "64c702f0e99ebe0004f2b386e74840fa",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_multi_doctor_flow.md": {
+    "mtime": 1787276123.9938767,
+    "ast_hash": "c612c7a711fb47e9c3478b70b86e9c90",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_onboarding_multiprofessional.md": {
+    "mtime": 1786906151.1026142,
+    "ast_hash": "6cce3d42ca9b881261bfbe702c7b3f18",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_patient_calendar_link.md": {
+    "mtime": 1787278066.8678942,
+    "ast_hash": "89296fe95bc6a5de856bbdf03a9ce66a",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_pix_deposit.md": {
+    "mtime": 1786909426.862687,
+    "ast_hash": "55144c95dede5c4405c90073916acbf3",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_plugins.md": {
+    "mtime": 1787710095.6272845,
+    "ast_hash": "e5f81350e8b78c571fb625ae3df23a37",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_post_consult_config.md": {
+    "mtime": 1784661339.845754,
+    "ast_hash": "73e1ce930f3b7c12ec7ed6cb5b0b6525",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_precheck_handoff_post_booking.md": {
+    "mtime": 1787797573.1136765,
+    "ast_hash": "3d836ee21eec0d80eff6eb14eb78490c",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_professional_booking_email.md": {
+    "mtime": 1787276051.840428,
+    "ast_hash": "e37431e151e04a324b6c58a5ebcf33dd",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_professional_config_gap_alert.md": {
+    "mtime": 1788060434.34781,
+    "ast_hash": "69b0356a14fcfc8eff5c1ef5b1c708a8",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_service_catalog.md": {
+    "mtime": 1787586785.9798634,
+    "ast_hash": "8847c3522919cf5f939c272e5c662f8d",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_trio_gerenciar_scoped_help.md": {
+    "mtime": 1787005411.8607924,
+    "ast_hash": "503383587ade606dbeff907f7ea1797b",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_whatsapp_text_limits.md": {
+    "mtime": 1788141039.9209895,
+    "ast_hash": "adc167402a0660d18165e29044cfbf32",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\WORKFLOWS_SECRETARIA.html": {
+    "mtime": 1786906124.4111254,
+    "ast_hash": "d9f5419a6b223c4842cc5ac7b9bfbb44",
+    "semantic_hash": ""
   }
 }

@@ -37,10 +37,12 @@ from secretaria.core.logging import get_logger
 from secretaria.core.whatsapp_limits import (
     EMOJI_AFFIRMATIVE,
     EMOJI_BACK,
+    EMOJI_DOCTOR,
     EMOJI_NEGATIVE,
     EMOJI_SCHEDULE,
     EMOJI_SERVICE,
     decorate,
+    decorate_and_truncate,
     decorate_if_fits,
     strip_decoration,
     truncate_button_label,
@@ -1253,6 +1255,21 @@ def _match_professional(professionals: list, body: str | None) -> Any | None:
     return None
 
 
+def _professional_row_title(name: str | None) -> str:
+    """A `prof|` row's visible title: "🥼 <name>", truncated to absorb it.
+
+    Unlike `_service_row_title`, this is unconditional: a `prof|` row's tap
+    always carries the professional's UUID in the trailing parens
+    (`_PAYLOAD_ROW_PREFIXES`, schemas/webhook.py — the comment there notes two
+    doctors CAN share a 24-char truncated title already), so the title is
+    never the sole lookup key the way a `svc|` title is. There is no tail to
+    protect, so every doctor gets the coat every time, exactly like the
+    LLM-facing `[SLOTS]` calendar emoji (`ai/formatter.py`), not like the
+    length-guarded service one.
+    """
+    return decorate_and_truncate(EMOJI_DOCTOR, str(name or ""))
+
+
 def _enter_professional_list(tenant: Tenant, professionals: list) -> FlowRouterResult:
     """Render the tappable doctor list ("Escolher médico").
 
@@ -1271,7 +1288,7 @@ def _enter_professional_list(tenant: Tenant, professionals: list) -> FlowRouterR
     rows = [
         (
             f"prof|{professional.id}",
-            truncate_list_row_title(str(professional.name)),
+            _professional_row_title(professional.name),
             (getattr(professional, "specialty", None) or None),
         )
         for professional in professionals[:MAX_CATALOG_OPTION_ROWS]
@@ -1393,7 +1410,7 @@ def _enter_service_professional_list(
     rows = [
         (
             f"prof|{professional.id}",
-            truncate_list_row_title(str(professional.name)),
+            _professional_row_title(professional.name),
             (getattr(professional, "specialty", None) or None),
         )
         for professional in professionals[:MAX_PROFESSIONAL_ROWS]
