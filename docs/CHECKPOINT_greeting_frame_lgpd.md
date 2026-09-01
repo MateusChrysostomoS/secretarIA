@@ -1,14 +1,29 @@
 # CHECKPOINT — Moldura de saudação + aviso de LGPD (2026-08-31)
 
-> Estado: **BUILT, uncommitted, NÃO deployado.** Migração `c1f4a8b6d2e9` **não rodada**.
-> Backend: 1963 testes verdes (`pytest -q`), `ruff check`/`format` limpos nos arquivos tocados.
-> Frontend (`secretarIA-frontend`): `tsc --noEmit` limpo, 474 testes, `npm run build` ok.
+> Estado: **BUILT, uncommitted, NÃO deployado.** Migrações `c1f4a8b6d2e9`, `d2a5b9c7e3f1` e
+> `e3b7c1d5a9f2` **não rodadas** — e a última tem ordem de deploy INVERTIDA (ver Pendências).
+> Backend: 1976 testes verdes (`pytest -q`), `ruff check`/`format` limpos nos arquivos tocados.
+> Frontend (`secretarIA-frontend`): `tsc --noEmit` limpo, 484 testes, `npm run build` ok.
 
 ## O que mudou, em uma frase
 
 A primeira mensagem que um paciente recebe deixou de ser texto livre da clínica e virou uma
-**moldura fixa de produto** com **um** slot para a clínica preencher — e, logo em seguida, o
-paciente recebe uma **segunda mensagem** com os Termos/Política e um botão `✅ Concordo`.
+**moldura fixa de produto** com **um** slot para a clínica preencher — e a conversa passou a ser
+**sequenciada por um gate de LGPD**, espelhando o PreCheck.
+
+## A sequência exata
+
+| # | O que sai | Botões |
+|---|---|---|
+| 1 | Moldura (nome da clínica + descrição + obrigações) | **nenhum** — texto puro |
+| 2 | Termos de Uso + Política de Privacidade | `[✅ Concordo]` |
+| 3 | *(qualquer coisa que não seja aceite)* → reenvio dos termos | `[✅ Concordo]` |
+| 4 | Após o aceite: "O que você precisa?" | `[🗓️ Agendar] [Outro]` |
+| 5 | Fluxo determinístico normal | — |
+
+A mensagem 1 sai **sem botões de propósito**: oferecer `[Agendar]` ali convidaria um toque que o
+gate recusaria no instante seguinte, e colocaria duas mensagens interativas seguidas com funções
+diferentes. A mensagem 4 é a **primeira** da conversa a carregar botões de ação.
 
 ## Por que a moldura não é opcional
 
@@ -49,25 +64,82 @@ inteiro**, então "quero voltar na segunda" segue roteando normal.
 `test_the_voltar_promise_is_backed_by_a_real_command` quebra se alguém estreitar de novo sem
 editar a copy.
 
-## O consentimento NÃO bloqueia — e isso é deliberado
+## O gate bloqueia — mas é um FATO, não um `FlowState`
 
-O PréCheck trava o questionário até o `Concordo`. Aqui não. A skill `conversation-flow-state`
-documenta o invariante: *todo estado não-`IDLE` precisa de uma saída que não dependa de o paciente
-escolhê-la*. Um `AWAITING_CONSENT` bloqueante teria como única saída o paciente tocar um botão —
-a mesma forma que já estacionou conversas para sempre antes (ver `_expire_stale_llm_state`), só
-que aqui trancaria o paciente para fora do agendamento **permanentemente**.
+O gate recusa atendimento enquanto `Patient.lgpd_accepted_at` for NULL: nem `Agendar`, nem
+`/menu`, nem `voltar` passam. Isso espelha o PreCheck, que responde qualquer coisa que não seja
+aceite com "Reenviar LGPD".
 
-Então: as duas mensagens vão, o tap grava um `ConsentEvent(kind="terms_accepted")` com base legal
-de consentimento, e quem não toca continua sendo atendido. O aviso é entregue e a aceitação
-explícita é auditável quando acontece. **Se o produto quiser o gate bloqueante do PréCheck, ele
-precisa vir com uma saída por tempo — não basta adicionar o estado.**
+A parte que importa para quem for mexer: **isso não é um `FlowState`**. A skill
+`conversation-flow-state` proíbe estado não-`IDLE` cuja única saída seja o paciente escolher — foi
+essa forma que estacionou conversas em modo LLM para sempre (`_expire_stale_llm_state`). Um
+`AWAITING_CONSENT` teria exatamente esse formato. Um **fato sobre o sujeito** não tem esse risco:
+`flow_state` não é tocado pelo gate, então o que a conversa estivesse fazendo retoma intacto no
+instante em que o aceite chega. Se alguém for transformar isto num `FlowState`, precisa levar
+junto uma saída por tempo.
 
-## `greeting_message` ficou órfã
+Duas exceções deliberadas, ambas acima do gate na escada de `_persist_inbound_message`:
 
-Nada mais lê ou escreve a coluna; ela saiu de `TENANT_SCALAR_FIELDS`, do `TenantConfigUpdate` e do
-`TenantConfigRead`. **Não** foi reaproveitada como slot de descrição de propósito: ela guarda
-saudações INTEIRAS hoje, e renderizar "Olá! Sou a secretária do Dr. X…" dentro de uma moldura que
-já abre exatamente assim é a duplicação ambígua que esta rodada existe para eliminar. Mantida
+- **Handover humano vence.** Consentimento governa o que o **bot** pode fazer sozinho; uma
+  secretária de carne e osso que assumiu a linha não é o bot. Ter isso invertido faria o produto
+  impedir uma atendente real de falar com o paciente. Fixado em
+  `test_human_handover_outranks_the_consent_gate`.
+- **Botões de ação de lembrete passam.** Honrar um agendamento que o paciente já fez (confirmar,
+  cancelar) não é tratamento novo a consentir.
+
+## O atributo que guarda o aceite
+
+| | PreCheck | secretarIA (agora) |
+|---|---|---|
+| Onde vive | `sessions.state`: `LGPD_PENDING` → `ACTIVE` | `patients.lgpd_accepted_at` (timestamptz) |
+| Responde "quando aceitou?" | **não** | sim |
+| Trilha de auditoria | nenhuma | `consent_events(kind="terms_accepted")` |
+| Sobrevive à limpeza | `wf-limpeza-diaria` mexe em sessions | evento sobrevive ao wipe de contexto |
+| Doc dos termos | `clinics.lgpd_doc_url` existe mas **ninguém lê** — a URL está hardcoded no nó do n8n | constante de produto em `greeting_template.py` |
+
+São **dois** registros de propósito, com tempos de vida diferentes:
+`/dangerously-remove-context` apaga a linha `Patient` (e com ela a coluna) mas **não** apaga
+`consent_events` — então limpar o contexto replaya um primeiro contato de verdade, incluindo ser
+perguntado de novo, enquanto o registro legal do que a pessoa já aceitou sobrevive.
+
+## A quarta armadilha: decorar o rótulo do botão
+
+`[🗓️ Agendar]` é seguro **só porque a palavra por baixo não mudou**. Todo matcher compara via
+`flow_router._norm`, que roda `strip_decoration` nos **dois** lados, então "🗓️ Agendar", "Agendar"
+e um "agendar" digitado compartilham a mesma chave (FEAT 44).
+
+`🗓️ Agendar Consulta` **não** sairia de graça: `strip_decoration` devolveria "Agendar Consulta",
+que não é `LABEL_BOOK` — seria preciso renomear a própria constante e arrastar junto todos os
+matchers, o prompt da LLM e `_GREETING_ACTION_IDS`. **O tamanho nunca foi o limite**: são 19 dos
+20 caracteres permitidos. Um efeito colateral já corrigido: `_send_greeting` fazia
+`label in _GREETING_ACTION_IDS` com o rótulo cru, o que passaria a errar em silêncio e daria ao
+toque um id posicional `reactivation|N`, custando ao tenant com flows desligados o degrade
+determinístico — sem nada logado.
+
+## `greeting_message` foi REMOVIDA (migração `e3b7c1d5a9f2`)
+
+Primeiro ficou órfã, depois foi apagada. **Não** foi reaproveitada como slot de descrição de
+propósito: ela guardava saudações INTEIRAS, e renderizar "Olá! Sou a secretária do Dr. X…" dentro
+de uma moldura que já abre exatamente assim é a duplicação ambígua que esta rodada existe para
+eliminar.
+
+O que saiu junto:
+
+- `Tenant.greeting_message` e `TenantRuntimeConfig.greeting_message` — este último era **escrito
+  por dois lugares e lido por nenhum** (conferido por grep antes de apagar, não presumido).
+- O fallback de reativação em `_reactivation_offer`, que reusava o "pitch de boas-vindas" para
+  um tenant opted-in sem `returning_greeting_message`. A **feature ficou**; só a fonte seguiu o
+  pitch para onde ele mora agora, `clinic_description` — e ficou mais leve, já que aquele slot é
+  capado em ~180 chars contra os 1024 da coluna antiga.
+- `scripts/apply_config.py` (allowlist) e o seed `clinica-psi-infantil.json`, cuja saudação de
+  416 chars virou o pitch de ~80 que cabe na moldura.
+- Os tipos mortos em `brain-frontend/lib/secretaria-hub.ts` (as telas da secretarIA saíram
+  daquele repo em 2026-08-24, mas a declaração ficou).
+
+`brain-api` tem **zero** referências ao campo — conferido, porque num mesh hub-and-spoke a
+ausência num spoke costuma significar que o hub é o dono, não que ninguém usa.
+
+Sobrou apenas
 (não dropada) para uma migração de limpeza futura — mesmo tratamento de `greeting_buttons`.
 
 ## Por que o preview é servido pelo backend
@@ -80,15 +152,25 @@ byte a byte que o que a clínica aprova é o que o paciente recebe.
 
 ## Pendências
 
-1. **Rodar a migração `c1f4a8b6d2e9` ANTES de qualquer deploy.** Coluna nullable, então é segura
-   de rodar primeiro e os dois serviços podem subir em qualquer ordem depois.
-2. **Deploy dos DOIS serviços** (`secretaria_api` e `secretaria-worker`) — a mudança toca
+1. **`c1f4a8b6d2e9` e `d2a5b9c7e3f1` ANTES de qualquer deploy.** Ambas só adicionam coluna
+   nullable, então são seguras de rodar primeiro e os dois serviços podem subir em qualquer ordem
+   depois. **Sem backfill de propósito:** todo paciente existente lê como "nunca aceitou" e é
+   perguntado uma vez na próxima mensagem — backfillar um timestamp seria inventar um
+   consentimento que não aconteceu.
+2. **`e3b7c1d5a9f2` (o DROP) por ÚLTIMO, e a ordem é a INVERSA das outras duas.** O SQLAlchemy
+   não faz `SELECT *`: emite a lista explícita de colunas do modelo. Um processo ainda no código
+   antigo não perde só o campo — **toda** leitura de `tenants` levanta
+   `column tenants.greeting_message does not exist`. Então: código nos **dois** serviços →
+   provar por `source_fingerprint` no `/build` de cada um ("dei push" não é prova) → só então
+   rodar. Depois do DROP, **rollback de código sozinho não volta atrás**: o caminho honesto é
+   para a frente.
+3. **Deploy dos DOIS serviços** (`secretaria_api` e `secretaria-worker`) — a mudança toca
    `workers/`, e a regra do `CLAUDE.md` se aplica: provar com `GET /build` / `deploy_parity`.
-3. **Rebuild da imagem do `secretarIA-frontend`** (static export).
-4. **Link dos Termos** aponta para um Google Doc em modo `/edit`. Trocar por `/view` antes de
+4. **Rebuild da imagem do `secretarIA-frontend`** (static export).
+5. **Link dos Termos** aponta para um Google Doc em modo `/edit`. Trocar por `/view` antes de
    mandar a pacientes — `/edit` sugere permissão de escrita, e se o compartilhamento estiver
    aberto alguém pode alterar o texto que o paciente está aceitando. Mesmo problema no PréCheck.
-5. **`legal_basis`** do `terms_accepted` diz "consentimento (art. 7º, I)". O `TODO_LAWYER` de
+6. **`legal_basis`** do `terms_accepted` diz "consentimento (art. 7º, I)". O `TODO_LAWYER` de
    `models/consent_event.py` continua valendo — confirmar com advogado.
-6. Clínicas existentes têm `clinic_description` NULL: mandam a moldura sem descrição (renderiza
+7. Clínicas existentes têm `clinic_description` NULL: mandam a moldura sem descrição (renderiza
    limpo, sem buraco). Vale um aviso no hub para preencherem.

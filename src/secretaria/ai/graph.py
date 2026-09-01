@@ -201,6 +201,7 @@ def base_tools_for(topology: str) -> tuple:
         return _SCOPE_FREE_TOOLS
     return _BASE_TOOLS
 
+
 # Compiled agent cache, keyed by the frozenset of tool NAMES the agent was
 # built with (base tools + whatever plugins a tenant is entitled to). Replaces
 # the old process-wide `_AGENT` singleton: different tenants can be entitled to
@@ -228,7 +229,6 @@ def _prompt_with_today(state: dict) -> list[BaseMessage]:
             _RC(
                 tenant_id=None,  # type: ignore[arg-type]
                 clinic_name="Clínica",
-                greeting_message=None,
                 language="pt-BR",
                 timezone=s.CLINIC_TIMEZONE,
                 appointment_duration_min=30,

@@ -61,7 +61,6 @@ class TenantRuntimeConfig:
 
     tenant_id: UUID
     clinic_name: str
-    greeting_message: str | None
     language: str
     timezone: str
     appointment_duration_min: int
@@ -354,9 +353,7 @@ async def set_asaas_webhook_token(session: AsyncSession, tenant_id: UUID, token:
     encrypted = encrypt(token)
     cred = await _get_credentials(session, tenant_id)
     if cred is None:
-        session.add(
-            TenantCredentials(tenant_id=tenant_id, asaas_webhook_token_encrypted=encrypted)
-        )
+        session.add(TenantCredentials(tenant_id=tenant_id, asaas_webhook_token_encrypted=encrypted))
     else:
         cred.asaas_webhook_token_encrypted = encrypted
 
@@ -532,9 +529,7 @@ async def resolve_professional_calendar(
     # can no longer drive this professional's default slot length.
     services = await load_service_catalog(session, tenant.id) if tenant is not None else []
     resolved_types = (
-        professional_appointment_types(professional, tenant, services)
-        if tenant is not None
-        else []
+        professional_appointment_types(professional, tenant, services) if tenant is not None else []
     )
     duration = int(resolved_types[0]["duration_min"]) if resolved_types else None
 
@@ -867,7 +862,6 @@ async def load_tenant_config(session: AsyncSession, tenant: Tenant) -> TenantRun
     return TenantRuntimeConfig(
         tenant_id=tenant.id,
         clinic_name=tenant.clinic_name,
-        greeting_message=tenant.greeting_message,
         language=tenant.language,
         timezone=tenant.timezone,
         appointment_duration_min=tenant.appointment_duration_min,
@@ -951,7 +945,6 @@ async def ensure_professional_secondary_calendar(
     clinic_config = TenantRuntimeConfig(
         tenant_id=tenant.id,
         clinic_name=tenant.clinic_name,
-        greeting_message=None,
         language=tenant.language,
         timezone=tenant.timezone,
         appointment_duration_min=tenant.appointment_duration_min,

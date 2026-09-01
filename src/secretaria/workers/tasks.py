@@ -47,7 +47,9 @@ from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger, wa_suffix
 from secretaria.core.whatsapp_limits import (
+    EMOJI_SCHEDULE,
     MAX_INTERACTIVE_BODY_CHARS,
+    decorate,
     strip_decoration,
     truncate_button_label,
     truncate_plain,
@@ -140,6 +142,7 @@ from secretaria.services.greeting_template import (
     CONSENT_ACCEPTED_MESSAGE,
     CONSENT_BUTTON_LABEL,
     CONSENT_EVENT_KIND,
+    CONSENT_REMINDER_MESSAGE,
     LGPD_CONSENT_MESSAGE,
     clinic_description_budget,
     render_greeting,
@@ -423,10 +426,14 @@ class _ReplyContext:
     # the patient taps comes back as their next message body.
     greeting_buttons: list[str] = field(default_factory=list)
     # When True, the LGPD terms notice goes out as a SECOND message right after
-    # the greeting, carrying the "✅ Concordo" button. Set only for a subject
-    # with no prior `terms_accepted` ConsentEvent, so it is asked once per
-    # (tenant, wa_id) and never re-asked on later conversations.
+    # the greeting, carrying the "✅ Concordo" button. Set only on a first
+    # contact by a subject whose `Patient.lgpd_accepted_at` is still NULL.
     send_consent_notice: bool = False
+    # When True, this turn is nothing BUT the consent re-prompt: the subject
+    # was already asked, said something else, and is still owed a legal basis.
+    # No greeting, no routing, no LLM - see the consent gate in
+    # `_persist_inbound_message`.
+    send_consent_reminder: bool = False
     # When True, the tenant's bot is not activated: send a single polite
     # fallback and do nothing else (no conversation, no LLM).
     service_unavailable: bool = False
@@ -763,30 +770,39 @@ async def _persist_inbound_message(
                 # The pending reactivation gate, if any, is consumed here too -
                 # an explicit "take me to the menu" answers the "quer
                 # continuar?" question by superseding it.
-                # LGPD consent tap, sitting just above `/menu` for the same
-                # reason `/menu` sits above the greeting: it is a structured
-                # tap on a message WE sent, and it must be recognised before
-                # any branch that could re-greet. Matched through
-                # `strip_decoration` like every other decorated label (FEAT 44),
-                # so a patient who types "concordo" instead of tapping is
-                # honoured too. Deliberately NOT a gate: nothing downstream
-                # checks for this event before serving the patient. A blocking
-                # `AWAITING_CONSENT` state would be a non-IDLE state whose only
-                # exit is the patient choosing it — the exact shape that
-                # permanently parked conversations before (see
-                # `_expire_stale_llm_state`), and here it would lock a patient
-                # out of booking forever for never tapping a button.
+                # --- LGPD consent gate -------------------------------------
+                # Sits ABOVE `/menu`, the greeting and normal dispatch, and
+                # BELOW human handover and reminder action buttons. That
+                # position is the whole design:
+                #
+                #   * below handover, so a human secretary who picks up the
+                #     conversation is never blocked by a bot-owned gate;
+                #   * below action buttons, so a patient can still cancel or
+                #     confirm an EXISTING appointment (honouring a booking they
+                #     already made is not new processing to consent to);
+                #   * above everything else, so nothing serves a patient whose
+                #     legal basis has not been established.
+                #
+                # Mirrors PreCheck, which parks the session in `LGPD_PENDING`
+                # and answers anything but an acceptance with "Reenviar LGPD"
+                # (see the `wf_condutor_generico_universal` n8n workflow).
+                #
+                # It is a gate on a FACT about the subject (`lgpd_accepted_at`),
+                # NOT a `FlowState`. That distinction matters: a non-IDLE flow
+                # state whose only exit is the patient tapping a button is the
+                # shape that permanently parked conversations before (see
+                # `_expire_stale_llm_state`). A fact carries no such risk —
+                # `flow_state` is untouched here, so whatever the conversation
+                # was doing resumes intact the moment consent lands.
                 if _is_consent_acceptance(body):
-                    already = await session.scalar(
-                        select(func.count())
-                        .select_from(ConsentEvent)
-                        .where(
-                            ConsentEvent.tenant_id == tenant.id,
-                            ConsentEvent.wa_id == wa_id,
-                            ConsentEvent.kind == CONSENT_EVENT_KIND,
-                        )
-                    )
-                    if not already:
+                    # Idempotent, like the `/menu` branch below: a second
+                    # delivery (or a tap on the old button further up the
+                    # thread) re-sends the same menu and writes nothing new.
+                    if patient.lgpd_accepted_at is None:
+                        patient.lgpd_accepted_at = datetime.now(UTC)
+                        # The Patient column is the operational flag; this row
+                        # is the immutable audit record. Different lifetimes on
+                        # purpose - see models/patient.py.
                         session.add(
                             ConsentEvent(
                                 tenant_id=tenant.id,
@@ -803,6 +819,7 @@ async def _persist_inbound_message(
                             conversation_id=str(conversation.id),
                             tenant_id=str(tenant.id),
                         )
+                    # The FIRST message of the conversation to carry buttons.
                     return _ReplyContext(
                         conversation_id=conversation.id,
                         tenant_id=tenant.id,
@@ -810,6 +827,39 @@ async def _persist_inbound_message(
                         inbound_body=body or "",
                         greeting_override=CONSENT_ACCEPTED_MESSAGE,
                         greeting_buttons=_greeting_buttons_for(tenant, CONSENT_ACCEPTED_MESSAGE),
+                    )
+
+                if patient.lgpd_accepted_at is None:
+                    if is_first_contact:
+                        # The frame goes out BUTTON-FREE and the consent notice
+                        # follows it. Offering [Agendar] here would invite a tap
+                        # this gate is about to refuse, and would put two button
+                        # messages back to back with different jobs.
+                        return _ReplyContext(
+                            conversation_id=conversation.id,
+                            tenant_id=tenant.id,
+                            patient_wa_id=wa_id,
+                            inbound_body=body or "",
+                            greeting_override=render_greeting(
+                                tenant.clinic_name, _fit_clinic_description(tenant)
+                            ),
+                            greeting_buttons=[],
+                            send_consent_notice=True,
+                        )
+                    # Already asked, still not accepted: re-prompt, with the
+                    # button attached so the way forward is one tap from the
+                    # newest message rather than a scroll back up the thread.
+                    logger.info(
+                        "conversation_consent_pending",
+                        conversation_id=str(conversation.id),
+                        tenant_id=str(tenant.id),
+                    )
+                    return _ReplyContext(
+                        conversation_id=conversation.id,
+                        tenant_id=tenant.id,
+                        patient_wa_id=wa_id,
+                        inbound_body=body or "",
+                        send_consent_reminder=True,
                     )
 
                 if is_menu_command(body):
@@ -973,31 +1023,17 @@ async def _persist_inbound_message(
 
                 greeting_buttons = _greeting_buttons_for(tenant, greeting_override, opening_context)
 
-                # The LGPD notice rides along with the greeting and only with
-                # the greeting: asked once per subject, keyed on the absence of
-                # a `terms_accepted` event rather than on "is this a new
-                # Patient row", so a patient whose row predates this round (or
-                # survived a `/menu`) is still asked exactly once.
-                send_consent_notice = False
-                if greeting_override is not None:
-                    accepted = await session.scalar(
-                        select(func.count())
-                        .select_from(ConsentEvent)
-                        .where(
-                            ConsentEvent.tenant_id == tenant.id,
-                            ConsentEvent.wa_id == wa_id,
-                            ConsentEvent.kind == CONSENT_EVENT_KIND,
-                        )
-                    )
-                    send_consent_notice = not accepted
-
+                # No `send_consent_notice` here: the gate above returns for
+                # every subject with a NULL `lgpd_accepted_at`, so anything
+                # reaching this far has already accepted. The greeting keeps
+                # its buttons on this path, which is why the interactive-body
+                # budget (services/greeting_template.py) still governs it.
                 return _ReplyContext(
                     conversation_id=conversation.id,
                     patient_wa_id=wa_id,
                     inbound_body=body or "",
                     greeting_override=greeting_override,
                     greeting_buttons=greeting_buttons,
-                    send_consent_notice=send_consent_notice,
                 )
         except IntegrityError:
             # A concurrent worker already claimed this event id.
@@ -1095,7 +1131,18 @@ def _greeting_buttons_for(
         and opening_context.future_appointments
     ):
         return [LABEL_RESCHEDULE, LABEL_CANCEL_APPT, LABEL_OTHER]
-    return [LABEL_BOOK, LABEL_OTHER]
+    # `Agendar` carries the calendar emoji; `Outro` deliberately does not - it
+    # is the "anything else" escape, and decorating it would imply a category.
+    #
+    # Decorating is safe ONLY because the label keeps its underlying word:
+    # every matcher compares through `flow_router._norm`, which runs
+    # `strip_decoration` on BOTH sides, so "🗓️ Agendar", "Agendar" and a typed
+    # "agendar" share one key (FEAT 44). Renaming it to "Agendar Consulta"
+    # would NOT be safe for free - it changes what `strip_decoration` yields,
+    # so `LABEL_BOOK` itself would have to be renamed and every matcher, the
+    # LLM prompt and `_GREETING_ACTION_IDS` would have to follow. Length was
+    # never the constraint: "🗓️ Agendar Consulta" is 19 of the 20 allowed.
+    return [decorate(EMOJI_SCHEDULE, LABEL_BOOK), LABEL_OTHER]
 
 
 def _flow_tenant_snapshot(
@@ -1441,7 +1488,14 @@ def _reactivation_offer(
         # cohort - re-pitching the clinic at every 6h return is a lot of message
         # for a question that stands perfectly well on its own, and the pitch is
         # the one part of this that has no sensible product default.
-        returning = (tenant.greeting_message or "").strip()
+        #
+        # The pitch used to be read from `greeting_message`. That column is gone
+        # (it held WHOLE greetings, and the first-contact message is a product
+        # frame now), so the fallback follows the pitch to where it actually
+        # lives: `clinic_description`, the clinic's own slot in that frame. This
+        # is also strictly lighter - the slot is capped at ~180 chars, where the
+        # old column could hold a full 1024-char greeting.
+        returning = (tenant.clinic_description or "").strip()
     greeting = _render_greeting_template(returning, patient.name) if returning else ""
 
     if origin in (
@@ -1563,7 +1617,7 @@ async def _handle_remove_context_command(
 
     Deletes the patient row for this number, their conversation(s) and every
     message, then recreates an empty patient + conversation and sends the
-    tenant's *first-contact* greeting (`greeting_message`), so the number is
+    tenant's *first-contact* greeting (the product frame), so the number is
     treated as a brand-new first contact. This is the old `/menu` "dev reset",
     unchanged in intent and renamed to a string nobody types by accident
     (PROMPT_FIX_18) - `/menu` itself is now non-destructive.
@@ -2070,6 +2124,15 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     # First-contact/returning greeting: deterministic, verbatim and sent with
     # this tenant's own WhatsApp number/token. This intentionally runs only
     # after entitlement and tenant credentials have been resolved.
+    # Consent still owed and the subject said something other than "Concordo":
+    # the re-prompt is the WHOLE turn. Placed before the greeting branch so
+    # nothing else can answer first.
+    if reply.send_consent_reminder:
+        await _send_consent_notice(
+            reply, tenant=tenant, waba_token=waba_token, body=CONSENT_REMINDER_MESSAGE
+        )
+        return
+
     if reply.greeting_override is not None:
         await _send_greeting(reply, tenant=tenant, waba_token=waba_token)
         if reply.send_consent_notice:
@@ -3729,8 +3792,16 @@ async def _send_greeting(
             # `extract_greeting_button`.
             buttons = [
                 (
-                    f"greeting|{_GREETING_ACTION_IDS[label]}"
-                    if label in _GREETING_ACTION_IDS
+                    f"greeting|{_GREETING_ACTION_IDS[strip_decoration(label)]}"
+                    # Looked up through `strip_decoration` for the same reason
+                    # every matcher normalises: since the greeting trio started
+                    # rendering "🗓️ Agendar", the raw label is no longer a key
+                    # in this dict. A plain `label in _GREETING_ACTION_IDS`
+                    # would silently miss and hand the tap a positional
+                    # `reactivation|N` id, which `extract_greeting_button`
+                    # ignores - costing a flows-disabled tenant its
+                    # deterministic degrade with nothing logged.
+                    if strip_decoration(label) in _GREETING_ACTION_IDS
                     else f"reactivation|{index}",
                     label,
                 )
@@ -3771,13 +3842,20 @@ async def _send_consent_notice(
     *,
     tenant: Tenant,
     waba_token: str | None = None,
+    body: str = LGPD_CONSENT_MESSAGE,
 ) -> None:
-    """Send the LGPD terms notice as the SECOND first-contact message.
+    """Send an LGPD terms message carrying the `✅ Concordo` button.
+
+    Two callers, one shape: the notice that follows the first-contact greeting
+    (`body` defaults to it), and the re-prompt for a subject who answered
+    something else while consent was still pending (`CONSENT_REMINDER_MESSAGE`).
+    Both need the same button, so they share the send rather than growing a
+    second near-identical function.
 
     Separate from the greeting on purpose rather than appended to it: the
     greeting is already near WhatsApp's 1024-char interactive cap, and the
-    notice needs its own button (`✅ Concordo`) — a single message cannot carry
-    both the action trio and the consent button.
+    notice needs its own button — a single message cannot carry both the
+    action trio and the consent button.
 
     Best-effort, exactly like `_send_greeting`: a failure here is logged and
     dropped, never retried. The greeting has already gone out and the patient's
@@ -3796,7 +3874,7 @@ async def _send_consent_notice(
     try:
         result = await client.send_buttons(
             to=reply.patient_wa_id,
-            body=LGPD_CONSENT_MESSAGE,
+            body=body,
             # The id is semantic (not positional) so it can never be confused
             # with a `greeting|N` tap by `extract_greeting_button`; the LABEL is
             # still what `_is_consent_acceptance` matches on, since
@@ -3820,7 +3898,7 @@ async def _send_consent_notice(
                         direction=MessageDirection.OUTBOUND,
                         sender=MessageSender.BOT,
                         wam_id=_extract_sent_wam_id(result),
-                        body=LGPD_CONSENT_MESSAGE,
+                        body=body,
                     )
                 )
                 conversation = await session.get(Conversation, reply.conversation_id)

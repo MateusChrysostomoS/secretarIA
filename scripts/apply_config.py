@@ -41,7 +41,9 @@ logger = get_logger(__name__)
 _ALLOWED_FIELDS = (
     "clinic_name",
     "contact_email",
-    "greeting_message",
+    # `greeting_message` was DROPPED with the greeting-frame round; the
+    # clinic-authored slot in the first-contact message is this instead.
+    "clinic_description",
     "returning_greeting_message",
     "persona_notes",
     "language",

@@ -34,7 +34,6 @@ def _config(**overrides) -> TenantRuntimeConfig:
     fields = dict(
         tenant_id=uuid4(),
         clinic_name="Clínica Teste",
-        greeting_message=None,
         language="pt-BR",
         timezone="America/Sao_Paulo",
         appointment_duration_min=30,

@@ -61,16 +61,6 @@ class Tenant(Base):
     # clinic_name grows) and enforced in services/tenant_config.py, which is
     # where the tenant row - and therefore the name - is actually available.
     clinic_description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # ORPHANED as of the greeting-frame round (migration c1f4a8b6d2e9) - no
-    # code reads or writes this column anymore. The first-contact greeting is
-    # now the product frame above, not clinic free text, for the same reason
-    # `greeting_buttons` below stopped being clinic free text: the
-    # obligations it carries cannot be optional per clinic. NOT reused as the
-    # description slot on purpose - it holds WHOLE greetings today, and
-    # rendering one inside a frame that already opens the same way is exactly
-    # the duplicated opener that round removed. Kept (not dropped) for a
-    # future cleanup migration only.
-    greeting_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Greeting sent to a patient who has contacted the clinic before (a known
     # patient starting a fresh conversation). Supports a `{{name}}` placeholder
     # substituted with the patient's stored name (or "" when unknown). NULL =

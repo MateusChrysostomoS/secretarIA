@@ -39,6 +39,7 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 from secretaria.api import webhook as webhook_api  # noqa: E402
 from secretaria.core import database as core_database  # noqa: E402
 from secretaria.core.database import Base  # noqa: E402
+from secretaria.core.whatsapp_limits import EMOJI_SCHEDULE, decorate  # noqa: E402
 from secretaria.models import (  # noqa: E402
     Appointment,
     AppointmentStatus,
@@ -99,7 +100,15 @@ async def _seed_tenant_and_patient(db, *, wa_id: str = "5511999990000") -> tuple
         )
         session.add(tenant)
         await session.flush()
-        patient = Patient(id=uuid4(), tenant_id=tenant.id, wa_id=wa_id, name="Maria")
+        patient = Patient(
+            id=uuid4(),
+            tenant_id=tenant.id,
+            wa_id=wa_id,
+            name="Maria",
+            # Past the LGPD consent gate - these tests are about the opening
+            # router, which runs below it.
+            lgpd_accepted_at=datetime.now(UTC),
+        )
         session.add(patient)
         await session.commit()
         await session.refresh(tenant)
@@ -523,7 +532,13 @@ def test_greeting_buttons_without_an_appointment_offer_only_what_works() -> None
     tenant-editable menu on the greeting itself (menu_buttons_for still drives
     mid-conversation re-presentation elsewhere, untouched)."""
     tenant = _greeting_tenant(initial_flows={"enabled": True})
-    fixed_pair = [LABEL_BOOK, LABEL_OTHER]
+    # `Agendar` renders decorated ("🗓️ Agendar"); `Outro` deliberately does
+    # not. Built through `decorate` rather than written as a literal so this
+    # assertion follows the emoji if the constant changes, and still fails if
+    # the LABEL underneath it is renamed — which is the change that would
+    # actually break the matcher (flow_router._norm strips the emoji, not a
+    # renamed word).
+    fixed_pair = [decorate(EMOJI_SCHEDULE, LABEL_BOOK), LABEL_OTHER]
     for context in (
         PatientOpeningContext(state=PatientOpeningState.NEW),
         PatientOpeningContext(state=PatientOpeningState.RETURNING_NO_APPOINTMENT, has_history=True),
@@ -690,11 +705,16 @@ async def test_opening_router_only_on_opening_message(db, monkeypatch: pytest.Mo
             phone_number_id=str(uuid4())[:12],
             is_active=True,
             initial_flows={},
-            greeting_message="Olá! Bem-vindo à Clínica.",
         )
         session.add(tenant)
         await session.flush()
-        patient = Patient(id=uuid4(), tenant_id=tenant.id, wa_id="5511988887777", name="Maria")
+        patient = Patient(
+            id=uuid4(),
+            tenant_id=tenant.id,
+            wa_id="5511988887777",
+            name="Maria",
+            lgpd_accepted_at=datetime.now(UTC),
+        )
         session.add(patient)
         await session.commit()
         await session.refresh(tenant)

@@ -129,7 +129,6 @@ async def _seed_tenant(db, **kwargs) -> Tenant:
             id=uuid4(),
             clinic_name="Clinic",
             phone_number_id=PHONE_NUMBER_ID,
-            greeting_message="Olá! Bem-vindo à Clínica.",
             **kwargs,
         )
         session.add(tenant)
@@ -183,8 +182,19 @@ async def test_greeting_uses_tenant_whatsapp_credentials(db, monkeypatch: pytest
     captured = {}
 
     class _Client:
+        # BOTH shapes, because which one fires is now the point: since the
+        # consent gate landed, a first contact by a subject who has not
+        # accepted the terms gets the frame as PLAIN TEXT (the action buttons
+        # would invite a tap the gate is about to refuse), and the LGPD notice
+        # carries the only button. A fake with just `send_buttons` fails with
+        # an AttributeError swallowed by `_send_greeting`'s except, which reads
+        # as "nothing was sent" rather than "the wrong shape was sent".
         async def send_buttons(self, *, to, body, buttons):
-            captured.update(to=to, body=body, buttons=buttons)
+            captured.update(to=to, body=body, buttons=buttons, shape="buttons")
+            return {"messages": [{"id": "wamid.sent.greeting"}]}
+
+        async def send_text_message(self, *, to, body):
+            captured.update(to=to, body=body, shape="text")
             return {"messages": [{"id": "wamid.sent.greeting"}]}
 
     def _for_tenant(cls, selected_tenant, token):
@@ -202,6 +212,11 @@ async def test_greeting_uses_tenant_whatsapp_credentials(db, monkeypatch: pytest
     # tenant's own `greeting_message` (which this round orphaned) — see
     # services/greeting_template.py.
     assert captured["body"] == render_greeting(tenant.clinic_name, tenant.clinic_description)
+    # …and it goes out button-free, with the LGPD notice (and its single
+    # "✅ Concordo" button) following as a separate message.
+    assert captured["shape"] == "text"
+    assert reply.send_consent_notice is True
+    assert reply.greeting_buttons == []
 
 
 async def test_wa_id_off_allowlist_is_dropped_silently(db, monkeypatch: pytest.MonkeyPatch):

@@ -1,6 +1,6 @@
 {
   "clinic_name": "Espaço Brincar — Psicanálise Infantil",
-  "greeting_message": "Olá! 😊 Aqui é a secretária virtual do Espaço Brincar — Clínica de Psicanálise Infantil.\n\nAcolhemos crianças e adolescentes com uma escuta cuidadosa, sempre junto à família. Estou aqui para tirar suas dúvidas, explicar como funciona o atendimento e ajudar a marcar uma primeira conversa com nossos analistas.\n\nComo posso te ajudar hoje? Toque em uma das opções abaixo ou, se preferir, me escreva o que você precisa. 💛",
+  "clinic_description": "Acolhemos crianças e adolescentes com uma escuta cuidadosa, sempre junto à família.",
   "returning_greeting_message": "Olá de novo, {{name}}! 😊 Que bom te ver por aqui. Como posso ajudar hoje? Toque em uma das opções abaixo ou me escreva o que precisar. 💛",
   "persona_notes": "Você é a secretária de uma clínica de PSICANÁLISE INFANTIL. Fale SEMPRE com o responsável (mãe, pai ou cuidador), nunca diretamente com a criança. Tom acolhedor, calmo e empático — famílias podem chegar preocupadas. Use pt-BR simples e cuidadoso. NÃO faça diagnósticos, não interprete sintomas e não dê orientações clínicas: seu papel é acolher, explicar como funciona o atendimento e AGENDAR. Quando perguntarem, explique que a primeira consulta é uma anamnese só com os responsáveis (a criança não participa) e que o trabalho com a criança acontece pela via do brincar. Ao iniciar um agendamento, peça o seu nome, o nome da criança e a sua relação com ela (mãe, pai, responsável). Preserve a confidencialidade e evite registrar detalhes clínicos sensíveis. Se a família relatar urgência ou risco (autoagressão, ideação suicida, violência), oriente a procurar emergência imediatamente (SAMU 192, CVV 188) e diga que um profissional dará retorno o quanto antes.",
   "language": "pt-BR",
@@ -12,26 +12,112 @@
   "initial_flows": {
     "enabled": true,
     "menu_label": "Como posso te ajudar?",
-    "buttons": ["Agendar consulta", "Horários", "Outro assunto"],
+    "buttons": [
+      "Agendar consulta",
+      "Horários",
+      "Outro assunto"
+    ],
     "reactivation": {
       "enabled": true,
       "gap_minutes": 360,
       "continue_prompt": "Você quer continuar com a nossa última conversa?",
-      "buttons": ["Sim", "Não"]
+      "buttons": [
+        "Sim",
+        "Não"
+      ]
     }
   },
   "business_hours": {
-    "monday":    [{ "start": "08:00", "end": "12:00" }, { "start": "13:00", "end": "18:00" }],
-    "tuesday":   [{ "start": "08:00", "end": "12:00" }, { "start": "13:00", "end": "18:00" }],
-    "wednesday": [{ "start": "08:00", "end": "12:00" }, { "start": "13:00", "end": "18:00" }],
-    "thursday":  [{ "start": "08:00", "end": "12:00" }, { "start": "13:00", "end": "18:00" }],
-    "friday":    [{ "start": "08:00", "end": "12:00" }, { "start": "13:00", "end": "17:00" }],
-    "saturday":  [{ "start": "08:00", "end": "12:00" }]
+    "monday": [
+      {
+        "start": "08:00",
+        "end": "12:00"
+      },
+      {
+        "start": "13:00",
+        "end": "18:00"
+      }
+    ],
+    "tuesday": [
+      {
+        "start": "08:00",
+        "end": "12:00"
+      },
+      {
+        "start": "13:00",
+        "end": "18:00"
+      }
+    ],
+    "wednesday": [
+      {
+        "start": "08:00",
+        "end": "12:00"
+      },
+      {
+        "start": "13:00",
+        "end": "18:00"
+      }
+    ],
+    "thursday": [
+      {
+        "start": "08:00",
+        "end": "12:00"
+      },
+      {
+        "start": "13:00",
+        "end": "18:00"
+      }
+    ],
+    "friday": [
+      {
+        "start": "08:00",
+        "end": "12:00"
+      },
+      {
+        "start": "13:00",
+        "end": "17:00"
+      }
+    ],
+    "saturday": [
+      {
+        "start": "08:00",
+        "end": "12:00"
+      }
+    ]
   },
   "appointment_types": [
-    { "name": "Consulta inicial (anamnese com responsáveis)", "description": "Primeiro encontro só com os pais/responsáveis para entender a demanda. A criança não participa.", "long_description": "Primeiro encontro, com cerca de 60 minutos, apenas com os responsáveis. É onde escutamos a demanda da família e explicamos como o acompanhamento acontece. A criança não participa desta etapa.", "price": "R$ 250", "duration_min": 60, "is_active": true, "sort_order": 0 },
-    { "name": "Sessão de psicanálise infantil", "description": "Sessão da criança com o analista, pela via do brincar (ludoterapia).", "price": "R$ 200", "duration_min": 50, "is_active": true, "sort_order": 1 },
-    { "name": "Orientação a pais", "description": "Encontro de orientação e acompanhamento com os responsáveis.", "price": "R$ 200", "duration_min": 50, "is_active": true, "sort_order": 2 },
-    { "name": "Devolutiva", "description": "Encontro para devolução das impressões após o período de avaliação.", "price": "R$ 200", "duration_min": 50, "is_active": true, "sort_order": 3 }
+    {
+      "name": "Consulta inicial (anamnese com responsáveis)",
+      "description": "Primeiro encontro só com os pais/responsáveis para entender a demanda. A criança não participa.",
+      "long_description": "Primeiro encontro, com cerca de 60 minutos, apenas com os responsáveis. É onde escutamos a demanda da família e explicamos como o acompanhamento acontece. A criança não participa desta etapa.",
+      "price": "R$ 250",
+      "duration_min": 60,
+      "is_active": true,
+      "sort_order": 0
+    },
+    {
+      "name": "Sessão de psicanálise infantil",
+      "description": "Sessão da criança com o analista, pela via do brincar (ludoterapia).",
+      "price": "R$ 200",
+      "duration_min": 50,
+      "is_active": true,
+      "sort_order": 1
+    },
+    {
+      "name": "Orientação a pais",
+      "description": "Encontro de orientação e acompanhamento com os responsáveis.",
+      "price": "R$ 200",
+      "duration_min": 50,
+      "is_active": true,
+      "sort_order": 2
+    },
+    {
+      "name": "Devolutiva",
+      "description": "Encontro para devolução das impressões após o período de avaliação.",
+      "price": "R$ 200",
+      "duration_min": 50,
+      "is_active": true,
+      "sort_order": 3
+    }
   ]
 }

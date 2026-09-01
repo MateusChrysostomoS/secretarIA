@@ -87,7 +87,6 @@ def _config(tenant_id=None, professional_id=None) -> TenantRuntimeConfig:
     return TenantRuntimeConfig(
         tenant_id=tenant_id or uuid4(),
         clinic_name="Clinica",
-        greeting_message=None,
         language="pt-BR",
         timezone="America/Sao_Paulo",
         appointment_duration_min=30,

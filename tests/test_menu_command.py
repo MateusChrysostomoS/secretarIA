@@ -284,10 +284,18 @@ async def _seed(
             clinic_name="Clinic",
             phone_number_id=PHONE_NUMBER_ID,
             is_active=is_active,
-            greeting_message="Olá! Bem-vindo à Clínica.",
             initial_flows={},
         )
-        patient = Patient(id=uuid4(), tenant_id=tenant.id, wa_id=WA_ID, name="Maria")
+        patient = Patient(
+            id=uuid4(),
+            tenant_id=tenant.id,
+            wa_id=WA_ID,
+            name="Maria",
+            # Past the LGPD consent gate, which sits ABOVE `/menu` in the
+            # ladder - an unconsented patient typing `/menu` gets the consent
+            # re-prompt, which is a different test.
+            lgpd_accepted_at=datetime.now(UTC),
+        )
         session.add_all([tenant, patient])
         await session.flush()
         conversation = Conversation(

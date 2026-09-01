@@ -58,11 +58,25 @@ LGPD_CONSENT_MESSAGE = (
 # plain button's title, not its id).
 CONSENT_BUTTON_LABEL = "✅ Concordo"
 
-# Sent right after the tap, so the acceptance is visibly acknowledged instead
-# of the patient wondering whether the button worked.
+# Sent right after the tap. Two jobs in one message: acknowledge the acceptance
+# (so the patient is not left wondering whether the button worked) and open the
+# actual service menu, which is the FIRST message of the conversation to carry
+# action buttons. Everything before it is deliberately button-free — see
+# workers/tasks.py::_persist_inbound_message's consent gate.
 CONSENT_ACCEPTED_MESSAGE = (
-    "Perfeito, obrigado! ✅ Sua concordância foi registrada.\n\n"
-    "Agora me diga: como posso ajudar você hoje?"
+    "Perfeito, obrigado! ✅ Sua concordância foi registrada.\n\nO que você precisa?"
+)
+
+# The re-prompt for a patient who says something else while consent is still
+# pending. PreCheck's equivalent ("Reenviar LGPD") is plain TEXT, which leaves
+# the patient scrolling back up the thread to find the button they need; this
+# one is sent WITH the button attached, so the way forward is always one tap
+# from the newest message.
+CONSENT_REMINDER_MESSAGE = (
+    "Para continuar, primeiro preciso da sua concordância com os Termos de Uso "
+    "e a Política de Privacidade, conforme a LGPD.\n\n"
+    f"📄 Leia aqui: {LGPD_TERMS_URL}\n\n"
+    "✍️ É só tocar no botão abaixo:"
 )
 
 # The ConsentEvent.kind written when the button is tapped. `first_contact_service`
@@ -111,9 +125,7 @@ agendamento.
 
 ⚠️ Errou? Digite *voltar* a qualquer momento para recomeçar.
 
-🚨 Em emergência, não use este canal: procure o pronto-socorro ou ligue 192.
-
-✨ Vamos começar? Me diga o que você precisa!"""
+🚨 Em emergência, não use este canal: procure o pronto-socorro ou ligue 192."""
 
 
 def render_greeting(clinic_name: str | None, clinic_description: str | None) -> str:

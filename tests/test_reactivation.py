@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo  # noqa: E402
 import pytest  # noqa: E402
 
 from secretaria.ai.formatter import ButtonBubble, SlotsBubble  # noqa: E402
+from secretaria.core.whatsapp_limits import EMOJI_SCHEDULE, decorate  # noqa: E402
 from secretaria.models import FlowState  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
     DEFAULT_CONTINUE_PROMPT,
@@ -66,7 +67,10 @@ def _tenant(reactivation=None, **overrides):
     base = dict(
         initial_flows=initial_flows,
         returning_greeting_message="Oi de novo, {{name}}!",
-        greeting_message="Olá! Bem-vindo.",
+        # The clinic's pitch. `_reactivation_offer` falls back to it for the
+        # opted-in cohort; it used to read `greeting_message`, which the
+        # greeting-frame round dropped.
+        clinic_description="Oftalmologia e cirurgia refrativa.",
         greeting_buttons=["Agendar", "Horários"],
         appointment_types=[
             {
@@ -160,9 +164,7 @@ def test_continue_prompt_default_and_custom():
 
 def test_choice_buttons_default_and_truncate():
     assert reactivation_choice_buttons(_tenant()) == ["✅ Sim", "❌ Não"]
-    buttons = reactivation_choice_buttons(
-        _tenant(reactivation={"buttons": ["A", "B", "C", "D"]})
-    )
+    buttons = reactivation_choice_buttons(_tenant(reactivation={"buttons": ["A", "B", "C", "D"]}))
     # A tenant that wrote its OWN buttons keeps them verbatim: the emoji belongs
     # to the DEFAULT copy we ship, not to whatever a clinic typed into the hub.
     assert buttons == ["A", "B", "C"]  # capped at 3
@@ -322,9 +324,7 @@ async def test_resume_awaiting_confirmation_without_slot_reasks_day():
 
 
 async def test_resume_awaiting_retry_reshows_choice():
-    conv = _conversation(
-        flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_AWAITING_RETRY
-    )
+    conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_AWAITING_RETRY)
     result = await resume_bubbles(conv, _tenant(), None)
     assert result.flow_step == STEP_AWAITING_RETRY
     assert isinstance(result.bubbles[0], MenuBubble)
@@ -412,7 +412,7 @@ def test_offer_idle_sends_plain_greeting_and_menu_without_arming():
     # menu - see docs/CHECKPOINT_fixed_greeting_buttons.md. "Gerenciar consulta"
     # is no longer offered to a patient with nothing booked (it could only reach
     # a dead end), leaving the [Agendar, Outro] pair.
-    assert offer.greeting_buttons == [LABEL_BOOK, LABEL_OTHER]
+    assert offer.greeting_buttons == [decorate(EMOJI_SCHEDULE, LABEL_BOOK), LABEL_OTHER]
     assert LABEL_MANAGE_APPOINTMENT not in offer.greeting_buttons
 
 
@@ -420,7 +420,10 @@ def test_offer_idle_without_any_greeting_returns_none():
     tenant = _tenant(
         reactivation={"enabled": True, "gap_minutes": 360},
         returning_greeting_message=None,
-        greeting_message=None,
+        # Both sources empty: no returning greeting AND no pitch to fall back
+        # on. Clearing only the first would now hit the clinic_description
+        # fallback and produce an offer.
+        clinic_description=None,
     )
     conv = _conversation(flow_state=FlowState.IDLE)
     stale = datetime.now(UTC) - timedelta(hours=10)
@@ -512,7 +515,7 @@ def _plain_tenant(**overrides):
     never even called for it (see `_persist_inbound_message`) - it is exactly
     the cohort that had no time-based exit from LLM mode at all.
     """
-    base = dict(returning_greeting_message=None, greeting_message="Olá!")
+    base = dict(returning_greeting_message=None, clinic_description="Oftalmologia.")
     base.update(overrides)
     tenant = _tenant(**base)
     tenant.initial_flows.pop("reactivation", None)
@@ -594,7 +597,6 @@ def test_expiry_honours_the_tenant_gap_override():
     tenant = _tenant(
         reactivation={"gap_minutes": 30},
         returning_greeting_message=None,
-        greeting_message="Olá!",
     )
     # No "enabled" key and no returning greeting -> still the skipped cohort.
     assert reactivation_enabled(tenant) is False

@@ -92,11 +92,19 @@ async def _seed(
             clinic_name="Clinic",
             phone_number_id=PHONE_NUMBER_ID,
             is_active=True,
-            greeting_message="Olá! Bem-vindo à Clínica.",
             returning_greeting_message=returning_greeting_message,
             initial_flows=initial_flows or {},
         )
-        patient = Patient(id=uuid4(), tenant_id=tenant.id, wa_id=WA_ID, name="Maria")
+        patient = Patient(
+            id=uuid4(),
+            tenant_id=tenant.id,
+            wa_id=WA_ID,
+            name="Maria",
+            # Past the LGPD consent gate: these tests are about the LLM-state
+            # TTL, and an unconsented patient never reaches that code at all
+            # (the gate answers them with the consent re-prompt instead).
+            lgpd_accepted_at=datetime.now(UTC),
+        )
         conversation = Conversation(
             id=uuid4(),
             tenant_id=tenant.id,
