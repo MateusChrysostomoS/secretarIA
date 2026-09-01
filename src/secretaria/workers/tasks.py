@@ -1616,9 +1616,13 @@ async def _handle_remove_context_command(
     """`/dangerously-remove-context`: wipe this number's conversational trail.
 
     Deletes the patient row for this number, their conversation(s) and every
-    message, then recreates an empty patient + conversation and sends the
-    tenant's *first-contact* greeting (the product frame), so the number is
-    treated as a brand-new first contact. This is the old `/menu` "dev reset",
+    message, then recreates an empty patient + conversation and replays the
+    whole first-contact OPENING - the product frame with no buttons, then the
+    LGPD notice with `✅ Concordo` - so the number is treated as a brand-new
+    first contact. Both messages, not just the frame: the recreated patient's
+    `lgpd_accepted_at` is NULL, so a real newcomer would be owed exactly this
+    pair (see `_persist_inbound_message`'s consent gate), and a rehearsal that
+    stops at the frame is not a rehearsal. This is the old `/menu` "dev reset",
     unchanged in intent and renamed to a string nobody types by accident
     (PROMPT_FIX_18) - `/menu` itself is now non-destructive.
 
@@ -1802,7 +1806,6 @@ async def _handle_remove_context_command(
                 # this command is once again a faithful rehearsal of what a
                 # brand-new patient sees.
                 greeting = render_greeting(tenant.clinic_name, _fit_clinic_description(tenant))
-                greeting_buttons = _greeting_buttons_for(tenant, greeting or None)
                 waba_token = await get_waba_token(session, tenant.id)
         except IntegrityError:
             logger.info("worker_remove_context_duplicate_race", wam_id=wam_id)
@@ -1844,20 +1847,28 @@ async def _handle_remove_context_command(
         logger.info("worker_remove_context_no_greeting", conversation_id=str(conversation_id))
         return
 
-    # Send the first-contact greeting verbatim (one message, with the configured
-    # quick-reply buttons), exactly as a brand-new patient would receive it.
-    await _send_greeting(
-        _ReplyContext(
-            conversation_id=conversation_id,
-            tenant_id=tenant.id,
-            patient_wa_id=wa_id,
-            inbound_body="",
-            greeting_override=greeting,
-            greeting_buttons=greeting_buttons,
-        ),
-        tenant=tenant,
-        waba_token=waba_token,
+    # Replay the opening EXACTLY as `_persist_inbound_message`'s consent gate
+    # produces it for a real newcomer: the frame BUTTON-FREE, then the LGPD
+    # notice carrying `✅ Concordo`. The recreated patient row has a NULL
+    # `lgpd_accepted_at`, so the gate genuinely owes this pair - and an
+    # operator resetting their own number is precisely the person who would
+    # mistake this command's output for what a newcomer sees. Sending only the
+    # frame, decorated with the [Agendar] trio, diverged in the two ways that
+    # are visible from the phone: buttons the gate would refuse on the very
+    # next tap, and no terms at all until the operator typed something else -
+    # because the greeting this command sends is itself recorded as a Message,
+    # so the next inbound no longer reads as `is_first_contact` and falls to
+    # the gate's re-prompt branch instead of its first-contact branch.
+    reply = _ReplyContext(
+        conversation_id=conversation_id,
+        tenant_id=tenant.id,
+        patient_wa_id=wa_id,
+        inbound_body="",
+        greeting_override=greeting,
+        greeting_buttons=[],
     )
+    await _send_greeting(reply, tenant=tenant, waba_token=waba_token)
+    await _send_consent_notice(reply, tenant=tenant, waba_token=waba_token)
 
 
 async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:

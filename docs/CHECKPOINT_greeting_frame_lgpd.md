@@ -1,7 +1,10 @@
 # CHECKPOINT — Moldura de saudação + aviso de LGPD (2026-08-31)
 
-> Estado: **BUILT, uncommitted, NÃO deployado.** Migrações `c1f4a8b6d2e9`, `d2a5b9c7e3f1` e
-> `e3b7c1d5a9f2` **não rodadas** — e a última tem ordem de deploy INVERTIDA (ver Pendências).
+> Estado: **COMMITADO E DEPLOYADO** (`8995f48`). Conferido em 2026-09-01 por
+> `GET /build` da API de produção: `source_fingerprint` bate byte a byte com o HEAD local,
+> `deploy_parity: "match"` entre `api` e `worker`, `alembic_head: e3b7c1d5a9f2` — ou seja, as três
+> migrações rodaram. **Uma correção posterior está uncommitted** — ver "A regressão do ensaio".
+> As Pendências 1–4 abaixo estão CUMPRIDAS; 5–7 continuam de pé.
 > Backend: 1976 testes verdes (`pytest -q`), `ruff check`/`format` limpos nos arquivos tocados.
 > Frontend (`secretarIA-frontend`): `tsc --noEmit` limpo, 484 testes, `npm run build` ok.
 
@@ -174,3 +177,29 @@ byte a byte que o que a clínica aprova é o que o paciente recebe.
    `models/consent_event.py` continua valendo — confirmar com advogado.
 7. Clínicas existentes têm `clinic_description` NULL: mandam a moldura sem descrição (renderiza
    limpo, sem buraco). Vale um aviso no hub para preencherem.
+
+## A regressão do ensaio (`/dangerously-remove-context`) — 2026-09-01
+
+**Sintoma relatado:** um paciente "novato" recebia a moldura **com** `[🗓️ Agendar] [Outro]` e
+**sem** os termos; o `✅ Concordo` só aparecia depois que ele mandava outra mensagem qualquer.
+
+**O caminho real nunca teve esse bug** — provado na WIRE, não no contexto: os dois testes novos em
+`test_lgpd_consent_gate.py` (`test_first_contact_puts_exactly_two_messages_on_the_wire` e
+`test_the_menu_buttons_only_appear_after_the_tap`) fingem o `WhatsAppClient` e conferem as
+chamadas de envio. Quem divergia era `_handle_remove_context_command`, isto é, **exatamente o
+comando que um operador usa para se testar como novato**: ele renderizava a moldura, colava os
+botões com `_greeting_buttons_for` e **nunca** mandava o aviso de LGPD.
+
+E o segundo sintoma é consequência do primeiro, não um bug separado: a saudação que esse comando
+manda **é gravada como `Message`** na conversa recém-criada. Então a próxima mensagem de verdade
+já não conta como `is_first_contact`, o gate cai no ramo de **re-prompt** e só ali aparece o
+`✅ Concordo`. Os dois sintomas relatados são o mesmo defeito visto de dois ângulos.
+
+**Correção:** o comando passou a reproduzir o par exato — `_send_greeting` com
+`greeting_buttons=[]` e, na sequência, `_send_consent_notice`. O `Patient` recriado tem
+`lgpd_accepted_at` NULL, então esse par é literalmente o que o gate deve a um novato.
+
+**A lição que vale além deste bug:** a suíte do gate parava no `_ReplyContext`. Um chamador que
+monta a moldura por conta própria — que é o que o ensaio fazia — honra o contexto e ainda assim
+manda a mensagem errada. Todo caminho que **envia** a abertura precisa de teste no nível do envio;
+existem exatamente dois `_send_greeting(` no repositório e agora ambos estão cobertos assim.

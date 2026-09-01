@@ -58,6 +58,11 @@ from secretaria.models import (  # noqa: E402
     Tenant,
 )
 from secretaria.schemas.webhook import WebhookValue  # noqa: E402
+from secretaria.services.greeting_template import (  # noqa: E402
+    CONSENT_BUTTON_LABEL,
+    LGPD_CONSENT_MESSAGE,
+    render_greeting,
+)
 from secretaria.workers import tasks  # noqa: E402
 
 PHONE_NUMBER_ID = "1234567890"
@@ -245,8 +250,10 @@ async def test_removes_patient_conversation_and_messages(db) -> None:
         # A fresh, empty patient + conversation replaced them.
         fresh = await session.scalar(select(Patient).where(Patient.wa_id == WA_ID))
         assert fresh is not None and fresh.id != seeded["patient"].id
-    # Only the greeting the new "first contact" receives remains as history.
-    assert await _count(db, Message) == 1
+    # Only the opening the new "first contact" receives remains as history:
+    # the frame and the LGPD notice, i.e. the same two messages a real
+    # newcomer's first turn produces.
+    assert await _count(db, Message) == 2
 
 
 async def test_sends_the_first_contact_greeting(db) -> None:
@@ -263,6 +270,53 @@ async def test_sends_the_first_contact_greeting(db) -> None:
     # itself is pinned in tests/test_greeting_template.py).
     assert any("assistente virtual automatizado" in body for body in bodies)
     assert any("Em emergência, não use este canal" in body for body in bodies)
+
+
+async def test_the_reset_replays_the_real_two_message_opening(db) -> None:
+    """The rehearsal must be message-for-message what a newcomer receives.
+
+    This is the regression that made the command lie: it sent the frame WITH
+    the [Agendar] trio and never sent the terms, so an operator resetting
+    their own number saw buttons the consent gate would refuse on the next
+    tap, and got the terms only after typing something else — the greeting
+    the command records is itself a Message, so the next inbound no longer
+    reads as a first contact and lands on the gate's re-prompt branch.
+    """
+    await _seed(db, with_appointment=False)
+
+    await tasks._handle_patient_messages(_value(COMMAND, wam_id="wamid.wipe.pair"))
+
+    sent = _FakeWhatsAppClient.sent
+    assert len(sent) == 2, sent
+
+    kind, _to, frame = sent[0][0], sent[0][1], sent[0][2]
+    # Plain text: a "text" tuple has no 4th element, so buttons cannot have
+    # been attached. This is the half the gate depends on.
+    assert kind == "text", f"the frame went out as {kind}: {sent[0]}"
+    # The tenant seeded above has no `clinic_description`; the frame still
+    # renders in full, which is the point of it being a product frame.
+    assert frame == render_greeting("Clinic", None)
+
+    kind, _to, notice, buttons = sent[1]
+    assert kind == "buttons"
+    assert notice == LGPD_CONSENT_MESSAGE
+    assert [label for _id, label in buttons] == [CONSENT_BUTTON_LABEL]
+
+
+async def test_the_reset_leaves_consent_still_owed(db) -> None:
+    """Sending the notice is not consent — the fresh patient still owes it.
+
+    Pins the reason the pair is sent at all: if the recreated row came back
+    already accepted, the second message would be noise.
+    """
+    await _seed(db, with_appointment=False)
+
+    await tasks._handle_patient_messages(_value(COMMAND, wam_id="wamid.wipe.owed"))
+
+    async with db() as session:
+        fresh = await session.scalar(select(Patient).where(Patient.wa_id == WA_ID))
+    assert fresh is not None
+    assert fresh.lgpd_accepted_at is None
 
 
 # --------------------------------------------------------------------------
@@ -387,8 +441,9 @@ async def test_audit_row_is_written_even_with_nothing_to_delete(db) -> None:
             )
         ).all()
     assert len(rows) == 2
-    # The second run had a freshly-created (near-empty) patient to remove.
-    assert rows[1].payload["messages"] <= 1
+    # The second run had a freshly-created patient to remove, holding only what
+    # the first run's rehearsal sent it: the frame and the LGPD notice.
+    assert rows[1].payload["messages"] <= 2
     assert rows[1].payload["appointments_preserved"] == 0
 
 

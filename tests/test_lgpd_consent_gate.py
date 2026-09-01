@@ -54,10 +54,13 @@ from secretaria.models import (  # noqa: E402
     Patient,
     Tenant,
 )
+from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
 from secretaria.services.flow_router import LABEL_BOOK, LABEL_OTHER  # noqa: E402
 from secretaria.services.greeting_template import (  # noqa: E402
     CONSENT_ACCEPTED_MESSAGE,
+    CONSENT_BUTTON_LABEL,
     CONSENT_EVENT_KIND,
+    LGPD_CONSENT_MESSAGE,
     render_greeting,
 )
 from secretaria.workers import tasks  # noqa: E402
@@ -286,3 +289,102 @@ async def test_human_handover_outranks_the_consent_gate(db) -> None:
     # The bot stays silent (that is what handover means); crucially it does NOT
     # come back with a consent re-prompt over the human's shoulder.
     assert reply is None or reply.send_consent_reminder is False
+
+
+# --------------------------------------------------------------------------
+# The same sequence, asserted on the WIRE
+# --------------------------------------------------------------------------
+# Everything above stops at the `_ReplyContext`. That is one seam short of the
+# thing the product promises: what a phone receives is decided by
+# `_send_bot_reply`, and a caller that builds the frame itself (the
+# `/dangerously-remove-context` rehearsal did exactly that) can honour the
+# context and still send the wrong pair. These two tests close that gap by
+# recording the actual client calls.
+
+
+class _WireClient:
+    """Records send_text_message / send_buttons; installed for the tests below."""
+
+    sends: list[tuple] = []
+
+    def __init__(self, access_token=None, phone_number_id=None):
+        pass
+
+    @classmethod
+    def for_tenant(cls, tenant, waba_token):
+        return cls()
+
+    async def send_text_message(self, to, body):
+        _WireClient.sends.append(("text", body, None))
+        return {"messages": [{"id": f"wamid.out.{len(_WireClient.sends)}"}]}
+
+    async def send_buttons(self, to, body, buttons):
+        _WireClient.sends.append(("buttons", body, [label for _id, label in buttons]))
+        return {"messages": [{"id": f"wamid.out.{len(_WireClient.sends)}"}]}
+
+    async def send_list(self, to, body, button_label, rows, section_title="Opções"):
+        _WireClient.sends.append(("list", body, None))
+        return {"messages": [{"id": f"wamid.out.{len(_WireClient.sends)}"}]}
+
+
+@pytest.fixture
+def wire(monkeypatch: pytest.MonkeyPatch):
+    _WireClient.sends = []
+    monkeypatch.setattr(tasks, "WhatsAppClient", _WireClient)
+
+    async def _fake_token(session, tenant_id):
+        return "decrypted-waba-token"
+
+    async def _fake_entitlements(tenant_id, redis):
+        return EntitlementSummary(
+            tenant_id=str(tenant_id),
+            status="active",
+            active=True,
+            secretaria_enabled=True,
+            plan="bronze",
+            secretaria_tier="basico",
+            addons={},
+            limits={},
+        )
+
+    monkeypatch.setattr(tasks, "get_waba_token", _fake_token)
+    monkeypatch.setattr(tasks, "get_entitlements", _fake_entitlements)
+    return _WireClient
+
+
+async def _turn(tenant: Tenant, body: str, wam_id: str) -> None:
+    """One whole turn: persist the inbound, then actually send the reply."""
+    reply = await _inbound(tenant, body, wam_id)
+    if reply is not None:
+        await tasks._send_bot_reply(reply, redis=None)
+
+
+async def test_first_contact_puts_exactly_two_messages_on_the_wire(db, wire) -> None:
+    tenant = await _seed_tenant(db)
+
+    await _turn(tenant, "oi", "wamid.first")
+
+    assert len(wire.sends) == 2, wire.sends
+    kind, body, buttons = wire.sends[0]
+    assert kind == "text", f"the frame went out as {kind} with {buttons}"
+    assert body == render_greeting(tenant.clinic_name, tenant.clinic_description)
+    kind, body, buttons = wire.sends[1]
+    assert (kind, body, buttons) == ("buttons", LGPD_CONSENT_MESSAGE, [CONSENT_BUTTON_LABEL])
+
+
+async def test_the_menu_buttons_only_appear_after_the_tap(db, wire) -> None:
+    """The whole opening, end to end: no action button exists before consent."""
+    tenant = await _seed_tenant(db)
+
+    await _turn(tenant, "oi", "wamid.first")
+    await _turn(tenant, "quero agendar", "wamid.second")
+    await _turn(tenant, CONSENT_BUTTON_LABEL, "wamid.third")
+
+    labels = [buttons for _kind, _body, buttons in wire.sends if buttons]
+    # Two consent prompts (the notice and the re-prompt), then the menu.
+    assert labels == [
+        [CONSENT_BUTTON_LABEL],
+        [CONSENT_BUTTON_LABEL],
+        [decorate(EMOJI_SCHEDULE, LABEL_BOOK), LABEL_OTHER],
+    ]
+    assert wire.sends[-1][1] == CONSENT_ACCEPTED_MESSAGE
