@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from secretaria.models.conversation import HandoverState
 
@@ -21,3 +21,19 @@ class HandoverUpdate(BaseModel):
     """POST /tenants/me/conversations/{id}/handover."""
 
     state: HandoverState
+
+
+class MessageRead(BaseModel):
+    """One message in a conversation thread — GET .../conversations/{id}/messages."""
+
+    id: str
+    direction: str
+    sender: str
+    body: str | None
+    created_at: datetime
+
+
+class MessageSend(BaseModel):
+    """POST /tenants/me/conversations/{id}/messages — staff sends a message."""
+
+    body: str = Field(min_length=1)

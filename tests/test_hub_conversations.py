@@ -19,9 +19,11 @@ os.environ.setdefault("ENCRYPTION_KEY", "gBSpATEZoI21UX0_59nHvxdUDJ4drCttg2RAEaP
 from datetime import UTC, datetime, timedelta  # noqa: E402
 from uuid import uuid4  # noqa: E402
 
+import httpx  # noqa: E402
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
 from httpx import AsyncClient  # noqa: E402
+from sqlalchemy import select  # noqa: E402
 from sqlalchemy.ext.asyncio import (  # noqa: E402
     AsyncSession,
     async_sessionmaker,
@@ -29,6 +31,7 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 )
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
+from secretaria.api.hub import conversations as hub_conversations  # noqa: E402
 from secretaria.api.hub.deps import get_current_tenant  # noqa: E402
 from secretaria.core.database import Base, get_session  # noqa: E402
 from secretaria.models import Conversation, HandoverState, Message, Patient, Tenant  # noqa: E402
@@ -125,6 +128,48 @@ async def _seed_message(
 async def _get_conversation_row(db, conversation_id) -> Conversation:
     async with db() as session:
         return await session.get(Conversation, conversation_id)
+
+
+async def _get_message_rows(db, conversation_id) -> list[Message]:
+    async with db() as session:
+        rows = await session.scalars(
+            select(Message)
+            .where(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at.asc())
+        )
+        return list(rows.all())
+
+
+class _FakeWhatsAppClient:
+    """Records constructed instances + sends; installed in place of the real
+    client — same idiom as test_deposit_lifecycle.py's fake."""
+
+    created: list["_FakeWhatsAppClient"] = []
+
+    def __init__(self, access_token=None, phone_number_id=None):
+        self._access_token = access_token
+        self._phone_number_id = phone_number_id
+        self.sent: list[tuple] = []
+        _FakeWhatsAppClient.created.append(self)
+
+    @classmethod
+    def for_tenant(cls, tenant, waba_token):
+        return cls(access_token=waba_token, phone_number_id=tenant.phone_number_id)
+
+    async def send_text_message(self, to, body):
+        self.sent.append((to, body))
+        return {"messages": [{"id": "wamid.console.1"}]}
+
+
+class _FailingWhatsAppClient:
+    """Every send raises — proves a failed delivery never gets persisted."""
+
+    @classmethod
+    def for_tenant(cls, tenant, waba_token):
+        return cls()
+
+    async def send_text_message(self, to, body):
+        raise httpx.ConnectError("whatsapp down")
 
 
 # --------------------------------------------------------------------------
@@ -321,3 +366,218 @@ async def test_handover_missing_state_is_422(client: AsyncClient, db, tenant) ->
 
     response = await client.post(f"{ENDPOINT}/{conv.id}/handover", json={})
     assert response.status_code == 422
+
+
+# --------------------------------------------------------------------------
+# GET /messages — full thread
+# --------------------------------------------------------------------------
+
+
+async def test_list_messages_returns_full_thread_oldest_first(
+    client: AsyncClient, db, tenant
+) -> None:
+    now = datetime.now(UTC)
+    patient = await _seed_patient(db, tenant)
+    conv = await _seed_conversation(db, tenant, patient)
+
+    await _seed_message(
+        db,
+        conv,
+        created_at=now - timedelta(minutes=5),
+        sender=MessageSender.PATIENT,
+        direction=MessageDirection.INBOUND,
+        body="oi, quero marcar",
+    )
+    await _seed_message(
+        db,
+        conv,
+        created_at=now - timedelta(minutes=4),
+        sender=MessageSender.BOT,
+        direction=MessageDirection.OUTBOUND,
+        body="Claro! Qual serviço?",
+    )
+    await _seed_message(
+        db,
+        conv,
+        created_at=now - timedelta(minutes=1),
+        sender=MessageSender.HUMAN,
+        direction=MessageDirection.OUTBOUND,
+        body="Oi, aqui é a recepção",
+    )
+
+    response = await client.get(f"{ENDPOINT}/{conv.id}/messages")
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 3
+    assert [m["sender"] for m in body] == ["patient", "bot", "human"]
+    assert [m["direction"] for m in body] == ["inbound", "outbound", "outbound"]
+    assert body[0]["body"] == "oi, quero marcar"
+    assert body[2]["body"] == "Oi, aqui é a recepção"
+    assert all(m["id"] and m["created_at"] for m in body)
+
+
+async def test_list_messages_is_empty_for_conversation_with_no_messages(
+    client: AsyncClient, db, tenant
+) -> None:
+    patient = await _seed_patient(db, tenant)
+    conv = await _seed_conversation(db, tenant, patient)
+
+    response = await client.get(f"{ENDPOINT}/{conv.id}/messages")
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+async def test_list_messages_for_other_tenant_conversation_is_404(
+    client: AsyncClient, db, tenant
+) -> None:
+    other_tenant = Tenant(id=uuid4(), clinic_name="Other Clinic", phone_number_id=str(uuid4())[:12])
+    async with db() as session:
+        session.add(other_tenant)
+        await session.commit()
+    patient = await _seed_patient(db, other_tenant)
+    conv = await _seed_conversation(db, other_tenant, patient)
+    await _seed_message(db, conv, created_at=datetime.now(UTC))
+
+    response = await client.get(f"{ENDPOINT}/{conv.id}/messages")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Conversation not found"
+
+
+async def test_list_messages_for_random_uuid_is_404(client: AsyncClient) -> None:
+    response = await client.get(f"{ENDPOINT}/{uuid4()}/messages")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Conversation not found"
+
+
+async def test_list_messages_without_token_is_401(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from secretaria.api.hub import deps as hub_deps
+    from secretaria.main import app
+
+    app.dependency_overrides.pop(get_current_tenant, None)
+
+    async def _fake_verify(token: str):
+        return None
+
+    monkeypatch.setattr(hub_deps, "verify_subscription_token", _fake_verify)
+
+    response = await client.get(f"{ENDPOINT}/{uuid4()}/messages")
+    assert response.status_code == 401
+
+
+# --------------------------------------------------------------------------
+# POST /messages — staff sends a message
+# --------------------------------------------------------------------------
+
+
+async def test_send_message_persists_as_human_and_delivers_via_whatsapp(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _FakeWhatsAppClient.created.clear()
+    monkeypatch.setattr(hub_conversations, "WhatsAppClient", _FakeWhatsAppClient)
+
+    patient = await _seed_patient(db, tenant, wa_id="5511987654321")
+    conv = await _seed_conversation(db, tenant, patient, handover_state=HandoverState.BOT_ACTIVE)
+
+    response = await client.post(f"{ENDPOINT}/{conv.id}/messages", json={"body": "Pode vir às 15h"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sender"] == "human"
+    assert body["direction"] == "outbound"
+    assert body["body"] == "Pode vir às 15h"
+
+    # Delivery actually happened - the whole point of this endpoint.
+    assert len(_FakeWhatsAppClient.created) == 1
+    fake_client = _FakeWhatsAppClient.created[-1]
+    assert fake_client.sent == [("5511987654321", "Pode vir às 15h")]
+
+    # Persisted with the same shape smb_message_echoes already uses.
+    rows = await _get_message_rows(db, conv.id)
+    assert len(rows) == 1
+    assert rows[0].sender == MessageSender.HUMAN
+    assert rows[0].direction == MessageDirection.OUTBOUND
+    assert rows[0].body == "Pode vir às 15h"
+    assert rows[0].wam_id == "wamid.console.1"
+
+    # Never diverges from the echo path: a human send takes the conversation over.
+    persisted_conv = await _get_conversation_row(db, conv.id)
+    assert persisted_conv.handover_state == HandoverState.HUMAN_ACTIVE
+    assert persisted_conv.last_human_message_at is not None
+
+
+async def test_send_message_for_other_tenant_conversation_is_404_and_never_sends(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _FakeWhatsAppClient.created.clear()
+    monkeypatch.setattr(hub_conversations, "WhatsAppClient", _FakeWhatsAppClient)
+
+    other_tenant = Tenant(id=uuid4(), clinic_name="Other Clinic", phone_number_id=str(uuid4())[:12])
+    async with db() as session:
+        session.add(other_tenant)
+        await session.commit()
+    patient = await _seed_patient(db, other_tenant)
+    conv = await _seed_conversation(db, other_tenant, patient)
+
+    response = await client.post(f"{ENDPOINT}/{conv.id}/messages", json={"body": "oi"})
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Conversation not found"
+    assert _FakeWhatsAppClient.created == []  # isolation is checked before any send
+
+
+async def test_send_message_without_token_is_401(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from secretaria.api.hub import deps as hub_deps
+    from secretaria.main import app
+
+    app.dependency_overrides.pop(get_current_tenant, None)
+
+    async def _fake_verify(token: str):
+        return None
+
+    monkeypatch.setattr(hub_deps, "verify_subscription_token", _fake_verify)
+
+    response = await client.post(f"{ENDPOINT}/{uuid4()}/messages", json={"body": "oi"})
+    assert response.status_code == 401
+
+
+async def test_send_message_empty_body_is_422(client: AsyncClient, db, tenant) -> None:
+    patient = await _seed_patient(db, tenant)
+    conv = await _seed_conversation(db, tenant, patient)
+
+    response = await client.post(f"{ENDPOINT}/{conv.id}/messages", json={"body": ""})
+    assert response.status_code == 422
+
+
+async def test_send_message_delivery_failure_is_502_and_persists_nothing(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(hub_conversations, "WhatsAppClient", _FailingWhatsAppClient)
+
+    patient = await _seed_patient(db, tenant)
+    conv = await _seed_conversation(db, tenant, patient, handover_state=HandoverState.BOT_ACTIVE)
+
+    response = await client.post(f"{ENDPOINT}/{conv.id}/messages", json={"body": "oi"})
+    assert response.status_code == 502
+
+    rows = await _get_message_rows(db, conv.id)
+    assert rows == []
+    persisted_conv = await _get_conversation_row(db, conv.id)
+    assert persisted_conv.handover_state == HandoverState.BOT_ACTIVE  # untouched on failure
+
+
+async def test_send_message_missing_whatsapp_credentials_is_502(
+    client: AsyncClient, db, tenant
+) -> None:
+    # No monkeypatch: the REAL WhatsAppClient.for_tenant, against a tenant with
+    # no waba token provisioned in tenant_credentials -> fails closed
+    # (PROMPT_FIX_21), same as every worker send path.
+    patient = await _seed_patient(db, tenant)
+    conv = await _seed_conversation(db, tenant, patient)
+
+    response = await client.post(f"{ENDPOINT}/{conv.id}/messages", json={"body": "oi"})
+    assert response.status_code == 502
+
+    rows = await _get_message_rows(db, conv.id)
+    assert rows == []
