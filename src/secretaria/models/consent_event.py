@@ -44,7 +44,10 @@ class ConsentEvent(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("tenants.id", ondelete="CASCADE"), index=True
     )
-    wa_id: Mapped[str] = mapped_column(String(32), index=True)
+    # Legacy name: holds Patient.external_id for a channel="brain_message" subject too
+    # (workers/tasks.py's LGPD-consent branch), not only a WhatsApp phone number — sized
+    # to match Patient.external_id's String(64) (migration aeeeb64360f5).
+    wa_id: Mapped[str] = mapped_column(String(64), index=True)
     kind: Mapped[str] = mapped_column(String(48))
     legal_basis: Mapped[str] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
