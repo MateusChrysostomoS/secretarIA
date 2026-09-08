@@ -138,6 +138,23 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
 - **`PROMPT_02_specialty_leak_deploy_parity.md`** — mensagem solta com a especialidade do médico ao selecioná-lo (ex.: "Geriatria" sozinha). **Já corrigido em `main`** (commit `64d1af8`); sintoma ao vivo é provável recorrência de paridade de deploy API/worker — o prompt manda checar `GET /build`/`deploy_parity` antes de tocar em código.
 - **`PROMPT_03_back_buttons_ambiguity.md`** — botões "Voltar" e "Escolher outro dia" na tela de horário. **Resolvido 2026-08-21**: usuário confirmou manter o destino ("Voltar" continua reabrindo a lista de serviços) e só trocar o texto pra deixar isso explícito — agora "Escolher outro Serviço" (`LABEL_ANOTHER_SERVICE`, calculado por `flow_router.py::_day_back_label`), tanto na picker de dia ("Ver dias") quanto na de horário. UNCOMMITTED.
 - **`PROMPT_04_list_row_truncation.md`** — nomes longos (médico/serviço) truncados nas listas do WhatsApp. **Resolvido 2026-08-21** — backend commit `ef8f6dd`, frontend commit `00f343d` — ver `docs/CHECKPOINT_whatsapp_text_limits.md`. Os 12 literais mágicos viraram `core/whatsapp_limits.py` (constante + UMA função de corte usada no render **e** no matcher), o hub ganhou `maxLength`+erro+tooltip no nome do profissional. **Divergência deliberada do prompt:** o corte NÃO é por fronteira de palavra — isso colapsaria "Consulta de rotina adulto"/"…infantil" no mesmo título e faria `resolve_service_name` agendar o serviço errado; o corte preserva a cauda e marca com "…". Cobriu só o nome do profissional — continuação em `PROMPT_04B`.
+- `z_prompts/PROMPT_BRAIN_MESSAGE_SECRETARIA_IDENTIDADE_PACIENTE.md`,
+  `..._CONSOLE_STAFF.md`, `..._PIPELINE_CANAL.md` (raiz de BRAIN, convenção compartilhada,
+  gerados 2026-09-07) — trazem este repo pra funcionar também pelo canal Brain-Message (além
+  do WhatsApp, sem substituí-lo): migração aditiva de identidade de paciente por canal,
+  endpoints de leitura/envio pro console de staff, e o núcleo channel-neutral do pipeline +
+  endpoints internos `/internal/brain-message/*`. Parte de um conjunto de 10 prompts
+  cross-repo (ver `z_prompts/PROMPT_BRAIN_MESSAGE_OTP_SWITCHBOARD.md` em brain-api pro plano
+  completo e a ordem de execução).
+  **`..._IDENTIDADE_PACIENTE.md` EXECUTADO 2026-09-08 — BUILT, `channel`/`external_id`
+  aditivos em `Patient`, `wa_id` nullable, migração `c7e1a4b9d0f3`; ver
+  `docs/CHECKPOINT_patient_channel_identity.md`. **Estado do banco de produção real (fora do
+  banco de teste do `.env`) NÃO confirmado** — `..._PIPELINE_CANAL.md` exige esta migração já
+  aplicada em produção antes de rodar; confirme isso antes de iniciar aquele prompt.**
+  **`..._CONSOLE_STAFF.md` EXECUTADO 2026-09-08 — BUILT, `GET`/`POST
+  /tenants/me/conversations/{id}/messages` em `api/hub/conversations.py`, suíte completa
+  verde (2014 passed); ver `docs/CHECKPOINT_console_staff_messages.md`.**
+  `..._PIPELINE_CANAL.md` continua PENDENTE — não executado ainda (onda 2).
 - **`z_prompts/PROMPT_PSEUDONYMIZE_SECRETARIA_ADOPTION.md`** (raiz de BRAIN, convenção
   compartilhada) — adota `pseudonymize-core` nos dois pontos de entrada de IA deste repo:
   `ai/graph.py::run_agent` (histórico + resposta) e `ai/scoped_help.py::_run`.
