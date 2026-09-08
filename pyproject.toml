@@ -26,6 +26,7 @@ dependencies = [
     "cryptography>=44.0.0",
     "dateparser>=1.2.0",
     "transcription-core",
+    "pseudonymize-core",
 ]
 
 [dependency-groups]
@@ -45,6 +46,7 @@ packages = ["src/secretaria"]
 
 [tool.uv.sources]
 transcription-core = { git = "https://github.com/MateusChrysostomoS/transcription-core.git", tag = "v0.1.0" }
+pseudonymize-core = { git = "https://github.com/MateusChrysostomoS/pseudonymize-core.git", tag = "v0.1.0" }
 
 [tool.ruff]
 target-version = "py312"

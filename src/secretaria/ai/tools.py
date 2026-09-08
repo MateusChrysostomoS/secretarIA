@@ -567,12 +567,91 @@ async def _mark_appointment_cancelled(event_id: str) -> str | None:
     return notice
 
 
+async def _own_google_event_ids(event_ids: list[str]) -> set[str]:
+    """Quais destes eventos do Google pertencem ao paciente DESTA conversa.
+
+    O vínculo é a tabela `appointments`, que guarda `google_event_id` nos DOIS
+    caminhos de agendamento (o do agente, `_persist_appointment`, e o do fluxo
+    de botões, `workers/tasks.py`) — nunca o título do evento, que é texto
+    livre digitado por qualquer pessoa com acesso à agenda.
+
+    FALHA FECHADA: sem contexto de paciente, ou com o banco fora do ar, devolve
+    conjunto VAZIO — ou seja, trata todo evento como de terceiro e esconde
+    tudo. O erro barato é a agente dizer "ocupado" sem detalhe; o caro é contar
+    a um paciente o nome de outro.
+    """
+    tenant_id = _tenant_id_ctx.get()
+    conversation_id = _conversation_id_ctx.get()
+    if not event_ids or tenant_id is None or conversation_id is None:
+        return set()
+    # Imported lazily, same reason as _persist_appointment above.
+    from sqlalchemy import select
+
+    from secretaria.core.database import async_session_factory
+    from secretaria.models import Appointment, Conversation
+
+    try:
+        async with async_session_factory() as session:
+            conversation = await session.get(Conversation, conversation_id)
+            patient_id = conversation.patient_id if conversation is not None else None
+            if patient_id is None:
+                return set()
+            rows = await session.scalars(
+                select(Appointment.google_event_id).where(
+                    Appointment.tenant_id == tenant_id,
+                    Appointment.patient_id == patient_id,
+                    Appointment.google_event_id.in_(event_ids),
+                )
+            )
+            return {row for row in rows if row}
+    except Exception as exc:
+        logger.warning(
+            "tool_own_event_ids_failed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return set()
+
+
+async def _busy_without_foreign_details(busy: list[dict]) -> list[dict]:
+    """Deixa passar o evento do próprio paciente; o resto vira só o intervalo.
+
+    A agenda da clínica é compartilhada: o título de um evento que não é deste
+    paciente é, quase sempre, o NOME DE OUTRO PACIENTE
+    ("Consulta - Maria Silva"). Devolvê-lo à LLM é entregar dado de saúde de
+    terceiro a quem não tem nada com isso — e o prompt pedia justamente que a
+    agente comentasse o conflito, então vazava por desenho, não por acidente.
+
+    O `id` do Google também some junto: além de não servir para nada aqui, é o
+    argumento que `cancel_event` aceita, e um id de terceiro na mão do modelo é
+    um cancelamento alheio a uma alucinação de distância.
+    """
+    if not busy:
+        return []
+    own = await _own_google_event_ids([str(e.get("id") or "") for e in busy])
+    out: list[dict] = []
+    for event in busy:
+        if str(event.get("id") or "") in own:
+            out.append({**event, "do_paciente": True})
+        else:
+            out.append({"start": event.get("start"), "end": event.get("end"), "do_paciente": False})
+    return out
+
+
 @tool
 async def check_availability(start: str, end: str) -> dict:
-    """Lista eventos que conflitam com o intervalo [start, end) no calendário
-    da clínica. Cada item tem id, summary, start, end (ISO 8601). Lista vazia
-    significa que a janela está totalmente livre. Eventos de dia inteiro e
-    eventos marcados como 'livre' são ignorados.
+    """Lista os intervalos ocupados dentro de [start, end) na agenda da clínica.
+    Lista vazia significa que a janela está totalmente livre. Eventos de dia
+    inteiro e eventos marcados como 'livre' são ignorados.
+
+    Cada item tem start, end (ISO 8601) e `do_paciente`:
+
+    - `do_paciente: false` — compromisso de OUTRA pessoa. Você recebe SOMENTE o
+      intervalo, de propósito. Diga apenas que o horário está ocupado e ofereça
+      alternativas. NUNCA especule de quem é, do que se trata, nem invente
+      qualquer detalhe sobre ele.
+    - `do_paciente: true` — é uma consulta DESTE paciente. Aí sim vêm id e
+      summary, e você pode citá-los ("você já tem consulta nesse horário").
 
     Args:
         start: Início da janela em ISO 8601 (ex: 2026-05-27T14:00:00).
@@ -585,7 +664,7 @@ async def check_availability(start: str, end: str) -> dict:
         datetime.fromisoformat(start),
         datetime.fromisoformat(end),
     )
-    return {"busy": busy}
+    return {"busy": await _busy_without_foreign_details(busy)}
 
 
 @tool

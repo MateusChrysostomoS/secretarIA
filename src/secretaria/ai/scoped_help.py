@@ -41,13 +41,19 @@ from uuid import UUID
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from pseudonymize_core import Pseudonymizer
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
+from secretaria.ai.pii import scrub_messages
 from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import Message, MessageSender
+from secretaria.services.pii_pseudonymization import (
+    load_pseudonymizer,
+    persist_pseudonymizer,
+)
 
 logger = get_logger(__name__)
 
@@ -242,15 +248,48 @@ async def _run(
     patient_message: str,
     final_round: bool,
 ) -> ScopedHelpOutcome:
+    """One scoped-help call, pseudonymized on the way out and back.
+
+    This path is masked but only PARTLY re-hydrated, and the asymmetry is the
+    shape of the outcome, not an oversight:
+
+      * `choice` is copied by the model from the options block of
+        `system_prompt`, which is the tenant's real catalog and is NEVER
+        masked — so it cannot contain a token, and the router re-validates it
+        against its own snapshot anyway (_match_professional/_match_service).
+      * `question` IS free prose the model writes, and `services/flow_router.py`
+        sends it to the patient verbatim inside a TextBubble. A token echoed
+        there would be printed to a human, so it gets re-hydrated.
+
+    `conversation_id=None` (router unit tests, dev snapshots) has no key to
+    persist under: mask with a throwaway map so nothing leaks, and skip the
+    save. Re-hydration still works within the call — the map is in memory.
+    """
+    p = (
+        await load_pseudonymizer(conversation_id)
+        if conversation_id is not None
+        else Pseudonymizer()
+    )
     history: list[BaseMessage] = []
     if conversation_id is not None:
         history = await _recent_history(conversation_id)
     if not history:
         history = [HumanMessage(content=patient_message)]
-    decision = await _get_decision_model().ainvoke(
-        [SystemMessage(content=system_prompt), *history]
-    )
-    return _normalize(decision, final_round)
+    history = scrub_messages(history, p)
+    try:
+        decision = await _get_decision_model().ainvoke(
+            [SystemMessage(content=system_prompt), *history]
+        )
+    finally:
+        # Same reason as run_agent's finally: the map grew during the scrub
+        # above, and re-minting those tokens next turn would split one person
+        # into two for the model.
+        if conversation_id is not None:
+            await persist_pseudonymizer(conversation_id, p)
+    outcome = _normalize(decision, final_round)
+    if outcome.kind == "clarify" and outcome.question:
+        outcome = ScopedHelpOutcome(kind="clarify", question=p.rehydrate(outcome.question))
+    return outcome
 
 
 async def run_professional_help(

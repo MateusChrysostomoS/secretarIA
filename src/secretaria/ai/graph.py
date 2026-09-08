@@ -26,6 +26,11 @@ from langgraph.prebuilt import create_react_agent
 from openai import APIConnectionError, APITimeoutError
 from sqlalchemy import select
 
+from secretaria.ai.pii import (
+    rehydrate_reply,
+    scrub_messages,
+    wrap_tools_with_pseudonymizer,
+)
 from secretaria.ai.prompts import secretary_system_prompt
 from secretaria.ai.tools import (
     GuidedBookingRequested,
@@ -55,6 +60,11 @@ from secretaria.services.booking_scope import (
     BOOKING_TOPOLOGY_UNKNOWN,
 )
 from secretaria.services.calendar import CalendarService, CalendarUnavailableError
+from secretaria.services.pii_pseudonymization import (
+    _pseudonymizer_ctx,
+    load_pseudonymizer,
+    persist_pseudonymizer,
+)
 from secretaria.services.tenant_config import TenantRuntimeConfig
 
 logger = get_logger(__name__)
@@ -256,6 +266,12 @@ def build_agent(extra_tools: Sequence = (), topology: str = BOOKING_TOPOLOGY_UNK
     cached = _AGENTS.get(key)
     if cached is not None:
         return cached
+    # Guard the tool boundary in BOTH directions (ai/pii.py): tool arguments
+    # are re-hydrated before they reach Google Calendar, tool results are
+    # masked before they re-enter the model's context. The wrapper preserves
+    # every tool's name, so `key` above — computed on the originals — still
+    # describes this agent exactly.
+    tools = list(wrap_tools_with_pseudonymizer(tools))
 
     s = get_settings()
     if not s.OPENAI_API_KEY:
@@ -460,6 +476,13 @@ async def run_agent(
     tok_tools = _extra_tools_ctx.set(extra_tools)
     tok_redis = _redis_ctx.set(redis)
     tok_topology = _booking_topology_ctx.set(booking_topology)
+    # Seeded from this conversation's stored map, so a phone tokenized last
+    # week keeps its token today. Installed in a ContextVar because the tool
+    # wrapper (ai/pii.py) runs deep inside the ReAct loop, in a context
+    # LangGraph copies — a value SET here is visible there, and the map GROWS
+    # there, on the same object.
+    pseudonymizer = await load_pseudonymizer(conversation_id)
+    tok_pii = _pseudonymizer_ctx.set(pseudonymizer)
 
     capabilities = [
         getattr(t, "name", str(t)) for t in (*base_tools_for(booking_topology), *extra_tools)
@@ -481,7 +504,13 @@ async def run_agent(
         if not history:
             logger.warning("ai_run_agent_no_history", conversation_id=str(conversation_id))
             history = [HumanMessage(content=message)]
+        # Nothing below this line sends un-masked patient text abroad: the
+        # history is the ONLY patient-authored material in the request (the
+        # system prompt is tenant/professional config — ai/prompts.py — and
+        # tool results are masked at the boundary by the wrapper).
+        history = scrub_messages(history, pseudonymizer)
         reply = await _invoke_agent_with_retry(history, conversation_id)
+        reply = rehydrate_reply(reply, pseudonymizer, conversation_id)
     except CalendarUnavailableError:
         # A calendar tool failed (token revoked / Google down / 5xx). It
         # propagates unwrapped out of the LangGraph ToolNode, so we catch it by
@@ -543,6 +572,13 @@ async def run_agent(
         _extra_tools_ctx.reset(tok_tools)
         _redis_ctx.reset(tok_redis)
         _booking_topology_ctx.reset(tok_topology)
+        _pseudonymizer_ctx.reset(tok_pii)
+        # In `finally`, not on the happy path: the map has already grown by the
+        # time any of the sentinel exceptions above fires, and re-minting those
+        # tokens next turn would make the model read one person as two. The
+        # save happens AFTER the invoke because the tool wrapper adds entries
+        # during it.
+        await persist_pseudonymizer(conversation_id, pseudonymizer)
 
     if not reply:
         logger.warning("ai_run_agent_empty_reply", conversation_id=str(conversation_id))

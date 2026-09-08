@@ -14,6 +14,7 @@ from secretaria.models.appointment import (
 )
 from secretaria.models.consent_event import ConsentEvent
 from secretaria.models.conversation import Conversation, FlowState, HandoverState
+from secretaria.models.conversation_pii_token_map import ConversationPiiTokenMap
 from secretaria.models.message import Message, MessageDirection, MessageSender
 from secretaria.models.patient import Patient
 from secretaria.models.pix_deposit import PixDeposit, PixDepositStatus
@@ -36,6 +37,7 @@ __all__ = [
     "is_live_status",
     "ConsentEvent",
     "Conversation",
+    "ConversationPiiTokenMap",
     "FlowState",
     "HandoverState",
     "Message",

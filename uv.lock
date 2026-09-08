@@ -760,6 +760,11 @@ wheels = [
 ]
 
 [[package]]
+name = "pseudonymize-core"
+version = "0.1.0"
+source = { git = "https://github.com/MateusChrysostomoS/pseudonymize-core.git?tag=v0.1.0#b990c393173af1867e77b2999735dfacb166122b" }
+
+[[package]]
 name = "pyasn1"
 version = "0.6.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1077,6 +1082,7 @@ dependencies = [
     { name = "langchain-openai" },
     { name = "langgraph" },
     { name = "openai" },
+    { name = "pseudonymize-core" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "sqlalchemy", extra = ["asyncio"] },
@@ -1110,6 +1116,7 @@ requires-dist = [
     { name = "langchain-openai", specifier = ">=1.2.2" },
     { name = "langgraph", specifier = ">=0.2.60" },
     { name = "openai", specifier = ">=2.38.0" },
+    { name = "pseudonymize-core", git = "https://github.com/MateusChrysostomoS/pseudonymize-core.git?tag=v0.1.0" },
     { name = "pydantic", specifier = ">=2.10.0" },
     { name = "pydantic-settings", specifier = ">=2.7.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },

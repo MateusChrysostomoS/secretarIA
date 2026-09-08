@@ -138,6 +138,39 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
 - **`PROMPT_02_specialty_leak_deploy_parity.md`** — mensagem solta com a especialidade do médico ao selecioná-lo (ex.: "Geriatria" sozinha). **Já corrigido em `main`** (commit `64d1af8`); sintoma ao vivo é provável recorrência de paridade de deploy API/worker — o prompt manda checar `GET /build`/`deploy_parity` antes de tocar em código.
 - **`PROMPT_03_back_buttons_ambiguity.md`** — botões "Voltar" e "Escolher outro dia" na tela de horário. **Resolvido 2026-08-21**: usuário confirmou manter o destino ("Voltar" continua reabrindo a lista de serviços) e só trocar o texto pra deixar isso explícito — agora "Escolher outro Serviço" (`LABEL_ANOTHER_SERVICE`, calculado por `flow_router.py::_day_back_label`), tanto na picker de dia ("Ver dias") quanto na de horário. UNCOMMITTED.
 - **`PROMPT_04_list_row_truncation.md`** — nomes longos (médico/serviço) truncados nas listas do WhatsApp. **Resolvido 2026-08-21** — backend commit `ef8f6dd`, frontend commit `00f343d` — ver `docs/CHECKPOINT_whatsapp_text_limits.md`. Os 12 literais mágicos viraram `core/whatsapp_limits.py` (constante + UMA função de corte usada no render **e** no matcher), o hub ganhou `maxLength`+erro+tooltip no nome do profissional. **Divergência deliberada do prompt:** o corte NÃO é por fronteira de palavra — isso colapsaria "Consulta de rotina adulto"/"…infantil" no mesmo título e faria `resolve_service_name` agendar o serviço errado; o corte preserva a cauda e marca com "…". Cobriu só o nome do profissional — continuação em `PROMPT_04B`.
+- **`z_prompts/PROMPT_PSEUDONYMIZE_SECRETARIA_ADOPTION.md`** (raiz de BRAIN, convenção
+  compartilhada) — adota `pseudonymize-core` nos dois pontos de entrada de IA deste repo:
+  `ai/graph.py::run_agent` (histórico + resposta) e `ai/scoped_help.py::_run`.
+  **EXECUTADO 2026-09-07 — BUILT, 1993 testes verdes (baseline do HEAD era 1980),
+  uncommitted, migração NÃO rodada em banco nenhum, não deployado; ver
+  `docs/CHECKPOINT_pseudonimizacao.md`.**
+  **A decisão que o prompt deixou em aberto (escopo das ferramentas do loop ReAct) foi
+  tomada com o usuário: o escopo CRESCEU.** A pergunta original ("retorno de ferramenta
+  carrega PII de terceiro?") tinha resposta *não* — mas a investigação achou o problema na
+  direção oposta: `ai/tools.py::create_event` instrui o modelo a intitular o evento
+  `'Consulta - João Silva'`, nome que ele tira do histórico. Mascarar o nome do paciente
+  **sem** re-hidratar o argumento encheria a agenda real do médico de
+  `Consulta - [PACIENTE_xxxx]` — corrupção, e pelo caminho instruído, não por acaso. Por
+  isso o guard é **simétrico e mora no limite da ferramenta** (`ai/pii.py`): re-hidrata todo
+  argumento na ida, escruda todo resultado na volta — cobre plugins e ferramentas futuras
+  por construção. Duas divergências deliberadas do prompt, ambas em §4 do checkpoint:
+  o nome do paciente usa `add_identifier` (não `add_person_name`, que faria "Dra. Ana Paula"
+  virar o nome do paciente para uma paciente chamada Ana), e o `clarify.question` do
+  `scoped_help` **precisa** de rehydrate (é prosa livre que o `flow_router` envia literal ao
+  paciente) — a hipótese do prompt só valia para o `pick.choice`.
+  **Duas decisões do usuário em 2026-09-07, depois da primeira rodada:**
+  (a) **`check_availability` parou de expor evento alheio** (§3.1 do checkpoint): só devolve
+  `summary`/`id` reais quando o evento é do PRÓPRIO paciente da conversa — provado pela
+  tabela `appointments` (`google_event_id`), nunca pelo título; para qualquer outro devolve
+  só `{start, end, do_paciente: false}`. Falha FECHADA (sem contexto, esconde tudo). O `id`
+  sai junto de propósito: é o argumento do `cancel_event`. `ai/prompts.py` mudou na mesma
+  rodada — o "mencione brevemente o conflito" virava vazamento por desenho. Varredura
+  confirmou que nenhum teste dependia do summary de terceiro.
+  (b) **Espaçamento não-canônico no nome NÃO se conserta aqui** (§4.1.1): a correção é do
+  `pseudonymize-core` e já está lá; o pin daqui segue em `v0.1.0`, que **ainda vaza** —
+  quando a tag nova sair, subir o pin em `pyproject.toml` e `uv sync`. Duplicar a lógica
+  deste lado é exatamente a armadilha que motivou extrair o pacote.
+  Pendências abertas em §9 do checkpoint: migração, deploy dos DOIS serviços, commit, pin.
 - **`PROMPT_04B_list_row_limits_remaining_surfaces.md`** — continuação do `PROMPT_04`. **Resolvido 2026-08-22 (UNCOMMITTED)** — ver §4 de `docs/CHECKPOINT_whatsapp_text_limits.md`. A varredura achou **três** campos, não dois: nome de serviço (`ServiceCard.tsx`) e também **convênio** (`ContextSection.tsx`, não previsto). Os dois **avisam sem bloquear** — `/configuracao` salva oito seções atrás de um botão só, e um nome legado longo não pode sequestrar o resto. Convênio valida **por item** sobre `toWireInsurances` (um `maxLength` no campo proibiria três planos curtos legais). `ai/prompts.py` agora interpola `MAX_LIST_ROW_TITLE_CHARS` no bloco `[SLOTS]` e `_parse_slot_rows` corta no parse. `[CONFIRM]` não precisou de nada (labels fixos no código) — há teste fixando isso. Bônus: `formatter.py` declarava um QUARTO literal (`MAX_LIST_ROWS = 10`), agora re-export.
 
 ## graphify
