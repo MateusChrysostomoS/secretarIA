@@ -143,6 +143,8 @@ async def _get_message_rows(db, conversation_id) -> list[Message]:
 class _FakeWhatsAppClient:
     """Records constructed instances + sends; installed in place of the real
     client — same idiom as test_deposit_lifecycle.py's fake."""
+    # Mirrors WhatsAppClient: the CALLER records the outbound row.
+    persists_outbound = False
 
     created: list["_FakeWhatsAppClient"] = []
 

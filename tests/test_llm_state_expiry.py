@@ -305,7 +305,7 @@ async def test_delegate_llm_result_writes_the_state_back_and_delegates(db):
     )
     reply = tasks._ReplyContext(
         conversation_id=conversation.id,
-        patient_wa_id=WA_ID,
+        patient_ref=WA_ID,
         inbound_body="Sim",
     )
 

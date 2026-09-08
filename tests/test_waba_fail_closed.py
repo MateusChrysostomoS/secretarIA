@@ -457,7 +457,7 @@ def test_reply_context_carries_the_tenant_for_the_inactive_path() -> None:
     ctx = tasks._ReplyContext(
         conversation_id=None,
         tenant_id=tenant_id,
-        patient_wa_id=PATIENT_WA_ID,
+        patient_ref=PATIENT_WA_ID,
         inbound_body="",
         service_unavailable=True,
     )

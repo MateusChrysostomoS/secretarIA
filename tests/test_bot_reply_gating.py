@@ -80,6 +80,8 @@ def _summary(**overrides) -> EntitlementSummary:
 
 class _FakeWhatsAppClient:
     """Records constructed instances + sends; installed in place of the real client."""
+    # Mirrors WhatsAppClient: the CALLER records the outbound row.
+    persists_outbound = False
 
     created: list["_FakeWhatsAppClient"] = []
 
@@ -201,7 +203,7 @@ def _reply_context(
     """
     return tasks._ReplyContext(
         conversation_id=conversation.id,
-        patient_wa_id=patient.wa_id,
+        patient_ref=patient.wa_id,
         inbound_body=inbound_body,
     )
 
@@ -419,7 +421,7 @@ async def _run_send_bot_reply_capturing_run_agent(
     await tasks._send_bot_reply(
         tasks._ReplyContext(
             conversation_id=conversation.id,
-            patient_wa_id=patient.wa_id,
+            patient_ref=patient.wa_id,
             inbound_body=inbound_body,
         )
     )
@@ -509,7 +511,7 @@ async def test_run_agent_receives_no_appointment_context_for_new_patient_without
 def _greeting_button_reply(conversation: Conversation, patient: Patient, suffix: str):
     return tasks._ReplyContext(
         conversation_id=conversation.id,
-        patient_wa_id=patient.wa_id,
+        patient_ref=patient.wa_id,
         inbound_body=f"greeting|{suffix}",
         greeting_button_unavailable=suffix,
     )
@@ -584,7 +586,7 @@ async def test_greeting_button_unavailable_still_replies_when_conversation_has_n
     await _assert_llm_never_called(monkeypatch)
     bogus = tasks._ReplyContext(
         conversation_id=uuid4(),
-        patient_wa_id="5511999",
+        patient_ref="5511999",
         inbound_body="greeting|agendar",
         greeting_button_unavailable="agendar",
     )
@@ -620,7 +622,7 @@ async def test_inactive_tenant_fallback_uses_that_tenants_own_credentials(
         tasks._ReplyContext(
             conversation_id=None,
             tenant_id=tenant.id,
-            patient_wa_id=patient.wa_id,
+            patient_ref=patient.wa_id,
             inbound_body="",
             service_unavailable=True,
         )
@@ -652,7 +654,7 @@ async def test_inactive_tenant_fallback_is_entitlement_gated(
         tasks._ReplyContext(
             conversation_id=None,
             tenant_id=tenant.id,
-            patient_wa_id=patient.wa_id,
+            patient_ref=patient.wa_id,
             inbound_body="",
             service_unavailable=True,
         )
@@ -667,7 +669,7 @@ async def test_dispatch_bubbles_sends_nothing_without_a_tenant(db) -> None:
     _tenant, patient, conversation = await _make_conversation(db)
     reply = tasks._ReplyContext(
         conversation_id=conversation.id,
-        patient_wa_id=patient.wa_id,
+        patient_ref=patient.wa_id,
         inbound_body="oi",
     )
 
@@ -693,7 +695,7 @@ async def test_apply_flow_result_handover_flips_to_human_and_sends_message(db) -
     )
     reply = tasks._ReplyContext(
         conversation_id=conversation.id,
-        patient_wa_id=patient.wa_id,
+        patient_ref=patient.wa_id,
         inbound_body="não sei mesmo",
     )
     result = FlowRouterResult(

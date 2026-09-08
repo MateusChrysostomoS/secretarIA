@@ -154,7 +154,21 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
   **`..._CONSOLE_STAFF.md` EXECUTADO 2026-09-08 — BUILT, `GET`/`POST
   /tenants/me/conversations/{id}/messages` em `api/hub/conversations.py`, suíte completa
   verde (2014 passed); ver `docs/CHECKPOINT_console_staff_messages.md`.**
-  `..._PIPELINE_CANAL.md` continua PENDENTE — não executado ainda (onda 2).
+  **`..._PIPELINE_CANAL.md` EXECUTADO 2026-09-08 — BUILT, suíte completa verde (2039 passed,
+  baseline 2014), uncommitted e não deployado; ver `docs/CHECKPOINT_brain_message_pipeline.md`.**
+  `_persist_inbound_message` virou wrapper WhatsApp + núcleo `_route_inbound_turn`
+  channel-neutro; `services/channel_sender.py` (novo) é o Protocol `ChannelSender` com as
+  MESMAS assinaturas de `WhatsAppClient` — por isso os ~60 call sites de envio ficaram
+  inalterados. `_ReplyContext.patient_wa_id` → `patient_ref` + `channel`. Endpoints
+  `POST /internal/brain-message/inbound` e
+  `GET /internal/brain-message/conversations/{external_id}/messages`.
+  **A resposta da pergunta em aberto do prompt:** a `Message` de saída é gravada SÓ DEPOIS de
+  a Graph API responder, e o `wam_id` sai da resposta — então "enviar" por `brain_message` não
+  podia ser só persistir; o sender do canal grava ele mesmo e os 3 sites que gravavam pulam
+  (flag `persists_outbound`). **Corrigiu de passagem uma bomba-relógio:**
+  `InternalPatient.wa_id` era não-opcional e o 1º paciente `brain_message` de um tenant daria
+  500 em `GET /internal/tenants/{id}/patients`, derrubando a lista do portal daquela clínica.
+  Reminders/HSM ficaram FORA por desenho (§ "lacuna conhecida" do checkpoint).
 - **`z_prompts/PROMPT_PSEUDONYMIZE_SECRETARIA_ADOPTION.md`** (raiz de BRAIN, convenção
   compartilhada) — adota `pseudonymize-core` nos dois pontos de entrada de IA deste repo:
   `ai/graph.py::run_agent` (histórico + resposta) e `ai/scoped_help.py::_run`.

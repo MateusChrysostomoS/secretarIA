@@ -99,6 +99,13 @@ from secretaria.services.booking_scope import (
 )
 from secretaria.services.brain_professionals import fetch_professional_emails
 from secretaria.services.calendar import CalendarService
+from secretaria.services.channel_sender import (
+    CHANNEL_BRAIN_MESSAGE,
+    CHANNEL_WHATSAPP,
+    BrainMessageSender,
+    ChannelSender,
+    sender_persists_outbound,
+)
 from secretaria.services.email import (
     send_calendar_alert,
     send_cancellation_escalation_alert,
@@ -412,8 +419,18 @@ class _ReplyContext:
     """Minimal data needed to send a bot reply once the inbound DB txn commits."""
 
     conversation_id: UUID | None
-    patient_wa_id: str
+    # How to address this patient back: their `wa_id` on WhatsApp, their
+    # `external_id` on Brain-Message. Named for the ROLE, not the format, since
+    # the day a second channel existed the old name `patient_wa_id` became a
+    # lie for half the rows it carried.
+    patient_ref: str
     inbound_body: str
+    # Which surface this turn arrived on, and therefore which one the reply
+    # leaves by. `_reply_sender` is the only reader; every send site downstream
+    # stays channel-blind. Defaults to WhatsApp so every `_ReplyContext` built
+    # outside `_route_inbound_turn` (the audio-transcription and human-echo
+    # paths, and ~20 tests) keeps its exact pre-refactor meaning.
+    channel: str = CHANNEL_WHATSAPP
     # The tenant this turn resolved to. Carried explicitly because the
     # `service_unavailable` degrade below has NO conversation to look it up
     # from, and every outbound send must still go out on this tenant's own
@@ -651,7 +668,7 @@ async def _persist_inbound_message(
                     return _ReplyContext(
                         conversation_id=None,
                         tenant_id=tenant.id,
-                        patient_wa_id=wa_id,
+                        patient_ref=wa_id,
                         inbound_body="",
                         service_unavailable=True,
                     )
@@ -685,360 +702,436 @@ async def _persist_inbound_message(
                 elif patient_name and not patient.name:
                     patient.name = patient_name
 
-                # Capture a self-introduced name ("meu nome é ...") when we don't
-                # have one yet, so future returning greetings can use {{name}}.
-                if not patient.name:
-                    extracted = extract_patient_name(body)
-                    if extracted:
-                        patient.name = extracted
-                        logger.info("worker_patient_name_captured", patient_id=str(patient.id))
-
-                conversation = await _get_or_create_conversation(session, tenant, patient)
-
-                # First contact = no prior message on this conversation. Counted
-                # BEFORE the inbound below is added so a brand-new conversation
-                # reads as 0. Drives the verbatim greeting (see below).
-                prior_messages = await session.scalar(
-                    select(func.count())
-                    .select_from(Message)
-                    .where(Message.conversation_id == conversation.id)
-                )
-                is_first_contact = (prior_messages or 0) == 0
-
-                # Timestamp of the last activity BEFORE this inbound, used to
-                # measure the silence gap for the returning-patient offer.
-                last_activity_at = await session.scalar(
-                    select(func.max(Message.created_at)).where(
-                        Message.conversation_id == conversation.id
-                    )
-                )
-
-                session.add(
-                    Message(
-                        conversation_id=conversation.id,
-                        direction=MessageDirection.INBOUND,
-                        sender=MessageSender.PATIENT,
-                        wam_id=wam_id,
-                        body=body,
-                    )
-                )
-
-                # Reminder action-button tap: short-circuit BEFORE the
-                # handover/flow/LLM gates below (see this function's
-                # docstring) - `_handle_action_button` does its own
-                # tenant-scoped appointment lookup and reply. The
-                # allowlist guard above already covers this path too: it
-                # returns before `action_button` is ever attached to a
-                # `_ReplyContext`, so a non-allowlisted wa_id never reaches
-                # `_handle_action_button` (dispatched from `_send_bot_reply`,
-                # which only runs when `_persist_inbound_message` returns
-                # non-None).
-                if action_button is not None:
-                    return _ReplyContext(
-                        conversation_id=conversation.id,
-                        patient_wa_id=wa_id,
-                        inbound_body=body or "",
-                        action_button=action_button,
-                    )
-
-                handover = HandoverManager(session)
-                if not handover.is_bot_active(conversation):
-                    # Human secretary is handling it - record only, stay quiet.
-                    logger.info(
-                        "worker_bot_paused_human_active",
-                        conversation_id=str(conversation.id),
-                    )
-                    return None
-
-                # `/menu` (and /reset, /recomeçar, /inicio): a NON-DESTRUCTIVE
-                # request to go back to the main menu (PROMPT_FIX_18). Nothing
-                # is deleted: the patient row, their history, appointments,
-                # consent events, Pix deposits and Google Calendar events are
-                # all untouched. Only the transient flow fields move, and
-                # `_apply_flow_result` (reached via `_handle_show_main_menu`)
-                # does that write.
-                #
-                # Placed HERE deliberately:
-                #   * AFTER the handover check, so an active human is NOT
-                #     silently pre-empted - while a human owns the
-                #     conversation, `/menu` is recorded like any other message
-                #     and IGNORED by the bot (the return above already
-                #     happened). It is never a way to take the bot back.
-                #   * BEFORE the greeting / reactivation branches, so it is
-                #     idempotent: two deliveries of `/menu` produce the same
-                #     menu, never a greeting on one and a menu on the other.
-                # The pending reactivation gate, if any, is consumed here too -
-                # an explicit "take me to the menu" answers the "quer
-                # continuar?" question by superseding it.
-                # --- LGPD consent gate -------------------------------------
-                # Sits ABOVE `/menu`, the greeting and normal dispatch, and
-                # BELOW human handover and reminder action buttons. That
-                # position is the whole design:
-                #
-                #   * below handover, so a human secretary who picks up the
-                #     conversation is never blocked by a bot-owned gate;
-                #   * below action buttons, so a patient can still cancel or
-                #     confirm an EXISTING appointment (honouring a booking they
-                #     already made is not new processing to consent to);
-                #   * above everything else, so nothing serves a patient whose
-                #     legal basis has not been established.
-                #
-                # Mirrors PreCheck, which parks the session in `LGPD_PENDING`
-                # and answers anything but an acceptance with "Reenviar LGPD"
-                # (see the `wf_condutor_generico_universal` n8n workflow).
-                #
-                # It is a gate on a FACT about the subject (`lgpd_accepted_at`),
-                # NOT a `FlowState`. That distinction matters: a non-IDLE flow
-                # state whose only exit is the patient tapping a button is the
-                # shape that permanently parked conversations before (see
-                # `_expire_stale_llm_state`). A fact carries no such risk —
-                # `flow_state` is untouched here, so whatever the conversation
-                # was doing resumes intact the moment consent lands.
-                if _is_consent_acceptance(body):
-                    # Idempotent, like the `/menu` branch below: a second
-                    # delivery (or a tap on the old button further up the
-                    # thread) re-sends the same menu and writes nothing new.
-                    if patient.lgpd_accepted_at is None:
-                        patient.lgpd_accepted_at = datetime.now(UTC)
-                        # The Patient column is the operational flag; this row
-                        # is the immutable audit record. Different lifetimes on
-                        # purpose - see models/patient.py.
-                        session.add(
-                            ConsentEvent(
-                                tenant_id=tenant.id,
-                                wa_id=wa_id,
-                                kind=CONSENT_EVENT_KIND,
-                                legal_basis=(
-                                    "consentimento (art. 7º, I) — aceite explícito dos "
-                                    "Termos de Uso e Política de Privacidade no WhatsApp"
-                                ),
-                            )
-                        )
-                        logger.info(
-                            "conversation_terms_accepted",
-                            conversation_id=str(conversation.id),
-                            tenant_id=str(tenant.id),
-                        )
-                    # The FIRST message of the conversation to carry buttons.
-                    return _ReplyContext(
-                        conversation_id=conversation.id,
-                        tenant_id=tenant.id,
-                        patient_wa_id=wa_id,
-                        inbound_body=body or "",
-                        greeting_override=CONSENT_ACCEPTED_MESSAGE,
-                        greeting_buttons=_greeting_buttons_for(tenant, CONSENT_ACCEPTED_MESSAGE),
-                    )
-
-                if patient.lgpd_accepted_at is None:
-                    if is_first_contact:
-                        # The frame goes out BUTTON-FREE and the consent notice
-                        # follows it. Offering [Agendar] here would invite a tap
-                        # this gate is about to refuse, and would put two button
-                        # messages back to back with different jobs.
-                        return _ReplyContext(
-                            conversation_id=conversation.id,
-                            tenant_id=tenant.id,
-                            patient_wa_id=wa_id,
-                            inbound_body=body or "",
-                            greeting_override=render_greeting(
-                                tenant.clinic_name, _fit_clinic_description(tenant)
-                            ),
-                            greeting_buttons=[],
-                            send_consent_notice=True,
-                        )
-                    # Already asked, still not accepted: re-prompt, with the
-                    # button attached so the way forward is one tap from the
-                    # newest message rather than a scroll back up the thread.
-                    logger.info(
-                        "conversation_consent_pending",
-                        conversation_id=str(conversation.id),
-                        tenant_id=str(tenant.id),
-                    )
-                    return _ReplyContext(
-                        conversation_id=conversation.id,
-                        tenant_id=tenant.id,
-                        patient_wa_id=wa_id,
-                        inbound_body=body or "",
-                        send_consent_reminder=True,
-                    )
-
-                if is_menu_command(body):
-                    conversation.reactivation_origin = None
-                    logger.info(
-                        "conversation_menu_requested",
-                        conversation_id=str(conversation.id),
-                        tenant_id=str(tenant.id),
-                        source="command",
-                    )
-                    return _ReplyContext(
-                        conversation_id=conversation.id,
-                        tenant_id=tenant.id,
-                        patient_wa_id=wa_id,
-                        inbound_body=body or "",
-                        menu_requested=True,
-                    )
-
-                # Greeting-button tap this tenant can't fulfil deterministically:
-                # flows are disabled for them, so route() would otherwise
-                # delegate straight to the LLM (see flow_router.route()'s
-                # top-of-function flows_enabled gate). A flows-ENABLED tenant's
-                # tap is NOT special-cased here - it falls through to the
-                # normal dispatch below, which route() already handles
-                # deterministically (LABEL_BOOK/LABEL_MANAGE_APPOINTMENT/
-                # LABEL_RESCHEDULE/LABEL_CANCEL_APPT, or a graceful "here's
-                # the menu again" for a stale/legacy label route() doesn't
-                # recognize). "Outro" is exempt for BOTH cohorts: it IS the
-                # deliberate LLM hand-off, and for a flows-disabled tenant the
-                # normal path below already goes straight to the LLM - exactly
-                # what the button promises - so short-circuiting it to a
-                # "contact us" degrade would break the one button that works
-                # fine for them.
-                if (
-                    greeting_button is not None
-                    and greeting_button != _GREETING_LLM_ESCAPE_SUFFIX
-                    and not flows_enabled(tenant)
-                ):
-                    return _ReplyContext(
-                        conversation_id=conversation.id,
-                        patient_wa_id=wa_id,
-                        inbound_body=body or "",
-                        greeting_button_unavailable=greeting_button,
-                    )
-
-                # A pending "quer continuar?" answer takes precedence over any
-                # greeting/offer: resume where they were, or reset to the menu.
-                if conversation.reactivation_origin is not None:
-                    origin = conversation.reactivation_origin
-                    conversation.reactivation_origin = None  # consume the gate
-                    answer = classify_yes_no(body, tenant)
-                    if answer == "no":
-                        conversation.flow_state = FlowState.IDLE
-                        conversation.flow_step = None
-                        conversation.flow_selected_type = None
-                        conversation.flow_selected_day = None
-                        conversation.flow_selected_slot = None
-                        conversation.flow_selected_professional_id = None
-                        conversation.flow_selected_insurance = None
-                        conversation.flow_managing_appointment_id = None
-                        return _ReplyContext(
-                            conversation_id=conversation.id,
-                            patient_wa_id=wa_id,
-                            inbound_body=body or "",
-                            reactivation=_ReactivationDirective(kind="reset", origin=origin),
-                        )
-                    if answer == "yes":
-                        return _ReplyContext(
-                            conversation_id=conversation.id,
-                            patient_wa_id=wa_id,
-                            inbound_body=body or "",
-                            reactivation=_ReactivationDirective(kind="resume", origin=origin),
-                        )
-                    # "other": gate consumed; fall through to normal dispatch so
-                    # their message is routed against the preserved flow state.
-
-                # On first contact, reply with a verbatim greeting (one message,
-                # no LLM): the returning greeting (with {{name}}) for a known
-                # patient, else the first-contact greeting. Tenants without a
-                # greeting fall through to the improvised LLM opener.
-                greeting_override = _select_greeting(
-                    tenant, patient, is_first_contact, is_returning_patient
-                )
-
-                # Context-aware opening (indexed reads, worker-side only): adapt
-                # the verbatim greeting to the patient's real appointment state.
-                # Same gate as the greeting itself — the conversation-opening
-                # message only. patient_id is always resolved here today (the
-                # Patient row is created/flushed above); the resolver's None
-                # guard is the safe degrade for any future call site.
-                # `opening_context` also feeds `_greeting_buttons_for` below
-                # (HAS_UPCOMING(_SOON) swaps the manage-action trio in for the
-                # menu) - it stays None when there is no greeting to adapt.
-                opening_context = None
-                if greeting_override is not None:
-                    opening_context = await resolve_patient_opening_state(
-                        session, tenant.id, patient.id
-                    )
-                    # HAS_UPCOMING(_SOON) needs a bit more than the resolver's
-                    # own indexed reads: the referenced professionals' display
-                    # names and the nearest appointment's catalog entry (for
-                    # price/description/orientações). Loaded here, in the same
-                    # open session, so `_adapt_greeting_to_state` itself stays
-                    # a pure composition function with no DB access of its own.
-                    upcoming_data = None
-                    if opening_context is not None and opening_context.state in (
-                        PatientOpeningState.HAS_UPCOMING_SOON,
-                        PatientOpeningState.HAS_UPCOMING,
-                    ):
-                        upcoming_data = await _load_upcoming_greeting_data(
-                            session, tenant, opening_context.future_appointments
-                        )
-                    greeting_override = _adapt_greeting_to_state(
-                        greeting_override, opening_context, tenant, upcoming_data
-                    )
-
-                # Universal floor on how long full LLM mode may last (see
-                # `_expire_stale_llm_state`). Runs BEFORE the offer below, and
-                # THAT ORDER IS LOAD-BEARING: the state must already be dropped
-                # when "quer continuar?" goes out, so a patient who simply never
-                # answers it still leaves LLM mode. Ask first and the prompt
-                # becomes the only time-based exit again - the exact hole this
-                # floor was added to close, just with a question instead of
-                # silence. The pre-expiry state is captured first so the offer
-                # can still arm the right resume origin, and "Sim" puts it back
-                # (see the reactivation directive in `_send_bot_reply`). Still
-                # after the pending-answer gate, so a resume in progress is
-                # never wiped.
-                resumable_origin = conversation.flow_state
-                if _expire_stale_llm_state(conversation, tenant, last_activity_at):
-                    logger.info(
-                        "conversation_llm_state_expired",
-                        conversation_id=str(conversation.id),
-                        tenant_id=str(tenant.id),
-                        ttl_minutes=llm_state_ttl_minutes(tenant),
-                    )
-
-                # Returning after a silence gap (and not already greeting on
-                # first contact): offer to resume the prior workflow, or
-                # re-greet. NO LONGER gated on `reactivation_enabled` - the
-                # resume prompt has a product default text, so it works for
-                # every tenant, while `reactivation_prompt_enabled` still
-                # honours an explicit `initial_flows.reactivation.enabled`
-                # of false.
-                if (
-                    greeting_override is None
-                    and is_returning_patient
-                    and reactivation_prompt_enabled(tenant)
-                ):
-                    offer = _reactivation_offer(
-                        conversation,
-                        tenant,
-                        patient,
-                        wa_id,
-                        body,
-                        last_activity_at,
-                        resumable_origin,
-                    )
-                    if offer is not None:
-                        return offer
-
-                greeting_buttons = _greeting_buttons_for(tenant, greeting_override, opening_context)
-
-                # No `send_consent_notice` here: the gate above returns for
-                # every subject with a NULL `lgpd_accepted_at`, so anything
-                # reaching this far has already accepted. The greeting keeps
-                # its buttons on this path, which is why the interactive-body
-                # budget (services/greeting_template.py) still governs it.
-                return _ReplyContext(
-                    conversation_id=conversation.id,
-                    patient_wa_id=wa_id,
-                    inbound_body=body or "",
-                    greeting_override=greeting_override,
-                    greeting_buttons=greeting_buttons,
+                return await _route_inbound_turn(
+                    session,
+                    tenant=tenant,
+                    patient=patient,
+                    # For WhatsApp the two are the same string, by construction
+                    # (models/patient.py: external_id mirrors wa_id). Passing
+                    # `wa_id` rather than `patient.external_id` keeps this call
+                    # correct even for a row written by the not-yet-redeployed
+                    # worker, whose external_id is NULL.
+                    patient_ref=wa_id,
+                    channel=CHANNEL_WHATSAPP,
+                    is_returning_patient=is_returning_patient,
+                    body=body,
+                    inbound_wam_id=wam_id,
+                    action_button=action_button,
+                    greeting_button=greeting_button,
                 )
         except IntegrityError:
             # A concurrent worker already claimed this event id.
             logger.info("worker_message_duplicate_race", wam_id=wam_id)
             return None
+
+
+async def _route_inbound_turn(
+    session: AsyncSession,
+    *,
+    tenant: Tenant,
+    patient: Patient,
+    patient_ref: str,
+    channel: str,
+    is_returning_patient: bool,
+    body: str | None,
+    inbound_wam_id: str | None,
+    action_button: tuple[str, str] | None = None,
+    greeting_button: str | None = None,
+) -> _ReplyContext | None:
+    """Decide what the bot should answer, for an ALREADY-RESOLVED turn.
+
+    The channel-neutral heart of an inbound message. Everything WhatsApp-shaped
+    happens before this is called - resolving a `phone_number_id` to a tenant, a
+    `wa_id` to a patient, a `wam_id` to a dedupe claim, and the wa_id allowlist -
+    and by the time control arrives here the turn is just: this tenant, this
+    patient, this text, on this channel. `POST /internal/brain-message/inbound`
+    resolves the same four things its own way and calls this same function.
+
+    THE ORDER OF THE BRANCHES BELOW IS THE PRODUCT. It was extracted verbatim
+    from `_persist_inbound_message`, not rewritten, and every comment explaining
+    why a gate sits where it does came with it. In sequence: inbound recorded ->
+    reminder action button (above handover, because honouring an existing
+    booking is not a conversational turn) -> human handover -> LGPD consent gate
+    -> `/menu` -> greeting-button degrade -> pending "quer continuar?" answer ->
+    greeting selection -> LLM-state expiry (BEFORE the reactivation offer, so a
+    patient who never answers it still leaves LLM mode) -> reactivation offer ->
+    normal dispatch. Moving any one of them changes which patients get answered
+    and how; see the `conversation-flow-state` skill.
+
+    Runs INSIDE the caller's transaction and inside the caller's session: it
+    adds the inbound `Message` and mutates `conversation`/`patient`, and the
+    caller commits. It never opens a session of its own.
+
+    Args:
+        patient_ref: how to address this patient back on `channel` - their
+            `wa_id` on WhatsApp, their `external_id` on Brain-Message. Rides
+            out on `_ReplyContext.patient_ref` and is what the channel's
+            sender is handed as `to`.
+        channel: `CHANNEL_WHATSAPP` or `CHANNEL_BRAIN_MESSAGE`; stamped on
+            every `_ReplyContext` built here so `_reply_sender` can pick the
+            delivery mechanism without re-reading the patient row.
+        inbound_wam_id: the Meta message id, stored on the inbound `Message`.
+            None on Brain-Message, where no Meta id exists.
+    """
+    # Capture a self-introduced name ("meu nome é ...") when we don't
+    # have one yet, so future returning greetings can use {{name}}.
+    if not patient.name:
+        extracted = extract_patient_name(body)
+        if extracted:
+            patient.name = extracted
+            logger.info("worker_patient_name_captured", patient_id=str(patient.id))
+
+    conversation = await _get_or_create_conversation(session, tenant, patient)
+
+    # First contact = no prior message on this conversation. Counted
+    # BEFORE the inbound below is added so a brand-new conversation
+    # reads as 0. Drives the verbatim greeting (see below).
+    prior_messages = await session.scalar(
+        select(func.count())
+        .select_from(Message)
+        .where(Message.conversation_id == conversation.id)
+    )
+    is_first_contact = (prior_messages or 0) == 0
+
+    # Timestamp of the last activity BEFORE this inbound, used to
+    # measure the silence gap for the returning-patient offer.
+    last_activity_at = await session.scalar(
+        select(func.max(Message.created_at)).where(
+            Message.conversation_id == conversation.id
+        )
+    )
+
+    session.add(
+        Message(
+            conversation_id=conversation.id,
+            direction=MessageDirection.INBOUND,
+            sender=MessageSender.PATIENT,
+            wam_id=inbound_wam_id,
+            body=body,
+        )
+    )
+
+    # Reminder action-button tap: short-circuit BEFORE the
+    # handover/flow/LLM gates below (see this function's
+    # docstring) - `_handle_action_button` does its own
+    # tenant-scoped appointment lookup and reply. The
+    # allowlist guard above already covers this path too: it
+    # returns before `action_button` is ever attached to a
+    # `_ReplyContext`, so a non-allowlisted wa_id never reaches
+    # `_handle_action_button` (dispatched from `_send_bot_reply`,
+    # which only runs when `_persist_inbound_message` returns
+    # non-None).
+    if action_button is not None:
+        return _ReplyContext(
+            channel=channel,
+            conversation_id=conversation.id,
+            patient_ref=patient_ref,
+            inbound_body=body or "",
+            action_button=action_button,
+        )
+
+    handover = HandoverManager(session)
+    if not handover.is_bot_active(conversation):
+        # Human secretary is handling it - record only, stay quiet.
+        logger.info(
+            "worker_bot_paused_human_active",
+            conversation_id=str(conversation.id),
+        )
+        return None
+
+    # `/menu` (and /reset, /recomeçar, /inicio): a NON-DESTRUCTIVE
+    # request to go back to the main menu (PROMPT_FIX_18). Nothing
+    # is deleted: the patient row, their history, appointments,
+    # consent events, Pix deposits and Google Calendar events are
+    # all untouched. Only the transient flow fields move, and
+    # `_apply_flow_result` (reached via `_handle_show_main_menu`)
+    # does that write.
+    #
+    # Placed HERE deliberately:
+    #   * AFTER the handover check, so an active human is NOT
+    #     silently pre-empted - while a human owns the
+    #     conversation, `/menu` is recorded like any other message
+    #     and IGNORED by the bot (the return above already
+    #     happened). It is never a way to take the bot back.
+    #   * BEFORE the greeting / reactivation branches, so it is
+    #     idempotent: two deliveries of `/menu` produce the same
+    #     menu, never a greeting on one and a menu on the other.
+    # The pending reactivation gate, if any, is consumed here too -
+    # an explicit "take me to the menu" answers the "quer
+    # continuar?" question by superseding it.
+    # --- LGPD consent gate -------------------------------------
+    # Sits ABOVE `/menu`, the greeting and normal dispatch, and
+    # BELOW human handover and reminder action buttons. That
+    # position is the whole design:
+    #
+    #   * below handover, so a human secretary who picks up the
+    #     conversation is never blocked by a bot-owned gate;
+    #   * below action buttons, so a patient can still cancel or
+    #     confirm an EXISTING appointment (honouring a booking they
+    #     already made is not new processing to consent to);
+    #   * above everything else, so nothing serves a patient whose
+    #     legal basis has not been established.
+    #
+    # Mirrors PreCheck, which parks the session in `LGPD_PENDING`
+    # and answers anything but an acceptance with "Reenviar LGPD"
+    # (see the `wf_condutor_generico_universal` n8n workflow).
+    #
+    # It is a gate on a FACT about the subject (`lgpd_accepted_at`),
+    # NOT a `FlowState`. That distinction matters: a non-IDLE flow
+    # state whose only exit is the patient tapping a button is the
+    # shape that permanently parked conversations before (see
+    # `_expire_stale_llm_state`). A fact carries no such risk —
+    # `flow_state` is untouched here, so whatever the conversation
+    # was doing resumes intact the moment consent lands.
+    if _is_consent_acceptance(body):
+        # Idempotent, like the `/menu` branch below: a second
+        # delivery (or a tap on the old button further up the
+        # thread) re-sends the same menu and writes nothing new.
+        if patient.lgpd_accepted_at is None:
+            patient.lgpd_accepted_at = datetime.now(UTC)
+            # The Patient column is the operational flag; this row
+            # is the immutable audit record. Different lifetimes on
+            # purpose - see models/patient.py.
+            session.add(
+                ConsentEvent(
+                    tenant_id=tenant.id,
+                    wa_id=patient_ref,
+                    kind=CONSENT_EVENT_KIND,
+                    legal_basis=(
+                        "consentimento (art. 7º, I) — aceite explícito dos "
+                        "Termos de Uso e Política de Privacidade no WhatsApp"
+                    ),
+                )
+            )
+            logger.info(
+                "conversation_terms_accepted",
+                conversation_id=str(conversation.id),
+                tenant_id=str(tenant.id),
+            )
+        # The FIRST message of the conversation to carry buttons.
+        return _ReplyContext(
+            channel=channel,
+            conversation_id=conversation.id,
+            tenant_id=tenant.id,
+            patient_ref=patient_ref,
+            inbound_body=body or "",
+            greeting_override=CONSENT_ACCEPTED_MESSAGE,
+            greeting_buttons=_greeting_buttons_for(tenant, CONSENT_ACCEPTED_MESSAGE),
+        )
+
+    if patient.lgpd_accepted_at is None:
+        if is_first_contact:
+            # The frame goes out BUTTON-FREE and the consent notice
+            # follows it. Offering [Agendar] here would invite a tap
+            # this gate is about to refuse, and would put two button
+            # messages back to back with different jobs.
+            return _ReplyContext(
+                channel=channel,
+                conversation_id=conversation.id,
+                tenant_id=tenant.id,
+                patient_ref=patient_ref,
+                inbound_body=body or "",
+                greeting_override=render_greeting(
+                    tenant.clinic_name, _fit_clinic_description(tenant)
+                ),
+                greeting_buttons=[],
+                send_consent_notice=True,
+            )
+        # Already asked, still not accepted: re-prompt, with the
+        # button attached so the way forward is one tap from the
+        # newest message rather than a scroll back up the thread.
+        logger.info(
+            "conversation_consent_pending",
+            conversation_id=str(conversation.id),
+            tenant_id=str(tenant.id),
+        )
+        return _ReplyContext(
+            channel=channel,
+            conversation_id=conversation.id,
+            tenant_id=tenant.id,
+            patient_ref=patient_ref,
+            inbound_body=body or "",
+            send_consent_reminder=True,
+        )
+
+    if is_menu_command(body):
+        conversation.reactivation_origin = None
+        logger.info(
+            "conversation_menu_requested",
+            conversation_id=str(conversation.id),
+            tenant_id=str(tenant.id),
+            source="command",
+        )
+        return _ReplyContext(
+            channel=channel,
+            conversation_id=conversation.id,
+            tenant_id=tenant.id,
+            patient_ref=patient_ref,
+            inbound_body=body or "",
+            menu_requested=True,
+        )
+
+    # Greeting-button tap this tenant can't fulfil deterministically:
+    # flows are disabled for them, so route() would otherwise
+    # delegate straight to the LLM (see flow_router.route()'s
+    # top-of-function flows_enabled gate). A flows-ENABLED tenant's
+    # tap is NOT special-cased here - it falls through to the
+    # normal dispatch below, which route() already handles
+    # deterministically (LABEL_BOOK/LABEL_MANAGE_APPOINTMENT/
+    # LABEL_RESCHEDULE/LABEL_CANCEL_APPT, or a graceful "here's
+    # the menu again" for a stale/legacy label route() doesn't
+    # recognize). "Outro" is exempt for BOTH cohorts: it IS the
+    # deliberate LLM hand-off, and for a flows-disabled tenant the
+    # normal path below already goes straight to the LLM - exactly
+    # what the button promises - so short-circuiting it to a
+    # "contact us" degrade would break the one button that works
+    # fine for them.
+    if (
+        greeting_button is not None
+        and greeting_button != _GREETING_LLM_ESCAPE_SUFFIX
+        and not flows_enabled(tenant)
+    ):
+        return _ReplyContext(
+            channel=channel,
+            conversation_id=conversation.id,
+            patient_ref=patient_ref,
+            inbound_body=body or "",
+            greeting_button_unavailable=greeting_button,
+        )
+
+    # A pending "quer continuar?" answer takes precedence over any
+    # greeting/offer: resume where they were, or reset to the menu.
+    if conversation.reactivation_origin is not None:
+        origin = conversation.reactivation_origin
+        conversation.reactivation_origin = None  # consume the gate
+        answer = classify_yes_no(body, tenant)
+        if answer == "no":
+            conversation.flow_state = FlowState.IDLE
+            conversation.flow_step = None
+            conversation.flow_selected_type = None
+            conversation.flow_selected_day = None
+            conversation.flow_selected_slot = None
+            conversation.flow_selected_professional_id = None
+            conversation.flow_selected_insurance = None
+            conversation.flow_managing_appointment_id = None
+            return _ReplyContext(
+                channel=channel,
+                conversation_id=conversation.id,
+                patient_ref=patient_ref,
+                inbound_body=body or "",
+                reactivation=_ReactivationDirective(kind="reset", origin=origin),
+            )
+        if answer == "yes":
+            return _ReplyContext(
+                channel=channel,
+                conversation_id=conversation.id,
+                patient_ref=patient_ref,
+                inbound_body=body or "",
+                reactivation=_ReactivationDirective(kind="resume", origin=origin),
+            )
+        # "other": gate consumed; fall through to normal dispatch so
+        # their message is routed against the preserved flow state.
+
+    # On first contact, reply with a verbatim greeting (one message,
+    # no LLM): the returning greeting (with {{name}}) for a known
+    # patient, else the first-contact greeting. Tenants without a
+    # greeting fall through to the improvised LLM opener.
+    greeting_override = _select_greeting(
+        tenant, patient, is_first_contact, is_returning_patient
+    )
+
+    # Context-aware opening (indexed reads, worker-side only): adapt
+    # the verbatim greeting to the patient's real appointment state.
+    # Same gate as the greeting itself — the conversation-opening
+    # message only. patient_id is always resolved here today (the
+    # Patient row is created/flushed above); the resolver's None
+    # guard is the safe degrade for any future call site.
+    # `opening_context` also feeds `_greeting_buttons_for` below
+    # (HAS_UPCOMING(_SOON) swaps the manage-action trio in for the
+    # menu) - it stays None when there is no greeting to adapt.
+    opening_context = None
+    if greeting_override is not None:
+        opening_context = await resolve_patient_opening_state(
+            session, tenant.id, patient.id
+        )
+        # HAS_UPCOMING(_SOON) needs a bit more than the resolver's
+        # own indexed reads: the referenced professionals' display
+        # names and the nearest appointment's catalog entry (for
+        # price/description/orientações). Loaded here, in the same
+        # open session, so `_adapt_greeting_to_state` itself stays
+        # a pure composition function with no DB access of its own.
+        upcoming_data = None
+        if opening_context is not None and opening_context.state in (
+            PatientOpeningState.HAS_UPCOMING_SOON,
+            PatientOpeningState.HAS_UPCOMING,
+        ):
+            upcoming_data = await _load_upcoming_greeting_data(
+                session, tenant, opening_context.future_appointments
+            )
+        greeting_override = _adapt_greeting_to_state(
+            greeting_override, opening_context, tenant, upcoming_data
+        )
+
+    # Universal floor on how long full LLM mode may last (see
+    # `_expire_stale_llm_state`). Runs BEFORE the offer below, and
+    # THAT ORDER IS LOAD-BEARING: the state must already be dropped
+    # when "quer continuar?" goes out, so a patient who simply never
+    # answers it still leaves LLM mode. Ask first and the prompt
+    # becomes the only time-based exit again - the exact hole this
+    # floor was added to close, just with a question instead of
+    # silence. The pre-expiry state is captured first so the offer
+    # can still arm the right resume origin, and "Sim" puts it back
+    # (see the reactivation directive in `_send_bot_reply`). Still
+    # after the pending-answer gate, so a resume in progress is
+    # never wiped.
+    resumable_origin = conversation.flow_state
+    if _expire_stale_llm_state(conversation, tenant, last_activity_at):
+        logger.info(
+            "conversation_llm_state_expired",
+            conversation_id=str(conversation.id),
+            tenant_id=str(tenant.id),
+            ttl_minutes=llm_state_ttl_minutes(tenant),
+        )
+
+    # Returning after a silence gap (and not already greeting on
+    # first contact): offer to resume the prior workflow, or
+    # re-greet. NO LONGER gated on `reactivation_enabled` - the
+    # resume prompt has a product default text, so it works for
+    # every tenant, while `reactivation_prompt_enabled` still
+    # honours an explicit `initial_flows.reactivation.enabled`
+    # of false.
+    if (
+        greeting_override is None
+        and is_returning_patient
+        and reactivation_prompt_enabled(tenant)
+    ):
+        offer = _reactivation_offer(
+            conversation,
+            tenant,
+            patient,
+            patient_ref,
+            body,
+            last_activity_at,
+            resumable_origin,
+        )
+        if offer is not None:
+            return offer
+
+    greeting_buttons = _greeting_buttons_for(tenant, greeting_override, opening_context)
+
+    # No `send_consent_notice` here: the gate above returns for
+    # every subject with a NULL `lgpd_accepted_at`, so anything
+    # reaching this far has already accepted. The greeting keeps
+    # its buttons on this path, which is why the interactive-body
+    # budget (services/greeting_template.py) still governs it.
+    return _ReplyContext(
+        channel=channel,
+        conversation_id=conversation.id,
+        patient_ref=patient_ref,
+        inbound_body=body or "",
+        greeting_override=greeting_override,
+        greeting_buttons=greeting_buttons,
+    )
 
 
 def _select_greeting(
@@ -1509,7 +1602,7 @@ def _reactivation_offer(
         body_text = f"{greeting}\n\n{prompt}".strip() if greeting else prompt
         return _ReplyContext(
             conversation_id=conversation.id,
-            patient_wa_id=wa_id,
+            patient_ref=wa_id,
             inbound_body=body or "",
             greeting_override=body_text,
             greeting_buttons=reactivation_choice_buttons(tenant),
@@ -1525,7 +1618,7 @@ def _reactivation_offer(
         return None
     return _ReplyContext(
         conversation_id=conversation.id,
-        patient_wa_id=wa_id,
+        patient_ref=wa_id,
         inbound_body=body or "",
         greeting_override=greeting,
         greeting_buttons=_greeting_buttons_for(tenant, greeting),
@@ -1862,7 +1955,7 @@ async def _handle_remove_context_command(
     reply = _ReplyContext(
         conversation_id=conversation_id,
         tenant_id=tenant.id,
-        patient_wa_id=wa_id,
+        patient_ref=wa_id,
         inbound_body="",
         greeting_override=greeting,
         greeting_buttons=[],
@@ -1920,7 +2013,7 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     manage_calendar: CalendarService | None = None
     manage_calendar_owned = False
     patient_name = None
-    patient_wa = reply.patient_wa_id
+    patient_wa = reply.patient_ref
     # Post-consult-knowledge injection gate (see
     # _should_inject_post_consult_knowledge below): the patient's derived
     # opening state and the conversation's flow_state, captured as plain
@@ -2852,6 +2945,7 @@ async def _send_reschedule_limit_buttons(
 
 
 async def _apply_deposit_awareness(
+    reply: _ReplyContext,
     result: FlowRouterResult,
     tenant: Tenant | None,
     patient_wa: str | None,
@@ -2926,7 +3020,7 @@ async def _apply_deposit_awareness(
             result.bubbles[0].body = f"{warning}\n\n{result.bubbles[0].body}"
         return result
 
-    client = _tenant_client(tenant, waba_token)
+    client = _reply_sender(reply, tenant, waba_token)
     if client is None:
         # Fail closed (PROMPT_FIX_21): without this tenant's own credentials
         # the keep-or-cancel card cannot be sent, so leave the flow result
@@ -2987,7 +3081,7 @@ async def _handle_action_button(
         # Fail closed (PROMPT_FIX_21): the tap is already deduped by its
         # ProcessedEvent, so raising here would just retry a configuration
         # problem forever. The patient simply gets no answer to the tap.
-        client = _tenant_client(tenant, waba_token)
+        client = _reply_sender(reply, tenant, waba_token)
         if client is None:
             logger.error("worker_action_button_no_credential", tenant_id=str(tenant.id))
             return
@@ -2998,7 +3092,7 @@ async def _handle_action_button(
             )
         )
         if appointment is None:
-            await client.send_text_message(to=reply.patient_wa_id, body=_APPOINTMENT_NOT_FOUND_TEXT)
+            await client.send_text_message(to=reply.patient_ref, body=_APPOINTMENT_NOT_FOUND_TEXT)
             return
 
         if action == "apptconfirm":
@@ -3023,7 +3117,7 @@ async def _handle_action_button(
             else:
                 text = "Essa consulta não está mais ativa."
             await session.commit()
-            await client.send_text_message(to=reply.patient_wa_id, body=text)
+            await client.send_text_message(to=reply.patient_ref, body=text)
             return
 
         if action == "apptcancel":
@@ -3040,7 +3134,7 @@ async def _handle_action_button(
                 warning = _pix_retention_warning_line(tenant, deposit)
                 body = f"{warning} Cancelar mesmo assim ou prefere reagendar?"
                 await client.send_buttons(
-                    reply.patient_wa_id,
+                    reply.patient_ref,
                     body,
                     [
                         (f"apptcancelyes|{appointment.id}", "Cancelar mesmo assim"),
@@ -3052,7 +3146,7 @@ async def _handle_action_button(
                 session, tenant, tenant_config, appointment, waba_token
             )
             await session.commit()
-            await client.send_text_message(to=reply.patient_wa_id, body=text)
+            await client.send_text_message(to=reply.patient_ref, body=text)
             return
 
         if action == "apptcancelyes":
@@ -3061,7 +3155,7 @@ async def _handle_action_button(
                 session, tenant, tenant_config, appointment, waba_token
             )
             await session.commit()
-            await client.send_text_message(to=reply.patient_wa_id, body=text)
+            await client.send_text_message(to=reply.patient_ref, body=text)
             return
 
         if action == "rebookno":
@@ -3081,7 +3175,7 @@ async def _handle_action_button(
             # produces a new booking through the normal tail.
             if not flows_enabled(tenant):
                 await client.send_text_message(
-                    to=reply.patient_wa_id,
+                    to=reply.patient_ref,
                     body="Para remarcar, entre em contato com a nossa equipe.",
                 )
                 return
@@ -3145,7 +3239,7 @@ async def _handle_action_button(
             if deposit is not None and deposit.reschedule_count >= tenant.pix_reschedule_limit:
                 await _send_reschedule_limit_buttons(
                     client,
-                    reply.patient_wa_id,
+                    reply.patient_ref,
                     appointment.id,
                     deposit.reschedule_count,
                     tenant.pix_reschedule_limit,
@@ -3157,13 +3251,13 @@ async def _handle_action_button(
                 # is a flow-only capability throughout this codebase; there is
                 # no non-flow equivalent to hand off to.
                 await client.send_text_message(
-                    to=reply.patient_wa_id,
+                    to=reply.patient_ref,
                     body="Para remarcar essa consulta, entre em contato com a nossa equipe.",
                 )
                 return
             if appointment.patient_id is None:
                 await client.send_text_message(
-                    to=reply.patient_wa_id, body=_APPOINTMENT_NOT_FOUND_TEXT
+                    to=reply.patient_ref, body=_APPOINTMENT_NOT_FOUND_TEXT
                 )
                 return
             appointments = await load_upcoming_appointments(
@@ -3211,7 +3305,7 @@ async def _handle_action_button(
         await _apply_flow_result(
             reply,
             enter_decline_reasons(dh_appointment_id),
-            reply.patient_wa_id,
+            reply.patient_ref,
             redis=redis,
             tenant=dh_tenant,
             waba_token=dh_waba_token,
@@ -3245,7 +3339,7 @@ async def _handle_action_button(
         await _apply_flow_result(
             reply,
             result,
-            reply.patient_wa_id,
+            reply.patient_ref,
             redis=redis,
             tenant=rb_tenant,
             waba_token=rb_waba_token,
@@ -3271,7 +3365,7 @@ async def _handle_action_button(
         await _apply_flow_result(
             reply,
             result,
-            reply.patient_wa_id,
+            reply.patient_ref,
             redis=redis,
             tenant=handoff_tenant,
             waba_token=handoff_waba_token,
@@ -3315,11 +3409,11 @@ async def _handle_greeting_button_unavailable(reply: _ReplyContext, suffix: str)
         if tenant is None:
             return
         waba_token = await get_waba_token(session, tenant.id)
-        client = _tenant_client(tenant, waba_token)
+        client = _reply_sender(reply, tenant, waba_token)
     if client is None:
         return  # fail closed - never on the global scaffold (PROMPT_FIX_21)
     text = _GREETING_ACTION_UNAVAILABLE_TEXT.get(suffix, _GREETING_ACTION_UNAVAILABLE_DEFAULT)
-    await _send_simple_text(reply.patient_wa_id, text, client=client)
+    await _send_simple_text(reply.patient_ref, text, client=client)
 
 
 async def _run_flow(
@@ -3435,7 +3529,7 @@ async def _apply_flow_result(
     Returns True when the turn was fully handled (bubbles sent, or handed off
     on a calendar outage); False for `delegate_llm`.
     """
-    result = await _apply_deposit_awareness(result, tenant, patient_wa, waba_token)
+    result = await _apply_deposit_awareness(reply, result, tenant, patient_wa, waba_token)
 
     # Persist the new flow state (+ any booked appointment) in one short txn.
     persisted = True
@@ -3671,7 +3765,7 @@ async def _dispatch_bubbles(
     returns 0 - it never falls back to the global env scaffold, which would
     answer this clinic's patient from another clinic's number.
     """
-    client = _tenant_client(tenant, waba_token)
+    client = _reply_sender(reply, tenant, waba_token)
     if client is None:
         logger.error(
             "worker_bot_reply_no_credential",
@@ -3682,7 +3776,7 @@ async def _dispatch_bubbles(
     sent_count = 0
     for index, bubble in enumerate(bubbles):
         try:
-            result = await _send_bubble(client, reply.patient_wa_id, bubble)
+            result = await _send_bubble(client, reply.patient_ref, bubble)
         except Exception as exc:
             logger.error(
                 "worker_bot_reply_failed",
@@ -3694,24 +3788,18 @@ async def _dispatch_bubbles(
             break
 
         sent_count += 1
+        if sender_persists_outbound(client):
+            # The sender already wrote this bubble's row - on Brain-Message the
+            # row IS the delivery (services/channel_sender.py), so recording a
+            # second one here would double every reply in the patient's console.
+            continue
         # The message is already delivered; a failure to record it must not
         # crash the turn (which would propagate, retry, and short-circuit on the
         # committed ProcessedEvent, losing the bubble entirely). Log and go on.
         try:
-            async with async_session_factory() as session:
-                async with session.begin():
-                    session.add(
-                        Message(
-                            conversation_id=reply.conversation_id,
-                            direction=MessageDirection.OUTBOUND,
-                            sender=MessageSender.BOT,
-                            wam_id=_extract_sent_wam_id(result),
-                            body=_bubble_history_body(bubble),
-                        )
-                    )
-                    conversation = await session.get(Conversation, reply.conversation_id)
-                    if conversation is not None:
-                        conversation.last_bot_message_at = datetime.now(UTC)
+            await _record_outbound(
+                reply.conversation_id, _bubble_history_body(bubble), result
+            )
         except Exception as exc:
             logger.error(
                 "worker_bot_reply_record_failed",
@@ -3777,7 +3865,7 @@ async def _send_greeting(
     # Fail closed (PROMPT_FIX_21) rather than letting the credential error
     # escape into the arq job, which would retry the whole turn forever on
     # what is a configuration problem, not a transient one.
-    client = _tenant_client(tenant, waba_token)
+    client = _reply_sender(reply, tenant, waba_token)
     if client is None:
         logger.error(
             "worker_greeting_no_credential",
@@ -3818,9 +3906,9 @@ async def _send_greeting(
                 )
                 for index, label in enumerate(reply.greeting_buttons)
             ]
-            result = await client.send_buttons(to=reply.patient_wa_id, body=body, buttons=buttons)
+            result = await client.send_buttons(to=reply.patient_ref, body=body, buttons=buttons)
         else:
-            result = await client.send_text_message(to=reply.patient_wa_id, body=body)
+            result = await client.send_text_message(to=reply.patient_ref, body=body)
     except Exception as exc:
         # MVP: no retry (mirrors _send_bot_reply). The patient's message still
         # reached the human secretary; the auto-greeting is simply lost.
@@ -3831,20 +3919,8 @@ async def _send_greeting(
         )
         return
 
-    async with async_session_factory() as session:
-        async with session.begin():
-            session.add(
-                Message(
-                    conversation_id=reply.conversation_id,
-                    direction=MessageDirection.OUTBOUND,
-                    sender=MessageSender.BOT,
-                    wam_id=_extract_sent_wam_id(result),
-                    body=body,
-                )
-            )
-            conversation = await session.get(Conversation, reply.conversation_id)
-            if conversation is not None:
-                conversation.last_bot_message_at = datetime.now(UTC)
+    if not sender_persists_outbound(client):
+        await _record_outbound(reply.conversation_id, body, result)
     logger.info("worker_greeting_sent", conversation_id=str(reply.conversation_id))
 
 
@@ -3874,7 +3950,7 @@ async def _send_consent_notice(
     re-send the greeting. The subject is simply asked again on their next
     first contact, since nothing recorded an acceptance.
     """
-    client = _tenant_client(tenant, waba_token)
+    client = _reply_sender(reply, tenant, waba_token)
     if client is None:
         logger.error(
             "worker_consent_notice_no_credential",
@@ -3884,7 +3960,7 @@ async def _send_consent_notice(
         return
     try:
         result = await client.send_buttons(
-            to=reply.patient_wa_id,
+            to=reply.patient_ref,
             body=body,
             # The id is semantic (not positional) so it can never be confused
             # with a `greeting|N` tap by `extract_greeting_button`; the LABEL is
@@ -3900,21 +3976,8 @@ async def _send_consent_notice(
         )
         return
 
-    if reply.conversation_id is not None:
-        async with async_session_factory() as session:
-            async with session.begin():
-                session.add(
-                    Message(
-                        conversation_id=reply.conversation_id,
-                        direction=MessageDirection.OUTBOUND,
-                        sender=MessageSender.BOT,
-                        wam_id=_extract_sent_wam_id(result),
-                        body=body,
-                    )
-                )
-                conversation = await session.get(Conversation, reply.conversation_id)
-                if conversation is not None:
-                    conversation.last_bot_message_at = datetime.now(UTC)
+    if reply.conversation_id is not None and not sender_persists_outbound(client):
+        await _record_outbound(reply.conversation_id, body, result)
     logger.info("worker_consent_notice_sent", conversation_id=str(reply.conversation_id))
 
 
@@ -3954,10 +4017,74 @@ async def _handle_service_unavailable(reply: _ReplyContext, redis=None) -> None:
         )
         return
 
-    client = _tenant_client(tenant, waba_token)
+    client = _reply_sender(reply, tenant, waba_token)
     if client is None:
         return
-    await _send_simple_text(reply.patient_wa_id, SERVICE_UNAVAILABLE_MESSAGE, client=client)
+    await _send_simple_text(reply.patient_ref, SERVICE_UNAVAILABLE_MESSAGE, client=client)
+
+
+def _reply_sender(
+    reply: _ReplyContext,
+    tenant: Tenant | None,
+    waba_token: str | None,
+) -> ChannelSender | None:
+    """The thing that delivers this reply, chosen by the channel it came in on.
+
+    The ONE place a channel is branched on. Everything downstream calls the four
+    `send_*` methods without knowing which implementation answered, because
+    `WhatsAppClient` and `BrainMessageSender` present the same four signatures
+    (services/channel_sender.py).
+
+    Fail-closed on both branches, for different reasons: WhatsApp because
+    sending on another clinic's number is worse than not sending (PROMPT_FIX_21),
+    Brain-Message because a reply with no conversation has nowhere to be
+    written and would vanish silently rather than loudly.
+    """
+    if reply.channel == CHANNEL_BRAIN_MESSAGE:
+        if reply.conversation_id is None:
+            logger.error(
+                "brain_message_sender_no_conversation",
+                tenant_id=str(getattr(tenant, "id", None)),
+            )
+            return None
+        return BrainMessageSender(
+            conversation_id=reply.conversation_id,
+            session_factory=async_session_factory,
+        )
+    return _tenant_client(tenant, waba_token)
+
+
+async def _record_outbound(
+    conversation_id: UUID | None,
+    body: str,
+    send_response: dict,
+) -> None:
+    """Write the history copy of a message the CHANNEL has already delivered.
+
+    Extracted verbatim from the three call sites that each held their own copy
+    of it (`_dispatch_bubbles`, `_send_greeting`, `_send_consent_notice`) when
+    the sender abstraction landed, because those three now have to SKIP it when
+    the sender persisted the row itself. One spelling, one place to gate.
+
+    Called strictly AFTER a successful send, and that ordering is the answer to
+    the question this refactor started from: on WhatsApp the row is derived from
+    the send response (`wam_id`), so persistence has never been independent of
+    the Graph API call. See services/channel_sender.py.
+    """
+    async with async_session_factory() as session:
+        async with session.begin():
+            session.add(
+                Message(
+                    conversation_id=conversation_id,
+                    direction=MessageDirection.OUTBOUND,
+                    sender=MessageSender.BOT,
+                    wam_id=_extract_sent_wam_id(send_response),
+                    body=body,
+                )
+            )
+            conversation = await session.get(Conversation, conversation_id)
+            if conversation is not None:
+                conversation.last_bot_message_at = datetime.now(UTC)
 
 
 def _tenant_client(tenant: Tenant | None, waba_token: str | None) -> WhatsAppClient | None:
@@ -4054,9 +4181,9 @@ async def _handle_calendar_unavailable(
     # Fail closed (PROMPT_FIX_21): the handover above already happened, so a
     # human still sees the conversation even when the patient-facing notice
     # can't be sent on this tenant's own credentials.
-    client = _tenant_client(tenant, waba_token)
+    client = _reply_sender(reply, tenant, waba_token)
     if client is not None:
-        await _send_simple_text(reply.patient_wa_id, CALENDAR_UNAVAILABLE_MESSAGE, client=client)
+        await _send_simple_text(reply.patient_ref, CALENDAR_UNAVAILABLE_MESSAGE, client=client)
 
     # Alert the clinic owner by email (at most once every CALENDAR_ALERT_SILENCE_SECONDS).
     if alert_tenant is not None and alert_tenant.contact_email:
@@ -4225,7 +4352,7 @@ async def _handle_professional_config_incomplete(
             professional.name,
             gap,
             patient_name=patient_name,
-            patient_phone=reply.patient_wa_id,
+            patient_phone=reply.patient_ref,
         )
 
 
@@ -5475,3 +5602,155 @@ async def check_handover_timeouts(ctx: dict) -> None:
                 )
     if flipped:
         logger.info("worker_handover_timeouts_swept", flipped=flipped)
+
+
+# --------------------------------------------------------------------------
+# Brain-Message inbound (the second channel)
+# --------------------------------------------------------------------------
+
+
+async def _persist_brain_message_inbound(
+    *,
+    tenant_id: UUID,
+    external_id: str,
+    text: str | None,
+    patient_name: str | None = None,
+    dedupe_id: str | None = None,
+) -> _ReplyContext | None:
+    """Resolve a Brain-Message turn and hand it to the channel-neutral core.
+
+    The Brain-Message twin of `_persist_inbound_message`: same shape, same
+    transaction discipline, different resolution. Where the WhatsApp wrapper
+    turns a `phone_number_id` into a tenant and a `wa_id` into a patient, this
+    one is handed the tenant id outright (the brain-api switchboard derived it
+    from its own validated session) and keys the patient on
+    `(tenant, channel="brain_message", external_id)`.
+
+    Two gates from the WhatsApp wrapper are deliberately NOT here:
+
+      * the `wa_id` allowlist. It is the hard boundary of the WhatsApp
+        Coexistence test window and is expressed as a set of phone-number
+        digits (`config.py::bot_allowlist_wa_ids`); a Brain-Message patient has
+        no phone number, so there is nothing to compare. Reaching this endpoint
+        at all already requires the internal API key AND a brain-api session.
+      * `ProcessedEvent` dedupe, unless the caller supplies `dedupe_id`. On
+        WhatsApp it is mandatory because Meta redelivers; here the switchboard
+        makes one call per patient action over an authenticated request. The
+        hook is kept so it can be turned on from the caller's side without
+        touching this function.
+    """
+    async with async_session_factory() as session:
+        try:
+            async with session.begin():
+                if dedupe_id is not None:
+                    if await _event_already_processed(session, dedupe_id):
+                        logger.info("brain_message_duplicate", dedupe_id=dedupe_id)
+                        return None
+                    session.add(ProcessedEvent(event_id=dedupe_id))
+
+                tenant = await session.get(Tenant, tenant_id)
+                if tenant is None:
+                    logger.error("brain_message_tenant_unresolved", tenant_id=str(tenant_id))
+                    return None
+
+                # Same degrade as WhatsApp, and for the same reason: a clinic
+                # that has not finished setup answers once, politely, and
+                # creates no conversation. `conversation_id=None` means
+                # `_reply_sender` cannot build a Brain-Message sender, so the
+                # notice is dropped rather than written nowhere - the honest
+                # outcome, logged, until onboarding completes.
+                if not tenant.is_active:
+                    logger.info("brain_message_bot_not_active", tenant_id=str(tenant.id))
+                    return _ReplyContext(
+                        conversation_id=None,
+                        tenant_id=tenant.id,
+                        patient_ref=external_id,
+                        channel=CHANNEL_BRAIN_MESSAGE,
+                        inbound_body="",
+                        service_unavailable=True,
+                    )
+
+                patient = await session.scalar(
+                    select(Patient).where(
+                        Patient.tenant_id == tenant.id,
+                        Patient.channel == CHANNEL_BRAIN_MESSAGE,
+                        Patient.external_id == external_id,
+                    )
+                )
+                is_returning_patient = patient is not None
+                if patient is None:
+                    # `wa_id` stays NULL: this person has no WhatsApp number.
+                    # That is what the nullable column shipped for - see
+                    # models/patient.py.
+                    patient = Patient(
+                        tenant_id=tenant.id,
+                        channel=CHANNEL_BRAIN_MESSAGE,
+                        external_id=external_id,
+                        name=patient_name,
+                    )
+                    session.add(patient)
+                    await session.flush()
+                    # One consent event per new patient row, exactly as on
+                    # WhatsApp. `ConsentEvent.wa_id` is NOT NULL and has no
+                    # channel column of its own (models/consent_event.py), so
+                    # the subject is identified by the only handle this channel
+                    # has: their external_id. Widening that model is a separate
+                    # migration, not a side effect of this pipeline.
+                    session.add(
+                        ConsentEvent(
+                            tenant_id=tenant.id,
+                            wa_id=external_id,
+                            kind="first_contact_service",
+                            legal_basis=(
+                                "TODO_LAWYER: execução de contrato vs consentimento — "
+                                "pendencias_advogado.md item pendente"
+                            ),
+                        )
+                    )
+                elif patient_name and not patient.name:
+                    patient.name = patient_name
+
+                return await _route_inbound_turn(
+                    session,
+                    tenant=tenant,
+                    patient=patient,
+                    patient_ref=external_id,
+                    channel=CHANNEL_BRAIN_MESSAGE,
+                    is_returning_patient=is_returning_patient,
+                    body=text,
+                    # No Meta id exists for a message Meta never carried.
+                    inbound_wam_id=None,
+                )
+        except IntegrityError:
+            # A concurrent call already claimed this dedupe id, or raced us to
+            # the (tenant, channel, external_id) constraint.
+            logger.info("brain_message_duplicate_race", dedupe_id=dedupe_id)
+            return None
+
+
+async def process_brain_message_inbound(
+    ctx: dict,
+    tenant_id: str,
+    external_id: str,
+    text: str | None = None,
+    patient_name: str | None = None,
+    dedupe_id: str | None = None,
+) -> None:
+    """arq job: run one Brain-Message turn end to end.
+
+    The same ack-fast/work-async split the WhatsApp webhook uses (see the
+    `whatsapp-webhook-arq` skill's golden rule): the HTTP handler enqueues this
+    and returns 202 immediately, so an LLM turn never runs inside a request.
+    Nothing about that rule was specific to Meta - it is about not holding a
+    connection open for seconds of model latency - so the new channel follows it
+    rather than taking an exception for itself.
+    """
+    reply = await _persist_brain_message_inbound(
+        tenant_id=UUID(tenant_id),
+        external_id=external_id,
+        text=text,
+        patient_name=patient_name,
+        dedupe_id=dedupe_id,
+    )
+    if reply is not None:
+        await _send_bot_reply(reply, redis=ctx.get("redis"))

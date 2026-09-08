@@ -457,7 +457,7 @@ async def _seed(
 def _reply(conversation) -> tasks._ReplyContext:
     return tasks._ReplyContext(
         conversation_id=conversation.id,
-        patient_wa_id=PATIENT_WA,
+        patient_ref=PATIENT_WA,
         inbound_body="quero marcar",
         tenant_id=conversation.tenant_id,
     )
@@ -597,7 +597,7 @@ async def test_second_patient_within_the_window_does_not_resend(db, sent, lookup
     # A different patient; same doctor, same gap, still inside the window.
     other = tasks._ReplyContext(
         conversation_id=conversation.id,
-        patient_wa_id="5511777776666",
+        patient_ref="5511777776666",
         inbound_body="quero marcar",
         tenant_id=conversation.tenant_id,
     )

@@ -434,7 +434,7 @@ async def _run_flow_reschedule(db, seeded, *, new_start: datetime) -> None:
     reply = tasks._ReplyContext(
         conversation_id=seeded["conversation"].id,
         tenant_id=seeded["tenant"].id,
-        patient_wa_id=seeded["patient"].wa_id,
+        patient_ref=seeded["patient"].wa_id,
         inbound_body="",
     )
     result = FlowRouterResult(

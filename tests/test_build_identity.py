@@ -358,6 +358,7 @@ def test_worker_registry_is_complete() -> None:
     """
     assert arq_worker.registered_function_names() == [
         "process_webhook_event",
+        "process_brain_message_inbound",
         "send_cancellation_notice",
         "send_patient_notification",
         "transcribe_audio_message",
@@ -388,7 +389,7 @@ async def test_worker_startup_logs_identity_and_registry(
         event, fields = recorder.records[0]
         assert event == "worker_started"
         assert {"build_sha", "built_at", "alembic_head", "source_fingerprint"} <= set(fields)
-        assert len(fields["functions"]) == 8
+        assert len(fields["functions"]) == 9
         assert len(fields["cron_jobs"]) == 5
 
         rendered = json.dumps(fields, default=str)

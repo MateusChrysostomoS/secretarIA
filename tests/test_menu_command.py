@@ -188,6 +188,8 @@ def _summary(**overrides) -> EntitlementSummary:
 
 class _FakeWhatsAppClient:
     """Records every send; installed in place of the real client."""
+    # Mirrors WhatsAppClient: the CALLER records the outbound row.
+    persists_outbound = False
 
     sent: list[tuple] = []
 

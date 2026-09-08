@@ -83,7 +83,16 @@ class WhatsAppClient:
 
     Both credentials are REQUIRED and explicit. Build one with `for_tenant`
     (production) or `for_dev_scaffold` (single-tenant dev only).
+
+    Satisfies `services/channel_sender.ChannelSender` structurally - the four
+    `send_*` methods below ARE that protocol, which is why introducing a second
+    channel needed no edit to any of them.
     """
+
+    # This class does not write the `messages` row for what it sends; the caller
+    # does, afterwards, from the send response. See ChannelSender's docstring -
+    # the Brain-Message sender is the one that says True here.
+    persists_outbound = False
 
     def __init__(
         self,

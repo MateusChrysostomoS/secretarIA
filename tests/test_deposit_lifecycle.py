@@ -102,6 +102,8 @@ class FakeAsaasClient:
 
 class _FakeWhatsAppClient:
     """Records constructed instances + sends; installed in place of the real client."""
+    # Mirrors WhatsAppClient: the CALLER records the outbound row.
+    persists_outbound = False
 
     created: list["_FakeWhatsAppClient"] = []
 

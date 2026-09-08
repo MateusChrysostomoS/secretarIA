@@ -418,7 +418,7 @@ def test_prompt_teaches_menu_and_professional_tools():
 def _reply_ctx(conversation) -> tasks._ReplyContext:
     return tasks._ReplyContext(
         conversation_id=conversation.id,
-        patient_wa_id="5511999999999",
+        patient_ref="5511999999999",
         inbound_body="tanto faz",
     )
 

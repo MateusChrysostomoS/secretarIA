@@ -71,6 +71,8 @@ COMMAND = "/dangerously-remove-context"
 
 
 class _FakeWhatsAppClient:
+    # Mirrors WhatsAppClient: the CALLER records the outbound row.
+    persists_outbound = False
     sent: list[tuple] = []
 
     def __init__(self, **kwargs):

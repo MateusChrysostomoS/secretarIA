@@ -63,6 +63,8 @@ def _summary(**overrides) -> EntitlementSummary:
 
 
 class _FakeWhatsAppClient:
+    # Mirrors WhatsAppClient: the CALLER records the outbound row.
+    persists_outbound = False
     created: list["_FakeWhatsAppClient"] = []
 
     def __init__(self, access_token=None, phone_number_id=None):

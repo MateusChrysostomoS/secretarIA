@@ -135,6 +135,8 @@ async def db():
 
 
 class _FakeWhatsAppClient:
+    # Mirrors WhatsAppClient: the CALLER records the outbound row.
+    persists_outbound = False
     created: list["_FakeWhatsAppClient"] = []
 
     def __init__(self, access_token=None, phone_number_id=None):
@@ -267,9 +269,9 @@ async def _seed_deposit(
         return deposit
 
 
-def _reply_ctx(conversation, *, patient_wa_id: str = "5511999999999") -> tasks._ReplyContext:
+def _reply_ctx(conversation, *, patient_ref: str = "5511999999999") -> tasks._ReplyContext:
     return tasks._ReplyContext(
-        conversation_id=conversation.id, patient_wa_id=patient_wa_id, inbound_body=""
+        conversation_id=conversation.id, patient_ref=patient_ref, inbound_body=""
     )
 
 

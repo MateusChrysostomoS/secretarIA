@@ -58,6 +58,10 @@ def _make_patient(**overrides: object) -> Patient:
         "id": uuid4(),
         "tenant_id": uuid4(),
         "wa_id": "5511999999999",
+        # Set explicitly: `Patient.channel`'s default is applied at INSERT, so a
+        # transient row built in a test (never flushed) has channel=None.
+        "channel": "whatsapp",
+        "external_id": "5511999999999",
         "name": "Maria Souza",
         "created_at": datetime(2026, 1, 1, tzinfo=UTC),
     }
@@ -195,7 +199,9 @@ async def test_patients_shape(client: AsyncClient) -> None:
         response = await client.get(PATIENTS, headers={"X-Internal-Api-Key": GOOD_KEY})
         assert response.status_code == 200
         row = response.json()["data"][0]
-        assert set(row.keys()) == {"id", "name", "wa_id", "created_at"}
+        assert set(row.keys()) == {
+            "id", "name", "wa_id", "channel", "external_id", "created_at",
+        }
         assert row["wa_id"] == "5511999999999"
         assert row["name"] == "Maria Souza"
     finally:
@@ -298,3 +304,32 @@ async def test_unset_previous_key_does_not_grant_empty_header_access(
         assert response.status_code == 401
     finally:
         get_settings.cache_clear()
+
+
+# --------------------------------------------------------------------------
+# A Brain-Message patient has no phone. The portal's patient list must survive it.
+# --------------------------------------------------------------------------
+
+
+async def test_a_phoneless_patient_does_not_break_the_list(client: AsyncClient) -> None:
+    """Regression: `InternalPatient.wa_id` used to be non-optional.
+
+    A patient who reached the clinic through the Brain-Message console has
+    `wa_id=None`. While the projection typed that field as `str`, the FIRST such
+    row made this endpoint raise a ValidationError and return 500 - taking down
+    the whole doctor portal's patient list for that clinic, not just the row.
+    """
+    _override_session(
+        [
+            _make_patient(),
+            _make_patient(wa_id=None, channel="brain_message", external_id="bm-abc"),
+        ]
+    )
+    try:
+        response = await client.get(PATIENTS, headers={"X-Internal-Api-Key": GOOD_KEY})
+        assert response.status_code == 200, response.text
+        rows = response.json()["data"]
+        assert [r["wa_id"] for r in rows] == ["5511999999999", None]
+        assert [r["channel"] for r in rows] == ["whatsapp", "brain_message"]
+    finally:
+        _clear_override()
