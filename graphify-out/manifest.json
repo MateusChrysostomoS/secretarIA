@@ -1670,8 +1670,8 @@
     "semantic_hash": ""
   },
   "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\api\\hub\\conversations.py": {
-    "mtime": 1784501064.9600303,
-    "ast_hash": "2794f9bc51dce092604b239a97b784d0",
+    "mtime": 1788837516.4030426,
+    "ast_hash": "a7105bc8b9a3285748cc72316504ffdc",
     "semantic_hash": ""
   },
   "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\api\\hub\\deps.py": {
@@ -1775,8 +1775,8 @@
     "semantic_hash": ""
   },
   "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\models\\patient.py": {
-    "mtime": 1788215466.5071983,
-    "ast_hash": "6bd87b75b938f81219f157b9c442b125",
+    "mtime": 1788838105.768786,
+    "ast_hash": "1ef76ddcadd6e4bec4239df22bff2a05",
     "semantic_hash": ""
   },
   "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\models\\pix_deposit.py": {
@@ -1920,8 +1920,8 @@
     "semantic_hash": ""
   },
   "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\schemas\\conversation.py": {
-    "mtime": 1784501064.9899766,
-    "ast_hash": "21c65adcb2779e86d86038cadf1ed081",
+    "mtime": 1788837391.1259,
+    "ast_hash": "ecae2cb627abef330e88727529342d19",
     "semantic_hash": ""
   },
   "C:\\TECH\\BRAIN\\secretarIA\\src\\secretaria\\schemas\\hub_configuration.py": {
@@ -2355,8 +2355,8 @@
     "semantic_hash": ""
   },
   "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_hub_conversations.py": {
-    "mtime": 1784501065.007761,
-    "ast_hash": "ba64c3fd336504b43fe0f48b25819afc",
+    "mtime": 1788837679.0268302,
+    "ast_hash": "e9d6427c8be98d80fa2f7fb2588f47fb",
     "semantic_hash": ""
   },
   "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_hub_deps.py": {
@@ -2620,8 +2620,8 @@
     "semantic_hash": ""
   },
   "C:\\TECH\\BRAIN\\secretarIA\\CLAUDE.md": {
-    "mtime": 1788823569.5708313,
-    "ast_hash": "a828e7325c073641e58c8eadd8870ea3",
+    "mtime": 1788878107.912318,
+    "ast_hash": "bf92fc4fbf2b9df70dd98690461d38fc",
     "semantic_hash": ""
   },
   "C:\\TECH\\BRAIN\\secretarIA\\docker-compose.yml": {
@@ -2812,6 +2812,26 @@
   "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_pseudonimizacao.md": {
     "mtime": 1788823510.8849514,
     "ast_hash": "f74a64d5aa3f03a3b754d49e14cca6bd",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\migrations\\versions\\c7e1a4b9d0f3_patient_channel_identity.py": {
+    "mtime": 1788837135.9337504,
+    "ast_hash": "0a002ca8cb95dd3801d3e0d10f8e610e",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\tests\\test_patient_channel_identity.py": {
+    "mtime": 1788837477.4449632,
+    "ast_hash": "cf8ac071008df8f0e4f7d67d86c99e5f",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_console_staff_messages.md": {
+    "mtime": 1788877125.7244325,
+    "ast_hash": "c856be1bc66e45ace9afe2196e776409",
+    "semantic_hash": ""
+  },
+  "C:\\TECH\\BRAIN\\secretarIA\\docs\\CHECKPOINT_patient_channel_identity.md": {
+    "mtime": 1788838257.9470139,
+    "ast_hash": "acae958001bf1c73bc79f15b506fb8e9",
     "semantic_hash": ""
   }
 }
