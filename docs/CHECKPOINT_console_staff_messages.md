@@ -1,6 +1,8 @@
 # CHECKPOINT — mensagens do console de staff (hub/conversations)
 
-**Estado:** BUILT, suíte completa verde (2014 passed, 0 failures). Uncommitted.
+**Estado:** BUILT, commitado. O envio do staff foi corrigido depois para despachar por canal — ver
+`docs/CHECKPOINT_brain_message_e2e_qa.md` §2 (a previsão da §8.1 abaixo se concretizou em produção
+em 2026-09-09: era 502, não 500).
 **Origem:** `z_prompts/PROMPT_BRAIN_MESSAGE_SECRETARIA_CONSOLE_STAFF.md` (prompt 4 de ~10 do
 plano Brain-Message, gerado 2026-09-07). Independente dos outros 9 — não precisou de
 migração de canal nem de conceito novo de identidade de paciente.
