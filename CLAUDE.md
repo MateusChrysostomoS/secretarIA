@@ -180,6 +180,14 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
   prompt existe. Na mesma sessão, o bug irmão do lado de LEITURA (`ConversationRead.patient_wa_id`
   não-opcional, 500 em `GET /tenants/me/conversations`) já foi corrigido diretamente — ver
   `docs/CHECKPOINT_patient_channel_identity.md`.
+- **`_TEMPLATES` (`services/email.py`) sem a chave `"patient_access_otp"`** — achado 2026-09-09
+  testando o OTP do paciente ao vivo: `request-otp` responde 200 e enfileira no arq, mas o
+  worker acha `_TEMPLATES.get("patient_access_otp")` `None`, loga
+  `transactional_email_unknown_template` e para — o e-mail nunca sai, sem erro visível em
+  lugar nenhum. Corrigido pelo roteiro em `z_prompts/PROMPT_BRAIN_MESSAGE_E2E_QA_PRODUCAO.md`
+  (raiz de BRAIN) junto com o bug acima — ambos vivem nesta mesma cadeia de teste ao vivo.
+  Lembrete: quem lê `_TEMPLATES` é o **worker**, então o fix exige redeploy dos dois serviços
+  (`secretaria_api` + `secretaria-worker`), não só um.
 - **`z_prompts/PROMPT_PSEUDONYMIZE_SECRETARIA_ADOPTION.md`** (raiz de BRAIN, convenção
   compartilhada) — adota `pseudonymize-core` nos dois pontos de entrada de IA deste repo:
   `ai/graph.py::run_agent` (histórico + resposta) e `ai/scoped_help.py::_run`.

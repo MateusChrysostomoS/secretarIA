@@ -571,6 +571,53 @@ async def test_notifications_email_enqueues_job(
     assert kwargs == {}
 
 
+async def test_notifications_email_rejects_a_template_this_service_cannot_render(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An id no template exists for is a 422 — and nothing reaches the queue.
+
+    The regression this pins: brain-api asked for `patient_access_otp` months before
+    services/email.py registered it, and every one of those patient login codes was
+    answered `{"queued": true}` and then dropped by the worker. A caller defect that
+    no retry fixes must fail at the door, not in another process's log.
+    """
+    from secretaria.main import app as fastapi_app
+
+    fake_pool = _FakeArqPool()
+    monkeypatch.setattr(fastapi_app.state, "arq_pool", fake_pool, raising=False)
+
+    response = await client.post(
+        "/internal/notifications/email",
+        json={"to": "patient@example.com", "template": "no_such_template", "variables": {}},
+        headers=HEADERS,
+    )
+    assert response.status_code == 422
+    assert fake_pool.calls == []
+
+
+async def test_notifications_email_accepts_the_patient_login_code_template(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exact id brain-api's `/patient-access/request-otp` sends must enqueue."""
+    from secretaria.main import app as fastapi_app
+
+    fake_pool = _FakeArqPool()
+    monkeypatch.setattr(fastapi_app.state, "arq_pool", fake_pool, raising=False)
+
+    response = await client.post(
+        "/internal/notifications/email",
+        json={
+            "to": "patient@example.com",
+            "template": "patient_access_otp",
+            "variables": {"code": "123456", "ttl_minutes": 10},
+        },
+        headers=HEADERS,
+    )
+    assert response.status_code == 200
+    assert response.json() == {"queued": True}
+    assert fake_pool.calls[0][1][0] == "patient_access_otp"
+
+
 async def test_notifications_email_queued_false_when_pool_unavailable(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

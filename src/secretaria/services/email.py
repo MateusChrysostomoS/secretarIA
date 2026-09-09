@@ -320,8 +320,9 @@ class _SafeDict(dict):
 
 # Variables used across templates below (a caller may omit any of these —
 # see `_SafeDict`): `clinic_name`, `name` (person being addressed), `link`
-# (a URL — invite/portal), `blocker_reason` (nudge templates only), `days`
-# and `restart_url` (test_window_expired only).
+# (a URL — invite/portal), `ttl_minutes` (how long a one-shot credential
+# lasts), `blocker_reason` (nudge templates only), `days` and `restart_url`
+# (test_window_expired only), `code` (patient_access_otp only).
 _TEMPLATES: dict[str, EmailTemplate] = {
     "professional_invite": EmailTemplate(
         subject="Você foi convidado(a) para a equipe da {clinic_name} no SecretarIA",
@@ -345,6 +346,23 @@ _TEMPLATES: dict[str, EmailTemplate] = {
             "Este link é de uso único e expira em {ttl_minutes} minutos.\n\n"
             "Se você não pediu essa redefinição, pode ignorar este e-mail — sua senha "
             "continua a mesma.\n\n"
+            "— Equipe SecretarIA"
+        ),
+    ),
+    # The patient-portal login code — brain-api's `/patient-access/request-otp`
+    # (api/patient_access.py::_OTP_EMAIL_TEMPLATE). ONLY `code` and `ttl_minutes`
+    # arrive, and deliberately so: `request-otp` answers identically whether or not
+    # the clinic exists or has Brain-Message on, so naming the clinic here would leak
+    # in the inbox exactly what that endpoint refuses to leak in its response.
+    "patient_access_otp": EmailTemplate(
+        subject="Seu código de acesso — SecretarIA",
+        body=(
+            "Olá!\n\n"
+            "Seu código para entrar na conversa com a clínica é:\n\n"
+            "{code}\n\n"
+            "Ele expira em {ttl_minutes} minutos e só pode ser usado uma vez.\n\n"
+            "Se você não pediu esse código, pode ignorar este e-mail — ninguém entra "
+            "na conversa sem ele.\n\n"
             "— Equipe SecretarIA"
         ),
     ),
@@ -510,6 +528,20 @@ _TEMPLATES: dict[str, EmailTemplate] = {
         ),
     ),
 }
+
+
+def is_known_template(template: str) -> bool:
+    """Whether `template` is an id this module can actually render.
+
+    Exists so the ENQUEUE side can refuse an unrenderable id up front. The template
+    name is otherwise resolved only much later, inside the arq worker, where an
+    unknown id becomes `EmailOutcome.UNKNOWN_TEMPLATE` — a WARNING in a different
+    process that the calling service never sees. A sibling service that invents an id
+    this repo never registered gets a 200 and an e-mail that is never sent; that is
+    precisely how brain-api's `patient_access_otp` silently dropped every patient
+    login code until it was registered above.
+    """
+    return template in _TEMPLATES
 
 
 class EmailOutcome(StrEnum):

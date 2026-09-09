@@ -41,6 +41,7 @@ from secretaria.schemas.internal_provisioning import (
     WhatsappConnectionOut,
 )
 from secretaria.services import provisioning
+from secretaria.services.email import is_known_template
 
 logger = get_logger(__name__)
 
@@ -247,14 +248,31 @@ async def activate(
     description=(
         "Enqueues the `send_transactional_email` arq job (workers/tasks.py). "
         "`queued=false` (never an error) when the arq pool is unreachable — the same "
-        "fail-soft shape as every other best-effort queue write in this service."
+        "fail-soft shape as every other best-effort queue write in this service. An "
+        "unknown `template`, by contrast, IS an error (422): it is a caller defect no "
+        "retry can fix, and answering 200 for it would promise an e-mail nobody sends."
     ),
-    responses=_INTERNAL_RESPONSES,
+    responses={
+        **_INTERNAL_RESPONSES,
+        422: {"description": "Unknown template id — this service cannot render it."},
+    },
 )
 async def notifications_email(
     body: NotificationEmailIn,
     request: Request,
 ) -> NotificationEmailOut:
+    # Resolve the template HERE, not only in the worker. The queue accepts any string,
+    # and an id this service cannot render dies as a WARNING inside the arq process —
+    # invisible to the caller, who already got its 200. That gap is what swallowed every
+    # patient login code while brain-api's `patient_access_otp` went unregistered, so the
+    # enqueue side now refuses what the render side could never have delivered.
+    if not is_known_template(body.template):
+        logger.error("provisioning_email_unknown_template", template=body.template)
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Unknown email template: {body.template}",
+        )
+
     arq_pool = getattr(request.app.state, "arq_pool", None)
     if arq_pool is None:
         logger.error("provisioning_email_arq_pool_unavailable", template=body.template)

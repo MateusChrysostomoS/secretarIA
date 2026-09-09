@@ -22,6 +22,7 @@ from secretaria.services.email import (  # noqa: E402
     _TEMPLATES,
     EmailOutcome,
     _SafeDict,
+    is_known_template,
     send_cancellation_escalation_alert,
     send_transactional_email_message,
     send_transactional_email_result,
@@ -88,6 +89,25 @@ def test_every_template_renders_without_variables():
         assert subject
         assert body
         assert "SecretarIA" in body or "SecretarIA" in subject or True  # smoke: no exception
+
+
+def test_patient_access_otp_template_exists_and_carries_the_code():
+    """brain-api's patient login (`api/patient_access.py::_OTP_EMAIL_TEMPLATE`) sends
+    exactly `code` and `ttl_minutes`; both must render, or the patient gets an e-mail
+    with a literal `{code}` in it and cannot log in.
+    """
+    tpl = _TEMPLATES["patient_access_otp"]
+    body = tpl.body.format_map(_SafeDict({"code": "123456", "ttl_minutes": 10}))
+    assert "123456" in body
+    assert "10 minutos" in body
+    assert "{" not in body  # every placeholder resolved
+
+
+def test_is_known_template_answers_for_the_enqueue_side():
+    """The guard `api/internal_provisioning.py` uses to refuse an unrenderable id
+    before it ever reaches the queue."""
+    assert is_known_template("patient_access_otp") is True
+    assert is_known_template("no_such_template") is False
 
 
 def test_atividade_insuficiente_template_matches_spec_copy():
