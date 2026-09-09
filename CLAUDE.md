@@ -169,6 +169,17 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
   `InternalPatient.wa_id` era não-opcional e o 1º paciente `brain_message` de um tenant daria
   500 em `GET /internal/tenants/{id}/patients`, derrubando a lista do portal daquela clínica.
   Reminders/HSM ficaram FORA por desenho (§ "lacuna conhecida" do checkpoint).
+- **`z_prompts/PROMPT_BRAIN_MESSAGE_SECRETARIA_CONSOLE_SEND_CHANNEL_DISPATCH.md`** (raiz de BRAIN,
+  gerado 2026-09-09 via `/prompt-generator` numa sessão de diagnóstico de produção) — fecha o fio
+  solto entre `..._CONSOLE_STAFF.md` (peça 4) e `..._PIPELINE_CANAL.md` (peça 5): o endpoint
+  `POST /tenants/me/conversations/{id}/messages` ainda chama `WhatsAppClient` incondicionalmente
+  (`_send_via_whatsapp`, `api/hub/conversations.py:121`), então staff respondendo um paciente
+  `channel="brain_message"` (que tem `wa_id=None`) quebra o envio. Precisa despachar por
+  `patient.channel` via `services/channel_sender.py::ChannelSender`/`BrainMessageSender`, igual
+  `workers/tasks.py::_reply_sender` já faz no caminho automático. **NÃO EXECUTADO ainda** — só o
+  prompt existe. Na mesma sessão, o bug irmão do lado de LEITURA (`ConversationRead.patient_wa_id`
+  não-opcional, 500 em `GET /tenants/me/conversations`) já foi corrigido diretamente — ver
+  `docs/CHECKPOINT_patient_channel_identity.md`.
 - **`z_prompts/PROMPT_PSEUDONYMIZE_SECRETARIA_ADOPTION.md`** (raiz de BRAIN, convenção
   compartilhada) — adota `pseudonymize-core` nos dois pontos de entrada de IA deste repo:
   `ai/graph.py::run_agent` (histórico + resposta) e `ai/scoped_help.py::_run`.

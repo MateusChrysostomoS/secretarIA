@@ -226,6 +226,31 @@ async def test_list_returns_only_own_tenant_conversations_with_correct_shape(
     assert body[1]["last_message_at"] is None
 
 
+async def test_list_includes_brain_message_patient_with_no_wa_id(
+    client: AsyncClient, db, tenant
+) -> None:
+    """A brain_message-channel patient has wa_id=None by construction (no
+    WhatsApp number) — the list must still serialize, not 500. Regression
+    test for the ConversationRead.patient_wa_id non-optional-str bug."""
+    patient = await _seed_patient(
+        db,
+        tenant,
+        wa_id=None,
+        channel="brain_message",
+        external_id=str(uuid4()),
+        name="Paciente Brain-Message",
+    )
+    conv = await _seed_conversation(db, tenant, patient, handover_state=HandoverState.BOT_ACTIVE)
+
+    response = await client.get(ENDPOINT)
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["id"] == str(conv.id)
+    assert body[0]["patient_wa_id"] is None
+    assert body[0]["patient_name"] == "Paciente Brain-Message"
+
+
 async def test_list_is_empty_for_a_tenant_with_no_conversations(client: AsyncClient) -> None:
     response = await client.get(ENDPOINT)
     assert response.status_code == 200

@@ -92,15 +92,37 @@ Nenhum destes foi corrigido aqui, **de propósito**: não existe linha
 `channel='brain_message'` até o pipeline entrar no ar, então todos continuam
 corretos. Ordenado por risco.
 
+**Atualização 2026-09-09 — dois já vieram à tona em produção, ambos por causa do
+próprio canal Brain-Message chegando a um tenant real:**
+- `schemas/internal.py:48` foi corrigido de passagem durante `PIPELINE_CANAL`
+  (ver `docs/CHECKPOINT_brain_message_pipeline.md`) — `wa_id: str | None` já em
+  produção.
+- `api/hub/conversations.py` → `_read_model()` derrubava `GET
+  /tenants/me/conversations` inteiro (500) desde o primeiro paciente
+  `brain_message` de um tenant — reproduzido em produção, corrigido nesta
+  sessão (`schemas/conversation.py:14`, `ConversationRead.patient_wa_id: str |
+  None`) + teste de regressão
+  `test_list_includes_brain_message_patient_with_no_wa_id`.
+- `_send_via_whatsapp()` **segue quebrado** (não corrigido) — é o próximo a
+  quebrar: staff responde um paciente Brain-Message pelo console e
+  `send_text_message(to=None)` estoura. Precisa ser reescrito pra usar
+  `services/channel_sender.py::ChannelSender`/`BrainMessageSender` (o mesmo
+  Protocol que o pipeline já usa), não `WhatsAppClient` direto.
+
 ### Assumem não-nulo e QUEBRAM com paciente sem telefone
 
 | local | o quê |
 |---|---|
-| `schemas/internal.py:48` + `api/internal.py:122` | `InternalPatient.wa_id: str` **não-opcional**. `wa_id=None` vira `ValidationError` na resposta — o mais duro do repo |
-| `api/hub/conversations.py` → `_send_via_whatsapp()` | `send_text_message(to=patient.wa_id)` — o próprio docstring diz ser "the one seam a future channel dispatch would branch on" |
+| `api/hub/conversations.py` → `_send_via_whatsapp()` | `send_text_message(to=patient.wa_id)` — o próprio docstring diz ser "the one seam a future channel dispatch would branch on". **Ainda quebrado.** |
 | `plugins/reminders.py:214, 221, 239, 280, 285` | 5 envios `to=patient.wa_id`; o join em `:309` não filtra `wa_id IS NOT NULL` |
 | `services/payments/deposit_lifecycle.py:194, 253` | envio e `create_customer(...)` no Asaas com o telefone |
-| `api/hub/conversations.py` → `_read_model()` | `patient_wa_id=patient.wa_id` no schema de leitura |
+
+### Corrigidos
+
+| local | quando |
+|---|---|
+| `schemas/internal.py:48` + `api/internal.py:122` (`InternalPatient.wa_id`) | de passagem, durante `PIPELINE_CANAL` (2026-09-08) |
+| `api/hub/conversations.py` → `_read_model()` / `schemas/conversation.py:14` (`ConversationRead.patient_wa_id`) | 2026-09-09, incidente de produção |
 
 ### Já toleram `None` (nada a fazer)
 

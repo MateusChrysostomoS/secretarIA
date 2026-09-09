@@ -11,7 +11,7 @@ class ConversationRead(BaseModel):
     """Response — whitelisted fields only (no message bodies ride along)."""
 
     id: str
-    patient_wa_id: str
+    patient_wa_id: str | None
     patient_name: str | None
     handover_state: str
     last_message_at: datetime | None
