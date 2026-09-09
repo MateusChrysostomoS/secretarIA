@@ -608,3 +608,57 @@ async def test_send_message_missing_whatsapp_credentials_is_502(
 
     rows = await _get_message_rows(db, conv.id)
     assert rows == []
+
+
+async def test_send_message_to_brain_message_patient_persists_without_touching_whatsapp(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Staff replying on the Brain-Message channel must not call the Graph API.
+
+    Regression for the bug reproduced live on 2026-09-09: `_send_via_whatsapp`
+    called `send_text_message(to=patient.wa_id)` unconditionally, and a
+    brain_message patient has `wa_id=None` by design (migration `c7e1a4b9d0f3`).
+    Meta answered 400 to the null `to`, which this router maps to 502 — so staff
+    could not answer a single patient on the new channel.
+
+    The row IS the delivery here (the patient's console polls
+    `/internal/brain-message/conversations/{external_id}/messages`, which filters
+    by conversation and not by sender), so the assertions that matter are that a
+    HUMAN row exists and that no WhatsApp client was ever built.
+    """
+    _FakeWhatsAppClient.created.clear()
+    monkeypatch.setattr(hub_conversations, "WhatsAppClient", _FakeWhatsAppClient)
+
+    patient = await _seed_patient(
+        db,
+        tenant,
+        wa_id=None,
+        channel="brain_message",
+        external_id=str(uuid4()),
+        name="Paciente Brain-Message",
+    )
+    conv = await _seed_conversation(db, tenant, patient, handover_state=HandoverState.BOT_ACTIVE)
+
+    response = await client.post(
+        f"{ENDPOINT}/{conv.id}/messages", json={"body": "Bom dia, pode vir às 15h"}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sender"] == "human"
+    assert body["direction"] == "outbound"
+    assert body["body"] == "Bom dia, pode vir às 15h"
+
+    # The whole point: no Graph API call was even attempted.
+    assert _FakeWhatsAppClient.created == []
+
+    rows = await _get_message_rows(db, conv.id)
+    assert len(rows) == 1
+    assert rows[0].sender == MessageSender.HUMAN
+    assert rows[0].direction == MessageDirection.OUTBOUND
+    # No Meta id exists for a message Meta never carried.
+    assert rows[0].wam_id is None
+
+    # Handover still flips, exactly as on the WhatsApp path.
+    persisted_conv = await _get_conversation_row(db, conv.id)
+    assert persisted_conv.handover_state == HandoverState.HUMAN_ACTIVE
+    assert persisted_conv.last_human_message_at is not None

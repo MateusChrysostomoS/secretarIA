@@ -24,9 +24,9 @@ A staff send is recorded the same way `smb_message_echoes` already records a
 human reply sent from the WhatsApp app
 (`workers/tasks.py::_persist_human_echo`): `Message(direction=OUTBOUND,
 sender=MessageSender.HUMAN)` + `HandoverManager.set_human_active`, so the two
-paths never diverge in behavior. Delivery is WhatsApp-only today — the only
-channel a Conversation has — `_send_via_whatsapp` is the single seam a future
-channel dispatch would wrap around.
+paths never diverge in behavior. Delivery goes through `_deliver_to_patient`,
+which branches on `Patient.channel` — the single place in this router that
+knows more than one channel exists.
 """
 
 from datetime import datetime
@@ -50,6 +50,7 @@ from secretaria.schemas.conversation import (
     MessageRead,
     MessageSend,
 )
+from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.handover import HandoverManager
 from secretaria.services.tenant_config import get_waba_token
 from secretaria.services.whatsapp import TenantWhatsAppCredentialMissing, WhatsAppClient
@@ -118,14 +119,43 @@ def _extract_wam_id(send_response: dict) -> str | None:
         return None
 
 
-async def _send_via_whatsapp(
+async def _deliver_to_patient(
     session: AsyncSession, tenant: Tenant, patient: Patient, body: str
 ) -> dict:
-    """Deliver `body` to `patient` over WhatsApp — the only channel a
-    Conversation has today. Raises rather than pretending to send, so a
-    caller never persists a Message for a delivery that did not happen. This
-    is the one seam a future channel dispatch would branch on.
+    """Deliver `body` to `patient` on the channel they actually reached the clinic on.
+
+    Raises rather than pretending to send, so the caller never persists a Message for
+    a delivery that did not happen.
+
+    The two channels disagree about what "delivered" MEANS, and that is the whole
+    reason this branches (the same asymmetry `services/channel_sender.py` documents
+    for the bot path):
+
+    - WhatsApp: the reply exists because Meta carried it. The network call IS the
+      delivery and the `Message` row written afterwards is a history copy.
+    - Brain-Message: there is no network leg and no phone number. The patient's
+      console polls `GET /internal/brain-message/conversations/{external_id}/messages`,
+      which returns every row on the conversation regardless of sender — so the row
+      the caller writes next IS the delivery. `{}` is the honest send response for
+      that: `_extract_wam_id` walks it to None, which is exactly right for a message
+      Meta never saw.
+
+    Deliberately NOT routed through `channel_sender.BrainMessageSender`, even though
+    that class exists and covers the bot path. It hardcodes `sender=BOT` and stamps
+    `conversation.last_bot_message_at`; using it here would label a human staff reply
+    as the secretarIA in the patient's transcript and start the bot's clock on a
+    human turn. It also sets `persists_outbound`, so this endpoint — which must write
+    and RETURN its own row — would produce two. The row this router already writes is
+    the correct one; all Brain-Message needs from delivery is to not make a call.
+
+    Before this branch existed, a `brain_message` patient (`wa_id=None` by design,
+    migration `c7e1a4b9d0f3`) sent `"to": null` to the Graph API, which answered 400
+    and surfaced to the console as a 502 "Failed to deliver message via WhatsApp" —
+    staff simply could not reply on the new channel.
     """
+    if patient.channel == CHANNEL_BRAIN_MESSAGE:
+        return {}
+
     waba_token = await get_waba_token(session, tenant.id)
     client = WhatsAppClient.for_tenant(tenant, waba_token)
     return await client.send_text_message(to=patient.wa_id, body=body)
@@ -219,7 +249,7 @@ async def send_message(
     patient = await session.get(Patient, conversation.patient_id)
 
     try:
-        send_response = await _send_via_whatsapp(session, tenant, patient, body.body)
+        send_response = await _deliver_to_patient(session, tenant, patient, body.body)
     except TenantWhatsAppCredentialMissing:
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY, "WhatsApp not configured for this tenant"
