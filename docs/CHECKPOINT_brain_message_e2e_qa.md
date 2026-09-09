@@ -1,7 +1,8 @@
 # CHECKPOINT — QA ao vivo do canal Brain-Message em produção (2026-09-09)
 
-**Estado:** dois bugs deste repo CORRIGIDOS, commitados e pushados. **Não deployados** — e o
-deploy é dos DOIS serviços (ver §4).
+**Estado:** dois bugs deste repo CORRIGIDOS, commitados, pushados e **DEPLOYADOS + VERIFICADOS AO
+VIVO em 2026-09-09** (ver §7). `GET /build` passou de `419ebec97e53` para `d8c2052b3b4a` nos DOIS
+serviços, `deploy_parity: match`.
 **Origem:** `z_prompts/PROMPT_BRAIN_MESSAGE_E2E_QA_PRODUCAO.md` — teste de ponta a ponta pelo
 navegador, contra produção, do canal Brain-Message (portal do paciente + console de staff).
 **Tenant de teste:** "Chrysostomo For Eyes" (`9c4fa6a5-ffdb-4adb-9fe1-9036270f1246`).
@@ -126,3 +127,61 @@ Bugs achados no `Brain-Message-Frontend` na mesma rodada (fora deste repo): bot�
 inerte com código de clínica inválido, e cabeçalho da thread dizendo "IA conduzindo" ao lado de um
 switch dizendo "Recepção conduz" depois do takeover. Ver
 `Brain-Message-Frontend/docs/CHECKPOINT_portal_paciente.md` e `..._console_real.md`.
+
+---
+
+## 7. Verificação ao vivo PÓS-DEPLOY (2026-09-09, ~15:20-15:31 UTC)
+
+Deploy confirmado por `GET /build`: `source_fingerprint` foi de `419ebec97e53` para
+`d8c2052b3b4a` na API **e** no worker, `deploy_parity: match`.
+
+**§1 (template do OTP) — PROVADO.** O e-mail chegou. Paciente pediu o código pelo `/conversa`,
+recebeu, entrou. Antes do deploy do worker esse e-mail simplesmente não existia. Login do paciente
+concluído às 15:24:30 UTC.
+
+**§2 (envio do staff) — PROVADO.** Mesma ação que dava 502 antes agora dá **200**, e a mensagem
+aparece no console atribuída a **"Mateus · médico(a)"** — não à secretarIA. Essa atribuição é
+exatamente o que a divergência do §2 preservou: com `BrainMessageSender` ela teria saído como se a
+secretarIA tivesse escrito. A mensagem também chegou ao portal do paciente pelo poll, confirmando
+na prática a premissa do fix — **a linha É a entrega**, não há perna de rede.
+
+**Laço completo provado:** paciente → bot (resposta em <4s pelo pipeline arq) → staff → paciente.
+
+**Handover:** os dois sentidos, com barra de confirmação, e o cabeçalho agora concorda com o
+switch (era o bug do `toState` no frontend, corrigido em `ae4b325`).
+
+**Sessão do paciente:** F5 derruba e exige código novo, como desenhado (sem refresh token do lado
+do paciente).
+
+### Armadilha operacional descoberta ao testar
+
+`issue_otp` SOBRESCREVE o desafio vivo do par (tenant, e-mail). Pedir um segundo código antes de
+usar o primeiro invalida o primeiro — e o paciente que ler o e-mail mais antigo recebe
+"Código inválido ou expirado", sem nada indicando que a causa foi o segundo pedido. Aconteceu
+nesta própria sessão. Não é bug (está documentado no docstring de `issue_otp` e é a defesa contra
+farmar tentativas), mas é a explicação de um suporte futuro do tipo "o código não funciona".
+
+## 8. BUG NOVO, AINDA ABERTO — PreCheck pelo portal do paciente (fora deste repo)
+
+**`POST /api/brain/patient-access/threads/precheck/messages` → 502**, determinístico (3 tentativas).
+A aba PreCheck do portal mostra "Não foi entregue / Tentar novamente" e o retry nunca funciona.
+O **GET** do mesmo thread responde 200 — então a perna do PreCheck está configurada e a chave
+interna está certa.
+
+O que a leitura de código descarta:
+- **não** é contrato: `BrainMessageInboundRequest` (`extra="forbid"`) aceita exatamente os 4
+  campos que `message_switchboard.send_message` envia;
+- **não** é auth: o GET usa a mesma `require_internal_api_token` e passa;
+- **não** é `clinic_flow_not_configured` nem `UnsupportedOnChannel`: os dois são **503**, e o
+  switchboard repassa 503 como 503 — recebemos 502, que é o ramo `status_code >= 400`;
+- **não** é `flow_not_found`: numa sessão nova o estado é `INIT`, e `BrainMessageConductor._open`
+  só grava estado e devolve welcome+LGPD — não chama o agente nem `load_flow`.
+
+Sobra: **uma exceção não tratada (500) em `resolve_session`/`update_session`** — a primeira
+escrita em `precheckv2` desse caminho. Vale checar GRANTs de INSERT/UPDATE nas tabelas que o
+condutor escreve, no espírito de [[precheck-sessions-grant-unproven]].
+
+**Como confirmar em 30s:** o status real do upstream está no log do brain-api, na linha
+`switchboard_upstream_error` (campos `product`, `path`, `status`); o PreCheck loga o próprio erro
+em `internal.brain_message.*`. Não dá para deduzir daqui — brain-api nunca repassa o corpo do
+upstream ao paciente, por desenho.
