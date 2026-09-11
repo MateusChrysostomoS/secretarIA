@@ -32,6 +32,7 @@ import pytest  # noqa: E402
 
 from secretaria.ai.formatter import MAX_LIST_ROWS, SlotsBubble, TextBubble  # noqa: E402
 from secretaria.models import FlowState  # noqa: E402
+from secretaria.schemas.webhook import inbound_routing_text  # noqa: E402
 from secretaria.services.calendar import (  # noqa: E402
     DAY_SCAN_MAX_EVENTS,
     CalendarService,
@@ -255,15 +256,15 @@ class _Calendar:
 
 
 def _day_tap(bubble: SlotsBubble, index: int = 0) -> str:
-    """The body a day-row tap produces (schemas.webhook.extract_inbound_body)."""
+    """What the router reads for a day-row tap (schemas.webhook.inbound_routing_text)."""
     row_id, title = bubble.rows[index][0], bubble.rows[index][1]
-    return f"{title} ({row_id.split('|', 1)[1]})"
+    return inbound_routing_text(title, row_id)
 
 
 def _control_tap(bubble: SlotsBubble, label: str) -> str:
     for row in bubble.rows:
         if row[1] == label:
-            return f"{row[1]} ({row[0].split('|', 1)[1]})"
+            return inbound_routing_text(row[1], row[0])
     raise AssertionError(f"no {label!r} row in {[r[1] for r in bubble.rows]}")
 
 

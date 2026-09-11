@@ -22,6 +22,7 @@ from secretaria.ai.formatter import SlotsBubble, TextBubble  # noqa: E402
 from secretaria.ai.scoped_help import ScopedHelpOutcome  # noqa: E402
 from secretaria.core.whatsapp_limits import truncate_list_row_title  # noqa: E402
 from secretaria.models import FlowState  # noqa: E402
+from secretaria.schemas.webhook import inbound_routing_text  # noqa: E402
 from secretaria.services import flow_router  # noqa: E402
 from secretaria.services.calendar import CalendarUnavailableError  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
@@ -156,12 +157,14 @@ class _FakeCalendar:
 
 
 def _tap(professional) -> str:
-    """The body a prof-row tap produces (see schemas.webhook.extract_inbound_body).
+    """What the router reads for a prof-row tap (schemas.webhook.inbound_routing_text).
 
     The title half goes through the SAME helper the row was rendered with, so a
     long doctor name exercises the real round-trip rather than a stale slice.
     """
-    return f"{truncate_list_row_title(str(professional.name))} ({professional.id})"
+    return inbound_routing_text(
+        truncate_list_row_title(str(professional.name)), f"prof|{professional.id}"
+    )
 
 
 # --------------------------------------------------------------------------

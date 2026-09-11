@@ -161,7 +161,19 @@ usar o primeiro invalida o primeiro — e o paciente que ler o e-mail mais antig
 nesta própria sessão. Não é bug (está documentado no docstring de `issue_otp` e é a defesa contra
 farmar tentativas), mas é a explicação de um suporte futuro do tipo "o código não funciona".
 
-## 8. BUG NOVO, AINDA ABERTO — PreCheck pelo portal do paciente (fora deste repo)
+## 8. PreCheck pelo portal do paciente (fora deste repo) — GRANT aplicado, reteste ao vivo pendente
+
+**Atualização 2026-09-09:** causa raiz confirmada por leitura de código (não só inferência dos
+logs) — `PreCheck/app/services/brain_message/store.py::record_answer` (chamado por
+`conductor.py:252`) faz `INSERT INTO answers ... ON CONFLICT (...) DO UPDATE`, e o role
+`precheck_media_ro` nunca tinha INSERT/UPDATE em `public.answers` (só `sessions` tinha, de uma
+migração anterior — por isso o GET e a abertura LGPD funcionavam e só a primeira resposta real
+quebrava). A migração que faltava já existia, escrita e nunca rodada:
+`PreCheck/docs/migration_precheckv2_brain_message_grant.sql`. **O dono confirmou tê-la rodado em
+produção (psql, banco `precheckv2`) em 2026-09-09.** Falta só o reteste ao vivo: repetir o envio
+na aba PreCheck do `/conversa` e confirmar 200 em vez de 502 — nenhuma sessão fez isso ainda.
+
+Texto original da sessão de QA, para contexto (o diagnóstico abaixo levou à causa acima):
 
 **`POST /api/brain/patient-access/threads/precheck/messages` → 502**, determinístico (3 tentativas).
 A aba PreCheck do portal mostra "Não foi entregue / Tentar novamente" e o retry nunca funciona.

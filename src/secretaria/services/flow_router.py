@@ -12,8 +12,11 @@ Design:
   create_event) but never opens its own DB transaction — the caller persists
   the returned `appointment` and applies the returned flow-state fields.
 - Button taps arrive as their label text; slot-list taps arrive as
-  "<label> (<iso>)" (see schemas.webhook.extract_inbound_body). The matching
-  here relies on that contract.
+  "<label> (<iso>)" (see schemas.webhook.inbound_routing_text). The matching
+  here relies on that contract. That string is the ROUTING text, recomposed in
+  memory from a tap's title and its row id - the stored `Message.body` is the
+  label alone, because it is what the staff console and the patient portal
+  show.
 """
 
 from __future__ import annotations
@@ -291,8 +294,9 @@ DAY_PICKER_PAGE_SIZE = 8
 # outro Serviço".
 SLOT_PICKER_MAX_SLOTS = 8
 
-# List-row id prefixes for the picker. The payload rides back in the body as
-# "<title> (<payload>)" — see schemas/webhook.py::_PAYLOAD_ROW_PREFIXES. That
+# List-row id prefixes for the picker. The payload rides back in the ROUTING
+# text as "<title> (<payload>)" — see schemas/webhook.py::_PAYLOAD_ROW_PREFIXES
+# and inbound_routing_text (the stored message body is the title alone). That
 # is what lets the page cursor live in the TAP instead of in a new
 # conversations column: nothing about pagination has to be persisted.
 ROW_DAY_PREFIX = "day|"
@@ -1210,9 +1214,11 @@ def enter_booking(tenant: Tenant, professionals: list | None = None) -> FlowRout
 def _professional_id_from_body(body: str | None) -> UUID | None:
     """Parse the professional UUID out of a list-row tap ("Dra. Ana (uuid)").
 
-    Mirrors `_slot_iso_from_body`: schemas.webhook.extract_inbound_body turns a
-    "prof|<uuid>" row id into "<title> (<uuid>)", so the UUID rides in the
-    trailing parentheses (or is the whole body when the row had no title).
+    Mirrors `_slot_iso_from_body`: schemas.webhook.inbound_routing_text
+    re-attaches a "prof|<uuid>" row id to its title as "<title> (<uuid>)", so
+    the UUID rides in the trailing parentheses (or is the whole text when the
+    row had no title). That is the routing text only - the stored message body
+    is the title alone.
     """
     if not body:
         return None

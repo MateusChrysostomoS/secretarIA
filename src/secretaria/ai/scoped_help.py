@@ -50,6 +50,7 @@ from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import Message, MessageSender
+from secretaria.schemas.webhook import inbound_routing_text
 from secretaria.services.pii_pseudonymization import (
     load_pseudonymizer,
     persist_pseudonymizer,
@@ -142,7 +143,8 @@ async def _recent_history(conversation_id: UUID) -> list[BaseMessage]:
     recent.reverse()
     out: list[BaseMessage] = []
     for m in recent:
-        content = m.body or ""
+        # The same view of a tap as graph._load_history: title + row payload.
+        content = inbound_routing_text(m.body, m.interactive_reply_id) or ""
         if not content:
             continue
         if m.sender == MessageSender.PATIENT:

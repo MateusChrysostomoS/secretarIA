@@ -222,6 +222,27 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
   deste lado é exatamente a armadilha que motivou extrair o pacote.
   Pendências abertas em §9 do checkpoint: migração, deploy dos DOIS serviços, commit, pin.
 - **`PROMPT_04B_list_row_limits_remaining_surfaces.md`** — continuação do `PROMPT_04`. **Resolvido 2026-08-22 (UNCOMMITTED)** — ver §4 de `docs/CHECKPOINT_whatsapp_text_limits.md`. A varredura achou **três** campos, não dois: nome de serviço (`ServiceCard.tsx`) e também **convênio** (`ContextSection.tsx`, não previsto). Os dois **avisam sem bloquear** — `/configuracao` salva oito seções atrás de um botão só, e um nome legado longo não pode sequestrar o resto. Convênio valida **por item** sobre `toWireInsurances` (um `maxLength` no campo proibiria três planos curtos legais). `ai/prompts.py` agora interpola `MAX_LIST_ROW_TITLE_CHARS` no bloco `[SLOTS]` e `_parse_slot_rows` corta no parse. `[CONFIRM]` não precisou de nada (labels fixos no código) — há teste fixando isso. Bônus: `formatter.py` declarava um QUARTO literal (`MAX_LIST_ROWS = 10`), agora re-export.
+- `z_prompts/PROMPT_BRAIN_MESSAGE_INTERACTIVE_BUBBLES_RENDERING.md` (raiz de BRAIN, gerado
+  2026-09-10 via `/prompt-generator` a partir de análise ao vivo no Chrome do console real) —
+  botões/listas do WhatsApp (`ButtonBubble`/`MenuBubble`/`SlotsBubble`) chegam ao
+  `Brain-Message-Frontend` (console de staff e portal do paciente) já achatados em texto puro por
+  `workers/tasks.py::_bubble_history_body`; `models/message.py::Message` não tem coluna pra
+  estrutura e `schemas/conversation.py::MessageRead` só expõe `body: str`. Pede migração nova
+  (coluna JSON) + extensão do wire, mantendo `body` achatado intocado (é o que a LLM lê). **NÃO
+  EXECUTADO ainda.**
+- `z_prompts/PROMPT_BRAIN_MESSAGE_INBOUND_PAYLOAD_LEAK.md` (raiz de BRAIN, gerado 2026-09-10,
+  mesma sessão) — achado relacionado mas com causa própria: a resposta da paciente a uma lista com
+  payload (`"prof|<uuid>"`, `flow_router.py` ~linha 1290) aparece no console como `"Dr. Fulano
+  (8faa12e1-…)"` — o UUID interno vaza porque `schemas/webhook.py::extract_inbound_body` (linhas
+  ~512-544) monta deliberadamente `"{title} ({payload})"` pro `flow_router` conseguir reconstruir a
+  escolha a partir do texto salvo, e essa MESMA string vira `Message.body`. Pede separar o texto de
+  exibição do sinal de roteamento. **EXECUTADO 2026-09-11 — BUILT, suíte completa verde (2066
+  passed), UNCOMMITTED, migração `9d3b7e1f5a2c` NÃO aplicada, não deployado; ver
+  `docs/CHECKPOINT_inbound_tap_display_vs_routing.md`.** Achado que o prompt não previa: o
+  histórico da LLM (`ai/graph.py::_load_history`) também lia o payload do `body` — o `[SLOTS]` da LLM
+  agenda um turno depois, lendo o ISO do histórico — por isso o id virou coluna
+  (`messages.interactive_reply_id`) em vez de só viajar em memória. **Deploy: migração ANTES do
+  worker** (§4 do checkpoint).
 
 ## graphify
 

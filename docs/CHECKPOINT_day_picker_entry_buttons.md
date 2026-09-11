@@ -158,7 +158,7 @@ houver `back_target`. Um dia que ficou sem horário entre os dois toques (algué
 
 **Paginação sem coluna nova.** O cursor viaja no **id da linha**, não no banco:
 
-| id da linha | corpo que chega | significado |
+| id da linha | texto que o router lê | significado |
 |---|---|---|
 | `day\|2026-08-18\|2` | `Seg, 18/08 (2026-08-18\|2)` | dia + página em que foi listado |
 | `daymore\|3` | `Ver mais dias (3)` | próxima página |
@@ -170,6 +170,11 @@ houver `back_target`. Um dia que ficou sem horário entre os dois toques (algué
 table-driveniza os `slot|`/`prof|` que já existiam e acrescenta a família do seletor —
 saída byte-idêntica para os dois antigos. `_control_match` (em `flow_router.py`) compara os
 rótulos de controle ignorando o sufixo `(payload)`; um `Voltar` **digitado** também casa.
+
+> **2026-09-11:** a coluna do meio da tabela acima é o **texto de roteamento**
+> (`schemas/webhook.py::inbound_routing_text`, recomposto em memória), não mais o corpo
+> gravado: `Message.body` guarda só o título e o id vai em `Message.interactive_reply_id`.
+> Ver `CHECKPOINT_inbound_tap_display_vs_routing.md`.
 
 ### Texto livre: continua atalho, deixou de ser vazamento
 

@@ -55,6 +55,7 @@ from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import Message, MessageSender
+from secretaria.schemas.webhook import inbound_routing_text
 from secretaria.services.booking_scope import (
     BOOKING_TOPOLOGY_MULTI,
     BOOKING_TOPOLOGY_UNKNOWN,
@@ -362,7 +363,11 @@ async def _load_history(conversation_id: UUID) -> list[BaseMessage]:
 
     out: list[BaseMessage] = []
     for m in recent:
-        content = m.body or ""
+        # A tap is stored as its title alone (the text staff see); the agent
+        # reads it with the row's payload re-attached - the "<rótulo> (<iso>)"
+        # its [SLOTS] instructions promise, on this turn AND on the later
+        # [CONFIRM] turn that actually books it.
+        content = inbound_routing_text(m.body, m.interactive_reply_id) or ""
         if not content:
             continue
         if m.sender == MessageSender.PATIENT:

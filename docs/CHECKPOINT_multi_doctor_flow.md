@@ -114,6 +114,10 @@ active-professionals snapshot** the worker passes into `route()` (new
   `schemas/webhook.py::extract_inbound_body` mirrors the `slot|` contract for
   `prof|` ids, so a tap arrives as `"Dra. Ana (uuid)"`; resolution is by the
   embedded UUID first, typed-name fallback second (24-char truncation aware).
+  *(2026-09-11: that string is now only the ROUTING text, recomposed in memory
+  by `schemas/webhook.py::inbound_routing_text`; the stored `Message.body` is
+  the title alone and the id lives in `Message.interactive_reply_id` — see
+  `CHECKPOINT_inbound_tap_display_vs_routing.md`.)*
 - **Tap** → `_enter_professional_services(professional, tenant)` (factored
   out because the PROMPT 3 hand-back calls the exact same sequence): greeting
   bubble = `specialty` (line) + `about` (verbatim), skipped entirely when both

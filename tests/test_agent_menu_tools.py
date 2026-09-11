@@ -78,6 +78,7 @@ from secretaria.models import (  # noqa: E402
     Tenant,
 )
 from secretaria.plugins import multi_professional as mp, registry as reg  # noqa: E402
+from secretaria.schemas.webhook import inbound_routing_text  # noqa: E402
 from secretaria.services.booking_scope import (  # noqa: E402
     BOOKING_TOPOLOGY_MULTI,
     BOOKING_TOPOLOGY_SOLE,
@@ -970,11 +971,12 @@ async def test_the_next_tap_after_the_handback_actually_advances(
         patient.wa_id,
     )
 
-    # Tap the first day exactly as WhatsApp delivers it: "<title> (<payload>)".
+    # Tap the first day: the text the router reads for it, "<title> (<payload>)"
+    # (WhatsApp delivers the two halves separately; the worker recomposes them).
     (days,) = _captured_bubbles
     row_id, row_title = days.rows[0]
     assert row_id.startswith("day|")
-    tap = f"{row_title} ({row_id.split('|', 1)[1]})"
+    tap = inbound_routing_text(row_title, row_id)
 
     async with db() as session:
         conv = await session.get(Conversation, conversation.id)

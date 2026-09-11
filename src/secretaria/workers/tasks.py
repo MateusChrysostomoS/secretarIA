@@ -84,7 +84,9 @@ from secretaria.schemas.webhook import (
     extract_echo_body,
     extract_greeting_button,
     extract_inbound_body,
+    extract_inbound_reply_id,
     history_item_is_final,
+    inbound_routing_text,
 )
 from secretaria.services import cancellation_notice
 from secretaria.services.appointment_status import (
@@ -424,6 +426,10 @@ class _ReplyContext:
     # the day a second channel existed the old name `patient_wa_id` became a
     # lie for half the rows it carried.
     patient_ref: str
+    # The ROUTING text of the inbound (see `_route_inbound_turn`): for a tap on
+    # a data-carrying list row it still carries the row's payload - "Dra. Ana
+    # (<uuid>)" - because the flow router and the agent resolve the tap from
+    # it. Never store or display it: the stored `Message.body` is the title.
     inbound_body: str
     # Which surface this turn arrived on, and therefore which one the reply
     # leaves by. `_reply_sender` is the only reader; every send site downstream
@@ -555,7 +561,12 @@ async def _handle_patient_messages(value: WebhookValue, redis=None) -> None:
 
         contact = contacts.get(msg.from_)
         patient_name = contact.profile.name if contact and contact.profile else None
+        # A tap arrives as two strings and stays two: the title the patient saw
+        # (`body`, the only text stored and shown to staff) and the id of the
+        # row/button tapped, which rides separately so its payload can route
+        # without ever landing in a bubble (see `_route_inbound_turn`).
         body = extract_inbound_body(msg)
+        interactive_reply_id = extract_inbound_reply_id(msg)
         action_button = extract_action_button(msg)
         greeting_button = extract_greeting_button(msg)
 
@@ -581,6 +592,7 @@ async def _handle_patient_messages(value: WebhookValue, redis=None) -> None:
             patient_name=patient_name,
             wam_id=msg.id,
             body=body,
+            interactive_reply_id=interactive_reply_id,
             action_button=action_button,
             greeting_button=greeting_button,
         )
@@ -597,6 +609,7 @@ async def _persist_inbound_message(
     body: str | None,
     action_button: tuple[str, str] | None = None,
     greeting_button: str | None = None,
+    interactive_reply_id: str | None = None,
 ) -> _ReplyContext | None:
     """Record an inbound message in its own transaction.
 
@@ -718,6 +731,7 @@ async def _persist_inbound_message(
                     inbound_wam_id=wam_id,
                     action_button=action_button,
                     greeting_button=greeting_button,
+                    interactive_reply_id=interactive_reply_id,
                 )
         except IntegrityError:
             # A concurrent worker already claimed this event id.
@@ -737,6 +751,7 @@ async def _route_inbound_turn(
     inbound_wam_id: str | None,
     action_button: tuple[str, str] | None = None,
     greeting_button: str | None = None,
+    interactive_reply_id: str | None = None,
 ) -> _ReplyContext | None:
     """Decide what the bot should answer, for an ALREADY-RESOLVED turn.
 
@@ -772,7 +787,25 @@ async def _route_inbound_turn(
             delivery mechanism without re-reading the patient row.
         inbound_wam_id: the Meta message id, stored on the inbound `Message`.
             None on Brain-Message, where no Meta id exists.
+        body: the message as the patient saw it - what they typed, or the
+            TITLE of the control they tapped. The only text the inbound
+            `Message` stores, because it is what the staff console and the
+            patient portal render.
+        interactive_reply_id: the raw id of the control tapped
+            (schemas/webhook.py::extract_inbound_reply_id), stored beside
+            `body`; None for anything typed, transcribed or sent on
+            Brain-Message.
     """
+    # Everything below DECIDES on the routing text, not on what is stored: for
+    # a tap on a data-carrying row it is the title with the row's payload
+    # re-attached - "Dra. Ana (<uuid>)", "15:00 (<iso>)" - the string every
+    # matcher in services/flow_router.py was written against, and identical to
+    # `body` for anything that is not such a tap. Rebinding the name keeps the
+    # ladder below exactly what it was before the two were split; the ONLY
+    # reader of `stored_body` is the inbound `Message` row.
+    stored_body = body
+    body = inbound_routing_text(stored_body, interactive_reply_id)
+
     # Capture a self-introduced name ("meu nome é ...") when we don't
     # have one yet, so future returning greetings can use {{name}}.
     if not patient.name:
@@ -807,7 +840,9 @@ async def _route_inbound_turn(
             direction=MessageDirection.INBOUND,
             sender=MessageSender.PATIENT,
             wam_id=inbound_wam_id,
-            body=body,
+            # The title alone, never the payload - see `stored_body` above.
+            body=stored_body,
+            interactive_reply_id=interactive_reply_id,
         )
     )
 

@@ -57,4 +57,12 @@ class Message(Base):
     # Meta message id (wamid.*). Nullable - not every event carries one.
     wam_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The raw id of the interactive control an INBOUND message tapped
+    # (`interactive.button_reply.id` / `list_reply.id`, e.g. "prof|<uuid>") -
+    # the machine half of a tap, NULL for anything typed. `body` keeps only the
+    # human half, the title the patient saw, because `body` is what the staff
+    # console and the patient portal render. Readers that need the payload back
+    # (the flow router, the agent's history) recompose it with
+    # schemas/webhook.py::inbound_routing_text; nothing displays this column.
+    interactive_reply_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

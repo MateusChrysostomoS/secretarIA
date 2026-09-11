@@ -483,8 +483,8 @@ def minimal_event_payload(payload: dict) -> dict:
     return {"entry": entries}
 
 
-# List-row id prefixes whose payload must survive into the message body,
-# because the row's visible title alone cannot identify what was tapped:
+# List-row id prefixes whose payload the ROUTER needs back, because the row's
+# visible title alone cannot identify what was tapped:
 #
 #   slot|<iso datetime>  -> "15:00 (2026-05-29T15:00)"     a free time slot
 #   prof|<uuid>          -> "Dra. Ana (uuid)"              a professional row
@@ -495,6 +495,14 @@ def minimal_event_payload(payload: dict) -> dict:
 #   daymore|<page>       -> "Ver mais dias (1)"            day-picker paging
 #   dayagain|<page>      -> "Escolher outro dia (1)"       slot list -> day list
 #   dayback|<target>     -> "Voltar (service)"             day/slot list -> back
+#
+# The right-hand column is the ROUTING text (`inbound_routing_text`): what the
+# flow router and the agent's history read. It is never the stored message
+# body and never reaches a person - the body is the title alone
+# (`extract_inbound_body`), and the id rides beside it in
+# `Message.interactive_reply_id` (`extract_inbound_reply_id`). The two used to
+# be one string, and that string was `Message.body`: "Dr. Fulano (8faa12e1-…)"
+# is what the staff console and the patient portal showed for a doctor tap.
 #
 # The last three carry the day picker's cursor/destination so pagination needs
 # no extra conversation column: the tap itself says where it came from and
@@ -509,39 +517,91 @@ _PAYLOAD_ROW_PREFIXES: tuple[str, ...] = (
 )
 
 
-def extract_inbound_body(msg: WebhookMessage) -> str | None:
-    """Return the human-readable text body of an inbound message.
-
-    Handles text messages (`text.body`) plus the two Cloud API interactive
-    callbacks: reply-button taps (`interactive.button_reply`) and list-row
-    taps (`interactive.list_reply`).
-
-    Returns None when the message type is not one the bot can act on
-    (image, audio, location, etc.) so the worker can decide to stay quiet
-    rather than feed a meaningless body to the LLM.
-    """
-    if msg.text and msg.text.body:
-        return msg.text.body
-
+def _interactive_reply(msg: WebhookMessage) -> WebhookInteractiveReply | None:
+    """The tapped reply button or list row, whichever this message carries."""
     interactive = msg.interactive
     if interactive is None:
         return None
+    return interactive.button_reply or interactive.list_reply
 
-    reply = interactive.button_reply or interactive.list_reply
+
+def extract_inbound_body(msg: WebhookMessage) -> str | None:
+    """Return the human-readable text of an inbound message.
+
+    What the patient typed (`text.body`), or the TITLE of the reply button
+    (`interactive.button_reply`) or list row (`interactive.list_reply`) they
+    tapped - never the tapped control's id. This is the text stored as
+    `Message.body`, i.e. what the staff console and the patient portal
+    render. The id is `extract_inbound_reply_id`; the router's view of the
+    two together is `inbound_routing_text`.
+
+    Returns None when the message type is not one the bot can act on
+    (image, audio, location, etc.) so the worker can decide to stay quiet
+    rather than feed a meaningless body to the LLM - and for a tap whose title
+    came back empty, which has no human-readable form at all (its id still
+    routes, through `inbound_routing_text`).
+    """
+    if msg.text and msg.text.body:
+        return msg.text.body
+    reply = _interactive_reply(msg)
     if reply is None:
         return None
-    title = (reply.title or "").strip()
-    payload_id = (reply.id or "").strip()
-    if not title and not payload_id:
-        return None
+    return (reply.title or "").strip() or None
 
-    # Data-carrying list rows: the id smuggles what the row's own title cannot
-    # express, and the body becomes self-describing — "<title> (<payload>)".
+
+def extract_inbound_reply_id(msg: WebhookMessage) -> str | None:
+    """Return the raw id of the control an inbound message tapped, or None.
+
+    The machine half of a tap, e.g. "prof|<uuid>" or "slot|2026-05-29T15:00",
+    stored apart from the title in `Message.interactive_reply_id` so a row's
+    payload can route without ever being shown to anyone. None for typed text
+    - which wins over an interactive part here exactly as it does in
+    `extract_inbound_body`, so the two halves always describe the same
+    message - and for a tap that carried no id.
+    """
+    if msg.text and msg.text.body:
+        return None
+    reply = _interactive_reply(msg)
+    if reply is None:
+        return None
+    return (reply.id or "").strip() or None
+
+
+def inbound_routing_text(body: str | None, reply_id: str | None) -> str | None:
+    """The text the flow router and the agent read for one inbound message.
+
+    Recomposes the two stored halves of a tap - its title (`body`) and its raw
+    id - into the exact string a tap was persisted as before they were split:
+    "<title> (<payload>)" for a `_PAYLOAD_ROW_PREFIXES` row, the bare title for
+    any other control. The router's matchers (`_slot_iso_from_body`,
+    `_professional_id_from_body`, `_row_payload`, `_control_match` in
+    services/flow_router.py) and the agent's own instructions (ai/prompts.py:
+    the body of a [SLOTS] tap arrives as "<rótulo> (<iso>)") were all written
+    against that string, so they keep reading it byte for byte while the
+    stored text shrinks to the title.
+
+    Never store or display the result. A message with no `reply_id` - typed
+    text, a transcript, a Brain-Message turn, or any row written before the id
+    had a column of its own - passes through unchanged, which is also why an
+    old row whose body still embeds its payload reads back exactly as it
+    always did.
+    """
+    if not reply_id:
+        return body
+    payload = _row_payload(reply_id)
+    if body:
+        return f"{body} ({payload})" if payload is not None else body
+    # A tap whose title came back empty: the fallback the single string always
+    # had - the payload alone for a data row, the whole id for anything else.
+    return payload if payload is not None else reply_id
+
+
+def _row_payload(reply_id: str) -> str | None:
+    """The part of a data-carrying row id after its prefix, or None."""
     for prefix in _PAYLOAD_ROW_PREFIXES:
-        if payload_id.startswith(prefix):
-            payload = payload_id[len(prefix) :]
-            return f"{title} ({payload})" if title else payload
-    return title or payload_id
+        if reply_id.startswith(prefix):
+            return reply_id[len(prefix) :]
+    return None
 
 
 # Action-button id/payload prefixes (the "<action>|<appointment_id>"
