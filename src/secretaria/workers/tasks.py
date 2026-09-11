@@ -182,7 +182,12 @@ from secretaria.services.tenant_config import (
     set_waba_token,
 )
 from secretaria.services.usage_events import emit_usage_event
-from secretaria.services.whatsapp import TenantWhatsAppCredentialMissing, WhatsAppClient
+from secretaria.services.whatsapp import (
+    TenantWhatsAppCredentialMissing,
+    WhatsAppClient,
+    interactive_buttons_record,
+    interactive_list_record,
+)
 
 logger = get_logger(__name__)
 
@@ -3833,7 +3838,10 @@ async def _dispatch_bubbles(
         # committed ProcessedEvent, losing the bubble entirely). Log and go on.
         try:
             await _record_outbound(
-                reply.conversation_id, _bubble_history_body(bubble), result
+                reply.conversation_id,
+                _bubble_history_body(bubble),
+                result,
+                interactive=_bubble_interactive(bubble),
             )
         except Exception as exc:
             logger.error(
@@ -3942,8 +3950,12 @@ async def _send_greeting(
                 for index, label in enumerate(reply.greeting_buttons)
             ]
             result = await client.send_buttons(to=reply.patient_ref, body=body, buttons=buttons)
+            # The card as the patient's screen shows it, for the staff console
+            # (`Message.interactive`); `body` alone stays the history text.
+            interactive = interactive_buttons_record(body, buttons)
         else:
             result = await client.send_text_message(to=reply.patient_ref, body=body)
+            interactive = None
     except Exception as exc:
         # MVP: no retry (mirrors _send_bot_reply). The patient's message still
         # reached the human secretary; the auto-greeting is simply lost.
@@ -3955,7 +3967,7 @@ async def _send_greeting(
         return
 
     if not sender_persists_outbound(client):
-        await _record_outbound(reply.conversation_id, body, result)
+        await _record_outbound(reply.conversation_id, body, result, interactive=interactive)
     logger.info("worker_greeting_sent", conversation_id=str(reply.conversation_id))
 
 
@@ -3993,15 +4005,16 @@ async def _send_consent_notice(
             tenant_id=str(tenant.id),
         )
         return
+    # The id is semantic (not positional) so it can never be confused with a
+    # `greeting|N` tap by `extract_greeting_button`; the LABEL is still what
+    # `_is_consent_acceptance` matches on, since `extract_inbound_body` hands
+    # back a plain button's title. One list for the send AND its record.
+    buttons = [("consent|accept", CONSENT_BUTTON_LABEL)]
     try:
         result = await client.send_buttons(
             to=reply.patient_ref,
             body=body,
-            # The id is semantic (not positional) so it can never be confused
-            # with a `greeting|N` tap by `extract_greeting_button`; the LABEL is
-            # still what `_is_consent_acceptance` matches on, since
-            # `extract_inbound_body` hands back a plain button's title.
-            buttons=[("consent|accept", CONSENT_BUTTON_LABEL)],
+            buttons=buttons,
         )
     except Exception as exc:
         logger.error(
@@ -4012,7 +4025,12 @@ async def _send_consent_notice(
         return
 
     if reply.conversation_id is not None and not sender_persists_outbound(client):
-        await _record_outbound(reply.conversation_id, body, result)
+        await _record_outbound(
+            reply.conversation_id,
+            body,
+            result,
+            interactive=interactive_buttons_record(body, buttons),
+        )
     logger.info("worker_consent_notice_sent", conversation_id=str(reply.conversation_id))
 
 
@@ -4093,6 +4111,7 @@ async def _record_outbound(
     conversation_id: UUID | None,
     body: str,
     send_response: dict,
+    interactive: dict | None = None,
 ) -> None:
     """Write the history copy of a message the CHANNEL has already delivered.
 
@@ -4105,6 +4124,10 @@ async def _record_outbound(
     the question this refactor started from: on WhatsApp the row is derived from
     the send response (`wam_id`), so persistence has never been independent of
     the Graph API call. See services/channel_sender.py.
+
+    `interactive` is the structure of a reply-button / list send
+    (`Message.interactive`, what the staff console draws); `body` stays the
+    history text either way.
     """
     async with async_session_factory() as session:
         async with session.begin():
@@ -4115,6 +4138,7 @@ async def _record_outbound(
                     sender=MessageSender.BOT,
                     wam_id=_extract_sent_wam_id(send_response),
                     body=body,
+                    interactive=interactive,
                 )
             )
             conversation = await session.get(Conversation, conversation_id)
@@ -4699,35 +4723,45 @@ async def _handle_start_guided_booking(
     )
 
 
+def _bubble_buttons(
+    bubble: TextBubble | ButtonBubble | SlotsBubble | MenuBubble,
+) -> list[tuple[str, str]] | None:
+    """The (id, label) pairs a button card goes out with; None for any other bubble.
+
+    Shared by the send (`_send_bubble`) and its record (`_bubble_interactive`),
+    so the ids the console links a later tap to are the ids WhatsApp sent.
+    """
+    if isinstance(bubble, MenuBubble):
+        # Generic N-button reply card; the tapped label becomes the next body.
+        return [(f"menu|{i}", label) for i, label in enumerate(bubble.labels)]
+    if isinstance(bubble, ButtonBubble):
+        return [
+            (BUTTON_ID_CONFIRM, bubble.confirm_label),
+            (BUTTON_ID_CANCEL, bubble.cancel_label),
+        ]
+    return None
+
+
+def _slots_rows(bubble: SlotsBubble) -> list[tuple[str, str, str | None]]:
+    # Rows are (id, title) or (id, title, description) — see SlotsBubble.
+    return [(row[0], row[1], row[2] if len(row) > 2 else None) for row in bubble.rows]
+
+
 async def _send_bubble(
     client: WhatsAppClient,
     to: str,
     bubble: TextBubble | ButtonBubble | SlotsBubble | MenuBubble,
 ) -> dict:
     """Dispatch a single bubble to the right WhatsAppClient method."""
-    if isinstance(bubble, MenuBubble):
-        # Generic N-button reply card; the tapped label becomes the next body.
-        return await client.send_buttons(
-            to=to,
-            body=bubble.body,
-            buttons=[(f"menu|{i}", label) for i, label in enumerate(bubble.labels)],
-        )
-    if isinstance(bubble, ButtonBubble):
-        return await client.send_buttons(
-            to=to,
-            body=bubble.body,
-            buttons=[
-                (BUTTON_ID_CONFIRM, bubble.confirm_label),
-                (BUTTON_ID_CANCEL, bubble.cancel_label),
-            ],
-        )
+    buttons = _bubble_buttons(bubble)
+    if buttons is not None:
+        return await client.send_buttons(to=to, body=bubble.body, buttons=buttons)
     if isinstance(bubble, SlotsBubble):
-        # Rows are (id, title) or (id, title, description) — see SlotsBubble.
         return await client.send_list(
             to=to,
             body=bubble.body,
             button_label=bubble.button_label,
-            rows=[(row[0], row[1], row[2] if len(row) > 2 else None) for row in bubble.rows],
+            rows=_slots_rows(bubble),
             section_title=bubble.section_title,
         )
     return await client.send_text_message(to=to, body=bubble.body)
@@ -4749,6 +4783,29 @@ def _bubble_history_body(bubble: TextBubble | ButtonBubble | SlotsBubble | MenuB
         labels = ", ".join(row[1] for row in bubble.rows)
         return f"{bubble.body}\n(opções: {labels})" if labels else bubble.body
     return bubble.body
+
+
+def _bubble_interactive(
+    bubble: TextBubble | ButtonBubble | SlotsBubble | MenuBubble,
+) -> dict | None:
+    """What an outbound bubble put on the patient's screen, for `Message.interactive`.
+
+    The human-facing twin of `_bubble_history_body` above, which keeps
+    flattening the card for the agent and does not change: this one keeps the
+    options, so the staff console can draw the reply buttons / the list the
+    patient got - and link a later tap back to them by id. Built from the same
+    arguments `_send_bubble` sends (`_bubble_buttons` / `_slots_rows`), through
+    the record WhatsAppClient builds its payload from. None for a text bubble
+    and for a card with nothing to offer.
+    """
+    buttons = _bubble_buttons(bubble)
+    if buttons:
+        return interactive_buttons_record(bubble.body, buttons)
+    if isinstance(bubble, SlotsBubble) and bubble.rows:
+        return interactive_list_record(
+            bubble.body, bubble.button_label, _slots_rows(bubble), bubble.section_title
+        )
+    return None
 
 
 # --------------------------------------------------------------------------

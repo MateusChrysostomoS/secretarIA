@@ -228,8 +228,13 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
   `Brain-Message-Frontend` (console de staff e portal do paciente) já achatados em texto puro por
   `workers/tasks.py::_bubble_history_body`; `models/message.py::Message` não tem coluna pra
   estrutura e `schemas/conversation.py::MessageRead` só expõe `body: str`. Pede migração nova
-  (coluna JSON) + extensão do wire, mantendo `body` achatado intocado (é o que a LLM lê). **NÃO
-  EXECUTADO ainda.**
+  (coluna JSON) + extensão do wire, mantendo `body` achatado intocado (é o que a LLM lê).
+  **EXECUTADO 2026-09-11 — BUILT, suíte completa verde (2076 passed), UNCOMMITTED, migração
+  `4c8e2a7f1b93` (`messages.interactive JSON NULL`, depois de `9d3b7e1f5a2c`) testada só em Postgres
+  local descartável, não deployado; ver `docs/CHECKPOINT_interactive_bubbles.md`.** Só o caminho
+  WhatsApp grava a coluna (o paciente Brain-Message recebe texto); `WhatsAppClient` monta o payload a
+  partir do mesmo registro gravado; o hub expõe `interactive` + `interactive_reply_id`. **Deploy:
+  migração ANTES da API e do worker.**
 - `z_prompts/PROMPT_BRAIN_MESSAGE_INBOUND_PAYLOAD_LEAK.md` (raiz de BRAIN, gerado 2026-09-10,
   mesma sessão) — achado relacionado mas com causa própria: a resposta da paciente a uma lista com
   payload (`"prof|<uuid>"`, `flow_router.py` ~linha 1290) aparece no console como `"Dr. Fulano

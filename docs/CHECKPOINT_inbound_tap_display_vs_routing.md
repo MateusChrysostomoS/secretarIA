@@ -65,7 +65,10 @@ Decisões:
   `_handle_patient_messages`):
   - toque `prof|` grava só o título, `interactive_reply_id` = id, e o `_ReplyContext` ainda leva
     `título (uuid)`; os outros 5 prefixos idem (parametrizado);
-  - o endpoint real do console (`GET /tenants/me/conversations/{id}/messages`) não contém o UUID;
+  - o endpoint real do console (`GET /tenants/me/conversations/{id}/messages`) não contém o UUID em
+    nenhum campo EXIBIDO (emenda 2026-09-11: desde `4c8e2a7f1b93` o id viaja como dado de máquina em
+    `interactive_reply_id`, pra ligar o toque ao cartão — o teste passou a checar os campos exibidos;
+    ver `CHECKPOINT_interactive_bubbles.md` §3.4);
   - **não-regressão do agendamento:** dois médicos com título de linha idêntico (nome acima do limite
     de 24); o toque no SEGUNDO passa por `_handle_patient_messages` → `_send_bot_reply` → `route()`
     → `_apply_flow_result` reais e a conversa persiste `flow_selected_professional_id` = segundo
@@ -114,6 +117,7 @@ nada é roteado errado: o router só lê o turno atual, que o código velho comp
 - Deploy (§4) e prova ao vivo no console — não feita nesta sessão: exigiria subir código não
   commitado em produção.
 - Commit (pedido: ficar uncommitted para revisão) + `graphify update .`.
-- `PROMPT_BRAIN_MESSAGE_INTERACTIVE_BUBBLES_RENDERING.md` (irmão, não executado) vai acrescentar
+- `PROMPT_BRAIN_MESSAGE_INTERACTIVE_BUBBLES_RENDERING.md` (irmão) — **executado 2026-09-11**
+  (`CHECKPOINT_interactive_bubbles.md`, revisão `4c8e2a7f1b93` encadeada depois desta): acrescentou
   outra coluna em `messages` (estrutura de SAÍDA). Compatível com esta; se rodar depois, o rótulo da
   opção escolhida pela paciente é o `Message.body` limpo daqui.

@@ -4,7 +4,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, String, Text, func
+from sqlalchemy import JSON, DateTime, Enum as SAEnum, ForeignKey, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from secretaria.core.database import Base
@@ -65,4 +65,19 @@ class Message(Base):
     # (the flow router, the agent's history) recompose it with
     # schemas/webhook.py::inbound_routing_text; nothing displays this column.
     interactive_reply_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # What an interactive OUTBOUND message offered - the reply buttons or the
+    # list rows exactly as the channel drew them:
+    #   {"kind": "buttons" | "list", "body", "options": [{"id", "title",
+    #    "description"}], "button_label", "section_title"}
+    # built by services/whatsapp.py::interactive_buttons_record /
+    # interactive_list_record from the same arguments as the Graph API payload.
+    # `body` above stays the flattened text the agent's history reads (a list
+    # gains "(opções: A, B)"), untouched; this is the half a HUMAN screen needs -
+    # the staff console draws real controls from it, and links a later tap back
+    # to it through `interactive_reply_id`. NULL for text, for inbound rows, for
+    # rows written before the column, and on Brain-Message, whose patient
+    # receives the options as plain text (services/channel_sender.py).
+    # Plain JSON like every JSON column here: the test suite runs on SQLite and
+    # nothing queries inside the blob.
+    interactive: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

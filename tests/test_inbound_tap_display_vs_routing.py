@@ -357,9 +357,20 @@ async def test_the_staff_console_shows_the_title_and_never_the_id(db, monkeypatc
         app.dependency_overrides.pop(get_current_tenant, None)
 
     assert response.status_code == 200, response.text
-    assert str(ana.id) not in response.text
+    # Nothing the console DISPLAYS carries the id: every human-readable field
+    # of every message. Since `messages.interactive` (revision 4c8e2a7f1b93)
+    # the id does ride the wire, as machine data only - the tap's
+    # `interactive_reply_id` (and a list's `interactive.options[].id`) is how
+    # the console ticks the option that was chosen; no screen renders either.
+    for message in response.json():
+        card = message["interactive"] or {"body": "", "options": []}
+        displayed = [message["body"] or "", card["body"]]
+        displayed += [o["title"] for o in card["options"]]
+        displayed += [o["description"] or "" for o in card["options"]]
+        assert all(str(ana.id) not in text for text in displayed), message
     inbound = [m for m in response.json() if m["direction"] == "inbound"]
     assert [m["body"] for m in inbound] == [title]
+    assert [m["interactive_reply_id"] for m in inbound] == [f"prof|{ana.id}"]
 
 
 # --------------------------------------------------------------------------

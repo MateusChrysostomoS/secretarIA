@@ -33,6 +33,60 @@ from secretaria.models.tenant import Tenant
 logger = get_logger(__name__)
 
 
+def interactive_buttons_record(body: str, buttons: list[tuple[str, str]]) -> dict:
+    """What `send_buttons` puts on the patient's screen, as data.
+
+    The reply-button card exactly as WhatsApp draws it - body and titles after
+    the payload's caps, buttons past MAX_BUTTONS_PER_MESSAGE dropped - in the
+    shape `Message.interactive` stores and the staff console renders:
+    `{"kind": "buttons", "body", "options": [{"id", "title"}]}`.
+
+    `send_buttons` builds its Graph API payload FROM this record, so the stored
+    copy and the delivered card cannot drift apart. `body` here is the card's
+    own text: unlike `Message.body` it never carries the "(opções: ...)" line
+    the agent's history keeps.
+    """
+    return {
+        "kind": "buttons",
+        "body": truncate_plain(body, MAX_INTERACTIVE_BODY_CHARS),
+        "options": [
+            {"id": bid[:256], "title": truncate_button_label(title)}
+            for bid, title in buttons[:MAX_BUTTONS_PER_MESSAGE]
+        ],
+    }
+
+
+def interactive_list_record(
+    body: str,
+    button_label: str,
+    rows: list[tuple[str, str, str | None]],
+    section_title: str = "Opções",
+) -> dict:
+    """What `send_list` puts on the patient's screen, as data.
+
+    The list card after the payload's caps (at most MAX_LIST_ROWS rows, one
+    section): `{"kind": "list", "body", "button_label", "section_title",
+    "options": [{"id", "title", "description"}]}`. `send_list` builds its
+    payload from this record, for the reason `interactive_buttons_record` gives.
+    """
+    return {
+        "kind": "list",
+        "body": truncate_plain(body, MAX_INTERACTIVE_BODY_CHARS),
+        "button_label": truncate_plain(button_label, MAX_LIST_OPEN_BUTTON_CHARS),
+        "section_title": truncate_plain(section_title, MAX_LIST_SECTION_TITLE_CHARS),
+        "options": [
+            {
+                "id": rid[:MAX_LIST_ROW_ID_CHARS],
+                "title": truncate_list_row_title(title, MAX_LIST_ROW_TITLE_CHARS),
+                "description": (
+                    truncate_plain(desc, MAX_LIST_ROW_DESCRIPTION_CHARS) if desc else None
+                ),
+            }
+            for rid, title, desc in rows[:MAX_LIST_ROWS]
+        ],
+    }
+
+
 class TenantWhatsAppCredentialMissing(RuntimeError):
     """A tenant-scoped send was attempted without that tenant's credentials.
 
@@ -263,16 +317,9 @@ class WhatsAppClient:
                 entries; extra entries are dropped silently so the LLM never
                 blocks a send by over-listing.
         """
-        capped = [
-            {
-                "type": "reply",
-                "reply": {
-                    "id": bid[:256],
-                    "title": truncate_button_label(title),
-                },
-            }
-            for bid, title in buttons[:MAX_BUTTONS_PER_MESSAGE]
-        ]
+        # Built FROM the record the worker stores for this send, so the copy
+        # the staff console draws is the card the patient's phone drew.
+        card = interactive_buttons_record(body, buttons)
         payload = {
             "messaging_product": "whatsapp",
             "recipient_type": "individual",
@@ -280,8 +327,13 @@ class WhatsAppClient:
             "type": "interactive",
             "interactive": {
                 "type": "button",
-                "body": {"text": truncate_plain(body, MAX_INTERACTIVE_BODY_CHARS)},
-                "action": {"buttons": capped},
+                "body": {"text": card["body"]},
+                "action": {
+                    "buttons": [
+                        {"type": "reply", "reply": {"id": o["id"], "title": o["title"]}}
+                        for o in card["options"]
+                    ]
+                },
             },
         }
         return await self._post(payload, to=to)
@@ -366,14 +418,13 @@ class WhatsAppClient:
             section_title: label above the rows in the picker
                 (MAX_LIST_SECTION_TITLE_CHARS).
         """
+        # Built FROM the stored record, exactly like send_buttons.
+        card = interactive_list_record(body, button_label, rows, section_title)
         capped_rows = []
-        for rid, title, desc in rows[:MAX_LIST_ROWS]:
-            row = {
-                "id": rid[:MAX_LIST_ROW_ID_CHARS],
-                "title": truncate_list_row_title(title, MAX_LIST_ROW_TITLE_CHARS),
-            }
-            if desc:
-                row["description"] = truncate_plain(desc, MAX_LIST_ROW_DESCRIPTION_CHARS)
+        for option in card["options"]:
+            row = {"id": option["id"], "title": option["title"]}
+            if option["description"]:
+                row["description"] = option["description"]
             capped_rows.append(row)
         payload = {
             "messaging_product": "whatsapp",
@@ -382,15 +433,10 @@ class WhatsAppClient:
             "type": "interactive",
             "interactive": {
                 "type": "list",
-                "body": {"text": truncate_plain(body, MAX_INTERACTIVE_BODY_CHARS)},
+                "body": {"text": card["body"]},
                 "action": {
-                    "button": truncate_plain(button_label, MAX_LIST_OPEN_BUTTON_CHARS),
-                    "sections": [
-                        {
-                            "title": truncate_plain(section_title, MAX_LIST_SECTION_TITLE_CHARS),
-                            "rows": capped_rows,
-                        }
-                    ],
+                    "button": card["button_label"],
+                    "sections": [{"title": card["section_title"], "rows": capped_rows}],
                 },
             },
         }
