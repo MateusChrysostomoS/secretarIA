@@ -1,5 +1,6 @@
 """Application configuration loaded from environment variables / .env file."""
 
+import json
 from functools import lru_cache
 
 from pydantic import AliasChoices, Field
@@ -371,12 +372,35 @@ class Settings(BaseSettings):
     REMINDER_DEPOSIT_TEMPLATE_NAME: str = "appointment_reminder_deposit"
 
     # --- CORS (the Next.js doctor portal) ---
-    # Comma-separated list of allowed origins for the hub API.
+    # Allowed origins for the hub API. Accepts a JSON array
+    # (`["https://a.com","https://b.com"]`) or the legacy comma-separated form
+    # (`https://a.com,https://b.com`) — see `cors_origins` below for parsing.
     CORS_ALLOW_ORIGINS: str = "http://localhost:3000"
 
     @property
     def cors_origins(self) -> list[str]:
         """Parse CORS_ALLOW_ORIGINS into a clean list of origins.
+
+        Accepts a JSON array (`["https://a.com","https://b.com"]`) — the value
+        starts with `[` — or falls back to the legacy comma-separated form
+        (`https://a.com,https://b.com`); a malformed JSON array degrades to
+        empty rather than raising, so a typo in EasyPanel fails closed (CORS
+        rejects everyone) instead of crashing every request through this
+        service (`Settings()` is built once per process and must never raise
+        here).
+
+        The JSON branch is NOT cosmetic. brain-api grew it on 2026-08-21 and
+        this service did not, so the two halves of the same mesh disagreed
+        about the format of a value operators copy between them. On 2026-09-12
+        the production value here was a JSON array, which the comma split tore
+        into `["https://…frontend…host` and `https://…host"]` — two entries
+        that match no browser's `Origin` header, so the hub answered 400
+        "Disallowed CORS origin" to EVERY origin. Every `/tenants/me/*` GET
+        from the doctor portal failed preflight, which the portal reports as
+        `TypeError: Failed to fetch` with no HTTP status, and
+        `/configuracao` (fail-closed by design) showed an empty, read-only
+        form: no clinic config, no professional roster, no service catalog.
+        See docs/CHECKPOINT_cors_json_array_hub.md.
 
         Trailing slashes are stripped because Starlette's CORSMiddleware matches
         the request's `Origin` header EXACTLY, and an origin is scheme+host+port
@@ -386,8 +410,17 @@ class Settings(BaseSettings):
         person who set it. Surrounding quotes are stripped for the same reason:
         some deploy panels persist the value with the quotes included.
         """
+        raw_value = self.CORS_ALLOW_ORIGINS.strip()
+        if raw_value.startswith("["):
+            try:
+                parsed = json.loads(raw_value)
+            except json.JSONDecodeError:
+                parsed = []
+            entries = [str(o) for o in parsed] if isinstance(parsed, list) else []
+        else:
+            entries = raw_value.split(",")
         origins: list[str] = []
-        for raw in self.CORS_ALLOW_ORIGINS.split(","):
+        for raw in entries:
             origin = raw.strip().strip("'\"").rstrip("/")
             # "*" must survive verbatim — rstrip("/") leaves it untouched, but an
             # empty entry (trailing comma, blank env var) is dropped.

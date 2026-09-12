@@ -90,6 +90,21 @@ Isto não é hipotético: em 2026-08-16 o worker ficou um commit atrás e todo
 greeting saiu de código velho enquanto a API parecia saudável. O sintoma leu
 como "a personalização quebrou"; a causa era um clique.
 
+## `CORS_ALLOW_ORIGINS` aceita DOIS formatos — e o valor "certo" já derrubou o portal
+
+`config.py::cors_origins` lê tanto uma lista JSON (`["https://a","https://b"]`)
+quanto a forma legada separada por vírgula. O ramo JSON existe porque o brain-api
+ganhou o dele em `46b4eb3` (2026-08-21) e este serviço não: em 2026-09-12 alguém
+copiou o valor JSON do painel do brain-api pro do `secretaria_api`, o split por
+vírgula partiu a string em `["https://…` e `…"]`, e o hub passou a responder
+**400 `Disallowed CORS origin` a toda origem** — `/configuracao` do portal do
+médico ficou vazia e read-only para uma clínica real. O valor parecia perfeito
+no painel. Ver `docs/CHECKPOINT_cors_json_array_hub.md`.
+
+**Regra que sai disso:** ao endurecer o parsing de uma variável de ambiente que
+operador copia entre painéis, propague para TODO serviço que lê a mesma variável
+no mesmo movimento. Meio-espelho vira armadilha silenciosa.
+
 Como provar, sem abrir `Environment`: `GET /build` na API responde a identidade
 dela e a última que o worker anunciou, mais o veredito `deploy_parity`
 (`match` | `divergent` | `unknown` — **`unknown` nunca significa paridade**). O
