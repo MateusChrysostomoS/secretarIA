@@ -797,9 +797,11 @@ async def _route_inbound_turn(
             `Message` stores, because it is what the staff console and the
             patient portal render.
         interactive_reply_id: the raw id of the control tapped
-            (schemas/webhook.py::extract_inbound_reply_id), stored beside
-            `body`; None for anything typed, transcribed or sent on
-            Brain-Message.
+            (schemas/webhook.py::extract_inbound_reply_id on WhatsApp; on
+            Brain-Message the portal's own tap, already checked against the
+            options this conversation offered by
+            `_validated_brain_message_reply_id`), stored beside `body`; None
+            for anything typed or transcribed.
     """
     # Everything below DECIDES on the routing text, not on what is stored: for
     # a tap on a data-carrying row it is the title with the row's payload
@@ -5701,6 +5703,85 @@ async def check_handover_timeouts(ctx: dict) -> None:
 # --------------------------------------------------------------------------
 
 
+# How far back a Brain-Message tap may reach: the option must be on one of
+# this many most recent cards (reply buttons or lists) of the conversation.
+# Generous against a patient scrolling up, tight against a stale card driving
+# a flow that has long moved on; WhatsApp itself lets a patient tap any old
+# card, and the router copes with that today, so the window is a bound on
+# what an unsigned client can inject, not on what the flow accepts.
+BRAIN_MESSAGE_TAP_WINDOW = 10
+
+
+def offered_reply_ids(cards: list[dict | None]) -> set[str]:
+    """Every option id the given `Message.interactive` blobs put on screen.
+
+    Pure, and tolerant of a blob that lost its shape (a card with no options,
+    an option with no id) - a malformed card simply offers nothing.
+    """
+    ids: set[str] = set()
+    for card in cards:
+        if not isinstance(card, dict):
+            continue
+        for option in card.get("options") or []:
+            if isinstance(option, dict) and isinstance(option.get("id"), str):
+                ids.add(option["id"])
+    return ids
+
+
+async def _validated_brain_message_reply_id(
+    session: AsyncSession, *, tenant: Tenant, patient: Patient, reply_id: str
+) -> str | None:
+    """`reply_id` if a recent card of this patient's conversation offered it, else None.
+
+    A WhatsApp tap id arrives inside a webhook Meta signed; a Brain-Message
+    tap id arrives from the patient's own browser, relayed by the switchboard.
+    The switchboard vouches for WHO is speaking (their session) but not for
+    the id itself, so before `_route_inbound_turn` may treat it as a tap -
+    and re-attach its payload to the routing text - it has to be one of the
+    ids THIS conversation actually put on screen, recently. Anything else is
+    dropped: the turn is then routed on `text` alone, exactly as a typed
+    message, and the event is logged. The set to check against is the column
+    `Message.interactive` exists for; a patient's forged "prof|<other uuid>"
+    never reaches `inbound_routing_text`.
+
+    Scope is the patient's own conversation only: the id is looked up under
+    (tenant, patient), so a patient cannot replay an id another conversation
+    offered, even one of the same clinic.
+    """
+    conversation_id = await session.scalar(
+        select(Conversation.id).where(
+            Conversation.tenant_id == tenant.id,
+            Conversation.patient_id == patient.id,
+        )
+    )
+    offered: set[str] = set()
+    if conversation_id is not None:
+        cards = (
+            await session.scalars(
+                select(Message.interactive)
+                .where(
+                    Message.conversation_id == conversation_id,
+                    Message.direction == MessageDirection.OUTBOUND,
+                    Message.interactive.is_not(None),
+                )
+                .order_by(Message.created_at.desc(), Message.id.desc())
+                .limit(BRAIN_MESSAGE_TAP_WINDOW)
+            )
+        ).all()
+        offered = offered_reply_ids(list(cards))
+    if reply_id in offered:
+        return reply_id
+    logger.warning(
+        "brain_message_reply_id_rejected",
+        tenant_id=str(tenant.id),
+        conversation_id=str(conversation_id) if conversation_id is not None else None,
+        # Untrusted input: bounded by the schema, cut again for the log line.
+        reply_id=reply_id[:80],
+        offered_count=len(offered),
+    )
+    return None
+
+
 async def _persist_brain_message_inbound(
     *,
     tenant_id: UUID,
@@ -5708,6 +5789,7 @@ async def _persist_brain_message_inbound(
     text: str | None,
     patient_name: str | None = None,
     dedupe_id: str | None = None,
+    interactive_reply_id: str | None = None,
 ) -> _ReplyContext | None:
     """Resolve a Brain-Message turn and hand it to the channel-neutral core.
 
@@ -5802,6 +5884,14 @@ async def _persist_brain_message_inbound(
                 elif patient_name and not patient.name:
                     patient.name = patient_name
 
+                # A tap id from this channel is the patient's own browser's
+                # word for it, not Meta's: only honoured when it names an
+                # option a recent card of THIS conversation offered.
+                if interactive_reply_id is not None:
+                    interactive_reply_id = await _validated_brain_message_reply_id(
+                        session, tenant=tenant, patient=patient, reply_id=interactive_reply_id
+                    )
+
                 return await _route_inbound_turn(
                     session,
                     tenant=tenant,
@@ -5812,6 +5902,7 @@ async def _persist_brain_message_inbound(
                     body=text,
                     # No Meta id exists for a message Meta never carried.
                     inbound_wam_id=None,
+                    interactive_reply_id=interactive_reply_id,
                 )
         except IntegrityError:
             # A concurrent call already claimed this dedupe id, or raced us to
@@ -5827,6 +5918,7 @@ async def process_brain_message_inbound(
     text: str | None = None,
     patient_name: str | None = None,
     dedupe_id: str | None = None,
+    interactive_reply_id: str | None = None,
 ) -> None:
     """arq job: run one Brain-Message turn end to end.
 
@@ -5843,6 +5935,7 @@ async def process_brain_message_inbound(
         text=text,
         patient_name=patient_name,
         dedupe_id=dedupe_id,
+        interactive_reply_id=interactive_reply_id,
     )
     if reply is not None:
         await _send_bot_reply(reply, redis=ctx.get("redis"))

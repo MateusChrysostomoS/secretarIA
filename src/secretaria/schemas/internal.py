@@ -17,8 +17,10 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from secretaria.core.whatsapp_limits import MAX_INTERACTIVE_REPLY_ID_CHARS
 from secretaria.models.appointment import AppointmentStatus
 from secretaria.models.message import MessageDirection, MessageSender
+from secretaria.schemas.conversation import InteractiveRead
 
 
 class InternalAppointment(BaseModel):
@@ -88,6 +90,17 @@ class BrainMessageInbound(BaseModel):
     external_id: str = Field(min_length=1, max_length=64)
     text: str | None = None
     patient_name: str | None = Field(default=None, max_length=255)
+    # The id of the button / list row the patient tapped in the portal, when
+    # `text` is that control's title rather than something typed. UNTRUSTED:
+    # unlike a WhatsApp tap it was not signed by Meta - it comes from the
+    # patient's own browser through the switchboard - so the worker only
+    # honours it after finding it among the options its own recent cards
+    # offered on this conversation (workers/tasks.py::
+    # _validated_brain_message_reply_id); anything else is routed as plain
+    # text. Bounded by the longest id a card can carry.
+    interactive_reply_id: str | None = Field(
+        default=None, min_length=1, max_length=MAX_INTERACTIVE_REPLY_ID_CHARS
+    )
     # Optional idempotency key. Off by default: unlike Meta, the switchboard
     # calls once per patient action over an authenticated request. Supplying it
     # turns on the same `processed_events` claim the WhatsApp path uses.
@@ -113,6 +126,13 @@ class BrainMessageMessage(BaseModel):
     sender: MessageSender
     body: str | None
     created_at: datetime
+    # Same two fields, same shape, as the staff console's `MessageRead`
+    # (schemas/conversation.py): the card an outbound row went out as, and on
+    # an inbound row the id of the option the patient tapped. Both optional
+    # and None by default, so a caller built against the text-only wire keeps
+    # working (`frozen-contract-migration`: additive, never required).
+    interactive: InteractiveRead | None = None
+    interactive_reply_id: str | None = None
 
 
 class BrainMessageMessageList(BaseModel):

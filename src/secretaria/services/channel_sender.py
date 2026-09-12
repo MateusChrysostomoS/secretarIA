@@ -39,6 +39,7 @@ from uuid import UUID
 
 from secretaria.core.logging import get_logger
 from secretaria.models import Conversation, Message, MessageDirection, MessageSender
+from secretaria.services.whatsapp import interactive_buttons_record, interactive_list_record
 
 logger = get_logger(__name__)
 
@@ -148,8 +149,13 @@ class BrainMessageSender:
         # they already monkeypatch onto `workers.tasks.async_session_factory`.
         self._session_factory = session_factory
 
-    async def _record(self, body: str) -> dict:
+    async def _record(self, body: str, interactive: dict | None = None) -> dict:
         """Persist one outbound message. Returns the empty send response.
+
+        `interactive` is the card a reply-button / list send put on the
+        patient's screen (`Message.interactive`), the same record
+        `workers/tasks.py::_record_outbound` stores for WhatsApp; `body` stays
+        the flattened history text either way.
 
         `{}` on purpose: `_extract_sent_wam_id` reads `["messages"][0]["id"]`
         out of it and already returns None for a shape it cannot walk, so a
@@ -167,6 +173,7 @@ class BrainMessageSender:
                         # No Meta id exists for a message Meta never carried.
                         wam_id=None,
                         body=body,
+                        interactive=interactive,
                     )
                 )
                 conversation = await session.get(Conversation, self._conversation_id)
@@ -182,7 +189,14 @@ class BrainMessageSender:
         return await self._record(body)
 
     async def send_buttons(self, to: str, body: str, buttons: list[tuple[str, str]]) -> dict:
-        return await self._record(interactive_history_body(body, [label for _, label in buttons]))
+        # The card is recorded through the SAME builder WhatsApp's payload is
+        # built from, so the portal's buttons suffer the same caps (3 buttons,
+        # truncated titles) as the real thing and the ids it can tap back are
+        # exactly the ids a WhatsApp patient could.
+        return await self._record(
+            interactive_history_body(body, [label for _, label in buttons]),
+            interactive=interactive_buttons_record(body, buttons),
+        )
 
     async def send_list(
         self,
@@ -192,7 +206,10 @@ class BrainMessageSender:
         rows: list[tuple[str, str, str | None]],
         section_title: str = "Opções",
     ) -> dict:
-        return await self._record(interactive_history_body(body, [row[1] for row in rows]))
+        return await self._record(
+            interactive_history_body(body, [row[1] for row in rows]),
+            interactive=interactive_list_record(body, button_label, rows, section_title),
+        )
 
     async def send_template(
         self,

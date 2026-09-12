@@ -30,6 +30,7 @@ from secretaria.config import get_settings
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
 from secretaria.models import Appointment, Conversation, Message, Patient
+from secretaria.schemas.conversation import interactive_read_or_none
 from secretaria.schemas.internal import (
     BrainMessageAck,
     BrainMessageInbound,
@@ -257,6 +258,7 @@ async def brain_message_inbound(
         text=payload.text,
         patient_name=payload.patient_name,
         dedupe_id=payload.dedupe_id,
+        interactive_reply_id=payload.interactive_reply_id,
     )
     logger.info(
         "brain_message_inbound_queued",
@@ -350,6 +352,8 @@ async def list_brain_message_messages(
                 sender=row.sender,
                 body=row.body,
                 created_at=row.created_at,
+                interactive=interactive_read_or_none(row.interactive, message_id=row.id),
+                interactive_reply_id=row.interactive_reply_id,
             )
             for row in rows
         ]

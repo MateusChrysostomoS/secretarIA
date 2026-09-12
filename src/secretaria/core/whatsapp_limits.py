@@ -58,6 +58,13 @@ MAX_LIST_ROW_ID_CHARS = 200
 MAX_LIST_SECTION_TITLE_CHARS = 24
 MAX_LIST_OPEN_BUTTON_CHARS = 20
 
+# A reply button's id caps at 256 chars (a list row's at MAX_LIST_ROW_ID_CHARS).
+MAX_BUTTON_ID_CHARS = 256
+# The longest id any recorded card can offer, so the bound on a tap id that
+# arrives from a channel Meta did not sign (Brain-Message: the patient's own
+# browser sends it). Longer than this cannot be an option we ever offered.
+MAX_INTERACTIVE_REPLY_ID_CHARS = max(MAX_BUTTON_ID_CHARS, MAX_LIST_ROW_ID_CHARS)
+
 # An interactive message body caps at 1024 chars (a plain text message allows
 # 4096), so a greeting that carries buttons must stay within the smaller limit.
 MAX_INTERACTIVE_BODY_CHARS = 1024

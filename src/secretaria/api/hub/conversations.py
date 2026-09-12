@@ -34,7 +34,6 @@ from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,6 +50,7 @@ from secretaria.schemas.conversation import (
     InteractiveRead,
     MessageRead,
     MessageSend,
+    interactive_read_or_none,
 )
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.handover import HandoverManager
@@ -97,20 +97,8 @@ async def _last_message_at(session: AsyncSession, conversation_id: UUID) -> date
 
 
 def _interactive_read(message: Message) -> InteractiveRead | None:
-    """The row's `interactive` blob in its wire shape, or None.
-
-    Tolerant on purpose: a blob that no longer validates costs THAT message its
-    controls (the console still draws its text `body`), never the whole thread.
-    One bad row failing the entire response is how the console once lost every
-    thread of a tenant (`ConversationRead.patient_wa_id` on a NULL wa_id).
-    """
-    if not message.interactive:
-        return None
-    try:
-        return InteractiveRead.model_validate(message.interactive)
-    except ValidationError:
-        logger.warning("hub_message_interactive_invalid", message_id=str(message.id))
-        return None
+    """The row's `interactive` blob in its wire shape, or None (tolerant)."""
+    return interactive_read_or_none(message.interactive, message_id=message.id)
 
 
 def _message_read_model(message: Message) -> MessageRead:

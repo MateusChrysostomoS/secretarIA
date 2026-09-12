@@ -3,9 +3,12 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
+from secretaria.core.logging import get_logger
 from secretaria.models.conversation import HandoverState
+
+logger = get_logger(__name__)
 
 
 class ConversationRead(BaseModel):
@@ -49,6 +52,25 @@ class InteractiveRead(BaseModel):
     section_title: str | None = None
 
 
+def interactive_read_or_none(blob: object, *, message_id: object) -> InteractiveRead | None:
+    """A row's `Message.interactive` blob in its wire shape, or None.
+
+    Tolerant on purpose, for every reader of the column (the staff hub and the
+    Brain-Message portal route): a blob that no longer validates costs THAT
+    message its controls (the caller still serves its text `body`), never the
+    whole thread. One bad row failing the entire response is how the console
+    once lost every thread of a tenant (`ConversationRead.patient_wa_id` on a
+    NULL wa_id).
+    """
+    if not blob:
+        return None
+    try:
+        return InteractiveRead.model_validate(blob)
+    except ValidationError:
+        logger.warning("message_interactive_invalid", message_id=str(message_id))
+        return None
+
+
 class MessageRead(BaseModel):
     """One message in a conversation thread — GET .../conversations/{id}/messages."""
 
@@ -60,8 +82,10 @@ class MessageRead(BaseModel):
     body: str | None
     created_at: datetime
     # Present on an outbound message that went out as reply buttons or a list;
-    # None for text, for inbound rows, for rows older than the column, and on
-    # Brain-Message (whose patient receives the options as text).
+    # None for text, for inbound rows and for rows older than the column. Both
+    # channels record it: WhatsApp (workers/tasks.py::_record_outbound) and
+    # Brain-Message (services/channel_sender.py::BrainMessageSender), whose
+    # portal draws the same controls.
     interactive: InteractiveRead | None = None
     # On an inbound TAP: the id of the option tapped - one of an earlier
     # message's `interactive.options[].id`. Never shown; it is how a console

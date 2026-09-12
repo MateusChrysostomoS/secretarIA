@@ -248,6 +248,13 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
   agenda um turno depois, lendo o ISO do histórico — por isso o id virou coluna
   (`messages.interactive_reply_id`) em vez de só viajar em memória. **Deploy: migração ANTES do
   worker** (§4 do checkpoint).
+- `z_prompts/PROMPT_BRAIN_MESSAGE_PORTAL_INTERACTIVE_TAP.md` (raiz de BRAIN, gerado 2026-09-11) —
+  continuação dos dois prompts acima: o Portal do paciente (`/conversa`, canal Brain-Message) ainda
+  não manda nem recebe estrutura interativa nenhuma (`BrainMessageSender` só grava texto,
+  `BrainMessageInbound`/`BrainMessageMessage` em `schemas/internal.py` não têm os campos novos).
+  Cross-repo com brain-api (autorizado explicitamente pelo dono) e Brain-Message-Frontend. Inclui
+  uma validação nova (id do toque vindo do navegador, não de webhook assinado). **NÃO EXECUTADO
+  ainda.**
 
 ## graphify
 

@@ -13,7 +13,7 @@ pin the two halves apart:
   agent's history has always read;
 - `WhatsAppClient` builds its payload FROM the same record, so the stored copy
   and the delivered card cannot drift;
-- Brain-Message rows stay text only - that patient never sees a control;
+- Brain-Message rows record the card too (the portal draws real controls);
 - the hub endpoint serves the card and the tap id, and a malformed blob costs
   one message its controls, never the whole thread.
 """
@@ -289,9 +289,10 @@ async def test_a_greeting_records_its_buttons_and_a_plain_one_records_none(
     assert rows["Bem-vinda de volta!"].interactive is None
 
 
-async def test_brain_message_rows_stay_text_only(db, seeded) -> None:
-    """That patient reads the options as text and types; recording a card
-    would make the console draw controls the patient never had."""
+async def test_brain_message_rows_record_the_card_too(db, seeded) -> None:
+    """The portal draws real controls now (PROMPT_BRAIN_MESSAGE_PORTAL_INTERACTIVE_TAP),
+    so this sender records the same card WhatsApp does; the history body is
+    unchanged. Detail in tests/test_brain_message_interactive_tap.py."""
     _, conversation = seeded
     sender = BrainMessageSender(conversation_id=conversation.id, session_factory=db)
 
@@ -301,7 +302,9 @@ async def test_brain_message_rows_stay_text_only(db, seeded) -> None:
 
     [row] = await _rows(db, conversation.id)
     assert row.body == "Aceita os termos?\n(opções: ✅ Concordo)"
-    assert row.interactive is None
+    assert row.interactive == interactive_buttons_record(
+        "Aceita os termos?", [("consent|accept", "✅ Concordo")]
+    )
 
 
 # --------------------------------------------------------------------------

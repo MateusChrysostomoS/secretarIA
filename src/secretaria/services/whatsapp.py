@@ -16,6 +16,7 @@ import httpx
 from secretaria.config import Settings, get_settings
 from secretaria.core.logging import get_logger, wa_suffix
 from secretaria.core.whatsapp_limits import (
+    MAX_BUTTON_ID_CHARS,
     MAX_BUTTONS_PER_MESSAGE,
     MAX_INTERACTIVE_BODY_CHARS,
     MAX_LIST_OPEN_BUTTON_CHARS,
@@ -50,7 +51,7 @@ def interactive_buttons_record(body: str, buttons: list[tuple[str, str]]) -> dic
         "kind": "buttons",
         "body": truncate_plain(body, MAX_INTERACTIVE_BODY_CHARS),
         "options": [
-            {"id": bid[:256], "title": truncate_button_label(title)}
+            {"id": bid[:MAX_BUTTON_ID_CHARS], "title": truncate_button_label(title)}
             for bid, title in buttons[:MAX_BUTTONS_PER_MESSAGE]
         ],
     }
