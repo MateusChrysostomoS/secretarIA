@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -145,3 +146,41 @@ class AppointmentRead(BaseModel):
     # persistent appointment attribute like `deposit_status` above; it exists
     # purely so the hub can show what just happened to the money.
     deposit_outcome: str | None = None
+
+
+# The four answers of services/tenant_config.py::calendar_credential_health.
+CalendarCredentialStatusWire = Literal["disconnected", "ok", "reconnect_required", "unavailable"]
+
+
+class ProfessionalCalendarHealthRead(BaseModel):
+    """One professional's OWN Google credential, checked live.
+
+    Never "disconnected": only a professional that HAS an own token is checked.
+    """
+
+    professional_id: str
+    status: Literal["ok", "reconnect_required", "unavailable"]
+
+
+class CalendarHealthRead(BaseModel):
+    """GET /tenants/me/calendar/health — do the stored Google credentials still work?
+
+    `calendar_connected` (GET /tenants/me/config), `has_calendar` and
+    `calendar_source` (GET /tenants/me/professionals) are PRESENCE flags: a token
+    Google has expired or revoked is still stored, so they stay true while every
+    booking fails. This is the live answer:
+
+      - `ok` — Google accepted the credential and the calendar answered.
+      - `reconnect_required` — Google rejected the refresh token itself
+        (`invalid_grant`); only reconnecting the account fixes it.
+      - `unavailable` — could not confirm right now (Google outage, network,
+        timeout). NOT evidence of a broken connection.
+      - `disconnected` — no token stored (clinic only).
+
+    `professionals` lists only the ones checked (see calendar_credential_health
+    for who that is). Categories only: no token, calendar id or Google message
+    is ever serialised here.
+    """
+
+    clinic: CalendarCredentialStatusWire
+    professionals: list[ProfessionalCalendarHealthRead]

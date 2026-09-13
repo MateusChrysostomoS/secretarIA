@@ -38,6 +38,7 @@ from secretaria.services.calendar import (  # noqa: E402
     CalendarService,
     CalendarUnavailableError,
     GoogleScopeInsufficientError,
+    GoogleTokenRevokedError,
     _raise_if_scope_insufficient,
     _raise_if_unavailable,
 )
@@ -114,6 +115,48 @@ def test_invalid_token_maps_to_refresh_token_rejected(
     with pytest.raises(CalendarUnavailableError) as exc_info:
         service._build_service()
     assert "refresh token rejected" in str(exc_info.value).lower()
+
+
+# The two shapes google-auth raised in production on 2026-09-12 — a clinic token
+# ("expired or revoked") and a professional's own ("Bad Request"). Both are
+# `invalid_grant`, and both kept every booking failing behind a hub that said
+# "Conectado": see GoogleTokenRevokedError.
+_PRODUCTION_INVALID_GRANTS = [
+    RefreshError(
+        "invalid_grant: Token has been expired or revoked.",
+        {"error": "invalid_grant", "error_description": "Token has been expired or revoked."},
+    ),
+    RefreshError(
+        "invalid_grant: Bad Request",
+        {"error": "invalid_grant", "error_description": "Bad Request"},
+    ),
+]
+
+
+@pytest.mark.parametrize("refresh_exc", _PRODUCTION_INVALID_GRANTS)
+def test_invalid_grant_maps_to_token_revoked(
+    monkeypatch: pytest.MonkeyPatch, refresh_exc: RefreshError
+) -> None:
+    service = _service_whose_refresh_raises(monkeypatch, refresh_exc)
+    with pytest.raises(GoogleTokenRevokedError) as exc_info:
+        service._build_service()
+    # Still the outage type: the booking path's handover + clinic alert catch
+    # CalendarUnavailableError and must keep firing exactly as before.
+    assert isinstance(exc_info.value, CalendarUnavailableError)
+    assert "refresh token rejected" in str(exc_info.value).lower()
+
+
+def test_non_invalid_grant_refresh_failure_stays_a_plain_outage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `invalid_client` is the PLATFORM's OAuth client being wrong: reconnecting a
+    # clinic's account would not fix it, so nothing may ask a clinic to.
+    service = _service_whose_refresh_raises(
+        monkeypatch, RefreshError("invalid_client: Unauthorized", {"error": "invalid_client"})
+    )
+    with pytest.raises(CalendarUnavailableError) as exc_info:
+        service._build_service()
+    assert not isinstance(exc_info.value, GoogleTokenRevokedError)
 
 
 @pytest.mark.parametrize(

@@ -1,4 +1,4 @@
-"""Doctor hub — Google Calendar OAuth (start / callback / disconnect).
+"""Doctor hub — Google Calendar OAuth (start / callback / disconnect / health).
 
 The refresh token only ever enters the system through the server-to-server code
 exchange in `callback`, encrypted before it touches the database. The doctor
@@ -8,6 +8,10 @@ Per-professional variant (contract v1 §10 item C): the SAME callback serves
 both flows. The signed `state` carries `tenant_id` ALWAYS and `professional_id`
 OPTIONALLY — when present, the callback routes the refresh token to
 `set_professional_google_refresh_token` instead of the tenant-level column.
+
+`health` is the live half of "connected": every stored-token flag stays true
+for a token Google has since expired or revoked, and only a real call can tell
+the two apart (services/tenant_config.py::calendar_credential_health).
 """
 
 from uuid import UUID
@@ -24,6 +28,7 @@ from secretaria.core.logging import get_logger
 from secretaria.core.signing import sign, verify
 from secretaria.models import Tenant
 from secretaria.models.professional import Professional
+from secretaria.schemas.calendar import CalendarHealthRead, ProfessionalCalendarHealthRead
 from secretaria.services import google_oauth, tenant_config as cfg
 
 logger = get_logger(__name__)
@@ -222,3 +227,32 @@ async def calendar_disconnect(
     await session.commit()
     logger.info("hub_oauth_calendar_disconnected", tenant_id=str(tenant.id))
     return {"status": "disconnected", "is_active": False}
+
+
+@router.get("/tenants/me/calendar/health", response_model=CalendarHealthRead)
+async def calendar_health(
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> CalendarHealthRead:
+    """Live check that the stored Google credentials still work.
+
+    `calendar_connected` on GET /tenants/me/config only says a token is STORED,
+    and a token Google has expired or revoked is still stored. This one asks
+    Google, so the configuration screen can offer "Reconectar" instead of
+    showing "Conectado" over a connection no booking can use — see
+    services/tenant_config.py::calendar_credential_health for what is checked.
+
+    Read-only and never gated by entitlements, like every connection endpoint
+    here. Slower than a config read (one bounded Google call per credential),
+    which is why it is its own request rather than a field on the config GET.
+    """
+    health = await cfg.calendar_credential_health(session, tenant)
+    return CalendarHealthRead(
+        clinic=health.clinic,
+        professionals=[
+            ProfessionalCalendarHealthRead(
+                professional_id=str(item.professional_id), status=item.status
+            )
+            for item in health.professionals
+        ],
+    )

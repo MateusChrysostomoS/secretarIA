@@ -96,6 +96,42 @@ def _raise_if_unavailable(exc: HttpError) -> None:
         raise CalendarUnavailableError(f"Google Calendar returned HTTP {status}") from exc
 
 
+class GoogleTokenRevokedError(CalendarUnavailableError):
+    """Google refused the stored refresh token itself (`invalid_grant`).
+
+    A SUBCLASS of `CalendarUnavailableError` on purpose: every existing
+    `except CalendarUnavailableError` — the flow router's `calendar_unavailable`
+    answer, the worker's handover + clinic alert — keeps working unchanged.
+
+    What the subclass adds is the one distinction those callers never needed
+    and the hub does: this is not an outage that passes. Google has expired or
+    revoked the grant (an OAuth consent screen still in "Testing" expires
+    refresh tokens after ~7 days; the account owner can also revoke access), so
+    nothing reaches the calendar again until someone reconnects the Google
+    account. Waiting does not fix it and retrying does not fix it — a Google
+    5xx is fixed by both. The hub maps it to `google_reconnect_required`
+    (api/hub/professionals.py) and reports it live on the configuration screen
+    (services/tenant_config.py::calendar_credential_health).
+    """
+
+
+def _is_invalid_grant(exc: RefreshError) -> bool:
+    """Whether a refresh failure is Google's `invalid_grant`.
+
+    google-auth raises `RefreshError(message, response_body)` — observed in
+    production as `('invalid_grant: Token has been expired or revoked.',
+    {'error': 'invalid_grant', ...})`. The structured body is checked first;
+    the message is the fallback for shapes that carry only a string. Every
+    other refresh failure (e.g. `invalid_client`, the PLATFORM's OAuth client
+    being misconfigured) is not something reconnecting a clinic's account
+    would fix, so it stays a plain `CalendarUnavailableError`.
+    """
+    for arg in exc.args:
+        if isinstance(arg, dict) and arg.get("error") == "invalid_grant":
+            return True
+    return "invalid_grant" in str(exc)
+
+
 class GoogleScopeInsufficientError(Exception):
     """A 403 caused by a token that predates a scope this call needs.
 
@@ -331,6 +367,9 @@ class CalendarService:
             creds.refresh(GoogleRequest())
         except RefreshError as exc:
             logger.error("calendar_token_refresh_failed", error=str(exc))
+            if _is_invalid_grant(exc):
+                # Expired or revoked: only a new OAuth consent brings it back.
+                raise GoogleTokenRevokedError("Google Calendar refresh token rejected") from exc
             raise CalendarUnavailableError("Google Calendar refresh token rejected") from exc
         except _NETWORK_ERRORS as exc:
             logger.error("calendar_token_refresh_network_error", error=str(exc))

@@ -39,7 +39,8 @@ POST  /tenants/me/professionals/{id}/calendar
                                           when the clinic has no Calendar connected,
                                           409 `google_reconnect_required` when the
                                           stored clinic token predates the
-                                          `calendar.app.created` scope.
+                                          `calendar.app.created` scope, or Google
+                                          has expired or revoked it.
 
 Entitlement + limit enforcement (brain-api is the source of truth, fetched
 fresh — `redis=None` — since this path is not hot):
@@ -80,6 +81,7 @@ from secretaria.services import hub_configuration as hubcfg
 from secretaria.services.calendar import (
     CalendarUnavailableError,
     GoogleScopeInsufficientError,
+    GoogleTokenRevokedError,
 )
 from secretaria.services.entitlements_client import get_entitlements, is_entitled
 from secretaria.services.tenant_config import (
@@ -92,6 +94,28 @@ router = APIRouter(prefix="/tenants/me/professionals", tags=["hub-professionals"
 
 ADDON_KEY = "multi_professional"
 LIMIT_KEY = "professionals"
+
+# The two reasons a clinic's Google account can no longer create agendas. Both
+# answer with the SAME code, `google_reconnect_required`, because the fix is the
+# same — reconnect the clinic's account — and the hub already branches on that
+# code; only the pt-BR sentence says which of the two happened.
+_RECONNECT_SCOPE_MESSAGE = (
+    "A conexão da clínica com o Google Calendar não tem mais a "
+    "permissão necessária para criar agendas. Reconecte a conta "
+    "Google da clínica para continuar."
+)
+_RECONNECT_REVOKED_MESSAGE = (
+    "O Google não aceita mais a conexão da clínica: o acesso expirou ou foi "
+    "revogado. Reconecte a conta Google da clínica para continuar."
+)
+
+
+def _reconnect_required(message: str) -> HTTPException:
+    """409 `google_reconnect_required`: the clinic must reconnect its Google account."""
+    return HTTPException(
+        status.HTTP_409_CONFLICT,
+        detail={"code": "google_reconnect_required", "message": message},
+    )
 
 
 def _read_model(professional: Professional) -> ProfessionalRead:
@@ -348,10 +372,10 @@ async def create_professional_calendars(
 
       - no clinic Google account connected -> 422 `clinic_calendar_not_connected`,
         and nothing was created (that check runs before the first Google call).
-      - the stored clinic token predates the `calendar.app.created` scope ->
-        409 `google_reconnect_required`, but only AFTER committing whatever
-        already succeeded: those calendars exist inside Google, and dropping
-        their ids here would orphan them.
+      - the stored clinic token predates the `calendar.app.created` scope, or
+        Google has expired/revoked it -> 409 `google_reconnect_required`, but
+        only AFTER committing whatever already succeeded: those calendars
+        exist inside Google, and dropping their ids here would orphan them.
 
     Anything else that goes wrong for ONE professional (a Google outage
     mid-run) is reported on that row and the run continues. Hence 200 with a
@@ -394,17 +418,15 @@ async def create_professional_calendars(
             ) from None
         except GoogleScopeInsufficientError:
             await session.commit()
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                detail={
-                    "code": "google_reconnect_required",
-                    "message": (
-                        "A conexão da clínica com o Google Calendar não tem mais a "
-                        "permissão necessária para criar agendas. Reconecte a conta "
-                        "Google da clínica para continuar."
-                    ),
-                },
-            ) from None
+            raise _reconnect_required(_RECONNECT_SCOPE_MESSAGE) from None
+        except GoogleTokenRevokedError:
+            # A property of the CLINIC's token, like the scope refusal: every
+            # remaining row would fail the same way. Before this branch a dead
+            # token fell into the per-row handler below and failed each doctor
+            # as "calendar_unavailable" — a transient-sounding code, and a save
+            # toast telling a clinic whose retry could never work to try again.
+            await session.commit()
+            raise _reconnect_required(_RECONNECT_REVOKED_MESSAGE) from None
         except Exception as exc:
             # Per-professional failure: keep going and report the row. `error`
             # is a CODE, never the exception text — a Google error body can
@@ -489,17 +511,9 @@ async def create_professional_calendar(
             },
         ) from None
     except GoogleScopeInsufficientError:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail={
-                "code": "google_reconnect_required",
-                "message": (
-                    "A conexão da clínica com o Google Calendar não tem mais a "
-                    "permissão necessária para criar agendas. Reconecte a conta "
-                    "Google da clínica para continuar."
-                ),
-            },
-        ) from None
+        raise _reconnect_required(_RECONNECT_SCOPE_MESSAGE) from None
+    except GoogleTokenRevokedError:
+        raise _reconnect_required(_RECONNECT_REVOKED_MESSAGE) from None
 
     await session.commit()
     logger.info(

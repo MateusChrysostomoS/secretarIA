@@ -18,8 +18,11 @@ itself is UNCHANGED (kept for its existing caller, api/hub/config.py); the
 professional-aware variant is additive.
 """
 
+import asyncio
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
+from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import select
@@ -32,7 +35,11 @@ from secretaria.models import Tenant
 from secretaria.models.professional import Professional
 from secretaria.models.professional_credentials import ProfessionalCredentials
 from secretaria.models.tenant_credentials import TenantCredentials
-from secretaria.services.calendar import CalendarService
+from secretaria.services.calendar import (
+    CalendarService,
+    CalendarUnavailableError,
+    GoogleTokenRevokedError,
+)
 from secretaria.services.service_catalog import load_service_catalog, resolve_entries
 
 logger = get_logger(__name__)
@@ -900,6 +907,30 @@ class SecondaryCalendarResult:
     created: bool
 
 
+def _clinic_runtime_config(tenant: Tenant, clinic_token: str | None) -> TenantRuntimeConfig:
+    """The CLINIC's own Google Calendar config, read straight off the tenant row.
+
+    Deliberately NOT `load_tenant_config`, which for a tenant with exactly one
+    active professional resolves the calendar id and credential THROUGH that
+    professional (see `_professional_credential`). Whatever must act on — or
+    report on — the clinic's own Google account builds its config here, so it
+    can never pick up a professional-substituted token by accident: creating a
+    shared_account secondary calendar (`ensure_professional_secondary_calendar`)
+    and the live credential check (`calendar_credential_health`).
+    """
+    return TenantRuntimeConfig(
+        tenant_id=tenant.id,
+        clinic_name=tenant.clinic_name,
+        language=tenant.language,
+        timezone=tenant.timezone,
+        appointment_duration_min=tenant.appointment_duration_min,
+        appointment_types=[],
+        business_hours={},
+        google_calendar_id=tenant.google_calendar_id,
+        google_refresh_token=clinic_token,
+    )
+
+
 async def ensure_professional_secondary_calendar(
     session: AsyncSession, tenant: Tenant, professional: Professional
 ) -> SecondaryCalendarResult:
@@ -942,17 +973,7 @@ async def ensure_professional_secondary_calendar(
     if not clinic_token:
         raise ClinicCalendarNotConnectedError("Clinic Google Calendar is not connected")
 
-    clinic_config = TenantRuntimeConfig(
-        tenant_id=tenant.id,
-        clinic_name=tenant.clinic_name,
-        language=tenant.language,
-        timezone=tenant.timezone,
-        appointment_duration_min=tenant.appointment_duration_min,
-        appointment_types=[],
-        business_hours={},
-        google_calendar_id=tenant.google_calendar_id,
-        google_refresh_token=clinic_token,
-    )
+    clinic_config = _clinic_runtime_config(tenant, clinic_token)
     summary = f"{professional.name} — {tenant.clinic_name}"
     created_calendar = await CalendarService.from_tenant_config(
         clinic_config
@@ -968,3 +989,145 @@ async def ensure_professional_secondary_calendar(
     return SecondaryCalendarResult(
         professional_id=professional.id, google_calendar_id=calendar_id, created=True
     )
+
+
+# --------------------------------------------------------------------------
+# Live Calendar credential health (hub configuration screen)
+# --------------------------------------------------------------------------
+
+CalendarCredentialStatus = Literal["disconnected", "ok", "reconnect_required", "unavailable"]
+
+# The same probe the admin fleet view runs (api/admin/tenants.py): one
+# events.list over a one-minute window, the cheapest real call that exercises
+# the refresh token AND the calendar id it is paired with.
+_HEALTH_PROBE_WINDOW = timedelta(minutes=1)
+_HEALTH_PROBE_CONCURRENCY = 5
+# Bounds the whole check, not each probe: the hub screen must never hang on a
+# slow Google. A probe still running at the deadline reports "unavailable".
+_HEALTH_PROBE_TIMEOUT_S = 10.0
+
+
+@dataclass(frozen=True)
+class ProfessionalCredentialHealth:
+    """One professional's OWN Google credential, checked live."""
+
+    professional_id: UUID
+    status: CalendarCredentialStatus
+
+
+@dataclass(frozen=True)
+class CalendarCredentialHealth:
+    """Outcome of `calendar_credential_health`. Categories only, never a credential."""
+
+    clinic: CalendarCredentialStatus
+    professionals: list[ProfessionalCredentialHealth]
+
+
+async def _probe_credential(config: TenantRuntimeConfig) -> CalendarCredentialStatus:
+    """Live check of ONE refresh token + calendar id. Never raises."""
+    service = CalendarService.from_tenant_config(config)
+    now = datetime.now(UTC)
+    try:
+        await service.check_availability(now, now + _HEALTH_PROBE_WINDOW)
+    except GoogleTokenRevokedError:
+        return "reconnect_required"
+    except CalendarUnavailableError:
+        return "unavailable"
+    except Exception as exc:  # noqa: BLE001 - a health read must never 500 the screen
+        logger.warning("calendar_health_probe_unexpected", error_type=type(exc).__name__)
+        return "unavailable"
+    return "ok"
+
+
+async def calendar_credential_health(
+    session: AsyncSession, tenant: Tenant
+) -> CalendarCredentialHealth:
+    """Whether the Google credentials the bot books with still WORK, right now.
+
+    Every other Calendar flag in this module is a PRESENCE check:
+    `has_google_refresh_token`, `has_calendar`, `professional_calendar_source`,
+    and the hub's `calendar_connected` built on them all answer "is a token
+    stored?", never "does Google still accept it?". A refresh token Google has
+    expired or revoked stays stored, so every one of them stays green while
+    every booking fails. That is how a `shared_account` clinic ended up
+    (2026-09-12) with "Conectado" on screen, no per-professional action to take
+    — that mode has none, by design — and patients unable to book with any
+    doctor, because the one credential that mode books with was dead.
+
+    Reports:
+      - `clinic`: the clinic's own token paired with the clinic's own calendar
+        id, via `_clinic_runtime_config` — never a professional-substituted
+        config. `disconnected` when no token is stored, with no network call.
+      - `professionals`: ONLY outside `shared_account`, and only for active
+        professionals holding their OWN token, paired the way the booking path
+        pairs it (`resolve_professional_calendar`): their own calendar id when
+        set, else the clinic's. In `shared_account` the routing rule never
+        books with an own token (`_professional_credential`), so probing one
+        would report on a credential no patient booking touches. A professional
+        with no own token is absent: the clinic status already covers them.
+
+    Two phases, like the admin fleet probe: every DB read and decryption runs
+    serially on the one session (an AsyncSession cannot run concurrent
+    statements), then only the network probes run concurrently, capped and
+    time-bounded. A probe that misses the deadline reports `unavailable` —
+    "could not confirm", never "ok".
+
+    Nothing but categories leaves this function: no token, no calendar id, no
+    Google error text.
+    """
+    clinic_token = await get_google_refresh_token(session, tenant.id)
+    clinic_config = _clinic_runtime_config(tenant, clinic_token)
+
+    # (professional_id, config) per probe; `None` marks the clinic's own.
+    probes: list[tuple[UUID | None, TenantRuntimeConfig]] = []
+    if clinic_token:
+        probes.append((None, clinic_config))
+    if tenant.google_calendar_mode != "shared_account":
+        for professional in await list_active_professionals(session, tenant.id):
+            own_token = await get_professional_google_refresh_token(session, professional.id)
+            if not own_token:
+                continue
+            own_config = replace(
+                clinic_config,
+                google_refresh_token=own_token,
+                google_calendar_id=professional.google_calendar_id or tenant.google_calendar_id,
+            )
+            probes.append((professional.id, own_config))
+
+    semaphore = asyncio.Semaphore(_HEALTH_PROBE_CONCURRENCY)
+
+    async def _bounded(config: TenantRuntimeConfig) -> CalendarCredentialStatus:
+        async with semaphore:
+            return await _probe_credential(config)
+
+    tasks = [asyncio.create_task(_bounded(config)) for _, config in probes]
+    statuses: list[CalendarCredentialStatus] = ["unavailable"] * len(tasks)
+    if tasks:
+        done, pending = await asyncio.wait(tasks, timeout=_HEALTH_PROBE_TIMEOUT_S)
+        for task in pending:
+            task.cancel()
+        if pending:
+            logger.warning("calendar_health_probe_timeout", unfinished=len(pending))
+        for index, task in enumerate(tasks):
+            if task in done and not task.cancelled() and task.exception() is None:
+                statuses[index] = task.result()
+
+    clinic: CalendarCredentialStatus = "disconnected"
+    professionals: list[ProfessionalCredentialHealth] = []
+    for (professional_id, _config), status in zip(probes, statuses, strict=True):
+        if professional_id is None:
+            clinic = status
+        else:
+            professionals.append(ProfessionalCredentialHealth(professional_id, status))
+
+    logger.info(
+        "calendar_health_checked",
+        tenant_id=str(tenant.id),
+        mode=tenant.google_calendar_mode,
+        clinic=clinic,
+        professionals_checked=len(professionals),
+        professionals_reconnect_required=sum(
+            1 for item in professionals if item.status == "reconnect_required"
+        ),
+    )
+    return CalendarCredentialHealth(clinic=clinic, professionals=professionals)

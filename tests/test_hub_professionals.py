@@ -840,6 +840,61 @@ async def test_bulk_route_does_not_shadow_the_per_professional_one(
     assert single.json()["professional_id"] == str(prof.id)
 
 
+async def test_create_calendar_revoked_clinic_token_maps_to_409_reconnect(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Google rejecting the clinic's refresh token (`invalid_grant`) is fixed by
+    reconnecting, exactly like the scope refusal - so it gets the same code."""
+    from secretaria.services.calendar import GoogleTokenRevokedError
+
+    prof = await _seed_professional(db, tenant, google_calendar_id=None)
+    await _connect_clinic(db, tenant, "dead-clinic-refresh-token")
+    _patch_calendar_service(monkeypatch)
+
+    async def _revoked(self, summary: str) -> dict:
+        raise GoogleTokenRevokedError("Google Calendar refresh token rejected")
+
+    monkeypatch.setattr(_FakeSecondaryCalendar, "create_secondary_calendar", _revoked)
+
+    response = await client.post(f"{ENDPOINT}/{prof.id}/calendar")
+    assert response.status_code == 409
+    body = response.json()
+    assert body["detail"]["code"] == "google_reconnect_required"
+    assert "Reconecte" in body["detail"]["message"]
+    assert "dead-clinic-refresh-token" not in response.text
+
+    async with db() as session:
+        refreshed = await session.get(Professional, prof.id)
+        assert refreshed.google_calendar_id is None
+
+
+async def test_bulk_revoked_clinic_token_is_409_not_a_row_failure(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production state of 2026-09-12: a shared_account clinic whose token
+    Google had revoked. The dead token used to fall into the per-row handler, so
+    every doctor failed as `calendar_unavailable` and the save asked the clinic
+    to "tente salvar de novo" - a retry that could never work. It is the
+    CLINIC's token, so the run stops at the first row with the reconnect code."""
+    from secretaria.services.calendar import GoogleTokenRevokedError
+
+    await _seed_professional(db, tenant, name="Dra. Ana")
+    await _seed_professional(db, tenant, name="Dr. Bruno")
+    await _connect_clinic(db, tenant)
+    _patch_calendar_service(monkeypatch)
+
+    async def _revoked(self, summary: str) -> dict:
+        _FakeSecondaryCalendar.calls.append(summary)
+        raise GoogleTokenRevokedError("Google Calendar refresh token rejected")
+
+    monkeypatch.setattr(_FakeSecondaryCalendar, "create_secondary_calendar", _revoked)
+
+    response = await client.post(BULK_ENDPOINT)
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "google_reconnect_required"
+    assert len(_FakeSecondaryCalendar.calls) == 1
+
+
 # --------------------------------------------------------------------------
 # A professional who JOINS a shared_account clinic gets their agenda too.
 # --------------------------------------------------------------------------

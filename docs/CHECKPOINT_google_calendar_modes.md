@@ -1,5 +1,8 @@
 # CHECKPOINT — Google Calendar integration modes (per_professional / shared_account)
 
+> **2026-09-12 — ver §10:** "conta única não deixa marcar" era o token da clínica recusado pelo
+> Google com a tela toda verde, não a regra de modo. Probe de saúde ao vivo BUILT, não deployado.
+
 Validated 2026-08-01 (`uv run python -m pytest -q` blocked on this machine by a Windows
 App Control policy — see Nota de ambiente below; ran the equivalent
 `python -m pytest -q` via the venv's base interpreter + `PYTHONPATH=src;.venv/Lib/site-packages`
@@ -431,3 +434,93 @@ a mensagem do Google); roster vazio; `/calendars` não colide com
 `/{id}/calendar`; e os três casos do profissional que entra (cria em
 `shared_account`, não cria em `per_professional`, falha do Google não impede a
 criação da linha).
+
+---
+
+## 10. "Conectado" que não agenda — token da clínica recusado pelo Google (2026-09-12)
+
+### O relato
+
+> "Quando uma clínica seleciona conectar o Google Calendar com uma única conta, nenhum médico em
+> si precisa conectar seu google calendar, tanto que nem tem como quando seleciona isso. Porém,
+> quando um paciente gostaria de marcar alguma consulta com ele, não é possível [...]"
+
+A hipótese implícita — "conta única ainda exige a agenda de cada médico" — **era falsa**. A regra
+de roteamento do item 4 está certa. Provado ao vivo, sem escrever nada:
+
+- Log do `secretaria-worker`, tenant `9c4fa6a5…` (Chrysostomo For Eyes), 2026-09-12 22:16Z, pelo
+  portal Brain-Message: `insurance_step_skipped professional_count=3` →
+  `calendar_token_refresh_failed invalid_grant: Token has been expired or revoked.` →
+  `worker_calendar_unavailable` → handover humano + `calendar_alert_email_sent`.
+- Probe só-leitura no container da API (imprimindo só categorias): modo `shared_account`; token da
+  clínica **presente e recusado** (`invalid_grant`, gravado pela última vez em 2026-08-25); os 3
+  profissionais ativos resolvem o agendamento pelo token da clínica — inclusive o único com token
+  próprio, também morto — e os 3 falham. Dois nem tinham `google_calendar_id`: o lote pós-save
+  bateu no mesmo token morto e cada linha virou `calendar_unavailable`.
+
+### A inconsistência real
+
+Toda flag de agenda que o hub expõe é de **presença**: `calendar_connected`, `has_calendar`,
+`calendar_source` e `google_calendar_id` respondem "existe algo gravado?". Um refresh token que o
+Google expirou ou revogou continua gravado, então tudo ficava verde: a Seção 08 dizia "Conectado"
+e só oferecia "Desconectar" (que ainda põe `is_active=False`), nenhuma linha de profissional tinha
+ação (por desenho, neste modo), e nenhum paciente conseguia marcar com médico nenhum. Causa
+provável da expiração: tela de consentimento OAuth ainda em "Testing" (refresh token expira em
+~7 dias) — **não conferido no Console nesta sessão**.
+
+### O que entrou (BUILT — suíte completa verde, NÃO commitado, NÃO deployado)
+
+- `services/calendar.py::GoogleTokenRevokedError` — **subclasse** de `CalendarUnavailableError`,
+  levantada por `_build_service` quando o `RefreshError` é `invalid_grant` (`_is_invalid_grant`:
+  corpo estruturado primeiro, mensagem como fallback). Todo `except CalendarUnavailableError`
+  existente (flow router, handover do worker, probe do admin) segue idêntico; `invalid_client` e
+  afins continuam outage comum.
+- `services/tenant_config.py::calendar_credential_health` — probe **ao vivo**, a mesma chamada do
+  probe do admin (`events.list` sobre 1 minuto). `clinic` = token da clínica + calendar id da
+  clínica via `_clinic_runtime_config` (extraído de `ensure_professional_secondary_calendar`, que
+  passou a usá-lo — nunca a substituição pelo profissional único de `load_tenant_config`).
+  `professionals` = só fora de `shared_account` e só quem tem token próprio, pareado como o
+  agendamento pareia. DB serial, rede concorrente (semáforo 5), prazo total de 10 s →
+  `unavailable`. Categorias: `ok` | `reconnect_required` | `unavailable` | `disconnected`.
+- `GET /tenants/me/calendar/health` (`api/hub/oauth.py`, schema
+  `schemas/calendar.py::CalendarHealthRead`). Sem gate de entitlement; só categorias no corpo.
+- `api/hub/professionals.py` — lote e criação individual mapeiam `GoogleTokenRevokedError` para
+  **409 `google_reconnect_required`** (mesmo código do escopo, frase própria;
+  `_reconnect_required`). O lote para na primeira linha e commita o que já deu certo, como no
+  escopo. Antes, o lote tratava como falha por linha ("tente salvar de novo") e a criação
+  individual devolvia 500.
+- Frontend: `secretarIA-frontend/docs/CHECKPOINT_marca_e_ux_configuracao.md` §6.
+
+### Testes
+
+Suíte completa: **2119 passed**. Novos:
+
+- `tests/test_hub_calendar_health.py` (11): desconectado sem rede; ok pareando token e agenda da
+  clínica; revogado → `reconnect_required`; 5xx → `unavailable` (nunca pede reconexão); erro
+  inesperado → `unavailable` sem 500; prazo estourado → `unavailable`; a clínica nunca é resolvida
+  pelo profissional único; `shared_account` nunca sonda token próprio; `per_professional` reporta
+  só tokens próprios, pareados como o agendamento; inativo ignorado; corpo sem token, calendar id
+  ou texto do Google.
+- `tests/test_calendar_unavailable_mapping.py`: as duas formas reais de `invalid_grant` vistas em
+  produção → `GoogleTokenRevokedError` (e ainda `CalendarUnavailableError`); `invalid_client` não.
+- `tests/test_hub_professionals.py`: 409 na criação individual; 409 no lote, parando na 1ª linha.
+
+`ruff check` limpo nos arquivos tocados. `ruff format --check` acusa `api/hub/oauth.py`,
+`services/calendar.py` e `tests/test_hub_professionals.py` — **pré-existente**: os trechos são
+todos de código antigo e os blobs do HEAD falham igual.
+
+### Pendências (em ordem)
+
+1. **Operacional, independe de deploy:** reconectar a conta Google da clínica do tenant `9c4fa6a5…`.
+   Até o frontend novo subir, o único caminho é "Desconectar" + "Conectar com Google" — e
+   desconectar põe `is_active=False`, então é preciso reativar depois
+   (`POST /internal/tenants/{id}/activate`). Em seguida, salvar a configuração para o lote criar as
+   agendas dos 2 profissionais sem `google_calendar_id`.
+2. Google Cloud Console (`secretaria-496912`): confirmar o status de publicação. Em "Testing" isto
+   se repete a cada ~7 dias para toda clínica.
+3. Commit + push; deploy de `secretaria_api` **e** `secretaria-worker` (o worker não muda de
+   comportamento, mas `calendar.py`/`tenant_config.py` entram no `source_fingerprint`); depois o
+   `secretarIA-frontend`. Ordem livre entre back e front: o frontend novo contra backend velho
+   recebe 404 e trata como "não dá pra saber".
+4. Prova ao vivo pós-deploy: `GET /tenants/me/calendar/health` devolvendo `reconnect_required`
+   para o tenant acima antes da reconexão, e `ok` depois.
