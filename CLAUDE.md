@@ -114,23 +114,11 @@ mais os nomes dos jobs e crons registrados. Divergência emite
 hora no worker. Ver `core/build_info.py` e a seção "Deploy both services, or
 neither" do `README.md`.
 
-## Documentação — manter em dia (obrigatório)
+## Documentação
 
-Os arquivos em `docs/` são a **fonte de verdade pra entender o projeto** — o objetivo é que uma
-sessão nova do Claude Code (ou qualquer pessoa) entenda tudo, profundamente, só lendo `docs/`.
-Por isso eles **têm que refletir o estado real** do projeto.
-
-**Quando atualizar:** ao fazer mudanças numa sessão, atualize os docs afetados — **não
-necessariamente na hora de cada mudança, mas no FIM da sessão**, depois que tudo foi **validado e
-verificado** (testes passando, deploy/migração confirmados). Documentar antes de validar gera doc
-errado; documentar depois garante que o doc descreve o que realmente está no ar.
-
-**Regras:**
-- Feature grande/multi-camada → um `docs/CHECKPOINT_<FEATURE>.md` (estado, o que entrou onde,
-  deployado/testado, pendências) + 1 linha de ponteiro nos docs relevantes — é o padrão já usado em
-  `docs/CHECKPOINT_plugins.md`.
-- Cite âncoras estáveis (nome de função/módulo), não números de linha frágeis, quando possível.
-- Mantenha o `CHECKPOINT_*` da feature em dia até ela ser 100% concluída/encerrada; aí vira histórico.
+`docs/` é a fonte de verdade deste repo (exemplo do padrão: `docs/CHECKPOINT_plugins.md`). Regra
+geral de quando/como atualizar (CHECKPOINT, âncoras estáveis) em `AI_WORKFLOW.md` — aqui só o que
+diverge, se houver.
 
 ## Prompts de correção pendentes (`.claude/prompts/`)
 
@@ -270,6 +258,13 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
   Cross-repo com brain-api (autorizado explicitamente pelo dono) e Brain-Message-Frontend. Inclui
   uma validação nova (id do toque vindo do navegador, não de webhook assinado). **NÃO EXECUTADO
   ainda.**
+- `z_prompts/PROMPT_BRAIN_MESSAGE_SECRETARIA_EMAIL_OTP_INLINE.md` (raiz de BRAIN, gerado 2026-09-16
+  via `/prompt-generator`, onda 2 de `PLANO_LOGIN_SEM_GATE_PACIENTE_NOVO.md`) — canal
+  `brain_message` só: insere um passo de captura de e-mail (sem verificar) entre `GREETING_FRAME` e
+  `LGPD_CONSENT_MESSAGE`, e depois de uma consulta confirmada com e-mail ainda não verificado, manda
+  aviso de código e verifica inline no chat. `FlowState` novos com saída limitada por tempo. Não
+  toca no fluxo de agendamento em si nem no canal WhatsApp. Depende do CHECKPOINT de
+  `PROMPT_BRAIN_MESSAGE_PORTAL_SESSAO_PENDENTE.md` (brain-api, onda 1). **NÃO EXECUTADO.**
 
 ## graphify
 
