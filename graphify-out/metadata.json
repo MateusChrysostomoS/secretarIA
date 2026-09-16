@@ -1,0 +1,11 @@
+﻿{
+    "metadata_schema":  "brain.graphify-metadata/v1",
+    "repository":  "secretarIA",
+    "repository_path":  "C:\\TECH\\BRAIN\\secretarIA",
+    "branch":  "main",
+    "commit":  "5aba2911515a39a062658c236a185cb338785471",
+    "generated_at":  "2026-09-16T18:57:25.8784917Z",
+    "graphify_version":  "0.9.5",
+    "graph_schema":  "networkx-node-link (unversioned upstream)",
+    "graph_sha256":  "33283db4041322e88ac034dc6819ce609dab50ac664b35d97de05b362f8bfe3f"
+}
