@@ -51,6 +51,7 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 )
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
+from secretaria.ai.formatter import TextBubble  # noqa: E402
 from secretaria.config import Settings  # noqa: E402
 from secretaria.core.database import Base  # noqa: E402
 from secretaria.models import (  # noqa: E402
@@ -76,6 +77,7 @@ from secretaria.services.channel_sender import (  # noqa: E402
     interactive_history_body,
 )
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
+from secretaria.services.flow_router import FlowRouterResult  # noqa: E402
 from secretaria.services.greeting_template import (  # noqa: E402
     CONSENT_ACCEPTED_MESSAGE,
     CONSENT_BUTTON_LABEL,
@@ -1074,3 +1076,53 @@ async def test_the_precheck_handoff_still_fires_exactly_as_before(db, calls, mon
     assert (await _outbound(db, tenant))[-1] == CODE_NOTICE_MESSAGE
     assert handoffs == [WA_ID], "PreCheck tried to reach a patient with no phone number"
     assert len(sent_wa) == 1
+
+
+async def test_a_portal_booking_records_no_phone_number(db, calls) -> None:
+    """The Portal's `patient_ref` is an id, not a phone, and is not stored as one.
+
+    `Appointment.phone` exists so a later cancel or reschedule can still reach
+    the patient on WhatsApp (models/appointment.py).  The channel-neutral send
+    handle `patient_wa` is a different thing: on Brain-Message it falls back to
+    `patient_ref`, a 36-character UUID that does not fit this VARCHAR(32)
+    column.  Writing it there made Postgres reject the INSERT and roll the
+    whole transaction back - flow state AND appointment - after the Google
+    Calendar event had already been created, so the clinic kept an orphaned
+    event and the patient was told only that the agenda was unavailable.
+
+    The assertion is on the VALUE rather than on the write succeeding: SQLite
+    does not enforce the column width, so a "did it insert?" test passes here
+    and still fails in production.  The agent path already resolves it this
+    way (ai/tools.py::_persist_appointment).
+    """
+    assert len(EXTERNAL_ID) > Appointment.__table__.c.phone.type.length
+
+    tenant = await _seed_tenant(db)
+    reply = await _bm_turn(tenant, "oi")
+    assert reply is not None and reply.conversation_id is not None
+
+    start = datetime.now(UTC) + timedelta(days=7)
+    result = FlowRouterResult(
+        action="reply",
+        bubbles=[TextBubble(body="Pronto! Seu agendamento está confirmado. ✅")],
+        flow_state=FlowState.IDLE,
+        appointment={
+            "google_event_id": "evt-portal-1",
+            "google_event_link": None,
+            "appointment_type": "Consulta",
+            "start_at": start,
+            "end_at": start + timedelta(minutes=30),
+        },
+    )
+
+    handled = await tasks._apply_flow_result(
+        reply, result, reply.patient_ref, redis=None, tenant=tenant
+    )
+
+    assert handled is True
+    async with db() as session:
+        appointment = await session.scalar(
+            select(Appointment).where(Appointment.tenant_id == tenant.id)
+        )
+    assert appointment is not None, "the booking was rolled back instead of persisted"
+    assert appointment.phone is None

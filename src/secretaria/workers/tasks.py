@@ -4029,11 +4029,28 @@ async def _apply_flow_result(
                     conv.flow_selected_insurance = result.flow_selected_insurance
                     conv.flow_managing_appointment_id = result.flow_managing_appointment_id
                     if result.appointment:
+                        # `phone` is the patient's WhatsApp number, kept so a
+                        # later cancel/reschedule can still reach them - NOT
+                        # the channel-neutral send handle. On Brain-Message
+                        # `patient_wa` falls back to `patient_ref`, a 36-char
+                        # UUID that does not fit this VARCHAR(32) column: the
+                        # INSERT was refused and rolled this whole transaction
+                        # back AFTER the calendar event had been created,
+                        # leaving the clinic an orphaned event and the patient
+                        # a bare "agenda unavailable". A portal patient has no
+                        # number, which is exactly what the nullable column and
+                        # `Patient.wa_id` are for. The agent path resolves it
+                        # the same way - ai/tools.py::_persist_appointment.
+                        booking_phone: str | None = None
+                        if conv.patient_id is not None:
+                            booking_patient = await session.get(Patient, conv.patient_id)
+                            if booking_patient is not None:
+                                booking_phone = booking_patient.wa_id
                         booked_appointment = Appointment(
                             tenant_id=conv.tenant_id,
                             patient_id=conv.patient_id,
                             conversation_id=conv.id,
-                            phone=patient_wa,
+                            phone=booking_phone,
                             status=AppointmentStatus.SCHEDULED,
                             **result.appointment,
                         )
