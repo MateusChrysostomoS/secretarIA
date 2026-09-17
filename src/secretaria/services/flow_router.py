@@ -698,6 +698,38 @@ def llm_state_ttl_minutes(tenant: Tenant) -> int:
     return reactivation_gap_minutes(tenant)
 
 
+# How long a Brain-Message conversation may sit waiting for an e-mail or for
+# the 6-digit code before the active state is dropped and a bounded
+# "quer continuar?" gate is offered.
+#
+# NOT per-tenant, and that is deliberate: `llm_state_ttl_minutes` is tunable
+# because clinics genuinely differ on how long a free-form chat should stay
+# open, while these two states are steps of a platform-owned identity flow that
+# no clinic configures, sees, or can reason about. A knob here would be an
+# unconsumed config field — the thing `plugins/precheck_handoff.py` argues
+# against for its own message.
+#
+# 60 minutes, against `llm_state_ttl_minutes`' default: long enough that a
+# patient who walks away to fetch the code from another device comes back to a
+# live prompt, short enough that an abandoned visit does not park the
+# conversation for the rest of the day. brain-api expires the code itself after
+# 10 minutes and the whole visit after 24 hours (CHECKPOINT §6.7), so an hour
+# sits inside the outer bound and comfortably outside the inner one.
+PENDING_IDENTITY_TTL_MINUTES = 60
+
+
+def pending_identity_ttl_minutes(tenant: Tenant) -> int:
+    """Silence budget for AWAITING_EMAIL / AWAITING_EMAIL_CODE, in minutes.
+
+    Takes `tenant` and ignores it, exactly as `flows_enabled` takes one and
+    returns True: the decision keeps ONE home, so the day it does become
+    per-clinic there is a single function to change and every caller already
+    passes what it would need. See this module's convention note on
+    `flows_enabled`.
+    """
+    return PENDING_IDENTITY_TTL_MINUTES
+
+
 def reactivation_continue_prompt(tenant: Tenant) -> str:
     """The question appended to the returning greeting (e.g. 'Quer continuar?')."""
     return str(_reactivation_config(tenant).get("continue_prompt") or DEFAULT_CONTINUE_PROMPT)
@@ -1056,6 +1088,22 @@ async def route(
     if state == FlowState.MANAGE_BOOKING:
         return await _manage_step(
             conversation, tenant, calendar, inbound_body, upcoming_appointments or [], professionals
+        )
+
+    # AWAITING_EMAIL / AWAITING_EMAIL_CODE should never reach here: both are
+    # intercepted upstream by `workers/tasks.py`'s pending-identity gate, which
+    # owns the whole turn and returns before dispatch. Reaching this line means
+    # the gate let one through (a channel mismatch, a state left behind by an
+    # older build), and the safe answer is the menu — falling through to the
+    # branches below does exactly that, and the result they build carries an
+    # explicit `flow_state`, so the conversation leaves the stranded state on
+    # this very turn rather than re-entering it. Named here so the next reader
+    # does not have to re-derive that it is deliberate.
+    if state in (FlowState.AWAITING_EMAIL, FlowState.AWAITING_EMAIL_CODE):
+        logger.warning(
+            "flow_router_pending_identity_state_leaked",
+            state=state.value,
+            conversation_id=str(conversation.id),
         )
 
     # IDLE / MENU / BUSINESS_HOURS: interpret as a menu interaction. The manage

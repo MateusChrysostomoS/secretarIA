@@ -33,6 +33,20 @@ class FlowState(enum.StrEnum):
     BUSINESS_HOURS  - patient asked for hours (one-shot, returns to IDLE).
     LLM             - full LLM mode (patient chose "Outro" or deviated); the
                       conversation stays here until a /menu reset.
+    AWAITING_EMAIL  - Brain-Message only: the greeting went out and the visitor
+                      was asked for their e-mail (services/pending_identity.py).
+                      The next inbound is read as an address, not as a menu tap.
+    AWAITING_EMAIL_CODE
+                    - Brain-Message only: an appointment was just committed for
+                      a visitor who has not proven their address, so the next
+                      inbound is read as the 6-digit code.
+
+    The two Brain-Message states are the ONLY ones a WhatsApp conversation can
+    never enter (`workers/tasks.py` gates both on `channel`), and both are
+    time-bounded by `_expire_stale_pending_identity_state` — not by the patient
+    answering. See the `conversation-flow-state` skill's invariant: a state
+    whose only exit is the patient choosing it is the shape that parked
+    conversations forever, and neither of these may repeat it.
     """
 
     IDLE = "IDLE"
@@ -41,6 +55,13 @@ class FlowState(enum.StrEnum):
     MANAGE_BOOKING = "MANAGE_BOOKING"
     BUSINESS_HOURS = "BUSINESS_HOURS"
     LLM = "LLM"
+    # No migration ships with these two. `flow_state` is a NON-native enum
+    # (`native_enum=False`) and SQLAlchemy 2.x defaults `create_constraint` to
+    # False, so the column is a bare VARCHAR(32) with no CHECK to widen —
+    # verified against migrations/versions/a3c4d5e6f7b8_flow_engine.py, which
+    # adds the column and no constraint. Both values fit in 32 characters.
+    AWAITING_EMAIL = "AWAITING_EMAIL"
+    AWAITING_EMAIL_CODE = "AWAITING_EMAIL_CODE"
 
 
 def _handover_values(enum_cls: type[enum.Enum]) -> list[str]:

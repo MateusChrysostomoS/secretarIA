@@ -264,7 +264,11 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
   `LGPD_CONSENT_MESSAGE`, e depois de uma consulta confirmada com e-mail ainda não verificado, manda
   aviso de código e verifica inline no chat. `FlowState` novos com saída limitada por tempo. Não
   toca no fluxo de agendamento em si nem no canal WhatsApp. Depende do CHECKPOINT de
-  `PROMPT_BRAIN_MESSAGE_PORTAL_SESSAO_PENDENTE.md` (brain-api, onda 1). **NÃO EXECUTADO.**
+  `PROMPT_BRAIN_MESSAGE_PORTAL_SESSAO_PENDENTE.md` (brain-api, onda 1). **EXECUTADO 2026-09-17 —
+  BUILT localmente, UNCOMMITTED e NÃO DEPLOYADO; contrato do brain-api ampliado antes da
+  implementação, dois estados com TTL + “quer continuar?”, OTP redigido do transcript e regressões
+  explícitas de WhatsApp/PreCheck; ver `docs/CHECKPOINT_secretaria_email_otp_inline.md`. Deploy exige
+  primeiro a migração `0022` + brain-api, depois `secretaria_api` e `secretaria-worker` juntos.**
 
 ## graphify
 

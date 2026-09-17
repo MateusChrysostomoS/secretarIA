@@ -23,6 +23,7 @@ from secretaria.plugins import (  # noqa: F401
     human_backup,
     multi_professional,
     multi_unit,
+    pending_identity,
     pix_deposit,
     precheck_handoff,
     professional_notification,

@@ -222,10 +222,20 @@ async def _bm_turn(tenant: Tenant, body: str, external_id: str = EXTERNAL_ID):
 async def test_both_wrappers_reach_the_same_decision(db) -> None:
     """The same first contact decides the same thing on either channel.
 
-    Every field of the returned `_ReplyContext` must match except the two that
+    Every field of the returned `_ReplyContext` must match except the ones that
     ARE the channel: `channel` itself and `patient_ref` (the address to reply
     to). `conversation_id` differs because they are different patients, which is
     the point — same decision, different people.
+
+    `probe_pending_identity` joined that list when the Brain-Message inline
+    identity steps shipped (`services/pending_identity.py`). It is the one
+    field whose whole job is to differ by channel: a Brain-Message visitor
+    arrives with no proven address and has to be asked for one, while a
+    WhatsApp patient arrives with a phone number Meta already verified. Every
+    OTHER field staying equal is exactly what the rest of this assertion now
+    proves — including `send_consent_notice`, which stays True on both, so the
+    e-mail step is a message inserted before the LGPD notice and never a
+    replacement for it.
     """
     tenant = await _seed_tenant(db)
 
@@ -233,7 +243,7 @@ async def test_both_wrappers_reach_the_same_decision(db) -> None:
     bm = await _bm_turn(tenant, "oi")
 
     assert wa is not None and bm is not None
-    differing = {"channel", "patient_ref", "conversation_id"}
+    differing = {"channel", "patient_ref", "conversation_id", "probe_pending_identity"}
     compared = 0
     for f in fields(tasks._ReplyContext):
         if f.name in differing:
@@ -246,6 +256,10 @@ async def test_both_wrappers_reach_the_same_decision(db) -> None:
     assert wa.patient_ref == WA_ID
     assert bm.channel == CHANNEL_BRAIN_MESSAGE
     assert bm.patient_ref == EXTERNAL_ID
+    # The excluded field, asserted rather than merely skipped: skipping alone
+    # would keep passing if the flag silently stopped being set at all.
+    assert bm.probe_pending_identity is True
+    assert wa.probe_pending_identity is False
 
 
 async def test_parity_holds_through_the_menu_branch(db) -> None:

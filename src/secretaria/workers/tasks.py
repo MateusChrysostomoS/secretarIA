@@ -138,6 +138,7 @@ from secretaria.services.flow_router import (
     manage_label,
     menu_buttons_for,
     menu_label,
+    pending_identity_ttl_minutes,
     reactivation_choice_buttons,
     reactivation_continue_prompt,
     reactivation_enabled,
@@ -165,6 +166,26 @@ from secretaria.services.patient_context import (
 )
 from secretaria.services.payments import deposit_lifecycle
 from secretaria.services.payments.money import format_brl
+from secretaria.services.pending_identity import (
+    CODE_ACCEPTED_MESSAGE,
+    CODE_GIVE_UP_MESSAGE,
+    CODE_INVALID_MESSAGE,
+    CODE_NOTICE_MESSAGE,
+    EMAIL_CLAIM_RETRY_MESSAGE,
+    EMAIL_INVALID_MESSAGE,
+    EMAIL_PAUSED_MESSAGE,
+    EMAIL_REQUEST_MESSAGE,
+    ClaimOutcome,
+    IdentityState,
+    RequestCodeOutcome,
+    VerifyOutcome,
+    claim_email,
+    parse_code,
+    parse_email,
+    probe_identity,
+    request_code,
+    verify_code,
+)
 from secretaria.services.service_catalog import (
     load_service_catalog,
     normalize as normalize_service_name,
@@ -490,6 +511,25 @@ class _ReplyContext:
     # allowlist, tenant-active, handover, entitlement and plugin gates have
     # all been cleared like any other turn (PROMPT_FIX_18).
     menu_requested: bool = False
+    # --- Brain-Message inline identity (services/pending_identity.py) ----
+    # Set on a Brain-Message FIRST contact. The greeting goes out, then
+    # `_send_bot_reply` asks brain-api whether this visitor still owes an
+    # address; only then does it choose between the e-mail question and the
+    # LGPD notice. The probe lives there, not in `_persist_inbound_message`,
+    # because that function runs inside the inbound transaction and an HTTP
+    # call has no business holding one open.
+    probe_pending_identity: bool = False
+    # A syntactically valid address the visitor just typed, already normalized.
+    # `_send_bot_reply` claims it against brain-api and then sends the LGPD
+    # notice — in that order, so a patient never consents before we have
+    # somewhere to send their confirmations.
+    pending_email_claim: str | None = None
+    # The visitor answered the e-mail question with something that is not an
+    # address. The re-ask is the WHOLE turn.
+    pending_email_invalid: bool = False
+    # A 6-digit code the visitor typed while the conversation was waiting for
+    # one. `_send_bot_reply` spends it against brain-api.
+    pending_code: str | None = None
 
 
 async def process_webhook_event(ctx: dict, payload: dict) -> None:
@@ -841,6 +881,19 @@ async def _route_inbound_turn(
         )
     )
 
+    # An OTP is an authentication secret, not conversation content. Keep the
+    # real value only in this turn's in-memory routing variable; the staff
+    # console / patient transcript receives a fixed redaction. This check is
+    # deliberately state- and channel-bound so an ordinary six-digit message
+    # elsewhere keeps its original meaning and display.
+    persisted_body = stored_body
+    if (
+        channel == CHANNEL_BRAIN_MESSAGE
+        and conversation.flow_state == FlowState.AWAITING_EMAIL_CODE
+        and parse_code(body) is not None
+    ):
+        persisted_body = "[código oculto]"
+
     session.add(
         Message(
             conversation_id=conversation.id,
@@ -848,7 +901,7 @@ async def _route_inbound_turn(
             sender=MessageSender.PATIENT,
             wam_id=inbound_wam_id,
             # The title alone, never the payload - see `stored_body` above.
-            body=stored_body,
+            body=persisted_body,
             interactive_reply_id=interactive_reply_id,
         )
     )
@@ -901,6 +954,134 @@ async def _route_inbound_turn(
     # The pending reactivation gate, if any, is consumed here too -
     # an explicit "take me to the menu" answers the "quer
     # continuar?" question by superseding it.
+    # --- Brain-Message inline identity gate --------------------
+    # ABOVE the LGPD gate, which is the entire point: the owner
+    # fixed the order as greeting -> e-mail -> LGPD, so a visitor
+    # who still owes an address must never be handed the consent
+    # notice first. Below handover and the action buttons for the
+    # same reasons the LGPD gate is (see its comment) — a human who
+    # picked up the conversation is never pre-empted by an
+    # identity step.
+    #
+    # WhatsApp CANNOT reach any of this: the whole block sits
+    # inside a channel check, and on WhatsApp the phone number is
+    # already the identity. That is the non-regression this
+    # feature turns on, so it is expressed as ONE guard at the top
+    # rather than as a condition repeated on each branch.
+    if channel == CHANNEL_BRAIN_MESSAGE:
+        # The time-based exit below reuses the product's existing
+        # "quer continuar?" gate. Its answer must be consumed here, before the
+        # LGPD gate: AWAITING_EMAIL lives before consent, while
+        # AWAITING_EMAIL_CODE lives after booking. The generic reactivation
+        # branch further down cannot know that ordering.
+        if conversation.reactivation_origin in (
+            FlowState.AWAITING_EMAIL.value,
+            FlowState.AWAITING_EMAIL_CODE.value,
+        ):
+            origin = conversation.reactivation_origin
+            answer = classify_yes_no(body, tenant)
+            if answer in ("yes", "no"):
+                conversation.reactivation_origin = None
+                return _ReplyContext(
+                    channel=channel,
+                    conversation_id=conversation.id,
+                    tenant_id=tenant.id,
+                    patient_ref=patient_ref,
+                    inbound_body=body or "",
+                    reactivation=_ReactivationDirective(
+                        kind="resume" if answer == "yes" else "reset",
+                        origin=origin,
+                    ),
+                )
+            # Keep the bounded gate armed and repeat the two explicit choices;
+            # an unrelated sentence must not be mistaken for an e-mail or OTP.
+            return _pending_identity_reactivation_offer(
+                conversation,
+                tenant,
+                patient_ref,
+                body,
+                FlowState(origin),
+            )
+
+        # The time-based floor runs FIRST, before the state is
+        # read, exactly as `_expire_stale_llm_state` runs before
+        # the state is used further down. A visitor who abandoned
+        # the e-mail question an hour ago is not still answering it.
+        pending_origin = conversation.flow_state
+        if _expire_stale_pending_identity_state(conversation, tenant, last_activity_at):
+            logger.info(
+                "conversation_pending_identity_state_expired",
+                conversation_id=str(conversation.id),
+                tenant_id=str(tenant.id),
+                ttl_minutes=pending_identity_ttl_minutes(tenant),
+            )
+            return _pending_identity_reactivation_offer(
+                conversation,
+                tenant,
+                patient_ref,
+                body,
+                pending_origin,
+            )
+
+        if conversation.flow_state == FlowState.AWAITING_EMAIL_CODE:
+            code = parse_code(body)
+            if code is not None:
+                return _ReplyContext(
+                    channel=channel,
+                    conversation_id=conversation.id,
+                    tenant_id=tenant.id,
+                    patient_ref=patient_ref,
+                    inbound_body=body or "",
+                    pending_code=code,
+                )
+            # Anything that is not six digits ENDS the wait and is
+            # routed normally on this same turn. The account is an
+            # offer, not a gate (the appointment is already
+            # committed — see plugins/pending_identity.py), so a
+            # patient with a different question must not have to
+            # answer this one first. It also gives the state a
+            # second exit that does not depend on the clock.
+            conversation.flow_state = FlowState.IDLE
+            logger.info(
+                "conversation_pending_code_abandoned",
+                conversation_id=str(conversation.id),
+                tenant_id=str(tenant.id),
+            )
+
+        elif conversation.flow_state == FlowState.AWAITING_EMAIL:
+            email = parse_email(body)
+            if email is None:
+                # No "skip" affordance, deliberately: the owner's
+                # words fix the e-mail as step 1 of the flow and
+                # say nothing about opting out, and the prompt that
+                # ordered this work says to treat an unsignalled
+                # escape as blocking rather than invent one. The
+                # exit that DOES exist is the silence floor above:
+                # it drops the active state after
+                # `pending_identity_ttl_minutes` and asks whether to
+                # resume. A later consent turn probes brain-api again,
+                # so the pause is bounded without becoming a bypass.
+                return _ReplyContext(
+                    channel=channel,
+                    conversation_id=conversation.id,
+                    tenant_id=tenant.id,
+                    patient_ref=patient_ref,
+                    inbound_body=body or "",
+                    pending_email_invalid=True,
+                )
+            # Keep the state until brain-api ACKs the claim. The wire call is
+            # made after this transaction commits; `_send_bot_reply` clears it
+            # only on CLAIMED. This makes the owner's ordering enforceable:
+            # e-mail claimed -> LGPD, never best-effort claim -> LGPD.
+            return _ReplyContext(
+                channel=channel,
+                conversation_id=conversation.id,
+                tenant_id=tenant.id,
+                patient_ref=patient_ref,
+                inbound_body=body or "",
+                pending_email_claim=email,
+            )
+
     # --- LGPD consent gate -------------------------------------
     # Sits ABOVE `/menu`, the greeting and normal dispatch, and
     # BELOW human handover and reminder action buttons. That
@@ -941,7 +1122,12 @@ async def _route_inbound_turn(
                     kind=CONSENT_EVENT_KIND,
                     legal_basis=(
                         "consentimento (art. 7º, I) — aceite explícito dos "
-                        "Termos de Uso e Política de Privacidade no WhatsApp"
+                        "Termos de Uso e Política de Privacidade "
+                        + (
+                            "no Portal Brain-Message"
+                            if channel == CHANNEL_BRAIN_MESSAGE
+                            else "no WhatsApp"
+                        )
                     ),
                 )
             )
@@ -978,6 +1164,15 @@ async def _route_inbound_turn(
                 ),
                 greeting_buttons=[],
                 send_consent_notice=True,
+                # Brain-Message only: `_send_bot_reply` will ask
+                # brain-api whether this visitor still owes an
+                # address and, if so, send the e-mail question in
+                # the slot the consent notice would have taken.
+                # `send_consent_notice` stays True as the fallback for every
+                # other channel and for an unavailable/unknown probe. A
+                # VERIFIED account is handled separately and skips account
+                # LGPD, as the brain-api contract requires.
+                probe_pending_identity=(channel == CHANNEL_BRAIN_MESSAGE),
             )
         # Already asked, still not accepted: re-prompt, with the
         # button attached so the way forward is one tap from the
@@ -994,6 +1189,11 @@ async def _route_inbound_turn(
             patient_ref=patient_ref,
             inbound_body=body or "",
             send_consent_reminder=True,
+            # A timed-out e-mail reactivation can leave this local row before
+            # consent while brain-api still owns the authoritative visit
+            # state. Re-probe on Brain-Message so "Não" pauses the flow without
+            # ever becoming a hidden way to skip the required e-mail step.
+            probe_pending_identity=(channel == CHANNEL_BRAIN_MESSAGE),
         )
 
     if is_menu_command(body):
@@ -1582,6 +1782,79 @@ async def _load_upcoming_greeting_data(
 def _as_utc(dt: datetime) -> datetime:
     """Treat a naive timestamp (e.g. from SQLite) as UTC; pass tz-aware through."""
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
+def _expire_stale_pending_identity_state(
+    conversation: Conversation,
+    tenant: Tenant,
+    last_activity_at: datetime | None,
+) -> bool:
+    """Drop an abandoned identity wait before offering an explicit resume.
+
+    The sibling of `_expire_stale_llm_state`, for the two states
+    `services/pending_identity.py` introduces, and it exists for exactly the
+    reason that one does: `Conversation` is one row per (tenant, patient)
+    forever, so a state nobody clears is not "until this conversation ends" —
+    it is permanent. The `conversation-flow-state` skill states the invariant
+    both of these answer: every non-IDLE state needs an exit that does not
+    depend on the patient or the agent choosing it.
+
+    What each state would cost without this:
+
+      * AWAITING_EMAIL parks the visitor BEFORE the LGPD notice. The floor
+        clears the active wait and the caller asks whether they want to resume;
+        it never silently skips the still-unclaimed address.
+      * AWAITING_EMAIL_CODE parks the visitor AFTER the appointment is already
+        committed. It has a second, immediate exit (any non-6-digit message
+        leaves it — see the gate in `_persist_inbound_message`), so the floor
+        here catches the narrower case of a patient who sends nothing at all
+        and comes back tomorrow to a prompt about a code that expired an hour
+        into the silence.
+
+    No consent, appointment or history row is touched; only the transient
+    column moves. The caller owns the visible "quer continuar?" prompt. The
+    appointment made during the visit is NOT affected in any way — it was
+    committed before AWAITING_EMAIL_CODE was ever entered.
+
+    Returns True when the state was expired (the caller logs it).
+    """
+    if conversation.flow_state not in (
+        FlowState.AWAITING_EMAIL,
+        FlowState.AWAITING_EMAIL_CODE,
+    ):
+        return False
+    if last_activity_at is None:
+        return False
+    gap = datetime.now(UTC) - _as_utc(last_activity_at)
+    if gap < timedelta(minutes=pending_identity_ttl_minutes(tenant)):
+        return False
+    conversation.flow_state = FlowState.IDLE
+    return True
+
+
+def _pending_identity_reactivation_offer(
+    conversation: Conversation,
+    tenant: Tenant,
+    patient_ref: str,
+    body: str | None,
+    origin: FlowState,
+) -> _ReplyContext:
+    """Arm the existing Sim/Não gate for an expired e-mail or OTP wait."""
+    conversation.reactivation_origin = origin.value
+    if origin == FlowState.AWAITING_EMAIL_CODE:
+        prefix = "Sua consulta continua marcada."
+    else:
+        prefix = "Seu atendimento ficou pausado antes da etapa de privacidade."
+    prompt = reactivation_continue_prompt(tenant)
+    return _ReplyContext(
+        channel=CHANNEL_BRAIN_MESSAGE,
+        conversation_id=conversation.id,
+        tenant_id=tenant.id,
+        patient_ref=patient_ref,
+        inbound_body=body or "",
+        greeting_override=f"{prefix}\n\n{prompt}",
+        greeting_buttons=reactivation_choice_buttons(tenant),
+    )
 
 
 def _reactivation_offer(
@@ -2273,7 +2546,152 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     # Consent still owed and the subject said something other than "Concordo":
     # the re-prompt is the WHOLE turn. Placed before the greeting branch so
     # nothing else can answer first.
+    # --- Brain-Message inline identity turns ---------------------------
+    # All three own the whole turn and all three sit ABOVE the consent
+    # reminder, mirroring the gate order in `_persist_inbound_message`: a
+    # visitor still owing an address is asked for it, not for consent.
+    # Unreachable on WhatsApp — only the Brain-Message branch of that gate
+    # ever sets these fields.
+    if reply.reactivation is not None and reply.reactivation.origin in (
+        FlowState.AWAITING_EMAIL.value,
+        FlowState.AWAITING_EMAIL_CODE.value,
+    ):
+        origin = FlowState(reply.reactivation.origin)
+        if reply.reactivation.kind == "reset":
+            body = (
+                EMAIL_PAUSED_MESSAGE
+                if origin == FlowState.AWAITING_EMAIL
+                else CODE_GIVE_UP_MESSAGE
+            )
+            await _send_plain_reply(
+                reply,
+                tenant=tenant,
+                waba_token=waba_token,
+                body=body,
+                event="pending_identity_reactivation_declined",
+            )
+            return
+
+        if origin == FlowState.AWAITING_EMAIL:
+            await _write_flow_state(reply.conversation_id, FlowState.AWAITING_EMAIL)
+            await _send_plain_reply(
+                reply,
+                tenant=tenant,
+                waba_token=waba_token,
+                body=EMAIL_REQUEST_MESSAGE,
+                event="pending_email_reactivated",
+            )
+            return
+
+        outcome = RequestCodeOutcome.UNAVAILABLE
+        if reply.tenant_id is not None:
+            outcome = await request_code(reply.tenant_id, reply.patient_ref)
+        if outcome is RequestCodeOutcome.SENT:
+            await _write_flow_state(reply.conversation_id, FlowState.AWAITING_EMAIL_CODE)
+            body = CODE_NOTICE_MESSAGE
+        else:
+            body = CODE_GIVE_UP_MESSAGE
+        await _send_plain_reply(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            body=body,
+            event="pending_code_reactivation_resolved",
+        )
+        return
+
+    if reply.pending_email_invalid:
+        await _send_plain_reply(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            body=EMAIL_INVALID_MESSAGE,
+            event="pending_email_reprompt_sent",
+        )
+        return
+
+    if reply.pending_email_claim is not None:
+        # Claim first, THEN consent. The owner fixed that sequence, so a failed
+        # wire call keeps the state and asks again; it is never converted into
+        # implicit permission to skip the e-mail step.
+        outcome = ClaimOutcome.UNAVAILABLE
+        if reply.tenant_id is not None:
+            outcome = await claim_email(
+                reply.tenant_id, reply.patient_ref, reply.pending_email_claim
+            )
+        if outcome is ClaimOutcome.CLAIMED:
+            await _write_flow_state(reply.conversation_id, FlowState.IDLE)
+            await _send_consent_notice(reply, tenant=tenant, waba_token=waba_token)
+            return
+        # A second browser may have completed the same account between the
+        # first-contact probe and this claim. Re-read only on the authoritative
+        # NOT_PENDING answer so that race becomes the verified-account path,
+        # not an hour of pointless e-mail retries.
+        if outcome is ClaimOutcome.NOT_PENDING and await _handle_pre_consent_identity(
+            reply,
+            tenant=tenant,
+            professionals=flow_professionals,
+            patient_wa=patient_wa,
+            redis=redis,
+            waba_token=waba_token,
+        ):
+            return
+        logger.warning(
+            "pending_email_claim_not_recorded",
+            outcome=outcome.value,
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(reply.tenant_id),
+        )
+        await _send_plain_reply(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            body=EMAIL_CLAIM_RETRY_MESSAGE,
+            event="pending_email_claim_retry_sent",
+        )
+        return
+
+    if reply.pending_code is not None:
+        result = VerifyOutcome.UNAVAILABLE
+        if reply.tenant_id is not None:
+            result = (
+                await verify_code(reply.tenant_id, reply.patient_ref, reply.pending_code)
+            ).outcome
+        if result is VerifyOutcome.VERIFIED:
+            body, next_state = CODE_ACCEPTED_MESSAGE, FlowState.IDLE
+        elif result is VerifyOutcome.INVALID:
+            # Stay in the state: brain-api owns the attempt budget and the
+            # 10-minute life of the challenge, and re-prompting is what lets
+            # the patient spend the attempts they still have. Duplicating that
+            # count here would be a second source of truth (see
+            # `services/pending_identity.py`).
+            body, next_state = CODE_INVALID_MESSAGE, FlowState.AWAITING_EMAIL_CODE
+        else:
+            # NOT_PENDING / NO_EMAIL / UNAVAILABLE: nothing the patient can act
+            # on. Leave the state so the conversation is usable again, and say
+            # the appointment stands — the fact they actually need.
+            body, next_state = CODE_GIVE_UP_MESSAGE, FlowState.IDLE
+        if next_state is not FlowState.AWAITING_EMAIL_CODE:
+            await _write_flow_state(reply.conversation_id, next_state)
+        await _send_plain_reply(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            body=body,
+            event="pending_code_reply_sent",
+        )
+        return
+
     if reply.send_consent_reminder:
+        if reply.probe_pending_identity and await _handle_pre_consent_identity(
+            reply,
+            tenant=tenant,
+            professionals=flow_professionals,
+            patient_wa=patient_wa,
+            redis=redis,
+            waba_token=waba_token,
+        ):
+            return
         await _send_consent_notice(
             reply, tenant=tenant, waba_token=waba_token, body=CONSENT_REMINDER_MESSAGE
         )
@@ -2282,6 +2700,26 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     if reply.greeting_override is not None:
         await _send_greeting(reply, tenant=tenant, waba_token=waba_token)
         if reply.send_consent_notice:
+            # Brain-Message first contact: the e-mail question takes this slot
+            # when — and only when — brain-api says the visitor still owes an
+            # address. Probed rather than assumed, because a patient who
+            # already verified at ANOTHER clinic is a first contact HERE and
+            # must not be asked to prove the same address twice
+            # (`IdentityState.VERIFIED`).
+            #
+            # Every other answer falls through to today's behaviour, including
+            # UNAVAILABLE: if brain-api cannot be reached, consent is the thing
+            # that must still happen, and an unasked address costs nothing that
+            # a later turn cannot recover.
+            if reply.probe_pending_identity and await _handle_pre_consent_identity(
+                reply,
+                tenant=tenant,
+                professionals=flow_professionals,
+                patient_wa=patient_wa,
+                redis=redis,
+                waba_token=waba_token,
+            ):
+                return
             await _send_consent_notice(reply, tenant=tenant, waba_token=waba_token)
         return
 
@@ -4034,6 +4472,177 @@ async def _send_consent_notice(
             interactive=interactive_buttons_record(body, buttons),
         )
     logger.info("worker_consent_notice_sent", conversation_id=str(reply.conversation_id))
+
+
+async def _send_plain_reply(
+    reply: _ReplyContext,
+    *,
+    tenant: Tenant,
+    waba_token: str | None,
+    body: str,
+    event: str,
+) -> None:
+    """Send one button-free message on this turn's channel. Best-effort.
+
+    The text-only twin of `_send_consent_notice`: same sender resolution, same
+    fail-closed on a missing credential, same "log it and move on" on a send
+    error. A separate function rather than a `buttons=None` parameter on that
+    one, because its whole reason to exist is the consent button and a caller
+    reading `_send_consent_notice(..., buttons=None)` would have to check what
+    that even means.
+
+    Used by the Brain-Message identity steps, all of which are typed answers
+    with nothing to tap (`services/pending_identity.py`).
+    """
+    client = _reply_sender(reply, tenant, waba_token)
+    if client is None:
+        logger.error(
+            f"{event}_no_credential",
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(tenant.id),
+        )
+        return
+    try:
+        result = await client.send_text_message(to=reply.patient_ref, body=body)
+    except Exception as exc:
+        logger.error(
+            f"{event}_send_failed",
+            error=str(exc),
+            conversation_id=str(reply.conversation_id),
+        )
+        return
+    if reply.conversation_id is not None and not sender_persists_outbound(client):
+        await _record_outbound(reply.conversation_id, body, result)
+    logger.info(event, conversation_id=str(reply.conversation_id))
+
+
+async def _write_flow_state(conversation_id: UUID | None, state: FlowState) -> None:
+    """Move `flow_state` from OUTSIDE the inbound transaction. Best-effort.
+
+    The inbound transaction has already committed by the time `_send_bot_reply`
+    runs, so the two identity steps that only learn their outcome from brain-api
+    (the first-contact probe, and spending a code) cannot use the in-place
+    mutation the rest of `_persist_inbound_message` uses. They open their own
+    short session instead — the same thing the fire-and-forget send paths do
+    (see `_handle_calendar_unavailable`) and what `plugins/base.py` tells an
+    `on_inbound` hook to do.
+
+    Writes ONLY `flow_state`. The other `flow_*` columns are the booking flow's
+    working memory and neither identity state has any business clearing them: a
+    patient can be asked for a code while a service selection is still parked,
+    and losing it would cost them the step they had already answered.
+
+    A failure is logged and swallowed. The cost of not writing is bounded by
+    `_expire_stale_pending_identity_state`, which drops whatever is there after
+    the silence budget.
+    """
+    if conversation_id is None:
+        return
+    try:
+        async with async_session_factory() as session:
+            async with session.begin():
+                conversation = await session.get(Conversation, conversation_id)
+                if conversation is None:
+                    return
+                conversation.flow_state = state
+    except Exception as exc:
+        logger.warning(
+            "pending_identity_flow_state_write_failed",
+            error=str(exc),
+            conversation_id=str(conversation_id),
+            state=state.value,
+        )
+
+
+async def _record_verified_account_consent(conversation_id: UUID | None) -> bool:
+    """Mirror brain-api's verified-account fact into the local LGPD gate.
+
+    `IdentityState.VERIFIED` is authoritative: brain-api already completed the
+    account consent and e-mail proof. This local stamp prevents a new clinic's
+    freshly-created Patient row from asking for the same account consent again.
+    The distinct audit kind avoids pretending the click happened in this chat.
+    """
+    if conversation_id is None:
+        return False
+    try:
+        async with async_session_factory() as session:
+            async with session.begin():
+                conversation = await session.get(Conversation, conversation_id)
+                if conversation is None or conversation.patient_id is None:
+                    return False
+                patient = await session.get(Patient, conversation.patient_id)
+                if patient is None:
+                    return False
+                subject_ref = patient.external_id or patient.wa_id
+                if not subject_ref:
+                    return False
+                if patient.lgpd_accepted_at is None:
+                    patient.lgpd_accepted_at = datetime.now(UTC)
+                    session.add(
+                        ConsentEvent(
+                            tenant_id=conversation.tenant_id,
+                            wa_id=subject_ref,
+                            kind="account_terms_verified",
+                            legal_basis=(
+                                "consentimento de conta previamente verificado "
+                                "pelo brain-api"
+                            ),
+                        )
+                    )
+        return True
+    except Exception as exc:
+        logger.warning(
+            "verified_account_consent_write_failed",
+            error_type=type(exc).__name__,
+            conversation_id=str(conversation_id),
+        )
+        return False
+
+
+async def _handle_pre_consent_identity(
+    reply: _ReplyContext,
+    *,
+    tenant: Tenant,
+    professionals: list | None,
+    patient_wa: str | None,
+    redis,
+    waba_token: str | None,
+) -> bool:
+    """Resolve brain-api identity before sending any local LGPD notice.
+
+    Returns True when the identity branch sent the complete answer for this
+    turn. PENDING_CLAIMED/UNKNOWN/UNAVAILABLE return False so the caller keeps
+    the pre-existing LGPD behaviour.
+    """
+    if reply.tenant_id is None:
+        return False
+    state = await probe_identity(reply.tenant_id, reply.patient_ref)
+    if state is IdentityState.PENDING_UNCLAIMED:
+        await _write_flow_state(reply.conversation_id, FlowState.AWAITING_EMAIL)
+        await _send_plain_reply(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            body=EMAIL_REQUEST_MESSAGE,
+            event="pending_email_requested",
+        )
+        return True
+    if state is not IdentityState.VERIFIED:
+        return False
+    if not await _record_verified_account_consent(reply.conversation_id):
+        # Fail closed on the local audit write: a verified remote account does
+        # not justify bypassing a local gate we failed to persist.
+        return False
+    await _handle_show_main_menu(
+        reply,
+        tenant,
+        professionals,
+        patient_wa,
+        redis=redis,
+        waba_token=waba_token,
+        source="verified_account",
+    )
+    return True
 
 
 async def _handle_service_unavailable(reply: _ReplyContext, redis=None) -> None:
