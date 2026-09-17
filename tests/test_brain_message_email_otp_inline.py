@@ -202,13 +202,15 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db, calls):
     yield
 
 
-async def _seed_tenant(db, phone_number_id: str = PHONE_NUMBER_ID) -> Tenant:
+async def _seed_tenant(
+    db, phone_number_id: str | None = PHONE_NUMBER_ID, *, is_active: bool = True
+) -> Tenant:
     async with db() as session:
         tenant = Tenant(
             id=uuid4(),
             clinic_name="Clinic",
             phone_number_id=phone_number_id,
-            is_active=True,
+            is_active=is_active,
             clinic_description="Oftalmologia.",
             initial_flows={},
         )
@@ -425,6 +427,31 @@ async def test_first_contact_asks_the_email_between_the_greeting_and_the_lgpd(db
     assert sent[3].startswith(CONSENT_ACCEPTED_MESSAGE)
     patient = await _patient(db, tenant)
     assert patient.lgpd_accepted_at is not None
+
+
+async def test_brain_message_does_not_inherit_the_whatsapp_activation_gate(db, calls) -> None:
+    """A portal-only clinic can converse without a live WhatsApp number.
+
+    `Tenant.is_active` is set by the WhatsApp activation path, whose contract
+    requires `phone_number_id`.  The Brain-Message channel is instead gated by
+    the subscription/secretaria entitlement in `_send_bot_reply`; coupling it
+    to this flag used to acknowledge the queued job and then drop every reply
+    because no conversation existed for `BrainMessageSender`.
+    """
+    tenant = await _seed_tenant(db, phone_number_id=None, is_active=False)
+
+    reply = await _bm_turn(tenant, "oi")
+
+    assert reply is not None
+    assert reply.channel == CHANNEL_BRAIN_MESSAGE
+    assert reply.service_unavailable is False
+    assert reply.conversation_id is not None
+    sent = await _outbound(db, tenant)
+    assert len(sent) == 2, sent
+    assert sent[0].startswith("👋 Olá! Bem-vindo(a) à Clinic!")
+    assert sent[1] == EMAIL_REQUEST_MESSAGE
+    assert calls.probed == [EXTERNAL_ID]
+    assert await _flow_state(db, tenant) == FlowState.AWAITING_EMAIL
 
 
 async def test_an_unreadable_answer_reasks_and_does_not_advance(db, calls) -> None:

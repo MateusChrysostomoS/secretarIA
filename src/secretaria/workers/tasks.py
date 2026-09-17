@@ -6436,22 +6436,15 @@ async def _persist_brain_message_inbound(
                     logger.error("brain_message_tenant_unresolved", tenant_id=str(tenant_id))
                     return None
 
-                # Same degrade as WhatsApp, and for the same reason: a clinic
-                # that has not finished setup answers once, politely, and
-                # creates no conversation. `conversation_id=None` means
-                # `_reply_sender` cannot build a Brain-Message sender, so the
-                # notice is dropped rather than written nowhere - the honest
-                # outcome, logged, until onboarding completes.
-                if not tenant.is_active:
-                    logger.info("brain_message_bot_not_active", tenant_id=str(tenant.id))
-                    return _ReplyContext(
-                        conversation_id=None,
-                        tenant_id=tenant.id,
-                        patient_ref=external_id,
-                        channel=CHANNEL_BRAIN_MESSAGE,
-                        inbound_body="",
-                        service_unavailable=True,
-                    )
+                # `Tenant.is_active` is the WhatsApp go-live flag: the internal
+                # activation endpoint deliberately requires a connected WhatsApp
+                # number in addition to calendar/services/hours. Brain-Message is
+                # a separate entitled channel and must not inherit that transport
+                # gate, otherwise a portal-only clinic can never create a
+                # conversation. `_send_bot_reply` still fails closed on the
+                # authoritative subscription/secretaria entitlement, while the
+                # ordinary booking flow continues to validate its own runtime
+                # configuration and calendar.
 
                 patient = await session.scalar(
                     select(Patient).where(
