@@ -120,6 +120,9 @@ neither" do `README.md`.
 geral de quando/como atualizar (CHECKPOINT, âncoras estáveis) em `AI_WORKFLOW.md` — aqui só o que
 diverge, se houver.
 
+O contrato de integração do canal Brain-Message está em
+`brain-api/docs/PORTAL_MESSAGING_API.md`; mantenha em dia ao mudar este lado do contrato.
+
 ## Prompts de correção pendentes (`.claude/prompts/`)
 
 Gerados por uma sessão de auditoria (2026-08-21) a partir de uma lista de bugs já reportados pelo usuário. Cada arquivo é autossuficiente (causa raiz já investigada, arquivo/linha citados) para rodar em uma sessão nova. Use quando for resolver o problema correspondente — releia o arquivo primeiro, os números de linha citados podem ter mudado desde a auditoria.
@@ -179,8 +182,20 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
   (`_send_via_whatsapp`, `api/hub/conversations.py:121`), então staff respondendo um paciente
   `channel="brain_message"` (que tem `wa_id=None`) quebra o envio. Precisa despachar por
   `patient.channel` via `services/channel_sender.py::ChannelSender`/`BrainMessageSender`, igual
-  `workers/tasks.py::_reply_sender` já faz no caminho automático. **NÃO EXECUTADO ainda** — só o
-  prompt existe. Na mesma sessão, o bug irmão do lado de LEITURA (`ConversationRead.patient_wa_id`
+  `workers/tasks.py::_reply_sender` já faz no caminho automático. **EXECUTADO em duas etapas.**
+  (1) 2026-09-09, `5b8bfdf`: o sintoma (502 ao responder paciente do Portal) foi contido por um
+  desvio inline que NÃO passava pelo `ChannelSender` (o `BrainMessageSender` era fixo em
+  `sender=BOT`). (2) **2026-09-18 — BUILT, suíte completa verde (2176 passed; baseline 2165 + 11
+  novos), UNCOMMITTED, não deployado:** o hub despacha por `patient.channel` em
+  `_staff_sender` → `BrainMessageSender(author=HUMAN)` ou `WhatsAppClient` (ramo WhatsApp
+  inalterado); `BrainMessageSender` ganhou `author` (padrão BOT — worker e `pending_identity`
+  intocados) e `session=` (o hub grava resposta + handover num commit só) e devolve o id da linha
+  em `RECORDED_MESSAGE_ID`. Ver §9 de
+  `docs/CHECKPOINT_console_staff_messages.md` e a skill nova
+  `TECH/.claude/skills/channel-aware-dispatch/`. Deploy: a rigor só `secretaria_api` precisa do
+  código novo (o worker importa `channel_sender.py`, mas usa só o padrão BOT, idêntico), porém
+  deployar os dois mantém `deploy_parity=match`. Na mesma sessão de 2026-09-09, o bug irmão do lado
+  de LEITURA (`ConversationRead.patient_wa_id`
   não-opcional, 500 em `GET /tenants/me/conversations`) já foi corrigido diretamente — ver
   `docs/CHECKPOINT_patient_channel_identity.md`.
 - **`_TEMPLATES` (`services/email.py`) sem a chave `"patient_access_otp"`** — achado 2026-09-09
@@ -265,10 +280,68 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
   aviso de código e verifica inline no chat. `FlowState` novos com saída limitada por tempo. Não
   toca no fluxo de agendamento em si nem no canal WhatsApp. Depende do CHECKPOINT de
   `PROMPT_BRAIN_MESSAGE_PORTAL_SESSAO_PENDENTE.md` (brain-api, onda 1). **EXECUTADO 2026-09-17 —
-  BUILT localmente, UNCOMMITTED e NÃO DEPLOYADO; contrato do brain-api ampliado antes da
-  implementação, dois estados com TTL + “quer continuar?”, OTP redigido do transcript e regressões
-  explícitas de WhatsApp/PreCheck; ver `docs/CHECKPOINT_secretaria_email_otp_inline.md`. Deploy exige
-  primeiro a migração `0022` + brain-api, depois `secretaria_api` e `secretaria-worker` juntos.**
+  COMMITADO/PUSHED em `main` (`2bda47b`) e observado em produção no fingerprint Linux
+  `8d7c6951e7fa`; o primeiro E2E revelou depois um gate de ativação do WhatsApp herdado
+  indevidamente por `brain_message`, corrigido no sucessor `b2f3055`. O contrato do brain-api foi
+  ampliado antes da implementação, com dois estados TTL + “quer continuar?”, OTP redigido e
+  regressões WhatsApp/PreCheck; ver `docs/CHECKPOINT_secretaria_email_otp_inline.md`.**
+- `z_prompts/PROMPT_BRAIN_MESSAGE_FECHAR_ONDA_2_ROLLOUT_E2E.md` (raiz de BRAIN, gerado 2026-09-17
+  via `$prompt-generator`, revisado após o primeiro QA) — handoff de fechamento da onda 2. O
+  fingerprint `8d7c6951e7fa` foi confirmado como o build Linux correto de `2bda47b`; o transcript
+  vazio veio do gate WhatsApp `Tenant.is_active` aplicado indevidamente ao canal `brain_message`.
+  A correção mínima e o teste estão commitados/pushed em `main@b2f3055` (fingerprint Linux esperado
+  `4b6bd25a508d`), com 2164 testes verdes. Falta comprovar Deploy/Rebuild conjunto de API+worker e
+  concluir o E2E greeting → e-mail → LGPD → consulta → OTP, redaction e idempotência.
+  **EXECUTADO 2026-09-17 — ONDA 2 FECHADA.** O rollout de `b2f3055` (`4b6bd25a508d`) destravou o
+  canal e expôs um defeito pré-existente a jusante: o agendamento pelo Portal gravava o `patient_ref`
+  (UUID de 36 chars) em `appointments.phone`, que é `VARCHAR(32)` — o Postgres recusava o INSERT,
+  a transação fazia rollback e o evento já criado no Google ficava órfão. Corrigido em `697c24a`
+  (`595b1f80df8c`), deployado com autorização explícita do dono, e os passos 1 a 15 do E2E foram
+  provados no runtime da clínica QA. Ver a seção "Rollout e prova em produção" de
+  `docs/CHECKPOINT_secretaria_email_otp_inline.md` e `tasks/TASK-002/TASK.md` (BRAIN).
+  Dois defeitos abertos ficaram registrados lá: DEF-2 (fuso na tela de cancelar/gerenciar) e
+  DEF-3 (calendário indisponível e falha de persistência dizem a mesma coisa ao paciente).
+- `z_prompts/PROMPT_BRAIN_MESSAGE_OTP_PORTAO_ANTES_DA_CONSULTA.md` (raiz de BRAIN, gerado 2026-09-17
+  via `/prompt-generator`) — **emenda que reverte, para o canal `brain_message`, a regra "onda 2
+  FECHADA" acima ("consulta antes do código")**: um E2E manual em produção (clínica "Chrysostomo
+  For Eyes") achou que uma mensagem fora do formato de 6 dígitos derruba
+  `FlowState.AWAITING_EMAIL_CODE` para `IDLE` (`workers/tasks.py:1026-1049`, por desenho — "a conta
+  é uma oferta, não um portão") e a mensagem seguinte com o código correto cai na LLM genérica, que
+  alucina "código verificado e conta ativada" sem nenhuma tool real por trás (`ai/` não tem nenhuma
+  noção de `verify_code`/OTP; a única mensagem de sucesso real é
+  `CODE_ACCEPTED_MESSAGE`/`services/pending_identity.py:126`, usada só em
+  `workers/tasks.py:2654-2673`). O dono decidiu reverter: código de 6 dígitos vira portão antes da
+  consulta ser criada de verdade (banco + Google Calendar), com reserva temporária do horário por
+  10 minutos e dois botões novos na mensagem de pedido de código ("Abrir e-mail" com logo por
+  provedor, "Reenviar Código" — reenvio só por botão, nunca por linguagem natural livre). Pede
+  também uma proteção estrutural de propósito geral: a LLM de fallback nunca pode afirmar uma ação
+  de segurança (verificação, pagamento, etc.) sem uma tool call real no mesmo turno — checar skills
+  existentes e, se faltar, criar uma via `skill-creator`. **NÃO EXECUTADO ainda.**
+- `z_prompts/PLANO_PORTAL_API_MVP.md` (raiz de BRAIN, gerado 2026-09-17) — prioridade atual do dono:
+  terminar o MVP da API de mensageria do Portal (estilo WhatsApp, documentada, adaptável a qualquer
+  produto) antes de retomar `PLANO_ATUALIZADO_LOGIN_E_FLUXO_PACIENTE_PRECHECK.md`. A Onda 0 desse
+  plano é o item **`PROMPT_BRAIN_MESSAGE_SECRETARIA_CONSOLE_SEND_CHANNEL_DISPATCH.md`** listado acima
+  (EXECUTADO 2026-09-18, BUILT e uncommitted — ver acima) — pré-requisito explícito, porque a peça de anexo abaixo edita a MESMA
+  função. Peça deste repo: `z_prompts/PROMPT_BRAIN_MESSAGE_ANEXOS_SECRETARIA_2_SECRETARIA.md`
+  (Opus 5, alto) — anexo de arquivo no canal Brain-Message: coluna JSON `messages.attachment`
+  (mesmo espírito de `messages.interactive`), armazenamento PRÓPRIO em R2 (cópia do padrão do
+  `PreCheck/app/services/r2.py`, credenciais e bucket novos, sem chamar o serviço do PreCheck),
+  `ChannelSender.send_media` novo, e escopo deliberadamente limitado a transporte (o bot confirma o
+  recebimento; não há OCR/IA de visão — isso é diferenciação do PreCheck, não desta API). Depende do
+  pré-requisito acima e da parte 1 (`brain-api`, mesmo plano). **NÃO EXECUTADO.**
+- `z_prompts/PROMPT_BRAIN_MESSAGE_STATUS_ENTREGA_1_SECRETARIA.md` (Opus 5, alto; adicionada
+  2026-09-18, achado do dono no console real) — Onda 3 de `PLANO_PORTAL_API_MVP.md`: "enviada,
+  recebida e vista, assim como faz o WhatsApp" não funciona hoje. Causa confirmada nos DOIS
+  canais: `workers/tasks.py::process_webhook_event` recebe `value.statuses` do Meta (evento real
+  de entrega/leitura) e nunca lê esse campo; `Message` não tem coluna de status nenhuma.
+  Colunas novas `delivered_at`/`read_at`/`failed_at`/`failure_reason`/`updated_at`; WhatsApp
+  passa a consumir o `statuses[]` que já chega (idempotente, nunca regride um estado mais
+  avançado); Brain-Message trata entrega como imediata e ganha duas rotas novas de "marcar como
+  lido" (paciente e staff), nunca aplicável a um paciente `channel="whatsapp"` (só o Meta confirma
+  leitura ali); o cursor `since` das listagens muda de `created_at` para `updated_at`, senão o
+  tique nunca avança para quem já buscou a mensagem antes da mudança de status. Sequencie DEPOIS
+  da peça de anexos acima (mesmos arquivos: `models/message.py`, `schemas/internal.py`,
+  `api/internal.py`, `api/hub/conversations.py`). **NÃO EXECUTADO.**
 
 ## graphify
 

@@ -30,12 +30,16 @@ an unwritten row means the patient is answered with silence. So the
 Brain-Message sender writes the row ITSELF, for every send, and the three
 callers that would otherwise write a second one skip theirs when
 `persists_outbound` is True. The flag is the honest name for that asymmetry
-rather than a special case buried in the callers.
+rather than a special case buried in the callers. A caller that has to hand
+the row back - the staff console answers its POST with it - reads it by the
+id the sender reports under `RECORDED_MESSAGE_ID`, never by writing its own.
 """
 
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
-from uuid import UUID
+from uuid import UUID, uuid4
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.logging import get_logger
 from secretaria.models import Conversation, Message, MessageDirection, MessageSender
@@ -48,6 +52,11 @@ logger = get_logger(__name__)
 # on without importing the model layer for a string.
 CHANNEL_WHATSAPP = "whatsapp"
 CHANNEL_BRAIN_MESSAGE = "brain_message"
+
+# The key under which a sender that writes its own row (`persists_outbound`)
+# reports that row's id in its send response. Not the Graph API's
+# `messages[0].id` on purpose - see `BrainMessageSender._record`.
+RECORDED_MESSAGE_ID = "recorded_message_id"
 
 
 def interactive_history_body(body: str, labels: list[str]) -> str:
@@ -125,7 +134,7 @@ class ChannelSender(Protocol):
 
 
 class BrainMessageSender:
-    """Deliver a bot reply to a Brain-Message patient by recording it.
+    """Deliver a reply to a Brain-Message patient by recording it.
 
     There is no network leg. The patient's console polls
     `GET /internal/brain-message/conversations/{external_id}/messages`, so
@@ -134,56 +143,97 @@ class BrainMessageSender:
 
     Each send opens its own short transaction, mirroring `_dispatch_bubbles`:
     the inbound turn's transaction has already committed by the time replies go
-    out, and one failed bubble must not roll back the ones before it.
+    out, and one failed bubble must not roll back the ones before it. A caller
+    with a unit of work of its own passes `session` instead of
+    `session_factory`: the row is then flushed into THAT session and never
+    committed here, so it lands together with whatever the caller writes next -
+    the staff console's handover flip - or not at all.
 
     `to` (the patient's `external_id`) is accepted and ignored: the conversation
     this sender was built for is the address. Keeping the parameter is what lets
     `WhatsAppClient` and this class share call sites.
+
+    `author` is who the row says spoke. The bot's paths
+    (`workers/tasks.py::_reply_sender`, `plugins/pending_identity.py`) keep the
+    default, BOT, which also stamps `conversation.last_bot_message_at`. The staff
+    console (`api/hub/conversations.py::_staff_sender`) passes HUMAN: the reply
+    then reads as the clinic, not the secretarIA, in both transcripts, and the
+    bot's clock is left alone - the human turn is recorded by
+    `HandoverManager.set_human_active`, which that caller runs itself. PATIENT
+    is refused: an outbound row authored by the patient is a contradiction, not
+    a variant.
     """
 
     persists_outbound = True
 
-    def __init__(self, *, conversation_id: UUID, session_factory) -> None:
+    def __init__(
+        self,
+        *,
+        conversation_id: UUID,
+        session_factory=None,
+        session: AsyncSession | None = None,
+        author: MessageSender = MessageSender.BOT,
+    ) -> None:
+        author = MessageSender(author)
+        if author == MessageSender.PATIENT:
+            raise ValueError("an outbound Brain-Message cannot be authored by the patient")
         self._conversation_id = conversation_id
         # Injected rather than imported so tests wire the same in-memory engine
         # they already monkeypatch onto `workers.tasks.async_session_factory`.
         self._session_factory = session_factory
+        self._session = session
+        self._author = author
 
     async def _record(self, body: str, interactive: dict | None = None) -> dict:
-        """Persist one outbound message. Returns the empty send response.
+        """Persist one outbound message. Returns the send response.
 
         `interactive` is the card a reply-button / list send put on the
         patient's screen (`Message.interactive`), the same record
         `workers/tasks.py::_record_outbound` stores for WhatsApp; `body` stays
         the flattened history text either way.
 
-        `{}` on purpose: `_extract_sent_wam_id` reads `["messages"][0]["id"]`
-        out of it and already returns None for a shape it cannot walk, so a
-        caller that still writes its own row (none do today - they check
-        `persists_outbound` first) would produce `wam_id=None`, which is exactly
-        right for a message Meta never saw.
+        The response holds the new row's id under `RECORDED_MESSAGE_ID`, and
+        deliberately NOT in the Graph API's `["messages"][0]["id"]` slot:
+        `_extract_sent_wam_id` walks that path, so a caller that still wrote its
+        own row (none do - they check `persists_outbound` first) gets
+        `wam_id=None`, exactly right for a message Meta never saw, instead of
+        this row's UUID posing as a wamid. The id is for the caller that must
+        hand the row back: the staff console answers its POST with it.
         """
-        async with self._session_factory() as session:
-            async with session.begin():
-                session.add(
-                    Message(
-                        conversation_id=self._conversation_id,
-                        direction=MessageDirection.OUTBOUND,
-                        sender=MessageSender.BOT,
-                        # No Meta id exists for a message Meta never carried.
-                        wam_id=None,
-                        body=body,
-                        interactive=interactive,
-                    )
-                )
-                conversation = await session.get(Conversation, self._conversation_id)
-                if conversation is not None:
-                    conversation.last_bot_message_at = datetime.now(UTC)
+        message_id = uuid4()
+        message = Message(
+            id=message_id,
+            conversation_id=self._conversation_id,
+            direction=MessageDirection.OUTBOUND,
+            sender=self._author,
+            # No Meta id exists for a message Meta never carried.
+            wam_id=None,
+            body=body,
+            interactive=interactive,
+        )
+        if self._session is not None:
+            # The caller's unit of work: flushed here, committed - or rolled
+            # back - by the caller, together with everything else it writes.
+            await self._write(self._session, message)
+            await self._session.flush()
+        else:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    await self._write(session, message)
         logger.info(
             "brain_message_outbound_recorded",
             conversation_id=str(self._conversation_id),
+            author=self._author.value,
         )
-        return {}
+        return {RECORDED_MESSAGE_ID: str(message_id)}
+
+    async def _write(self, session: AsyncSession, message: Message) -> None:
+        """Add the row; a bot turn also starts the bot's clock on the conversation."""
+        session.add(message)
+        if self._author == MessageSender.BOT:
+            conversation = await session.get(Conversation, self._conversation_id)
+            if conversation is not None:
+                conversation.last_bot_message_at = datetime.now(UTC)
 
     async def send_text_message(self, to: str, body: str) -> dict:
         return await self._record(body)

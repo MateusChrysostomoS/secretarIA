@@ -2,7 +2,8 @@
 
 **Estado:** BUILT, commitado. O envio do staff foi corrigido depois para despachar por canal — ver
 `docs/CHECKPOINT_brain_message_e2e_qa.md` §2 (a previsão da §8.1 abaixo se concretizou em produção
-em 2026-09-09: era 502, não 500).
+em 2026-09-09: era 502, não 500). **2026-09-18 (uncommitted):** o despacho passou a ir pelo
+`ChannelSender` de verdade — ver §9 no fim deste arquivo, que substitui a §3.2.
 **Origem:** `z_prompts/PROMPT_BRAIN_MESSAGE_SECRETARIA_CONSOLE_STAFF.md` (prompt 4 de ~10 do
 plano Brain-Message, gerado 2026-09-07). Independente dos outros 9 — não precisou de
 migração de canal nem de conceito novo de identidade de paciente.
@@ -46,7 +47,7 @@ existe hoje nenhum endpoint paginado em `api/hub/` pra copiar um padrão. Pagina
 convenção nova pra um caso que a experiência de console provavelmente nunca estressa; se um
 dia precisar, é aditivo (cursor por `created_at`) e não quebra o contrato atual.
 
-**3.2 — Sem campo/dispatch de canal.** `PROMPT_BRAIN_MESSAGE_SECRETARIA_PIPELINE_CANAL.md`
+**3.2 — Sem campo/dispatch de canal.** *(Superada — ver §9.)* `PROMPT_BRAIN_MESSAGE_SECRETARIA_PIPELINE_CANAL.md`
 (que introduziria `Conversation.channel`) **não rodou** — confirmado no `CLAUDE.md` deste
 repo ("PENDENTES — nenhum executado ainda") e por grep: não existe `channel` em
 `models/conversation.py` nem em nenhum lugar do código de mensageria (os únicos hits de
@@ -139,3 +140,83 @@ mesmo estado atual do working tree, não em snapshots separados.
   continuam pendentes, não executados nesta sessão (fora de escopo deste prompt).
 - Consumidor real (`PROMPT_FABLE_BRAIN_MESSAGE_CONSOLE_REAL.md`, no
   `Brain-Message-Frontend`) ainda não escrito.
+
+## 9. 2026-09-18 — despacho por canal via `ChannelSender` (substitui a §3.2)
+
+**Origem:** `z_prompts/PROMPT_BRAIN_MESSAGE_SECRETARIA_CONSOLE_SEND_CHANNEL_DISPATCH.md` (Onda 0 de
+`z_prompts/PLANO_PORTAL_API_MVP.md`). **Estado:** BUILT, suíte completa verde (2176 passed — a
+baseline registrada era 2165, +11 testes novos), `ruff check` limpo nos arquivos tocados,
+revisado por um subagente independente (read-only; o achado dele está nas decisões abaixo),
+UNCOMMITTED, não deployado.
+
+**O que já existia:** `5b8bfdf` (2026-09-09) conteve o 502 com um `if patient.channel ==
+CHANNEL_BRAIN_MESSAGE: return {}` inline, com a própria rota gravando a linha — de propósito FORA
+do `ChannelSender`, porque `BrainMessageSender` era fixo em `sender=BOT` e carimbava
+`last_bot_message_at`. Funcionava, mas deixava dois escritores do formato da linha Brain-Message
+(bot e staff), e a peça seguinte do plano (anexos, `send_media`) pede o despacho pelo sender.
+
+**O que mudou:**
+- `services/channel_sender.py::BrainMessageSender` ganhou `author` (keyword, padrão `BOT`). `BOT`
+  mantém exatamente o comportamento anterior (worker `_reply_sender`, `plugins/pending_identity.py`
+  — nenhum call site mudou); `HUMAN` grava a linha como a clínica e NÃO carimba
+  `last_bot_message_at` (o turno humano é do `HandoverManager`); `PATIENT` levanta `ValueError`.
+- `_record` devolve `{RECORDED_MESSAGE_ID: "<uuid>"}` em vez de `{}`. O id fica FORA do slot
+  `messages[0].id` do Graph de propósito, pra nunca ser gravado como `wam_id`. Nenhum consumidor
+  lia o `{}` (grep: o worker só usa a resposta em `_record_outbound`, que é pulado quando
+  `persists_outbound`; `pending_identity` ignora o retorno).
+- `api/hub/conversations.py`: `_deliver_to_patient` → `_staff_sender` (gêmeo de
+  `workers/tasks.py::_reply_sender`, chave `Patient.channel`), que devolve `(sender, to)`.
+  WhatsApp: idêntico ao anterior (`get_waba_token` → `WhatsAppClient.for_tenant` →
+  `send_text_message(to=wa_id)`; a rota grava a linha HUMAN com o wamid). Brain-Message:
+  `BrainMessageSender(session=<sessão do request>, author=HUMAN)` grava a linha (só `flush`); a
+  rota NÃO grava outra — lê de volta pelo `RECORDED_MESSAGE_ID`, comita junto com o handover e
+  responde com ela. `HandoverManager.set_human_active` continua incondicional nos dois canais. O
+  log `hub_conversation_message_sent` ganhou `channel`.
+
+**Decisões (e por quê):**
+- **O sender escreve na sessão do request — uma transação só.** `BrainMessageSender` ganhou
+  `session=` (além de `session_factory=`): com a sessão do chamador ele só faz `flush`, e o commit
+  da rota publica a resposta JUNTO com o flip de handover, ou nada. A primeira versão desta rodada
+  dava ao sender uma factory derivada do mesmo engine (`async_sessionmaker(session.bind, ...)`) e
+  ele comitava sozinho; a revisão independente (subagente read-only, 2026-09-18) apontou que isso
+  **regredia** o `5b8bfdf`, que era atômico: uma falha entre os dois commits deixava a resposta
+  entregue com o bot ainda no comando, e a equipe, vendo erro, reenviaria (duplicata) — além de
+  segurar uma 2ª conexão do pool por envio. Com `session=` os dois problemas somem; o teste
+  `test_send_message_brain_message_reply_and_takeover_commit_together` fixa isso. O worker segue
+  com `session_factory` (uma transação por bolha, por desenho). No WhatsApp a janela "entregou,
+  commit falhou" continua existindo e é inevitável (a perna de rede não entra em transação).
+- **Erro:** os dois 502 (`TenantWhatsAppCredentialMissing`, `httpx.HTTPError`) agora só podem vir
+  do ramo WhatsApp — o texto "WhatsApp" ficou correto por construção. Falha do Brain-Message é
+  escrita no banco deste serviço: propaga como 500 (não é gateway) e a unidade de trabalho inteira
+  é revertida — nada gravado, handover intacto, retry sem duplicata. O `Brain-Message-Frontend`
+  (`lib/real/console-api.real.ts::sendMessage`) trata qualquer não-2xx como "não enviada" — nada a
+  mudar lá.
+- **`to=` do WhatsApp segue `wa_id`, não `external_id`:** linhas gravadas por um worker pré-canal
+  na janela de deploy misto podem ter `external_id=NULL` (comentário da constraint em
+  `models/patient.py`).
+
+**`WhatsAppClient.send_text_message(to=None)` hoje** (pergunta do prompt, §1): não levanta
+localmente. `wa_suffix(None)` devolve None, o payload sai com `"to": null`, a chamada HTTP
+autenticada vai de fato à Graph API, a Meta responde 400 e `raise_for_status()` levanta
+`httpx.HTTPStatusError`, que a rota mapeava pra 502 "Failed to deliver message via WhatsApp"
+(foi o que se viu em produção em 2026-09-09). Nada chega a destinatário nenhum, mas a chamada gasta
+o token da clínica e culpa o canal errado. Com o despacho, esse caminho ficou inalcançável a partir
+do console.
+
+**Testes (`tests/test_hub_conversations.py`):** o de não-regressão original do WhatsApp
+(`test_send_message_persists_as_human_and_delivers_via_whatsapp`) ficou INTOCADO e passa. Novos:
+WhatsApp nunca constrói `BrainMessageSender`; Brain-Message passa pelo `BrainMessageSender` real
+(spy que delega) como HUMAN, com exatamente 1 linha, resposta = a linha e `last_bot_message_at`
+intocado; `HandoverManager.set_human_active` chamado 1× nos dois canais (parametrizado); falha de
+escrita do Brain-Message não persiste nada nem vira 502; falha do handover DEPOIS do envio reverte
+a resposta junto (o achado da revisão); e 5 testes do contrato do sender (padrão BOT, HUMAN,
+PATIENT recusado, id fora do slot do wamid, `session=` deixa o commit pro chamador).
+
+**Skill nova:** `TECH/.claude/skills/channel-aware-dispatch/` — o invariante "todo envio escolhe o
+sender pelo canal via `ChannelSender`", com os próximos locais que ainda assumem WhatsApp
+(`plugins/reminders.py`, `services/payments/deposit_lifecycle.py` — fora de escopo aqui por serem
+decisão de produto, não bug de despacho).
+
+**Pendências:** commit (sessão de auditoria separada, padrão deste plano); deploy do
+`secretaria_api` (o worker importa `channel_sender.py`, mas só no padrão BOT, idêntico — deployar
+os dois apenas mantém `deploy_parity=match`).

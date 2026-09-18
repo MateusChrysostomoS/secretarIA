@@ -24,6 +24,7 @@ import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
 from httpx import AsyncClient  # noqa: E402
 from sqlalchemy import select  # noqa: E402
+from sqlalchemy.exc import SQLAlchemyError  # noqa: E402
 from sqlalchemy.ext.asyncio import (  # noqa: E402
     AsyncSession,
     async_sessionmaker,
@@ -36,6 +37,11 @@ from secretaria.api.hub.deps import get_current_tenant  # noqa: E402
 from secretaria.core.database import Base, get_session  # noqa: E402
 from secretaria.models import Conversation, HandoverState, Message, Patient, Tenant  # noqa: E402
 from secretaria.models.message import MessageDirection, MessageSender  # noqa: E402
+from secretaria.services.channel_sender import (  # noqa: E402
+    RECORDED_MESSAGE_ID,
+    BrainMessageSender,
+)
+from secretaria.services.handover import HandoverManager  # noqa: E402
 
 ENDPOINT = "/tenants/me/conversations"
 
@@ -172,6 +178,50 @@ class _FailingWhatsAppClient:
 
     async def send_text_message(self, to, body):
         raise httpx.ConnectError("whatsapp down")
+
+
+class _SpyBrainMessageSender(BrainMessageSender):
+    """The REAL Brain-Message sender, remembering how it was built and what it sent.
+
+    Every write is delegated to `BrainMessageSender`, so the row a test asserts on
+    is the one production writes — the spy only proves the endpoint went through it.
+    """
+
+    built: list["_SpyBrainMessageSender"] = []
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.kwargs = kwargs
+        self.sent: list[tuple] = []
+        _SpyBrainMessageSender.built.append(self)
+
+    async def send_text_message(self, to, body):
+        self.sent.append((to, body))
+        return await super().send_text_message(to=to, body=body)
+
+
+class _FailingBrainMessageSender(BrainMessageSender):
+    """The Brain-Message write itself fails — this service's own database, not an upstream."""
+
+    async def _record(self, body, interactive=None):
+        raise SQLAlchemyError("database unavailable")
+
+
+class _SpyHandoverManager(HandoverManager):
+    """The real manager, recording which conversations a send took over."""
+
+    taken_over: list = []
+
+    async def set_human_active(self, conversation):
+        _SpyHandoverManager.taken_over.append(conversation.id)
+        await super().set_human_active(conversation)
+
+
+class _ExplodingHandoverManager(HandoverManager):
+    """The takeover fails AFTER the reply was already written into the session."""
+
+    async def set_human_active(self, conversation):
+        raise SQLAlchemyError("connection dropped before the commit")
 
 
 # --------------------------------------------------------------------------
@@ -662,3 +712,237 @@ async def test_send_message_to_brain_message_patient_persists_without_touching_w
     persisted_conv = await _get_conversation_row(db, conv.id)
     assert persisted_conv.handover_state == HandoverState.HUMAN_ACTIVE
     assert persisted_conv.last_human_message_at is not None
+
+
+# --------------------------------------------------------------------------
+# POST /messages — channel dispatch through services/channel_sender.py
+# --------------------------------------------------------------------------
+
+
+async def test_send_message_to_whatsapp_patient_never_builds_a_brain_message_sender(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-regression for the dispatch itself, on the channel in production today.
+
+    A WhatsApp patient's reply still leaves over the Graph API — never "delivered"
+    into a table only the portal reads, which would be silence for a WhatsApp
+    patient — and the endpoint still writes the one history row, with the wamid.
+    """
+    _FakeWhatsAppClient.created.clear()
+    _SpyBrainMessageSender.built.clear()
+    monkeypatch.setattr(hub_conversations, "WhatsAppClient", _FakeWhatsAppClient)
+    monkeypatch.setattr(hub_conversations, "BrainMessageSender", _SpyBrainMessageSender)
+
+    patient = await _seed_patient(db, tenant, wa_id="5511987654321")
+    conv = await _seed_conversation(db, tenant, patient, handover_state=HandoverState.BOT_ACTIVE)
+
+    response = await client.post(f"{ENDPOINT}/{conv.id}/messages", json={"body": "Pode vir às 15h"})
+    assert response.status_code == 200
+
+    assert _SpyBrainMessageSender.built == []
+    assert [c.sent for c in _FakeWhatsAppClient.created] == [[("5511987654321", "Pode vir às 15h")]]
+    rows = await _get_message_rows(db, conv.id)
+    assert len(rows) == 1
+    assert response.json()["id"] == str(rows[0].id)
+    assert rows[0].sender == MessageSender.HUMAN
+    assert rows[0].wam_id == "wamid.console.1"
+
+
+async def test_send_message_to_brain_message_patient_goes_through_its_channel_sender(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Brain-Message staff reply is dispatched by `BrainMessageSender`, as HUMAN.
+
+    The row that sender writes IS the delivery (`persists_outbound`), so the
+    endpoint must not write a second one and must answer with THAT row. And a
+    staff reply is a human turn: the handover flips and stamps the human clock,
+    while the bot's clock — which the same sender stamps on the bot path — stays
+    untouched.
+    """
+    _FakeWhatsAppClient.created.clear()
+    _SpyBrainMessageSender.built.clear()
+    monkeypatch.setattr(hub_conversations, "WhatsAppClient", _FakeWhatsAppClient)
+    monkeypatch.setattr(hub_conversations, "BrainMessageSender", _SpyBrainMessageSender)
+
+    external_id = str(uuid4())
+    patient = await _seed_patient(
+        db,
+        tenant,
+        wa_id=None,
+        channel="brain_message",
+        external_id=external_id,
+        name="Paciente Brain-Message",
+    )
+    conv = await _seed_conversation(db, tenant, patient, handover_state=HandoverState.BOT_ACTIVE)
+
+    response = await client.post(f"{ENDPOINT}/{conv.id}/messages", json={"body": "Pode vir às 15h"})
+    assert response.status_code == 200
+    body = response.json()
+
+    # Dispatched by the channel's own sender, as the clinic — no network leg.
+    assert len(_SpyBrainMessageSender.built) == 1
+    sender = _SpyBrainMessageSender.built[0]
+    assert sender.kwargs["conversation_id"] == conv.id
+    assert sender.kwargs["author"] == MessageSender.HUMAN
+    assert sender.sent == [(external_id, "Pode vir às 15h")]
+    assert _FakeWhatsAppClient.created == []
+
+    # Exactly one row — the sender's — and the endpoint answers with it.
+    rows = await _get_message_rows(db, conv.id)
+    assert len(rows) == 1
+    assert body["id"] == str(rows[0].id)
+    assert body["sender"] == "human"
+    assert rows[0].sender == MessageSender.HUMAN
+    assert rows[0].direction == MessageDirection.OUTBOUND
+    assert rows[0].body == "Pode vir às 15h"
+    assert rows[0].wam_id is None
+
+    persisted_conv = await _get_conversation_row(db, conv.id)
+    assert persisted_conv.handover_state == HandoverState.HUMAN_ACTIVE
+    assert persisted_conv.last_human_message_at is not None
+    assert persisted_conv.last_bot_message_at is None
+
+
+@pytest.mark.parametrize("channel", ["whatsapp", "brain_message"])
+async def test_send_message_takes_the_conversation_over_on_both_channels(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch, channel: str
+) -> None:
+    """`HandoverManager.set_human_active` runs once per staff send, on every channel."""
+    _SpyHandoverManager.taken_over.clear()
+    monkeypatch.setattr(hub_conversations, "WhatsAppClient", _FakeWhatsAppClient)
+    monkeypatch.setattr(hub_conversations, "HandoverManager", _SpyHandoverManager)
+
+    if channel == "brain_message":
+        patient = await _seed_patient(
+            db, tenant, wa_id=None, channel="brain_message", external_id=str(uuid4())
+        )
+    else:
+        patient = await _seed_patient(db, tenant)
+    conv = await _seed_conversation(db, tenant, patient, handover_state=HandoverState.BOT_ACTIVE)
+
+    response = await client.post(f"{ENDPOINT}/{conv.id}/messages", json={"body": "oi"})
+    assert response.status_code == 200
+    assert _SpyHandoverManager.taken_over == [conv.id]
+
+
+async def test_send_message_brain_message_write_failure_persists_nothing_and_is_not_a_502(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Brain-Message send is a write to this service's own database, not an upstream call.
+
+    So its failure is not mapped to the WhatsApp-worded 502: it propagates as the
+    server error it is (the app raises here; over HTTP that is a 500). And exactly
+    as with a failed WhatsApp send, nothing is persisted and the conversation is not
+    taken over.
+    """
+    _FakeWhatsAppClient.created.clear()
+    monkeypatch.setattr(hub_conversations, "WhatsAppClient", _FakeWhatsAppClient)
+    monkeypatch.setattr(hub_conversations, "BrainMessageSender", _FailingBrainMessageSender)
+
+    patient = await _seed_patient(
+        db, tenant, wa_id=None, channel="brain_message", external_id=str(uuid4())
+    )
+    conv = await _seed_conversation(db, tenant, patient, handover_state=HandoverState.BOT_ACTIVE)
+
+    with pytest.raises(SQLAlchemyError):
+        await client.post(f"{ENDPOINT}/{conv.id}/messages", json={"body": "oi"})
+
+    assert _FakeWhatsAppClient.created == []
+    assert await _get_message_rows(db, conv.id) == []
+    persisted_conv = await _get_conversation_row(db, conv.id)
+    assert persisted_conv.handover_state == HandoverState.BOT_ACTIVE
+    assert persisted_conv.last_human_message_at is None
+
+
+async def test_send_message_brain_message_reply_and_takeover_commit_together(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Brain-Message reply and the takeover land in one commit, or neither does.
+
+    Found by the independent review of this change (2026-09-18): with the sender
+    committing on its own connection, a failure between that commit and the
+    handover commit left the reply delivered to the patient while the bot stayed
+    in charge — and the staff, seeing an error, would send it again. The sender
+    now writes into the request's session, so a failed takeover takes the reply
+    with it.
+    """
+    monkeypatch.setattr(hub_conversations, "HandoverManager", _ExplodingHandoverManager)
+
+    patient = await _seed_patient(
+        db, tenant, wa_id=None, channel="brain_message", external_id=str(uuid4())
+    )
+    conv = await _seed_conversation(db, tenant, patient, handover_state=HandoverState.BOT_ACTIVE)
+
+    with pytest.raises(SQLAlchemyError):
+        await client.post(f"{ENDPOINT}/{conv.id}/messages", json={"body": "oi"})
+
+    assert await _get_message_rows(db, conv.id) == []
+    persisted_conv = await _get_conversation_row(db, conv.id)
+    assert persisted_conv.handover_state == HandoverState.BOT_ACTIVE
+
+
+# --------------------------------------------------------------------------
+# BrainMessageSender — the authorship / row-id contract this endpoint relies on
+# (services/channel_sender.py; the bot path keeps the BOT default)
+# --------------------------------------------------------------------------
+
+
+async def _seed_brain_message_conversation(db, tenant: Tenant) -> tuple[Patient, Conversation]:
+    patient = await _seed_patient(
+        db, tenant, wa_id=None, channel="brain_message", external_id=str(uuid4())
+    )
+    return patient, await _seed_conversation(db, tenant, patient)
+
+
+async def test_brain_message_sender_default_author_is_still_the_bot(db, tenant) -> None:
+    """The bot path passes no author: its rows stay BOT and still start the bot's clock."""
+    patient, conv = await _seed_brain_message_conversation(db, tenant)
+    sender = BrainMessageSender(conversation_id=conv.id, session_factory=db)
+
+    response = await sender.send_text_message(to=patient.external_id, body="Olá!")
+
+    rows = await _get_message_rows(db, conv.id)
+    assert [row.sender for row in rows] == [MessageSender.BOT]
+    assert response == {RECORDED_MESSAGE_ID: str(rows[0].id)}
+    assert (await _get_conversation_row(db, conv.id)).last_bot_message_at is not None
+
+
+async def test_brain_message_sender_human_author_leaves_the_bot_clock_alone(db, tenant) -> None:
+    patient, conv = await _seed_brain_message_conversation(db, tenant)
+    sender = BrainMessageSender(
+        conversation_id=conv.id, session_factory=db, author=MessageSender.HUMAN
+    )
+
+    await sender.send_text_message(to=patient.external_id, body="Aqui é a recepção")
+
+    rows = await _get_message_rows(db, conv.id)
+    assert [row.sender for row in rows] == [MessageSender.HUMAN]
+    assert (await _get_conversation_row(db, conv.id)).last_bot_message_at is None
+
+
+async def test_brain_message_sender_with_a_session_leaves_the_commit_to_the_caller(
+    db, tenant
+) -> None:
+    """Built with the caller's `session`, the sender only flushes: the caller's
+    rollback takes the row with it — what makes the console's send atomic."""
+    patient, conv = await _seed_brain_message_conversation(db, tenant)
+    async with db() as session:
+        sender = BrainMessageSender(
+            conversation_id=conv.id, session=session, author=MessageSender.HUMAN
+        )
+        await sender.send_text_message(to=patient.external_id, body="oi")
+        await session.rollback()
+
+    assert await _get_message_rows(db, conv.id) == []
+
+
+def test_brain_message_sender_refuses_a_patient_authored_outbound() -> None:
+    with pytest.raises(ValueError):
+        BrainMessageSender(
+            conversation_id=uuid4(), session_factory=None, author=MessageSender.PATIENT
+        )
+
+
+def test_recorded_message_id_never_reads_as_a_wamid() -> None:
+    """The row id travels outside `messages[0].id`, so no caller can store it as `wam_id`."""
+    assert hub_conversations._extract_wam_id({RECORDED_MESSAGE_ID: str(uuid4())}) is None

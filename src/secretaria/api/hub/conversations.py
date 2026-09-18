@@ -24,9 +24,9 @@ A staff send is recorded the same way `smb_message_echoes` already records a
 human reply sent from the WhatsApp app
 (`workers/tasks.py::_persist_human_echo`): `Message(direction=OUTBOUND,
 sender=MessageSender.HUMAN)` + `HandoverManager.set_human_active`, so the two
-paths never diverge in behavior. Delivery goes through `_deliver_to_patient`,
-which branches on `Patient.channel` — the single place in this router that
-knows more than one channel exists.
+paths never diverge in behavior. Delivery goes through `_staff_sender`, which
+picks a `services/channel_sender.py::ChannelSender` by `Patient.channel` — the
+single place in this router that knows more than one channel exists.
 """
 
 from datetime import datetime
@@ -52,7 +52,13 @@ from secretaria.schemas.conversation import (
     MessageSend,
     interactive_read_or_none,
 )
-from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
+from secretaria.services.channel_sender import (
+    CHANNEL_BRAIN_MESSAGE,
+    RECORDED_MESSAGE_ID,
+    BrainMessageSender,
+    ChannelSender,
+    sender_persists_outbound,
+)
 from secretaria.services.handover import HandoverManager
 from secretaria.services.tenant_config import get_waba_token
 from secretaria.services.whatsapp import TenantWhatsAppCredentialMissing, WhatsAppClient
@@ -128,46 +134,50 @@ def _extract_wam_id(send_response: dict) -> str | None:
         return None
 
 
-async def _deliver_to_patient(
-    session: AsyncSession, tenant: Tenant, patient: Patient, body: str
-) -> dict:
-    """Deliver `body` to `patient` on the channel they actually reached the clinic on.
+async def _staff_sender(
+    session: AsyncSession, tenant: Tenant, conversation: Conversation, patient: Patient
+) -> tuple[ChannelSender, str | None]:
+    """The sender that delivers a staff reply to `patient`, and the address it takes.
 
-    Raises rather than pretending to send, so the caller never persists a Message for
-    a delivery that did not happen.
+    The staff-side twin of `workers/tasks.py::_reply_sender`, keyed on
+    `Patient.channel` because this path holds the patient row rather than a
+    `_ReplyContext`. Like it, anything that is not Brain-Message is WhatsApp —
+    the column holds only those two values today.
 
-    The two channels disagree about what "delivered" MEANS, and that is the whole
-    reason this branches (the same asymmetry `services/channel_sender.py` documents
-    for the bot path):
+    The two channels disagree about what "delivered" MEANS (the asymmetry
+    `services/channel_sender.py` documents as `persists_outbound`):
 
-    - WhatsApp: the reply exists because Meta carried it. The network call IS the
-      delivery and the `Message` row written afterwards is a history copy.
-    - Brain-Message: there is no network leg and no phone number. The patient's
-      console polls `GET /internal/brain-message/conversations/{external_id}/messages`,
-      which returns every row on the conversation regardless of sender — so the row
-      the caller writes next IS the delivery. `{}` is the honest send response for
-      that: `_extract_wam_id` walks it to None, which is exactly right for a message
-      Meta never saw.
+    - WhatsApp: exactly what this endpoint always did — the tenant's own client,
+      failing closed on a missing credential (PROMPT_FIX_21), addressed to
+      `wa_id`. Meta carrying the message IS the delivery; the caller writes the
+      history row afterwards, from the send response.
+    - Brain-Message: `BrainMessageSender` authored as HUMAN, writing into THIS
+      request's session. No network leg and no phone number: the patient's
+      portal polls `/internal/brain-message/conversations/{external_id}/messages`,
+      so the row the sender writes IS the delivery — and because it is only
+      flushed, it commits together with the caller's handover flip, or not at
+      all (a sender committing on its own connection left a window where the
+      reply was delivered but the bot still in charge). `external_id` is passed
+      for symmetry; the sender addresses by conversation.
 
-    Deliberately NOT routed through `channel_sender.BrainMessageSender`, even though
-    that class exists and covers the bot path. It hardcodes `sender=BOT` and stamps
-    `conversation.last_bot_message_at`; using it here would label a human staff reply
-    as the secretarIA in the patient's transcript and start the bot's clock on a
-    human turn. It also sets `persists_outbound`, so this endpoint — which must write
-    and RETURN its own row — would produce two. The row this router already writes is
-    the correct one; all Brain-Message needs from delivery is to not make a call.
-
-    Before this branch existed, a `brain_message` patient (`wa_id=None` by design,
-    migration `c7e1a4b9d0f3`) sent `"to": null` to the Graph API, which answered 400
-    and surfaced to the console as a 502 "Failed to deliver message via WhatsApp" —
-    staff simply could not reply on the new channel.
+    History: this endpoint first built a `WhatsAppClient` unconditionally, and a
+    `brain_message` patient (`wa_id=None` by design, migration `c7e1a4b9d0f3`)
+    sent `"to": null` to the Graph API — Meta answered 400, surfaced to the
+    console as a 502 (reproduced live 2026-09-09). `5b8bfdf` stopped that by
+    skipping the call and writing the row in this router. Routing through the
+    channel's own sender instead leaves ONE writer for the Brain-Message row
+    format, bot and staff alike, rather than two to keep in step.
     """
     if patient.channel == CHANNEL_BRAIN_MESSAGE:
-        return {}
+        sender = BrainMessageSender(
+            conversation_id=conversation.id,
+            session=session,
+            author=MessageSender.HUMAN,
+        )
+        return sender, patient.external_id
 
     waba_token = await get_waba_token(session, tenant.id)
-    client = WhatsAppClient.for_tenant(tenant, waba_token)
-    return await client.send_text_message(to=patient.wa_id, body=body)
+    return WhatsAppClient.for_tenant(tenant, waba_token), patient.wa_id
 
 
 @router.get("", response_model=list[ConversationRead])
@@ -257,8 +267,14 @@ async def send_message(
     conversation = await _get_conversation(session, tenant, conversation_id)
     patient = await session.get(Patient, conversation.patient_id)
 
+    # Both 502s come only from the WhatsApp branch — an upstream the clinic
+    # depends on. A Brain-Message send is a write into this request's own
+    # transaction: if it, or anything after it up to the commit below, fails,
+    # the error propagates as the 500 it is and the whole unit of work rolls
+    # back — no reply delivered, no takeover — so a retry cannot duplicate it.
     try:
-        send_response = await _deliver_to_patient(session, tenant, patient, body.body)
+        sender, to = await _staff_sender(session, tenant, conversation, patient)
+        send_response = await sender.send_text_message(to=to, body=body.body)
     except TenantWhatsAppCredentialMissing:
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY, "WhatsApp not configured for this tenant"
@@ -268,17 +284,24 @@ async def send_message(
             status.HTTP_502_BAD_GATEWAY, "Failed to deliver message via WhatsApp"
         ) from None
 
-    # Same persistence shape as `smb_message_echoes`
-    # (workers/tasks.py::_persist_human_echo): a human send always takes the
-    # conversation over, whether it came from the WhatsApp app or from here.
-    message = Message(
-        conversation_id=conversation.id,
-        direction=MessageDirection.OUTBOUND,
-        sender=MessageSender.HUMAN,
-        wam_id=_extract_wam_id(send_response),
-        body=body.body,
-    )
-    session.add(message)
+    if sender_persists_outbound(sender):
+        # Brain-Message: the sender already wrote the row into this session, and
+        # that row IS the delivery (the commit below publishes it together with
+        # the takeover). Answer with it; writing here would be a second.
+        message = await session.get(Message, UUID(send_response[RECORDED_MESSAGE_ID]))
+    else:
+        # WhatsApp: the history copy of what Meta carried, in the same shape as
+        # `smb_message_echoes` (workers/tasks.py::_persist_human_echo).
+        message = Message(
+            conversation_id=conversation.id,
+            direction=MessageDirection.OUTBOUND,
+            sender=MessageSender.HUMAN,
+            wam_id=_extract_wam_id(send_response),
+            body=body.body,
+        )
+        session.add(message)
+    # A human send always takes the conversation over, whichever channel carried
+    # it and whether it came from the WhatsApp app or from here.
     await HandoverManager(session).set_human_active(conversation)
     await session.commit()
     await session.refresh(message)
@@ -287,5 +310,6 @@ async def send_message(
         "hub_conversation_message_sent",
         tenant_id=str(tenant.id),
         conversation_id=str(conversation.id),
+        channel=patient.channel,
     )
     return _message_read_model(message)

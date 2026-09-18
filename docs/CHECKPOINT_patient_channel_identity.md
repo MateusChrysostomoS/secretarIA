@@ -103,17 +103,18 @@ próprio canal Brain-Message chegando a um tenant real:**
   sessão (`schemas/conversation.py:14`, `ConversationRead.patient_wa_id: str |
   None`) + teste de regressão
   `test_list_includes_brain_message_patient_with_no_wa_id`.
-- `_send_via_whatsapp()` **segue quebrado** (não corrigido) — é o próximo a
-  quebrar: staff responde um paciente Brain-Message pelo console e
-  `send_text_message(to=None)` estoura. Precisa ser reescrito pra usar
-  `services/channel_sender.py::ChannelSender`/`BrainMessageSender` (o mesmo
-  Protocol que o pipeline já usa), não `WhatsAppClient` direto.
+- `_send_via_whatsapp()` quebrou como previsto (502 em produção, 2026-09-09) e
+  foi resolvido em duas etapas: `5b8bfdf` conteve o sintoma pulando a chamada
+  de rede; em 2026-09-18 (uncommitted) a rota passou a despachar por
+  `Patient.channel` via `ChannelSender` (`_staff_sender` →
+  `BrainMessageSender(author=HUMAN)` / `WhatsAppClient`) — ver §9 de
+  `docs/CHECKPOINT_console_staff_messages.md`.
 
 ### Assumem não-nulo e QUEBRAM com paciente sem telefone
 
 | local | o quê |
 |---|---|
-| `api/hub/conversations.py` → `_send_via_whatsapp()` | `send_text_message(to=patient.wa_id)` — o próprio docstring diz ser "the one seam a future channel dispatch would branch on". **Ainda quebrado.** |
+| `api/hub/conversations.py` → `_send_via_whatsapp()` | **RESOLVIDO** — `5b8bfdf` (2026-09-09) conteve o 502; em 2026-09-18 virou `_staff_sender`, despacho por `Patient.channel` via `ChannelSender`; `to=patient.wa_id` só sobrevive no ramo WhatsApp |
 | `plugins/reminders.py:214, 221, 239, 280, 285` | 5 envios `to=patient.wa_id`; o join em `:309` não filtra `wa_id IS NOT NULL` |
 | `services/payments/deposit_lifecycle.py:194, 253` | envio e `create_customer(...)` no Asaas com o telefone |
 

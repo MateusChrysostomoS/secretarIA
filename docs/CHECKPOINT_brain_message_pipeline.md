@@ -35,7 +35,9 @@ e ela tem nome: `persists_outbound` (`services/channel_sender.py`).
 - **`services/channel_sender.py`** (novo) — `ChannelSender` (Protocol) com os **mesmos quatro
   métodos e as mesmas assinaturas** de `WhatsAppClient`. Foi de propósito: `WhatsAppClient`
   satisfaz o protocolo **estruturalmente**, então os ~60 call sites de envio em `tasks.py`
-  ficaram **inalterados, byte a byte**. `BrainMessageSender` grava a `Message` e devolve `{}`.
+  ficaram **inalterados, byte a byte**. `BrainMessageSender` grava a `Message` e devolve `{}`
+  (desde 2026-09-18 devolve `{RECORDED_MESSAGE_ID: <id da linha>}` e aceita `author`, padrão BOT —
+  ver `docs/CHECKPOINT_console_staff_messages.md` §9).
   `sender_persists_outbound()` lê a flag por `getattr` com default **False** — o default é a
   parte que carrega peso: False é o comportamento pré-refatoração, então qualquer dublê de
   teste antigo continua correto sem saber que a flag existe.
@@ -73,7 +75,7 @@ Do bloco "Assumem não-nulo e QUEBRAM com paciente sem telefone" de
 |---|---|
 | `schemas/internal.py` + `api/internal.py` (`InternalPatient.wa_id: str`) | **CORRIGIDO** (acima) |
 | `_ReplyContext.patient_wa_id` | **CORRIGIDO** — virou `patient_ref`, 21 leituras + 14 construções, mais 9 arquivos de teste |
-| `api/hub/conversations.py` → `_send_via_whatsapp()` | **NÃO tocado** — é o console de STAFF (clínica respondendo), superfície do prompt anterior, não deste. Continua correto: ainda não há caminho que faça a staff responder a um paciente `brain_message` por ali. **Lacuna conhecida**, é o próximo item natural |
+| `api/hub/conversations.py` → `_send_via_whatsapp()` | **NÃO tocado aqui; RESOLVIDO depois** — `5b8bfdf` (2026-09-09) conteve o 502; em 2026-09-18 a rota passou a usar `BrainMessageSender(author=HUMAN)` via `_staff_sender` (`docs/CHECKPOINT_console_staff_messages.md` §9) |
 | `api/hub/conversations.py` → `_read_model()` (`patient_wa_id=`) | **NÃO tocado**, mesmo motivo; é campo JSON do hub, homônimo mas não relacionado |
 | `plugins/reminders.py` (5 envios + join sem `wa_id IS NOT NULL`) | **NÃO tocado — fora de escopo por desenho**, ver abaixo |
 | `services/payments/deposit_lifecycle.py` | **NÃO tocado** — Asaas exige telefone real; um paciente sem telefone não pode ter cobrança Pix hoje. Lacuna registrada |
@@ -144,5 +146,6 @@ monotônica — migração, escopo de outro round.
    worker antigo **não conhece** e o 202 viraria mentira.
 2. Não há migração nesta rodada; a de `channel`/`external_id` (`c7e1a4b9d0f3`) continua sendo
    pré-requisito **em produção**.
-3. Console de staff (`api/hub/conversations.py`) ainda responde só por WhatsApp.
+3. ~~Console de staff (`api/hub/conversations.py`) ainda responde só por WhatsApp.~~ Resolvido:
+   despacho por canal via `ChannelSender` em 2026-09-18 (`docs/CHECKPOINT_console_staff_messages.md` §9).
 4. Reminders proativos por Brain-Message, e Pix para paciente sem telefone (acima).
