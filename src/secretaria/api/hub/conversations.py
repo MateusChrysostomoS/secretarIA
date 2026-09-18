@@ -11,7 +11,12 @@ GET  /tenants/me/conversations/{id}/messages        - full thread for one
                                                        conversation, oldest
                                                        first.
 POST /tenants/me/conversations/{id}/messages        - staff sends a message
-                                                       from the console.
+                                                       from the console: JSON
+                                                       text, or multipart with
+                                                       ONE file (Brain-Message).
+GET  /tenants/me/conversations/{id}/messages/{mid}/media
+                                                     - that message's file,
+                                                       streamed.
 
 The state flip itself is never reimplemented here — it goes through
 `services/handover.py::HandoverManager`, which also stamps
@@ -33,11 +38,20 @@ from datetime import datetime
 from uuid import UUID
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from secretaria.api.attachment_http import (
+    checked_upload,
+    is_multipart,
+    read_attachment_form,
+    read_json_body,
+    refusal,
+    stream_attachment,
+)
 from secretaria.api.hub.deps import get_current_tenant
+from secretaria.core import attachments
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
 from secretaria.models import Tenant
@@ -50,14 +64,18 @@ from secretaria.schemas.conversation import (
     InteractiveRead,
     MessageRead,
     MessageSend,
+    MessageSendForm,
+    attachment_read_or_none,
     interactive_read_or_none,
 )
+from secretaria.services import media_storage
 from secretaria.services.channel_sender import (
     CHANNEL_BRAIN_MESSAGE,
     RECORDED_MESSAGE_ID,
     BrainMessageSender,
     ChannelSender,
     sender_persists_outbound,
+    sender_sends_media,
 )
 from secretaria.services.handover import HandoverManager
 from secretaria.services.tenant_config import get_waba_token
@@ -65,6 +83,21 @@ from secretaria.services.whatsapp import TenantWhatsAppCredentialMissing, WhatsA
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/tenants/me/conversations", tags=["hub-conversations"])
+
+# The multipart body `send_message` takes next to JSON: ONE file, an optional caption.
+_SEND_FORM_SCHEMA: dict = {
+    "type": "object",
+    "required": ["file"],
+    "properties": {
+        "file": {
+            "type": "string",
+            "format": "binary",
+            "description": "JPEG, PNG, WEBP, GIF or PDF (by content), 1 byte to 20 MiB.",
+        },
+        "body": {"type": "string", "minLength": 1, "description": "Optional caption."},
+    },
+    "additionalProperties": False,
+}
 
 
 def _read_model(
@@ -116,6 +149,7 @@ def _message_read_model(message: Message) -> MessageRead:
         created_at=message.created_at,
         interactive=_interactive_read(message),
         interactive_reply_id=message.interactive_reply_id,
+        attachment=attachment_read_or_none(message.attachment, message_id=message.id),
     )
 
 
@@ -173,6 +207,9 @@ async def _staff_sender(
             conversation_id=conversation.id,
             session=session,
             author=MessageSender.HUMAN,
+            media_key_prefix=media_storage.object_key_prefix(
+                conversation.tenant_id, patient.id
+            ),
         )
         return sender, patient.external_id
 
@@ -257,13 +294,34 @@ async def list_messages(
     return [_message_read_model(message) for message in rows]
 
 
-@router.post("/{conversation_id}/messages", response_model=MessageRead)
+@router.post(
+    "/{conversation_id}/messages",
+    response_model=MessageRead,
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {"schema": MessageSend.model_json_schema()},
+                "multipart/form-data": {"schema": _SEND_FORM_SCHEMA},
+            },
+        }
+    },
+)
 async def send_message(
     conversation_id: str,
-    body: MessageSend,
+    request: Request,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_session),
 ) -> MessageRead:
+    """Staff reply: JSON `{"body"}` for text, or multipart with ONE file (part
+    `file`) and an optional caption (`body`) - a file for Brain-Message patients only.
+
+    Neither body is declared on the route, so FastAPI does not read it before the
+    hub token is checked (api/attachment_http.py).
+    """
+    if is_multipart(request):
+        return await _send_attachment(conversation_id, request, tenant, session)
+    body = await read_json_body(request, MessageSend)
     conversation = await _get_conversation(session, tenant, conversation_id)
     patient = await session.get(Patient, conversation.patient_id)
 
@@ -313,3 +371,122 @@ async def send_message(
         channel=patient.channel,
     )
     return _message_read_model(message)
+
+
+async def _send_attachment(
+    conversation_id: str, request: Request, tenant: Tenant, session: AsyncSession
+) -> MessageRead:
+    """The multipart branch of `send_message`: ONE file to a Brain-Message patient.
+
+    Cost order: the conversation and its channel are checked before a byte of the body
+    is read, and the read transaction is ENDED before the body is read at the client's
+    pace - `get_current_tenant` opened it on this same session, and holding a pooled
+    connection through a slow upload is how brain-api once exhausted its pool (its
+    CHECKPOINT §6.13). `expire_on_commit` is off (core/database.py), so the rows loaded
+    here stay usable after that commit, which has nothing to write.
+    """
+    try:
+        conversation = await _get_conversation(session, tenant, conversation_id)
+        patient = await session.get(Patient, conversation.patient_id)
+        if patient.channel != CHANNEL_BRAIN_MESSAGE:
+            # The clinic sends files to a WhatsApp patient from its own WhatsApp app,
+            # never through the bot's outbound (no media send exists on WhatsAppClient).
+            raise attachments.AttachmentRefused(attachments.ATTACHMENT_UNSUPPORTED_FOR_CHANNEL)
+        await session.commit()
+        fields, upload, form = await read_attachment_form(request, MessageSendForm)
+        try:
+            checked = await checked_upload(upload)
+            sender, to = await _staff_sender(session, tenant, conversation, patient)
+            if not sender_sends_media(sender):  # Brain-Message only, checked above
+                raise attachments.AttachmentRefused(
+                    attachments.ATTACHMENT_UNSUPPORTED_FOR_CHANNEL
+                )
+            send_response = await sender.send_media(
+                to, file=upload.file, attachment=checked, caption=fields.body
+            )
+        finally:
+            await form.close()
+    except attachments.AttachmentRefused as refused:
+        # By CODE only - never the file's name (it may carry PII) or a byte of it.
+        logger.info("hub_attachment_refused", tenant_id=str(tenant.id), code=refused.code)
+        raise HTTPException(refused.status_code, refused.detail) from None
+    except media_storage.MediaStorageUnavailable:
+        raise refusal(attachments.ATTACHMENT_STORAGE_UNAVAILABLE) from None
+
+    message = await session.get(Message, UUID(send_response[RECORDED_MESSAGE_ID]))
+    stored_key = message.attachment["r2_object_key"]
+    try:
+        # A human send always takes the conversation over - a file as much as a text.
+        await HandoverManager(session).set_human_active(conversation)
+        await session.commit()
+    except Exception:
+        # The row rolls back with the session; the bytes would stay behind with nothing
+        # pointing at them. Remove them (best effort), then fail exactly as before. The
+        # one case this gets wrong is a COMMIT that landed but was reported as failed
+        # (connection lost after the server committed): that row's file then answers
+        # 404 - rarer, and louder, than a silent orphan.
+        await media_storage.delete_object(stored_key)
+        raise
+    await session.refresh(message)
+    logger.info(
+        "hub_conversation_message_sent",
+        tenant_id=str(tenant.id),
+        conversation_id=str(conversation.id),
+        channel=patient.channel,
+        attachment_content_type=checked.kind.content_type,
+        attachment_size_bytes=checked.size_bytes,
+    )
+    return _message_read_model(message)
+
+
+@router.get(
+    "/{conversation_id}/messages/{message_id}/media",
+    response_class=Response,
+    summary="The file one message carries (staff console)",
+    responses={
+        200: {
+            "description": "The file's bytes, typed by what was stored.",
+            "content": {content_type: {} for content_type in attachments.ALLOWED_KINDS},
+        },
+        404: {"description": "No such file in this tenant's conversation - one answer."},
+        503: {"description": "Attachment storage unavailable."},
+    },
+)
+async def get_message_media(
+    conversation_id: str,
+    message_id: str,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """Stream a message's file to the clinic's staff - never a storage URL.
+
+    Ownership is decided in ONE query: the message, in THIS conversation, of THIS
+    tenant (the hub token's), with a file. Anything else - another clinic's message, a
+    message of another conversation, a message without a file, an id that is not a
+    UUID - is the same 404, so the route confirms nothing about what exists elsewhere.
+    """
+    try:
+        conv_uuid = UUID(conversation_id)
+        msg_uuid = UUID(message_id)
+    except ValueError:
+        raise refusal(attachments.ATTACHMENT_NOT_FOUND) from None
+    row = (
+        await session.execute(
+            select(Message.id, Message.attachment)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .where(
+                Message.id == msg_uuid,
+                Message.conversation_id == conv_uuid,
+                Conversation.tenant_id == tenant.id,
+                Message.attachment.is_not(None),
+            )
+        )
+    ).first()
+    # Nothing to write: hand the pooled connection back before streaming.
+    await session.close()
+    record = (
+        attachments.stored_attachment_or_none(row.attachment, message_id=row.id)
+        if row is not None
+        else None
+    )
+    return await stream_attachment(record)

@@ -44,6 +44,7 @@ from secretaria.ai.graph import (
 )
 from secretaria.ai.tools import manage_existing_appointment, start_guided_booking
 from secretaria.config import get_settings
+from secretaria.core.attachments import attachment_body
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger, wa_suffix
 from secretaria.core.whatsapp_limits import (
@@ -486,6 +487,9 @@ class _ReplyContext:
     # When True, the tenant's bot is not activated: send a single polite
     # fallback and do nothing else (no conversation, no LLM).
     service_unavailable: bool = False
+    # A Brain-Message patient sent a FILE: the whole answer is the fixed receipt
+    # (`_handle_attachment_received`) - transport, not analysis.
+    attachment_received: bool = False
     # Set when this inbound is a returning patient's answer to the "quer
     # continuar?" prompt: drives resume-vs-reset in `_send_bot_reply`.
     reactivation: "_ReactivationDirective | None" = None
@@ -797,6 +801,7 @@ async def _route_inbound_turn(
     action_button: tuple[str, str] | None = None,
     greeting_button: str | None = None,
     interactive_reply_id: str | None = None,
+    attachment: dict | None = None,
 ) -> _ReplyContext | None:
     """Decide what the bot should answer, for an ALREADY-RESOLVED turn.
 
@@ -811,7 +816,8 @@ async def _route_inbound_turn(
     from `_persist_inbound_message`, not rewritten, and every comment explaining
     why a gate sits where it does came with it. In sequence: inbound recorded ->
     reminder action button (above handover, because honouring an existing
-    booking is not a conversational turn) -> human handover -> LGPD consent gate
+    booking is not a conversational turn) -> human handover -> a FILE (the fixed
+    receipt, Brain-Message only) -> LGPD consent gate
     -> `/menu` -> greeting-button degrade -> pending "quer continuar?" answer ->
     greeting selection -> LLM-state expiry (BEFORE the reactivation offer, so a
     patient who never answers it still leaves LLM mode) -> reactivation offer ->
@@ -842,6 +848,10 @@ async def _route_inbound_turn(
             options this conversation offered by
             `_validated_brain_message_reply_id`), stored beside `body`; None
             for anything typed or transcribed.
+        attachment: the stored file record (`messages.attachment`,
+            core/attachments.py::StoredAttachment) when a Brain-Message patient
+            sent a file - already in the bucket, put there by the API. The row
+            keeps it; the answer is the fixed receipt (branch after handover).
     """
     # Everything below DECIDES on the routing text, not on what is stored: for
     # a tap on a data-carrying row it is the title with the row's payload
@@ -903,6 +913,7 @@ async def _route_inbound_turn(
             # The title alone, never the payload - see `stored_body` above.
             body=persisted_body,
             interactive_reply_id=interactive_reply_id,
+            attachment=attachment,
         )
     )
 
@@ -933,6 +944,24 @@ async def _route_inbound_turn(
             conversation_id=str(conversation.id),
         )
         return None
+
+    # A FILE (Brain-Message only): transport, not analysis. The row above already
+    # carries it; the bot's whole answer is a fixed receipt, and nothing below -
+    # identity steps, the LGPD gate, /menu, the flow router, the LLM - sees the turn.
+    # After the handover check (a human who took over answers the file themselves)
+    # and BEFORE the identity gate, whose AWAITING_EMAIL_CODE branch would read the
+    # placeholder as a wrong code and drop the state. `flow_state` is left as it was,
+    # so the patient's next typed message continues whatever the file interrupted.
+    # Consent was checked by the API before the bytes were stored.
+    if attachment is not None:
+        return _ReplyContext(
+            channel=channel,
+            conversation_id=conversation.id,
+            tenant_id=tenant.id,
+            patient_ref=patient_ref,
+            inbound_body=body or "",
+            attachment_received=True,
+        )
 
     # `/menu` (and /reset, /recomeçar, /inicio): a NON-DESTRUCTIVE
     # request to go back to the main menu (PROMPT_FIX_18). Nothing
@@ -2302,6 +2331,11 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     # every other outbound (PROMPT_FIX_21).
     if reply.service_unavailable:
         await _handle_service_unavailable(reply, redis=redis)
+        return
+
+    # A file arrived: the fixed receipt, behind the same entitlement gate.
+    if reply.attachment_received:
+        await _handle_attachment_received(reply, redis=redis)
         return
 
     # Load per-tenant config + flow context (one short read). We snapshot the
@@ -4704,6 +4738,40 @@ async def _handle_service_unavailable(reply: _ReplyContext, redis=None) -> None:
     await _send_simple_text(reply.patient_ref, SERVICE_UNAVAILABLE_MESSAGE, client=client)
 
 
+#: The bot's whole answer to a file: transport, not analysis. No OCR, no vision, no
+#: summary - reading the file is the clinic's job (that is PreCheck's differentiator
+#: for the exams it receives, not a capability of this channel).
+ATTACHMENT_RECEIVED_MESSAGE = "Recebi seu arquivo, a equipe da clínica vai conferir."
+
+
+async def _handle_attachment_received(reply: _ReplyContext, redis=None) -> None:
+    """Acknowledge a file with the fixed receipt - entitlement-gated, on the channel's
+    own sender. The shape of `_handle_service_unavailable`: resolve the tenant the
+    context carries, fail closed on entitlement, send through `_reply_sender`. On
+    Brain-Message (the only channel a file arrives on) the sender records the row.
+    """
+    if reply.tenant_id is None:
+        logger.error("attachment_receipt_no_tenant")
+        return
+    async with async_session_factory() as session:
+        tenant = await session.get(Tenant, reply.tenant_id)
+    if tenant is None:
+        logger.error("attachment_receipt_no_tenant", tenant_id=str(reply.tenant_id))
+        return
+    summary = await get_entitlements(tenant.id, redis)
+    if summary is None or not (summary.active and summary.secretaria_enabled):
+        logger.warning(
+            "bot_reply_suppressed_unentitled",
+            tenant_id=str(tenant.id),
+            status=summary.status if summary is not None else None,
+        )
+        return
+    sender = _reply_sender(reply, tenant, None)
+    if sender is None:
+        return
+    await _send_simple_text(reply.patient_ref, ATTACHMENT_RECEIVED_MESSAGE, client=sender)
+
+
 def _reply_sender(
     reply: _ReplyContext,
     tenant: Tenant | None,
@@ -6408,6 +6476,22 @@ async def _validated_brain_message_reply_id(
     return None
 
 
+def _log_discarded_attachment(attachment: dict | None, reason: str) -> None:
+    """Report a file whose turn this job dropped before writing its row.
+
+    The API stored the bytes before enqueueing; a job that returns without the
+    `messages` row leaves them in the bucket with nothing pointing at them. The worker
+    holds no storage credentials (services/media_storage.py), so it cannot delete them -
+    it says so, loudly and with the key (ids only, no name), for an operator or a sweep.
+    """
+    if attachment is not None:
+        logger.warning(
+            "brain_message_attachment_discarded",
+            reason=reason,
+            r2_object_key=attachment.get("r2_object_key"),
+        )
+
+
 async def _persist_brain_message_inbound(
     *,
     tenant_id: UUID,
@@ -6416,6 +6500,7 @@ async def _persist_brain_message_inbound(
     patient_name: str | None = None,
     dedupe_id: str | None = None,
     interactive_reply_id: str | None = None,
+    attachment: dict | None = None,
 ) -> _ReplyContext | None:
     """Resolve a Brain-Message turn and hand it to the channel-neutral core.
 
@@ -6445,12 +6530,14 @@ async def _persist_brain_message_inbound(
                 if dedupe_id is not None:
                     if await _event_already_processed(session, dedupe_id):
                         logger.info("brain_message_duplicate", dedupe_id=dedupe_id)
+                        _log_discarded_attachment(attachment, "duplicate")
                         return None
                     session.add(ProcessedEvent(event_id=dedupe_id))
 
                 tenant = await session.get(Tenant, tenant_id)
                 if tenant is None:
                     logger.error("brain_message_tenant_unresolved", tenant_id=str(tenant_id))
+                    _log_discarded_attachment(attachment, "tenant_unresolved")
                     return None
 
                 # `Tenant.is_active` is the WhatsApp go-live flag: the internal
@@ -6518,15 +6605,22 @@ async def _persist_brain_message_inbound(
                     patient_ref=external_id,
                     channel=CHANNEL_BRAIN_MESSAGE,
                     is_returning_patient=is_returning_patient,
-                    body=text,
+                    # A file's row is never empty: its caption, or the placeholder.
+                    body=(
+                        text
+                        if attachment is None
+                        else attachment_body(text, attachment.get("filename") or "anexo")
+                    ),
                     # No Meta id exists for a message Meta never carried.
                     inbound_wam_id=None,
                     interactive_reply_id=interactive_reply_id,
+                    attachment=attachment,
                 )
         except IntegrityError:
             # A concurrent call already claimed this dedupe id, or raced us to
             # the (tenant, channel, external_id) constraint.
             logger.info("brain_message_duplicate_race", dedupe_id=dedupe_id)
+            _log_discarded_attachment(attachment, "integrity_race")
             return None
 
 
@@ -6538,8 +6632,13 @@ async def process_brain_message_inbound(
     patient_name: str | None = None,
     dedupe_id: str | None = None,
     interactive_reply_id: str | None = None,
+    attachment: dict | None = None,
 ) -> None:
     """arq job: run one Brain-Message turn end to end.
+
+    `attachment` (optional, so jobs enqueued by an older API still run) is the
+    stored file record the API wrote to the bucket before enqueueing - the job
+    carries a reference, never the bytes.
 
     The same ack-fast/work-async split the WhatsApp webhook uses (see the
     `whatsapp-webhook-arq` skill's golden rule): the HTTP handler enqueues this
@@ -6555,6 +6654,7 @@ async def process_brain_message_inbound(
         patient_name=patient_name,
         dedupe_id=dedupe_id,
         interactive_reply_id=interactive_reply_id,
+        attachment=attachment,
     )
     if reply is not None:
         await _send_bot_reply(reply, redis=ctx.get("redis"))

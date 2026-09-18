@@ -27,6 +27,8 @@ dependencies = [
     "dateparser>=1.2.0",
     "transcription-core",
     "pseudonymize-core",
+    "boto3>=1.36",
+    "python-multipart>=0.0.20",
 ]
 
 [dependency-groups]

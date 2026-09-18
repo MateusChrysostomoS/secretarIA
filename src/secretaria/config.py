@@ -371,6 +371,30 @@ class Settings(BaseSettings):
     # this setting only names it ahead of time.
     REMINDER_DEPOSIT_TEMPLATE_NAME: str = "appointment_reminder_deposit"
 
+    # --- Brain-Message attachments (docs/CHECKPOINT_brain_message_anexos_secretaria.md) ---
+    # secretarIA's OWN Cloudflare R2 bucket for the files patients and clinic staff
+    # exchange on the Brain-Message channel (services/media_storage.py). Deliberately not
+    # PreCheck's `R2_*` names: separate products, separate buckets and credentials, even
+    # if one provider account ever backs both. Only `secretaria_api` needs them - uploads
+    # and downloads both happen in the API process; the worker never touches the bucket.
+    # Any of the four empty => every upload and download answers 503
+    # `attachment_storage_unavailable` (fail closed, nothing stored); text is unaffected.
+    # The secret is never logged (tenant-secrets-encryption).
+    ATTACHMENTS_R2_ACCOUNT_ID: str = ""
+    ATTACHMENTS_R2_ACCESS_KEY_ID: str = ""
+    ATTACHMENTS_R2_SECRET_ACCESS_KEY: str = ""
+    ATTACHMENTS_R2_BUCKET: str = ""
+    # Lifetime of the presigned GET the API signs to pull an object it is about to
+    # stream. Never handed to anyone: it only has to outlive the start of one fetch.
+    ATTACHMENTS_R2_SIGNED_URL_TTL_SECONDS: int = 60
+    # Persisted daily quota of bytes PATIENTS upload (rolling 24h, summed from
+    # `messages.attachment`), per patient and per clinic; 0 disables one. brain-api only
+    # counts uploads per minute, in memory, per process - without this an identity could
+    # store ~288 GiB/day (brain-api CHECKPOINT §4.1). The clinic quota is the one that
+    # binds: an unverified visitor's identity costs one call. Staff uploads do not count.
+    ATTACHMENT_DAILY_BYTES_PER_PATIENT: int = 100 * 1024 * 1024
+    ATTACHMENT_DAILY_BYTES_PER_TENANT: int = 1024 * 1024 * 1024
+
     # --- CORS (the Next.js doctor portal) ---
     # Allowed origins for the hub API. Accepts a JSON array
     # (`["https://a.com","https://b.com"]`) or the legacy comma-separated form

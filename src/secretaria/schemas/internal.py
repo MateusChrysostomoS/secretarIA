@@ -15,12 +15,12 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from secretaria.core.whatsapp_limits import MAX_INTERACTIVE_REPLY_ID_CHARS
 from secretaria.models.appointment import AppointmentStatus
 from secretaria.models.message import MessageDirection, MessageSender
-from secretaria.schemas.conversation import InteractiveRead
+from secretaria.schemas.conversation import AttachmentRead, InteractiveRead
 
 
 class InternalAppointment(BaseModel):
@@ -107,6 +107,25 @@ class BrainMessageInbound(BaseModel):
     dedupe_id: str | None = Field(default=None, max_length=128)
 
 
+class BrainMessageInboundForm(BrainMessageInbound):
+    """The text fields of `POST /internal/brain-message/inbound` when it carries a FILE.
+
+    The JSON body's fields, sent as multipart form fields next to the part `file`
+    (brain-api/docs/CHECKPOINT_brain_message_anexos.md §4.1); `text` becomes an
+    optional caption. Strict, unlike the JSON model: this encoding is new, so refusing
+    an unknown field costs no existing caller and turns contract drift into a clear
+    422 instead of a silently dropped value (`frozen-contract-migration`).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # No idempotency key on this encoding: brain-api's contract (§4.1) never sends one
+    # with a file, and a replayed key would make the worker drop a job whose file is
+    # already stored - bytes in the bucket with nothing pointing at them. Sending one
+    # is a 422 on `dedupe_id`, never a silent drop.
+    dedupe_id: None = None
+
+
 class BrainMessageAck(BaseModel):
     """`POST /internal/brain-message/inbound` response.
 
@@ -133,6 +152,10 @@ class BrainMessageMessage(BaseModel):
     # working (`frozen-contract-migration`: additive, never required).
     interactive: InteractiveRead | None = None
     interactive_reply_id: str | None = None
+    # The file this message carries: what it IS, never where it is stored - no object
+    # key and no URL, here or in any other field (brain-api rewrites exactly this key
+    # for the patient and passes every other field through). Additive and optional.
+    attachment: AttachmentRead | None = None
 
 
 class BrainMessageMessageList(BaseModel):

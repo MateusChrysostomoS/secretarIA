@@ -328,7 +328,7 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
   `PreCheck/app/services/r2.py`, credenciais e bucket novos, sem chamar o serviço do PreCheck),
   `ChannelSender.send_media` novo, e escopo deliberadamente limitado a transporte (o bot confirma o
   recebimento; não há OCR/IA de visão — isso é diferenciação do PreCheck, não desta API). Depende do
-  pré-requisito acima e da parte 1 (`brain-api`, mesmo plano). **NÃO EXECUTADO.**
+  pré-requisito acima e da parte 1 (`brain-api`, mesmo plano). **EXECUTADO 2026-09-18 — BUILT, UNCOMMITTED, não deployado; ver `docs/CHECKPOINT_brain_message_anexos_secretaria.md`.** Upload no request da API (o job leva só a referência; só `secretaria_api` precisa das 4 variáveis `ATTACHMENTS_R2_*`), migração `5e1f9a3c7d20` (coluna + índice parcial, provada em Postgres descartável), `send_media` como capacidade (`MediaChannelSender`) porque o `WhatsAppClient` precisa continuar satisfazendo o `ChannelSender`, 409 antes do aceite LGPD e cota diária persistida (429) — o brain-api precisa passar a repassar esses dois códigos.
 - `z_prompts/PROMPT_BRAIN_MESSAGE_STATUS_ENTREGA_1_SECRETARIA.md` (Opus 5, alto; adicionada
   2026-09-18, achado do dono no console real) — Onda 3 de `PLANO_PORTAL_API_MVP.md`: "enviada,
   recebida e vista, assim como faz o WhatsApp" não funciona hoje. Causa confirmada nos DOIS

@@ -4,7 +4,17 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Enum as SAEnum, ForeignKey, String, Text, func
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Enum as SAEnum,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from secretaria.core.database import Base
@@ -33,6 +43,17 @@ class Message(Base):
     """One WhatsApp message, inbound or outbound."""
 
     __tablename__ = "messages"
+    __table_args__ = (
+        # Serves the persisted daily byte quota (api/internal.py::
+        # _enforce_attachment_quota): only rows WITH a file enter it, so it stays tiny.
+        # Migration 5e1f9a3c7d20.
+        Index(
+            "ix_messages_attachment_created_at",
+            "created_at",
+            postgresql_where=text("attachment IS NOT NULL"),
+            sqlite_where=text("attachment IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     conversation_id: Mapped[uuid.UUID] = mapped_column(
@@ -80,4 +101,15 @@ class Message(Base):
     # Plain JSON like every JSON column here: the test suite runs on SQLite and
     # nothing queries inside the blob.
     interactive: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # The ONE file a Brain-Message message carries (patient -> clinic or clinic ->
+    # patient), or NULL: {"r2_object_key", "content_type", "size_bytes", "filename"}
+    # (core/attachments.py::StoredAttachment). The bytes live in secretarIA's own R2
+    # bucket (services/media_storage.py); `r2_object_key` never leaves this service -
+    # every projection drops it and both media routes stream the bytes themselves.
+    # `body` is never empty on such a row: the caption, or "[anexo: <filename>]"
+    # (core/attachments.py::attachment_body). WhatsApp media is not stored here.
+    # `none_as_null=True`, unlike `interactive` above: a message without a file must be
+    # SQL NULL, never JSON 'null', because the quota index and sum select on
+    # `attachment IS NOT NULL`.
+    attachment: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -33,16 +33,33 @@ callers that would otherwise write a second one skip theirs when
 rather than a special case buried in the callers. A caller that has to hand
 the row back - the staff console answers its POST with it - reads it by the
 id the sender reports under `RECORDED_MESSAGE_ID`, never by writing its own.
+
+## `send_media` - a capability, not a fifth member of the protocol
+
+Sending a FILE is Brain-Message only (the staff console attaching an exam or a
+document for a Portal patient). It lives on `MediaChannelSender`, a sub-protocol,
+instead of on `ChannelSender` itself, on purpose: the whole seam rests on
+`WhatsAppClient` satisfying `ChannelSender` structurally, unchanged
+(`test_whatsapp_client_satisfies_the_sender_protocol`), and giving WhatsApp a media
+send is out of scope - nobody asked for the bot to push files over WhatsApp, and it
+would widen the production outbound surface for nothing. `sender_sends_media` is how
+a caller asks, the same `getattr` idiom as `sender_persists_outbound`.
 """
 
 from datetime import UTC, datetime
-from typing import Protocol, runtime_checkable
+from typing import BinaryIO, Protocol, runtime_checkable
 from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from secretaria.core.attachments import (
+    CheckedAttachment,
+    attachment_body,
+    attachment_record,
+)
 from secretaria.core.logging import get_logger
 from secretaria.models import Conversation, Message, MessageDirection, MessageSender
+from secretaria.services import media_storage
 from secretaria.services.whatsapp import interactive_buttons_record, interactive_list_record
 
 logger = get_logger(__name__)
@@ -133,6 +150,31 @@ class ChannelSender(Protocol):
     ) -> dict: ...
 
 
+@runtime_checkable
+class MediaChannelSender(ChannelSender, Protocol):
+    """A `ChannelSender` that can also deliver ONE file (see this module's docstring).
+
+    Only `BrainMessageSender` is one today. `file` is a seekable binary file (the
+    request's spooled upload); `attachment` is what `core/attachments.py::
+    check_attachment` made of it - the sniffed kind and the safe name are what travel,
+    never the uploader's claims; `caption` is optional text.
+    """
+
+    async def send_media(
+        self,
+        to: str,
+        *,
+        file: BinaryIO,
+        attachment: CheckedAttachment,
+        caption: str | None = None,
+    ) -> dict: ...
+
+
+def sender_sends_media(sender) -> bool:
+    """Can this sender deliver a file? Asked by `getattr`, like `sender_persists_outbound`."""
+    return callable(getattr(sender, "send_media", None))
+
+
 class BrainMessageSender:
     """Deliver a reply to a Brain-Message patient by recording it.
 
@@ -162,6 +204,10 @@ class BrainMessageSender:
     `HandoverManager.set_human_active`, which that caller runs itself. PATIENT
     is refused: an outbound row authored by the patient is a contradiction, not
     a variant.
+
+    `media_key_prefix` (where this conversation's files live in the bucket,
+    `media_storage.object_key_prefix`) is needed only by `send_media`; the bot's
+    senders never send files and leave it unset.
     """
 
     persists_outbound = True
@@ -173,6 +219,7 @@ class BrainMessageSender:
         session_factory=None,
         session: AsyncSession | None = None,
         author: MessageSender = MessageSender.BOT,
+        media_key_prefix: str | None = None,
     ) -> None:
         author = MessageSender(author)
         if author == MessageSender.PATIENT:
@@ -183,8 +230,11 @@ class BrainMessageSender:
         self._session_factory = session_factory
         self._session = session
         self._author = author
+        self._media_key_prefix = media_key_prefix
 
-    async def _record(self, body: str, interactive: dict | None = None) -> dict:
+    async def _record(
+        self, body: str, interactive: dict | None = None, attachment: dict | None = None
+    ) -> dict:
         """Persist one outbound message. Returns the send response.
 
         `interactive` is the card a reply-button / list send put on the
@@ -210,6 +260,7 @@ class BrainMessageSender:
             wam_id=None,
             body=body,
             interactive=interactive,
+            attachment=attachment,
         )
         if self._session is not None:
             # The caller's unit of work: flushed here, committed - or rolled
@@ -237,6 +288,38 @@ class BrainMessageSender:
 
     async def send_text_message(self, to: str, body: str) -> dict:
         return await self._record(body)
+
+    async def send_media(
+        self,
+        to: str,
+        *,
+        file: BinaryIO,
+        attachment: CheckedAttachment,
+        caption: str | None = None,
+    ) -> dict:
+        """Deliver ONE file: upload the bytes, then record the row that points at them.
+
+        Upload first, row second - a row never references bytes that are not there. If
+        the row then fails, the object is removed (best effort) before the error
+        propagates; what can still leave an orphan is the CALLER's commit failing after
+        this returns (docs/CHECKPOINT_brain_message_anexos_secretaria.md). `body` is the
+        caption, or the "[anexo: <name>]" placeholder (`attachment_body`).
+
+        Raises `media_storage.MediaStorageUnavailable` when the bytes could not be
+        stored; nothing is written then.
+        """
+        if self._media_key_prefix is None:
+            raise ValueError("this BrainMessageSender was built without a media_key_prefix")
+        key = media_storage.new_object_key(self._media_key_prefix)
+        await media_storage.put_object(key, file, attachment.kind.content_type)
+        try:
+            return await self._record(
+                attachment_body(caption, attachment.filename),
+                attachment=attachment_record(attachment, key),
+            )
+        except Exception:
+            await media_storage.delete_object(key)
+            raise
 
     async def send_buttons(self, to: str, body: str, buttons: list[tuple[str, str]]) -> dict:
         # The card is recorded through the SAME builder WhatsApp's payload is

@@ -3,8 +3,9 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from secretaria.core.attachments import stored_attachment_or_none
 from secretaria.core.logging import get_logger
 from secretaria.models.conversation import HandoverState
 
@@ -71,6 +72,31 @@ def interactive_read_or_none(blob: object, *, message_id: object) -> Interactive
         return None
 
 
+class AttachmentRead(BaseModel):
+    """What a message's file IS - never where it is stored (`Message.attachment`).
+
+    The same three fields on both wires: the staff hub here, and the Brain-Message
+    listing that brain-api rewrites for the patient (schemas/internal.py).
+    """
+
+    content_type: str
+    size_bytes: int
+    filename: str
+
+
+def attachment_read_or_none(blob: object, *, message_id: object) -> AttachmentRead | None:
+    """A row's `Message.attachment` without its storage key, or None (tolerant, like
+    `interactive_read_or_none`: a bad blob costs that message its file, not the thread)."""
+    record = stored_attachment_or_none(blob, message_id=message_id)
+    if record is None:
+        return None
+    return AttachmentRead(
+        content_type=record.content_type,
+        size_bytes=record.size_bytes,
+        filename=record.filename,
+    )
+
+
 class MessageRead(BaseModel):
     """One message in a conversation thread — GET .../conversations/{id}/messages."""
 
@@ -91,9 +117,24 @@ class MessageRead(BaseModel):
     # message's `interactive.options[].id`. Never shown; it is how a console
     # knows which option a reply chose. None for anything typed.
     interactive_reply_id: str | None = None
+    # The file this message carries (Brain-Message only), WITHOUT where it is stored;
+    # the bytes come from GET .../conversations/{id}/messages/{message_id}/media.
+    attachment: AttachmentRead | None = None
 
 
 class MessageSend(BaseModel):
     """POST /tenants/me/conversations/{id}/messages — staff sends a message."""
 
     body: str = Field(min_length=1)
+
+
+class MessageSendForm(BaseModel):
+    """The text fields of a staff send that carries a FILE (multipart/form-data).
+
+    The file itself is the part `file`; `body` becomes an optional caption. Strict
+    (`extra="forbid"`): a field this service does not know is refused, not ignored.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    body: str | None = Field(default=None, min_length=1)
