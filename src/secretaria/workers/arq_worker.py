@@ -28,6 +28,7 @@ from secretaria.workers.payments_tasks import process_asaas_event
 from secretaria.workers.tasks import (
     check_handover_timeouts,
     process_brain_message_inbound,
+    process_message_statuses,
     process_webhook_event,
     send_cancellation_notice,
     send_patient_notification,
@@ -100,6 +101,9 @@ class WorkerSettings:
         process_webhook_event,
         # The second inbound channel; same worker, same job discipline.
         process_brain_message_inbound,
+        # The one deferred second look at WhatsApp delivery receipts that overtook
+        # their message's row; enqueued only from process_webhook_event.
+        process_message_statuses,
         send_cancellation_notice,
         send_patient_notification,
         # Dedicated voice-note job, enqueued directly by the webhook handler

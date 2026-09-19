@@ -341,7 +341,14 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
   leitura ali); o cursor `since` das listagens muda de `created_at` para `updated_at`, senão o
   tique nunca avança para quem já buscou a mensagem antes da mudança de status. Sequencie DEPOIS
   da peça de anexos acima (mesmos arquivos: `models/message.py`, `schemas/internal.py`,
-  `api/internal.py`, `api/hub/conversations.py`). **NÃO EXECUTADO.**
+  `api/internal.py`, `api/hub/conversations.py`). **EXECUTADO 2026-09-19 — BUILT, 2232 testes
+  verdes (baseline 2202), UNCOMMITTED, migração `8b4d2f6e1a37` NÃO aplicada, não deployado; ver
+  `docs/CHECKPOINT_brain_message_status_entrega.md`.** O recibo morria num 3º ponto que o prompt
+  não previa: o fast-ACK (`schemas/webhook.py::minimal_event_payload`) nunca carregava
+  `statuses`. Agora carrega, sem `recipient_id`. **`since` passou a comparar `updated_at`:
+  o brain-api (parte 2) precisa fazer upsert por `id`.** Leitura manual de paciente WhatsApp
+  devolve `applied: false` (ignorada, não recusada). Deploy: migração ANTES, depois os DOIS
+  serviços.
 
 ## graphify
 

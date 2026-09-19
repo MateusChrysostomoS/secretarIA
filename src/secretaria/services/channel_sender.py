@@ -50,6 +50,7 @@ from datetime import UTC, datetime
 from typing import BinaryIO, Protocol, runtime_checkable
 from uuid import UUID, uuid4
 
+from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.attachments import (
@@ -261,6 +262,9 @@ class BrainMessageSender:
             body=body,
             interactive=interactive,
             attachment=attachment,
+            # No network leg to confirm: persisted IS delivered on this channel. Same
+            # INSERT, same now() as `created_at`; `read_at` comes from the read routes.
+            delivered_at=func.now(),
         )
         if self._session is not None:
             # The caller's unit of work: flushed here, committed - or rolled

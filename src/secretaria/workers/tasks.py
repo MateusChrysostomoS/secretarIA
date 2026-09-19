@@ -80,6 +80,7 @@ from secretaria.plugins.post_booking import enqueue_post_booking_hooks
 from secretaria.plugins.registry import agent_tools_for, run_on_inbound
 from secretaria.schemas.webhook import (
     WebhookPayload,
+    WebhookStatus,
     WebhookValue,
     extract_action_button,
     extract_echo_body,
@@ -159,6 +160,7 @@ from secretaria.services.greeting_template import (
     render_greeting,
 )
 from secretaria.services.handover import HandoverManager
+from secretaria.services.message_status import apply_whatsapp_statuses
 from secretaria.services.patient_context import (
     PatientOpeningContext,
     PatientOpeningState,
@@ -560,6 +562,11 @@ async def process_webhook_event(ctx: dict, payload: dict) -> None:
             field = change.field or ""
             if field == "messages":
                 await _handle_patient_messages(value, redis=ctx.get("redis"))
+                # Delivery receipts ride the same field: a status-only event has
+                # `messages` empty and `statuses` populated. Dropped here, before,
+                # which is why no WhatsApp message ever showed past "enviado".
+                if value.statuses:
+                    await _handle_message_statuses(value, redis=ctx.get("redis"))
             elif field == "smb_message_echoes":
                 # Coexistence: the human secretary replied from the app.
                 await _handle_human_echoes(value)
@@ -571,6 +578,63 @@ async def process_webhook_event(ctx: dict, payload: dict) -> None:
                 await _handle_smb_app_state_sync(value)
             else:
                 logger.info("worker_field_ignored", field=field)
+
+
+# --------------------------------------------------------------------------
+# Delivery receipts (value.statuses)
+# --------------------------------------------------------------------------
+
+# A receipt can overtake the row it is about: the outbound row is written only AFTER
+# the Graph API answers (`_record_outbound`), in its own transaction. Receipts that
+# match nothing get ONE deferred second look; what still matches nothing then is a
+# message this service did not record (sent from elsewhere on the same number).
+_STATUS_RETRY_DELAY = timedelta(seconds=30)
+
+
+async def _apply_statuses(phone_number_id: str, statuses: list[WebhookStatus]):
+    async with async_session_factory() as session:
+        async with session.begin():
+            return await apply_whatsapp_statuses(
+                session, phone_number_id=phone_number_id, statuses=statuses
+            )
+
+
+async def _handle_message_statuses(value: WebhookValue, redis=None) -> None:
+    """Write Meta's delivered / read / failed receipts onto their messages.
+
+    A DB error propagates, so arq retries the whole event - safe, because every write
+    is conditional (services/message_status.py) and inbound messages are claimed in
+    `processed_events`.
+    """
+    phone_number_id = value.metadata.phone_number_id if value.metadata else None
+    if not phone_number_id:
+        # Without the receiving number there is no tenant to scope the match to.
+        logger.warning("worker_statuses_without_phone_number_id", count=len(value.statuses))
+        return
+    result = await _apply_statuses(phone_number_id, value.statuses)
+    if not result.unmatched:
+        return
+    if redis is None:
+        logger.info("whatsapp_status_unmatched", count=len(result.unmatched), retried=False)
+        return
+    await redis.enqueue_job(
+        "process_message_statuses",
+        phone_number_id,
+        [status.model_dump(exclude_none=True) for status in result.unmatched],
+        _defer_by=_STATUS_RETRY_DELAY,
+    )
+
+
+async def process_message_statuses(ctx: dict, phone_number_id: str, statuses: list[dict]) -> None:
+    """arq job: the one deferred second look at receipts that matched no message.
+
+    Enqueued only by `_handle_message_statuses`, with receipts already reduced to
+    `WebhookStatus` fields (no recipient). Never re-enqueues itself.
+    """
+    parsed = [WebhookStatus.model_validate(status) for status in statuses]
+    result = await _apply_statuses(phone_number_id, parsed)
+    if result.unmatched:
+        logger.info("whatsapp_status_unmatched", count=len(result.unmatched), retried=True)
 
 
 # --------------------------------------------------------------------------
@@ -914,6 +978,10 @@ async def _route_inbound_turn(
             body=persisted_body,
             interactive_reply_id=interactive_reply_id,
             attachment=attachment,
+            # Brain-Message: reaching this row IS delivery to the clinic - same
+            # INSERT, same now() as `created_at` (services/message_status.py).
+            # WhatsApp inbound keeps NULL: its receipt is the patient's, not ours.
+            delivered_at=func.now() if channel == CHANNEL_BRAIN_MESSAGE else None,
         )
     )
 

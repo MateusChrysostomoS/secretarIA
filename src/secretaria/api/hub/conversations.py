@@ -17,6 +17,9 @@ POST /tenants/me/conversations/{id}/messages        - staff sends a message
 GET  /tenants/me/conversations/{id}/messages/{mid}/media
                                                      - that message's file,
                                                        streamed.
+POST /tenants/me/conversations/{id}/messages/read   - staff has seen the
+                                                       thread up to a cursor
+                                                       (Brain-Message only).
 
 The state flip itself is never reimplemented here — it goes through
 `services/handover.py::HandoverManager`, which also stamps
@@ -56,7 +59,7 @@ from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
 from secretaria.models import Tenant
 from secretaria.models.conversation import Conversation, HandoverState
-from secretaria.models.message import Message, MessageDirection, MessageSender
+from secretaria.models.message import Message, MessageDirection, MessageSender, status_of
 from secretaria.models.patient import Patient
 from secretaria.schemas.conversation import (
     ConversationRead,
@@ -65,10 +68,12 @@ from secretaria.schemas.conversation import (
     MessageRead,
     MessageSend,
     MessageSendForm,
+    MessagesReadMark,
+    MessagesReadResult,
     attachment_read_or_none,
     interactive_read_or_none,
 )
-from secretaria.services import media_storage
+from secretaria.services import media_storage, message_status
 from secretaria.services.channel_sender import (
     CHANNEL_BRAIN_MESSAGE,
     RECORDED_MESSAGE_ID,
@@ -150,6 +155,11 @@ def _message_read_model(message: Message) -> MessageRead:
         interactive=_interactive_read(message),
         interactive_reply_id=message.interactive_reply_id,
         attachment=attachment_read_or_none(message.attachment, message_id=message.id),
+        status=status_of(message),
+        delivered_at=message.delivered_at,
+        read_at=message.read_at,
+        failure_reason=message.failure_reason,
+        updated_at=message.updated_at,
     )
 
 
@@ -292,6 +302,55 @@ async def list_messages(
         )
     ).all()
     return [_message_read_model(message) for message in rows]
+
+
+@router.post("/{conversation_id}/messages/read", response_model=MessagesReadResult)
+async def mark_messages_read(
+    conversation_id: str,
+    body: MessagesReadMark,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> MessagesReadResult:
+    """The clinic's staff has seen this thread up to a cursor: the PATIENT's messages
+    (inbound) up to it become read, so the patient's portal shows the blue ticks.
+
+    Brain-Message only. A WhatsApp conversation answers `applied: false` and changes
+    nothing - deliberately not an error, so the console may call this on every thread it
+    opens without knowing the channel: a WhatsApp read is reported to the patient by
+    WhatsApp itself, and marking it here would claim a read Meta never confirmed.
+    Same tenant-scoped 404 as every other route in this router.
+    """
+    conversation = await _get_conversation(session, tenant, conversation_id)
+    patient = await session.get(Patient, conversation.patient_id)
+    if patient is None or patient.channel != CHANNEL_BRAIN_MESSAGE:
+        logger.info(
+            "hub_conversation_read_not_applicable",
+            tenant_id=str(tenant.id),
+            conversation_id=str(conversation.id),
+            channel=patient.channel if patient is not None else None,
+        )
+        return MessagesReadResult(marked=0, applied=False)
+    cutoff = await message_status.read_cutoff(
+        session,
+        conversation.id,
+        up_to_message_id=body.up_to_message_id,
+        up_to=body.up_to,
+    )
+    marked = 0
+    if cutoff is not None:
+        marked = await message_status.mark_read(
+            session, conversation.id, direction=MessageDirection.INBOUND, cutoff=cutoff
+        )
+    await session.commit()
+    logger.info(
+        "hub_conversation_read_marked",
+        tenant_id=str(tenant.id),
+        conversation_id=str(conversation.id),
+        side="staff",
+        marked=marked,
+        cursor_found=cutoff is not None,
+    )
+    return MessagesReadResult(marked=marked, applied=True)
 
 
 @router.post(

@@ -2,12 +2,14 @@
 
 from datetime import datetime
 from typing import Literal
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from secretaria.core.attachments import stored_attachment_or_none
 from secretaria.core.logging import get_logger
 from secretaria.models.conversation import HandoverState
+from secretaria.models.message import MessageStatus
 
 logger = get_logger(__name__)
 
@@ -120,6 +122,50 @@ class MessageRead(BaseModel):
     # The file this message carries (Brain-Message only), WITHOUT where it is stored;
     # the bytes come from GET .../conversations/{id}/messages/{message_id}/media.
     attachment: AttachmentRead | None = None
+    # Delivery state (docs/CHECKPOINT_brain_message_status_entrega.md). `status` is
+    # DERIVED from the timestamps (models/message.py::status_of): "falhou" > "lido" >
+    # "entregue" > "enviado". On WhatsApp only Meta's receipts move it; on Brain-Message
+    # a row is "entregue" from birth and "lido" once the other side marks it read.
+    # "enviando" never comes from here - it is the client's state before the POST
+    # returns. All additive with defaults (`frozen-contract-migration`).
+    status: MessageStatus = "enviado"
+    delivered_at: datetime | None = None
+    read_at: datetime | None = None
+    # "<Meta error code>: <title>" when `status == "falhou"`; never personal data.
+    failure_reason: str | None = None
+    # Bumped by every write to the row, status included.
+    updated_at: datetime | None = None
+
+
+class MessagesReadMark(BaseModel):
+    """"I have seen this conversation up to here" - exactly ONE of the two cursors.
+
+    `up_to_message_id`: the last message the reader saw (resolved to its `created_at`
+    inside the same conversation). `up_to`: an instant, which must carry its offset -
+    a naive time is refused, never guessed at (`naive-timestamp-serialization`).
+    Everything the OTHER side wrote up to that point becomes read.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    up_to_message_id: UUID | None = None
+    up_to: AwareDatetime | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_cursor(self):
+        if (self.up_to_message_id is None) == (self.up_to is None):
+            raise ValueError("send exactly one of up_to_message_id, up_to")
+        return self
+
+
+class MessagesReadResult(BaseModel):
+    """What a read mark did. `applied` is false when read marks do not apply to this
+    conversation at all - a WhatsApp patient (only Meta reports those reads), or no such
+    Brain-Message conversation - and then nothing was changed. `marked` counts rows that
+    moved to read now; rows already read are not counted again."""
+
+    marked: int
+    applied: bool
 
 
 class MessageSend(BaseModel):

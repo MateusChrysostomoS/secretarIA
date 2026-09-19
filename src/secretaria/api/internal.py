@@ -48,19 +48,25 @@ from secretaria.core import attachments
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
 from secretaria.models import Appointment, Conversation, Message, MessageDirection, Patient
-from secretaria.schemas.conversation import attachment_read_or_none, interactive_read_or_none
+from secretaria.models.message import status_of
+from secretaria.schemas.conversation import (
+    MessagesReadResult,
+    attachment_read_or_none,
+    interactive_read_or_none,
+)
 from secretaria.schemas.internal import (
     BrainMessageAck,
     BrainMessageInbound,
     BrainMessageInboundForm,
     BrainMessageMessage,
     BrainMessageMessageList,
+    BrainMessageReadMark,
     InternalAppointment,
     InternalAppointmentList,
     InternalPatient,
     InternalPatientList,
 )
-from secretaria.services import media_storage
+from secretaria.services import media_storage, message_status
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 
 logger = get_logger(__name__)
@@ -510,8 +516,10 @@ async def brain_message_inbound(
     summary="Messages of one Brain-Message patient (internal)",
     description=(
         "Returns the message history of ONE patient on the Brain-Message channel, "
-        "scoped to tenant_id + external_id. `since` returns only messages created "
-        "strictly after that instant (poll cursor). Requires the X-Internal-Api-Key header."
+        "scoped to tenant_id + external_id. `since` returns only messages CHANGED "
+        "(`updated_at`: created, or their delivery status moved) strictly after that "
+        "instant, ordered by `updated_at` - a message already fetched comes back when it "
+        "is read; upsert by `id`. Requires the X-Internal-Api-Key header."
     ),
     responses=_INTERNAL_RESPONSES,
 )
@@ -520,7 +528,12 @@ async def list_brain_message_messages(
     tenant_id: Annotated[UUID, Query(description="Tenant UUID — REQUIRED; the outer scope.")],
     since: Annotated[
         datetime | None,
-        Query(description="Return only messages created strictly after this instant."),
+        Query(
+            description=(
+                "Return only messages whose `updated_at` is strictly after this instant "
+                "(new, or status changed). Next cursor: the largest `updated_at` received."
+            )
+        ),
     ] = None,
     limit: Annotated[int, Query(ge=1, le=_MAX_PAGE)] = _DEFAULT_PAGE,
     session: AsyncSession = Depends(get_session),
@@ -565,12 +578,38 @@ async def list_brain_message_messages(
         return BrainMessageMessageList(data=[])
 
     stmt = select(Message).where(Message.conversation_id == conversation_id)
-    if since is not None:
-        stmt = stmt.where(Message.created_at > since)
-    # Oldest first: this is a transcript, and the caller appends it to what it
-    # already shows. `id` breaks ties between rows written in the same tick.
-    stmt = stmt.order_by(Message.created_at, Message.id).limit(limit)
-    rows = (await session.execute(stmt)).scalars().all()
+    if since is None:
+        # The first load: the transcript, oldest first. `id` breaks ties between rows
+        # written in the same tick.
+        stmt = stmt.order_by(Message.created_at, Message.id)
+    else:
+        # The poll: everything that CHANGED since the cursor - new rows and rows whose
+        # status moved (`updated_at`, bumped by every write). `created_at` here would
+        # never return a message again once fetched, so its ticks would freeze at
+        # whatever they were on the first fetch. Ordered by the cursor column.
+        stmt = stmt.where(Message.updated_at > since).order_by(Message.updated_at, Message.id)
+    rows = list((await session.execute(stmt.limit(limit))).scalars().all())
+    if since is not None and len(rows) == limit:
+        # A page never ends INSIDE a group of equal `updated_at`: one read mark stamps
+        # every row it touches with the same now(), and the caller's next cursor is the
+        # last `updated_at` it received - with a strict `>`, the rest of a group cut by
+        # `limit` would never be served again. So the page is completed with the rest
+        # of the last row's group (it may exceed `limit` by that group).
+        # Column-to-column, not the loaded value re-bound: a datetime round-trip need not
+        # compare equal to what the database stored.
+        seen = {row.id for row in rows}
+        last_updated_at = (
+            select(Message.updated_at).where(Message.id == rows[-1].id).scalar_subquery()
+        )
+        tail = await session.scalars(
+            select(Message)
+            .where(
+                Message.conversation_id == conversation_id,
+                Message.updated_at == last_updated_at,
+            )
+            .order_by(Message.id)
+        )
+        rows.extend(row for row in tail.all() if row.id not in seen)
     logger.info(
         "brain_message_messages_listed",
         tenant_id=str(tenant_id),
@@ -588,10 +627,78 @@ async def list_brain_message_messages(
                 interactive=interactive_read_or_none(row.interactive, message_id=row.id),
                 interactive_reply_id=row.interactive_reply_id,
                 attachment=attachment_read_or_none(row.attachment, message_id=row.id),
+                status=status_of(row),
+                delivered_at=row.delivered_at,
+                read_at=row.read_at,
+                updated_at=row.updated_at,
             )
             for row in rows
         ]
     )
+
+
+@router.post(
+    "/brain-message/messages/read",
+    response_model=MessagesReadResult,
+    summary="The patient has seen their Brain-Message conversation up to a point (internal)",
+    description=(
+        "Marks the CLINIC's messages (outbound) in this patient's conversation as read, up "
+        "to `up_to_message_id` (that message's creation) or `up_to` (an offset-aware "
+        "instant) - exactly one. Idempotent: already-read rows are left as they are and not "
+        "counted. Scoped to tenant_id + external_id + channel brain_message; an unknown "
+        "patient answers `applied: false`, never 404. Requires the X-Internal-Api-Key header."
+    ),
+    responses={
+        **_INTERNAL_RESPONSES,
+        422: {"description": "Not exactly one cursor, or a naive `up_to`."},
+    },
+)
+async def mark_brain_message_read(
+    payload: BrainMessageReadMark,
+    session: AsyncSession = Depends(get_session),
+) -> MessagesReadResult:
+    """brain-api calls this when the PATIENT's portal shows the conversation.
+
+    The patient is looked up with the same three-link scope as the transcript route
+    (tenant, channel, external_id), so a WhatsApp patient can never be marked from here -
+    a WhatsApp read is only ever Meta's receipt (services/message_status.py). Unknown
+    patient or conversation: `applied: false`, the same answer the transcript gives
+    with an empty list, confirming nothing about which ids exist.
+    """
+    conversation_id = await session.scalar(
+        select(Conversation.id)
+        .join(Patient, Patient.id == Conversation.patient_id)
+        .where(
+            Conversation.tenant_id == payload.tenant_id,
+            Patient.tenant_id == payload.tenant_id,
+            Patient.channel == CHANNEL_BRAIN_MESSAGE,
+            Patient.external_id == payload.external_id,
+        )
+    )
+    if conversation_id is None:
+        logger.info("brain_message_read_unknown_patient", tenant_id=str(payload.tenant_id))
+        return MessagesReadResult(marked=0, applied=False)
+    cutoff = await message_status.read_cutoff(
+        session,
+        conversation_id,
+        up_to_message_id=payload.up_to_message_id,
+        up_to=payload.up_to,
+    )
+    marked = 0
+    if cutoff is not None:
+        marked = await message_status.mark_read(
+            session, conversation_id, direction=MessageDirection.OUTBOUND, cutoff=cutoff
+        )
+    await session.commit()
+    logger.info(
+        "brain_message_read_marked",
+        tenant_id=str(payload.tenant_id),
+        conversation_id=str(conversation_id),
+        side="patient",
+        marked=marked,
+        cursor_found=cutoff is not None,
+    )
+    return MessagesReadResult(marked=marked, applied=True)
 
 
 @router.get(

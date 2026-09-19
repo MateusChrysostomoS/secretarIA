@@ -141,8 +141,11 @@ def test_drops_the_personal_data_the_worker_never_reads() -> None:
     value = minimal["entry"][0]["changes"][0]["value"]
     flat = _flat(minimal)
 
-    assert "statuses" not in value
+    # The receipt itself now travels (docs/CHECKPOINT_brain_message_status_entrega.md) -
+    # reduced to what apply_whatsapp_statuses reads, never its recipient or billing.
+    assert value["statuses"] == [{"id": "wamid.OLD", "status": "delivered", "timestamp": None}]
     assert OTHER_PATIENT not in flat  # the delivery receipt's recipient
+    assert "pricing" not in flat
     assert BUSINESS_NUMBER not in flat  # display_phone_number
     assert "messaging_product" not in value
     assert "timestamp" not in value["messages"][0]

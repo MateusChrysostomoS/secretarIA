@@ -3,6 +3,7 @@
 import enum
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from sqlalchemy import (
     JSON,
@@ -53,6 +54,9 @@ class Message(Base):
             postgresql_where=text("attachment IS NOT NULL"),
             sqlite_where=text("attachment IS NOT NULL"),
         ),
+        # Serves the transcript poll cursor (`updated_at > since` inside one
+        # conversation). Migration 8b4d2f6e1a37.
+        Index("ix_messages_conversation_updated_at", "conversation_id", "updated_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -113,3 +117,44 @@ class Message(Base):
     # `attachment IS NOT NULL`.
     attachment: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Delivery state, as FACTS - the status a screen draws is derived from them by
+    # `status_of` below, never stored as a fifth column that could disagree.
+    # Migration 8b4d2f6e1a37; docs/CHECKPOINT_brain_message_status_entrega.md.
+    #   WhatsApp: written from Meta's `statuses[]` callback, matched by `wam_id`
+    #     (services/message_status.py::apply_whatsapp_statuses) - never before Meta says.
+    #   Brain-Message: there is no network leg to confirm, so a row is delivered the
+    #     instant it is persisted (`delivered_at` == `created_at`, same INSERT); `read_at`
+    #     comes from the two "mark as read" routes, one per side.
+    # Each is written at most once (`WHERE <column> IS NULL`): a late or replayed
+    # event never moves a message backwards.
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # "<Meta error code>: <title>" - Meta's generic error title, never the recipient
+    # or anything else personal. NULL unless `failed_at` is set.
+    failure_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Bumped by EVERY write to the row, status included: it is the poll cursor
+    # (`since`) of the Brain-Message transcript, so a message already fetched comes
+    # back once its ticks move. `created_at` could not do that - it never changes.
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+MessageStatus = Literal["enviado", "entregue", "lido", "falhou"]
+
+
+def status_of(message: Message) -> MessageStatus:
+    """The delivery status a bubble draws, derived from the row's timestamps.
+
+    Failure wins over everything (a failed message does not "progress" afterwards),
+    then read, then delivered; none of the three is "enviado" - the row exists, so
+    the server accepted it. "enviando" (not yet accepted) exists only on the client.
+    """
+    if message.failed_at is not None:
+        return "falhou"
+    if message.read_at is not None:
+        return "lido"
+    if message.delivered_at is not None:
+        return "entregue"
+    return "enviado"

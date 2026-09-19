@@ -158,6 +158,34 @@ class WebhookStateSyncItem(BaseModel):
     action: str | None = None
 
 
+class WebhookStatusError(BaseModel):
+    """One `statuses[].errors[]` entry: Meta's numeric code and generic title only."""
+
+    model_config = _PERMISSIVE
+
+    code: int | str | None = None
+    title: str | None = None
+
+
+class WebhookStatus(BaseModel):
+    """One delivery receipt (`value.statuses[]`, webhook field `messages`).
+
+    `id` is the wamid of an OUTBOUND message (what the send response returned and
+    `Message.wam_id` stores); `status` is "sent" | "delivered" | "read" | "failed";
+    `timestamp` is Meta's epoch seconds (a string on the wire; an int tolerated).
+    `recipient_id` - the patient's full phone number - is deliberately not modeled and
+    never reaches the worker (`minimal_event_payload` drops it). Consumed by
+    services/message_status.py::apply_whatsapp_statuses.
+    """
+
+    model_config = _PERMISSIVE
+
+    id: str | None = None
+    status: str | None = None
+    timestamp: str | int | None = None
+    errors: list[WebhookStatusError] = Field(default_factory=list)
+
+
 class WebhookValue(BaseModel):
     model_config = _PERMISSIVE
 
@@ -165,7 +193,9 @@ class WebhookValue(BaseModel):
     metadata: WebhookMetadata | None = None
     contacts: list[WebhookContact] = Field(default_factory=list)
     messages: list[WebhookMessage] = Field(default_factory=list)
-    statuses: list[dict] = Field(default_factory=list)
+    # Delivery receipts. A status-only event arrives under field "messages" with
+    # `messages` empty and this populated.
+    statuses: list[WebhookStatus] = Field(default_factory=list)
     # Coexistence: echoes of messages the human secretary sent from the
     # WhatsApp mobile app (webhook field `smb_message_echoes`).
     message_echoes: list[WebhookMessage] = Field(default_factory=list)
@@ -369,6 +399,32 @@ def _minimal_message(msg: dict, *, keep_to: bool) -> dict | None:
     return out
 
 
+def _minimal_status(status: object) -> dict | None:
+    """One delivery receipt reduced to what `apply_whatsapp_statuses` reads.
+
+    Kept: `id` (the wamid it is about), `status`, `timestamp`, and per error only
+    `code` + `title`. Dropped: `recipient_id` (the patient's full phone number),
+    `conversation`/`pricing` (billing), `biz_opaque_callback_data`, and each error's
+    free-text `message`/`error_data`. A receipt without an id matches nothing, so it
+    is not carried.
+    """
+    if not isinstance(status, dict) or not status.get("id"):
+        return None
+    out: dict = {
+        "id": status["id"],
+        "status": status.get("status"),
+        "timestamp": status.get("timestamp"),
+    }
+    errors = [
+        {"code": error.get("code"), "title": error.get("title")}
+        for error in status.get("errors") or []
+        if isinstance(error, dict)
+    ]
+    if errors:
+        out["errors"] = errors
+    return out
+
+
 def minimal_event_payload(payload: dict) -> dict:
     """Reduce a raw Meta webhook body to ONLY what the arq worker reads.
 
@@ -387,7 +443,9 @@ def minimal_event_payload(payload: dict) -> dict:
       * `messages`           -> metadata.phone_number_id, contacts (wa_id +
                                 profile.name), and each message reduced by
                                 `_minimal_message`. The message `id` is the
-                                idempotency key and is always preserved.
+                                idempotency key and is always preserved. Plus
+                                each delivery receipt (`statuses[]`) reduced by
+                                `_minimal_status` - never its `recipient_id`.
       * `smb_message_echoes` -> same, plus each echo's `to` (the patient).
       * `history`            -> per chunk: `metadata.phase`/`progress` and an
                                 `errors` list of the right LENGTH with empty
@@ -446,6 +504,15 @@ def minimal_event_payload(payload: dict) -> dict:
                         messages.append(minimal)
                 if messages:
                     reduced[key] = messages
+
+                if field == "messages":
+                    statuses = [
+                        minimal
+                        for minimal in map(_minimal_status, value.get("statuses") or [])
+                        if minimal is not None
+                    ]
+                    if statuses:
+                        reduced["statuses"] = statuses
 
             elif field == "history":
                 chunks: list[dict] = []

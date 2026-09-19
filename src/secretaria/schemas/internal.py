@@ -19,8 +19,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from secretaria.core.whatsapp_limits import MAX_INTERACTIVE_REPLY_ID_CHARS
 from secretaria.models.appointment import AppointmentStatus
-from secretaria.models.message import MessageDirection, MessageSender
-from secretaria.schemas.conversation import AttachmentRead, InteractiveRead
+from secretaria.models.message import MessageDirection, MessageSender, MessageStatus
+from secretaria.schemas.conversation import AttachmentRead, InteractiveRead, MessagesReadMark
 
 
 class InternalAppointment(BaseModel):
@@ -156,6 +156,26 @@ class BrainMessageMessage(BaseModel):
     # key and no URL, here or in any other field (brain-api rewrites exactly this key
     # for the patient and passes every other field through). Additive and optional.
     attachment: AttachmentRead | None = None
+    # Delivery state, same derivation and meaning as the staff console's `MessageRead`
+    # (schemas/conversation.py). On this channel a row is "entregue" from birth; the
+    # clinic's rows turn "lido" when the patient's read mark reaches them, the
+    # patient's when the staff's does. `updated_at` is what `since` compares against:
+    # a row comes back on the next poll when its status changes. Additive, defaulted.
+    status: MessageStatus = "enviado"
+    delivered_at: datetime | None = None
+    read_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class BrainMessageReadMark(MessagesReadMark):
+    """`POST /internal/brain-message/messages/read` - the PATIENT has seen their
+    conversation up to a cursor, so the clinic's messages up to it become read.
+
+    Same scope keys as every other Brain-Message route (tenant + external_id) plus
+    exactly one cursor; strict, like the base (`extra="forbid"`)."""
+
+    tenant_id: UUID
+    external_id: str = Field(min_length=1, max_length=64)
 
 
 class BrainMessageMessageList(BaseModel):
