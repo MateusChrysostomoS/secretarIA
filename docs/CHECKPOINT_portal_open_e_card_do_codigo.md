@@ -95,9 +95,19 @@ Antes, `plugins/precheck_handoff.py` saía em `no_patient_phone` para todo pacie
   desta função é nunca levantar no chamador.
 - O corpo de uma chamada WhatsApp é **byte-idêntico** ao de ontem — nem uma chave nula a mais —, o
   que é o que torna este lado seguro de subir sozinho. Há teste fixando isso.
-- **422 ganhou ramo próprio:** `precheck_handoff_body_rejected` com `subject_field`, ainda mapeando
-  para `UNAVAILABLE`. Para o paciente é a mesma silêncio; para quem lê log, é a diferença entre
-  "ordem de deploy errada" e "rede caiu".
+- **422 e 501 ganharam ramos próprios**, os dois ainda mapeando para `UNAVAILABLE` (para o paciente
+  é o mesmo silêncio; para quem lê log, não é a mesma coisa):
+  - `precheck_handoff_body_rejected` com `subject_field` — corpo recusado: campo que o
+    `extra="forbid"` não conhece, **ou** um handle fora da forma que o brain-api tipa (ele declara
+    `external_id` como `UUID`; aqui `Patient.external_id` é VARCHAR livre). Lê-se como "ordem de
+    deploy / handle errado", não "rede caiu".
+  - `precheck_handoff_unsupported` — **o que acontece hoje de verdade.** O Implementer B parou
+    conforme a regra de parada: o brain-api valida `external_id` e responde
+    `501 precheck_portal_handoff_unsupported` sem abrir sessão no PreCheck, porque terminar isso
+    exigiria mexer no repo do PreCheck. Recusa **permanente** e entendida, não transitória
+    (`brain-mesh-permanent-vs-transient-refusal`). Este lado está correto e **inerte** sob isso:
+    manda o corpo certo, registra o motivo certo, e o paciente não recebe nada. No dia em que
+    aquele ramo responder 200, nada muda aqui.
 - `plugins/precheck_handoff.py` resolve o canal **primeiro** e ele decide tudo depois: qual handle
   nomeia o paciente, quais pré-condições valem (o número da plataforma só interessa ao ramo que
   monta o `wa.me`) e quem entrega. Portal → `BrainMessageSender` na conversa do paciente, com
@@ -128,6 +138,10 @@ canal só.
 4. secretaria_api E secretaria-worker, JUNTOS
 ```
 
+O passo 3 não tem ordem obrigatória nos dois sentidos: o brain-api absorve o 404 de uma rota que
+ainda não existe, e uma rota que existe sem gatilho nenhum simplesmente não é chamada. O passo 1
+tem: `external_id` contra um brain-api velho é 422.
+
 Por que os dois serviços: a rota nova vive na **API**, o job novo (`process_brain_message_open`),
 o card e o ramo do handoff vivem no **worker**. Subir só a API faz a rota responder 202 e o job
 nunca rodar ("unknown job"); subir só o worker deixa a rota inexistente. Não há migração nesta
@@ -140,13 +154,13 @@ chamado por ninguém.
 ## Validação
 
 ```
-uv run pytest -q     ->  2293 passed, 2 failed
-uv run ruff check .  ->  8 errors
-uv run ruff format --check .  ->  61 files would be reformatted
+uv run pytest -q     ->  2297 passed, 2 failed      (HEAD 9cc9b7a: 2230 passed, 2 failed)
+uv run ruff check .  ->  8 errors                   (HEAD 9cc9b7a: os mesmos 8)
+uv run ruff format --check .  ->  61 files          (HEAD 9cc9b7a: as mesmas 61)
 ```
 
 As 2 falhas e os 8 erros de lint são **pré-existentes no HEAD `9cc9b7a`**, medidos antes de
-qualquer edição (2230 passed / 2 failed; os mesmos 8 erros; as mesmas 61 files). As duas falhas são
+qualquer edição. As duas falhas são
 `tests/test_action_buttons.py` pedindo credenciais reais do Google Calendar, que esta worktree não
 tem (`.env` ausente por desenho). `ruff format .` **não** foi rodado (memória
 `secretaria-make-lint-red-at-head`); os dois arquivos que minhas edições sujaram foram formatados
@@ -157,6 +171,12 @@ idêntico ao do HEAD.
 
 - Nada rodou contra o brain-api real: os três contratos novos (`open`, `email_masked`,
   `external_id`) são exercitados só contra `httpx.MockTransport`.
+- **Os dois lados do `open` foram construídos contra o papel, não um contra o outro.** Um nome de
+  campo diferente no corpo que o brain-api envia (`patient_ref` em vez de `external_id`, por
+  exemplo) dá 422 aqui e o gatilho morre em silêncio — e é silêncio porque a chamada é
+  fire-and-forget do outro lado. Conferir o corpo real das duas pontas é passo de integração
+  obrigatório antes do deploy, e nenhum `extra=` ajuda nisso: um campo RENOMEADO falha de qualquer
+  jeito, porque `external_id` é obrigatório.
 - O card nunca foi visto num navegador nesta rodada. O frontend já renderiza e toca
   `interactive` (`docs/CHECKPOINT_portal_interactive_tap.md`), mas estes três ids são novos.
 - A fixture roda em SQLite, que não impõe largura de `VARCHAR` — a chave do ledger foi calculada

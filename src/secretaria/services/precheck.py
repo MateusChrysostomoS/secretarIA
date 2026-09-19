@@ -53,10 +53,20 @@ Responses:
   403 precheck_not_entitled                   -> NOT_ENTITLED
   404 no_clinic_for_tenant                    -> NO_CLINIC
   409 conflicting_active_session              -> CONFLICT
-  422 body rejected (an unknown/absent field) -> UNAVAILABLE, logged as such
+  422 body rejected (unknown field, or a
+      handle that is not the shape it types)  -> UNAVAILABLE, logged as such
+  501 precheck_portal_handoff_unsupported     -> UNAVAILABLE, logged as such
   503 not configured / 502 upstream failure   -> UNAVAILABLE
   network error / unconfigured BRAIN_API_BASE_URL or INTERNAL_API_KEY
                                                -> UNAVAILABLE
+
+The 501 is live today, not hypothetical: brain-api validates `external_id` but
+STOPS before opening a PreCheck session with it, because doing so would require
+changing the PreCheck repo, which TASK-003 forbids. So every Portal hand-off
+currently ends in a logged no-op. This side is deliberately built to be correct
+and INERT under that: it sends the right body, it records the right reason, and
+the patient hears nothing at all (`plugins/precheck_handoff.py`'s silence rule).
+The day brain-api's branch starts answering 200, nothing here changes.
 
 Everything here FAILS CLOSED into UNAVAILABLE — this function never raises
 into the calling agent tool. Same base URL + key pattern, and the same
@@ -284,15 +294,18 @@ async def request_precheck_handoff(
         return HandoffResult(status_outcome)
 
     if response.status_code == 422:
-        # brain-api REFUSED THE BODY, which on this route means one thing in
-        # practice: `PrecheckHandoffIn` is `extra="forbid"` and does not know
-        # the key we sent. Today that is `external_id` — this side is allowed
-        # to ship first (module docstring), so the Portal hand-off is simply
-        # unavailable until brain-api catches up. Same UNAVAILABLE as an
-        # outage, because there is nothing a patient could do differently
-        # either way, but a DIFFERENT log line: an operator reading
-        # `precheck_handoff_body_rejected` knows to check the deploy order,
-        # where `non_200_status` would have them checking the network.
+        # brain-api REFUSED THE BODY. Two causes, both of them ours and
+        # neither of them a network problem: a key `PrecheckHandoffIn` does
+        # not know (it is `extra="forbid"`, and `external_id` is new — this
+        # side is allowed to ship first, see the module docstring), or a value
+        # that is not the SHAPE it types (it declares `external_id` as a UUID,
+        # while `Patient.external_id` is a free VARCHAR here).
+        #
+        # Same UNAVAILABLE as an outage, because there is nothing a patient
+        # could do differently either way, but a DIFFERENT log line: an
+        # operator reading `precheck_handoff_body_rejected` knows to check the
+        # deploy order and the handle, where `non_200_status` would have them
+        # checking the network.
         logger.warning(
             "precheck_handoff_body_rejected",
             reason="contract_not_accepted",
@@ -301,6 +314,23 @@ async def request_precheck_handoff(
             # WHICH spelling was refused, so the line names the missing half
             # of the rollout without quoting the body back.
             subject_field="phone_number" if phone_number is not None else "external_id",
+        )
+        return HandoffResult(HandoffOutcome.UNAVAILABLE)
+
+    if response.status_code == 501:
+        # brain-api understood the request and refuses it PERMANENTLY: its
+        # Portal branch validates the handle but stops before opening a
+        # PreCheck session, because finishing that would mean changing the
+        # PreCheck repo (TASK-003 forbids it). Mapped to UNAVAILABLE like
+        # every other non-deliverable outcome — the hook's rule is silence —
+        # but logged as its own thing, because "not built yet" and "down right
+        # now" call for opposite reactions from whoever reads the line
+        # (`brain-mesh-permanent-vs-transient-refusal`).
+        logger.warning(
+            "precheck_handoff_unsupported",
+            reason="portal_handoff_not_implemented_upstream",
+            tenant_id=str(tenant_id),
+            **_subject_fields(phone_number, external_id),
         )
         return HandoffResult(HandoffOutcome.UNAVAILABLE)
 

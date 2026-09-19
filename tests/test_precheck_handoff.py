@@ -572,6 +572,7 @@ async def test_external_id_is_keyword_only() -> None:
         ({"status_code": 200, "body": {"status": "seeded"}}, "seeded"),
         ({"status_code": 200, "body": {"status": "nonsense"}}, "unexpected_status_body"),
         ({"status_code": 422, "body": {"detail": "unknown field"}}, "body_rejected"),
+        ({"status_code": 501, "body": {"detail": "unsupported"}}, "unsupported"),
         ({"status_code": 503, "body": None}, "unavailable"),
         ({"raise_exc": httpx.ConnectError("boom")}, "network_error"),
     ],
@@ -597,3 +598,25 @@ async def test_the_portal_paths_log_the_handle_but_never_the_name(
     assert log.records, f"the {why} path must say what it did"
     assert PATIENT_NAME not in log.text
     assert PORTAL_EXTERNAL_ID in log.text
+
+
+async def test_a_501_is_unavailable_and_says_the_portal_branch_is_not_built(
+    monkeypatch: pytest.MonkeyPatch, log: _LogRecorder
+) -> None:
+    """The answer this side actually gets today, and the one it must survive.
+
+    brain-api validates `external_id` and then stops: opening the PreCheck
+    session would mean changing the PreCheck repo, which TASK-003 forbids, so
+    its Portal branch answers `501 precheck_portal_handoff_unsupported`. The
+    patient must hear nothing (the hook's silence rule) and the log must not
+    read like an outage — "not built yet" and "down right now" call for
+    opposite reactions.
+    """
+    _install_fake_client(monkeypatch, status_code=501, body={"detail": "unsupported"})
+
+    result = await precheck.request_precheck_handoff(uuid4(), external_id=PORTAL_EXTERNAL_ID)
+
+    assert result == HandoffResult(HandoffOutcome.UNAVAILABLE)
+    events = [(event, fields) for _lvl, event, fields in log.records]
+    assert any(event == "precheck_handoff_unsupported" for event, _fields in events), log.text
+    assert not any(event == "precheck_handoff_failed" for event, _fields in events), log.text
