@@ -19,6 +19,13 @@ context added by FEAT 39: "patient_name" and "booked_service" (<= 255 chars
 each; sent only when non-blank, and the key is omitted entirely otherwise, so
 a call that passes neither produces byte-identically the two-field body above).
 
+WHO the patient is may now be spelled two ways, exactly one per call
+(TASK-003 §5): "phone_number" for a WhatsApp patient, or "external_id" for a
+Portal one, who has no phone number at all (`Patient.wa_id` is NULL there by
+design). The two are mutually exclusive on brain-api's side — both together
+is a 422 — and they are mutually exclusive here too, checked before the
+request is built rather than after it is refused.
+
 ADDING A FIELD HERE IS NOT A LOCAL CHANGE. brain-api's `PrecheckHandoffIn` is
 `extra="forbid"`: a field name it does not yet know does not get ignored, it
 422s the WHOLE request — and a 422 lands in the fail-closed bucket below as an
@@ -31,11 +38,22 @@ module was allowed to send them: brain-api's published OpenAPI carries
 patient_name + booked_service on PrecheckHandoffIn, and so does PreCheck's own
 PrecheckHandoffRequest one hop further in.
 
+`external_id` is the SECOND time this bill comes due and it is NOT verified
+live yet. Until brain-api ships its half, every Portal hand-off 422s. That is
+survivable exactly because of how the two sides are separated: only a PORTAL
+patient's call carries the new key, and before this change a Portal patient
+got NOTHING at all (the hook skipped on `no_patient_phone`), so the failure
+mode of shipping this side first is the old behaviour plus one WARNING line —
+never a regression for a WhatsApp patient, whose body is byte-identical to
+what it was. The 422 is separated from a generic outage below so the log says
+which one it is instead of leaving an operator to guess.
+
 Responses:
   200 {"status": "seeded" | "already_active"} -> SEEDED / ALREADY_ACTIVE
   403 precheck_not_entitled                   -> NOT_ENTITLED
   404 no_clinic_for_tenant                    -> NO_CLINIC
   409 conflicting_active_session              -> CONFLICT
+  422 body rejected (an unknown/absent field) -> UNAVAILABLE, logged as such
   503 not configured / 502 upstream failure   -> UNAVAILABLE
   network error / unconfigured BRAIN_API_BASE_URL or INTERNAL_API_KEY
                                                -> UNAVAILABLE
@@ -45,7 +63,11 @@ into the calling agent tool. Same base URL + key pattern, and the same
 httpx usage/timeouts, as core/subscription.py and services/entitlements_client.py.
 
 The phone number is never logged in full — only a sha256 hash (enough to
-correlate log lines for the same number, never enough to recover it). The
+correlate log lines for the same number, never enough to recover it). An
+`external_id` IS logged whole, and the difference is not an oversight: it is
+an opaque browser-session handle minted by brain-api, carrying no personal
+data of its own, and the rest of this service already logs it that way
+(`api/internal.py`). The
 X-Internal-Api-Key value is never logged at all. `patient_name` is
 patient-identifying free text: it travels in the request BODY and nowhere else.
 No log line in this module takes it — not on the happy path, and not on any
@@ -104,26 +126,52 @@ def _context_field(value: str | None) -> str | None:
     return cleaned or None
 
 
+def _subject_fields(phone_number: str | None, external_id: str | None) -> dict[str, str]:
+    """How a log line names the patient on whichever channel this call is for.
+
+    One helper rather than two spellings at eight call sites, and it is the
+    single place the PII rule for this module is applied: a phone number is
+    hashed, an opaque session handle is not (see the module docstring).
+    """
+    if phone_number:
+        return {"phone_hash": _phone_hash(phone_number)}
+    return {"external_id": external_id or ""}
+
+
 def _log_outcome(
-    tenant_id: UUID, phone_number: str, outcome: HandoffOutcome, **extra: object
+    tenant_id: UUID,
+    phone_number: str | None,
+    external_id: str | None,
+    outcome: HandoffOutcome,
+    **extra: object,
 ) -> None:
     logger.info(
         "precheck_handoff_result",
         tenant_id=str(tenant_id),
         outcome=outcome.value,
-        phone_hash=_phone_hash(phone_number),
+        **_subject_fields(phone_number, external_id),
         **extra,
     )
 
 
 async def request_precheck_handoff(
     tenant_id: UUID,
-    phone_number: str,
+    phone_number: str | None = None,
     *,
+    external_id: str | None = None,
     patient_name: str | None = None,
     booked_service: str | None = None,
 ) -> HandoffResult:
-    """Ask brain-api to pre-seed a PreCheck session for `phone_number` under `tenant_id`.
+    """Ask brain-api to pre-seed a PreCheck session for this patient under `tenant_id`.
+
+    Exactly ONE of `phone_number` (WhatsApp) and `external_id` (Portal) names
+    the patient. Neither or both is a programming error, and it is reported the
+    way every other ambiguity here is — a WARNING and UNAVAILABLE — rather than
+    by raising, because the whole point of this function's contract is that a
+    caller in a post-booking hook or an agent tool never has to guard it.
+    `phone_number` stays positional so every pre-TASK-003 call site is
+    unchanged; `external_id` is keyword-only, like the two context fields, so
+    the two handles can never be swapped by position.
 
     Fails closed to UNAVAILABLE on any ambiguity (unconfigured settings,
     network error, timeout, unexpected status/body) — never raises into the
@@ -139,12 +187,31 @@ async def request_precheck_handoff(
     unchanged, and `None` here is the normal case (a block slot, an untyped
     appointment), not an error.
     """
+    phone_number = (phone_number or "").strip() or None
+    external_id = (external_id or "").strip() or None
+    if (phone_number is None) == (external_id is None):
+        logger.warning(
+            "precheck_handoff_invalid_subject",
+            tenant_id=str(tenant_id),
+            # Which of the two was supplied, never their values.
+            has_phone=phone_number is not None,
+            has_external_id=external_id is not None,
+        )
+        return HandoffResult(HandoffOutcome.UNAVAILABLE)
+
     settings = get_settings()
     if not settings.BRAIN_API_BASE_URL or not settings.INTERNAL_API_KEY:
         logger.warning("precheck_handoff_unconfigured", tenant_id=str(tenant_id))
         return HandoffResult(HandoffOutcome.UNAVAILABLE)
 
-    body: dict[str, str] = {"tenant_id": str(tenant_id), "phone_number": phone_number}
+    body: dict[str, str] = {"tenant_id": str(tenant_id)}
+    # Exactly one key, never both and never a null: `PrecheckHandoffIn` is
+    # `extra="forbid"` AND rejects the pair, and a WhatsApp call must keep
+    # producing the byte-identical body it produced before this branch existed.
+    if phone_number is not None:
+        body["phone_number"] = phone_number
+    else:
+        body["external_id"] = external_id or ""
     # Absent keys, never null ones: `extra="forbid"` on the other side polices
     # unknown NAMES, but omitting a key we have nothing for also keeps the
     # no-context payload identical to the pre-FEAT-39 one, which is what makes
@@ -171,7 +238,7 @@ async def request_precheck_handoff(
             "precheck_handoff_failed",
             reason="network_error",
             tenant_id=str(tenant_id),
-            phone_hash=_phone_hash(phone_number),
+            **_subject_fields(phone_number, external_id),
             error=str(exc),
         )
         return HandoffResult(HandoffOutcome.UNAVAILABLE)
@@ -184,7 +251,7 @@ async def request_precheck_handoff(
                 "precheck_handoff_failed",
                 reason="invalid_json",
                 tenant_id=str(tenant_id),
-                phone_hash=_phone_hash(phone_number),
+                **_subject_fields(phone_number, external_id),
                 error=str(exc),
             )
             return HandoffResult(HandoffOutcome.UNAVAILABLE)
@@ -199,11 +266,11 @@ async def request_precheck_handoff(
                 "precheck_handoff_failed",
                 reason="unexpected_status_body",
                 tenant_id=str(tenant_id),
-                phone_hash=_phone_hash(phone_number),
+                **_subject_fields(phone_number, external_id),
                 body_status=status,
             )
             return HandoffResult(HandoffOutcome.UNAVAILABLE)
-        _log_outcome(tenant_id, phone_number, outcome)
+        _log_outcome(tenant_id, phone_number, external_id, outcome)
         return HandoffResult(outcome)
 
     status_outcome = {
@@ -213,15 +280,36 @@ async def request_precheck_handoff(
     }.get(response.status_code)
 
     if status_outcome is not None:
-        _log_outcome(tenant_id, phone_number, status_outcome)
+        _log_outcome(tenant_id, phone_number, external_id, status_outcome)
         return HandoffResult(status_outcome)
+
+    if response.status_code == 422:
+        # brain-api REFUSED THE BODY, which on this route means one thing in
+        # practice: `PrecheckHandoffIn` is `extra="forbid"` and does not know
+        # the key we sent. Today that is `external_id` — this side is allowed
+        # to ship first (module docstring), so the Portal hand-off is simply
+        # unavailable until brain-api catches up. Same UNAVAILABLE as an
+        # outage, because there is nothing a patient could do differently
+        # either way, but a DIFFERENT log line: an operator reading
+        # `precheck_handoff_body_rejected` knows to check the deploy order,
+        # where `non_200_status` would have them checking the network.
+        logger.warning(
+            "precheck_handoff_body_rejected",
+            reason="contract_not_accepted",
+            tenant_id=str(tenant_id),
+            **_subject_fields(phone_number, external_id),
+            # WHICH spelling was refused, so the line names the missing half
+            # of the rollout without quoting the body back.
+            subject_field="phone_number" if phone_number is not None else "external_id",
+        )
+        return HandoffResult(HandoffOutcome.UNAVAILABLE)
 
     # 502/503 and anything else unexpected: fail closed.
     logger.warning(
         "precheck_handoff_failed",
         reason="non_200_status",
         tenant_id=str(tenant_id),
-        phone_hash=_phone_hash(phone_number),
+        **_subject_fields(phone_number, external_id),
         status_code=response.status_code,
     )
     return HandoffResult(HandoffOutcome.UNAVAILABLE)

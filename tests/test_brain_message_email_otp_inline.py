@@ -87,15 +87,22 @@ from secretaria.services.pending_identity import (  # noqa: E402
     CODE_ACCEPTED_MESSAGE,
     CODE_GIVE_UP_MESSAGE,
     CODE_INVALID_MESSAGE,
+    CODE_NOTICE_BUTTONS,
     CODE_NOTICE_MESSAGE,
     EMAIL_CLAIM_RETRY_MESSAGE,
     EMAIL_INVALID_MESSAGE,
     EMAIL_REQUEST_MESSAGE,
+    IDENTITY_BACK_ACTION,
+    IDENTITY_CHANGE_EMAIL_ACTION,
+    IDENTITY_RESEND_ACTION,
     ClaimOutcome,
     IdentityState,
     RequestCodeOutcome,
+    RequestCodeResult,
     VerifyOutcome,
     VerifyResult,
+    code_notice_body,
+    masked_email_or_none,
     parse_code,
     parse_email,
 )
@@ -105,6 +112,24 @@ PHONE_NUMBER_ID = "1234567890"
 WA_ID = "5511988887777"
 EXTERNAL_ID = "00000000-0000-4000-8000-000000000001"
 EMAIL = "maria@exemplo.com"
+# What brain-api hands back for `EMAIL` (TASK-003 §3): first character, ***,
+# last character of the local part, then the whole domain. The ONLY form of an
+# address this repo is allowed to put in a transcript.
+EMAIL_MASKED = "m***a@exemplo.com"
+
+
+def _code_notice_row(email_masked: str | None = EMAIL_MASKED) -> str:
+    """The code notice AS STORED on Brain-Message.
+
+    A card is recorded flattened — body plus "(opções: ...)" — for the reason
+    `LGPD_ROW` below records: the next agent turn is rebuilt from the
+    `messages` table and a bare body would hide what was offered. So this, not
+    the bare constant, is what the patient's console renders.
+    """
+    return interactive_history_body(
+        code_notice_body(email_masked), [title for _, title in CODE_NOTICE_BUTTONS]
+    )
+
 
 # The LGPD notice AS STORED on the Brain-Message channel. A card is recorded
 # flattened — body plus "(opções: ...)" — because the next agent turn is
@@ -194,7 +219,7 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db, calls):
 
     async def _request(tenant_id, external_id):
         calls.code_requests.append(external_id)
-        return RequestCodeOutcome.SENT
+        return RequestCodeResult(RequestCodeOutcome.SENT, email_masked=EMAIL_MASKED)
 
     monkeypatch.setattr(tasks, "probe_identity", _probe)
     monkeypatch.setattr(tasks, "claim_email", _claim)
@@ -370,7 +395,8 @@ async def test_wire_contract_matches_brain_api_internal_endpoints(monkeypatch) -
         is IdentityState.PENDING_UNCLAIMED
     )
     assert await pending_service.claim_email(tenant_id, EXTERNAL_ID, EMAIL) is ClaimOutcome.CLAIMED
-    assert await pending_service.request_code(tenant_id, EXTERNAL_ID) is RequestCodeOutcome.SENT
+    request = await pending_service.request_code(tenant_id, EXTERNAL_ID)
+    assert request.outcome is RequestCodeOutcome.SENT
     result = await pending_service.verify_code(tenant_id, EXTERNAL_ID, "123456")
     assert result.outcome is VerifyOutcome.VERIFIED
 
@@ -775,7 +801,7 @@ async def test_saying_something_else_leaves_the_code_state_immediately(db, calls
     assert calls.verified == []
     after = await _outbound(db, tenant)
     assert CODE_INVALID_MESSAGE not in after[len(before) :]
-    assert CODE_NOTICE_MESSAGE not in after[len(before) :]
+    assert _code_notice_row() not in after[len(before) :]
     assert await _flow_state(db, tenant) != FlowState.AWAITING_EMAIL_CODE
 
 
@@ -916,7 +942,7 @@ async def test_a_booking_by_an_unverified_visitor_gets_the_code_notice(db, calls
     await plugin._post_booking(_ctx(tenant, patient, appointment))
 
     assert calls.code_requests == [EXTERNAL_ID]
-    assert (await _outbound(db, tenant))[-1] == CODE_NOTICE_MESSAGE
+    assert (await _outbound(db, tenant))[-1] == _code_notice_row()
     assert await _flow_state(db, tenant) == FlowState.AWAITING_EMAIL_CODE
 
 
@@ -933,7 +959,7 @@ async def test_the_code_notice_is_sent_at_most_once_per_appointment(db, calls) -
     await plugin._post_booking(ctx)
 
     assert calls.code_requests == [EXTERNAL_ID]
-    assert (await _outbound(db, tenant)).count(CODE_NOTICE_MESSAGE) == 1
+    assert (await _outbound(db, tenant)).count(_code_notice_row()) == 1
 
 
 @pytest.mark.parametrize(
@@ -953,7 +979,7 @@ async def test_no_code_no_message_and_the_claim_goes_back(db, monkeypatch, outco
     """
 
     async def _no(tenant_id, external_id):
-        return outcome
+        return RequestCodeResult(outcome)
 
     monkeypatch.setattr(plugin, "request_code", _no)
     tenant = await _seed_tenant(db)
@@ -964,7 +990,7 @@ async def test_no_code_no_message_and_the_claim_goes_back(db, monkeypatch, outco
 
     await plugin._post_booking(_ctx(tenant, patient, appointment))
 
-    assert CODE_NOTICE_MESSAGE not in await _outbound(db, tenant)
+    assert _code_notice_row() not in await _outbound(db, tenant)
     assert await _flow_state(db, tenant) != FlowState.AWAITING_EMAIL_CODE
     async with db() as session:
         held = await session.scalar(
@@ -1006,20 +1032,28 @@ async def test_a_whatsapp_booking_never_reaches_the_identity_leg(db, calls) -> N
 
 
 async def test_the_precheck_handoff_still_fires_exactly_as_before(db, calls, monkeypatch) -> None:
-    """CHECKLIST: feat36-40 is untouched, including on the shared event.
+    """CHECKLIST: feat36-40 is untouched on WhatsApp, and TASK-003 added a second door.
 
-    Both hooks are run against the same committed appointment and each is
-    asserted separately. The two are disjoint by channel — `precheck_handoff`
-    needs a `wa_id`, which a Brain-Message row does not have — so this test
-    runs the pair TWICE, once per channel, and pins that exactly one of them
-    speaks each time. That is the property a future change would break
-    silently.
+    Both hooks are run against the same committed appointment, twice, once per
+    channel. What the two channels share is the ledger and the SEED call; what
+    they must never share is the delivery:
+
+      * WhatsApp: named to brain-api by `phone_number`, invited with a `wa.me`
+        deep link through `WhatsAppClient` — byte for byte what feat36-40
+        shipped;
+      * Portal: named by `external_id` (and NEVER by a phone), invited inside
+        the conversation, with no `wa.me` anywhere in the transcript.
+
+    Before TASK-003 the Portal half of this test asserted silence, because the
+    hook skipped on `no_patient_phone`. That skip is the thing this task
+    removed, so the assertion now pins the pair of branches instead of the
+    absence of one.
     """
-    handoffs: list[str] = []
+    handoffs: list[tuple[str | None, str | None]] = []
     sent_wa: list[str] = []
 
-    async def _handoff(tenant_id, phone, **kwargs):
-        handoffs.append(phone)
+    async def _handoff(tenant_id, phone=None, *, external_id=None, **kwargs):
+        handoffs.append((phone, external_id))
         return SimpleNamespace(outcome=precheck_handoff.HandoffOutcome.SEEDED)
 
     class _Client:
@@ -1058,8 +1092,9 @@ async def test_the_precheck_handoff_still_fires_exactly_as_before(db, calls, mon
     await plugin._post_booking(wa_ctx)
     await precheck_handoff._post_booking(wa_ctx)
 
-    assert handoffs == [WA_ID], "the PreCheck handoff stopped firing on WhatsApp"
+    assert handoffs == [(WA_ID, None)], "the PreCheck handoff stopped firing on WhatsApp"
     assert len(sent_wa) == 1
+    assert "wa.me/" in sent_wa[0]
     assert calls.code_requests == []
 
     # --- Brain-Message booking: the identity hook speaks, PreCheck is silent ---
@@ -1073,9 +1108,16 @@ async def test_the_precheck_handoff_still_fires_exactly_as_before(db, calls, mon
     await precheck_handoff._post_booking(bm_ctx)
 
     assert calls.code_requests == [EXTERNAL_ID]
-    assert (await _outbound(db, tenant))[-1] == CODE_NOTICE_MESSAGE
-    assert handoffs == [WA_ID], "PreCheck tried to reach a patient with no phone number"
-    assert len(sent_wa) == 1
+    portal_rows = await _outbound(db, tenant)
+    assert _code_notice_row() in portal_rows
+    assert handoffs == [
+        (WA_ID, None),
+        (None, EXTERNAL_ID),
+    ], "the Portal hand-off must name the visitor by external_id, never by a phone"
+    assert len(sent_wa) == 1, "a Portal patient must never be sent to over WhatsApp"
+    assert not any("wa.me/" in row for row in portal_rows), (
+        "a wa.me link reached a patient who has no WhatsApp"
+    )
 
 
 async def test_a_portal_booking_records_no_phone_number(db, calls) -> None:
@@ -1126,3 +1168,308 @@ async def test_a_portal_booking_records_no_phone_number(db, calls) -> None:
         )
     assert appointment is not None, "the booking was rolled back instead of persisted"
     assert appointment.phone is None
+
+
+# --------------------------------------------------------------------------
+# 9. The code notice as a CARD: the masked inbox and the three exits (TASK-003)
+# --------------------------------------------------------------------------
+
+
+async def _bm_tap(tenant: Tenant, title: str, reply_id: str, external_id: str = EXTERNAL_ID):
+    """One TAP on the Portal, through the real validation the channel applies.
+
+    Goes in as a title plus a raw id, exactly as the switchboard relays a tap
+    from the patient's browser, so `_validated_brain_message_reply_id` gets to
+    refuse an id this conversation never offered — which is the property half
+    of these tests turn on.
+    """
+    reply = await tasks._persist_brain_message_inbound(
+        tenant_id=tenant.id,
+        external_id=external_id,
+        text=title,
+        interactive_reply_id=reply_id,
+    )
+    if reply is not None:
+        await tasks._send_bot_reply(reply, redis=None)
+    return reply
+
+
+async def _last_card(db, tenant: Tenant) -> dict | None:
+    """The `Message.interactive` of the newest outbound row, as stored."""
+    async with db() as session:
+        rows = (
+            await session.scalars(
+                select(Message)
+                .join(Conversation, Conversation.id == Message.conversation_id)
+                .where(
+                    Conversation.tenant_id == tenant.id,
+                    Message.direction == MessageDirection.OUTBOUND,
+                )
+                .order_by(Message.created_at, text("messages.rowid"))
+            )
+        ).all()
+    return rows[-1].interactive if rows else None
+
+
+async def _card_state(db, tenant: Tenant):
+    """A Portal conversation parked on a REAL code-notice card.
+
+    Built through the plugin rather than by writing `flow_state` by hand
+    (`_ready_for_code`), because these tests are about the card: the ids have
+    to be on a recorded `Message.interactive` or no tap can be honoured.
+    """
+    await _bm_turn(tenant, "oi")
+    await _bm_turn(tenant, EMAIL)
+    await _bm_turn(tenant, CONSENT_BUTTON_LABEL)
+    patient = await _patient(db, tenant)
+    appointment = await _booked(db, tenant, patient)
+    await plugin._post_booking(_ctx(tenant, patient, appointment))
+    assert await _flow_state(db, tenant) == FlowState.AWAITING_EMAIL_CODE
+    return patient, appointment
+
+
+def test_the_three_button_titles_fit_the_reply_button_cap() -> None:
+    """20 code units is the cap `interactive_buttons_record` applies.
+
+    Pinned because two of the three titles carry a variation selector and one
+    is an astral emoji, so their cost is not their glyph count: a title over
+    the cap is silently CUT, and a cut label is what a patient reads.
+    """
+    from secretaria.core.whatsapp_limits import MAX_BUTTON_LABEL_CHARS
+
+    assert [action for action, _ in CODE_NOTICE_BUTTONS] == [
+        IDENTITY_BACK_ACTION,
+        IDENTITY_RESEND_ACTION,
+        IDENTITY_CHANGE_EMAIL_ACTION,
+    ]
+    for _action, title in CODE_NOTICE_BUTTONS:
+        assert len(title) <= MAX_BUTTON_LABEL_CHARS, title
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("m***a@exemplo.com", "m***a@exemplo.com"),
+        ("  m***a@exemplo.com ", "m***a@exemplo.com"),
+        ("a***@exemplo.com", "a***@exemplo.com"),
+        # Everything below is REFUSED, and the first row is the one that
+        # matters: an unmasked address must never reach a transcript, whoever
+        # sent it.
+        ("maria@exemplo.com", None),
+        ("m***a exemplo.com", None),
+        ("m***a@", None),
+        ("***", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_only_a_visibly_masked_address_is_allowed_into_the_copy(raw, expected) -> None:
+    assert masked_email_or_none(raw) == expected
+
+
+def test_the_body_names_the_mask_and_degrades_without_one() -> None:
+    """No mask must never become an invented address, or an empty slot."""
+    assert EMAIL_MASKED in code_notice_body(EMAIL_MASKED)
+    assert EMAIL not in code_notice_body(EMAIL_MASKED)
+    assert code_notice_body(None) == CODE_NOTICE_MESSAGE
+    # A brain-api bug that sent the raw address falls back too, rather than
+    # printing it.
+    assert code_notice_body(EMAIL) == CODE_NOTICE_MESSAGE
+
+
+async def test_request_code_reads_the_optional_mask_off_the_200(monkeypatch) -> None:
+    """Additive field, additive behaviour: absent is SENT without a mask."""
+    bodies = [
+        {"status": "sent", "email_masked": EMAIL_MASKED},
+        {"status": "sent"},
+        {"status": "sent", "email_masked": EMAIL},
+    ]
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=bodies.pop(0))
+
+    real_client = httpx.AsyncClient
+    transport = httpx.MockTransport(_handler)
+    monkeypatch.setattr(
+        pending_service,
+        "get_settings",
+        lambda: Settings(
+            BRAIN_API_BASE_URL="https://brain-api.test",
+            INTERNAL_API_KEY="contract-key",
+        ),
+    )
+    monkeypatch.setattr(
+        pending_service.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=transport, **kwargs),
+    )
+    tenant_id = uuid4()
+
+    masked = await pending_service.request_code(tenant_id, EXTERNAL_ID)
+    plain = await pending_service.request_code(tenant_id, EXTERNAL_ID)
+    leaky = await pending_service.request_code(tenant_id, EXTERNAL_ID)
+
+    assert masked.outcome is RequestCodeOutcome.SENT
+    assert masked.email_masked == EMAIL_MASKED
+    assert plain.outcome is RequestCodeOutcome.SENT and plain.email_masked is None
+    # The code WAS mailed; only the cosmetic half was unusable.
+    assert leaky.outcome is RequestCodeOutcome.SENT and leaky.email_masked is None
+
+
+async def test_the_code_notice_is_a_card_with_three_ids_and_the_mask(db) -> None:
+    """CHECKLIST (§3 + §4): the body names the masked inbox, the card has 3 buttons."""
+    tenant = await _seed_tenant(db)
+
+    await _card_state(db, tenant)
+
+    card = await _last_card(db, tenant)
+    assert card is not None, "the code notice went out as plain text"
+    assert card["kind"] == "buttons"
+    assert EMAIL_MASKED in card["body"]
+    assert EMAIL not in card["body"]
+    assert [option["id"] for option in card["options"]] == [
+        IDENTITY_BACK_ACTION,
+        IDENTITY_RESEND_ACTION,
+        IDENTITY_CHANGE_EMAIL_ACTION,
+    ]
+    assert [option["title"] for option in card["options"]] == [
+        title for _, title in CODE_NOTICE_BUTTONS
+    ]
+    # And the raw address is nowhere in the transcript, card or not.
+    assert not any(EMAIL in row for row in await _outbound(db, tenant))
+
+
+async def test_resend_asks_for_a_new_code_and_re_emits_the_same_card(db, calls) -> None:
+    """CHECKLIST (§4): `identity_resend` -> request_code again, same card."""
+    tenant = await _seed_tenant(db)
+    await _card_state(db, tenant)
+    assert calls.code_requests == [EXTERNAL_ID]
+
+    await _bm_tap(tenant, "Reenviar codigo", IDENTITY_RESEND_ACTION)
+
+    assert calls.code_requests == [EXTERNAL_ID, EXTERNAL_ID]
+    assert (await _outbound(db, tenant))[-1] == _code_notice_row()
+    assert await _flow_state(db, tenant) == FlowState.AWAITING_EMAIL_CODE
+    card = await _last_card(db, tenant)
+    assert card is not None and EMAIL_MASKED in card["body"]
+
+
+async def test_a_resend_that_cannot_be_mailed_frees_the_conversation(db, monkeypatch) -> None:
+    """Never park a patient on a prompt for a code that was not sent."""
+    tenant = await _seed_tenant(db)
+    await _card_state(db, tenant)
+
+    async def _no(tenant_id, external_id):
+        return RequestCodeResult(RequestCodeOutcome.UNAVAILABLE)
+
+    monkeypatch.setattr(tasks, "request_code", _no)
+
+    await _bm_tap(tenant, "Reenviar codigo", IDENTITY_RESEND_ACTION)
+
+    assert (await _outbound(db, tenant))[-1] == CODE_GIVE_UP_MESSAGE
+    assert await _flow_state(db, tenant) == FlowState.IDLE
+
+
+async def test_change_email_goes_back_to_the_address_question(db, calls) -> None:
+    """CHECKLIST (§4): `identity_change_email` -> AWAITING_EMAIL + the ask.
+
+    And the next valid address is CLAIMED, which is the half that makes the
+    button worth having: a typo is recoverable inside the same visit.
+    """
+    tenant = await _seed_tenant(db)
+    await _card_state(db, tenant)
+    claimed_before = list(calls.claimed)
+
+    await _bm_tap(tenant, "Mudar e-mail", IDENTITY_CHANGE_EMAIL_ACTION)
+
+    assert (await _outbound(db, tenant))[-1] == EMAIL_REQUEST_MESSAGE
+    assert await _flow_state(db, tenant) == FlowState.AWAITING_EMAIL
+    assert calls.verified == []
+
+    await _bm_turn(tenant, "outra@exemplo.com")
+
+    assert calls.claimed == [*claimed_before, "outra@exemplo.com"]
+
+
+async def test_back_leaves_for_the_menu_without_touching_the_appointment(db, calls) -> None:
+    """CHECKLIST (§4): `identity_back` -> IDLE/MENU and the menu is shown."""
+    tenant = await _seed_tenant(db)
+    _patient_row, appointment = await _card_state(db, tenant)
+    before = await _outbound(db, tenant)
+
+    await _bm_tap(tenant, "Voltar", IDENTITY_BACK_ACTION)
+
+    after = await _outbound(db, tenant)
+    assert len(after) > len(before), "no menu was sent"
+    assert await _flow_state(db, tenant) in (FlowState.IDLE, FlowState.MENU)
+    assert calls.verified == []
+    async with db() as session:
+        still_there = await session.get(Appointment, appointment.id)
+    assert still_there is not None, "leaving the code prompt cancelled the appointment"
+
+
+async def test_typing_the_code_still_works_with_the_card_on_screen(db, calls) -> None:
+    """Non-regression: the buttons are an addition, not a replacement."""
+    tenant = await _seed_tenant(db)
+    await _card_state(db, tenant)
+
+    await _bm_turn(tenant, "123456")
+
+    assert calls.verified == ["123456"]
+    assert (await _outbound(db, tenant))[-1] == CODE_ACCEPTED_MESSAGE
+    assert await _flow_state(db, tenant) == FlowState.IDLE
+    # The redaction survived the card: the code is not in the transcript.
+    assert "123456" not in await _inbound(db, tenant)
+
+
+async def test_a_forged_card_id_is_ignored_and_routed_as_text(db, calls) -> None:
+    """The tap id is the patient's browser's word for it, not Meta's.
+
+    A conversation that never showed the card cannot be driven by its ids —
+    `_validated_brain_message_reply_id` drops them, and the turn falls through
+    to the ordinary text routing.
+    """
+    tenant = await _seed_tenant(db)
+    await _bm_turn(tenant, "oi")
+    await _bm_turn(tenant, EMAIL)
+    await _bm_turn(tenant, CONSENT_BUTTON_LABEL)
+    before = len(calls.code_requests)
+
+    await _bm_tap(tenant, "Reenviar codigo", IDENTITY_RESEND_ACTION)
+
+    assert len(calls.code_requests) == before, "a forged id reached the identity leg"
+
+
+async def test_whatsapp_never_sees_a_code_card(db, calls) -> None:
+    """CHECKLIST (WhatsApp non-regression): the whole card leg is Portal-only.
+
+    A WhatsApp conversation cannot even enter `AWAITING_EMAIL_CODE` — the gate
+    is inside a channel check — so forcing the state and then tapping must
+    change nothing on the identity leg.
+    """
+    tenant = await _seed_tenant(db)
+    await tasks._persist_inbound_message(
+        phone_number_id=tenant.phone_number_id,
+        wa_id=WA_ID,
+        patient_name="Maria",
+        wam_id="wamid.card.1",
+        body="oi",
+    )
+    async with db() as session:
+        async with session.begin():
+            conversation = await session.scalar(
+                select(Conversation).where(Conversation.tenant_id == tenant.id)
+            )
+            conversation.flow_state = FlowState.AWAITING_EMAIL_CODE
+
+    await tasks._persist_inbound_message(
+        phone_number_id=tenant.phone_number_id,
+        wa_id=WA_ID,
+        patient_name="Maria",
+        wam_id="wamid.card.2",
+        body="Reenviar codigo",
+    )
+
+    assert calls.code_requests == []
+    assert calls.probed == []
+    assert calls.verified == []

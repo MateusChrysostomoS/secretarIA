@@ -173,16 +173,22 @@ from secretaria.services.pending_identity import (
     CODE_ACCEPTED_MESSAGE,
     CODE_GIVE_UP_MESSAGE,
     CODE_INVALID_MESSAGE,
-    CODE_NOTICE_MESSAGE,
+    CODE_NOTICE_BUTTONS,
     EMAIL_CLAIM_RETRY_MESSAGE,
     EMAIL_INVALID_MESSAGE,
     EMAIL_PAUSED_MESSAGE,
     EMAIL_REQUEST_MESSAGE,
+    IDENTITY_BACK_ACTION,
+    IDENTITY_CHANGE_EMAIL_ACTION,
+    IDENTITY_RESEND_ACTION,
     ClaimOutcome,
     IdentityState,
     RequestCodeOutcome,
+    RequestCodeResult,
     VerifyOutcome,
     claim_email,
+    code_notice_body,
+    identity_action_or_none,
     parse_code,
     parse_email,
     probe_identity,
@@ -536,6 +542,16 @@ class _ReplyContext:
     # A 6-digit code the visitor typed while the conversation was waiting for
     # one. `_send_bot_reply` spends it against brain-api.
     pending_code: str | None = None
+    # The visitor TAPPED one of the three buttons on the code-notice card
+    # instead of typing a code (`services/pending_identity.py`:
+    # identity_back / identity_resend / identity_change_email). Carries the
+    # option id, never the label: the id is what
+    # `_validated_brain_message_reply_id` already checked against the cards
+    # this conversation offered, while the label is display copy that a
+    # wording change may move at any time. One field for all three because
+    # they are one card and `_handle_identity_card_action` owns the whole
+    # turn for every one of them.
+    identity_action: str | None = None
 
 
 async def process_webhook_event(ctx: dict, payload: dict) -> None:
@@ -1121,6 +1137,40 @@ async def _route_inbound_turn(
             )
 
         if conversation.flow_state == FlowState.AWAITING_EMAIL_CODE:
+            # A TAP on the code notice's own card, checked BEFORE the six
+            # digits because the two cannot collide and the tap is the more
+            # specific signal: `identity_action_or_none` only ever matches an
+            # id this module minted, and `interactive_reply_id` arrived here
+            # already revalidated against the cards this conversation offered
+            # (`_validated_brain_message_reply_id`), so a forged id is None by
+            # the time it gets here. The LABEL is never consulted — a tap on
+            # "⬅️ Voltar" routes on `identity_back`, not on the arrow.
+            action = identity_action_or_none(interactive_reply_id)
+            if action is not None:
+                # The state moves HERE, inside the inbound transaction, for
+                # the two actions whose destination does not depend on
+                # brain-api. `identity_resend` is the exception: it stays in
+                # AWAITING_EMAIL_CODE and `_send_bot_reply` rewrites it only
+                # once a new challenge is confirmed, exactly as the
+                # reactivation branch does.
+                if action == IDENTITY_CHANGE_EMAIL_ACTION:
+                    conversation.flow_state = FlowState.AWAITING_EMAIL
+                elif action == IDENTITY_BACK_ACTION:
+                    conversation.flow_state = FlowState.IDLE
+                logger.info(
+                    "pending_identity_card_tapped",
+                    action=action,
+                    conversation_id=str(conversation.id),
+                    tenant_id=str(tenant.id),
+                )
+                return _ReplyContext(
+                    channel=channel,
+                    conversation_id=conversation.id,
+                    tenant_id=tenant.id,
+                    patient_ref=patient_ref,
+                    inbound_body=body or "",
+                    identity_action=action,
+                )
             code = parse_code(body)
             if code is not None:
                 return _ReplyContext(
@@ -1246,30 +1296,12 @@ async def _route_inbound_turn(
 
     if patient.lgpd_accepted_at is None:
         if is_first_contact:
-            # The frame goes out BUTTON-FREE and the consent notice
-            # follows it. Offering [Agendar] here would invite a tap
-            # this gate is about to refuse, and would put two button
-            # messages back to back with different jobs.
-            return _ReplyContext(
-                channel=channel,
+            return _first_contact_reply(
+                tenant=tenant,
                 conversation_id=conversation.id,
-                tenant_id=tenant.id,
                 patient_ref=patient_ref,
+                channel=channel,
                 inbound_body=body or "",
-                greeting_override=render_greeting(
-                    tenant.clinic_name, _fit_clinic_description(tenant)
-                ),
-                greeting_buttons=[],
-                send_consent_notice=True,
-                # Brain-Message only: `_send_bot_reply` will ask
-                # brain-api whether this visitor still owes an
-                # address and, if so, send the e-mail question in
-                # the slot the consent notice would have taken.
-                # `send_consent_notice` stays True as the fallback for every
-                # other channel and for an unavailable/unknown probe. A
-                # VERIFIED account is handled separately and skips account
-                # LGPD, as the brain-api contract requires.
-                probe_pending_identity=(channel == CHANNEL_BRAIN_MESSAGE),
             )
         # Already asked, still not accepted: re-prompt, with the
         # button attached so the way forward is one tap from the
@@ -1470,6 +1502,51 @@ async def _route_inbound_turn(
         inbound_body=body or "",
         greeting_override=greeting_override,
         greeting_buttons=greeting_buttons,
+    )
+
+
+def _first_contact_reply(
+    *,
+    tenant: Tenant,
+    conversation_id: UUID,
+    patient_ref: str,
+    channel: str,
+    inbound_body: str = "",
+) -> _ReplyContext:
+    """The very first thing a clinic says to a patient who owes consent.
+
+    ONE spelling of the first-contact turn, because there are now two ways to
+    reach it and only one of them involves the patient speaking:
+
+      * `_route_inbound_turn`, when a first message arrives;
+      * `_open_brain_message_conversation`, when the Portal link is opened and
+        the automation speaks first (`POST /internal/brain-message/open`).
+
+    Keeping it here is what makes that second entry point a new TRIGGER rather
+    than a second greeting machine: change the frame, the button policy or the
+    probe once and both doors produce the identical pair of messages.
+
+    The frame goes out BUTTON-FREE and the consent notice follows it. Offering
+    [Agendar] here would invite a tap the gate is about to refuse, and would
+    put two button messages back to back with different jobs.
+
+    On Brain-Message `_send_bot_reply` asks brain-api whether this visitor
+    still owes an address and, if so, sends the e-mail question in the slot the
+    consent notice would have taken. `send_consent_notice` stays True as the
+    fallback for every other channel and for an unavailable/unknown probe. A
+    VERIFIED account is handled separately and skips account LGPD, as the
+    brain-api contract requires.
+    """
+    return _ReplyContext(
+        channel=channel,
+        conversation_id=conversation_id,
+        tenant_id=tenant.id,
+        patient_ref=patient_ref,
+        inbound_body=inbound_body,
+        greeting_override=render_greeting(tenant.clinic_name, _fit_clinic_description(tenant)),
+        greeting_buttons=[],
+        send_consent_notice=True,
+        probe_pending_identity=(channel == CHANNEL_BRAIN_MESSAGE),
     )
 
 
@@ -2685,20 +2762,38 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
             )
             return
 
-        outcome = RequestCodeOutcome.UNAVAILABLE
+        result = RequestCodeResult(RequestCodeOutcome.UNAVAILABLE)
         if reply.tenant_id is not None:
-            outcome = await request_code(reply.tenant_id, reply.patient_ref)
-        if outcome is RequestCodeOutcome.SENT:
+            result = await request_code(reply.tenant_id, reply.patient_ref)
+        if result.outcome is RequestCodeOutcome.SENT:
             await _write_flow_state(reply.conversation_id, FlowState.AWAITING_EMAIL_CODE)
-            body = CODE_NOTICE_MESSAGE
-        else:
-            body = CODE_GIVE_UP_MESSAGE
+            # The card, not a bare line: a resumed wait offers the same three
+            # exits the original notice did, and names the same inbox.
+            await _send_code_notice(
+                reply,
+                tenant=tenant,
+                waba_token=waba_token,
+                email_masked=result.email_masked,
+                event="pending_code_reactivation_resolved",
+            )
+            return
         await _send_plain_reply(
             reply,
             tenant=tenant,
             waba_token=waba_token,
-            body=body,
+            body=CODE_GIVE_UP_MESSAGE,
             event="pending_code_reactivation_resolved",
+        )
+        return
+
+    if reply.identity_action is not None:
+        await _handle_identity_card_action(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            professionals=flow_professionals,
+            patient_wa=patient_wa,
+            redis=redis,
         )
         return
 
@@ -4633,6 +4728,187 @@ async def _send_plain_reply(
     if reply.conversation_id is not None and not sender_persists_outbound(client):
         await _record_outbound(reply.conversation_id, body, result)
     logger.info(event, conversation_id=str(reply.conversation_id))
+
+
+async def _send_buttons_reply(
+    reply: _ReplyContext,
+    *,
+    tenant: Tenant,
+    waba_token: str | None,
+    body: str,
+    buttons: list[tuple[str, str]],
+    event: str,
+) -> None:
+    """Send one CARD (body + tappable options) on this turn's channel. Best-effort.
+
+    The button-carrying twin of `_send_plain_reply`, with the same sender
+    resolution, the same fail-closed on a missing credential and the same "log
+    it and move on" on a send error. Deliberately NOT a refactor of
+    `_send_consent_notice`, whose three log event names (`worker_consent_notice_*`)
+    are load-bearing in production dashboards and do not fit this function's
+    `f"{event}_..."` scheme; the duplication is twenty lines and the alternative
+    is renaming log lines nobody asked to rename.
+
+    `buttons` is `(id, title)` pairs, and the ID is what comes back from a tap.
+    The record and the delivered card are built from the same list, so the
+    options a patient can send back are exactly the ones they were shown
+    (`services/whatsapp.py::interactive_buttons_record`).
+    """
+    client = _reply_sender(reply, tenant, waba_token)
+    if client is None:
+        logger.error(
+            f"{event}_no_credential",
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(tenant.id),
+        )
+        return
+    try:
+        result = await client.send_buttons(to=reply.patient_ref, body=body, buttons=buttons)
+    except Exception as exc:
+        logger.error(
+            f"{event}_send_failed",
+            error=str(exc),
+            conversation_id=str(reply.conversation_id),
+        )
+        return
+    if reply.conversation_id is not None and not sender_persists_outbound(client):
+        await _record_outbound(
+            reply.conversation_id,
+            body,
+            result,
+            interactive=interactive_buttons_record(body, buttons),
+        )
+    logger.info(event, conversation_id=str(reply.conversation_id))
+
+
+async def _send_code_notice(
+    reply: _ReplyContext,
+    *,
+    tenant: Tenant,
+    waba_token: str | None,
+    email_masked: str | None,
+    event: str,
+) -> None:
+    """The code notice, as the three-button card, naming the masked inbox.
+
+    One spelling for the two places `_send_bot_reply` emits it (a resumed wait
+    and a resend); `plugins/pending_identity.py` emits the third, the one that
+    follows a booking, through `BrainMessageSender` directly because it has no
+    `_ReplyContext` to hand. All three build the body and the buttons from
+    `services/pending_identity.py`, so the card cannot drift between them.
+    """
+    await _send_buttons_reply(
+        reply,
+        tenant=tenant,
+        waba_token=waba_token,
+        body=code_notice_body(email_masked),
+        buttons=list(CODE_NOTICE_BUTTONS),
+        event=event,
+    )
+
+
+async def _handle_identity_card_action(
+    reply: _ReplyContext,
+    *,
+    tenant: Tenant | None,
+    waba_token: str | None,
+    professionals: list | None,
+    patient_wa: str | None,
+    redis,
+) -> None:
+    """Own the whole turn for a tap on the code notice's card.
+
+    Three exits from `AWAITING_EMAIL_CODE` that do not require the patient to
+    have the code in front of them — which is the point of the card. The flow
+    state for two of them was already written inside the inbound transaction
+    (`_route_inbound_turn`); only `identity_resend` waits on brain-api and
+    therefore writes its state here.
+
+    Fails the same way the rest of this leg does: a dead end says the
+    appointment stands (`CODE_GIVE_UP_MESSAGE`) and leaves the conversation
+    usable, never parked in a state whose only exit is a code that was never
+    mailed.
+    """
+    if tenant is None:
+        logger.warning(
+            "pending_identity_card_action_without_tenant",
+            conversation_id=str(reply.conversation_id),
+        )
+        return
+
+    if reply.identity_action == IDENTITY_BACK_ACTION:
+        # Out to the menu. `_handle_show_main_menu` re-writes the flow state
+        # through `_apply_flow_result` (to MENU), which supersedes the IDLE
+        # written upstream; that IDLE is what remains if this send fails, and
+        # IDLE is the right resting place either way. The account offer is not
+        # withdrawn: the code is still valid, and the existing reactivation
+        # machinery can still bring the patient back to it.
+        await _handle_show_main_menu(
+            reply,
+            tenant,
+            professionals,
+            patient_wa,
+            redis=redis,
+            waba_token=waba_token,
+            source="identity_card",
+        )
+        return
+
+    if reply.identity_action == IDENTITY_CHANGE_EMAIL_ACTION:
+        # Back to the address question. The state is already AWAITING_EMAIL,
+        # so the next syntactically valid address is claimed exactly as a
+        # first one would be — brain-api overwrites the claim on the same
+        # visit (`services/pending_identity.py::claim_email`), which is what
+        # makes "I typed it wrong" recoverable without a new visit.
+        await _send_plain_reply(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            body=EMAIL_REQUEST_MESSAGE,
+            event="pending_email_change_requested",
+        )
+        return
+
+    if reply.identity_action != IDENTITY_RESEND_ACTION:
+        # A fourth button added to the card without a branch here. Say so
+        # rather than silently treating it as a resend, which would mail the
+        # patient a code they did not ask for.
+        logger.warning(
+            "pending_identity_card_action_unhandled",
+            action=reply.identity_action,
+            conversation_id=str(reply.conversation_id),
+        )
+        return
+
+    # identity_resend: a NEW challenge, then the same card again.
+    result = RequestCodeResult(RequestCodeOutcome.UNAVAILABLE)
+    if reply.tenant_id is not None:
+        result = await request_code(reply.tenant_id, reply.patient_ref)
+    if result.outcome is RequestCodeOutcome.SENT:
+        # Re-asserted rather than assumed: the state is already
+        # AWAITING_EMAIL_CODE on the happy path, and writing it again costs
+        # one short transaction while covering the case where something else
+        # moved it between the tap and here.
+        await _write_flow_state(reply.conversation_id, FlowState.AWAITING_EMAIL_CODE)
+        await _send_code_notice(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            email_masked=result.email_masked,
+            event="pending_code_resent",
+        )
+        return
+    # NOT_PENDING / NO_EMAIL / UNAVAILABLE. Leave the wait: the patient just
+    # asked for a code that is not coming, so keeping them in a state that
+    # only reads six digits would strand them until the silence floor.
+    await _write_flow_state(reply.conversation_id, FlowState.IDLE)
+    await _send_plain_reply(
+        reply,
+        tenant=tenant,
+        waba_token=waba_token,
+        body=CODE_GIVE_UP_MESSAGE,
+        event="pending_code_resend_unavailable",
+    )
 
 
 async def _write_flow_state(conversation_id: UUID | None, state: FlowState) -> None:
@@ -6726,3 +7002,232 @@ async def process_brain_message_inbound(
     )
     if reply is not None:
         await _send_bot_reply(reply, redis=ctx.get("redis"))
+
+
+# --------------------------------------------------------------------------
+# Brain-Message open (the automation speaks first)
+# --------------------------------------------------------------------------
+#
+# Every other way a `Conversation` comes into existence starts with the patient
+# saying something: `_get_or_create_conversation` has exactly one caller,
+# `_route_inbound_turn`, and every road to it runs through an inbound message.
+# A patient who opens a clinic's Portal link and has not typed yet therefore
+# used to land in an empty chat and be greeted by nothing.
+#
+# This is the second door, and the ONLY thing it changes is the trigger. The
+# greeting itself, the e-mail question, the consent notice and the ordering
+# between them all come from `_first_contact_reply` + `_send_bot_reply`,
+# unmodified and shared with the inbound path. In particular NO inbound
+# `Message` is written here: the patient did not speak, and a fabricated bubble
+# from them would be a lie told to the transcript, the staff console and the
+# model's own history.
+
+
+def _open_ledger_key(tenant_id: UUID, external_id: str) -> str:
+    """The idempotency key for "this visitor has already been greeted unasked".
+
+    Keyed on (tenant, external_id) rather than on a request id, because the
+    thing that must happen at most once is per VISITOR, not per call: brain-api
+    fires this on every `POST /patient-access/pending` that creates a visit, and
+    a browser refresh that resumes the same pending visit arrives with the same
+    `external_id`.
+
+    `ProcessedEvent.event_id` is VARCHAR(128) and this key is at most
+    19 + 36 + 1 + 64 = 120 characters — `external_id` is bounded at 64 by both
+    the route's schema and `Patient.external_id`'s column, so the key cannot
+    outgrow the column.
+    """
+    return f"brain_message_open:{tenant_id}:{external_id}"
+
+
+async def _release_open_claim(key: str) -> None:
+    """Give back an open claim whose greeting never landed. Best-effort.
+
+    Same reasoning as `plugins/precheck_handoff._release`: a claim held over a
+    greeting that failed to send would make an empty chat permanent, since
+    nothing else is ever allowed to try. Released, the next `open` for the same
+    visitor gets a real second chance.
+    """
+    try:
+        async with async_session_factory() as session:
+            async with session.begin():
+                await session.execute(delete(ProcessedEvent).where(ProcessedEvent.event_id == key))
+    except Exception as exc:
+        logger.warning("brain_message_open_release_failed", key=key, error=str(exc))
+
+
+async def _conversation_has_outbound(tenant_id: UUID, external_id: str) -> bool:
+    """Did this Portal conversation ever say anything to the patient?
+
+    The post-condition of one open: on this channel the row IS the delivery
+    (`services/channel_sender.py`), so an outbound row existing is the only
+    honest evidence the greeting reached the patient — `_send_bot_reply`
+    swallows its own send failures by design and cannot report one back.
+    """
+    async with async_session_factory() as session:
+        row = await session.scalar(
+            select(Message.id)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .join(Patient, Patient.id == Conversation.patient_id)
+            .where(
+                Conversation.tenant_id == tenant_id,
+                Patient.tenant_id == tenant_id,
+                Patient.channel == CHANNEL_BRAIN_MESSAGE,
+                Patient.external_id == external_id,
+                Message.direction == MessageDirection.OUTBOUND,
+            )
+            .limit(1)
+        )
+    return row is not None
+
+
+async def _open_brain_message_conversation(
+    *,
+    tenant_id: UUID,
+    external_id: str,
+    patient_name: str | None,
+) -> _ReplyContext | None:
+    """Create the conversation, if it is new, and decide the opening turn.
+
+    The Brain-Message sibling of `_persist_brain_message_inbound`, with the one
+    difference that gives this whole route its reason to exist: it writes no
+    inbound `Message`. Patient row, consent event and conversation are created
+    exactly as that function creates them, so the two doors produce the same
+    rows for the same visitor.
+
+    Returns None — and the caller sends nothing — when there is nobody to greet
+    (unknown tenant) or nothing to open (the conversation already has history).
+    That second case is the contract's `exists`: a conversation that has already
+    started must never receive an unsolicited greeting on top of it.
+    """
+    async with async_session_factory() as session:
+        try:
+            async with session.begin():
+                tenant = await session.get(Tenant, tenant_id)
+                if tenant is None:
+                    logger.error("brain_message_open_tenant_unresolved", tenant_id=str(tenant_id))
+                    return None
+
+                # `Tenant.is_active` is deliberately NOT consulted, for the
+                # reason spelled out in `_persist_brain_message_inbound`: it is
+                # the WhatsApp go-live flag and this channel must not inherit
+                # a transport gate. `_send_bot_reply` still fails closed on the
+                # authoritative subscription/secretaria entitlement.
+                patient = await session.scalar(
+                    select(Patient).where(
+                        Patient.tenant_id == tenant.id,
+                        Patient.channel == CHANNEL_BRAIN_MESSAGE,
+                        Patient.external_id == external_id,
+                    )
+                )
+                if patient is None:
+                    patient = Patient(
+                        tenant_id=tenant.id,
+                        channel=CHANNEL_BRAIN_MESSAGE,
+                        external_id=external_id,
+                        name=patient_name,
+                    )
+                    session.add(patient)
+                    await session.flush()
+                    session.add(
+                        ConsentEvent(
+                            tenant_id=tenant.id,
+                            wa_id=external_id,
+                            kind="first_contact_service",
+                            legal_basis=(
+                                "TODO_LAWYER: execução de contrato vs consentimento — "
+                                "pendencias_advogado.md item pendente"
+                            ),
+                        )
+                    )
+                elif patient_name and not patient.name:
+                    patient.name = patient_name
+
+                conversation = await _get_or_create_conversation(session, tenant, patient)
+                prior_messages = await session.scalar(
+                    select(func.count())
+                    .select_from(Message)
+                    .where(Message.conversation_id == conversation.id)
+                )
+                if prior_messages:
+                    logger.info(
+                        "brain_message_open_already_started",
+                        tenant_id=str(tenant_id),
+                        conversation_id=str(conversation.id),
+                    )
+                    return None
+
+                # `patient.lgpd_accepted_at` is not branched on, unlike in
+                # `_route_inbound_turn`: a conversation with zero messages and a
+                # consented patient is a state no path produces (consent is only
+                # ever written alongside messages), and treating it as a first
+                # contact is harmless if it ever appears — the consent notice is
+                # idempotent and, on this channel, the brain-api probe decides
+                # what actually goes out anyway.
+                return _first_contact_reply(
+                    tenant=tenant,
+                    conversation_id=conversation.id,
+                    patient_ref=external_id,
+                    channel=CHANNEL_BRAIN_MESSAGE,
+                )
+        except IntegrityError:
+            # A concurrent open (or a first inbound) raced us to the
+            # (tenant, channel, external_id) constraint. Whoever won is
+            # greeting this visitor; this call says nothing.
+            logger.info("brain_message_open_race", tenant_id=str(tenant_id))
+            return None
+
+
+async def process_brain_message_open(
+    ctx: dict,
+    tenant_id: str,
+    external_id: str,
+    patient_name: str | None = None,
+) -> None:
+    """arq job: greet a Portal visitor who has not said anything yet.
+
+    Idempotent in two independent layers, because one is not enough:
+
+      * the ROUTE refuses (200 `exists`) when the conversation already carries
+        a message, which is the cheap answer for a returning visitor and costs
+        no job at all;
+      * this LEDGER claim is what makes two concurrent calls — the same link
+        opened twice, a refresh racing the first request — produce one
+        greeting. Both would pass the route's read; only one can insert the key.
+
+    The claim is given back when nothing was actually said, so a greeting lost
+    to a send failure does not become a permanently empty chat.
+    """
+    tenant_uuid = UUID(tenant_id)
+    key = _open_ledger_key(tenant_uuid, external_id)
+    if not await _claim_event(key):
+        logger.info(
+            "brain_message_open_already_claimed",
+            tenant_id=tenant_id,
+            external_id=external_id,
+        )
+        return
+
+    reply = await _open_brain_message_conversation(
+        tenant_id=tenant_uuid,
+        external_id=external_id,
+        patient_name=patient_name,
+    )
+    if reply is not None:
+        await _send_bot_reply(reply, redis=ctx.get("redis"))
+
+    if await _conversation_has_outbound(tenant_uuid, external_id):
+        logger.info(
+            "brain_message_open_greeted",
+            tenant_id=tenant_id,
+            external_id=external_id,
+        )
+        return
+    # Nothing reached the patient: an unknown tenant, an unentitled clinic, a
+    # send that failed. Hand the key back rather than sealing the silence in.
+    await _release_open_claim(key)
+    logger.warning(
+        "brain_message_open_nothing_sent",
+        tenant_id=tenant_id,
+        external_id=external_id,
+    )

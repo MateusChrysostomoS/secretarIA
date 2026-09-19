@@ -4,6 +4,11 @@ Data: 2026-09-17
 Prompt: `z_prompts/PROMPT_BRAIN_MESSAGE_SECRETARIA_EMAIL_OTP_INLINE.md` (onda 2)  
 Estado: **DEPLOYADO E PROVADO EM PRODUÇÃO** (2026-09-17) — ver a última seção
 
+> **Continuação (TASK-003, 2026-09-19, BUILT e não deployado):** o aviso do código virou um card de
+> 3 botões com o e-mail mascarado, a conversa passou a poder nascer sem inbound
+> (`POST /internal/brain-message/open`) e o handoff do PreCheck ganhou um ramo do Portal — ver
+> `docs/CHECKPOINT_portal_open_e_card_do_codigo.md`. A ordem fixada aqui não mudou.
+
 ## Resultado
 
 O canal `brain_message` agora executa a ordem fechada pelo produto:

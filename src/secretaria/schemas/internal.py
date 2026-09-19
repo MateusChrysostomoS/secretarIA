@@ -126,12 +126,44 @@ class BrainMessageInboundForm(BrainMessageInbound):
     dedupe_id: None = None
 
 
+class BrainMessageOpen(BaseModel):
+    """`POST /internal/brain-message/open` — start the conversation, unasked.
+
+    The patient has opened a clinic's Portal link and typed NOTHING. brain-api,
+    which owns their browser session, tells us who they are so the greeting can
+    go out before there is anything to reply to. No message text: there is no
+    message — that is the whole point of the route.
+
+    Strict (`extra="forbid"`), for the reason `BrainMessageInboundForm` gives:
+    the route is new, so refusing an unknown field costs no existing caller and
+    turns contract drift into a clear 422 instead of a silently dropped value
+    (`frozen-contract-migration`).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: UUID
+    # Same bound and same meaning as everywhere else on this channel: the
+    # patient's handle, validated against `Patient.external_id`'s VARCHAR(64).
+    external_id: str = Field(min_length=1, max_length=64)
+    # What brain-api already knows the visitor is called, if anything. Only
+    # ever used to fill a patient row that has no name yet — never to overwrite
+    # one, and never required.
+    patient_name: str | None = Field(default=None, max_length=255)
+
+
 class BrainMessageAck(BaseModel):
     """`POST /internal/brain-message/inbound` response.
 
     Deliberately carries no reply: the turn is processed on the arq worker, so
     by the time this is serialised the agent has not run. The caller polls the
     messages endpoint for what the bot said.
+
+    Reused by `POST /internal/brain-message/open`, whose two answers ride the
+    same one-field envelope: `queued` (202, a greeting is on its way) and
+    `exists` (200, this conversation had already started and NOTHING was sent).
+    The status CODE is what a caller should branch on; the string says the same
+    thing in a form that survives a proxy.
     """
 
     status: str

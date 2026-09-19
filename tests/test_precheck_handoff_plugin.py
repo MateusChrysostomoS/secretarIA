@@ -50,10 +50,19 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from secretaria.core.database import Base  # noqa: E402
-from secretaria.models import Appointment, Patient, ProcessedEvent, Tenant  # noqa: E402
+from secretaria.models import (  # noqa: E402
+    Appointment,
+    Conversation,
+    Message,
+    MessageDirection,
+    Patient,
+    ProcessedEvent,
+    Tenant,
+)
 from secretaria.plugins import precheck_handoff as ph  # noqa: E402
 from secretaria.plugins.base import PostBookingContext  # noqa: E402
 from secretaria.plugins.registry import enabled_plugins  # noqa: E402
+from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE  # noqa: E402
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
 from secretaria.services.precheck import HandoffOutcome, HandoffResult  # noqa: E402
 
@@ -156,18 +165,25 @@ class _Handoff:
         self.explode = explode
         self.calls: list[tuple] = []
         self.context: list[dict] = []
+        # WHICH handle named the patient on each call. Recorded separately
+        # from `calls` because the two are mutually exclusive (TASK-003 §5)
+        # and an assertion about the Portal branch has to be able to say that
+        # the phone was not merely empty but absent.
+        self.subjects: list[dict] = []
 
     async def __call__(
         self,
         tenant_id,
-        phone_number,
+        phone_number=None,
         *,
+        external_id: str | None = None,
         patient_name: str | None = None,
         booked_service: str | None = None,
     ):
         if self.explode:
             raise RuntimeError("brain-api down")
         self.calls.append((tenant_id, phone_number))
+        self.subjects.append({"phone_number": phone_number, "external_id": external_id})
         self.context.append({"patient_name": patient_name, "booked_service": booked_service})
         return HandoffResult(self.outcome)
 
@@ -761,3 +777,231 @@ async def test_a_refused_handoff_does_not_stop_the_other_post_booking_hooks(db, 
     ran = await _run_sweep_with_pix(db, monkeypatch, tenant, patient, appointment)
 
     assert ran == ["pix_deposit"]
+
+
+# --------------------------------------------------------------------------
+# The Portal branch (TASK-003 §5.2): the same offer, delivered where the
+# patient actually is
+# --------------------------------------------------------------------------
+#
+# Before this, a Portal patient reached `no_patient_phone` and got nothing at
+# all. The branch is decided by `Patient.channel`, so what these tests pin is
+# the pair: which handle names the patient to brain-api, and which sender
+# delivers. A `wa.me` link in a Portal transcript is the failure this section
+# exists to catch - it points at an app the patient may not have, from a number
+# they never gave.
+
+PORTAL_EXTERNAL_ID = "bm-session-precheck-1"
+
+
+async def _make_portal_rows(db, *, with_conversation: bool = True, external_id=PORTAL_EXTERNAL_ID):
+    """A clinic, a PORTAL patient (no phone at all) and a committed booking."""
+    async with db() as session:
+        tenant = Tenant(
+            id=uuid4(),
+            clinic_name="Clinica Boa Saude",
+            phone_number_id=str(uuid4())[:12],
+            timezone="America/Sao_Paulo",
+        )
+        session.add(tenant)
+        patient = Patient(
+            id=uuid4(),
+            tenant_id=tenant.id,
+            # The whole reason `wa_id` is nullable: this person has no phone.
+            wa_id=None,
+            channel=CHANNEL_BRAIN_MESSAGE,
+            external_id=external_id,
+            name=PATIENT_NAME,
+        )
+        session.add(patient)
+        if with_conversation:
+            session.add(Conversation(id=uuid4(), tenant_id=tenant.id, patient_id=patient.id))
+        appointment = Appointment(
+            id=uuid4(),
+            tenant_id=tenant.id,
+            patient_id=patient.id,
+            google_event_id="evt-portal-1",
+            appointment_type=BOOKED_SERVICE,
+            start_at=datetime(2026, 8, 3, 17, 0, tzinfo=UTC),
+            end_at=datetime(2026, 8, 3, 17, 30, tzinfo=UTC),
+            # A Portal booking records no phone (see
+            # docs/CHECKPOINT_secretaria_email_otp_inline.md).
+            phone=None,
+        )
+        session.add(appointment)
+        await session.commit()
+        for row in (tenant, patient, appointment):
+            await session.refresh(row)
+        return tenant, patient, appointment
+
+
+async def _portal_bodies(db, tenant) -> list[str]:
+    async with db() as session:
+        rows = (
+            await session.scalars(
+                select(Message.body)
+                .join(Conversation, Conversation.id == Message.conversation_id)
+                .where(
+                    Conversation.tenant_id == tenant.id,
+                    Message.direction == MessageDirection.OUTBOUND,
+                )
+                .order_by(Message.created_at)
+            )
+        ).all()
+    return list(rows)
+
+
+async def test_a_portal_patient_is_named_by_external_id_and_answered_in_the_conversation(
+    db, handoff, whatsapp
+):
+    """CHECKLIST (§5.2): no `no_patient_phone`, no `wa.me`, no WhatsApp client.
+
+    The three halves of the branch, asserted together because each one alone
+    would pass against a half-built implementation: brain-api is asked with
+    `external_id` and no phone, the invitation lands as a row on the patient's
+    own conversation, and `WhatsAppClient` is never touched.
+    """
+    tenant, patient, appointment = await _make_portal_rows(db)
+
+    await ph._post_booking(_ctx(tenant, patient, appointment))
+
+    assert handoff.subjects == [{"phone_number": None, "external_id": PORTAL_EXTERNAL_ID}]
+    assert whatsapp.calls == [], "a Portal patient was sent to over WhatsApp"
+    bodies = await _portal_bodies(db, tenant)
+    assert len(bodies) == 1
+    assert "pré-consulta" in bodies[0]
+    assert "wa.me" not in bodies[0]
+    assert PRECHECK_NUMBER not in bodies[0]
+
+
+async def test_the_portal_branch_still_forwards_the_booking_context(db, handoff):
+    """FEAT 39 did not become WhatsApp-only."""
+    tenant, patient, appointment = await _make_portal_rows(db)
+
+    await ph._post_booking(_ctx(tenant, patient, appointment))
+
+    assert handoff.context == [
+        {"patient_name": PATIENT_NAME, "booked_service": BOOKED_SERVICE},
+    ]
+
+
+async def test_the_portal_branch_does_not_need_the_platform_whatsapp_number(
+    db, monkeypatch, handoff
+):
+    """The number only ever built a `wa.me` link; the Portal builds none.
+
+    Before TASK-003 that check was the FIRST thing the hook did, so leaving it
+    there would have made the Portal offer depend on a setting it does not use.
+    """
+    tenant, patient, appointment = await _make_portal_rows(db)
+    _unset_precheck_number(monkeypatch)
+
+    await ph._post_booking(_ctx(tenant, patient, appointment))
+
+    assert handoff.subjects == [{"phone_number": None, "external_id": PORTAL_EXTERNAL_ID}]
+    assert len(await _portal_bodies(db, tenant)) == 1
+
+
+async def test_one_portal_invitation_per_appointment(db, handoff):
+    """The ledger covers BOTH channels: an arq retry must not send twice."""
+    tenant, patient, appointment = await _make_portal_rows(db)
+    ctx = _ctx(tenant, patient, appointment)
+
+    await ph._post_booking(ctx)
+    await ph._post_booking(ctx)
+
+    assert len(handoff.calls) == 1
+    assert len(await _portal_bodies(db, tenant)) == 1
+
+
+async def test_a_portal_patient_with_no_conversation_is_a_free_noop(db, handoff, log):
+    """Resolved BEFORE the claim, so a structural dead end burns no key."""
+    tenant, patient, appointment = await _make_portal_rows(db, with_conversation=False)
+
+    await ph._post_booking(_ctx(tenant, patient, appointment))
+
+    assert handoff.calls == []
+    assert not await _claimed(db, appointment.id)
+    assert ("precheck_handoff_post_booking_skipped", "no_conversation") in [
+        (event, fields.get("reason")) for _lvl, event, fields in log.records
+    ]
+
+
+async def test_a_portal_patient_with_no_handle_is_a_free_noop(db, handoff, log):
+    tenant, patient, appointment = await _make_portal_rows(db, external_id="")
+
+    await ph._post_booking(_ctx(tenant, patient, appointment))
+
+    assert handoff.calls == []
+    assert not await _claimed(db, appointment.id)
+    assert ("precheck_handoff_post_booking_skipped", "no_patient_external_id") in [
+        (event, fields.get("reason")) for _lvl, event, fields in log.records
+    ]
+
+
+async def test_a_refused_portal_handoff_says_nothing_and_frees_the_key(db, handoff):
+    """Silence is still the failure mode, and a 422 from an un-upgraded
+    brain-api arrives here as exactly that UNAVAILABLE."""
+    tenant, patient, appointment = await _make_portal_rows(db)
+    handoff.outcome = HandoffOutcome.UNAVAILABLE
+
+    await ph._post_booking(_ctx(tenant, patient, appointment))
+
+    assert await _portal_bodies(db, tenant) == []
+    assert not await _claimed(db, appointment.id)
+
+
+async def test_no_patient_name_or_handle_reaches_the_portal_message_body(db, handoff):
+    """Same promise as the WhatsApp body, on the new one."""
+    tenant, patient, appointment = await _make_portal_rows(db)
+
+    await ph._post_booking(_ctx(tenant, patient, appointment))
+
+    body = (await _portal_bodies(db, tenant))[0]
+    assert PATIENT_NAME not in body
+    assert PATIENT_WA_ID not in body
+    assert PORTAL_EXTERNAL_ID not in body
+
+
+async def test_the_two_channels_use_disjoint_deliveries_for_their_own_bookings(db, handoff):
+    """CHECKLIST (§5.2): WhatsApp by the old path, Portal by the new, never both.
+
+    Two clinics, two patients, two appointments, one hook. Each booking gets
+    exactly one invitation, on its own channel, and neither leaks into the
+    other: no `wa.me` in the Portal row, no Portal row for the WhatsApp
+    patient.
+    """
+    wa_tenant, wa_patient, wa_appointment = await _make_rows(db)
+    portal_tenant, portal_patient, portal_appointment = await _make_portal_rows(db)
+
+    await ph._post_booking(_ctx(wa_tenant, wa_patient, wa_appointment))
+    await ph._post_booking(_ctx(portal_tenant, portal_patient, portal_appointment))
+
+    assert handoff.subjects == [
+        {"phone_number": PATIENT_WA_ID, "external_id": None},
+        {"phone_number": None, "external_id": PORTAL_EXTERNAL_ID},
+    ]
+    assert await _portal_bodies(db, wa_tenant) == [], (
+        "the Portal sender answered a WhatsApp patient"
+    )
+    portal_rows = await _portal_bodies(db, portal_tenant)
+    assert len(portal_rows) == 1 and "wa.me" not in portal_rows[0]
+
+
+async def test_the_real_handoff_accepts_the_portal_call_shape():
+    """The Portal twin of the WhatsApp binding guard above.
+
+    `_Handoff` would accept anything; the real signature is what brain-api's
+    `extra="forbid"` body is built from, so bind against it.
+    """
+    import inspect
+
+    from secretaria.services.precheck import request_precheck_handoff
+
+    inspect.signature(request_precheck_handoff).bind(
+        uuid4(),
+        None,
+        external_id=PORTAL_EXTERNAL_ID,
+        patient_name=PATIENT_NAME,
+        booked_service=BOOKED_SERVICE,
+    )
