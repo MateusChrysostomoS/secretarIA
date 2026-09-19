@@ -956,12 +956,8 @@ async def _route_inbound_turn(
     # First contact = no prior message on this conversation. Counted
     # BEFORE the inbound below is added so a brand-new conversation
     # reads as 0. Drives the verbatim greeting (see below).
-    prior_messages = await session.scalar(
-        select(func.count())
-        .select_from(Message)
-        .where(Message.conversation_id == conversation.id)
-    )
-    is_first_contact = (prior_messages or 0) == 0
+    prior_messages = await _conversation_message_count(session, conversation.id)
+    is_first_contact = prior_messages == 0
 
     # Timestamp of the last activity BEFORE this inbound, used to
     # measure the silence gap for the returning-patient offer.
@@ -4767,7 +4763,12 @@ async def _send_buttons_reply(
     except Exception as exc:
         logger.error(
             f"{event}_send_failed",
-            error=str(exc),
+            # `error_type` and not `str(exc)`, unlike its plain-text twin: the
+            # one card this function sends carries a masked address in its
+            # BODY, and a driver error raised while inserting that row can
+            # carry its bound parameters into the exception's text. The type
+            # is what an operator acts on anyway.
+            error_type=type(exc).__name__,
             conversation_id=str(reply.conversation_id),
         )
         return
@@ -6333,6 +6334,24 @@ async def _get_or_create_patient(
     return patient
 
 
+async def _conversation_message_count(session: AsyncSession, conversation_id: UUID) -> int:
+    """How many messages this conversation already carries, in the caller's txn.
+
+    "Has this thread begun?" asked identically by the two functions that decide
+    a first-contact turn — `_route_inbound_turn` and
+    `_open_brain_message_conversation`. One spelling, because the day the two
+    disagree about what counts as a started conversation is the day one of them
+    greets a patient twice.
+    """
+    return (
+        await session.scalar(
+            select(func.count())
+            .select_from(Message)
+            .where(Message.conversation_id == conversation_id)
+        )
+    ) or 0
+
+
 async def _get_or_create_conversation(
     session: AsyncSession,
     tenant: Tenant,
@@ -6666,7 +6685,7 @@ async def _claim_event(key: str) -> bool:
     return True
 
 
-async def _release_event(key: str) -> None:
+async def _release_event(key: str, *, event: str = "cancellation_notice_release_failed") -> None:
     """Give back a claim whose send did not happen — nothing more.
 
     A release states one fact: the key was NOT consumed, so whoever runs next
@@ -6674,13 +6693,17 @@ async def _release_event(key: str) -> None:
     a retry. The caller is what decides whether one exists — in
     `send_cancellation_notice` that means raising `arq.Retry` right after
     releasing, which is the only thing that actually re-runs the job.
+
+    `event` names the failure line, so a second caller can be told apart in the
+    logs without a second copy of this function. It defaults to the original
+    caller's name precisely so that caller's log output is unchanged.
     """
     try:
         async with async_session_factory() as session:
             async with session.begin():
                 await session.execute(delete(ProcessedEvent).where(ProcessedEvent.event_id == key))
     except Exception as exc:
-        logger.warning("cancellation_notice_release_failed", key=key, error=str(exc))
+        logger.warning(event, key=key, error=str(exc))
 
 
 # --------------------------------------------------------------------------
@@ -7040,45 +7063,36 @@ def _open_ledger_key(tenant_id: UUID, external_id: str) -> str:
     return f"brain_message_open:{tenant_id}:{external_id}"
 
 
-async def _release_open_claim(key: str) -> None:
-    """Give back an open claim whose greeting never landed. Best-effort.
+async def _portal_conversation_has(
+    tenant_id: UUID, external_id: str, *, direction: MessageDirection | None = None
+) -> bool:
+    """Does this Portal conversation already carry a message (of `direction`)?
 
-    Same reasoning as `plugins/precheck_handoff._release`: a claim held over a
-    greeting that failed to send would make an empty chat permanent, since
-    nothing else is ever allowed to try. Released, the next `open` for the same
-    visitor gets a real second chance.
+    One indexed read on the same three-link scope every Brain-Message query
+    uses. Two questions, one query, because they differ only in the predicate:
+
+      * `direction=OUTBOUND` — did the greeting actually LAND? On this channel
+        the row IS the delivery (`services/channel_sender.py`), so an outbound
+        row is the only honest evidence: `_send_bot_reply` swallows its own
+        send failures by design and cannot report one back.
+      * `direction=None` — has this thread begun AT ALL? Which is what decides
+        whether an unsolicited greeting is still appropriate.
     """
-    try:
-        async with async_session_factory() as session:
-            async with session.begin():
-                await session.execute(delete(ProcessedEvent).where(ProcessedEvent.event_id == key))
-    except Exception as exc:
-        logger.warning("brain_message_open_release_failed", key=key, error=str(exc))
-
-
-async def _conversation_has_outbound(tenant_id: UUID, external_id: str) -> bool:
-    """Did this Portal conversation ever say anything to the patient?
-
-    The post-condition of one open: on this channel the row IS the delivery
-    (`services/channel_sender.py`), so an outbound row existing is the only
-    honest evidence the greeting reached the patient — `_send_bot_reply`
-    swallows its own send failures by design and cannot report one back.
-    """
-    async with async_session_factory() as session:
-        row = await session.scalar(
-            select(Message.id)
-            .join(Conversation, Conversation.id == Message.conversation_id)
-            .join(Patient, Patient.id == Conversation.patient_id)
-            .where(
-                Conversation.tenant_id == tenant_id,
-                Patient.tenant_id == tenant_id,
-                Patient.channel == CHANNEL_BRAIN_MESSAGE,
-                Patient.external_id == external_id,
-                Message.direction == MessageDirection.OUTBOUND,
-            )
-            .limit(1)
+    stmt = (
+        select(Message.id)
+        .join(Conversation, Conversation.id == Message.conversation_id)
+        .join(Patient, Patient.id == Conversation.patient_id)
+        .where(
+            Conversation.tenant_id == tenant_id,
+            Patient.tenant_id == tenant_id,
+            Patient.channel == CHANNEL_BRAIN_MESSAGE,
+            Patient.external_id == external_id,
         )
-    return row is not None
+    )
+    if direction is not None:
+        stmt = stmt.where(Message.direction == direction)
+    async with async_session_factory() as session:
+        return await session.scalar(stmt.limit(1)) is not None
 
 
 async def _open_brain_message_conversation(
@@ -7144,11 +7158,22 @@ async def _open_brain_message_conversation(
                     patient.name = patient_name
 
                 conversation = await _get_or_create_conversation(session, tenant, patient)
-                prior_messages = await session.scalar(
-                    select(func.count())
-                    .select_from(Message)
-                    .where(Message.conversation_id == conversation.id)
-                )
+                # THE RACE THIS READ DOES NOT CLOSE, stated where it lives: the
+                # ledger claim serialises two `open` jobs against each other,
+                # and the unique constraints on `patients` and `conversations`
+                # serialise two jobs that both try to CREATE them. What neither
+                # covers is an `open` overlapping a genuinely concurrent FIRST
+                # inbound on a conversation row that already exists with no
+                # messages: under READ COMMITTED both can read zero before
+                # either commits, and the patient sees the greeting twice.
+                # `process_brain_message_open` re-reads this immediately before
+                # sending, which closes everything except a sub-commit overlap
+                # (the inbound path writes its `Message` inside the SAME
+                # transaction as its decision, so it becomes visible the moment
+                # it commits). Closing the remainder needs a lock both paths
+                # take — see the CHECKPOINT; it is not worth putting one in the
+                # hot path of every WhatsApp turn for a duplicated greeting.
+                prior_messages = await _conversation_message_count(session, conversation.id)
                 if prior_messages:
                     logger.info(
                         "brain_message_open_already_started",
@@ -7214,9 +7239,28 @@ async def process_brain_message_open(
         patient_name=patient_name,
     )
     if reply is not None:
+        # Asked AGAIN, after the decision transaction closed and immediately
+        # before speaking. The decision and the send are necessarily in
+        # different transactions (an HTTP probe and a model-free greeting have
+        # no business inside an open one), and in that gap a genuinely
+        # concurrent FIRST inbound may have started the thread. The inbound
+        # path commits its `Message` together with its own decision, so this
+        # read sees it the instant it lands — which narrows the duplicate
+        # greeting to an overlap shorter than one commit. See the comment at
+        # `_open_brain_message_conversation`'s count for what it still does
+        # not close.
+        if await _portal_conversation_has(tenant_uuid, external_id):
+            logger.info(
+                "brain_message_open_superseded",
+                tenant_id=tenant_id,
+                external_id=external_id,
+            )
+            return
         await _send_bot_reply(reply, redis=ctx.get("redis"))
 
-    if await _conversation_has_outbound(tenant_uuid, external_id):
+    if await _portal_conversation_has(
+        tenant_uuid, external_id, direction=MessageDirection.OUTBOUND
+    ):
         logger.info(
             "brain_message_open_greeted",
             tenant_id=tenant_id,
@@ -7225,7 +7269,7 @@ async def process_brain_message_open(
         return
     # Nothing reached the patient: an unknown tenant, an unentitled clinic, a
     # send that failed. Hand the key back rather than sealing the silence in.
-    await _release_open_claim(key)
+    await _release_event(key, event="brain_message_open_release_failed")
     logger.warning(
         "brain_message_open_nothing_sent",
         tenant_id=tenant_id,

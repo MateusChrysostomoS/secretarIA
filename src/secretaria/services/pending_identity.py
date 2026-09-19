@@ -161,11 +161,13 @@ IDENTITY_BACK_ACTION = "identity_back"
 IDENTITY_RESEND_ACTION = "identity_resend"
 IDENTITY_CHANGE_EMAIL_ACTION = "identity_change_email"
 
-# Titles fit WhatsApp's 20-code-unit reply-button cap (which
-# `interactive_buttons_record` enforces for this channel too, so the portal's
-# card and a WhatsApp card cannot drift): "⬅️ Voltar" 9, "↩️ Reenviar código"
-# 18, "📩 Mudar e-mail" 15 — the variation selector in ⬅️/↩️ and the astral
-# 📩 each cost an extra unit. A test pins this.
+# Titles fit the 20-character reply-button cap `truncate_button_label` applies
+# (via `interactive_buttons_record`, so the portal's card and a WhatsApp card
+# cannot drift). Measured in the unit the code actually counts in — Python code
+# points, i.e. `len()`: "⬅️ Voltar" 9, "↩️ Reenviar código" 18, "📩 Mudar
+# e-mail" 14. The arrows are two code points each (the invisible U+FE0F
+# variation selector), which is the part that is free to forget; 📩 is one code
+# point here although it is two UTF-16 units. A test pins the ceiling.
 CODE_NOTICE_BUTTONS: tuple[tuple[str, str], ...] = (
     (IDENTITY_BACK_ACTION, "⬅️ Voltar"),
     (IDENTITY_RESEND_ACTION, "↩️ Reenviar código"),
@@ -201,6 +203,14 @@ _MASKED_EMAIL_RE = re.compile(r"^[^@\s]*\*\*\*[^@\s]*@[^@\s]+$")
 
 def masked_email_or_none(value: str | None) -> str | None:
     """`value` if it is a MASKED address we may show, else None.
+
+    A SHAPE check, not a proof: a real address whose local part happened to
+    contain `***` would pass. That is accepted deliberately — the input comes
+    from a sibling service over an authenticated internal call, not from a
+    patient, so the threat modelled here is a masking BUG upstream, not an
+    attacker choosing the string. The check is what stops the ordinary version
+    of that bug (masking silently turned off, a rollback to a build that sent
+    the raw address) from writing an inbox into `messages`.
 
     Pure apart from one log line, which records only that a value was refused
     — never the value, which is precisely the thing we are refusing to let

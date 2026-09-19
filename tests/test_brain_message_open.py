@@ -479,6 +479,39 @@ async def test_an_open_after_the_patient_wrote_says_nothing(db) -> None:
     assert await _bodies(db, tenant, MessageDirection.INBOUND) == ["oi"]
 
 
+async def test_an_inbound_that_lands_mid_open_wins_and_the_greeting_is_dropped(db, state) -> None:
+    """The decision and the send are in different transactions. Mind the gap.
+
+    The ledger claim serialises two opens against each other; it says nothing
+    about an open racing the patient's genuinely FIRST message. So the job asks
+    again, immediately before speaking, and stands down if the thread started
+    meanwhile — otherwise the patient is greeted twice.
+
+    Simulated by letting the inbound commit between the decision and the send,
+    which is exactly the ordering the re-read exists for.
+    """
+    tenant = await _seed_tenant(db)
+
+    reply = await tasks._open_brain_message_conversation(
+        tenant_id=tenant.id, external_id=EXTERNAL_ID, patient_name="Maria"
+    )
+    assert reply is not None, "the decision itself should have found an empty conversation"
+
+    inbound = await tasks._persist_brain_message_inbound(
+        tenant_id=tenant.id, external_id=EXTERNAL_ID, text="oi"
+    )
+    assert inbound is not None
+    await tasks._send_bot_reply(inbound, redis=None)
+    after_inbound = await _bodies(db, tenant, MessageDirection.OUTBOUND)
+
+    # The whole job, re-run over the state the inbound just left behind.
+    await _open(tenant)
+
+    assert await _bodies(db, tenant, MessageDirection.OUTBOUND) == after_inbound
+    greeting = render_greeting(tenant.clinic_name, tenant.clinic_description)
+    assert after_inbound.count(greeting) == 1, "the patient was greeted twice"
+
+
 async def test_a_greeting_that_never_landed_gives_the_claim_back(db, state) -> None:
     """A held claim over an unsent greeting would make the empty chat permanent.
 

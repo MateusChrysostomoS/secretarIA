@@ -26,12 +26,27 @@ paciente novo que abre o link do Portal caía num chat vazio até digitar alguma
 | Compartilhado | `workers/tasks.py::_first_contact_reply` | extraído de `_route_inbound_turn`; **uma** saudação para as duas portas |
 | Registro | `workers/arq_worker.py` | `process_brain_message_open` na lista de `functions` |
 
-**Idempotência em duas camadas, porque uma não basta.** A rota lê se a conversa já carrega
-qualquer mensagem (barato, e é a resposta certa para quem volta); o job reserva
+**Idempotência em camadas, porque uma não basta.** A rota lê se a conversa já carrega qualquer
+mensagem (barato, e é a resposta certa para quem volta); o job reserva
 `brain_message_open:<tenant_id>:<external_id>` no `ProcessedEvent`. As duas chamadas concorrentes
 de um F5 passam pela leitura; só uma insere a chave. A chave é **devolvida** quando nada chegou ao
-paciente (`_conversation_has_outbound` como pós-condição), senão uma saudação perdida num erro de
-envio transformaria o chat vazio em permanente.
+paciente (`_portal_conversation_has(..., direction=OUTBOUND)` como pós-condição), senão uma
+saudação perdida num erro de envio transformaria o chat vazio em permanente.
+
+**A corrida que isso NÃO fecha** (achado do `ecc:python-reviewer`, registrada aqui porque é a única
+que sobrou): o ledger serializa dois `open` entre si, e as unique constraints de `patients` e
+`conversations` serializam dois jobs que tentam CRIAR as linhas. O que nenhum dos dois cobre é um
+`open` sobrepondo o **primeiro inbound de verdade** sobre uma conversa que já existe vazia — sob
+READ COMMITTED os dois podem ler zero antes de qualquer um commitar, e o paciente é saudado duas
+vezes. Mitigação implementada: `process_brain_message_open` **relê** imediatamente antes de falar
+(`brain_message_open_superseded`), e como o caminho do inbound grava a `Message` na MESMA transação
+da decisão dele, a janela cai para uma sobreposição menor que um commit. Fechar o resto exige um
+lock que as duas pernas peguem (`pg_advisory_xact_lock` em `(tenant, external_id)`) — **não foi
+feito de propósito**: ele teria que entrar em `_route_inbound_turn`, que é o caminho quente de todo
+turno de WhatsApp em produção, e o pior caso desta corrida é uma saudação duplicada. Decisão para o
+dono/Orchestrator, não para esta tarefa. Coberto pelo teste
+`test_an_inbound_that_lands_mid_open_wins_and_the_greeting_is_dropped` (o SQLite da suíte é
+single-writer e não consegue exercitar a corrida real).
 
 **A regra que não pode ser afrouxada:** nenhuma `Message` com `direction="inbound"` é criada aqui.
 O paciente não escreveu nada, e uma bolha fabricada mentiria ao mesmo tempo para o console do
@@ -154,7 +169,7 @@ chamado por ninguém.
 ## Validação
 
 ```
-uv run pytest -q     ->  2297 passed, 2 failed      (HEAD 9cc9b7a: 2230 passed, 2 failed)
+uv run pytest -q     ->  2298 passed, 2 failed      (HEAD 9cc9b7a: 2230 passed, 2 failed)
 uv run ruff check .  ->  8 errors                   (HEAD 9cc9b7a: os mesmos 8)
 uv run ruff format --check .  ->  61 files          (HEAD 9cc9b7a: as mesmas 61)
 ```
