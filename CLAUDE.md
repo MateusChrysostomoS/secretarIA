@@ -127,6 +127,17 @@ O contrato de integração do canal Brain-Message está em
 
 Gerados por uma sessão de auditoria (2026-08-21) a partir de uma lista de bugs já reportados pelo usuário. Cada arquivo é autossuficiente (causa raiz já investigada, arquivo/linha citados) para rodar em uma sessão nova. Use quando for resolver o problema correspondente — releia o arquivo primeiro, os números de linha citados podem ter mudado desde a auditoria.
 
+## Prompt pendente — `interactive` grava a string JSON `'null'` em vez de NULL
+
+`z_prompts/PROMPT_INTERACTIVE_NULL_PORTAL_TAP_WINDOW.md` (raiz de BRAIN, gerado 2026-09-19 via
+`/prompt-generator`) — achado registrado em `docs/CHECKPOINT_brain_message_anexos_secretaria.md`
+§8: `models/message.py:107` não tem `none_as_null=True` (ao contrário de `attachment`, linha 118),
+então `interactive=None` numa bolha de texto grava a string `'null'`, não SQL NULL. Consequência:
+`workers/tasks.py::_validated_brain_message_reply_id` (linha 6493, filtro na linha 6527,
+`BRAIN_MESSAGE_TAP_WINDOW=10` na linha 6474) conta as 10 últimas mensagens de qualquer tipo, não
+os 10 últimos cartões interactive — um cartão seguido de 10+ bolhas de texto teria o toque
+recusado. Confirmado ainda pendente em 2026-09-19. **NÃO EXECUTADO.**
+
 ## Prompts de feature pendentes (`TECH/BRAIN/z_prompts/debug_secretaria_producao/`)
 
 Convenção compartilhada entre repos da Brain (não uma pasta deste repo) — mesmo local onde vive a cadeia `FEAT_36`-`40`. Gerados 2026-08-28 a partir do incidente do tenant "Chrysostomo For Eyes" (ver memória `secretaria-agendar-inactive-tenant-2026-08-28`): hoje um profissional ativo mas com configuração incompleta (sem horário ou sem serviço) aparece normalmente no seletor de médicos e nunca avisa ninguém quando um paciente esbarra nele.

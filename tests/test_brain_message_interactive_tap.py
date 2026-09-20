@@ -40,7 +40,7 @@ from uuid import uuid4  # noqa: E402
 
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import select, text  # noqa: E402
 from sqlalchemy.ext.asyncio import (  # noqa: E402
     AsyncSession,
     async_sessionmaker,
@@ -525,6 +525,47 @@ async def test_a_card_past_the_window_no_longer_vouches_for_its_ids(db, monkeypa
 
     assert replies[0].inbound_body == title
     assert (await _inbound_row(db, conversation.id)).interactive_reply_id is None
+
+
+async def test_a_text_message_stores_real_sql_null_not_the_json_literal(db) -> None:
+    """Regression for the bug the CHECKPOINT recorded: `interactive=None` on a text
+    message must land as SQL NULL, never the 4-byte JSON literal `'null'` - the ORM
+    decodes both back to Python `None`, so only a raw read tells them apart."""
+    _, _, conversation = await _seed(db)
+    await BrainMessageSender(conversation_id=conversation.id, session_factory=db).send_text_message(
+        to=EXTERNAL_ID, body="Olá"
+    )
+    async with db() as session:
+        raw = await session.scalar(
+            text("SELECT interactive FROM messages WHERE conversation_id = :cid"),
+            {"cid": str(conversation.id)},
+        )
+    assert raw is None, f"expected SQL NULL, got the stored literal {raw!r}"
+
+
+async def test_text_messages_after_a_card_do_not_push_it_out_of_the_tap_window(
+    db, monkeypatch
+) -> None:
+    """Regression: with the old mapping, `interactive`'s JSON literal 'null' satisfied
+    `WHERE interactive IS NOT NULL`, so BRAIN_MESSAGE_TAP_WINDOW plain text replies after
+    a card counted as if they were cards too, and could push a still-relevant card out of
+    its own window - the same scenario `test_a_card_past_the_window...` above exercises
+    with OTHER CARDS must NOT also be triggered by plain text."""
+    tenant, [ana], conversation = await _seed(db)
+    title = await _offer_doctor(db, conversation, ana)
+    sender = BrainMessageSender(conversation_id=conversation.id, session_factory=db)
+    for i in range(tasks.BRAIN_MESSAGE_TAP_WINDOW):
+        await sender.send_text_message(to=EXTERNAL_ID, body=f"texto {i}")
+    replies = _stop_at_the_reply_seam(monkeypatch)
+
+    await _turn(tenant, title, f"prof|{ana.id}")
+
+    [reply] = replies
+    # The router reads the WhatsApp string: "<title> (<uuid>)" - only true when the tap
+    # was honoured; a dropped id would route on the plain title instead (see the "forged
+    # id" test above).
+    assert reply.inbound_body == f"{title} ({ana.id})"
+    assert (await _inbound_row(db, conversation.id)).interactive_reply_id == f"prof|{ana.id}"
 
 
 # --------------------------------------------------------------------------

@@ -280,17 +280,30 @@ json | CREATE INDEX ix_messages_attachment_created_at ... WHERE (attachment IS N
 - Sem antivírus: todo arquivo é tratado como não confiável (servido com `nosniff` + CSP
   `sandbox`; PDF só como download). Opção futura.
 - A legenda de um arquivo não é roteada (decisão 4).
-- **Achado PRÉ-EXISTENTE (não corrigido, fora do escopo):** `messages.interactive` usa
-  `JSON` com `none_as_null=False` (padrão), e `BrainMessageSender._record` passa
-  `interactive=None` explícito em toda bolha de texto — isso grava a string JSON `'null'`, não
+- **Achado PRÉ-EXISTENTE, CORRIGIDO em 2026-09-19 (BUILT, uncommitted):** `messages.interactive`
+  usava `JSON` com `none_as_null=False` (padrão), e `BrainMessageSender._record` passa
+  `interactive=None` explícito em toda bolha de texto — isso gravava a string JSON `'null'`, não
   SQL NULL (provado nesta sessão: `raw rows: [('x', 'null', None), ...]`, `interactive IS NOT
   NULL: 1`). Consequência: em `workers/tasks.py::_validated_brain_message_reply_id`, o filtro
-  `Message.interactive.is_not(None)` não exclui texto, e o `limit(BRAIN_MESSAGE_TAP_WINDOW)` (10)
-  vira "as 10 últimas mensagens de saída" em vez de "os 10 últimos cartões" — um cartão seguido de
-  10+ bolhas de texto teria o toque recusado (roteado como texto). Correção sugerida (prompt
-  próprio): filtrar também `Message.interactive != JSON.NULL` (ou `none_as_null=True` + backfill
-  `'null'` → NULL). É exatamente por isso que `messages.attachment` nasceu com
-  `none_as_null=True` (decisão 7).
+  `Message.interactive.is_not(None)` não excluía texto, e o `limit(BRAIN_MESSAGE_TAP_WINDOW)` (10)
+  virava "as 10 últimas mensagens de saída" em vez de "os 10 últimos cartões" — um cartão seguido
+  de 10+ bolhas de texto teria o toque recusado (roteado como texto). **Correção aplicada**: coluna
+  remapeada `none_as_null=True` (`models/message.py:107`, igual a `messages.attachment`, decisão
+  7) + migração de backfill `migrations/versions/c1d4a8e6f2b0_message_interactive_null_backfill.py`
+  (`UPDATE messages SET interactive = NULL WHERE CAST(interactive AS TEXT) = 'null'`, idempotente,
+  sem alteração de coluna/índice — `none_as_null` é só serialização do lado do ORM). Nenhuma
+  mudança precisou no filtro de `workers/tasks.py`: ele já lia `IS NOT NULL` corretamente, só a
+  coluna que mentia. Dois testes novos em `tests/test_brain_message_interactive_tap.py`:
+  `test_a_text_message_stores_real_sql_null_not_the_json_literal` (lê o valor bruto via SQL,
+  não pelo ORM — o ORM decodifica os dois casos como `None` igualmente) e
+  `test_text_messages_after_a_card_do_not_push_it_out_of_the_tap_window` (reproduz o cenário exato
+  do bug: cartão + `BRAIN_MESSAGE_TAP_WINDOW` textos, toque no cartão original ainda é aceito).
+  Suíte completa: **2233 passed, 1 failed** (`uv run python -m pytest`) — a falha é a flake
+  pré-existente e já documentada de fuso (`test_human_backup_plugin.py::
+  test_on_inbound_inside_hours_returns_false`, só falha 00h–03h UTC; rodou às 02:10 UTC). `ruff
+  check`/`ruff format --check` limpos nos 3 arquivos tocados. **Não provado em Postgres real**
+  (a suíte roda em SQLite) — o `CAST(... AS TEXT)` da migração foi escolhido por funcionar
+  identicamente nos dois dialetos sem branch, mas a prova de fato só acontece no deploy.
 - Prova ponta a ponta contra o R2 REAL só depois do deploy autorizado, com um arquivo de teste.
 - Skill `attachment-upload-relay` (a parte 1 adiou para cá): agora há as DUAS implementações de
   referência (brain-api `core/attachments.py` + `api/patient_access.py`; secretarIA os 3 módulos

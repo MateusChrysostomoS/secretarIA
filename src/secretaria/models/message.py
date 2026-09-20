@@ -102,9 +102,14 @@ class Message(Base):
     # to it through `interactive_reply_id`. NULL for text, for inbound rows, for
     # rows written before the column, and on Brain-Message, whose patient
     # receives the options as plain text (services/channel_sender.py).
-    # Plain JSON like every JSON column here: the test suite runs on SQLite and
-    # nothing queries inside the blob.
-    interactive: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # `none_as_null=True`, like `attachment` below (same reasoning): a text message
+    # must be SQL NULL here, never the JSON literal 'null', because
+    # `workers/tasks.py::_validated_brain_message_reply_id` selects the
+    # `BRAIN_MESSAGE_TAP_WINDOW` most recent rows `WHERE interactive IS NOT NULL` to find
+    # which cards a tap may reference - a JSON 'null' still satisfies "IS NOT NULL" in SQL,
+    # so before this flag every text message counted as a card and could push a real card
+    # out of the window (migration c1d4a8e6f2b0 backfills the rows written before this).
+    interactive: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     # The ONE file a Brain-Message message carries (patient -> clinic or clinic ->
     # patient), or NULL: {"r2_object_key", "content_type", "size_bytes", "filename"}
     # (core/attachments.py::StoredAttachment). The bytes live in secretarIA's own R2
