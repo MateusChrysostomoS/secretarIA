@@ -69,6 +69,23 @@ Current `api/` domains (for reference when it grows):
 
 When you restructure, do it as a dedicated change (move files + fix imports in `main.py` + fix `tests/`), then run `graphify update .` — never bundle a structural move with a behavioural change.
 
+### Onde vive o código do Portal (Brain-Message)
+
+O dono perguntou (2026-09-20, TASK-004) se cada peça do Portal não deveria virar uma pasta
+`portal/` própria, como o PreCheck tem. A decisão foi **não mover nada** — e esta seção existe
+para que uma sessão futura não reabra a proposta sem saber que ela já foi avaliada e recusada.
+As três peças, e o motivo de cada uma:
+
+| Peça | Natureza | Por que fica onde está |
+|---|---|---|
+| `services/channel_sender.py::BrainMessageSender` | exclusiva do Portal, **dentro de arquivo compartilhado** | o que está acima dela no arquivo (o Protocol `ChannelSender`, `MediaChannelSender` e os helpers `interactive_history_body` / `sender_persists_outbound` / `sender_sends_media`) é dos DOIS canais, porque `WhatsAppClient` satisfaz o mesmo Protocol estruturalmente. Tirar só o sender parte o seam em duas metades incompletas. |
+| `plugins/precheck_handoff.py::_post_booking` | **ramo por canal dentro de uma função só** | `portal = ctx.patient.channel == CHANNEL_BRAIN_MESSAGE` decide tudo depois dele; é o padrão `channel-aware-dispatch` (um ponto de decisão, nunca os dois ramos disparando). Separar exigiria duplicar a função. |
+| `plugins/pending_identity.py` | **100% do Portal** (guarda `ctx.patient.channel != CHANNEL_BRAIN_MESSAGE` no topo) | é 1 arquivo só. A regra de granularidade logo acima promove um domínio a subpacote com ~3+ arquivos; uma pasta para 1 arquivo furaria a própria regra do repo. |
+
+Do lado do PreCheck a pasta **existe** e não segue este padrão: `app/services/brain_message/`
+(`store.py` / `agent_client.py` / `conductor.py`) é do Portal de ponta a ponta — nenhum nó do n8n
+a chama. Ou seja, o pedido do dono já está atendido lá; não renomeie nem recrie.
+
 ### General
 - Pure decision functions over side-effects: prefer the `flow_router.route()` pattern — return a result object, let the caller persist/send. Easier to test without network/DB.
 - All env config goes through `config.py::Settings` (pydantic-settings). Never read `os.environ` directly elsewhere.
