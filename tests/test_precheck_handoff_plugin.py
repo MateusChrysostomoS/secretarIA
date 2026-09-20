@@ -780,22 +780,38 @@ async def test_a_refused_handoff_does_not_stop_the_other_post_booking_hooks(db, 
 
 
 # --------------------------------------------------------------------------
-# The Portal branch (TASK-003 §5.2): the same offer, delivered where the
-# patient actually is
+# The Portal branch (TASK-003 §5.2, rewritten by TASK-004 §3c): the hand-off
+# happens and NOTHING is said
 # --------------------------------------------------------------------------
 #
-# Before this, a Portal patient reached `no_patient_phone` and got nothing at
-# all. The branch is decided by `Patient.channel`, so what these tests pin is
-# the pair: which handle names the patient to brain-api, and which sender
-# delivers. A `wa.me` link in a Portal transcript is the failure this section
-# exists to catch - it points at an app the patient may not have, from a number
-# they never gave.
+# Before TASK-003 a Portal patient reached `no_patient_phone` and got nothing
+# at all. TASK-003 gave them the hand-off plus a bubble inviting them to open
+# the Pre-consulta tab; TASK-004 took the bubble back out, because on the
+# Portal the two conversations are tabs of ONE screen and the screen moves
+# there by itself (`precheckRevealVerdict`, Brain-Message-Frontend). An
+# instruction to perform a tap the interface performs on its own is noise.
+#
+# So what this section pins is a PAIR OF NEGATIVES beside one positive: the
+# hand-off is asked for with `external_id` and no phone (positive), no
+# `WhatsAppClient` is ever touched, and no outbound row is written on the
+# patient's conversation. The two old failures this section was written to
+# catch still count: a `wa.me` link in a Portal transcript points at an app the
+# patient may not have, from a number they never gave -- and now an invitation
+# bubble of ANY wording is a failure too, because the interface already moved.
+
+# What `_portal_bodies` may ever return, TASK-004 onwards.
+NO_PORTAL_BODIES: list[str] = []
 
 PORTAL_EXTERNAL_ID = "bm-session-precheck-1"
 
 
-async def _make_portal_rows(db, *, with_conversation: bool = True, external_id=PORTAL_EXTERNAL_ID):
-    """A clinic, a PORTAL patient (no phone at all) and a committed booking."""
+async def _make_portal_rows(db, *, external_id=PORTAL_EXTERNAL_ID):
+    """A clinic, a PORTAL patient (no phone at all) and a committed booking.
+
+    The conversation row is always created even though nothing writes to it any
+    more: it is what makes "no outbound row" a real assertion rather than one
+    that passes because there was nowhere to write in the first place.
+    """
     async with db() as session:
         tenant = Tenant(
             id=uuid4(),
@@ -814,8 +830,7 @@ async def _make_portal_rows(db, *, with_conversation: bool = True, external_id=P
             name=PATIENT_NAME,
         )
         session.add(patient)
-        if with_conversation:
-            session.add(Conversation(id=uuid4(), tenant_id=tenant.id, patient_id=patient.id))
+        session.add(Conversation(id=uuid4(), tenant_id=tenant.id, patient_id=patient.id))
         appointment = Appointment(
             id=uuid4(),
             tenant_id=tenant.id,
@@ -851,15 +866,14 @@ async def _portal_bodies(db, tenant) -> list[str]:
     return list(rows)
 
 
-async def test_a_portal_patient_is_named_by_external_id_and_answered_in_the_conversation(
-    db, handoff, whatsapp
-):
-    """CHECKLIST (§5.2): no `no_patient_phone`, no `wa.me`, no WhatsApp client.
+async def test_a_portal_patient_is_named_by_external_id_and_told_nothing(db, handoff, whatsapp):
+    """CHECKLIST (§5.2 + TASK-004 §3c): no `no_patient_phone`, no WhatsApp, no bubble.
 
     The three halves of the branch, asserted together because each one alone
-    would pass against a half-built implementation: brain-api is asked with
-    `external_id` and no phone, the invitation lands as a row on the patient's
-    own conversation, and `WhatsAppClient` is never touched.
+    would pass against a half-built implementation: brain-api IS asked, with
+    `external_id` and no phone; `WhatsAppClient` is never touched; and the
+    patient's conversation gains no outbound row, because the pre-consult
+    announces itself by existing.
     """
     tenant, patient, appointment = await _make_portal_rows(db)
 
@@ -867,11 +881,9 @@ async def test_a_portal_patient_is_named_by_external_id_and_answered_in_the_conv
 
     assert handoff.subjects == [{"phone_number": None, "external_id": PORTAL_EXTERNAL_ID}]
     assert whatsapp.calls == [], "a Portal patient was sent to over WhatsApp"
-    bodies = await _portal_bodies(db, tenant)
-    assert len(bodies) == 1
-    assert "pré-consulta" in bodies[0]
-    assert "wa.me" not in bodies[0]
-    assert PRECHECK_NUMBER not in bodies[0]
+    assert await _portal_bodies(db, tenant) == NO_PORTAL_BODIES, (
+        "the Portal branch wrote a bubble; TASK-004 removed the invitation for good"
+    )
 
 
 async def test_the_portal_branch_still_forwards_the_booking_context(db, handoff):
@@ -899,11 +911,16 @@ async def test_the_portal_branch_does_not_need_the_platform_whatsapp_number(
     await ph._post_booking(_ctx(tenant, patient, appointment))
 
     assert handoff.subjects == [{"phone_number": None, "external_id": PORTAL_EXTERNAL_ID}]
-    assert len(await _portal_bodies(db, tenant)) == 1
+    assert await _portal_bodies(db, tenant) == NO_PORTAL_BODIES
 
 
-async def test_one_portal_invitation_per_appointment(db, handoff):
-    """The ledger covers BOTH channels: an arq retry must not send twice."""
+async def test_one_portal_handoff_per_appointment(db, handoff):
+    """The ledger covers BOTH channels: an arq retry must not ask twice.
+
+    The Portal branch sends nothing, so the claim no longer guards a message
+    here -- it guards a redundant round-trip to brain-api, and keeping one
+    ledger for both channels keeps one decision point.
+    """
     tenant, patient, appointment = await _make_portal_rows(db)
     ctx = _ctx(tenant, patient, appointment)
 
@@ -911,20 +928,7 @@ async def test_one_portal_invitation_per_appointment(db, handoff):
     await ph._post_booking(ctx)
 
     assert len(handoff.calls) == 1
-    assert len(await _portal_bodies(db, tenant)) == 1
-
-
-async def test_a_portal_patient_with_no_conversation_is_a_free_noop(db, handoff, log):
-    """Resolved BEFORE the claim, so a structural dead end burns no key."""
-    tenant, patient, appointment = await _make_portal_rows(db, with_conversation=False)
-
-    await ph._post_booking(_ctx(tenant, patient, appointment))
-
-    assert handoff.calls == []
-    assert not await _claimed(db, appointment.id)
-    assert ("precheck_handoff_post_booking_skipped", "no_conversation") in [
-        (event, fields.get("reason")) for _lvl, event, fields in log.records
-    ]
+    assert await _portal_bodies(db, tenant) == NO_PORTAL_BODIES
 
 
 async def test_a_portal_patient_with_no_handle_is_a_free_noop(db, handoff, log):
@@ -951,25 +955,34 @@ async def test_a_refused_portal_handoff_says_nothing_and_frees_the_key(db, hando
     assert not await _claimed(db, appointment.id)
 
 
-async def test_no_patient_name_or_handle_reaches_the_portal_message_body(db, handoff):
-    """Same promise as the WhatsApp body, on the new one."""
+@pytest.mark.parametrize("outcome", [HandoffOutcome.SEEDED, HandoffOutcome.ALREADY_ACTIVE])
+async def test_the_portal_branch_writes_no_row_on_either_deliverable_outcome(db, handoff, outcome):
+    """The privacy promise the old body test made, made unconditional.
+
+    That test asked whether the name or a handle leaked INTO the bubble. With
+    no bubble the question is stronger and simpler: on both outcomes that used
+    to produce one, the conversation gains nothing at all -- so there is no
+    body for anything to leak into.
+    """
     tenant, patient, appointment = await _make_portal_rows(db)
+    handoff.outcome = outcome
 
     await ph._post_booking(_ctx(tenant, patient, appointment))
 
-    body = (await _portal_bodies(db, tenant))[0]
-    assert PATIENT_NAME not in body
-    assert PATIENT_WA_ID not in body
-    assert PORTAL_EXTERNAL_ID not in body
+    assert len(handoff.calls) == 1
+    assert await _portal_bodies(db, tenant) == NO_PORTAL_BODIES
 
 
-async def test_the_two_channels_use_disjoint_deliveries_for_their_own_bookings(db, handoff):
-    """CHECKLIST (§5.2): WhatsApp by the old path, Portal by the new, never both.
+async def test_the_two_channels_use_disjoint_deliveries_for_their_own_bookings(
+    db, handoff, whatsapp
+):
+    """CHECKLIST (§5.2 + TASK-004 §3c): WhatsApp leg untouched, Portal leg silent.
 
-    Two clinics, two patients, two appointments, one hook. Each booking gets
-    exactly one invitation, on its own channel, and neither leaks into the
-    other: no `wa.me` in the Portal row, no Portal row for the WhatsApp
-    patient.
+    Two clinics, two patients, two appointments, one hook. The WhatsApp half of
+    this assertion is EXACTLY what it was before TASK-004 -- one `wa.me`
+    invitation, to that patient's number, and no row on their conversation --
+    because that leg is the one thing this change must not disturb. The Portal
+    half inverted: where it used to demand one row, it now forbids any.
     """
     wa_tenant, wa_patient, wa_appointment = await _make_rows(db)
     portal_tenant, portal_patient, portal_appointment = await _make_portal_rows(db)
@@ -981,11 +994,16 @@ async def test_the_two_channels_use_disjoint_deliveries_for_their_own_bookings(d
         {"phone_number": PATIENT_WA_ID, "external_id": None},
         {"phone_number": None, "external_id": PORTAL_EXTERNAL_ID},
     ]
-    assert await _portal_bodies(db, wa_tenant) == [], (
+    # The WhatsApp leg: still exactly one send, still the link, still nobody else.
+    assert len(whatsapp.calls) == 1
+    assert whatsapp.calls[0]["to"] == PATIENT_WA_ID
+    assert "wa.me" in whatsapp.calls[0]["body"]
+    assert await _portal_bodies(db, wa_tenant) == NO_PORTAL_BODIES, (
         "the Portal sender answered a WhatsApp patient"
     )
-    portal_rows = await _portal_bodies(db, portal_tenant)
-    assert len(portal_rows) == 1 and "wa.me" not in portal_rows[0]
+    assert await _portal_bodies(db, portal_tenant) == NO_PORTAL_BODIES, (
+        "the Portal patient got a bubble; the interface is what moves them now"
+    )
 
 
 async def test_the_real_handoff_accepts_the_portal_call_shape():

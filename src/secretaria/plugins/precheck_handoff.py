@@ -51,13 +51,26 @@ the order is enforced. Registration order also puts `pix_deposit` ahead of this
 hook (see `plugins/__init__.py`), so a clinic charging a deposit asks for money
 before asking for the questionnaire.
 
-**Two channels, one appointment, one send.** A WhatsApp patient is named to
-brain-api by `phone_number` and invited with a `wa.me` deep link to PreCheck's
-shared number. A Portal patient is named by `external_id` and invited IN their
-existing conversation, through `BrainMessageSender` — never a `wa.me` link,
-which for someone who reached the clinic from a browser points at an app they
-may not have, a number they never gave and a thread they cannot see. Which
-branch runs is decided ONCE, by `ctx.patient.channel`, and a patient has
+**Two channels, one appointment — and only ONE of them says anything.** A
+WhatsApp patient is named to brain-api by `phone_number` and invited with a
+`wa.me` deep link to PreCheck's shared number, because there the pre-consult
+genuinely IS somewhere else: another number, another thread, an app this hook
+cannot open for them. A Portal patient is named by `external_id` and told
+nothing at all — the hand-off itself is the whole delivery.
+
+That asymmetry is the point rather than an omission (TASK-004 §3c). On the
+Portal the two conversations are TABS OF ONE SCREEN, so there is no elsewhere
+to send anyone: once the hand-off opens the pre-consult, the patient's own
+screen notices the thread stopped being empty and goes there by itself
+(`Brain-Message-Frontend`: `precheckRevealVerdict` in `lib/patient-portal.ts`
+and THE REVEAL in `components/portal/PortalConversation.tsx`). Until TASK-004
+this branch sent a bubble telling the patient to open the Pre-consulta tab —
+the WhatsApp shape copied where it does not belong, an instruction for a tap
+the interface can perform on its own. It was removed, not replaced: the
+presentation the owner wants read is PreCheck's OWN (welcome + LGPD gate),
+inside the pre-consult, not an announcement from secretarIA that a tab moved.
+
+Which branch runs is decided ONCE, by `ctx.patient.channel`, and a patient has
 exactly one; the two can therefore never both fire for the same appointment,
 and the single `ProcessedEvent` claim below covers both.
 
@@ -72,9 +85,11 @@ Idempotency is the `ProcessedEvent` ledger, namespaced
 `precheck:<appointment_id>` — the same durable claim the webhook pipeline,
 `plugins/reminders.py` and `professional_notification` use.
 `seed_handoff_session` is already idempotent on PreCheck's side (a second call
-answers `already_active` instead of duplicating the session), but the SEND is
-not: without the claim, an arq retry of the post_booking job would hand the
-same patient the same invitation twice.
+answers `already_active` instead of duplicating the session), but the WhatsApp
+SEND is not: without the claim, an arq retry of the post_booking job would hand
+the same patient the same `wa.me` invitation twice. The Portal branch keeps the
+claim although it sends nothing — one ledger and one decision point for both,
+and a retry that skips a redundant round-trip to brain-api.
 
 Never LOGS a phone number, a patient name, or the message body — only ids and
 an outcome string. `services/precheck.py` hashes the phone before logging it;
@@ -104,10 +119,10 @@ from sqlalchemy.exc import IntegrityError
 from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
-from secretaria.models import Conversation, ProcessedEvent
+from secretaria.models import ProcessedEvent
 from secretaria.plugins.base import PluginSpec, PostBookingContext
 from secretaria.plugins.registry import register
-from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE, BrainMessageSender
+from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.precheck import HandoffOutcome, request_precheck_handoff
 from secretaria.services.whatsapp import WhatsAppClient
 
@@ -129,17 +144,6 @@ _MESSAGE = (
     "É rápido, e acontece em outro número de WhatsApp. É só tocar no link "
     "abaixo e enviar a mensagem:\n\n"
     "{link}"
-)
-
-# The Portal's second bubble. Everything surprising about the WhatsApp one is
-# absent here, so the sentence explaining it is absent too: there is no other
-# number, no app to leave, no link to tap. The pre-consult is another thread of
-# the SAME conversation the patient is already looking at, and the frontend
-# reveals it on its own once it stops being empty (TASK-003 §5.3) — so this
-# says where it is, not how to get there.
-_PORTAL_MESSAGE = (
-    "Para agilizar seu atendimento, você já pode responder à sua pré-consulta. 📋\n\n"
-    "É rápido, e acontece aqui mesmo: é só abrir a *Pré-consulta* nesta conversa."
 )
 
 
@@ -214,25 +218,6 @@ def _link(number: str, prefill: str) -> str:
     return f"https://wa.me/{number}?text={quote(prefill)}"
 
 
-async def _conversation_id(tenant_id: UUID, patient_id: UUID) -> UUID | None:
-    """This patient's conversation row, which IS the Portal address.
-
-    Same lookup, and for the same reason, as
-    `plugins/pending_identity.py::_conversation_id`: `BrainMessageSender`
-    delivers by writing a `Message` on a conversation, so without this id the
-    invitation has nowhere to land. Resolved BEFORE the ledger claim, so a
-    Portal patient who somehow has no conversation is a free structural no-op
-    rather than a burnt key.
-    """
-    async with async_session_factory() as session:
-        return await session.scalar(
-            select(Conversation.id).where(
-                Conversation.tenant_id == tenant_id,
-                Conversation.patient_id == patient_id,
-            )
-        )
-
-
 async def _post_booking(ctx: PostBookingContext) -> None:
     """Offer the pre-consult to the patient who just booked. At most once.
 
@@ -258,7 +243,6 @@ async def _post_booking(ctx: PostBookingContext) -> None:
     phone = "" if portal else (ctx.patient.wa_id or "").strip()
     external_id = (ctx.patient.external_id or "").strip() if portal else ""
     number = "" if portal else (settings.PRECHECK_WHATSAPP_NUMBER or "").strip()
-    conversation_id: UUID | None = None
 
     if portal:
         if not external_id:
@@ -266,10 +250,9 @@ async def _post_booking(ctx: PostBookingContext) -> None:
             # column is nullable and brain-api would 404 on an empty string.
             _skip(ctx, "no_patient_external_id")
             return
-        conversation_id = await _conversation_id(ctx.tenant.id, ctx.patient.id)
-        if conversation_id is None:
-            _skip(ctx, "no_conversation")
-            return
+        # Nothing else to resolve. This branch writes no message, so it needs
+        # no conversation to write one on; what reacts to the hand-off is the
+        # patient's own screen (see the module docstring).
     else:
         if not number:
             # The platform-wide PreCheck number is not configured in this
@@ -323,19 +306,11 @@ async def _post_booking(ctx: PostBookingContext) -> None:
         _skip(ctx, f"handoff_{outcome.value}")
         return
 
-    try:
-        if portal:
-            # No network leg and no credential to fail closed on: writing the
-            # row IS the delivery on this channel
-            # (`services/channel_sender.py`), which is also why the WhatsApp
-            # client must never be reached from here — it would send this
-            # clinic's invitation to a phone number that does not exist.
-            sender = BrainMessageSender(
-                conversation_id=conversation_id,
-                session_factory=async_session_factory,
-            )
-            await sender.send_text_message(to=external_id, body=_PORTAL_MESSAGE)
-        else:
+    if not portal:
+        # Only WhatsApp has a send. On the Portal the hand-off above already
+        # WAS the delivery, so there is nothing here that could fail and
+        # nothing to give the claim back for.
+        try:
             # `for_tenant` FAILS CLOSED on a missing tenant credential rather
             # than falling back to the global env scaffold (PROMPT_FIX_21) —
             # it raises, which is why the send lives inside this try alongside
@@ -345,29 +320,29 @@ async def _post_booking(ctx: PostBookingContext) -> None:
                 to=phone,
                 body=_MESSAGE.format(link=_link(number, settings.PRECHECK_HANDOFF_PREFILL)),
             )
-    except Exception as exc:
-        # The session IS seeded on PreCheck's side; only the invitation is
-        # lost. Releasing the claim lets an arq retry of the surrounding job
-        # send it, and a second seed is an idempotent `already_active`.
-        # `error_type` only — a Meta error body echoes the recipient's number
-        # and the message text back at us.
-        logger.warning(
-            "precheck_handoff_post_booking_failed",
-            reason="send_failed",
-            error_type=type(exc).__name__,
-            tenant_id=str(ctx.tenant.id),
-            appointment_id=str(ctx.appointment.id),
-        )
-        await _release(ctx.appointment.id)
-        return
+        except Exception as exc:
+            # The session IS seeded on PreCheck's side; only the invitation is
+            # lost. Releasing the claim lets an arq retry of the surrounding
+            # job send it, and a second seed is an idempotent `already_active`.
+            # `error_type` only — a Meta error body echoes the recipient's
+            # number and the message text back at us.
+            logger.warning(
+                "precheck_handoff_post_booking_failed",
+                reason="send_failed",
+                error_type=type(exc).__name__,
+                tenant_id=str(ctx.tenant.id),
+                appointment_id=str(ctx.appointment.id),
+            )
+            await _release(ctx.appointment.id)
+            return
 
     logger.info(
         "precheck_handoff_post_booking_sent",
         outcome=outcome.value,
         source=ctx.source,
-        # WHICH of the two branches delivered. The one fact a reader of this
-        # line could not otherwise recover, and the one that says whether a
-        # `wa.me` link went out.
+        # WHICH of the two branches ran. The one fact a reader of this line
+        # could not otherwise recover, and the one that says whether a `wa.me`
+        # link went out at all (on the Portal, none does: TASK-004 §3c).
         channel=ctx.patient.channel,
         tenant_id=str(ctx.tenant.id),
         appointment_id=str(ctx.appointment.id),
