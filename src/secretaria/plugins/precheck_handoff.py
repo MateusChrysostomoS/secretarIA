@@ -1,4 +1,4 @@
-"""CORE post_booking hook: hand the patient the PreCheck link right after booking.
+"""CORE post_booking hook: offer the patient their pre-consult right after booking.
 
 Until this existed, the bridge to PreCheck had exactly one trigger: the agent
 tool `ai/tools.py::iniciar_pre_consulta`, called only when the LLM decided
@@ -51,13 +51,45 @@ the order is enforced. Registration order also puts `pix_deposit` ahead of this
 hook (see `plugins/__init__.py`), so a clinic charging a deposit asks for money
 before asking for the questionnaire.
 
+**Two channels, one appointment — and only ONE of them says anything.** A
+WhatsApp patient is named to brain-api by `phone_number` and invited with a
+`wa.me` deep link to PreCheck's shared number, because there the pre-consult
+genuinely IS somewhere else: another number, another thread, an app this hook
+cannot open for them. A Portal patient is named by `external_id` and told
+nothing at all — the hand-off itself is the whole delivery.
+
+That asymmetry is the point rather than an omission (TASK-004 §3c). On the
+Portal the two conversations are TABS OF ONE SCREEN, so there is no elsewhere
+to send anyone: once the hand-off opens the pre-consult, the patient's own
+screen notices the thread stopped being empty and goes there by itself
+(`Brain-Message-Frontend`: `precheckRevealVerdict` in `lib/patient-portal.ts`
+and THE REVEAL in `components/portal/PortalConversation.tsx`). Until TASK-004
+this branch sent a bubble telling the patient to open the Pre-consulta tab —
+the WhatsApp shape copied where it does not belong, an instruction for a tap
+the interface can perform on its own. It was removed, not replaced: the
+presentation the owner wants read is PreCheck's OWN (welcome + LGPD gate),
+inside the pre-consult, not an announcement from secretarIA that a tab moved.
+
+Which branch runs is decided ONCE, by `ctx.patient.channel`, and a patient has
+exactly one; the two can therefore never both fire for the same appointment,
+and the single `ProcessedEvent` claim below covers both.
+
+Before TASK-003 the Portal branch did not exist and this hook skipped every
+Brain-Message patient on `no_patient_phone` — `Patient.wa_id` is NULL for all
+of them by design (`models/patient.py`). That skip was also, incidentally, what
+made this hook and `plugins/pending_identity.py` disjoint. It no longer does:
+see that module's docstring, which now records what the two hooks share and
+why neither can suppress the other.
+
 Idempotency is the `ProcessedEvent` ledger, namespaced
 `precheck:<appointment_id>` — the same durable claim the webhook pipeline,
 `plugins/reminders.py` and `professional_notification` use.
 `seed_handoff_session` is already idempotent on PreCheck's side (a second call
 answers `already_active` instead of duplicating the session), but the WhatsApp
 SEND is not: without the claim, an arq retry of the post_booking job would hand
-the same patient the same link twice.
+the same patient the same `wa.me` invitation twice. The Portal branch keeps the
+claim although it sends nothing — one ledger and one decision point for both,
+and a retry that skips a redundant round-trip to brain-api.
 
 Never LOGS a phone number, a patient name, or the message body — only ids and
 an outcome string. `services/precheck.py` hashes the phone before logging it;
@@ -90,6 +122,7 @@ from secretaria.core.logging import get_logger
 from secretaria.models import ProcessedEvent
 from secretaria.plugins.base import PluginSpec, PostBookingContext
 from secretaria.plugins.registry import register
+from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.precheck import HandoffOutcome, request_precheck_handoff
 from secretaria.services.whatsapp import WhatsAppClient
 
@@ -193,25 +226,43 @@ async def _post_booking(ctx: PostBookingContext) -> None:
     claim happens before the brain-api call (so two concurrent sweeps cannot
     both seed and both send), and the claim is released on every path that
     ends without a message.
-    """
-    settings = get_settings()
-    number = (settings.PRECHECK_WHATSAPP_NUMBER or "").strip()
-    if not number:
-        # The platform-wide PreCheck number is not configured in this
-        # environment. Nothing tenant-specific about it, and nothing to retry.
-        _skip(ctx, "precheck_number_not_configured")
-        return
 
+    The channel is resolved first and decides everything after it: which
+    handle names the patient to brain-api, which preconditions are even
+    relevant (the platform WhatsApp number matters only to the branch that
+    builds a `wa.me` link out of it), and which sender delivers.
+    """
     if ctx.patient is None:
         # A block slot created from the doctor hub: a real appointment with
         # nobody on the other end to invite.
         _skip(ctx, "no_patient")
         return
 
-    phone = (ctx.patient.wa_id or "").strip()
-    if not phone:
-        _skip(ctx, "no_patient_phone")
-        return
+    settings = get_settings()
+    portal = ctx.patient.channel == CHANNEL_BRAIN_MESSAGE
+    phone = "" if portal else (ctx.patient.wa_id or "").strip()
+    external_id = (ctx.patient.external_id or "").strip() if portal else ""
+    number = "" if portal else (settings.PRECHECK_WHATSAPP_NUMBER or "").strip()
+
+    if portal:
+        if not external_id:
+            # A Brain-Message row with no handle should not exist, but the
+            # column is nullable and brain-api would 404 on an empty string.
+            _skip(ctx, "no_patient_external_id")
+            return
+        # Nothing else to resolve. This branch writes no message, so it needs
+        # no conversation to write one on; what reacts to the hand-off is the
+        # patient's own screen (see the module docstring).
+    else:
+        if not number:
+            # The platform-wide PreCheck number is not configured in this
+            # environment. Nothing tenant-specific about it, nothing to retry,
+            # and — unlike on the Portal — nothing to send without it.
+            _skip(ctx, "precheck_number_not_configured")
+            return
+        if not phone:
+            _skip(ctx, "no_patient_phone")
+            return
 
     if not await _claim(ctx.appointment.id):
         _skip(ctx, "already_sent")
@@ -220,7 +271,9 @@ async def _post_booking(ctx: PostBookingContext) -> None:
     try:
         result = await request_precheck_handoff(
             ctx.tenant.id,
-            phone,
+            phone or None,
+            # Exactly one of the two handles, decided above by the channel.
+            external_id=external_id or None,
             # Both may be None — a patient row with no name yet, an
             # appointment booked without a type. That is the ordinary case,
             # not a failure: `request_precheck_handoff` simply leaves the key
@@ -253,36 +306,44 @@ async def _post_booking(ctx: PostBookingContext) -> None:
         _skip(ctx, f"handoff_{outcome.value}")
         return
 
-    try:
-        # `for_tenant` FAILS CLOSED on a missing tenant credential rather than
-        # falling back to the global env scaffold (PROMPT_FIX_21) — it raises,
-        # which is why the send lives inside this try alongside the client
-        # build.
-        client = WhatsAppClient.for_tenant(ctx.tenant, ctx.waba_token)
-        await client.send_text_message(
-            to=phone,
-            body=_MESSAGE.format(link=_link(number, settings.PRECHECK_HANDOFF_PREFILL)),
-        )
-    except Exception as exc:
-        # The session IS seeded on PreCheck's side; only the invitation is
-        # lost. Releasing the claim lets an arq retry of the surrounding job
-        # send it, and a second seed is an idempotent `already_active`.
-        # `error_type` only — a Meta error body echoes the recipient's number
-        # and the message text back at us.
-        logger.warning(
-            "precheck_handoff_post_booking_failed",
-            reason="send_failed",
-            error_type=type(exc).__name__,
-            tenant_id=str(ctx.tenant.id),
-            appointment_id=str(ctx.appointment.id),
-        )
-        await _release(ctx.appointment.id)
-        return
+    if not portal:
+        # Only WhatsApp has a send. On the Portal the hand-off above already
+        # WAS the delivery, so there is nothing here that could fail and
+        # nothing to give the claim back for.
+        try:
+            # `for_tenant` FAILS CLOSED on a missing tenant credential rather
+            # than falling back to the global env scaffold (PROMPT_FIX_21) —
+            # it raises, which is why the send lives inside this try alongside
+            # the client build.
+            client = WhatsAppClient.for_tenant(ctx.tenant, ctx.waba_token)
+            await client.send_text_message(
+                to=phone,
+                body=_MESSAGE.format(link=_link(number, settings.PRECHECK_HANDOFF_PREFILL)),
+            )
+        except Exception as exc:
+            # The session IS seeded on PreCheck's side; only the invitation is
+            # lost. Releasing the claim lets an arq retry of the surrounding
+            # job send it, and a second seed is an idempotent `already_active`.
+            # `error_type` only — a Meta error body echoes the recipient's
+            # number and the message text back at us.
+            logger.warning(
+                "precheck_handoff_post_booking_failed",
+                reason="send_failed",
+                error_type=type(exc).__name__,
+                tenant_id=str(ctx.tenant.id),
+                appointment_id=str(ctx.appointment.id),
+            )
+            await _release(ctx.appointment.id)
+            return
 
     logger.info(
         "precheck_handoff_post_booking_sent",
         outcome=outcome.value,
         source=ctx.source,
+        # WHICH of the two branches ran. The one fact a reader of this line
+        # could not otherwise recover, and the one that says whether a `wa.me`
+        # link went out at all (on the Portal, none does: TASK-004 §3c).
+        channel=ctx.patient.channel,
         tenant_id=str(ctx.tenant.id),
         appointment_id=str(ctx.appointment.id),
     )

@@ -9,18 +9,25 @@ different idempotency keys, and only one of them is channel-specific. Folding
 them together would mean a PreCheck outage could swallow an account, or an
 unverified address could hold up a pre-consult link.
 
-Their order relative to each other does not matter, and cannot: the two are
-DISJOINT BY CHANNEL. `precheck_handoff` reads `ctx.patient.wa_id`, which is
-NULL for every Brain-Message row (`models/patient.py` — that person has no
-phone number), so it skips with `no_patient_phone` before it calls anything;
-this hook returns on `channel != brain_message` before it calls anything. For
-any one appointment at most one of them can ever send. Registration order
-(alphabetical, ruff-enforced, so this module comes first) is therefore not
-load-bearing — stated here because the natural assumption on reading two
-post_booking hooks is that they queue behind each other, and a future change
-that gives a Brain-Message patient a `wa_id` would make that assumption start
-to matter. `run_post_booking` has no short-circuit — every hook runs, each
-wrapped in its own try/except — so neither can suppress the other either way.
+Until TASK-003 they were also DISJOINT BY CHANNEL, and that is no longer true.
+`precheck_handoff` used to read `ctx.patient.wa_id`, NULL for every
+Brain-Message row (`models/patient.py` — that person has no phone number), and
+skip with `no_patient_phone`; it now has a Portal branch of its own, so for one
+Portal booking BOTH hooks send: this one asks for the code, that one offers the
+pre-consult. That is intended, not an oversight — they are different offers
+with different ledgers, and neither is a precondition of the other.
+
+What still holds is that neither can suppress the other: `run_post_booking` has
+no short-circuit, every hook runs, each wrapped in its own try/except, and the
+two claims (`pending_identity:` / `precheck:`) can never collide. Registration
+order (alphabetical, ruff-enforced, so this module comes first) decides only
+which bubble lands first, and the order it produces is the one product wants:
+the code prompt, then the pre-consult offer.
+
+One consequence is worth stating out loud, because it is the thing that would
+break if either hook grew stricter: this hook leaves the conversation in
+`AWAITING_EMAIL_CODE`, and the pre-consult bubble that follows does NOT change
+it. The patient's next six digits are still read as the code.
 
 ## Why the appointment is already committed when this runs
 
@@ -75,8 +82,9 @@ from secretaria.plugins.base import PluginSpec, PostBookingContext
 from secretaria.plugins.registry import register
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE, BrainMessageSender
 from secretaria.services.pending_identity import (
-    CODE_NOTICE_MESSAGE,
+    CODE_NOTICE_BUTTONS,
     RequestCodeOutcome,
+    code_notice_body,
     request_code,
 )
 
@@ -191,7 +199,7 @@ async def _post_booking(ctx: PostBookingContext) -> None:
         return
 
     try:
-        outcome = await request_code(ctx.tenant.id, external_id)
+        result = await request_code(ctx.tenant.id, external_id)
     except Exception as exc:
         # `request_code` fails closed by contract and should never raise; belt
         # and braces, because escaping here would leave the claim held with no
@@ -206,14 +214,14 @@ async def _post_booking(ctx: PostBookingContext) -> None:
         await _release(ctx.appointment.id)
         return
 
-    if outcome is not RequestCodeOutcome.SENT:
+    if result.outcome is not RequestCodeOutcome.SENT:
         # NOT_PENDING (already an account, or the visit expired), NO_EMAIL (no
         # address was ever captured), UNAVAILABLE. The patient hears nothing:
         # this hook was not asked for anything, so it has nothing to apologise
         # for, and a prompt for a code that was never mailed is worse than
         # silence.
         await _release(ctx.appointment.id)
-        _skip(ctx, f"request_{outcome.value}")
+        _skip(ctx, f"request_{result.outcome.value}")
         return
 
     try:
@@ -226,7 +234,16 @@ async def _post_booking(ctx: PostBookingContext) -> None:
             conversation_id=conversation_id,
             session_factory=async_session_factory,
         )
-        await sender.send_text_message(to=external_id, body=CODE_NOTICE_MESSAGE)
+        # A CARD, not a line of text: the three buttons are what give this
+        # state an exit that is not "type six digits or wait an hour"
+        # (`services/pending_identity.py::CODE_NOTICE_BUTTONS`), and the body
+        # names the inbox the code went to whenever brain-api told us — never
+        # a raw address, only its mask.
+        await sender.send_buttons(
+            to=external_id,
+            body=code_notice_body(result.email_masked),
+            buttons=list(CODE_NOTICE_BUTTONS),
+        )
     except Exception as exc:
         # The code IS in the patient's inbox; only the prompt is missing. The
         # claim goes back so an arq retry of the surrounding job can try again

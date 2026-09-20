@@ -9,6 +9,11 @@
 >   agendado passam a viajar no handoff. Commit `3325b7e` (+ `f44b2d3`, refresh do graphify),
 >   **pushed** pra `origin/main`. Estado: **COMMITTED + PUSHED, NÃO DEPLOYADO.**
 >   Ver "Fatia P1", no fim.
+> - **P2, o ramo do Portal** (TASK-003, 2026-09-19) — o hook deixou de sair em `no_patient_phone`
+>   para paciente `brain_message`: manda `external_id` em vez de `phone_number` e entrega por
+>   `BrainMessageSender`, nunca `wa.me`. Estado: **BUILT, só na branch `task/TASK-003-secretaria`,
+>   NÃO deployado, e depende do brain-api aceitar `external_id` primeiro.** Ver
+>   `docs/CHECKPOINT_portal_open_e_card_do_codigo.md`.
 
 ## O que existia, e o que faltava
 

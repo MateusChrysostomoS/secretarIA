@@ -44,6 +44,26 @@ instead of on `ChannelSender` itself, on purpose: the whole seam rests on
 send is out of scope - nobody asked for the bot to push files over WhatsApp, and it
 would widen the production outbound surface for nothing. `sender_sends_media` is how
 a caller asks, the same `getattr` idiom as `sender_persists_outbound`.
+
+## Where the Portal's code lives, and why it is not a folder (TASK-004)
+
+`BrainMessageSender` below is the ONLY Portal-exclusive thing in this file, and
+the owner asked (2026-09-20) whether every Portal piece should move into a
+`portal/` package of its own. The answer here is no, and the reason is this
+file's shape rather than a preference about layout: what sits above the sender -
+the `ChannelSender` protocol, `MediaChannelSender`, and the three helpers
+`interactive_history_body` / `sender_persists_outbound` / `sender_sends_media` -
+is shared by BOTH channels, because `WhatsAppClient` satisfies the same protocol
+structurally. Lifting `BrainMessageSender` out would leave a seam whose two
+halves are read in different files while neither half is complete on its own.
+
+The two other Portal pieces were weighed the same way and stayed put for their
+own reasons, recorded in `CLAUDE.md` ("Onde vive o codigo do Portal"):
+`plugins/precheck_handoff.py::_post_booking` branches by channel INSIDE one
+function, and `plugins/pending_identity.py` is Portal-only but is a single
+module - under the ~3-file bar this repo sets for promoting a domain to a
+subpackage. On PreCheck's side the folder DOES exist and is not this pattern:
+`app/services/brain_message/` is Portal-only end to end.
 """
 
 from datetime import UTC, datetime

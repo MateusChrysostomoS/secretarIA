@@ -436,3 +436,187 @@ async def test_result_is_frozen_dataclass() -> None:
     result = HandoffResult(HandoffOutcome.SEEDED)
     with pytest.raises(dataclasses.FrozenInstanceError):
         result.outcome = HandoffOutcome.UNAVAILABLE  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------
+# Naming the patient: phone_number XOR external_id (TASK-003 §5)
+# --------------------------------------------------------------------------
+#
+# The second field this module has had to add to a body brain-api validates
+# with `extra="forbid"`, and the second time the deploy order is the whole
+# risk. What these tests pin is the shape on the wire (exactly one handle, no
+# nulls, a WhatsApp body byte-identical to yesterday's) and the 422 that says
+# "brain-api has not shipped its half yet" instead of "the network is down".
+
+PORTAL_EXTERNAL_ID = "bm-session-precheck-1"
+
+
+async def test_a_portal_call_sends_external_id_and_no_phone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_id = uuid4()
+    calls = _install_fake_client(monkeypatch, status_code=200, body={"status": "seeded"})
+
+    result = await precheck.request_precheck_handoff(tenant_id, external_id=PORTAL_EXTERNAL_ID)
+
+    assert result == HandoffResult(HandoffOutcome.SEEDED)
+    assert _posted_body(calls) == {
+        "tenant_id": str(tenant_id),
+        "external_id": PORTAL_EXTERNAL_ID,
+    }
+
+
+async def test_a_whatsapp_call_is_byte_identical_to_what_it_always_was(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The regression guard for the new branch.
+
+    Adding a second way to name the patient must not add a key — not even a
+    null one — to the body a WhatsApp booking produces, because that body is
+    the one already in production against a schema that forbids extras.
+    """
+    tenant_id = uuid4()
+    calls = _install_fake_client(monkeypatch, status_code=200, body={"status": "seeded"})
+
+    await precheck.request_precheck_handoff(tenant_id, "5511999999999")
+
+    assert _posted_body(calls) == {
+        "tenant_id": str(tenant_id),
+        "phone_number": "5511999999999",
+    }
+
+
+async def test_the_portal_call_still_carries_the_booking_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_id = uuid4()
+    calls = _install_fake_client(monkeypatch, status_code=200, body={"status": "seeded"})
+
+    await precheck.request_precheck_handoff(
+        tenant_id,
+        external_id=PORTAL_EXTERNAL_ID,
+        patient_name=PATIENT_NAME,
+        booked_service=BOOKED_SERVICE,
+    )
+
+    assert _posted_body(calls) == {
+        "tenant_id": str(tenant_id),
+        "external_id": PORTAL_EXTERNAL_ID,
+        "patient_name": PATIENT_NAME,
+        "booked_service": BOOKED_SERVICE,
+    }
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {},
+        {"phone_number": "5511999999999", "external_id": PORTAL_EXTERNAL_ID},
+        {"phone_number": "   ", "external_id": ""},
+    ],
+)
+async def test_neither_or_both_handles_is_refused_before_the_request(
+    monkeypatch: pytest.MonkeyPatch, kwargs: dict
+) -> None:
+    """brain-api 422s the pair; there is no reason to spend a round trip on it.
+
+    Reported as UNAVAILABLE rather than raised, because every caller of this
+    function is a post-booking hook or an agent tool that the fail-closed
+    contract promises will never see an exception from here.
+    """
+    calls = _install_fake_client(monkeypatch, status_code=200, body={"status": "seeded"})
+
+    result = await precheck.request_precheck_handoff(uuid4(), **kwargs)
+
+    assert result == HandoffResult(HandoffOutcome.UNAVAILABLE)
+    assert calls["posts"] == [], "a request went out with an ambiguous subject"
+
+
+async def test_a_422_is_unavailable_but_says_the_contract_was_refused(
+    monkeypatch: pytest.MonkeyPatch, log: _LogRecorder
+) -> None:
+    """The deploy-order failure, made readable.
+
+    An un-upgraded brain-api answers 422 to `external_id` because
+    `PrecheckHandoffIn` forbids extras. The patient-visible result is the same
+    silence as an outage — there is nothing they could do differently — but an
+    operator must not be left checking the network for what is a rollout
+    ordering problem.
+    """
+    _install_fake_client(monkeypatch, status_code=422, body={"detail": "unknown field"})
+
+    result = await precheck.request_precheck_handoff(uuid4(), external_id=PORTAL_EXTERNAL_ID)
+
+    assert result == HandoffResult(HandoffOutcome.UNAVAILABLE)
+    events = [(event, fields) for _lvl, event, fields in log.records]
+    assert any(
+        event == "precheck_handoff_body_rejected" and fields.get("subject_field") == "external_id"
+        for event, fields in events
+    ), log.text
+
+
+async def test_external_id_is_keyword_only() -> None:
+    """`phone_number` stays positional so no pre-TASK-003 call site moves, and
+    the two handles can therefore never be swapped by position."""
+    import inspect
+
+    params = inspect.signature(precheck.request_precheck_handoff).parameters
+    assert params["external_id"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert params["external_id"].default is None
+    assert params["phone_number"].default is None
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "why"),
+    [
+        ({"status_code": 200, "body": {"status": "seeded"}}, "seeded"),
+        ({"status_code": 200, "body": {"status": "nonsense"}}, "unexpected_status_body"),
+        ({"status_code": 422, "body": {"detail": "unknown field"}}, "body_rejected"),
+        ({"status_code": 501, "body": {"detail": "unsupported"}}, "unsupported"),
+        ({"status_code": 503, "body": None}, "unavailable"),
+        ({"raise_exc": httpx.ConnectError("boom")}, "network_error"),
+    ],
+)
+async def test_the_portal_paths_log_the_handle_but_never_the_name(
+    monkeypatch: pytest.MonkeyPatch, log: _LogRecorder, kwargs: dict, why: str
+) -> None:
+    """The Portal twin of the leak guard above, with one deliberate difference.
+
+    `external_id` IS allowed in a log line — it is an opaque browser-session
+    handle, not a phone number, and the rest of this service logs it whole. The
+    patient's NAME still is not, on any path.
+    """
+    _install_fake_client(monkeypatch, **kwargs)
+
+    await precheck.request_precheck_handoff(
+        uuid4(),
+        external_id=PORTAL_EXTERNAL_ID,
+        patient_name=PATIENT_NAME,
+        booked_service=BOOKED_SERVICE,
+    )
+
+    assert log.records, f"the {why} path must say what it did"
+    assert PATIENT_NAME not in log.text
+    assert PORTAL_EXTERNAL_ID in log.text
+
+
+async def test_a_501_is_unavailable_and_says_the_portal_branch_is_not_built(
+    monkeypatch: pytest.MonkeyPatch, log: _LogRecorder
+) -> None:
+    """The answer this side actually gets today, and the one it must survive.
+
+    brain-api validates `external_id` and then stops: opening the PreCheck
+    session would mean changing the PreCheck repo, which TASK-003 forbids, so
+    its Portal branch answers `501 precheck_portal_handoff_unsupported`. The
+    patient must hear nothing (the hook's silence rule) and the log must not
+    read like an outage — "not built yet" and "down right now" call for
+    opposite reactions.
+    """
+    _install_fake_client(monkeypatch, status_code=501, body={"detail": "unsupported"})
+
+    result = await precheck.request_precheck_handoff(uuid4(), external_id=PORTAL_EXTERNAL_ID)
+
+    assert result == HandoffResult(HandoffOutcome.UNAVAILABLE)
+    events = [(event, fields) for _lvl, event, fields in log.records]
+    assert any(event == "precheck_handoff_unsupported" for event, _fields in events), log.text
+    assert not any(event == "precheck_handoff_failed" for event, _fields in events), log.text

@@ -60,6 +60,7 @@ from secretaria.schemas.internal import (
     BrainMessageInboundForm,
     BrainMessageMessage,
     BrainMessageMessageList,
+    BrainMessageOpen,
     BrainMessageReadMark,
     InternalAppointment,
     InternalAppointmentList,
@@ -505,6 +506,130 @@ async def brain_message_inbound(
         # The external_id is the patient's identifier on this channel; logged
         # whole because — unlike a wa_id — it is an opaque session handle, not
         # a phone number, so it carries no personal data of its own.
+        external_id=payload.external_id,
+    )
+    return BrainMessageAck(status="queued")
+
+
+async def _brain_message_conversation_started(
+    session: AsyncSession, tenant_id: UUID, external_id: str
+) -> bool:
+    """Has this patient's Portal conversation already carried a message?
+
+    ONE indexed read, and the only thing the open route needs in order to
+    choose its status code. The same three-link scope every route here uses
+    (tenant, channel, external_id), so an `external_id` that belongs to another
+    clinic - or to a WhatsApp patient who happens to share the string - reads
+    as "not started" rather than leaking that it exists.
+
+    Deliberately ANY message, inbound or outbound: the question is whether this
+    thread has begun at all, and a thread the patient has already written in
+    must not be reopened with an unsolicited greeting on top.
+    """
+    started = await session.scalar(
+        select(Message.id)
+        .join(Conversation, Conversation.id == Message.conversation_id)
+        .join(Patient, Patient.id == Conversation.patient_id)
+        .where(
+            Conversation.tenant_id == tenant_id,
+            Patient.tenant_id == tenant_id,
+            Patient.channel == CHANNEL_BRAIN_MESSAGE,
+            Patient.external_id == external_id,
+        )
+        .limit(1)
+    )
+    return started is not None
+
+
+@router.post(
+    "/brain-message/open",
+    response_model=BrainMessageAck,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Open a Brain-Message conversation and greet first (internal)",
+    description=(
+        "Starts the conversation for a patient who has opened the clinic's portal link "
+        "and typed NOTHING, and queues the same first-contact turn an inbound message "
+        "would have produced - greeting, then the e-mail question or the terms notice. "
+        "202 `queued` when the greeting is on its way; 200 `exists` when this "
+        "conversation had already started, in which case NOTHING is sent. Idempotent per "
+        "(tenant_id, external_id): a refresh that resumes the same visit produces one "
+        "greeting, never two. No inbound message is ever created - the patient did not "
+        "write one. Requires the X-Internal-Api-Key header."
+    ),
+    responses={
+        **_INTERNAL_RESPONSES,
+        200: {
+            "description": "The conversation had already started; nothing was sent.",
+            # Spelled out because FastAPI attaches `response_model` only to the
+            # route's DECLARED status code (202): without this, a client
+            # generated from the published spec sees the `exists` answer as an
+            # untyped empty body, which is precisely the branch the caller has
+            # to distinguish.
+            "content": {"application/json": {"schema": BrainMessageAck.model_json_schema()}},
+        },
+        422: {"description": "Malformed body."},
+        503: {"description": "Queue unavailable."},
+    },
+)
+async def brain_message_open(
+    payload: BrainMessageOpen,
+    response: Response,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> BrainMessageAck:
+    """Queue the unsolicited opening turn. ACK FAST, exactly like `/inbound`.
+
+    The greeting costs a tenant-config load, an entitlement read and a
+    brain-api identity probe, so it belongs on the worker for the same reason
+    an agent turn does (the `whatsapp-webhook-arq` golden rule). brain-api
+    calls this fire-and-forget after committing the visit, so this handler
+    must be cheap and must never be the reason a patient's visit fails.
+
+    The read below is the CHEAP half of idempotency and cannot be the whole of
+    it: two concurrent opens both see an unstarted conversation. The durable
+    half is the worker's `ProcessedEvent` claim
+    (`workers/tasks.py::_open_ledger_key`), and it is what actually guarantees
+    one greeting.
+
+    Fail-closed on a missing queue with 503, like `/inbound`: answering 202
+    with nothing enqueued would promise a greeting that never comes.
+    """
+    if await _brain_message_conversation_started(session, payload.tenant_id, payload.external_id):
+        response.status_code = status.HTTP_200_OK
+        logger.info(
+            "brain_message_open_exists",
+            tenant_id=str(payload.tenant_id),
+            external_id=payload.external_id,
+        )
+        return BrainMessageAck(status="exists")
+
+    arq_pool = _arq_pool_or_503(request)
+    # Nothing left to read: hand the pooled connection back before the Redis
+    # round trip, the same discipline the multipart branch above applies before
+    # its upload.
+    await session.close()
+    try:
+        await arq_pool.enqueue_job(
+            "process_brain_message_open",
+            str(payload.tenant_id),
+            payload.external_id,
+            patient_name=payload.patient_name,
+        )
+    except Exception as exc:
+        # `_arq_pool_or_503` only proves a pool OBJECT exists; the enqueue
+        # itself can still fail against Redis, and an uncaught 500 here would
+        # contradict this route's own promise to fail closed. The caller is
+        # fire-and-forget, so the status code is all it can act on.
+        logger.error("brain_message_open_enqueue_failed", error_type=type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Queue unavailable.",
+        ) from exc
+    logger.info(
+        "brain_message_open_queued",
+        tenant_id=str(payload.tenant_id),
+        # Logged whole for the reason `/inbound` gives: an opaque session
+        # handle, not a phone number.
         external_id=payload.external_id,
     )
     return BrainMessageAck(status="queued")

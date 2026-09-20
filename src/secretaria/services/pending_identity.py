@@ -50,6 +50,17 @@ differs is what the caller does with a failure, and the three are not alike:
     activated right now AND that the appointment stands, because they are
     staring at a prompt they just answered.
 
+## The masked address, and why it is checked on the way IN
+
+`request_code` came back with a bare status until TASK-003 §3 added
+`email_masked` to it. That value is the only part of this whole module that
+reaches the patient's transcript verbatim, so it is validated here
+(`masked_email_or_none`) before anything is allowed to render it: it must
+LOOK masked. brain-api is the one that masks, and this is not distrust of
+it so much as a refusal to let one bug over there become a permanent row in
+`messages` over here. An absent or malformed mask silently falls back to
+wording that names no inbox at all — never to a guess.
+
 ## What is never logged
 
 No address, ever — not even hashed, which is the one difference from
@@ -58,7 +69,9 @@ because the same number recurs across handoffs and a hash lets two log lines be
 tied together without storing the number. Nothing here needs that tie: one
 address belongs to one visit, and the visit already has an id worth logging.
 No code either, in any state — a six-digit secret with a ten-minute life is
-exactly the thing a log aggregator should never see.
+exactly the thing a log aggregator should never see. The MASK is not logged
+either: it is a fragment of the same address, and a log line only ever
+records whether one arrived (`has_email_mask`), never its characters.
 """
 
 import re
@@ -116,12 +129,115 @@ EMAIL_PAUSED_MESSAGE = (
 # unrequested, immediately after a booking, and asks for a secret — the exact
 # shape of a scam. Leading with the thing the patient just did, and saying the
 # appointment is already done, is what makes the ask legible.
+#
+# This is the FALLBACK wording: the one used when brain-api did not tell us
+# which inbox the code went to. It names no address at all rather than
+# inventing one — "o e-mail que você me passou" is true whatever was claimed.
 CODE_NOTICE_MESSAGE = (
     "🔐 Sua consulta já está confirmada! ✅\n\n"
     "Para você conseguir voltar a esta conversa depois, de qualquer aparelho, "
     "enviei um código de *6 dígitos* para o e-mail que você me passou.\n\n"
     "✍️ Digite o código aqui para ativar sua conta."
 )
+
+# The same notice when brain-api DID hand back a masked address. Saying which
+# inbox to look in is the whole reason the mask exists: the patient typed the
+# address minutes ago and a code arriving at an inbox they cannot name is the
+# single most common reason the step is abandoned.
+_CODE_NOTICE_MASKED_MESSAGE = (
+    "🔐 Sua consulta já está confirmada! ✅\n\n"
+    "Para você conseguir voltar a esta conversa depois, de qualquer aparelho, "
+    "enviei um código de *6 dígitos* para {email_masked}.\n\n"
+    "✍️ Digite o código aqui para ativar sua conta."
+)
+
+# The three buttons the notice carries, in the order the owner listed them.
+# Ids are stable strings, NOT positions: they are what comes back from the
+# patient's tap (already revalidated against the cards this conversation
+# offered, `workers/tasks.py::_validated_brain_message_reply_id`), and the
+# router branches on the id alone — never on the label, which is display text
+# that a copy change may move at any time.
+IDENTITY_BACK_ACTION = "identity_back"
+IDENTITY_RESEND_ACTION = "identity_resend"
+IDENTITY_CHANGE_EMAIL_ACTION = "identity_change_email"
+
+# Titles fit the 20-character reply-button cap `truncate_button_label` applies
+# (via `interactive_buttons_record`, so the portal's card and a WhatsApp card
+# cannot drift). Measured in the unit the code actually counts in — Python code
+# points, i.e. `len()`: "⬅️ Voltar" 9, "↩️ Reenviar código" 18, "📩 Mudar
+# e-mail" 14. The arrows are two code points each (the invisible U+FE0F
+# variation selector), which is the part that is free to forget; 📩 is one code
+# point here although it is two UTF-16 units. A test pins the ceiling.
+CODE_NOTICE_BUTTONS: tuple[tuple[str, str], ...] = (
+    (IDENTITY_BACK_ACTION, "⬅️ Voltar"),
+    (IDENTITY_RESEND_ACTION, "↩️ Reenviar código"),
+    (IDENTITY_CHANGE_EMAIL_ACTION, "📩 Mudar e-mail"),
+)
+
+_IDENTITY_ACTIONS = frozenset(action for action, _ in CODE_NOTICE_BUTTONS)
+
+
+def identity_action_or_none(reply_id: str | None) -> str | None:
+    """The code-notice action `reply_id` names, or None for anything else.
+
+    Pure. Keeps the id vocabulary in the module that owns the card, so a
+    fourth button is added in one place rather than in the router's `if`
+    ladder as well.
+    """
+    return reply_id if reply_id in _IDENTITY_ACTIONS else None
+
+
+# What a masked address looks like, per the brain-api contract (§3 of
+# TASK-003): first character + `***` + last character of the local part, `@`,
+# then the whole domain. A one-character local part becomes `a***@dominio`.
+#
+# This is checked HERE, on the way in, and that check is a safety property and
+# not tidiness: `email_masked` is the only field of this contract whose value
+# ends up verbatim in the patient's transcript, and the transcript is exactly
+# where a raw address must never appear. A brain-api that one day sends the
+# full address — a bug, a rollback, a mis-merge — must not be able to write it
+# into `messages` through us. Anything that is not visibly masked is dropped
+# and the fallback wording is used instead.
+_MASKED_EMAIL_RE = re.compile(r"^[^@\s]*\*\*\*[^@\s]*@[^@\s]+$")
+
+
+def masked_email_or_none(value: str | None) -> str | None:
+    """`value` if it is a MASKED address we may show, else None.
+
+    A SHAPE check, not a proof: a real address whose local part happened to
+    contain `***` would pass. That is accepted deliberately — the input comes
+    from a sibling service over an authenticated internal call, not from a
+    patient, so the threat modelled here is a masking BUG upstream, not an
+    attacker choosing the string. The check is what stops the ordinary version
+    of that bug (masking silently turned off, a rollback to a build that sent
+    the raw address) from writing an inbox into `messages`.
+
+    Pure apart from one log line, which records only that a value was refused
+    — never the value, which is precisely the thing we are refusing to let
+    out.
+    """
+    candidate = (value or "").strip()
+    if not candidate:
+        return None
+    if len(candidate) > 254 or not _MASKED_EMAIL_RE.match(candidate):
+        logger.warning("pending_code_email_mask_rejected", length=len(candidate))
+        return None
+    return candidate
+
+
+def code_notice_body(email_masked: str | None) -> str:
+    """The code notice, naming the masked inbox when we have one.
+
+    Pure. Degrades to `CODE_NOTICE_MESSAGE` for an absent OR unacceptable
+    mask, so a brain-api that predates the field — and one that sends a
+    malformed value — both produce today's message rather than an empty slot
+    or a leak.
+    """
+    masked = masked_email_or_none(email_masked)
+    if masked is None:
+        return CODE_NOTICE_MESSAGE
+    return _CODE_NOTICE_MASKED_MESSAGE.format(email_masked=masked)
+
 
 CODE_ACCEPTED_MESSAGE = "✅ Tudo certo, sua conta está ativa! Esta conversa fica salva para você."
 
@@ -272,6 +388,22 @@ class VerifyResult:
     outcome: VerifyOutcome
 
 
+@dataclass(frozen=True)
+class RequestCodeResult:
+    """The outcome of one `request_code` call, plus where the code went.
+
+    `email_masked` is brain-api's own masking of the address the visit
+    claimed (`a***a@gmail.com`) — the ONLY form of it this service is ever
+    handed, and the only form allowed into the transcript. It is None
+    whenever brain-api did not send the field (a deploy that predates it) or
+    sent something that is not visibly masked (`masked_email_or_none`), and
+    every caller must cope with that rather than substituting a guess.
+    """
+
+    outcome: RequestCodeOutcome
+    email_masked: str | None = None
+
+
 async def _post(path: str, body: dict, *, tenant_id: UUID, event: str) -> httpx.Response | None:
     """One internal POST to brain-api, or None if it could not be made.
 
@@ -385,8 +517,16 @@ async def claim_email(tenant_id: UUID, external_id: str, email: str) -> ClaimOut
     return ClaimOutcome.CLAIMED
 
 
-async def request_code(tenant_id: UUID, external_id: str) -> RequestCodeOutcome:
-    """Ask brain-api to mail the code. Takes no address — see the docstring."""
+async def request_code(tenant_id: UUID, external_id: str) -> RequestCodeResult:
+    """Ask brain-api to mail the code. Takes no address — see the docstring.
+
+    Reads the OPTIONAL `email_masked` off a 200 (TASK-003 §3). Optional in
+    both directions: a brain-api that does not send it yet still produces
+    SENT, and a mask that does not look like one is dropped without
+    downgrading the outcome — the code WAS mailed either way, and refusing to
+    say so because the cosmetic half of the answer was malformed would turn a
+    copy problem into a silence.
+    """
     response = await _post(
         "/internal/brain-message/pending-otp/request",
         {"tenant_id": str(tenant_id), "external_id": external_id},
@@ -394,11 +534,11 @@ async def request_code(tenant_id: UUID, external_id: str) -> RequestCodeOutcome:
         event="pending_code_request",
     )
     if response is None:
-        return RequestCodeOutcome.UNAVAILABLE
+        return RequestCodeResult(RequestCodeOutcome.UNAVAILABLE)
     if response.status_code == 404:
-        return RequestCodeOutcome.NOT_PENDING
+        return RequestCodeResult(RequestCodeOutcome.NOT_PENDING)
     if response.status_code == 409:
-        return RequestCodeOutcome.NO_EMAIL
+        return RequestCodeResult(RequestCodeOutcome.NO_EMAIL)
     if response.status_code != 200:
         logger.warning(
             "pending_code_request_failed",
@@ -406,9 +546,35 @@ async def request_code(tenant_id: UUID, external_id: str) -> RequestCodeOutcome:
             status_code=response.status_code,
             tenant_id=str(tenant_id),
         )
-        return RequestCodeOutcome.UNAVAILABLE
-    logger.info("pending_code_requested", tenant_id=str(tenant_id))
-    return RequestCodeOutcome.SENT
+        return RequestCodeResult(RequestCodeOutcome.UNAVAILABLE)
+    masked = masked_email_or_none(_masked_email_field(response, tenant_id=tenant_id))
+    logger.info(
+        "pending_code_requested",
+        tenant_id=str(tenant_id),
+        # Whether we can name the inbox, never which one it is.
+        has_email_mask=masked is not None,
+    )
+    return RequestCodeResult(RequestCodeOutcome.SENT, email_masked=masked)
+
+
+def _masked_email_field(response: httpx.Response, *, tenant_id: UUID) -> str | None:
+    """The raw `email_masked` value off a 200, or None if there is not one.
+
+    A body that is not JSON, not an object, or carries the key as something
+    other than a string is simply a body without the field — the code was
+    still mailed, so this never turns into a failure.
+    """
+    try:
+        payload = response.json()
+    except ValueError:
+        logger.warning(
+            "pending_code_request_body_unreadable",
+            reason="invalid_json",
+            tenant_id=str(tenant_id),
+        )
+        return None
+    value = payload.get("email_masked") if isinstance(payload, dict) else None
+    return value if isinstance(value, str) else None
 
 
 async def verify_code(tenant_id: UUID, external_id: str, code: str) -> VerifyResult:
