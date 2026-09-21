@@ -233,9 +233,13 @@ async def test_both_wrappers_reach_the_same_decision(db) -> None:
     arrives with no proven address and has to be asked for one, while a
     WhatsApp patient arrives with a phone number Meta already verified. Every
     OTHER field staying equal is exactly what the rest of this assertion now
-    proves — including `send_consent_notice`, which stays True on both, so the
-    e-mail step is a message inserted before the LGPD notice and never a
-    replacement for it.
+    proves.
+
+    `send_consent_notice` / `send_name_request` joined it with the name step
+    (services/patient_name.py, 2026-09-21), for the mirror-image reason: the
+    name question follows the greeting on WhatsApp, while on Brain-Message it
+    waits for the e-mail — which is what decides there whether the visitor is
+    new at all. Both are asserted below rather than skipped.
     """
     tenant = await _seed_tenant(db)
 
@@ -243,7 +247,14 @@ async def test_both_wrappers_reach_the_same_decision(db) -> None:
     bm = await _bm_turn(tenant, "oi")
 
     assert wa is not None and bm is not None
-    differing = {"channel", "patient_ref", "conversation_id", "probe_pending_identity"}
+    differing = {
+        "channel",
+        "patient_ref",
+        "conversation_id",
+        "probe_pending_identity",
+        "send_consent_notice",
+        "send_name_request",
+    }
     compared = 0
     for f in fields(tasks._ReplyContext):
         if f.name in differing:
@@ -260,6 +271,8 @@ async def test_both_wrappers_reach_the_same_decision(db) -> None:
     # would keep passing if the flag silently stopped being set at all.
     assert bm.probe_pending_identity is True
     assert wa.probe_pending_identity is False
+    assert (wa.send_name_request, wa.send_consent_notice) == (True, False)
+    assert (bm.send_name_request, bm.send_consent_notice) == (False, True)
 
 
 async def test_parity_holds_through_the_menu_branch(db) -> None:
@@ -267,7 +280,11 @@ async def test_parity_holds_through_the_menu_branch(db) -> None:
     tenant = await _seed_tenant(db)
     from secretaria.services.greeting_template import CONSENT_BUTTON_LABEL
 
-    for turn in (("oi", "w1"), (CONSENT_BUTTON_LABEL, "w2"), ("/menu", "w3")):
+    # WhatsApp answers the name question first (services/patient_name.py); on
+    # this bare path (no `_send_bot_reply`, so no brain-api e-mail step)
+    # Brain-Message goes straight to consent. Both then decide `/menu` alike.
+    wa_turns = (("oi", "w1"), ("Ana Souza", "w1n"), (CONSENT_BUTTON_LABEL, "w2"), ("/menu", "w3"))
+    for turn in wa_turns:
         wa = await _wa_turn(tenant, turn[0], turn[1])
     for body in ("oi", CONSENT_BUTTON_LABEL, "/menu"):
         bm = await _bm_turn(tenant, body)

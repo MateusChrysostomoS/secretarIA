@@ -764,7 +764,7 @@ PENDING_IDENTITY_TTL_MINUTES = 60
 
 
 def pending_identity_ttl_minutes(tenant: Tenant) -> int:
-    """Silence budget for AWAITING_EMAIL / AWAITING_EMAIL_CODE, in minutes.
+    """Silence budget for AWAITING_EMAIL / AWAITING_EMAIL_CODE / AWAITING_NAME, in minutes.
 
     Takes `tenant` and ignores it, exactly as `flows_enabled` takes one and
     returns True: the decision keeps ONE home, so the day it does become
@@ -1170,16 +1170,20 @@ async def _route(
             conversation, tenant, calendar, inbound_body, upcoming_appointments or [], professionals
         )
 
-    # AWAITING_EMAIL / AWAITING_EMAIL_CODE should never reach here: both are
-    # intercepted upstream by `workers/tasks.py`'s pending-identity gate, which
-    # owns the whole turn and returns before dispatch. Reaching this line means
+    # AWAITING_EMAIL / AWAITING_EMAIL_CODE / AWAITING_NAME should never reach
+    # here: all three are intercepted upstream by `workers/tasks.py`'s identity
+    # gates, which own the whole turn and return before dispatch. Reaching this line means
     # the gate let one through (a channel mismatch, a state left behind by an
     # older build), and the safe answer is the menu — falling through to the
     # branches below does exactly that, and the result they build carries an
     # explicit `flow_state`, so the conversation leaves the stranded state on
     # this very turn rather than re-entering it. Named here so the next reader
     # does not have to re-derive that it is deliberate.
-    if state in (FlowState.AWAITING_EMAIL, FlowState.AWAITING_EMAIL_CODE):
+    if state in (
+        FlowState.AWAITING_EMAIL,
+        FlowState.AWAITING_EMAIL_CODE,
+        FlowState.AWAITING_NAME,
+    ):
         logger.warning(
             "flow_router_pending_identity_state_leaked",
             state=state.value,

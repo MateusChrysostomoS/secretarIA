@@ -41,8 +41,15 @@ class FlowState(enum.StrEnum):
                       a visitor who has not proven their address, so the next
                       inbound is read as the 6-digit code.
 
-    The two Brain-Message states are the ONLY ones a WhatsApp conversation can
-    never enter (`workers/tasks.py` gates both on `channel`), and both are
+    AWAITING_NAME   - BOTH channels: the patient was asked "qual é o seu
+                      nome?" (services/patient_name.py) and the next inbound is
+                      read as their name. WhatsApp: right after the greeting on
+                      a first contact. Brain-Message: right after an e-mail
+                      that belongs to no account. Always before LGPD.
+
+    The two e-mail states are the ONLY ones a WhatsApp conversation can never
+    enter (`workers/tasks.py` gates both on `channel`); AWAITING_NAME is
+    channel-neutral on purpose. All three are pre-/post-consent identity waits
     time-bounded by `_expire_stale_pending_identity_state` — not by the patient
     answering. See the `conversation-flow-state` skill's invariant: a state
     whose only exit is the patient choosing it is the shape that parked
@@ -62,6 +69,8 @@ class FlowState(enum.StrEnum):
     # adds the column and no constraint. Both values fit in 32 characters.
     AWAITING_EMAIL = "AWAITING_EMAIL"
     AWAITING_EMAIL_CODE = "AWAITING_EMAIL_CODE"
+    # Same reasoning, same absence of a migration: 13 characters.
+    AWAITING_NAME = "AWAITING_NAME"
 
 
 def _handover_values(enum_cls: type[enum.Enum]) -> list[str]:

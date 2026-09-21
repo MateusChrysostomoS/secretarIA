@@ -83,6 +83,10 @@ from secretaria.services.greeting_template import (  # noqa: E402
     CONSENT_BUTTON_LABEL,
     LGPD_CONSENT_MESSAGE,
 )
+from secretaria.services.patient_name import (  # noqa: E402
+    NAME_REQUEST_AFTER_EMAIL_MESSAGE,
+    NAME_REQUEST_MESSAGE,
+)
 from secretaria.services.pending_identity import (  # noqa: E402
     CODE_ACCEPTED_MESSAGE,
     CODE_GIVE_UP_MESSAGE,
@@ -96,6 +100,7 @@ from secretaria.services.pending_identity import (  # noqa: E402
     IDENTITY_CHANGE_EMAIL_ACTION,
     IDENTITY_RESEND_ACTION,
     ClaimOutcome,
+    ClaimResult,
     IdentityState,
     RequestCodeOutcome,
     RequestCodeResult,
@@ -116,6 +121,9 @@ EMAIL = "maria@exemplo.com"
 # last character of the local part, then the whole domain. The ONLY form of an
 # address this repo is allowed to put in a transcript.
 EMAIL_MASKED = "m***a@exemplo.com"
+# The answer to "Prazer! Qual é o seu nome?" (services/patient_name.py), which
+# since 2026-09-21 sits between a NEW address and the LGPD notice.
+NAME = "Maria Silva"
 
 
 def _code_notice_row(email_masked: str | None = EMAIL_MASKED) -> str:
@@ -211,7 +219,7 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db, calls):
 
     async def _claim(tenant_id, external_id, email):
         calls.claimed.append(email)
-        return ClaimOutcome.CLAIMED
+        return ClaimResult(ClaimOutcome.CLAIMED)
 
     async def _verify(tenant_id, external_id, code):
         calls.verified.append(code)
@@ -394,7 +402,11 @@ async def test_wire_contract_matches_brain_api_internal_endpoints(monkeypatch) -
         await pending_service.probe_identity(tenant_id, EXTERNAL_ID)
         is IdentityState.PENDING_UNCLAIMED
     )
-    assert await pending_service.claim_email(tenant_id, EXTERNAL_ID, EMAIL) is ClaimOutcome.CLAIMED
+    claim = await pending_service.claim_email(tenant_id, EXTERNAL_ID, EMAIL)
+    assert claim.outcome is ClaimOutcome.CLAIMED
+    # A brain-api that predates `account_exists` (this handler sends only a
+    # status) reads as a NEW address, never as an error.
+    assert claim.account_exists is False and claim.email_masked is None
     request = await pending_service.request_code(tenant_id, EXTERNAL_ID)
     assert request.outcome is RequestCodeOutcome.SENT
     result = await pending_service.verify_code(tenant_id, EXTERNAL_ID, "123456")
@@ -444,15 +456,25 @@ async def test_first_contact_asks_the_email_between_the_greeting_and_the_lgpd(db
 
     sent = await _outbound(db, tenant)
     assert calls.claimed == [EMAIL], "the address must reach brain-api before consent"
-    assert sent[2] == LGPD_ROW
+    # A NEW address (brain-api said no account) earns the name question, and
+    # the LGPD notice waits for its answer (services/patient_name.py).
+    assert sent[2] == NAME_REQUEST_AFTER_EMAIL_MESSAGE
+    assert LGPD_ROW not in sent
+    assert await _flow_state(db, tenant) == FlowState.AWAITING_NAME
+
+    await _bm_turn(tenant, NAME)
+
+    sent = await _outbound(db, tenant)
+    assert sent[3] == LGPD_ROW
     assert await _flow_state(db, tenant) == FlowState.IDLE
+    assert (await _patient(db, tenant)).name == NAME
 
     # ...and the ordinary flow resumes: accepting the terms opens the menu,
     # exactly as it does on WhatsApp. The identity step added messages BEFORE
     # the booking flow and changed nothing inside it.
     await _bm_turn(tenant, CONSENT_BUTTON_LABEL)
     sent = await _outbound(db, tenant)
-    assert sent[3].startswith(CONSENT_ACCEPTED_MESSAGE)
+    assert sent[4].startswith(CONSENT_ACCEPTED_MESSAGE)
     patient = await _patient(db, tenant)
     assert patient.lgpd_accepted_at is not None
 
@@ -499,7 +521,7 @@ async def test_an_unreadable_answer_reasks_and_does_not_advance(db, calls) -> No
     # a dead end.
     await _bm_turn(tenant, EMAIL)
     assert calls.claimed == [EMAIL]
-    assert (await _outbound(db, tenant))[3] == LGPD_ROW
+    assert (await _outbound(db, tenant))[3] == NAME_REQUEST_AFTER_EMAIL_MESSAGE
 
 
 async def test_a_brain_api_outage_on_the_claim_does_not_advance_to_consent(
@@ -511,7 +533,7 @@ async def test_a_brain_api_outage_on_the_claim_does_not_advance_to_consent(
 
     async def _down(tenant_id, external_id, email):
         calls.claimed.append(email)
-        return ClaimOutcome.UNAVAILABLE
+        return ClaimResult(ClaimOutcome.UNAVAILABLE)
 
     monkeypatch.setattr(tasks, "claim_email", _down)
     await _bm_turn(tenant, EMAIL)
@@ -535,7 +557,7 @@ async def test_claim_race_reprobes_and_accepts_an_already_verified_account(
 
     async def _already_done(tenant_id, external_id, email):
         calls.claimed.append(email)
-        return ClaimOutcome.NOT_PENDING
+        return ClaimResult(ClaimOutcome.NOT_PENDING)
 
     monkeypatch.setattr(tasks, "probe_identity", _probe)
     monkeypatch.setattr(tasks, "claim_email", _already_done)
@@ -621,12 +643,14 @@ async def test_an_unreachable_probe_falls_back_to_todays_behaviour(db, monkeypat
 
 
 async def test_whatsapp_first_contact_is_byte_for_byte_unchanged(db, calls) -> None:
-    """CHECKLIST: the WhatsApp channel does not change at all.
+    """CHECKLIST: the WhatsApp channel never gains an e-mail step.
 
-    Greeting then LGPD, in that order, and — the load-bearing part — the
-    identity leg is never called. Not "called and ignored": never reached. On
-    WhatsApp the phone number IS the identity, and a brain-api round trip per
-    first contact would be a cost and a failure mode this channel never had.
+    Greeting then the NAME question (services/patient_name.py, 2026-09-21 —
+    the one deliberate change on this channel), then LGPD after the answer,
+    and — the load-bearing part — the e-mail identity leg is never called.
+    Not "called and ignored": never reached. On WhatsApp the phone number IS
+    the identity, and a brain-api round trip per first contact would be a cost
+    and a failure mode this channel never had.
     """
     tenant = await _seed_tenant(db)
 
@@ -655,13 +679,24 @@ async def test_whatsapp_first_contact_is_byte_for_byte_unchanged(db, calls) -> N
         )
         assert reply is not None
         await tasks._send_bot_reply(reply, redis=None)
+        name_reply = await tasks._persist_inbound_message(
+            phone_number_id=tenant.phone_number_id,
+            wa_id=WA_ID,
+            patient_name="Maria",
+            wam_id="wamid.identity.regression.name",
+            body=NAME,
+        )
+        assert name_reply is not None
+        await tasks._send_bot_reply(name_reply, redis=None)
     finally:
         tasks._tenant_client = original
 
-    assert len(sent_bodies) == 2, sent_bodies
+    assert len(sent_bodies) == 3, sent_bodies
     assert sent_bodies[0].startswith("👋 Olá! Bem-vindo(a) à Clinic!")
-    assert sent_bodies[1] == LGPD_CONSENT_MESSAGE
+    assert sent_bodies[1] == NAME_REQUEST_MESSAGE
+    assert sent_bodies[2] == LGPD_CONSENT_MESSAGE
     assert EMAIL_REQUEST_MESSAGE not in sent_bodies
+    assert NAME_REQUEST_AFTER_EMAIL_MESSAGE not in sent_bodies
     assert calls.probed == [], "WhatsApp reached the identity leg"
     assert calls.claimed == []
     assert calls.verified == []
@@ -716,6 +751,7 @@ async def _ready_for_code(db, tenant: Tenant) -> None:
     """Get a Brain-Message conversation to the state the post-booking hook leaves."""
     await _bm_turn(tenant, "oi")
     await _bm_turn(tenant, EMAIL)
+    await _bm_turn(tenant, NAME)
     await _bm_turn(tenant, CONSENT_BUTTON_LABEL)
     async with db() as session:
         async with session.begin():
@@ -936,6 +972,7 @@ async def test_a_booking_by_an_unverified_visitor_gets_the_code_notice(db, calls
     tenant = await _seed_tenant(db)
     await _bm_turn(tenant, "oi")
     await _bm_turn(tenant, EMAIL)
+    await _bm_turn(tenant, NAME)
     patient = await _patient(db, tenant)
     appointment = await _booked(db, tenant, patient)
 
@@ -951,6 +988,7 @@ async def test_the_code_notice_is_sent_at_most_once_per_appointment(db, calls) -
     tenant = await _seed_tenant(db)
     await _bm_turn(tenant, "oi")
     await _bm_turn(tenant, EMAIL)
+    await _bm_turn(tenant, NAME)
     patient = await _patient(db, tenant)
     appointment = await _booked(db, tenant, patient)
     ctx = _ctx(tenant, patient, appointment)
@@ -985,6 +1023,7 @@ async def test_no_code_no_message_and_the_claim_goes_back(db, monkeypatch, outco
     tenant = await _seed_tenant(db)
     await _bm_turn(tenant, "oi")
     await _bm_turn(tenant, EMAIL)
+    await _bm_turn(tenant, NAME)
     patient = await _patient(db, tenant)
     appointment = await _booked(db, tenant, patient)
 
@@ -1100,6 +1139,7 @@ async def test_the_precheck_handoff_still_fires_exactly_as_before(db, calls, mon
     # --- Brain-Message booking: the identity hook speaks, PreCheck is silent ---
     await _bm_turn(tenant, "oi")
     await _bm_turn(tenant, EMAIL)
+    await _bm_turn(tenant, NAME)
     bm_patient = await _patient(db, tenant)
     bm_appointment = await _booked(db, tenant, bm_patient)
     bm_ctx = _ctx(tenant, bm_patient, bm_appointment)
@@ -1220,6 +1260,7 @@ async def _card_state(db, tenant: Tenant):
     """
     await _bm_turn(tenant, "oi")
     await _bm_turn(tenant, EMAIL)
+    await _bm_turn(tenant, NAME)
     await _bm_turn(tenant, CONSENT_BUTTON_LABEL)
     patient = await _patient(db, tenant)
     appointment = await _booked(db, tenant, patient)
@@ -1432,6 +1473,7 @@ async def test_a_forged_card_id_is_ignored_and_routed_as_text(db, calls) -> None
     tenant = await _seed_tenant(db)
     await _bm_turn(tenant, "oi")
     await _bm_turn(tenant, EMAIL)
+    await _bm_turn(tenant, NAME)
     await _bm_turn(tenant, CONSENT_BUTTON_LABEL)
     before = len(calls.code_requests)
 

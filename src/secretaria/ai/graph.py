@@ -61,6 +61,7 @@ from secretaria.services.booking_scope import (
     BOOKING_TOPOLOGY_UNKNOWN,
 )
 from secretaria.services.calendar import CalendarService, CalendarUnavailableError
+from secretaria.services.patient_name import NAME_ANSWER_LLM_PLACEHOLDER, is_name_question
 from secretaria.services.pii_pseudonymization import (
     _pseudonymizer_ctx,
     load_pseudonymizer,
@@ -362,7 +363,17 @@ async def _load_history(conversation_id: UUID) -> list[BaseMessage]:
     recent.reverse()
 
     out: list[BaseMessage] = []
+    # The answer to the name question is replaced before the model sees it
+    # (services/patient_name.py): an answer that did not parse holds a name
+    # the pseudonymizer never registered. Keyed on the bot row that asked, so
+    # no column is needed and the staff console keeps the real text.
+    previous_bot_body: str | None = None
     for m in recent:
+        if m.sender == MessageSender.PATIENT and is_name_question(previous_bot_body):
+            previous_bot_body = None
+            out.append(HumanMessage(content=NAME_ANSWER_LLM_PLACEHOLDER))
+            continue
+        previous_bot_body = m.body if m.sender != MessageSender.PATIENT else None
         # A tap is stored as its title alone (the text staff see); the agent
         # reads it with the row's payload re-attached - the "<rótulo> (<iso>)"
         # its [SLOTS] instructions promise, on this turn AND on the later

@@ -212,10 +212,12 @@ async def test_greeting_uses_tenant_whatsapp_credentials(db, monkeypatch: pytest
     # tenant's own `greeting_message` (which this round orphaned) — see
     # services/greeting_template.py.
     assert captured["body"] == render_greeting(tenant.clinic_name, tenant.clinic_description)
-    # …and it goes out button-free, with the LGPD notice (and its single
-    # "✅ Concordo" button) following as a separate message.
+    # …and it goes out button-free. On WhatsApp the name question follows it
+    # (services/patient_name.py) and the LGPD notice, with its single
+    # "✅ Concordo" button, follows the answer.
     assert captured["shape"] == "text"
-    assert reply.send_consent_notice is True
+    assert reply.send_name_request is True
+    assert reply.send_consent_notice is False
     assert reply.greeting_buttons == []
 
 

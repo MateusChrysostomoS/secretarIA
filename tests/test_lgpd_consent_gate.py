@@ -4,6 +4,8 @@ The shape being pinned, message by message:
 
     patient's 1st message
       -> the greeting frame, as PLAIN TEXT, no buttons
+      -> "Prazer! Qual é o seu nome?" (services/patient_name.py, 2026-09-21)
+    the answer
       -> the LGPD notice, carrying the single "✅ Concordo" button
     anything that is not an acceptance
       -> the notice again (PreCheck's "Reenviar LGPD"), still with the button
@@ -63,6 +65,7 @@ from secretaria.services.greeting_template import (  # noqa: E402
     LGPD_CONSENT_MESSAGE,
     render_greeting,
 )
+from secretaria.services.patient_name import NAME_REQUEST_MESSAGE  # noqa: E402
 from secretaria.workers import tasks  # noqa: E402
 
 PHONE_NUMBER_ID = "1234567890"
@@ -123,6 +126,16 @@ async def _inbound(tenant: Tenant, body: str, wam_id: str):
     )
 
 
+async def _open(tenant: Tenant) -> None:
+    """The opening up to the LGPD notice: first message, then the name answer.
+
+    Since the name step (services/patient_name.py) the notice follows the
+    patient's name, not the greeting — everything below starts from there.
+    """
+    await _inbound(tenant, "oi", "wamid.first")
+    await _inbound(tenant, "Ana Souza", "wamid.name")
+
+
 async def _patient(db) -> Patient:
     async with db() as session:
         return await session.scalar(select(Patient).where(Patient.wa_id == WA_ID))
@@ -152,7 +165,9 @@ async def test_first_contact_sends_the_frame_without_buttons(db) -> None:
     # The load-bearing half: no action buttons on the frame. Offering [Agendar]
     # here would invite a tap the gate is about to refuse.
     assert reply.greeting_buttons == []
-    assert reply.send_consent_notice is True
+    # The name question takes the notice's slot; the notice follows the answer.
+    assert reply.send_name_request is True
+    assert reply.send_consent_notice is False
     assert reply.send_consent_reminder is False
 
 
@@ -181,7 +196,7 @@ async def test_pending_consent_re_prompts_and_serves_nothing(db, body: str) -> N
     answered with the terms rather than with service.
     """
     tenant = await _seed_tenant(db)
-    await _inbound(tenant, "oi", "wamid.first")
+    await _open(tenant)
 
     reply = await _inbound(tenant, body, "wamid.second")
 
@@ -201,7 +216,7 @@ async def test_pending_consent_re_prompts_and_serves_nothing(db, body: str) -> N
 @pytest.mark.parametrize("body", ["✅ Concordo", "Concordo", "concordo"])
 async def test_acceptance_stamps_the_patient_and_audits_it(db, body: str) -> None:
     tenant = await _seed_tenant(db)
-    await _inbound(tenant, "oi", "wamid.first")
+    await _open(tenant)
 
     reply = await _inbound(tenant, body, "wamid.accept")
 
@@ -216,7 +231,7 @@ async def test_acceptance_stamps_the_patient_and_audits_it(db, body: str) -> Non
 async def test_acceptance_opens_the_service_menu(db) -> None:
     """Step 4: the first message of the conversation to carry action buttons."""
     tenant = await _seed_tenant(db)
-    await _inbound(tenant, "oi", "wamid.first")
+    await _open(tenant)
 
     reply = await _inbound(tenant, "✅ Concordo", "wamid.accept")
 
@@ -234,7 +249,7 @@ async def test_acceptance_is_idempotent(db) -> None:
     consent moment and move the recorded timestamp.
     """
     tenant = await _seed_tenant(db)
-    await _inbound(tenant, "oi", "wamid.first")
+    await _open(tenant)
     first = await _inbound(tenant, "✅ Concordo", "wamid.accept.1")
     stamped = (await _patient(db)).lgpd_accepted_at
 
@@ -253,7 +268,7 @@ async def test_acceptance_is_idempotent(db) -> None:
 
 async def test_a_consented_patient_is_routed_normally(db) -> None:
     tenant = await _seed_tenant(db)
-    await _inbound(tenant, "oi", "wamid.first")
+    await _open(tenant)
     await _inbound(tenant, "✅ Concordo", "wamid.accept")
 
     reply = await _inbound(tenant, "quero marcar uma consulta", "wamid.after")
@@ -368,7 +383,13 @@ async def test_first_contact_puts_exactly_two_messages_on_the_wire(db, wire) -> 
     kind, body, buttons = wire.sends[0]
     assert kind == "text", f"the frame went out as {kind} with {buttons}"
     assert body == render_greeting(tenant.clinic_name, tenant.clinic_description)
-    kind, body, buttons = wire.sends[1]
+    assert wire.sends[1] == ("text", NAME_REQUEST_MESSAGE, None)
+
+    # The answer is what releases the notice — one message, the button on it.
+    await _turn(tenant, "Ana Souza", "wamid.name")
+
+    assert len(wire.sends) == 3, wire.sends
+    kind, body, buttons = wire.sends[2]
     assert (kind, body, buttons) == ("buttons", LGPD_CONSENT_MESSAGE, [CONSENT_BUTTON_LABEL])
 
 
@@ -377,6 +398,7 @@ async def test_the_menu_buttons_only_appear_after_the_tap(db, wire) -> None:
     tenant = await _seed_tenant(db)
 
     await _turn(tenant, "oi", "wamid.first")
+    await _turn(tenant, "Ana Souza", "wamid.name")
     await _turn(tenant, "quero agendar", "wamid.second")
     await _turn(tenant, CONSENT_BUTTON_LABEL, "wamid.third")
 

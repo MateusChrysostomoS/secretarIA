@@ -394,6 +394,13 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
   o brain-api (parte 2) precisa fazer upsert por `id`.** Leitura manual de paciente WhatsApp
   devolve `applied: false` (ignorada, não recusada). Deploy: migração ANTES, depois os DOIS
   serviços.
+- `z_prompts/PROMPT_SECRETARIA_ARQ_JOB_LOG_SECRET_LEAK.md` (raiz de BRAIN, gerado 2026-09-21 via
+  `/prompt-generator`) — **segurança, Prioridade 0 de `PLANO_PORTAL_COMO_WHATSAPP.md`**: o código
+  OTP do paciente (e o token de `password_reset`) aparecem em texto plano no log do worker, via
+  log NATIVO da biblioteca `arq` (`arq/worker.py::Worker.run_job`), não de código deste repo — o
+  processor `redact_secrets` de `core/logging.py` não cobre isso porque só atua no pipeline
+  `structlog`. Bloqueante para considerar a autenticação do paciente (item 1 acima) fechada.
+  **NÃO EXECUTADO ainda.**
 - `z_prompts/PROMPT_PORTAL_PASTA_EXCLUSIVA_E_HANDOFF_PRECHECK.md` (raiz de BRAIN, gerado
   2026-09-20 via `/prompt-generator`) — fecha a peça 3 do TASK-003 (handoff do PreCheck pelo
   Portal, hoje `501`), reaproveitando `POST /internal/brain-message/inbound` do PreCheck com
@@ -401,6 +408,22 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
   paciente — `PreCheck/app/services/brain_message/conductor.py:260-269`), e cria a pasta
   exclusiva do Portal que o dono pediu. Use quando for terminar o fluxo do Portal antes de
   autorizar merge/deploy das 3 branches do TASK-003. **NÃO EXECUTADO ainda.**
+- `z_prompts/PROMPT_BRAIN_MESSAGE_ABERTURA_EMAIL_NOME_2_SECRETARIA.md` (raiz de BRAIN, gerado
+  2026-09-20 via `/prompt-generator`, parte 2/2 — parte 1 é `..._1_BRAIN_API.md` no `brain-api`) —
+  item 2 da Prioridade 1 de `PLANO_PORTAL_COMO_WHATSAPP.md`: `FlowState.AWAITING_NAME` novo, nos
+  DOIS canais, para uma pergunta estilizada de nome ("Prazer! Qual o seu nome?") — no Portal só no
+  ramo "e-mail é de fato novo" (entre o e-mail e o LGPD; o ramo "e-mail já é de uma conta" pula a
+  pergunta e pede o código direto, com o e-mail mascarado que a parte 1 do brain-api passa a
+  devolver), e no WhatsApp SEMPRE no primeiro contato (mesmo com `profile.name` do Meta presente,
+  tratado como não confiável), entre `GREETING_FRAME` e o convite de LGPD — decisões do dono
+  fechadas na sessão que gerou o prompt, não reabrir. O nome capturado grava em `Patient.name`, o
+  MESMO campo que `services/pii_pseudonymization.py::load_pseudonymizer` já mascara antes de
+  qualquer turno em modo LLM — o prompt não cria nenhum mecanismo de pseudonimização novo, só
+  garante que o campo certo seja usado. **EXECUTADO 2026-09-21 — BUILT, 2364 testes verdes
+  (baseline 2331), UNCOMMITTED, sem migração, não deployado (exige o worker); ver
+  `docs/CHECKPOINT_abertura_pergunta_nome.md`.** O ramo "e-mail já cadastrado" reaproveita
+  `AWAITING_EMAIL_CODE`/`verify_code` (a diferença é decidida por consentimento, não por estado
+  novo); skill nova `TECH/.claude/skills/pii-field-capture-pseudonymization/`.
 - `z_prompts/PROMPT_PORTAL_CALENDARIO_COMPONENTE.md` (raiz de BRAIN, gerado 2026-09-20) —
   calendário clicável só no Portal (WhatsApp continua mês→dia→horário), substituindo a
   sequência de telas de chat na escolha de data. **NÃO EXECUTADO ainda.**

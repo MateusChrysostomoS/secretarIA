@@ -181,9 +181,18 @@ from secretaria.services.patient_context import (
     load_upcoming_appointments,
     resolve_patient_opening_state,
 )
+from secretaria.services.patient_name import (
+    NAME_INVALID_MESSAGE,
+    NAME_PAUSED_MESSAGE,
+    NAME_REASKED_STEP,
+    NAME_REQUEST_AFTER_EMAIL_MESSAGE,
+    NAME_REQUEST_MESSAGE,
+    parse_patient_name,
+)
 from secretaria.services.payments import deposit_lifecycle
 from secretaria.services.payments.money import format_brl
 from secretaria.services.pending_identity import (
+    ACCOUNT_CODE_GIVE_UP_MESSAGE,
     BOOKING_HOLD_EXPIRED_MESSAGE,
     CODE_ACCEPTED_MESSAGE,
     CODE_GIVE_UP_MESSAGE,
@@ -197,6 +206,7 @@ from secretaria.services.pending_identity import (
     IDENTITY_CHANGE_EMAIL_ACTION,
     IDENTITY_RESEND_ACTION,
     ClaimOutcome,
+    ClaimResult,
     IdentityState,
     RequestCodeOutcome,
     RequestCodeResult,
@@ -205,6 +215,7 @@ from secretaria.services.pending_identity import (
     booking_gate_reprompt_body,
     claim_email,
     code_notice_body,
+    existing_account_code_body,
     identity_action_or_none,
     parse_code,
     parse_email,
@@ -576,6 +587,18 @@ class _ReplyContext:
     # they are one card and `_handle_identity_card_action` owns the whole
     # turn for every one of them.
     identity_action: str | None = None
+    # --- The name question (services/patient_name.py), BOTH channels ------
+    # WhatsApp first contact: the greeting goes out and the name question
+    # follows it in the slot the LGPD notice used to take. The state was
+    # already moved to AWAITING_NAME inside the inbound transaction.
+    send_name_request: bool = False
+    # The patient answered the name question with a name (already written to
+    # `Patient.name` inside the inbound transaction): the LGPD notice follows.
+    # Also set when a second unreadable answer gives up on the name — the
+    # notice is the next step either way.
+    name_captured: bool = False
+    # The answer did not look like a name; the re-ask is the whole turn.
+    name_invalid: bool = False
 
 
 async def process_webhook_event(ctx: dict, payload: dict) -> None:
@@ -1087,6 +1110,130 @@ async def _route_inbound_turn(
     # The pending reactivation gate, if any, is consumed here too -
     # an explicit "take me to the menu" answers the "quer
     # continuar?" question by superseding it.
+    # --- The name question (BOTH channels) ---------------------
+    # ABOVE the Brain-Message identity gate and the LGPD gate: the
+    # owner's order is greeting -> [e-mail ->] name -> LGPD, so a
+    # patient being asked their name must never be handed the consent
+    # re-prompt instead. Below handover and the action buttons for the
+    # same reasons the LGPD gate is.
+    #
+    # Channel-neutral on purpose. The state is only ever ENTERED by a
+    # channel-aware decision (`_asks_name_at_first_contact` on WhatsApp,
+    # the "e-mail is new" branch of the claim on Brain-Message), and
+    # reading the answer is identical on both. Nothing in this block
+    # knows about e-mail — WhatsApp never gets an e-mail step.
+    #
+    # The answer is written to `Patient.name` and ONLY there: that is
+    # the field `services/pii_pseudonymization.py::load_pseudonymizer`
+    # registers as PACIENTE before any LLM turn (services/patient_name.py).
+    if conversation.reactivation_origin == FlowState.AWAITING_NAME.value:
+        # The Sim/Não the silence floor below offered. Same shape as the
+        # e-mail step's own gate in the Brain-Message block.
+        answer = classify_yes_no(body, tenant)
+        if answer in ("yes", "no"):
+            conversation.reactivation_origin = None
+            return _ReplyContext(
+                channel=channel,
+                conversation_id=conversation.id,
+                tenant_id=tenant.id,
+                patient_ref=patient_ref,
+                inbound_body=body or "",
+                reactivation=_ReactivationDirective(
+                    kind="resume" if answer == "yes" else "reset",
+                    origin=FlowState.AWAITING_NAME.value,
+                ),
+            )
+        # Anything else consumes the offer — never re-arms it. The natural
+        # reply to "quer continuar?" after a name question is the NAME, so a
+        # parseable one is taken and the opening moves on; anything else falls
+        # through to the consent gate below. The name is a courtesy: the offer
+        # must not become a loop whose only exit is a button (the invariant in
+        # the `conversation-flow-state` skill).
+        conversation.reactivation_origin = None
+        late_name = parse_patient_name(body)
+        if late_name is not None:
+            patient.name = late_name
+            logger.info(
+                "worker_patient_name_answered",
+                patient_id=str(patient.id),
+                channel=channel,
+            )
+            return _ReplyContext(
+                channel=channel,
+                conversation_id=conversation.id,
+                tenant_id=tenant.id,
+                patient_ref=patient_ref,
+                inbound_body=body or "",
+                name_captured=True,
+            )
+
+    if conversation.flow_state == FlowState.AWAITING_NAME:
+        # The time-based floor first, as everywhere else: a patient who went
+        # silent on the question an hour ago is not answering it now.
+        if _expire_stale_pending_identity_state(conversation, tenant, last_activity_at):
+            conversation.flow_step = None
+            logger.info(
+                "conversation_name_request_expired",
+                conversation_id=str(conversation.id),
+                tenant_id=str(tenant.id),
+                channel=channel,
+                ttl_minutes=pending_identity_ttl_minutes(tenant),
+            )
+            return _pending_identity_reactivation_offer(
+                conversation,
+                tenant,
+                patient_ref,
+                body,
+                FlowState.AWAITING_NAME,
+                channel=channel,
+                pre_consent=patient.lgpd_accepted_at is None,
+            )
+        # A direct answer first; a self-introduction inside a longer sentence
+        # ("meu nome é Ana, tudo bem?") second, through the same extractor the
+        # opportunistic capture above uses.
+        name = parse_patient_name(body) or extract_patient_name(body)
+        if name is None and conversation.flow_step != NAME_REASKED_STEP:
+            conversation.flow_step = NAME_REASKED_STEP
+            return _ReplyContext(
+                channel=channel,
+                conversation_id=conversation.id,
+                tenant_id=tenant.id,
+                patient_ref=patient_ref,
+                inbound_body=body or "",
+                name_invalid=True,
+            )
+        # Leaving the state, with or without a name. A SECOND unreadable
+        # answer moves on rather than asking a third time: the name is a
+        # courtesy, consent is the obligation, and a state whose only exit
+        # is the patient producing a string we like is the stuck shape the
+        # `conversation-flow-state` skill forbids.
+        conversation.flow_state = FlowState.IDLE
+        conversation.flow_step = None
+        if name is not None:
+            # Overwrites on purpose: on WhatsApp this replaces the Meta
+            # profile name the row was created with (owner, 2026-09-20: the
+            # profile name is not trusted; the typed answer is).
+            patient.name = name
+            logger.info(
+                "worker_patient_name_answered",
+                patient_id=str(patient.id),
+                channel=channel,
+            )
+        else:
+            logger.info(
+                "worker_patient_name_skipped",
+                patient_id=str(patient.id),
+                channel=channel,
+            )
+        return _ReplyContext(
+            channel=channel,
+            conversation_id=conversation.id,
+            tenant_id=tenant.id,
+            patient_ref=patient_ref,
+            inbound_body=body or "",
+            name_captured=True,
+        )
+
     # --- Brain-Message inline identity gate --------------------
     # ABOVE the LGPD gate, which is the entire point: the owner
     # fixed the order as greeting -> e-mail -> LGPD, so a visitor
@@ -1134,6 +1281,8 @@ async def _route_inbound_turn(
                 patient_ref,
                 body,
                 FlowState(origin),
+                channel=channel,
+                pre_consent=patient.lgpd_accepted_at is None,
             )
 
         # The time-based floor runs FIRST, before the state is
@@ -1154,6 +1303,8 @@ async def _route_inbound_turn(
                 patient_ref,
                 body,
                 pending_origin,
+                channel=channel,
+                pre_consent=patient.lgpd_accepted_at is None,
             )
 
         if conversation.flow_state == FlowState.AWAITING_EMAIL_CODE:
@@ -1339,12 +1490,18 @@ async def _route_inbound_turn(
 
     if patient.lgpd_accepted_at is None:
         if is_first_contact:
+            # The state is NOT moved here: `_send_bot_reply` writes
+            # AWAITING_NAME only once it is about to ask (past the entitlement
+            # gate), exactly as the Portal's e-mail step does. A turn that
+            # sends nothing must not leave the next message read as a name.
+            ask_name = _asks_name_at_first_contact(channel, patient, is_returning_patient)
             return _first_contact_reply(
                 tenant=tenant,
                 conversation_id=conversation.id,
                 patient_ref=patient_ref,
                 channel=channel,
                 inbound_body=body or "",
+                ask_name=ask_name,
             )
         # Already asked, still not accepted: re-prompt, with the
         # button attached so the way forward is one tap from the
@@ -1548,6 +1705,26 @@ async def _route_inbound_turn(
     )
 
 
+def _asks_name_at_first_contact(channel: str, patient: Patient, is_returning_patient: bool) -> bool:
+    """Whether a first contact on `channel` is followed by the name question.
+
+    The WhatsApp half of the name step's channel decision (the Brain-Message
+    half is the "e-mail is new" branch of the claim in `_send_bot_reply`,
+    because on the Portal the e-mail comes first and decides who is new).
+
+      * Brain-Message: never HERE — the question waits for the e-mail.
+      * WhatsApp, a Patient row created by this very message: ALWAYS, even
+        though the row was just created with Meta's `profile.name` — the owner
+        does not trust it (2026-09-20) and the typed answer replaces it.
+      * WhatsApp, a Patient row that already existed (a first contact again
+        only because the history was wiped): only if we still have no name.
+        A returning patient whose name we already hold is never asked again.
+    """
+    if channel == CHANNEL_BRAIN_MESSAGE:
+        return False
+    return not is_returning_patient or not patient.name
+
+
 def _first_contact_reply(
     *,
     tenant: Tenant,
@@ -1555,6 +1732,7 @@ def _first_contact_reply(
     patient_ref: str,
     channel: str,
     inbound_body: str = "",
+    ask_name: bool = False,
 ) -> _ReplyContext:
     """The very first thing a clinic says to a patient who owes consent.
 
@@ -1579,6 +1757,10 @@ def _first_contact_reply(
     fallback for every other channel and for an unavailable/unknown probe. A
     VERIFIED account is handled separately and skips account LGPD, as the
     brain-api contract requires.
+
+    `ask_name` (WhatsApp, `_asks_name_at_first_contact`): the name question
+    takes the consent notice's slot instead, and the notice follows the answer.
+    `_send_bot_reply` moves the state to AWAITING_NAME when it asks.
     """
     return _ReplyContext(
         channel=channel,
@@ -1588,7 +1770,8 @@ def _first_contact_reply(
         inbound_body=inbound_body,
         greeting_override=render_greeting(tenant.clinic_name, _fit_clinic_description(tenant)),
         greeting_buttons=[],
-        send_consent_notice=True,
+        send_consent_notice=not ask_name,
+        send_name_request=ask_name,
         probe_pending_identity=(channel == CHANNEL_BRAIN_MESSAGE),
     )
 
@@ -2018,6 +2201,10 @@ def _expire_stale_pending_identity_state(
 
     What each state would cost without this:
 
+      * AWAITING_NAME (both channels) parks the patient BEFORE the LGPD
+        notice, on a question the product can live without. Same treatment
+        as AWAITING_EMAIL: the wait is dropped and the caller asks whether to
+        resume ("Sim" re-asks the name, "Não" pauses).
       * AWAITING_EMAIL parks the visitor BEFORE the LGPD notice. The floor
         clears the active wait and the caller asks whether they want to resume;
         it never silently skips the still-unclaimed address.
@@ -2038,6 +2225,7 @@ def _expire_stale_pending_identity_state(
     if conversation.flow_state not in (
         FlowState.AWAITING_EMAIL,
         FlowState.AWAITING_EMAIL_CODE,
+        FlowState.AWAITING_NAME,
     ):
         return False
     if last_activity_at is None:
@@ -2055,16 +2243,26 @@ def _pending_identity_reactivation_offer(
     patient_ref: str,
     body: str | None,
     origin: FlowState,
+    *,
+    channel: str,
+    pre_consent: bool = False,
 ) -> _ReplyContext:
-    """Arm the existing Sim/Não gate for an expired e-mail or OTP wait."""
+    """Arm the existing Sim/Não gate for an expired e-mail, OTP or name wait.
+
+    `channel` is required: the e-mail waits only exist on Brain-Message but
+    the name wait lives on both, and a default would silently send a WhatsApp
+    patient's offer down the wrong channel (`channel-aware-dispatch`). `pre_consent` picks the true
+    sentence for a code wait: a code asked BEFORE consent (an e-mail that
+    already had an account) has no consultation behind it to reassure about.
+    """
     conversation.reactivation_origin = origin.value
-    if origin == FlowState.AWAITING_EMAIL_CODE:
+    if origin == FlowState.AWAITING_EMAIL_CODE and not pre_consent:
         prefix = "Sua consulta continua marcada."
     else:
         prefix = "Seu atendimento ficou pausado antes da etapa de privacidade."
     prompt = reactivation_continue_prompt(tenant)
     return _ReplyContext(
-        channel=CHANNEL_BRAIN_MESSAGE,
+        channel=channel,
         conversation_id=conversation.id,
         tenant_id=tenant.id,
         patient_ref=patient_ref,
@@ -2551,6 +2749,11 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     manage_calendar_owned = False
     patient_name = None
     patient_wa = reply.patient_ref
+    # Whether this patient still owes LGPD consent. Only the identity turns
+    # read it: a code asked BEFORE consent (an e-mail that already had an
+    # account) has no appointment behind it, so every wording and every exit of
+    # that wait differs from the post-booking code gate's.
+    patient_owes_consent = False
     # Post-consult-knowledge injection gate (see
     # _should_inject_post_consult_knowledge below): the patient's derived
     # opening state and the conversation's flow_state, captured as plain
@@ -2598,6 +2801,7 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                     if patient is not None:
                         patient_name = patient.name
                         patient_wa = patient.wa_id or patient_wa
+                        patient_owes_consent = patient.lgpd_accepted_at is None
                 if tenant is not None:
                     # Active-professionals snapshot (plain objects — the flow
                     # router does no DB I/O). Loaded whenever a tenant
@@ -2774,15 +2978,43 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     # visitor still owing an address is asked for it, not for consent.
     # Unreachable on WhatsApp — only the Brain-Message branch of that gate
     # ever sets these fields.
+    # The name question's own "quer continuar?" answer. Channel-neutral, like
+    # the state: "Sim" asks again, "Não" pauses and the next message meets the
+    # LGPD re-prompt — the name is never a second wall in front of consent.
+    if (
+        reply.reactivation is not None
+        and reply.reactivation.origin == FlowState.AWAITING_NAME.value
+    ):
+        if reply.reactivation.kind == "reset":
+            await _send_plain_reply(
+                reply,
+                tenant=tenant,
+                waba_token=waba_token,
+                body=NAME_PAUSED_MESSAGE,
+                event="patient_name_reactivation_declined",
+            )
+            return
+        await _write_flow_state(reply.conversation_id, FlowState.AWAITING_NAME)
+        await _send_plain_reply(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            body=NAME_REQUEST_MESSAGE,
+            event="patient_name_reactivated",
+        )
+        return
+
     if reply.reactivation is not None and reply.reactivation.origin in (
         FlowState.AWAITING_EMAIL.value,
         FlowState.AWAITING_EMAIL_CODE.value,
     ):
         origin = FlowState(reply.reactivation.origin)
         if reply.reactivation.kind == "reset":
+            # A code wait BEFORE consent has no consultation to reassure
+            # about: it pauses exactly like the e-mail step it came from.
             body = (
                 EMAIL_PAUSED_MESSAGE
-                if origin == FlowState.AWAITING_EMAIL
+                if origin == FlowState.AWAITING_EMAIL or patient_owes_consent
                 else CODE_GIVE_UP_MESSAGE
             )
             await _send_plain_reply(
@@ -2818,6 +3050,15 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                 waba_token=waba_token,
                 email_masked=result.email_masked,
                 event="pending_code_reactivation_resolved",
+                pre_consent=patient_owes_consent,
+            )
+            return
+        if patient_owes_consent:
+            await _account_code_dead_end(
+                reply,
+                tenant=tenant,
+                waba_token=waba_token,
+                event="pending_code_reactivation_resolved",
             )
             return
         await _send_plain_reply(
@@ -2837,6 +3078,7 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
             professionals=flow_professionals,
             patient_wa=patient_wa,
             redis=redis,
+            pre_consent=patient_owes_consent,
         )
         return
 
@@ -2870,16 +3112,40 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
         )
         return
 
+    # --- The name question's two answers (both channels) -----------------
+    if reply.name_invalid:
+        await _send_plain_reply(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            body=NAME_INVALID_MESSAGE,
+            event="patient_name_reprompt_sent",
+        )
+        return
+
+    if reply.name_captured:
+        # The name (if any) is already on `Patient.name`, committed with the
+        # inbound. Consent is next, on every channel — the same notice, with
+        # the same button, that followed the greeting before this step existed.
+        await _send_consent_notice(reply, tenant=tenant, waba_token=waba_token)
+        return
+
     if reply.pending_email_claim is not None:
         # Claim first, THEN consent. The owner fixed that sequence, so a failed
         # wire call keeps the state and asks again; it is never converted into
         # implicit permission to skip the e-mail step.
-        outcome = ClaimOutcome.UNAVAILABLE
+        claim = ClaimResult(ClaimOutcome.UNAVAILABLE)
         if reply.tenant_id is not None:
-            outcome = await claim_email(
-                reply.tenant_id, reply.patient_ref, reply.pending_email_claim
-            )
+            claim = await claim_email(reply.tenant_id, reply.patient_ref, reply.pending_email_claim)
+        outcome = claim.outcome
+        if outcome is ClaimOutcome.CLAIMED and patient_owes_consent:
+            # The opening: brain-api just told us whether this inbox is new.
+            await _continue_after_email_claim(reply, claim, tenant=tenant, waba_token=waba_token)
+            return
         if outcome is ClaimOutcome.CLAIMED:
+            # A patient who already consented re-typing an address ("📩 Mudar
+            # e-mail" on the post-booking card): unchanged from before the
+            # name step existed.
             await _write_flow_state(reply.conversation_id, FlowState.IDLE)
             await _send_consent_notice(reply, tenant=tenant, waba_token=waba_token)
             return
@@ -2917,6 +3183,23 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
             result = (
                 await verify_code(reply.tenant_id, reply.patient_ref, reply.pending_code)
             ).outcome
+        if patient_owes_consent and result is not VerifyOutcome.INVALID:
+            # The KNOWN-ADDRESS code, asked before consent. No hold, no
+            # appointment: success makes this a verified account, which is
+            # exactly the case `_handle_pre_consent_identity` already handles
+            # (mirror the account's consent, open the menu); failure carries on
+            # as a new visitor would, with the LGPD notice. A wrong code falls
+            # through to the shared re-prompt below.
+            await _finish_account_code_before_consent(
+                reply,
+                verified=result is VerifyOutcome.VERIFIED,
+                tenant=tenant,
+                waba_token=waba_token,
+                professionals=flow_professionals,
+                patient_wa=patient_wa,
+                redis=redis,
+            )
+            return
         if result is VerifyOutcome.VERIFIED:
             body, next_state = CODE_ACCEPTED_MESSAGE, FlowState.IDLE
             # The code was a GATE for this conversation: the appointment does
@@ -2974,6 +3257,20 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
 
     if reply.greeting_override is not None:
         await _send_greeting(reply, tenant=tenant, waba_token=waba_token)
+        if reply.send_name_request:
+            # WhatsApp first contact: the name question in the consent
+            # notice's slot (`_asks_name_at_first_contact`); the notice
+            # follows the answer. The state is written here, past the
+            # entitlement gate, as the Portal's e-mail step writes its own.
+            await _write_flow_state(reply.conversation_id, FlowState.AWAITING_NAME)
+            await _send_plain_reply(
+                reply,
+                tenant=tenant,
+                waba_token=waba_token,
+                body=NAME_REQUEST_MESSAGE,
+                event="patient_name_requested",
+            )
+            return
         if reply.send_consent_notice:
             # Brain-Message first contact: the e-mail question takes this slot
             # when — and only when — brain-api says the visitor still owes an
@@ -5166,8 +5463,13 @@ async def _send_code_notice(
     waba_token: str | None,
     email_masked: str | None,
     event: str,
+    pre_consent: bool = False,
 ) -> None:
     """The code notice, as the three-button card, naming the masked inbox.
+
+    `pre_consent` picks the KNOWN-ADDRESS wording
+    (`existing_account_code_body`): a code asked before consent, for an
+    e-mail that already had an account, with no appointment to mention.
 
     One spelling for the two places `_send_bot_reply` emits it (a resumed wait
     and a resend); `plugins/pending_identity.py` emits the third, the one that
@@ -5179,10 +5481,145 @@ async def _send_code_notice(
         reply,
         tenant=tenant,
         waba_token=waba_token,
-        body=code_notice_body(email_masked),
+        body=(
+            existing_account_code_body(email_masked)
+            if pre_consent
+            else code_notice_body(email_masked)
+        ),
         buttons=list(CODE_NOTICE_BUTTONS),
         event=event,
     )
+
+
+async def _continue_after_email_claim(
+    reply: _ReplyContext,
+    claim: ClaimResult,
+    *,
+    tenant: Tenant,
+    waba_token: str | None,
+) -> None:
+    """Pick the question that follows an acknowledged e-mail, before consent.
+
+    The e-mail is what tells a new visitor from a known one (owner,
+    2026-09-20), so this is the Portal half of the name step's channel
+    decision — the WhatsApp half is `_asks_name_at_first_contact`.
+
+      * `account_exists` -> NO name question: the code, straight away, on the
+        existing three-button card, naming the inbox with the mask brain-api
+        returned on the claim (falling back to the one the code request
+        returns — brain-api guarantees they are the same string). The wait
+        reuses AWAITING_EMAIL_CODE and `verify_code` as they are; what differs
+        is only what a success and a dead end lead to, and that is decided by
+        consent (`_finish_account_code_before_consent`), not by a new state.
+        If the code could not be mailed there is nothing to wait for: the
+        conversation carries on to the LGPD notice, still without asking a
+        known person their name.
+      * a new address -> AWAITING_NAME and the name question; the LGPD notice
+        follows the answer (`name_captured`).
+    """
+    if claim.account_exists:
+        result = RequestCodeResult(RequestCodeOutcome.UNAVAILABLE)
+        if reply.tenant_id is not None:
+            result = await request_code(reply.tenant_id, reply.patient_ref)
+        if result.outcome is RequestCodeOutcome.SENT:
+            await _write_flow_state(reply.conversation_id, FlowState.AWAITING_EMAIL_CODE)
+            await _send_code_notice(
+                reply,
+                tenant=tenant,
+                waba_token=waba_token,
+                email_masked=claim.email_masked or result.email_masked,
+                event="existing_account_code_requested",
+                pre_consent=True,
+            )
+            return
+        logger.warning(
+            "existing_account_code_unavailable",
+            outcome=result.outcome.value,
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(reply.tenant_id),
+        )
+        await _write_flow_state(reply.conversation_id, FlowState.IDLE)
+        await _send_consent_notice(reply, tenant=tenant, waba_token=waba_token)
+        return
+
+    await _write_flow_state(reply.conversation_id, FlowState.AWAITING_NAME)
+    await _send_plain_reply(
+        reply,
+        tenant=tenant,
+        waba_token=waba_token,
+        body=NAME_REQUEST_AFTER_EMAIL_MESSAGE,
+        event="patient_name_requested",
+    )
+
+
+async def _account_code_dead_end(
+    reply: _ReplyContext,
+    *,
+    tenant: Tenant,
+    waba_token: str | None,
+    event: str,
+) -> None:
+    """A known-address code that will not happen: carry on to consent.
+
+    The pre-consent twin of `CODE_GIVE_UP_MESSAGE`, which would promise a
+    consultation that does not exist. Leaves the wait and sends the LGPD
+    notice, so the visitor continues exactly as a new one would.
+    """
+    await _write_flow_state(reply.conversation_id, FlowState.IDLE)
+    await _send_plain_reply(
+        reply,
+        tenant=tenant,
+        waba_token=waba_token,
+        body=ACCOUNT_CODE_GIVE_UP_MESSAGE,
+        event=event,
+    )
+    await _send_consent_notice(reply, tenant=tenant, waba_token=waba_token)
+
+
+async def _finish_account_code_before_consent(
+    reply: _ReplyContext,
+    *,
+    verified: bool,
+    tenant: Tenant | None,
+    waba_token: str | None,
+    professionals: list | None,
+    patient_wa: str | None,
+    redis,
+) -> None:
+    """Close the known-address code wait (anything but a wrong code).
+
+    Verified: the visit is now a verified account, so the same path a verified
+    visitor takes on first contact applies — `_handle_pre_consent_identity`
+    re-probes brain-api, mirrors the account's consent locally
+    (`account_terms_verified`) and opens the menu. If that cannot be recorded
+    the local LGPD notice goes out instead: a verified remote account never
+    justifies skipping a local gate we failed to persist.
+    """
+    if tenant is None:
+        return
+    if not verified:
+        await _account_code_dead_end(
+            reply, tenant=tenant, waba_token=waba_token, event="existing_account_code_failed"
+        )
+        return
+    await _write_flow_state(reply.conversation_id, FlowState.IDLE)
+    await _send_plain_reply(
+        reply,
+        tenant=tenant,
+        waba_token=waba_token,
+        body=CODE_ACCEPTED_MESSAGE,
+        event="existing_account_code_verified",
+    )
+    if await _handle_pre_consent_identity(
+        reply,
+        tenant=tenant,
+        professionals=professionals,
+        patient_wa=patient_wa,
+        redis=redis,
+        waba_token=waba_token,
+    ):
+        return
+    await _send_consent_notice(reply, tenant=tenant, waba_token=waba_token)
 
 
 async def _handle_identity_card_action(
@@ -5193,8 +5630,13 @@ async def _handle_identity_card_action(
     professionals: list | None,
     patient_wa: str | None,
     redis,
+    pre_consent: bool = False,
 ) -> None:
     """Own the whole turn for a tap on the code notice's card.
+
+    `pre_consent`: the card was the KNOWN-ADDRESS one (asked before consent).
+    "Voltar" then continues to the LGPD notice instead of the menu — a menu
+    tap would only meet the consent gate — and a resend re-sends that wording.
 
     Three exits from `AWAITING_EMAIL_CODE` that do not require the patient to
     have the code in front of them — which is the point of the card. The flow
@@ -5212,6 +5654,12 @@ async def _handle_identity_card_action(
             "pending_identity_card_action_without_tenant",
             conversation_id=str(reply.conversation_id),
         )
+        return
+
+    if reply.identity_action == IDENTITY_BACK_ACTION and pre_consent:
+        # The state is already IDLE (written upstream). Carry on as a new
+        # visitor: the consent notice is the next step, not the menu.
+        await _send_consent_notice(reply, tenant=tenant, waba_token=waba_token)
         return
 
     if reply.identity_action == IDENTITY_BACK_ACTION:
@@ -5274,6 +5722,12 @@ async def _handle_identity_card_action(
             waba_token=waba_token,
             email_masked=result.email_masked,
             event="pending_code_resent",
+            pre_consent=pre_consent,
+        )
+        return
+    if pre_consent:
+        await _account_code_dead_end(
+            reply, tenant=tenant, waba_token=waba_token, event="pending_code_resend_unavailable"
         )
         return
     # NOT_PENDING / NO_EMAIL / UNAVAILABLE. Leave the wait: the patient just

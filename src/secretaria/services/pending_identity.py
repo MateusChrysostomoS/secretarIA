@@ -388,6 +388,57 @@ BOOKING_SLOT_TAKEN_MESSAGE = (
 )
 
 
+# ---------------------------------------------------------------------------
+# The KNOWN-ADDRESS wording (2026-09-21) — the e-mail already has an account
+# ---------------------------------------------------------------------------
+#
+# A third wording for the same three-button card, and like the two above it is
+# NOT interchangeable with them: here there is no appointment at all (not
+# committed, not reserved) and no consent yet — the visitor just typed an
+# address brain-api recognised (`ClaimResult.account_exists`). So the card must
+# not mention a consultation. The first sentence is the owner's ("seu e-mail já
+# está no nosso sistema, digite o código de 6 dígitos que mandamos para ...").
+# It names the inbox with the MASK brain-api returned on the claim, never with
+# the address this conversation captured: the mask is the only form allowed in
+# the transcript, and it is the same string the code request returns.
+EXISTING_ACCOUNT_SENTENCE = "📧 Seu e-mail já está no nosso sistema! 🙌"
+
+_EXISTING_ACCOUNT_CODE_LINE = (
+    "🔐 Para confirmar que é você, enviei um *código de 6 dígitos* para {inbox}."
+)
+
+
+def existing_account_code_body(email_masked: str | None) -> str:
+    """The code card for a visitor whose address already has an account.
+
+    Pure. Names the masked inbox when there is a valid one and says "o seu
+    e-mail" otherwise — never a guess, same degradation as `code_notice_body`.
+    The provider link rides along exactly as on the booking gate, because the
+    patient's next move is the same: open the inbox.
+    """
+    masked = masked_email_or_none(email_masked)
+    parts = [
+        EXISTING_ACCOUNT_SENTENCE,
+        _EXISTING_ACCOUNT_CODE_LINE.format(inbox=masked or "o seu e-mail"),
+    ]
+    provider = provider_link(masked)
+    if provider is not None:
+        name, url = provider
+        parts.append(f"Abrir o {name}:\n{url}")
+    parts.append("✍️ Digite o código aqui.")
+    return "\n\n".join(parts)
+
+
+# A dead end on the known-address code (brain-api unreachable, visit gone,
+# code not mailed). `CODE_GIVE_UP_MESSAGE` would say "sua consulta continua
+# marcada", which is false here: there is no consultation. The conversation
+# simply continues as a new visitor would — the LGPD notice follows this line.
+ACCOUNT_CODE_GIVE_UP_MESSAGE = (
+    "Não consegui confirmar o seu código agora. 😕\n\n"
+    "Sem problema: podemos seguir com o seu atendimento por aqui mesmo."
+)
+
+
 CODE_ACCEPTED_MESSAGE = "✅ Tudo certo, sua conta está ativa! Esta conversa fica salva para você."
 
 # Wrong or expired code. Does NOT say how many attempts are left: the budget is
@@ -531,6 +582,29 @@ class IdentityState(StrEnum):
 
 
 @dataclass(frozen=True)
+class ClaimResult:
+    """The outcome of one `claim_email` call, plus whether the inbox is known.
+
+    `account_exists` is brain-api's answer to "does this address already
+    belong to a `MessagePatientAccount`?" — a PLATFORM fact, asked before the
+    claim was written and in the same transaction (brain-api CHECKPOINT §2).
+    It decides the NEXT question the conversation asks, nothing about the
+    claim itself: True skips the name question and goes straight to the code
+    (`existing_account_code_body`); False is a new person, who is asked their
+    name before the LGPD notice (`services/patient_name.py`).
+
+    `email_masked` is present only with `account_exists=True` and only when it
+    survives `masked_email_or_none` — the same rule, and the same shape, as
+    `RequestCodeResult.email_masked`, which brain-api guarantees is byte for
+    byte the same string for the same visit.
+    """
+
+    outcome: ClaimOutcome
+    account_exists: bool = False
+    email_masked: str | None = None
+
+
+@dataclass(frozen=True)
 class VerifyResult:
     """The outcome of one `verify_code` call."""
 
@@ -637,11 +711,19 @@ async def probe_identity(tenant_id: UUID, external_id: str) -> IdentityState:
     return state
 
 
-async def claim_email(tenant_id: UUID, external_id: str, email: str) -> ClaimOutcome:
+async def claim_email(tenant_id: UUID, external_id: str, email: str) -> ClaimResult:
     """Write the address the patient typed onto their pending visit.
 
     Never logs the address (module docstring). Re-claiming overwrites, which is
     what a chat needs: the patient corrected a typo.
+
+    Reads brain-api's two OPTIONAL fields off a 200
+    (`brain-api/docs/CHECKPOINT_portal_email_ja_cadastrado.md` §3):
+    `account_exists` and, only with it, `email_masked`. Best-effort in the same
+    way `request_code` reads its mask — an absent, non-boolean or unreadable
+    field is "a brain-api that predates the field", never an error, and it
+    reads as `account_exists=False`, i.e. exactly the behaviour before the
+    field existed. The claim itself succeeded either way.
     """
     response = await _post(
         "/internal/brain-message/pending-email",
@@ -650,10 +732,10 @@ async def claim_email(tenant_id: UUID, external_id: str, email: str) -> ClaimOut
         event="pending_email_claim",
     )
     if response is None:
-        return ClaimOutcome.UNAVAILABLE
+        return ClaimResult(ClaimOutcome.UNAVAILABLE)
     if response.status_code == 404:
         logger.info("pending_email_claim_not_pending", tenant_id=str(tenant_id))
-        return ClaimOutcome.NOT_PENDING
+        return ClaimResult(ClaimOutcome.NOT_PENDING)
     if response.status_code != 200:
         logger.warning(
             "pending_email_claim_failed",
@@ -661,9 +743,27 @@ async def claim_email(tenant_id: UUID, external_id: str, email: str) -> ClaimOut
             status_code=response.status_code,
             tenant_id=str(tenant_id),
         )
-        return ClaimOutcome.UNAVAILABLE
-    logger.info("pending_email_claimed", tenant_id=str(tenant_id))
-    return ClaimOutcome.CLAIMED
+        return ClaimResult(ClaimOutcome.UNAVAILABLE)
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict):
+        payload = {}
+    account_exists = payload.get("account_exists") is True
+    raw_mask = payload.get("email_masked")
+    masked = (
+        masked_email_or_none(raw_mask) if account_exists and isinstance(raw_mask, str) else None
+    )
+    logger.info(
+        "pending_email_claimed",
+        tenant_id=str(tenant_id),
+        # A fact about a clinic's visit, not about a person — brain-api logs it
+        # too. Whether the inbox can be named, never which one it is.
+        account_exists=account_exists,
+        has_email_mask=masked is not None,
+    )
+    return ClaimResult(ClaimOutcome.CLAIMED, account_exists=account_exists, email_masked=masked)
 
 
 async def request_code(tenant_id: UUID, external_id: str) -> RequestCodeResult:
