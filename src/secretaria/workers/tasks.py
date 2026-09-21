@@ -4235,7 +4235,16 @@ async def _run_flow(
     # there: a slot a Portal visitor is holding has to be invisible to a
     # WhatsApp patient too, or the reservation only half exists.
     gate = BookingGate(
-        tenant_id=reply.tenant_id,
+        # `tenant` (already loaded by the caller), NOT `reply.tenant_id`.
+        # `_ReplyContext.tenant_id` is populated only on the branches that need
+        # it downstream — the identity legs and the degrade paths — and the
+        # ORDINARY turn, which is the one that books, leaves it None (see the
+        # terminal `_ReplyContext` of `_route_inbound_turn`). Reading it here
+        # disarmed the gate on exactly the path it exists for, and did it
+        # SILENTLY: an unarmed gate emits no log line at all, so production
+        # looked identical to the pre-gate build. Proved in production on
+        # 2026-09-21 and pinned by `test_the_gate_arms_on_the_real_reply_path`.
+        tenant_id=tenant.id if tenant is not None else reply.tenant_id,
         conversation_id=reply.conversation_id,
         patient_id=None,
         external_id=reply.patient_ref,

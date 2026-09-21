@@ -154,3 +154,40 @@ falha igual. Baseline do HEAD era 2301 passed; os 27 novos fecham em 2328.
    obrigatória do `CLAUDE.md` se aplica.
 6. **Commitado e pushado em `main` (`b0c43a9`), NÃO deployado.** Commit e push não movem os
    serviços: `secretaria_api` e `secretaria-worker` são deploy manual e separado.
+
+## 6. Prova em produção 2026-09-21 — e o defeito que ela achou
+
+O deploy foi confirmado pelos logs do worker: reinício às `01:59:48Z` com
+`source_fingerprint=b55739fb8cfe`, API atrás às `02:00:11Z`, e
+`deploy_sha_parity ... 'match'` às `02:07:00Z`. Os dois serviços no código novo.
+
+O E2E foi feito pelo Portal da clínica QA (`9c4fa6a5-…`, visita de teste do
+TASK-004), percorrendo serviço → médico → dia → horário → **Confirmar**.
+
+**O portão não engatou.** A conversa respondeu `"Pronto! Seu agendamento está
+confirmado. ✅"` e só então o cartão antigo do código — o comportamento
+pré-portão. O log do turno (`02:26:09Z`) mostra `calendar_event_created` e
+`booking_owner_resolved`, e **nenhuma linha `booking_gate_*`**: nem
+`booking_gate_held`, nem `booking_gate_stood_down`, nem
+`booking_gate_hold_failed`.
+
+Causa raiz: `_run_flow` montava o `BookingGate` com `tenant_id=reply.tenant_id`.
+`_ReplyContext.tenant_id` é preenchido só nas pernas de identidade e nos
+degrades; o turno ORDINÁRIO — o que agenda — o deixa `None` (o
+`_ReplyContext` terminal de `_route_inbound_turn`). `BookingGate.__init__`
+trata tenant ausente como "não armado", então `_handle_confirmation` pulava o
+ramo do portão.
+
+**O que tornou isso invisível é o que torna o teste novo obrigatório: um gate
+desarmado não emite log nenhum.** Produção ficou idêntica ao build pré-portão, e
+o único sintoma era uma consulta que não deveria existir ainda.
+
+Corrigido lendo o `tenant` que o próprio `_run_flow` já recebe.
+`test_the_gate_arms_on_the_real_reply_path` fixa a fiação (verificado: falha com
+o bug reintroduzido, passa com o fix). Os 27 testes anteriores passavam porque
+todos construíam o `BookingGate` à mão, já com tenant — a fiação nunca tinha
+sido exercitada.
+
+Resíduo desta prova, a limpar: consulta `ac107f06-a039-4983-a052-e3b71a11e8ff`
+(Cirurgia de Catarata, Dr. Diogo Raposo, 30/09/2026 16:00, evento Google
+`1urlf006pl0faafgslmt9iqpb8`), com e-mail de aviso já enviado ao profissional.

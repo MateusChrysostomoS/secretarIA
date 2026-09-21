@@ -518,6 +518,96 @@ async def test_the_gate_stands_down_when_no_code_can_be_mailed(db, calls, monkey
 
 
 # --------------------------------------------------------------------------
+# 4-bis. The WIRING. Proved in production, the hard way.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_gate_arms_on_the_real_reply_path(db, calls, monkeypatch):
+    """A Brain-Message booking turn must reach `route()` with an ARMED gate.
+
+    This is the test that was missing, and its absence cost a real booking on a
+    real clinic's calendar on 2026-09-21. Every other test in this file builds
+    the `BookingGate` by hand, with a tenant id in it — so all of them passed
+    while the gate was, in production, never arming at all.
+
+    The bug: `_run_flow` read `reply.tenant_id`, which `_ReplyContext` populates
+    only on the identity legs and the degrade paths. The ORDINARY turn — the one
+    that books — leaves it None (the terminal `_ReplyContext` of
+    `_route_inbound_turn`). `BookingGate.__init__` treats a missing tenant as
+    "not armed", so `_handle_confirmation` skipped the gate branch.
+
+    What made it invisible is what makes this test necessary: an unarmed gate
+    emits NO log line. Production looked byte-identical to the pre-gate build,
+    and the only symptom was an appointment that should not have existed yet.
+    So the assertion is on the gate the router is HANDED, not on any message.
+    """
+    tenant = await _seed_tenant(db)
+    _, conversation = await _seed_conversation(db, tenant)
+
+    seen = {}
+
+    async def _capture(*args, **kwargs):
+        seen["gate"] = kwargs.get("gate")
+        return fr.FlowRouterResult(action="delegate_llm")
+
+    monkeypatch.setattr(tasks, "route", _capture)
+
+    # Exactly the shape production builds for an ordinary turn: no tenant_id.
+    reply = tasks._ReplyContext(
+        channel=CHANNEL_BRAIN_MESSAGE,
+        conversation_id=conversation.id,
+        patient_ref=EXTERNAL_ID,
+        inbound_body="✅ Confirmar",
+    )
+    assert reply.tenant_id is None, "the regression only reproduces without it"
+
+    await tasks._run_flow(
+        reply,
+        _conversation_snapshot("2099-01-05T10:00"),
+        SimpleNamespace(id=tenant.id),
+        None,
+        "Maria",
+        None,
+        tenant=tenant,
+    )
+
+    gate = seen["gate"]
+    assert gate is not None, "route() must be given a gate"
+    assert gate.armed is True, "a Brain-Message booking turn must arm the gate"
+
+
+@pytest.mark.asyncio
+async def test_the_gate_stays_disarmed_on_whatsapp(db, calls, monkeypatch):
+    """The same wiring, from the other side: WhatsApp never arms it."""
+    tenant = await _seed_tenant(db)
+    _, conversation = await _seed_conversation(db, tenant)
+
+    seen = {}
+
+    async def _capture(*args, **kwargs):
+        seen["gate"] = kwargs.get("gate")
+        return fr.FlowRouterResult(action="delegate_llm")
+
+    monkeypatch.setattr(tasks, "route", _capture)
+    reply = tasks._ReplyContext(
+        conversation_id=conversation.id,
+        patient_ref="5511988887777",
+        inbound_body="✅ Confirmar",
+    )
+    await tasks._run_flow(
+        reply,
+        _conversation_snapshot("2099-01-05T10:00"),
+        SimpleNamespace(id=tenant.id),
+        None,
+        "Maria",
+        "5511988887777",
+        tenant=tenant,
+    )
+    assert seen["gate"].armed is False
+
+
+# --------------------------------------------------------------------------
 # 5-6. Promotion: the appointment is born when the code is verified
 # --------------------------------------------------------------------------
 
