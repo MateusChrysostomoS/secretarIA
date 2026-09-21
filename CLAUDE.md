@@ -344,7 +344,19 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
   provedor, "Reenviar Código" — reenvio só por botão, nunca por linguagem natural livre). Pede
   também uma proteção estrutural de propósito geral: a LLM de fallback nunca pode afirmar uma ação
   de segurança (verificação, pagamento, etc.) sem uma tool call real no mesmo turno — checar skills
-  existentes e, se faltar, criar uma via `skill-creator`. **NÃO EXECUTADO ainda.**
+  existentes e, se faltar, criar uma via `skill-creator`. **EXECUTADO 2026-09-20 — BUILT, 2328
+  testes verdes (baseline 2301; a única falha é o flake de fuso pré-existente de
+  `test_human_backup_plugin`, provado no HEAD limpo), COMMITADO/PUSHED em `main` (`b0c43a9`),
+  migração `a7d2f4b9c013` NÃO aplicada, não deployado; ver `docs/CHECKPOINT_secretaria_booking_code_gate.md`.** Tabela nova
+  `booking_holds` (reserva de 10 min, mesmo relógio do OTP do brain-api), `BookingGate` fail-open
+  injetado no `flow_router`, promoção da reserva em `workers/tasks.py::_promote_booking_hold` — é
+  de lá que os hooks de `post_booking` (handoff do PreCheck incluído) passam a disparar. O card de
+  3 botões do TASK-003 foi **reaproveitado**, não recriado; só o corpo mudou. Bug 1 ganhou duas
+  camadas: regra 5 nas REGRAS INEGOCIÁVEIS de `ai/prompts.py` e o filtro de saída
+  `services/sensitive_claim_guard.py`. **Divergências do prompt:** "Abrir e-mail" saiu como LINK
+  (o card tem teto de 3 botões e botão de URL exigiria o Brain-Message-Frontend, fora de escopo),
+  e o logo por provedor ficou como pendência pela mesma razão. Pendências em §5 do checkpoint —
+  entre elas, remarcar ainda pode cair num horário reservado.
 - `z_prompts/PLANO_PORTAL_API_MVP.md` (raiz de BRAIN, gerado 2026-09-17) — prioridade atual do dono:
   terminar o MVP da API de mensageria do Portal (estilo WhatsApp, documentada, adaptável a qualquer
   produto) antes de retomar `PLANO_ATUALIZADO_LOGIN_E_FLUXO_PACIENTE_PRECHECK.md`. A Onda 0 desse

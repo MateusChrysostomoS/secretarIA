@@ -1,5 +1,14 @@
 # CHECKPOINT — e-mail + OTP inline no Brain-Message
 
+> **EMENDA 2026-09-20 — a decisão "consulta antes do código" foi REVERTIDA pelo dono.**
+> Para o canal `brain_message`, o código de 6 dígitos passou a ser um PORTÃO: a consulta só é
+> criada (Google Calendar + `appointments`) depois do código verificado, e o horário fica
+> reservado por 10 minutos enquanto isso. Ver `docs/CHECKPOINT_secretaria_booking_code_gate.md`.
+> **Nada abaixo foi apagado**: a prova de produção de 17/09 continua sendo o registro de como o
+> comportamento anterior funcionou e por que foi revertido. Onde este arquivo diz que o código é
+> uma oferta e não uma trava, leia "era, até 2026-09-20".
+
+
 Data: 2026-09-17  
 Prompt: `z_prompts/PROMPT_BRAIN_MESSAGE_SECRETARIA_EMAIL_OTP_INLINE.md` (onda 2)  
 Estado: **DEPLOYADO E PROVADO EM PRODUÇÃO** (2026-09-17) — ver a última seção
