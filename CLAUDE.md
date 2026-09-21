@@ -400,7 +400,14 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
   log NATIVO da biblioteca `arq` (`arq/worker.py::Worker.run_job`), não de código deste repo — o
   processor `redact_secrets` de `core/logging.py` não cobre isso porque só atua no pipeline
   `structlog`. Bloqueante para considerar a autenticação do paciente (item 1 acima) fechada.
-  **NÃO EXECUTADO ainda.**
+  **EXECUTADO 2026-09-21 — BUILT, 2385 testes verdes (baseline 2377), UNCOMMITTED, sem migração,
+  não deployado (exige o WORKER — é lá que `run_job` loga); ver
+  `docs/CHECKPOINT_secretaria_arq_log_secret_leak.md`.** `core/logging.py` ganhou
+  `ArqJobArgsRedactionFilter` (instalado por `setup_logging()` em `arq.worker`/`arq.jobs`),
+  **genérico** para todo job: mesmo vocabulário de `redact_secrets` + `code`/`otp`/`link`, por
+  regex sobre o texto livre, e e-mail posicional pelo formato. Armadilha que o prompt não previa:
+  o arq **trunca** os args em 80 chars, então o código pode sair cortado sem aspas de fechamento
+  (`'code': '918…`) — o regex termina o valor em fim de string para não vazar o prefixo.
 - `z_prompts/PROMPT_PORTAL_PASTA_EXCLUSIVA_E_HANDOFF_PRECHECK.md` (raiz de BRAIN, gerado
   2026-09-20 via `/prompt-generator`) — fecha a peça 3 do TASK-003 (handoff do PreCheck pelo
   Portal, hoje `501`), reaproveitando `POST /internal/brain-message/inbound` do PreCheck com

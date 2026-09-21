@@ -5,6 +5,7 @@ Never use `print` in application code - always use a structlog logger.
 """
 
 import logging
+import re
 import sys
 
 import structlog
@@ -110,6 +111,99 @@ def redact_secrets(
     return event_dict
 
 
+# One-time transactional secrets carried as job arguments: the patient-portal
+# OTP (`code`) and the single-use password-reset/invite URL (`link`). Neither is
+# personal data nor a credential name, so neither list above catches them.
+_JOB_SECRET_KEYS = frozenset({"code", "otp", "link"})
+
+# `'key': value` (a repr'd dict) or `key=value` (a repr'd kwarg). The value is a
+# quoted string — which may have NO closing quote, because arq truncates the
+# argument string at 80 chars (`'code': '91…`) — or a bare token up to the next
+# separator. `$` as a terminator is what stops a truncated value from leaking.
+# A bare value never starts a container (`{[(`) or a quote: `'variables': {…}`
+# matches an EMPTY value, so the scan goes on INTO the dict and finds `'code'`.
+_KEYED_VALUE = re.compile(
+    r"""(?P<head>(?P<q>['"])(?P<dkey>\w+)(?P=q)\s*:\s*|\b(?P<kkey>\w+)=)"""
+    # `[bBrRuU]{0,2}`: a repr'd bytes value is `b'…'` — without the prefix the
+    # bare-token branch would eat only the `b` and leave the quoted secret intact.
+    r"""(?P<value>[bBrRuU]{0,2}(?:'(?:[^'\\]|\\.)*(?:'|$)|"(?:[^"\\]|\\.)*(?:"|$))"""
+    r"""|[^,}\])\s'"{\[(]*)"""
+)
+# An e-mail address is a POSITIONAL job argument (`send_transactional_email(
+# template, to, variables)`), so it has no key to match on — match its shape.
+# `[\w.-]*` after the `@` also covers an address cut short by the truncation.
+_EMAIL = re.compile(r"[\w.+-]+@[\w.-]*")
+
+
+def _is_sensitive_key(key: str) -> bool:
+    low = key.lower()
+    return (
+        low.endswith("_encrypted")
+        or any(hint in low for hint in _SECRET_HINTS)
+        or low in _PII_KEYS
+        or low in _JOB_SECRET_KEYS
+    )
+
+
+def redact_free_text(text: str) -> str:
+    """Scrub a free-text log message the same way `redact_secrets` scrubs keys.
+
+    For stdlib loggers that bypass structlog and hand us an already-formatted
+    string (arq's `→ job(args…)` line). Same vocabulary as `redact_secrets`, plus
+    `_JOB_SECRET_KEYS`, applied by REGEX because there is no dict here — and to
+    ANY job, not only `send_transactional_email`, so the next job that carries a
+    secret is covered without anyone remembering to add it.
+    """
+
+    def _sub(match: re.Match[str]) -> str:
+        key = match.group("dkey") or match.group("kkey")
+        if not _is_sensitive_key(key):
+            return match.group(0)
+        return f"{match.group('head')}'{_REDACTED}'"
+
+    return _EMAIL.sub(_REDACTED, _KEYED_VALUE.sub(_sub, text))
+
+
+class ArqJobArgsRedactionFilter(logging.Filter):
+    """Redact job arguments that arq's own logger prints in clear text.
+
+    `arq.worker.Worker.run_job` logs `'%6.2fs → %s(%s)%s'` with
+    `arq.utils.args_to_string(args, kwargs)` — a plain `repr()` of every
+    argument of every job, at INFO, through stdlib `logging`, never through
+    structlog, so `redact_secrets` never sees it. That line printed the portal
+    OTP and the recipient's e-mail for `send_transactional_email` (see
+    docs/CHECKPOINT_secretaria_arq_log_secret_leak.md). We redact instead of
+    raising the logger to WARNING: the job name/duration line is the worker's
+    only operational trace.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:  # noqa: BLE001 — a broken record must not kill logging
+            return True
+        redacted = redact_free_text(message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = ()
+        return True
+
+
+# Every arq logger that can format job data: `arq.worker` (job start `→ args`,
+# job end `● repr(result)`) and `arq.jobs` (result serialization). The filter
+# sits on the LOGGER, not a handler, so it holds whatever handler arq's own
+# `dictConfig` installs (`disable_existing_loggers` is False there).
+_ARQ_LOGGERS = ("arq.worker", "arq.jobs")
+
+
+def install_arq_log_redaction() -> None:
+    """Attach `ArqJobArgsRedactionFilter` to arq's loggers. Idempotent."""
+    for name in _ARQ_LOGGERS:
+        target = logging.getLogger(name)
+        if not any(isinstance(f, ArqJobArgsRedactionFilter) for f in target.filters):
+            target.addFilter(ArqJobArgsRedactionFilter())
+
+
 def setup_logging() -> None:
     """Configure structlog + stdlib logging. Safe to call more than once."""
     global _configured
@@ -120,6 +214,7 @@ def setup_logging() -> None:
     level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
 
     logging.basicConfig(format="%(message)s", stream=sys.stdout, level=level)
+    install_arq_log_redaction()
 
     shared_processors: list[structlog.types.Processor] = [
         structlog.contextvars.merge_contextvars,
