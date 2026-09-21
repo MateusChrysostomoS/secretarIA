@@ -137,6 +137,11 @@ neither" do `README.md`.
 geral de quando/como atualizar (CHECKPOINT, âncoras estáveis) em `AI_WORKFLOW.md` — aqui só o que
 diverge, se houver.
 
+`docs/JORNADA_PACIENTE_WHATSAPP_E_PORTAL.md` (gerado 2026-09-20) é o mapa de produto leigo — sem
+código, sem função — de todos os fluxos determinísticos que o paciente vê, WhatsApp e Portal
+lado a lado, cada bloco marcado "no ar" / "construído, não no ar" / "não existe ainda". Releia
+antes de confiar: o status muda a cada rodada de trabalho.
+
 O contrato de integração do canal Brain-Message está em
 `brain-api/docs/PORTAL_MESSAGING_API.md`; mantenha em dia ao mudar este lado do contrato.
 
@@ -389,6 +394,20 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
   o brain-api (parte 2) precisa fazer upsert por `id`.** Leitura manual de paciente WhatsApp
   devolve `applied: false` (ignorada, não recusada). Deploy: migração ANTES, depois os DOIS
   serviços.
+- `z_prompts/PROMPT_PORTAL_PASTA_EXCLUSIVA_E_HANDOFF_PRECHECK.md` (raiz de BRAIN, gerado
+  2026-09-20 via `/prompt-generator`) — fecha a peça 3 do TASK-003 (handoff do PreCheck pelo
+  Portal, hoje `501`), reaproveitando `POST /internal/brain-message/inbound` do PreCheck com
+  `text` vazio (confirmado por leitura de código nesta sessão que isso não fabrica bolha de
+  paciente — `PreCheck/app/services/brain_message/conductor.py:260-269`), e cria a pasta
+  exclusiva do Portal que o dono pediu. Use quando for terminar o fluxo do Portal antes de
+  autorizar merge/deploy das 3 branches do TASK-003. **NÃO EXECUTADO ainda.**
+- `z_prompts/PROMPT_PORTAL_CALENDARIO_COMPONENTE.md` (raiz de BRAIN, gerado 2026-09-20) —
+  calendário clicável só no Portal (WhatsApp continua mês→dia→horário), substituindo a
+  sequência de telas de chat na escolha de data. **NÃO EXECUTADO ainda.**
+- `z_prompts/PROMPT_WHATSAPP_FLOW_POC_CALENDARIO.md` (raiz de BRAIN, gerado 2026-09-20) —
+  prova de conceito (1 clínica de teste, sem produção) de WhatsApp Flow como o mesmo
+  calendário dentro do WhatsApp; decide se vale o custo operacional por clínica (chave
+  RSA por WABA) antes de abrir um TASK de verdade. **NÃO EXECUTADO ainda.**
 
 ## graphify
 
