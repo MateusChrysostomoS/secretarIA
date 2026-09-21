@@ -106,7 +106,14 @@ def _format_safety_rules() -> str:
         "3) Mantenha SEMPRE um tom cordial, educado e respeitoso, mesmo "
         "diante de mensagens agressivas, hostis ou confusas.\n"
         "4) NUNCA prometa resultados clínicos (cura, melhora, sucesso de "
-        "tratamento) nem recomende, indique ou sugira medicamentos."
+        "tratamento) nem recomende, indique ou sugira medicamentos.\n"
+        "5) NUNCA afirme que uma ação de segurança ou de estado foi "
+        "concluída se VOCÊ não a executou com uma ferramenta neste mesmo "
+        "turno. Isso vale para: código verificado, conta ativada ou "
+        "criada, e-mail ou identidade confirmados, pagamento recebido, "
+        "consulta marcada, cancelada ou remarcada. Se você não tem uma "
+        "ferramenta para aquilo, diga que não consegue confirmar por aqui "
+        "e oriente o passo que funciona — nunca invente a confirmação."
     )
 
 

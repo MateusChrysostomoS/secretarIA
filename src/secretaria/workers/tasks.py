@@ -4,6 +4,7 @@ This code runs OUTSIDE the HTTP request/response cycle, so it may safely do
 database writes, handover logic and outbound Cloud API calls.
 """
 
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -96,13 +97,25 @@ from secretaria.services.appointment_status import (
     SOURCE_FLOW,
     log_status_transition,
 )
+from secretaria.services.booking_hold import (
+    HOLD_TTL_MINUTES,
+    BookingGate,
+    HeldSlot,
+    latest_hold_in,
+    live_hold_in,
+    release_in as release_hold_in,
+)
 from secretaria.services.booking_scope import (
     BOOKING_TOPOLOGY_MULTI,
     booking_topology,
     sole_active_professional,
 )
 from secretaria.services.brain_professionals import fetch_professional_emails
-from secretaria.services.calendar import CalendarService
+from secretaria.services.calendar import (
+    CalendarService,
+    CalendarUnavailableError,
+    build_patient_calendar_link,
+)
 from secretaria.services.channel_sender import (
     CHANNEL_BRAIN_MESSAGE,
     CHANNEL_WHATSAPP,
@@ -127,6 +140,7 @@ from secretaria.services.flow_router import (
     STEP_MANAGE_DAY,
     STEP_MANAGE_DAY_ESCAPE,
     STEP_MANAGE_DAY_RETRY,
+    WHEN_FORMAT,
     FlowRouterResult,
     MenuBubble,
     _enter_professional_services,
@@ -170,6 +184,7 @@ from secretaria.services.patient_context import (
 from secretaria.services.payments import deposit_lifecycle
 from secretaria.services.payments.money import format_brl
 from secretaria.services.pending_identity import (
+    BOOKING_HOLD_EXPIRED_MESSAGE,
     CODE_ACCEPTED_MESSAGE,
     CODE_GIVE_UP_MESSAGE,
     CODE_INVALID_MESSAGE,
@@ -186,6 +201,8 @@ from secretaria.services.pending_identity import (
     RequestCodeOutcome,
     RequestCodeResult,
     VerifyOutcome,
+    booking_gate_body,
+    booking_gate_reprompt_body,
     claim_email,
     code_notice_body,
     identity_action_or_none,
@@ -195,6 +212,7 @@ from secretaria.services.pending_identity import (
     request_code,
     verify_code,
 )
+from secretaria.services.sensitive_claim_guard import guard_reply
 from secretaria.services.service_catalog import (
     load_service_catalog,
     normalize as normalize_service_name,
@@ -531,6 +549,12 @@ class _ReplyContext:
     # because that function runs inside the inbound transaction and an HTTP
     # call has no business holding one open.
     probe_pending_identity: bool = False
+    # The visitor typed something that is not six digits WHILE a slot is
+    # held for them. Before the code became a gate this ended the wait; now
+    # leaving would cost them the reservation, so the card is re-sent
+    # instead and its Voltar button stays the explicit way out. Carries
+    # the live hold so the re-ask can name the window and the minutes left.
+    pending_code_reprompt: HeldSlot | None = None
     # A syntactically valid address the visitor just typed, already normalized.
     # `_send_bot_reply` claims it against brain-api and then sends the LGPD
     # notice — in that order, so a patient never consents before we have
@@ -1177,13 +1201,36 @@ async def _route_inbound_turn(
                     inbound_body=body or "",
                     pending_code=code,
                 )
-            # Anything that is not six digits ENDS the wait and is
-            # routed normally on this same turn. The account is an
-            # offer, not a gate (the appointment is already
-            # committed — see plugins/pending_identity.py), so a
-            # patient with a different question must not have to
-            # answer this one first. It also gives the state a
-            # second exit that does not depend on the clock.
+            # Anything that is not six digits. What happens next depends on
+            # whether this wait is a GATE or an OFFER, and the thing that
+            # tells them apart is a live hold.
+            #
+            #   hold  -> the appointment does NOT exist yet and the slot is
+            #            reserved (`services/booking_hold.py`). Dropping the
+            #            state here would silently cost the patient the very
+            #            window they just chose, so the card is repeated with
+            #            the reservation spelled out. Not a trap: the card's
+            #            back button leaves in one tap, and the silence floor
+            #            above still expires the state on the clock.
+            #   none  -> the pre-2026-09-20 behaviour, unchanged: the account
+            #            is an offer, the appointment is already committed, and
+            #            a patient with a different question must not have to
+            #            answer this one first.
+            held = await live_hold_in(session, conversation.id)
+            if held is not None:
+                logger.info(
+                    "conversation_pending_code_reprompted",
+                    conversation_id=str(conversation.id),
+                    tenant_id=str(tenant.id),
+                )
+                return _ReplyContext(
+                    channel=channel,
+                    conversation_id=conversation.id,
+                    tenant_id=tenant.id,
+                    patient_ref=patient_ref,
+                    inbound_body=body or "",
+                    pending_code_reprompt=held,
+                )
             conversation.flow_state = FlowState.IDLE
             logger.info(
                 "conversation_pending_code_abandoned",
@@ -2793,6 +2840,26 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
         )
         return
 
+    if reply.pending_code_reprompt is not None:
+        # The card again, saying the reservation is still standing. No mask:
+        # brain-api hands one back only on a fresh `request_code`, and this
+        # turn asked for no new code - so the notice names the window and the
+        # minutes instead of inventing an inbox.
+        held = reply.pending_code_reprompt
+        await _send_buttons_reply(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            body=booking_gate_reprompt_body(
+                None,
+                when=_hold_when(held, tenant),
+                hold_minutes=_hold_minutes_left(held),
+            ),
+            buttons=list(CODE_NOTICE_BUTTONS),
+            event="booking_gate_reprompt_sent",
+        )
+        return
+
     if reply.pending_email_invalid:
         await _send_plain_reply(
             reply,
@@ -2852,6 +2919,21 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
             ).outcome
         if result is VerifyOutcome.VERIFIED:
             body, next_state = CODE_ACCEPTED_MESSAGE, FlowState.IDLE
+            # The code was a GATE for this conversation: the appointment does
+            # not exist yet and this is the moment it is allowed to. Runs
+            # BEFORE the acceptance message is sent so the patient reads the
+            # two facts in the order they happened - account active, then
+            # appointment confirmed - and so a promotion that fails never
+            # follows a message implying it worked.
+            promoted = await _promote_booking_hold(
+                reply,
+                tenant=tenant,
+                waba_token=waba_token,
+                professionals=flow_professionals,
+                redis=redis,
+            )
+            if promoted is not None:
+                body = CODE_ACCEPTED_MESSAGE + chr(10) + chr(10) + promoted
         elif result is VerifyOutcome.INVALID:
             # Stay in the state: brain-api owns the attempt budget and the
             # 10-minute life of the challenge, and re-prompting is what lets
@@ -3099,6 +3181,21 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
         ),
         appointment_context=appointment_context_text,
     )
+
+    # The model may not announce an action no tool performed. Applied HERE -
+    # after run_agent and before every send path below, so there is exactly
+    # one place an LLM reply can reach the patient from and exactly one place
+    # this is checked. The sentinels are protocol strings, not prose, so they
+    # are passed through untouched. `proven_actions` is empty because the
+    # agent has no identity/payment tool at all today; the day one exists it
+    # passes its own key and the sentence becomes sayable. See
+    # services/sensitive_claim_guard.py for the production incident.
+    if not _is_agent_sentinel(reply_text):
+        reply_text = guard_reply(
+            reply_text,
+            proven_actions=frozenset(),
+            conversation_id=str(reply.conversation_id),
+        )
 
     # A tool failed because the calendar is unreachable: tell the patient and
     # hand the conversation to a human secretary instead of faking success.
@@ -4131,6 +4228,19 @@ async def _run_flow(
         if manage_calendar_owned
         else _flow_turn_calendar(conv_snapshot, tenant_config, flow_calendar)
     )
+    # The booking gate for THIS turn. Armed only on Brain-Message, and only
+    # then does "Confirmar" become a reservation plus a mailed code instead of
+    # an appointment (`services/booking_hold.py`). Built unarmed on WhatsApp
+    # rather than left as None because the hold LOOKUPS must still happen
+    # there: a slot a Portal visitor is holding has to be invisible to a
+    # WhatsApp patient too, or the reservation only half exists.
+    gate = BookingGate(
+        tenant_id=reply.tenant_id,
+        conversation_id=reply.conversation_id,
+        patient_id=None,
+        external_id=reply.patient_ref,
+        armed=reply.channel == CHANNEL_BRAIN_MESSAGE,
+    )
     try:
         result = await route(
             conv_snapshot,
@@ -4140,6 +4250,7 @@ async def _run_flow(
             patient_name,
             upcoming_appointments=upcoming_appointments,
             professionals=professionals,
+            gate=gate,
         )
     except Exception as exc:
         logger.warning(
@@ -4402,6 +4513,18 @@ async def _apply_flow_result(
     if booked_appointment is not None and persisted and tenant is not None:
         _log_booking_scope(booked_appointment, tenant.id, source=SOURCE_FLOW)
         await enqueue_post_booking_hooks(redis, tenant.id, booked_appointment.id, source="flow")
+
+    # A HELD slot, not a booking: the router reserved the window and brain-api
+    # mailed a code. Nothing was created on Google Calendar and no appointment
+    # row exists, so there is nothing to enqueue post_booking hooks for - both
+    # of those happen later, in `_promote_booking_hold`, and only if the code
+    # arrives before the reservation expires. The flow-state write above
+    # already parked the conversation in AWAITING_EMAIL_CODE.
+    if result.booking_hold is not None:
+        await _send_booking_gate_notice(
+            reply, result.booking_hold, tenant=tenant, waba_token=waba_token
+        )
+        return True
 
     if result.action == "calendar_unavailable":
         await _handle_calendar_unavailable(reply, redis=redis, tenant=tenant, waba_token=waba_token)
@@ -4780,6 +4903,251 @@ async def _send_buttons_reply(
             interactive=interactive_buttons_record(body, buttons),
         )
     logger.info(event, conversation_id=str(reply.conversation_id))
+
+
+def _is_agent_sentinel(reply_text: str) -> bool:
+    """True when `run_agent` returned a PROTOCOL string, not prose for a patient.
+
+    The sentinels are hand-back instructions this module consumes itself and
+    never shows to anybody, so the honesty filter has nothing to say about
+    them. Listed in ONE place so a new sentinel cannot be forgotten by the
+    filter and silently rewritten into an apology.
+    """
+    return reply_text in (CALENDAR_UNAVAILABLE_SENTINEL, SHOW_MAIN_MENU_SENTINEL) or (
+        reply_text.startswith(SELECT_PROFESSIONAL_SENTINEL_PREFIX)
+        or reply_text.startswith(MANAGE_APPOINTMENT_SENTINEL_PREFIX)
+    )
+
+
+def _hold_minutes_left(held: HeldSlot) -> int:
+    """Whole minutes still on the reservation, never below 1.
+
+    Rounded UP, and floored at one: telling a patient "0 minutos" while the
+    hold is technically still live would read as "you already lost it", and
+    the honest ceiling is the one the clock will actually enforce.
+    """
+    remaining = (held.expires_at - datetime.now(UTC)).total_seconds()
+    return max(1, min(HOLD_TTL_MINUTES, math.ceil(remaining / 60)))
+
+
+def _tenant_tzinfo(tenant: Tenant | None):
+    """The clinic's timezone, falling back to the product default."""
+    name = getattr(tenant, "timezone", None) or "America/Sao_Paulo"
+    try:
+        return ZoneInfo(str(name))
+    except Exception:
+        return ZoneInfo("America/Sao_Paulo")
+
+
+def _hold_when(held: HeldSlot, tenant: Tenant | None) -> str:
+    """The held window, spelled in the CLINIC's timezone.
+
+    The row is UTC; the patient is not. Rendering the raw UTC value would tell
+    a Sao Paulo patient their 14:00 appointment is at 17:00 - the exact class
+    of defect DEF-2 already records on the manage screen, so it is not
+    repeated here.
+    """
+    return held.start_at.astimezone(_tenant_tzinfo(tenant)).strftime(WHEN_FORMAT)
+
+
+async def _send_booking_gate_notice(
+    reply: _ReplyContext,
+    hold: dict,
+    *,
+    tenant: Tenant | None,
+    waba_token: str | None,
+) -> None:
+    """Ask for the code that will CREATE the appointment, as the same card.
+
+    The card is TASK-003's three-button one, reused verbatim - `identity_back`,
+    `identity_resend`, `identity_change_email` all keep working, and so does
+    the router branch that reads their ids. Only the BODY is new, because the
+    old body opens by saying the consultation is confirmed and at this point
+    it is not (`services/pending_identity.py` explains the two wordings).
+    """
+    if tenant is None:
+        logger.warning(
+            "booking_gate_notice_skipped_no_tenant",
+            conversation_id=str(reply.conversation_id),
+        )
+        return
+    await _send_buttons_reply(
+        reply,
+        tenant=tenant,
+        waba_token=waba_token,
+        body=booking_gate_body(
+            hold.get("email_masked"),
+            when=hold.get("when"),
+            hold_minutes=HOLD_TTL_MINUTES,
+        ),
+        buttons=list(CODE_NOTICE_BUTTONS),
+        event="booking_gate_notice_sent",
+    )
+
+
+async def _promote_booking_hold(
+    reply: _ReplyContext,
+    *,
+    tenant: Tenant | None,
+    waba_token: str | None,
+    professionals: list | None,
+    redis,
+) -> str | None:
+    """Turn this conversation's reservation into a real appointment.
+
+    Returns the extra paragraph to append to the code-accepted message, or
+    None. None means "this conversation was never gated" - a patient whose
+    booking was committed the old way, or one the gate stood down on. That
+    path must stay byte-identical to what it was, which is why None is a
+    distinct answer and not an empty string.
+
+    The order here is the whole feature: the hold is read, the Google event is
+    created, the appointment row is written, and only THEN is the hold
+    dropped. An event created with no row behind it is the orphan of the
+    previous wave; a hold dropped before the row exists would free a slot the
+    patient just paid for with a code.
+    """
+    if tenant is None:
+        return None
+    async with async_session_factory() as session:
+        held = await latest_hold_in(session, reply.conversation_id)
+    if held is None:
+        return None
+
+    if held.expires_at <= datetime.now(UTC):
+        # The ten minutes ran out. The slot went back on sale the moment the
+        # clock passed, so there is nothing to promote and nothing to undo -
+        # say so plainly rather than confirming an appointment that does not
+        # exist. The account IS active: the code itself was still good.
+        await _release_hold(held.id)
+        logger.info(
+            "booking_hold_expired_at_verify",
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(tenant.id),
+        )
+        return BOOKING_HOLD_EXPIRED_MESSAGE
+
+    target = _appointment_calendar_target({"professional_id": held.professional_id}, professionals)
+    async with async_session_factory() as session:
+        calendar = await _appointment_calendar(session, tenant, target)
+        patient_id = await session.scalar(
+            select(Conversation.patient_id).where(Conversation.id == reply.conversation_id)
+        )
+    if calendar is None:
+        # No agenda to book on. The reservation is KEPT: it costs nothing, it
+        # expires on its own, and dropping it here would hand the slot to
+        # somebody else while a human is still trying to rescue this booking.
+        logger.error(
+            "booking_hold_promote_no_calendar",
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(tenant.id),
+        )
+        await _set_conversation_human_active(reply.conversation_id)
+        return _PROMOTE_FAILED_MESSAGE
+
+    service_type = held.appointment_type or "Consulta"
+    patient_name = await _patient_display_name(patient_id)
+    summary = f"{service_type} - {patient_name}" if patient_name else service_type
+    try:
+        event = await calendar.create_event(start=held.start_at, end=held.end_at, summary=summary)
+    except CalendarUnavailableError:
+        logger.error(
+            "booking_hold_promote_calendar_unavailable",
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(tenant.id),
+        )
+        await _set_conversation_human_active(reply.conversation_id)
+        return _PROMOTE_FAILED_MESSAGE
+
+    appointment = Appointment(
+        tenant_id=tenant.id,
+        patient_id=patient_id,
+        conversation_id=reply.conversation_id,
+        google_event_id=event.get("id") or "",
+        google_event_link=event.get("htmlLink"),
+        appointment_type=service_type[:120],
+        start_at=held.start_at,
+        end_at=held.end_at,
+        # NOT the patient_ref: on Brain-Message that is a 36-character UUID and
+        # `appointments.phone` is VARCHAR(32). Writing it there is the defect
+        # 697c24a fixed; a Portal patient simply has no phone number.
+        phone=None,
+        professional_id=held.professional_id,
+        insurance=held.insurance,
+    )
+    try:
+        async with async_session_factory() as session:
+            async with session.begin():
+                session.add(appointment)
+    except Exception as exc:
+        # The event EXISTS on Google and the row does not. Same answer the
+        # flow path gives in the same situation: never tell the patient it is
+        # confirmed, hand it to a human to reconcile.
+        logger.error(
+            "booking_hold_promote_persist_failed",
+            error=str(exc),
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(tenant.id),
+        )
+        await _set_conversation_human_active(reply.conversation_id)
+        return _PROMOTE_FAILED_MESSAGE
+
+    await _release_hold(held.id)
+    _log_booking_scope(appointment, tenant.id, source=SOURCE_FLOW)
+    logger.info(
+        "booking_hold_promoted",
+        conversation_id=str(reply.conversation_id),
+        tenant_id=str(tenant.id),
+        appointment_id=str(appointment.id),
+    )
+    # NOW the post_booking hooks fire, from the point where the appointment
+    # genuinely starts existing. `plugins/precheck_handoff.py` gets the
+    # committed appointment it has always needed; `plugins/pending_identity.py`
+    # runs too and skips on its own, because brain-api answers NOT_PENDING for
+    # a visitor who just verified - no second card, no parallel mechanism.
+    await enqueue_post_booking_hooks(redis, tenant.id, appointment.id, source="flow")
+
+    tz = _tenant_tzinfo(tenant)
+    local_start = held.start_at.astimezone(tz)
+    local_end = held.end_at.astimezone(tz)
+    return (
+        "Pronto! Seu agendamento está confirmado. \u2705\n\n"
+        f"{service_type}\n{local_start.strftime(WHEN_FORMAT)}\n\n"
+        "Adicionar à sua agenda:\n"
+        f"{build_patient_calendar_link(local_start, local_end, summary, tz=tz)}"
+    )
+
+
+async def _release_hold(hold_id) -> None:
+    """Drop the reservation, on THIS module's session factory. Best-effort.
+
+    Routed through the worker's own factory rather than the service's so the
+    whole promotion leg - read, write, release - runs on one engine, which is
+    also the one the worker's tests substitute.
+    """
+    try:
+        async with async_session_factory() as session:
+            async with session.begin():
+                await release_hold_in(session, hold_id)
+    except Exception as exc:
+        logger.warning("booking_hold_release_failed", hold_id=str(hold_id), error=str(exc))
+
+
+async def _patient_display_name(patient_id) -> str | None:
+    """The patient's name for the calendar event title, or None."""
+    if patient_id is None:
+        return None
+    async with async_session_factory() as session:
+        return await session.scalar(select(Patient.name).where(Patient.id == patient_id))
+
+
+# Said when the code was good but the appointment could not be created. Never
+# claims a booking, never blames the patient, and is always paired with a
+# handover so a human is already looking at it.
+_PROMOTE_FAILED_MESSAGE = (
+    "Ativei sua conta, mas não consegui fechar o agendamento agora. 😕\n\n"
+    "Já avisei a equipe da clínica — alguém fala com você por aqui em instantes."
+)
 
 
 async def _send_code_notice(

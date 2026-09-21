@@ -239,6 +239,155 @@ def code_notice_body(email_masked: str | None) -> str:
     return _CODE_NOTICE_MASKED_MESSAGE.format(email_masked=masked)
 
 
+# ---------------------------------------------------------------------------
+# The GATE wording (2026-09-20) — the code now comes BEFORE the appointment
+# ---------------------------------------------------------------------------
+#
+# `CODE_NOTICE_MESSAGE` above opens with "Sua consulta já está confirmada!" and
+# that sentence is now FALSE at the moment the code is asked for: nothing has
+# been committed yet, the slot is only reserved. The two wordings therefore
+# coexist on purpose and are NOT interchangeable —
+#
+#   CODE_NOTICE_MESSAGE      the appointment exists; the code is an offer.
+#                            Still reached by the reactivation and resend legs
+#                            of a conversation whose booking was committed
+#                            before this feature shipped, and by any booking
+#                            the gate stood down on (see BookingGate's
+#                            fail-open contract).
+#   booking_gate_body()      the appointment does NOT exist yet; the code is
+#                            what creates it.
+#
+# The first sentence is the owner's, verbatim, and a test pins it.
+BOOKING_GATE_SENTENCE = (
+    "Para registrá-lo(a) no sistema e confirmar a sua consulta, verifique o "
+    "*código de 6 dígitos* que chegou no seu e-mail."
+)
+
+# What the patient is holding while they do it. The minutes are named because
+# a reservation the patient cannot see the end of is not a reservation they can
+# act on — and because the honest thing to say about a slot we are keeping from
+# other people is how long we are keeping it.
+_BOOKING_GATE_HOLD_LINE = "⏳ Guardei o horário *{when}* para você por {minutes} minutos."
+
+# The webmail each masked domain belongs to. Deliberately short: it covers the
+# Brazilian consumer inboxes that actually show up, and an unknown domain gets
+# no link at all. Guessing `https://<domain>` for an unrecognised domain would
+# put an unvalidated, patient-influenced string into a clickable position in
+# the transcript, which is a worse trade than one missing link.
+_PROVIDERS: tuple[tuple[tuple[str, ...], str, str], ...] = (
+    (("gmail.com", "googlemail.com"), "Gmail", "https://mail.google.com/"),
+    (
+        ("outlook.com", "hotmail.com", "live.com", "msn.com", "outlook.com.br", "hotmail.com.br"),
+        "Outlook",
+        "https://outlook.live.com/mail/",
+    ),
+    (("yahoo.com", "yahoo.com.br", "ymail.com"), "Yahoo Mail", "https://mail.yahoo.com/"),
+    (("icloud.com", "me.com", "mac.com"), "iCloud Mail", "https://www.icloud.com/mail"),
+    (("uol.com.br", "bol.com.br"), "UOL Mail", "https://email.uol.com.br/"),
+    (("terra.com.br",), "Terra Mail", "https://mail.terra.com.br/"),
+    (("proton.me", "protonmail.com", "pm.me"), "Proton Mail", "https://mail.proton.me/"),
+    (("zoho.com",), "Zoho Mail", "https://mail.zoho.com/"),
+)
+
+
+def provider_link(email_masked: str | None) -> tuple[str, str] | None:
+    """(provider name, webmail URL) for a MASKED address, or None.
+
+    Derived from the mask, never from the address: brain-api's mask keeps the
+    domain intact (`a***a@gmail.com`), so the inbox can be named and linked
+    without this service ever holding the real address — which is the whole
+    reason the mask is the only form allowed in here. An address that does not
+    survive `masked_email_or_none` produces None, so the leak check guards the
+    link exactly as it guards the text.
+    """
+    masked = masked_email_or_none(email_masked)
+    if masked is None:
+        return None
+    domain = masked.rsplit("@", 1)[-1].casefold()
+    for suffixes, name, url in _PROVIDERS:
+        if any(domain == suffix or domain.endswith("." + suffix) for suffix in suffixes):
+            return name, url
+    return None
+
+
+def booking_gate_body(
+    email_masked: str | None, *, when: str | None = None, hold_minutes: int | None = None
+) -> str:
+    """The gate notice: the owner's sentence, the inbox, the link, the hold.
+
+    Pure. Every part after the first sentence is optional and disappears
+    cleanly when its input is missing, so a brain-api that sends no mask, an
+    unrecognised e-mail provider and a caller with no window to quote all
+    produce a shorter but still correct message rather than an empty slot.
+
+    The "Abrir e-mail" affordance ships as a LINK, not as a fourth button. The
+    card this notice carries is the TASK-003 three-button card, and three is
+    the cap the reply-button format allows; adding a URL button would also need
+    rendering work in Brain-Message-Frontend, which the prompt that ordered
+    this change puts explicitly out of scope. The provider LOGO asked for in
+    that prompt needs the same frontend work and is recorded as a pendência in
+    `docs/CHECKPOINT_secretaria_booking_code_gate.md`.
+    """
+    parts = [BOOKING_GATE_SENTENCE]
+    parts.extend(_booking_gate_details(email_masked, when=when, hold_minutes=hold_minutes))
+    return "\n\n".join(parts)
+
+
+def _booking_gate_details(
+    email_masked: str | None, *, when: str | None, hold_minutes: int | None
+) -> list[str]:
+    """The inbox / link / reservation paragraphs, in order. Pure."""
+    parts: list[str] = []
+    masked = masked_email_or_none(email_masked)
+    if masked is not None:
+        parts.append(f"📩 Enviei para {masked}.")
+    provider = provider_link(email_masked)
+    if provider is not None:
+        name, url = provider
+        parts.append(f"Abrir o {name}:\n{url}")
+    if when and hold_minutes:
+        parts.append(_BOOKING_GATE_HOLD_LINE.format(when=when, minutes=hold_minutes))
+    return parts
+
+
+# The patient typed something that is not six digits WHILE a slot is held for
+# them. Before the gate existed this ended the wait (the account was an offer);
+# now leaving would cost them the reservation, so the wait is repeated instead
+# — with the card, whose "⬅️ Voltar" button is the explicit exit that keeps the
+# conversation from being stuck. See `workers/tasks.py`'s identity gate.
+BOOKING_GATE_REPROMPT_SENTENCE = (
+    "Ainda preciso do *código de 6 dígitos* para confirmar a sua consulta."
+)
+
+
+def booking_gate_reprompt_body(
+    email_masked: str | None, *, when: str | None = None, hold_minutes: int | None = None
+) -> str:
+    """The same notice, re-asked, saying the reservation is still standing."""
+    parts = [BOOKING_GATE_REPROMPT_SENTENCE]
+    parts.extend(_booking_gate_details(email_masked, when=when, hold_minutes=hold_minutes))
+    return "\n\n".join(parts)
+
+
+# The reservation ran out before the code arrived. Says the one thing the
+# patient can act on (the slot is free again, pick another) and never claims an
+# appointment that does not exist.
+BOOKING_HOLD_EXPIRED_MESSAGE = (
+    "⌛ O horário que eu tinha guardado para você expirou, então ele voltou a "
+    "ficar disponível para outras pessoas.\n\n"
+    "Sua conta está ativa — é só escolher um novo horário quando quiser. "
+    "Digite *menu* para começar de novo."
+)
+
+# Somebody else is holding the exact window this patient just confirmed. Short
+# and free of blame: from the patient's seat this is indistinguishable from the
+# slot having been booked a second earlier, which is a thing that already
+# happens today.
+BOOKING_SLOT_TAKEN_MESSAGE = (
+    "Poxa, alguém acabou de reservar esse horário. 😕\n\nQuer escolher outro?"
+)
+
+
 CODE_ACCEPTED_MESSAGE = "✅ Tudo certo, sua conta está ativa! Esta conversa fica salva para você."
 
 # Wrong or expired code. Does NOT say how many attempts are left: the budget is

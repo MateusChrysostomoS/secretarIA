@@ -22,6 +22,7 @@ Design:
 from __future__ import annotations
 
 import re
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
@@ -52,6 +53,7 @@ from secretaria.core.whatsapp_limits import (
     truncate_list_row_title,
 )
 from secretaria.models import FlowState
+from secretaria.services.booking_hold import BookingGate, overlaps
 from secretaria.services.booking_scope import (
     canonical_service_name,
     resolve_booking_owner_id,
@@ -61,6 +63,7 @@ from secretaria.services.calendar import (
     CalendarUnavailableError,
     build_patient_calendar_link,
 )
+from secretaria.services.pending_identity import BOOKING_SLOT_TAKEN_MESSAGE
 from secretaria.services.service_catalog import normalize, professionals_offering
 from secretaria.services.tenant_config import (
     active_appointment_types,
@@ -391,6 +394,38 @@ PROFESSIONAL_NO_HOURS_FALLBACK = (
 PROFESSIONAL_NO_SERVICES_MESSAGE = "No momento não há serviços disponíveis para agendamento."
 
 
+# How a booked window is spelled to the patient. One constant because the
+# confirmation bubble and the gate notice must name the same instant in the
+# same words - they are two halves of one booking now.
+WHEN_FORMAT = "%d/%m/%Y às %H:%M"
+
+# The gate for the turn currently being routed, or None.
+#
+# A ContextVar rather than a parameter on the eight functions between
+# `route()` and the slot picker. Two reasons, in order of weight:
+#
+#   * EVERY listing path has to see it, not just the booking one. A slot a
+#     Portal visitor is holding must also disappear from the reschedule
+#     picker, and those two paths do not share a call chain — threading an
+#     argument would have meant remembering each of them, which is precisely
+#     the kind of "remember to pass it" rule that silently stops holding.
+#   * `contextvars` is per-task under asyncio, so two conversations routed
+#     concurrently in the same worker never see each other's gate. A module
+#     global would have been the bug this avoids.
+#
+# Set and reset by `route()` alone, always in a try/finally, so nothing can
+# leak the previous turn's gate into the next one.
+_ACTIVE_GATE: ContextVar[BookingGate | None] = ContextVar("flow_router_gate", default=None)
+
+
+async def _hold_windows(professional_id: UUID | None) -> list[tuple[datetime, datetime]]:
+    """Windows other conversations are holding on this agenda, or []."""
+    gate = _ACTIVE_GATE.get()
+    if gate is None:
+        return []
+    return await gate.busy_windows(professional_id)
+
+
 @dataclass
 class FlowRouterResult:
     """The router's decision for one inbound turn.
@@ -460,6 +495,16 @@ class FlowRouterResult:
     decline_reason: dict | None = None
     # When set, the matching appointment row should be flipped to CANCELLED.
     appointment_cancel_id: str | None = None
+    # When set, the patient CONFIRMED a slot but no appointment was created:
+    # the slot is reserved (`services/booking_hold.py`) and a 6-digit code is
+    # in their inbox. The caller sends the gate notice as the code card and
+    # parks the conversation in AWAITING_EMAIL_CODE; the appointment is
+    # created later, from `workers/tasks.py::_promote_booking_hold`, and only
+    # if the code is verified before the reservation expires. Mutually
+    # exclusive with `appointment` by construction — the whole point is that
+    # exactly one of the two exists for any confirmed slot.
+    # {"hold_id": UUID, "email_masked": str | None, "when": str, "minutes": int}
+    booking_hold: dict | None = None
     # When set, the matching appointment row should be moved (RESCHEDULED):
     # {"google_event_id", "start_at", "end_at"}.
     appointment_reschedule: dict | None = None
@@ -1038,6 +1083,41 @@ async def route(
     patient_name: str | None = None,
     upcoming_appointments: list[dict] | None = None,
     professionals: list | None = None,
+    gate: BookingGate | None = None,
+) -> FlowRouterResult:
+    """Route one turn with `gate` in scope for every listing/booking branch.
+
+    The whole body lives in `_route`; this wrapper exists only to publish the
+    gate on `_ACTIVE_GATE` and take it down again, in a `finally`, so a raise
+    inside the router cannot leave the next turn holding this turn's gate.
+    See `_ACTIVE_GATE` for why the gate travels this way rather than as an
+    argument on every function between here and the slot picker.
+    """
+    token = _ACTIVE_GATE.set(gate)
+    try:
+        return await _route(
+            conversation,
+            tenant,
+            calendar,
+            inbound_body,
+            patient_name,
+            upcoming_appointments=upcoming_appointments,
+            professionals=professionals,
+            gate=gate,
+        )
+    finally:
+        _ACTIVE_GATE.reset(token)
+
+
+async def _route(
+    conversation: Conversation,
+    tenant: Tenant,
+    calendar: CalendarService | None,
+    inbound_body: str,
+    patient_name: str | None = None,
+    upcoming_appointments: list[dict] | None = None,
+    professionals: list | None = None,
+    gate: BookingGate | None = None,
 ) -> FlowRouterResult:
     """Decide the next deterministic step for this inbound turn.
 
@@ -1082,7 +1162,7 @@ async def route(
 
     if state == FlowState.SERVICE_CATALOG:
         return await _catalog_step(
-            conversation, tenant, calendar, inbound_body, patient_name, professionals
+            conversation, tenant, calendar, inbound_body, patient_name, professionals, gate
         )
 
     if state == FlowState.MANAGE_BOOKING:
@@ -1921,6 +2001,7 @@ async def _catalog_step(
     body: str,
     patient_name: str | None,
     professionals: list | None = None,
+    gate: BookingGate | None = None,
 ) -> FlowRouterResult:
     step = conversation.flow_step
 
@@ -2024,7 +2105,7 @@ async def _catalog_step(
 
     if step == STEP_AWAITING_CONFIRMATION:
         return await _handle_confirmation(
-            conversation, tenant, calendar, body, patient_name, services, professionals
+            conversation, tenant, calendar, body, patient_name, services, professionals, gate
         )
 
     if step == STEP_AWAITING_RETRY:
@@ -2301,6 +2382,19 @@ async def enter_day_picker(
     )
 
 
+def _slot_dt(raw, calendar: CalendarService | None) -> datetime:
+    """A slot's start as an AWARE datetime, whatever shape the calendar gave.
+
+    `list_free_slots` hands back whatever `CalendarService` built; a naive
+    value is read in the clinic's own timezone, which is the only reading that
+    can be right - the slot was computed from that clinic's business hours.
+    """
+    value = raw if isinstance(raw, datetime) else datetime.fromisoformat(str(raw))
+    if value.tzinfo is None and calendar is not None:
+        return value.replace(tzinfo=calendar.tzinfo)
+    return value
+
+
 async def _enter_slot_picker(
     conversation: Conversation,
     tenant: Tenant,
@@ -2327,6 +2421,36 @@ async def _enter_slot_picker(
         )
     except CalendarUnavailableError:
         return _calendar_unavailable(conversation, branch, branch.day_step)
+
+    # A slot another conversation is HOLDING is not free, even though Google
+    # has never heard of it: between "Confirmar" and a verified code the
+    # booking exists only in `booking_holds`. Applied on EVERY channel and on
+    # both branches (first booking and reschedule) - a reservation half the
+    # surfaces ignore is not a reservation. The patient's own hold is excluded
+    # upstream, so their own choice stays visible to them.
+    reserved = await _hold_windows(_selected_professional_id(conversation))
+    if reserved:
+        before = len(slots)
+        slots = [
+            slot
+            for slot in slots
+            if not any(
+                overlaps(
+                    _slot_dt(slot["start"], calendar),
+                    _slot_dt(slot["start"], calendar)
+                    + timedelta(minutes=duration_minutes or 0),
+                    held_start,
+                    held_end,
+                )
+                for held_start, held_end in reserved
+            )
+        ]
+        if len(slots) != before:
+            logger.info(
+                "flow_slots_hidden_by_hold",
+                hidden=before - len(slots),
+                conversation_id=str(getattr(conversation, "id", None)),
+            )
 
     if not slots:
         return await enter_day_picker(
@@ -2717,7 +2841,32 @@ async def _handle_confirmation(
     patient_name: str | None,
     services: list[dict] | None = None,
     professionals: list | None = None,
+    gate: BookingGate | None = None,
 ) -> FlowRouterResult:
+    """"Confirmar" on the recap card: either a booking, or a held slot.
+
+    Until 2026-09-20 there was only one outcome here - create the Google event,
+    hand the caller an `appointment` dict, confirm. That is still what happens
+    for every WhatsApp patient and for every Brain-Message visitor who has
+    already proven their address.
+
+    What is new is the third party in the room. `gate` (armed only for a
+    Brain-Message visitor who still owes a code) is asked FIRST, before the
+    event exists, and it can answer three ways:
+
+        commit      -> today's path, unchanged, byte for byte.
+        held        -> the slot is reserved in Postgres and a code is in the
+                       patient's inbox. NOTHING is created on Google Calendar
+                       and no appointment row is written: the caller asks for
+                       the code and the booking happens later, in
+                       `workers/tasks.py::_promote_booking_hold`.
+        slot_taken  -> another conversation is holding this exact window.
+
+    The order matters more than it looks: the gate runs before
+    `calendar.create_event`, so a gated booking never puts an event on a real
+    clinic's agenda that a never-typed code would then have to remove. That is
+    the orphan the previous wave produced in the opposite order.
+    """
     if _norm(body) == _norm(LABEL_CANCEL):
         return FlowRouterResult(
             action="reply",
@@ -2753,6 +2902,63 @@ async def _handle_confirmation(
     end = start + timedelta(minutes=duration)
 
     summary = f"{service_type} - {patient_name}" if patient_name else service_type
+
+    # Resolved BEFORE the gate so a held slot and a committed appointment
+    # record the same service, owner and convenio: the hold is what the later
+    # promotion reads to build the appointment row.
+    canonical_type = canonical_service_name(services, service_type)
+    professional_id = resolve_booking_owner_id(
+        professionals, _selected_professional_id(conversation)
+    )
+    insurance = _selected_insurance(conversation)
+
+    if gate is not None and gate.armed:
+        decision = await gate.decide(
+            start_at=start,
+            end_at=end,
+            professional_id=professional_id,
+            appointment_type=(canonical_type or service_type)[:120],
+            insurance=insurance,
+        )
+        if decision.outcome == "slot_taken":
+            # Offer the day again rather than a dead end: the patient picked a
+            # real time a moment ago and the only thing that changed is that
+            # somebody else got there first.
+            return FlowRouterResult(
+                action="reply",
+                bubbles=[
+                    MenuBubble(
+                        body=BOOKING_SLOT_TAKEN_MESSAGE,
+                        labels=[LABEL_RETRY_YES, LABEL_RETRY_MENU],
+                    )
+                ],
+                flow_state=FlowState.SERVICE_CATALOG,
+                flow_step=STEP_AWAITING_RETRY,
+                flow_selected_type=conversation.flow_selected_type,
+                flow_selected_day=conversation.flow_selected_day,
+                flow_selected_slot=conversation.flow_selected_slot,
+                flow_selected_professional_id=_selected_professional_id(conversation),
+                flow_selected_insurance=insurance,
+            )
+        if decision.outcome == "held":
+            # No bubbles: the caller sends the code CARD (three buttons), which
+            # this module cannot build - `services/pending_identity.py` owns it
+            # and `workers/tasks.py::_send_code_notice` is the single spelling.
+            return FlowRouterResult(
+                action="reply",
+                flow_state=FlowState.AWAITING_EMAIL_CODE,
+                flow_step=None,
+                flow_selected_type=None,
+                flow_selected_day=None,
+                flow_selected_slot=None,
+                booking_hold={
+                    "hold_id": decision.hold_id,
+                    "email_masked": decision.email_masked,
+                    "when": start.strftime(WHEN_FORMAT),
+                },
+            )
+        # "commit" falls through to exactly the code that was here before.
+
     try:
         event = await calendar.create_event(start=start, end=end, summary=summary)
     except CalendarUnavailableError:
@@ -2767,12 +2973,11 @@ async def _handle_confirmation(
             flow_selected_insurance=_selected_insurance(conversation),
         )
 
-    # The catalog's own spelling, never whatever `flow_selected_type` drifted
-    # into (a service renamed/deactivated mid-flow). None keeps the stored
-    # label so the patient's confirmation still names what they picked, and
-    # the Pix hook then skips with an honest "no such service" reason instead
-    # of pricing the wrong entry - see services/booking_scope.py.
-    canonical_type = canonical_service_name(services, service_type)
+    # `canonical_type` is the catalog's own spelling, never whatever
+    # `flow_selected_type` drifted into (a service renamed/deactivated
+    # mid-flow). Resolved above, before the gate, so a hold and a committed
+    # appointment cannot disagree about the service - see
+    # services/booking_scope.py.
     appointment = {
         "google_event_id": event.get("id") or "",
         "google_event_link": event.get("htmlLink"),
@@ -2785,12 +2990,8 @@ async def _handle_confirmation(
     # hours and calendar this very booking already used. The key stays
     # OMITTED (not None) when no owner can be proven, so a tenant with zero
     # or several professionals and no valid pick keeps today's plain dict.
-    professional_id = resolve_booking_owner_id(
-        professionals, _selected_professional_id(conversation)
-    )
     if professional_id is not None:
         appointment["professional_id"] = professional_id
-    insurance = _selected_insurance(conversation)
     if insurance:
         appointment["insurance"] = insurance
     # ONE bubble, not two: the patient keeps a single message they can
