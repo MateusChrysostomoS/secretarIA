@@ -234,6 +234,12 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db, calls):
     monkeypatch.setattr(tasks, "verify_code", _verify)
     monkeypatch.setattr(tasks, "request_code", _request)
     monkeypatch.setattr(plugin, "request_code", _request)
+
+    async def _report(tenant_id, external_id, name):
+        # The name-to-brain-api leg (2026-09-24): no network from this suite.
+        return True
+
+    monkeypatch.setattr(tasks, "report_name", _report)
     yield
 
 

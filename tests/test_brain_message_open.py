@@ -57,12 +57,23 @@ from secretaria.models import (  # noqa: E402
     ProcessedEvent,
     Tenant,
 )
+from secretaria.models.conversation import FlowState  # noqa: E402
 from secretaria.services.channel_sender import (  # noqa: E402
     CHANNEL_BRAIN_MESSAGE,
     CHANNEL_WHATSAPP,
 )
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
-from secretaria.services.greeting_template import render_greeting  # noqa: E402
+from secretaria.services.flow_router import menu_buttons_for, menu_label  # noqa: E402
+from secretaria.services.greeting_template import (  # noqa: E402
+    CONSENT_REMINDER_MESSAGE,
+    LGPD_CONSENT_MESSAGE,
+    render_greeting,
+)
+from secretaria.services.patient_name import (  # noqa: E402
+    NAME_INVALID_MESSAGE,
+    NAME_REQUEST_AFTER_EMAIL_MESSAGE,
+    NAME_REQUEST_MESSAGE,
+)
 from secretaria.services.pending_identity import (  # noqa: E402
     EMAIL_REQUEST_MESSAGE,
     IdentityState,
@@ -438,6 +449,330 @@ async def test_an_already_verified_visitor_is_taken_straight_to_the_menu(db, sta
     async with db() as session:
         patient = await session.scalar(select(Patient))
         assert patient is not None and patient.lgpd_accepted_at is not None
+
+
+# --------------------------------------------------------------------------
+# 2b. A Portal ACCOUNT opening a clinic it has never talked to
+# --------------------------------------------------------------------------
+#
+# Origin: z_prompts/PLANO_BRAIN_MESSAGE_ENTRAR_TAMBEM_SESSAO_ATIVA.md, part 2.
+# brain-api (`CHECKPOINT_portal_sessao_ativa_pula_pendente.md` §3) adds the
+# clinic to a live account instead of minting an anonymous visit; the signal is
+# the probe it already answers, `pending-identity` -> `verified`. The clinic
+# still needs the NAME (calendar event, professional e-mail, PreCheck hand-off —
+# owner, 2026-09-24): brain-api sends it on the `open` when the account gave it
+# at another clinic, and otherwise it is asked once. Never an e-mail, never a code.
+
+
+class _NoIdentityWrites:
+    """The e-mail/code legs. A verified account must never reach any of them."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def _claim(*args, **kwargs):
+            self.calls.append("claim_email")
+            raise AssertionError("a verified account was asked for its e-mail")
+
+        async def _request(*args, **kwargs):
+            self.calls.append("request_code")
+            raise AssertionError("a verified account was sent a code")
+
+        async def _verify(*args, **kwargs):
+            self.calls.append("verify_code")
+            raise AssertionError("a verified account was asked for a code")
+
+        monkeypatch.setattr(tasks, "claim_email", _claim)
+        monkeypatch.setattr(tasks, "request_code", _request)
+        monkeypatch.setattr(tasks, "verify_code", _verify)
+
+
+@pytest.fixture
+def reported(monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
+    """Every name handed to brain-api (`report_name`), and what it answers."""
+    calls: list[tuple] = []
+
+    async def _report(tenant_id, external_id, name):
+        calls.append((tenant_id, external_id, name))
+        return True
+
+    monkeypatch.setattr(tasks, "report_name", _report)
+    return calls
+
+
+async def _conversation(db) -> Conversation:
+    async with db() as session:
+        conversation = await session.scalar(select(Conversation))
+    assert conversation is not None
+    return conversation
+
+
+async def _patient(db) -> Patient:
+    async with db() as session:
+        patient = await session.scalar(select(Patient))
+    assert patient is not None
+    return patient
+
+
+async def _consent_kinds(db) -> list[str]:
+    async with db() as session:
+        rows = (await session.scalars(select(ConsentEvent))).all()
+    return sorted(e.kind for e in rows)
+
+
+async def _say(tenant: Tenant, text: str) -> None:
+    """One patient message, decided and answered — what the inbound job does."""
+    inbound = await tasks._persist_brain_message_inbound(
+        tenant_id=tenant.id, external_id=EXTERNAL_ID, text=text
+    )
+    assert inbound is not None
+    await tasks._send_bot_reply(inbound, redis=None)
+
+
+def _menu_body(tenant: Tenant) -> str:
+    """The menu bubble as a Brain-Message transcript stores it (flattened card)."""
+    labels = menu_buttons_for(tenant, False)
+    return f"{menu_label(tenant)}\n(opções: {', '.join(labels)})"
+
+
+_OPENING_QUESTIONS_NEVER_ASKED = (
+    EMAIL_REQUEST_MESSAGE,
+    NAME_REQUEST_AFTER_EMAIL_MESSAGE,
+    LGPD_CONSENT_MESSAGE,
+    CONSENT_REMINDER_MESSAGE,
+)
+
+
+async def test_a_known_account_whose_name_brain_api_sends_reads_the_frame_then_the_menu(
+    db, state, reported, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE symptom of 2026-09-23, closed — the account already gave its name elsewhere.
+
+    A verified account opened "Clinica Nova Unidade Teste" and was asked for its
+    e-mail, then a code. Given `verified` and the account's name on the `open`,
+    the clinic's first two messages are its own frame (first contact HERE: the
+    disclosure is owed) and the main menu — nothing in between, nothing after —
+    and the clinic HAS the name for the appointment it is about to book.
+    """
+    tenant = await _seed_tenant(db)
+    state.answer = IdentityState.VERIFIED
+    legs = _NoIdentityWrites()
+    legs.install(monkeypatch)
+
+    await _open(tenant, name="Maria Silva")
+
+    assert await _bodies(db, tenant, MessageDirection.INBOUND) == []
+    assert await _bodies(db, tenant, MessageDirection.OUTBOUND) == [
+        render_greeting(tenant.clinic_name, tenant.clinic_description),
+        _menu_body(tenant),
+    ]
+    assert legs.calls == []
+    assert state.probed == [EXTERNAL_ID]
+    conversation = await _conversation(db)
+    assert conversation.flow_state == FlowState.MENU
+    assert conversation.flow_step is None
+    patient = await _patient(db)
+    assert patient.name == "Maria Silva"
+    assert patient.lgpd_accepted_at is not None
+    assert await _consent_kinds(db) == ["account_terms_verified", "first_contact_service"]
+    # Nothing was captured here, so nothing is reported back.
+    assert reported == []
+
+
+async def test_a_known_account_without_a_name_is_asked_it_once_and_nothing_else(
+    db, state, reported, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No name anywhere on the account: frame, the name question — no e-mail, no code."""
+    tenant = await _seed_tenant(db)
+    state.answer = IdentityState.VERIFIED
+    legs = _NoIdentityWrites()
+    legs.install(monkeypatch)
+
+    await _open(tenant, name=None)
+
+    assert await _bodies(db, tenant, MessageDirection.OUTBOUND) == [
+        render_greeting(tenant.clinic_name, tenant.clinic_description),
+        NAME_REQUEST_MESSAGE,
+    ]
+    assert legs.calls == []
+    assert (await _conversation(db)).flow_state == FlowState.AWAITING_NAME
+    # Consent was mirrored BEFORE the question: the answer must lead to the
+    # menu, never to the account LGPD a verified account already gave.
+    assert (await _patient(db)).lgpd_accepted_at is not None
+    assert await _consent_kinds(db) == ["account_terms_verified", "first_contact_service"]
+
+
+async def test_the_name_answer_opens_the_menu_and_reaches_brain_api(
+    db, state, reported, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one question, answered: the name is kept here AND for the next clinic."""
+    tenant = await _seed_tenant(db)
+    state.answer = IdentityState.VERIFIED
+    legs = _NoIdentityWrites()
+    legs.install(monkeypatch)
+    await _open(tenant, name=None)
+    opened = await _bodies(db, tenant, MessageDirection.OUTBOUND)
+
+    await _say(tenant, "ana souza")
+
+    assert (await _bodies(db, tenant, MessageDirection.OUTBOUND))[len(opened) :] == [
+        _menu_body(tenant)
+    ]
+    assert (await _conversation(db)).flow_state == FlowState.MENU
+    assert (await _patient(db)).name == "Ana Souza"
+    assert reported == [(tenant.id, EXTERNAL_ID, "Ana Souza")]
+    assert legs.calls == []
+    assert state.probed == [EXTERNAL_ID], "the answer re-probed brain-api"
+
+
+async def test_two_unreadable_answers_still_reach_the_menu(db, state, reported) -> None:
+    """The name is a courtesy: the question must never become a wall (no stuck state)."""
+    tenant = await _seed_tenant(db)
+    state.answer = IdentityState.VERIFIED
+    await _open(tenant, name=None)
+
+    await _say(tenant, "123")
+    await _say(tenant, "456")
+
+    outbound = await _bodies(db, tenant, MessageDirection.OUTBOUND)
+    assert outbound[-2:] == [NAME_INVALID_MESSAGE, _menu_body(tenant)]
+    assert (await _conversation(db)).flow_state == FlowState.MENU
+    assert (await _patient(db)).name is None
+    assert reported == []
+    for question in _OPENING_QUESTIONS_NEVER_ASKED:
+        assert all(not body.startswith(question) for body in outbound), question
+
+
+async def test_a_name_brain_api_did_not_take_does_not_hold_the_patient(
+    db, state, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`report_name` failing costs a future question, never this turn."""
+    tenant = await _seed_tenant(db)
+    state.answer = IdentityState.VERIFIED
+
+    async def _refused(tenant_id, external_id, name):
+        return False
+
+    monkeypatch.setattr(tasks, "report_name", _refused)
+    await _open(tenant, name=None)
+
+    await _say(tenant, "Ana Souza")
+
+    assert (await _bodies(db, tenant, MessageDirection.OUTBOUND))[-1] == _menu_body(tenant)
+    assert (await _patient(db)).name == "Ana Souza"
+
+
+@pytest.mark.parametrize("name", ["Maria Silva", None])
+async def test_no_e_mail_or_consent_question_is_ever_sent_to_a_known_account(
+    db, state, reported, name
+) -> None:
+    """Each pre-consent question, checked by name — with and without a known name."""
+    tenant = await _seed_tenant(db)
+    state.answer = IdentityState.VERIFIED
+
+    await _open(tenant, name=name)
+
+    outbound = await _bodies(db, tenant, MessageDirection.OUTBOUND)
+    for question in _OPENING_QUESTIONS_NEVER_ASKED:
+        assert all(not body.startswith(question) for body in outbound), question
+    assert (await _conversation(db)).flow_state not in {
+        FlowState.AWAITING_EMAIL,
+        FlowState.AWAITING_EMAIL_CODE,
+    }
+
+
+@pytest.mark.parametrize(
+    ("name", "second", "state_after"),
+    [
+        ("Maria Silva", "menu", FlowState.MENU),
+        (None, "name", FlowState.AWAITING_NAME),
+    ],
+)
+async def test_reopening_the_clinic_as_a_known_account_changes_nothing(
+    db, state, reported, name, second, state_after
+) -> None:
+    """F5 on the new clinic: no second frame, no second question, no regression.
+
+    brain-api answers the second `/pending` with the same `patient_ref`
+    (idempotent `add_clinic`), so the second open arrives for the same visitor.
+    """
+    tenant = await _seed_tenant(db)
+    state.answer = IdentityState.VERIFIED
+
+    await _open(tenant, name=name)
+    before = await _bodies(db, tenant, MessageDirection.OUTBOUND)
+    await _open(tenant, name=name)
+
+    assert await _bodies(db, tenant, MessageDirection.OUTBOUND) == before
+    expected = _menu_body(tenant) if second == "menu" else NAME_REQUEST_MESSAGE
+    assert before == [render_greeting(tenant.clinic_name, tenant.clinic_description), expected]
+    assert state.probed == [EXTERNAL_ID], "the second open asked brain-api again"
+    assert (await _conversation(db)).flow_state == state_after
+    assert await _consent_kinds(db) == ["account_terms_verified", "first_contact_service"]
+
+
+async def test_a_known_accounts_first_tap_on_the_menu_is_served_not_gated(
+    db, state, reported
+) -> None:
+    """The menu is a real one: the next turn is not held at a consent gate.
+
+    Consent was mirrored locally (`account_terms_verified`), so the patient's
+    first inbound after the opening is routed like any consented patient's —
+    no e-mail question, no LGPD notice, and brain-api is not probed again.
+    """
+    tenant = await _seed_tenant(db)
+    state.answer = IdentityState.VERIFIED
+    await _open(tenant, name="Maria Silva")
+    opened = await _bodies(db, tenant, MessageDirection.OUTBOUND)
+
+    await _say(tenant, menu_buttons_for(tenant, False)[0])
+
+    after = (await _bodies(db, tenant, MessageDirection.OUTBOUND))[len(opened) :]
+    assert after, "the tap went unanswered"
+    for body in after:
+        for question in _OPENING_QUESTIONS_NEVER_ASKED:
+            assert not body.startswith(question)
+    assert state.probed == [EXTERNAL_ID]
+
+
+async def test_the_ordinary_open_is_unchanged_message_by_message(db, state) -> None:
+    """Regression, stated explicitly: a visitor brain-api does NOT know.
+
+    Same frame, then the e-mail question, parked in AWAITING_EMAIL, no consent
+    recorded yet, one `first_contact_service` event — exactly what the open did
+    before part 1 existed. Not the verified branch leaking the other way.
+    """
+    tenant = await _seed_tenant(db)
+    state.answer = IdentityState.PENDING_UNCLAIMED
+
+    await _open(tenant, name=None)
+
+    assert await _bodies(db, tenant, MessageDirection.OUTBOUND) == [
+        render_greeting(tenant.clinic_name, tenant.clinic_description),
+        EMAIL_REQUEST_MESSAGE,
+    ]
+    conversation = await _conversation(db)
+    assert conversation.flow_state == FlowState.AWAITING_EMAIL
+    async with db() as session:
+        patient = await session.scalar(select(Patient))
+    assert patient is not None and patient.lgpd_accepted_at is None
+    assert await _consent_kinds(db) == ["first_contact_service"]
+
+
+@pytest.mark.parametrize("answer", [IdentityState.UNKNOWN, IdentityState.UNAVAILABLE])
+async def test_an_undecided_probe_still_falls_back_to_the_consent_notice(db, state, answer) -> None:
+    """Only `verified` skips anything. A brain-api that cannot say gets today's LGPD."""
+    tenant = await _seed_tenant(db)
+    state.answer = answer
+
+    await _open(tenant, name=None)
+
+    outbound = await _bodies(db, tenant, MessageDirection.OUTBOUND)
+    assert outbound[0] == render_greeting(tenant.clinic_name, tenant.clinic_description)
+    assert outbound[1].startswith(LGPD_CONSENT_MESSAGE)
+    assert _menu_body(tenant) not in outbound
+    assert await _consent_kinds(db) == ["first_contact_service"]
 
 
 # --------------------------------------------------------------------------

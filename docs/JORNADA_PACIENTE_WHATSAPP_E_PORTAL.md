@@ -9,8 +9,10 @@ implementar. Cada bloco traz uma marca de status:
   mas o paciente ainda não vê isso na vida real.
 - **(não existe ainda)** — não há nenhum código para isso; é só intenção de produto.
 
-Datado em 2026-09-20. Este arquivo descreve o estado real verificado nesta data — releia antes
-de confiar nele para decisões novas, porque cada rodada de trabalho muda esse mapa.
+Datado em 2026-09-20, corrigido em 2026-09-23 (pergunta do nome marcada como no ar; seção de
+convênio adicionada — faltava por completo). Este arquivo descreve o estado real verificado na
+data da última correção — releia antes de confiar nele para decisões novas, porque cada rodada de
+trabalho muda esse mapa.
 
 ---
 
@@ -40,10 +42,11 @@ A mensagem sempre deixa explícito pra qual endereço o código foi (mascarado, 
 inteiro: `a***a@gmail.com`), porque a pessoa pode ter digitado errado e precisa saber pra qual
 caixa olhar.
 
-### Passo que falta em QUALQUER canal (não existe ainda)
-Hoje a secretarIA nunca pergunta explicitamente "como posso te chamar?" — no WhatsApp ela usa
-direto o nome de perfil do contato, que às vezes é um apelido, o nome de outra pessoa da
-família, ou um emoji. Isso nunca foi corrigido; é só uma ideia de produto ainda.
+### Pergunta do nome (no ar, desde 2026-09-21)
+A secretarIA pergunta explicitamente "Prazer! Qual o seu nome?" nos dois canais — no WhatsApp,
+sempre no primeiro contato (o `profile.name` do Meta não é usado, por não ser confiável); no
+Portal, só no ramo em que o e-mail é de fato novo (entre o e-mail e o LGPD — quem já tem conta
+pula direto pro pedido de código). Ver `docs/CHECKPOINT_abertura_pergunta_nome.md`.
 
 ---
 
@@ -68,6 +71,16 @@ vai ser atendido. Não existe pergunta nem fluxo pra marcar consulta pra outra p
 filho marcando pra a mãe), nem a frase de autorização que isso exigiria ("ao informar os dados
 de [nome], você confirma que tem autorização para compartilhar essas informações com a
 clínica"). É só proposta de produto.
+
+### Convênio (no ar, quando a clínica ativa — mesma lógica nos dois canais)
+Depois de confirmar o serviço, se a clínica ligou "perguntar convênio" e cadastrou pelo menos um
+plano aceito, a secretarIA pergunta "Você vai usar convênio?" com uma lista: os planos da clínica
++ "Particular" + "Outro convênio" (que abre uma pergunta de texto livre com o nome do plano). A
+resposta é **só informativa** — carimbada no agendamento pra a recepção ver, mas nunca filtra
+médico, serviço, preço ou horário disponível; hoje não existe verificação de elegibilidade nem
+preço diferente por convênio. Vale pra clínica com um médico só ou vários — não é recurso
+multi-profissional. **(Adicionado a este mapa em 2026-09-23 — já estava no ar e não constava aqui;
+ver `flow_router.py::_enter_insurance`/`_handle_insurance`.)**
 
 ### Pagamento (sinal pelo Pix) — (no ar, quando a clínica ativa)
 Cada clínica decide se cobra sinal pra confirmar a consulta, e se é 100% do valor ou uma

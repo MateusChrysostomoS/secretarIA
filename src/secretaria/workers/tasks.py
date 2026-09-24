@@ -211,6 +211,7 @@ from secretaria.services.pending_identity import (
     RequestCodeOutcome,
     RequestCodeResult,
     VerifyOutcome,
+    VerifyResult,
     booking_gate_body,
     booking_gate_reprompt_body,
     claim_email,
@@ -220,6 +221,7 @@ from secretaria.services.pending_identity import (
     parse_code,
     parse_email,
     probe_identity,
+    report_name,
     request_code,
     verify_code,
 )
@@ -1150,7 +1152,7 @@ async def _route_inbound_turn(
         # must not become a loop whose only exit is a button (the invariant in
         # the `conversation-flow-state` skill).
         conversation.reactivation_origin = None
-        late_name = parse_patient_name(body)
+        late_name = parse_patient_name(body, not_names=_menu_vocabulary(tenant))
         if late_name is not None:
             patient.name = late_name
             logger.info(
@@ -1191,7 +1193,9 @@ async def _route_inbound_turn(
         # A direct answer first; a self-introduction inside a longer sentence
         # ("meu nome é Ana, tudo bem?") second, through the same extractor the
         # opportunistic capture above uses.
-        name = parse_patient_name(body) or extract_patient_name(body)
+        name = parse_patient_name(body, not_names=_menu_vocabulary(tenant)) or extract_patient_name(
+            body
+        )
         if name is None and conversation.flow_step != NAME_REASKED_STEP:
             conversation.flow_step = NAME_REASKED_STEP
             return _ReplyContext(
@@ -1703,6 +1707,20 @@ async def _route_inbound_turn(
         greeting_override=greeting_override,
         greeting_buttons=greeting_buttons,
     )
+
+
+def _menu_vocabulary(tenant: Tenant) -> list[str]:
+    """Every menu label this clinic can show — never a name (`parse_patient_name`).
+
+    Both menus (single- and multi-doctor) and the manage label, because the name
+    question can be answered after either was seen, and a clinic may rename all
+    of them in `initial_flows`.
+    """
+    return [
+        *menu_buttons_for(tenant, False),
+        *menu_buttons_for(tenant, True),
+        manage_label(tenant),
+    ]
 
 
 def _asks_name_at_first_contact(channel: str, patient: Patient, is_returning_patient: bool) -> bool:
@@ -3125,8 +3143,31 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
 
     if reply.name_captured:
         # The name (if any) is already on `Patient.name`, committed with the
-        # inbound. Consent is next, on every channel — the same notice, with
-        # the same button, that followed the greeting before this step existed.
+        # inbound. On the Portal it also goes to brain-api, which keeps it for
+        # the next clinic this ACCOUNT opens (`report_name`); best effort, after
+        # the commit, so a failure costs one future question and nothing now.
+        if (
+            reply.channel == CHANNEL_BRAIN_MESSAGE
+            and reply.tenant_id is not None
+            and (patient_name or "").strip()
+        ):
+            await report_name(reply.tenant_id, reply.patient_ref, patient_name)
+        if not patient_owes_consent:
+            # A verified account asked for its name at a clinic it had never
+            # talked to (`_handle_pre_consent_identity`): consent was mirrored
+            # from the account before the question, so the menu is next.
+            await _handle_show_main_menu(
+                reply,
+                tenant,
+                flow_professionals,
+                patient_wa,
+                redis=redis,
+                waba_token=waba_token,
+                source="name_captured",
+            )
+            return
+        # Consent is next, on every channel — the same notice, with the same
+        # button, that followed the greeting before this step existed.
         await _send_consent_notice(reply, tenant=tenant, waba_token=waba_token)
         return
 
@@ -3178,11 +3219,10 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
         return
 
     if reply.pending_code is not None:
-        result = VerifyOutcome.UNAVAILABLE
+        verification = VerifyResult(VerifyOutcome.UNAVAILABLE)
         if reply.tenant_id is not None:
-            result = (
-                await verify_code(reply.tenant_id, reply.patient_ref, reply.pending_code)
-            ).outcome
+            verification = await verify_code(reply.tenant_id, reply.patient_ref, reply.pending_code)
+        result = verification.outcome
         if patient_owes_consent and result is not VerifyOutcome.INVALID:
             # The KNOWN-ADDRESS code, asked before consent. No hold, no
             # appointment: success makes this a verified account, which is
@@ -3198,6 +3238,7 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                 professionals=flow_professionals,
                 patient_wa=patient_wa,
                 redis=redis,
+                account_name=verification.patient_name,
             )
             return
         if result is VerifyOutcome.VERIFIED:
@@ -5585,6 +5626,7 @@ async def _finish_account_code_before_consent(
     professionals: list | None,
     patient_wa: str | None,
     redis,
+    account_name: str | None = None,
 ) -> None:
     """Close the known-address code wait (anything but a wrong code).
 
@@ -5594,6 +5636,10 @@ async def _finish_account_code_before_consent(
     (`account_terms_verified`) and opens the menu. If that cannot be recorded
     the local LGPD notice goes out instead: a verified remote account never
     justifies skipping a local gate we failed to persist.
+
+    `account_name` is the name brain-api returned with the verification (the
+    account gave it at another clinic). Written first, so the identity branch
+    finds it and does not ask a known person their name.
     """
     if tenant is None:
         return
@@ -5602,6 +5648,8 @@ async def _finish_account_code_before_consent(
             reply, tenant=tenant, waba_token=waba_token, event="existing_account_code_failed"
         )
         return
+    if account_name:
+        await _adopt_account_name(reply.conversation_id, account_name)
     await _write_flow_state(reply.conversation_id, FlowState.IDLE)
     await _send_plain_reply(
         reply,
@@ -5826,6 +5874,60 @@ async def _record_verified_account_consent(conversation_id: UUID | None) -> bool
         return False
 
 
+async def _conversation_patient_has_name(conversation_id: UUID | None) -> bool:
+    """Whether this conversation's Patient row already carries a name.
+
+    A read failure answers True — i.e. "do not ask": the name is a courtesy the
+    flow can live without (`services/patient_name.py`), so an unreadable row
+    must not park a verified account in a question it may already have answered.
+    """
+    if conversation_id is None:
+        return True
+    try:
+        async with async_session_factory() as session:
+            conversation = await session.get(Conversation, conversation_id)
+            if conversation is None or conversation.patient_id is None:
+                return True
+            patient = await session.get(Patient, conversation.patient_id)
+            return patient is None or bool((patient.name or "").strip())
+    except Exception as exc:
+        logger.warning(
+            "patient_name_read_failed",
+            error_type=type(exc).__name__,
+            conversation_id=str(conversation_id),
+        )
+        return True
+
+
+async def _adopt_account_name(conversation_id: UUID | None, name: str) -> None:
+    """Put the account's name on this conversation's Patient row, if it has none.
+
+    Only ever called with a name brain-api returned for a PROVEN account (the
+    verification of the known-address code). Never overwrites: a name typed here
+    is the patient's own and outranks one learned from another clinic. Written
+    to `Patient.name` and nowhere else, so the pseudonymizer masks it like any
+    other (`services/patient_name.py`). A failed write is logged and swallowed:
+    the worst case is that the name is asked once.
+    """
+    if conversation_id is None:
+        return
+    try:
+        async with async_session_factory() as session:
+            async with session.begin():
+                conversation = await session.get(Conversation, conversation_id)
+                if conversation is None or conversation.patient_id is None:
+                    return
+                patient = await session.get(Patient, conversation.patient_id)
+                if patient is not None and not (patient.name or "").strip():
+                    patient.name = name
+    except Exception as exc:
+        logger.warning(
+            "account_name_write_failed",
+            error_type=type(exc).__name__,
+            conversation_id=str(conversation_id),
+        )
+
+
 async def _handle_pre_consent_identity(
     reply: _ReplyContext,
     *,
@@ -5860,6 +5962,22 @@ async def _handle_pre_consent_identity(
         # Fail closed on the local audit write: a verified remote account does
         # not justify bypassing a local gate we failed to persist.
         return False
+    if not await _conversation_patient_has_name(reply.conversation_id):
+        # The clinic needs the name — the calendar event's title, the
+        # professional's e-mail, the PreCheck hand-off (owner, 2026-09-24).
+        # brain-api sends it on the `open` when the ACCOUNT already gave one at
+        # another clinic, and then this is skipped; otherwise it is asked once,
+        # here, and still no e-mail and no code. The answer leaves AWAITING_NAME
+        # through `name_captured`, which sends a consented patient to the menu.
+        await _write_flow_state(reply.conversation_id, FlowState.AWAITING_NAME)
+        await _send_plain_reply(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            body=NAME_REQUEST_MESSAGE,
+            event="verified_account_name_requested",
+        )
+        return True
     await _handle_show_main_menu(
         reply,
         tenant,

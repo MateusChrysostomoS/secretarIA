@@ -431,6 +431,16 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
   `docs/CHECKPOINT_abertura_pergunta_nome.md`.** O ramo "e-mail já cadastrado" reaproveita
   `AWAITING_EMAIL_CODE`/`verify_code` (a diferença é decidida por consentimento, não por estado
   novo); skill nova `TECH/.claude/skills/pii-field-capture-pseudonymization/`.
+- `z_prompts/PLANO_BRAIN_MESSAGE_ENTRAR_TAMBEM_SESSAO_ATIVA.md` (raiz de BRAIN, gerado 2026-09-24) —
+  paciente com sessão de conta ativa no Portal pula e-mail/código ao abrir clínica nova; parte 2/3
+  deste repo é `z_prompts/PROMPT_BRAIN_MESSAGE_ENTRAR_TAMBEM_2_SECRETARIA.md` (depende da parte 1,
+  brain-api). **Parte 2 EXECUTADA 2026-09-24 — BUILT, uncommitted, não deployada.** `open` →
+  probe `verified` → frame + menu, sem e-mail/código. **Nome (decisão do dono, mesma data — a
+  clínica precisa dele no evento e no fluxo):** vem do brain-api no `open`/na verificação do código
+  quando a conta já tem; senão é perguntado UMA vez (frame → nome → menu, sem LGPD) e reportado ao
+  brain-api (`services/pending_identity.py::report_name`). Deploy: migração `0024` → brain-api →
+  API + worker. Provas, decisões e a correção do parser (aceitava "Serviços e Custo" como nome; agora recusa o vocabulário do menu e os botões da clínica, nos 2 canais) em
+  `docs/CHECKPOINT_portal_conta_ativa_abre_clinica.md`.
 - `z_prompts/PROMPT_PORTAL_CALENDARIO_COMPONENTE.md` (raiz de BRAIN, gerado 2026-09-20) —
   calendário clicável só no Portal (WhatsApp continua mês→dia→horário), substituindo a
   sequência de telas de chat na escolha de data. **NÃO EXECUTADO ainda.**
@@ -438,6 +448,29 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
   prova de conceito (1 clínica de teste, sem produção) de WhatsApp Flow como o mesmo
   calendário dentro do WhatsApp; decide se vale o custo operacional por clínica (chave
   RSA por WABA) antes de abrir um TASK de verdade. **NÃO EXECUTADO ainda.**
+- `z_prompts/PROMPT_CONVENIO_CATALOGO_ACEITACAO_1_SECRETARIA.md` (raiz de BRAIN, gerado
+  2026-09-23 via `/prompt-generator`) — catálogo canônico global de convênios (pesquisa web:
+  Unimed, Amil, Bradesco Saúde, SulAmérica, Hapvida, NotreDame Intermédica, Porto Seguro Saúde,
+  Golden Cross, Prevent Senior, CASSI e similares), substituindo `Tenant.insurances` (texto
+  livre) por uma tabela canônica compartilhada entre tenants; aceitação de convênio por
+  profissional (subconjunto do que a clínica habilitou); reordena o fluxo determinístico de
+  agendamento para convênio → profissional (mostrando todos, com marcação de quem aceita) →
+  serviço → data → horário — hoje é serviço → profissional (só quando >1 oferece o serviço) →
+  confirmação → convênio → dia. Cita `flow_router.py::_enter_insurance`/`_handle_insurance`/
+  `_insurance_step_skip_reason`/`_match_insurance_plan` (linhas ~1749-1863) e confirma que
+  `PROMPT_FIX_19_SINGLE_PRO_INSURANCE.md` (`z_prompts/debug_secretaria_producao/`) já foi
+  executado (o próprio docstring de `_insurance_step_skip_reason` narra a correção). Parte 1/2
+  — parte 2 é `..._2_SECRETARIA_FRONTEND.md`, no `secretarIA-frontend`. **NÃO EXECUTADO ainda.**
+  Coordenar com o prompt abaixo antes de rodar (mesma região de `flow_router.py`).
+- `z_prompts/PROMPT_AGENDAR_PARA_TERCEIRO_SECRETARIA.md` (raiz de BRAIN, gerado 2026-09-23 via
+  `/prompt-generator`) — "Essa consulta é pra você?": permite marcar consulta para outra pessoa,
+  com a frase de autorização já redigida em `docs/JORNADA_PACIENTE_WHATSAPP_E_PORTAL.md` §2
+  ("ao informar os dados de [nome], você confirma que tem autorização para compartilhar essas
+  informações com a clínica") exigida antes de coletar/usar os dados de quem vai ser atendido.
+  Coluna nova em `Appointment` para o nome do atendido, `ConsentEvent` de auditoria, skill
+  `pii-field-capture-pseudonymization` para a captura de PII de terceiro. **NÃO EXECUTADO
+  ainda.** Coordenar com o prompt acima antes de rodar (mesma região de `flow_router.py`) —
+  prefira rodar este primeiro, a pergunta "pra você?" fica mais externa na ordem final.
 
 ## graphify
 

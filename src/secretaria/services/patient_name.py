@@ -41,6 +41,8 @@ way.
 """
 
 import re
+import unicodedata
+from collections.abc import Iterable
 
 # ---------------------------------------------------------------------------
 # Copy (pure)
@@ -215,8 +217,65 @@ _NOT_A_NAME = frozenset(
         "pra",
         "com",
         "sem",
+        # The product's own menu and flow vocabulary (`services/flow_router.py`:
+        # DEFAULT_MENU_BUTTONS, the multi-doctor trio, the convênio rows). A patient
+        # who answers the name question with what they WANT ("Serviços e Custo",
+        # "Outro") was accepted as "Serviços e Custo" until 2026-09-24 — and since
+        # the same day a Portal name follows the ACCOUNT to its next clinics, so a
+        # wrong one would no longer stay in one conversation. A clinic's CUSTOM
+        # labels are refused by the caller through `not_names`.
+        "outro",
+        "outra",
+        "outros",
+        "serviço",
+        "servico",
+        "serviços",
+        "servicos",
+        "custo",
+        "custos",
+        "preço",
+        "preco",
+        "exame",
+        "exames",
+        "procedimento",
+        "procedimentos",
+        "escolher",
+        "médico",
+        "medico",
+        "médica",
+        "medica",
+        "profissional",
+        "particular",
+        "convênio",
+        "convenio",
+        "desmarcar",
+        "reagendar",
+        "informação",
+        "informacao",
+        "informações",
+        "informacoes",
+        "endereço",
+        "endereco",
+        "preparo",
+        "opção",
+        "opcao",
+        "opções",
+        "opcoes",
+        "confirmar",
     }
 )
+
+
+def _label_key(text: str | None) -> str:
+    """A button label or an answer reduced to its letters, for equality only.
+
+    Case, accents, emoji decorations ("✅ Sim") and punctuation are dropped, so a
+    typed "servicos e custo" matches the button "Serviços e Custo".
+    """
+    decomposed = unicodedata.normalize("NFKD", (text or "").casefold())
+    letters = "".join(c if c.isalpha() else " " for c in decomposed if not unicodedata.combining(c))
+    return " ".join(letters.split())
+
 
 # Name particles stay lowercase inside a name ("Maria da Silva"), but a name
 # never STARTS with one.
@@ -236,8 +295,12 @@ def _title(word: str) -> str:
     return "'".join(part[:1].upper() + part[1:] for part in word.split("'"))
 
 
-def parse_patient_name(body: str | None) -> str | None:
+def parse_patient_name(body: str | None, not_names: Iterable[str] = ()) -> str | None:
     """The name in a direct answer to "qual é o seu nome?", normalized — or None.
+
+    `not_names`: labels the caller knows are not names — the clinic's own menu
+    buttons (`workers/tasks.py` passes them). An answer equal to one of them,
+    ignoring case, accents and emoji, is refused.
 
     Pure. The rule, chosen for a DIRECT answer rather than for prose:
 
@@ -266,6 +329,10 @@ def parse_patient_name(body: str | None) -> str | None:
         return None
     # A question or a list is never a name ("sou a Maria, e você?").
     if "?" in text or "," in text:
+        return None
+    # A button of this clinic's menu, typed or tapped, is what they want, not who they are.
+    answer_key = _label_key(text)
+    if any(answer_key == _label_key(label) for label in not_names):
         return None
     stripped = _INTRO_RE.sub("", text, count=1)
     introduced = stripped != text

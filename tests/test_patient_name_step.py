@@ -134,6 +134,10 @@ class _Calls:
         # What the NEXT claim answers; tests flip it to "already an account".
         self.claim_result = ClaimResult(ClaimOutcome.CLAIMED)
         self.probe_states: list[IdentityState] = []
+        # The name brain-api returns with a verified code (the ACCOUNT's, from
+        # another clinic), and every name this side reported back to it.
+        self.account_name: str | None = None
+        self.reported: list[tuple] = []
 
 
 @pytest.fixture
@@ -206,12 +210,19 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db, calls):
 
     async def _verify(tenant_id, external_id, code):
         calls.verified.append(code)
-        return VerifyResult(VerifyOutcome.VERIFIED if code == "123456" else VerifyOutcome.INVALID)
+        if code != "123456":
+            return VerifyResult(VerifyOutcome.INVALID)
+        return VerifyResult(VerifyOutcome.VERIFIED, patient_name=calls.account_name)
 
     async def _request(tenant_id, external_id):
         calls.code_requests.append(external_id)
         return RequestCodeResult(RequestCodeOutcome.SENT, email_masked=EMAIL_MASKED)
 
+    async def _report(tenant_id, external_id, name):
+        calls.reported.append((external_id, name))
+        return True
+
+    monkeypatch.setattr(tasks, "report_name", _report)
     monkeypatch.setattr(tasks, "probe_identity", _probe)
     monkeypatch.setattr(tasks, "claim_email", _claim)
     monkeypatch.setattr(tasks, "verify_code", _verify)
@@ -336,12 +347,64 @@ async def _age_conversation(db, tenant: Tenant, minutes: int) -> None:
         ("Eh isso", None),
         ("Ana, tudo bem?", None),
         ("Maria Clara da Silva Santos", "Maria Clara da Silva Santos"),
+        # The menu's own words (2026-09-24): what the patient wants, not who they are.
+        ("Serviços e Custo", None),
+        ("servicos e custo", None),
+        ("Outro", None),
+        ("Escolher médico", None),
+        ("Escolher serviço", None),
+        ("Particular", None),
+        ("Outro convênio", None),
+        # ... without catching real names that merely CONTAIN one of those words.
+        ("Custódio Lima", "Custódio Lima"),
+        ("Outília Souza", "Outília Souza"),
         ("", None),
         (None, None),
     ],
 )
 def test_parse_patient_name(raw, expected) -> None:
     assert parse_patient_name(raw) == expected
+
+
+def test_a_clinics_custom_menu_label_is_never_a_name() -> None:
+    """Labels come from `initial_flows`; matched ignoring case, accents and emoji."""
+    # Labels that WOULD pass as a name without `not_names` (no refused word in them).
+    labels = ["Lentes Esclerais", "✅ Harmonização"]
+    assert parse_patient_name("Lentes Esclerais") == "Lentes Esclerais"
+
+    assert parse_patient_name("lentes esclerais", not_names=labels) is None
+    assert parse_patient_name("Harmonizacao", not_names=labels) is None
+    # Only the WHOLE answer: a real name is not refused for sharing a word.
+    assert parse_patient_name("Ana Lentes", not_names=labels) == "Ana Lentes"
+
+
+async def test_whatsapp_a_menu_label_as_the_name_answer_is_reasked(db, calls) -> None:
+    """The live symptom: "Serviços e Custo" answered to "qual é o seu nome?"."""
+    tenant = await _seed_tenant(db)
+    await _wa_turn(tenant, "oi")
+
+    await _wa_turn(tenant, "Serviços e Custo")
+
+    assert _WireClient.sends[-1] == ("text", NAME_INVALID_MESSAGE, None)
+    assert (await _patient(db, tenant, CHANNEL_WHATSAPP)).name == PROFILE_NAME
+    assert (await _conversation(db, tenant)).flow_state == FlowState.AWAITING_NAME
+
+
+async def test_portal_a_custom_menu_label_as_the_name_answer_is_reasked(db, calls) -> None:
+    """A clinic's own button text is refused too, and nothing reaches brain-api."""
+    tenant = await _seed_tenant(db)
+    async with db() as session:
+        async with session.begin():
+            row = await session.get(Tenant, tenant.id)
+            row.initial_flows = {**(row.initial_flows or {}), "buttons": ["Lentes Esclerais"]}
+    await _bm_turn(tenant, "oi")
+    await _bm_turn(tenant, EMAIL)
+
+    await _bm_turn(tenant, "lentes esclerais")
+
+    assert (await _outbound(db, tenant))[-1] == NAME_INVALID_MESSAGE
+    assert (await _patient(db, tenant, CHANNEL_BRAIN_MESSAGE)).name is None
+    assert calls.reported == []
 
 
 def test_the_known_address_card_names_the_mask_and_no_consultation() -> None:
@@ -434,6 +497,8 @@ async def test_whatsapp_first_contact_asks_the_name_even_with_a_profile_name(db,
     # CHECKLIST: WhatsApp gained no e-mail step — the identity leg is untouched.
     bodies = [body for _kind, body, _buttons in _WireClient.sends]
     assert EMAIL_REQUEST_MESSAGE not in bodies
+    # ... and never reports the name to brain-api: WhatsApp has no Portal account.
+    assert calls.reported == []
     assert NAME_REQUEST_AFTER_EMAIL_MESSAGE not in bodies
     assert (calls.probed, calls.claimed, calls.code_requests, calls.verified) == ([], [], [], [])
 
@@ -612,6 +677,8 @@ async def test_portal_new_email_asks_the_name_before_the_lgpd(db, calls) -> None
 
     sent = await _outbound(db, tenant)
     assert sent[3] == LGPD_ROW
+    # Portal: the typed name also goes to brain-api, for this account's next clinic.
+    assert calls.reported == [(EXTERNAL_ID, "Beatriz Lima")]
     assert (await _patient(db, tenant, CHANNEL_BRAIN_MESSAGE)).name == "Beatriz Lima"
     assert (await _conversation(db, tenant)).flow_state == FlowState.IDLE
 
@@ -640,7 +707,10 @@ async def test_portal_known_email_skips_the_name_and_asks_the_code(db, calls) ->
     assert (await _conversation(db, tenant)).flow_state == FlowState.AWAITING_EMAIL_CODE
 
     # The right code makes the visit a verified account: the account's consent
-    # is mirrored (never forged as a click here) and the menu opens.
+    # is mirrored (never forged as a click here) and the menu opens. brain-api
+    # returns the name the ACCOUNT gave at another clinic (2026-09-24), so the
+    # known person is still not asked it — and the clinic has it.
+    calls.account_name = "Maria Silva"
     calls.probe_states = [IdentityState.VERIFIED]
     await _bm_turn(tenant, "123456")
 
@@ -648,12 +718,42 @@ async def test_portal_known_email_skips_the_name_and_asks_the_code(db, calls) ->
     assert calls.verified == ["123456"]
     assert CODE_ACCEPTED_MESSAGE in sent
     assert sent[-1].startswith("Como posso te ajudar?")
+    assert NAME_REQUEST_MESSAGE not in sent
     patient = await _patient(db, tenant, CHANNEL_BRAIN_MESSAGE)
     assert patient.lgpd_accepted_at is not None
-    assert patient.name is None, "a known visitor is not asked, so nothing is invented"
+    assert patient.name == "Maria Silva"
+    assert calls.reported == [], "a name learned from brain-api is not sent back to it"
     async with db() as session:
         kinds = (await session.scalars(select(ConsentEvent.kind))).all()
     assert "account_terms_verified" in kinds
+    assert (await _conversation(db, tenant)).flow_state == FlowState.MENU
+
+
+async def test_portal_known_email_whose_account_has_no_name_is_asked_it_after_the_code(
+    db, calls
+) -> None:
+    """The clinic needs the name (owner, 2026-09-24): asked once, then the menu — no LGPD."""
+    calls.claim_result = ClaimResult(
+        ClaimOutcome.CLAIMED, account_exists=True, email_masked=EMAIL_MASKED
+    )
+    tenant = await _seed_tenant(db)
+    await _bm_turn(tenant, "oi")
+    await _bm_turn(tenant, EMAIL)
+    calls.probe_states = [IdentityState.VERIFIED]
+
+    await _bm_turn(tenant, "123456")
+
+    sent = await _outbound(db, tenant)
+    assert sent[-2:] == [CODE_ACCEPTED_MESSAGE, NAME_REQUEST_MESSAGE]
+    assert (await _conversation(db, tenant)).flow_state == FlowState.AWAITING_NAME
+
+    await _bm_turn(tenant, "Maria Silva")
+
+    sent = await _outbound(db, tenant)
+    assert sent[-1].startswith("Como posso te ajudar?")
+    assert LGPD_ROW not in sent
+    assert (await _patient(db, tenant, CHANNEL_BRAIN_MESSAGE)).name == "Maria Silva"
+    assert calls.reported == [(EXTERNAL_ID, "Maria Silva")]
     assert (await _conversation(db, tenant)).flow_state == FlowState.MENU
 
 

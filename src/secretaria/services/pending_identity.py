@@ -606,9 +606,16 @@ class ClaimResult:
 
 @dataclass(frozen=True)
 class VerifyResult:
-    """The outcome of one `verify_code` call."""
+    """The outcome of one `verify_code` call.
+
+    `patient_name` (2026-09-24): the name the proven address's ACCOUNT already
+    gave at another clinic, when brain-api has one — so a known person who typed
+    their e-mail here is not asked their name again. Best effort: absent from an
+    older brain-api, and never a reason to change the outcome.
+    """
 
     outcome: VerifyOutcome
+    patient_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -709,6 +716,39 @@ async def probe_identity(tenant_id: UUID, external_id: str) -> IdentityState:
         return IdentityState.UNKNOWN
     logger.info("pending_identity_probed", state=state.value, tenant_id=str(tenant_id))
     return state
+
+
+async def report_name(tenant_id: UUID, external_id: str, name: str) -> bool:
+    """Hand the name this conversation just captured to brain-api. Best effort.
+
+    brain-api keeps it on the clinic identity so that, when the same ACCOUNT is
+    later added to another clinic, it can send the name in that clinic's
+    `POST /internal/brain-message/open` (`patient_name`) and the patient is not
+    asked again (owner, 2026-09-24: the clinic needs the name for the calendar
+    event and the flow messages). The link between clinics is the account
+    brain-api already owns — this side never looks a name up by any attribute.
+
+    Never raises and never blocks the turn: a name brain-api did not get only
+    means the next clinic asks for it once. The name is PII and is not logged.
+    """
+    response = await _post(
+        "/internal/brain-message/patient-name",
+        {"tenant_id": str(tenant_id), "external_id": external_id, "name": name},
+        tenant_id=tenant_id,
+        event="patient_name_report",
+    )
+    if response is None:
+        return False
+    if response.status_code != 200:
+        logger.warning(
+            "patient_name_report_failed",
+            reason="unexpected_status",
+            status_code=response.status_code,
+            tenant_id=str(tenant_id),
+        )
+        return False
+    logger.info("patient_name_reported", tenant_id=str(tenant_id))
+    return True
 
 
 async def claim_email(tenant_id: UUID, external_id: str, email: str) -> ClaimResult:
@@ -862,4 +902,15 @@ async def verify_code(tenant_id: UUID, external_id: str, code: str) -> VerifyRes
         )
         return VerifyResult(VerifyOutcome.UNAVAILABLE)
     logger.info("pending_code_verified", tenant_id=str(tenant_id))
-    return VerifyResult(VerifyOutcome.VERIFIED)
+    return VerifyResult(VerifyOutcome.VERIFIED, patient_name=_patient_name_field(response))
+
+
+def _patient_name_field(response: httpx.Response) -> str | None:
+    """`patient_name` from a verify body, or None. Never raises; never logs the value."""
+    try:
+        value = response.json().get("patient_name")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()[:255]

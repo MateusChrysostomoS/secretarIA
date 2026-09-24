@@ -10,6 +10,9 @@ Nada daquela ordem foi reescrito — as três peças abaixo só acrescentam gati
 
 ## 1. `POST /internal/brain-message/open` — a conversa nasce sem inbound
 
+> **2026-09-24:** conta ativa do Portal abrindo clínica nova (probe `verified`) → frame + menu, sem
+> e-mail/código/nome — provado em `CHECKPOINT_portal_conta_ativa_abre_clinica.md`.
+
 **O que existia.** `Conversation` tinha um único construtor em `src/`
 (`workers/tasks.py::_get_or_create_conversation`) e um único caminho até ele,
 `_route_inbound_turn`, alcançado apenas por `POST /internal/brain-message/inbound`. Consequência:
