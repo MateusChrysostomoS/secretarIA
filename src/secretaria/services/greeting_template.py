@@ -100,7 +100,7 @@ CONSENT_EVENT_KIND = "terms_accepted"
 # checking the command still exists — advertising an escape hatch that does
 # nothing is worse than not advertising one.
 GREETING_FRAME = """\
-👋 Olá! Bem-vindo(a) à {clinic_name}!
+👋 Olá! Bem-vindo(a) à {clinic_name}{patient_suffix}!
 Sou a secretária virtual e cuido dos agendamentos por aqui. 😊
 
 {clinic_description}
@@ -128,7 +128,11 @@ agendamento.
 🚨 Em emergência, não use este canal: procure o pronto-socorro ou ligue 192."""
 
 
-def render_greeting(clinic_name: str | None, clinic_description: str | None) -> str:
+def render_greeting(
+    clinic_name: str | None,
+    clinic_description: str | None,
+    patient_name: str | None = None,
+) -> str:
     """Render the frame for one tenant. Pure; never raises on missing input.
 
     An empty `clinic_description` collapses cleanly: the blank line that would
@@ -136,11 +140,20 @@ def render_greeting(clinic_name: str | None, clinic_description: str | None) -> 
     well-formed greeting rather than a visible hole. An empty `clinic_name`
     degrades to a generic but grammatical opener rather than printing an empty
     placeholder.
+
+    `patient_name` greets the patient by name ("..., Maria!") and is only ever
+    passed on the Portal channel, where the account's name is known before the
+    greeting goes out. None or blank leaves the opener byte-for-byte as it was
+    — never a dangling comma — so the default keeps `clinic_description_budget`
+    and `FRAME_FIXED_CHARS` measuring the no-name frame, which is exactly what
+    WhatsApp (the only channel with the 1024-char cap) always sends.
     """
     name = (clinic_name or "").strip()
     description = (clinic_description or "").strip()
+    patient = (patient_name or "").strip()
     rendered = GREETING_FRAME.format(
         clinic_name=name or "nossa clínica",
+        patient_suffix=f", {patient}" if patient else "",
         clinic_description=description,
     )
     # Collapse the run of blank lines an empty slot leaves behind. Done with a

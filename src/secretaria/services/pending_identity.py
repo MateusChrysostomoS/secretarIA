@@ -174,6 +174,19 @@ CODE_NOTICE_BUTTONS: tuple[tuple[str, str], ...] = (
     (IDENTITY_CHANGE_EMAIL_ACTION, "📩 Mudar e-mail"),
 )
 
+# The pre-consent twin of the card above, for a KNOWN address (`account_exists`,
+# asked before consent — see `workers/tasks.py::_send_code_notice`). "Voltar"
+# is dropped here on purpose (owner, 2026-09-25): its only destination for this
+# card was the LGPD notice — i.e. forward, into the same consent step the
+# patient would reach anyway — which reads to the patient as the button doing
+# nothing. `identity_back` stays a valid id (`_IDENTITY_ACTIONS` below still
+# includes it) because the post-consent/post-booking card still offers it with
+# a real destination (the menu); only THIS card stops offering it.
+EXISTING_ACCOUNT_CODE_BUTTONS: tuple[tuple[str, str], ...] = (
+    (IDENTITY_RESEND_ACTION, "↩️ Reenviar código"),
+    (IDENTITY_CHANGE_EMAIL_ACTION, "📩 Mudar e-mail"),
+)
+
 _IDENTITY_ACTIONS = frozenset(action for action, _ in CODE_NOTICE_BUTTONS)
 
 

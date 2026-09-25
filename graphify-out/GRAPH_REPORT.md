@@ -1,16 +1,16 @@
-# Graph Report - secretarIA  (2026-09-19)
+# Graph Report - secretarIA  (2026-09-25)
 
 ## Corpus Check
-- 315 files · ~406,044 words
+- 332 files · ~455,328 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 7227 nodes · 16819 edges · 579 communities (393 shown, 186 thin omitted)
-- Extraction: 82% EXTRACTED · 18% INFERRED · 0% AMBIGUOUS · INFERRED: 3003 edges (avg confidence: 0.74)
+- 7777 nodes · 18169 edges · 595 communities (412 shown, 183 thin omitted)
+- Extraction: 82% EXTRACTED · 18% INFERRED · 0% AMBIGUOUS · INFERRED: 3209 edges (avg confidence: 0.73)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `b844245d`
+- Built from commit: `7ae484d3`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -446,14 +446,29 @@
 - [[_COMMUNITY__RescheduleDayCalendar|_RescheduleDayCalendar]]
 - [[_COMMUNITY_test_live_and_terminal_partition_the_enum|test_live_and_terminal_partition_the_enum]]
 - [[_COMMUNITY_test_send_simple_text_requires_an_explicit_client|test_send_simple_text_requires_an_explicit_client]]
+- [[_COMMUNITY__FakeCalendar|_FakeCalendar]]
+- [[_COMMUNITY__FakeCalendarService|_FakeCalendarService]]
 - [[_COMMUNITY_Map the raw decision onto the outcome the router acts on.      Malformed combina|Map the raw decision onto the outcome the router acts on.      Malformed combina]]
 - [[_COMMUNITY_One scoped-help turn for which professional fits my case.      `professionals|One scoped-help turn for "which professional fits my case?".      `professionals]]
 - [[_COMMUNITY_One scoped-help turn for which service fits what I need.      `services` is t|One scoped-help turn for "which service fits what I need?".      `services` is t]]
+- [[_COMMUNITY_CHECKPOINT — Onda 4 jornada sem gate ponta a ponta (E2E, sem PreCheck)|CHECKPOINT — Onda 4: jornada sem gate ponta a ponta (E2E, sem PreCheck)]]
 - [[_COMMUNITY_Build (once) the structured-output model both nodes share.      Same knobs as ai|Build (once) the structured-output model both nodes share.      Same knobs as ai]]
 - [[_COMMUNITY_Lista eventos que conflitam com o intervalo start, end) no calendário     da c|Lista eventos que conflitam com o intervalo [start, end) no calendário     da c]]
+- [[_COMMUNITY_FakeRedis|FakeRedis]]
+- [[_COMMUNITY__FakeWhatsAppClient|_FakeWhatsAppClient]]
+- [[_COMMUNITY__canonical_appointment_type|_canonical_appointment_type]]
 - [[_COMMUNITY_A patient, identified by their WhatsApp id (wa_id) within a tenant.|A patient, identified by their WhatsApp id (wa_id) within a tenant.]]
+- [[_COMMUNITY_lifespan|lifespan]]
+- [[_COMMUNITY__conversation_snapshot|_conversation_snapshot]]
+- [[_COMMUNITY__FakeArqPool|_FakeArqPool]]
+- [[_COMMUNITY_booking_gate_body|booking_gate_body]]
 - [[_COMMUNITY_Return the human-readable text body of an inbound message.      Handles text m|Return the human-readable text body of an inbound message.      Handles text m]]
 - [[_COMMUNITY_Persist one outbound message. Returns the empty send response.          `{}` o|Persist one outbound message. Returns the empty send response.          `{}` o]]
+- [[_COMMUNITY_c1d4a8e6f2b0_message_interactive_null_backfill.py|c1d4a8e6f2b0_message_interactive_null_backfill.py]]
+- [[_COMMUNITY__calendar_for_calendar_id|_calendar_for_calendar_id]]
+- [[_COMMUNITY_iniciar_pre_consulta|iniciar_pre_consulta]]
+- [[_COMMUNITY__no_entitlement_calls|_no_entitlement_calls]]
+- [[_COMMUNITY_booking_hold.py|booking_hold.py]]
 - [[_COMMUNITY_Corrections round Task 2 subject names the test window explicitly;     body|Corrections round "Task 2": subject names the test window explicitly;     body]]
 - [[_COMMUNITY_The bool wrapper collapses both to False. A caller deciding whether to     RETR|The bool wrapper collapses both to False. A caller deciding whether to     RETR]]
 - [[_COMMUNITY_It is the end of the line a failed alert must not become an unhandled     exce|It is the end of the line: a failed alert must not become an unhandled     exce]]
@@ -463,13 +478,13 @@
 - [[_COMMUNITY_The body a prof-row tap produces (see schemas.webhook.extract_inbound_body).|The body a prof-row tap produces (see schemas.webhook.extract_inbound_body).]]
 
 ## God Nodes (most connected - your core abstractions)
-1. `Tenant` - 414 edges
-2. `Conversation` - 179 edges
-3. `Appointment` - 156 edges
-4. `route()` - 144 edges
-5. `Patient` - 130 edges
+1. `Tenant` - 448 edges
+2. `Conversation` - 197 edges
+3. `Appointment` - 160 edges
+4. `Patient` - 147 edges
+5. `route()` - 146 edges
 6. `Professional` - 130 edges
-7. `Base` - 96 edges
+7. `Base` - 105 edges
 8. `get_settings()` - 90 edges
 9. `SlotsBubble` - 84 edges
 10. `TextBubble` - 82 edges
@@ -497,15 +512,15 @@
 - **Entitlement-gated plugin catalog** — plugins_registry, plugins_reminders, plugins_human_backup, plugins_multi_professional, plugins_ehr [EXTRACTED 0.85]
 - **Per-tenant SaaS adaptation** — claudemd_tenant_config, claudemd_secretary_system_prompt, claudemd_encryption_at_rest, claudemd_coexistence_model [INFERRED 0.75]
 
-## Communities (579 total, 186 thin omitted)
+## Communities (595 total, 183 thin omitted)
 
 ### Community 0 - "Appointment"
-Cohesion: 0.11
-Nodes (78): _capture_email(), _capture_events(), _capture_usage(), db(), _fake_list(), _fakes(), _item(), _make_tenant() (+70 more)
+Cohesion: 0.21
+Nodes (42): _capture_email(), _capture_events(), _fake_list(), _item(), _make_tenant(), MonkeyPatch, No next_retry_at scheduled (e.g. already exhausted the window) -> no send., Manual-action blockers are excluded from the eligible population     entirely, (+34 more)
 
 ### Community 1 - "Conversation"
-Cohesion: 0.08
-Nodes (67): _bm_turn(), _booked(), _ctx(), db(), _flow_state(), _inbound(), _outbound(), _patient() (+59 more)
+Cohesion: 0.05
+Nodes (97): _bm_tap(), _bm_turn(), _booked(), _card_state(), _code_notice_row(), _ctx(), db(), _flow_state() (+89 more)
 
 ### Community 2 - "test_reminders_plugin.py"
 Cohesion: 0.12
@@ -517,15 +532,15 @@ Nodes (65): _allow_multi_professional(), _connect_clinic(), db(), _entitled_fake
 
 ### Community 4 - "route"
 Cohesion: 0.08
-Nodes (87): MenuBubble, Decide the next deterministic step for this inbound turn.      `patient_name`, An N-button reply card (the formatter's ButtonBubble is confirm/cancel     only, route(), _appt_window(), _conversation(), _FakeCalendar, Tests for the deterministic flow router (no DB / network). (+79 more)
+Nodes (86): Route one turn with `gate` in scope for every listing/booking branch.      The, Decide the next deterministic step for this inbound turn.      `patient_name`, route(), _appt_window(), _conversation(), _FakeCalendar, Tests for the deterministic flow router (no DB / network)., 12 active services: 9 real rows + the reserved "Não sei" row = 10     (WhatsApp (+78 more)
 
 ### Community 5 - "test_action_buttons.py"
-Cohesion: 0.16
-Nodes (35): _async_return(), db(), _greeting_button_msg(), datetime, Tests for the reminder action-button routing (PROMPT S3 section 3).  Two layer, tenant + patient + conversation + one appointment (no google_event_id     -> _e, total retention + inside window -> CANCELLED_RETAINED needs no PSP     call at, No agenda for the appointment (owner gone, or the build failed): hand to     a (+27 more)
+Cohesion: 0.12
+Nodes (40): _async_return(), db(), _fake_get_waba_token(), _fakes(), _greeting_button_msg(), datetime, MonkeyPatch, Tests for the reminder action-button routing (PROMPT S3 section 3).  Two layer (+32 more)
 
 ### Community 6 - "_send_bot_reply"
-Cohesion: 0.08
-Nodes (51): _claimed(), _ctx(), db(), _make_rows(), _patch_lookup(), Is the ledger key for this appointment currently held?, A PostBookingContext carrying DETACHED rows — what     plugins/post_booking.py:, 17:00 UTC is 14:00 in São Paulo. A doctor reading the server's clock     would (+43 more)
+Cohesion: 0.09
+Nodes (43): _claimed(), _ctx(), db(), _make_rows(), _patch_lookup(), Is the ledger key for this appointment currently held?, A PostBookingContext carrying DETACHED rows — what     plugins/post_booking.py:, 17:00 UTC is 14:00 in São Paulo. A doctor reading the server's clock     would (+35 more)
 
 ### Community 7 - "Professional"
 Cohesion: 0.18
@@ -548,8 +563,8 @@ Cohesion: 0.09
 Nodes (47): history_item_is_final(), True when this `history` chunk signals the sync is FULLY complete.      Three, _CapturingLogger, db(), _history_item(), _history_value(), MonkeyPatch, Tests for the `history` / `smb_app_state_sync` webhook fields (contract v1 §10): (+39 more)
 
 ### Community 12 - "test_hub_units.py"
-Cohesion: 0.17
-Nodes (21): _count_active(), create_unit(), _get_unit(), list_units(), AsyncSession, UUID, Doctor hub — units CRUD (multi_unit addon).  GET   /tenants/me/units      - li, Gate an activate/create-active mutation. Raises HTTPException on failure. (+13 more)
+Cohesion: 0.07
+Nodes (57): _count_active(), create_unit(), _get_unit(), list_units(), AsyncSession, UUID, Doctor hub — units CRUD (multi_unit addon).  GET   /tenants/me/units      - li, Gate an activate/create-active mutation. Raises HTTPException on failure. (+49 more)
 
 ### Community 13 - "test_professional_config.py"
 Cohesion: 0.09
@@ -557,39 +572,39 @@ Nodes (52): can_activate_professional_aware(), load_tenant_config(), professiona
 
 ### Community 14 - "resume_bubbles"
 Cohesion: 0.06
-Nodes (80): classify_yes_no(), llm_state_ttl_minutes(), Re-emit the prompt for the conversation's CURRENT flow step.      Used when a, True when this tenant offers a 'welcome back / continue?' prompt.      A confi, True when the returning "quer continuar?" prompt may be offered.      Universa, Minutes of silence after which a returning patient is offered to resume., Minutes a conversation may sit in ``FlowState.LLM`` before it is dropped., The question appended to the returning greeting (e.g. 'Quer continuar?'). (+72 more)
+Nodes (82): classify_yes_no(), llm_state_ttl_minutes(), Re-emit the prompt for the conversation's CURRENT flow step.      Used when a, True when this tenant offers a 'welcome back / continue?' prompt.      A confi, True when the returning "quer continuar?" prompt may be offered.      Universa, Minutes of silence after which a returning patient is offered to resume., Minutes a conversation may sit in ``FlowState.LLM`` before it is dropped., The question appended to the returning greeting (e.g. 'Quer continuar?'). (+74 more)
 
 ### Community 15 - "test_calendar_unavailable_mapping.py"
-Cohesion: 0.11
-Nodes (37): BaseException, GoogleScopeInsufficientError, _raise_if_scope_insufficient(), A 403 caused by a token that predates a scope this call needs.      Raised by, Translate a scope-insufficient 403 into GoogleScopeInsufficientError.      MUS, _fake_calendars_service(), _http_error(), HttpError (+29 more)
+Cohesion: 0.18
+Nodes (22): BaseException, GoogleTokenRevokedError, Google refused the stored refresh token itself (`invalid_grant`).      A SUBCL, _fake_calendars_service(), MonkeyPatch, RefreshError, Detection-layer contract: every "Google Calendar is broken" mode funnels into a, A minimal fake of the googleapiclient `.calendars().insert(...).execute()`     c (+14 more)
 
 ### Community 16 - "test_analytics_bi_plugin.py"
 Cohesion: 0.07
-Nodes (57): AnalyticsEvent, AnalyticsEvent model - minimal, non-personal usage events (analytics_bi addon)., One minimal, non-personal business event for a tenant., _post_booking(), analytics_bi plugin: record a minimal booking event (post_booking).  Entitleme, db(), _entitled_fake(), _patch_session_factory() (+49 more)
+Nodes (55): AnalyticsEvent, AnalyticsEvent model - minimal, non-personal usage events (analytics_bi addon)., One minimal, non-personal business event for a tenant., db(), _entitled_fake(), _patch_session_factory(), AsyncClient, MonkeyPatch (+47 more)
 
 ### Community 18 - "test_precheck_handoff.py"
-Cohesion: 0.13
-Nodes (40): HandoffResult, The outcome of one `request_precheck_handoff` call., _fresh_settings(), _install_fake_client(), _posted_body(), MonkeyPatch, Tests for services/precheck.py — the precheck hand-off seam.  `request_prechec, The single JSON body this call put on the wire. (+32 more)
+Cohesion: 0.09
+Nodes (55): HandoffResult, The outcome of one `request_precheck_handoff` call., _fresh_settings(), _install_fake_client(), log(), _LogRecorder, _posted_body(), MonkeyPatch (+47 more)
 
 ### Community 19 - "tenant_config.py"
-Cohesion: 0.06
-Nodes (70): decrypt(), encrypt(), EncryptionError, _fernet(), Symmetric encryption for tenant secrets at rest (Fernet / AES-128-CBC + HMAC)., Raised when encryption/decryption cannot be performed., Build the process-wide Fernet from settings.ENCRYPTION_KEY.      Cached so we va, Encrypt `plaintext`, returning a urlsafe-base64 ciphertext string. (+62 more)
+Cohesion: 0.05
+Nodes (82): CalendarCredentialStatus, decrypt(), encrypt(), EncryptionError, _fernet(), Symmetric encryption for tenant secrets at rest (Fernet / AES-128-CBC + HMAC)., Raised when encryption/decryption cannot be performed., Build the process-wide Fernet from settings.ENCRYPTION_KEY.      Cached so we va (+74 more)
 
 ### Community 20 - "test_deposit_lifecycle.py"
-Cohesion: 0.15
-Nodes (41): PixDeposit, One Pix deposit (sinal) charge tied to exactly one appointment., db(), _FailingWhatsAppClient, _install_fake_client(), _install_fake_whatsapp(), AsyncSession, datetime (+33 more)
+Cohesion: 0.18
+Nodes (39): PixDeposit, One Pix deposit (sinal) charge tied to exactly one appointment., db(), _install_fake_client(), _install_fake_whatsapp(), AsyncSession, datetime, MonkeyPatch (+31 more)
 
 ### Community 21 - "TextBubble"
 Cohesion: 0.08
-Nodes (44): ButtonBubble, _clean(), _finalise(), parse(), _parse_slot_rows(), _pop_preceding_text_for(), Bubble, Parse the agent's text output into a sequence of WhatsApp message bubbles.  Th (+36 more)
+Nodes (40): _clean(), _finalise(), parse(), _parse_slot_rows(), _pop_preceding_text_for(), Bubble, Parse the agent's text output into a sequence of WhatsApp message bubbles.  Th, Split a free-text chunk into one or more text bubbles on `---`. (+32 more)
 
 ### Community 22 - "provisioning.py"
-Cohesion: 0.14
-Nodes (17): main(), _parse_args(), Namespace, Wipe dynamic data from the database for clean testing.  By default truncates the, _count(), delete_tenant(), DeleteTenantOutcome, DeleteTenantResult (+9 more)
+Cohesion: 0.07
+Nodes (70): is_name_question(), _label_key(), parse_patient_name(), The explicit "qual é o seu nome?" step, on BOTH channels.  Until this module exi, A button label or an answer reduced to its letters, for equality only.      Case, Title-case one word, keeping hyphenated and apostrophe'd parts apart., The name in a direct answer to "qual é o seu nome?", normalized — or None., Whether an outbound row asked the patient for their name.      Pure. `ai/graph.p (+62 more)
 
 ### Community 23 - "test_onboarding_cadence.py"
-Cohesion: 0.10
-Nodes (37): api(), db(), _ExplodingWhatsAppClient, _FakeArqPool, _inbound_row(), _offer_doctor(), _post_inbound(), MonkeyPatch (+29 more)
+Cohesion: 0.11
+Nodes (38): db(), _ExplodingWhatsAppClient, _inbound_row(), _offer_doctor(), _post_inbound(), MonkeyPatch, Real taps on the patient portal: the Brain-Message twin of a WhatsApp tap.  Orig, Any use at all fails the test: a portal turn must never reach Meta. (+30 more)
 
 ### Community 24 - "test_internal_provisioning.py"
 Cohesion: 0.12
@@ -600,24 +615,24 @@ Cohesion: 0.12
 Nodes (30): _configured_settings(), _FakeAsyncClient, _FakeResponse, _install_fake_client(), Exception, MonkeyPatch, Tests for services/brain_onboarding.py — the onboarding-cron -> brain-api clien, Corrections round "Task 2": once brain-api ships the three test-window     fiel (+22 more)
 
 ### Community 26 - "onboarding_cron.py"
-Cohesion: 0.14
-Nodes (28): Counter, OnboardingTenant, post_onboarding_event(), POST one onboarding event to brain-api. Returns `applied`, or False on     any, One row of brain-api's `GET /internal/onboarding/tenants` response., _month_bounds_utc(), _process_config_reminder(), _process_retry_and_closing() (+20 more)
+Cohesion: 0.10
+Nodes (38): Counter, _item_from_dict(), list_onboarding_tenants(), OnboardingTenant, _parse_dt(), post_onboarding_event(), datetime, UUID (+30 more)
 
 ### Community 27 - "test_email_transactional.py"
 Cohesion: 0.06
-Nodes (46): dict, Email the clinic when a patient could NOT be told their consultation was cancell, `str.format_map` companion that leaves an unknown `{placeholder}` intact     ins, Render `template` with `variables` and send it. NEVER raises.      Returns False, _SafeDict, send_cancellation_escalation_alert(), send_transactional_email_message(), arq job: render + send one onboarding transactional email.      Enqueued by `P (+38 more)
+Nodes (47): dict, Email the clinic when a patient could NOT be told their consultation was cancell, `str.format_map` companion that leaves an unknown `{placeholder}` intact     ins, Render `template` with `variables` and send it. NEVER raises.      Same work as, Render `template` with `variables` and send it. NEVER raises.      Returns False, _SafeDict, send_cancellation_escalation_alert(), send_transactional_email_message() (+39 more)
 
 ### Community 28 - "AsaasClient"
-Cohesion: 0.11
-Nodes (30): AsaasClient, AsaasError, _extract_code_hint(), Response, Thin async client for the Asaas v3 API (Pix deposit charges).  Each tenant suppl, POST /payments (billingType=PIX). `due_date` ("YYYY-MM-DD") is the         calle, GET /payments/{id}/pixQrCode -> {payload, encodedImage, expirationDate, ...}., POST /payments/{id}/refund. `value_cents=None` omits "value" entirely         (A (+22 more)
+Cohesion: 0.07
+Nodes (47): LogCaptureFixture, AsaasClient, AsaasError, _extract_code_hint(), Response, Thin async client for the Asaas v3 API (Pix deposit charges).  Each tenant suppl, POST /payments (billingType=PIX). `due_date` ("YYYY-MM-DD") is the         calle, GET /payments/{id}/pixQrCode -> {payload, encodedImage, expirationDate, ...}. (+39 more)
 
 ### Community 29 - "secretary_system_prompt"
-Cohesion: 0.13
-Nodes (33): _format_appointment_context(), Render the "CONSULTAS MARCADAS DESTE PACIENTE" block, or "" when unset.      `, Render the full system prompt for a specific tenant., secretary_system_prompt(), _config(), Tests for ai/prompts.py: the hardcoded safety/tone block (`_format_safety_rules, load_tenant_config leaves these fields unset for a multi-professional     tenan, Sanity: the professional-context addition must not disturb the     existing hou (+25 more)
+Cohesion: 0.09
+Nodes (44): _format_appointment_context(), _format_appointment_types(), _format_business_hours(), _format_post_consult_knowledge(), _format_professional_context(), _format_safety_rules(), System prompts for the SecretarIA conversational agent.  Lives outside ai/grap, Render the "SOBRE O PROFISSIONAL" block, or "" when nothing is set.      Only (+36 more)
 
 ### Community 30 - "internal_provisioning.py"
-Cohesion: 0.13
-Nodes (32): Conversation, A patient <-> clinic conversation and its handover state., _booking_professional(), _catalog_step(), _confirmation_recap(), _enter_insurance(), _enter_professional_help(), _enter_service_help() (+24 more)
+Cohesion: 0.08
+Nodes (68): Conversation, A patient <-> clinic conversation and its handover state., _booking_duration(), _booking_professional(), _catalog_step(), _enter_professional_help(), _enter_professional_services(), _enter_service_detail() (+60 more)
 
 ### Community 31 - "test_internal.py"
 Cohesion: 0.12
@@ -628,36 +643,36 @@ Cohesion: 0.10
 Nodes (42): _assert_llm_never_called(), _days_from_now(), db(), _fake_get_waba_token(), _fakes(), _FakeWhatsAppClient, _greeting_button_reply(), _make_conversation() (+34 more)
 
 ### Community 33 - "Base"
-Cohesion: 0.07
-Nodes (29): Hard cut with no mark, for fields nothing ever matches against.      Row descr, truncate_plain(), FlowState, Which deterministic (zero-LLM) flow the conversation is currently in.      IDL, parse_code(), parse_email(), The address in `body`, normalized — or None if it does not look like one.      P, The 6-digit code in `body`, or None if the message is not one.      Pure. A None (+21 more)
+Cohesion: 0.05
+Nodes (47): parse_email(), The address in `body`, normalized — or None if it does not look like one., _calendar_for_appointment(), _cancellation_retry_decision(), _claim_event(), _conversation_message_count(), _emit_cancellation_usage(), _escalate_cancellation_failure() (+39 more)
 
 ### Community 34 - "test_hub_calendar_money.py"
-Cohesion: 0.13
-Nodes (24): _connect_calendar(), db(), _FakeArqPool, _FakeCalendarService, _override(), AsyncClient, datetime, MonkeyPatch (+16 more)
+Cohesion: 0.20
+Nodes (22): _connect_calendar(), db(), _FakeArqPool, _override(), AsyncClient, datetime, MonkeyPatch, Tests for api/hub/calendar.py's Pix-deposit money hooks (PROMPT S3 section 4, i (+14 more)
 
 ### Community 35 - "run_agent"
-Cohesion: 0.20
-Nodes (17): BaseMessage, UUID, Scoped LLM helper nodes for the deterministic flow's "Não sei" rows.  Two narr, Last few conversation turns, chronological (graph._load_history's shape)., One scoped-help call, pseudonymized on the way out and back.      This path is, One scoped-help turn for "which professional fits my case?".      `professiona, One scoped-help turn for "which service fits what I need?".      `services` is, The node's decision, already normalized for the flow router.      kind="pick" (+9 more)
+Cohesion: 0.17
+Nodes (19): _get_decision_model(), _professional_help_prompt(), _professional_options_block(), Any, BaseMessage, UUID, Scoped LLM helper nodes for the deterministic flow's "Não sei" rows.  Two narr, Build (once) the structured-output model both nodes share.      Same knobs as (+11 more)
 
 ### Community 36 - "test_hub_config.py"
 Cohesion: 0.08
 Nodes (41): db(), AsyncClient, Tests for api/hub/config.py — PUT /tenants/me/config, focused on the contract v, The greeting's buttons are now a fixed, product-defined set     (workers/tasks., The tenant fixture has phone_number_id=None and no Calendar connected -     a p, A completely unrelated config field (no address/insurance at all)     must also, PUT no longer accepts this field at all: an incoming `greeting_buttons`     is, The greeting is ALWAYS sent with the fixed action buttons attached (no     more (+33 more)
 
 ### Community 37 - "BaseModel"
-Cohesion: 0.06
-Nodes (44): BaseModel, PrivacyAppointment, PrivacyConsentEvent, PrivacyConversation, PrivacyEraseResult, PrivacyExportBundle, PrivacyMessage, PrivacyPatient (+36 more)
+Cohesion: 0.07
+Nodes (42): BaseModel, PrivacyAppointment, PrivacyConsentEvent, PrivacyConversation, PrivacyEraseResult, PrivacyExportBundle, PrivacyMessage, PrivacyPatient (+34 more)
 
 ### Community 38 - "list_tenant_appointments"
-Cohesion: 0.10
-Nodes (36): _arq_pool_or_503(), brain_message_inbound(), _inbound_with_attachment(), Request, The queue, or 503: the caller must learn the message was NOT accepted., The multipart branch: validate, gate, store, enqueue - in cost order.      1., Enqueue one Brain-Message turn. ACK FAST — no model call happens here.      Th, AppointmentStatus (+28 more)
+Cohesion: 0.08
+Nodes (39): DeclarativeBase, Base, Declarative base shared by every ORM model., AppointmentStatus, MessageDirection, MessageSender, Relative to the clinic's WhatsApp number., Who authored the message. (+31 more)
 
 ### Community 39 - "tools.py"
-Cohesion: 0.07
-Nodes (44): _blocked_tenant_level(), _busy_without_foreign_details(), _calendar_for_calendar_id(), _calendar_for_professional(), cancel_event(), _canonical_appointment_type(), check_availability(), create_event() (+36 more)
+Cohesion: 0.11
+Nodes (30): _blocked_tenant_level(), _busy_without_foreign_details(), cancel_event(), check_availability(), create_event(), _event_window(), _get_calendar(), list_free_slots() (+22 more)
 
 ### Community 40 - "test_subscription.py"
-Cohesion: 0.13
-Nodes (45): MessageStatus, Message, The delivery status a bubble draws, derived from the row's timestamps.      Fa, One WhatsApp message, inbound or outbound., status_of(), db(), _deliver_receipt(), _meta_receipt() (+37 more)
+Cohesion: 0.18
+Nodes (34): db(), _deliver_receipt(), _meta_receipt(), datetime, Delivery state (enviado / entregue / lido / falhou), part 1 of 3 (secretarIA)., A row written in the PAST, so a later write gets a strictly later `updated_at`, A receipt as Meta sends it - recipient phone, billing and all., Exactly the production path: fast-ACK reduction, then the arq job. (+26 more)
 
 ### Community 41 - "get_settings"
 Cohesion: 0.25
@@ -684,20 +699,20 @@ Cohesion: 0.15
 Nodes (22): _match_by_name(), Any, Case-insensitive exact match of `name` against `item.name` in `items`.      Sh, _active_professionals(), create_event_for_professional(), list_free_slots_for_professional(), list_professionals(), _professional_calendar() (+14 more)
 
 ### Community 48 - "calendar.py"
-Cohesion: 0.21
-Nodes (24): _appointment_read(), cancel_appointment(), cancel_preview(), create_appointment(), create_block(), _deposit_status_value(), _get_appointment(), _get_calendar() (+16 more)
+Cohesion: 0.09
+Nodes (43): _appointment_read(), cancel_appointment(), cancel_preview(), create_appointment(), create_block(), _deposit_status_value(), _get_appointment(), _get_calendar() (+35 more)
 
 ### Community 49 - "test_pix_deposit_plugin.py"
-Cohesion: 0.12
-Nodes (29): claim_email(), ClaimOutcome, IdentityState, _post(), probe_identity(), Response, UUID, The two inline identity steps a Brain-Message visitor goes through, and their wi (+21 more)
+Cohesion: 0.09
+Nodes (39): _booking_gate_details(), booking_gate_reprompt_body(), claim_email(), code_notice_body(), existing_account_code_body(), identity_action_or_none(), _masked_email_field(), masked_email_or_none() (+31 more)
 
 ### Community 50 - "resolve_professional_calendar"
 Cohesion: 0.14
 Nodes (27): CalendarService for professional X under tenant config Y (contract v1 §10)., _professional_credential(), Which refresh token to use for ONE professional's Calendar operations.      TH, Resolve ONE professional's own config into a ready CalendarService.      THE s, resolve_professional_calendar(), db(), _fake_calendar(), _FakeCalendarService (+19 more)
 
 ### Community 51 - "test_entitlements_client.py"
-Cohesion: 0.13
-Nodes (18): _body_for(), _configured_settings(), _FakeAsyncClient, _FakeRedis, _FakeResponse, _install_fake_client(), Exception, MonkeyPatch (+10 more)
+Cohesion: 0.24
+Nodes (14): _body_for(), _configured_settings(), _FakeRedis, _install_fake_client(), MonkeyPatch, Tests for services/entitlements_client.py — the plugin/tier gating seam.  `get, Minimal async Redis stub: get / setex / delete / exists, in memory., test_cache_hit_makes_one_http_call_for_two_reads() (+6 more)
 
 ### Community 53 - "test_internal_asaas_connection.py"
 Cohesion: 0.30
@@ -708,24 +723,24 @@ Cohesion: 0.12
 Nodes (38): Appointment, Platform-side record of a clinic appointment.      Created whenever the platfo, apply_asaas_event(), _as_utc(), _asaas_client_for(), _deposit_request_text(), get_deposit_for_appointment(), _log_deposit_skip() (+30 more)
 
 ### Community 55 - "test_agent_capability_cache.py"
-Cohesion: 0.09
-Nodes (27): _config(), _ExplodingCalendar, _multi_turn(), _names(), The agent's capabilities are enforced by the tool set, not by the prompt.  A m, Stand-in for the compiled LangGraph: records its tools, never calls an LLM., The safe alternative replaces the unsafe one — it does not sit beside it., No entitlement means no booking tool at all — never a broader one. (+19 more)
+Cohesion: 0.05
+Nodes (43): _clean_agent_cache_and_fakes(), _empty_history(), _fake_tool_a(), _fake_tool_b(), _FakeCompiledAgent, MonkeyPatch, Tests for the capability-keyed agent cache in ai/graph.py.  Replaces the old p, A fake plugin tool A. (+35 more)
 
 ### Community 56 - "test_agent_menu_tools.py"
 Cohesion: 0.33
 Nodes (14): db(), _headers(), AsyncClient, MonkeyPatch, Tests for api/internal_privacy.py — LGPD export/erase endpoints — and the conse, _seed_full_subject(), test_erase_counts_and_anonymizes_appointment_not_deletes(), test_erase_is_idempotent_repeat_returns_zero_counts() (+6 more)
 
 ### Community 57 - "test_human_backup_plugin.py"
-Cohesion: 0.29
-Nodes (21): db(), _entitled_fake(), _never_called_fake(), AsyncClient, MonkeyPatch, Tests for api/hub/units.py — multi_unit CRUD + gating. Mirrors test_hub_profess, _seed_unit(), tenant() (+13 more)
+Cohesion: 0.10
+Nodes (36): BookingHold, One slot reserved for one conversation, until `expires_at`., _aware(), BookingGate, GateDecision, held_windows(), HeldSlot, latest_hold() (+28 more)
 
 ### Community 58 - "main"
-Cohesion: 0.18
-Nodes (12): on_shutdown(), on_startup(), arq worker entry point.  Start the worker with:     arq secretaria.workers.ar, Job names arq will accept in `enqueue_job`, in registration order.      Logged, Cron job names, in registration order. Same purpose as the above., Run once when the worker process starts., Run once when the worker process stops., arq worker configuration.      arq reads these as plain class attributes, so ` (+4 more)
+Cohesion: 0.15
+Nodes (14): on_shutdown(), on_startup(), arq worker entry point.  Start the worker with:     arq secretaria.workers.ar, Job names arq will accept in `enqueue_job`, in registration order.      Logged, Cron job names, in registration order. Same purpose as the above., Run once when the worker process starts., Run once when the worker process stops., arq worker configuration.      arq reads these as plain class attributes, so ` (+6 more)
 
 ### Community 59 - "oauth.py"
-Cohesion: 0.07
-Nodes (59): _claimed(), _ctx(), db(), _make_rows(), Tests for plugins/precheck_handoff.py — "your pre-consult is waiting".  Same i, Is the ledger key for this appointment currently held?, A PostBookingContext carrying DETACHED rows — what     plugins/post_booking.py:, Every addon off, plain tier: the hook still runs.      Deliberate — the real " (+51 more)
+Cohesion: 0.06
+Nodes (61): _claimed(), _ctx(), db(), _Handoff, _make_rows(), Tests for plugins/precheck_handoff.py — "your pre-consult is waiting".  Same i, Stands in for `request_precheck_handoff`: records asks, replays one outcome., Is the ledger key for this appointment currently held? (+53 more)
 
 ### Community 60 - "test_audio_transcription.py"
 Cohesion: 0.10
@@ -733,15 +748,15 @@ Nodes (40): iter_audio_messages(), Yield one minimal dict per inbound WhatsApp v
 
 ### Community 61 - "_config_with_selected_professional"
 Cohesion: 0.12
-Nodes (26): interactive_list_record(), What `send_list` puts on the patient's screen, as data.      The list card aft, _add(), db(), _payload_capturing_client(), AsyncClient, datetime, MonkeyPatch (+18 more)
+Nodes (26): interactive_buttons_record(), interactive_list_record(), What `send_buttons` puts on the patient's screen, as data.      The reply-butt, What `send_list` puts on the patient's screen, as data.      The list card aft, _add(), db(), _payload_capturing_client(), AsyncClient (+18 more)
 
 ### Community 62 - "analytics_advanced"
-Cohesion: 0.06
-Nodes (45): Last `size` DIGITS of a phone/wa_id — the only form allowed in a log.      Ret, wa_suffix(), WebhookValue, _apply_statuses(), _event_already_processed(), _get_or_create_conversation(), _get_or_create_patient(), _handle_history() (+37 more)
+Cohesion: 0.13
+Nodes (20): WebhookValue, _apply_statuses(), _handle_history(), _handle_human_echoes(), _handle_message_statuses(), _handle_patient_messages(), _handle_smb_app_state_sync(), is_remove_context_command() (+12 more)
 
 ### Community 63 - "ManageAppointmentRequested"
-Cohesion: 0.15
-Nodes (29): _extract_wam_id(), _get_conversation(), get_message_media(), _last_message_at(), list_conversations(), list_messages(), mark_messages_read(), _message_read_model() (+21 more)
+Cohesion: 0.06
+Nodes (61): refusal(), _extract_wam_id(), _get_conversation(), get_message_media(), _interactive_read(), _last_message_at(), list_conversations(), list_messages() (+53 more)
 
 ### Community 64 - "test_flow_router_multiprofessional.py"
 Cohesion: 0.10
@@ -749,7 +764,7 @@ Nodes (61): _conv_at_service_confirm(), _conversation(), _FakeCalendar, _profess
 
 ### Community 65 - "_should_inject_post_consult_knowledge"
 Cohesion: 0.15
-Nodes (27): ProfessionalCredentials, professional_calendar_source(), Encrypt and upsert the professional's own Calendar refresh token. Caller commits, WHOSE Calendar credential covers this professional: the professional's own,, set_professional_google_refresh_token(), api_tenant(), db(), _make() (+19 more)
+Nodes (27): ProfessionalCredentials, Encrypt and upsert the Calendar refresh token. Caller commits., Encrypt and upsert the professional's own Calendar refresh token. Caller commits, set_google_refresh_token(), set_professional_google_refresh_token(), api_tenant(), db(), _make() (+19 more)
 
 ### Community 66 - "test_ai_tools_cancel_money.py"
 Cohesion: 0.21
@@ -768,16 +783,16 @@ Cohesion: 0.21
 Nodes (12): _apply(), _demo(), FakeCalendar, main(), _print_bubbles(), SimpleNamespace, Terminal harness for the deterministic flow router (cancel/reschedule).  Unlike, Mirror the worker's _apply_flow_result against in-memory state. (+4 more)
 
 ### Community 70 - "test_admin_tenants.py"
-Cohesion: 0.13
-Nodes (32): extract_inbound_body(), extract_inbound_reply_id(), _interactive_reply(), The tapped reply button or list row, whichever this message carries., Return the human-readable text of an inbound message.      What the patient ty, Return the raw id of the control an inbound message tapped, or None.      The, WebhookMessage, The second prefix re-checked: a free-slot row, parsed from a real tap. (+24 more)
+Cohesion: 0.11
+Nodes (38): extract_greeting_button(), extract_inbound_body(), extract_inbound_reply_id(), _interactive_reply(), The tapped reply button or list row, whichever this message carries., Return the human-readable text of an inbound message.      What the patient ty, Return the raw id of the control an inbound message tapped, or None.      The, Decode a tap on the greeting's id, when it carries the "greeting|" prefix. (+30 more)
 
 ### Community 71 - "get_current_tenant"
-Cohesion: 0.05
-Nodes (64): InboundContext, PluginSpec, PluginSpec: the shape of one optional, entitlement-gated capability., One optional capability, gated by ANY of a set of entitlement keys.      id: t, What an `on_inbound` hook needs to decide + act on one inbound turn.      Hook, Run `on_inbound` hooks for every plugin this tenant is entitled to.      Stops, run_on_inbound(), _ctx() (+56 more)
+Cohesion: 0.18
+Nodes (21): Run `on_inbound` hooks for every plugin this tenant is entitled to.      Stops, run_on_inbound(), _ctx(), db(), _fakes(), _FakeWhatsAppClient, _make_conversation(), MonkeyPatch (+13 more)
 
 ### Community 72 - "config.py"
-Cohesion: 0.07
-Nodes (48): _as_utc(), _claim(), _deliver(), _ledger_key(), _load_professional(), _local_when(), _post_booking(), datetime (+40 more)
+Cohesion: 0.15
+Nodes (25): _as_utc(), _claim(), _deliver(), _ledger_key(), _load_professional(), _local_when(), _post_booking(), datetime (+17 more)
 
 ### Community 73 - "test_tasks_helpers.py"
 Cohesion: 0.12
@@ -789,39 +804,39 @@ Nodes (40): _count_active(), create_professional(), create_professional_calendar
 
 ### Community 75 - "config.py"
 Cohesion: 0.08
-Nodes (36): ASGIMessage, FormData, M, MultiPartException, Receive, RequestValidationError, Scope, Send (+28 more)
+Nodes (35): ASGIMessage, FormData, M, MultiPartException, Receive, RequestValidationError, Scope, Send (+27 more)
 
 ### Community 76 - "verify_meta_signature"
 Cohesion: 0.23
 Nodes (13): Security helpers - Meta webhook HMAC-SHA256 signature validation.  Meta signs ev, Return True if `signature_header` is a valid HMAC of `raw_body`.      Args:, verify_meta_signature(), Tests for the Meta webhook HMAC-SHA256 signature validation., Build a valid `X-Hub-Signature-256` header value for `body`., _sign(), test_empty_app_secret_is_rejected(), test_invalid_signature_is_rejected() (+5 more)
 
 ### Community 77 - "test_hub_conversations.py"
-Cohesion: 0.24
-Nodes (25): _agent_context(), db(), Tests for plugins/multi_professional.py — professional-aware booking tools.  I, The professional's OWN refresh token wins over the tenant's own., On a multi-professional tenant this is the ONLY booking tool the agent     gets, _seed_tenant_and_professionals(), _summary(), _tenant_config() (+17 more)
+Cohesion: 0.21
+Nodes (27): _agent_context(), db(), _fakes(), MonkeyPatch, Tests for plugins/multi_professional.py — professional-aware booking tools.  I, The professional's OWN refresh token wins over the tenant's own., On a multi-professional tenant this is the ONLY booking tool the agent     gets, _seed_tenant_and_professionals() (+19 more)
 
 ### Community 78 - "test_list_patient_appointments_tool.py"
-Cohesion: 0.15
-Nodes (26): minimal_event_payload(), _minimal_message(), _minimal_status(), One inbound message / echo reduced to the fields the worker reads.      `keep_, One delivery receipt reduced to what `apply_whatsapp_statuses` reads.      Kep, Reduce a raw Meta webhook body to ONLY what the arq worker reads.      The job, _flat(), _messages_payload() (+18 more)
+Cohesion: 0.11
+Nodes (29): iter_event_ids(), minimal_event_payload(), _minimal_message(), _minimal_status(), Yield every message / echo id in a raw webhook payload (light parsing).      U, One inbound message / echo reduced to the fields the worker reads.      `keep_, One delivery receipt reduced to what `apply_whatsapp_statuses` reads.      Kep, Reduce a raw Meta webhook body to ONLY what the arq worker reads.      The job (+21 more)
 
 ### Community 79 - "What was built"
 Cohesion: 0.07
 Nodes (27): 10. "Conectado" que não agenda — token da clínica recusado pelo Google (2026-09-12), 1. Mode field, 2. OAuth scopes, 3. Secondary calendar creation, 4. Routing rule (event create/move/cancel) — the credential × calendar_id edge case, 5. Scope-insufficient 403 → structured reconnect signal, 6. Mode endpoint, 7. Professionals roster payload (+19 more)
 
 ### Community 80 - "SecretarIA"
-Cohesion: 0.11
-Nodes (17): Auxiliary scripts (Fase A scaffolding), Code conventions & project structure, `CORS_ALLOW_ORIGINS` aceita DOIS formatos — e o valor "certo" já derrubou o portal, Deploy — a API e o worker são DOIS serviços (regra obrigatória), Documentação, Folder granularity — group by domain, not "one folder per file", General, graphify (+9 more)
+Cohesion: 0.10
+Nodes (19): Auxiliary scripts (Fase A scaffolding), Code conventions & project structure, `CORS_ALLOW_ORIGINS` aceita DOIS formatos — e o valor "certo" já derrubou o portal, Deploy — a API e o worker são DOIS serviços (regra obrigatória), Documentação, Folder granularity — group by domain, not "one folder per file", General, graphify (+11 more)
 
 ### Community 81 - "_FakeCalendarService"
-Cohesion: 0.10
-Nodes (50): _agent_context(), _captured_bubbles(), db(), _handback_names(), _patch_session_factory(), MonkeyPatch, Tests for the LLM handoff round (PROMPT 3, multi-doctor flow).  Covers the two, The clinic shape this repo calls "the tenant that broke": the legacy     `tenan (+42 more)
+Cohesion: 0.13
+Nodes (40): _agent_context(), db(), _handback_names(), Tests for the LLM handoff round (PROMPT 3, multi-doctor flow).  Covers the two, The clinic shape this repo calls "the tenant that broke": the legacy     `tenan, Second lock on the topology.      `_flow_handback_tools` withholds the tool fr, First lock, and the reason the flow never has to guess an agenda: on     these, The `_seed` clinic reduced to ONE active professional (a SOLE tenant). (+32 more)
 
 ### Community 82 - "TenantRuntimeConfig"
 Cohesion: 0.10
-Nodes (55): inbound_routing_text(), The text the flow router and the agent read for one inbound message.      Reco, _appt(), _Calendar, _calendar_service(), _control_tap(), _conversation(), _day_tap() (+47 more)
+Nodes (53): _appt(), _Calendar, _calendar_service(), _control_tap(), _conversation(), _day_tap(), SimpleNamespace, The reusable day/time branch (PROMPT_FEAT_32 part B).  Two layers, mirroring h (+45 more)
 
 ### Community 84 - "is_entitled"
-Cohesion: 0.09
-Nodes (22): ServiceRole, build(), Any, Request, Which code is running here, and does the worker agree? (FIX_01 §5.1/§5.2)      A, alembic_head(), build_identity(), Path (+14 more)
+Cohesion: 0.17
+Nodes (16): alembic_head(), build_identity(), Path, Build identity of the running process — the deploy-parity proof (FIX_01 §5.1/§5., Normalise a commit sha to its short form so both sides compare equal.      A pip, First directory containing `migrations/versions`, or None.      Checked from the, Head revision of the migration scripts shipped in THIS image.      This is the m, Hash of the `secretaria` sources this process actually imported.      The point (+8 more)
 
 ### Community 85 - "_FakeSession"
 Cohesion: 0.07
@@ -836,32 +851,32 @@ Cohesion: 0.13
 Nodes (26): build_patient_calendar_link(), The "adicionar à minha agenda" link to send the PATIENT. Pure, no I/O.      NO, _params(), Unit tests for `services/calendar.py::build_patient_calendar_link` (pure, no net, The digits in the URL are UTC, never the clinic's wall clock, and never     acco, Both booking paths hand over aware values; this is the contract that     keeps a, tz localizes naive values only — it must never re-stamp an aware one., No knowable instant. Raising beats emitting a link that is quietly wrong     by (+18 more)
 
 ### Community 88 - "_resolve_unit_or_error"
-Cohesion: 0.12
-Nodes (23): entry_service_id(), find_near_duplicates(), _index(), match_service(), normalize(), offering_map(), Any, UUID (+15 more)
+Cohesion: 0.11
+Nodes (25): entry_service_id(), find_near_duplicates(), _index(), match_service(), normalize(), offering_map(), Any, UUID (+17 more)
 
 ### Community 89 - "Settings"
-Cohesion: 0.06
-Nodes (50): CalendarService, Any, Async wrapper around the (sync) Google Calendar v3 API., Delete an event by id. 404/410 are treated as success (idempotent)., Create a NEW secondary Google Calendar via `calendars.insert`.          shared, _appt_duration_minutes(), _appt_row_label(), _appt_summary() (+42 more)
+Cohesion: 0.09
+Nodes (27): _appt_duration_minutes(), _appt_row_label(), _appt_summary(), _appt_uuid(), _begin_cancel(), _begin_reschedule(), enter_decline_reasons(), _enter_manage() (+19 more)
 
 ### Community 90 - "_appointment_context_text"
-Cohesion: 0.14
-Nodes (23): base_tools_for(), _body_digest(), build_agent(), invoke_agent(), _invoke_agent_with_retry(), _load_history(), _looks_like_meta_output(), _meta_output_reason() (+15 more)
+Cohesion: 0.09
+Nodes (33): base_tools_for(), _body_digest(), build_agent(), invoke_agent(), _invoke_agent_with_retry(), _load_history(), _looks_like_meta_output(), _meta_output_reason() (+25 more)
 
 ### Community 91 - "_FakeRedis"
-Cohesion: 0.11
-Nodes (44): _add_appointment(), _agent_context(), _conversation_snapshot(), db(), _FakeAsaas, _FakeCalendar, _flow_professional(), _persist_flow_appointment() (+36 more)
+Cohesion: 0.07
+Nodes (53): _add_appointment(), _agent_context(), _conversation_snapshot(), db(), _FakeAsaas, _FakeCalendar, _FakeRedis, _fakes() (+45 more)
 
 ### Community 92 - "_FakeArqPool"
-Cohesion: 0.14
-Nodes (29): GoogleTokenRevokedError, Google refused the stored refresh token itself (`invalid_grant`).      A SUBCL, _connect_clinic(), db(), fake_google(), _FakeCalendar, _FakeCalendarFactory, AsyncClient (+21 more)
+Cohesion: 0.22
+Nodes (22): _connect_clinic(), db(), AsyncClient, Tests for GET /tenants/me/calendar/health (api/hub/oauth.py) and the service beh, The production state: shared_account, clinic token rejected by Google., A 5xx or a network blip passes on its own; asking the clinic to reconnect     ov, load_tenant_config resolves a single-professional clinic's credential     THROUG, In shared_account every booking uses the clinic's token     (_professional_crede (+14 more)
 
 ### Community 93 - "_FakeAsyncClient"
 Cohesion: 0.15
 Nodes (18): cancellation_notice(), The honest pt-BR line to append after resolving a cancellation's money     outco, format_brl(), parse_brl_to_cents(), BRL free-text money parsing/formatting — no currency library, no network.  `appo, Parse free-text BRL into integer cents. Returns None, never raises.      None fo, Render integer cents as pt-BR currency text, e.g. 125050 -> "R$ 1.250,50"., Tests for services/payments/money.py — BRL free-text parsing/formatting.  `appoi (+10 more)
 
 ### Community 94 - "FastAPI"
-Cohesion: 0.13
-Nodes (29): _conversation_snapshot(), db(), _inbound_row(), MonkeyPatch, SimpleNamespace, A tapped row's id is routing data, never display text - end to end.  Found live, End the turn where the reply would start; return what reached it., A live clinic and a consented, returning patient mid-conversation. (+21 more)
+Cohesion: 0.12
+Nodes (25): db(), _inbound_row(), MonkeyPatch, A tapped row's id is routing data, never display text - end to end.  Found live, Stands in for WhatsAppClient: records every send, reaches nothing., End the turn where the reply would start; return what reached it., A live clinic and a consented, returning patient mid-conversation., The `messages` change Meta delivers for one list-row tap: the id and the     tit (+17 more)
 
 ### Community 95 - "HandoverManager"
 Cohesion: 0.07
@@ -872,28 +887,28 @@ Cohesion: 0.10
 Nodes (41): db(), other_tenant_professional(), professional(), AsyncClient, Tests for PUT /tenants/me/configuration — the transactional tenant + professiona, Re-read from a FRESH session — the only honest way to ask what committed., The PUT response is built by the same readers the GETs use, so a client     can, PUT is idempotent: a double click, or a retry after a timed-out     response, mu (+33 more)
 
 ### Community 97 - "panel.py"
-Cohesion: 0.17
-Nodes (10): _extract_event_fields(), JSONResponse, Request, Asaas payment webhook endpoint.  POST /webhooks/asaas - receives Pix payment lif, Tolerant extraction of (event_id, event_type, payment_id) from an Asaas     webh, Fast-ACK Asaas webhook receiver. Auth + processing happen in the worker., receive_asaas_webhook(), arq_pool() (+2 more)
+Cohesion: 0.13
+Nodes (36): _capture_usage(), db(), _fakes(), UUID, Integration tests for workers/onboarding_cron.py — both onboarding crons (contr, Same month + same pair -> same event_id every run, which is exactly     what ma, America/Sao_Paulo is UTC-3: a UTC timestamp just after midnight on the     1st, N active professionals -> N events, each with feature     "active_professionals (+28 more)
 
 ### Community 98 - "signing.py"
 Cohesion: 0.22
 Nodes (8): 1. Greeting trio consolidated (workers/tasks.py + services/flow_router.py), 2. Scoped-help LLM nodes ("Não sei" on both catalog lists), 3. Frontend (brain-frontend, separate repo), CHECKPOINT — Trio [Agendar][Gerenciar consulta][Outro] + LLM escopada em médico/serviço, Decisões e pendências, Investigation findings (the brief's "investigar antes"), Testes (34 new / updated across the two repos' concerns), What was built
 
 ### Community 99 - "receive_webhook"
-Cohesion: 0.18
-Nodes (38): db(), _pdf(), _png(), _post_file(), MonkeyPatch, Brain-Message attachments, part 2 of 3 (secretarIA): storage, and both direction, ASGI >= 2.4: the socket dies mid-stream, Starlette raises ClientDisconnect befor, Run what the endpoint enqueued, exactly as arq would. (+30 more)
+Cohesion: 0.16
+Nodes (40): api(), db(), _pdf(), _png(), _post_file(), MonkeyPatch, Brain-Message attachments, part 2 of 3 (secretarIA): storage, and both direction, ASGI >= 2.4: the socket dies mid-stream, Starlette raises ClientDisconnect befor (+32 more)
 
 ### Community 100 - "_calendar_for_calendar_id"
-Cohesion: 0.12
-Nodes (35): db(), datetime, MonkeyPatch, RESCHEDULED is a LIVE status — one taxonomy for writers and readers.  PROMPT_F, The reader must not keep a private copy that can drift again., `still_live=False` is the countable signal for "left the live set"., Regression: the other half of the taxonomy must stay out., HAS_UPCOMING(_SOON) is derived from the same query — a moved booking     must s (+27 more)
+Cohesion: 0.13
+Nodes (33): db(), datetime, MonkeyPatch, RESCHEDULED is a LIVE status — one taxonomy for writers and readers.  PROMPT_F, `still_live=False` is the countable signal for "left the live set"., Regression: the other half of the taxonomy must stay out., HAS_UPCOMING(_SOON) is derived from the same query — a moved booking     must s, The hard prerequisite for dropping "Gerenciar consulta" from the     no-appoint (+25 more)
 
 ### Community 101 - "TenantConfigUpdate"
 Cohesion: 0.14
 Nodes (13): 1. The fixed set: payload ids, labels, routes, 1. The `greeting|N` payload: full path, and how it actually diverged from the brief's working assumption, 2. Making it work for `flows_enabled(tenant) == False` too (the actual hard part), 2. `reactivation_choice_buttons(tenant)` — confirmed already deterministic, 3. Legacy `greeting|<número>` handling, 4. Hub config contract (backend is now the source of truth for the frontend agent), 5. `tenant.greeting_buttons` (the DB column), Achados fora de escopo (registrados, não corrigidos) (+5 more)
 
 ### Community 102 - "Tenant"
-Cohesion: 0.13
-Nodes (31): max_length, min_length, _appointment_dto(), _attachment_gate(), _enforce_attachment_quota(), get_brain_message_media(), _inbound_attachment_bytes(), list_brain_message_messages() (+23 more)
+Cohesion: 0.10
+Nodes (44): max_length, min_length, _appointment_dto(), _arq_pool_or_503(), _attachment_gate(), _brain_message_conversation_started(), brain_message_inbound(), brain_message_open() (+36 more)
 
 ### Community 103 - "CHECKPOINT — Multi-doctor WhatsApp workflow (deterministic doctor selection)"
 Cohesion: 0.22
@@ -921,27 +936,27 @@ Nodes (33): activate(), asaas_connection(), attach_professional(), config_status
 
 ### Community 109 - "_on_inbound"
 Cohesion: 0.07
-Nodes (22): AppointmentType, clean_requirements(), _parse_hhmm(), Request/response schemas for the doctor-hub config endpoints.  All domain *sha, Reject unknown weekday keys and overlapping windows within a day., Clinic's physical address (contract v1 §10). Every field optional —     a clini, PUT body. Every field is optional — only provided fields are updated.      `bu, Light shape check for the deterministic-flow config blob. (+14 more)
+Nodes (28): get_config(), AsyncSession, Doctor hub — tenant configuration endpoints (authenticated).  GET  /tenants/me, Save tenant config and one professional's config in ONE transaction.      Orde, LEGACY single-scope save. Superseded by PUT /tenants/me/configuration.      Be, update_config(), update_configuration(), _parse_hhmm() (+20 more)
 
 ### Community 110 - "_read_model"
-Cohesion: 0.11
-Nodes (31): booking_topology(), Any, UUID, Booking scope: WHO owns a booking, WHICH service it is — one rule, everywhere., Name of one catalog entry, whichever shape it travels in.      The effective c, Every non-empty name in `services`, in catalog order., Name this tenant's booking topology from its ACTIVE professionals roster., The ONE active professional, or None when there is not exactly one.      "Exac (+23 more)
+Cohesion: 0.09
+Nodes (38): booking_topology(), canonical_service_name(), Any, UUID, Booking scope: WHO owns a booking, WHICH service it is — one rule, everywhere., Name of one catalog entry, whichever shape it travels in.      The effective c, Every non-empty name in `services`, in catalog order., The catalog's OWN spelling of the service `candidate` refers to, or None. (+30 more)
 
 ### Community 111 - "receive_asaas_webhook"
 Cohesion: 0.05
-Nodes (56): main(), _parse_args(), Namespace, Apply a JSON config file onto a tenant row (the doctor-hub columns).  This is, Return a list of human-readable warnings (does not block the write)., # NOTE: "greeting_buttons" is intentionally NOT in _ALLOWED_FIELDS anymore, _validate(), Tenant model - one clinic, with its own WhatsApp Business credentials. (+48 more)
+Nodes (56): Tenant model - one clinic, with its own WhatsApp Business credentials., A clinic using SecretarIA.      The system is multi-tenant in the data model., Tenant, _ask_day(), _clinic_service_catalog(), enter_booking(), _enter_clinic_service_catalog(), enter_guided_booking() (+48 more)
 
 ### Community 112 - "_render_greeting_template"
 Cohesion: 0.22
 Nodes (8): CHECKPOINT — WhatsApp Coexistence onboarding (Tasks 4 + 5), Coverage verification (read, not assumed), External dependencies (not part of this round, pending before a live test), Pending, Status, Task 4 — `BOT_ALLOWLIST_WA_IDS` (test-window allowlist), Task 5 — webhook docstring, Tests
 
 ### Community 115 - "arq_worker.py"
-Cohesion: 0.13
-Nodes (24): agent_tools_for(), enabled_plugins(), The plugin registry: id -> PluginSpec, filtered per tenant by entitlement.  St, Add (or replace) a plugin in the registry, keyed by `spec.id`., PluginSpecs this tenant is currently entitled to.      A disabled plugin (tena, Flatten `agent_tools` across every plugin this tenant is entitled to., register(), db() (+16 more)
+Cohesion: 0.27
+Nodes (14): db(), _detached_ctx(), _make_rows(), _patch_session_factory(), MonkeyPatch, Tests for plugins/pix_deposit.py — the real Pix deposit post_booking hook.  In-m, A PostBookingContext carrying DETACHED copies (own session already     closed) —, maybe_create_deposit mutates rows but never commits (see its own     docstring) (+6 more)
 
 ### Community 116 - "_apply_deposit_awareness"
-Cohesion: 0.14
-Nodes (31): TextBubble, enter_decline_reasons(), _enter_menu_choice(), FlowRouterResult, format_business_hours(), _handle_decline_reason(), Bounded exit: fixed message + human handover, flow reset to IDLE., Ask why, deterministically, after the patient declined to rebook.      Never h (+23 more)
+Cohesion: 0.38
+Nodes (16): db(), datetime, Tests for the deterministic manage flow's Pix-deposit money hooks (PROMPT S3 se, Entry was pre-checked and allowed it, but a race left the deposit     already a, _reply_ctx(), _seed(), _seed_deposit(), test_cancel_completion_applies_money_and_appends_notice() (+8 more)
 
 ### Community 117 - "test_webhook.py"
 Cohesion: 0.39
@@ -953,15 +968,15 @@ Nodes (6): CHECKPOINT — Post-consult tenant config fields, Pendências, Qualif
 
 ### Community 119 - "EhrProvider"
 Cohesion: 0.05
-Nodes (39): Protocol, attachment_record(), CheckedAttachment, An upload that passed `check_attachment`: its REAL kind, a safe name, its real s, The JSON blob `messages.attachment` stores for an upload that passed the checks., BrainMessageSender, ChannelSender, interactive_history_body() (+31 more)
+Nodes (35): Protocol, attachment_record(), CheckedAttachment, An upload that passed `check_attachment`: its REAL kind, a safe name, its real s, The JSON blob `messages.attachment` stores for an upload that passed the checks., BrainMessageSender, ChannelSender, interactive_history_body() (+27 more)
 
 ### Community 120 - "main"
 Cohesion: 0.07
-Nodes (53): _as_page(), _calendar_unavailable(), _control_match(), _day_back_label(), _day_branch_fields(), _day_from_body(), _day_row_label(), DayBranch (+45 more)
+Nodes (54): _as_page(), _calendar_unavailable(), _confirmation_recap(), _control_match(), _day_back_label(), _day_branch_fields(), _day_from_body(), _day_row_label() (+46 more)
 
 ### Community 121 - "MenuBubble"
-Cohesion: 0.12
-Nodes (16): _clean_agent_cache_and_fakes(), _empty_history(), _fake_tool_a(), _fake_tool_b(), _FakeCompiledAgent, MonkeyPatch, Tests for the capability-keyed agent cache in ai/graph.py.  Replaces the old p, A fake plugin tool A. (+8 more)
+Cohesion: 0.15
+Nodes (33): _appointments(), _async(), db(), _expire(), _FakeCalendar, _hold_rows(), _outbound(), _place() (+25 more)
 
 ### Community 122 - "CHECKPOINT — Inbound WhatsApp audio transcription"
 Cohesion: 0.33
@@ -970,10 +985,6 @@ Nodes (5): CHECKPOINT — Inbound WhatsApp audio transcription, Config, Key desi
 ### Community 123 - "CHECKPOINT — Pix deposit (sinal) add-on + appointment payment lifecycle"
 Cohesion: 0.33
 Nodes (5): CHECKPOINT — Pix deposit (sinal) add-on + appointment payment lifecycle, External pendências (do NOT fabricate — nothing works end-to-end until these), Flags / known gaps (deliberate, pending product decisions), State machine (`PixDeposit.status`, SEPARATE from `AppointmentStatus`), Where everything lives
-
-### Community 124 - "brain_onboarding.py"
-Cohesion: 0.14
-Nodes (6): CalendarUnavailableError, HttpError, _raise_if_unavailable(), Raised when Google Calendar cannot be reached or refused our credentials., Translate an outage/auth HttpError into CalendarUnavailableError.      Returns, test_unavailable_http_status_maps_to_outage()
 
 ### Community 125 - "conversation.py"
 Cohesion: 0.16
@@ -988,8 +999,8 @@ Cohesion: 0.10
 Nodes (26): attachment_body(), attachment_placeholder(), AttachmentKind, AttachmentRefused, check_attachment(), _clean(), content_disposition(), extension_conflicts() (+18 more)
 
 ### Community 128 - "_FakeWhatsAppClient"
-Cohesion: 0.09
-Nodes (41): ConsentEvent, ConsentEvent model - LGPD consent/legal-basis audit trail (groundwork).  One r, One LGPD consent/legal-basis moment for a (tenant, wa_id) subject., Patient, A patient, identified by (tenant, channel, external_id).      Historically tha, ProcessedEvent, ProcessedEvent model - idempotency ledger for incoming webhook events., One row per Meta event id already handled.      The unique constraint on `event_ (+33 more)
+Cohesion: 0.07
+Nodes (50): Last `size` DIGITS of a phone/wa_id — the only form allowed in a log.      Ret, wa_suffix(), ConsentEvent, ConsentEvent model - LGPD consent/legal-basis audit trail (groundwork).  One r, One LGPD consent/legal-basis moment for a (tenant, wa_id) subject., ProcessedEvent, ProcessedEvent model - idempotency ledger for incoming webhook events., One row per Meta event id already handled.      The unique constraint on `event_ (+42 more)
 
 ### Community 131 - "_confirmation_recap"
 Cohesion: 0.18
@@ -1005,39 +1016,43 @@ Nodes (3): process_asaas_event(), arq job(s) for the Pix deposit (sinal) payment
 
 ### Community 148 - "test_service_catalog.py"
 Cohesion: 0.13
-Nodes (35): Professional, Professional model - one bookable staff member within a tenant.  Multi-professio, A bookable professional (doctor, therapist, ...) belonging to a tenant., _catalog_row(), db(), AsyncClient, The canonical service catalog: identity, resolution, backfill and the hub API., The whole point of entrega 2: picking from the catalog writes the link. (+27 more)
+Nodes (35): Professional, Professional model - one bookable staff member within a tenant.  Multi-professio, A bookable professional (doctor, therapist, ...) belonging to a tenant., _catalog_row(), db(), AsyncClient, The canonical service catalog: identity, resolution, backfill and the hub API., A tenant not backfilled yet keeps the pre-catalog exact-name behaviour. (+27 more)
 
 ### Community 149 - "extract_inbound_body"
-Cohesion: 0.09
-Nodes (28): AsyncBaseTransport, Exception, _bucket(), delete_object(), is_configured(), MediaObjectMissing, MediaStorageUnavailable, MediaStream (+20 more)
+Cohesion: 0.06
+Nodes (41): AsyncBaseTransport, Exception, _internal_key_scheme, Security, Gate `/internal/*` on the `X-Internal-Api-Key` shared secret. Fail CLOSED., require_internal_api_key(), get_settings(), Return a cached Settings instance (read once per process). (+33 more)
 
 ### Community 150 - "oauth.py"
-Cohesion: 0.06
-Nodes (43): RedirectResponse, get_config(), AsyncSession, Doctor hub — tenant configuration endpoints (authenticated).  GET  /tenants/me, Save tenant config and one professional's config in ONE transaction.      Orde, LEGACY single-scope save. Superseded by PUT /tenants/me/configuration.      Be, update_config(), update_configuration() (+35 more)
+Cohesion: 0.09
+Nodes (32): RedirectResponse, calendar_disconnect(), calendar_health(), oauth_callback(), oauth_start(), _owned_professional(), _portal_redirect(), professional_calendar_disconnect() (+24 more)
 
 ### Community 156 - "CalendarService"
-Cohesion: 0.20
-Nodes (10): datetime, timedelta, Return events overlapping [start, end) on the clinic calendar.          Each i, Resolve the availability windows for `day_local` (clinic-local).          Uses, Turn `check_availability` items into clinic-local [start, end) pairs., Free slots inside `windows`, given an already-fetched busy list.          Pure, Return free [start, end) slots on `day` within business hours.          Walks, Days in [start_day, start_day + `days`) with at least one free slot. (+2 more)
+Cohesion: 0.16
+Nodes (14): CalendarService, datetime, timedelta, Async wrapper around the (sync) Google Calendar v3 API., Return events overlapping [start, end) on the clinic calendar.          Each i, Resolve the availability windows for `day_local` (clinic-local).          Uses, Turn `check_availability` items into clinic-local [start, end) pairs., Free slots inside `windows`, given an already-fetched busy list.          Pure (+6 more)
 
 ### Community 220 - "analytics.py"
 Cohesion: 0.15
 Nodes (24): _all_tenants(), db(), MonkeyPatch, workers/tasks.py:_resolve_tenant - nullable phone_number_id + autoprovision gate, Even an event with no phone_number_id at all must not match a NULL row., Regression guard: this exact call used to silently auto-create a tenant., No metadata.phone_number_id on the event at all - still dropped, not adopted., A NULL-phone tenant already exists; autoprovision must create/target a real numb (+16 more)
 
 ### Community 222 - "config.py"
-Cohesion: 0.17
-Nodes (19): apply_whatsapp_statuses(), failure_reason(), mark_read(), meta_timestamp(), _outbound_ids(), AsyncSession, datetime, UUID (+11 more)
+Cohesion: 0.16
+Nodes (21): One delivery receipt (`value.statuses[]`, webhook field `messages`).      `id`, WebhookStatus, apply_whatsapp_statuses(), failure_reason(), mark_read(), meta_timestamp(), _outbound_ids(), AsyncSession (+13 more)
 
 ### Community 227 - "internal.py"
-Cohesion: 0.22
-Nodes (11): _professional_help_prompt(), _professional_options_block(), _FakeModel, _professionals(), Tests for the scoped-help LLM nodes (ai/scoped_help.py) - no network.  The route, Two nodes, two prompts - never one reused question for both scopes., _services(), test_professional_prompt_lists_only_real_options() (+3 more)
+Cohesion: 0.18
+Nodes (18): _normalize(), Map the raw decision onto the outcome the router acts on.      Malformed combi, The node's decision, already normalized for the flow router.      kind="pick", Forced-tool-call schema for one scoped-help turn (see module docstring)., _ScopedHelpDecision, ScopedHelpOutcome, _FakeModel, _professionals() (+10 more)
+
+### Community 241 - "unit.py"
+Cohesion: 0.16
+Nodes (14): inbound_routing_text(), The text the flow router and the agent read for one inbound message.      Reco, _Calendar, _conversation_snapshot(), SimpleNamespace, Why the end-to-end test below can only pass through the id.      Both rows rende, Just enough CalendarService for the slot step, which lists nothing., The second prefix re-checked: a free-slot row, parsed from a real tap. (+6 more)
 
 ### Community 247 - "admin.py"
 Cohesion: 0.15
 Nodes (27): _FakeSession, _make_config(), _make_tenant(), _override_session(), AsyncClient, MonkeyPatch, Tests for the admin fleet endpoints (GET /admin/tenants + calendar health).  T, Minimal AsyncSession stand-in for the delete path.      `tenant` is what `get` (+19 more)
 
 ### Community 248 - "analytics.py"
-Cohesion: 0.09
-Nodes (28): _interactive_read(), The row's `interactive` blob in its wire shape, or None (tolerant)., _handover_values(), HandoverState, Enum, Conversation model - one ongoing thread between a patient and a clinic., Who currently owns the conversation.      BOT_ACTIVE   - the AI may answer aut, attachment_read_or_none() (+20 more)
+Cohesion: 0.67
+Nodes (3): _handover_values(), Enum, Conversation model - one ongoing thread between a patient and a clinic.
 
 ### Community 250 - "config.py"
 Cohesion: 0.12
@@ -1045,47 +1060,47 @@ Nodes (16): 10. Skill: nenhuma criada, e por quê, 1. O que mudou, em uma frase,
 
 ### Community 253 - "internal.py"
 Cohesion: 0.08
-Nodes (33): clinic_description_budget(), greeting_preview_template(), The product-defined first-contact greeting frame, and the LGPD consent notice., Render the frame for one tenant. Pure; never raises on missing input.      An em, How many characters of description still fit for THIS clinic.      The greeting, The frame for this clinic with `PREVIEW_PLACEHOLDER` in the slot.      Byte-for-, render_greeting(), tenant_read_model() (+25 more)
+Nodes (32): clinic_description_budget(), greeting_preview_template(), The product-defined first-contact greeting frame, and the LGPD consent notice., Render the frame for one tenant. Pure; never raises on missing input.      An em, How many characters of description still fit for THIS clinic.      The greeting, The frame for this clinic with `PREVIEW_PLACEHOLDER` in the slot.      Byte-for-, render_greeting(), Tests for services/greeting_template.py — the product greeting frame.  Two thing (+24 more)
 
 ### Community 255 - "unit.py"
-Cohesion: 0.19
-Nodes (24): _consent_events(), db(), _inbound(), _patient(), Tests for the LGPD consent gate — the sequenced first conversation.  The shape, Sending the notice is not consent. Only the tap is., Not even `/menu` gets through — the gate sits above it in the ladder.      `Ag, Step 4: the first message of the conversation to carry action buttons. (+16 more)
+Cohesion: 0.11
+Nodes (31): _consent_events(), db(), _inbound(), _open(), _patient(), MonkeyPatch, Tests for the LGPD consent gate — the sequenced first conversation.  The shape, The opening up to the LGPD notice: first message, then the name answer.      S (+23 more)
 
 ### Community 256 - "admin.py"
-Cohesion: 0.07
-Nodes (33): BoundLogger, main(), Dev/test: store an INVALID Google Calendar refresh token for a tenant so the nex, main(), Diagnose Fase A auth: what scopes does our refresh token actually carry?  A refr, _short(), main(), Generate a Google Calendar refresh token for Fase A (single tenant).  One-shot C (+25 more)
+Cohesion: 0.18
+Nodes (16): _origins(), CORS_ALLOW_ORIGINS parsing — the format the mesh actually ships.  The failure th, The exact string that was live in EasyPanel when the portal broke., The actual regression: an origin carrying `["` or `"]` matches nothing., The old format stays valid — this is additive, nothing to migrate., A typo must reject everyone, never crash the process building Settings., Same origins, either spelling — the property the mesh relies on., test_blank_values_yield_no_origins() (+8 more)
 
 ### Community 261 - "calendar.py"
-Cohesion: 0.16
-Nodes (9): CalendarCredentialStatus, _probe_credential(), Live check of ONE refresh token + calendar id. Never raises., Everything needed to run the agent for one tenant, resolved + decrypted., TenantRuntimeConfig, _FakeCalendarService, _fakes(), MonkeyPatch (+1 more)
+Cohesion: 0.17
+Nodes (10): _config_with_selected_professional(), Overlay an explicitly-selected professional onto the runtime config.      `load_, Everything needed to run the agent for one tenant, resolved + decrypted., TenantRuntimeConfig, _tenant_config(), test_config_overlay_is_identity_without_selection(), test_config_overlay_renders_professional_context_in_prompt(), test_prompt_teaches_menu_and_professional_tools() (+2 more)
 
 ### Community 264 - "base.py"
-Cohesion: 0.21
-Nodes (15): _agent_context(), db(), _FakeCalendarService, _fakes(), MonkeyPatch, Tests for plugins/multi_unit.py — unit-aware booking tools.  Same in-memory-sq, The sole booking tool for a tenant with multi_unit and no     multi_professional, _seed_tenant_and_units() (+7 more)
+Cohesion: 0.12
+Nodes (33): _bodies(), _claim_held(), db(), _open(), One open, decided AND delivered — what the arq job does end to end., The point of the whole route, and the line it must not cross.      The patient, The same rows an inbound creates, minus the message., The opening turn is the SHARED first-contact turn, not a copy of it.      Prov (+25 more)
 
 ### Community 284 - "for_tenant"
-Cohesion: 0.16
-Nodes (25): professionals_offering(), Overlay the canonical catalog onto per-professional JSON entries.      Returns, Which of `professionals` actually offer `service`. Order preserved.      `serv, resolve_entries(), _entry(), FIX_08's structural fix: the copy has ONE owner, so a professional     payload, The 'no other doctor does this' answer FEAT_34 has to handle., A tenant not backfilled yet keeps the pre-catalog exact-name behaviour. (+17 more)
+Cohesion: 0.18
+Nodes (23): professionals_offering(), Overlay the canonical catalog onto per-professional JSON entries.      Returns, Which of `professionals` actually offer `service`. Order preserved.      `serv, resolve_entries(), _entry(), FIX_08's structural fix: the copy has ONE owner, so a professional     payload, The 'no other doctor does this' answer FEAT_34 has to handle., One stored appointment_types entry, the shape that exists today. (+15 more)
 
 ### Community 287 - "for_tenant"
 Cohesion: 0.25
 Nodes (13): _agent_context(), db(), _patch_session_factory(), datetime, MonkeyPatch, Tests for ai/tools.py:list_patient_appointments — the read-only agent tool.  M, Tenant + patient + conversation, with a mix of appointments:      future SCHED, _seed_with_appointments() (+5 more)
 
 ### Community 288 - "from_tenant_config"
-Cohesion: 0.11
-Nodes (17): AppointmentCreate, AppointmentReschedule, AppointmentStatusUpdate, BlockCreate, CalendarEventRead, CalendarHealthRead, CancelPreviewRead, ProfessionalCalendarHealthRead (+9 more)
+Cohesion: 0.14
+Nodes (23): fetch_professional_emails(), UUID, secretarIA -> brain-api client for professional CONTACT data (their email).  ===, `{professional_id: email}` for one tenant's linked professionals.      Keys are, _configured(), MonkeyPatch, Request, Tests for services/brain_professionals.py — the professional-email lookup.  Mirr (+15 more)
 
 ### Community 289 - "for_tenant"
-Cohesion: 0.08
-Nodes (38): datetime, Doctor-initiated cancellation: the patient is ALWAYS told, and told properly., The safe direction: a free-form send would just be rejected by Meta., One appointment, optionally owned by a professional and linked to a     patient, The patient has NOT been told. That is the doctor's choice (they were     shown, No conversation at all — a free-form send would just be rejected., arq retries jobs. Inside the window a duplicate is inbox noise; outside     it, A claim is a lock, not a receipt — but giving the lock back is only half     of (+30 more)
+Cohesion: 0.14
+Nodes (21): One appointment, optionally owned by a professional and linked to a     patient, The patient has NOT been told. That is the doctor's choice (they were     shown, No conversation at all — a free-form send would just be rejected., arq retries jobs. Inside the window a duplicate is inbox noise; outside     it, A claim is a lock, not a receipt — but giving the lock back is only half     of, Outside the 24h window every send is billed, so the retry path is the one     p, The message already went out. A metering blip must not reach the retry     path, Count-only observability: ids and reasons, never patient content.      `capsys (+13 more)
 
 ### Community 293 - "_handle_day_step"
-Cohesion: 0.16
-Nodes (23): _connect_calendar(), db(), _events(), AsyncClient, Typed straight into Google Calendar — the UI must keep cancel disabled     rath, Isolation invariant: a shared or mis-configured Google account must not     han, A month of a busy clinic is hundreds of events; the N+1 shape would put     tha, The whole point of the change: a blank box used to mean silence. (+15 more)
+Cohesion: 0.24
+Nodes (16): _connect_calendar(), _events(), AsyncClient, Typed straight into Google Calendar — the UI must keep cancel disabled     rath, Isolation invariant: a shared or mis-configured Google account must not     han, A month of a busy clinic is hundreds of events; the N+1 shape would put     tha, The whole point of the change: a blank box used to mean silence., test_another_tenants_event_id_never_resolves() (+8 more)
 
 ### Community 294 - "test_waba_fail_closed.py"
-Cohesion: 0.21
-Nodes (10): configured_secrets(), AsyncClient, `/health` is a frozen contract: a load balancer may match on this body.      Bui, A silent worker must never read as agreement.      Under ASGITransport the lifes, The endpoint that proves the deploy must not become the leak., Values that must never appear in a build-identity payload or log line., test_build_endpoint_exposes_no_secret(), test_build_endpoint_proves_what_this_process_runs() (+2 more)
+Cohesion: 0.19
+Nodes (10): BrokenRedis, AsyncClient, `/health` is a frozen contract: a load balancer may match on this body.      B, A silent worker must never read as agreement.      Under ASGITransport the lif, The endpoint that proves the deploy must not become the leak., Every call raises — the "Redis went away mid-flight" shape., test_build_endpoint_exposes_no_secret(), test_build_endpoint_proves_what_this_process_runs() (+2 more)
 
 ### Community 296 - "test_build_identity.py"
 Cohesion: 0.18
@@ -1096,12 +1111,12 @@ Cohesion: 0.19
 Nodes (21): create_service(), _duplicate_error(), list_services(), _offering(), AsyncSession, HTTPException, Doctor hub — the clinic's CANONICAL service catalog.  GET   /tenants/me/servic, The clinic's whole catalog, retired services included.      Retired rows are r (+13 more)
 
 ### Community 298 - "_entry"
-Cohesion: 0.14
-Nodes (17): _adapt_greeting_has_upcoming(), _adapt_greeting_to_state(), _appointment_doctor_name(), _as_utc(), _compose_upcoming_greeting_body(), _format_appointment_when(), _hours_until_start(), datetime (+9 more)
+Cohesion: 0.08
+Nodes (39): ButtonBubble, InboundContext, What an `on_inbound` hook needs to decide + act on one inbound turn.      Hook, MenuBubble, An N-button reply card (the formatter's ButtonBubble is confirm/cancel     only, PatientOpeningState, The five opening states, in first-match order (see the resolver)., ClaimOutcome (+31 more)
 
 ### Community 299 - "test_hub_conversations.py"
 Cohesion: 0.13
-Nodes (50): db(), _get_conversation_row(), _get_message_rows(), AsyncClient, datetime, MonkeyPatch, Tests for api/hub/conversations.py — per-conversation manual handover.  Uses the, A brain_message-channel patient has wa_id=None by construction (no     WhatsApp (+42 more)
+Nodes (52): db(), _get_conversation_row(), _get_message_rows(), AsyncClient, datetime, MonkeyPatch, Tests for api/hub/conversations.py — per-conversation manual handover.  Uses the, A brain_message-channel patient has wa_id=None by construction (no     WhatsApp (+44 more)
 
 ### Community 300 - "Parte 1 — `/menu` deixou de ser destrutivo (PROMPT_FIX_18)"
 Cohesion: 0.09
@@ -1124,12 +1139,12 @@ Cohesion: 0.20
 Nodes (13): collect_groups(), _Group, look_alike_pairs(), main(), _print_report(), UUID, Populate the canonical service catalog from the existing JSON entries.  DELIVERY, Distinct services whose names resemble each other. NEVER merged.      Advisory o (+5 more)
 
 ### Community 306 - "_resolve"
-Cohesion: 0.07
-Nodes (51): BuildIdentity, check_deploy_parity(), compare_build(), publish_build_identity(), Any, ParityVerdict, Build identity of the running process — the deploy-parity proof (FIX_01 §5.1/§5., Are these two processes running the same code?      Both `build_sha` and `source (+43 more)
+Cohesion: 0.16
+Nodes (18): BuildIdentity, compare_build(), Are these two processes running the same code?      Both `build_sha` and `source, What this process is running. Every field is safe to log and to serve., make_identity(), Build identity and the deploy-divergence alarm (FIX_01 §5.1/§5.2).  The failur, A full sha from a pipeline and a short one from a panel are the same commit., The normal case today: nothing passes BUILD_SHA, parity still provable. (+10 more)
 
 ### Community 307 - "hub_configuration.py"
 Cohesion: 0.11
-Nodes (23): ActivationBlocked, apply_professional_config(), apply_tenant_config(), check_appointment_type_service_ids(), check_tenant_activation(), ClinicDescriptionTooLong, config_source_fields(), professional_list_item() (+15 more)
+Nodes (24): ActivationBlocked, apply_professional_config(), apply_tenant_config(), check_appointment_type_service_ids(), check_tenant_activation(), ClinicDescriptionTooLong, config_source_fields(), professional_list_item() (+16 more)
 
 ### Community 308 - "Recorder"
 Cohesion: 0.16
@@ -1140,12 +1155,12 @@ Cohesion: 0.15
 Nodes (9): FEAT 44 - which surfaces wear an emoji, and that decorating broke no matcher., _services(), _tenant(), test_a_service_name_that_is_already_truncated_stays_bare(), test_a_tap_on_a_decorated_service_row_still_resolves_to_the_catalog_entry(), test_both_service_catalogs_render_a_name_identically(), test_default_reactivation_buttons_are_decorated_but_a_tenants_own_are_not(), test_tapping_a_decorated_service_row_advances_the_flow() (+1 more)
 
 ### Community 310 - "resolve_patient_opening_state"
-Cohesion: 0.23
-Nodes (15): list_patient_appointments(), Lista as consultas FUTURAS já marcadas DESTE paciente nesta clínica.     Use pa, as_utc(), _load_recent_past_appointments(), load_upcoming_appointments(), AsyncSession, datetime, timedelta (+7 more)
+Cohesion: 0.29
+Nodes (11): as_utc(), _load_recent_past_appointments(), AsyncSession, datetime, timedelta, UUID, Patient appointment context — shared queries + the opening-state resolver.  One, Non-cancelled appointments that STARTED within the last `window`, newest first. (+3 more)
 
 ### Community 311 - "check_deploy_parity"
-Cohesion: 0.26
-Nodes (11): _context_field(), _log_outcome(), _phone_hash(), UUID, Precheck hand-off — asks brain-api (the mesh hub) to pre-seed a PreCheck conver, Ask brain-api to pre-seed a PreCheck session for `phone_number` under `tenant_id, Short, non-reversible fingerprint of a phone number, safe to log., One optional context field, normalized: blank and absent are the same thing. (+3 more)
+Cohesion: 0.15
+Nodes (17): _context_field(), HandoffOutcome, _log_outcome(), _phone_hash(), UUID, Precheck hand-off — asks brain-api (the mesh hub) to pre-seed a PreCheck conver, Result of asking brain-api to pre-seed a PreCheck session., Short, non-reversible fingerprint of a phone number, safe to log. (+9 more)
 
 ### Community 312 - "normalize"
 Cohesion: 0.10
@@ -1168,20 +1183,20 @@ Cohesion: 0.13
 Nodes (14): A ordem de deploy é a parte perigosa, CHECKPOINT — PreCheck oferecido automaticamente logo depois do agendamento, Deploy desta perna, `entitlement_keys=()` é deliberado, Fatia P1 (contexto do agendamento) — IMPLEMENTADA (FEAT 39, 2026-08-26), Idempotência — e por que não há job de retry, LGPD, O hook (+6 more)
 
 ### Community 317 - "enter_booking"
-Cohesion: 0.06
-Nodes (80): Build a CalendarService using per-tenant credentials.          The OAuth app (, Does this sender write the outbound `Message` row itself?      Read through `g, sender_persists_outbound(), flows_enabled(), ALWAYS True — the deterministic entry flows ARE the product.      Used to be a, _apply_deposit_awareness(), _apply_flow_result(), _appointment_calendar() (+72 more)
+Cohesion: 0.04
+Nodes (130): Build a CalendarService using per-tenant credentials.          The OAuth app (, Does this sender write the outbound `Message` row itself?      Read through `g, sender_persists_outbound(), flows_enabled(), ALWAYS True — the deterministic entry flows ARE the product.      Used to be a, load_upcoming_appointments(), Future LIVE appointments for a patient, nearest first.      "Live" is SCHEDULED, _account_code_dead_end() (+122 more)
 
 ### Community 318 - "CHECKPOINT — Catálogo canônico de serviços da clínica (FEAT 35)"
 Cohesion: 0.11
 Nodes (18): 1. O problema, 2. A decisão de modelagem, 3. O que entrou (entrega 1), 4. Contrato para a UI (entrega 2 — frontends), 5. Testes, 6. Pendências, 7.1 O bug que travava tudo: `service_id` era descartado em silêncio, 7.2 Um `service_id` que não é da clínica agora é recusado (+10 more)
 
 ### Community 319 - "ConsentEvent"
-Cohesion: 0.33
-Nodes (8): erase_subject(), export_subject(), _hash_wa_id(), AsyncSession, _TENANT_PATH, LGPD privacy endpoints — internal service-to-service (`/internal/privacy/*`)., SHA-256 hex digest of a wa_id — logged instead of the raw value, ever., _WA_ID_PATH
+Cohesion: 0.11
+Nodes (19): FastAPI, health(), Liveness probe and build identity.  `/health` is the LIVENESS probe and its resp, Liveness probe. Intentionally does not touch Postgres or Redis., erase_subject(), export_subject(), _hash_wa_id(), AsyncSession (+11 more)
 
 ### Community 320 - "clean_requirements"
-Cohesion: 0.09
-Nodes (22): _extract_message_id(), _meta_error_code(), Response, WhatsApp Cloud API client - sends outbound messages.  FAIL-CLOSED per tenant (, Pull the wamid from a Cloud API send response, tolerating bad shapes., Meta's NUMERIC error code/subcode from an error body, or None.      Deliberate, A "4xx"/"5xx"-style bucket — enough to alert on, carries no content., Async client for the Meta WhatsApp Cloud API.      Both credentials are REQUIR (+14 more)
+Cohesion: 0.07
+Nodes (27): _extract_message_id(), _meta_error_code(), Response, UUID, WhatsApp Cloud API client - sends outbound messages.  FAIL-CLOSED per tenant (, Pull the wamid from a Cloud API send response, tolerating bad shapes., Meta's NUMERIC error code/subcode from an error body, or None.      Deliberate, A "4xx"/"5xx"-style bucket — enough to alert on, carries no content. (+19 more)
 
 ### Community 321 - "BrokenRedis"
 Cohesion: 0.17
@@ -1200,12 +1215,12 @@ Cohesion: 0.22
 Nodes (8): A constante compartilhada, A decisão, Arquivos, CHECKPOINT — `RESCHEDULED` é status VIVO (taxonomia unificada), O bug, Observabilidade, Pendências, Sem migração, sem backfill
 
 ### Community 325 - "receive_asaas_webhook"
-Cohesion: 0.17
-Nodes (11): _format_appointment_types(), _format_business_hours(), _format_post_consult_knowledge(), _format_professional_context(), _format_safety_rules(), System prompts for the SecretarIA conversational agent.  Lives outside ai/grap, Render the "SOBRE O PROFISSIONAL" block, or "" when nothing is set.      Only, Render the "CONHECIMENTO PÓS-CONSULTA" block, or "" when nothing is set. (+3 more)
+Cohesion: 0.16
+Nodes (22): _consent_kinds(), _conversation(), _menu_body(), _NoIdentityWrites, _patient(), MonkeyPatch, The e-mail/code legs. A verified account must never reach any of them., One patient message, decided and answered — what the inbound job does. (+14 more)
 
 ### Community 326 - "extract_action_button"
-Cohesion: 0.31
-Nodes (9): _active_units(), list_units(), UUID, multi_unit plugin: unit (physical location) awareness for booking.  Entitlemen, Active units for `tenant_id`, ordered by name. Never raises., Resolve an active unit by name for `tenant_id`.      Returns (unit, None) on s, Lista as unidades/locais ativos da clínica, com nome e endereço. Use     para i, _resolve_unit_or_error() (+1 more)
+Cohesion: 0.26
+Nodes (11): _active_units(), create_event_at_unit(), list_units(), UUID, multi_unit plugin: unit (physical location) awareness for booking.  Entitlemen, Cria uma consulta na agenda da clínica, associada a uma unidade     específica., Active units for `tenant_id`, ordered by name. Never raises., Resolve an active unit by name for `tenant_id`.      Returns (unit, None) on s (+3 more)
 
 ### Community 327 - "CHECKPOINT — Fluxos determinísticos incondicionais (fim do gate `initial_flows.enabled`)"
 Cohesion: 0.29
@@ -1216,24 +1231,24 @@ Cohesion: 0.36
 Nodes (7): dtime, _is_outside_business_hours(), _on_inbound(), _parse_hhmm(), datetime, human_backup_24_7 plugin: hand inbound messages to a human outside business hour, True when `now` falls outside every configured window for today.      Empty/un
 
 ### Community 329 - "_FakeAsaasClient"
-Cohesion: 0.21
-Nodes (11): _filter_new_event_ids(), Request, Response, WhatsApp webhook endpoints.  GET  /webhook  - Meta verification handshake (ech, Meta verification handshake.      Meta calls this once when the webhook is con, Return the subset of `event_ids` not yet in `processed_events`.      Fail-open, Receive a webhook event.      GOLDEN RULE: return 200 in well under 5 seconds., receive_webhook() (+3 more)
+Cohesion: 0.27
+Nodes (9): _filter_new_event_ids(), Request, Response, WhatsApp webhook endpoints.  GET  /webhook  - Meta verification handshake (ech, Meta verification handshake.      Meta calls this once when the webhook is con, Return the subset of `event_ids` not yet in `processed_events`.      Fail-open, Receive a webhook event.      GOLDEN RULE: return 200 in well under 5 seconds., receive_webhook() (+1 more)
 
 ### Community 330 - "_FakeWhatsAppClient"
-Cohesion: 0.29
-Nodes (7): canonical_service_name(), The catalog's OWN spelling of the service `candidate` refers to, or None., test_canonical_service_name_is_none_for_anything_unproven(), test_canonical_service_name_keeps_prefix_heavy_services_apart(), test_canonical_service_name_matches_the_whatsapp_row_truncation(), test_canonical_service_name_returns_the_catalogs_own_spelling(), test_decoration_cannot_make_two_services_resolve_to_each_other()
+Cohesion: 0.17
+Nodes (22): PluginSpec, One optional capability, gated by ANY of a set of entitlement keys.      id: t, _clean_registry(), _fake_ehr_tool(), _fake_pix_tool(), Tests for plugins/base.py + plugins/registry.py — the plugin foundation., Cumulative multi-tier ranking (a plugin gated on a HIGHER tier than the     ten, A plugin gated by multiple keys (a tier AND an addon) is enabled when ANY of (+14 more)
 
 ### Community 332 - "find_near_duplicates"
-Cohesion: 0.18
-Nodes (7): HandoffOutcome, Result of asking brain-api to pre-seed a PreCheck session., log(), _LogRecorder, _Handoff, Stands in for `request_precheck_handoff`: records asks, replays one outcome., Records every structlog call - same shape as     tests/test_precheck_handoff_pl
+Cohesion: 0.09
+Nodes (19): _ExplodingWhatsAppClient, `POST /internal/brain-message/open` — the automation speaks first.  Origin: TA, Any use at all fails the test. Nothing on this path may reach Meta., What the identity leg was asked for, and what it should answer., 202 `queued`, and the job carries exactly what the worker needs., 200 `exists`, and NOTHING is queued — the contract's second answer.      The p, Answering 202 with nothing enqueued would promise a greeting forever., A pool OBJECT is not a working queue.      The existence check cannot see a Re (+11 more)
 
 ### Community 333 - "_FakeAsaas"
 Cohesion: 0.14
 Nodes (17): Run `post_booking` hooks for every plugin this tenant is entitled to.      Unl, run_post_booking(), _FakeRedis, Tests for plugins/professional_notification.py — "a patient booked with you"., The arq pool, recording what the hook asks to be enqueued., Every addon off, plain tier: the hook still runs. Telling a doctor that     som, Core still means "while the subscription is live" — a lapsed clinic does     no, Count-only observability: ids and reasons, never personal data.      See `_Log (+9 more)
 
 ### Community 334 - "_StubCalendarService"
-Cohesion: 0.09
-Nodes (31): RuntimeError, Build a client for a tenant. The DECRYPTED token is injected by the caller., A tenant-scoped send was attempted without that tenant's credentials.      Car, TenantWhatsAppCredentialMissing, The inverted invariant (PROMPT_FIX_21).      This test used to assert the oppo, test_missing_tenant_token_fails_closed_not_global_scaffold(), _ExplodingHttpClient, _FakeResponse (+23 more)
+Cohesion: 0.08
+Nodes (36): RuntimeError, Build a client for a tenant. The DECRYPTED token is injected by the caller., The single-tenant `META_*` env scaffold, requested BY NAME.          Developme, A tenant-scoped send was attempted without that tenant's credentials.      Car, TenantWhatsAppCredentialMissing, The inverted invariant (PROMPT_FIX_21).      This test used to assert the oppo, test_missing_tenant_token_fails_closed_not_global_scaffold(), _ExplodingHttpClient (+28 more)
 
 ### Community 335 - "check_deploy_parity_cron"
 Cohesion: 0.20
@@ -1244,20 +1259,20 @@ Cohesion: 0.20
 Nodes (4): _FakeAsyncClient, _FakeResponse, Exception, Records init kwargs + posted requests; returns a canned response or raises.
 
 ### Community 337 - "_calendar_for_professional"
-Cohesion: 0.18
-Nodes (20): db(), _inbound(), MonkeyPatch, Patient identity by channel - the additive half.  This pins the property that ma, The untouched call site produces a complete channel-addressable row., Identity by wa_id still resolves to ONE row, not a new one per message.      The, Tenant isolation survives the new key: the same phone, two clinics., A patient with no phone number gets a row - the case that was impossible. (+12 more)
+Cohesion: 0.07
+Nodes (42): DefaultExecutionContext, _external_id_default(), Patient, Patient model - a person messaging a clinic on one of its channels., Mirror `wa_id` into `external_id` when the caller did not supply one.      A c, A patient, identified by (tenant, channel, external_id).      Historically tha, _adopt_account_name(), _asks_name_at_first_contact() (+34 more)
 
 ### Community 338 - "conversation.py"
-Cohesion: 0.12
-Nodes (20): _config_with_selected_professional(), Overlay an explicitly-selected professional onto the runtime config.      `loa, GuidedBookingRequested, Raised by `start_guided_booking`: hand the BOOKING to the button flow.      Sa, _booking_context(), Agent context with a catalog to validate `appointment_type` against., The service is proven against the catalog BEFORE the hand-back: it lands     on, Recoverable, not raised: the model can correct itself in the same turn     inst (+12 more)
+Cohesion: 0.16
+Nodes (14): GuidedBookingRequested, Raised by `start_guided_booking`: hand the BOOKING to the button flow.      Sa, _booking_context(), Agent context with a catalog to validate `appointment_type` against., The service is proven against the catalog BEFORE the hand-back: it lands     on, Recoverable, not raised: the model can correct itself in the same turn     inst, A clinic with nothing to prove a service against books typeless, the     same h, Second lock. The day picker it opens would read availability off the     CLINIC (+6 more)
 
 ### Community 339 - "_FakeRedis"
-Cohesion: 0.20
-Nodes (11): log_status_transition(), UUID, Appointment status transitions — the one observability seam (PROMPT_FIX_16).  Th, Record one appointment status transition, sanitized.      `idempotency_key` is w, _calendar_for_appointment(), _execute_appointment_cancel(), _load_upcoming_greeting_data(), AsyncSession (+3 more)
+Cohesion: 0.13
+Nodes (21): GoogleScopeInsufficientError, HttpError, _raise_if_scope_insufficient(), _raise_if_unavailable(), A 403 caused by a token that predates a scope this call needs.      Raised by, Translate a scope-insufficient 403 into GoogleScopeInsufficientError.      MUS, Translate an outage/auth HttpError into CalendarUnavailableError.      Returns, _http_error() (+13 more)
 
 ### Community 341 - "_filter_active_hours"
-Cohesion: 0.06
-Nodes (71): _filter_active_hours(), _filter_active_types(), professional_appointment_types(), professional_business_hours(), professional_inherits_appointment_types(), professional_inherits_business_hours(), Shared filter behind `active_appointment_types` / `professional_appointment_type, Shared filter behind `active_business_hours` / `professional_business_hours`. (+63 more)
+Cohesion: 0.10
+Nodes (43): _filter_active_types(), professional_appointment_types(), professional_business_hours(), professional_inherits_business_hours(), Shared filter behind `active_appointment_types` / `professional_appointment_type, True when this professional has no hours of their own (NULL = inherit)., Active appointment-type dicts for ONE professional.      The professional's ow, Weekday -> non-empty window list for ONE professional.      The professional's (+35 more)
 
 ### Community 342 - "test_send_simple_text_requires_an_explicit_client"
 Cohesion: 0.15
@@ -1269,15 +1284,15 @@ Nodes (15): A correção — `services/calendar.py::build_patient_calendar_link`
 
 ### Community 344 - "_connect_calendar"
 Cohesion: 0.17
-Nodes (12): _cancellation_retry_decision(), _claim_event(), _emit_cancellation_usage(), _escalate_cancellation_failure(), arq job: tell a patient their doctor cancelled, and offer a way back.      Spl, Seconds to wait before re-running the notice, or None to give up.      Two bou, Last resort: every retry spent and the patient still has not been told.      T, Best-effort meter tick for one BILLED (outside-window) cancellation send. (+4 more)
+Nodes (18): _ctx(), db(), _empty_registry(), _fake_get_waba_token(), _fakes(), _make_appointment(), MonkeyPatch, Tests for the post_booking seam: plugins/base.py's PostBookingContext, registry (+10 more)
 
 ### Community 345 - "enabled_plugins"
-Cohesion: 0.18
-Nodes (6): HandoverManager, AsyncSession, Handover logic - switching a conversation between the bot and a human.  Coexis, Reads and mutates the handover state of a conversation.      All mutations `fl, True when the bot is allowed to answer automatically., Pause the bot - a human secretary has taken over.
+Cohesion: 0.10
+Nodes (20): 1. Primeiro contato, 2. Escolher profissional, serviço, data e horário (mesma lógica nos dois canais), 3. Se a pessoa escreve de novo antes da consulta (no ar), 4. Lembretes automáticos, 5. Depois da consulta, 6. Quando a pessoa volta depois de já ter sido atendida (no ar), 7. Remarcar ou cancelar, a qualquer momento (no ar), 8. Calendário dinâmico (não existe ainda em canal nenhum) (+12 more)
 
 ### Community 346 - "_audit"
-Cohesion: 0.29
-Nodes (7): EventDict, Blank secret-bearing keys AND personal-data/content keys before rendering., redact_secrets(), test_redactor_blanks_secret_bearing_keys(), Exact-match, never substring: the reduced/opaque forms must survive., test_redactor_blanks_personal_data_and_content(), test_redactor_keeps_the_identifiers_operations_needs()
+Cohesion: 0.09
+Nodes (23): BoundLogger, EventDict, LogRecord, ArqJobArgsRedactionFilter, get_logger(), install_arq_log_redaction(), Structured logging setup using structlog.  JSON output in non-dev environments, Scrub a free-text log message the same way `redact_secrets` scrubs keys. (+15 more)
 
 ### Community 347 - "RuntimeAppointmentType"
 Cohesion: 0.14
@@ -1293,7 +1308,7 @@ Nodes (10): A decisão: perguntar, não copiar, CHECKPOINT — E-mail ao profiss
 
 ### Community 350 - "_should_inject_appointment_context"
 Cohesion: 0.05
-Nodes (59): An active appointment type as the LLM should see it., RuntimeAppointmentType, _appointment_context_text(), _is_rate_limited(), _manage_owner_calendar_target(), Whether THIS turn's system prompt should carry the appointment context block., Render the per-turn "consultas marcadas" block for the LLM prompt.      Pure f, Whose calendar this turn's manage action acts on (pure, no I/O).      Two turn (+51 more)
+Nodes (61): FlowState, Which deterministic (zero-LLM) flow the conversation is currently in.      IDL, An active appointment type as the LLM should see it., RuntimeAppointmentType, _appointment_context_text(), _is_rate_limited(), _llm_activation_reason(), _manage_owner_calendar_target() (+53 more)
 
 ### Community 351 - "wipe_data"
 Cohesion: 0.17
@@ -1304,8 +1319,8 @@ Cohesion: 0.21
 Nodes (12): Any, BaseMessage, Pseudonymizer, LangChain-facing half of the pseudonymization step.  `services/pii_pseudonymiz, Wrap a tool sequence for the agent. Safe to call once per agent build.      Th, Un-tokenize the bot's reply, and shout if anything is left over.      A token, Mask every message's content, preserving its TYPE.      `model_copy` rather th, One tool, guarded on both sides. Returns the tool itself if unwrappable. (+4 more)
 
 ### Community 353 - "test_a_failed_enqueue_is_reported_not_assumed"
-Cohesion: 0.12
-Nodes (7): PixDepositStatus, PixDeposit model - the sinal (deposit) payment lifecycle for a booked appointmen, str, FakeAsaasClient, _FakeWhatsAppClient, Records constructed instances + sends; installed in place of the real client., Records every call; every failure mode is injectable per-instance.
+Cohesion: 0.10
+Nodes (9): PixDepositStatus, PixDeposit model - the sinal (deposit) payment lifecycle for a booked appointmen, str, _FailingWhatsAppClient, FakeAsaasClient, _FakeWhatsAppClient, Records constructed instances + sends; installed in place of the real client., Every send raises — used to prove a send failure never blocks a booking. (+1 more)
 
 ### Community 354 - "_patch_agenda_url"
 Cohesion: 0.20
@@ -1316,8 +1331,8 @@ Cohesion: 0.36
 Nodes (8): extract_action_button(), Decode a reminder action-button reply into (action, appointment_id).      Two, _interactive_msg(), _template_button_msg(), test_extract_action_button_both_carriers_agree(), test_extract_action_button_malformed_uuid_returns_none(), test_extract_action_button_no_button_at_all_returns_none(), test_extract_action_button_unknown_prefix_returns_none()
 
 ### Community 356 - "_flow_tenant"
-Cohesion: 0.21
-Nodes (15): LogCaptureFixture, _FakeError, _noop_sleep(), MonkeyPatch, Tests for the transient-network retry inside run_agent.  Verifies that a single, A CalendarUnavailableError from a tool must surface the degradation     sentinel, Skip the 1-second backoff so the test suite stays fast., Stand-in for a non-transient runtime error (e.g. a bug in the agent). (+7 more)
+Cohesion: 0.15
+Nodes (15): _emit_arq_job_start_line(), arq's NATIVE job log must not carry the OTP, the reset link or the e-mail.  `a, arq truncates the args string at 80 chars — a long address pushes the OTP     a, repr(bytes) is `b'…'` — the prefix must not stop the quoted value from matching., Emit EXACTLY the line arq's `Worker.run_job` emits, with arq's own     logger a, Drift guard: if a future arq changes how it logs job args, fail here so     the, Stand-in for the job module's structlog logger. structlog caches loggers     on, _RecordingLogger (+7 more)
 
 ### Community 357 - "test_whatsapp_template.py"
 Cohesion: 0.18
@@ -1325,15 +1340,15 @@ Nodes (10): ATENÇÃO — isto provavelmente NÃO é um bug de código ativo, co
 
 ### Community 358 - "_ExplodingHttpClient"
 Cohesion: 0.22
-Nodes (9): Cut a reply-button title to `limit`, UNMARKED - see why below.      Buttons de, truncate_button_label(), _label_match_body(), True when `body` equals `label` or its 20-char button truncation.      Normali, test_no_decorated_label_is_silently_cut_by_the_send_path(), test_the_greeting_cards_matcher_in_the_worker_accepts_all_three_forms(), test_button_label_cut_is_unmarked_and_matches_the_historical_slice(), test_button_label_handles_none() (+1 more)
+Nodes (9): Cut a reply-button title to `limit`, UNMARKED - see why below.      Buttons de, truncate_button_label(), _label_match_body(), True when `body` equals `label` or its 20-char button truncation.      Normalise, test_no_decorated_label_is_silently_cut_by_the_send_path(), test_the_greeting_cards_matcher_in_the_worker_accepts_all_three_forms(), test_button_label_cut_is_unmarked_and_matches_the_historical_slice(), test_button_label_handles_none() (+1 more)
 
 ### Community 359 - "logging.py"
 Cohesion: 0.18
 Nodes (10): Backend — truncamento já existe, mas é ingênuo e duplicado (não é ausência de truncamento, é truncamento ruim), code:python (capped_rows = []), code:tsx (const [name, setName] = useState("");), Cuidado, Frontend — sem limite de tamanho no campo de nome, O que a investigação já encontrou, O que fazer, Origem (+2 more)
 
 ### Community 360 - "ShowMainMenuRequested"
-Cohesion: 0.25
-Nodes (10): days_elapsed(), _next_checkpoint_day(), next_retry_time(), datetime, Pure cadence/due-date math for the onboarding nudge cron (contract v1 §11/§12)., Fractional days between `anchor` and `now` (may be negative).      Both must b, Smallest checkpoint (day-offset from anchor) STRICTLY greater than     `elapsed, The NEXT retry-nudge checkpoint strictly after `now`, or None once the     sequ (+2 more)
+Cohesion: 0.11
+Nodes (15): datetime, Doctor-initiated cancellation: the patient is ALWAYS told, and told properly., The safe direction: a free-form send would just be rejected by Meta., Replaced by `justification`, not kept beside it — two fields with     confusabl, A cancellation notice landing hours later reaches somebody who has     already, Even with no clinic email on file, the abandonment carries a stable alarm     f, Cancelling with no reason is a supported path, not a degraded one — it     must, send_buttons truncates past 20 SILENTLY, so an over-long label would     reach (+7 more)
 
 ### Community 361 - "_LogRecorder"
 Cohesion: 0.22
@@ -1344,20 +1359,20 @@ Cohesion: 0.70
 Nodes (4): main(), UUID, READ-ONLY report: future appointments saved without a professional owner.  Booki, _report()
 
 ### Community 365 - "_FakeGoogleService"
-Cohesion: 0.16
-Nodes (25): config_reminder_due(), Whether a config reminder is due at `now`.      Never sent yet (`last_sent is, _at(), Exhaustive tests for workers/onboarding_cadence.py — the pure cadence/ due-date, D+58's next biweekly point would be D+72, which exceeds the 60-day cap., Config reminders keep recurring indefinitely - no D+60-style cutoff., The checkpoint that just fired must never be returned as 'next'., test_config_reminder_due_d14_continues_weekly_to_d21() (+17 more)
+Cohesion: 0.09
+Nodes (46): config_reminder_due(), days_elapsed(), _next_checkpoint_day(), next_retry_time(), datetime, Pure cadence/due-date math for the onboarding nudge cron (contract v1 §11/§12)., Whether `now_local`'s wall-clock time falls inside `window`     ("HH:MM-HH:MM",, Fractional days between `anchor` and `now` (may be negative).      Both must b (+38 more)
 
 ### Community 366 - "_FakeWhatsAppClient"
-Cohesion: 0.15
-Nodes (18): PatientOpeningState, The five opening states, in first-match order (see the resolver)., Whether THIS turn's system prompt should carry post_consult_knowledge.      Pu, _should_inject_post_consult_knowledge(), Unit tests for workers/tasks.py::_should_inject_post_consult_knowledge - the pur, Nothing to inject regardless of how "qualifying" the turn otherwise is., Conversation already in full-LLM ("Outro"/deviated) mode., The deterministic router just delegated THIS turn (e.g. the "Outro" tap). (+10 more)
+Cohesion: 0.17
+Nodes (16): Whether THIS turn's system prompt should carry post_consult_knowledge.      Pure, _should_inject_post_consult_knowledge(), Unit tests for workers/tasks.py::_should_inject_post_consult_knowledge - the pur, Nothing to inject regardless of how "qualifying" the turn otherwise is., Conversation already in full-LLM ("Outro"/deviated) mode., The deterministic router just delegated THIS turn (e.g. the "Outro" tap)., opening_state unresolved (e.g. patient_id unknown), ordinary IDLE turn., RETURNING_NO_APPOINTMENT / HAS_UPCOMING(_SOON) are not post-consult states. (+8 more)
 
 ### Community 368 - "test_agent.py"
-Cohesion: 0.21
-Nodes (12): Whether `spec`'s hooks/tools run for this tenant.      Two cases:      - `en, _spec_enabled(), is_entitled(), Whether `summary`'s tenant is entitled to `key`.      `key` is either an addon, Ordinal rank of a tier name. Unknown/None ranks below every real tier., _tier_rank(), Cumulative multi-tier ranking (ferro < bronze_1 < bronze_2) is retired along, _summary() (+4 more)
+Cohesion: 0.27
+Nodes (10): is_entitled(), Whether `summary`'s tenant is entitled to `key`.      `key` is either an addon, Ordinal rank of a tier name. Unknown/None ranks below every real tier., _tier_rank(), Cumulative multi-tier ranking (ferro < bronze_1 < bronze_2) is retired along, _summary(), test_addon_flag_true_and_false(), test_inactive_tenant_entitled_to_nothing() (+2 more)
 
 ### Community 369 - "Community 369"
-Cohesion: 0.13
-Nodes (11): EmailOutcome, WHY a transactional send did or did not happen.      The bool `send_transactiona, True iff trying the exact same send again could plausibly succeed., log(), _LogRecorder, _Mailer, _patch_session_factory(), MonkeyPatch (+3 more)
+Cohesion: 0.12
+Nodes (12): EmailOutcome, WHY a transactional send did or did not happen.      The bool `send_transactiona, True iff trying the exact same send again could plausibly succeed., log(), _LogRecorder, _Mailer, _patch_session_factory(), MonkeyPatch (+4 more)
 
 ### Community 370 - "_FakeAsaas"
 Cohesion: 0.22
@@ -1368,40 +1383,36 @@ Cohesion: 0.19
 Nodes (11): IClinicProvider, iClinic EHR provider — STUB.  TODO: real iClinic API integration (OAuth/API-ke, STUB `EhrProvider` for iClinic — logs and returns a fake record id., _ctx(), Tests for plugins/ehr.py (provider selection) and services/ehr/iclinic.py (the s, plugins/ehr.py itself does not try/except — registry.run_post_booking does., test_configured_provider_is_invoked(), test_iclinic_stub_returns_deterministic_fake_id_and_logs() (+3 more)
 
 ### Community 372 - "logging.py"
-Cohesion: 0.15
-Nodes (20): Enum, activate_tenant(), ConfigStatus, connect_asaas(), connect_whatsapp(), ConnectOutcome, create_or_attach_professional(), get_config_status() (+12 more)
+Cohesion: 0.07
+Nodes (37): Enum, main(), _parse_args(), Namespace, Wipe dynamic data from the database for clean testing.  By default truncates the, _count(), delete_tenant(), DeleteTenantOutcome (+29 more)
 
 ### Community 373 - "ShowMainMenuRequested"
-Cohesion: 0.22
-Nodes (11): Whether `now_local`'s wall-clock time falls inside `window`     ("HH:MM-HH:MM",, within_send_window(), _local(), datetime, Brazil abolished DST in 2019: the UTC offset must be identical across     the y, Passing tz-aware datetimes in America/Sao_Paulo vs UTC must yield the     exact, test_america_sao_paulo_has_no_dst_offset_shift(), test_next_retry_time_identical_across_utc_and_local_tz_labels() (+3 more)
+Cohesion: 0.15
+Nodes (19): api(), api_tenant(), db(), AsyncClient, The HTTP client with tenant/session overrides and entitlements stubbed.      Bun, The fourth state: absent means "don't touch", not "set to null".      This is wh, A retried save must land on the same state, not oscillate., Compatibility both ways, on the wire.      An OLD client sends the pre-flag body (+11 more)
 
 ### Community 374 - "find_near_duplicates"
 Cohesion: 0.20
 Nodes (9): ATENÇÃO — a premissa do relato está errada no código atual, confirme antes de agir, code:python (LABEL_BACK = "Voltar"                       # ~linha 131), code:python (rows: list[tuple[str, str]] = [(f"slot|{s['start']}", s["lab), code:python (if _control_match(body, LABEL_BACK):                       #), O que a investigação já encontrou, O que fazer, Origem, Problema: botões "Voltar" e "Escolher outro dia" na tela de horários (+1 more)
-
-### Community 375 - "active_business_hours"
-Cohesion: 0.20
-Nodes (4): _fake_get_waba_token(), _fakes(), _FakeWhatsAppClient, MonkeyPatch
 
 ### Community 376 - "_render_greeting_template"
 Cohesion: 0.22
 Nodes (8): code:python (state = conversation.flow_state), Cuidado, O gap real identificado, O que a investigação já encontrou (ponto de partida), O que fazer, Origem, Problema: conversas presas em modo LLM sem retorno ao fluxo determinístico, Repositório
 
 ### Community 378 - "_post_booking"
-Cohesion: 0.14
-Nodes (18): PostBookingContext, What a `post_booking` hook needs to react to one freshly booked appointment., _post_booking(), ehr plugin: push a freshly booked appointment to the tenant's EHR (post_booking), _post_booking(), pix_deposit plugin: ask for a Pix deposit right after a booking (post_booking)., _claim(), _ledger_key() (+10 more)
+Cohesion: 0.11
+Nodes (21): _post_booking(), analytics_bi plugin: record a minimal booking event (post_booking).  Entitleme, PostBookingContext, PluginSpec: the shape of one optional, entitlement-gated capability., What a `post_booking` hook needs to react to one freshly booked appointment., _post_booking(), ehr plugin: push a freshly booked appointment to the tenant's EHR (post_booking), _post_booking() (+13 more)
 
 ### Community 379 - "Community 379"
 Cohesion: 0.15
 Nodes (12): Assumem não-nulo e QUEBRAM com paciente sem telefone, Corrigidos, Decisão 1 — a constraint antiga foi MANTIDA, não substituída, Decisão 2 — `external_id` é NULLABLE, embora `NOT NULL` fosse o invariante melhor, Decisão 3 — o preenchimento automático é default de coluna, não mudança no call site, Identidade de paciente por canal — migração aditiva, Inventário de `.wa_id` — para o próximo prompt (pipeline), Já toleram `None` (nada a fazer) (+4 more)
 
 ### Community 380 - "Community 380"
-Cohesion: 0.11
-Nodes (31): decorate_and_truncate(), decorate_if_fits(), decorated_text_budget(), WhatsApp Cloud API display limits, and the ONE way we cut text down to them., Prefix `text` only when the WHOLE of it still fits inside `limit`.      The co, How many characters of TEXT still fit beside `emoji` inside `limit`.      The, Always prefix; `text` absorbs the cost by being cut that much harder.      The, Cut `text` to `limit` characters, marking the cut with an ellipsis.      The s (+23 more)
+Cohesion: 0.10
+Nodes (33): decorate_and_truncate(), decorate_if_fits(), decorated_text_budget(), WhatsApp Cloud API display limits, and the ONE way we cut text down to them., Hard cut with no mark, for fields nothing ever matches against.      Row descr, Prefix `text` only when the WHOLE of it still fits inside `limit`.      The co, How many characters of TEXT still fit beside `emoji` inside `limit`.      The, Always prefix; `text` absorbs the cost by being cut that much harder.      The (+25 more)
 
 ### Community 381 - "Community 381"
-Cohesion: 0.06
-Nodes (50): api(), _bm_turn(), _call(), db(), _ExplodingWhatsAppClient, _FakeArqPool, MonkeyPatch, The second channel: one pipeline, two ways in.  What these tests are actually (+42 more)
+Cohesion: 0.07
+Nodes (46): api(), _bm_turn(), _call(), db(), _ExplodingWhatsAppClient, _FakeArqPool, MonkeyPatch, The second channel: one pipeline, two ways in.  What these tests are actually (+38 more)
 
 ### Community 383 - "Community 383"
 Cohesion: 0.17
@@ -1412,20 +1423,20 @@ Cohesion: 0.33
 Nodes (6): _fake_tool(), A stand-in for create_event: records what actually reached it., The doctor's real calendar must never receive a token.      create_event's own d, Dev terminal / direct callers behave exactly as before this feature., test_tool_arguments_are_rehydrated_before_they_leave(), test_tools_are_untouched_outside_a_pseudonymized_turn()
 
 ### Community 385 - "Community 385"
-Cohesion: 0.12
-Nodes (18): _admin_token_scheme, FastAPI, Security, Administrative endpoints (currently: data wipe).  Every route here is guarded, Reset the database. Requires `confirm: true` to actually run., FastAPI dependency: 403 unless `X-Admin-Token` matches the env token.      Use, require_admin(), reset_data() (+10 more)
+Cohesion: 0.24
+Nodes (9): _admin_token_scheme, Security, Administrative endpoints (currently: data wipe).  Every route here is guarded, Reset the database. Requires `confirm: true` to actually run., FastAPI dependency: 403 unless `X-Admin-Token` matches the env token.      Use, require_admin(), reset_data(), ResetRequest (+1 more)
 
 ### Community 386 - "Community 386"
-Cohesion: 0.18
-Nodes (9): client(), AsyncClient, Shared pytest fixtures and deterministic test environment., An httpx AsyncClient bound to the FastAPI app via ASGITransport.      The app, api(), _ExplodingWhatsAppClient, MonkeyPatch, The real app on the in-memory DB, a recording queue, and a hub token whose     t (+1 more)
+Cohesion: 0.13
+Nodes (11): client(), AsyncClient, Shared pytest fixtures and deterministic test environment., An httpx AsyncClient bound to the FastAPI app via ASGITransport.      The app, api(), _ExplodingWhatsAppClient, MonkeyPatch, _Queue (+3 more)
 
 ### Community 387 - "Community 387"
-Cohesion: 0.33
-Nodes (8): _audit(), _classify(), Counts, main(), READ-ONLY audit: NULL versus EMPTY on every professional's own config.  `Profess, Pure tallies. Nothing here can hold an id, a name or a config value., Per-tenant counts, numbered positionally so no tenant id is ever printed., TenantBucket
+Cohesion: 0.26
+Nodes (10): _audit(), _classify(), Counts, main(), READ-ONLY audit: NULL versus EMPTY on every professional's own config.  `Profess, Pure tallies. Nothing here can hold an id, a name or a config value., Per-tenant counts, numbered positionally so no tenant id is ever printed., TenantBucket (+2 more)
 
 ### Community 388 - "Community 388"
-Cohesion: 0.19
-Nodes (14): _enter_professional_services(), _professional_card_header(), _professional_config_incomplete(), _professional_greeting_body(), Any, Bubble, v1 doctor greeting body: `specialty` (short line) then `about` verbatim., The doctor's presentation, as the service card's own header block.      Name f (+6 more)
+Cohesion: 0.14
+Nodes (18): _make_portal_rows(), _portal_bodies(), A clinic, a PORTAL patient (no phone at all) and a committed booking.      The, CHECKLIST (§5.2 + TASK-004 §3c): no `no_patient_phone`, no WhatsApp, no bubble., FEAT 39 did not become WhatsApp-only., The number only ever built a `wa.me` link; the Portal builds none.      Before, The ledger covers BOTH channels: an arq retry must not ask twice.      The Por, Silence is still the failure mode, and a 422 from an un-upgraded     brain-api (+10 more)
 
 ### Community 389 - "Community 389"
 Cohesion: 0.29
@@ -1436,28 +1447,28 @@ Cohesion: 0.10
 Nodes (11): AppointmentCancel, POST /appointments/{id}/cancel.      `custom_message` is GONE, replaced by `ju, _FakeArqPool, _FakeCalendarService, _FakeWhatsApp, metered(), _override(), MonkeyPatch (+3 more)
 
 ### Community 392 - "Community 392"
-Cohesion: 0.27
-Nodes (10): extract_greeting_button(), Decode a tap on the greeting's id, when it carries the "greeting|" prefix., _greeting_button_msg(), A button sent before the fixed-buttons deploy: positional numeric id,     the cl, Reactivation's Sim/Não use a DISTINCT id prefix precisely so they are     never, test_extract_greeting_button_known_action(), test_extract_greeting_button_legacy_numeric_id(), test_extract_greeting_button_no_button_at_all_returns_none() (+2 more)
+Cohesion: 0.18
+Nodes (11): configured_secrets(), MonkeyPatch, The exact 2026-08-16 shape: worker on an older commit than the API., No pool, no peer — reported as unknown, never as agreement., Captures structlog calls (house pattern, see test_appointment_status_taxonomy)., Values that must never appear in a build-identity payload or log line., Recorder, test_deploy_parity_alarms_on_divergence() (+3 more)
 
 ### Community 393 - "Community 393"
 Cohesion: 0.11
 Nodes (10): log(), _LogRecorder, _patch_session_factory(), precheck_number(), MonkeyPatch, Configure the platform PreCheck number for every test in this file.      `get_, Stands in for `WhatsAppClient`, as both the class and the client.      `for_te, Autouse so no test can reach the real Cloud API by forgetting to ask. (+2 more)
 
 ### Community 394 - "Community 394"
-Cohesion: 0.22
-Nodes (8): _is_invalid_grant(), _patient_link_stamp(), RefreshError, ZoneInfo, Google Calendar integration for the clinic.  Fase A (single tenant): credentia, Whether a refresh failure is Google's `invalid_grant`.      google-auth raises, One half of the `dates=` pair, e.g. `20260529T170000Z`., The clinic-local timezone this service interprets naive times in.
+Cohesion: 0.16
+Nodes (9): _is_invalid_grant(), _patient_link_stamp(), Any, RefreshError, ZoneInfo, Google Calendar integration for the clinic.  Fase A (single tenant): credentia, Whether a refresh failure is Google's `invalid_grant`.      google-auth raises, One half of the `dates=` pair, e.g. `20260529T170000Z`. (+1 more)
 
 ### Community 395 - "Community 395"
-Cohesion: 0.28
-Nodes (7): _make_tenant(), WABA-token encryption at rest (tenant-secrets-encryption skill).  Covers the f, The load-bearing guarantee: no `access_token` (or any token) column on tenants., One credentials row per tenant: setting the WABA token must not duplicate it., test_tenant_model_has_no_plaintext_secret_column(), test_waba_upsert_shares_row_with_google_credential(), test_whatsapp_client_token_is_injected()
+Cohesion: 0.16
+Nodes (13): Pattern, _Claim, guard_reply(), _p(), The LLM may not announce an action it did not perform.  ## The bug that produced, The action `text` claims without evidence, or None if it claims nothing.      Pu, `text`, or the honest replacement when it claims an unproven action.      The ON, unbacked_claim() (+5 more)
 
 ### Community 396 - "Community 396"
-Cohesion: 0.28
-Nodes (9): _get_decision_model(), _normalize(), Any, Build (once) the structured-output model both nodes share.      Same knobs as, Map the raw decision onto the outcome the router acts on.      Malformed combi, Forced-tool-call schema for one scoped-help turn (see module docstring)., _ScopedHelpDecision, test_normalize_malformed_and_final_round_collapse_to_escalate() (+1 more)
+Cohesion: 0.16
+Nodes (13): main(), _parse_args(), Namespace, Apply a JSON config file onto a tenant row (the doctor-hub columns).  This is, Return a list of human-readable warnings (does not block the write)., # NOTE: "greeting_buttons" is intentionally NOT in _ALLOWED_FIELDS anymore, _validate(), active_business_hours() (+5 more)
 
 ### Community 397 - "Community 397"
-Cohesion: 0.33
-Nodes (8): _item_from_dict(), list_onboarding_tenants(), _parse_dt(), datetime, UUID, Onboarding cron -> brain-api client (cross-service contract v1 §4 endpoints 7/8), Parse an ISO-ish datetime from JSON. Always returns tz-aware (UTC when     the, Fetch the onboarding tenant list from brain-api.      Returns `None` on any am
+Cohesion: 0.15
+Nodes (12): 1. O que passou a valer, 2.1 `BookingGate` é **fail-open**, e isso não é descuido, 2.2 Por que o gate viaja num `ContextVar`, 2.3 O que acontece com o card do TASK-003 e com o handoff do TASK-004, 2.4 Bug 2 — sair da espera passou a depender de existir reserva, 2.5 Bug 1 — a LLM não pode anunciar o que nenhuma tool fez, 2. Peças, 3. Prova (rodada 2026-09-20) (+4 more)
 
 ### Community 401 - "Community 401"
 Cohesion: 0.29
@@ -1472,92 +1483,168 @@ Cohesion: 0.38
 Nodes (6): enqueue_post_booking_hooks(), UUID, post_booking dispatch: react to a freshly committed appointment, off the hot pat, Fire-and-forget enqueue of `run_post_booking_hooks`. Never raises.      `redis, arq job: run every entitled plugin's `post_booking` hook for one appointment., run_post_booking_hooks()
 
 ### Community 404 - "Community 404"
-Cohesion: 0.13
-Nodes (9): BaseSettings, Strongly-typed settings. Values come from the environment or `.env`.      Real, Parse BOT_ALLOWLIST_WA_IDS into a set of digits-only wa_ids.          Meta alw, Parse CORS_ALLOW_ORIGINS into a clean list of origins.          Accepts a JSON, Settings, UUID, The single-tenant `META_*` env scaffold, requested BY NAME.          Developme, test_dev_scaffold_also_fails_closed_when_env_is_empty() (+1 more)
+Cohesion: 0.11
+Nodes (10): BaseSettings, Strongly-typed settings. Values come from the environment or `.env`.      Real, Parse BOT_ALLOWLIST_WA_IDS into a set of digits-only wa_ids.          Meta alw, Parse CORS_ALLOW_ORIGINS into a clean list of origins.          Accepts a JSON, Settings, FakeStorage, The bucket, in memory., api() (+2 more)
 
 ### Community 405 - "Community 405"
 Cohesion: 0.33
 Nodes (4): _CalendarWithBusy, check_availability hands back real Google Calendar event titles., Devolve a forma crua do Google: id + summary + intervalo., test_tool_results_are_masked_before_re_entering_the_model()
 
 ### Community 407 - "Community 407"
-Cohesion: 0.11
-Nodes (14): DeclarativeBase, Base, Declarative base shared by every ORM model., Why a patient walked away after their doctor cancelled.  This is BUSINESS data —, One patient's stated reason for not rebooking after a doctor cancelled., RebookingDecline, _ExplodingHandoverManager, _FailingBrainMessageSender (+6 more)
+Cohesion: 0.50
+Nodes (3): Why a patient walked away after their doctor cancelled.  This is BUSINESS data —, One patient's stated reason for not rebooking after a doctor cancelled., RebookingDecline
 
 ### Community 408 - "Community 408"
-Cohesion: 0.29
-Nodes (3): _FakeGoogleEvents, _FakeGoogleService, Records every events.list call and replays a fixed busy list.
+Cohesion: 0.21
+Nodes (12): MessageStatus, _enum_values(), Message, Enum, Message model - a single message inside a conversation., The delivery status a bubble draws, derived from the row's timestamps.      Fa, One WhatsApp message, inbound or outbound., status_of() (+4 more)
 
 ### Community 411 - "build"
 Cohesion: 0.29
 Nodes (4): _FakeWhatsAppClient, Records constructed instances + sends; installed in place of the real     client, `HandoverManager.set_human_active` runs once per staff send, on every channel., test_send_message_takes_the_conversation_over_on_both_channels()
 
 ### Community 412 - "parse_code"
-Cohesion: 0.20
-Nodes (5): MonkeyPatch, Records send_text_message / send_buttons; installed for the tests below., wire(), _wire_db(), _WireClient
+Cohesion: 0.18
+Nodes (13): ServiceRole, build(), Any, Request, Which code is running here, and does the worker agree? (FIX_01 §5.1/§5.2)      A, check_deploy_parity(), Any, ParityVerdict (+5 more)
+
+### Community 414 - "Community 414"
+Cohesion: 0.19
+Nodes (12): agent_tools_for(), enabled_plugins(), The plugin registry: id -> PluginSpec, filtered per tenant by entitlement.  St, Add (or replace) a plugin in the registry, keyed by `spec.id`., Whether `spec`'s hooks/tools run for this tenant.      Two cases:      - `en, PluginSpecs this tenant is currently entitled to.      A disabled plugin (tena, Flatten `agent_tools` across every plugin this tenant is entitled to., register() (+4 more)
 
 ### Community 416 - "_FakeArqPool"
-Cohesion: 0.40
-Nodes (5): main(), _print_tool_calls(), BaseMessage, Terminal agent loop for SecretarIA (Fase A smoke test).  Uses the SAME LangGra, Surface tool invocations so the dev can see what the LLM decided.
+Cohesion: 0.08
+Nodes (20): main(), Dev/test: store an INVALID Google Calendar refresh token for a tenant so the nex, _load_config(), main(), Terminal chat with the agent DRESSED by a real tenant's hub config.  Unlike scri, main(), Diagnose Fase A auth: what scopes does our refresh token actually carry?  A refr, _short() (+12 more)
 
 ### Community 418 - "Community 418"
 Cohesion: 0.29
 Nodes (7): _patch_agenda_url(), Both commit points funnel into the same arq job, so both must reach the     hoo, A mail with no link is fine; a mail with a broken link is not. The path     dif, `agenda_line` (this product's agenda screen) and `calendar_line` (the     Googl, test_agenda_link_is_omitted_when_unconfigured(), test_emails_the_owning_professional_from_both_booking_paths(), test_the_two_agenda_links_coexist()
 
-### Community 429 - "Community 429"
+### Community 419 - "Community 419"
 Cohesion: 0.33
-Nodes (4): The REAL Brain-Message sender, remembering how it was built and what it sent., The bot path passes no author: its rows stay BOT and still start the bot's clock, _SpyBrainMessageSender, test_brain_message_sender_default_author_is_still_the_bot()
+Nodes (4): Two adjacent `str | None` with no shape that tells them apart: passed     posit, `phone_number` stays positional so no pre-TASK-003 call site moves, and     the, test_context_fields_are_keyword_only(), test_external_id_is_keyword_only()
+
+### Community 429 - "Community 429"
+Cohesion: 0.17
+Nodes (9): AppointmentType, clean_requirements(), Trim items, drop blanks, and cap count/length.      ONE rule, shared by every, A bookable reason for a consult, with its own duration.      `service_id` is w, Request/response schemas for the doctor-hub canonical service catalog.  The cl, POST /tenants/me/services.      `name` is the clinic's canonical spelling. The, PATCH /tenants/me/services/{id}. Every field optional (partial update).      R, ServiceCreate (+1 more)
 
 ### Community 444 - "Community 444"
 Cohesion: 0.18
 Nodes (10): A bomba-relógio que este round desarmou, A pergunta da §1 do prompt — respondida, Inventário de `.wa_id` do prompt anterior — o que foi de fato ajustado aqui, Limitação conhecida do endpoint de leitura, O que entrou, Pendências, Pipeline channel-neutro + endpoints internos do Brain-Message, Provas (+2 more)
 
 ### Community 447 - "Community 447"
-Cohesion: 0.15
-Nodes (9): manage_existing_appointment(), ManageAppointmentRequested, Raised by `manage_existing_appointment`: the patient wants to reschedule     or, Raised by `select_professional_and_continue` (plugins/multi_professional.py)., Aciona o fluxo de remarcação/cancelamento de uma consulta JÁ MARCADA     deste, SelectProfessionalRequested, Every day of the window is free; records the durations it was asked for., _StubCalendar (+1 more)
+Cohesion: 0.20
+Nodes (7): manage_existing_appointment(), ManageAppointmentRequested, Raised by `manage_existing_appointment`: the patient wants to reschedule     or, Raised by `select_professional_and_continue` (plugins/multi_professional.py)., Aciona o fluxo de remarcação/cancelamento de uma consulta JÁ MARCADA     deste, SelectProfessionalRequested, test_manage_existing_appointment_tool_raises_canonical_action()
 
 ### Community 448 - "Community 448"
-Cohesion: 0.40
-Nodes (4): DefaultExecutionContext, _external_id_default(), Patient model - a person messaging a clinic on one of its channels., Mirror `wa_id` into `external_id` when the caller did not supply one.      A c
+Cohesion: 0.17
+Nodes (11): §1 — Causa raiz (confirmada no código antes de programar), §2 — A sequência nova, §3 — Cópia exata das mensagens (`services/patient_name.py`), §4 — Regra de validação do nome (`parse_patient_name`), §5 — Contrato consumido (brain-api parte 1) e compatibilidade, §6 — Decisão: o ramo "e-mail já cadastrado" REAPROVEITA `AWAITING_EMAIL_CODE`/`verify_code`, §7.1 — PII: respostas que NÃO viraram `Patient.name` (achado 3 do Reviewer), §7 — TTL de silêncio nos dois canais (+3 more)
+
+### Community 453 - "test_live_and_terminal_partition_the_enum"
+Cohesion: 0.18
+Nodes (10): publish_build_identity(), Announce this process's identity so its peer can compare. Never raises.      Fai, The full, allowlisted field set — the ONLY shape that leaves here., check_deploy_parity_cron(), ParityVerdict, arq cron: the recurring deploy-divergence alarm (FIX_01 §5.2).  `on_startup` in, Re-announce this worker's build identity and alarm if the API differs.      Re-p, The recurring alarm: a divergence introduced AFTER startup still fires. (+2 more)
 
 ### Community 457 - "Community 457"
-Cohesion: 0.33
-Nodes (7): Volta a conversa para o menu inicial de botões da clínica. Use quando o     pac, Raised by the `show_main_menu` tool: the patient wants the button menu back., show_main_menu(), ShowMainMenuRequested, test_show_main_menu_tool_raises(), Name/description/schema must survive, and hand-backs must still raise.      grap, test_wrapping_preserves_the_agent_cache_key_and_sentinels()
+Cohesion: 0.20
+Nodes (9): Volta a conversa para o menu inicial de botões da clínica. Use quando o     pac, Raised by the `show_main_menu` tool: the patient wants the button menu back., show_main_menu(), ShowMainMenuRequested, Every day of the window is free; records the durations it was asked for., _StubCalendar, test_show_main_menu_tool_raises(), Name/description/schema must survive, and hand-backs must still raise.      grap (+1 more)
 
 ### Community 458 - "_reset_settings_cache_after"
-Cohesion: 0.40
-Nodes (3): _fakes(), _FakeWhatsApp, MonkeyPatch
+Cohesion: 0.20
+Nodes (4): _FakeAsyncClient, _FakeResponse, Exception, Records init kwargs + GET requests; returns a canned response or raises.
 
 ### Community 464 - "test_wire_contract_matches_brain_api_internal_endpoints"
-Cohesion: 0.08
-Nodes (34): _internal_key_scheme, Security, Gate `/internal/*` on the `X-Internal-Api-Key` shared secret. Fail CLOSED., require_internal_api_key(), get_settings(), Return a cached Settings instance (read once per process)., EmailTemplate, is_known_template() (+26 more)
+Cohesion: 0.13
+Nodes (19): EmailTemplate, is_known_template(), Outbound email — operational alerts + onboarding transactional templates.  Uses, Email the clinic owner when the human_backup_24_7 addon engages     (an inbound, Email the clinic and/or the doctor that a patient just hit an unbookable doctor., Blocking SMTP send for the transactional path — called via asyncio.to_thread., One pt-BR transactional template: `str.format`-style subject + body., Blocking SMTP send — called via asyncio.to_thread.      Shared connection/auth p (+11 more)
 
 ### Community 490 - "main"
-Cohesion: 0.67
-Nodes (3): _load_config(), main(), Terminal chat with the agent DRESSED by a real tenant's hub config.  Unlike scri
+Cohesion: 0.22
+Nodes (8): 1. `POST /internal/brain-message/open` — a conversa nasce sem inbound, 2. O aviso do código vira card de 3 botões, com o e-mail mascarado, 3. Handoff do PreCheck a partir do Portal, CHECKPOINT — Portal: a automação fala primeiro, o aviso do código vira card, e o PreCheck sai pelo Portal, O invariante que MUDOU (e está registrado nos dois módulos), O que NÃO foi provado, Ordem de deploy (nada disto foi executado), Validação
 
 ### Community 491 - "emit_usage_event"
+Cohesion: 0.22
+Nodes (9): db(), It is read before the doctor has decided anything — it must not cancel,     and, Past the budget the patient still has not been told, and nobody is     reading, Isolation guard on the job itself, not just on the endpoint., tenant(), test_an_appointment_from_another_tenant_is_never_notified(), test_cancelled_appointment_stays_cancelled(), test_preview_never_mutates_anything() (+1 more)
+
+### Community 492 - "_FakeRedis"
+Cohesion: 0.22
+Nodes (8): A clinic that never enabled mail is not an incident. If DISABLED escalated,, No Redis means no resend can be scheduled. That is the exact outcome this     m, A pool that raises is the same loss as no pool at all., Both bounds end the same way: stop, and say so with the stable alarm.      Ret, test_a_failed_enqueue_is_reported_not_assumed(), test_a_failure_with_no_pool_says_so_instead_of_going_quiet(), test_a_switched_off_mailer_raises_no_alarm(), test_the_resend_gives_up_visibly_rather_than_forever()
+
+### Community 493 - "_RescheduleDayCalendar"
+Cohesion: 0.25
+Nodes (7): §1 — Ponto de entrada (confirmado no código), §2 — Decisões, §3 — Testes, §4 — Validação (comandos e resultados reais, 2026-09-24, rodada 2), §5 — Achados laterais, §6 — Deploy e pendências, CHECKPOINT — conta ativa do Portal abre clínica nova: sem e-mail/código; nome vem da conta ou é perguntado uma vez (2026-09-24)
+
+### Community 494 - "test_live_and_terminal_partition_the_enum"
+Cohesion: 0.33
+Nodes (4): The reader must not keep a private copy that can drift again., Every member is classified exactly once.      The guard that matters when a st, test_live_and_terminal_partition_the_enum(), test_upcoming_statuses_is_the_shared_constant()
+
+### Community 495 - "test_send_simple_text_requires_an_explicit_client"
+Cohesion: 0.25
+Nodes (7): 1. Causa raiz (reconfirmada na versão instalada, `arq==0.28.0`), 2. A correção, 3. Testes (`tests/test_arq_log_secret_redaction.py`), 4. Outros loggers de terceiro (passo 3 do prompt), 5. Pendências, 6. Revisão de segurança (2026-09-21), CHECKPOINT — OTP / reset link leaking through arq's native job log
+
+### Community 496 - "_FakeCalendar"
+Cohesion: 0.29
+Nodes (5): fake_google(), _FakeCalendar, _FakeCalendarFactory, MonkeyPatch, Stands in for CalendarService. Answers each probe by the refresh token it     wa
+
+### Community 501 - "CHECKPOINT — Onda 4: jornada sem gate ponta a ponta (E2E, sem PreCheck)"
+Cohesion: 0.29
+Nodes (6): Achados — divergências entre CHECKPOINT e realidade (uma linha cada, sem investigação de causa), CHECKPOINT — Onda 4: jornada sem gate ponta a ponta (E2E, sem PreCheck), Comandos de teste rodados (repetíveis), Matriz de cenários — resultado, Pendências para uma sessão futura, Veredito dos Achados 10 e 11 (fechamento 2026-09-24)
+
+### Community 505 - "FakeRedis"
+Cohesion: 0.29
+Nodes (5): FakeRedis, A reader that forwards whatever it finds is one poisoned key from a leak., `set`/`get` in a dict — the only two calls build_info makes., test_read_build_identity_drops_unexpected_fields(), test_read_build_identity_survives_garbage()
+
+### Community 506 - "_FakeWhatsAppClient"
+Cohesion: 0.29
+Nodes (3): _fakes(), _FakeWhatsAppClient, MonkeyPatch
+
+### Community 507 - "_canonical_appointment_type"
+Cohesion: 0.33
+Nodes (6): _canonical_appointment_type(), _effective_service_catalog(), The catalog THIS turn books from: the resolved tenant/professional one.      `, Resolve `candidate` to a catalog service name. Returns (name, error).      `Ap, Entrega o agendamento ao fluxo guiado de botões, abrindo direto a lista     de, start_guided_booking()
+
+### Community 528 - "lifespan"
+Cohesion: 0.40
+Nodes (5): create_app(), lifespan(), FastAPI application entrypoint.  Run with:     uvicorn secretaria.main:app --, Create the arq Redis pool on startup, close it on shutdown.      The pool is s, Build and configure the FastAPI application.
+
+### Community 529 - "_conversation_snapshot"
+Cohesion: 0.47
+Nodes (6): _conversation_snapshot(), SimpleNamespace, A Brain-Message booking turn must reach `route()` with an ARMED gate.      Thi, The same wiring, from the other side: WhatsApp never arms it., test_the_gate_arms_on_the_real_reply_path(), test_the_gate_stays_disarmed_on_whatsapp()
+
+### Community 530 - "_FakeArqPool"
+Cohesion: 0.33
+Nodes (4): api(), _FakeArqPool, Records what the endpoint enqueued, so a test can run it as the worker would., The real ASGI app, on the in-memory DB, with a recording queue.
+
+### Community 531 - "booking_gate_body"
+Cohesion: 0.40
+Nodes (5): booking_gate_body(), The gate notice: the owner's sentence, the inbox, the link, the hold.      Pur, test_the_gate_notice_opens_with_the_owners_exact_sentence(), test_the_notice_names_the_masked_inbox_the_reservation_and_the_webmail(), test_without_a_mask_the_notice_is_just_the_sentence()
+
+### Community 548 - "_calendar_for_calendar_id"
 Cohesion: 0.50
-Nodes (3): emit_usage_event(), Usage-event emission — the billing-meter seam to brain-api.  =================, POST one usage event to brain-api. Returns the `recorded` flag, or False on any
+Nodes (4): _calendar_for_calendar_id(), _calendar_for_professional(), Build a CalendarService scoped to a specific Google Calendar id.      Used by, Build a CalendarService for ONE professional's own config (contract v1 §10 item
+
+### Community 549 - "iniciar_pre_consulta"
+Cohesion: 0.50
+Nodes (4): iniciar_pre_consulta(), Best-effort patient WhatsApp id (phone) for the current turn.      Mirrors `_p, Inicia a pré-consulta (anamnese) do paciente desta clínica, encaminhando-o, _resolve_patient_phone()
+
+### Community 551 - "_no_entitlement_calls"
+Cohesion: 0.67
+Nodes (3): _no_entitlement_calls(), MonkeyPatch, A config save is never gated, so no brain-api call may happen at all.
 
 ## Knowledge Gaps
-- **528 isolated node(s):** `secretaria`, `Product vision`, `The "Eye Company" scaffold is gone — keep it that way`, `Per-tenant config (what each clinic can configure)`, `What the agent became` (+523 more)
+- **589 isolated node(s):** `secretaria`, `_Claim`, `Product vision`, `The "Eye Company" scaffold is gone — keep it that way`, `Per-tenant config (what each clinic can configure)` (+584 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **186 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **183 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `Tenant` connect `receive_asaas_webhook` to `Appointment`, `Conversation`, `test_reminders_plugin.py`, `test_hub_professionals.py`, `route`, `test_action_buttons.py`, `_send_bot_reply`, `Professional`, `list_tenants`, `test_patient_context.py`, `test_webhook_history_sync.py`, `test_hub_units.py`, `test_professional_config.py`, `resume_bubbles`, `test_analytics_bi_plugin.py`, `tenant_config.py`, `test_deposit_lifecycle.py`, `provisioning.py`, `test_onboarding_cadence.py`, `test_internal_provisioning.py`, `onboarding_cron.py`, `internal_provisioning.py`, `Patient`, `Base`, `test_hub_calendar_money.py`, `test_hub_config.py`, `tools.py`, `test_subscription.py`, `reminders.py`, `PixDeposit`, `EntitlementSummary`, `multi_professional.py`, `calendar.py`, `resolve_professional_calendar`, `test_internal_asaas_connection.py`, `AppointmentStatus`, `test_agent_menu_tools.py`, `test_human_backup_plugin.py`, `oauth.py`, `test_audio_transcription.py`, `_config_with_selected_professional`, `analytics_advanced`, `ManageAppointmentRequested`, `_should_inject_post_consult_knowledge`, `test_ai_tools_cancel_money.py`, `test_precheck_handoff_tool.py`, `get_current_tenant`, `config.py`, `test_tasks_helpers.py`, `set_professional_google_refresh_token`, `test_hub_conversations.py`, `_FakeCalendarService`, `Settings`, `_FakeRedis`, `_FakeArqPool`, `_FakeAsyncClient`, `FastAPI`, `HandoverManager`, `ShowMainMenuRequested`, `receive_webhook`, `_calendar_for_calendar_id`, `test_waba_encryption.py`, `env.py`, `arq_worker.py`, `_apply_deposit_awareness`, `main`, `conversation.py`, `is_menu_command`, `_FakeWhatsAppClient`, `_confirmation_recap`, `test_service_catalog.py`, `oauth.py`, `analytics.py`, `config.py`, `admin.py`, `internal.py`, `unit.py`, `admin.py`, `base.py`, `for_tenant`, `for_tenant`, `for_tenant`, `_handle_day_step`, `test_build_identity.py`, `HTTPException`, `_entry`, `test_hub_conversations.py`, `apply_groups`, `hub_configuration.py`, `TenantWhatsAppCredentialMissing`, `enter_booking`, `clean_requirements`, `_FakeCalendarService`, `_FakeWhatsAppClient`, `_StubCalendarService`, `_calendar_for_professional`, `_FakeRedis`, `_filter_active_hours`, `_connect_calendar`, `iniciar_pre_consulta`, `Community 371`, `logging.py`, `_post_booking`, `Community 381`, `Community 387`, `Community 388`, `Community 395`, `_ExplodingWhatsAppClient`, `Community 407`, `main`?**
-  _High betweenness centrality (0.253) - this node is a cross-community bridge._
-- **Why does `Base` connect `Community 407` to `_FakeWhatsAppClient`, `Community 386`, `test_hub_professionals.py`, `test_reminders_plugin.py`, `calendar.py`, `Community 391`, `base.py`, `Community 393`, `test_webhook_history_sync.py`, `test_hub_units.py`, `test_analytics_bi_plugin.py`, `test_deposit_lifecycle.py`, `test_service_catalog.py`, `Community 405`, `test_onboarding_cadence.py`, `test_internal_provisioning.py`, `build`, `parse_code`, `parse_email`, `internal_provisioning.py`, `Community 414`, `Patient`, `Base`, `test_hub_calendar_money.py`, `list_tenant_appointments`, `test_subscription.py`, `PixDeposit`, `Community 429`, `EntitlementSummary`, `test_pix_deposit_plugin.py`, `resolve_professional_calendar`, `AppointmentStatus`, `TenantWhatsAppCredentialMissing`, `test_audio_transcription.py`, `_config_with_selected_professional`, `Community 447`, `test_ai_tools_cancel_money.py`, `_FakeWhatsAppClient`, `test_live_and_terminal_partition_the_enum`, `get_current_tenant`, `_reset_settings_cache_after`, `find_near_duplicates`, `_FakeAsaas`, `check_deploy_parity_cron`, `EhrProvider`, `_FakeRedis`, `_FakeArqPool`, `test_a_failed_enqueue_is_reported_not_assumed`, `test_waba_encryption.py`, `_FakeRedis`, `_RescheduleDayCalendar`, `receive_asaas_webhook`, `unit.py`, `Community 369`, `_apply_deposit_awareness`, `active_business_hours`, `analytics.py`, `Community 381`, `is_menu_command`?**
-  _High betweenness centrality (0.097) - this node is a cross-community bridge._
-- **Why does `Professional` connect `test_service_catalog.py` to `Appointment`, `Community 387`, `test_hub_professionals.py`, `calendar.py`, `_send_bot_reply`, `Professional`, `test_patient_context.py`, `test_professional_config.py`, `tenant_config.py`, `oauth.py`, `Community 407`, `test_onboarding_cadence.py`, `test_internal_provisioning.py`, `for_tenant`, `HTTPException`, `EntitlementSummary`, `apply_groups`, `resolve_professional_calendar`, `hub_configuration.py`, `AppointmentStatus`, `TenantWhatsAppCredentialMissing`, `enter_booking`, `_should_inject_post_consult_knowledge`, `config.py`, `set_professional_google_refresh_token`, `test_hub_conversations.py`, `_FakeCalendarService`, `_FakeRedis`, `_filter_active_hours`, `_FakeRedis`, `_FakeArqPool`, `_should_inject_appointment_context`, `FastAPI`, `ShowMainMenuRequested`, `iniciar_pre_consulta`, `logging.py`?**
-  _High betweenness centrality (0.061) - this node is a cross-community bridge._
-- **Are the 132 inferred relationships involving `Tenant` (e.g. with `main()` and `_audit()`) actually correct?**
-  _`Tenant` has 132 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 104 inferred relationships involving `Conversation` (e.g. with `list_patient_appointments()` and `_own_google_event_ids()`) actually correct?**
-  _`Conversation` has 104 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 121 inferred relationships involving `Appointment` (e.g. with `_report()` and `_mark_appointment_cancelled()`) actually correct?**
-  _`Appointment` has 121 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 121 inferred relationships involving `route()` (e.g. with `main()` and `_run_flow()`) actually correct?**
-  _`route()` has 121 INFERRED edges - model-reasoned connections that need verification._
+- **Why does `Tenant` connect `receive_asaas_webhook` to `Appointment`, `Conversation`, `test_reminders_plugin.py`, `test_hub_professionals.py`, `route`, `test_action_buttons.py`, `_send_bot_reply`, `Professional`, `list_tenants`, `test_patient_context.py`, `test_webhook_history_sync.py`, `test_hub_units.py`, `test_professional_config.py`, `resume_bubbles`, `test_analytics_bi_plugin.py`, `tenant_config.py`, `test_deposit_lifecycle.py`, `provisioning.py`, `test_onboarding_cadence.py`, `test_internal_provisioning.py`, `onboarding_cron.py`, `internal_provisioning.py`, `Patient`, `Base`, `test_hub_calendar_money.py`, `test_hub_config.py`, `list_tenant_appointments`, `tools.py`, `test_subscription.py`, `reminders.py`, `PixDeposit`, `EntitlementSummary`, `multi_professional.py`, `calendar.py`, `resolve_professional_calendar`, `test_internal_asaas_connection.py`, `AppointmentStatus`, `test_agent_menu_tools.py`, `oauth.py`, `test_audio_transcription.py`, `_config_with_selected_professional`, `analytics_advanced`, `ManageAppointmentRequested`, `_should_inject_post_consult_knowledge`, `test_ai_tools_cancel_money.py`, `test_precheck_handoff_tool.py`, `get_current_tenant`, `config.py`, `test_tasks_helpers.py`, `set_professional_google_refresh_token`, `test_hub_conversations.py`, `_FakeCalendarService`, `_resolve_unit_or_error`, `Settings`, `_FakeRedis`, `_FakeArqPool`, `_FakeAsyncClient`, `FastAPI`, `HandoverManager`, `ShowMainMenuRequested`, `receive_webhook`, `_calendar_for_calendar_id`, `test_waba_encryption.py`, `env.py`, `_on_inbound`, `arq_worker.py`, `_apply_deposit_awareness`, `main`, `MenuBubble`, `conversation.py`, `is_menu_command`, `_FakeWhatsAppClient`, `_confirmation_recap`, `test_service_catalog.py`, `oauth.py`, `analytics.py`, `config.py`, `admin.py`, `unit.py`, `base.py`, `for_tenant`, `_handle_day_step`, `test_build_identity.py`, `HTTPException`, `test_hub_conversations.py`, `apply_groups`, `hub_configuration.py`, `TenantWhatsAppCredentialMissing`, `enter_booking`, `clean_requirements`, `_FakeCalendarService`, `_FakeWhatsAppClient`, `receive_asaas_webhook`, `_StubCalendarService`, `_calendar_for_professional`, `_filter_active_hours`, `_connect_calendar`, `iniciar_pre_consulta`, `Community 371`, `logging.py`, `ShowMainMenuRequested`, `_post_booking`, `Community 381`, `Community 387`, `Community 388`, `Community 396`, `_ExplodingWhatsAppClient`, `_FakeArqPool`, `emit_usage_event`?**
+  _High betweenness centrality (0.268) - this node is a cross-community bridge._
+- **Why does `Base` connect `list_tenant_appointments` to `_FakeWhatsAppClient`, `Community 386`, `test_hub_professionals.py`, `test_reminders_plugin.py`, `test_action_buttons.py`, `calendar.py`, `Community 391`, `Community 393`, `test_webhook_history_sync.py`, `test_hub_units.py`, `test_analytics_bi_plugin.py`, `_FakeArqPool`, `test_deposit_lifecycle.py`, `test_service_catalog.py`, `Community 404`, `Community 407`, `Community 408`, `test_onboarding_cadence.py`, `test_internal_provisioning.py`, `build`, `Community 405`, `parse_email`, `internal_provisioning.py`, `Patient`, `test_hub_calendar_money.py`, `_entry`, `PixDeposit`, `EntitlementSummary`, `resolve_professional_calendar`, `AppointmentStatus`, `test_human_backup_plugin.py`, `TenantWhatsAppCredentialMissing`, `oauth.py`, `test_audio_transcription.py`, `ManageAppointmentRequested`, `test_ai_tools_cancel_money.py`, `_FakeWhatsAppClient`, `receive_asaas_webhook`, `get_current_tenant`, `Community 457`, `find_near_duplicates`, `_FakeAsaas`, `check_deploy_parity_cron`, `_calendar_for_professional`, `EhrProvider`, `_FakeRedis`, `_should_inject_appointment_context`, `FastAPI`, `test_a_failed_enqueue_is_reported_not_assumed`, `test_waba_encryption.py`, `receive_asaas_webhook`, `_FakeCalendar`, `_FakeCalendarService`, `unit.py`, `Community 369`, `active_business_hours`, `MenuBubble`, `_FakeWhatsAppClient`, `Community 381`, `is_menu_command`, `unit.py`?**
+  _High betweenness centrality (0.086) - this node is a cross-community bridge._
+- **Why does `Conversation` connect `internal_provisioning.py` to `_FakeWhatsAppClient`, `Conversation`, `test_reminders_plugin.py`, `_confirmation_recap`, `route`, `test_action_buttons.py`, `Community 388`, `base.py`, `resume_bubbles`, `test_analytics_bi_plugin.py`, `extract_inbound_body`, `provisioning.py`, `test_onboarding_cadence.py`, `for_tenant`, `Patient`, `Base`, `for_tenant`, `iniciar_pre_consulta`, `list_tenant_appointments`, `tools.py`, `test_build_identity.py`, `test_subscription.py`, `test_hub_conversations.py`, `EntitlementSummary`, `resolve_professional_calendar`, `test_agent_menu_tools.py`, `enter_booking`, `_config_with_selected_professional`, `ConsentEvent`, `ManageAppointmentRequested`, `test_precheck_handoff_tool.py`, `receive_asaas_webhook`, `get_current_tenant`, `redact_secrets`, `test_tasks_helpers.py`, `test_hub_conversations.py`, `check_deploy_parity_cron`, `_calendar_for_professional`, `_FakeCalendarService`, `_FakeRedis`, `main`, `config.py`, `FastAPI`, `receive_webhook`, `_calendar_for_calendar_id`, `Tenant`, `_filter_active_hours`, `receive_asaas_webhook`, `logging.py`, `_apply_deposit_awareness`, `EhrProvider`, `analytics.py`, `MenuBubble`, `Community 381`, `is_menu_command`, `unit.py`?**
+  _High betweenness centrality (0.053) - this node is a cross-community bridge._
+- **Are the 135 inferred relationships involving `Tenant` (e.g. with `main()` and `_audit()`) actually correct?**
+  _`Tenant` has 135 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 122 inferred relationships involving `Conversation` (e.g. with `list_patient_appointments()` and `_own_google_event_ids()`) actually correct?**
+  _`Conversation` has 122 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 123 inferred relationships involving `Appointment` (e.g. with `_report()` and `_mark_appointment_cancelled()`) actually correct?**
+  _`Appointment` has 123 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 112 inferred relationships involving `Patient` (e.g. with `_persist_appointment()` and `_resolve_patient_phone()`) actually correct?**
+  _`Patient` has 112 INFERRED edges - model-reasoned connections that need verification._

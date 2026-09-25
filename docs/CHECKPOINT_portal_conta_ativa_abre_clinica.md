@@ -165,3 +165,30 @@ serviços — o worker é quem roda o `open` e o turno do nome). Compatibilidade
 
 Pendências: não commitado, não deployado; prova ao vivo depende da parte 3 (frontend) mandar
 `X-Brain-Client: web`.
+
+## §7 — Nome do paciente na saudação inicial (Portal) — 2026-09-25
+
+Pedido do dono: quando o nome já é conhecido (herdado da conta via 0024), a saudação usa-o —
+"👋 Olá! Bem-vindo(a) à GinecoAqui, Mateus!".
+
+- `services/greeting_template.py::render_greeting(clinic_name, clinic_description,
+  patient_name=None)` — slot novo `{patient_suffix}` na 1ª linha do `GREETING_FRAME`
+  (`", <nome>"` ou `""`). `None`/vazio/só espaços ⇒ string byte a byte igual à anterior (sem
+  vírgula solta). Slot fixo do produto, nunca editável pela clínica.
+- `workers/tasks.py::_select_greeting` passa `patient_name=patient.name` **só quando
+  `patient.channel == CHANNEL_BRAIN_MESSAGE`**; WhatsApp sempre `None` (lá o nome é perguntado
+  depois da saudação, `AWAITING_NAME`). O ramo de paciente retornando
+  (`returning_greeting_message` + `{{name}}`) não mudou.
+- Orçamento de 1024 chars intacto: `clinic_description_budget`/`FRAME_FIXED_CHARS` não mudaram e
+  chamam `render_greeting` sem o argumento novo, então medem o frame sem nome — que é exatamente o
+  que o WhatsApp manda. O preview do hub (`greeting_preview_template`) também não muda.
+- Sem mecanismo genérico de variáveis (decisão do dono: só quando houver 2ª variável real).
+
+Testes em `tests/test_greeting_template.py` (seção "Patient name in the opener"): nome presente;
+sem nome = sha256/tamanho capturados no HEAD 7ae484d antes da mudança (793 chars); orçamento
+`GinecoAqui` = 229 e preview sha inalterados; `_select_greeting` com os dois canais lado a lado.
+Suíte: HEAD **2411 passed** → depois **2418 passed, 0 falhas**. `ruff check` limpo;
+`ruff format --check` em `tasks.py` já falhava no HEAD (trechos antigos, fora do diff).
+
+Estado: **local, não commitado, não deployado**. Deploy precisa de `secretaria_api` **e**
+`secretaria-worker` (quem monta a saudação é o worker).

@@ -202,6 +202,7 @@ from secretaria.services.pending_identity import (
     EMAIL_INVALID_MESSAGE,
     EMAIL_PAUSED_MESSAGE,
     EMAIL_REQUEST_MESSAGE,
+    EXISTING_ACCOUNT_CODE_BUTTONS,
     IDENTITY_BACK_ACTION,
     IDENTITY_CHANGE_EMAIL_ACTION,
     IDENTITY_RESEND_ACTION,
@@ -1818,7 +1819,14 @@ def _select_greeting(
     returning = (tenant.returning_greeting_message or "").strip()
     if is_returning_patient and returning:
         return _render_greeting_template(returning, patient.name)
-    return render_greeting(tenant.clinic_name, _fit_clinic_description(tenant))
+    # The name only ever rides on the Portal: WhatsApp asks for it right AFTER
+    # this greeting (AWAITING_NAME), and its 1024-char budget is measured on
+    # the no-name frame.
+    return render_greeting(
+        tenant.clinic_name,
+        _fit_clinic_description(tenant),
+        patient_name=patient.name if patient.channel == CHANNEL_BRAIN_MESSAGE else None,
+    )
 
 
 def _fit_clinic_description(tenant: Tenant) -> str:
@@ -5506,11 +5514,16 @@ async def _send_code_notice(
     event: str,
     pre_consent: bool = False,
 ) -> None:
-    """The code notice, as the three-button card, naming the masked inbox.
+    """The code notice, as the button card, naming the masked inbox.
 
     `pre_consent` picks the KNOWN-ADDRESS wording
     (`existing_account_code_body`): a code asked before consent, for an
-    e-mail that already had an account, with no appointment to mention.
+    e-mail that already had an account, with no appointment to mention. It
+    also picks the two-button card (`EXISTING_ACCOUNT_CODE_BUTTONS`, owner,
+    2026-09-25): "Voltar" on this card only led forward to the LGPD notice,
+    which reads as the button doing nothing — the three-button card
+    (`CODE_NOTICE_BUTTONS`) is for the post-consent/post-booking notice,
+    where "Voltar" has a real destination (the menu).
 
     One spelling for the two places `_send_bot_reply` emits it (a resumed wait
     and a resend); `plugins/pending_identity.py` emits the third, the one that
@@ -5527,7 +5540,7 @@ async def _send_code_notice(
             if pre_consent
             else code_notice_body(email_masked)
         ),
-        buttons=list(CODE_NOTICE_BUTTONS),
+        buttons=list(EXISTING_ACCOUNT_CODE_BUTTONS if pre_consent else CODE_NOTICE_BUTTONS),
         event=event,
     )
 
@@ -5682,9 +5695,10 @@ async def _handle_identity_card_action(
 ) -> None:
     """Own the whole turn for a tap on the code notice's card.
 
-    `pre_consent`: the card was the KNOWN-ADDRESS one (asked before consent).
-    "Voltar" then continues to the LGPD notice instead of the menu — a menu
-    tap would only meet the consent gate — and a resend re-sends that wording.
+    `pre_consent`: the card was the KNOWN-ADDRESS one (asked before consent),
+    which does not offer "Voltar" at all (owner, 2026-09-25 —
+    `services/pending_identity.py::EXISTING_ACCOUNT_CODE_BUTTONS`); a resend
+    re-sends that same wording.
 
     Three exits from `AWAITING_EMAIL_CODE` that do not require the patient to
     have the code in front of them — which is the point of the card. The flow
@@ -5702,12 +5716,6 @@ async def _handle_identity_card_action(
             "pending_identity_card_action_without_tenant",
             conversation_id=str(reply.conversation_id),
         )
-        return
-
-    if reply.identity_action == IDENTITY_BACK_ACTION and pre_consent:
-        # The state is already IDLE (written upstream). Carry on as a new
-        # visitor: the consent notice is the next step, not the menu.
-        await _send_consent_notice(reply, tenant=tenant, waba_token=waba_token)
         return
 
     if reply.identity_action == IDENTITY_BACK_ACTION:

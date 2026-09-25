@@ -15,8 +15,10 @@ Two things are pinned here, and they fail for different reasons:
     copy is edited, and pass while production overflowed.
 """
 
+import hashlib
 import os
 import re
+from types import SimpleNamespace
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -31,8 +33,11 @@ from secretaria.core.whatsapp_limits import (  # noqa: E402
     MAX_BUTTON_LABEL_CHARS,
     MAX_INTERACTIVE_BODY_CHARS,
 )
+from secretaria.models.patient import CHANNEL_WHATSAPP  # noqa: E402
+from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE  # noqa: E402
 from secretaria.services.greeting_template import (  # noqa: E402
     CONSENT_BUTTON_LABEL,
+    FRAME_FIXED_CHARS,
     LGPD_CONSENT_MESSAGE,
     LGPD_TERMS_URL,
     PREVIEW_PLACEHOLDER,
@@ -226,3 +231,66 @@ def test_preview_template_contains_exactly_one_placeholder() -> None:
     template = greeting_preview_template("Clínica São Lucas")
 
     assert template.count(PREVIEW_PLACEHOLDER) == 1
+
+
+# --------------------------------------------------------------------------
+# Patient name in the opener (Portal only)
+# --------------------------------------------------------------------------
+
+# Captured from `render_greeting("GinecoAqui", "")` / the preview / the budget
+# at HEAD 7ae484d, BEFORE the `patient_name` slot existed. The no-name path must
+# stay byte-for-byte identical: WhatsApp always takes it, and its 1024-char
+# budget is measured on it.
+_NO_NAME_GREETING_SHA256 = "52206c49125ed5e341ae862f3c4fe540b52c0413a8af182531de699a5a0e9381"
+_NO_NAME_GREETING_LEN = 793
+_PREVIEW_SHA256 = "e43e76fe668527e57e715056e7c50d8f85d83d7e1e583a605d38361fa2ecccab"
+_GINECOAQUI_BUDGET = 229
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_greeting_with_patient_name_addresses_the_patient() -> None:
+    rendered = render_greeting("GinecoAqui", "", patient_name="Mateus")
+
+    assert rendered.startswith("👋 Olá! Bem-vindo(a) à GinecoAqui, Mateus!\n")
+    assert "Bem-vindo(a) à GinecoAqui, Mateus!" in rendered
+
+
+@pytest.mark.parametrize("patient_name", [None, "", "   "])
+def test_greeting_without_patient_name_is_unchanged(patient_name: str | None) -> None:
+    rendered = render_greeting("GinecoAqui", "", patient_name=patient_name)
+
+    assert len(rendered) == _NO_NAME_GREETING_LEN
+    assert _sha256(rendered) == _NO_NAME_GREETING_SHA256
+    assert rendered == render_greeting("GinecoAqui", "")
+    assert ", !" not in rendered
+
+
+def test_budget_and_preview_unchanged_by_patient_name_slot() -> None:
+    assert clinic_description_budget("GinecoAqui") == _GINECOAQUI_BUDGET
+    assert FRAME_FIXED_CHARS == len(render_greeting("", ""))
+    assert _sha256(greeting_preview_template("GinecoAqui")) == _PREVIEW_SHA256
+
+
+@pytest.mark.parametrize(
+    ("channel", "expect_name"),
+    [(CHANNEL_BRAIN_MESSAGE, True), (CHANNEL_WHATSAPP, False)],
+)
+def test_select_greeting_names_patient_only_on_portal(channel: str, expect_name: bool) -> None:
+    tenant = SimpleNamespace(
+        clinic_name="GinecoAqui",
+        clinic_description="",
+        returning_greeting_message=None,
+    )
+    patient = SimpleNamespace(name="Mateus", channel=channel)
+
+    greeting = tasks._select_greeting(
+        tenant, patient, is_first_contact=True, is_returning_patient=False
+    )
+
+    assert greeting is not None
+    assert ("GinecoAqui, Mateus!" in greeting) is expect_name
+    if not expect_name:
+        assert greeting == render_greeting("GinecoAqui", "")

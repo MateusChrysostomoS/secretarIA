@@ -103,6 +103,26 @@ pedido explícito do dono (2026-09-21).
     Registro como limitação de teste, não bug: não dá pra saber pelo Chrome sozinho se o timer
     era da sessão pendente ou do `booking_holds`.
 
+## Veredito dos Achados 10 e 11 (fechamento 2026-09-24)
+
+- **Achado 10 (histórico inesperado — "Remarcar/Cancelar" no primeiro menu):** confirmado como
+  **não-bug**. `flow_router.py::DEFAULT_MENU_BUTTONS` é fixo e aparece para qualquer paciente,
+  não depende de agendamento prévio — a leitura original ("sugere interação prévia") estava
+  errada. Já registrado inline no item 10 acima e em `CHECKPOINT_portal_conta_ativa_abre_clinica.md`
+  §5.1. Nenhuma mudança de código.
+- **Achado 11 (reforçar teste de não-duplicação no caminho de e-mail conhecido):** já **coberto**
+  por um teste existente, não localizado na varredura anterior —
+  `brain-api/tests/test_patient_pending_session.py::test_a_clinic_that_already_knows_the_address_keeps_its_own_identity`
+  (linha 458). Exercita exatamente o caminho pedido: visita pendente → `POST
+  /internal/brain-message/pending-email` (`claim_pending_email`) com um e-mail que JÁ tem
+  identidade nessa clínica → `pending/request-otp` + `pending/verify-otp` (código certo). Provas
+  no teste: a identidade da visita não é apagada nem tem o e-mail reescrito
+  (`pending_identity.email is None`), a conta usa a identidade pré-existente
+  (`body["patient_ref"] == str(existing)`), e `visit.superseded_by == existing` é gravado
+  corretamente. Nenhum `MessagePatient` novo é criado. Nenhum teste novo necessário.
+- **Suíte completa do brain-api rodada nesta sessão:** `uv run python -m pytest -q` →
+  **860 passed, 2 skipped, 0 failed** (1171s). Sem regressão.
+
 ## Comandos de teste rodados (repetíveis)
 
 ```

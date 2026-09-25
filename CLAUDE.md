@@ -471,6 +471,15 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
   `pii-field-capture-pseudonymization` para a captura de PII de terceiro. **NÃO EXECUTADO
   ainda.** Coordenar com o prompt acima antes de rodar (mesma região de `flow_router.py`) —
   prefira rodar este primeiro, a pergunta "pra você?" fica mais externa na ordem final.
+- `z_prompts/PROMPT_BRAIN_MESSAGE_SAUDACAO_NOME_PACIENTE_SECRETARIA.md` (raiz de BRAIN, gerado
+  2026-09-25 via `/prompt-generator`) — personaliza `GREETING_FRAME` com o nome do paciente
+  (`render_greeting(..., patient_name=...)`), só no canal `brain_message` (o nome nunca está
+  disponível a tempo no WhatsApp) e só quando a conta já o conhece (via `account_display_name`
+  do brain-api). Ponto de atenção: não mexer no cálculo de orçamento de caracteres do WhatsApp
+  (`clinic_description_budget`/`FRAME_FIXED_CHARS`), que deve continuar medindo a variante sem
+  nome. Sessão única. Irmão de `PROMPT_BRAIN_MESSAGE_COMPOSER_VARIAVEL_NOME_FRONTEND.md`
+  (Brain-Message-Frontend) — independentes entre si, sem ordem de execução exigida.
+  **NÃO EXECUTADO ainda.**
 
 ## graphify
 

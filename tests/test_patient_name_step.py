@@ -82,8 +82,8 @@ from secretaria.services.patient_name import (  # noqa: E402
 from secretaria.services.pending_identity import (  # noqa: E402
     ACCOUNT_CODE_GIVE_UP_MESSAGE,
     CODE_ACCEPTED_MESSAGE,
-    CODE_NOTICE_BUTTONS,
     EMAIL_REQUEST_MESSAGE,
+    EXISTING_ACCOUNT_CODE_BUTTONS,
     EXISTING_ACCOUNT_SENTENCE,
     ClaimOutcome,
     ClaimResult,
@@ -684,7 +684,12 @@ async def test_portal_new_email_asks_the_name_before_the_lgpd(db, calls) -> None
 
 
 async def test_portal_known_email_skips_the_name_and_asks_the_code(db, calls) -> None:
-    """CHECKLIST: no name question; the code, citing the MASKED inbox, not the raw one."""
+    """CHECKLIST: no name question; the code, citing the MASKED inbox, not the raw one.
+
+    Owner, 2026-09-25: this card has no "Voltar" — its only destination was
+    forward, into the same LGPD notice the patient would reach anyway, which
+    read as the button doing nothing (confirmed live in the Portal).
+    """
     calls.claim_result = ClaimResult(
         ClaimOutcome.CLAIMED, account_exists=True, email_masked=EMAIL_MASKED
     )
@@ -697,8 +702,13 @@ async def test_portal_known_email_skips_the_name_and_asks_the_code(db, calls) ->
     assert NAME_REQUEST_AFTER_EMAIL_MESSAGE not in sent
     assert NAME_REQUEST_MESSAGE not in sent
     assert LGPD_ROW not in sent
+    assert [title for _, title in EXISTING_ACCOUNT_CODE_BUTTONS] == [
+        "↩️ Reenviar código",
+        "📩 Mudar e-mail",
+    ], "no Voltar on the known-address code card"
     assert sent[2] == interactive_history_body(
-        existing_account_code_body(EMAIL_MASKED), [title for _, title in CODE_NOTICE_BUTTONS]
+        existing_account_code_body(EMAIL_MASKED),
+        [title for _, title in EXISTING_ACCOUNT_CODE_BUTTONS],
     )
     assert EMAIL_MASKED in sent[2]
     assert all(EMAIL not in body for body in sent), "the raw address reached the transcript"
