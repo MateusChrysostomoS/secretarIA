@@ -127,6 +127,9 @@ active-professionals snapshot** the worker passes into `route()` (new
   worker resolves the selected professional's own `CalendarService`
   (`resolve_professional_calendar`) and passes it as `route()`'s `calendar`,
   so slot listing/booking hit the right agenda with the right duration.
+- **Superseded by TASK-006 (`docs/CHECKPOINT_convenio_catalogo.md`, not deployed):** the
+  convênio is now asked FIRST (before the doctor list, which lists every doctor and marks the
+  ones accepting the plan), from a global catalog; the paragraph below is the historical design.
 - **Convênio step** (`STEP_AWAITING_INSURANCE`), between service-confirm and
   the day question, only when a professional is selected AND
   `tenant.collect_insurance` AND `tenant.insurances` non-empty: plan list

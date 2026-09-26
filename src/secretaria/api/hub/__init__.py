@@ -1,1 +1,4 @@
-"""Doctor hub / CRM API: tenant-facing dashboard backend (config, OAuth onboarding, calendar actions)."""
+"""Doctor hub / CRM API: tenant-facing dashboard backend.
+
+Config, OAuth onboarding, calendar actions.
+"""

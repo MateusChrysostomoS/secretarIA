@@ -80,6 +80,11 @@ telefone ou data de nascimento do terceiro). Pelo chat livre a secretarIA não m
 outra pessoa: ela devolve ao menu para passar por essa pergunta.
 
 ### Convênio (no ar, quando a clínica ativa — mesma lógica nos dois canais)
+> **Mudando (TASK-006, construído, NÃO deployado):** o convênio passa a ser a PRIMEIRA pergunta
+> depois de "pra quem", antes do profissional; a lista de profissionais mostra todos e marca
+> "✅ Aceita seu convênio" nos que aceitam o plano escolhido; os planos vêm de um catálogo global.
+> Ver `docs/CHECKPOINT_convenio_catalogo.md`. O texto abaixo descreve o que está no ar hoje.
+
 Depois de confirmar o serviço, se a clínica ligou "perguntar convênio" e cadastrou pelo menos um
 plano aceito, a secretarIA pergunta "Você vai usar convênio?" com uma lista: os planos da clínica
 + "Particular" + "Outro convênio" (que abre uma pergunta de texto livre com o nome do plano). A

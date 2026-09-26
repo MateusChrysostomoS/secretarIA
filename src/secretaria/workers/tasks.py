@@ -180,6 +180,11 @@ from secretaria.services.greeting_template import (
     render_greeting,
 )
 from secretaria.services.handover import HandoverManager
+from secretaria.services.insurance_catalog import (
+    TenantInsurance,
+    load_tenant_insurance,
+    resolve_tenant_plan_id,
+)
 from secretaria.services.message_status import apply_whatsapp_statuses
 from secretaria.services.patient_context import (
     PatientOpeningContext,
@@ -1922,7 +1927,10 @@ def _greeting_buttons_for(
 
 
 def _flow_tenant_snapshot(
-    tenant: Tenant, professionals: list[Professional], services: list | None = None
+    tenant: Tenant,
+    professionals: list[Professional],
+    services: list | None = None,
+    insurance: TenantInsurance | None = None,
 ) -> SimpleNamespace:
     """Build the tenant-shaped config consumed by the deterministic router.
 
@@ -1952,6 +1960,14 @@ def _flow_tenant_snapshot(
     patient one spelling per service: the router receives entries that are
     already canonical and filters them exactly as before. An empty catalog (a
     tenant not backfilled yet) resolves to the raw stored entries.
+
+    `insurance` is the clinic's convênio catalog selection
+    (services/insurance_catalog.py::load_tenant_insurance), loaded by the
+    caller for the same reason. It becomes `insurance_plans` (the plans, with
+    catalog ids) and `insurance_accepted_by` (which doctor takes which), which
+    is what lets the router MARK the doctors who take the patient's plan. Left
+    out, `insurance_plans` stays None and the router falls back to the legacy
+    `insurances` strings - same names, no marks.
     """
     appointment_types = resolve_entries(tenant.appointment_types, services)
     business_hours = tenant.business_hours
@@ -1967,6 +1983,8 @@ def _flow_tenant_snapshot(
         business_hours=business_hours,
         collect_insurance=tenant.collect_insurance,
         insurances=tenant.insurances,
+        insurance_plans=insurance.plans if insurance is not None else None,
+        insurance_accepted_by=insurance.accepted_by if insurance is not None else {},
     )
 
 
@@ -2905,6 +2923,10 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                     # own list is `[]` offers nothing, and flattening here would
                     # silently turn that into the clinic's old catalog.
                     service_catalog = await load_service_catalog(session, tenant.id)
+                    # Same one-read-per-turn rule for the convênio catalog: the
+                    # clinic's plans and which doctor takes which, so the pure
+                    # router can mark doctors without a query of its own.
+                    tenant_insurance = await load_tenant_insurance(session, tenant.id)
                     flow_professionals = [
                         SimpleNamespace(
                             id=p.id,
@@ -2976,7 +2998,9 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                             flow_attendee_name=conversation.flow_attendee_name,
                             patient_id=conversation.patient_id,
                         ),
-                        _flow_tenant_snapshot(tenant, professional_rows, service_catalog),
+                        _flow_tenant_snapshot(
+                            tenant, professional_rows, service_catalog, tenant_insurance
+                        ),
                     )
                     # Load the patient's future appointments whenever THIS turn
                     # might need them - no longer only the manage (cancel/
@@ -4798,6 +4822,12 @@ async def _apply_flow_result(
                             conversation_id=conv.id,
                             phone=booking_phone,
                             status=AppointmentStatus.SCHEDULED,
+                            # The clinic plan the convênio text names, by id,
+                            # for the Pix-deposit guard (None for Particular /
+                            # a typed plan / no answer).
+                            insurance_plan_id=await resolve_tenant_plan_id(
+                                session, conv.tenant_id, result.appointment.get("insurance")
+                            ),
                             **result.appointment,
                         )
                         session.add(booked_appointment)
@@ -5523,6 +5553,9 @@ async def _promote_booking_hold(
     try:
         async with async_session_factory() as session:
             async with session.begin():
+                appointment.insurance_plan_id = await resolve_tenant_plan_id(
+                    session, tenant.id, held.insurance
+                )
                 session.add(appointment)
     except Exception as exc:
         # The event EXISTS on Google and the row does not. Same answer the
@@ -6607,10 +6640,14 @@ async def _handle_select_professional(
         )
         return
     result = _enter_professional_services(professional, tenant_snapshot)
-    # Built here, not by route(), so `_carry_attendee` never saw it: keep the
-    # authorized attendee of the booking this hand-back continues.
+    # Built here, not by route(), so `_carry_booking` never saw it: keep the
+    # authorized attendee and the convênio answer of the booking this hand-back
+    # continues (an unanswered convênio is asked at "Sim, agendar").
     if flow_snapshot is not None and result.flow_state == FlowState.SERVICE_CATALOG:
         result.flow_attendee_name = getattr(flow_snapshot[0], "flow_attendee_name", None)
+        result.flow_selected_insurance = getattr(
+            flow_snapshot[0], "flow_selected_insurance", None
+        )
     await _apply_flow_result(
         reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
     )
@@ -6757,6 +6794,7 @@ async def _handle_start_guided_booking(
         )
         professional_rows = await list_active_professionals(session, tenant.id)
         service_catalog = await load_service_catalog(session, tenant.id)
+        tenant_insurance = await load_tenant_insurance(session, tenant.id)
         booking_calendar = await _appointment_calendar(
             session,
             tenant,
@@ -6795,7 +6833,9 @@ async def _handle_start_guided_booking(
     # exactly the clinics that configure everything per-professional — the day
     # picker would then slot on the clinic default instead of the service's own
     # duration, and offer the patient the wrong lengths.
-    tenant_snapshot = _flow_tenant_snapshot(tenant, professional_rows, service_catalog)
+    tenant_snapshot = _flow_tenant_snapshot(
+        tenant, professional_rows, service_catalog, tenant_insurance
+    )
 
     result = await enter_guided_booking(
         tenant_snapshot,

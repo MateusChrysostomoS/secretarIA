@@ -57,7 +57,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from secretaria.core.database import Base
 
 
-class AppointmentStatus(str, enum.Enum):
+class AppointmentStatus(str, enum.Enum):  # noqa: UP042 - StrEnum would change str(member)
     SCHEDULED = "scheduled"
     CANCELLED = "cancelled"
     RESCHEDULED = "rescheduled"
@@ -144,6 +144,15 @@ class Appointment(Base):
     # deterministic booking flow. Informational only — never filters
     # professionals or slots (clinic-wide fact, see tenants.insurances).
     insurance: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # The catalog entry `insurance` resolved to, when it names one of the
+    # clinic's own plans (services/insurance_catalog.py::resolve_tenant_plan_id,
+    # applied once, when the row is created). NULL for "Particular", a typed
+    # "Outro convênio" and every row before the catalog existed. Read by the
+    # Pix-deposit guard (DEPOSIT_SKIP_INSURANCE_NO_CHARGE) BY ID, so a plan
+    # renamed in the catalog later cannot silently change that decision.
+    insurance_plan_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("insurance_catalog.id", ondelete="SET NULL"), nullable=True
+    )
     # Name of the person who will be ATTENDED, when the booking was made for
     # someone else ("Essa consulta é pra você?" -> "Pra outra pessoa", then the
     # authorization sentence - services/attendee.py). NULL means the attendee

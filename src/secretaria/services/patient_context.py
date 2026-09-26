@@ -44,7 +44,7 @@ def as_utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
-class PatientOpeningState(str, Enum):
+class PatientOpeningState(str, Enum):  # noqa: UP042 - StrEnum would change str(member)
     """The five opening states, in first-match order (see the resolver)."""
 
     HAS_UPCOMING_SOON = "has_upcoming_soon"

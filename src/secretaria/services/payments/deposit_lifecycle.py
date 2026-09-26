@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.logging import get_logger
 from secretaria.models import Appointment, AppointmentStatus, Patient, Professional, Tenant
+from secretaria.models.insurance import TenantInsurancePlan
 from secretaria.models.pix_deposit import PixDeposit, PixDepositStatus
 from secretaria.models.processed_asaas_event import ProcessedAsaasEvent
 from secretaria.services import tenant_config as cfg
@@ -71,6 +72,11 @@ DEPOSIT_SKIP_NO_API_KEY = "no_api_key"
 DEPOSIT_SKIP_NO_SERVICE = "no_service"
 DEPOSIT_SKIP_UNPARSEABLE_PRICE = "unparseable_price"
 DEPOSIT_SKIP_ZERO_AMOUNT = "zero_amount"
+# The booking's convênio is one of the clinic's plans that the clinic marked
+# "não cobra sinal" (tenant_insurance_plans.charge_deposit = false). Owner's
+# decision 2026-09-25: per clinic AND per plan, never inferred from the
+# operator - see models/insurance.py.
+DEPOSIT_SKIP_INSURANCE_NO_CHARGE = "insurance_no_charge"
 
 
 def _log_deposit_skip(tenant: Tenant, appointment: Appointment, reason: str) -> None:
@@ -194,6 +200,29 @@ async def _send_deposit_request(
     await client.send_text_message(to=patient.wa_id, body=text)
 
 
+async def _insurance_charges_deposit(
+    session: AsyncSession, tenant: Tenant, appointment: Appointment
+) -> bool:
+    """False only when the booking's plan is one this clinic flagged "no deposit".
+
+    Reads `appointment.insurance_plan_id` (set once, when the row was created)
+    BY ID - never re-matching the free-text `insurance`. No plan id
+    ("Particular", a typed "Outro convênio", no answer, every row older than
+    the catalog) or a plan the clinic no longer accepts -> True: the tenant's
+    own pix_deposit_* policy decides, exactly as before the catalog existed.
+    """
+    plan_id = getattr(appointment, "insurance_plan_id", None)
+    if plan_id is None:
+        return True
+    charge = await session.scalar(
+        select(TenantInsurancePlan.charge_deposit).where(
+            TenantInsurancePlan.tenant_id == tenant.id,
+            TenantInsurancePlan.catalog_id == plan_id,
+        )
+    )
+    return charge is not False
+
+
 async def maybe_create_deposit(
     session: AsyncSession,
     *,
@@ -216,6 +245,9 @@ async def maybe_create_deposit(
     """
     if not tenant.pix_deposit_enabled:
         _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_DISABLED)
+        return None
+    if not await _insurance_charges_deposit(session, tenant, appointment):
+        _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_INSURANCE_NO_CHARGE)
         return None
     if patient is None:
         _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_NO_PATIENT)

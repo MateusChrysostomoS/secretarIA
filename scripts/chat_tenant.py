@@ -66,7 +66,12 @@ async def main() -> None:
     print(f"Conversando com a secretarIA da: {config.clinic_name}")
     print(f"  idioma:   {config.language}    tz: {config.timezone}")
     print(f"  motivos:  {[t.name for t in config.appointment_types] or 'nenhum configurado'}")
-    print(f"  calendar: {'tenant (tenant_credentials)' if config.google_refresh_token else 'env fallback (GOOGLE_REFRESH_TOKEN)'}")
+    calendar_source = (
+        "tenant (tenant_credentials)"
+        if config.google_refresh_token
+        else "env fallback (GOOGLE_REFRESH_TOKEN)"
+    )
+    print(f"  calendar: {calendar_source}")
     print("Digite 'sair' para encerrar.")
     print("=" * 60)
 

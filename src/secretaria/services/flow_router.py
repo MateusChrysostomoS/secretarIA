@@ -45,12 +45,14 @@ from secretaria.core.whatsapp_limits import (
     EMOJI_NEGATIVE,
     EMOJI_SCHEDULE,
     EMOJI_SERVICE,
+    MAX_LIST_ROW_DESCRIPTION_CHARS,
     decorate,
     decorate_and_truncate,
     decorate_if_fits,
     strip_decoration,
     truncate_button_label,
     truncate_list_row_title,
+    truncate_plain,
 )
 from secretaria.models import FlowState
 from secretaria.services.attendee import (
@@ -74,6 +76,7 @@ from secretaria.services.calendar import (
     CalendarUnavailableError,
     build_patient_calendar_link,
 )
+from secretaria.services.insurance_catalog import match_plan
 from secretaria.services.pending_identity import BOOKING_SLOT_TAKEN_MESSAGE
 from secretaria.services.service_catalog import normalize, professionals_offering
 from secretaria.services.tenant_config import (
@@ -122,6 +125,12 @@ LABEL_OTHER = "Outro"
 LABEL_INSURANCE_PARTICULAR = "Particular"
 LABEL_INSURANCE_OTHER = "Outro convênio"
 INSURANCE_PROMPT_OTHER = "Qual é o nome do seu convênio?"
+# The per-row mark on the doctor list once the patient named one of the
+# clinic's catalog plans (owner, 2026-09-23: show EVERY doctor, mark the ones
+# who take the plan, never hide the others). It rides in the list-row
+# description, where the specialty already goes, so WhatsApp and the Portal
+# render it with no new UI.
+INSURANCE_ACCEPTED_MARK = f"{EMOJI_AFFIRMATIVE} Aceita seu convênio"
 # Structured reasons for `insurance_step_skipped` (see _insurance_step_skip_reason).
 # Count-only observability: which CONFIGURATION silenced the step, never which
 # plan a patient picked.
@@ -1058,6 +1067,36 @@ def _carry_attendee(conversation: Conversation, result: FlowRouterResult) -> Flo
     return result
 
 
+def _carry_insurance(conversation: Conversation, result: FlowRouterResult) -> FlowRouterResult:
+    """Keep the convênio answer on every result that stays inside the booking.
+
+    Same reason as `_carry_attendee`: since the owner's 2026-09-23 order the
+    convênio is asked FIRST (convênio -> profissional -> serviço -> dia ->
+    horário), so the doctor list, the service list, the detail card and the
+    scoped-help nodes that follow all know nothing about it - yet
+    `_apply_flow_result` writes `flow_selected_insurance` unconditionally.
+
+    Leaves alone: a result that already names one, the steps that come BEFORE
+    the answer exists (pra-quem, the convênio question itself), and anything
+    leaving the booking - so the answer is dropped exactly when its booking
+    ends.
+    """
+    if (
+        result.flow_selected_insurance is not None
+        or result.flow_step in ATTENDEE_STEPS
+        or result.flow_step == STEP_AWAITING_INSURANCE
+    ):
+        return result
+    if result.flow_state in (FlowState.SERVICE_CATALOG, FlowState.LLM):
+        result.flow_selected_insurance = _selected_insurance(conversation)
+    return result
+
+
+def _carry_booking(conversation: Conversation, result: FlowRouterResult) -> FlowRouterResult:
+    """Both carries, applied once per public entry (route, resume, hand-back)."""
+    return _carry_insurance(conversation, _carry_attendee(conversation, result))
+
+
 def _selected_managing_appointment_id(conversation: Conversation) -> UUID | None:
     """The conversation's in-progress manage-flow target (getattr: same rationale)."""
     return getattr(conversation, "flow_managing_appointment_id", None)
@@ -1169,7 +1208,7 @@ async def route(
             professionals=professionals,
             gate=gate,
         )
-        return _carry_attendee(conversation, result)
+        return _carry_booking(conversation, result)
     finally:
         _ACTIVE_GATE.reset(token)
 
@@ -1392,13 +1431,54 @@ def enter_booking(tenant: Tenant, professionals: list | None = None) -> FlowRout
     return _ask_attendee_first(ATTENDEE_NEXT_BOOK, tenant, professionals)
 
 
+def _booking_entry(
+    next_step: str | None, tenant: Tenant, professionals: list | None
+) -> FlowRouterResult:
+    """The first list a booking entry would show, used to spot a dead end early.
+
+    "Escolher serviço" on a clinic whose doctors offer NO service at all keeps
+    its old answer ("não há serviços" + the menu) instead of a doctor list
+    where every tap would dead-end - that was the one thing the retired
+    service-first entry did that the doctor list does not.
+    """
+    if (
+        next_step == ATTENDEE_NEXT_CATALOG
+        and _is_multi_professional(professionals)
+        and not _clinic_service_catalog(tenant, professionals or [])
+    ):
+        return _enter_clinic_service_catalog(tenant, professionals or [])
+    return _start_booking(tenant, professionals)
+
+
 def _booking_continuation(
     next_step: str | None, tenant: Tenant, professionals: list | None
 ) -> FlowRouterResult:
-    """The list a booking entry opens once pra-quem is answered."""
-    if next_step == ATTENDEE_NEXT_CATALOG and _is_multi_professional(professionals):
-        return _enter_clinic_service_catalog(tenant, professionals or [])
-    return _start_booking(tenant, professionals)
+    """What a booking entry opens once pra-quem is answered: the convênio first.
+
+    The owner fixed the order on 2026-09-23 - convênio -> profissional ->
+    serviço -> dia -> horário - so the convênio answer can MARK which doctors
+    take the patient's plan on the list that follows. Both multi-doctor menu
+    entries (`next_step`: "Escolher médico" / "Escolher serviço") therefore
+    open the same sequence; the old service-first branch chose the service
+    before the doctor, which that order retires (its handlers stay only for
+    conversations already parked mid-way when this shipped).
+
+    Asked only when the clinic collects it (`_insurance_step_skip_reason`) AND
+    the entry really opens a booking: in front of "não há serviços" it would be
+    a question whose every answer dead-ends.
+    """
+    entry = _booking_entry(next_step, tenant, professionals)
+    if entry.flow_state != FlowState.SERVICE_CATALOG:
+        return entry
+    skip_reason = _insurance_step_skip_reason(tenant)
+    if skip_reason is None:
+        return _enter_insurance(tenant)
+    logger.info(
+        "insurance_step_skipped",
+        reason=skip_reason,
+        professional_count=len(professionals or []),
+    )
+    return entry
 
 
 def _attendee_question(next_step: str) -> FlowRouterResult:
@@ -1425,9 +1505,9 @@ def _ask_attendee_first(
     (no services, no bookable doctor) the patient gets that answer straight
     away instead of a question whose every answer leads to "não há serviços".
     """
-    continuation = _booking_continuation(next_step, tenant, professionals)
-    if continuation.flow_state != FlowState.SERVICE_CATALOG:
-        return continuation
+    entry = _booking_entry(next_step, tenant, professionals)
+    if entry.flow_state != FlowState.SERVICE_CATALOG:
+        return entry
     return _attendee_question(next_step)
 
 
@@ -1502,7 +1582,9 @@ def _attendee_step(
     return _preserve(conversation, "delegate_llm")
 
 
-def _start_booking(tenant: Tenant, professionals: list | None = None) -> FlowRouterResult:
+def _start_booking(
+    tenant: Tenant, professionals: list | None = None, *, insurance: str | None = None
+) -> FlowRouterResult:
     """What a direct "Agendar" tap opened before the pra-quem question existed.
 
     Mirrors `_enter_menu_choice`'s index-0 branch (single-doctor: straight to
@@ -1511,9 +1593,17 @@ def _start_booking(tenant: Tenant, professionals: list | None = None) -> FlowRou
     as those existing paths, reused as-is. `route()`'s IDLE dispatch calls
     this BEFORE the multi-doctor check (like LABEL_RESCHEDULE/LABEL_CANCEL_APPT
     above), so "Agendar" works identically on single- and multi-doctor tenants.
+
+    `insurance` is the patient's convênio answer, when it was already given:
+    it only MARKS the doctors who take that plan - every doctor is listed.
+
+    A clinic with ONE active professional keeps skipping the doctor list
+    (decision recorded in docs/CHECKPOINT_convenio_catalogo.md): "show every
+    doctor" over a roster of one is a list of one, and the extra tap would buy
+    the patient nothing the service list does not already show.
     """
     if _is_multi_professional(professionals):
-        return _enter_professional_list(tenant, professionals or [])
+        return _enter_professional_list(tenant, professionals or [], insurance=insurance)
     services = active_appointment_types(tenant)
     if not services:
         return FlowRouterResult(
@@ -1599,11 +1689,72 @@ def _professional_row_title(name: str | None) -> str:
     return decorate_and_truncate(EMOJI_DOCTOR, str(name or ""))
 
 
-def _enter_professional_list(tenant: Tenant, professionals: list) -> FlowRouterResult:
+def _selected_plan(tenant: Tenant, insurance: str | None) -> dict | None:
+    """The clinic plan the patient's convênio answer names, or None.
+
+    None for "Particular", a typed "Outro convênio", no answer at all, and on a
+    tenant snapshot without catalog ids (legacy strings): nothing to mark then.
+    """
+    plan = match_plan(_tenant_insurance_plans(tenant), insurance)
+    return plan if plan is not None and plan.get("id") else None
+
+
+def _accepts_plan(tenant: Tenant, professional: Any, plan_id: str) -> bool:
+    accepted = (getattr(tenant, "insurance_accepted_by", None) or {}).get(
+        str(professional.id), ()
+    )
+    return plan_id in accepted
+
+
+def _professional_rows(
+    tenant: Tenant, professionals: list, insurance: str | None
+) -> tuple[list[tuple[str, str, str | None]], dict | None]:
+    """One `prof|` row per doctor - ALL of them - marked when they take the plan.
+
+    Owner, 2026-09-23: "quando for escolher o médico é necessário mostrar todos
+    porém ter uma especificação que certos médicos aceitam o convênio da
+    pessoa". So this never filters: a doctor who does not take the plan keeps
+    their row exactly as before (specialty as description); one who does gets
+    INSURANCE_ACCEPTED_MARK in front of it. Returns the matched plan too, so
+    the caller can name it in the list body.
+    """
+    plan = _selected_plan(tenant, insurance)
+    rows: list[tuple[str, str, str | None]] = []
+    marked = 0
+    for professional in professionals:
+        specialty = (getattr(professional, "specialty", None) or "").strip() or None
+        description = specialty
+        if plan is not None and _accepts_plan(tenant, professional, str(plan["id"])):
+            marked += 1
+            description = truncate_plain(
+                f"{INSURANCE_ACCEPTED_MARK} · {specialty}" if specialty
+                else INSURANCE_ACCEPTED_MARK,
+                MAX_LIST_ROW_DESCRIPTION_CHARS,
+            )
+        rows.append(
+            (f"prof|{professional.id}", _professional_row_title(professional.name), description)
+        )
+    if plan is not None:
+        # Counts only - never WHICH plan (it identifies the patient's coverage).
+        logger.info("professional_list_insurance_marked", shown=len(rows), marked=marked)
+    return rows, plan
+
+
+def _professional_list_body(question: str, plan: dict | None) -> str:
+    if plan is None:
+        return question
+    return f"{question}\n\n{EMOJI_AFFIRMATIVE} = aceita {plan['name']}"
+
+
+def _enter_professional_list(
+    tenant: Tenant, professionals: list, *, insurance: str | None = None
+) -> FlowRouterResult:
     """Render the tappable doctor list ("Escolher médico").
 
     Each row carries the professional's specialty as the WhatsApp list-row
-    description — the "apresentação dos médicos" made tappable. Real options
+    description — the "apresentação dos médicos" made tappable — prefixed with
+    INSURANCE_ACCEPTED_MARK when `insurance` names a plan that doctor takes
+    (`_professional_rows`: every doctor listed, never filtered). Real options
     cap at MAX_CATALOG_OPTION_ROWS (the 10-row WhatsApp hard limit minus the
     reserved "Não sei" scoped-help row appended last); beyond that we log and
     truncate, pagination is explicitly out of scope.
@@ -1614,14 +1765,9 @@ def _enter_professional_list(tenant: Tenant, professionals: list) -> FlowRouterR
             total=len(professionals),
             shown=MAX_CATALOG_OPTION_ROWS,
         )
-    rows = [
-        (
-            f"prof|{professional.id}",
-            _professional_row_title(professional.name),
-            (getattr(professional, "specialty", None) or None),
-        )
-        for professional in professionals[:MAX_CATALOG_OPTION_ROWS]
-    ]
+    rows, plan = _professional_rows(
+        tenant, professionals[:MAX_CATALOG_OPTION_ROWS], insurance
+    )
     # Fixed last row: opens the scoped professional-help node
     # (STEP_PROFESSIONAL_HELP). Not "prof|"-prefixed on purpose - the tap must
     # arrive as the plain "Não sei" title (see extract_inbound_body), never as
@@ -1631,7 +1777,9 @@ def _enter_professional_list(tenant: Tenant, professionals: list) -> FlowRouterR
         action="reply",
         bubbles=[
             SlotsBubble(
-                body="Com qual profissional você gostaria de agendar?",
+                body=_professional_list_body(
+                    "Com qual profissional você gostaria de agendar?", plan
+                ),
                 rows=rows,
                 button_label="Ver profissionais",
                 section_title="Profissionais",
@@ -1728,22 +1876,23 @@ def _enter_clinic_service_catalog(tenant: Tenant, professionals: list) -> FlowRo
 
 
 def _enter_service_professional_list(
-    tenant: Tenant, professionals: list, service_name: str
+    tenant: Tenant, professionals: list, service_name: str, *, insurance: str | None = None
 ) -> FlowRouterResult:
-    """The doctors who offer `service_name`, with the service already stored.
+    """EVERY active doctor, with the service already stored - and marked.
+
+    Only reached by a conversation that chose its service first (the retired
+    service-first branch, parked mid-way when the convênio-first order
+    shipped). It used to list only the doctors offering `service_name`; the
+    owner's rule is now "show everyone, mark who takes the plan", so the list
+    is the whole roster. A tap on a doctor who does not offer the service is
+    already handled downstream (`_handle_service_professional` falls back to
+    that doctor's own services).
 
     The tap lands on STEP_AWAITING_SERVICE_PROFESSIONAL, which re-enters the
     normal flow at that service's own detail card — never back at the service
     list, which the patient has already answered.
     """
-    rows = [
-        (
-            f"prof|{professional.id}",
-            _professional_row_title(professional.name),
-            (getattr(professional, "specialty", None) or None),
-        )
-        for professional in professionals[:MAX_PROFESSIONAL_ROWS]
-    ]
+    rows, plan = _professional_rows(tenant, professionals[:MAX_PROFESSIONAL_ROWS], insurance)
     if len(professionals) > MAX_PROFESSIONAL_ROWS:
         logger.warning(
             "flow_service_professional_list_truncated",
@@ -1754,7 +1903,7 @@ def _enter_service_professional_list(
         action="reply",
         bubbles=[
             SlotsBubble(
-                body=f"Quem você prefere para {service_name}?",
+                body=_professional_list_body(f"Quem você prefere para {service_name}?", plan),
                 rows=rows,
                 button_label="Ver profissionais",
                 section_title="Profissionais",
@@ -1800,7 +1949,9 @@ def _handle_catalog_service(
             ],
             flow_state=FlowState.MENU,
         )
-    return _enter_service_professional_list(tenant, offering, service_name)
+    return _enter_service_professional_list(
+        tenant, professionals, service_name, insurance=_selected_insurance(conversation)
+    )
 
 
 def _handle_service_professional(
@@ -1937,23 +2088,43 @@ def _enter_professional_services(professional: Any, tenant: Tenant) -> FlowRoute
 
 
 # --------------------------------------------------------------------------
-# Convênio step (multi-doctor branch; informational only, by design)
+# Convênio step - asked FIRST since 2026-09-23; never filters, only marks
 # --------------------------------------------------------------------------
 
 
+def _tenant_insurance_plans(tenant: Tenant) -> list[dict]:
+    """The clinic's plans as `{"id", "name"}` dicts, catalog-backed when possible.
+
+    The worker's tenant snapshot carries `insurance_plans` (the clinic's rows in
+    `tenant_insurance_plans`, services/insurance_catalog.py) - the only source
+    with ids, so the only one that can mark doctors. A bare `Tenant` (a caller
+    that never built the snapshot) has no such attribute and falls back to the
+    legacy `insurances` strings, which the hub keeps mirrored during the
+    transition: same names, no ids, so no marks - never a wrong one.
+    """
+    plans = getattr(tenant, "insurance_plans", None)
+    if plans is not None:
+        return [plan for plan in plans if str(plan.get("name") or "").strip()]
+    return [
+        {"id": None, "name": str(plan)}
+        for plan in (getattr(tenant, "insurances", None) or [])
+        if str(plan).strip()
+    ]
+
+
 def _tenant_insurances(tenant: Tenant) -> list[str]:
-    return [str(plan) for plan in (getattr(tenant, "insurances", None) or []) if str(plan).strip()]
+    return [str(plan["name"]) for plan in _tenant_insurance_plans(tenant)]
 
 
 def _insurance_step_skip_reason(tenant: Tenant) -> str | None:
     """Why the convênio step must be skipped for this tenant, or None to ask.
 
-    `collect_insurance` and `insurances` are CLINIC-wide settings (they live on
-    `tenants`, the hub edits them once for the whole clinic) and the answer is
-    informational only — it never filters doctors, services or slots. So the
-    step depends on the clinic's configuration and NOTHING else: zero, one and
-    many active professionals all get the same question after the service is
-    confirmed.
+    `collect_insurance` and the clinic's plans are CLINIC-wide settings (the
+    hub edits them once for the whole clinic) and the answer never filters
+    doctors, services or slots - it only marks, on the doctor list, who takes
+    the plan. So the step depends on the clinic's configuration and NOTHING
+    else: zero, one and many active professionals all get the same question,
+    at the start of the booking.
 
     It used to additionally require `flow_selected_professional_id`, which only
     a multi-doctor tenant ever sets (`_enter_professional_services`). A clinic
@@ -1975,15 +2146,22 @@ def _match_insurance_plan(tenant: Tenant, body: str | None) -> str | None:
         return None
     if _label_match(body, LABEL_INSURANCE_PARTICULAR):
         return LABEL_INSURANCE_PARTICULAR
-    for plan in _tenant_insurances(tenant):
-        # send_list caps row titles at 24 chars, so compare on that prefix too.
-        if _norm(truncate_list_row_title(plan)) == target or _norm(plan) == target:
-            return plan
-    return None
+    # send_list caps row titles at 24 chars; match_plan compares on that too.
+    plan = match_plan(_tenant_insurance_plans(tenant), body)
+    return str(plan["name"]) if plan is not None else None
 
 
-def _enter_insurance(conversation: Conversation, tenant: Tenant) -> FlowRouterResult:
-    """Render the convênio list: the clinic's plans + Particular + Outro."""
+def _enter_insurance(
+    tenant: Tenant, conversation: Conversation | None = None
+) -> FlowRouterResult:
+    """Render the convênio list: the clinic's plans + Particular + Outro.
+
+    `conversation` is None at the START of a booking (the owner's order: the
+    convênio is the first question after pra-quem), and names the booking in
+    progress otherwise - a booking begun before that order shipped, or an LLM
+    hand-back with the service already chosen - whose service/doctor must ride
+    along to the day picker.
+    """
     plans = _tenant_insurances(tenant)
     if len(plans) > MAX_INSURANCE_PLAN_ROWS:
         logger.warning(
@@ -2000,6 +2178,7 @@ def _enter_insurance(conversation: Conversation, tenant: Tenant) -> FlowRouterRe
         # Count only — WHICH plans a clinic offers is fine to size, but never
         # which one this patient is about to choose.
         plan_count=len(plans),
+        booking_started=conversation is None,
     )
     return FlowRouterResult(
         action="reply",
@@ -2013,8 +2192,10 @@ def _enter_insurance(conversation: Conversation, tenant: Tenant) -> FlowRouterRe
         ],
         flow_state=FlowState.SERVICE_CATALOG,
         flow_step=STEP_AWAITING_INSURANCE,
-        flow_selected_type=conversation.flow_selected_type,
-        flow_selected_professional_id=_selected_professional_id(conversation),
+        flow_selected_type=conversation.flow_selected_type if conversation else None,
+        flow_selected_professional_id=(
+            _selected_professional_id(conversation) if conversation else None
+        ),
     )
 
 
@@ -2026,12 +2207,19 @@ async def _handle_insurance(
     services: list[dict] | None = None,
     professionals: list | None = None,
 ) -> FlowRouterResult:
-    """Record the convênio answer, then ask the day. Informational only.
+    """Record the convênio answer, then continue the booking. Never filters.
 
     Tapping "Outro convênio" asks for the plan's name and stays on this step;
     anything else — a listed plan's tap, "Particular", or free text — is
     stored as-is (canonicalized to the full plan name when it matches one)
-    and copied onto the appointment at booking time. Never filters anything.
+    and copied onto the appointment at booking time.
+
+    What comes next depends on whether the service is already chosen:
+    normally it is NOT (the convênio is the first question), so the answer
+    opens the doctor list - every doctor, the ones who take the plan marked -
+    or, on a single-doctor clinic, the service list. A booking that already
+    has its service (begun before the convênio-first order shipped, or an LLM
+    hand-back) goes straight to the day picker, as it always did.
     """
     if _label_match(body, LABEL_INSURANCE_OTHER):
         return FlowRouterResult(
@@ -2044,6 +2232,10 @@ async def _handle_insurance(
         )
     matched = _match_insurance_plan(tenant, body)
     stored = (matched or (body or "").strip())[:120] or None
+    if stored is None:
+        # No text at all (e.g. a media message): re-ask here, rather than walk
+        # on with no answer and ask the same question again at "Sim, agendar".
+        return _enter_insurance(tenant, conversation)
     logger.info(
         "insurance_selected",
         conversation_id=str(getattr(conversation, "id", None)),
@@ -2052,10 +2244,28 @@ async def _handle_insurance(
         from_catalog=matched is not None,
         stored=stored is not None,
     )
-    result = await _ask_day(conversation, tenant, calendar, services, professionals)
+    result = None
+    if not conversation.flow_selected_type:
+        result = _start_booking(tenant, professionals, insurance=stored)
+        if result.flow_state != FlowState.SERVICE_CATALOG:
+            # The button flow never asks the convênio in front of a clinic with
+            # no services (`_booking_continuation`), so a dead end here means a
+            # typeless LLM hand-back (`enter_guided_booking` with no catalog):
+            # it books typeless, straight to the day, exactly as it did before
+            # the convênio moved to the front.
+            result = None
+    if result is None:
+        state = _DayPickerState(
+            id=getattr(conversation, "id", None),
+            flow_selected_type=conversation.flow_selected_type,
+            flow_selected_professional_id=_selected_professional_id(conversation),
+            flow_selected_insurance=stored,
+            flow_attendee_name=_attendee_name(conversation),
+        )
+        result = await _ask_day(state, tenant, calendar, services, professionals)
     if result.flow_state is FlowState.SERVICE_CATALOG:
-        # Only the picker itself carries the booking fields; the no-availability
-        # fallback resets to MENU on purpose and must not resurrect them.
+        # Only a result still inside the booking carries it; a dead end (no
+        # services, no availability) resets on purpose and must not resurrect it.
         result.flow_selected_insurance = stored
     return result
 
@@ -2250,14 +2460,20 @@ async def _catalog_step(
     if step == STEP_AWAITING_SERVICE_CONFIRM:
         if _norm(body) == _norm(LABEL_BOOK_SERVICE):
             skip_reason = _insurance_step_skip_reason(tenant)
-            if skip_reason is None:
-                return _enter_insurance(conversation, tenant)
-            logger.info(
-                "insurance_step_skipped",
-                reason=skip_reason,
-                conversation_id=str(getattr(conversation, "id", None)),
-                professional_count=len(professionals or []),
-            )
+            if skip_reason is None and not _selected_insurance(conversation):
+                # The convênio is normally answered at the START of the
+                # booking. Still unanswered here means a path that entered
+                # after that point (a booking parked mid-way when the order
+                # changed, the LLM's doctor hand-back): ask it now rather than
+                # lose information the clinic collects on every other booking.
+                return _enter_insurance(tenant, conversation)
+            if skip_reason is not None:
+                logger.info(
+                    "insurance_step_skipped",
+                    reason=skip_reason,
+                    conversation_id=str(getattr(conversation, "id", None)),
+                    professional_count=len(professionals or []),
+                )
             return await _ask_day(conversation, tenant, calendar, services, professionals)
         if _norm(body) == _norm(LABEL_OTHER_SERVICE):
             return FlowRouterResult(
@@ -2704,7 +2920,9 @@ def _handle_day_back(
     going back must never silently erase them.
     """
     if target == BACK_TARGET_PROFESSIONAL and _is_multi_professional(professionals):
-        result = _enter_professional_list(tenant, professionals or [])
+        result = _enter_professional_list(
+            tenant, professionals or [], insurance=_selected_insurance(conversation)
+        )
         result.flow_selected_type = conversation.flow_selected_type
         result.flow_selected_insurance = _selected_insurance(conversation)
         return result
@@ -2928,7 +3146,15 @@ async def enter_guided_booking(
     free-text conversation resolved the service; everything after it (convênio,
     day, time, confirmation, the booking itself) is the button flow's again.
 
-    **It deliberately does NOT jump straight to the day picker.** The literal
+    Same order as the button flow (convênio -> profissional -> serviço -> dia):
+    the doctor is already fixed here (this hand-back only serves single-doctor
+    clinics - workers/tasks.py turns a multi-doctor one away to the menu) and
+    the service arrives chosen, so the only earlier answer that can still be
+    missing is the convênio. Already answered in the button flow before the
+    patient drifted into the LLM -> straight to the day picker; unanswered and
+    collected by the clinic -> asked now, then the day picker.
+
+    **It deliberately does NOT skip an unanswered convênio.** The literal
     ask was "open the day list", but `collect_insurance` is a clinic-wide
     setting the hub saved on purpose, and `_insurance_step_skip_reason` is the
     single place that decides whether it applies. Skipping it here would mean a
@@ -2970,15 +3196,16 @@ async def enter_guided_booking(
         flow_attendee_name=attendee_name,
     )
     skip_reason = _insurance_step_skip_reason(tenant)
-    if skip_reason is None:
-        return _carry_attendee(state, _enter_insurance(state, tenant))
-    logger.info(
-        "insurance_step_skipped",
-        reason=skip_reason,
-        conversation_id=str(conversation_id),
-        professional_count=len(professionals or []),
-    )
-    return _carry_attendee(state, await _ask_day(state, tenant, calendar, services, professionals))
+    if skip_reason is None and not insurance:
+        return _carry_booking(state, _enter_insurance(tenant, state))
+    if skip_reason is not None:
+        logger.info(
+            "insurance_step_skipped",
+            reason=skip_reason,
+            conversation_id=str(conversation_id),
+            professional_count=len(professionals or []),
+        )
+    return _carry_booking(state, await _ask_day(state, tenant, calendar, services, professionals))
 
 
 async def _relist_stored_day(
@@ -3798,9 +4025,9 @@ async def resume_bubbles(
     calendar: CalendarService | None,
     professionals: list | None = None,
 ) -> FlowRouterResult:
-    """`_resume_bubbles` with the attendee carried forward (see `_carry_attendee`)."""
+    """`_resume_bubbles` with attendee and convênio carried forward (`_carry_booking`)."""
     result = await _resume_bubbles(conversation, tenant, calendar, professionals)
-    return _carry_attendee(conversation, result)
+    return _carry_booking(conversation, result)
 
 
 async def _resume_bubbles(
@@ -3851,7 +4078,9 @@ async def _resume_bubbles(
     if step == STEP_AWAITING_PROFESSIONAL:
         if not _is_multi_professional(professionals):
             return _menu_fallback()
-        return _enter_professional_list(tenant, professionals or [])
+        return _enter_professional_list(
+            tenant, professionals or [], insurance=_selected_insurance(conversation)
+        )
 
     if step == STEP_AWAITING_ATTENDEE_CHOICE:
         return _attendee_question(conversation.flow_selected_type or ATTENDEE_NEXT_BOOK)
@@ -3864,7 +4093,7 @@ async def _resume_bubbles(
         return _attendee_authorization_card(conversation.flow_selected_type, name)
 
     if step == STEP_AWAITING_INSURANCE:
-        return _enter_insurance(conversation, tenant)
+        return _enter_insurance(tenant, conversation)
 
     if step == STEP_AWAITING_CATALOG_SERVICE:
         return _enter_clinic_service_catalog(tenant, professionals or [])
@@ -3876,7 +4105,10 @@ async def _resume_bubbles(
         if not offering:
             return _menu_fallback()
         return _enter_service_professional_list(
-            tenant, offering, conversation.flow_selected_type or ""
+            tenant,
+            professionals or [],
+            conversation.flow_selected_type or "",
+            insurance=_selected_insurance(conversation),
         )
 
     if step == STEP_AWAITING_SERVICE:

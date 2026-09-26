@@ -257,7 +257,8 @@ class Settings(BaseSettings):
 
     # --- Platform encryption (tenant secrets at rest) ---
     # Fernet key (urlsafe base64, 32 bytes). Generate one with the snippet in
-    # .env.example / docs/CHECKPOINT_onboarding_multiprofessional.md. Needed before a Calendar connects.
+    # .env.example / docs/CHECKPOINT_onboarding_multiprofessional.md. Needed before a
+    # Calendar connects.
     ENCRYPTION_KEY: str = ""
 
     # --- Google Calendar OAuth (platform-level hub onboarding) ---

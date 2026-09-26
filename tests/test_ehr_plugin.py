@@ -19,7 +19,10 @@ from secretaria.services.ehr.iclinic import IClinicProvider  # noqa: E402
 
 def _ctx(ehr_provider: str | None) -> PostBookingContext:
     tenant = Tenant(
-        id=uuid4(), clinic_name="Clinic", phone_number_id=str(uuid4())[:12], ehr_provider=ehr_provider
+        id=uuid4(),
+        clinic_name="Clinic",
+        phone_number_id=str(uuid4())[:12],
+        ehr_provider=ehr_provider,
     )
     patient = Patient(id=uuid4(), tenant_id=tenant.id, wa_id="5511999999", name="Maria")
     appointment = Appointment(

@@ -429,35 +429,17 @@ async def test_stale_selected_professional_delegates_llm():
 
 
 # --------------------------------------------------------------------------
-# "Escolher serviço": clinic-wide catalog -> the service narrows the doctors
-# (replaces the old "Procurar médico", which was a sticky-LLM door)
+# "Escolher serviço" since the convênio-first order (owner, 2026-09-23):
+# convênio -> profissional -> serviço, so this entry opens the SAME doctor list
+# as "Escolher médico". The service-first handlers below stay only for a
+# conversation parked on STEP_AWAITING_CATALOG_SERVICE when the order shipped.
 # --------------------------------------------------------------------------
 
 
-async def test_choose_service_lists_the_clinics_unified_catalog():
-    """The union of every active doctor's services, deduplicated - and NOT a
-    hand-off to the model, which is what this menu slot used to be."""
-    res = await _route_past_attendee(
-        _conversation(flow_state=FlowState.MENU),
-        _tenant(),
-        None,
-        BTN_CHOOSE_SERVICE,
-        professionals=_professionals(),
-    )
-    assert res.action == "reply"
-    assert res.flow_state == FlowState.SERVICE_CATALOG
-    assert res.flow_step == flow_router.STEP_AWAITING_CATALOG_SERVICE
-    bubble = res.bubbles[0]
-    assert isinstance(bubble, SlotsBubble)
-    # Ana's own "Consulta Cardio" + Bruno's tenant-fallback "Consulta Geral".
-    assert [row[1] for row in bubble.rows] == ["🏥 Consulta Cardio", "🏥 Consulta Geral"]
-
-
-async def test_choose_service_deduplicates_a_shared_service():
+async def test_choose_service_now_opens_the_doctor_list_like_choose_doctor():
+    """Not the clinic-wide service list any more: the service is chosen AFTER
+    the doctor, and the doctor list shows every doctor."""
     profs = _professionals()
-    profs[1].appointment_types = [
-        {"name": "Consulta Cardio", "duration_min": 30, "is_active": True, "sort_order": 0}
-    ]
     res = await _route_past_attendee(
         _conversation(flow_state=FlowState.MENU),
         _tenant(),
@@ -465,6 +447,26 @@ async def test_choose_service_deduplicates_a_shared_service():
         BTN_CHOOSE_SERVICE,
         professionals=profs,
     )
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.SERVICE_CATALOG
+    assert res.flow_step == STEP_AWAITING_PROFESSIONAL
+    titles = [row[1] for row in res.bubbles[0].rows]
+    assert titles[:2] == ["🥼 Dra. Ana", "🥼 Dr. Bruno"]
+
+
+async def test_parked_catalog_service_step_still_resumes_the_deduplicated_catalog():
+    """A conversation parked on the retired service-first step when this
+    shipped is re-rendered, not stranded - union of services, deduplicated."""
+    profs = _professionals()
+    profs[1].appointment_types = [
+        {"name": "Consulta Cardio", "duration_min": 30, "is_active": True, "sort_order": 0}
+    ]
+    conv = _conversation(
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=flow_router.STEP_AWAITING_CATALOG_SERVICE,
+    )
+    res = await resume_bubbles(conv, _tenant(), None, professionals=profs)
+    assert res.flow_step == flow_router.STEP_AWAITING_CATALOG_SERVICE
     assert [row[1] for row in res.bubbles[0].rows] == ["🏥 Consulta Cardio"]
 
 

@@ -45,6 +45,7 @@ from secretaria.services.greeting_template import (
     clinic_description_budget,
     greeting_preview_template,
 )
+from secretaria.services.insurance_catalog import sync_legacy_insurances
 from secretaria.services.service_catalog import entry_service_id, load_service_catalog
 
 # ---------------------------------------------------------------------------
@@ -267,6 +268,12 @@ async def apply_tenant_config(session: AsyncSession, tenant: Tenant, data: dict)
     for field_name in TENANT_SCALAR_FIELDS:
         if field_name in data:
             setattr(tenant, field_name, data[field_name])
+
+    # Legacy free-text convênios (a hub frontend that predates the catalog):
+    # applied to the catalog tables too, so the booking flow - which reads
+    # only those - sees the save. See insurance_catalog.sync_legacy_insurances.
+    if "insurances" in data:
+        await sync_legacy_insurances(session, tenant, data["insurances"])
 
     # Budget check for the greeting's clinic slot. Runs on the PATCHED tenant
     # so a PUT that changes `clinic_name` and `clinic_description` together is

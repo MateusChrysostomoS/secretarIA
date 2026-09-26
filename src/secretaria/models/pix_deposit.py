@@ -38,7 +38,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from secretaria.core.database import Base
 
 
-class PixDepositStatus(str, enum.Enum):
+class PixDepositStatus(str, enum.Enum):  # noqa: UP042 - StrEnum would change str(member)
     AWAITING = "aguardando_sinal"
     PAID = "confirmado_pago"
     CANCELLED_REFUNDED = "cancelado_reembolsado"

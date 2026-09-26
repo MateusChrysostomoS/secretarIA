@@ -460,8 +460,10 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
   `_insurance_step_skip_reason`/`_match_insurance_plan` (linhas ~1749-1863) e confirma que
   `PROMPT_FIX_19_SINGLE_PRO_INSURANCE.md` (`z_prompts/debug_secretaria_producao/`) já foi
   executado (o próprio docstring de `_insurance_step_skip_reason` narra a correção). Parte 1/2
-  — parte 2 é `..._2_SECRETARIA_FRONTEND.md`, no `secretarIA-frontend`. **NÃO EXECUTADO ainda.**
-  Coordenar com o prompt abaixo antes de rodar (mesma região de `flow_router.py`).
+  — parte 2 é `..._2_SECRETARIA_FRONTEND.md`, no `secretarIA-frontend`. **EXECUTADO 2026-09-26
+  (TASK-006), commit local na branch `task/TASK-006-secretaria` (worktree
+  `BRAIN-worktrees/TASK-006`), em cima da TASK-007; não pushado, não deployado** — estado, contrato
+  do hub e fontes da pesquisa em `docs/CHECKPOINT_convenio_catalogo.md`. Parte 2 NÃO executada.
 - `z_prompts/PROMPT_AGENDAR_PARA_TERCEIRO_SECRETARIA.md` (raiz de BRAIN, gerado 2026-09-23 via
   `/prompt-generator`) — "Essa consulta é pra você?": permite marcar consulta para outra pessoa,
   com a frase de autorização já redigida em `docs/JORNADA_PACIENTE_WHATSAPP_E_PORTAL.md` §2

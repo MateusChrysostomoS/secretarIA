@@ -65,7 +65,9 @@ def _summary(**overrides) -> EntitlementSummary:
 def _ctx(**overrides) -> PostBookingContext:
     tenant = Tenant(id=uuid4(), clinic_name="Clinic", phone_number_id=str(uuid4())[:12])
     appointment = Appointment(id=uuid4(), tenant_id=tenant.id, google_event_id="evt-1")
-    base = dict(tenant=tenant, patient=None, appointment=appointment, waba_token=None, source="agent")
+    base = dict(
+        tenant=tenant, patient=None, appointment=appointment, waba_token=None, source="agent"
+    )
     base.update(overrides)
     return PostBookingContext(**base)
 

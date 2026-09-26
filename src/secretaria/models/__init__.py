@@ -16,6 +16,11 @@ from secretaria.models.booking_hold import BookingHold
 from secretaria.models.consent_event import ConsentEvent
 from secretaria.models.conversation import Conversation, FlowState, HandoverState
 from secretaria.models.conversation_pii_token_map import ConversationPiiTokenMap
+from secretaria.models.insurance import (
+    InsuranceCatalog,
+    ProfessionalInsurancePlan,
+    TenantInsurancePlan,
+)
 from secretaria.models.message import Message, MessageDirection, MessageSender
 from secretaria.models.patient import Patient
 from secretaria.models.pix_deposit import PixDeposit, PixDepositStatus
@@ -42,6 +47,7 @@ __all__ = [
     "ConversationPiiTokenMap",
     "FlowState",
     "HandoverState",
+    "InsuranceCatalog",
     "Message",
     "MessageDirection",
     "MessageSender",
@@ -53,8 +59,10 @@ __all__ = [
     "Professional",
     "RebookingDecline",
     "ProfessionalCredentials",
+    "ProfessionalInsurancePlan",
     "Service",
     "Tenant",
     "TenantCredentials",
+    "TenantInsurancePlan",
     "Unit",
 ]

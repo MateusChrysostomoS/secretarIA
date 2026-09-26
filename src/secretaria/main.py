@@ -26,6 +26,7 @@ from secretaria.api.hub import (
     calendar,
     config,
     conversations,
+    insurance,
     oauth,
     professionals,
     services,
@@ -119,6 +120,9 @@ def create_app() -> FastAPI:
     # and copy are edited; professionals reference its ids. Core wiring, never
     # entitlement-gated (see api/hub/services.py).
     app.include_router(services.router)
+    # The convênio catalog (global) + the clinic's plans + each doctor's plans;
+    # same core-wiring rule as the service catalog (see api/hub/insurance.py).
+    app.include_router(insurance.router)
     # Addon CRUD: multi_professional / multi_unit (entitlement + limit gated
     # in the routers themselves; see api/hub/professionals.py, api/hub/units.py).
     app.include_router(professionals.router)
