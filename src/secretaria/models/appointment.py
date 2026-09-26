@@ -144,6 +144,13 @@ class Appointment(Base):
     # deterministic booking flow. Informational only — never filters
     # professionals or slots (clinic-wide fact, see tenants.insurances).
     insurance: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # Name of the person who will be ATTENDED, when the booking was made for
+    # someone else ("Essa consulta é pra você?" -> "Pra outra pessoa", then the
+    # authorization sentence - services/attendee.py). NULL means the attendee
+    # IS the patient/account that booked (`patient_id`), which is every row
+    # before this column existed and every "é pra mim" booking after. Same
+    # informational shape as `insurance`. PII: see load_pseudonymizer.
+    attendee_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     status: Mapped[AppointmentStatus] = mapped_column(
         # The Postgres `appointment_status` type stores the lowercase enum
         # *values* ("scheduled", ...) — see the c4d8e2f1a5b6 migration. Without

@@ -43,10 +43,17 @@ from contextvars import ContextVar
 from uuid import UUID
 
 from pseudonymize_core import Pseudonymizer
+from sqlalchemy import select
 
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
-from secretaria.models import Conversation, ConversationPiiTokenMap, Patient
+from secretaria.models import (
+    Appointment,
+    BookingHold,
+    Conversation,
+    ConversationPiiTokenMap,
+    Patient,
+)
 
 logger = get_logger(__name__)
 
@@ -61,6 +68,10 @@ _pseudonymizer_ctx: ContextVar[Pseudonymizer | None] = ContextVar("pseudonymizer
 def current_pseudonymizer() -> Pseudonymizer | None:
     """The turn's Pseudonymizer, or None outside a pseudonymized turn."""
     return _pseudonymizer_ctx.get()
+
+
+# Token prefix for a third party's name (services/attendee.py).
+ATTENDEE_KIND = "ATENDIDO"
 
 
 async def load_pseudonymizer(conversation_id: UUID) -> Pseudonymizer:
@@ -79,6 +90,7 @@ async def load_pseudonymizer(conversation_id: UUID) -> Pseudonymizer:
     tokens: dict[str, str] = {}
     patient_name: str | None = None
     patient_phone: str | None = None
+    attendee_names: list[str] = []
     try:
         async with async_session_factory() as session:
             row = await session.get(ConversationPiiTokenMap, conversation_id)
@@ -90,6 +102,7 @@ async def load_pseudonymizer(conversation_id: UUID) -> Pseudonymizer:
                 if patient is not None:
                     patient_name = patient.name
                     patient_phone = patient.wa_id
+            attendee_names = await _attendee_names(session, conversation)
     except Exception as exc:
         # Degrade to a fresh map rather than dropping the turn - see the
         # module docstring. Masking still happens; only reuse is lost.
@@ -101,13 +114,67 @@ async def load_pseudonymizer(conversation_id: UUID) -> Pseudonymizer:
         )
         return Pseudonymizer(tokens=tokens)
 
+    # A restored map only REUSES tokens; it does not re-create the masking
+    # rules. Every attendee name this conversation ever captured is therefore
+    # re-registered from the map itself (see `remember_attendee_name`), which
+    # keeps it masked after a "Cancelar" or an abandoned booking left no row.
+    attendee_names = sorted(
+        set(attendee_names)
+        | {value for token, value in tokens.items() if token.startswith(f"[{ATTENDEE_KIND}_")}
+    )
     p = Pseudonymizer(tokens=tokens)
     p.add_identifier("PACIENTE", patient_name)
     # The WhatsApp id is already shaped like a BR phone, so PHONE_RE would
     # catch most spellings of it anyway; registering it pins ONE token to the
     # canonical form the DB holds instead of minting a new one per spelling.
     p.add_identifier("TELEFONE", patient_phone)
+    # The name of a third party the patient booked for ("Essa consulta é pra
+    # você?" -> "Pra outra pessoa", services/attendee.py). It lives in three
+    # columns none of which is Patient.name, so it is registered here, next to
+    # the patient's own name, and nowhere else.
+    for name in attendee_names:
+        p.add_identifier(ATTENDEE_KIND, name)
     return p
+
+
+async def remember_attendee_name(conversation_id: UUID, name: str) -> None:
+    """Pin a just-captured attendee name into this conversation's token map.
+
+    Called the moment the name is captured (the authorization card), BEFORE
+    any appointment row exists: the card and the recap put the name in the
+    message history, and "Cancelar" or an abandoned booking clears the flow
+    field without ever writing a row that `_attendee_names` could find.
+    Best-effort like `persist_pseudonymizer`; never raises.
+    """
+    try:
+        p = await load_pseudonymizer(conversation_id)
+        p.add_identifier(ATTENDEE_KIND, name)
+        await persist_pseudonymizer(conversation_id, p)
+    except Exception as exc:  # pragma: no cover - both callees already swallow
+        logger.warning("pii_remember_attendee_failed", error_type=type(exc).__name__)
+
+
+async def _attendee_names(session, conversation: Conversation | None) -> list[str]:
+    """Every third-party attendee name this conversation has ever carried.
+
+    The in-progress one (`Conversation.flow_attendee_name`, cleared when the
+    booking ends), a held one (`BookingHold`) and every past booking's
+    (`Appointment`): the name stays in the message history - the authorization
+    sentence, the confirmation - long after the flow field is cleared, so the
+    appointment rows are what keep masking it on every later turn.
+    """
+    if conversation is None:
+        return []
+    names = {conversation.flow_attendee_name}
+    for model in (Appointment, BookingHold):
+        rows = await session.scalars(
+            select(model.attendee_name).where(
+                model.conversation_id == conversation.id,
+                model.attendee_name.is_not(None),
+            )
+        )
+        names.update(rows)
+    return sorted(n for n in names if n)
 
 
 async def persist_pseudonymizer(conversation_id: UUID, p: Pseudonymizer) -> None:

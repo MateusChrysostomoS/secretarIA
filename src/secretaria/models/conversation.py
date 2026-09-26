@@ -145,6 +145,14 @@ class Conversation(Base):
     # Appointment at booking time. Free text, not a FK — tenants.insurances is
     # a JSON list of plan names, there is no Insurance table.
     flow_selected_insurance: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # Name of the person the booking in progress is FOR, when the patient
+    # answered "pra outra pessoa" and confirmed the authorization sentence
+    # (services/attendee.py). NULL = the booking is for the patient themself —
+    # today's behaviour. Copied onto `BookingHold.attendee_name` /
+    # `Appointment.attendee_name` at booking time, exactly like the convênio
+    # above. PII: registered as the ATENDIDO identifier by
+    # `services/pii_pseudonymization.py::load_pseudonymizer`.
+    flow_attendee_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     # Set while a returning patient is mid-"quer continuar?" prompt: holds the
     # FlowState value to resume to AND marks that the next inbound is the Sim/Não
     # answer. NULL whenever no reactivation prompt is pending.

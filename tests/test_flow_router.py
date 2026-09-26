@@ -16,6 +16,7 @@ from secretaria.ai.formatter import ButtonBubble, SlotsBubble, TextBubble  # noq
 from secretaria.ai.scoped_help import ScopedHelpOutcome  # noqa: E402
 from secretaria.models import FlowState  # noqa: E402
 from secretaria.services import flow_router  # noqa: E402
+from secretaria.services.attendee import LABEL_ATTENDEE_SELF  # noqa: E402
 from secretaria.services.calendar import CalendarUnavailableError  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
     LABEL_BOOK,
@@ -26,6 +27,7 @@ from secretaria.services.flow_router import (  # noqa: E402
     LABEL_RESCHEDULE,
     SCOPED_HELP_ESCALATE_MESSAGE,
     SERVICE_HELP_OPENER,
+    STEP_AWAITING_ATTENDEE_CHOICE,
     STEP_AWAITING_CONFIRMATION,
     STEP_AWAITING_DAY,
     STEP_AWAITING_SERVICE,
@@ -82,6 +84,25 @@ def _conversation(**kw):
     )
     base.update(kw)
     return SimpleNamespace(**base)
+
+
+async def _route_past_attendee(conversation, tenant, calendar, body, **kw):
+    """Tap a booking entry, then answer "Essa consulta é pra você?" with "Sim".
+
+    Every booking entry asks pra-quem first (services/attendee.py). The "é pra
+    mim" answer must land exactly where the entry used to land on its own -
+    which is what the callers of this helper keep asserting.
+    """
+    first = await route(conversation, tenant, calendar, body, **kw)
+    assert first.action == "reply"
+    assert first.flow_state == FlowState.SERVICE_CATALOG
+    assert first.flow_step == STEP_AWAITING_ATTENDEE_CHOICE
+    answered = _conversation(
+        flow_state=first.flow_state,
+        flow_step=first.flow_step,
+        flow_selected_type=first.flow_selected_type,
+    )
+    return await route(answered, tenant, calendar, LABEL_ATTENDEE_SELF, **kw)
 
 
 class _FakeCalendar:
@@ -171,7 +192,12 @@ async def test_idle_unmatched_shows_menu():
 
 
 async def test_menu_select_services_lists_catalog():
-    res = await route(_conversation(flow_state=FlowState.MENU), _tenant(), None, "Serviços e Custo")
+    res = await _route_past_attendee(
+        _conversation(flow_state=FlowState.MENU),
+        _tenant(),
+        None,
+        "Serviços e Custo",
+    )
     assert res.action == "reply"
     assert res.flow_state == FlowState.SERVICE_CATALOG
     assert res.flow_step == STEP_AWAITING_SERVICE
@@ -780,8 +806,19 @@ async def test_enter_manage_action_caps_pick_list_at_ten():
 # --------------------------------------------------------------------------
 
 
-def test_enter_booking_single_professional_lists_services():
-    res = enter_booking(_tenant())
+async def test_enter_booking_single_professional_lists_services():
+    question = enter_booking(_tenant())
+    assert question.flow_step == STEP_AWAITING_ATTENDEE_CHOICE
+    res = await route(
+        _conversation(
+            flow_state=question.flow_state,
+            flow_step=question.flow_step,
+            flow_selected_type=question.flow_selected_type,
+        ),
+        _tenant(),
+        None,
+        LABEL_ATTENDEE_SELF,
+    )
     assert res.action == "reply"
     assert res.flow_state == FlowState.SERVICE_CATALOG
     assert res.flow_step == STEP_AWAITING_SERVICE
@@ -799,7 +836,12 @@ def test_enter_booking_no_services_replies_deterministically():
 
 
 async def test_route_idle_book_label_enters_directly():
-    res = await route(_conversation(flow_state=FlowState.IDLE), _tenant(), None, LABEL_BOOK)
+    res = await _route_past_attendee(
+        _conversation(flow_state=FlowState.IDLE),
+        _tenant(),
+        None,
+        LABEL_BOOK,
+    )
     assert res.action == "reply"
     assert res.flow_state == FlowState.SERVICE_CATALOG
     assert res.flow_step == STEP_AWAITING_SERVICE
@@ -818,7 +860,7 @@ async def test_single_professional_agendar_adds_no_intermediate_card():
     professional = SimpleNamespace(
         id=uuid4(), name="Dra. Ana", specialty="Cardiologia", about=None, appointment_types=None
     )
-    res = await route(
+    res = await _route_past_attendee(
         _conversation(flow_state=FlowState.IDLE),
         _tenant(),
         None,
@@ -1002,7 +1044,12 @@ async def test_route_idle_manage_appointment_empty_is_deterministic():
 
 
 async def test_service_list_offers_dont_know_last_row():
-    res = await route(_conversation(flow_state=FlowState.MENU), _tenant(), None, "Serviços e Custo")
+    res = await _route_past_attendee(
+        _conversation(flow_state=FlowState.MENU),
+        _tenant(),
+        None,
+        "Serviços e Custo",
+    )
     rows = res.bubbles[0].rows
     assert rows[-1] == ("svchelp|0", LABEL_DONT_KNOW)
     # The help row never masquerades as a service row.
@@ -1018,7 +1065,12 @@ async def test_service_list_reserves_help_slot_at_whatsapp_cap():
         {"name": f"Serviço {i:02d}", "duration_min": 30, "is_active": True, "sort_order": i}
         for i in range(12)
     ]
-    res = await route(_conversation(flow_state=FlowState.MENU), tenant, None, "Serviços e Custo")
+    res = await _route_past_attendee(
+        _conversation(flow_state=FlowState.MENU),
+        tenant,
+        None,
+        "Serviços e Custo",
+    )
     rows = res.bubbles[0].rows
     assert len(rows) == 10
     assert rows[-1] == ("svchelp|0", LABEL_DONT_KNOW)

@@ -84,6 +84,20 @@ _UNKNOWN_SERVICE = "Consulta"
 _UNKNOWN_PATIENT = "Paciente"
 
 
+def _patient_line_name(appointment, patient) -> str:
+    """Who the doctor will see: the attendee, and who booked when it differs.
+
+    A booking made for someone else (services/attendee.py) is the attendee's
+    consultation; the account holder is named too, because that is who the
+    clinic calls back.
+    """
+    account = (patient.name if patient else None) or None
+    attendee = getattr(appointment, "attendee_name", None)
+    if attendee:
+        return f"{attendee} (agendado por {account})" if account else attendee
+    return account or _UNKNOWN_PATIENT
+
+
 def _ledger_key(appointment_id: UUID) -> str:
     return f"profnotif:{appointment_id}"
 
@@ -254,7 +268,7 @@ async def _deliver(tenant: Tenant, patient: Patient | None, appointment: Appoint
         "professional_name": professional.name,
         # `patient` is None for a booking with no patient row (a hub-created
         # block). The appointment is still real, so the mail still goes.
-        "patient_name": (patient.name if patient else None) or _UNKNOWN_PATIENT,
+        "patient_name": _patient_line_name(appointment, patient),
         "service": appointment.appointment_type or _UNKNOWN_SERVICE,
         "when": _local_when(appointment.start_at, tenant.timezone),
         # Pre-rendered lines: empty when there is nothing to say, so the

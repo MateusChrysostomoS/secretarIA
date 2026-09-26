@@ -65,12 +65,19 @@ pula direto pro pedido de código). Ver `docs/CHECKPOINT_abertura_pergunta_nome.
 5. Em qualquer uma dessas telas, o botão **⬅️Voltar** sempre volta exatamente 1 passo — nunca
    pula direto pro início.
 
-### Passo que falta (não existe ainda)
-"Essa consulta é pra você?" — hoje a secretarIA sempre assume que quem está escrevendo é quem
-vai ser atendido. Não existe pergunta nem fluxo pra marcar consulta pra outra pessoa (ex.: um
-filho marcando pra a mãe), nem a frase de autorização que isso exigiria ("ao informar os dados
-de [nome], você confirma que tem autorização para compartilhar essas informações com a
-clínica"). É só proposta de produto.
+### "Essa consulta é pra você?" (construído, não no ar — 2026-09-25, branch `task/TASK-007-secretaria`)
+É a PRIMEIRA pergunta de qualquer agendamento, antes do profissional, do serviço e do convênio,
+nos dois canais. Aparece ao tocar "Agendar", "Escolher médico", "Escolher serviço" ou, na clínica
+de um profissional só, "Serviços e Custo". Dois botões: **✅ Sim, é pra mim**, e o agendamento
+segue exatamente como antes; ou **👤 Pra outra pessoa** (ex.: um filho marcando pra mãe). No
+segundo caso a secretarIA pergunta o nome completo de quem vai ser atendido e mostra a frase de
+autorização com o nome já preenchido: "Ao informar os dados de **[nome]**, você confirma que tem
+autorização para compartilhar essas informações com a clínica." A pessoa precisa tocar
+**✅ Confirmar** para seguir; **⬅️ Cancelar** volta para a pergunta "é pra você?". O aceite fica
+registrado para auditoria. Daí em diante a agenda da clínica, a confirmação, o lembrete e o
+e-mail ao profissional usam o nome de quem vai ser atendido. Só o nome é pedido (nada de CPF,
+telefone ou data de nascimento do terceiro). Pelo chat livre a secretarIA não marca consulta para
+outra pessoa: ela devolve ao menu para passar por essa pergunta.
 
 ### Convênio (no ar, quando a clínica ativa — mesma lógica nos dois canais)
 Depois de confirmar o serviço, se a clínica ligou "perguntar convênio" e cadastrou pelo menos um

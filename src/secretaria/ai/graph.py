@@ -56,6 +56,10 @@ from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import Message, MessageSender
 from secretaria.schemas.webhook import inbound_routing_text
+from secretaria.services.attendee import (
+    ATTENDEE_NAME_LLM_PLACEHOLDER,
+    is_attendee_name_question,
+)
 from secretaria.services.booking_scope import (
     BOOKING_TOPOLOGY_MULTI,
     BOOKING_TOPOLOGY_UNKNOWN,
@@ -372,6 +376,14 @@ async def _load_history(conversation_id: UUID) -> list[BaseMessage]:
         if m.sender == MessageSender.PATIENT and is_name_question(previous_bot_body):
             previous_bot_body = None
             out.append(HumanMessage(content=NAME_ANSWER_LLM_PLACEHOLDER))
+            continue
+        # Same treatment for the answer to "qual é o nome da pessoa que vai
+        # ser atendida?" (services/attendee.py): a parsed answer is also
+        # masked as ATENDIDO, but a refused one ("minha mãe, Ana") is a third
+        # party's name nobody registered.
+        if m.sender == MessageSender.PATIENT and is_attendee_name_question(previous_bot_body):
+            previous_bot_body = None
+            out.append(HumanMessage(content=ATTENDEE_NAME_LLM_PLACEHOLDER))
             continue
         previous_bot_body = m.body if m.sender != MessageSender.PATIENT else None
         # A tap is stored as its title alone (the text staff see); the agent

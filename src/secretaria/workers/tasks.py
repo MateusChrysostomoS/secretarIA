@@ -97,6 +97,10 @@ from secretaria.services.appointment_status import (
     SOURCE_FLOW,
     log_status_transition,
 )
+from secretaria.services.attendee import (
+    CONSENT_KIND_THIRD_PARTY_BOOKING,
+    CONSENT_LEGAL_BASIS_THIRD_PARTY_BOOKING,
+)
 from secretaria.services.booking_hold import (
     HOLD_TTL_MINUTES,
     BookingGate,
@@ -131,11 +135,13 @@ from secretaria.services.email import (
 )
 from secretaria.services.entitlements_client import get_entitlements
 from secretaria.services.flow_router import (
+    ATTENDEE_STEPS,
     LABEL_BOOK,
     LABEL_CANCEL_APPT,
     LABEL_MANAGE_APPOINTMENT,
     LABEL_OTHER,
     LABEL_RESCHEDULE,
+    STEP_AWAITING_ATTENDEE_AUTH,
     STEP_MANAGE_CANCEL_CONFIRM,
     STEP_MANAGE_DAY,
     STEP_MANAGE_DAY_ESCAPE,
@@ -226,6 +232,7 @@ from secretaria.services.pending_identity import (
     request_code,
     verify_code,
 )
+from secretaria.services.pii_pseudonymization import remember_attendee_name
 from secretaria.services.sensitive_claim_guard import guard_reply
 from secretaria.services.service_catalog import (
     load_service_catalog,
@@ -1590,6 +1597,7 @@ async def _route_inbound_turn(
             conversation.flow_selected_professional_id = None
             conversation.flow_selected_insurance = None
             conversation.flow_managing_appointment_id = None
+            conversation.flow_attendee_name = None
             return _ReplyContext(
                 channel=channel,
                 conversation_id=conversation.id,
@@ -1664,6 +1672,13 @@ async def _route_inbound_turn(
     if _expire_stale_llm_state(conversation, tenant, last_activity_at):
         logger.info(
             "conversation_llm_state_expired",
+            conversation_id=str(conversation.id),
+            tenant_id=str(tenant.id),
+            ttl_minutes=llm_state_ttl_minutes(tenant),
+        )
+    if _expire_stale_attendee_step(conversation, tenant, last_activity_at):
+        logger.info(
+            "conversation_attendee_step_expired",
             conversation_id=str(conversation.id),
             tenant_id=str(tenant.id),
             ttl_minutes=llm_state_ttl_minutes(tenant),
@@ -2432,6 +2447,10 @@ def _expire_stale_llm_state(
     conversation.flow_selected_day = None
     conversation.flow_selected_slot = None
     conversation.flow_managing_appointment_id = None
+    # The attendee IS cleared, unlike the two below: it belongs to one
+    # booking, and a later chat booking must never inherit a third party's
+    # name from a conversation that went quiet mid-flow (services/attendee.py).
+    conversation.flow_attendee_name = None
     # `flow_selected_professional_id` / `flow_selected_insurance` are NOT
     # cleared here, unlike the "Não" answer which drops everything. They say WHO
     # the patient is dealing with, not where they were in a form, and the agent
@@ -2441,6 +2460,46 @@ def _expire_stale_llm_state(
     # had silently forgotten the patient's doctor. Nothing leaks from keeping
     # them: `_apply_flow_result` rewrites every flow field from the next result,
     # so the very next routed turn overwrites both.
+    return True
+
+
+def _expire_stale_attendee_step(
+    conversation: Conversation,
+    tenant: Tenant,
+    last_activity_at: datetime | None,
+) -> bool:
+    """Drop a long-idle pra-quem / attendee-name / authorization step.
+
+    Unlike the rest of SERVICE_CATALOG (which `_expire_stale_llm_state`
+    deliberately leaves alone because it re-prompts on unexpected input), the
+    NAME step accepts free text: a patient who walks away there and comes back
+    days later with "Maria, bom dia" would otherwise have their greeting read
+    as a third party's name. So the three steps get the same universal,
+    config-free floor as full LLM mode (skill conversation-flow-state:
+    every non-IDLE state needs a time-bounded exit not gated on tenant config).
+
+    Silent, in place, `flow_*` only - the shape of the LLM floor above. Nothing
+    of the booking is lost: these steps come BEFORE any other booking choice.
+    """
+    if conversation.flow_state != FlowState.SERVICE_CATALOG:
+        return False
+    # The three attendee steps, AND any later booking step that carries an
+    # authorized attendee: a list left open for weeks must not book for a
+    # third party on a stale tap. A self-booking mid-catalog keeps today's
+    # behaviour (those steps re-prompt and self-correct).
+    if conversation.flow_step not in ATTENDEE_STEPS and not conversation.flow_attendee_name:
+        return False
+    if last_activity_at is None:
+        return False
+    gap = datetime.now(UTC) - _as_utc(last_activity_at)
+    if gap < timedelta(minutes=llm_state_ttl_minutes(tenant)):
+        return False
+    conversation.flow_state = FlowState.IDLE
+    conversation.flow_step = None
+    conversation.flow_selected_type = None
+    conversation.flow_selected_day = None
+    conversation.flow_selected_slot = None
+    conversation.flow_attendee_name = None
     return True
 
 
@@ -2914,6 +2973,7 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                             flow_managing_appointment_id=(
                                 conversation.flow_managing_appointment_id
                             ),
+                            flow_attendee_name=conversation.flow_attendee_name,
                             patient_id=conversation.patient_id,
                         ),
                         _flow_tenant_snapshot(tenant, professional_rows, service_catalog),
@@ -3424,6 +3484,7 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
                     # these drops the patient's doctor on the way back in.
                     flow_selected_professional_id=conv_snapshot.flow_selected_professional_id,
                     flow_selected_insurance=conv_snapshot.flow_selected_insurance,
+                    flow_attendee_name=conv_snapshot.flow_attendee_name,
                 ),
                 patient_wa,
                 redis=redis,
@@ -4348,6 +4409,7 @@ async def _handle_action_button(
                 service_name,
                 candidates,
                 prefix,
+                appointment.attendee_name,
             )
 
         if action == "apptresched":
@@ -4440,6 +4502,7 @@ async def _handle_action_button(
             rb_service_name,
             rb_candidates,
             rb_prefix,
+            rb_attendee_name,
         ) = rebooking_handoff
         result = await enter_rebooking(
             rb_conversation,
@@ -4452,6 +4515,10 @@ async def _handle_action_button(
             candidates=rb_candidates,
             prefix=rb_prefix,
         )
+        # Rebooking the SAME person the doctor cancelled on: a booking made for
+        # a third party (already authorized for that appointment) stays theirs.
+        if rb_attendee_name and result.flow_state == FlowState.SERVICE_CATALOG:
+            result.flow_attendee_name = rb_attendee_name
         await _apply_flow_result(
             reply,
             result,
@@ -4670,6 +4737,12 @@ async def _apply_flow_result(
     """
     result = await _apply_deposit_awareness(reply, result, tenant, patient_wa, waba_token)
 
+    # A third party's name was just captured (the authorization card): pin it
+    # into the PII token map now, so it stays masked for the LLM even if this
+    # booking is cancelled or abandoned before any row carries it.
+    if result.flow_step == STEP_AWAITING_ATTENDEE_AUTH and result.flow_attendee_name:
+        await remember_attendee_name(reply.conversation_id, result.flow_attendee_name)
+
     # Persist the new flow state (+ any booked appointment) in one short txn.
     persisted = True
     booked_appointment: Appointment | None = None
@@ -4687,6 +4760,20 @@ async def _apply_flow_result(
                     conv.flow_selected_professional_id = result.flow_selected_professional_id
                     conv.flow_selected_insurance = result.flow_selected_insurance
                     conv.flow_managing_appointment_id = result.flow_managing_appointment_id
+                    conv.flow_attendee_name = result.flow_attendee_name
+                    if result.attendee_authorized and tenant is not None:
+                        # The explicit "Confirmar" under the authorization
+                        # sentence (services/attendee.py): the audit row, in
+                        # the same transaction as the state it authorizes.
+                        # Same subject handle every other consent row uses.
+                        session.add(
+                            ConsentEvent(
+                                tenant_id=tenant.id,
+                                wa_id=reply.patient_ref,
+                                kind=CONSENT_KIND_THIRD_PARTY_BOOKING,
+                                legal_basis=CONSENT_LEGAL_BASIS_THIRD_PARTY_BOOKING,
+                            )
+                        )
                     if result.appointment:
                         # `phone` is the patient's WhatsApp number, kept so a
                         # later cancel/reschedule can still reach them - NOT
@@ -5401,8 +5488,10 @@ async def _promote_booking_hold(
         return _PROMOTE_FAILED_MESSAGE
 
     service_type = held.appointment_type or "Consulta"
-    patient_name = await _patient_display_name(patient_id)
-    summary = f"{service_type} - {patient_name}" if patient_name else service_type
+    # The attendee's name titles the event on a booking for someone else, as
+    # on the ungated path (flow_router._handle_confirmation).
+    event_name = held.attendee_name or await _patient_display_name(patient_id)
+    summary = f"{service_type} - {event_name}" if event_name else service_type
     try:
         event = await calendar.create_event(start=held.start_at, end=held.end_at, summary=summary)
     except CalendarUnavailableError:
@@ -5429,6 +5518,7 @@ async def _promote_booking_hold(
         phone=None,
         professional_id=held.professional_id,
         insurance=held.insurance,
+        attendee_name=held.attendee_name,
     )
     try:
         async with async_session_factory() as session:
@@ -5467,7 +5557,9 @@ async def _promote_booking_hold(
     local_end = held.end_at.astimezone(tz)
     return (
         "Pronto! Seu agendamento está confirmado. \u2705\n\n"
-        f"{service_type}\n{local_start.strftime(WHEN_FORMAT)}\n\n"
+        f"{service_type}\n"
+        + (f"Paciente: {held.attendee_name}\n" if held.attendee_name else "")
+        + f"{local_start.strftime(WHEN_FORMAT)}\n\n"
         "Adicionar à sua agenda:\n"
         f"{build_patient_calendar_link(local_start, local_end, summary, tz=tz)}"
     )
@@ -6515,6 +6607,10 @@ async def _handle_select_professional(
         )
         return
     result = _enter_professional_services(professional, tenant_snapshot)
+    # Built here, not by route(), so `_carry_attendee` never saw it: keep the
+    # authorized attendee of the booking this hand-back continues.
+    if flow_snapshot is not None and result.flow_state == FlowState.SERVICE_CATALOG:
+        result.flow_attendee_name = getattr(flow_snapshot[0], "flow_attendee_name", None)
     await _apply_flow_result(
         reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
     )
@@ -6656,6 +6752,9 @@ async def _handle_start_guided_booking(
         selected_insurance = (
             conversation.flow_selected_insurance if conversation is not None else None
         )
+        selected_attendee = (
+            conversation.flow_attendee_name if conversation is not None else None
+        )
         professional_rows = await list_active_professionals(session, tenant.id)
         service_catalog = await load_service_catalog(session, tenant.id)
         booking_calendar = await _appointment_calendar(
@@ -6706,6 +6805,7 @@ async def _handle_start_guided_booking(
         professional_id=selected_id,
         insurance=selected_insurance,
         professionals=professionals,
+        attendee_name=selected_attendee,
     )
     logger.info(
         "conversation_guided_booking_entered",

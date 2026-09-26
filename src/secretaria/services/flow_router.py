@@ -53,6 +53,17 @@ from secretaria.core.whatsapp_limits import (
     truncate_list_row_title,
 )
 from secretaria.models import FlowState
+from secretaria.services.attendee import (
+    ATTENDEE_NAME_INVALID,
+    ATTENDEE_NAME_REQUEST,
+    ATTENDEE_QUESTION_BODY,
+    LABEL_ATTENDEE_AUTH_BACK,
+    LABEL_ATTENDEE_AUTH_CONFIRM,
+    LABEL_ATTENDEE_OTHER,
+    LABEL_ATTENDEE_SELF,
+    authorization_body,
+    parse_attendee_name,
+)
 from secretaria.services.booking_hold import BookingGate, overlaps
 from secretaria.services.booking_scope import (
     canonical_service_name,
@@ -227,6 +238,21 @@ STEP_AWAITING_RETRY = "awaiting_retry_choice"
 # clinic's unified catalog, then the doctors who offer the picked service.
 # Both live in SERVICE_CATALOG like every other booking step.
 STEP_AWAITING_CATALOG_SERVICE = "awaiting_catalog_service"
+# "Essa consulta é pra você?" (services/attendee.py) - the FIRST booking
+# question, ahead of everything above: pra-quem -> [name -> authorization].
+# While on these steps `flow_selected_type` holds WHICH booking entry the
+# patient came from (ATTENDEE_NEXT_*), so the answer continues into the exact
+# list the entry would have opened; it is otherwise unused this early.
+STEP_AWAITING_ATTENDEE_CHOICE = "awaiting_attendee_choice"
+STEP_AWAITING_ATTENDEE_NAME = "awaiting_attendee_name"
+STEP_AWAITING_ATTENDEE_AUTH = "awaiting_attendee_auth"
+ATTENDEE_STEPS = (
+    STEP_AWAITING_ATTENDEE_CHOICE,
+    STEP_AWAITING_ATTENDEE_NAME,
+    STEP_AWAITING_ATTENDEE_AUTH,
+)
+ATTENDEE_NEXT_BOOK = "__attendee_next_book__"
+ATTENDEE_NEXT_CATALOG = "__attendee_next_catalog__"
 STEP_AWAITING_SERVICE_PROFESSIONAL = "awaiting_service_professional"
 # Scoped-help ("Não sei") steps, still within SERVICE_CATALOG. The *_FINAL
 # variant marks the last allowed exchange: entered after the node's single
@@ -474,6 +500,16 @@ class FlowRouterResult:
     # them explicitly.
     flow_selected_professional_id: UUID | None = None
     flow_selected_insurance: str | None = None
+    # Who the booking in progress is FOR when it is not the patient themself
+    # (services/attendee.py). Unlike the fields above it does NOT have to be
+    # carried by hand: `_carry_attendee` (applied once, in `route()` and
+    # `resume_bubbles()`) copies it forward on every booking/LLM result, so
+    # only the attendee steps and `_handle_confirmation` ever name it.
+    flow_attendee_name: str | None = None
+    # True on exactly the result of the "Confirmar" tap under the
+    # authorization sentence; the caller writes one
+    # ConsentEvent(kind="third_party_booking_authorized") for it.
+    attendee_authorized: bool = False
     # WHICH static config the professional is missing, on an
     # action="professional_config_incomplete" result and nowhere else. WHO it
     # is missing rides on `flow_selected_professional_id` above rather than in
@@ -589,6 +625,7 @@ class _DayPickerState:
     flow_selected_professional_id: UUID | None = None
     flow_selected_insurance: str | None = None
     flow_managing_appointment_id: UUID | None = None
+    flow_attendee_name: str | None = None
 
 
 # --------------------------------------------------------------------------
@@ -995,6 +1032,32 @@ def _selected_insurance(conversation: Conversation) -> str | None:
     return getattr(conversation, "flow_selected_insurance", None)
 
 
+def _attendee_name(conversation: Conversation) -> str | None:
+    """The in-progress booking's attendee name (None = the patient themself)."""
+    return getattr(conversation, "flow_attendee_name", None)
+
+
+def _carry_attendee(conversation: Conversation, result: FlowRouterResult) -> FlowRouterResult:
+    """Keep the attendee on every result that stays inside the booking (or LLM).
+
+    `_apply_flow_result` writes every flow field unconditionally, and the
+    attendee is chosen FIRST - before a dozen builders (professional list,
+    service detail, day picker...) that know nothing about it. Rather than
+    thread it through each of them, the two public entries apply this once.
+
+    Leaves alone: a result that already names an attendee, the attendee steps
+    themselves (they decide it explicitly, including clearing it on
+    "Cancelar"), and anything leaving the booking (menu, manage flow, the
+    Brain-Message hold - which carries the name on the hold row instead), so
+    the name is dropped exactly when the booking it belongs to ends.
+    """
+    if result.flow_attendee_name is not None or result.flow_step in ATTENDEE_STEPS:
+        return result
+    if result.flow_state in (FlowState.SERVICE_CATALOG, FlowState.LLM):
+        result.flow_attendee_name = _attendee_name(conversation)
+    return result
+
+
 def _selected_managing_appointment_id(conversation: Conversation) -> UUID | None:
     """The conversation's in-progress manage-flow target (getattr: same rationale)."""
     return getattr(conversation, "flow_managing_appointment_id", None)
@@ -1067,6 +1130,7 @@ def _preserve(conversation: Conversation, action: str) -> FlowRouterResult:
         flow_selected_professional_id=_selected_professional_id(conversation),
         flow_selected_insurance=_selected_insurance(conversation),
         flow_managing_appointment_id=_selected_managing_appointment_id(conversation),
+        flow_attendee_name=_attendee_name(conversation),
     )
 
 
@@ -1095,7 +1159,7 @@ async def route(
     """
     token = _ACTIVE_GATE.set(gate)
     try:
-        return await _route(
+        result = await _route(
             conversation,
             tenant,
             calendar,
@@ -1105,6 +1169,7 @@ async def route(
             professionals=professionals,
             gate=gate,
         )
+        return _carry_attendee(conversation, result)
     finally:
         _ACTIVE_GATE.reset(token)
 
@@ -1250,6 +1315,12 @@ async def _route(
         return FlowRouterResult(
             action="reply", bubbles=_menu_bubbles(tenant), flow_state=FlowState.MENU
         )
+    if index == 0:
+        # "Serviços e Custo" is the single-doctor menu's ONLY way into a
+        # booking (it is also where `show_main_menu` lands a patient), so it
+        # asks pra-quem first like "Agendar" does. Its continuation is the same
+        # service list `_enter_menu_choice` renders for index 0.
+        return _ask_attendee_first(ATTENDEE_NEXT_BOOK, tenant, professionals)
     return await _enter_menu_choice(index, tenant, calendar)
 
 
@@ -1265,9 +1336,9 @@ def _menu_choice_multi(
     """
     labels = menu_buttons_for(tenant, True)
     if _label_match(body, labels[0]):
-        return _enter_professional_list(tenant, professionals)
+        return _ask_attendee_first(ATTENDEE_NEXT_BOOK, tenant, professionals)
     if _label_match(body, labels[1]):
-        return _enter_clinic_service_catalog(tenant, professionals)
+        return _ask_attendee_first(ATTENDEE_NEXT_CATALOG, tenant, professionals)
     if _label_match(body, labels[2]):
         return FlowRouterResult(action="delegate_llm", flow_state=FlowState.LLM)
     if conversation.flow_state == FlowState.MENU:
@@ -1312,7 +1383,127 @@ async def _enter_menu_choice(
 
 
 def enter_booking(tenant: Tenant, professionals: list | None = None) -> FlowRouterResult:
-    """Deterministic entry for a direct "Agendar" tap (fixed greeting button).
+    """Deterministic entry for a direct "Agendar" tap: "Essa consulta é pra você?".
+
+    Asks pra-quem first (services/attendee.py); the answer continues into
+    `_start_booking`, which is what this function returned before the question
+    existed.
+    """
+    return _ask_attendee_first(ATTENDEE_NEXT_BOOK, tenant, professionals)
+
+
+def _booking_continuation(
+    next_step: str | None, tenant: Tenant, professionals: list | None
+) -> FlowRouterResult:
+    """The list a booking entry opens once pra-quem is answered."""
+    if next_step == ATTENDEE_NEXT_CATALOG and _is_multi_professional(professionals):
+        return _enter_clinic_service_catalog(tenant, professionals or [])
+    return _start_booking(tenant, professionals)
+
+
+def _attendee_question(next_step: str) -> FlowRouterResult:
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[
+            MenuBubble(
+                body=ATTENDEE_QUESTION_BODY,
+                labels=[LABEL_ATTENDEE_SELF, LABEL_ATTENDEE_OTHER],
+            )
+        ],
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=STEP_AWAITING_ATTENDEE_CHOICE,
+        flow_selected_type=next_step,
+    )
+
+
+def _ask_attendee_first(
+    next_step: str, tenant: Tenant, professionals: list | None
+) -> FlowRouterResult:
+    """"Essa consulta é pra você?" in front of a booking entry - unless it dead-ends.
+
+    The continuation is computed first: when it would not open a booking at all
+    (no services, no bookable doctor) the patient gets that answer straight
+    away instead of a question whose every answer leads to "não há serviços".
+    """
+    continuation = _booking_continuation(next_step, tenant, professionals)
+    if continuation.flow_state != FlowState.SERVICE_CATALOG:
+        return continuation
+    return _attendee_question(next_step)
+
+
+def _attendee_name_request(next_step: str | None, *, invalid: bool = False) -> FlowRouterResult:
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[TextBubble(body=ATTENDEE_NAME_INVALID if invalid else ATTENDEE_NAME_REQUEST)],
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=STEP_AWAITING_ATTENDEE_NAME,
+        flow_selected_type=next_step,
+    )
+
+
+def _attendee_authorization_card(next_step: str | None, name: str) -> FlowRouterResult:
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[
+            ButtonBubble(
+                body=authorization_body(name),
+                confirm_label=LABEL_ATTENDEE_AUTH_CONFIRM,
+                cancel_label=LABEL_ATTENDEE_AUTH_BACK,
+            )
+        ],
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=STEP_AWAITING_ATTENDEE_AUTH,
+        flow_selected_type=next_step,
+        flow_attendee_name=name,
+    )
+
+
+def _attendee_step(
+    conversation: Conversation, tenant: Tenant, body: str, professionals: list | None
+) -> FlowRouterResult:
+    """pra-quem -> [name -> authorization] -> the booking entry's own list.
+
+    Never delegates the NAME step to the LLM: whatever is typed there is either
+    a name or a re-ask, so a third party's name cannot reach the model through
+    an unmatched-input fallback. The two button steps fall back to the LLM on
+    free text like every other catalog step (state kept, next tap still works).
+    """
+    step = conversation.flow_step
+    next_step = conversation.flow_selected_type
+
+    if step == STEP_AWAITING_ATTENDEE_CHOICE:
+        if _label_match(body, LABEL_ATTENDEE_SELF):
+            logger.info("attendee_choice", choice="self")
+            return _booking_continuation(next_step, tenant, professionals)
+        if _label_match(body, LABEL_ATTENDEE_OTHER):
+            logger.info("attendee_choice", choice="other")
+            return _attendee_name_request(next_step)
+        return _preserve(conversation, "delegate_llm")
+
+    if step == STEP_AWAITING_ATTENDEE_NAME:
+        name = parse_attendee_name(body)
+        # A boolean only - never the value (skill pii-field-capture).
+        logger.info("attendee_name_answered", parsed=name is not None)
+        if name is None:
+            return _attendee_name_request(next_step, invalid=True)
+        return _attendee_authorization_card(next_step, name)
+
+    # STEP_AWAITING_ATTENDEE_AUTH
+    name = _attendee_name(conversation)
+    if not name or _label_match(body, LABEL_ATTENDEE_AUTH_BACK):
+        # Back one step, name dropped: the pra-quem question again.
+        return _attendee_question(next_step or ATTENDEE_NEXT_BOOK)
+    if _label_match(body, LABEL_ATTENDEE_AUTH_CONFIRM):
+        result = _booking_continuation(next_step, tenant, professionals)
+        if result.flow_state == FlowState.SERVICE_CATALOG:
+            result.flow_attendee_name = name
+            result.attendee_authorized = True
+        return result
+    return _preserve(conversation, "delegate_llm")
+
+
+def _start_booking(tenant: Tenant, professionals: list | None = None) -> FlowRouterResult:
+    """What a direct "Agendar" tap opened before the pra-quem question existed.
 
     Mirrors `_enter_menu_choice`'s index-0 branch (single-doctor: straight to
     the service catalog) and `_menu_choice_multi`'s "Escolher médico" branch
@@ -2008,6 +2199,9 @@ async def _catalog_step(
     gate: BookingGate | None = None,
 ) -> FlowRouterResult:
     step = conversation.flow_step
+
+    if step in ATTENDEE_STEPS:
+        return _attendee_step(conversation, tenant, body, professionals)
 
     # Multi-doctor branch: with a professional selected, every later step is
     # scoped to THAT professional — their services here, their calendar via
@@ -2724,6 +2918,7 @@ async def enter_guided_booking(
     insurance: str | None = None,
     services: list[dict] | None = None,
     professionals: list | None = None,
+    attendee_name: str | None = None,
 ) -> FlowRouterResult:
     """LLM hand-back entry: resume the booking AFTER the service was chosen.
 
@@ -2769,17 +2964,21 @@ async def enter_guided_booking(
         flow_selected_type=appointment_type,
         flow_selected_professional_id=professional_id,
         flow_selected_insurance=insurance,
+        # A pra-quem answer given in the button flow BEFORE the patient drifted
+        # into the LLM survives the hand-back (services/attendee.py). The LLM
+        # itself never books for someone else - see ai/tools.py.
+        flow_attendee_name=attendee_name,
     )
     skip_reason = _insurance_step_skip_reason(tenant)
     if skip_reason is None:
-        return _enter_insurance(state, tenant)
+        return _carry_attendee(state, _enter_insurance(state, tenant))
     logger.info(
         "insurance_step_skipped",
         reason=skip_reason,
         conversation_id=str(conversation_id),
         professional_count=len(professionals or []),
     )
-    return await _ask_day(state, tenant, calendar, services, professionals)
+    return _carry_attendee(state, await _ask_day(state, tenant, calendar, services, professionals))
 
 
 async def _relist_stored_day(
@@ -2820,10 +3019,7 @@ def _handle_slot(conversation: Conversation, body: str) -> FlowRouterResult:
     if start is None:
         return _preserve(conversation, "delegate_llm")
     slot_iso = start.replace(tzinfo=None).isoformat(timespec="minutes")
-    recap = (
-        f"{conversation.flow_selected_type or 'Consulta'}\n"
-        f"{start.strftime('%d/%m/%Y às %H:%M')}"
-    )
+    recap = _recap_text(conversation, start)
     return FlowRouterResult(
         action="reply",
         bubbles=[ButtonBubble(body=recap, confirm_label=LABEL_CONFIRM, cancel_label=LABEL_CANCEL)],
@@ -2905,7 +3101,11 @@ async def _handle_confirmation(
         start = start.replace(tzinfo=calendar.tzinfo)
     end = start + timedelta(minutes=duration)
 
-    summary = f"{service_type} - {patient_name}" if patient_name else service_type
+    # The event is the ATTENDEE's consultation: on a booking for someone else
+    # their name titles it, not the name of the account that booked.
+    attendee_name = _attendee_name(conversation)
+    event_name = attendee_name or patient_name
+    summary = f"{service_type} - {event_name}" if event_name else service_type
 
     # Resolved BEFORE the gate so a held slot and a committed appointment
     # record the same service, owner and convenio: the hold is what the later
@@ -2923,6 +3123,7 @@ async def _handle_confirmation(
             professional_id=professional_id,
             appointment_type=(canonical_type or service_type)[:120],
             insurance=insurance,
+            attendee_name=attendee_name,
         )
         if decision.outcome == "slot_taken":
             # Offer the day again rather than a dead end: the patient picked a
@@ -2998,6 +3199,9 @@ async def _handle_confirmation(
         appointment["professional_id"] = professional_id
     if insurance:
         appointment["insurance"] = insurance
+    # Same omit-when-absent rule: an "é pra mim" booking keeps today's dict.
+    if attendee_name:
+        appointment["attendee_name"] = attendee_name
     # ONE bubble, not two: the patient keeps a single message they can
     # screenshot or forward, and it costs one WhatsApp send instead of two.
     # The labelled blank line is what separates the link from the confirmation
@@ -3007,7 +3211,8 @@ async def _handle_confirmation(
     # services/calendar.py::build_patient_calendar_link.
     confirmation = (
         "Pronto! Seu agendamento está confirmado. ✅\n\n"
-        f"{service_type}\n{start.strftime('%d/%m/%Y às %H:%M')}\n\n"
+        f"{service_type}\n{_attendee_line(conversation)}"
+        f"{start.strftime('%d/%m/%Y às %H:%M')}\n\n"
         "Adicionar à sua agenda:\n"
         f"{build_patient_calendar_link(start, end, summary, tz=calendar.tzinfo)}"
     )
@@ -3560,6 +3765,21 @@ def _preserve_reply(
     )
 
 
+def _attendee_line(conversation: Conversation) -> str:
+    """"Paciente: <name>" plus a newline on a booking for someone else, else ""."""
+    name = _attendee_name(conversation)
+    return f"Paciente: {name}\n" if name else ""
+
+
+def _recap_text(conversation: Conversation, start: datetime) -> str:
+    """The recap card body; unchanged (byte for byte) when there is no attendee."""
+    return (
+        f"{conversation.flow_selected_type or 'Consulta'}\n"
+        f"{_attendee_line(conversation)}"
+        f"{start.strftime('%d/%m/%Y às %H:%M')}"
+    )
+
+
 def _confirmation_recap(conversation: Conversation) -> str | None:
     """Rebuild the confirmation recap text from the stored slot, or None."""
     slot = conversation.flow_selected_slot
@@ -3569,13 +3789,21 @@ def _confirmation_recap(conversation: Conversation) -> str | None:
         start = datetime.fromisoformat(slot)
     except ValueError:
         return None
-    return (
-        f"{conversation.flow_selected_type or 'Consulta'}\n"
-        f"{start.strftime('%d/%m/%Y às %H:%M')}"
-    )
+    return _recap_text(conversation, start)
 
 
 async def resume_bubbles(
+    conversation: Conversation,
+    tenant: Tenant,
+    calendar: CalendarService | None,
+    professionals: list | None = None,
+) -> FlowRouterResult:
+    """`_resume_bubbles` with the attendee carried forward (see `_carry_attendee`)."""
+    result = await _resume_bubbles(conversation, tenant, calendar, professionals)
+    return _carry_attendee(conversation, result)
+
+
+async def _resume_bubbles(
     conversation: Conversation,
     tenant: Tenant,
     calendar: CalendarService | None,
@@ -3624,6 +3852,16 @@ async def resume_bubbles(
         if not _is_multi_professional(professionals):
             return _menu_fallback()
         return _enter_professional_list(tenant, professionals or [])
+
+    if step == STEP_AWAITING_ATTENDEE_CHOICE:
+        return _attendee_question(conversation.flow_selected_type or ATTENDEE_NEXT_BOOK)
+    if step == STEP_AWAITING_ATTENDEE_NAME:
+        return _attendee_name_request(conversation.flow_selected_type)
+    if step == STEP_AWAITING_ATTENDEE_AUTH:
+        name = _attendee_name(conversation)
+        if not name:
+            return _attendee_question(conversation.flow_selected_type or ATTENDEE_NEXT_BOOK)
+        return _attendee_authorization_card(conversation.flow_selected_type, name)
 
     if step == STEP_AWAITING_INSURANCE:
         return _enter_insurance(conversation, tenant)

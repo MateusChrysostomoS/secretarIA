@@ -116,6 +116,17 @@ def _render_reminder_text(tenant: Tenant, appointment: Appointment) -> str:
     local_start = _as_utc(appointment.start_at).astimezone(tz) if appointment.start_at else None
     when = local_start.strftime("%d/%m/%Y às %H:%M") if local_start else "horário a confirmar"
     appt_type = appointment.appointment_type or "sua consulta"
+    # A booking made for someone else (services/attendee.py) reminds the
+    # account holder - the only one we can reach - about the ATTENDEE's
+    # consultation. Plain one-line text either way: it is also the single
+    # variable of the Meta reminder template.
+    attendee = getattr(appointment, "attendee_name", None)
+    if attendee:
+        appt_type = appointment.appointment_type or "consulta"
+        return (
+            f"Lembrete: {attendee} tem {appt_type} agendado(a) para {when} "
+            f"na {tenant.clinic_name}."
+        )
     return f"Lembrete: você tem {appt_type} agendado(a) para {when} na {tenant.clinic_name}."
 
 

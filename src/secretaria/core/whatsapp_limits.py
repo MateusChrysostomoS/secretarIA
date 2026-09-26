@@ -184,6 +184,8 @@ EMOJI_SERVICE = "🏥"
 EMOJI_SCHEDULE = "🗓️"
 EMOJI_BACK = "⬅️"
 EMOJI_DOCTOR = "🥼"
+# "Pra outra pessoa" on the pra-quem card (services/attendee.py).
+EMOJI_PERSON = "👤"
 
 # Every prefix `strip_decoration` knows how to undo. Deliberately OUR six and
 # not "any leading emoji": a clinic that named a service "🦷 Limpeza" means the
@@ -196,6 +198,7 @@ DECORATION_EMOJI: tuple[str, ...] = (
     EMOJI_SCHEDULE,
     EMOJI_BACK,
     EMOJI_DOCTOR,
+    EMOJI_PERSON,
 )
 
 

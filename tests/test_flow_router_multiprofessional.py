@@ -24,6 +24,7 @@ from secretaria.core.whatsapp_limits import truncate_list_row_title  # noqa: E40
 from secretaria.models import FlowState  # noqa: E402
 from secretaria.schemas.webhook import inbound_routing_text  # noqa: E402
 from secretaria.services import flow_router  # noqa: E402
+from secretaria.services.attendee import LABEL_ATTENDEE_SELF  # noqa: E402
 from secretaria.services.calendar import CalendarUnavailableError  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
     BTN_CHOOSE_PROFESSIONAL,
@@ -37,6 +38,7 @@ from secretaria.services.flow_router import (  # noqa: E402
     LABEL_RESCHEDULE,
     PROFESSIONAL_HELP_OPENER,
     SCOPED_HELP_ESCALATE_MESSAGE,
+    STEP_AWAITING_ATTENDEE_CHOICE,
     STEP_AWAITING_CONFIRMATION,
     STEP_AWAITING_DAY,
     STEP_AWAITING_INSURANCE,
@@ -117,6 +119,25 @@ def _conversation(**kw):
     )
     base.update(kw)
     return SimpleNamespace(**base)
+
+
+async def _route_past_attendee(conversation, tenant, calendar, body, **kw):
+    """Tap a booking entry, then answer "Essa consulta é pra você?" with "Sim".
+
+    Every booking entry asks pra-quem first (services/attendee.py). The "é pra
+    mim" answer must land exactly where the entry used to land on its own -
+    which is what the callers of this helper keep asserting.
+    """
+    first = await route(conversation, tenant, calendar, body, **kw)
+    assert first.action == "reply"
+    assert first.flow_state == FlowState.SERVICE_CATALOG
+    assert first.flow_step == STEP_AWAITING_ATTENDEE_CHOICE
+    answered = _conversation(
+        flow_state=first.flow_state,
+        flow_step=first.flow_step,
+        flow_selected_type=first.flow_selected_type,
+    )
+    return await route(answered, tenant, calendar, LABEL_ATTENDEE_SELF, **kw)
 
 
 class _FakeCalendar:
@@ -303,7 +324,7 @@ async def test_book_label_wins_before_multi_doctor_menu_dispatch():
     # doctor list on a multi-doctor tenant, exactly like tapping "Escolher
     # médico" - it is matched in route() BEFORE the multi-doctor menu's own
     # dispatch, same place-it-anywhere precedent as Remarcar/Cancelar above.
-    res = await route(
+    res = await _route_past_attendee(
         _conversation(flow_state=FlowState.IDLE),
         _tenant(),
         None,
@@ -322,7 +343,7 @@ async def test_book_label_wins_before_multi_doctor_menu_dispatch():
 
 async def test_choose_doctor_lists_professionals_with_specialty_description():
     profs = _professionals()
-    res = await route(
+    res = await _route_past_attendee(
         _conversation(flow_state=FlowState.MENU),
         _tenant(),
         None,
@@ -416,7 +437,7 @@ async def test_stale_selected_professional_delegates_llm():
 async def test_choose_service_lists_the_clinics_unified_catalog():
     """The union of every active doctor's services, deduplicated - and NOT a
     hand-off to the model, which is what this menu slot used to be."""
-    res = await route(
+    res = await _route_past_attendee(
         _conversation(flow_state=FlowState.MENU),
         _tenant(),
         None,
@@ -437,7 +458,7 @@ async def test_choose_service_deduplicates_a_shared_service():
     profs[1].appointment_types = [
         {"name": "Consulta Cardio", "duration_min": 30, "is_active": True, "sort_order": 0}
     ]
-    res = await route(
+    res = await _route_past_attendee(
         _conversation(flow_state=FlowState.MENU),
         _tenant(),
         None,
@@ -796,7 +817,7 @@ async def test_manage_appointment_label_wins_before_multi_doctor_menu_dispatch()
 
 async def test_professional_list_offers_dont_know_last_row():
     profs = _professionals()
-    res = await route(
+    res = await _route_past_attendee(
         _conversation(flow_state=FlowState.MENU),
         _tenant(),
         None,
@@ -822,7 +843,7 @@ async def test_professional_list_reserves_help_slot_at_whatsapp_cap():
         )
         for i in range(12)
     ]
-    res = await route(
+    res = await _route_past_attendee(
         _conversation(flow_state=FlowState.MENU),
         _tenant(),
         None,

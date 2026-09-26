@@ -409,6 +409,7 @@ async def _persist_appointment(
     professional_id: UUID | None = None,
     unit_id: UUID | None = None,
     source: str = "agent",
+    attendee_name: str | None = None,
 ) -> None:
     """Record a bot-created appointment. Best-effort: never raises.
 
@@ -464,8 +465,15 @@ async def _persist_appointment(
                     status=AppointmentStatus.SCHEDULED,
                     professional_id=professional_id,
                     unit_id=unit_id,
+                    attendee_name=attendee_name,
                 )
                 session.add(appointment)
+                # The attendee belonged to THIS booking: consumed here, so the
+                # patient's next chat booking ("agora uma pra mim") is theirs.
+                if attendee_name and conversation_id is not None:
+                    booked_conversation = await session.get(Conversation, conversation_id)
+                    if booked_conversation is not None:
+                        booked_conversation.flow_attendee_name = None
         logger.info("tool_appointment_persisted", event_id=event.get("id"))
     except Exception as exc:
         # The calendar event already exists; a missing DB row is recoverable
@@ -690,6 +698,27 @@ async def list_free_slots(day: str, max_slots: int = 6) -> dict:
     return {"slots": slots}
 
 
+async def _conversation_attendee_name() -> str | None:
+    """This conversation's authorized attendee (flow_attendee_name), or None.
+
+    Best-effort like `_persist_appointment`: a failed read books for the
+    patient themself, exactly as before the attendee existed.
+    """
+    conversation_id = _conversation_id_ctx.get()
+    if conversation_id is None or _tenant_id_ctx.get() is None:
+        return None
+    from secretaria.core.database import async_session_factory
+    from secretaria.models import Conversation
+
+    try:
+        async with async_session_factory() as session:
+            conversation = await session.get(Conversation, conversation_id)
+            return conversation.flow_attendee_name if conversation is not None else None
+    except Exception as exc:
+        logger.warning("tool_attendee_lookup_failed", error_type=type(exc).__name__)
+        return None
+
+
 @tool
 async def create_event(
     start: str,
@@ -699,7 +728,10 @@ async def create_event(
     appointment_type: str = "",
 ) -> dict:
     """Cria um evento (consulta) no calendário da clínica. Use SOMENTE depois
-    de check_availability E confirmação explícita do paciente.
+    de check_availability E confirmação explícita do paciente. Agenda sempre
+    para QUEM ESTÁ CONVERSANDO: se a consulta for para outra pessoa, não use
+    esta ferramenta — chame show_main_menu (o fluxo de botões pede o nome do
+    atendido e a autorização para compartilhar os dados).
 
     Args:
         start: Início em ISO 8601 (ex: 2026-05-27T14:00:00).
@@ -725,6 +757,14 @@ async def create_event(
 
     cal = _get_calendar()
     fallback_start, fallback_end = _localize_window(start, end, cal)
+    # A pra-quem answer the patient gave in the button flow before drifting
+    # here (services/attendee.py). The model never books for a third party by
+    # itself (ai/prompts.py sends it to show_main_menu), but when the flow has
+    # already recorded an AUTHORIZED attendee for this booking, the event is
+    # theirs: titled deterministically, never left to the model's wording.
+    attendee_name = await _conversation_attendee_name()
+    if attendee_name:
+        summary = f"{canonical_type or 'Consulta'} - {attendee_name}"
     event = await cal.create_event(
         start=fallback_start,
         end=fallback_end,
@@ -737,6 +777,7 @@ async def create_event(
         fallback_end,
         canonical_type,
         professional_id=_sole_professional_id(),
+        attendee_name=attendee_name,
     )
 
     return {

@@ -88,6 +88,9 @@ class BookingHold(Base):
     # The convênio label the patient picked, carried so promotion writes the
     # same appointment the ungated path would have written.
     insurance: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # Who the held booking is FOR, when not the patient themself - carried for
+    # the same reason as `insurance` (services/attendee.py).
+    attendee_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)

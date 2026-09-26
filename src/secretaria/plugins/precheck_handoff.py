@@ -279,7 +279,11 @@ async def _post_booking(ctx: PostBookingContext) -> None:
             # not a failure: `request_precheck_handoff` simply leaves the key
             # out of the body, and the hand-off proceeds exactly as it did
             # before FEAT 39.
-            patient_name=ctx.patient.name,
+            # The questionnaire is about whoever will be ATTENDED: on a booking
+            # made for someone else (services/attendee.py) that is the
+            # attendee, not the account that booked - the same person the
+            # patient just authorized sharing with the clinic.
+            patient_name=ctx.appointment.attendee_name or ctx.patient.name,
             booked_service=ctx.appointment.appointment_type,
         )
         outcome = result.outcome

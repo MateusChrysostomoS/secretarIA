@@ -77,6 +77,7 @@ class HeldSlot:
     start_at: datetime
     end_at: datetime
     expires_at: datetime
+    attendee_name: str | None = None
 
     @classmethod
     def of(cls, row: BookingHold) -> "HeldSlot":
@@ -91,6 +92,7 @@ class HeldSlot:
             start_at=_aware(row.start_at),
             end_at=_aware(row.end_at),
             expires_at=_aware(row.expires_at),
+            attendee_name=row.attendee_name,
         )
 
 
@@ -242,6 +244,7 @@ async def place_hold(
     start_at: datetime,
     end_at: datetime,
     ttl_minutes: int = HOLD_TTL_MINUTES,
+    attendee_name: str | None = None,
 ) -> HeldSlot | None:
     """Reserve [start_at, end_at) for this conversation. None = somebody else has it.
 
@@ -296,6 +299,7 @@ async def place_hold(
                 professional_id=professional_id,
                 appointment_type=appointment_type,
                 insurance=insurance,
+                attendee_name=attendee_name,
                 start_at=start_at,
                 end_at=end_at,
                 expires_at=expires_at,
@@ -397,6 +401,7 @@ class BookingGate:
         professional_id: UUID | None,
         appointment_type: str | None,
         insurance: str | None,
+        attendee_name: str | None = None,
     ) -> GateDecision:
         """Hold the slot and mail a code, or tell the router to commit as usual."""
         if not self._armed or self._tenant_id is None:
@@ -412,6 +417,7 @@ class BookingGate:
                 insurance=insurance,
                 start_at=start_at,
                 end_at=end_at,
+                attendee_name=attendee_name,
             )
         except Exception as exc:
             # The hold could not be written. Committing now is the fail-open
