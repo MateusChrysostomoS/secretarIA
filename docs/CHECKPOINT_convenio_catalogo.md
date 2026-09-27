@@ -398,6 +398,19 @@ dois endpoints (`PUT /config` puro e via serviço): `tests/test_convenio_catalog
 6. **Catálogo de `independent` não tem paginação** — `GET .../insurance-plans` nesse modo devolve
    o catálogo global inteiro (14 linhas hoje); aceitável no tamanho atual, revisitar se o catálogo
    crescer muito via o endpoint admin.
+7. **`professional_insurance_plans.tenant_plan_id` não tem tenant-scoping no banco** (achado do
+   Tester, confirmado por INSERT direto): a FK aponta só para `tenant_insurance_plans.id`, sem
+   checar que aquela linha pertence ao mesmo tenant do profissional — em teoria um bug de código
+   poderia gravar a linha de convênio de OUTRA clínica. Nenhum caminho de código hoje faz isso (a
+   API sempre resolve `tenant_plan_id` a partir do próprio tenant autenticado), mas é uma garantia
+   que só existe em aplicação, não em banco. Registrado como risco latente de isolamento
+   multi-tenant.
+8. **Correção ao item de downgrade em 10.1**: o gatilho documentado ali ("falha com dado
+   `independent`/custom") é mais estreito que a realidade (achado do Tester) — uma customização
+   comum de `clinic_with_exceptions` (profissional que restringiu o próprio subconjunto) TAMBÉM
+   deixa `catalog_id` NULL em alguma linha e quebra o mesmo `downgrade -1`, não só dado
+   independente/custom. Não muda o risco (downgrade é conveniência de dev/teste, nunca roda contra
+   dado real), só a precisão da nota.
 
 ## 10.9 Pendências (TASK-008)
 
@@ -407,4 +420,25 @@ dois endpoints (`PUT /config` puro e via serviço): `tests/test_convenio_catalog
 - Limpeza de dado órfão ao trocar de modo (10.8.5).
 - Migração que remove `tenants.insurances` — segue não feita (mesma pendência do TASK-006, agora
   também bloqueada por `insurance_catalog_unmatched` ainda referenciar textos legados).
-- Deploy: **NÃO AUTORIZADO**, como sempre.
+- Deploy: **NÃO AUTORIZADO**, como sempre. Ver 10.10 antes de autorizar — tem uma janela de
+  quebra real se a ordem não for respeitada.
+
+## 10.10 Ordem de deploy obrigatória (achado do Reviewer, severidade HIGH — ler antes de autorizar)
+
+Esta migração e este código **precisam subir junto com o TASK-006** (que ainda não foi deployado
+nenhuma vez) — não é só "compatibilidade de leitura" como uma nota anterior sugeria, é também um
+risco de ESCRITA:
+
+- `appointments.insurance_plan_id` teve a FK re-apontada de `insurance_catalog.id` para
+  `tenant_insurance_plans.id` (10.1). Quem escreve essa coluna é o **worker**
+  (`src/secretaria/workers/tasks.py`), serviço deployado separadamente da API
+  (`secretarIA/CLAUDE.md`, seção "Deploy — DOIS serviços").
+- Se a migração rodar (banco já com a FK nova) ANTES do worker ser redeployado com o código
+  novo, o worker antigo ainda resolve um valor no formato antigo (id de catálogo) para essa
+  coluna — a inserção falha com `IntegrityError` de FK em **todo agendamento com convênio**
+  durante essa janela, não é um caso raro.
+- Regra de deploy, quando for autorizado (não agora): migração → API → worker, na mesma janela,
+  sem intervalo onde o worker antigo processe um webhook com convênio contra o schema novo.
+  Mesma disciplina que `docs/CHECKPOINT_pix_deposit.md` e outras migrações aditivas deste repo já
+  exigem — nada novo em espécie, só reforçando porque aqui o efeito de pular a ordem é um
+  `IntegrityError` visível, não um bug silencioso.
