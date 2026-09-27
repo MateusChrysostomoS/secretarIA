@@ -226,6 +226,7 @@ from secretaria.services.pending_identity import (
     VerifyResult,
     booking_gate_body,
     booking_gate_reprompt_body,
+    cancel_pending_code,
     claim_email,
     code_notice_body,
     existing_account_code_body,
@@ -5879,6 +5880,14 @@ async def _handle_identity_card_action(
         # first one would be — brain-api overwrites the claim on the same
         # visit (`services/pending_identity.py::claim_email`), which is what
         # makes "I typed it wrong" recoverable without a new visit.
+        #
+        # The OLD address's code wait is cancelled first (best-effort, never
+        # blocks the message below): otherwise the Portal composer keeps
+        # reading brain-api's `/pending/status` as `otp_sent` and locks the
+        # field to 6 digits while this very message is asking for an e-mail
+        # (owner, 2026-09-25, reported live).
+        if reply.tenant_id is not None:
+            await cancel_pending_code(reply.tenant_id, reply.patient_ref)
         await _send_plain_reply(
             reply,
             tenant=tenant,

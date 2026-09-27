@@ -175,6 +175,7 @@ class _Calls:
         self.claimed: list[str] = []
         self.verified: list[str] = []
         self.code_requests: list[str] = []
+        self.cancelled: list[str] = []
 
 
 @pytest.fixture
@@ -229,11 +230,16 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db, calls):
         calls.code_requests.append(external_id)
         return RequestCodeResult(RequestCodeOutcome.SENT, email_masked=EMAIL_MASKED)
 
+    async def _cancel(tenant_id, external_id):
+        calls.cancelled.append(external_id)
+        return True
+
     monkeypatch.setattr(tasks, "probe_identity", _probe)
     monkeypatch.setattr(tasks, "claim_email", _claim)
     monkeypatch.setattr(tasks, "verify_code", _verify)
     monkeypatch.setattr(tasks, "request_code", _request)
     monkeypatch.setattr(plugin, "request_code", _request)
+    monkeypatch.setattr(tasks, "cancel_pending_code", _cancel)
 
     async def _report(tenant_id, external_id, name):
         # The name-to-brain-api leg (2026-09-24): no network from this suite.
@@ -1422,6 +1428,11 @@ async def test_change_email_goes_back_to_the_address_question(db, calls) -> None
 
     And the next valid address is CLAIMED, which is the half that makes the
     button worth having: a typo is recoverable inside the same visit.
+
+    Regression (owner, 2026-09-25, reported live): the OLD address's code
+    wait must be cancelled on brain-api too, or the Portal composer keeps
+    reading `otp_sent` and locks the field to 6 digits while this very
+    message is asking for an e-mail.
     """
     tenant = await _seed_tenant(db)
     await _card_state(db, tenant)
@@ -1431,6 +1442,7 @@ async def test_change_email_goes_back_to_the_address_question(db, calls) -> None
 
     assert (await _outbound(db, tenant))[-1] == EMAIL_REQUEST_MESSAGE
     assert await _flow_state(db, tenant) == FlowState.AWAITING_EMAIL
+    assert calls.cancelled == [EXTERNAL_ID]
     assert calls.verified == []
 
     await _bm_turn(tenant, "outra@exemplo.com")

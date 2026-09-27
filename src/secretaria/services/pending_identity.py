@@ -859,6 +859,34 @@ async def request_code(tenant_id: UUID, external_id: str) -> RequestCodeResult:
     return RequestCodeResult(RequestCodeOutcome.SENT, email_masked=masked)
 
 
+async def cancel_pending_code(tenant_id: UUID, external_id: str) -> bool:
+    """Tell brain-api this visit's code wait is abandoned. Best-effort.
+
+    Called when the patient taps "Mudar e-mail" (`IDENTITY_CHANGE_EMAIL_ACTION`,
+    `workers/tasks.py::_handle_identity_card_action`) — the chat is about to
+    ask for a different address, and the Portal composer reads brain-api's
+    `/pending/status` to choose between a six-digit-only field and a
+    free-text one. Leaving the OLD address's `otp_requested_at` stamped would
+    keep answering `otp_sent` and lock the field to digits while this turn is
+    asking for an e-mail — the bug this function closes (owner, 2026-09-25,
+    reported live: tapped "Mudar e-mail", got asked for the address again,
+    but the input still only took 6 digits).
+
+    Never touches the claimed address (a re-claim overwrites it once the
+    patient types the new one, `claim_email`) and never raises: a brain-api
+    that is down, predates this route, or has nothing to cancel all leave the
+    chat's own message (`EMAIL_REQUEST_MESSAGE`) unaffected — this call can
+    only widen the composer's input, never narrow the conversation.
+    """
+    response = await _post(
+        "/internal/brain-message/pending-otp/cancel",
+        {"tenant_id": str(tenant_id), "external_id": external_id},
+        tenant_id=tenant_id,
+        event="pending_code_cancel",
+    )
+    return response is not None and response.status_code == 200
+
+
 def _masked_email_field(response: httpx.Response, *, tenant_id: UUID) -> str | None:
     """The raw `email_masked` value off a 200, or None if there is not one.
 
