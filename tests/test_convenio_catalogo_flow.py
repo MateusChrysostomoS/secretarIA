@@ -67,8 +67,21 @@ CLINIC_PLANS = [AMIL, BRADESCO, UNIMED]
 # --------------------------------------------------------------------------
 
 
-def _tenant(*, collect_insurance=True, plans=None, accepted_by=None):
-    """Tenant snapshot as the worker builds it (catalog-backed convênios)."""
+def _tenant(*, collect_insurance=True, plans=None, accepted_by=None, insurance_mode="independent"):
+    """Tenant snapshot as the worker builds it (catalog-backed convênios).
+
+    TASK-008: `insurance_mode` must be non-None or `_insurance_step_skip_reason`
+    now skips the whole step (SPEC §2 - no silent default). This file's fixture
+    defaults to `"independent"` NOT because it models a doctor's own
+    catalog-drawn list (structurally these snapshots still model one shared
+    clinic list) - it is the one mode whose marking rule
+    (`flow_router._accepts_plan`) matches what every test below already
+    assumed: a professional ABSENT from `accepted_by` is simply not marked, no
+    inheritance. `clinic_with_exceptions`' TASK-008 default (absent = inherits
+    ALL clinic plans) would flip roughly half of this file's `not-accepts`
+    expectations, and is exercised on its own, correctly, in
+    tests/test_insurance_mode_matrix.py instead.
+    """
     plans = list(CLINIC_PLANS if plans is None else plans)
     return SimpleNamespace(
         initial_flows={
@@ -82,6 +95,7 @@ def _tenant(*, collect_insurance=True, plans=None, accepted_by=None):
         appointment_duration_min=30,
         business_hours={"monday": [{"start": "08:00", "end": "12:00"}]},
         collect_insurance=collect_insurance,
+        insurance_mode=insurance_mode,
         # The hub keeps the legacy strings mirrored during the transition.
         insurances=[plan["name"] for plan in plans],
         insurance_plans=plans,

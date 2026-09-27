@@ -19,7 +19,7 @@ os.environ.setdefault("META_ACCESS_TOKEN", "test-access-token")
 os.environ.setdefault("META_PHONE_NUMBER_ID", "1234567890")
 os.environ.setdefault("ENCRYPTION_KEY", "gBSpATEZoI21UX0_59nHvxdUDJ4drCttg2RAEaPJc1w=")
 
-from uuid import uuid4  # noqa: E402
+from uuid import UUID, uuid4  # noqa: E402
 
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
@@ -47,10 +47,11 @@ from secretaria.services.insurance_catalog import (  # noqa: E402
     NotClinicPlans,
     catalog_id_for_slug,
     ensure_catalog_seeded,
+    list_tenant_plans,
     load_tenant_insurance,
     professional_plan_ids,
     resolve_tenant_plan_id,
-    set_professional_plans,
+    set_professional_clinic_plans,
     set_tenant_plans,
     sync_legacy_insurances,
 )
@@ -84,10 +85,28 @@ async def db():
 
 
 async def _tenant(session: AsyncSession, **fields) -> Tenant:
+    # TASK-008: `insurance_mode` gates every per-doctor endpoint/skip-reason now
+    # (SPEC §2, no silent default) - every test in this file exercises the
+    # `clinic_with_exceptions` subset rule (TASK-006's original scope), so it
+    # is the default here unless a test overrides it explicitly.
+    fields.setdefault("insurance_mode", "clinic_with_exceptions")
     tenant = Tenant(id=uuid4(), clinic_name="Clinic", phone_number_id=str(uuid4())[:12], **fields)
     session.add(tenant)
     await session.flush()
     return tenant
+
+
+async def _plan_id(session: AsyncSession, tenant_id, catalog_id) -> str:
+    """The `tenant_insurance_plans.id` for one of the clinic's catalog-backed plans.
+
+    TASK-008: doctor acceptance (`professional_insurance_plans.tenant_plan_id`)
+    and the appointment's `insurance_plan_id` now key on this row id, never
+    the catalog id directly - a custom "Outro" plan has no catalog id at all.
+    """
+    for plan, entry in await list_tenant_plans(session, tenant_id):
+        if entry is not None and entry.id == catalog_id:
+            return str(plan.id)
+    raise AssertionError(f"no tenant_insurance_plans row for catalog_id={catalog_id}")
 
 
 async def _professional(
@@ -114,20 +133,25 @@ async def test_professional_plan_outside_clinic_raises_and_writes_nothing(db):
     async with db() as session:
         tenant = await _tenant(session)
         ana = await _professional(session, tenant)
-        await set_tenant_plans(session, tenant, [(UNIMED, True)])
-        await set_professional_plans(session, ana, [str(UNIMED)])
+        await set_tenant_plans(session, tenant, [(UNIMED, True), (AMIL, True)])
+        await session.flush()
+        unimed_plan_id = await _plan_id(session, tenant.id, UNIMED)
+        # Re-enable only Unimed at clinic level (Amil stays enabled too, but
+        # Ana will only be given the Unimed id below).
+        await set_professional_clinic_plans(session, ana, [unimed_plan_id])
         await session.commit()
         ana_id = ana.id
 
         with pytest.raises(NotClinicPlans) as excinfo:
-            # Unimed IS enabled, Amil is NOT: the whole request is refused.
-            await set_professional_plans(session, ana, [str(UNIMED), str(AMIL)])
-        assert excinfo.value.catalog_ids == [str(AMIL)]
+            # A bogus id that names no tenant_insurance_plans row at all -
+            # the whole request is refused.
+            await set_professional_clinic_plans(session, ana, [unimed_plan_id, str(uuid4())])
+        assert excinfo.value.catalog_ids != [unimed_plan_id]
         await session.rollback()
 
     async with db() as session:
         # Nothing written: the doctor still has exactly what they had.
-        assert await professional_plan_ids(session, ana_id) == [str(UNIMED)]
+        assert await professional_plan_ids(session, ana_id) == [unimed_plan_id]
         assert await _count(session, ProfessionalInsurancePlan) == 1
 
 
@@ -137,20 +161,21 @@ async def test_professional_plan_outside_clinic_with_no_prior_rows(db):
         ana = await _professional(session, tenant)
         await set_tenant_plans(session, tenant, [(UNIMED, True)])
         with pytest.raises(NotClinicPlans):
-            await set_professional_plans(session, ana, [str(AMIL)])
+            await set_professional_clinic_plans(session, ana, [str(uuid4())])
         assert await _count(session, ProfessionalInsurancePlan) == 0
 
 
 async def test_plan_of_another_clinic_is_outside_this_clinic(db):
-    """Clinic B enabling Amil does not let clinic A's doctor accept Amil."""
+    """Clinic B enabling Amil does not let clinic A's doctor accept Amil's row."""
     async with db() as session:
         clinic_a = await _tenant(session)
         clinic_b = await _tenant(session)
         ana = await _professional(session, clinic_a)
         await set_tenant_plans(session, clinic_a, [(UNIMED, True)])
         await set_tenant_plans(session, clinic_b, [(AMIL, True)])
+        amil_plan_id_at_clinic_b = await _plan_id(session, clinic_b.id, AMIL)
         with pytest.raises(NotClinicPlans):
-            await set_professional_plans(session, ana, [str(AMIL)])
+            await set_professional_clinic_plans(session, ana, [amil_plan_id_at_clinic_b])
 
 
 async def test_removing_plan_at_clinic_level_removes_it_from_doctors(db):
@@ -159,20 +184,26 @@ async def test_removing_plan_at_clinic_level_removes_it_from_doctors(db):
         ana = await _professional(session, tenant, "Dra. Ana")
         bruno = await _professional(session, tenant, "Dr. Bruno")
         await set_tenant_plans(session, tenant, [(UNIMED, True), (AMIL, True)])
-        await set_professional_plans(session, ana, [str(UNIMED), str(AMIL)])
-        await set_professional_plans(session, bruno, [str(UNIMED)])
+        unimed_plan_id = await _plan_id(session, tenant.id, UNIMED)
+        amil_plan_id = await _plan_id(session, tenant.id, AMIL)
+        await set_professional_clinic_plans(session, ana, [unimed_plan_id, amil_plan_id])
+        await set_professional_clinic_plans(session, bruno, [unimed_plan_id])
         await session.commit()
 
         await set_tenant_plans(session, tenant, [(AMIL, True)])
         await session.commit()
 
     async with db() as session:
-        assert await professional_plan_ids(session, ana.id) == [str(AMIL)]
+        assert await professional_plan_ids(session, ana.id) == [amil_plan_id]
+        # Bruno customized down to ONLY Unimed, which just got removed at the
+        # clinic level - he now explicitly accepts nothing (customized, not
+        # inherited: TASK-008's inherit-all default never applies to him again
+        # once `insurance_plans_customized` is true).
         assert await professional_plan_ids(session, bruno.id) == []
         insurance = await load_tenant_insurance(session, tenant.id)
         assert [plan["name"] for plan in insurance.plans] == ["Amil"]
-        assert insurance.accepted_by.get(str(ana.id)) == frozenset({str(AMIL)})
-        assert str(bruno.id) not in insurance.accepted_by
+        assert insurance.accepted_by.get(str(ana.id)) == frozenset({amil_plan_id})
+        assert insurance.accepted_by.get(str(bruno.id)) == frozenset()
 
 
 async def test_plan_added_at_clinic_level_is_not_granted_to_doctors(db):
@@ -189,6 +220,8 @@ async def test_plan_added_at_clinic_level_is_not_granted_to_doctors(db):
 @pytest_asyncio.fixture
 async def hub(db):
     """A seeded clinic with Unimed enabled and one doctor; app deps overridden."""
+    from fastapi import Depends
+
     from secretaria.main import app
 
     async with db() as session:
@@ -201,8 +234,12 @@ async def hub(db):
         async with db() as session:
             yield session
 
-    async def _fake_get_current_tenant():
-        return tenant
+    # Re-fetch by id through the (overridden) get_session dependency, not the
+    # detached `tenant` object closed above - some routes (PUT /tenants/me/config)
+    # call `session.refresh(tenant)`, which requires the SAME session/instance
+    # the route's own `Depends(get_session)` is using (see test_hub_config.py).
+    async def _fake_get_current_tenant(session: AsyncSession = Depends(get_session)) -> Tenant:
+        return await session.get(Tenant, tenant.id)
 
     app.dependency_overrides[get_session] = _fake_get_session
     app.dependency_overrides[get_current_tenant] = _fake_get_current_tenant
@@ -215,35 +252,49 @@ async def test_http_put_doctor_plan_outside_clinic_is_422(client: AsyncClient, h
     _tenant_row, ana = hub
     response = await client.put(
         f"/tenants/me/professionals/{ana.id}/insurance-plans",
-        json={"catalog_ids": [str(UNIMED), str(AMIL)]},
+        json={"plan_ids": [str(uuid4())]},
     )
     assert response.status_code == 422, response.text
     detail = response.json()["detail"]
     assert detail["code"] == "plans_not_enabled_by_clinic"
-    assert detail["catalog_ids"] == [str(AMIL)]
     async with db() as session:
         assert await _count(session, ProfessionalInsurancePlan) == 0
 
 
 async def test_http_put_doctor_plan_inside_clinic_is_saved(client: AsyncClient, hub, db):
     _tenant_row, ana = hub
+    catalog = await client.get(f"/tenants/me/professionals/{ana.id}/insurance-plans")
+    unimed_plan_id = next(p["id"] for p in catalog.json()["selectable"] if p["name"] == "Unimed")
     response = await client.put(
         f"/tenants/me/professionals/{ana.id}/insurance-plans",
-        json={"catalog_ids": [str(UNIMED)]},
+        json={"plan_ids": [unimed_plan_id]},
     )
     assert response.status_code == 200, response.text
-    assert response.json()["accepted_catalog_ids"] == [str(UNIMED)]
+    assert response.json()["accepted_plan_ids"] == [unimed_plan_id]
+    assert response.json()["inherits_clinic"] is False
     got = await client.get(f"/tenants/me/professionals/{ana.id}/insurance-plans")
     assert got.status_code == 200
-    assert got.json()["accepted_catalog_ids"] == [str(UNIMED)]
-    assert [plan["catalog_id"] for plan in got.json()["selectable"]] == [str(UNIMED)]
+    assert got.json()["accepted_plan_ids"] == [unimed_plan_id]
+    assert [plan["id"] for plan in got.json()["selectable"]] == [unimed_plan_id]
+
+
+async def test_http_get_doctor_plans_before_customizing_inherits_all(client: AsyncClient, hub):
+    """TASK-008 §2: never customized = accepts every clinic plan, by default."""
+    _tenant_row, ana = hub
+    got = await client.get(f"/tenants/me/professionals/{ana.id}/insurance-plans")
+    assert got.status_code == 200, got.text
+    body = got.json()
+    assert body["inherits_clinic"] is True
+    assert body["accepted_plan_ids"] == [plan["id"] for plan in body["selectable"]]
 
 
 async def test_http_clinic_put_removing_plan_cascades_to_doctor(client: AsyncClient, hub, db):
     _tenant_row, ana = hub
+    catalog = await client.get(f"/tenants/me/professionals/{ana.id}/insurance-plans")
+    unimed_plan_id = next(p["id"] for p in catalog.json()["selectable"] if p["name"] == "Unimed")
     saved = await client.put(
         f"/tenants/me/professionals/{ana.id}/insurance-plans",
-        json={"catalog_ids": [str(UNIMED)]},
+        json={"plan_ids": [unimed_plan_id]},
     )
     assert saved.status_code == 200, saved.text
     response = await client.put(
@@ -251,9 +302,17 @@ async def test_http_clinic_put_removing_plan_cascades_to_doctor(client: AsyncCli
         json={"plans": [{"catalog_id": str(AMIL), "charge_deposit": False}]},
     )
     assert response.status_code == 200, response.text
-    assert response.json() == [{"catalog_id": str(AMIL), "name": "Amil", "charge_deposit": False}]
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["catalog_id"] == str(AMIL)
+    assert body[0]["name"] == "Amil"
+    assert body[0]["charge_deposit"] is False
+    assert body[0]["is_custom"] is False
     got = await client.get(f"/tenants/me/professionals/{ana.id}/insurance-plans")
-    assert got.json()["accepted_catalog_ids"] == []
+    # Ana had customized down to Unimed alone, which just got removed - she
+    # keeps her explicit (now empty) choice, never re-inherits.
+    assert got.json()["accepted_plan_ids"] == []
+    assert got.json()["inherits_clinic"] is False
 
 
 # --------------------------------------------------------------------------
@@ -280,9 +339,10 @@ async def test_legacy_sync_matches_catalog_and_keeps_unknown_verbatim(db):
         # Only Unimed became a plan row; nothing for "Plano Inexistente".
         assert [plan.catalog_id for plan in plans] == [UNIMED]
         assert plans[0].charge_deposit is True
+        unimed_plan_id = str(plans[0].id)
         # Granted to every ACTIVE doctor, not to the inactive one.
-        assert await professional_plan_ids(session, ana.id) == [str(UNIMED)]
-        assert await professional_plan_ids(session, bruno.id) == [str(UNIMED)]
+        assert await professional_plan_ids(session, ana.id) == [unimed_plan_id]
+        assert await professional_plan_ids(session, bruno.id) == [unimed_plan_id]
         assert await professional_plan_ids(session, retired.id) == []
         stored = await session.get(Tenant, tenant.id)
         assert "Plano Inexistente" in stored.insurances
@@ -296,7 +356,8 @@ async def test_legacy_sync_keeps_existing_plan_settings(db):
         ana = await _professional(session, tenant, "Dra. Ana")
         bruno = await _professional(session, tenant, "Dr. Bruno")
         await set_tenant_plans(session, tenant, [(UNIMED, False)])
-        await set_professional_plans(session, ana, [str(UNIMED)])
+        unimed_plan_id = await _plan_id(session, tenant.id, UNIMED)
+        await set_professional_clinic_plans(session, ana, [unimed_plan_id])
         await sync_legacy_insurances(session, tenant, ["Unimed"])
         charge = await session.scalar(
             select(TenantInsurancePlan.charge_deposit).where(
@@ -304,26 +365,64 @@ async def test_legacy_sync_keeps_existing_plan_settings(db):
             )
         )
         assert charge is False
-        assert await professional_plan_ids(session, ana.id) == [str(UNIMED)]
+        assert await professional_plan_ids(session, ana.id) == [unimed_plan_id]
         # Not newly added -> not force-granted to Bruno.
         assert await professional_plan_ids(session, bruno.id) == []
 
 
-async def test_hub_config_put_of_legacy_insurances_reaches_the_catalog(db):
+async def test_hub_config_put_no_longer_accepts_insurances(db):
+    """TASK-008: `PUT /tenants/me/config` never mutates `tenant_insurance_plans`
+    again - `insurances` is gone from `TenantConfigUpdate`'s schema, and
+    `apply_tenant_config` no longer calls `sync_legacy_insurances` at all.
+    Sending the field is silently ignored (same "retired field" treatment as
+    `greeting_buttons`), never an error and never a mutation.
+    """
     async with db() as session:
         tenant = await _tenant(session)
         ana = await _professional(session, tenant)
-        await apply_tenant_config(session, tenant, {"insurances": ["Bradesco Saude", "Xyz"]})
+        await set_tenant_plans(session, tenant, [(UNIMED, True)])
+        unimed_plan_id = await _plan_id(session, tenant.id, UNIMED)
+        await set_professional_clinic_plans(session, ana, [unimed_plan_id])
         await session.commit()
+
+        await apply_tenant_config(
+            session, tenant, {"insurances": ["Bradesco Saude", "Xyz"], "collect_insurance": True}
+        )
+        await session.commit()
+
+    async with db() as session:
+        # Untouched: still only Unimed, Ana's explicit acceptance intact.
+        insurance = await load_tenant_insurance(session, tenant.id)
+        assert insurance.plans == [{"id": unimed_plan_id, "name": "Unimed", "note": None}]
+        assert insurance.accepted_by[str(ana.id)] == frozenset({unimed_plan_id})
+        stored = await session.get(Tenant, tenant.id)
+        # `insurances` itself is also untouched by the PUT - still the legacy
+        # mirror `set_tenant_plans` wrote above ("Unimed"), never
+        # "Bradesco Saude"/"Xyz" from the ignored field.
+        assert stored.insurances == ["Unimed"]
+        assert stored.collect_insurance is True
+
+
+async def test_http_put_config_with_insurances_field_is_ignored(client: AsyncClient, hub, db):
+    """Same regression, over the actual `PUT /tenants/me/config` HTTP endpoint."""
+    tenant, ana = hub
+    unimed_plan_id = await _plan_id_via_client(client)
+    response = await client.put(
+        "/tenants/me/config",
+        json={"insurances": ["Bradesco Saude"], "collect_insurance": True},
+    )
+    assert response.status_code == 200, response.text
+    assert "insurances" not in response.json()
     async with db() as session:
         insurance = await load_tenant_insurance(session, tenant.id)
-        # Catalog plan first (with its id); the legacy string that matches no
-        # catalog entry is still offered, id-less, until part 2 retires it.
-        assert insurance.plans == [
-            {"id": str(BRADESCO), "name": "Bradesco Saúde"},
-            {"id": None, "name": "Xyz"},
-        ]
-        assert insurance.accepted_by[str(ana.id)] == frozenset({str(BRADESCO)})
+        # Still just Unimed (the hub fixture's seed) - Bradesco never arrived.
+        assert [plan["name"] for plan in insurance.plans] == ["Unimed"]
+        assert unimed_plan_id in {plan["id"] for plan in insurance.plans}
+
+
+async def _plan_id_via_client(client: AsyncClient) -> str:
+    got = await client.get("/tenants/me/insurance-plans")
+    return got.json()[0]["id"]
 
 
 async def test_legacy_only_plan_is_offered_but_a_removed_catalog_plan_does_not_return(db):
@@ -336,9 +435,10 @@ async def test_legacy_only_plan_is_offered_but_a_removed_catalog_plan_does_not_r
         await session.commit()
     async with db() as session:
         before = await load_tenant_insurance(session, tenant.id)
+        unimed_plan_id = await _plan_id(session, tenant.id, UNIMED)
         assert before.plans == [
-            {"id": str(UNIMED), "name": "Unimed"},
-            {"id": None, "name": "GEAP"},
+            {"id": unimed_plan_id, "name": "Unimed", "note": None},
+            {"id": None, "name": "GEAP", "note": None},
         ]
         tenant = await session.get(Tenant, tenant.id)
         await set_tenant_plans(session, tenant, [])
@@ -346,7 +446,7 @@ async def test_legacy_only_plan_is_offered_but_a_removed_catalog_plan_does_not_r
         assert tenant.insurances == ["GEAP"]
     async with db() as session:
         after = await load_tenant_insurance(session, tenant.id)
-        assert after.plans == [{"id": None, "name": "GEAP"}]
+        assert after.plans == [{"id": None, "name": "GEAP", "note": None}]
 
 
 # --------------------------------------------------------------------------
@@ -384,8 +484,15 @@ async def _seed_booking(
             {"name": "Consulta", "duration_min": 30, "is_active": True, "price": "R$ 200,00"}
         ],
     )
+    tenant_plan_id = None
     if charge_deposit is not None:
         await set_tenant_plans(session, tenant, [(plan_id, charge_deposit)])
+        tenant_plan_id = await _plan_id(session, tenant.id, plan_id)
+    elif with_plan_id:
+        # "a plan id the clinic no longer accepts": no `tenant_insurance_plans`
+        # row exists at all, so any random id (never a real row) reproduces
+        # the same "not found -> tenant policy decides" path as before.
+        tenant_plan_id = str(uuid4())
     patient = Patient(id=uuid4(), tenant_id=tenant.id, wa_id="5511999999999", name="Maria")
     session.add(patient)
     await session.flush()
@@ -398,7 +505,7 @@ async def _seed_booking(
         phone=patient.wa_id,
         status=AppointmentStatus.SCHEDULED,
         insurance="Unimed" if with_plan_id else "Particular",
-        insurance_plan_id=plan_id if with_plan_id else None,
+        insurance_plan_id=UUID(tenant_plan_id) if with_plan_id else None,
     )
     session.add(appointment)
     if asaas_api_key:
@@ -517,7 +624,9 @@ async def test_resolve_plan_name_variants(db, text):
     async with db() as session:
         tenant = await _tenant(session)
         await set_tenant_plans(session, tenant, [(BRADESCO, True), (UNIMED, True)])
-        assert await resolve_tenant_plan_id(session, tenant.id, text) == BRADESCO
+        bradesco_plan_id = await _plan_id(session, tenant.id, BRADESCO)
+        resolved = await resolve_tenant_plan_id(session, tenant.id, text)
+        assert resolved is not None and str(resolved) == bradesco_plan_id
 
 
 @pytest.mark.parametrize(
@@ -603,8 +712,10 @@ async def test_e2e_db_acceptance_marks_doctor_list(db):
         ana = await _professional(session, tenant, "Dra. Ana")
         bruno = await _professional(session, tenant, "Dr. Bruno")
         await set_tenant_plans(session, tenant, [(UNIMED, True), (AMIL, True)])
-        await set_professional_plans(session, ana, [str(UNIMED)])
-        await set_professional_plans(session, bruno, [str(AMIL)])
+        unimed_plan_id = await _plan_id(session, tenant.id, UNIMED)
+        amil_plan_id = await _plan_id(session, tenant.id, AMIL)
+        await set_professional_clinic_plans(session, ana, [unimed_plan_id])
+        await set_professional_clinic_plans(session, bruno, [amil_plan_id])
         await session.commit()
         insurance = await load_tenant_insurance(session, tenant.id)
 

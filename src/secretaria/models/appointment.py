@@ -144,14 +144,29 @@ class Appointment(Base):
     # deterministic booking flow. Informational only — never filters
     # professionals or slots (clinic-wide fact, see tenants.insurances).
     insurance: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    # The catalog entry `insurance` resolved to, when it names one of the
-    # clinic's own plans (services/insurance_catalog.py::resolve_tenant_plan_id,
-    # applied once, when the row is created). NULL for "Particular", a typed
-    # "Outro convênio" and every row before the catalog existed. Read by the
-    # Pix-deposit guard (DEPOSIT_SKIP_INSURANCE_NO_CHARGE) BY ID, so a plan
-    # renamed in the catalog later cannot silently change that decision.
+    # The CLINIC's own convênio row (`tenant_insurance_plans.id` - catalog-backed
+    # or the clinic's "Outro") `insurance` resolved to, applied once when the
+    # row is created (services/insurance_catalog.py::resolve_booking_plan_ids).
+    # NULL for "Particular", a typed "Outro convênio", every row before the
+    # catalog existed, and every booking made under `insurance_mode ==
+    # "independent"` (see `insurance_professional_plan_id` below instead). Read
+    # by the Pix-deposit guard (DEPOSIT_SKIP_INSURANCE_NO_CHARGE) BY ID, so a
+    # plan renamed later cannot silently change that decision.
+    #
+    # TASK-008: this used to point at `insurance_catalog.id` directly. It now
+    # points at the CLINIC's row instead, because a clinic "Outro" convênio has
+    # no catalog id at all - `tenant_insurance_plans.id` is the one identifier
+    # that exists for both catalog-backed and custom clinic plans.
     insurance_plan_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("insurance_catalog.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("tenant_insurance_plans.id", ondelete="SET NULL"), nullable=True
+    )
+    # The DOCTOR's own convênio row, set instead of `insurance_plan_id` only
+    # when `Tenant.insurance_mode == "independent"` — that mode has no clinic
+    # row to point at (the doctor's list is the whole catalog plus their own
+    # "Outro", never a clinic-enabled subset). Exactly one of the two is set
+    # whenever `insurance` names a plan; both NULL for "Particular"/free text.
+    insurance_professional_plan_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("professional_insurance_plans.id", ondelete="SET NULL"), nullable=True
     )
     # Name of the person who will be ATTENDED, when the booking was made for
     # someone else ("Essa consulta é pra você?" -> "Pra outra pessoa", then the

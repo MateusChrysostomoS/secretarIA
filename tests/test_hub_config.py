@@ -106,7 +106,6 @@ async def test_get_config_includes_new_fields_with_defaults(client: AsyncClient)
     assert response.status_code == 200
     body = response.json()
     assert body["address"] is None
-    assert body["insurances"] == []
     assert body["collect_insurance"] is False
     assert body["post_consult_message"] is None
     assert body["post_consult_knowledge"] is None
@@ -127,7 +126,7 @@ async def test_get_config_omits_greeting_buttons(client: AsyncClient) -> None:
 # --------------------------------------------------------------------------
 
 
-async def test_put_address_and_insurances_succeeds_while_disconnected(
+async def test_put_address_and_collect_insurance_succeeds_while_disconnected(
     client: AsyncClient, tenant
 ) -> None:
     """The tenant fixture has phone_number_id=None and no Calendar connected -
@@ -143,14 +142,12 @@ async def test_put_address_and_insurances_succeeds_while_disconnected(
                 "state": "SP",
                 "postal_code": "01000-000",
             },
-            "insurances": ["Unimed", "Amil"],
             "collect_insurance": True,
         },
     )
     assert response.status_code == 200
     body = response.json()
     assert body["address"]["city"] == "São Paulo"
-    assert body["insurances"] == ["Unimed", "Amil"]
     assert body["collect_insurance"] is True
     assert body["is_active"] is False  # untouched
 
@@ -327,15 +324,15 @@ async def test_put_is_active_false_is_never_gated(client: AsyncClient) -> None:
 # --------------------------------------------------------------------------
 
 
-async def test_put_insurances_trims_and_drops_blank_entries(client: AsyncClient) -> None:
-    response = await client.put(CONFIG, json={"insurances": ["  Unimed  ", "", "   ", "Amil"]})
+async def test_put_insurances_field_is_silently_ignored(client: AsyncClient) -> None:
+    """TASK-008: `insurances` is gone from `TenantConfigUpdate` - see
+    docs/CHECKPOINT_convenio_catalogo.md and
+    tests/test_convenio_catalogo_db.py's dedicated regression tests for the
+    "never mutates tenant_insurance_plans" proof. Sending it here must not
+    error (no `extra="forbid"` on this model) and must not appear back."""
+    response = await client.put(CONFIG, json={"insurances": ["Unimed", "Amil"]})
     assert response.status_code == 200
-    assert response.json()["insurances"] == ["Unimed", "Amil"]
-
-
-async def test_put_insurances_over_limit_is_422(client: AsyncClient) -> None:
-    response = await client.put(CONFIG, json={"insurances": [f"Plan {i}" for i in range(51)]})
-    assert response.status_code == 422
+    assert "insurances" not in response.json()
 
 
 async def test_put_address_partial_fields_allowed(client: AsyncClient) -> None:

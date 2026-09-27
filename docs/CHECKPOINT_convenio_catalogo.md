@@ -199,10 +199,246 @@ direta e promoção de `booking_hold` do Portal); o agente LLM não grava convê
 - Revisão independente: `tasks/TASK-006/REVIEW.md` (raiz de BRAIN) — 3 MEDIUM + 2 LOW, todos
   tratados (código + teste que morde, ou regra explícita no contrato da seção 4).
 
-## 9. Pendências
+## 9. Pendências (TASK-006)
 
-- Parte 2 (hub frontend) — consome a seção 4.
+- Parte 2 (hub frontend) — consome a seção 4 **mais** a seção 10 abaixo (TASK-008 substitui parte
+  do contrato da seção 4 para o convênio da clínica/profissional — o catálogo global em si e
+  `GET /insurance-catalog` não mudaram).
 - Rótulo do botão "Escolher serviço" no menu multi-médico: hoje leva ao mesmo fluxo de "Escolher
   médico". Decisão de copy para o dono (renomear/remover) — não mudei o menu.
 - Migração que remove `tenants.insurances` (seção 6).
 - Deploy: não autorizado.
+
+---
+
+# TASK-008 — Modos de aceitação + catálogo extensível + convênio "Outro"
+
+Branch `task/TASK-008-convenio-integracao` (worktree `C:\TECH\BRAIN-worktrees\TASK-008\secretarIA`),
+em cima do commit `7ed2028` (TASK-006, que já inclui TASK-007). **BUILT, commit local, NÃO
+pushado, NÃO deployado.** Ver `tasks/TASK-008/SPEC.md` (raiz de BRAIN) para o pedido completo e
+`tasks/TASK-008/results/implementer-be.md` para o relatório de entrega.
+
+## 10.1 Schema (migração `d4f8a2c6e913`, revises `c9f4e2a7b815`)
+
+Aditiva, sem valor atribuído a `insurance_mode` para tenant nenhum (nem os já migrados pelo
+TASK-006) — decisão explícita do dono, não reabrir.
+
+| Tabela / coluna | O quê |
+|---|---|
+| `tenants.insurance_mode` | nullable, `CHECK IN ('shared','clinic_with_exceptions','independent')`. `NULL` = não escolhido; enquanto `NULL`, o passo de convênio no chat é pulado (`INSURANCE_SKIP_NO_MODE`, mesmo caminho de catálogo vazio). |
+| `insurance_catalog.aliases` | `JSON NOT NULL DEFAULT '[]'` — apelidos extra que também casam com a entrada (`services/insurance_catalog.py::catalog_match_keys`). |
+| `insurance_catalog_unmatched` | NOVA. `id`, `tenant_id` (FK cascade), `raw_text`, `normalized_text` (chave de dedupe/match, `UNIQUE(tenant_id, normalized_text)`), `first_seen_at`, `resolved_at` (nullable), `resolved_insurance_catalog_id` (nullable FK). Backfillada na própria migração TASK-008, **re-derivando** de `tenants.insurances` contra o catálogo atual (superset do que a migração TASK-006 apenas logou). |
+| `tenant_insurance_plans.catalog_id` | agora nullable; colunas novas `custom_name`, `custom_payment_note`; `CHECK` "exatamente um entre catalog_id/custom_name". |
+| `professional_insurance_plans` | **redesenhada** — a FK composta do TASK-006 (`(tenant_id, catalog_id)` → clínica) foi removida: ela impunha "o médico só aceita o que a clínica aceita" de forma incondicional, o que quebra o modo `independent` (médico escolhe do catálogo global, sem precisar que a clínica tenha habilitado). Agora tem TRÊS formas mutuamente exclusivas (`CHECK` soma = 1): `tenant_plan_id` (FK → `tenant_insurance_plans.id`, modos `shared`/`clinic_with_exceptions`, ainda com CASCADE), `catalog_id` (FK simples → `insurance_catalog.id`, modo `independent`), `custom_name`/`custom_payment_note` (Outro do próprio médico). Ganhou `charge_deposit` (só relevante para as duas formas do modo `independent`). |
+| `professionals.insurance_plans_customized` | `BOOLEAN NOT NULL DEFAULT false` — distingue "nunca mexeu" (herda tudo, `clinic_with_exceptions`) de "salvou vazio de propósito" (aceita nada); zero linhas em `professional_insurance_plans` não bastava para isso. |
+| `appointments.insurance_plan_id` | **FK re-apontada**: antes → `insurance_catalog.id`, agora → `tenant_insurance_plans.id` (a linha da clínica é o único identificador que serve tanto para catálogo quanto para "Outro" da clínica). Migração re-popula por `(tenant_id, catalog_id antigo)`. |
+| `appointments.insurance_professional_plan_id` | NOVA, FK → `professional_insurance_plans.id`, usada só quando `insurance_mode == "independent"` (não há linha de clínica para apontar nesse modo). |
+
+Testada em Postgres 18 descartável local (initdb + `pg_ctl` em porta 5544, destruído ao final):
+`upgrade` do zero até `c9f4e2a7b815` (TASK-006) com 2 tenants sintéticos (`insurances` com
+strings casáveis e não-casáveis) → `upgrade` até `d4f8a2c6e913` — confirmado: nenhum tenant
+recebeu `insurance_mode`; `insurance_catalog_unmatched` populada com "GEAP"/"Cabesp"; as duas
+`CHECK` constraints (`tenant_insurance_plans`, `professional_insurance_plans`) recusam
+both-null e both-set (testado com INSERT direto); `create_catalog_entry` +
+`reconcile_unmatched_insurances` (via serviço, contra o Postgres real) resolveram "GEAP" e
+deixaram "Cabesp" pendente; `create_tenant_custom_plan` gravou e apareceu em
+`load_tenant_insurance`. `downgrade -1` → `upgrade head`: **limpo quando não há dado de
+`independent`/custom** (ciclo completo provado); com uma linha `custom_name` presente, o
+downgrade falha na hora de tornar `catalog_id NOT NULL` de novo — **documentado no próprio
+docstring da migração** como limitação aceita (downgrade é conveniência de dev/teste, nunca
+rodado em produção com dado real; a mesma transação falha inteira e reverte sozinha, sem deixar
+estado parcial — confirmado via `alembic current` após a falha).
+
+## 10.2 Serviços (`services/insurance_catalog.py`)
+
+- `insurance_mode_configured(tenant)` → `services/tenant_config.py` (usado pelo hub para bloquear
+  seções e pelo flow_router para decidir o skip).
+- `load_tenant_insurance` fica mode-aware: `independent` monta a união dos
+  `professional_insurance_plans` de profissionais ATIVOS (`_load_independent_insurance`);
+  `shared`/`clinic_with_exceptions`/`None` mantêm o caminho do TASK-006 (planos da clínica +
+  fallback de strings legadas não casadas).
+- `set_professional_clinic_plans` (renomeou `set_professional_plans`) — modo
+  `clinic_with_exceptions`: substitui o subconjunto por **id da linha da clínica**
+  (`tenant_insurance_plans.id`), não mais por catalog_id — necessário porque uma linha "Outro" da
+  clínica não tem catalog_id. Sempre marca `insurance_plans_customized = True`, mesmo com lista
+  vazia. Rejeita id fora do conjunto da clínica (`NotClinicPlans`).
+- `set_professional_independent_plans` — modo `independent`: substitui as escolhas por
+  **catalog_id direto** (sem checar contra a clínica). Rejeita catalog_id fora do catálogo ativo
+  (`UnknownCatalogIds`).
+- `create_tenant_custom_plan` / `create_professional_custom_plan` — convênio "Outro" da clínica /
+  do profissional (`independent`).
+- `update_tenant_plan_charge_deposit` — toggle de `charge_deposit` por linha (catálogo OU custom),
+  já que `set_tenant_plans` (PUT em lote) só mexe nas linhas com `catalog_id` (nunca nas custom).
+- `create_catalog_entry` (admin) + `reconcile_unmatched_insurances` + `record_unmatched` —
+  catálogo extensível (seção 10.4).
+- `resolve_booking_plan_ids(session, tenant_id, insurance, professional_id=None)` — substitui
+  `resolve_tenant_plan_id` (mantida como wrapper fino, sem `professional_id`, para quem não tem
+  esse contexto). Retorna `(tenant_plan_id, professional_plan_id)`: no modo `independent` resolve
+  contra as linhas do PRÓPRIO profissional que fez a reserva; nos demais, contra as linhas da
+  clínica — exatamente um dos dois preenchido, ou nenhum se não casou.
+
+## 10.3 `flow_router.py`
+
+- `_insurance_step_skip_reason` ganhou `INSURANCE_SKIP_NO_MODE` (checada depois de
+  `collect_insurance`, antes de "catálogo vazio").
+- `_accepts_plan` (usada por `_professional_rows`, chamada tanto pelo caminho de botão quanto por
+  `enter_guided_booking` — **um helper só**, como pedido no SPEC §4.2): `shared` → todo profissional
+  ativo marcado, sem olhar `professional_insurance_plans`; `clinic_with_exceptions` → linha própria
+  se `insurance_plans_customized`, senão herda tudo (default do dono); `independent` → só linha
+  própria decide, nunca herda; `None` (modo não escolhido, ou snapshot legado sem o atributo) —
+  preserva o default ORIGINAL do TASK-006 (nunca aceita por omissão), decisão que **não foi
+  reaberta**, só passou a valer apenas para esse caso.
+- `_handle_confirmation` (confirmação do agendamento) agora anexa a `custom_payment_note` do plano
+  escolhido (se houver) à mensagem de confirmação, prefixada com "💳 Sobre o pagamento do
+  convênio:".
+- `enter_guided_booking` não precisou de nenhuma mudança de lógica: já chamava
+  `_insurance_step_skip_reason`/`_enter_insurance` — os MESMOS pontos que o caminho de botão usa —
+  então herdou o comportamento novo automaticamente. Teste dedicado:
+  `test_insurance_mode_matrix.py::test_enter_guided_booking_skips_when_mode_is_none`.
+
+## 10.4 `services/payments/deposit_lifecycle.py`
+
+- `_insurance_charges_deposit` passa a checar `appointment.insurance_professional_plan_id`
+  PRIMEIRO (modo `independent`, lê `ProfessionalInsurancePlan.charge_deposit`); cai para
+  `insurance_plan_id` (agora `TenantInsurancePlan.id`, não mais `catalog_id`) como antes.
+- `_deposit_request_text` ganhou parâmetro `payment_note` — repete a explicação de pagamento do
+  convênio "Outro" junto do pedido de sinal Pix quando `charge_deposit=true`, buscada por
+  `_insurance_payment_note` (nova função, lê `custom_payment_note` de qualquer um dos dois lados).
+
+## 10.5 Contrato do hub — `api/hub/insurance.py` (substitui parte da seção 4)
+
+Auth igual à seção 4 (`get_current_tenant`), nunca gated por entitlement, corpos com
+`extra="forbid"`.
+
+| Método | Rota | Corpo | Resposta / erros |
+|---|---|---|---|
+| GET | `/tenants/me/insurance-mode` | — | `{mode: str \| null}` |
+| PUT | `/tenants/me/insurance-mode` | `{mode}` | `{mode}`; 422 `invalid_insurance_mode` |
+| GET | `/tenants/me/insurance-catalog` | — | igual à seção 4 (inalterado) |
+| GET | `/tenants/me/insurance-plans` | — | `[{id, catalog_id\|null, name, is_custom, custom_payment_note\|null, charge_deposit}]` |
+| PUT | `/tenants/me/insurance-plans` | `{plans: [{catalog_id, charge_deposit?=true}]}` (≤50) | mesma forma do GET; **só mexe nas linhas com catalog_id** — nunca nas "Outro" |
+| POST | `/tenants/me/insurance-plans/custom` | `{custom_name, custom_payment_note, charge_deposit?=true}` | 201, forma do GET; 409 `insurance_mode_not_applicable` se `independent`/sem modo |
+| PATCH | `/tenants/me/insurance-plans/{plan_id}` | `{charge_deposit}` | forma do GET; 404 se o id não é da clínica |
+| GET | `/tenants/me/professionals/{id}/insurance-plans` | — | `{professional_id, mode, selectable, accepted_plan_ids, inherits_clinic}` — ver semântica abaixo |
+| PUT | `/tenants/me/professionals/{id}/insurance-plans` | `{plan_ids}` (clinic_with_exceptions) OU `{catalog_ids}` (independent) | mesma forma do GET; 422 `wrong_field_for_mode` se enviar o campo errado para o modo atual |
+| POST | `/tenants/me/professionals/{id}/insurance-plans/custom` | `{custom_name, custom_payment_note, charge_deposit?=true}` | 201, forma do GET; 409 se modo != `independent` |
+
+**GET/PUT professional insurance-plans por modo:**
+- `mode is None` ou `"shared"` → **409** `insurance_mode_not_applicable` (não há seção nesses
+  casos — a UI nem deve chamar).
+- `"clinic_with_exceptions"` → `selectable` = os planos da clínica (mesma forma do
+  `GET /insurance-plans`, chave é `id`, não `catalog_id`); `accepted_plan_ids` ⊆ `selectable`;
+  `inherits_clinic=true` quando o profissional nunca customizou (nesse caso
+  `accepted_plan_ids == [todos os ids de selectable]`, para a UI já nascer com tudo marcado).
+- `"independent"` → `selectable` = catálogo global inteiro + os próprios "Outro" do profissional
+  (mesma forma do `GET /insurance-plans`, mas SEM ligação com a lista da clínica);
+  `accepted_plan_ids` são os próprios catalog_ids + ids das próprias linhas custom;
+  `inherits_clinic` sempre `false`.
+
+**Erros 422 (`detail = {code, message, catalog_ids}`)** — nome do campo `catalog_ids` mantido do
+TASK-006 por estabilidade de contrato, mas em `clinic_with_exceptions` os valores dentro dele são
+**ids de linha da clínica** (`tenant_insurance_plans.id`), não catalog ids — divergência
+deliberada, documentada aqui para o time de frontend não se confundir: `plans_not_enabled_by_clinic`
+(médico tentando aceitar plano fora do conjunto da clínica), `unknown_catalog_ids` (id fora do
+catálogo ativo, PUT da clínica ou modo independent), `invalid_catalog_ids` (não é UUID).
+
+**Semântica que a UI precisa respeitar (adicional à seção 4):**
+- Trocar de modo NÃO apaga dado do modo anterior — só para de ser lido. Não há tela de "limpar"
+  dado órfão; ficou registrado como pendência (10.7).
+- Remover um plano "Outro" da clínica: **não existe endpoint de delete** nesta rodada — só criar e
+  alternar `charge_deposit`. Pendência (10.7).
+- Um médico do modo `clinic_with_exceptions` que nunca mexeu aparece com tudo marcado
+  (`inherits_clinic=true`); ao salvar QUALQUER seleção (mesmo idêntica ao herdado), ele passa a
+  "customizado" e não volta a herdar sozinho.
+
+## 10.6 Admin (SaaS-owner) — `api/admin/insurance.py` (NOVO)
+
+Guard: `require_admin` (mesmo `X-Admin-Token` dos outros endpoints admin).
+
+| Método | Rota | Corpo | Resposta |
+|---|---|---|---|
+| POST | `/admin/insurance-catalog` | `{name, aliases?=[], mechanism?="desconhecido", note?}` | 201 `{id, slug, name, aliases, mechanism, note, is_active, reconciled_count}`; 409 `duplicate_catalog_entry` se o nome normalizado já existe; 422 `invalid_mechanism` |
+| GET | `/admin/insurance-catalog/unmatched` | — | `[{tenant_id, raw_text, first_seen_at}]` — só visibilidade, nunca altera nada |
+
+`reconciled_count` é o número de tenants cujo texto legado casou com a entrada nova (ou um dos
+`aliases`) e ganhou uma linha em `tenant_insurance_plans` na mesma transação da criação — **sem
+deploy de código**, exatamente o pedido do dono (SPEC §3.2).
+
+## 10.7 `PUT /tenants/me/config` — `insurances` removido
+
+`insurances` saiu de `TenantConfigUpdate`/`TenantConfigRead` (`schemas/config.py`) e de
+`TENANT_SCALAR_FIELDS`/`apply_tenant_config`/`tenant_read_model`
+(`services/hub_configuration.py`) — `sync_legacy_insurances` (`services/insurance_catalog.py`)
+ficou **órfã**, sem nenhum caminho HTTP que a chame; mantida (não apagada) só para eventual
+tooling futuro, não reconectar sem reler por que foi removida.
+
+Como `TenantConfigUpdate` nunca teve `extra="forbid"` (só o envelope `HubConfigurationUpdate`
+tem — ver o comentário de FIX 34 no próprio arquivo), enviar `insurances` no PUT **não dá erro**:
+o campo é silenciosamente ignorado, igual a `greeting_buttons`. Teste de regressão explícito nos
+dois endpoints (`PUT /config` puro e via serviço): `tests/test_convenio_catalogo_db.py::test_hub_config_put_no_longer_accepts_insurances`,
+`::test_http_put_config_with_insurances_field_is_ignored`, `tests/test_hub_config.py::test_put_insurances_field_is_silently_ignored`.
+
+## 10.8 Decisões de implementação não 100% fechadas no SPEC (registradas aqui)
+
+1. **`appointments.insurance_plan_id` mudou de alvo** (era `insurance_catalog.id`, agora
+   `tenant_insurance_plans.id`) em vez de criar uma terceira coluna. Necessário porque uma linha
+   "Outro" da clínica não tem catalog_id — sem isso, o convênio "Outro" nunca poderia ser
+   registrado no agendamento nem alimentar a guarda do sinal. Migração re-popula por join;
+   `resolve_tenant_plan_id` (nome antigo) virou wrapper de `resolve_booking_plan_ids`.
+2. **`professional_insurance_plans` perdeu a FK composta** do TASK-006 — ver 10.1. O subconjunto
+   de `clinic_with_exceptions` passa a ser 100% aplicação (a mesma garantia de UX que já existia
+   via 422; o Postgres agora só garante "essa linha existe e pertence a uma clínica", não mais "é
+   subconjunto").
+3. **Nome do campo no erro 422** (`catalog_ids`) mantido por estabilidade, mesmo carregando ids de
+   linha (não catalog ids) em `clinic_with_exceptions` — ver 10.5.
+4. **Sem endpoint de exclusão** de convênio "Outro" (clínica ou profissional) — só criar e
+   alternar `charge_deposit`. Fora do escopo explícito do SPEC (só citava "criar").
+5. **Trocar de `insurance_mode` não limpa dado do modo anterior.** Decisão deliberada (menor
+   risco de apagar histórico sem querer) — pendência de limpeza futura, não bloqueante.
+6. **Catálogo de `independent` não tem paginação** — `GET .../insurance-plans` nesse modo devolve
+   o catálogo global inteiro (14 linhas hoje); aceitável no tamanho atual, revisitar se o catálogo
+   crescer muito via o endpoint admin.
+7. **`professional_insurance_plans.tenant_plan_id` não tem tenant-scoping no banco** (achado do
+   Tester, confirmado por INSERT direto): a FK aponta só para `tenant_insurance_plans.id`, sem
+   checar que aquela linha pertence ao mesmo tenant do profissional — em teoria um bug de código
+   poderia gravar a linha de convênio de OUTRA clínica. Nenhum caminho de código hoje faz isso (a
+   API sempre resolve `tenant_plan_id` a partir do próprio tenant autenticado), mas é uma garantia
+   que só existe em aplicação, não em banco. Registrado como risco latente de isolamento
+   multi-tenant.
+8. **Correção ao item de downgrade em 10.1**: o gatilho documentado ali ("falha com dado
+   `independent`/custom") é mais estreito que a realidade (achado do Tester) — uma customização
+   comum de `clinic_with_exceptions` (profissional que restringiu o próprio subconjunto) TAMBÉM
+   deixa `catalog_id` NULL em alguma linha e quebra o mesmo `downgrade -1`, não só dado
+   independente/custom. Não muda o risco (downgrade é conveniência de dev/teste, nunca roda contra
+   dado real), só a precisão da nota.
+
+## 10.9 Pendências (TASK-008)
+
+- Frontend (`secretarIA-frontend`) — consome as seções 10.5/10.6, ainda não iniciado nesta rodada
+  (é o Implementer-FE, tarefa separada em `tasks/TASK-008/TASK.md`).
+- Endpoint de exclusão de convênio "Outro" (10.8.4).
+- Limpeza de dado órfão ao trocar de modo (10.8.5).
+- Migração que remove `tenants.insurances` — segue não feita (mesma pendência do TASK-006, agora
+  também bloqueada por `insurance_catalog_unmatched` ainda referenciar textos legados).
+- Deploy: **NÃO AUTORIZADO**, como sempre. Ver 10.10 antes de autorizar — tem uma janela de
+  quebra real se a ordem não for respeitada.
+
+## 10.10 Ordem de deploy obrigatória (achado do Reviewer, severidade HIGH — ler antes de autorizar)
+
+Esta migração e este código **precisam subir junto com o TASK-006** (que ainda não foi deployado
+nenhuma vez) — não é só "compatibilidade de leitura" como uma nota anterior sugeria, é também um
+risco de ESCRITA:
+
+- `appointments.insurance_plan_id` teve a FK re-apontada de `insurance_catalog.id` para
+  `tenant_insurance_plans.id` (10.1). Quem escreve essa coluna é o **worker**
+  (`src/secretaria/workers/tasks.py`), serviço deployado separadamente da API
+  (`secretarIA/CLAUDE.md`, seção "Deploy — DOIS serviços").
+- Se a migração rodar (banco já com a FK nova) ANTES do worker ser redeployado com o código
+  novo, o worker antigo ainda resolve um valor no formato antigo (id de catálogo) para essa
+  coluna — a inserção falha com `IntegrityError` de FK em **todo agendamento com convênio**
+  durante essa janela, não é um caso raro.
+- Regra de deploy, quando for autorizado (não agora): migração → API → worker, na mesma janela,
+  sem intervalo onde o worker antigo processe um webhook com convênio contra o schema novo.
+  Mesma disciplina que `docs/CHECKPOINT_pix_deposit.md` e outras migrações aditivas deste repo já
+  exigem — nada novo em espécie, só reforçando porque aqui o efeito de pular a ordem é um
+  `IntegrityError` visível, não um bug silencioso.

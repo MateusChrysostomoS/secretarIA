@@ -836,6 +836,7 @@ async def test_handle_start_guided_booking_asks_convenio_first_when_configured(
     async with db() as session:
         row = await session.get(Tenant, tenant.id)
         row.collect_insurance = True
+        row.insurance_mode = "shared"
         row.insurances = ["Unimed", "Amil"]
         await session.commit()
         await session.refresh(row)

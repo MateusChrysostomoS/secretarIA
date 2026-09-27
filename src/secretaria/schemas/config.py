@@ -184,8 +184,16 @@ class TenantConfigUpdate(BaseModel):
     # Clinic physical address. NULL/omitted = leave untouched (or "not
     # collected yet" on first save).
     address: TenantAddress | None = None
-    # Accepted health-insurance plan names, e.g. ["Unimed", "Amil"].
-    insurances: list[str] | None = None
+    # TASK-008: `insurances` (free-text convênio names) is GONE from this
+    # payload on purpose - it used to pass through `sync_legacy_insurances`,
+    # which could silently re-derive the clinic's `tenant_insurance_plans` set
+    # from stale strings on any save (docs/CHECKPOINT_convenio_catalogo.md,
+    # Reviewer finding M3, TASK-006). This model has no `extra="forbid"` (see
+    # its class docstring), so a frontend still sending the old field is
+    # silently IGNORED, not rejected - the same "retired field" treatment
+    # `greeting_buttons` already gets here. Convênio has its own dedicated
+    # endpoints now: api/hub/insurance.py.
+    #
     # Whether the bot should ask patients for their insurance during booking.
     collect_insurance: bool | None = None
     # --- Pix deposit (sinal) policy — services/payments/deposit_lifecycle.py ---
@@ -196,16 +204,6 @@ class TenantConfigUpdate(BaseModel):
     pix_partial_refund_percent: int | None = Field(default=None, ge=1, le=100)
     pix_reschedule_limit: int | None = Field(default=None, ge=0)
     is_active: bool | None = None
-
-    @field_validator("insurances")
-    @classmethod
-    def _check_insurances(cls, value: list[str] | None) -> list[str] | None:
-        if value is None:
-            return None
-        cleaned = [v.strip() for v in value if v and v.strip()]
-        if len(cleaned) > 50:
-            raise ValueError("at most 50 insurance names allowed")
-        return cleaned
 
     @field_validator("initial_flows")
     @classmethod
@@ -314,7 +312,6 @@ class TenantConfigRead(BaseModel):
     appointment_types: list
     initial_flows: dict
     address: dict | None
-    insurances: list[str]
     collect_insurance: bool
     is_active: bool
     # True when a Google Calendar refresh token is stored for this tenant.

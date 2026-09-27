@@ -3,10 +3,22 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Index, Integer, String, Text, func, text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from secretaria.core.database import Base
+from secretaria.models.insurance import INSURANCE_MODES
 
 
 class Tenant(Base):
@@ -32,6 +44,12 @@ class Tenant(Base):
             unique=True,
             postgresql_where=text("phone_number_id IS NOT NULL"),
             sqlite_where=text("phone_number_id IS NOT NULL"),
+        ),
+        CheckConstraint(
+            "insurance_mode IS NULL OR insurance_mode IN ("
+            + ", ".join(f"'{mode}'" for mode in INSURANCE_MODES)
+            + ")",
+            name="ck_tenants_insurance_mode",
         ),
     )
 
@@ -200,5 +218,18 @@ class Tenant(Base):
     collect_insurance: Mapped[bool] = mapped_column(
         Boolean, server_default=text("false"), default=False
     )
+    # TASK-008 §3.1: which of the three convênio-acceptance topologies this
+    # clinic uses - "shared" (every doctor accepts every clinic plan),
+    # "clinic_with_exceptions" (doctors may opt out of clinic plans, default
+    # is to accept all of them), "independent" (each doctor keeps their own
+    # list, drawn from the WHOLE global catalog, not a clinic subset).
+    # NULL = not chosen yet, DELIBERATELY with no default: the owner's
+    # explicit decision (2026-09-26) is that no tenant - new or already
+    # migrated by TASK-006 - gets a mode assigned for it. While NULL, the
+    # booking flow skips the convênio question entirely
+    # (services/flow_router.py::_insurance_step_skip_reason), the same path an
+    # empty catalog already took. See
+    # services/tenant_config.py::insurance_mode_configured.
+    insurance_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

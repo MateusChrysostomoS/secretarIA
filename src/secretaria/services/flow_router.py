@@ -136,6 +136,11 @@ INSURANCE_ACCEPTED_MARK = f"{EMOJI_AFFIRMATIVE} Aceita seu convênio"
 # plan a patient picked.
 INSURANCE_SKIP_DISABLED = "disabled"
 INSURANCE_SKIP_EMPTY_CATALOG = "empty_catalog"
+# TASK-008: the clinic has not chosen one of the three acceptance modes yet
+# (services/tenant_config.py::insurance_mode_configured). Same effective
+# behaviour as an empty catalog - the owner's explicit decision is that this
+# case gets NO default, ever (SPEC §2).
+INSURANCE_SKIP_NO_MODE = "no_mode"
 
 # WhatsApp caps interactive lists at 10 rows. Professionals beyond the cap are
 # dropped (with a warning) — pagination is out of scope this round. Insurance
@@ -1700,10 +1705,28 @@ def _selected_plan(tenant: Tenant, insurance: str | None) -> dict | None:
 
 
 def _accepts_plan(tenant: Tenant, professional: Any, plan_id: str) -> bool:
-    accepted = (getattr(tenant, "insurance_accepted_by", None) or {}).get(
-        str(professional.id), ()
-    )
-    return plan_id in accepted
+    """TASK-008 §4.2: who counts as accepting a plan depends on `insurance_mode`.
+
+    `shared` - every active professional accepts every clinic plan; no
+    per-doctor row is ever consulted. `clinic_with_exceptions` - the doctor's
+    own row if they have customized (`Professional.insurance_plans_customized`
+    - absent from `insurance_accepted_by` means "never customized", which
+    inherits ALL clinic plans, per the owner's TASK-008 decision, SPEC §2).
+    `independent` - only the doctor's own row decides, with NO clinic-wide
+    inheritance (there is no clinic list for this mode to inherit from).
+    `None` (mode not chosen yet, or a legacy bare `Tenant` that predates the
+    mode column) preserves TASK-006's ORIGINAL default instead: a doctor who
+    never took a plan explicitly does not accept it - this decision is not
+    reopened, only scoped down to the one mode that changes it.
+    """
+    mode = getattr(tenant, "insurance_mode", None)
+    if mode == "shared":
+        return True
+    accepted_by = getattr(tenant, "insurance_accepted_by", None) or {}
+    professional_id = str(professional.id)
+    if professional_id in accepted_by:
+        return plan_id in accepted_by[professional_id]
+    return mode == "clinic_with_exceptions"
 
 
 def _professional_rows(
@@ -2134,6 +2157,8 @@ def _insurance_step_skip_reason(tenant: Tenant) -> str | None:
     """
     if not bool(getattr(tenant, "collect_insurance", False)):
         return INSURANCE_SKIP_DISABLED
+    if getattr(tenant, "insurance_mode", None) is None:
+        return INSURANCE_SKIP_NO_MODE
     if not _tenant_insurances(tenant):
         return INSURANCE_SKIP_EMPTY_CATALOG
     return None
@@ -3436,12 +3461,19 @@ async def _handle_confirmation(
     # (stored above as `google_event_link`, and the right link for the clinic)
     # would open a permission error for the patient. See
     # services/calendar.py::build_patient_calendar_link.
+    # TASK-008 §4.3: a custom "Outro" convênio carries its own payment
+    # explanation, shown here right after the patient chose it. Catalog plans
+    # have no patient-facing note (`mechanism`/`note` there are internal
+    # metadata, never product copy - see models/insurance.py).
+    plan = _selected_plan(tenant, insurance)
+    payment_note = str(plan["note"]).strip() if plan and plan.get("note") else None
     confirmation = (
         "Pronto! Seu agendamento está confirmado. ✅\n\n"
         f"{service_type}\n{_attendee_line(conversation)}"
         f"{start.strftime('%d/%m/%Y às %H:%M')}\n\n"
         "Adicionar à sua agenda:\n"
         f"{build_patient_calendar_link(start, end, summary, tz=calendar.tzinfo)}"
+        + (f"\n\n💳 Sobre o pagamento do convênio:\n{payment_note}" if payment_note else "")
     )
     return FlowRouterResult(
         action="reply",
