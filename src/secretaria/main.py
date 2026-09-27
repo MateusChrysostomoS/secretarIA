@@ -20,7 +20,7 @@ from secretaria.api import (
     webhook,
     webhook_asaas,
 )
-from secretaria.api.admin import panel, tenants
+from secretaria.api.admin import insurance as admin_insurance, panel, tenants
 from secretaria.api.hub import (
     analytics,
     calendar,
@@ -112,6 +112,8 @@ def create_app() -> FastAPI:
     app.include_router(panel.router, tags=["admin"])
     # Admin fleet view: list tenants + per-tenant Google Calendar health (router self-tags).
     app.include_router(tenants.router)
+    # Admin: extend the global convênio catalog without a code migration.
+    app.include_router(admin_insurance.router, tags=["admin"])
     # Doctor hub: tenant config + Google Calendar OAuth onboarding + calendar actions.
     app.include_router(config.router)
     app.include_router(oauth.router)

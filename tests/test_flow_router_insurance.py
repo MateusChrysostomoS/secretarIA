@@ -30,6 +30,7 @@ from secretaria.services import flow_router  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
     INSURANCE_SKIP_DISABLED,
     INSURANCE_SKIP_EMPTY_CATALOG,
+    INSURANCE_SKIP_NO_MODE,
     LABEL_INSURANCE_OTHER,
     LABEL_INSURANCE_PARTICULAR,
     STEP_AWAITING_CONFIRMATION,
@@ -44,7 +45,14 @@ _SERVICE = "Consulta Geral"
 _TZ = ZoneInfo("America/Sao_Paulo")
 
 
-def _tenant(collect_insurance=False, insurances=None):
+def _tenant(collect_insurance=False, insurances=None, insurance_mode="shared"):
+    """TASK-008: `insurance_mode` must be non-None or the step is skipped
+    outright (SPEC §2). This file predates the mode column and tests the
+    legacy `Tenant.insurances`-fallback path (no `insurance_plans`/
+    `insurance_accepted_by` on these snapshots at all), which is mode-agnostic
+    beyond the skip check - `"shared"` is the default only because it needs no
+    per-professional acceptance data to mark anyone.
+    """
     return SimpleNamespace(
         initial_flows={"buttons": ["Serviços e Custo", "Horários", "Outro"]},
         appointment_types=[
@@ -53,6 +61,7 @@ def _tenant(collect_insurance=False, insurances=None):
         appointment_duration_min=30,
         business_hours={"monday": [{"start": "08:00", "end": "12:00"}]},
         collect_insurance=collect_insurance,
+        insurance_mode=insurance_mode,
         insurances=insurances,
     )
 
@@ -170,6 +179,12 @@ def test_skip_reason_names_which_configuration_silenced_the_step():
     assert (
         flow_router._insurance_step_skip_reason(_tenant(collect_insurance=False))
         == INSURANCE_SKIP_DISABLED
+    )
+    assert (
+        flow_router._insurance_step_skip_reason(
+            _tenant(collect_insurance=True, insurance_mode=None)
+        )
+        == INSURANCE_SKIP_NO_MODE
     )
     assert (
         flow_router._insurance_step_skip_reason(_tenant(collect_insurance=True, insurances=[]))

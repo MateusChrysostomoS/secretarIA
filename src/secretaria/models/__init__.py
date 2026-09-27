@@ -17,7 +17,10 @@ from secretaria.models.consent_event import ConsentEvent
 from secretaria.models.conversation import Conversation, FlowState, HandoverState
 from secretaria.models.conversation_pii_token_map import ConversationPiiTokenMap
 from secretaria.models.insurance import (
+    INSURANCE_MECHANISMS,
+    INSURANCE_MODES,
     InsuranceCatalog,
+    InsuranceCatalogUnmatched,
     ProfessionalInsurancePlan,
     TenantInsurancePlan,
 )
@@ -37,6 +40,8 @@ from secretaria.models.unit import Unit
 __all__ = [
     "LIVE_APPOINTMENT_STATUSES",
     "TERMINAL_APPOINTMENT_STATUSES",
+    "INSURANCE_MECHANISMS",
+    "INSURANCE_MODES",
     "AnalyticsEvent",
     "Appointment",
     "AppointmentStatus",
@@ -48,6 +53,7 @@ __all__ = [
     "FlowState",
     "HandoverState",
     "InsuranceCatalog",
+    "InsuranceCatalogUnmatched",
     "Message",
     "MessageDirection",
     "MessageSender",

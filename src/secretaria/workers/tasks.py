@@ -183,7 +183,7 @@ from secretaria.services.handover import HandoverManager
 from secretaria.services.insurance_catalog import (
     TenantInsurance,
     load_tenant_insurance,
-    resolve_tenant_plan_id,
+    resolve_booking_plan_ids,
 )
 from secretaria.services.message_status import apply_whatsapp_statuses
 from secretaria.services.patient_context import (
@@ -1982,6 +1982,7 @@ def _flow_tenant_snapshot(
         appointment_duration_min=tenant.appointment_duration_min,
         business_hours=business_hours,
         collect_insurance=tenant.collect_insurance,
+        insurance_mode=getattr(tenant, "insurance_mode", None),
         insurances=tenant.insurances,
         insurance_plans=insurance.plans if insurance is not None else None,
         insurance_accepted_by=insurance.accepted_by if insurance is not None else {},
@@ -4816,18 +4817,26 @@ async def _apply_flow_result(
                             booking_patient = await session.get(Patient, conv.patient_id)
                             if booking_patient is not None:
                                 booking_phone = booking_patient.wa_id
+                        booking_insurance_plan_id, booking_insurance_professional_plan_id = (
+                            await resolve_booking_plan_ids(
+                                session,
+                                conv.tenant_id,
+                                result.appointment.get("insurance"),
+                                result.appointment.get("professional_id"),
+                            )
+                        )
                         booked_appointment = Appointment(
                             tenant_id=conv.tenant_id,
                             patient_id=conv.patient_id,
                             conversation_id=conv.id,
                             phone=booking_phone,
                             status=AppointmentStatus.SCHEDULED,
-                            # The clinic plan the convênio text names, by id,
-                            # for the Pix-deposit guard (None for Particular /
-                            # a typed plan / no answer).
-                            insurance_plan_id=await resolve_tenant_plan_id(
-                                session, conv.tenant_id, result.appointment.get("insurance")
-                            ),
+                            # The clinic (or, in independent mode, the
+                            # professional's own) plan the convênio text names,
+                            # by id, for the Pix-deposit guard (both None for
+                            # Particular / a typed plan / no answer).
+                            insurance_plan_id=booking_insurance_plan_id,
+                            insurance_professional_plan_id=booking_insurance_professional_plan_id,
                             **result.appointment,
                         )
                         session.add(booked_appointment)
@@ -5553,8 +5562,11 @@ async def _promote_booking_hold(
     try:
         async with async_session_factory() as session:
             async with session.begin():
-                appointment.insurance_plan_id = await resolve_tenant_plan_id(
-                    session, tenant.id, held.insurance
+                (
+                    appointment.insurance_plan_id,
+                    appointment.insurance_professional_plan_id,
+                ) = await resolve_booking_plan_ids(
+                    session, tenant.id, held.insurance, held.professional_id
                 )
                 session.add(appointment)
     except Exception as exc:

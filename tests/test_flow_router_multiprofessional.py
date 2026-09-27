@@ -61,7 +61,12 @@ from secretaria.services.flow_router import (  # noqa: E402
 _TZ = ZoneInfo("America/Sao_Paulo")
 
 
-def _tenant(collect_insurance=False, insurances=None):
+def _tenant(collect_insurance=False, insurances=None, insurance_mode="shared"):
+    # TASK-008: `insurance_mode` must be non-None or the convênio step is
+    # skipped outright (SPEC §2). This file predates the mode column and tests
+    # the legacy `Tenant.insurances` fallback path - `"shared"` needs no
+    # per-professional acceptance data, matching what these snapshots already
+    # provide.
     return SimpleNamespace(
         initial_flows={
             "enabled": True,
@@ -79,6 +84,7 @@ def _tenant(collect_insurance=False, insurances=None):
         appointment_duration_min=30,
         business_hours={"monday": [{"start": "08:00", "end": "12:00"}]},
         collect_insurance=collect_insurance,
+        insurance_mode=insurance_mode,
         insurances=insurances,
     )
 

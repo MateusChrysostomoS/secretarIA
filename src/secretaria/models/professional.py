@@ -78,4 +78,18 @@ class Professional(Base):
     # Resolved by services/tenant_config.professional_appointment_types.
     appointment_types: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
+    # TASK-008 (`clinic_with_exceptions` insurance mode): False = this doctor
+    # has never saved their own convênio subset, so they implicitly accept
+    # EVERY plan the clinic enables (owner's decision, SPEC §2 - "nunca
+    # 'nenhum' por omissão"). True = the doctor has saved at least once via
+    # PUT /tenants/me/professionals/{id}/insurance-plans, even if that save
+    # ended with an explicitly empty set - which is the one state that having
+    # zero rows in `professional_insurance_plans` cannot distinguish from
+    # "never touched it" on its own. Never reset once true. Irrelevant for
+    # `shared` (nobody customizes) and `independent` (every doctor always has
+    # their own explicit list) modes.
+    insurance_plans_customized: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false"), default=False
+    )
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

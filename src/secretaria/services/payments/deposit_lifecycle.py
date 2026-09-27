@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.logging import get_logger
 from secretaria.models import Appointment, AppointmentStatus, Patient, Professional, Tenant
-from secretaria.models.insurance import TenantInsurancePlan
+from secretaria.models.insurance import ProfessionalInsurancePlan, TenantInsurancePlan
 from secretaria.models.pix_deposit import PixDeposit, PixDepositStatus
 from secretaria.models.processed_asaas_event import ProcessedAsaasEvent
 from secretaria.services import tenant_config as cfg
@@ -170,7 +170,11 @@ async def _price_text_for_appointment(
 
 
 def _deposit_request_text(
-    tenant: Tenant, appointment: Appointment, amount_cents: int, copy_paste: str | None
+    tenant: Tenant,
+    appointment: Appointment,
+    amount_cents: int,
+    copy_paste: str | None,
+    payment_note: str | None = None,
 ) -> str:
     appt_type = appointment.appointment_type or "sua consulta"
     lines = [
@@ -182,7 +186,35 @@ def _deposit_request_text(
         lines.append(copy_paste)
     lines.append("Sua reserva fica garantida assim que o pagamento for confirmado.")
     lines.append("O código Pix vence ainda hoje.")
+    if payment_note:
+        # TASK-008 §4.3: a custom "Outro" convênio's payment explanation,
+        # repeated here (it already appeared once at booking confirmation) so
+        # it is not buried in an earlier message by the time the Pix ask
+        # arrives.
+        lines.append("")
+        lines.append(f"💳 Sobre o pagamento do convênio:\n{payment_note}")
     return "\n".join(lines)
+
+
+async def _insurance_payment_note(session: AsyncSession, appointment: Appointment) -> str | None:
+    """`custom_payment_note` of whichever custom "Outro" plan this booking used.
+
+    None for a catalog-backed plan (its `note` is internal metadata, never
+    patient-facing copy) or no plan at all.
+    """
+    professional_plan_id = getattr(appointment, "insurance_professional_plan_id", None)
+    if professional_plan_id is not None:
+        return await session.scalar(
+            select(ProfessionalInsurancePlan.custom_payment_note).where(
+                ProfessionalInsurancePlan.id == professional_plan_id
+            )
+        )
+    plan_id = getattr(appointment, "insurance_plan_id", None)
+    if plan_id is None:
+        return None
+    return await session.scalar(
+        select(TenantInsurancePlan.custom_payment_note).where(TenantInsurancePlan.id == plan_id)
+    )
 
 
 async def _send_deposit_request(
@@ -196,28 +228,42 @@ async def _send_deposit_request(
 ) -> None:
     token = waba_token if waba_token is not None else await cfg.get_waba_token(session, tenant.id)
     client = WhatsAppClient.for_tenant(tenant, token)
-    text = _deposit_request_text(tenant, appointment, amount_cents, copy_paste)
+    payment_note = await _insurance_payment_note(session, appointment)
+    text = _deposit_request_text(tenant, appointment, amount_cents, copy_paste, payment_note)
     await client.send_text_message(to=patient.wa_id, body=text)
 
 
 async def _insurance_charges_deposit(
     session: AsyncSession, tenant: Tenant, appointment: Appointment
 ) -> bool:
-    """False only when the booking's plan is one this clinic flagged "no deposit".
+    """False only when the booking's plan is one flagged "no deposit".
 
-    Reads `appointment.insurance_plan_id` (set once, when the row was created)
-    BY ID - never re-matching the free-text `insurance`. No plan id
+    Reads the plan BY ID - never re-matching the free-text `insurance`. TASK-008:
+    checks `insurance_professional_plan_id` FIRST (set only under
+    `insurance_mode == "independent"`, where there is no clinic-level
+    `tenant_insurance_plans` row to read `charge_deposit` from at all), then
+    falls back to the pre-existing `insurance_plan_id` (the clinic's own row,
+    catalog-backed or custom - both read the SAME column, since TASK-008
+    re-pointed this FK at `tenant_insurance_plans.id`). No plan id at all
     ("Particular", a typed "Outro convênio", no answer, every row older than
-    the catalog) or a plan the clinic no longer accepts -> True: the tenant's
-    own pix_deposit_* policy decides, exactly as before the catalog existed.
+    the catalog) -> True: the tenant's own pix_deposit_* policy decides,
+    exactly as before the catalog existed.
     """
+    professional_plan_id = getattr(appointment, "insurance_professional_plan_id", None)
+    if professional_plan_id is not None:
+        charge = await session.scalar(
+            select(ProfessionalInsurancePlan.charge_deposit).where(
+                ProfessionalInsurancePlan.id == professional_plan_id
+            )
+        )
+        return charge is not False
     plan_id = getattr(appointment, "insurance_plan_id", None)
     if plan_id is None:
         return True
     charge = await session.scalar(
         select(TenantInsurancePlan.charge_deposit).where(
+            TenantInsurancePlan.id == plan_id,
             TenantInsurancePlan.tenant_id == tenant.id,
-            TenantInsurancePlan.catalog_id == plan_id,
         )
     )
     return charge is not False

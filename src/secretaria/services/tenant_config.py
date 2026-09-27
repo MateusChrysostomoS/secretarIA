@@ -154,6 +154,18 @@ def active_business_hours(tenant: Tenant) -> dict:
 # instead of each re-deriving `is None` and drifting apart.
 
 
+def insurance_mode_configured(tenant: Tenant) -> bool:
+    """True once the clinic picked one of the three convênio-acceptance modes.
+
+    Shared by the hub (blocks the convênio config sections until a mode is
+    chosen — TASK-008 §3.1) and services/flow_router.py (skips the booking
+    flow's convênio question the same way an empty catalog does today). NEVER
+    defaults `insurance_mode` to a value — the owner's explicit decision is
+    that no tenant, new or already migrated, gets one assigned silently.
+    """
+    return getattr(tenant, "insurance_mode", None) is not None
+
+
 def professional_inherits_business_hours(professional: Professional) -> bool:
     """True when this professional has no hours of their own (NULL = inherit)."""
     return professional.business_hours is None
