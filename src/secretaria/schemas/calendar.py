@@ -10,6 +10,42 @@ from pydantic import BaseModel, Field
 from secretaria.models.appointment import AppointmentStatus
 
 
+class CalendarInsurancePlanRead(BaseModel):
+    """The convênio plan an appointment resolved to, as the agenda shows it.
+
+    Deliberately three fields. `id` is the ROW the booking pointed at: a
+    `tenant_insurance_plans.id` (shared / clinic_with_exceptions modes) or, in
+    `independent` mode, a `professional_insurance_plans.id`. `charge_deposit` is
+    that row's own flag - a clinic policy for the plan, NOT proof that a Pix
+    deposit was charged (that also needs the Pix add-on, a readable price and an
+    Asaas key). The clinic's payment note and the catalog metadata stay out.
+    """
+
+    id: str
+    name: str
+    charge_deposit: bool
+
+
+class CalendarDepositRead(BaseModel):
+    """The Pix deposit (sinal) of an appointment, as the agenda shows it.
+
+    Deliberately two fields, both read straight from `pix_deposits`:
+    `status` is the VALUE of `models/pix_deposit.py::PixDepositStatus`
+    ("aguardando_sinal", "confirmado_pago", "expirado", ...) and `amount_cents`
+    the charge. It is the STATE OF THE MONEY, not of the appointment: today a
+    paid deposit does not change `Appointment.status`, so nothing here may be
+    read as "the consultation is confirmed". The Pix copy-paste payload, the
+    Asaas payment id, the patient and the dates stay out. `status` is a plain
+    string, not an enum, so a status added later never breaks this wire.
+    """
+
+    status: str
+    amount_cents: int
+    # Deliberately NOT here yet: spec F (2026-09-29, section 10A.5) adds a third,
+    # additive key `needs_attention: bool` in TASK-017. Until then the wire is these
+    # two keys, and a consumer must ignore any key it does not know.
+
+
 class CalendarEventRead(BaseModel):
     """A Google Calendar event as returned by the agenda view.
 
@@ -34,6 +70,19 @@ class CalendarEventRead(BaseModel):
     start: str
     end: str
     appointment_id: str | None = None
+    # Convênio the patient chose ("Unimed", "Particular", or free text), trimmed;
+    # None when the appointment has none or the event has no local Appointment.
+    insurance: str | None = None
+    # The plan row that label resolved to at booking time; None for "Particular",
+    # a typed "Outro convênio", rows older than the catalog, a plan since removed,
+    # and any id that does not belong to THIS clinic. Additive: every existing
+    # consumer of this wire keeps working with the two new keys ignored.
+    insurance_plan: CalendarInsurancePlanRead | None = None
+    # The deposit row of this appointment (models/pix_deposit.py); None when it has
+    # none: no local Appointment, a manual booking (the hub create route never
+    # asks for a deposit), a clinic/plan without deposit, or a charge that could
+    # not be created. The backend does not tell those apart and neither does the UI.
+    deposit: CalendarDepositRead | None = None
 
 
 class AppointmentCreate(BaseModel):
