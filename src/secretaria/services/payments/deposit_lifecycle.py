@@ -17,6 +17,8 @@ a real network in a test run.
 """
 
 import hmac
+from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -105,6 +107,43 @@ async def get_deposit_for_appointment(
     return await session.scalar(
         select(PixDeposit).where(PixDeposit.appointment_id == appointment_id)
     )
+
+
+@dataclass(frozen=True)
+class AppointmentDepositView:
+    """What the agenda may know about an appointment's deposit: the state of the
+    money and its amount. Never the Pix payload, the Asaas id or the patient."""
+
+    status: PixDepositStatus
+    amount_cents: int
+
+
+async def load_deposit_views(
+    session: AsyncSession, tenant_id: UUID, appointment_ids: Iterable[UUID | None]
+) -> dict[UUID, AppointmentDepositView]:
+    """The deposit state of a whole page of appointments in ONE query.
+
+    Read-only sibling of `get_deposit_for_appointment` for list endpoints (which
+    must not do a lookup per row). `tenant_id` is in the WHERE: a deposit row of
+    another clinic never comes back, whatever ids the caller passes. Appointments
+    without a deposit are simply absent from the result; no ids (or only None) means
+    no query. A charge with no appointment yet (the `before`-mode hold of spec F)
+    can never match an id here. Selects three columns on purpose - the Pix
+    copy-paste payload stays in the DB.
+    """
+    ids = {i for i in appointment_ids if i is not None}
+    if not ids:
+        return {}
+    rows = await session.execute(
+        select(PixDeposit.appointment_id, PixDeposit.status, PixDeposit.amount_cents).where(
+            PixDeposit.tenant_id == tenant_id,
+            PixDeposit.appointment_id.in_(ids),
+        )
+    )
+    return {
+        appointment_id: AppointmentDepositView(status=status, amount_cents=amount_cents)
+        for appointment_id, status, amount_cents in rows.all()
+    }
 
 
 # --------------------------------------------------------------------------

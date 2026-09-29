@@ -992,3 +992,119 @@ async def reconcile_unmatched_insurances(
             resolved_count=resolved,
         )
     return resolved
+
+
+# ---------------------------------------------------------------------------
+# Agenda read model (TASK-014 / spec TASK E): which plan did each booking use?
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AppointmentPlan:
+    """One convênio row as the agenda shows it: an identity, a name, a flag.
+
+    Never carries `custom_payment_note` or catalog metadata - the read model is
+    the wrong place to widen what leaves the clinic's own screen.
+    """
+
+    id: UUID
+    name: str
+    charge_deposit: bool
+
+
+@dataclass(frozen=True)
+class AppointmentPlanLookup:
+    """Resolved plan rows for one page of appointments, keyed by row id."""
+
+    tenant: dict[UUID, AppointmentPlan] = field(default_factory=dict)
+    professional: dict[UUID, AppointmentPlan] = field(default_factory=dict)
+
+    def resolve(
+        self, tenant_plan_id: UUID | None, professional_plan_id: UUID | None
+    ) -> AppointmentPlan | None:
+        """The plan one appointment points at, or None.
+
+        Same precedence as `deposit_lifecycle._insurance_charges_deposit`: a
+        professional row (only ever set under `independent` mode) decides ALONE.
+        If it does not resolve (another clinic's id, a doctor row that carries no
+        name of its own) the answer is None - it never falls back to the clinic
+        row, or the agenda and the deposit guard would name different plans.
+        """
+        if professional_plan_id is not None:
+            return self.professional.get(professional_plan_id)
+        if tenant_plan_id is not None:
+            return self.tenant.get(tenant_plan_id)
+        return None
+
+
+def _plan_from_row(
+    plan_id: UUID, charge_deposit: bool | None, custom_name: str | None, catalog_name: str | None
+) -> AppointmentPlan | None:
+    name = (catalog_name or custom_name or "").strip()
+    if not name:
+        return None
+    # `is not False`: same reading as the deposit guard - only an explicit false waives.
+    return AppointmentPlan(id=plan_id, name=name, charge_deposit=charge_deposit is not False)
+
+
+async def load_appointment_plans(
+    session: AsyncSession,
+    tenant_id: UUID,
+    *,
+    tenant_plan_ids: Iterable[UUID | None],
+    professional_plan_ids: Iterable[UUID | None],
+) -> AppointmentPlanLookup:
+    """Resolve every plan id of a page of appointments in at most TWO queries.
+
+    One per table, `IN (...)`, both filtered by `tenant_id`: a plan id that
+    belongs to another clinic (a forged or corrupted appointment row) is simply
+    absent from the result. No ids for a table means no query for that table.
+    """
+    clinic_ids = {i for i in tenant_plan_ids if i is not None}
+    doctor_ids = {i for i in professional_plan_ids if i is not None}
+
+    clinic: dict[UUID, AppointmentPlan] = {}
+    if clinic_ids:
+        rows = await session.execute(
+            select(
+                TenantInsurancePlan.id,
+                TenantInsurancePlan.charge_deposit,
+                TenantInsurancePlan.custom_name,
+                InsuranceCatalog.name,
+            )
+            .select_from(TenantInsurancePlan)
+            .outerjoin(InsuranceCatalog, InsuranceCatalog.id == TenantInsurancePlan.catalog_id)
+            .where(
+                TenantInsurancePlan.tenant_id == tenant_id,
+                TenantInsurancePlan.id.in_(clinic_ids),
+            )
+        )
+        for plan_id, charge, custom_name, catalog_name in rows.all():
+            resolved = _plan_from_row(plan_id, charge, custom_name, catalog_name)
+            if resolved is not None:
+                clinic[plan_id] = resolved
+
+    doctor: dict[UUID, AppointmentPlan] = {}
+    if doctor_ids:
+        rows = await session.execute(
+            select(
+                ProfessionalInsurancePlan.id,
+                ProfessionalInsurancePlan.charge_deposit,
+                ProfessionalInsurancePlan.custom_name,
+                InsuranceCatalog.name,
+            )
+            .select_from(ProfessionalInsurancePlan)
+            .outerjoin(
+                InsuranceCatalog, InsuranceCatalog.id == ProfessionalInsurancePlan.catalog_id
+            )
+            .where(
+                ProfessionalInsurancePlan.tenant_id == tenant_id,
+                ProfessionalInsurancePlan.id.in_(doctor_ids),
+            )
+        )
+        for plan_id, charge, custom_name, catalog_name in rows.all():
+            resolved = _plan_from_row(plan_id, charge, custom_name, catalog_name)
+            if resolved is not None:
+                doctor[plan_id] = resolved
+
+    return AppointmentPlanLookup(tenant=clinic, professional=doctor)
