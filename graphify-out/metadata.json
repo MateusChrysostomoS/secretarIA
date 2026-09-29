@@ -1,11 +1,11 @@
 ﻿{
     "metadata_schema":  "brain.graphify-metadata/v1",
     "repository":  "secretarIA",
-    "repository_path":  "C:\\TECH\\BRAIN\\secretarIA",
-    "branch":  "main",
-    "commit":  "7ae484d31d8510bc2d1e6d5ed75c42650074bd79",
-    "generated_at":  "2026-09-25T04:46:21.2286463Z",
+    "repository_path":  "C:\\TECH\\BRAIN-worktrees\\TASK-014\\secretarIA",
+    "branch":  "task/TASK-014-convenio-agenda",
+    "commit":  "bce3d5987befab6ecdf9549afee3b8020cc02781",
+    "generated_at":  "2026-09-29T21:02:01.2759198Z",
     "graphify_version":  "0.9.5",
     "graph_schema":  "networkx-node-link (unversioned upstream)",
-    "graph_sha256":  "0504c2acc0ed3ccb00d45c74b92b490231797d2ad06cb4e83ee55a4b8c019522"
+    "graph_sha256":  "0babc9cbab0331c1ffb9af81693eac385ddfa19ec8d402010cc99fa9397f449f"
 }

@@ -442,3 +442,82 @@ risco de ESCRITA:
   Mesma disciplina que `docs/CHECKPOINT_pix_deposit.md` e outras migrações aditivas deste repo já
   exigem — nada novo em espécie, só reforçando porque aqui o efeito de pular a ordem é um
   `IntegrityError` visível, não um bug silencioso.
+
+
+---
+
+# TASK-014 — Convênio e sinal na agenda (leitura)
+
+Branch `task/TASK-014-convenio-agenda` (worktree `C:\TECH\BRAIN-worktrees\TASK-014\secretarIA`), em
+cima de `main`. **BUILT, commit local, NÃO pushado, NÃO deployado, SEM migração.** Spec:
+`Brain-Message-Frontend/docs/superpowers/specs/2026-09-29-anamneses-compra-convenios-design.md` §8;
+plano: `Brain-Message-Frontend/docs/superpowers/plans/2026-09-29-task-e-convenio-agenda.md`.
+
+## 11.1 Contrato
+
+`GET /tenants/me/calendar/events?start=&end=` (auth do hub, `get_current_tenant`) devolve, por evento,
+TRÊS campos novos, todos opcionais e aditivos (consumidor que não os conhece os ignora):
+
+| Campo | Tipo | Significado |
+|---|---|---|
+| `insurance` | `string \| null` | Rótulo que o paciente escolheu/digitou (`appointments.insurance`), sem espaços nas pontas. `null` quando vazio, em branco ou quando o evento não tem `Appointment` local (evento digitado direto no Google, bloqueio). |
+| `insurance_plan` | `{id, name, charge_deposit} \| null` | A linha de plano a que o rótulo resolveu na criação da consulta. Exatamente 3 chaves. |
+| `deposit` | `{status, amount_cents} \| null` | A linha de `pix_deposits` da consulta (1 por consulta). `status` é o VALOR de `PixDepositStatus`: `aguardando_sinal`, `confirmado_pago`, `cancelado_reembolsado`, `cancelado_retido`, `no_show_retido`, `expirado`. Exatamente 2 chaves. `null` = a consulta não tem linha de sinal. |
+
+- `insurance_plan.id` é a linha usada: `tenant_insurance_plans.id` (modos `shared` /
+  `clinic_with_exceptions`) ou, no modo `independent`, `professional_insurance_plans.id`.
+- `insurance_plan.name` é o nome ATUAL da linha (nome do catálogo, ou `custom_name` do "Outro");
+  o rótulo antigo continua em `insurance`.
+- `charge_deposit` é a política do plano (`false` só quando a coluna é literalmente falsa). NÃO prova
+  que um Pix foi cobrado: isso também depende do add-on Pix, de preço legível e de chave Asaas
+  (`deposit_lifecycle.maybe_create_deposit`). O frontend redige o texto de acordo.
+- `insurance_plan = null` quando: "Particular", "Outro convênio" digitado, consulta anterior ao
+  catálogo, plano removido depois (FK `SET NULL`), ou id que não pertence à clínica autenticada.
+- Nunca vão para o fio: `custom_payment_note`, `mechanism`, `note`, slug do catálogo; do sinal, `pix_copy_paste`, `asaas_payment_id`, `patient_id`, `refunded_amount_cents` e datas.
+- `deposit.status` é o ESTADO DO DINHEIRO, não da consulta. Hoje (verificado em `main` 676814a): a consulta nasce `SCHEDULED` e o paciente já recebe "agendamento confirmado" na reserva (`flow_router.py:3471`); o sinal é criado depois, num hook best-effort (`maybe_create_deposit`); o pagamento só muda `pix_deposits.status` (`apply_asaas_event`), NÃO `Appointment.status`; a falta de pagamento só cancela a consulta quando o webhook do Asaas manda `PAYMENT_OVERDUE`/`PAYMENT_DELETED`. Quem consome NÃO pode ler `confirmado_pago` como "consulta confirmada".
+- **Compatibilidade com a TASK F** (spec `Brain-Message-Frontend/docs/superpowers/specs/2026-09-29-task-f-sinal-pix-confirmacao-design.md`): `status` continua sendo o valor de `pix_deposits.status` (os seis valores não mudam; a F acrescenta o eixo `fulfillment_status` e `appointment_id` NULLABLE, e o eixo NÃO vai ao fio). A TASK-017 acrescenta a 3ª chave aditiva `needs_attention: bool` (spec F §10A.5) e atualiza o teste de "2 chaves"; consumidor deve ignorar chave que não conhece e ocultar `status` que não conhece. Cobrança sem consulta (hold do modo `before`) nunca aparece em `deposit`; vai para uma lista separada `awaiting_payment` da F. Sem estorno automático (D15): `cancelado_reembolsado` continua existindo em dados antigos e, depois da F, só é gravado quando a clínica marca o item como devolvido no painel do provedor.
+- Símbolos protegidos contra a reestruturação da F1 (TASK-016): `deposit_lifecycle.AppointmentDepositView`, `deposit_lifecycle.load_deposit_views`, `insurance_catalog.AppointmentPlan`/`AppointmentPlanLookup`/`load_appointment_plans` e o teste `tests/test_calendar_events_insurance.py`.
+- `deposit = null` cobre casos que o backend não distingue: sem add-on/`pix_deposit_enabled`, convênio com `charge_deposit=false`, sem chave Asaas, preço ilegível, falha do Asaas, agendamento manual pela agenda (não enfileira o hook) e evento só do Google. O consumidor não deve inventar explicação para o `null`.
+
+## 11.2 Como resolve
+
+Mesma precedência do guarda do sinal (`deposit_lifecycle._insurance_charges_deposit`):
+`insurance_professional_plan_id` decide sozinho quando preenchido; senão `insurance_plan_id`. Uma
+linha de profissional que aponta para linha da clínica (`tenant_plan_id`, sem nome próprio) não
+resolve. Tudo em `services/insurance_catalog.py::load_appointment_plans`: no máximo 1 query em
+`tenant_insurance_plans` e 1 em `professional_insurance_plans` por página de eventos, ambas com
+`tenant_id`; zero query quando nenhum evento tem plano. O sinal vem de
+`deposit_lifecycle.load_deposit_views`: 1 query em `pix_deposits` (só `appointment_id`, `status`,
+`amount_cents`), com `tenant_id` no `WHERE`; zero query quando nenhum evento tem `Appointment` local.
+Nenhuma função que crie, expire ou mude sinal/consulta foi editada. `AppointmentRead` (respostas de escrita)
+não mudou.
+
+## 11.3 Testes
+
+`tests/test_calendar_events_insurance.py`: schema (8 chaves, plano com 3, sinal com 2), serviço de plano (catálogo,
+"Outro", `independent`, id de outra clínica, precedência, zero query, 1 query por tabela), serviço de sinal (os 6
+status reais, ausente, de outra clínica, zero query, `None` nos ids, 1 query, sem a coluna do Pix) e HTTP (os dois
+caminhos, nota de pagamento nunca no fio, rótulo em branco, evento só-Google, id forjado, consulta de
+outra clínica, plano removido/renomeado, os 6 status de sinal no fio, sem vazar Pix/Asaas, sinal de outra
+clínica, página mista sem N+1). Os testes de `/events` anteriores
+passam sem edição.
+
+## 11.4 Deploy (NÃO autorizado)
+
+Sem migração nova, mas a rota agora SELECIONA `insurance_plan_id` e `insurance_professional_plan_id` e LÊ
+`pix_deposits`: um banco sem a migração `d4f8a2c6e913` (ou sem `b06ff85998bf`, a do sinal) responderia 500 em `/events`. Vale a ordem da seção 10.10
+(migração → API → worker, junto com TASK-006/008). O worker não muda com esta tarefa. O
+Brain-Message-Frontend novo é seguro contra a API antiga (campos ausentes = nenhuma linha).
+
+## 11.5 Fora deste contrato (decisão do dono, 2026-09-29)
+
+"A consulta deve ser marcada e confirmada apenas após o pagamento do sinal" NÃO está implementada e NÃO faz parte
+desta tarefa: é a TASK F (spec aprovado `Brain-Message-Frontend/docs/superpowers/specs/2026-09-29-task-f-sinal-pix-confirmacao-design.md`,
+TASK-016 a TASK-019; abordagem A: hold + cobrança, SEM status novo de consulta, modo `before` opt-in por clínica).
+A evidência do que o código faz hoje está na seção "Fora deste plano" de
+`Brain-Message-Frontend/docs/superpowers/plans/2026-09-29-task-e-convenio-agenda.md`. Quando a F for executada,
+este contrato ganha `deposit.needs_attention` (aditivo) e uma lista separada `awaiting_payment`; `deposit.status` e
+`amount_cents` continuam válidos. Itens de atenção (pagamento pago sem consulta) aparecem só na tela inicial do Chat,
+nunca na agenda.
+
+Validation (2026-09-29): 44 new tests passed; full suite 2577 passed, 2 failed (same Google Calendar credential baseline: 2533 passed, 2 failed). Ruff check clean. Lifecycle diff: 39 added, 0 removed. Graphify update/diagnose: 8351 nodes, 19927 edges, zero duplicates/dangling endpoints, one incidental self-loop.
