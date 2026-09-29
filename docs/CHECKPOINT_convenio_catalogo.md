@@ -448,6 +448,12 @@ risco de ESCRITA:
 
 # TASK-014 — Convênio e sinal na agenda (leitura)
 
+**Atualização de integração (2026-09-29):** o dono autorizou merge e push; a TASK-014 entrou
+em `main` por fast-forward (`98371e7`), sem conflitos, com árvore idêntica à branch validada.
+Push de `main` autorizado nesta sessão; resultado remoto em `tasks/TASK-014/TASK.md`.
+Deploy será feito pelo dono. Nenhum deploy, SQL remoto ou migração executado nesta sessão.
+“NÃO pushado” abaixo descreve o estado histórico ao concluir a implementação.
+
 Branch `task/TASK-014-convenio-agenda` (worktree `C:\TECH\BRAIN-worktrees\TASK-014\secretarIA`), em
 cima de `main`. **BUILT, commit local, NÃO pushado, NÃO deployado, SEM migração.** Spec:
 `Brain-Message-Frontend/docs/superpowers/specs/2026-09-29-anamneses-compra-convenios-design.md` §8;
