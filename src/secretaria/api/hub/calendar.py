@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import Row, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.api.hub.deps import get_current_tenant
@@ -28,12 +28,15 @@ from secretaria.schemas.calendar import (
     AppointmentReschedule,
     AppointmentStatusUpdate,
     BlockCreate,
+    CalendarDepositRead,
     CalendarEventRead,
+    CalendarInsurancePlanRead,
     CancelPreviewRead,
 )
 from secretaria.services import cancellation_notice
 from secretaria.services.appointment_status import SOURCE_HUB, log_status_transition
 from secretaria.services.calendar import CalendarService
+from secretaria.services.insurance_catalog import AppointmentPlan, load_appointment_plans
 from secretaria.services.payments import deposit_lifecycle
 from secretaria.services.tenant_config import load_tenant_config
 
@@ -130,6 +133,28 @@ async def _professional_name(
 # ---------------------------------------------------------------------------
 
 
+def _insurance_label(value: str | None) -> str | None:
+    """The patient's own convênio answer, trimmed; blank means "no answer"."""
+    return (value or "").strip() or None
+
+
+def _insurance_plan_read(plan: AppointmentPlan | None) -> CalendarInsurancePlanRead | None:
+    if plan is None:
+        return None
+    return CalendarInsurancePlanRead(
+        id=str(plan.id), name=plan.name, charge_deposit=plan.charge_deposit
+    )
+
+
+def _deposit_read(
+    view: deposit_lifecycle.AppointmentDepositView | None,
+) -> CalendarDepositRead | None:
+    """The state of the money for the agenda (status VALUE + amount), or None."""
+    if view is None:
+        return None
+    return CalendarDepositRead(status=view.status.value, amount_cents=view.amount_cents)
+
+
 @router.get("/events", response_model=list[CalendarEventRead])
 async def list_events(
     start: datetime,
@@ -155,26 +180,61 @@ async def list_events(
     # and handing this doctor a working cancel button for someone else's
     # patient.
     google_ids = [e["id"] for e in events if e.get("id")]
-    local_ids: dict[str, str] = {}
+    booked: dict[str, Row] = {}
     if google_ids:
+        # The convênio columns ride along on the SAME single query: the plan
+        # ids are only needed to resolve names, never sent to the client.
         rows = await session.execute(
-            select(Appointment.google_event_id, Appointment.id).where(
+            select(
+                Appointment.google_event_id,
+                Appointment.id,
+                Appointment.insurance,
+                Appointment.insurance_plan_id,
+                Appointment.insurance_professional_plan_id,
+            ).where(
                 Appointment.tenant_id == tenant.id,
                 Appointment.google_event_id.in_(google_ids),
             )
         )
-        local_ids = {google_id: str(appt_id) for google_id, appt_id in rows.all()}
+        booked = {row.google_event_id: row for row in rows.all()}
 
-    return [
-        CalendarEventRead(
-            id=e["id"],
-            summary=e.get("summary"),
-            start=e["start"],
-            end=e["end"],
-            appointment_id=local_ids.get(e["id"]),
+    # At most ONE query per plan table for the whole page, both tenant-scoped
+    # (services/insurance_catalog.py::load_appointment_plans) - a plan id from
+    # another clinic never resolves, whatever the appointment row says.
+    plans = await load_appointment_plans(
+        session,
+        tenant.id,
+        tenant_plan_ids=[row.insurance_plan_id for row in booked.values()],
+        professional_plan_ids=[row.insurance_professional_plan_id for row in booked.values()],
+    )
+    # ONE query for the whole page's deposit state, also tenant-scoped: a
+    # pix_deposits row of another clinic never resolves. Read-only - nothing in
+    # the deposit lifecycle is touched by listing the agenda.
+    deposits = await deposit_lifecycle.load_deposit_views(
+        session, tenant.id, [row.id for row in booked.values()]
+    )
+
+    reads: list[CalendarEventRead] = []
+    for e in events:
+        row = booked.get(e["id"])
+        plan = (
+            plans.resolve(row.insurance_plan_id, row.insurance_professional_plan_id)
+            if row is not None
+            else None
         )
-        for e in events
-    ]
+        reads.append(
+            CalendarEventRead(
+                id=e["id"],
+                summary=e.get("summary"),
+                start=e["start"],
+                end=e["end"],
+                appointment_id=str(row.id) if row is not None else None,
+                insurance=_insurance_label(row.insurance) if row is not None else None,
+                insurance_plan=_insurance_plan_read(plan),
+                deposit=_deposit_read(deposits.get(row.id)) if row is not None else None,
+            )
+        )
+    return reads
 
 
 # ---------------------------------------------------------------------------
