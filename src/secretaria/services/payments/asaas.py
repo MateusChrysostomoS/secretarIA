@@ -1,5 +1,9 @@
 """Thin async client for the Asaas v3 API (Pix deposit charges).
 
+There is NO refund method (decision D15): the platform never returns money, on any
+provider. `services/payments/asaas_provider.py` is the wrapper the rest of the system uses;
+this module is only the wire.
+
 Each tenant supplies its OWN Asaas API key
 (`tenant_credentials.asaas_api_key_encrypted`, decrypted only by
 `services/tenant_config.get_asaas_api_key`): the CLINIC's own Asaas account
@@ -16,6 +20,8 @@ message or a log line — only the HTTP status and, best-effort, a short
 symbolic error `code` (never a free-text `description`/`message`, which may
 echo request data back).
 """
+
+from dataclasses import dataclass
 
 import httpx
 
@@ -56,6 +62,25 @@ def _extract_code_hint(response: httpx.Response) -> str | None:
     return code[:64] if isinstance(code, str) else None
 
 
+@dataclass(frozen=True)
+class ProbeResponse:
+    """The raw facts of one read-only permission probe: status, short symbolic error code,
+    whether the body was the expected JSON shape, and a parsed `Retry-After`. Never a body."""
+
+    status_code: int
+    code_hint: str | None
+    json_ok: bool
+    retry_after: float | None
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    raw = response.headers.get("Retry-After")
+    try:
+        return float(raw) if raw is not None else None
+    except ValueError:
+        return None
+
+
 class AsaasClient:
     """Async wrapper around the Asaas v3 REST API, scoped to ONE tenant's own API key."""
 
@@ -67,12 +92,16 @@ class AsaasClient:
         self._base_url = (base_url or settings.ASAAS_BASE_URL).rstrip("/")
         self._timeout = settings.ASAAS_TIMEOUT_SECONDS if timeout is None else timeout
 
-    async def _request(self, method: str, path: str, *, json: dict | None = None) -> dict:
+    async def _request(
+        self, method: str, path: str, *, json: dict | None = None, params: dict | None = None
+    ) -> dict:
         url = f"{self._base_url}{path}"
         headers = {"access_token": self._api_key, "Content-Type": "application/json"}
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             try:
-                response = await client.request(method, url, headers=headers, json=json)
+                response = await client.request(
+                    method, url, headers=headers, json=json, params=params
+                )
             except httpx.HTTPError as exc:
                 logger.error("asaas_connection_error", path=path, error_type=type(exc).__name__)
                 raise AsaasError(0, "connection_error") from exc
@@ -90,11 +119,19 @@ class AsaasClient:
             return {}
         return data if isinstance(data, dict) else {}
 
-    async def create_customer(self, name: str, mobile_phone: str | None) -> str:
-        """POST /customers -> the new (or Asaas-resolved) customer id."""
+    async def create_customer(
+        self, name: str, mobile_phone: str | None, cpf_cnpj: str | None = None
+    ) -> str:
+        """POST /customers -> the new (or Asaas-resolved) customer id.
+
+        `cpf_cnpj` (digits only) is sent when given: Asaas' reference lists it as required
+        for a customer. It is transient - never stored, never logged.
+        """
         body: dict = {"name": name}
         if mobile_phone:
             body["mobilePhone"] = mobile_phone
+        if cpf_cnpj:
+            body["cpfCnpj"] = cpf_cnpj
         data = await self._request("POST", "/customers", json=body)
         return str(data.get("id") or "")
 
@@ -124,14 +161,73 @@ class AsaasClient:
         """GET /payments/{id}/pixQrCode -> {payload, encodedImage, expirationDate, ...}."""
         return await self._request("GET", f"/payments/{payment_id}/pixQrCode")
 
-    async def refund_payment(self, payment_id: str, value_cents: int | None) -> dict:
-        """POST /payments/{id}/refund. `value_cents=None` omits "value" entirely
-        (Asaas refunds the payment in full); otherwise a partial refund amount."""
-        body: dict = {}
-        if value_cents is not None:
-            body["value"] = round(value_cents / 100, 2)
-        return await self._request("POST", f"/payments/{payment_id}/refund", json=body)
+    async def get_payment(self, payment_id: str) -> dict:
+        """GET /payments/{id} -> {id, status, value, externalReference, deleted, ...}."""
+        return await self._request("GET", f"/payments/{payment_id}")
 
     async def delete_payment(self, payment_id: str) -> dict:
         """DELETE /payments/{id} — voids an unpaid (AWAITING) charge."""
         return await self._request("DELETE", f"/payments/{payment_id}")
+
+    async def delete_customer(self, customer_id: str) -> dict:
+        """DELETE /customers/{id} — LGPD erasure of the clinic-side customer record."""
+        return await self._request("DELETE", f"/customers/{customer_id}")
+
+    # --- webhook management (the connection service registers the clinic's webhook) ---
+
+    async def create_webhook(self, body: dict) -> dict:
+        """POST /webhooks. The response carries the webhook `id`; the `authToken` we sent is
+        never read back from Asaas (it is only ever returned at creation)."""
+        return await self._request("POST", "/webhooks", json=body)
+
+    async def list_webhooks(self, limit: int = 100) -> dict:
+        """GET /webhooks -> {"data": [{id, url, enabled, interrupted, ...}], ...}."""
+        return await self._request("GET", "/webhooks", params={"limit": limit})
+
+    async def update_webhook(self, webhook_id: str, body: dict) -> dict:
+        """PUT /webhooks/{id} (re-enable a paused queue with {"interrupted": False})."""
+        return await self._request("PUT", f"/webhooks/{webhook_id}", json=body)
+
+    async def delete_webhook(self, webhook_id: str) -> dict:
+        return await self._request("DELETE", f"/webhooks/{webhook_id}")
+
+    async def probe(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        expect_list: bool = False,
+        timeout: float = 5.0,
+    ) -> ProbeResponse:
+        """One read-only permission probe (`limit=1`, empty body, 5 s timeout).
+
+        Unlike `_request`, an HTTP status is DATA here (403 `insufficient_permission` means
+        "this key lacks that permission"), so it never raises. Only the status, a short
+        symbolic error code and a JSON-shape flag survive: the response body is discarded.
+        """
+        url = f"{self._base_url}{path}"
+        headers = {"access_token": self._api_key}
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                response = await client.request(
+                    method, url, headers=headers, params={"limit": 1} if method == "GET" else None
+                )
+            except httpx.HTTPError as exc:
+                logger.warning("asaas_probe_connection_error", error_type=type(exc).__name__)
+                return ProbeResponse(0, "connection_error", False, None)
+
+        json_ok = False
+        if response.status_code == 200:
+            try:
+                data = response.json()
+            except ValueError:
+                data = None
+            json_ok = isinstance(data, dict) and (
+                not expect_list or isinstance(data.get("data"), list)
+            )
+        return ProbeResponse(
+            status_code=response.status_code,
+            code_hint=_extract_code_hint(response) if response.status_code >= 300 else None,
+            json_ok=json_ok,
+            retry_after=_retry_after(response),
+        )

@@ -11,8 +11,11 @@ locally.
 Contract (brain-api, already implemented, do not change): POST
 {BRAIN_API_BASE_URL}/internal/secretaria/hub-token/verify, header
 X-Internal-Api-Key: <INTERNAL_API_KEY>, body {"token": "<token>"}. 200 response:
-{"active": bool, "tenant_id": "<uuid>" | null}. "active" is the LIVE answer —
-token validity AND entitlement, in one call.
+{"active": bool, "tenant_id": "<uuid>" | null, ...}. "active" is the LIVE answer —
+token validity AND entitlement, in one call. Since TASK-020 the body may also carry the
+acting user's `role` (str), `is_owner` and `is_manager` (bool); they are OPTIONAL — an
+older brain-api omits them and the claim then has `role=None` (the role gates in
+api/hub/deps.py fail closed on that).
 
 Everything here FAILS CLOSED: any ambiguity (unconfigured settings, network
 error, timeout, bad response) returns None, which the caller (api/hub/deps.py)
@@ -58,10 +61,34 @@ class SubscriptionClaim:
         always carries a concrete tenant_id.
     active:    whether the subscription is currently active/trialing AND
         secretaria_enabled, as reported by brain-api.
+    role:      the acting user's role as brain-api reported it (`manager`, `doctor`,
+        `secretary`, ...), or None when the body carried no well-formed role (an older
+        brain-api, or a malformed value). None NEVER grants anything: the role gates
+        (api/hub/deps.py) refuse it with `role_claim_missing`.
+    is_owner / is_manager: the acting user's flags; only a real boolean True counts,
+        everything else reads as False.
     """
 
     tenant_id: UUID | None
     active: bool
+    role: str | None = None
+    is_owner: bool = False
+    is_manager: bool = False
+
+
+_MAX_ROLE_LENGTH = 32
+
+
+def _parse_role_claims(body: dict) -> tuple[str | None, bool, bool]:
+    """Read `(role, is_owner, is_manager)` from the introspection body, defensively.
+
+    A malformed value reads as absent/False — never an exception, never a guess: the role
+    must be a non-empty string of at most 32 characters, the flags must be the boolean
+    `True` itself (`"true"`, `1` and lists do not count). No case-folding or trimming.
+    """
+    raw_role = body.get("role")
+    role = raw_role if isinstance(raw_role, str) and 0 < len(raw_role) <= _MAX_ROLE_LENGTH else None
+    return role, body.get("is_owner") is True, body.get("is_manager") is True
 
 
 def _cache_key(token: str) -> str:
@@ -152,6 +179,13 @@ async def verify_subscription_token(token: str) -> SubscriptionClaim | None:
         logger.warning("subscription_verify_failed", reason="bad_tenant_id")
         return None
 
-    claim = SubscriptionClaim(tenant_id=tenant_id, active=True)
+    role, is_owner, is_manager = _parse_role_claims(body)
+    claim = SubscriptionClaim(
+        tenant_id=tenant_id,
+        active=True,
+        role=role,
+        is_owner=is_owner,
+        is_manager=is_manager,
+    )
     _cache_put(key, claim, settings.SUBSCRIPTION_CACHE_TTL_SECONDS)
     return claim

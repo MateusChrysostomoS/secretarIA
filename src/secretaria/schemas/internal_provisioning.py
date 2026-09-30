@@ -40,10 +40,16 @@ class WhatsappConnectionOut(BaseModel):
 
 
 class AsaasConnectionIn(BaseModel):
-    """POST /internal/tenants/{tenant_id}/asaas-connection body."""
+    """POST /internal/tenants/{tenant_id}/asaas-connection body.
 
-    api_key: str = Field(min_length=10)
-    webhook_token: str = Field(min_length=10)
+    Deliberately NO length constraints: a Pydantic validation error echoes the offending input,
+    and this field is a credential. The key is validated by the connection service (format,
+    then permission probes); `webhook_token` (32-255 chars) is optional - when absent the
+    platform generates the webhook `authToken` itself.
+    """
+
+    api_key: str
+    webhook_token: str | None = None
 
 
 class AsaasConnectionOut(BaseModel):

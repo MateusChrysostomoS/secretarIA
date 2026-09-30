@@ -1,5 +1,10 @@
 # CHECKPOINT — Pix deposit (sinal) add-on + appointment payment lifecycle
 
+> **Atualização 2026-09-29 (TASK-016):** os caminhos de estorno automático descritos abaixo
+> (`_refund`, `refunded`, `partial_refund`, `refund_failed`) foram REMOVIDOS: nenhum caminho devolve
+> dinheiro, o cancelamento com sinal pago vira um item de atenção para a clínica. O webhook global
+> `/webhooks/asaas` continua, agora sobre o núcleo novo. Ver `docs/CHECKPOINT_pix_provider_core.md`.
+
 **Status (2026-07-22): BUILT + fully tested (suite 1011 green), NOT deployed.**
 Migration `b06ff85998bf` pending deploy — the chain `32e87fcf926b` (post-consult) →
 `e51cd84e1959` (flow_managing_appointment_id) → `b06ff85998bf` (this feature) is ALL

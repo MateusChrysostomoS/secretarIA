@@ -414,7 +414,11 @@ async def cancel_appointment(
     # lifecycle sends no message itself (see its docstring); this endpoint
     # decides whether/how to notify via the existing custom_message path.
     deposit_outcome = await deposit_lifecycle.on_appointment_cancelled(
-        session, tenant=tenant, appointment=appt, waba_token=None
+        session,
+        tenant=tenant,
+        appointment=appt,
+        waba_token=None,
+        cancelled_by=deposit_lifecycle.CANCELLED_BY_CLINIC,
     )
     notice: str | None = None
     if deposit_outcome is not None:
@@ -553,7 +557,11 @@ async def update_appointment_status(
     deposit_outcome: str | None = None
     if body.status == AppointmentStatus.CANCELLED:
         deposit_outcome = await deposit_lifecycle.on_appointment_cancelled(
-            session, tenant=tenant, appointment=appt, waba_token=None
+            session,
+            tenant=tenant,
+            appointment=appt,
+            waba_token=None,
+            cancelled_by=deposit_lifecycle.CANCELLED_BY_CLINIC,
         )
     elif body.status == AppointmentStatus.NO_SHOW:
         deposit_outcome = await deposit_lifecycle.on_no_show(

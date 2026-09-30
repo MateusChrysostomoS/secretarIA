@@ -19,6 +19,7 @@ from secretaria.api import (
     internal_provisioning,
     webhook,
     webhook_asaas,
+    webhook_payments,
 )
 from secretaria.api.admin import insurance as admin_insurance, panel, tenants
 from secretaria.api.hub import (
@@ -28,6 +29,7 @@ from secretaria.api.hub import (
     conversations,
     insurance,
     oauth,
+    payment_accounts,
     professionals,
     services,
     units,
@@ -102,6 +104,9 @@ def create_app() -> FastAPI:
     # Asaas Pix-deposit payment webhook (fast-ACK; auth+processing happen in
     # the arq worker — see api/webhook_asaas.py's module docstring).
     app.include_router(webhook_asaas.router, tags=["webhook"])
+    # Per-clinic payment webhook (any provider): authenticated and PERSISTED before the 200,
+    # a deliberate payments-only exception to the fast-ACK rule - see api/webhook_payments.py.
+    app.include_router(webhook_payments.router, tags=["webhook"])
     # Internal-only service-to-service surface (brain-api -> appointments/patients),
     # guarded by X-Internal-Api-Key at the router level (self-tags "internal").
     app.include_router(internal.router)
@@ -125,6 +130,10 @@ def create_app() -> FastAPI:
     # The convênio catalog (global) + the clinic's plans + each doctor's plans;
     # same core-wiring rule as the service catalog (see api/hub/insurance.py).
     app.include_router(insurance.router)
+    # Payment provider connection (the clinic pastes its Asaas key ONCE; write-only, rate
+    # limited, never echoed - see api/hub/payment_accounts.py). Core wiring, not add-on gated:
+    # cancelling the Pix add-on must never lock a clinic out of disconnecting its key.
+    app.include_router(payment_accounts.router)
     # Addon CRUD: multi_professional / multi_unit (entitlement + limit gated
     # in the routers themselves; see api/hub/professionals.py, api/hub/units.py).
     app.include_router(professionals.router)

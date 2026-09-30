@@ -55,7 +55,7 @@ from secretaria.services.insurance_catalog import (  # noqa: E402
     set_tenant_plans,
     sync_legacy_insurances,
 )
-from secretaria.services.payments import deposit_lifecycle  # noqa: E402
+from secretaria.services.payments import asaas_provider, deposit_lifecycle  # noqa: E402
 
 UNIMED = catalog_id_for_slug("unimed")
 AMIL = catalog_id_for_slug("amil")
@@ -530,7 +530,7 @@ def skips(monkeypatch):
 @pytest.fixture
 def asaas(monkeypatch):
     client = _RecordingAsaas()
-    monkeypatch.setattr(deposit_lifecycle, "_asaas_client_for", lambda api_key: client)
+    monkeypatch.setattr(asaas_provider, "client_for", lambda api_key: client)
     return client
 
 

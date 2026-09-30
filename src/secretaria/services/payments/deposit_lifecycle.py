@@ -20,7 +20,7 @@ import hmac
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -28,16 +28,22 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.logging import get_logger
-from secretaria.models import Appointment, AppointmentStatus, Patient, Professional, Tenant
+from secretaria.models import Appointment, Patient, Professional, Tenant
+from secretaria.models.clinic_payment_account import PROVIDER_ASAAS
 from secretaria.models.insurance import ProfessionalInsurancePlan, TenantInsurancePlan
-from secretaria.models.pix_deposit import PixDeposit, PixDepositStatus
+from secretaria.models.payment_attention_item import (
+    REASON_PAID_THEN_CANCELLED,
+    REASON_REFUND_DUE_POLICY,
+    PaymentAttentionItem,
+)
+from secretaria.models.pix_deposit import DEPOSIT_TIMING_AFTER, PixDeposit, PixDepositStatus
 from secretaria.models.processed_asaas_event import ProcessedAsaasEvent
 from secretaria.services import tenant_config as cfg
-from secretaria.services.appointment_status import SOURCE_SYSTEM, log_status_transition
 from secretaria.services.booking_scope import canonical_service_name
 from secretaria.services.calendar import CalendarService
-from secretaria.services.payments.asaas import AsaasClient
+from secretaria.services.payments import accounts, attention, registry
 from secretaria.services.payments.money import format_brl, parse_brl_to_cents
+from secretaria.services.payments.provider import ChargeRequest, PaymentStatus, ProviderError
 from secretaria.services.service_catalog import load_service_catalog, service_by_name
 from secretaria.services.tenant_config import load_tenant_config
 from secretaria.services.whatsapp import WhatsAppClient
@@ -45,9 +51,15 @@ from secretaria.services.whatsapp import WhatsAppClient
 logger = get_logger(__name__)
 
 
-def _asaas_client_for(api_key: str) -> AsaasClient:
-    """Construction seam so tests can monkeypatch in a fake recording client."""
-    return AsaasClient(api_key)
+# The legacy route only ever receives these Asaas event names (anything else is a claimed no-op).
+_LEGACY_EVENT_STATUS = {
+    "PAYMENT_RECEIVED": PaymentStatus.PAID,
+    "PAYMENT_CONFIRMED": PaymentStatus.PAID,
+    "PAYMENT_OVERDUE": PaymentStatus.EXPIRED,
+    "PAYMENT_DELETED": PaymentStatus.EXPIRED,
+    "PAYMENT_REFUNDED": PaymentStatus.REFUNDED,
+    "PAYMENT_PARTIALLY_REFUNDED": PaymentStatus.REFUNDED,
+}
 
 
 def _tenant_tz(tenant: Tenant) -> ZoneInfo:
@@ -71,6 +83,8 @@ def _as_utc(dt: datetime) -> datetime:
 DEPOSIT_SKIP_DISABLED = "disabled"
 DEPOSIT_SKIP_NO_PATIENT = "no_patient"
 DEPOSIT_SKIP_NO_API_KEY = "no_api_key"
+# The clinic chose a provider that has no wrapper registered (yet).
+DEPOSIT_SKIP_NO_PROVIDER = "no_provider"
 DEPOSIT_SKIP_NO_SERVICE = "no_service"
 DEPOSIT_SKIP_UNPARSEABLE_PRICE = "unparseable_price"
 DEPOSIT_SKIP_ZERO_AMOUNT = "zero_amount"
@@ -338,8 +352,15 @@ async def maybe_create_deposit(
         _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_NO_PATIENT)
         return None
 
-    api_key = await cfg.get_asaas_api_key(session, tenant.id)
-    if not api_key:
+    provider_name = tenant.payment_provider or PROVIDER_ASAAS
+    provider = registry.find_provider(provider_name)
+    if provider is None:
+        _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_NO_PROVIDER)
+        return None
+    account = await accounts.load_charge_account(
+        session, tenant_id=tenant.id, provider=provider_name, timing="after"
+    )
+    if account is None:
         _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_NO_API_KEY)
         return None
 
@@ -362,64 +383,64 @@ async def maybe_create_deposit(
         _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_ZERO_AMOUNT)
         return None
 
-    client = _asaas_client_for(api_key)
-
-    try:
-        customer_id = patient.asaas_customer_id
-        if not customer_id:
-            customer_id = await client.create_customer(patient.name or "Paciente", patient.wa_id)
-            patient.asaas_customer_id = customer_id
-    except Exception as exc:
-        logger.warning(
-            "pix_deposit_customer_failed", error=str(exc), tenant_id=str(tenant.id)
-        )
-        return None
-
-    due_date = datetime.now(_tenant_tz(tenant)).date().isoformat()
+    # The reference we send the provider is the deposit's OWN id (not the appointment's:
+    # in `before` timing there is no appointment yet), generated up front so it is inside the
+    # charge from the first byte and comes back on every webhook and `get_charge`.
+    deposit_id = uuid4()
+    customer_id = await accounts.get_customer_id(
+        session, tenant_id=tenant.id, patient_id=patient.id, provider=provider_name
+    )
     description = f"Sinal - {appointment.appointment_type or 'consulta'} - {tenant.clinic_name}"
     try:
-        payment = await client.create_pix_payment(
-            customer_id, amount_cents, str(appointment.id), description[:255], due_date
+        created = await provider.create_pix_charge(
+            account,
+            ChargeRequest(
+                amount_cents=amount_cents,
+                external_reference=str(deposit_id),
+                description=description[:255],
+                due_date=datetime.now(_tenant_tz(tenant)).date(),
+                payer_name=patient.name or "Paciente",
+                payer_phone=patient.wa_id,
+                # The CPF is collected by the F2 flow (transiently, decision D7); F1 sends none.
+                provider_customer_id=customer_id,
+            ),
         )
     except Exception as exc:
         logger.warning(
-            "pix_deposit_payment_failed",
-            error=str(exc),
+            "pix_deposit_charge_failed",
+            code=exc.code if isinstance(exc, ProviderError) else type(exc).__name__,
             tenant_id=str(tenant.id),
             appointment_id=str(appointment.id),
         )
         return None
 
-    payment_id = payment.get("id")
-    if not payment_id:
-        logger.warning(
-            "pix_deposit_payment_missing_id",
-            tenant_id=str(tenant.id),
-            appointment_id=str(appointment.id),
+    if created.provider_customer_id and created.provider_customer_id != customer_id:
+        await accounts.remember_customer_id(
+            session,
+            tenant_id=tenant.id,
+            patient_id=patient.id,
+            provider=provider_name,
+            provider_customer_id=created.provider_customer_id,
         )
-        return None
-
-    copy_paste: str | None = None
-    try:
-        qr = await client.get_pix_qr(str(payment_id))
-        copy_paste = qr.get("payload")
-    except Exception as exc:
-        logger.warning(
-            "pix_deposit_qr_failed",
-            error=str(exc),
-            tenant_id=str(tenant.id),
-            appointment_id=str(appointment.id),
-        )
+    copy_paste = created.copy_paste
 
     deposit = PixDeposit(
+        id=deposit_id,
         tenant_id=tenant.id,
         appointment_id=appointment.id,
         patient_id=patient.id,
-        asaas_payment_id=str(payment_id),
+        provider=provider_name,
+        provider_charge_id=created.provider_charge_id,
+        # Dual-written until the "narrow" phase: pre-core readers key on this column.
+        asaas_payment_id=(
+            created.provider_charge_id if provider_name == PROVIDER_ASAAS else None
+        ),
+        external_reference=str(deposit_id),
         amount_cents=amount_cents,
         percent_applied=tenant.pix_deposit_percent,
         pix_copy_paste=copy_paste,
         status=PixDepositStatus.AWAITING,
+        deposit_timing=DEPOSIT_TIMING_AFTER,
     )
     session.add(deposit)
     await session.flush()
@@ -452,68 +473,73 @@ async def maybe_create_deposit(
 
 async def _void_awaiting(
     session: AsyncSession, tenant: Tenant, deposit: PixDeposit, now: datetime
-) -> None:
-    """Best-effort void an unpaid Asaas charge, then mark the deposit EXPIRED."""
-    if deposit.asaas_payment_id:
-        api_key = await cfg.get_asaas_api_key(session, tenant.id)
-        if api_key:
-            try:
-                await _asaas_client_for(api_key).delete_payment(deposit.asaas_payment_id)
-            except Exception as exc:
-                logger.warning(
-                    "pix_deposit_void_failed",
-                    error=str(exc),
-                    tenant_id=str(tenant.id),
-                    deposit_id=str(deposit.id),
-                )
+) -> str:
+    """Void an UNPAID charge at the provider, then mark the deposit EXPIRED.
+
+    Returns "voided", or "payment_in_flight" when the provider says the charge was paid in
+    the meantime: a paid charge is NEVER deleted (`cancel_charge` is only for unpaid ones) -
+    the deposit stays AWAITING and the webhook / reconciliation settles it (and, the
+    consultation being cancelled, opens an attention item). A provider outage or failed void
+    also leaves it AWAITING so the reconciliation job can still discover a late payment.
+    """
+    charge_id = deposit.provider_charge_id or deposit.asaas_payment_id
+    provider = registry.find_provider(deposit.provider)
+    account = await cfg.get_payment_account(session, tenant.id, deposit.provider)
+    if charge_id and provider is not None and account is not None:
+        state = None
+        try:
+            state = await provider.get_charge(account, charge_id)
+        except Exception as exc:
+            logger.warning(
+                "pix_deposit_void_state_unknown",
+                error_type=type(exc).__name__,
+                tenant_id=str(tenant.id),
+                deposit_id=str(deposit.id),
+            )
+            return "payment_in_flight"
+        if state is not None and state.status is PaymentStatus.PAID:
+            logger.warning(
+                "pix_deposit_void_skipped_paid",
+                tenant_id=str(tenant.id),
+                deposit_id=str(deposit.id),
+            )
+            return "payment_in_flight"
+        try:
+            await provider.cancel_charge(account, charge_id)
+        except Exception as exc:
+            logger.warning(
+                "pix_deposit_void_failed",
+                error_type=type(exc).__name__,
+                tenant_id=str(tenant.id),
+                deposit_id=str(deposit.id),
+            )
+            return "payment_in_flight"
+    else:
+        return "payment_in_flight"
     deposit.status = PixDepositStatus.EXPIRED
     deposit.resolved_at = now
+    return "voided"
 
 
-async def _refund(
-    session: AsyncSession,
-    tenant: Tenant,
-    deposit: PixDeposit,
-    *,
-    value_cents: int | None,
-    full: bool,
-    now: datetime,
-) -> str:
-    """Issue a full/partial refund via Asaas. On ANY failure (missing key,
-    missing payment id, or the PSP call itself raising) the deposit STAYS
-    PAID — never pretend a refund happened — and "refund_failed" is returned."""
-    api_key = await cfg.get_asaas_api_key(session, tenant.id)
-    if not api_key or not deposit.asaas_payment_id:
-        logger.error(
-            "pix_refund_failed",
-            tenant_id=str(tenant.id),
-            deposit_id=str(deposit.id),
-            appointment_id=str(deposit.appointment_id),
+CANCELLED_BY_PATIENT = "patient"
+CANCELLED_BY_CLINIC = "clinic"
+
+_CANCELLATION_REASONS = (REASON_REFUND_DUE_POLICY, REASON_PAID_THEN_CANCELLED)
+
+
+async def _cancellation_already_handled(
+    session: AsyncSession, tenant_id: UUID, deposit_id: UUID
+) -> bool:
+    """True when an item of a cancellation reason already exists for this deposit (a second
+    cancel call, from any surface, must never open a second item)."""
+    found = await session.scalar(
+        select(PaymentAttentionItem.id).where(
+            PaymentAttentionItem.tenant_id == tenant_id,
+            PaymentAttentionItem.deposit_id == deposit_id,
+            PaymentAttentionItem.reason.in_(_CANCELLATION_REASONS),
         )
-        return "refund_failed"
-
-    try:
-        await _asaas_client_for(api_key).refund_payment(deposit.asaas_payment_id, value_cents)
-    except Exception as exc:
-        logger.error(
-            "pix_refund_failed",
-            error=str(exc),
-            tenant_id=str(tenant.id),
-            deposit_id=str(deposit.id),
-            appointment_id=str(deposit.appointment_id),
-        )
-        return "refund_failed"
-
-    if full:
-        deposit.status = PixDepositStatus.CANCELLED_REFUNDED
-        deposit.refunded_amount_cents = deposit.amount_cents
-        deposit.resolved_at = now
-        return "refunded"
-
-    deposit.status = PixDepositStatus.CANCELLED_RETAINED
-    deposit.refunded_amount_cents = value_cents
-    deposit.resolved_at = now
-    return "partial_refund"
+    )
+    return found is not None
 
 
 async def on_appointment_cancelled(
@@ -523,17 +549,20 @@ async def on_appointment_cancelled(
     appointment: Appointment,
     waba_token: str | None = None,
     now: datetime | None = None,
+    cancelled_by: str = CANCELLED_BY_PATIENT,
 ) -> str | None:
-    """Resolve a deposit's money outcome for a cancelled appointment.
+    """Resolve a deposit's money outcome for a cancelled appointment. NEVER refunds.
 
-    Returns one of "voided" / "refunded" / "partial_refund" / "retained" /
-    "refund_failed", or None when there is no deposit at all or it is already
-    resolved (a second cancel call must be a safe no-op). `waba_token` is
-    accepted for signature symmetry with the rest of this module's tenant-
-    scoped functions but unused: this function sends NO message itself — see
-    `cancellation_notice` below for the copy; the caller (a later wave, which
-    owns the actual conversational turn) decides whether/how to send it. Does
-    NOT commit — caller's transaction.
+    Returns one of "voided" / "payment_in_flight" / "refund_due" / "partial_refund_due" /
+    "retained", or None when there is no deposit, it is already resolved, or this
+    cancellation was already handled (a second call is a safe no-op).
+
+    A PAID deposit is never returned by us (decision D15): when the clinic's policy says money
+    is due (an early patient cancellation, a partial-retention cancellation, or ANY
+    cancellation made by the clinic) the function opens ONE attention item carrying the
+    calculated `suggested_refund_cents`, and the clinic returns it in the provider's own panel.
+    `waba_token` is accepted for signature symmetry and unused: this function sends NO
+    message itself. Does NOT commit - caller's transaction.
     """
     deposit = await get_deposit_for_appointment(session, appointment.id)
     if deposit is None or deposit.status not in (PixDepositStatus.AWAITING, PixDepositStatus.PAID):
@@ -542,10 +571,34 @@ async def on_appointment_cancelled(
     now = now or datetime.now(UTC)
 
     if deposit.status is PixDepositStatus.AWAITING:
-        await _void_awaiting(session, tenant, deposit, now)
-        return "voided"
+        return await _void_awaiting(session, tenant, deposit, now)
 
-    # PAID: refund window decides full refund vs. the tenant's retention policy.
+    if await _cancellation_already_handled(session, tenant.id, deposit.id):
+        return None
+
+    slot = {
+        "slot_start": appointment.start_at,
+        "slot_end": appointment.end_at,
+        "service_label": appointment.appointment_type,
+    }
+    charge_ref = deposit.provider_charge_id or deposit.asaas_payment_id or str(deposit.id)
+
+    async def _ask_the_clinic(reason: str, suggested_cents: int) -> None:
+        await attention.open_attention_item(
+            session,
+            tenant_id=tenant.id,
+            reason=reason,
+            dedupe_key=attention.attention_dedupe_key(deposit.provider, charge_ref, reason),
+            deposit=deposit,
+            suggested_refund_cents=suggested_cents,
+            **slot,
+        )
+
+    if cancelled_by == CANCELLED_BY_CLINIC:
+        await _ask_the_clinic(REASON_PAID_THEN_CANCELLED, deposit.amount_cents)
+        return "refund_due"
+
+    # PAID, cancelled by the patient: the refund window decides what the policy says is due.
     start_at = appointment.start_at
     if start_at is None:
         hours_until = None
@@ -558,15 +611,15 @@ async def on_appointment_cancelled(
         hours_until = (_as_utc(start_at) - now).total_seconds() / 3600
 
     if hours_until is None or hours_until > tenant.pix_refund_window_hours:
-        return await _refund(session, tenant, deposit, value_cents=None, full=True, now=now)
+        await _ask_the_clinic(REASON_REFUND_DUE_POLICY, deposit.amount_cents)
+        return "refund_due"
 
     if tenant.pix_retention_policy == "partial":
         partial_amount = round(deposit.amount_cents * tenant.pix_partial_refund_percent / 100)
-        return await _refund(
-            session, tenant, deposit, value_cents=partial_amount, full=False, now=now
-        )
+        await _ask_the_clinic(REASON_REFUND_DUE_POLICY, partial_amount)
+        return "partial_refund_due"
 
-    # "total": clinic keeps the whole deposit, no PSP call at all.
+    # "total": the clinic keeps the whole deposit; nothing is due, nothing to ask.
     deposit.status = PixDepositStatus.CANCELLED_RETAINED
     deposit.refunded_amount_cents = 0
     deposit.resolved_at = now
@@ -575,24 +628,30 @@ async def on_appointment_cancelled(
 
 def cancellation_notice(outcome: str | None, tenant: Tenant, deposit: PixDeposit) -> str | None:
     """The honest pt-BR line to append after resolving a cancellation's money
-    outcome. Callers (a later wave) own the rest of the conversational reply;
-    this returns ONLY the money-specific sentence, or None when there is
-    nothing worth telling the patient (voided, or no outcome at all)."""
-    if outcome == "refunded":
-        return "O estorno do sinal foi solicitado — normalmente cai em poucos dias úteis."
-    if outcome == "partial_refund":
-        refunded = format_brl(deposit.refunded_amount_cents or 0)
+    outcome. Callers own the rest of the conversational reply; this returns ONLY the
+    money-specific sentence, or None when there is nothing worth telling the patient.
+
+    It never says the money "will be refunded" or that a refund "was requested": the platform
+    does not return money - the CLINIC does, manually - so the promise is exactly that.
+    """
+    if outcome == "refund_due":
+        return "A clínica fará a devolução do seu sinal; você será avisado."
+    if outcome == "partial_refund_due":
+        partial = round(deposit.amount_cents * tenant.pix_partial_refund_percent / 100)
         return (
-            f"Como o cancelamento ficou fora do prazo, {refunded} do sinal serão estornados; "
-            "o restante fica retido pela clínica."
+            f"Como o cancelamento ficou fora do prazo, a clínica fará a devolução de "
+            f"{format_brl(partial)} do sinal; o restante fica retido. Você será avisado."
         )
     if outcome == "retained":
         return (
             f"Como o cancelamento ocorreu com menos de {tenant.pix_refund_window_hours}h de "
             "antecedência, o sinal fica retido pela clínica."
         )
-    if outcome == "refund_failed":
-        return "O estorno será processado pela clínica."
+    if outcome == "payment_in_flight":
+        return (
+            "Recebemos o pagamento do seu sinal agora; a clínica vai conferir e, se for o caso, "
+            "fará a devolução. Você será avisado."
+        )
     return None
 
 
@@ -611,8 +670,7 @@ async def on_no_show(
 
     now = datetime.now(UTC)
     if deposit.status is PixDepositStatus.AWAITING:
-        await _void_awaiting(session, tenant, deposit, now)
-        return "voided"
+        return await _void_awaiting(session, tenant, deposit, now)
 
     deposit.status = PixDepositStatus.NO_SHOW_RETAINED
     deposit.refunded_amount_cents = 0
@@ -774,10 +832,22 @@ async def apply_asaas_event(
         logger.warning("asaas_webhook_auth_failed", tenant_id=str(tenant.id))
         return "auth_failed"
 
-    slot_freed = False
-    expired_appointment: Appointment | None = None
-    outcome = "noop"
+    # The money transitions are the payment core's (services/payments/event_processor.py):
+    # the provider confirms a PAID event before any state moves, "paid" happens once,
+    # OVERDUE/DELETED cancel only a `SCHEDULED` consultation, and no path refunds. This legacy
+    # route keeps ITS authentication (the per-tenant token above) and ITS ledger
+    # (`ProcessedAsaasEvent`); everything after the claim is the shared core.
+    from secretaria.services.payments import event_processor, registry
+    from secretaria.services.payments.provider import NormalizedPaymentEvent, PaymentStatus
 
+    account = await cfg.get_payment_account(session, tenant.id, "asaas")
+    event = NormalizedPaymentEvent(
+        provider="asaas",
+        event_id=event_id,
+        provider_charge_id=payment_id,
+        status=_LEGACY_EVENT_STATUS.get(event_type, PaymentStatus.OTHER),
+        event_type=event_type,
+    )
     try:
         existing = await session.scalar(
             select(ProcessedAsaasEvent.id).where(ProcessedAsaasEvent.event_id == event_id)
@@ -786,43 +856,13 @@ async def apply_asaas_event(
             return "duplicate"
         session.add(ProcessedAsaasEvent(event_id=event_id))
 
-        if event_type in ("PAYMENT_RECEIVED", "PAYMENT_CONFIRMED"):
-            if deposit.status == PixDepositStatus.AWAITING:
-                deposit.status = PixDepositStatus.PAID
-                deposit.paid_at = datetime.now(UTC)
-                outcome = "paid"
-        elif event_type in ("PAYMENT_OVERDUE", "PAYMENT_DELETED"):
-            if deposit.status == PixDepositStatus.AWAITING:
-                deposit.status = PixDepositStatus.EXPIRED
-                deposit.resolved_at = datetime.now(UTC)
-                expired_appointment = await session.get(Appointment, deposit.appointment_id)
-                if expired_appointment is not None:
-                    previous_status = expired_appointment.status
-                    expired_appointment.status = AppointmentStatus.CANCELLED
-                    log_status_transition(
-                        appointment_id=expired_appointment.id,
-                        tenant_id=tenant.id,
-                        old_status=previous_status,
-                        new_status=AppointmentStatus.CANCELLED,
-                        source=SOURCE_SYSTEM,
-                        # The Asaas event id is the real replay guard here (see
-                        # the ProcessedAsaasEvent claim above); reusing it keeps
-                        # this line joinable to that ledger.
-                        idempotency_key=f"asaas:{event_id}",
-                    )
-                    slot_freed = True
-                outcome = "expired"
-        elif event_type == "PAYMENT_REFUNDED":
-            logger.info(
-                "asaas_event_refund_observed",
-                tenant_id=str(tenant.id),
-                deposit_id=str(deposit.id),
-            )
-        else:
-            logger.info(
-                "asaas_event_type_unhandled", event_type=event_type, tenant_id=str(tenant.id)
-            )
-
+        result = await event_processor.apply_normalized_event(
+            session,
+            tenant=tenant,
+            account=account,
+            provider=registry.get_provider("asaas"),
+            event=event,
+        )
         await session.commit()
     except IntegrityError:
         await session.rollback()
@@ -830,17 +870,10 @@ async def apply_asaas_event(
 
     # Best-effort notifications, AFTER commit — never allowed to undo the
     # already-committed state mutation above.
-    try:
-        if outcome == "paid":
-            await _notify_paid(session, tenant, deposit)
-        elif outcome == "expired" and slot_freed and expired_appointment is not None:
-            await _notify_expired(session, tenant, expired_appointment)
-    except Exception as exc:
-        logger.warning(
-            "asaas_event_notification_failed",
-            error=str(exc),
-            tenant_id=str(tenant.id),
-            deposit_id=str(deposit.id),
-        )
+    await event_processor.run_post_commit(session, tenant, result)
 
-    return outcome
+    if result.outcome == "paid":
+        return "paid"
+    if result.outcome in ("expired", "expired_appointment_kept"):
+        return "expired"
+    return "noop"

@@ -72,8 +72,23 @@ _PII_KEYS = frozenset(
         "response",
         "response_text",
         "payload",
+        # Payment providers: the payer's identity and documents (a charge is matched by id,
+        # never by who paid, so none of these is ever needed in a log line).
+        "payer",
+        "customer",
+        "cpf",
+        "cpf_cnpj",
+        "cpfcnpj",
+        "document",
+        "payer_document",
+        "payer_email",
+        "email",
     }
 )
+
+# An Asaas API key (`$aact_prod_...` / `$aact_hmlg_...`) wherever it hides: inside an exception
+# message, an f-string, a job argument. Key-name redaction cannot see that; the SHAPE can.
+_ASAAS_KEY = re.compile(r"\$aact_[A-Za-z0-9_\-:=+/.$]+")
 
 
 def wa_suffix(value: str | None, size: int = 4) -> str | None:
@@ -108,6 +123,8 @@ def redact_secrets(
             or low in _PII_KEYS
         ):
             event_dict[key] = _REDACTED
+        elif isinstance(event_dict[key], str):
+            event_dict[key] = _ASAAS_KEY.sub(_REDACTED, event_dict[key])
     return event_dict
 
 
@@ -161,7 +178,7 @@ def redact_free_text(text: str) -> str:
             return match.group(0)
         return f"{match.group('head')}'{_REDACTED}'"
 
-    return _EMAIL.sub(_REDACTED, _KEYED_VALUE.sub(_sub, text))
+    return _ASAAS_KEY.sub(_REDACTED, _EMAIL.sub(_REDACTED, _KEYED_VALUE.sub(_sub, text)))
 
 
 class ArqJobArgsRedactionFilter(logging.Filter):

@@ -134,6 +134,45 @@ async def send_human_backup_alert(to_email: str, clinic_name: str) -> None:
         )
 
 
+# What each payment alert says: (subject, what happened, what to do). No patient, no document,
+# no key, no provider URL - only the problem and where to fix it.
+_PAYMENT_ALERTS: dict[str, tuple[str, str, str]] = {
+    "patient_cancelled_paid": (
+        "Consulta cancelada com sinal pago",
+        "Um paciente cancelou uma consulta cujo sinal Pix já foi pago.",
+        "Abra os itens de atenção do pagamento e resolva a devolução no painel do provedor.",
+    ),
+}
+
+
+async def send_payment_alert(to_email: str, clinic_name: str, kind: str) -> None:
+    """Email the clinic about a payment-connection or payment-flow problem.
+
+    Fail-open and silent without SMTP_HOST, like the alerts above; NEVER raises. The
+    debounce lives in `services/payments/alerts.py`.
+    """
+    settings = get_settings()
+    if not settings.SMTP_HOST:
+        return
+    subject_tail, what, todo = _PAYMENT_ALERTS.get(
+        kind,
+        (
+            "Atenção no pagamento do sinal",
+            "A SecretarIA detectou um problema no pagamento do sinal.",
+            "Abra o painel e confira Contexto, Pagamento do sinal.",
+        ),
+    )
+    subject = f"[SecretarIA] {subject_tail} — {clinic_name}"
+    body = f"Olá,\n\n{what}\n\n{todo}\n\n— Equipe SecretarIA"
+    try:
+        await asyncio.to_thread(_send_sync, to_email, subject, body)
+        logger.info("payment_alert_email_sent", kind=kind, clinic=clinic_name)
+    except Exception as exc:
+        logger.warning(
+            "payment_alert_email_failed", error=str(exc), kind=kind, clinic=clinic_name
+        )
+
+
 async def send_cancellation_escalation_alert(
     to_email: str, clinic_name: str, whatsapp_link: str | None
 ) -> None:

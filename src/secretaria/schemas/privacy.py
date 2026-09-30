@@ -17,6 +17,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict
 
 from secretaria.models.appointment import AppointmentStatus
+from secretaria.models.pix_deposit import PixDepositStatus
 
 
 class PrivacyPatient(BaseModel):
@@ -90,6 +91,22 @@ class PrivacyConsentEvent(BaseModel):
     created_at: datetime
 
 
+class PrivacyPixDeposit(BaseModel):
+    """One deposit (sinal) of this subject: what was charged and what became of it. Deliberately
+    WITHOUT the provider's charge id, the Pix "copia e cola" and any payer data - the subject's
+    own data is the amount, the status and the dates."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    appointment_id: UUID | None
+    provider: str
+    amount_cents: int
+    status: PixDepositStatus
+    paid_at: datetime | None
+    created_at: datetime
+
+
 class PrivacyExportBundle(BaseModel):
     """GET /internal/privacy/tenants/{tenant_id}/subjects/{wa_id}/export response.
 
@@ -109,6 +126,8 @@ class PrivacyExportBundle(BaseModel):
     messages: list[PrivacyMessage]
     consent_events: list[PrivacyConsentEvent]
     analytics_events: list[dict] = []
+    # Additive (payment provider core): consumers that predate it ignore the key.
+    pix_deposits: list[PrivacyPixDeposit] = []
 
 
 class PrivacyEraseResult(BaseModel):

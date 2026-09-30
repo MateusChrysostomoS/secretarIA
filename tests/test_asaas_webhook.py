@@ -30,7 +30,13 @@ from secretaria.models import Appointment, AppointmentStatus, Patient, Tenant  #
 from secretaria.models.pix_deposit import PixDeposit, PixDepositStatus  # noqa: E402
 from secretaria.models.processed_asaas_event import ProcessedAsaasEvent  # noqa: E402
 from secretaria.services import tenant_config  # noqa: E402
-from secretaria.services.payments import deposit_lifecycle  # noqa: E402
+from secretaria.services.payments import deposit_lifecycle, registry  # noqa: E402
+from secretaria.services.payments.provider import ChargeState, PaymentStatus  # noqa: E402
+from tests.payments_support import FakeProvider  # noqa: E402
+
+# The legacy route now shares the payment core: a PAID event is confirmed with the provider
+# (`get_charge`) before any state moves, so these tests script that answer.
+LEGACY_REFERENCE = "ref-legacy-test"
 
 
 class _FakeArqPool:
@@ -84,6 +90,10 @@ def _fakes(monkeypatch: pytest.MonkeyPatch):
     _FakeCalendarService.cancelled = []
     _FakeCalendarService.should_raise = False
     monkeypatch.setattr(deposit_lifecycle, "CalendarService", _FakeCalendarService)
+    paid = ChargeState(
+        status=PaymentStatus.PAID, paid_amount_cents=6000, external_reference=LEGACY_REFERENCE
+    )
+    monkeypatch.setitem(registry._PROVIDERS, "asaas", FakeProvider(state=paid))
     yield
 
 
@@ -134,11 +144,13 @@ async def _seed_deposit_with_tenant(
             appointment_id=appointment.id,
             patient_id=patient.id,
             asaas_payment_id=asaas_payment_id,
+            external_reference=LEGACY_REFERENCE,
             amount_cents=6000,
             percent_applied=30,
             status=status,
         )
         session.add(deposit)
+        await tenant_config.set_asaas_api_key(session, tenant.id, "legacy-api-key")
         if webhook_token:
             await tenant_config.set_asaas_webhook_token(session, tenant.id, webhook_token)
         await session.commit()
@@ -396,7 +408,12 @@ async def test_payment_confirmed_idempotent_when_already_paid(db) -> None:
     assert _FakeWhatsAppClient.created == []  # no notification for a no-op
 
 
-async def test_payment_overdue_expires_and_cancels_appointment(db) -> None:
+async def test_payment_overdue_expires_and_cancels_appointment(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(
+        registry._PROVIDERS, "asaas", FakeProvider(state=ChargeState(status=PaymentStatus.EXPIRED))
+    )
     tenant, patient, appointment, deposit = await _seed_deposit_with_tenant(
         db, status=PixDepositStatus.AWAITING, webhook_token="tok"
     )
@@ -513,3 +530,84 @@ async def test_missing_payment_id_no_claim(db) -> None:
     async with db() as session2:
         claims = (await session2.scalars(select(ProcessedAsaasEvent))).all()
     assert claims == []
+
+
+# --------------------------------------------------------------------------
+# TASK-016: the legacy route shares the payment core's safety rules
+# --------------------------------------------------------------------------
+
+
+async def test_overdue_never_cancels_a_consultation_the_patient_confirmed(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(
+        registry._PROVIDERS, "asaas", FakeProvider(state=ChargeState(status=PaymentStatus.EXPIRED))
+    )
+    tenant, patient, appointment, deposit = await _seed_deposit_with_tenant(
+        db, status=PixDepositStatus.AWAITING, webhook_token="tok"
+    )
+    async with db() as session:
+        row = await session.get(Appointment, appointment.id)
+        row.status = AppointmentStatus.CONFIRMED
+        await session.commit()
+    async with db() as session:
+        outcome = await deposit_lifecycle.apply_asaas_event(
+            session,
+            event_id="evt-overdue-confirmed",
+            event_type="PAYMENT_OVERDUE",
+            payment_id=deposit.asaas_payment_id,
+            access_token_header="tok",
+        )
+    assert outcome == "expired"
+    async with db() as session2:
+        assert (await session2.get(Appointment, appointment.id)).status == (
+            AppointmentStatus.CONFIRMED
+        )
+    assert _FakeWhatsAppClient.created == []  # nobody is told "your reservation was released"
+
+
+async def test_a_paid_event_the_provider_does_not_confirm_moves_nothing(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(
+        registry._PROVIDERS,
+        "asaas",
+        FakeProvider(state=ChargeState(status=PaymentStatus.PENDING)),
+    )
+    tenant, patient, appointment, deposit = await _seed_deposit_with_tenant(
+        db, status=PixDepositStatus.AWAITING, webhook_token="tok"
+    )
+    async with db() as session:
+        outcome = await deposit_lifecycle.apply_asaas_event(
+            session,
+            event_id="evt-forged",
+            event_type="PAYMENT_RECEIVED",
+            payment_id=deposit.asaas_payment_id,
+            access_token_header="tok",
+        )
+    assert outcome == "noop"
+    async with db() as session2:
+        assert (await session2.get(PixDeposit, deposit.id)).status == PixDepositStatus.AWAITING
+    assert _FakeWhatsAppClient.created == []
+
+
+async def test_a_paid_event_for_a_tenant_without_an_api_key_cannot_be_verified(db) -> None:
+    tenant, patient, appointment, deposit = await _seed_deposit_with_tenant(
+        db, status=PixDepositStatus.AWAITING, webhook_token="tok"
+    )
+    async with db() as session:
+        await tenant_config.set_asaas_api_key(session, tenant.id, "x")
+        cred = await tenant_config._get_credentials(session, tenant.id)
+        cred.asaas_api_key_encrypted = None
+        await session.commit()
+    async with db() as session:
+        outcome = await deposit_lifecycle.apply_asaas_event(
+            session,
+            event_id="evt-noaccount",
+            event_type="PAYMENT_RECEIVED",
+            payment_id=deposit.asaas_payment_id,
+            access_token_header="tok",
+        )
+    assert outcome == "noop"
+    async with db() as session2:
+        assert (await session2.get(PixDeposit, deposit.id)).status == PixDepositStatus.AWAITING

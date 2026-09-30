@@ -58,6 +58,7 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
     create_async_engine,
 )
 from sqlalchemy.pool import StaticPool  # noqa: E402
+from structlog import get_logger  # noqa: E402
 from structlog.testing import capture_logs  # noqa: E402
 
 from secretaria.ai.prompts import secretary_system_prompt  # noqa: E402
@@ -65,6 +66,7 @@ from secretaria.api.hub import professionals as professionals_api  # noqa: E402
 from secretaria.api.hub.deps import get_current_tenant  # noqa: E402
 from secretaria.core.database import Base, get_session  # noqa: E402
 from secretaria.models import Appointment, Professional, Tenant  # noqa: E402
+from secretaria.services import tenant_config as tenant_config_module  # noqa: E402
 from secretaria.services.calendar import CalendarService  # noqa: E402
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
 from secretaria.services.payments import deposit_lifecycle  # noqa: E402
@@ -331,7 +333,9 @@ async def test_activation_still_allowed_when_the_professional_inherits(session):
     assert (ok, reasons) == (True, [])
 
 
-async def test_completeness_alert_is_categorical_and_carries_no_identifiers(session):
+async def test_completeness_alert_is_categorical_and_carries_no_identifiers(
+    session, monkeypatch
+):
     """The empty-config warning may carry counts and flags — nothing else.
 
     Asserted, not just documented: a log line is an artifact that leaves the
@@ -344,6 +348,9 @@ async def test_completeness_alert_is_categorical_and_carries_no_identifiers(sess
     await make_professional(session, tenant, name="Dra. Sigilosa", business_hours={})
 
     with capture_logs() as captured:
+        # The application caches module-level bound loggers; a prior test may have bound this
+        # one to the real renderer before capture_logs changes the processor list.
+        monkeypatch.setattr(tenant_config_module, "logger", get_logger("completeness-test"))
         await professional_completeness(session, tenant)
 
     events = [e for e in captured if e.get("event") == "professional_config_resolves_empty"]
@@ -373,12 +380,13 @@ async def test_completeness_alert_is_categorical_and_carries_no_identifiers(sess
         assert forbidden not in blob
 
 
-async def test_no_alert_when_every_active_professional_resolves_to_something(session):
+async def test_no_alert_when_every_active_professional_resolves_to_something(session, monkeypatch):
     """The alert must stay quiet on a healthy clinic, or it is noise nobody reads."""
     tenant = await make_tenant(session)
     await make_professional(session, tenant)  # inherits a populated tenant
 
     with capture_logs() as captured:
+        monkeypatch.setattr(tenant_config_module, "logger", get_logger("completeness-test"))
         await professional_completeness(session, tenant)
 
     assert [e for e in captured if e.get("event") == "professional_config_resolves_empty"] == []

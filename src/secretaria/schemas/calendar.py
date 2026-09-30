@@ -188,8 +188,10 @@ class AppointmentRead(BaseModel):
     # or None when there is no deposit at all — see models/pix_deposit.py's
     # PixDepositStatus. Read-only: never set via a request body.
     deposit_status: str | None = None
-    # The one-time deposit_lifecycle outcome ("voided"/"refunded"/
-    # "partial_refund"/"retained"/"refund_failed") of THIS request, populated
+    # The one-time deposit_lifecycle outcome ("voided"/"payment_in_flight"/"refund_due"/
+    # "partial_refund_due"/"retained") of THIS request - the platform never refunds, so
+    # "refund_due" means the CLINIC owes the patient a return (an attention item was opened);
+    # it replaced "refunded"/"partial_refund"/"refund_failed". Populated
     # only by POST /cancel and PATCH /status (CANCELLED/NO_SHOW) — every other
     # endpoint (including a plain GET-shaped re-read) leaves it None. Not a
     # persistent appointment attribute like `deposit_status` above; it exists

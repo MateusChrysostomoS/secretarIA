@@ -32,10 +32,33 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Enum as SAEnum,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from secretaria.core.database import Base
+
+# What we did with the money, orthogonal to `status` (which is the money itself). A value here
+# never needs a PG enum: the column is a plain VARCHAR (spec section 6.1).
+FULFILLMENT_NONE = "none"
+FULFILLMENT_PROMOTING = "promoting"
+FULFILLMENT_CONFIRMED = "confirmed"
+FULFILLMENT_NEEDS_ATTENTION = "needs_attention"
+FULFILLMENT_RESOLVED = "resolved"
+
+# When the deposit is charged relative to the consultation's confirmation (per clinic).
+DEPOSIT_TIMING_BEFORE = "before"
+DEPOSIT_TIMING_AFTER = "after"
 
 
 class PixDepositStatus(str, enum.Enum):  # noqa: UP042 - StrEnum would change str(member)
@@ -57,9 +80,11 @@ class PixDeposit(Base):
         ForeignKey("tenants.id", ondelete="CASCADE"), index=True
     )
     # One deposit per appointment - see module docstring for why a reschedule
-    # never needs (or gets) a second row.
-    appointment_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("appointments.id", ondelete="CASCADE"), unique=True, index=True
+    # never needs (or gets) a second row. NULLABLE since the payment provider core: in
+    # `before` timing the charge is created BEFORE the appointment exists (Postgres lets
+    # the UNIQUE hold many NULLs).
+    appointment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("appointments.id", ondelete="CASCADE"), unique=True, index=True, nullable=True
     )
     # SET NULL (not CASCADE): deleting a patient row must never erase the
     # clinic's payment/refund history.
@@ -106,4 +131,38 @@ class PixDeposit(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    # --- payment provider core (TASK-016). All additive: code that predates them ignores them ---
+    provider: Mapped[str] = mapped_column(String(16), server_default="asaas", default="asaas")
+    # The provider's charge id. Dual-written with `asaas_payment_id` until the "narrow" phase;
+    # readers of an Asaas deposit must accept EITHER (a row written by pre-core code has only
+    # the legacy column).
+    provider_charge_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    # OUR reference sent to the provider (= this row's id for new charges, the appointment id
+    # for rows that predate the core). Matched against the provider's `externalReference`.
+    external_reference: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_payment_check_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    paid_notice_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fulfillment_status: Mapped[str] = mapped_column(
+        String(24), server_default=FULFILLMENT_NONE, default=FULFILLMENT_NONE
+    )
+    confirming_event_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    paid_amount_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # {conversation_id, professional_id, appointment_type, insurance, attendee_name, start_at,
+    # end_at} - what the promotion needs when the hold has already been swept. Never the
+    # patient's name (same rule as `booking_holds`).
+    booking_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    hold_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)  # no FK: the hold is deleted
+    calendar_event_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    deposit_timing: Mapped[str] = mapped_column(
+        String(16), server_default=DEPOSIT_TIMING_AFTER, default=DEPOSIT_TIMING_AFTER
+    )
+
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_charge_id", name="uq_pix_deposits_provider_charge"),
+        Index("ix_pix_deposits_tenant_status_expires", "tenant_id", "status", "expires_at"),
     )

@@ -32,6 +32,7 @@ from secretaria.config import get_settings
 from secretaria.core.crypto import decrypt, encrypt
 from secretaria.core.logging import get_logger
 from secretaria.models import Tenant
+from secretaria.models.clinic_payment_account import ClinicPaymentAccount
 from secretaria.models.professional import Professional
 from secretaria.models.professional_credentials import ProfessionalCredentials
 from secretaria.models.tenant_credentials import TenantCredentials
@@ -40,6 +41,7 @@ from secretaria.services.calendar import (
     CalendarUnavailableError,
     GoogleTokenRevokedError,
 )
+from secretaria.services.payments.provider import PaymentAccount
 from secretaria.services.service_catalog import load_service_catalog, resolve_entries
 
 logger = get_logger(__name__)
@@ -326,7 +328,16 @@ async def clear_waba_token(session: AsyncSession, tenant_id: UUID) -> None:
 
 async def has_asaas_api_key(session: AsyncSession, tenant_id: UUID) -> bool:
     """True when a (non-null) Asaas API key is stored for this tenant — an
-    EXISTENCE check, no decryption (mirrors has_waba_token)."""
+    EXISTENCE check, no decryption (mirrors has_waba_token). Dual-read: the per-provider
+    account row (`clinic_payment_accounts`) OR the legacy `tenant_credentials` column."""
+    row = await session.scalar(
+        select(ClinicPaymentAccount.api_key_encrypted).where(
+            ClinicPaymentAccount.tenant_id == tenant_id,
+            ClinicPaymentAccount.provider == "asaas",
+        )
+    )
+    if row:
+        return True
     cred = await _get_credentials(session, tenant_id)
     return bool(cred and cred.asaas_api_key_encrypted)
 
@@ -353,6 +364,14 @@ async def set_asaas_api_key(session: AsyncSession, tenant_id: UUID, api_key: str
         cred.asaas_api_key_encrypted = encrypted
 
 
+async def clear_asaas_credentials(session: AsyncSession, tenant_id: UUID) -> None:
+    """Forget the legacy Asaas API key and webhook token (disconnect). Caller commits."""
+    cred = await _get_credentials(session, tenant_id)
+    if cred is not None:
+        cred.asaas_api_key_encrypted = None
+        cred.asaas_webhook_token_encrypted = None
+
+
 async def get_asaas_webhook_token(session: AsyncSession, tenant_id: UUID) -> str | None:
     """Return the decrypted Asaas webhook shared token, or None when not provisioned.
 
@@ -375,6 +394,104 @@ async def set_asaas_webhook_token(session: AsyncSession, tenant_id: UUID, token:
         session.add(TenantCredentials(tenant_id=tenant_id, asaas_webhook_token_encrypted=encrypted))
     else:
         cred.asaas_webhook_token_encrypted = encrypted
+
+
+# --------------------------------------------------------------------------
+# Encrypted credential helpers (clinic_payment_accounts — every payment provider)
+# --------------------------------------------------------------------------
+#
+# THE single decrypt point for payment-provider secrets (tenant-secrets-encryption). The
+# decrypted values live only inside a `PaymentAccount` (services/payments/provider.py) whose
+# secret fields are `repr=False`, handed to a provider wrapper for ONE call.
+
+
+def payment_account_from_row(row: ClinicPaymentAccount) -> PaymentAccount:
+    """Decrypt a `clinic_payment_accounts` row into a `PaymentAccount`. Nothing else in the
+    codebase may call `decrypt` on these columns."""
+
+    def _plain(value: str | None) -> str | None:
+        return decrypt(value) if value else None
+
+    return PaymentAccount(
+        tenant_id=row.tenant_id,
+        provider=row.provider,
+        webhook_slug=row.webhook_slug,
+        external_account_id=row.external_account_id,
+        api_key=_plain(row.api_key_encrypted),
+        webhook_token=_plain(row.webhook_token_encrypted),
+        access_token=_plain(row.access_token_encrypted),
+        webhook_secret=_plain(row.webhook_secret_encrypted),
+    )
+
+
+async def get_payment_account(
+    session: AsyncSession, tenant_id: UUID, provider: str
+) -> PaymentAccount | None:
+    """The clinic's decrypted account for `provider`, or None when there is none.
+
+    Dual-read for Asaas: an account row wins; without one, the legacy
+    `tenant_credentials.asaas_*` columns (still written until the "narrow" phase) are used,
+    so a clinic provisioned by pre-core code keeps working.
+    """
+    row = await session.scalar(
+        select(ClinicPaymentAccount).where(
+            ClinicPaymentAccount.tenant_id == tenant_id,
+            ClinicPaymentAccount.provider == provider,
+        )
+    )
+    if row is not None:
+        return payment_account_from_row(row)
+    if provider != "asaas":
+        return None
+    cred = await _get_credentials(session, tenant_id)
+    if not cred or not cred.asaas_api_key_encrypted:
+        return None
+    return PaymentAccount(
+        tenant_id=tenant_id,
+        provider="asaas",
+        api_key=decrypt(cred.asaas_api_key_encrypted),
+        webhook_token=(
+            decrypt(cred.asaas_webhook_token_encrypted)
+            if cred.asaas_webhook_token_encrypted
+            else None
+        ),
+    )
+
+
+def set_payment_account_secrets(
+    row: ClinicPaymentAccount,
+    *,
+    api_key: str | None = None,
+    webhook_token: str | None = None,
+    access_token: str | None = None,
+    refresh_token: str | None = None,
+    webhook_secret: str | None = None,
+    pkce_verifier: str | None = None,
+) -> None:
+    """Encrypt and store ONLY the secrets given (a None never wipes an existing one). The
+    caller owns the transaction."""
+    if api_key is not None:
+        row.api_key_encrypted = encrypt(api_key)
+    if webhook_token is not None:
+        row.webhook_token_encrypted = encrypt(webhook_token)
+    if access_token is not None:
+        row.access_token_encrypted = encrypt(access_token)
+    if refresh_token is not None:
+        row.refresh_token_encrypted = encrypt(refresh_token)
+    if webhook_secret is not None:
+        row.webhook_secret_encrypted = encrypt(webhook_secret)
+    if pkce_verifier is not None:
+        row.oauth_pkce_verifier_encrypted = encrypt(pkce_verifier)
+
+
+def clear_payment_account_secrets(row: ClinicPaymentAccount) -> None:
+    """Forget every stored secret of this account (disconnect)."""
+    row.api_key_encrypted = None
+    row.webhook_token_encrypted = None
+    row.access_token_encrypted = None
+    row.refresh_token_encrypted = None
+    row.webhook_secret_encrypted = None
+    row.oauth_pkce_verifier_encrypted = None
 
 
 # --------------------------------------------------------------------------

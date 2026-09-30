@@ -185,6 +185,20 @@ class Tenant(Base):
     # before register_reschedule starts refusing (0 = no reschedule allowed
     # at all once a deposit exists).
     pix_reschedule_limit: Mapped[int] = mapped_column(Integer, server_default="2", default=2)
+    # Which payment provider this clinic charges the deposit through ("asaas" |
+    # "mercadopago"). The default keeps every existing clinic on Asaas.
+    payment_provider: Mapped[str] = mapped_column(
+        String(16), server_default="asaas", default="asaas"
+    )
+    # "before": the consultation is only created/confirmed after the deposit is paid.
+    # "after": confirm first, ask for the deposit next (today's behaviour, the default).
+    deposit_timing: Mapped[str] = mapped_column(
+        String(16), server_default="after", default="after"
+    )
+    # How long the slot is held while waiting for the Pix, in minutes (`before` only).
+    deposit_hold_ttl_minutes: Mapped[int] = mapped_column(
+        Integer, server_default="30", default=30
+    )
 
     # --- Onboarding / multi-professional (cross-service contract v1) ---
     # When the WhatsApp number was connected (phone_number_id/waba_id set).

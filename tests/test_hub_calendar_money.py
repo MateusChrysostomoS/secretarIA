@@ -38,6 +38,7 @@ from secretaria.models import (  # noqa: E402
     Appointment,
     AppointmentStatus,
     Patient,
+    PaymentAttentionItem,
     PixDeposit,
     PixDepositStatus,
     Tenant,
@@ -211,14 +212,18 @@ async def test_post_cancel_triggers_lifecycle_and_returns_deposit_outcome(
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "cancelled"
-    assert body["deposit_outcome"] == "retained"  # total policy, inside window
-    assert body["deposit_status"] == PixDepositStatus.CANCELLED_RETAINED.value
+    # A cancellation made by the CLINIC always asks the clinic to return the deposit (the
+    # patient did not cancel), whatever the retention window says. Nothing is refunded here.
+    assert body["deposit_outcome"] == "refund_due"
+    assert body["deposit_status"] == PixDepositStatus.PAID.value
 
     async with db() as session:
         deposit = await session.scalar(
             select(PixDeposit).where(PixDeposit.appointment_id == appt.id)
         )
-        assert deposit.status == PixDepositStatus.CANCELLED_RETAINED
+        assert deposit.status == PixDepositStatus.PAID
+        item = await session.scalar(select(PaymentAttentionItem))
+        assert (item.reason, item.suggested_refund_cents) == ("paid_then_cancelled", 10000)
 
 
 async def test_post_cancel_without_deposit_returns_none_outcome(client: AsyncClient, db, tenant):
@@ -273,7 +278,7 @@ async def test_post_cancel_passes_deposit_notice_to_the_cancellation_job(
     ) = pool.calls[0]
     assert name == "send_cancellation_notice"
     assert justification == "Imprevisto do médico"
-    assert "retido pela clínica" in extra_notice  # deposit notice rides along
+    assert "clínica fará a devolução" in extra_notice  # deposit notice rides along
     assert allow_paid is False  # not authorised => never the paid path
 
 
@@ -295,8 +300,8 @@ async def test_patch_status_cancelled_triggers_on_appointment_cancelled(
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "cancelled"
-    assert body["deposit_outcome"] == "retained"
-    assert body["deposit_status"] == PixDepositStatus.CANCELLED_RETAINED.value
+    assert body["deposit_outcome"] == "refund_due"
+    assert body["deposit_status"] == PixDepositStatus.PAID.value
 
 
 async def test_patch_status_no_show_triggers_on_no_show(client: AsyncClient, db, tenant):

@@ -105,42 +105,6 @@ async def test_create_pix_payment_rounds_to_two_decimals(
 
 
 # --------------------------------------------------------------------------
-# Refund with / without value
-# --------------------------------------------------------------------------
-
-
-async def test_refund_with_value(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["body"] = jsonlib.loads(request.content)
-        return httpx.Response(200, json={"id": "pay_1", "status": "REFUNDED"})
-
-    _install_transport(monkeypatch, handler)
-    client = AsaasClient("key")
-    await client.refund_payment("pay_1", 5000)
-
-    assert captured["body"] == {"value": 50.0}
-
-
-async def test_refund_without_value_omits_key_for_full_refund(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["body"] = jsonlib.loads(request.content) if request.content else {}
-        return httpx.Response(200, json={"id": "pay_1", "status": "REFUNDED"})
-
-    _install_transport(monkeypatch, handler)
-    client = AsaasClient("key")
-    await client.refund_payment("pay_1", None)
-
-    assert captured["body"] == {}
-    assert "value" not in captured["body"]
-
-
-# --------------------------------------------------------------------------
 # get_pix_qr tolerates absent fields; delete_payment uses DELETE
 # --------------------------------------------------------------------------
 
@@ -253,3 +217,122 @@ async def test_non_2xx_with_unparseable_body_still_raises_cleanly(
     assert exc_info.value.status_code == 500
     assert exc_info.value.code_hint is None
     assert "<html>" not in str(exc_info.value)
+
+
+# --------------------------------------------------------------------------
+# TASK-016: no refund, cpfCnpj, get_payment, webhook management, probe
+# --------------------------------------------------------------------------
+
+
+def test_client_has_no_refund_method_decision_d15() -> None:
+    assert not any("refund" in name.lower() for name in dir(AsaasClient))
+
+
+async def test_create_customer_sends_cpf_cnpj_only_when_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bodies = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(jsonlib.loads(request.content))
+        return httpx.Response(200, json={"id": "cus_1"})
+
+    _install_transport(monkeypatch, handler)
+    client = AsaasClient("key")
+    await client.create_customer("Maria", "5511999999999")
+    await client.create_customer("Maria", "5511999999999", cpf_cnpj="52998224725")
+
+    assert "cpfCnpj" not in bodies[0]
+    assert bodies[1]["cpfCnpj"] == "52998224725"
+
+
+async def test_get_payment_uses_get_and_returns_the_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"], captured["path"] = request.method, request.url.path
+        return httpx.Response(
+            200, json={"id": "pay_1", "status": "RECEIVED", "value": 60.0, "externalReference": "r"}
+        )
+
+    _install_transport(monkeypatch, handler)
+    data = await AsaasClient("key").get_payment("pay_1")
+
+    assert (captured["method"], captured["path"]) == ("GET", "/v3/payments/pay_1")
+    assert data["status"] == "RECEIVED"
+
+
+async def test_webhook_management_paths_and_bodies(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = jsonlib.loads(request.content) if request.content else None
+        seen.append((request.method, request.url.path, dict(request.url.params), body))
+        return httpx.Response(200, json={"id": "wh_1", "data": []})
+
+    _install_transport(monkeypatch, handler)
+    client = AsaasClient("key")
+    await client.create_webhook({"name": "n", "url": "https://x/y"})
+    await client.list_webhooks()
+    await client.update_webhook("wh_1", {"interrupted": False})
+    await client.delete_webhook("wh_1")
+    await client.delete_customer("cus_1")
+
+    assert seen == [
+        ("POST", "/v3/webhooks", {}, {"name": "n", "url": "https://x/y"}),
+        ("GET", "/v3/webhooks", {"limit": "100"}, None),
+        ("PUT", "/v3/webhooks/wh_1", {}, {"interrupted": False}),
+        ("DELETE", "/v3/webhooks/wh_1", {}, None),
+        ("DELETE", "/v3/customers/cus_1", {}, None),
+    ]
+
+
+async def test_probe_returns_classification_inputs_and_never_raises_on_http_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replies = iter(
+        [
+            httpx.Response(200, json={"data": [], "hasMore": False}),
+            httpx.Response(
+                403, json={"errors": [{"code": "insufficient_permission", "description": "TEXT"}]}
+            ),
+            httpx.Response(401, json={}),
+            httpx.Response(429, headers={"Retry-After": "2"}, json={}),
+            httpx.Response(503, text="<html>down</html>"),
+            httpx.Response(200, text="not json"),
+        ]
+    )
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path, dict(request.url.params)))
+        return next(replies)
+
+    _install_transport(monkeypatch, handler)
+    client = AsaasClient("secret-key-value")
+    results = [await client.probe("/transfers", expect_list=True) for _ in range(6)]
+
+    assert [(r.status_code, r.code_hint, r.json_ok, r.retry_after) for r in results] == [
+        (200, None, True, None),
+        (403, "insufficient_permission", False, None),
+        (401, None, False, None),
+        (429, None, False, 2.0),
+        (503, None, False, None),
+        (200, None, False, None),
+    ]
+    assert requests[0] == ("GET", "/v3/transfers", {"limit": "1"})
+    assert "TEXT" not in repr(results)
+
+
+async def test_probe_maps_a_connection_error_to_status_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("boom", request=request)
+
+    _install_transport(monkeypatch, handler)
+    result = await AsaasClient("key").probe("/customers")
+
+    assert (result.status_code, result.code_hint, result.json_ok) == (0, "connection_error", False)
