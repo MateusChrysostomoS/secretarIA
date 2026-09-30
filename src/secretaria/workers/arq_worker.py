@@ -25,11 +25,13 @@ from secretaria.workers.onboarding_cron import (
     run_patient_usage_metering,
 )
 from secretaria.workers.payments_cron import (
+    ATTENTION_ALERT_MINUTES,
     DAILY_HOUR,
     DAILY_MINUTE,
     EXPIRY_MINUTES,
     RECONCILE_MINUTES,
     SWEEP_MINUTES,
+    run_attention_alerts,
     run_payment_daily,
     run_payment_expiry,
     run_payment_reconciliation,
@@ -183,6 +185,8 @@ class WorkerSettings:
         cron(run_payment_reconciliation, minute=RECONCILE_MINUTES),
         cron(run_payment_sweeps, minute=SWEEP_MINUTES),
         cron(run_payment_daily, hour={DAILY_HOUR}, minute={DAILY_MINUTE}),
+        # One e-mail per item when a patient cancels a paid consultation (TASK-017, answer 13).
+        cron(run_attention_alerts, minute=ATTENTION_ALERT_MINUTES),
     ]
     on_startup = on_startup
     on_shutdown = on_shutdown

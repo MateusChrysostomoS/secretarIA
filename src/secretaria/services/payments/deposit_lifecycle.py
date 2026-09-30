@@ -39,6 +39,7 @@ from secretaria.models.payment_attention_item import (
 from secretaria.models.pix_deposit import (
     DEPOSIT_TIMING_AFTER,
     DEPOSIT_TIMING_BEFORE,
+    FULFILLMENT_NEEDS_ATTENTION,
     PixDeposit,
     PixDepositStatus,
 )
@@ -140,6 +141,8 @@ class AppointmentDepositView:
 
     status: PixDepositStatus
     amount_cents: int
+    # `fulfillment_status == needs_attention`: an attention item is open on this deposit.
+    needs_attention: bool = False
 
 
 async def load_deposit_views(
@@ -159,14 +162,23 @@ async def load_deposit_views(
     if not ids:
         return {}
     rows = await session.execute(
-        select(PixDeposit.appointment_id, PixDeposit.status, PixDeposit.amount_cents).where(
+        select(
+            PixDeposit.appointment_id,
+            PixDeposit.status,
+            PixDeposit.amount_cents,
+            PixDeposit.fulfillment_status,
+        ).where(
             PixDeposit.tenant_id == tenant_id,
             PixDeposit.appointment_id.in_(ids),
         )
     )
     return {
-        appointment_id: AppointmentDepositView(status=status, amount_cents=amount_cents)
-        for appointment_id, status, amount_cents in rows.all()
+        appointment_id: AppointmentDepositView(
+            status=status,
+            amount_cents=amount_cents,
+            needs_attention=fulfillment == FULFILLMENT_NEEDS_ATTENTION,
+        )
+        for appointment_id, status, amount_cents, fulfillment in rows.all()
     }
 
 

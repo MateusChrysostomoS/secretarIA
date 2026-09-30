@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from secretaria.models.appointment import AppointmentStatus
 
@@ -26,6 +26,23 @@ class CalendarInsurancePlanRead(BaseModel):
     charge_deposit: bool
 
 
+class AwaitingPaymentRead(BaseModel):
+    """A slot held for a Pix that is still payable (`GET /calendar/awaiting-payment`).
+
+    No patient, no amount, no provider: the agenda only needs to show that the window is taken
+    and until when.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str  # the hold's id: opaque, only good for a list key
+    start: datetime
+    end: datetime
+    service: str | None = None
+    expires_at: datetime
+    professional_id: str | None = None
+
+
 class CalendarDepositRead(BaseModel):
     """The Pix deposit (sinal) of an appointment, as the agenda shows it.
 
@@ -41,9 +58,10 @@ class CalendarDepositRead(BaseModel):
 
     status: str
     amount_cents: int
-    # Deliberately NOT here yet: spec F (2026-09-29, section 10A.5) adds a third,
-    # additive key `needs_attention: bool` in TASK-017. Until then the wire is these
-    # two keys, and a consumer must ignore any key it does not know.
+    # TASK-017 (spec 10A.5): true when an open attention item hangs on this deposit (money
+    # received that the clinic still has to decide about). Additive: a consumer that does not
+    # know the key ignores it.
+    needs_attention: bool = False
 
 
 class CalendarEventRead(BaseModel):

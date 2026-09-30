@@ -173,6 +173,34 @@ async def send_payment_alert(to_email: str, clinic_name: str, kind: str) -> None
         )
 
 
+async def send_paid_cancellation_alert(to_email: str, clinic_name: str) -> bool:
+    """Email the clinic that a patient cancelled a consultation whose deposit was already paid
+    (owner answer 13, spec 10A.4).
+
+    Same channel as the alerts above: SMTP only, fail-open, NEVER raises. Unlike them it says
+    whether the message was handed to the SMTP server: True only then, so the sweep in
+    `services/payments/attention_alerts.py` releases its claim on an item that was NOT sent and
+    never repeats one that was. The body carries no patient name, no amount and no document: it
+    says that a paid consultation was cancelled and where the clinic decides.
+    """
+    settings = get_settings()
+    if not settings.SMTP_HOST:
+        return False
+    subject = f"[SecretarIA] Consulta cancelada com sinal já pago — {clinic_name}"
+    body = (
+        "Olá,\n\nUm paciente cancelou uma consulta cujo sinal já estava pago.\n\n"
+        'Abra o Chat, em "Pagamentos que precisam de decisão", para ver o caso e registrar a '
+        "decisão da clínica.\n\n— Equipe SecretarIA"
+    )
+    try:
+        await asyncio.to_thread(_send_sync, to_email, subject, body)
+    except Exception as exc:
+        logger.warning("payment_paid_cancellation_email_failed", error=str(exc), clinic=clinic_name)
+        return False
+    logger.info("payment_paid_cancellation_email_sent", clinic=clinic_name)
+    return True
+
+
 async def send_cancellation_escalation_alert(
     to_email: str, clinic_name: str, whatsapp_link: str | None
 ) -> None:

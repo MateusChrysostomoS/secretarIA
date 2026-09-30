@@ -18,6 +18,7 @@ from secretaria.core.logging import get_logger
 from secretaria.services import deposit_wait  # noqa: F401
 from secretaria.services.payments import (
     asaas_connection,  # noqa: F401
+    attention_alerts,
     jobs,
 )
 from secretaria.workers.payments_tasks import enqueue_for
@@ -30,6 +31,8 @@ EXPIRY_MINUTES = frozenset(minute for minute in range(1, 60, 2) if minute % 5 an
 RECONCILE_MINUTES = frozenset({2, 12, 22, 32, 42, 52})
 # Both sweeps, about every 4-6 minutes, on even minutes that no other payment job uses.
 SWEEP_MINUTES = frozenset({4, 8, 14, 18, 24, 28, 34, 38, 44, 48, 54, 58})
+# Every ~10 minutes, on the even minutes no other cron uses: the e-mail of a paid cancellation.
+ATTENTION_ALERT_MINUTES = frozenset({6, 16, 26, 36, 46, 56})
 DAILY_HOUR = 4
 DAILY_MINUTE = 17
 
@@ -62,6 +65,14 @@ async def run_payment_sweeps(ctx: dict) -> None:
         notices = await jobs.recover_paid_notices(session, now=now)
     if events or fulfillments or notices:
         logger.info("payment_sweep_tick", events=events, fulfillments=fulfillments, notices=notices)
+
+
+async def run_attention_alerts(ctx: dict) -> None:
+    """E-mail the clinic ONCE per item when a patient cancelled a paid consultation (answer 13)."""
+    async with async_session_factory() as session:
+        report = await attention_alerts.alert_new_items(session, now=datetime.now(UTC))
+    if any(asdict(report).values()):
+        logger.info("payment_attention_alert_tick", **asdict(report))
 
 
 async def run_payment_daily(ctx: dict) -> None:

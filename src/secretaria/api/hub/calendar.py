@@ -19,7 +19,14 @@ from secretaria.api.hub.deps import get_current_tenant
 from secretaria.config import get_settings
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
-from secretaria.models import Appointment, AppointmentStatus, Professional, Tenant
+from secretaria.models import (
+    Appointment,
+    AppointmentStatus,
+    PixDeposit,
+    PixDepositStatus,
+    Professional,
+    Tenant,
+)
 from secretaria.models.patient import Patient
 from secretaria.schemas.calendar import (
     AppointmentCancel,
@@ -27,6 +34,7 @@ from secretaria.schemas.calendar import (
     AppointmentRead,
     AppointmentReschedule,
     AppointmentStatusUpdate,
+    AwaitingPaymentRead,
     BlockCreate,
     CalendarDepositRead,
     CalendarEventRead,
@@ -181,7 +189,11 @@ def _deposit_read(
     """The state of the money for the agenda (status VALUE + amount), or None."""
     if view is None:
         return None
-    return CalendarDepositRead(status=view.status.value, amount_cents=view.amount_cents)
+    return CalendarDepositRead(
+        status=view.status.value,
+        amount_cents=view.amount_cents,
+        needs_attention=view.needs_attention,
+    )
 
 
 @router.get("/events", response_model=list[CalendarEventRead])
@@ -264,6 +276,52 @@ async def list_events(
             )
         )
     return reads
+
+
+# ---------------------------------------------------------------------------
+# GET /awaiting-payment — slots held for a Pix that is still payable
+# ---------------------------------------------------------------------------
+
+
+@router.get("/awaiting-payment", response_model=list[AwaitingPaymentRead])
+async def list_awaiting_payment(
+    start: datetime,
+    end: datetime,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> list[AwaitingPaymentRead]:
+    """The `before`-timing reservations in [start, end): a slot a patient is paying for, with
+    no appointment and no Google event yet. A SIBLING of `GET /events` (whose body is a plain
+    array the agenda already consumes), so the doctor does not book on top of it.
+
+    Only live payment-phase holds whose charge is still awaiting payment; the answer carries the
+    window, the service and the deadline - never the patient, the amount or the provider.
+    """
+    holds = await booking_hold.live_payment_holds(session, tenant.id, start, end)
+    charge_ids = [hold.charge_id for hold in holds if hold.charge_id is not None]
+    live: set[UUID] = set()
+    if charge_ids:
+        live = set(
+            await session.scalars(
+                select(PixDeposit.id).where(
+                    PixDeposit.tenant_id == tenant.id,
+                    PixDeposit.id.in_(charge_ids),
+                    PixDeposit.status == PixDepositStatus.AWAITING,
+                )
+            )
+        )
+    return [
+        AwaitingPaymentRead(
+            id=str(hold.id),
+            start=hold.start_at,
+            end=hold.end_at,
+            service=hold.appointment_type,
+            expires_at=hold.expires_at,
+            professional_id=str(hold.professional_id) if hold.professional_id else None,
+        )
+        for hold in holds
+        if hold.charge_id in live
+    ]
 
 
 # ---------------------------------------------------------------------------
