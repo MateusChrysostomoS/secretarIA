@@ -143,7 +143,9 @@ async def test_a_token_without_a_role_claim_is_role_claim_missing_on_resolve(
 
 
 @pytest.mark.parametrize(
-    ("role", "flags"), [("manager", {"is_manager": True}), ("doctor", {})], ids=["manager", "doctor"]
+    ("role", "flags"),
+    [("manager", {"is_manager": True}), ("doctor", {})],
+    ids=["manager", "doctor"],
 )
 async def test_a_manager_and_a_doctor_resolve_an_item(client: AsyncClient, db, role, flags):
     world, item_id = await _world_with_an_open_item(db)

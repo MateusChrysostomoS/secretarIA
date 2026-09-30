@@ -40,7 +40,7 @@ from secretaria.services.payments import attention_alerts
 from secretaria.services.tenant_config import set_google_refresh_token
 from secretaria.workers import payments_cron
 from tests.before_support import make_world
-from tests.payments_support import FakeArqPool, FakeRedis, make_sessionmaker
+from tests.payments_support import FakeArqPool, make_sessionmaker
 
 ITEMS = "/tenants/me/payment-attention-items"
 NOTE = "Devolvi o valor no painel do provedor hoje de manhã."
