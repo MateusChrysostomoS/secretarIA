@@ -19,7 +19,14 @@ from secretaria.api.hub.deps import get_current_tenant
 from secretaria.config import get_settings
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
-from secretaria.models import Appointment, AppointmentStatus, Professional, Tenant
+from secretaria.models import (
+    Appointment,
+    AppointmentStatus,
+    PixDeposit,
+    PixDepositStatus,
+    Professional,
+    Tenant,
+)
 from secretaria.models.patient import Patient
 from secretaria.schemas.calendar import (
     AppointmentCancel,
@@ -27,13 +34,14 @@ from secretaria.schemas.calendar import (
     AppointmentRead,
     AppointmentReschedule,
     AppointmentStatusUpdate,
+    AwaitingPaymentRead,
     BlockCreate,
     CalendarDepositRead,
     CalendarEventRead,
     CalendarInsurancePlanRead,
     CancelPreviewRead,
 )
-from secretaria.services import cancellation_notice
+from secretaria.services import booking_hold, cancellation_notice
 from secretaria.services.appointment_status import SOURCE_HUB, log_status_transition
 from secretaria.services.calendar import CalendarService
 from secretaria.services.insurance_catalog import AppointmentPlan, load_appointment_plans
@@ -42,6 +50,35 @@ from secretaria.services.tenant_config import load_tenant_config
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/tenants/me/calendar", tags=["hub-calendar"])
+
+
+SLOT_HELD_MESSAGE = (
+    "Este horário está reservado: um paciente está pagando o sinal e a consulta será "
+    "confirmada assim que o pagamento cair. Escolha outro horário."
+)
+
+
+async def _refuse_if_slot_is_held(
+    session: AsyncSession,
+    tenant: Tenant,
+    start: datetime,
+    end: datetime,
+    *,
+    professional_id: UUID | None | str = "any",
+) -> None:
+    """409 when a live hold (a code or a Pix pending) overlaps the window (decision D4).
+
+    A manual booking needs no deposit - a human decides, the money may have changed hands at the
+    front desk - but it must never take the slot somebody is paying for. The hub's create route
+    has no professional, so ANY live hold of the clinic blocks it.
+    """
+    if await booking_hold.live_hold_overlaps(
+        session, tenant.id, start, end, professional_id=professional_id
+    ):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"code": "slot_held_awaiting_payment", "message": SLOT_HELD_MESSAGE},
+        )
 
 
 def _appointment_read(
@@ -152,7 +189,11 @@ def _deposit_read(
     """The state of the money for the agenda (status VALUE + amount), or None."""
     if view is None:
         return None
-    return CalendarDepositRead(status=view.status.value, amount_cents=view.amount_cents)
+    return CalendarDepositRead(
+        status=view.status.value,
+        amount_cents=view.amount_cents,
+        needs_attention=view.needs_attention,
+    )
 
 
 @router.get("/events", response_model=list[CalendarEventRead])
@@ -238,6 +279,52 @@ async def list_events(
 
 
 # ---------------------------------------------------------------------------
+# GET /awaiting-payment — slots held for a Pix that is still payable
+# ---------------------------------------------------------------------------
+
+
+@router.get("/awaiting-payment", response_model=list[AwaitingPaymentRead])
+async def list_awaiting_payment(
+    start: datetime,
+    end: datetime,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> list[AwaitingPaymentRead]:
+    """The `before`-timing reservations in [start, end): a slot a patient is paying for, with
+    no appointment and no Google event yet. A SIBLING of `GET /events` (whose body is a plain
+    array the agenda already consumes), so the doctor does not book on top of it.
+
+    Only live payment-phase holds whose charge is still awaiting payment; the answer carries the
+    window, the service and the deadline - never the patient, the amount or the provider.
+    """
+    holds = await booking_hold.live_payment_holds(session, tenant.id, start, end)
+    charge_ids = [hold.charge_id for hold in holds if hold.charge_id is not None]
+    live: set[UUID] = set()
+    if charge_ids:
+        live = set(
+            await session.scalars(
+                select(PixDeposit.id).where(
+                    PixDeposit.tenant_id == tenant.id,
+                    PixDeposit.id.in_(charge_ids),
+                    PixDeposit.status == PixDepositStatus.AWAITING,
+                )
+            )
+        )
+    return [
+        AwaitingPaymentRead(
+            id=str(hold.id),
+            start=hold.start_at,
+            end=hold.end_at,
+            service=hold.appointment_type,
+            expires_at=hold.expires_at,
+            professional_id=str(hold.professional_id) if hold.professional_id else None,
+        )
+        for hold in holds
+        if hold.charge_id in live
+    ]
+
+
+# ---------------------------------------------------------------------------
 # POST /appointments — create consultation with patient linking
 # ---------------------------------------------------------------------------
 
@@ -249,6 +336,7 @@ async def create_appointment(
     session: AsyncSession = Depends(get_session),
 ) -> AppointmentRead:
     cal = await _get_calendar(session, tenant)
+    await _refuse_if_slot_is_held(session, tenant, body.start, body.end)
     event = await cal.create_event(
         start=body.start,
         end=body.end,
@@ -477,6 +565,13 @@ async def reschedule_appointment(
         raise HTTPException(status.HTTP_409_CONFLICT, "Cannot reschedule a cancelled appointment")
 
     cal = await _get_calendar(session, tenant)
+    await _refuse_if_slot_is_held(
+        session,
+        tenant,
+        body.new_start,
+        body.new_end,
+        professional_id=appt.professional_id if appt.professional_id else "any",
+    )
     await cal.update_event(appt.google_event_id, body.new_start, body.new_end)
 
     # BUGFIX (PROMPT S3): this endpoint moved the Calendar event but never

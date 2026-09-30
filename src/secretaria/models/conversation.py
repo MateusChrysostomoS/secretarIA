@@ -41,6 +41,24 @@ class FlowState(enum.StrEnum):
                       a visitor who has not proven their address, so the next
                       inbound is read as the 6-digit code.
 
+    AWAITING_DEPOSIT
+                    - BOTH channels, `before` timing only: the slot is HELD and a Pix was sent;
+                      the conversation waits for the payment (`services/deposit_wait.py`). It
+                      offers "Já paguei / Trocar horário / Cancelar reserva" and leaves on its
+                      own: the payment (fulfillment), the Pix window ending (the expiry job) or,
+                      for an inbound after the window, the lazy exit in
+                      `_persist_inbound_message`. Never the patient alone.
+    AWAITING_PAYER_DATA
+                    - BOTH channels, BOTH timings, a provider that needs a payer field (Asaas: the
+                      CPF/CNPJ; Mercado Pago: the e-mail): the patient was asked for it (decision
+                      D7) right before the Pix. `before`: BEFORE any slot is held or Pix created
+                      (the answer replays the "Confirmar"). `after`: the consultation already
+                      exists and stands (the answer resumes its Pix). The answer never reaches
+                      `messages` (stored redacted) nor the LLM (`services/payments/payer_data.py`).
+                      It leaves on its own: a valid answer, "Não quero informar", the third
+                      invalid answer (a human takes over) or 15 minutes of silence (the lazy exit
+                      in `_route_inbound_turn`). `flow_step` carries
+                      "payer_data:<before|after>:<doc|mail>:<invalid answers>".
     AWAITING_NAME   - BOTH channels: the patient was asked "qual é o seu
                       nome?" (services/patient_name.py) and the next inbound is
                       read as their name. WhatsApp: right after the greeting on
@@ -71,6 +89,10 @@ class FlowState(enum.StrEnum):
     AWAITING_EMAIL_CODE = "AWAITING_EMAIL_CODE"
     # Same reasoning, same absence of a migration: 13 characters.
     AWAITING_NAME = "AWAITING_NAME"
+    # Same reasoning, same absence of a migration: 16 characters in the VARCHAR(32).
+    AWAITING_DEPOSIT = "AWAITING_DEPOSIT"
+    # Same reasoning, same absence of a migration: 19 characters in the VARCHAR(32).
+    AWAITING_PAYER_DATA = "AWAITING_PAYER_DATA"
 
 
 def _handover_values(enum_cls: type[enum.Enum]) -> list[str]:

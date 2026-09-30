@@ -527,3 +527,28 @@ este contrato ganha `deposit.needs_attention` (aditivo) e uma lista separada `aw
 nunca na agenda.
 
 Validation (2026-09-29): 44 new tests passed; full suite 2577 passed, 2 failed (same Google Calendar credential baseline: 2533 passed, 2 failed). Ruff check clean. Lifecycle diff: 39 added, 0 removed. Graphify update/diagnose: 8351 nodes, 19927 edges, zero duplicates/dangling endpoints, one incidental self-loop.
+
+## 12. Descrição de pagamento por convênio na lista do paciente (TASK-017 / F2 Task 15A, 2026-09-30)
+
+A lista "Você vai usar convênio?" (`flow_router._enter_insurance`) passa a dar a cada plano uma **descrição de linha**
+pública que diz como o pagamento funciona, vinda do `mechanism` do catálogo (`insurance_catalog`):
+
+| `mechanism` | Descrição (≤ 72 caracteres, o teto da linha da lista) |
+|---|---|
+| `reembolso` | Reembolso: você paga e solicita à operadora, conforme seu contrato. |
+| `coparticipacao` | Coparticipação: parte do custo pode ser cobrada de você. |
+| `desconto_direto` | Desconto direto: pode haver redução no valor pago à clínica. |
+| `variavel_por_plano` | Varia por plano: confirme cobertura e pagamento com a operadora. |
+| qualquer outro valor, ausente ou plano próprio/legado | Pagamento: confirme as condições com a clínica. |
+
+- Cópia pura em `services/insurance_payment_copy.py::insurance_payment_description` (mecanismo desconhecido nunca levanta).
+- O snapshot do convênio (`TenantInsurance.plans`) ganhou `mechanism` nos três caminhos (catálogo, plano próprio e
+  string legada → `"desconhecido"`); **nenhum SELECT novo** (a coluna já vinha no JOIN) e os ids e o `accepted_by`
+  não mudam.
+- O payload público é o campo que já existia: `interactive.options[].description` (WhatsApp e Portal gravam o mesmo
+  `interactive_list_record`); a nota de pagamento da clínica (`note`) **nunca** vai para a lista antes da escolha.
+- Reembolso é coisa entre paciente e operadora: **não** é devolução de sinal Pix, e o `mechanism` nunca decide se o
+  sinal é cobrado (isso segue sendo `charge_deposit` do plano, Task 4/15). "Particular" e "Outro" ficam sem descrição.
+- Testes: `tests/test_insurance_payment_copy.py`, `tests/test_flow_router_insurance.py`,
+  `tests/test_convenio_catalogo_db.py`, `tests/test_insurance_mode_matrix.py`,
+  `tests/test_interactive_bubble_record.py` (Portal).

@@ -36,12 +36,19 @@ from secretaria.models.payment_attention_item import (
     REASON_REFUND_DUE_POLICY,
     PaymentAttentionItem,
 )
-from secretaria.models.pix_deposit import DEPOSIT_TIMING_AFTER, PixDeposit, PixDepositStatus
+from secretaria.models.pix_deposit import (
+    DEPOSIT_TIMING_AFTER,
+    DEPOSIT_TIMING_BEFORE,
+    FULFILLMENT_NEEDS_ATTENTION,
+    PixDeposit,
+    PixDepositStatus,
+)
 from secretaria.models.processed_asaas_event import ProcessedAsaasEvent
 from secretaria.services import tenant_config as cfg
 from secretaria.services.booking_scope import canonical_service_name
 from secretaria.services.calendar import CalendarService
-from secretaria.services.payments import accounts, attention, registry
+from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
+from secretaria.services.payments import accounts, attention, notify, payer_data, registry
 from secretaria.services.payments.money import format_brl, parse_brl_to_cents
 from secretaria.services.payments.provider import ChargeRequest, PaymentStatus, ProviderError
 from secretaria.services.service_catalog import load_service_catalog, service_by_name
@@ -93,6 +100,10 @@ DEPOSIT_SKIP_ZERO_AMOUNT = "zero_amount"
 # decision 2026-09-25: per clinic AND per plan, never inferred from the
 # operator - see models/insurance.py.
 DEPOSIT_SKIP_INSURANCE_NO_CHARGE = "insurance_no_charge"
+# TASK-017: the clinic charges BEFORE confirming, so this hook has nothing to add; and an
+# appointment that already has a deposit row never gets a second charge.
+DEPOSIT_SKIP_TIMING_BEFORE = "timing_before"
+DEPOSIT_SKIP_ALREADY_CHARGED = "already_charged"
 
 
 def _log_deposit_skip(tenant: Tenant, appointment: Appointment, reason: str) -> None:
@@ -130,6 +141,8 @@ class AppointmentDepositView:
 
     status: PixDepositStatus
     amount_cents: int
+    # `fulfillment_status == needs_attention`: an attention item is open on this deposit.
+    needs_attention: bool = False
 
 
 async def load_deposit_views(
@@ -149,14 +162,23 @@ async def load_deposit_views(
     if not ids:
         return {}
     rows = await session.execute(
-        select(PixDeposit.appointment_id, PixDeposit.status, PixDeposit.amount_cents).where(
+        select(
+            PixDeposit.appointment_id,
+            PixDeposit.status,
+            PixDeposit.amount_cents,
+            PixDeposit.fulfillment_status,
+        ).where(
             PixDeposit.tenant_id == tenant_id,
             PixDeposit.appointment_id.in_(ids),
         )
     )
     return {
-        appointment_id: AppointmentDepositView(status=status, amount_cents=amount_cents)
-        for appointment_id, status, amount_cents in rows.all()
+        appointment_id: AppointmentDepositView(
+            status=status,
+            amount_cents=amount_cents,
+            needs_attention=fulfillment == FULFILLMENT_NEEDS_ATTENTION,
+        )
+        for appointment_id, status, amount_cents, fulfillment in rows.all()
     }
 
 
@@ -279,10 +301,17 @@ async def _send_deposit_request(
     copy_paste: str | None,
     waba_token: str | None,
 ) -> None:
-    token = waba_token if waba_token is not None else await cfg.get_waba_token(session, tenant.id)
-    client = WhatsAppClient.for_tenant(tenant, token)
     payment_note = await _insurance_payment_note(session, appointment)
     text = _deposit_request_text(tenant, appointment, amount_cents, copy_paste, payment_note)
+    if patient.channel == CHANNEL_BRAIN_MESSAGE:
+        # A Portal patient has no `wa_id`: the request travels as a Portal message, through the
+        # ONE channel resolver of the payments code (`notify.resolve_sender`).
+        await notify.deliver(
+            session, tenant, patient, [notify.Text(text)], waba_token=waba_token
+        )
+        return
+    token = waba_token if waba_token is not None else await cfg.get_waba_token(session, tenant.id)
+    client = WhatsAppClient.for_tenant(tenant, token)
     await client.send_text_message(to=patient.wa_id, body=text)
 
 
@@ -329,6 +358,9 @@ async def maybe_create_deposit(
     patient: Patient | None,
     appointment: Appointment,
     waba_token: str | None,
+    collect_payer_data: bool = False,
+    redis=None,
+    conversation_id: UUID | None = None,
 ) -> PixDeposit | None:
     """Best-effort: create a Pix deposit charge for a freshly booked appointment.
 
@@ -341,9 +373,24 @@ async def maybe_create_deposit(
     track of a live Asaas charge. Nothing here ever raises into the caller —
     a payment/notification hiccup must never block or unwind the booking
     itself, which is already committed by the time this runs.
+
+    `collect_payer_data` (True only from the `after` hook, decision D7): when the provider says it
+    needs a payer field (`payer_document_required` / `payer_email_required`) and none was given,
+    raise `payer_data.PayerDataNeeded(kind, provider)` instead of skipping in silence, so the
+    caller can ASK the patient. Every other caller keeps the silent skip. `redis` and
+    `conversation_id` locate the transient answer (encrypted, 15 minutes): it goes to the provider
+    and to nobody else and is forgotten right after that call.
     """
     if not tenant.pix_deposit_enabled:
         _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_DISABLED)
+        return None
+    if (tenant.deposit_timing or DEPOSIT_TIMING_AFTER) == DEPOSIT_TIMING_BEFORE:
+        # `before` timing charges BEFORE the appointment exists (`booking_charge.py`); the
+        # post-booking hook of the same booking must never ask for a second deposit.
+        _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_TIMING_BEFORE)
+        return None
+    if await get_deposit_for_appointment(session, appointment.id) is not None:
+        _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_ALREADY_CHARGED)
         return None
     if not await _insurance_charges_deposit(session, tenant, appointment):
         _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_INSURANCE_NO_CHARGE)
@@ -390,6 +437,9 @@ async def maybe_create_deposit(
     customer_id = await accounts.get_customer_id(
         session, tenant_id=tenant.id, patient_id=patient.id, provider=provider_name
     )
+    payer = await payer_data.recall_all(
+        redis, tenant_id=tenant.id, conversation_id=conversation_id
+    )
     description = f"Sinal - {appointment.appointment_type or 'consulta'} - {tenant.clinic_name}"
     try:
         created = await provider.create_pix_charge(
@@ -401,11 +451,19 @@ async def maybe_create_deposit(
                 due_date=datetime.now(_tenant_tz(tenant)).date(),
                 payer_name=patient.name or "Paciente",
                 payer_phone=patient.wa_id,
-                # The CPF is collected by the F2 flow (transiently, decision D7); F1 sends none.
+                # Collected by the F2 flow (transiently, decision D7); never stored nor logged.
                 provider_customer_id=customer_id,
+                payer_document=payer.document,
+                payer_email=payer.email,
             ),
         )
     except Exception as exc:
+        needed = payer_data.kind_for_code(exc.code) if isinstance(exc, ProviderError) else None
+        if collect_payer_data and needed is not None and not payer.has(needed):
+            # Nothing was charged and nothing was stored: let the caller ask (what the patient
+            # already gave stays for the answer that completes the request).
+            raise payer_data.PayerDataNeeded(needed, provider_name) from None
+        await payer_data.discard(redis, tenant_id=tenant.id, conversation_id=conversation_id)
         logger.warning(
             "pix_deposit_charge_failed",
             code=exc.code if isinstance(exc, ProviderError) else type(exc).__name__,
@@ -413,6 +471,9 @@ async def maybe_create_deposit(
             appointment_id=str(appointment.id),
         )
         return None
+
+    # The provider saw it: forget it (the deposit row and the log never carry it).
+    await payer_data.discard(redis, tenant_id=tenant.id, conversation_id=conversation_id)
 
     if created.provider_customer_id and created.provider_customer_id != customer_id:
         await accounts.remember_customer_id(
@@ -713,10 +774,13 @@ async def _notify_paid(session: AsyncSession, tenant: Tenant, deposit: PixDeposi
         )
         text = f"{text} {when}."
 
+    patient = await session.get(Patient, deposit.patient_id) if deposit.patient_id else None
+    if patient is not None and patient.channel == CHANNEL_BRAIN_MESSAGE:
+        await notify.deliver(session, tenant, patient, [notify.Text(text)])
+        return
     to = appointment.phone if appointment is not None else None
-    if not to and deposit.patient_id is not None:
-        patient = await session.get(Patient, deposit.patient_id)
-        to = patient.wa_id if patient is not None else None
+    if not to and patient is not None:
+        to = patient.wa_id
     if not to:
         logger.info(
             "pix_deposit_paid_notice_skipped_no_phone",
@@ -750,10 +814,18 @@ async def _notify_expired(session: AsyncSession, tenant: Tenant, appointment: Ap
                 appointment_id=str(appointment.id),
             )
 
+    patient = await session.get(Patient, appointment.patient_id) if appointment.patient_id else None
+    if patient is not None and patient.channel == CHANNEL_BRAIN_MESSAGE:
+        await notify.deliver(
+            session,
+            tenant,
+            patient,
+            [notify.Text("O prazo para pagamento do sinal expirou e sua reserva foi liberada.")],
+        )
+        return
     to = appointment.phone
-    if not to and appointment.patient_id is not None:
-        patient = await session.get(Patient, appointment.patient_id)
-        to = patient.wa_id if patient is not None else None
+    if not to and patient is not None:
+        to = patient.wa_id
     if not to:
         logger.info(
             "pix_deposit_expired_notice_skipped_no_phone",
@@ -877,3 +949,90 @@ async def apply_asaas_event(
     if result.outcome in ("expired", "expired_appointment_kept"):
         return "expired"
     return "noop"
+
+
+# --------------------------------------------------------------------------
+# `before` timing copy (TASK-017) - every patient-facing pt-BR line of the deposit-gated
+# booking lives here, next to the `after` copy above. NOTHING in this block promises, mentions
+# or automates a refund (decision D15): a payment the system cannot honour is handed to the
+# clinic (an attention item) and the patient is told the CLINIC will get in touch.
+# --------------------------------------------------------------------------
+
+# The taps of the "waiting for your Pix" card. Matched by label on BOTH channels (a Portal card
+# id is revalidated against the cards the conversation offered, the label is what always arrives).
+LABEL_DEPOSIT_PAID = "Já paguei"
+LABEL_DEPOSIT_CHANGE = "Trocar horário"
+LABEL_DEPOSIT_CANCEL = "Cancelar reserva"
+DEPOSIT_WAIT_BUTTONS: tuple[tuple[str, str], ...] = (
+    ("deposit_paid", LABEL_DEPOSIT_PAID),
+    ("deposit_change", LABEL_DEPOSIT_CHANGE),
+    ("deposit_cancel", LABEL_DEPOSIT_CANCEL),
+)
+
+
+BEFORE_COPY_PASTE_LABEL = "Segue o Pix copia e cola, na próxima mensagem:"
+
+
+def before_request_text(
+    clinic_name: str,
+    *,
+    service: str,
+    when_text: str,
+    amount_cents: int,
+    minutes: int,
+    until_text: str,
+    payment_note: str | None = None,
+) -> str:
+    """The first bubble of the Pix request: what it is for, how much, until when."""
+    lines = [
+        f"Para reservar {service} em {when_text} na {clinic_name}, pedimos um sinal de "
+        f"{format_brl(amount_cents)} via Pix.",
+        f"O horário fica reservado para você por {minutes} minutos (até {until_text}). "
+        "A consulta só é confirmada depois que o pagamento for identificado.",
+    ]
+    if payment_note:
+        lines.append(f"💳 Sobre o pagamento do convênio:\n{payment_note}")
+    return "\n\n".join(lines)
+
+
+BEFORE_COPY_PASTE_LABEL = "Pix copia e cola:"
+
+
+def before_wait_card_text(until_text: str) -> str:
+    """The body of the card that keeps the conversation while the Pix is open."""
+    return (
+        f"Estou aguardando o pagamento do Pix até {until_text}. "
+        "Assim que ele for identificado, confirmo a sua consulta por aqui."
+    )
+
+
+BEFORE_STILL_WAITING_TEXT = (
+    "Ainda não identifiquei o pagamento. Se você já pagou, aguarde um instante: "
+    "assim que ele cair, confirmo a sua consulta por aqui."
+)
+BEFORE_PAYMENT_FOUND_TEXT = "Recebi o seu pagamento! Estou confirmando a sua consulta agora."
+BEFORE_RELEASED_TEXT = (
+    "Tudo bem, liberei o horário e cancelei o Pix. Quando quiser, é só pedir um novo agendamento."
+)
+BEFORE_CHANGE_TEXT = "Tudo bem, liberei o horário e cancelei o Pix. Quer escolher outro horário?"
+BEFORE_EXPIRED_TEXT = (
+    "O prazo do Pix acabou e o horário foi liberado. Quer escolher outro horário?"
+)
+BEFORE_BLOCKED_TEXT = (
+    "Não consegui iniciar o seu agendamento agora. Vou passar a conversa para a equipe da "
+    "clínica, que continua o seu atendimento por aqui."
+)
+BEFORE_LATE_TAKEN_TEXT = (
+    "Recebemos o seu pagamento, mas o horário que você escolheu não está mais disponível. "
+    "A clínica vai falar com você para remarcar ou resolver o valor."
+)
+BEFORE_PROMOTION_STUCK_TEXT = (
+    "Recebemos o seu pagamento, mas não conseguimos confirmar a consulta agora. "
+    "A clínica foi avisada e vai falar com você."
+)
+
+
+def before_late_reopened_text() -> str:
+    """Said BEFORE the confirmation bubble when the payment came after the Pix window but the
+    slot was still free, so the reservation was reopened."""
+    return "Recebemos o seu pagamento e o horário ainda estava livre, então reabri a sua reserva."

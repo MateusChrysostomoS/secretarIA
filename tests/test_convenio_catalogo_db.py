@@ -36,6 +36,7 @@ from secretaria.api.hub.deps import get_current_tenant  # noqa: E402
 from secretaria.core.database import Base, get_session  # noqa: E402
 from secretaria.models import Appointment, AppointmentStatus, Patient, Tenant  # noqa: E402
 from secretaria.models.insurance import (  # noqa: E402
+    InsuranceCatalog,
     ProfessionalInsurancePlan,
     TenantInsurancePlan,
 )
@@ -46,6 +47,8 @@ from secretaria.services.hub_configuration import apply_tenant_config  # noqa: E
 from secretaria.services.insurance_catalog import (  # noqa: E402
     NotClinicPlans,
     catalog_id_for_slug,
+    create_professional_custom_plan,
+    create_tenant_custom_plan,
     ensure_catalog_seeded,
     list_tenant_plans,
     load_tenant_insurance,
@@ -393,7 +396,10 @@ async def test_hub_config_put_no_longer_accepts_insurances(db):
     async with db() as session:
         # Untouched: still only Unimed, Ana's explicit acceptance intact.
         insurance = await load_tenant_insurance(session, tenant.id)
-        assert insurance.plans == [{"id": unimed_plan_id, "name": "Unimed", "note": None}]
+        unimed_mechanism = (await session.get(InsuranceCatalog, UNIMED)).mechanism
+        assert insurance.plans == [
+            {"id": unimed_plan_id, "name": "Unimed", "note": None, "mechanism": unimed_mechanism}
+        ]
         assert insurance.accepted_by[str(ana.id)] == frozenset({unimed_plan_id})
         stored = await session.get(Tenant, tenant.id)
         # `insurances` itself is also untouched by the PUT - still the legacy
@@ -436,9 +442,10 @@ async def test_legacy_only_plan_is_offered_but_a_removed_catalog_plan_does_not_r
     async with db() as session:
         before = await load_tenant_insurance(session, tenant.id)
         unimed_plan_id = await _plan_id(session, tenant.id, UNIMED)
+        unimed_mechanism = (await session.get(InsuranceCatalog, UNIMED)).mechanism
         assert before.plans == [
-            {"id": unimed_plan_id, "name": "Unimed", "note": None},
-            {"id": None, "name": "GEAP", "note": None},
+            {"id": unimed_plan_id, "name": "Unimed", "note": None, "mechanism": unimed_mechanism},
+            {"id": None, "name": "GEAP", "note": None, "mechanism": "desconhecido"},
         ]
         tenant = await session.get(Tenant, tenant.id)
         await set_tenant_plans(session, tenant, [])
@@ -446,7 +453,9 @@ async def test_legacy_only_plan_is_offered_but_a_removed_catalog_plan_does_not_r
         assert tenant.insurances == ["GEAP"]
     async with db() as session:
         after = await load_tenant_insurance(session, tenant.id)
-        assert after.plans == [{"id": None, "name": "GEAP", "note": None}]
+        assert after.plans == [
+            {"id": None, "name": "GEAP", "note": None, "mechanism": "desconhecido"}
+        ]
 
 
 # --------------------------------------------------------------------------
@@ -770,3 +779,86 @@ async def test_e2e_clinic_with_only_non_catalog_legacy_plans_still_asks_insuranc
         f"convênio step skipped: got {after.flow_step!r} although collect_insurance=True "
         f"and tenants.insurances={tenant.insurances!r}"
     )
+
+
+# --------------------------------------------------------------------------
+# TASK-017 / 15A: the snapshot carries each plan's payment mechanism
+# --------------------------------------------------------------------------
+
+
+async def test_snapshot_carries_each_plans_mechanism_in_the_clinic_modes(db):
+    async with db() as session:
+        (await session.get(InsuranceCatalog, UNIMED)).mechanism = "reembolso"
+        (await session.get(InsuranceCatalog, AMIL)).mechanism = "coparticipacao"
+        tenant = await _tenant(session, insurances=["GEAP"])
+        other = await _tenant(session)
+        await set_tenant_plans(session, tenant, [(UNIMED, True)])
+        await create_tenant_custom_plan(
+            session, tenant, custom_name="Prefeitura", custom_payment_note="Nota interna"
+        )
+        await sync_legacy_insurances(session, tenant, tenant.insurances)
+        await set_tenant_plans(session, other, [(AMIL, True)])
+        await session.commit()
+    async with db() as session:
+        insurance = await load_tenant_insurance(session, tenant.id)
+        unimed_plan_id = await _plan_id(session, tenant.id, UNIMED)
+    by_name = {plan["name"]: plan for plan in insurance.plans}
+    assert by_name["Unimed"]["mechanism"] == "reembolso"
+    assert by_name["Unimed"]["id"] == unimed_plan_id  # the row identity is untouched
+    assert by_name["Prefeitura"]["mechanism"] == "desconhecido"  # custom: no catalog entry
+    assert by_name["GEAP"]["mechanism"] == "desconhecido"  # legacy string
+    assert "Amil" not in by_name  # another clinic's plan never leaks in
+
+
+async def test_snapshot_carries_the_mechanism_in_independent_mode_and_keeps_the_dedupe(db):
+    async with db() as session:
+        (await session.get(InsuranceCatalog, UNIMED)).mechanism = "reembolso"
+        tenant = await _tenant(session, insurance_mode="independent")
+        ana = await _professional(session, tenant, "Dra. Ana")
+        bruno = await _professional(session, tenant, "Dr. Bruno")
+        for doctor in (ana, bruno):
+            session.add(
+                ProfessionalInsurancePlan(
+                    professional_id=doctor.id, tenant_id=tenant.id, catalog_id=UNIMED
+                )
+            )
+        await create_professional_custom_plan(
+            session, ana, custom_name="Plano da Ana", custom_payment_note="Nota A"
+        )
+        await create_professional_custom_plan(
+            session, bruno, custom_name="Plano do Bruno", custom_payment_note="Nota B"
+        )
+        await session.commit()
+    async with db() as session:
+        insurance = await load_tenant_insurance(session, tenant.id)
+    by_name = {plan["name"]: plan for plan in insurance.plans}
+    assert sorted(by_name) == ["Plano da Ana", "Plano do Bruno", "Unimed"]  # ONE Unimed row
+    assert by_name["Unimed"]["mechanism"] == "reembolso"
+    assert by_name["Plano da Ana"]["mechanism"] == "desconhecido"
+
+
+async def test_the_mechanism_adds_no_select_per_plan(db):
+    from sqlalchemy import event
+
+    async def _selects(plan_count: int) -> int:
+        async with db() as session:
+            tenant = await _tenant(session)
+            plans = [(UNIMED, True), (AMIL, True), (BRADESCO, True)][:plan_count]
+            await set_tenant_plans(session, tenant, plans)
+            await session.commit()
+        seen: list[str] = []
+        async with db() as session:
+            engine = session.bind.sync_engine
+
+            def _count(conn, cursor, statement, *args):
+                if statement.lstrip().upper().startswith("SELECT"):
+                    seen.append(statement)
+
+            event.listen(engine, "before_cursor_execute", _count)
+            try:
+                await load_tenant_insurance(session, tenant.id)
+            finally:
+                event.remove(engine, "before_cursor_execute", _count)
+        return len(seen)
+
+    assert await _selects(1) == await _selects(3)

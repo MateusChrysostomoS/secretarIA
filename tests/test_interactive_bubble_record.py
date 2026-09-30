@@ -504,3 +504,31 @@ async def test_a_malformed_card_costs_its_controls_never_the_thread(
     assert broken["body"] == "Escolha"
     assert broken["interactive"] is None
     assert after["body"] == "oi"
+
+
+async def test_portal_list_persists_the_row_description_the_clinic_insurance_list_carries(
+    db, seeded
+) -> None:
+    """TASK-017 / 15A: the convênio list's payment description reaches the Portal patient too."""
+    from secretaria.services.insurance_payment_copy import insurance_payment_description
+
+    _, conversation = seeded
+    sender = BrainMessageSender(conversation_id=conversation.id, session_factory=db)
+    description = insurance_payment_description("reembolso")
+    rows = [("ins|Exemplo", "Exemplo", description), ("ins|particular", "Particular", None)]
+
+    await sender.send_list(
+        to="ext-1",
+        body="Você vai usar convênio? Escolha uma opção:",
+        button_label="Ver convênios",
+        rows=rows,
+        section_title="Convênios",
+    )
+
+    [row] = await _rows(db, conversation.id)
+    assert row.interactive == interactive_list_record(
+        "Você vai usar convênio? Escolha uma opção:", "Ver convênios", rows, "Convênios"
+    )
+    assert row.interactive["options"][0]["description"] == description
+    assert row.interactive["options"][0]["id"] == "ins|Exemplo"
+    assert row.interactive["options"][1]["description"] is None

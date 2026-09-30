@@ -94,6 +94,9 @@ class PaymentAttentionItem(Base):
     # `<provider>:<charge id or event id>:<reason>` - replay, reconciliation and sweeps can
     # never duplicate an item because this is unique per tenant.
     dedupe_key: Mapped[str] = mapped_column(String(220))
+    # Set once the clinic was e-mailed about this item (`services/payments/alerts.py`, F2): the
+    # alert sweep only ever picks items where it is NULL, so an item is announced exactly once.
+    alerted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # --- resolution (written by the hub `resolve` endpoint, F2) ---
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolution_action: Mapped[str | None] = mapped_column(String(32), nullable=True)

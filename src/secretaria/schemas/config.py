@@ -203,6 +203,12 @@ class TenantConfigUpdate(BaseModel):
     pix_retention_policy: Literal["total", "partial"] | None = None
     pix_partial_refund_percent: int | None = Field(default=None, ge=1, le=100)
     pix_reschedule_limit: int | None = Field(default=None, ge=0)
+    # --- How the deposit is charged (TASK-017; rules in services/payments/settings.py) ---
+    # Which PSP; `deposit_timing` "before" = the consultation is confirmed only after the Pix is
+    # paid, "after" = confirm first (today); the Pix / slot window in minutes, 30-120.
+    payment_provider: Literal["asaas", "mercadopago"] | None = None
+    deposit_timing: Literal["before", "after"] | None = None
+    deposit_hold_ttl_minutes: int | None = Field(default=None, ge=30, le=120)
     is_active: bool | None = None
 
     @field_validator("initial_flows")
@@ -323,6 +329,10 @@ class TenantConfigRead(BaseModel):
     pix_retention_policy: str
     pix_partial_refund_percent: int
     pix_reschedule_limit: int
+    # TASK-017. Defaults keep an older constructor call valid.
+    payment_provider: str = "asaas"
+    deposit_timing: str = "after"
+    deposit_hold_ttl_minutes: int = 30
     # True when an Asaas API key is stored for this tenant. Read-only/derived
     # (from has_asaas_api_key) — NOT declared on TenantConfigUpdate, so a PUT
     # can never flip it; it only ever changes via

@@ -22,7 +22,7 @@ Rules it enforces (spec sections 8.2-8.6, 10, 10A):
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import or_, select, update
@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.logging import get_logger
 from secretaria.models import Appointment, AppointmentStatus, Tenant
+from secretaria.models.booking_hold import BookingHold
 from secretaria.models.payment_attention_item import (
     REASON_AMOUNT_OVER,
     REASON_AMOUNT_UNDER,
@@ -279,6 +280,27 @@ async def _claim_paid(
     return False, False
 
 
+# A paid reservation keeps its slot held until the promotion retries have run their course
+# (`fulfillment.GIVE_UP_AFTER` is 15 minutes; 5 more of margin): otherwise the Pix window ending
+# a moment before the promotion finishes lets a patient who has NOT paid take the slot of one who
+# has. The hold is released by the promotion itself (`release_hold_of_charge`).
+PROMOTION_HOLD_MINUTES = 20
+
+
+async def _pin_hold_while_promoting(
+    session: AsyncSession, deposit: PixDeposit, now: datetime
+) -> None:
+    if deposit.hold_id is None:
+        return
+    hold = await session.get(BookingHold, deposit.hold_id)
+    if hold is None or hold.tenant_id != deposit.tenant_id:
+        return
+    until = now + timedelta(minutes=PROMOTION_HOLD_MINUTES)
+    current = hold.expires_at if hold.expires_at.tzinfo else hold.expires_at.replace(tzinfo=UTC)
+    if current < until:
+        hold.expires_at = until
+
+
 async def _on_paid(
     session: AsyncSession,
     tenant: Tenant,
@@ -365,6 +387,10 @@ async def _on_paid(
         # The consultation does not exist yet: the promoter (F2) creates it, retryably,
         # from the deposit's own state. Nothing else happens here.
         attention.mark_fulfillment(deposit, FULFILLMENT_PROMOTING)
+        # Our own clock, not the provider's date: the promotion's retry window starts here
+        # (`fulfillment._promotion_started_at`), and the slot stays held for it (below).
+        deposit.last_payment_check_at = now
+        await _pin_hold_while_promoting(session, deposit, now)
         return EventResult("paid_before", fulfill_deposit_id=deposit.id)
 
     if appointment is None:

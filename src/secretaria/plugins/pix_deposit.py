@@ -33,7 +33,7 @@ from secretaria.core.logging import get_logger
 from secretaria.models import Appointment, Patient, Tenant
 from secretaria.plugins.base import PluginSpec, PostBookingContext
 from secretaria.plugins.registry import register
-from secretaria.services.payments import deposit_lifecycle
+from secretaria.services.payments import deposit_lifecycle, notify, payer_data, payer_data_after
 
 logger = get_logger(__name__)
 
@@ -56,13 +56,32 @@ async def _post_booking(ctx: PostBookingContext) -> None:
                 )
                 return
 
-            await deposit_lifecycle.maybe_create_deposit(
-                session,
-                tenant=tenant,
-                patient=patient,
-                appointment=appointment,
-                waba_token=ctx.waba_token,
-            )
+            conversation_id = await notify.conversation_id_for(session, tenant.id, patient.id)
+            try:
+                await deposit_lifecycle.maybe_create_deposit(
+                    session,
+                    tenant=tenant,
+                    patient=patient,
+                    appointment=appointment,
+                    waba_token=ctx.waba_token,
+                    # Decision D7, `after` timing: the provider may need a payer field. Ask for it
+                    # right before the Pix instead of skipping the Pix in silence.
+                    collect_payer_data=True,
+                    redis=ctx.redis,
+                    conversation_id=conversation_id,
+                )
+            except payer_data.PayerDataNeeded as need:
+                await payer_data_after.ask_after_booking(
+                    session,
+                    tenant=tenant,
+                    patient=patient,
+                    appointment=appointment,
+                    kind=need.kind,
+                    provider=need.provider,
+                    waba_token=ctx.waba_token,
+                    redis=ctx.redis,
+                    conversation_id=conversation_id,
+                )
             await session.commit()
     except Exception as exc:
         logger.warning(

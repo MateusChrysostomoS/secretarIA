@@ -225,13 +225,16 @@ class TenantInsurance:
     """What the pure flow router needs about one clinic's convênios.
 
     `plans` keeps catalog order (by name) as plain dicts, `{"id": str, "name":
-    str, "note": str | None}`, so it travels on the tenant snapshot like
+    str, "note": str | None, "mechanism": str}`, so it travels on the tenant snapshot like
     `appointment_types` does. `id` is the row's own identity - a
     `tenant_insurance_plans.id` (shared/clinic_with_exceptions modes) or a
     `professional_insurance_plans.id`/catalog id (independent mode, see
     `_load_independent_insurance`) - never a bare catalog id, because a custom
     "Outro" plan has none. `note` is `custom_payment_note` for a custom plan,
-    else None (catalog metadata is never patient-facing prose).
+    else None (catalog metadata is never patient-facing prose). `mechanism` is the catalog
+    entry's payment mechanism ("desconhecido" for a custom plan or a legacy string); it is the
+    ONE catalog field the patient sees, as the list row's description
+    (`insurance_payment_copy.py`), and it never decides whether a deposit is charged.
     `accepted_by` maps professional id (str) -> the plan ids (str, same `id`
     space as `plans`) that doctor accepts; a doctor with no rows maps to
     nothing, which the flow renders as "not marked" - never as hidden.
@@ -400,6 +403,7 @@ async def _load_independent_insurance(session: AsyncSession, tenant_id: UUID) ->
                 "id": plan_id,
                 "name": name,
                 "note": plan.custom_payment_note if entry is None else None,
+                "mechanism": entry.mechanism if entry is not None else "desconhecido",
             }
         accepted.setdefault(str(plan.professional_id), set()).add(plan_id)
     plans = sorted(plans_by_id.values(), key=lambda item: normalize(item["name"]))
@@ -436,11 +440,12 @@ async def load_tenant_insurance(session: AsyncSession, tenant_id: UUID) -> Tenan
             "id": str(plan.id),
             "name": _plan_display_name(plan, entry),
             "note": plan.custom_payment_note if entry is None else None,
+            "mechanism": entry.mechanism if entry is not None else "desconhecido",
         }
         for plan, entry in await list_tenant_plans(session, tenant_id)
     ]
     plans.extend(
-        {"id": None, "name": name, "note": None}
+        {"id": None, "name": name, "note": None, "mechanism": "desconhecido"}
         for name in await _legacy_only_names(session, tenant_id)
     )
 

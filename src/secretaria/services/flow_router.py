@@ -77,6 +77,9 @@ from secretaria.services.calendar import (
     build_patient_calendar_link,
 )
 from secretaria.services.insurance_catalog import match_plan
+from secretaria.services.insurance_payment_copy import insurance_payment_description
+from secretaria.services.payments import payer_data
+from secretaria.services.payments.deposit_lifecycle import BEFORE_BLOCKED_TEXT
 from secretaria.services.pending_identity import BOOKING_SLOT_TAKEN_MESSAGE
 from secretaria.services.service_catalog import normalize, professionals_offering
 from secretaria.services.tenant_config import (
@@ -555,6 +558,14 @@ class FlowRouterResult:
     # exactly one of the two exists for any confirmed slot.
     # {"hold_id": UUID, "email_masked": str | None, "when": str, "minutes": int}
     booking_hold: dict | None = None
+    # When set (`before` timing), the patient CONFIRMED a slot and the gate held it for a
+    # deposit: a Pix exists and NOTHING was created on Google or in `appointments`. The caller
+    # persists `flow_state = AWAITING_DEPOSIT` (the selection is carried, so "Trocar horário"
+    # can re-open the picker) and then sends the Pix; if that send fails it voids the charge.
+    # Mutually exclusive with `appointment` and `booking_hold`.
+    # {"deposit_id", "amount_cents", "copy_paste", "expires_at", "start_at", "end_at",
+    #  "service", "minutes", "payment_note"}
+    deposit_request: dict | None = None
     # When set, the matching appointment row should be moved (RESCHEDULED):
     # {"google_event_id", "start_at", "end_at"}.
     appointment_reschedule: dict | None = None
@@ -1292,6 +1303,8 @@ async def _route(
         FlowState.AWAITING_EMAIL,
         FlowState.AWAITING_EMAIL_CODE,
         FlowState.AWAITING_NAME,
+        FlowState.AWAITING_DEPOSIT,
+        FlowState.AWAITING_PAYER_DATA,
     ):
         logger.warning(
             "flow_router_pending_identity_state_leaked",
@@ -2187,13 +2200,20 @@ def _enter_insurance(
     hand-back with the service already chosen - whose service/doctor must ride
     along to the day picker.
     """
-    plans = _tenant_insurances(tenant)
+    plans = _tenant_insurance_plans(tenant)
     if len(plans) > MAX_INSURANCE_PLAN_ROWS:
         logger.warning(
             "flow_insurance_list_truncated", total=len(plans), shown=MAX_INSURANCE_PLAN_ROWS
         )
-    rows: list[tuple[str, str]] = [
-        (f"ins|{plan}", truncate_list_row_title(plan)) for plan in plans[:MAX_INSURANCE_PLAN_ROWS]
+    # The row description says how payment works for the plan (the catalog mechanism): public,
+    # fixed copy - never the clinic's own note, never anything that decides the deposit.
+    rows: list[tuple] = [
+        (
+            f"ins|{plan['name']}",
+            truncate_list_row_title(str(plan["name"])),
+            insurance_payment_description(plan.get("mechanism")),
+        )
+        for plan in plans[:MAX_INSURANCE_PLAN_ROWS]
     ]
     rows.append(("ins|particular", LABEL_INSURANCE_PARTICULAR))
     rows.append(("ins|outro", LABEL_INSURANCE_OTHER))
@@ -2759,11 +2779,17 @@ async def enter_day_picker(
     step = step or branch.day_step
     if calendar is None:
         return _calendar_unavailable(conversation, branch, step)
+    # Time other conversations HOLD (a code or a Pix pending) is busy even though Google has
+    # never heard of it: without it a fully held day would still be offered. Passed only when
+    # there is something to pass, so a calendar double without the parameter is unaffected.
+    reserved = await _hold_windows(_selected_professional_id(conversation))
+    extra = {"extra_busy": reserved} if reserved else {}
     try:
         days = await calendar.list_available_days(
             start_day=datetime.now(calendar.tzinfo),
             days=DAY_PICKER_WINDOW_DAYS,
             slot_minutes=duration_minutes,
+            **extra,
         )
     except CalendarUnavailableError:
         return _calendar_unavailable(conversation, branch, step)
@@ -2854,20 +2880,26 @@ async def _enter_slot_picker(
     """
     if calendar is None:
         return _calendar_unavailable(conversation, branch, branch.day_step)
+    reserved = await _hold_windows(_selected_professional_id(conversation))
+    extra = {"extra_busy": reserved} if reserved else {}
     try:
         slots = await calendar.list_free_slots(
-            day=target, slot_minutes=duration_minutes, max_slots=SLOT_PICKER_MAX_SLOTS
+            day=target,
+            slot_minutes=duration_minutes,
+            max_slots=SLOT_PICKER_MAX_SLOTS,
+            **extra,
         )
     except CalendarUnavailableError:
         return _calendar_unavailable(conversation, branch, branch.day_step)
 
     # A slot another conversation is HOLDING is not free, even though Google
-    # has never heard of it: between "Confirmar" and a verified code the
+    # has never heard of it: between "Confirmar" and a verified code (or a paid Pix) the
     # booking exists only in `booking_holds`. Applied on EVERY channel and on
     # both branches (first booking and reschedule) - a reservation half the
     # surfaces ignore is not a reservation. The patient's own hold is excluded
-    # upstream, so their own choice stays visible to them.
-    reserved = await _hold_windows(_selected_professional_id(conversation))
+    # upstream, so their own choice stays visible to them. `list_free_slots` already
+    # skipped these windows (`extra_busy`); this filter stays as the second line for a
+    # calendar that does not take the parameter.
     if reserved:
         before = len(slots)
         slots = [
@@ -3368,7 +3400,7 @@ async def _handle_confirmation(
     )
     insurance = _selected_insurance(conversation)
 
-    if gate is not None and gate.armed:
+    if gate is not None and (gate.armed or gate.deposit_capable):
         decision = await gate.decide(
             start_at=start,
             end_at=end,
@@ -3412,6 +3444,72 @@ async def _handle_confirmation(
                     "hold_id": decision.hold_id,
                     "email_masked": decision.email_masked,
                     "when": start.strftime(WHEN_FORMAT),
+                },
+            )
+        if decision.outcome == "blocked":
+            # A deposit is due and cannot be asked for (spec 7): the booking is NOT made and a
+            # human takes the conversation (`action="handover"`). There is no clinic e-mail for
+            # this (owner answer 13): the log line of the gate is the operational record, so the
+            # copy must not say the clinic was alerted.
+            return FlowRouterResult(
+                action="handover",
+                bubbles=[TextBubble(body=BEFORE_BLOCKED_TEXT)],
+                flow_state=FlowState.IDLE,
+                flow_step=None,
+                flow_selected_type=None,
+                flow_selected_day=None,
+                flow_selected_slot=None,
+            )
+        if decision.outcome == "needs_payer_data" and decision.payer_field is not None:
+            # The provider needs a payer field (decision D7). Nothing is held or charged; the
+            # conversation waits for it and the answer replays THIS confirmation
+            # (`workers/tasks.py`, the AWAITING_PAYER_DATA branch of the inbound ladder).
+            return FlowRouterResult(
+                action="reply",
+                bubbles=[
+                    MenuBubble(
+                        body=payer_data.ask_text(decision.payer_field, decision.payer_provider),
+                        labels=[payer_data.LABEL_OPTOUT],
+                    )
+                ],
+                flow_state=FlowState.AWAITING_PAYER_DATA,
+                flow_step=payer_data.step_for("before", decision.payer_field, 0),
+                flow_selected_type=conversation.flow_selected_type,
+                flow_selected_day=conversation.flow_selected_day,
+                flow_selected_slot=conversation.flow_selected_slot,
+                flow_selected_professional_id=_selected_professional_id(conversation),
+                flow_selected_insurance=insurance,
+                flow_attendee_name=conversation.flow_attendee_name,
+            )
+        if decision.outcome == "awaiting_payment" and decision.payment is not None:
+            payment = decision.payment
+            plan = _selected_plan(tenant, insurance)
+            return FlowRouterResult(
+                action="reply",
+                flow_state=FlowState.AWAITING_DEPOSIT,
+                flow_step=None,
+                # The selection is CARRIED (written unconditionally by the caller): "Trocar
+                # horário" re-opens the picker from it and "Já paguei" needs nothing else.
+                flow_selected_type=conversation.flow_selected_type,
+                flow_selected_day=conversation.flow_selected_day,
+                flow_selected_slot=conversation.flow_selected_slot,
+                flow_selected_professional_id=_selected_professional_id(conversation),
+                flow_selected_insurance=insurance,
+                # Carried too: "Trocar horario" must not silently turn a booking for someone
+                # else into one for the patient. `leave_wait` clears it when the booking ends.
+                flow_attendee_name=attendee_name,
+                deposit_request={
+                    "deposit_id": payment.deposit_id,
+                    "amount_cents": payment.amount_cents,
+                    "copy_paste": payment.copy_paste,
+                    "expires_at": payment.expires_at,
+                    "start_at": payment.start_at,
+                    "end_at": payment.end_at,
+                    "service": payment.service,
+                    "minutes": payment.minutes,
+                    "payment_note": (
+                        str(plan["note"]).strip() if plan and plan.get("note") else None
+                    ),
                 },
             )
         # "commit" falls through to exactly the code that was here before.

@@ -50,6 +50,9 @@ NEW_TABLES = (
     "payment_attention_items",
 )
 TOUCHED = NEW_TABLES + ("pix_deposits", "tenants", "booking_holds")
+# Columns a LATER revision adds to this revision's tables (TASK-017, `e2b7c4a9d1f5`): the models
+# declare them, this revision's CREATE TABLE rightly does not.
+ADDED_BY_LATER_REVISIONS = {("payment_attention_items", "alerted_at")}
 
 
 def _config() -> Config:
@@ -80,8 +83,12 @@ def _migration_module():
 
 def test_revision_chain_has_a_single_head_after_the_previous_one():
     script = ScriptDirectory.from_config(_config())
-    assert script.get_heads() == [REVISION]
+    # TASK-017 chains `e2b7c4a9d1f5` on top of this revision, so it is no longer THE head; the
+    # invariant that matters is one head overall and this revision still hanging off the
+    # previous one.
+    assert len(script.get_heads()) == 1
     assert script.get_revision(REVISION).down_revision == PREVIOUS_HEAD
+    assert REVISION in {rev.revision for rev in script.walk_revisions()}
 
 
 def test_offline_sql_is_additive_and_creates_the_four_tables():
@@ -102,6 +109,8 @@ def test_offline_sql_covers_every_column_the_models_declare():
     for table in NEW_TABLES:
         block = re.search(rf"CREATE TABLE {table} \((.*?)\n\);", sql, re.S).group(1)
         for column in Base.metadata.tables[table].columns:
+            if (table, column.name) in ADDED_BY_LATER_REVISIONS:
+                continue
             assert column.name in block, f"{table}.{column.name} missing from the migration"
     for column in (
         "provider", "provider_charge_id", "external_reference", "expires_at",

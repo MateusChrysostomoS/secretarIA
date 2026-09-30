@@ -849,7 +849,8 @@ async def test_handle_start_guided_booking_asks_convenio_first_when_configured(
 
     (insurance,) = _captured_bubbles
     assert isinstance(insurance, SlotsBubble)
-    assert [title for _id, title in insurance.rows][:2] == ["Unimed", "Amil"]
+    # Plan rows carry a third element since TASK-017 / 15A (the payment description)
+    assert [row[1] for row in insurance.rows][:2] == ["Unimed", "Amil"]
     assert _stub_calendar.day_scans == []
 
     async with db() as session:

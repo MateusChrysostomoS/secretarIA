@@ -27,15 +27,18 @@ takes no address by design) and receives back at most a MASK.
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, or_, select, text, update
 
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
-from secretaria.models import BookingHold
+from secretaria.models import BookingHold, Conversation, Tenant
 from secretaria.services.pending_identity import RequestCodeOutcome, request_code
+
+if TYPE_CHECKING:  # pragma: no cover
+    from secretaria.services.payments.booking_charge import PaymentStart
 
 logger = get_logger(__name__)
 
@@ -78,6 +81,11 @@ class HeldSlot:
     end_at: datetime
     expires_at: datetime
     attendee_name: str | None = None
+    # "code" (the OTP clock, 10 minutes) or "payment" (the clinic's deposit TTL). The
+    # "hold never outlives the code" rule holds only in the code phase (TASK-017).
+    phase: str = "code"
+    # The `pix_deposits` row this hold waits for, in the payment phase.
+    charge_id: UUID | None = None
 
     @classmethod
     def of(cls, row: BookingHold) -> "HeldSlot":
@@ -93,6 +101,8 @@ class HeldSlot:
             end_at=_aware(row.end_at),
             expires_at=_aware(row.expires_at),
             attendee_name=row.attendee_name,
+            phase=row.phase or "code",
+            charge_id=row.charge_id,
         )
 
 
@@ -233,6 +243,38 @@ async def release(hold_id: UUID) -> None:
         logger.warning("booking_hold_release_failed", hold_id=str(hold_id), error=str(exc))
 
 
+def hold_lock_key(tenant_id: UUID, professional_id: UUID | None) -> str:
+    """The advisory-lock key of ONE agenda (a clinic's, or one professional's)."""
+    return f"booking_hold:{tenant_id}:{professional_id}"
+
+
+async def _serialize_agenda(session, tenant_id: UUID, professional_id: UUID | None) -> None:
+    """Postgres only: serialise concurrent `place_hold`s of the SAME agenda.
+
+    The overlap test in `place_hold` is check-then-insert under READ COMMITTED, and there is no
+    UNIQUE constraint to catch a loser (`professional_id` is nullable, so it cannot be one). Two
+    patients confirming the same slot in the same instant could both pass the check and both be
+    charged for it. A transaction-scoped advisory lock closes that window: the second transaction
+    waits for the first to commit and then SEES its row. Released automatically at commit or
+    rollback; a different professional's agenda uses a different key and never waits.
+    """
+    if session.get_bind().dialect.name != "postgresql":
+        return
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": hold_lock_key(tenant_id, professional_id)},
+    )
+
+
+class LiveChargeHoldError(Exception):
+    """This conversation's own hold is the reservation behind a Pix that can still be paid.
+
+    `place_hold` normally replaces a conversation's previous hold. Doing that while the charge
+    is alive would free the slot the patient may be paying for, so it refuses (spec 4.2 item 1):
+    the way out is to void the charge first (`booking_charge.abandon_charge`).
+    """
+
+
 async def place_hold(
     *,
     tenant_id: UUID,
@@ -245,8 +287,14 @@ async def place_hold(
     end_at: datetime,
     ttl_minutes: int = HOLD_TTL_MINUTES,
     attendee_name: str | None = None,
+    phase: str = "code",
+    charge_id: UUID | None = None,
 ) -> HeldSlot | None:
     """Reserve [start_at, end_at) for this conversation. None = somebody else has it.
+
+    `phase="payment"` + `charge_id` reserve the slot for a Pix (TASK-017): the TTL is then the
+    clinic's deposit window instead of the 10-minute code clock. Raises `LiveChargeHoldError`
+    when this conversation's own previous hold still backs a payable charge.
 
     One transaction does all three things that have to agree with each other:
     expired rows go, this conversation's own previous hold goes (a patient who
@@ -260,6 +308,16 @@ async def place_hold(
     expires_at = now + timedelta(minutes=ttl_minutes)
     async with async_session_factory() as session:
         async with session.begin():
+            await _serialize_agenda(session, tenant_id, professional_id)
+            live_charge = await session.scalar(
+                select(BookingHold.id).where(
+                    BookingHold.conversation_id == conversation_id,
+                    BookingHold.charge_id.is_not(None),
+                    BookingHold.expires_at > now,
+                )
+            )
+            if live_charge is not None:
+                raise LiveChargeHoldError
             await session.execute(
                 delete(BookingHold).where(
                     BookingHold.tenant_id == tenant_id,
@@ -303,6 +361,8 @@ async def place_hold(
                 start_at=start_at,
                 end_at=end_at,
                 expires_at=expires_at,
+                phase=phase,
+                charge_id=charge_id,
             )
             session.add(row)
             await session.flush()
@@ -315,6 +375,90 @@ async def place_hold(
         ttl_minutes=ttl_minutes,
     )
     return held
+
+
+async def extend_to_payment(
+    hold_id: UUID, *, ttl_minutes: int, charge_id: UUID
+) -> HeldSlot | None:
+    """Turn a LIVE code-phase hold into the payment-phase hold of `charge_id`.
+
+    The same row, so the slot is never free in between: `expires_at` moves to now + the
+    clinic's TTL and `phase`/`charge_id` are set in ONE conditional UPDATE. None when the hold
+    already expired or vanished (the caller then tries a fresh `place_hold`).
+    """
+    now = _now()
+    async with async_session_factory() as session:
+        async with session.begin():
+            result = await session.execute(
+                update(BookingHold)
+                .where(BookingHold.id == hold_id, BookingHold.expires_at > now)
+                .values(
+                    phase="payment",
+                    charge_id=charge_id,
+                    expires_at=now + timedelta(minutes=ttl_minutes),
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if not result.rowcount:
+                return None
+            row = await session.get(BookingHold, hold_id)
+            await session.refresh(row)
+            return HeldSlot.of(row)
+
+
+async def live_hold_overlaps(
+    session,
+    tenant_id: UUID,
+    start_at: datetime,
+    end_at: datetime,
+    *,
+    professional_id: UUID | None | Literal["any"] = "any",
+    exclude_charge_id: UUID | None = None,
+) -> bool:
+    """Is any live hold of this clinic on [start_at, end_at)?
+
+    `professional_id="any"` (the default) ignores whose agenda a hold belongs to: the hub's
+    manual booking has no professional to compare with, so any live hold blocks it. A concrete
+    id (or None for the tenant-level agenda) compares like `place_hold` does.
+    `exclude_charge_id` is the promotion's own hold: it must not block its own payment.
+    """
+    stmt = select(BookingHold.start_at, BookingHold.end_at).where(
+        BookingHold.tenant_id == tenant_id, BookingHold.expires_at > _now()
+    )
+    if professional_id != "any":
+        stmt = stmt.where(
+            BookingHold.professional_id == professional_id
+            if professional_id is not None
+            else BookingHold.professional_id.is_(None)
+        )
+    if exclude_charge_id is not None:
+        stmt = stmt.where(
+            or_(BookingHold.charge_id.is_(None), BookingHold.charge_id != exclude_charge_id)
+        )
+    rows = (await session.execute(stmt)).all()
+    return any(
+        overlaps(start_at, end_at, _aware(other_start), _aware(other_end))
+        for other_start, other_end in rows
+    )
+
+
+async def live_payment_holds(
+    session, tenant_id: UUID, start: datetime, end: datetime
+) -> list[BookingHold]:
+    """The live payment-phase holds of a clinic that overlap [start, end): the agenda's
+    "awaiting payment" list. Rows, not `HeldSlot`s, so the caller reads `charge_id` too."""
+    rows = await session.scalars(
+        select(BookingHold)
+        .where(
+            BookingHold.tenant_id == tenant_id,
+            BookingHold.phase == "payment",
+            BookingHold.expires_at > _now(),
+            BookingHold.start_at < end,
+            BookingHold.end_at > start,
+        )
+        .order_by(BookingHold.start_at)
+    )
+    return list(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -334,11 +478,29 @@ class GateDecision:
                    No event, no appointment row: the router asks for the code.
     "slot_taken" - somebody else is holding this exact window. The router
                    sends the patient back to pick another time.
+    "awaiting_payment"
+                 - (`before` timing) the slot is held for the deposit window and a Pix
+                   exists: `payment` carries what the caller sends. No event, no
+                   appointment: they are created by the payment (`fulfillment.py`).
+    "blocked"    - (`before` timing) a deposit is due but cannot be asked for. The booking is
+                   NOT made and nothing is held; `blocked_reason` is symbolic.
+    "needs_payer_data"
+                 - (`before` timing) the provider will not create the charge without a payer
+                   field it has not been given (decision D7): the CPF/CNPJ (Asaas) or the e-mail
+                   (Mercado Pago). Nothing is held or charged; the router parks the conversation
+                   in `AWAITING_PAYER_DATA`. `payer_field` is "document" or "email" and
+                   `payer_provider` names the provider for the copy.
     """
 
-    outcome: Literal["commit", "held", "slot_taken"]
+    outcome: Literal[
+        "commit", "held", "slot_taken", "awaiting_payment", "blocked", "needs_payer_data"
+    ]
     email_masked: str | None = None
     hold_id: UUID | None = None
+    payment: "PaymentStart | None" = None
+    blocked_reason: str | None = None
+    payer_field: str | None = None
+    payer_provider: str | None = None
 
 
 class BookingGate:
@@ -366,16 +528,26 @@ class BookingGate:
         patient_id: UUID | None,
         external_id: str | None,
         armed: bool,
+        redis=None,
     ) -> None:
         self._tenant_id = tenant_id
         self._conversation_id = conversation_id
         self._patient_id = patient_id
         self._external_id = (external_id or "").strip()
         self._armed = bool(armed and tenant_id is not None and self._external_id)
+        # Cache for the add-on entitlement lookup of `quote_deposit` (`before` timing); optional.
+        self._redis = redis
+        self._tenant: Tenant | None = None
 
     @property
     def armed(self) -> bool:
         return self._armed
+
+    @property
+    def deposit_capable(self) -> bool:
+        """Whether `decide` may have something to say on this channel: the deposit gate
+        (`before` timing) applies on WhatsApp too, so it does not depend on `armed`."""
+        return self._tenant_id is not None and self._conversation_id is not None
 
     async def busy_windows(self, professional_id: UUID | None) -> list[tuple[datetime, datetime]]:
         """Windows other conversations are holding on this agenda, for slot lists."""
@@ -403,8 +575,32 @@ class BookingGate:
         insurance: str | None,
         attendee_name: str | None = None,
     ) -> GateDecision:
-        """Hold the slot and mail a code, or tell the router to commit as usual."""
-        if not self._armed or self._tenant_id is None:
+        """Hold the slot and mail a code / ask for the Pix, or tell the router to commit."""
+        if self._tenant_id is None:
+            return GateDecision("commit")
+
+        # `before` timing: a deposit gates the booking on EVERY channel. The quote is the first
+        # thing decided (nothing is reserved yet); every clinic on `after` (all of them today)
+        # leaves here with `quote is None` and takes the code unchanged from before.
+        quote = await self._deposit_quote(
+            appointment_type=appointment_type,
+            professional_id=professional_id,
+            insurance=insurance,
+        )
+        if quote is not None and quote.blocked:
+            return await self._blocked(quote.reason)
+        if quote is not None and quote.required:
+            return await self._decide_required(
+                quote,
+                start_at=start_at,
+                end_at=end_at,
+                professional_id=professional_id,
+                appointment_type=appointment_type,
+                insurance=insurance,
+                attendee_name=attendee_name,
+            )
+
+        if not self._armed:
             return GateDecision("commit")
 
         try:
@@ -464,3 +660,159 @@ class BookingGate:
             hold_id=str(held.id),
         )
         return GateDecision("held", email_masked=result.email_masked, hold_id=held.id)
+
+    # ------------------------------------------------------------------
+    # `before` timing (TASK-017)
+    # ------------------------------------------------------------------
+
+    async def _deposit_quote(
+        self,
+        *,
+        appointment_type: str | None,
+        professional_id: UUID | None,
+        insurance: str | None,
+    ):
+        """The deposit decision for this booking, or None when the clinic is not on `before`.
+
+        FAIL-OPEN until the clinic is known to be on `before` (the gate has always failed open:
+        an outage must not stop an `after` clinic's agenda), FAIL-CLOSED afterwards: once a
+        deposit may be due, a failure to decide is a `blocked`, never a free booking.
+        """
+        from secretaria.services.payments import deposit_gate
+
+        on_before = False
+        try:
+            async with async_session_factory() as session:
+                tenant = await session.get(Tenant, self._tenant_id)
+                if tenant is None or not deposit_gate.timing_is_before(tenant):
+                    return None
+                on_before = True
+                self._tenant = tenant
+                patient_id = self._patient_id
+                if patient_id is None and self._conversation_id is not None:
+                    patient_id = await session.scalar(
+                        select(Conversation.patient_id).where(
+                            Conversation.id == self._conversation_id
+                        )
+                    )
+                self._patient_id = patient_id
+                return await deposit_gate.quote_deposit(
+                    session,
+                    tenant,
+                    patient_id=patient_id,
+                    appointment_type=appointment_type,
+                    professional_id=professional_id,
+                    insurance=insurance,
+                    redis=self._redis,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("booking_gate_quote_failed", error_type=type(exc).__name__)
+            if not on_before:
+                return None
+            return deposit_gate.DepositQuote("blocked", "quote_failed")
+
+    async def _blocked(self, reason: str) -> GateDecision:
+        """A deposit is due but cannot be asked for: the booking is not made and a human takes over.
+
+        No clinic e-mail (owner answer 13: the only clinic e-mail is a paid deposit the patient
+        cancelled); the log line above is the operational record."""
+        logger.warning(
+            "booking_gate_deposit_blocked",
+            reason=reason,
+            tenant_id=str(self._tenant_id),
+            conversation_id=str(self._conversation_id),
+        )
+        return GateDecision("blocked", blocked_reason=reason)
+
+    async def _forget_payer_data(self) -> None:
+        """The provider call that needed the data has been made: forget all of it (D7)."""
+        from secretaria.services.payments import payer_data
+
+        await payer_data.discard(
+            self._redis, tenant_id=self._tenant_id, conversation_id=self._conversation_id
+        )
+
+    async def _decide_required(
+        self,
+        quote,
+        *,
+        start_at: datetime,
+        end_at: datetime,
+        professional_id: UUID | None,
+        appointment_type: str | None,
+        insurance: str | None,
+        attendee_name: str | None,
+    ) -> GateDecision:
+        """A deposit is due. Portal first proves the address (decision D12: never charge an
+        identity nobody proved), WhatsApp goes straight to the Pix."""
+        held: HeldSlot | None = None
+        if self._armed:
+            try:
+                held = await place_hold(
+                    tenant_id=self._tenant_id,
+                    conversation_id=self._conversation_id,
+                    patient_id=self._patient_id,
+                    professional_id=professional_id,
+                    appointment_type=appointment_type,
+                    insurance=insurance,
+                    start_at=start_at,
+                    end_at=end_at,
+                    attendee_name=attendee_name,
+                )
+            except LiveChargeHoldError:
+                return await self._blocked("charge_pending")
+            if held is None:
+                return GateDecision("slot_taken")
+            try:
+                result = await request_code(self._tenant_id, self._external_id)
+            except Exception as exc:  # noqa: BLE001 - `request_code` fails closed by contract
+                logger.warning("booking_gate_request_raised", error=str(exc))
+                result = None
+            if result is not None and result.outcome is RequestCodeOutcome.SENT:
+                # The code comes first; the payment starts when it is verified
+                # (`workers/tasks.py`), on this same hold, extended to the payment phase.
+                return GateDecision("held", email_masked=result.email_masked, hold_id=held.id)
+            # No code is coming (already verified, no address, brain-api down): the deposit is
+            # itself the barrier, so the SAME hold moves straight to the payment phase.
+
+        from secretaria.services.payments import booking_charge, payer_data
+
+        # What the patient already gave this turn or the last one (encrypted, 15 minutes, this
+        # conversation only). Nothing is the normal case.
+        payer = await payer_data.recall_all(
+            self._redis, tenant_id=self._tenant_id, conversation_id=self._conversation_id
+        )
+        try:
+            payment = await booking_charge.begin_payment(
+                tenant_id=self._tenant_id,
+                conversation_id=self._conversation_id,
+                patient_id=self._patient_id,
+                quote=quote,
+                professional_id=professional_id,
+                appointment_type=(appointment_type or "Consulta"),
+                insurance=insurance,
+                attendee_name=attendee_name,
+                start_at=start_at,
+                end_at=end_at,
+                existing_hold=held,
+                payer_document=payer.document,
+                payer_email=payer.email,
+            )
+        except booking_charge.ChargeStartError as exc:
+            needed = payer_data.kind_for_code(exc.code)
+            if needed is not None and not payer.has(needed):
+                # The provider is the authority on what it needs (decision D7): nothing is held
+                # (`begin_payment` released the hold) and nothing was charged, so whatever the
+                # patient already gave stays (its TTL) for the answer that completes the request.
+                return GateDecision(
+                    "needs_payer_data", payer_field=needed, payer_provider=quote.provider
+                )
+            # The provider saw the data (or failed for another reason): forget it. A provider
+            # that STILL asks for what it was given is the D3 "blocked", never a second question.
+            await self._forget_payer_data()
+            return await self._blocked(exc.code)
+        if payment is None:
+            # No provider call was made: the data (if any) stays for the next try (its TTL).
+            return GateDecision("slot_taken")
+        await self._forget_payer_data()
+        return GateDecision("awaiting_payment", hold_id=payment.hold_id, payment=payment)

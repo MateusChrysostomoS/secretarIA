@@ -156,7 +156,7 @@ class FakeAsaasClient:
 
 
 class FakeRedis:
-    """The few Redis calls the payments code makes (SET NX EX, INCR, EXPIRE, GET)."""
+    """The few Redis calls the payments code makes (SET NX EX, INCR, EXPIRE, GET, DEL)."""
 
     def __init__(self) -> None:
         self.store: dict[str, Any] = {}
@@ -180,6 +180,14 @@ class FakeRedis:
     async def expire(self, key, seconds):
         self.ttls[key] = seconds
         return True
+
+    async def delete(self, *keys):
+        removed = 0
+        for key in keys:
+            if self.store.pop(key, None) is not None:
+                removed += 1
+            self.ttls.pop(key, None)
+        return removed
 
 
 class FakeArqPool(FakeRedis):

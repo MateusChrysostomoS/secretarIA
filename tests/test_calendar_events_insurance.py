@@ -98,15 +98,16 @@ def test_the_plan_wire_carries_exactly_three_keys():
     assert set(CalendarInsurancePlanRead.model_fields) == {"id", "name", "charge_deposit"}
 
 
-def test_the_deposit_wire_carries_exactly_two_keys():
+def test_the_deposit_wire_carries_exactly_three_keys():
     """The Pix copy-paste payload, the Asaas payment id and the patient stay
     server-side: the agenda shows the STATE of the deposit and its amount.
 
-    This is the wire of TODAY. Spec F (section 10A.5) deliberately adds a third
-    key, `needs_attention`, in TASK-017, which then updates THIS assertion on
-    purpose; nothing else may widen it (never the provider charge id, the
-    fulfillment_status column itself, the booking snapshot or the payer)."""
-    assert set(CalendarDepositRead.model_fields) == {"status", "amount_cents"}
+    Spec F (section 10A.5) deliberately added a third key, `needs_attention`, in TASK-017 (an
+    additive, defaulted key: a consumer that does not know it ignores it); nothing else may
+    widen it (never the provider charge id, the fulfillment_status column itself, the booking
+    snapshot or the payer)."""
+    assert set(CalendarDepositRead.model_fields) == {"status", "amount_cents", "needs_attention"}
+    assert CalendarDepositRead(status="confirmado_pago", amount_cents=1).needs_attention is False
 
 
 # ---------------------------------------------------------------------------
@@ -762,7 +763,11 @@ async def test_the_deposit_carries_its_real_status_value_and_amount(
 
     body = (await _events(client)).json()[0]
 
-    assert body["deposit"] == {"status": status.value, "amount_cents": 4550}
+    assert body["deposit"] == {
+        "status": status.value,
+        "amount_cents": 4550,
+        "needs_attention": False,  # fulfillment_status is not "needs_attention"
+    }
 
 
 async def test_a_paid_deposit_says_nothing_about_the_appointment_and_leaks_no_payment_data(
@@ -778,7 +783,7 @@ async def test_a_paid_deposit_says_nothing_about_the_appointment_and_leaks_no_pa
     resp = await _events(client)
 
     body = resp.json()[0]
-    assert set(body["deposit"]) == {"status", "amount_cents"}
+    assert set(body["deposit"]) == {"status", "amount_cents", "needs_attention"}
     assert "status" not in {k for k in body if k != "deposit"}
     assert "NAO-VAZAR" not in resp.text
     assert "pay_" not in resp.text
