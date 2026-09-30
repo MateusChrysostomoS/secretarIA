@@ -3,10 +3,18 @@
 **Data:** 2026-09-30 · **Origem:** `Brain-Message-Frontend/docs/superpowers/specs/2026-09-29-task-f-sinal-pix-confirmacao-design.md`
 (§17/§17A) + plano `.../plans/2026-09-29-task-f1-pix-nucleo-provedores-asaas.md` ·
 **Estado: BUILT no worktree `C:\TECH\BRAIN-worktrees\TASK-016\secretarIA` (branch
-`task/TASK-016-pix-nucleo`), alterações locais SEM commit, push ou deploy; migração
+`task/TASK-016-pix-nucleo`), commitado em 2026-09-30 (`57959e3`) e mesclado em `feature/out-of-mvp`
+(`8fda1b1`, NÃO em `main`: decisão do dono), sem push ou deploy; migração
 `c8a5d3f1b7e2` NÃO aplicada em produção. Provas ao vivo no sandbox Asaas: **NÃO PROVADAS
 (puladas: `no_sandbox_key`)**. Os scripts recusaram chamadas de rede sem
 `ASAAS_SANDBOX_API_KEY`.**
+
+> **Continuação (TASK-017, F2):** o modo `before` foi construído em cima desta fundação — ver
+> `docs/CHECKPOINT_pix_before_timing.md`. O que mudou em código desta fase: `fulfill_paid_charge` ganhou
+> o promotor real (o ramo `promotion_failed` da §1 foi substituído), o teste de migração e o de
+> `test_payment_tasks.py` que fixavam o estado interino foram atualizados de propósito, e o worker
+> ganhou um cron (`run_attention_alerts`).
+
 
 Esta fase é a fundação de "sinal Pix por clínica, Asaas + Mercado Pago, antes ou depois de confirmar".
 Ela **não muda o comportamento visível de nenhuma clínica**: o modo `after` (confirma e depois
