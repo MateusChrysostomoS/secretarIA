@@ -434,13 +434,15 @@ async def test_a_patient_who_moved_on_gets_no_expiry_notice(db, env):
     assert env.notices == []
 
 
-def test_the_wait_is_over_when_there_is_no_open_deposit_or_its_window_ended():
+def test_the_wait_verdict_separates_waiting_paid_and_over():
     now = datetime.now(UTC)
     open_deposit = PixDeposit(
         status=PixDepositStatus.AWAITING, expires_at=now + timedelta(minutes=5)
     )
-    assert deposit_wait.is_wait_over(None) is True
-    assert deposit_wait.is_wait_over(open_deposit) is False
-    assert deposit_wait.is_wait_over(open_deposit, now=now + timedelta(minutes=6)) is True
-    paid = PixDeposit(status=PixDepositStatus.PAID, expires_at=now + timedelta(minutes=5))
-    assert deposit_wait.is_wait_over(paid) is True
+    assert deposit_wait.wait_verdict(None) == "over"
+    assert deposit_wait.wait_verdict(open_deposit) == "waiting"
+    assert deposit_wait.wait_verdict(open_deposit, now=now + timedelta(minutes=6)) == "over"
+    paid = PixDeposit(status=PixDepositStatus.PAID, expires_at=now - timedelta(minutes=5))
+    assert deposit_wait.wait_verdict(paid) == "paid"  # never told "your Pix expired"
+    expired = PixDeposit(status=PixDepositStatus.EXPIRED, expires_at=now + timedelta(minutes=5))
+    assert deposit_wait.wait_verdict(expired) == "over"
