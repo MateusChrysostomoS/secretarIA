@@ -43,14 +43,23 @@ import hashlib
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Path
+from fastapi import APIRouter, Depends, Path, Request
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.api.internal import require_internal_api_key
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
-from secretaria.models import Appointment, ConsentEvent, Conversation, Message, Patient
+from secretaria.models import (
+    Appointment,
+    ConsentEvent,
+    Conversation,
+    Message,
+    Patient,
+    PatientPaymentCustomer,
+    PaymentAttentionItem,
+    PixDeposit,
+)
 from secretaria.schemas.privacy import (
     PrivacyAppointment,
     PrivacyConsentEvent,
@@ -59,6 +68,7 @@ from secretaria.schemas.privacy import (
     PrivacyExportBundle,
     PrivacyMessage,
     PrivacyPatient,
+    PrivacyPixDeposit,
 )
 
 logger = get_logger(__name__)
@@ -78,6 +88,11 @@ _EMPTY_ERASE_COUNTS = {
     "messages": 0,
     "appointments": 0,
     "consent_events": 0,
+    # Payment provider core: deposits are ANONYMISED (accounting rows stay), attention items
+    # lose their patient link, and the provider-side customer records are asked to be deleted.
+    "pix_deposits": 0,
+    "payment_attention_items": 0,
+    "payment_customers": 0,
 }
 
 _INTERNAL_RESPONSES = {
@@ -150,6 +165,13 @@ async def export_subject(
             )
         )
     ).all()
+    deposits = (
+        await session.scalars(
+            select(PixDeposit).where(
+                PixDeposit.tenant_id == tenant_id, PixDeposit.patient_id == patient.id
+            )
+        )
+    ).all()
 
     logger.info("privacy_export_bundle_built", tenant_id=str(tenant_id))
     return PrivacyExportBundle(
@@ -161,6 +183,7 @@ async def export_subject(
         messages=[PrivacyMessage.model_validate(m) for m in messages],
         consent_events=[PrivacyConsentEvent.model_validate(e) for e in consent_events],
         analytics_events=[],
+        pix_deposits=[PrivacyPixDeposit.model_validate(d) for d in deposits],
     )
 
 
@@ -179,6 +202,7 @@ async def export_subject(
 async def erase_subject(
     tenant_id: _TENANT_PATH,
     wa_id: _WA_ID_PATH,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> PrivacyEraseResult:
     patient = await session.scalar(
@@ -203,6 +227,33 @@ async def erase_subject(
         .values(patient_id=None, phone=None)
     )
     counts["appointments"] = appt_result.rowcount or 0
+
+    # Payments: read the provider-side customer ids FIRST (the mapping rows go with the
+    # patient), anonymise the deposits and attention items (the money rows are an accounting
+    # obligation and stay, minus the identity), then ask each provider to delete its customer.
+    remote_customers = await _remote_customers(session, tenant_id, patient)
+    counts["payment_customers"] = len(remote_customers)
+    deposit_result = await session.execute(
+        update(PixDeposit)
+        .where(PixDeposit.tenant_id == tenant_id, PixDeposit.patient_id == patient.id)
+        .values(patient_id=None)
+    )
+    counts["pix_deposits"] = deposit_result.rowcount or 0
+    item_result = await session.execute(
+        update(PaymentAttentionItem)
+        .where(
+            PaymentAttentionItem.tenant_id == tenant_id,
+            PaymentAttentionItem.patient_id == patient.id,
+        )
+        .values(patient_id=None)
+    )
+    counts["payment_attention_items"] = item_result.rowcount or 0
+    await session.execute(
+        delete(PatientPaymentCustomer).where(
+            PatientPaymentCustomer.tenant_id == tenant_id,
+            PatientPaymentCustomer.patient_id == patient.id,
+        )
+    )
 
     conv_ids = (
         await session.scalars(
@@ -233,6 +284,8 @@ async def erase_subject(
 
     await session.commit()
 
+    await _enqueue_customer_deletions(request, tenant_id, remote_customers)
+
     logger.warning(
         "privacy_erasure_executed",
         tenant_id=str(tenant_id),
@@ -240,3 +293,48 @@ async def erase_subject(
         counts=counts,
     )
     return PrivacyEraseResult(erased=counts)
+
+
+async def _remote_customers(
+    session: AsyncSession, tenant_id: UUID, patient: Patient
+) -> set[tuple[str, str]]:
+    """Every (provider, provider customer id) held for this patient: the mapping rows plus the
+    legacy `patients.asaas_customer_id` column (deduplicated). Opaque ids, not personal data."""
+    rows = (
+        await session.execute(
+            select(
+                PatientPaymentCustomer.provider, PatientPaymentCustomer.provider_customer_id
+            ).where(
+                PatientPaymentCustomer.tenant_id == tenant_id,
+                PatientPaymentCustomer.patient_id == patient.id,
+            )
+        )
+    ).all()
+    found = {(provider, customer_id) for provider, customer_id in rows}
+    if patient.asaas_customer_id:
+        found.add(("asaas", patient.asaas_customer_id))
+    return found
+
+
+async def _enqueue_customer_deletions(
+    request: Request, tenant_id: UUID, customers: set[tuple[str, str]]
+) -> None:
+    """Ask each provider to delete its customer record. Best-effort AFTER the local erasure
+    committed: a queue outage must never undo or block it, so a failure is logged with the
+    (non-personal) provider ids an operator needs to retry by hand."""
+    pool = getattr(request.app.state, "arq_pool", None)
+    for provider, customer_id in sorted(customers):
+        try:
+            if pool is None:
+                raise RuntimeError("arq pool unavailable")
+            await pool.enqueue_job(
+                "delete_provider_customer_job", str(tenant_id), provider, customer_id
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "privacy_customer_delete_enqueue_failed",
+                tenant_id=str(tenant_id),
+                provider=provider,
+                provider_customer_id=customer_id,
+                error_type=type(exc).__name__,
+            )

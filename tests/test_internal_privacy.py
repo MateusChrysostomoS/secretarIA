@@ -212,6 +212,9 @@ async def test_erase_counts_and_anonymizes_appointment_not_deletes(client: Async
         "messages": 2,
         "appointments": 1,
         "consent_events": 1,
+        "pix_deposits": 0,
+        "payment_attention_items": 0,
+        "payment_customers": 0,
     }
 
     async with db() as session:
@@ -253,6 +256,9 @@ async def test_erase_is_idempotent_repeat_returns_zero_counts(client: AsyncClien
         "messages": 0,
         "appointments": 0,
         "consent_events": 0,
+        "pix_deposits": 0,
+        "payment_attention_items": 0,
+        "payment_customers": 0,
     }
 
 

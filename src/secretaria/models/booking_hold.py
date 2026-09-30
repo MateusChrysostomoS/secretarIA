@@ -94,6 +94,12 @@ class BookingHold(Base):
     start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    # "code" (10 min, the OTP clock, untouched) -> "payment" (the clinic's deposit TTL). The
+    # "hold never outlives the code" invariant holds only in the code phase.
+    phase: Mapped[str] = mapped_column(String(16), server_default="code", default="code")
+    # The pix_deposits row whose payment this hold waits for (payment phase). No FK: holds
+    # are swept by unrelated conversations, the charge must outlive them.
+    charge_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

@@ -1,17 +1,52 @@
 """Shared FastAPI dependencies for the doctor hub.
 
-`get_current_tenant` is the single authentication gate for every hub endpoint.
-It turns an `Authorization: Bearer <token>` header into a Tenant row, delegating
-token validation to core.subscription (which calls brain-api).
+`get_current_tenant` is the single authentication gate for every existing hub endpoint.
+It turns an `Authorization: Bearer <token>` header into a Tenant row, delegating token
+validation to core.subscription (which calls brain-api). It does NOT look at the caller's
+role, and it must keep not doing so: old hub tokens (no role claim) stay valid everywhere
+that uses it.
+
+TASK-020 adds the ROLE gates, for the few actions only a clinic manager may take (the Pix
+key, payment settings) or only clinical staff may take (resolving attention items):
+
+  * `require_clinic_manager`   — `manager`, or a `doctor` flagged `is_owner`/`is_manager`.
+  * `require_clinic_clinician` — `manager` or `doctor`; never a `secretary`.
+
+Both return the `Tenant` exactly like `get_current_tenant`, so a route adopts a gate by
+swapping one `Depends`. They FAIL CLOSED with a structured 403 detail:
+`{"code": "role_claim_missing"}` when the token carries no well-formed role (an older
+brain-api, a malformed value) and `{"code": "forbidden_role"}` when the role is known but
+not allowed. Order of refusals: 401 (no/invalid/inactive token) -> 403 (role) -> 404
+(tenant). The tenant always comes from the verified claim, never from the request.
+
+For a route whose ONE handler serves callers of several roles and only some FIELDS are
+manager-only (payment settings in the config PUT), take `claim: SubscriptionClaim =
+Depends(get_hub_claim)` next to `get_current_tenant` and call `ensure_clinic_manager(claim)`
+inside the handler when such a field is present (the second verification is a positive-
+cache hit).
 """
+
+from collections.abc import Callable
 
 from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.database import get_session
-from secretaria.core.subscription import verify_subscription_token
+from secretaria.core.hub_roles import is_clinic_clinician, is_clinic_manager
+from secretaria.core.logging import get_logger
+from secretaria.core.subscription import SubscriptionClaim, verify_subscription_token
 from secretaria.models import Tenant
+
+logger = get_logger(__name__)
+
+# Machine-readable 403 codes; the console (Brain-Message-Frontend, TASK F4) translates them.
+ROLE_CLAIM_MISSING = "role_claim_missing"
+FORBIDDEN_ROLE = "forbidden_role"
+
+_MISSING_ROLE_MESSAGE = "Sua sessão não informa o seu papel na clínica. Entre novamente."
+_MANAGER_ONLY_MESSAGE = "Somente o gestor da clínica pode fazer isto."
+_CLINICIAN_ONLY_MESSAGE = "Somente médicos e gestores da clínica podem fazer isto."
 
 
 def _bearer_token(authorization: str | None) -> str | None:
@@ -38,14 +73,10 @@ async def _resolve_tenant(session: AsyncSession, tenant_id) -> Tenant | None:
     return rows[0] if len(rows) == 1 else None
 
 
-async def get_current_tenant(
-    authorization: str | None = Header(default=None),
-    session: AsyncSession = Depends(get_session),
-) -> Tenant:
-    """Authenticate the request and return the caller's Tenant row.
+async def get_hub_claim(authorization: str | None = Header(default=None)) -> SubscriptionClaim:
+    """Authenticate the request and return the verified claim (no role judgement).
 
-    401 for a missing/invalid/inactive token, 404 when the token is valid but
-    no tenant can be resolved.
+    401 for a missing/invalid/inactive token — the same refusals `get_current_tenant` gives.
     """
     token = _bearer_token(authorization)
     if not token:
@@ -54,8 +85,77 @@ async def get_current_tenant(
     claim = await verify_subscription_token(token)
     if claim is None or not claim.active:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or inactive subscription token")
+    return claim
 
+
+async def _tenant_for_claim(session: AsyncSession, claim: SubscriptionClaim) -> Tenant:
     tenant = await _resolve_tenant(session, claim.tenant_id)
     if tenant is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No tenant resolved for this subscription")
     return tenant
+
+
+async def get_current_tenant(
+    authorization: str | None = Header(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> Tenant:
+    """Authenticate the request and return the caller's Tenant row.
+
+    401 for a missing/invalid/inactive token, 404 when the token is valid but
+    no tenant can be resolved. Role-blind by design (see the module docstring).
+    """
+    claim = await get_hub_claim(authorization)
+    return await _tenant_for_claim(session, claim)
+
+
+def _refuse(code: str, message: str, claim: SubscriptionClaim) -> HTTPException:
+    # Only the code, the role string and the tenant id: never the token, never PII.
+    logger.warning("hub_role_refused", code=code, role=claim.role, tenant_id=str(claim.tenant_id))
+    return HTTPException(status.HTTP_403_FORBIDDEN, detail={"code": code, "message": message})
+
+
+def _enforce(
+    claim: SubscriptionClaim, allowed: Callable[[SubscriptionClaim], bool], message: str
+) -> None:
+    if claim.role is None:
+        raise _refuse(ROLE_CLAIM_MISSING, _MISSING_ROLE_MESSAGE, claim)
+    if not allowed(claim):
+        raise _refuse(FORBIDDEN_ROLE, message, claim)
+
+
+def _is_manager(claim: SubscriptionClaim) -> bool:
+    return is_clinic_manager(claim.role, claim.is_owner, claim.is_manager)
+
+
+def _is_clinician(claim: SubscriptionClaim) -> bool:
+    return is_clinic_clinician(claim.role)
+
+
+def ensure_clinic_manager(claim: SubscriptionClaim) -> None:
+    """Raise the 403 `require_clinic_manager` would raise; no-op for a manager."""
+    _enforce(claim, _is_manager, _MANAGER_ONLY_MESSAGE)
+
+
+def ensure_clinic_clinician(claim: SubscriptionClaim) -> None:
+    """Raise the 403 `require_clinic_clinician` would raise; no-op for a manager or doctor."""
+    _enforce(claim, _is_clinician, _CLINICIAN_ONLY_MESSAGE)
+
+
+async def require_clinic_manager(
+    authorization: str | None = Header(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> Tenant:
+    """Only a clinic manager: `manager`, or a `doctor` flagged `is_owner`/`is_manager`."""
+    claim = await get_hub_claim(authorization)
+    ensure_clinic_manager(claim)
+    return await _tenant_for_claim(session, claim)
+
+
+async def require_clinic_clinician(
+    authorization: str | None = Header(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> Tenant:
+    """Clinical staff or the manager: `manager` or `doctor`; never a `secretary`."""
+    claim = await get_hub_claim(authorization)
+    ensure_clinic_clinician(claim)
+    return await _tenant_for_claim(session, claim)

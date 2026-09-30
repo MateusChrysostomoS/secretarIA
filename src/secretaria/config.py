@@ -366,6 +366,23 @@ class Settings(BaseSettings):
     # --- Asaas / Pix deposit ---
     ASAAS_BASE_URL: str = "https://api.asaas.com/v3"
     ASAAS_TIMEOUT_SECONDS: float = 10.0
+    # Public https base URL of THIS API (e.g. https://secretaria.example.com), used to register
+    # each clinic's per-clinic payment webhook (`<base>/webhooks/<provider>/<slug>`) at the
+    # provider. Empty = the connection service leaves the account `incomplete`
+    # (`webhook_create_failed`): a clinic can never be "connected" without a webhook.
+    PAYMENTS_WEBHOOK_BASE_URL: str = ""
+    # Asaas webhook source-IP allowlist: "off" | "alert" (log only, the default) | "enforce"
+    # (403). Turn "enforce" on only after the sandbox/production IPs were proved.
+    ASAAS_WEBHOOK_IP_MODE: str = "alert"
+    # Asaas permission-probe qualification (spec 12.3A). OFF (the default) = the connection
+    # service refuses EVERY key with `probes_not_qualified` until the sandbox proof is recorded
+    # in `asaas_probes.QUALIFIED_EXCESS_GROUPS`. ON = trust the four minimum probes. Set it to
+    # true only on purpose, after the merge; a wrong probe can only ever REFUSE a good key.
+    ASAAS_PROBES_QUALIFIED: bool = False
+
+    @property
+    def payments_webhook_base_url(self) -> str:
+        return self.PAYMENTS_WEBHOOK_BASE_URL.strip().rstrip("/")
     # Meta utility (HSM) template name for a deposit reminder with 3
     # quick-reply buttons (wave S3 - not sent yet by this wave). The template
     # itself needs external Meta approval before it can actually be used;

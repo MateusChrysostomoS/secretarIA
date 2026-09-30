@@ -368,6 +368,9 @@ def test_worker_registry_is_complete() -> None:
         "retry_professional_notification",
         "send_transactional_email",
         "process_asaas_event",
+        "process_payment_event",
+        "fulfill_paid_charge_job",
+        "delete_provider_customer_job",
     ]
     assert arq_worker.registered_cron_names() == [
         "cron:check_handover_timeouts",
@@ -375,6 +378,10 @@ def test_worker_registry_is_complete() -> None:
         "cron:run_onboarding_nudges",
         "cron:run_patient_usage_metering",
         "cron:check_deploy_parity_cron",
+        "cron:run_payment_expiry",
+        "cron:run_payment_reconciliation",
+        "cron:run_payment_sweeps",
+        "cron:run_payment_daily",
     ]
 
 
@@ -391,8 +398,8 @@ async def test_worker_startup_logs_identity_and_registry(
         event, fields = recorder.records[0]
         assert event == "worker_started"
         assert {"build_sha", "built_at", "alembic_head", "source_fingerprint"} <= set(fields)
-        assert len(fields["functions"]) == 11
-        assert len(fields["cron_jobs"]) == 5
+        assert len(fields["functions"]) == 14
+        assert len(fields["cron_jobs"]) == 9
 
         rendered = json.dumps(fields, default=str)
         for secret in configured_secrets():

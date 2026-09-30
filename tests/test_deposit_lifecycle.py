@@ -1,7 +1,7 @@
 """Tests for services/payments/deposit_lifecycle.py — the Pix deposit money brain.
 
 In-memory-sqlite pattern established by tests/test_reminders_plugin.py: a real
-DB, monkeypatched in place via a `db` fixture. `_asaas_client_for` is
+DB, monkeypatched in place via a `db` fixture. `asaas_provider.client_for` is
 monkeypatched with a fake recording client (never a real network call, and
 never AsaasClient's own httpx plumbing — that is test_asaas_client.py's job).
 `WhatsAppClient` is faked the same way test_reminders_plugin.py does it.
@@ -31,9 +31,10 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from secretaria.core.database import Base  # noqa: E402
 from secretaria.models import Appointment, AppointmentStatus, Patient, Tenant  # noqa: E402
+from secretaria.models.payment_attention_item import PaymentAttentionItem  # noqa: E402
 from secretaria.models.pix_deposit import PixDeposit, PixDepositStatus  # noqa: E402
 from secretaria.services import tenant_config  # noqa: E402
-from secretaria.services.payments import deposit_lifecycle  # noqa: E402
+from secretaria.services.payments import asaas_provider, deposit_lifecycle  # noqa: E402
 
 # --------------------------------------------------------------------------
 # Fakes
@@ -52,7 +53,6 @@ class FakeAsaasClient:
         create_customer_error=None,
         create_payment_error=None,
         qr_error=None,
-        refund_error=None,
         delete_error=None,
     ):
         self.customer_id = customer_id
@@ -61,7 +61,6 @@ class FakeAsaasClient:
         self.create_customer_error = create_customer_error
         self.create_payment_error = create_payment_error
         self.qr_error = qr_error
-        self.refund_error = refund_error
         self.delete_error = delete_error
         self.calls: list[tuple] = []
 
@@ -87,17 +86,18 @@ class FakeAsaasClient:
             raise self.qr_error
         return {"payload": self.qr_payload, "encodedImage": "b64", "expirationDate": "2026-07-21"}
 
-    async def refund_payment(self, payment_id, value_cents):
-        self.calls.append(("refund_payment", payment_id, value_cents))
-        if self.refund_error:
-            raise self.refund_error
-        return {"id": payment_id, "status": "REFUNDED"}
+    async def refund_payment(self, payment_id, value_cents):  # pragma: no cover
+        raise AssertionError("refund_payment was called: the platform never refunds (D15)")
 
     async def delete_payment(self, payment_id):
         self.calls.append(("delete_payment", payment_id))
         if self.delete_error:
             raise self.delete_error
         return {"deleted": True}
+
+    async def get_payment(self, payment_id):
+        self.calls.append(("get_payment", payment_id))
+        return {"status": "PENDING", "value": 60.0, "externalReference": "r"}
 
 
 class _FakeWhatsAppClient:
@@ -135,7 +135,7 @@ class _FailingWhatsAppClient:
 
 def _install_fake_client(monkeypatch: pytest.MonkeyPatch, **kwargs) -> FakeAsaasClient:
     client = FakeAsaasClient(**kwargs)
-    monkeypatch.setattr(deposit_lifecycle, "_asaas_client_for", lambda api_key: client)
+    monkeypatch.setattr(asaas_provider, "client_for", lambda api_key: client)
     return client
 
 
@@ -466,7 +466,9 @@ async def test_waba_token_none_is_fetched_via_tenant_config(db, monkeypatch):
 # --------------------------------------------------------------------------
 
 
-async def test_cancel_outside_window_full_refund(db, monkeypatch):
+async def test_cancel_outside_window_asks_the_clinic_to_return_the_full_deposit(
+    db, monkeypatch
+):
     fake = _install_fake_client(monkeypatch)
     async with db() as session:
         tenant, patient, appointment = await _seed(
@@ -481,13 +483,14 @@ async def test_cancel_outside_window_full_refund(db, monkeypatch):
         )
         await session.commit()
 
-    assert outcome == "refunded"
-    assert fake.calls == [("refund_payment", "pay_existing", None)]
+    assert outcome == "refund_due"
+    assert fake.calls == []  # the platform never refunds (D15): no PSP call at all
     async with db() as session2:
         refreshed = await session2.get(PixDeposit, deposit.id)
-    assert refreshed.status == PixDepositStatus.CANCELLED_REFUNDED
-    assert refreshed.refunded_amount_cents == 6000
-    assert refreshed.resolved_at is not None
+        item = await session2.scalar(select(PaymentAttentionItem))
+    assert refreshed.status == PixDepositStatus.PAID  # the money is still here
+    assert refreshed.refunded_amount_cents is None
+    assert (item.reason, item.suggested_refund_cents) == ("refund_due_policy", 6000)
 
 
 async def test_cancel_inside_window_total_retention_no_psp_call(db, monkeypatch):
@@ -516,7 +519,9 @@ async def test_cancel_inside_window_total_retention_no_psp_call(db, monkeypatch)
     assert refreshed.refunded_amount_cents == 0
 
 
-async def test_cancel_inside_window_partial_refund_amount_math(db, monkeypatch):
+async def test_cancel_inside_window_partial_policy_asks_for_the_partial_amount(
+    db, monkeypatch
+):
     fake = _install_fake_client(monkeypatch)
     async with db() as session:
         tenant, patient, appointment = await _seed(
@@ -535,12 +540,13 @@ async def test_cancel_inside_window_partial_refund_amount_math(db, monkeypatch):
         )
         await session.commit()
 
-    assert outcome == "partial_refund"
-    assert fake.calls == [("refund_payment", "pay_existing", 2400)]  # 6000 * 40% = 2400
+    assert outcome == "partial_refund_due"
+    assert fake.calls == []
     async with db() as session2:
         refreshed = await session2.get(PixDeposit, deposit.id)
-    assert refreshed.status == PixDepositStatus.CANCELLED_RETAINED
-    assert refreshed.refunded_amount_cents == 2400
+        item = await session2.scalar(select(PaymentAttentionItem))
+    assert refreshed.status == PixDepositStatus.PAID
+    assert item.suggested_refund_cents == 2400  # 6000 * 40% = 2400
 
 
 async def test_cancel_awaiting_deposit_voided(db, monkeypatch):
@@ -559,33 +565,11 @@ async def test_cancel_awaiting_deposit_voided(db, monkeypatch):
         await session.commit()
 
     assert outcome == "voided"
-    assert fake.calls == [("delete_payment", "pay_existing")]
+    assert fake.calls == [("get_payment", "pay_existing"), ("delete_payment", "pay_existing")]
     async with db() as session2:
         refreshed = await session2.get(PixDeposit, deposit.id)
     assert refreshed.status == PixDepositStatus.EXPIRED
     assert refreshed.resolved_at is not None
-
-
-async def test_cancel_refund_api_failure_stays_paid(db, monkeypatch):
-    _install_fake_client(monkeypatch, refund_error=RuntimeError("asaas down"))
-    async with db() as session:
-        tenant, patient, appointment = await _seed(
-            session, pix_refund_window_hours=24, start_at=datetime.now(UTC) + timedelta(hours=48)
-        )
-        deposit = await _seed_deposit(
-            session, tenant, appointment, status=PixDepositStatus.PAID, amount_cents=6000
-        )
-        await session.commit()
-        outcome = await deposit_lifecycle.on_appointment_cancelled(
-            session, tenant=tenant, appointment=appointment
-        )
-        await session.commit()
-
-    assert outcome == "refund_failed"
-    async with db() as session2:
-        refreshed = await session2.get(PixDeposit, deposit.id)
-    assert refreshed.status == PixDepositStatus.PAID  # never pretend
-    assert refreshed.refunded_amount_cents is None
 
 
 async def test_cancel_no_deposit_returns_none(db):
@@ -630,7 +614,7 @@ async def test_no_show_awaiting_voided(db, monkeypatch):
         await session.commit()
 
     assert outcome == "voided"
-    assert fake.calls == [("delete_payment", "pay_existing")]
+    assert fake.calls == [("get_payment", "pay_existing"), ("delete_payment", "pay_existing")]
     async with db() as session2:
         refreshed = await session2.get(PixDeposit, deposit.id)
     assert refreshed.status == PixDepositStatus.EXPIRED
@@ -718,27 +702,26 @@ async def test_register_reschedule_blocks_at_limit(db):
 
 
 def test_cancellation_notice_texts_for_each_outcome():
-    tenant = Tenant(id=uuid4(), clinic_name="Clinic", pix_refund_window_hours=24)
+    tenant = Tenant(
+        id=uuid4(), clinic_name="Clinic", pix_refund_window_hours=24, pix_partial_refund_percent=40
+    )
     deposit = PixDeposit(
-        id=uuid4(),
-        tenant_id=tenant.id,
-        appointment_id=uuid4(),
-        amount_cents=6000,
+        id=uuid4(), tenant_id=tenant.id, appointment_id=uuid4(), amount_cents=6000,
         percent_applied=30,
-        refunded_amount_cents=2400,
     )
 
-    refunded = deposit_lifecycle.cancellation_notice("refunded", tenant, deposit)
-    assert refunded is not None and "estorno" in refunded.lower()
+    due = deposit_lifecycle.cancellation_notice("refund_due", tenant, deposit)
+    assert due is not None and "clínica fará a devolução" in due
 
-    partial = deposit_lifecycle.cancellation_notice("partial_refund", tenant, deposit)
-    assert partial is not None and "R$ 24,00" in partial
+    partial = deposit_lifecycle.cancellation_notice("partial_refund_due", tenant, deposit)
+    assert partial is not None and "R$ 24,00" in partial  # 40% of R$ 60,00
 
     retained = deposit_lifecycle.cancellation_notice("retained", tenant, deposit)
     assert retained is not None and "24h" in retained
 
-    failed = deposit_lifecycle.cancellation_notice("refund_failed", tenant, deposit)
-    assert failed is not None
+    in_flight = deposit_lifecycle.cancellation_notice("payment_in_flight", tenant, deposit)
+    assert in_flight is not None and "clínica" in in_flight
 
-    assert deposit_lifecycle.cancellation_notice("voided", tenant, deposit) is None
-    assert deposit_lifecycle.cancellation_notice(None, tenant, deposit) is None
+    # Gone outcomes (the platform no longer refunds) and the silent ones say nothing.
+    for silent in ("voided", None, "refunded", "partial_refund", "refund_failed"):
+        assert deposit_lifecycle.cancellation_notice(silent, tenant, deposit) is None

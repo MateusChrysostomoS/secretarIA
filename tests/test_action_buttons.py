@@ -43,6 +43,7 @@ from secretaria.models import (  # noqa: E402
     FlowState,
     HandoverState,
     Patient,
+    PaymentAttentionItem,
     PixDeposit,
     PixDepositStatus,
     Tenant,
@@ -54,7 +55,7 @@ from secretaria.schemas.webhook import (  # noqa: E402
     extract_inbound_body,
 )
 from secretaria.services.flow_router import STEP_MANAGE_DAY  # noqa: E402
-from secretaria.services.payments import deposit_lifecycle  # noqa: E402
+from secretaria.services.payments import asaas_provider  # noqa: E402
 from secretaria.services.tenant_config import set_asaas_api_key  # noqa: E402
 from secretaria.workers import tasks  # noqa: E402
 
@@ -167,10 +168,10 @@ class _FakeWhatsAppClient:
 
 
 class _FakeAsaasClient:
-    """Minimal fake — only `refund_payment` is exercised by these tests."""
+    """Minimal fake. `refund_payment` fails the test: the platform never refunds (D15)."""
 
-    async def refund_payment(self, payment_id, value_cents):
-        return {"id": payment_id, "status": "REFUNDED"}
+    async def refund_payment(self, payment_id, value_cents):  # pragma: no cover
+        raise AssertionError("refund_payment was called")
 
     async def delete_payment(self, payment_id):
         return {"deleted": True}
@@ -413,7 +414,7 @@ async def test_apptcancelyes_executes_cancel_with_retained_notice(db):
         assert deposit.status == PixDepositStatus.CANCELLED_RETAINED
 
 
-async def test_apptcancel_outside_window_cancels_immediately_with_refund_notice(
+async def test_apptcancel_outside_window_cancels_and_tells_the_patient_the_clinic_will_return_it(
     db, monkeypatch: pytest.MonkeyPatch
 ):
     tenant, patient, conversation, appt = await _seed(
@@ -425,9 +426,7 @@ async def test_apptcancel_outside_window_cancels_immediately_with_refund_notice(
     async with db() as session:
         await set_asaas_api_key(session, tenant.id, "asaas-key-1234567890")
         await session.commit()
-    monkeypatch.setattr(
-        deposit_lifecycle, "_asaas_client_for", lambda api_key: _FakeAsaasClient()
-    )
+    monkeypatch.setattr(asaas_provider, "client_for", lambda api_key: _FakeAsaasClient())
 
     await tasks._handle_action_button(_reply_ctx(conversation), "apptcancel", str(appt.id))
 
@@ -435,7 +434,8 @@ async def test_apptcancel_outside_window_cancels_immediately_with_refund_notice(
     kind, to, body = client.sent[0]
     assert kind == "text"
     assert "Consulta cancelada." in body
-    assert "estorno" in body.lower()
+    assert "clínica fará a devolução" in body
+    assert "estorno" not in body.lower()
 
     async with db() as session:
         refreshed = await session.get(Appointment, appt.id)
@@ -443,7 +443,9 @@ async def test_apptcancel_outside_window_cancels_immediately_with_refund_notice(
         deposit = await session.scalar(
             select(PixDeposit).where(PixDeposit.appointment_id == appt.id)
         )
-        assert deposit.status == PixDepositStatus.CANCELLED_REFUNDED
+        assert deposit.status == PixDepositStatus.PAID  # never refunded by us
+        item = await session.scalar(select(PaymentAttentionItem))
+        assert item.reason == "refund_due_policy"
 
 
 async def test_apptcancel_no_deposit_cancels_immediately_no_notice(db):

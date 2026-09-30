@@ -13,6 +13,7 @@ from secretaria.models.appointment import (
     is_live_status,
 )
 from secretaria.models.booking_hold import BookingHold
+from secretaria.models.clinic_payment_account import ClinicPaymentAccount
 from secretaria.models.consent_event import ConsentEvent
 from secretaria.models.conversation import Conversation, FlowState, HandoverState
 from secretaria.models.conversation_pii_token_map import ConversationPiiTokenMap
@@ -26,6 +27,9 @@ from secretaria.models.insurance import (
 )
 from secretaria.models.message import Message, MessageDirection, MessageSender
 from secretaria.models.patient import Patient
+from secretaria.models.patient_payment_customer import PatientPaymentCustomer
+from secretaria.models.payment_attention_item import PaymentAttentionItem
+from secretaria.models.payment_webhook_event import PaymentWebhookEvent
 from secretaria.models.pix_deposit import PixDeposit, PixDepositStatus
 from secretaria.models.processed_asaas_event import ProcessedAsaasEvent
 from secretaria.models.processed_event import ProcessedEvent
@@ -46,6 +50,7 @@ __all__ = [
     "Appointment",
     "AppointmentStatus",
     "BookingHold",
+    "ClinicPaymentAccount",
     "is_live_status",
     "ConsentEvent",
     "Conversation",
@@ -58,6 +63,9 @@ __all__ = [
     "MessageDirection",
     "MessageSender",
     "Patient",
+    "PatientPaymentCustomer",
+    "PaymentAttentionItem",
+    "PaymentWebhookEvent",
     "PixDeposit",
     "PixDepositStatus",
     "ProcessedAsaasEvent",

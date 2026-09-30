@@ -24,7 +24,23 @@ from secretaria.workers.onboarding_cron import (
     run_onboarding_nudges,
     run_patient_usage_metering,
 )
-from secretaria.workers.payments_tasks import process_asaas_event
+from secretaria.workers.payments_cron import (
+    DAILY_HOUR,
+    DAILY_MINUTE,
+    EXPIRY_MINUTES,
+    RECONCILE_MINUTES,
+    SWEEP_MINUTES,
+    run_payment_daily,
+    run_payment_expiry,
+    run_payment_reconciliation,
+    run_payment_sweeps,
+)
+from secretaria.workers.payments_tasks import (
+    delete_provider_customer_job,
+    fulfill_paid_charge_job,
+    process_asaas_event,
+    process_payment_event,
+)
 from secretaria.workers.tasks import (
     check_handover_timeouts,
     process_brain_message_inbound,
@@ -132,6 +148,14 @@ class WorkerSettings:
         # POST /webhooks/asaas. See workers/payments_tasks.py and
         # services/payments/deposit_lifecycle.py.
         process_asaas_event,
+        # Per-clinic payment webhook events (any provider): enqueued by
+        # POST /webhooks/{provider}/{webhook_slug} with the durable row id ONLY, and by the
+        # sweeps. See workers/payments_tasks.py and services/payments/event_processor.py.
+        process_payment_event,
+        # Post-payment step of one deposit (idempotent, retryable from the deposit's state).
+        fulfill_paid_charge_job,
+        # LGPD erasure: ask the provider to delete a patient's customer record.
+        delete_provider_customer_job,
     ]
     # Sweep stale human-handover conversations back to the bot every 15 min;
     # sweep upcoming appointments for due lead-window reminders every 5 min
@@ -152,6 +176,13 @@ class WorkerSettings:
         cron(run_onboarding_nudges, minute={10}),
         cron(run_patient_usage_metering, hour={3}, minute={30}),
         cron(check_deploy_parity_cron, minute={7}),
+        # Payment provider core (services/payments/jobs.py): void expired `before` charges,
+        # reconcile paid-but-unheard charges, re-enqueue stuck events/fulfillments, and the
+        # daily key recheck + payload pruning. Minutes are disjoint from every cron above.
+        cron(run_payment_expiry, minute=EXPIRY_MINUTES),
+        cron(run_payment_reconciliation, minute=RECONCILE_MINUTES),
+        cron(run_payment_sweeps, minute=SWEEP_MINUTES),
+        cron(run_payment_daily, hour={DAILY_HOUR}, minute={DAILY_MINUTE}),
     ]
     on_startup = on_startup
     on_shutdown = on_shutdown

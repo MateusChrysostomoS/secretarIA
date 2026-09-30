@@ -18,14 +18,14 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
 from secretaria.models import Professional, Tenant
+from secretaria.services.payments.asaas_connection import ConnectionResult, connect_asaas_account
 from secretaria.services.tenant_config import (
     ProfessionalCompletenessItem,
     can_activate_professional_aware,
     professional_completeness,
-    set_asaas_api_key,
-    set_asaas_webhook_token,
     set_waba_token,
 )
 
@@ -123,20 +123,31 @@ async def connect_whatsapp(
 
 
 async def connect_asaas(
-    session: AsyncSession, *, tenant_id: UUID, api_key: str, webhook_token: str
-) -> bool:
-    """Store a tenant's Asaas credentials, encrypted (Pix deposit wave,
-    adjacent to connect_whatsapp above). Returns False when the tenant does
-    not exist (the API layer 404s), True once both secrets are stored.
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    api_key: str,
+    webhook_token: str | None = None,
+) -> ConnectionResult | None:
+    """Connect a tenant's Asaas account for an OPERATOR (adjacent to connect_whatsapp above).
+
+    Returns None when the tenant does not exist (the API layer 404s); otherwise the result of
+    the SAME connection service the clinic's own screen uses - the key is format-checked and
+    permission-probed before it is stored, a refused key is never saved, and the clinic's
+    webhook is created and read back (the operator no longer registers it by hand). A supplied
+    `webhook_token` becomes the webhook `authToken`; without one the platform generates it.
     Values are never logged. Caller commits.
     """
     tenant = await session.get(Tenant, tenant_id)
     if tenant is None:
-        return False
-    await set_asaas_api_key(session, tenant_id, api_key)
-    await set_asaas_webhook_token(session, tenant_id, webhook_token)
-    logger.info("provisioning_asaas_connected", tenant_id=str(tenant_id))
-    return True
+        return None
+    return await connect_asaas_account(
+        session,
+        tenant_id=tenant_id,
+        api_key=api_key,
+        webhook_base_url=get_settings().payments_webhook_base_url or None,
+        auth_token=webhook_token,
+    )
 
 
 @dataclass(frozen=True)

@@ -65,7 +65,7 @@ from secretaria.services.booking_scope import (  # noqa: E402
 )
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
 from secretaria.services.flow_router import STEP_AWAITING_CONFIRMATION, route  # noqa: E402
-from secretaria.services.payments import deposit_lifecycle  # noqa: E402
+from secretaria.services.payments import asaas_provider, deposit_lifecycle  # noqa: E402
 
 _TZ = ZoneInfo("America/Sao_Paulo")
 _SERVICE = "Consulta Cardiológica"
@@ -755,7 +755,7 @@ async def test_free_calendar_title_as_type_creates_no_charge(db, monkeypatch):
     """A booking whose type is unprovable must skip the deposit, not guess one."""
     clinic = await _seed_sole_professional_clinic(db)
     asaas = _FakeAsaas()
-    monkeypatch.setattr(deposit_lifecycle, "_asaas_client_for", lambda api_key: asaas)
+    monkeypatch.setattr(asaas_provider, "client_for", lambda api_key: asaas)
     async with db() as session:
         tenant = await session.get(Tenant, clinic.tenant.id)
         patient = await session.get(Patient, clinic.patient.id)
@@ -775,7 +775,7 @@ async def test_free_calendar_title_as_type_creates_no_charge(db, monkeypatch):
 async def test_owned_booking_creates_exactly_one_charge(db, monkeypatch):
     clinic = await _seed_sole_professional_clinic(db)
     asaas = _FakeAsaas()
-    monkeypatch.setattr(deposit_lifecycle, "_asaas_client_for", lambda api_key: asaas)
+    monkeypatch.setattr(asaas_provider, "client_for", lambda api_key: asaas)
     async with db() as session:
         tenant = await session.get(Tenant, clinic.tenant.id)
         patient = await session.get(Patient, clinic.patient.id)
@@ -785,8 +785,10 @@ async def test_owned_booking_creates_exactly_one_charge(db, monkeypatch):
         )
         await session.commit()
     assert deposit is not None
-    # 30% of R$ 300,00
-    assert asaas.payments == [(str(appointment.id), 9000)]
+    # 30% of R$ 300,00. The reference sent to the PSP is the deposit's OWN id (not the
+    # appointment's: in `before` timing the charge exists before any appointment).
+    assert asaas.payments == [(str(deposit.id), 9000)]
+    assert deposit.appointment_id == appointment.id
 
 
 # --------------------------------------------------------------------------
@@ -797,7 +799,7 @@ async def test_owned_booking_creates_exactly_one_charge(db, monkeypatch):
 async def test_flow_and_tool_bookings_each_produce_exactly_one_pix_intent(db, monkeypatch):
     clinic = await _seed_sole_professional_clinic(db)
     asaas = _FakeAsaas()
-    monkeypatch.setattr(deposit_lifecycle, "_asaas_client_for", lambda api_key: asaas)
+    monkeypatch.setattr(asaas_provider, "client_for", lambda api_key: asaas)
 
     async def _entitlements(tenant_id, redis=None):
         return _summary(tenant_id=str(tenant_id))
@@ -857,10 +859,9 @@ async def test_flow_and_tool_bookings_each_produce_exactly_one_pix_intent(db, mo
         await post_booking.run_post_booking_hooks({"redis": redis}, *args)
 
     assert len(asaas.payments) == 2
-    assert {reference for reference, _cents in asaas.payments} == {
-        str(a.id) for a in appointments
-    }
     assert {cents for _reference, cents in asaas.payments} == {9000}
     async with db() as session:
         deposits = (await session.scalars(select(PixDeposit))).all()
     assert len(deposits) == 2
+    assert {reference for reference, _cents in asaas.payments} == {str(d.id) for d in deposits}
+    assert {d.appointment_id for d in deposits} == {a.id for a in appointments}

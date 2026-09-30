@@ -124,26 +124,46 @@ async def whatsapp_connection(
 @router.post(
     "/tenants/{tenant_id}/asaas-connection",
     response_model=AsaasConnectionOut,
-    summary="Store a tenant's Asaas API key + webhook token (internal)",
+    summary="Connect a tenant's Asaas account from an API key (internal)",
     description=(
-        "Encrypts and upserts both secrets (tenant_credentials.asaas_api_key_encrypted / "
-        "asaas_webhook_token_encrypted). Values are never echoed back or logged. "
-        "404 unknown tenant. Same internal auth as whatsapp-connection."
+        "Runs the same connection service as the clinic's own screen: format check, permission "
+        "probes (a key with permissions beyond Clientes/Cobranças/Webhooks is REFUSED and never "
+        "stored), then stores the key encrypted and creates + reads back the clinic's webhook. "
+        "`webhook_token` is optional (generated when absent). Values are never echoed back or "
+        "logged. 404 unknown tenant; 422 refused key (`detail.code`); 503 could not verify. "
+        "Same internal auth as whatsapp-connection."
     ),
-    responses=_NOT_FOUND_RESPONSES,
+    responses={
+        **_NOT_FOUND_RESPONSES,
+        422: {"description": "Key refused (invalid, missing or excess permissions)."},
+        503: {"description": "Permissions could not be verified; nothing was stored."},
+    },
 )
 async def asaas_connection(
     tenant_id: _TENANT_PATH,
     body: AsaasConnectionIn,
     session: AsyncSession = Depends(get_session),
 ) -> AsaasConnectionOut:
-    connected = await provisioning.connect_asaas(
+    result = await provisioning.connect_asaas(
         session, tenant_id=tenant_id, api_key=body.api_key, webhook_token=body.webhook_token
     )
-    if not connected:
+    if result is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown tenant")
+    if result.outcome == "refused":
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {
+                "code": result.code,
+                "missing_groups": list(result.missing_groups),
+                "excess_groups": list(result.excess_groups),
+            },
+        )
+    if result.outcome == "inconclusive":
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, {"code": result.code})
     await session.commit()
-    return AsaasConnectionOut(status="ok", asaas_connected=True)
+    return AsaasConnectionOut(
+        status="ok" if result.outcome == "connected" else "incomplete", asaas_connected=True
+    )
 
 
 @router.get(
