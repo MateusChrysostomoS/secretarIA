@@ -336,3 +336,31 @@ async def test_tenant_b_never_sees_tenant_a_plans():
     )
     assert [row[1] for row in a.bubbles[0].rows][0] == "Plano A"
     assert [row[1] for row in b.bubbles[0].rows][0] == "Plano B"
+
+
+# --------------------------------------------------------------------------
+# TASK-017 / 15A: the payment mechanism rides the list row's public description
+# --------------------------------------------------------------------------
+
+
+async def test_the_list_row_describes_how_payment_works_for_the_plan():
+    tenant = _tenant(collect_insurance=True)
+    tenant.insurance_plans = [
+        {"id": "p1", "name": "Exemplo", "mechanism": "reembolso", "note": "NAO-VAZAR"},
+        {"id": "p2", "name": "Outro Plano"},  # a snapshot that predates `mechanism`
+    ]
+    res = await _confirm_service(tenant, _professionals(1))
+    rows = res.bubbles[0].rows
+    assert rows[0] == (
+        "ins|Exemplo",
+        "Exemplo",
+        "Reembolso: você paga e solicita à operadora, conforme seu contrato.",
+    )
+    assert rows[1] == (
+        "ins|Outro Plano",
+        "Outro Plano",
+        "Pagamento: confirme as condições com a clínica.",
+    )
+    assert "NAO-VAZAR" not in repr(rows)  # the clinic's note is never shown before the choice
+    assert [row[0] for row in rows[-2:]] == ["ins|particular", "ins|outro"]
+    assert all(len(row) == 2 for row in rows[-2:])  # Particular/Outro keep no description

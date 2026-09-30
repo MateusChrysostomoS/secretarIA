@@ -476,6 +476,7 @@ async def test_clinic_custom_plan_appears_in_patient_list_and_can_toggle_deposit
                 "id": plan_id,
                 "name": "Convênio da Prefeitura",
                 "note": "Pagamento via reembolso, envie a nota fiscal em até 30 dias.",
+                "mechanism": "desconhecido",  # custom plans have no catalog entry
             }
         ]
 

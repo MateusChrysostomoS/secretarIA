@@ -77,6 +77,7 @@ from secretaria.services.calendar import (
     build_patient_calendar_link,
 )
 from secretaria.services.insurance_catalog import match_plan
+from secretaria.services.insurance_payment_copy import insurance_payment_description
 from secretaria.services.payments import payer_data
 from secretaria.services.payments.deposit_lifecycle import BEFORE_BLOCKED_TEXT
 from secretaria.services.pending_identity import BOOKING_SLOT_TAKEN_MESSAGE
@@ -2199,13 +2200,20 @@ def _enter_insurance(
     hand-back with the service already chosen - whose service/doctor must ride
     along to the day picker.
     """
-    plans = _tenant_insurances(tenant)
+    plans = _tenant_insurance_plans(tenant)
     if len(plans) > MAX_INSURANCE_PLAN_ROWS:
         logger.warning(
             "flow_insurance_list_truncated", total=len(plans), shown=MAX_INSURANCE_PLAN_ROWS
         )
-    rows: list[tuple[str, str]] = [
-        (f"ins|{plan}", truncate_list_row_title(plan)) for plan in plans[:MAX_INSURANCE_PLAN_ROWS]
+    # The row description says how payment works for the plan (the catalog mechanism): public,
+    # fixed copy - never the clinic's own note, never anything that decides the deposit.
+    rows: list[tuple] = [
+        (
+            f"ins|{plan['name']}",
+            truncate_list_row_title(str(plan["name"])),
+            insurance_payment_description(plan.get("mechanism")),
+        )
+        for plan in plans[:MAX_INSURANCE_PLAN_ROWS]
     ]
     rows.append(("ins|particular", LABEL_INSURANCE_PARTICULAR))
     rows.append(("ins|outro", LABEL_INSURANCE_OTHER))
