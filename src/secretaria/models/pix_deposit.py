@@ -162,6 +162,20 @@ class PixDeposit(Base):
         String(16), server_default=DEPOSIT_TIMING_AFTER, default=DEPOSIT_TIMING_AFTER
     )
 
+    # --- `before` timing (TASK-017, F2). Additive, NULL for every row written before it ---
+    # The conversation that is waiting for this charge (`FlowState.AWAITING_DEPOSIT`). SET NULL:
+    # the money row outlives a deleted conversation. It is how the webhook-driven side (payment
+    # arrives, Pix expires) finds the chat to tell and to move out of the waiting state.
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    # Set when the "Pix expired" notice went out, claimed AFTER a successful send (the paid twin,
+    # `paid_notice_sent_at`, is the F1 column above): a replay never sends it twice and a failed
+    # send is retried.
+    expired_notice_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     __table_args__ = (
         UniqueConstraint("provider", "provider_charge_id", name="uq_pix_deposits_provider_charge"),
         Index("ix_pix_deposits_tenant_status_expires", "tenant_id", "status", "expires_at"),
