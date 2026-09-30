@@ -41,6 +41,13 @@ class FlowState(enum.StrEnum):
                       a visitor who has not proven their address, so the next
                       inbound is read as the 6-digit code.
 
+    AWAITING_DEPOSIT
+                    - BOTH channels, `before` timing only: the slot is HELD and a Pix was sent;
+                      the conversation waits for the payment (`services/deposit_wait.py`). It
+                      offers "Já paguei / Trocar horário / Cancelar reserva" and leaves on its
+                      own: the payment (fulfillment), the Pix window ending (the expiry job) or,
+                      for an inbound after the window, the lazy exit in
+                      `_persist_inbound_message`. Never the patient alone.
     AWAITING_NAME   - BOTH channels: the patient was asked "qual é o seu
                       nome?" (services/patient_name.py) and the next inbound is
                       read as their name. WhatsApp: right after the greeting on
@@ -71,6 +78,8 @@ class FlowState(enum.StrEnum):
     AWAITING_EMAIL_CODE = "AWAITING_EMAIL_CODE"
     # Same reasoning, same absence of a migration: 13 characters.
     AWAITING_NAME = "AWAITING_NAME"
+    # Same reasoning, same absence of a migration: 16 characters in the VARCHAR(32).
+    AWAITING_DEPOSIT = "AWAITING_DEPOSIT"
 
 
 def _handover_values(enum_cls: type[enum.Enum]) -> list[str]:

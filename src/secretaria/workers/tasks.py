@@ -200,7 +200,10 @@ from secretaria.services.patient_name import (
     NAME_REQUEST_MESSAGE,
     parse_patient_name,
 )
-from secretaria.services.payments import deposit_lifecycle
+from secretaria.services.payments import (
+    booking_charge,
+    deposit_lifecycle,
+)
 from secretaria.services.payments.money import format_brl
 from secretaria.services.pending_identity import (
     ACCOUNT_CODE_GIVE_UP_MESSAGE,
@@ -4688,6 +4691,7 @@ async def _run_flow(
         patient_id=None,
         external_id=reply.patient_ref,
         armed=reply.channel == CHANNEL_BRAIN_MESSAGE,
+        redis=redis,
     )
     try:
         result = await route(
@@ -5006,6 +5010,20 @@ async def _apply_flow_result(
         await _send_booking_gate_notice(
             reply, result.booking_hold, tenant=tenant, waba_token=waba_token
         )
+        return True
+
+    # A slot held for a DEPOSIT (`before` timing): the router persisted AWAITING_DEPOSIT above
+    # and a Pix exists. Send it on this turn's channel; if the patient cannot be reached the
+    # charge is voided and the slot freed, because a Pix nobody received would hold the slot
+    # until it expires (spec 7). Nothing was created on Google or in `appointments`.
+    if result.deposit_request is not None and tenant is not None:
+        delivered = await _send_deposit_request_notice(
+            reply, result.deposit_request, tenant=tenant, waba_token=waba_token
+        )
+        if not delivered:
+            await _abort_deposit_request(
+                reply, result.deposit_request, tenant=tenant, waba_token=waba_token, redis=redis
+            )
         return True
 
     if result.action == "calendar_unavailable":
@@ -5464,6 +5482,102 @@ async def _send_booking_gate_notice(
         ),
         buttons=list(CODE_NOTICE_BUTTONS),
         event="booking_gate_notice_sent",
+    )
+
+
+async def _send_deposit_request_notice(
+    reply: _ReplyContext,
+    request: dict,
+    *,
+    tenant: Tenant,
+    waba_token: str | None,
+) -> bool:
+    """Ask the patient to pay, on this turn's channel: what it is for, the Pix code in a bubble
+    of its own (easy to copy) and the card that keeps the conversation while it is open.
+
+    Unlike `_send_plain_reply` this REPORTS failure: in `before` timing a Pix nobody received
+    must not keep the slot (`_abort_deposit_request`). Each message is retried once; the
+    sender is the same channel-aware seam every other reply uses (`_reply_sender`), so a Portal
+    patient with no phone gets it as Portal messages.
+    """
+    sender = _reply_sender(reply, tenant, waba_token)
+    if sender is None:
+        logger.error(
+            "deposit_request_no_sender",
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(tenant.id),
+        )
+        return False
+    tz = _tenant_tzinfo(tenant)
+    until_text = request["expires_at"].astimezone(tz).strftime("%H:%M")
+    steps: list[tuple[str, str]] = [
+        (
+            "text",
+            deposit_lifecycle.before_request_text(
+                tenant.clinic_name,
+                service=request["service"],
+                when_text=request["start_at"].astimezone(tz).strftime(WHEN_FORMAT),
+                amount_cents=request["amount_cents"],
+                minutes=request["minutes"],
+                until_text=until_text,
+                payment_note=request.get("payment_note"),
+            ),
+        ),
+        ("text", request["copy_paste"]),
+        ("buttons", deposit_lifecycle.before_wait_card_text(until_text)),
+    ]
+    for kind, body in steps:
+        for attempt in (1, 2):
+            try:
+                if kind == "buttons":
+                    buttons = list(deposit_lifecycle.DEPOSIT_WAIT_BUTTONS)
+                    result = await sender.send_buttons(
+                        to=reply.patient_ref, body=body, buttons=buttons
+                    )
+                    interactive = interactive_buttons_record(body, buttons)
+                else:
+                    result = await sender.send_text_message(to=reply.patient_ref, body=body)
+                    interactive = None
+            except Exception as exc:
+                logger.warning(
+                    "deposit_request_send_failed",
+                    error_type=type(exc).__name__,
+                    attempt=attempt,
+                    conversation_id=str(reply.conversation_id),
+                )
+                if attempt == 2:
+                    return False
+                continue
+            if reply.conversation_id is not None and not sender_persists_outbound(sender):
+                await _record_outbound(reply.conversation_id, body, result, interactive)
+            break
+    logger.info("deposit_request_sent", conversation_id=str(reply.conversation_id))
+    return True
+
+
+async def _abort_deposit_request(
+    reply: _ReplyContext,
+    request: dict,
+    *,
+    tenant: Tenant,
+    waba_token: str | None,
+    redis,
+) -> None:
+    """The Pix could not be delivered: void the charge, free the slot and hand the conversation
+    to a human (nothing was created, nothing is owed). No clinic e-mail (owner answer 13)."""
+    try:
+        async with async_session_factory() as session:
+            await booking_charge.abandon_charge(session, tenant, request["deposit_id"])
+    except Exception as exc:
+        logger.error("deposit_request_abort_failed", error_type=type(exc).__name__)
+    await _write_flow_state(reply.conversation_id, FlowState.IDLE)
+    await _set_conversation_human_active(reply.conversation_id)
+    await _send_plain_reply(
+        reply,
+        tenant=tenant,
+        waba_token=waba_token,
+        body=deposit_lifecycle.BEFORE_BLOCKED_TEXT,
+        event="deposit_request_blocked_notice_sent",
     )
 
 

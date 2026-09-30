@@ -917,6 +917,9 @@ DEPOSIT_WAIT_BUTTONS: tuple[tuple[str, str], ...] = (
 )
 
 
+BEFORE_COPY_PASTE_LABEL = "Segue o Pix copia e cola, na próxima mensagem:"
+
+
 def before_request_text(
     clinic_name: str,
     *,
