@@ -102,11 +102,19 @@ async def begin_payment(
     start_at: datetime,
     end_at: datetime,
     existing_hold: HeldSlot | None = None,
+    payer_document: str | None = None,
+    payer_email: str | None = None,
 ) -> PaymentStart | None:
     """Hold the slot for the deposit window and create its Pix.
 
     Returns None when somebody else holds the window (`slot_taken`, nothing was created).
     Raises `ChargeStartError` when the charge could not be started; the hold is gone by then.
+
+    `payer_document` (CPF/CNPJ, digits only) and `payer_email` are the TRANSIENT answers of
+    decision D7. They go to the provider (as the customer's `cpfCnpj` / the payer's e-mail) and to
+    nobody else: never stored, never logged, and absent from the deposit row and the booking
+    snapshot. `ChargeStartError("payer_document_required")` / `("payer_email_required")` mean the
+    provider needs one and there was none.
     """
     if patient_id is None:
         raise ChargeStartError("no_patient")
@@ -150,6 +158,8 @@ async def begin_payment(
             insurance=insurance,
             attendee_name=attendee_name,
             professional_id=professional_id,
+            payer_document=payer_document,
+            payer_email=payer_email,
         )
     except ChargeStartError:
         await _release_hold(hold.id)
@@ -172,6 +182,8 @@ async def _create_and_record(
     insurance: str | None,
     attendee_name: str | None,
     professional_id: UUID | None,
+    payer_document: str | None = None,
+    payer_email: str | None = None,
 ) -> PaymentStart:
     provider_name = quote.provider or PROVIDER_ASAAS
     provider = registry.find_provider(provider_name)
@@ -204,6 +216,8 @@ async def _create_and_record(
                     payer_name=patient.name or "Paciente",
                     payer_phone=patient.wa_id,
                     provider_customer_id=customer_id,
+                    payer_document=payer_document,
+                    payer_email=payer_email,
                     expires_at=hold.expires_at,
                 ),
             )

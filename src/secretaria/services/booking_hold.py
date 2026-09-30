@@ -484,13 +484,23 @@ class GateDecision:
                    appointment: they are created by the payment (`fulfillment.py`).
     "blocked"    - (`before` timing) a deposit is due but cannot be asked for. The booking is
                    NOT made and nothing is held; `blocked_reason` is symbolic.
+    "needs_payer_data"
+                 - (`before` timing) the provider will not create the charge without a payer
+                   field it has not been given (decision D7): the CPF/CNPJ (Asaas) or the e-mail
+                   (Mercado Pago). Nothing is held or charged; the router parks the conversation
+                   in `AWAITING_PAYER_DATA`. `payer_field` is "document" or "email" and
+                   `payer_provider` names the provider for the copy.
     """
 
-    outcome: Literal["commit", "held", "slot_taken", "awaiting_payment", "blocked"]
+    outcome: Literal[
+        "commit", "held", "slot_taken", "awaiting_payment", "blocked", "needs_payer_data"
+    ]
     email_masked: str | None = None
     hold_id: UUID | None = None
     payment: "PaymentStart | None" = None
     blocked_reason: str | None = None
+    payer_field: str | None = None
+    payer_provider: str | None = None
 
 
 class BookingGate:
@@ -714,6 +724,14 @@ class BookingGate:
         )
         return GateDecision("blocked", blocked_reason=reason)
 
+    async def _forget_payer_data(self) -> None:
+        """The provider call that needed the data has been made: forget all of it (D7)."""
+        from secretaria.services.payments import payer_data
+
+        await payer_data.discard(
+            self._redis, tenant_id=self._tenant_id, conversation_id=self._conversation_id
+        )
+
     async def _decide_required(
         self,
         quote,
@@ -757,8 +775,13 @@ class BookingGate:
             # No code is coming (already verified, no address, brain-api down): the deposit is
             # itself the barrier, so the SAME hold moves straight to the payment phase.
 
-        from secretaria.services.payments import booking_charge
+        from secretaria.services.payments import booking_charge, payer_data
 
+        # What the patient already gave this turn or the last one (encrypted, 15 minutes, this
+        # conversation only). Nothing is the normal case.
+        payer = await payer_data.recall_all(
+            self._redis, tenant_id=self._tenant_id, conversation_id=self._conversation_id
+        )
         try:
             payment = await booking_charge.begin_payment(
                 tenant_id=self._tenant_id,
@@ -772,9 +795,24 @@ class BookingGate:
                 start_at=start_at,
                 end_at=end_at,
                 existing_hold=held,
+                payer_document=payer.document,
+                payer_email=payer.email,
             )
         except booking_charge.ChargeStartError as exc:
+            needed = payer_data.kind_for_code(exc.code)
+            if needed is not None and not payer.has(needed):
+                # The provider is the authority on what it needs (decision D7): nothing is held
+                # (`begin_payment` released the hold) and nothing was charged, so whatever the
+                # patient already gave stays (its TTL) for the answer that completes the request.
+                return GateDecision(
+                    "needs_payer_data", payer_field=needed, payer_provider=quote.provider
+                )
+            # The provider saw the data (or failed for another reason): forget it. A provider
+            # that STILL asks for what it was given is the D3 "blocked", never a second question.
+            await self._forget_payer_data()
             return await self._blocked(exc.code)
         if payment is None:
+            # No provider call was made: the data (if any) stays for the next try (its TTL).
             return GateDecision("slot_taken")
+        await self._forget_payer_data()
         return GateDecision("awaiting_payment", hold_id=payment.hold_id, payment=payment)

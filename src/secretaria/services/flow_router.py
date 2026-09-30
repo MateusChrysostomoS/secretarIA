@@ -77,6 +77,7 @@ from secretaria.services.calendar import (
     build_patient_calendar_link,
 )
 from secretaria.services.insurance_catalog import match_plan
+from secretaria.services.payments import payer_data
 from secretaria.services.payments.deposit_lifecycle import BEFORE_BLOCKED_TEXT
 from secretaria.services.pending_identity import BOOKING_SLOT_TAKEN_MESSAGE
 from secretaria.services.service_catalog import normalize, professionals_offering
@@ -1302,6 +1303,7 @@ async def _route(
         FlowState.AWAITING_EMAIL_CODE,
         FlowState.AWAITING_NAME,
         FlowState.AWAITING_DEPOSIT,
+        FlowState.AWAITING_PAYER_DATA,
     ):
         logger.warning(
             "flow_router_pending_identity_state_leaked",
@@ -3448,6 +3450,27 @@ async def _handle_confirmation(
                 flow_selected_type=None,
                 flow_selected_day=None,
                 flow_selected_slot=None,
+            )
+        if decision.outcome == "needs_payer_data" and decision.payer_field is not None:
+            # The provider needs a payer field (decision D7). Nothing is held or charged; the
+            # conversation waits for it and the answer replays THIS confirmation
+            # (`workers/tasks.py`, the AWAITING_PAYER_DATA branch of the inbound ladder).
+            return FlowRouterResult(
+                action="reply",
+                bubbles=[
+                    MenuBubble(
+                        body=payer_data.ask_text(decision.payer_field, decision.payer_provider),
+                        labels=[payer_data.LABEL_OPTOUT],
+                    )
+                ],
+                flow_state=FlowState.AWAITING_PAYER_DATA,
+                flow_step=payer_data.step_for("before", decision.payer_field, 0),
+                flow_selected_type=conversation.flow_selected_type,
+                flow_selected_day=conversation.flow_selected_day,
+                flow_selected_slot=conversation.flow_selected_slot,
+                flow_selected_professional_id=_selected_professional_id(conversation),
+                flow_selected_insurance=insurance,
+                flow_attendee_name=conversation.flow_attendee_name,
             )
         if decision.outcome == "awaiting_payment" and decision.payment is not None:
             payment = decision.payment

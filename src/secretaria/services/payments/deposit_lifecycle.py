@@ -48,7 +48,7 @@ from secretaria.services import tenant_config as cfg
 from secretaria.services.booking_scope import canonical_service_name
 from secretaria.services.calendar import CalendarService
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
-from secretaria.services.payments import accounts, attention, notify, registry
+from secretaria.services.payments import accounts, attention, notify, payer_data, registry
 from secretaria.services.payments.money import format_brl, parse_brl_to_cents
 from secretaria.services.payments.provider import ChargeRequest, PaymentStatus, ProviderError
 from secretaria.services.service_catalog import load_service_catalog, service_by_name
@@ -358,6 +358,9 @@ async def maybe_create_deposit(
     patient: Patient | None,
     appointment: Appointment,
     waba_token: str | None,
+    collect_payer_data: bool = False,
+    redis=None,
+    conversation_id: UUID | None = None,
 ) -> PixDeposit | None:
     """Best-effort: create a Pix deposit charge for a freshly booked appointment.
 
@@ -370,6 +373,13 @@ async def maybe_create_deposit(
     track of a live Asaas charge. Nothing here ever raises into the caller —
     a payment/notification hiccup must never block or unwind the booking
     itself, which is already committed by the time this runs.
+
+    `collect_payer_data` (True only from the `after` hook, decision D7): when the provider says it
+    needs a payer field (`payer_document_required` / `payer_email_required`) and none was given,
+    raise `payer_data.PayerDataNeeded(kind, provider)` instead of skipping in silence, so the
+    caller can ASK the patient. Every other caller keeps the silent skip. `redis` and
+    `conversation_id` locate the transient answer (encrypted, 15 minutes): it goes to the provider
+    and to nobody else and is forgotten right after that call.
     """
     if not tenant.pix_deposit_enabled:
         _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_DISABLED)
@@ -427,6 +437,9 @@ async def maybe_create_deposit(
     customer_id = await accounts.get_customer_id(
         session, tenant_id=tenant.id, patient_id=patient.id, provider=provider_name
     )
+    payer = await payer_data.recall_all(
+        redis, tenant_id=tenant.id, conversation_id=conversation_id
+    )
     description = f"Sinal - {appointment.appointment_type or 'consulta'} - {tenant.clinic_name}"
     try:
         created = await provider.create_pix_charge(
@@ -438,11 +451,19 @@ async def maybe_create_deposit(
                 due_date=datetime.now(_tenant_tz(tenant)).date(),
                 payer_name=patient.name or "Paciente",
                 payer_phone=patient.wa_id,
-                # The CPF is collected by the F2 flow (transiently, decision D7); F1 sends none.
+                # Collected by the F2 flow (transiently, decision D7); never stored nor logged.
                 provider_customer_id=customer_id,
+                payer_document=payer.document,
+                payer_email=payer.email,
             ),
         )
     except Exception as exc:
+        needed = payer_data.kind_for_code(exc.code) if isinstance(exc, ProviderError) else None
+        if collect_payer_data and needed is not None and not payer.has(needed):
+            # Nothing was charged and nothing was stored: let the caller ask (what the patient
+            # already gave stays for the answer that completes the request).
+            raise payer_data.PayerDataNeeded(needed, provider_name) from None
+        await payer_data.discard(redis, tenant_id=tenant.id, conversation_id=conversation_id)
         logger.warning(
             "pix_deposit_charge_failed",
             code=exc.code if isinstance(exc, ProviderError) else type(exc).__name__,
@@ -450,6 +471,9 @@ async def maybe_create_deposit(
             appointment_id=str(appointment.id),
         )
         return None
+
+    # The provider saw it: forget it (the deposit row and the log never carry it).
+    await payer_data.discard(redis, tenant_id=tenant.id, conversation_id=conversation_id)
 
     if created.provider_customer_id and created.provider_customer_id != customer_id:
         await accounts.remember_customer_id(

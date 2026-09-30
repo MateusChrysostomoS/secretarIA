@@ -6,7 +6,7 @@ database writes, handover logic and outbound Cloud API calls.
 
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dataclass_replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Literal
@@ -138,12 +138,14 @@ from secretaria.services.flow_router import (
     ATTENDEE_STEPS,
     LABEL_BOOK,
     LABEL_CANCEL_APPT,
+    LABEL_CONFIRM,
     LABEL_MANAGE_APPOINTMENT,
     LABEL_OTHER,
     LABEL_RESCHEDULE,
     LABEL_RETRY_MENU,
     LABEL_RETRY_YES,
     STEP_AWAITING_ATTENDEE_AUTH,
+    STEP_AWAITING_CONFIRMATION,
     STEP_AWAITING_RETRY,
     STEP_MANAGE_CANCEL_CONFIRM,
     STEP_MANAGE_DAY,
@@ -207,6 +209,8 @@ from secretaria.services.payments import (
     booking_charge,
     deposit_gate,
     deposit_lifecycle,
+    payer_data,
+    payer_data_after,
 )
 from secretaria.services.payments.money import format_brl
 from secretaria.services.pending_identity import (
@@ -583,6 +587,18 @@ class _ReplyContext:
     # `_handle_deposit_wait`, before the menu and the flow router see the turn.
     deposit_wait_action: str | None = None
     deposit_wait_id: UUID | None = None
+    # --- decision D7: the patient was asked for a payer field the provider needs ---
+    # `payer_data_action` is set by the inbound ladder for the ends of that wait ("invalid" asks
+    # again, "optout" / "exhausted" hand the chat to a human, "expired" offers the retry card
+    # (`before`) or a human (`after`), "captured_after" resumes the Pix of a consultation that
+    # already stands) and handled by `_handle_payer_data`. A VALID answer in the `before` timing
+    # sets `payer_data_answer` instead: the value, in memory only, until `_send_bot_reply` stores
+    # it encrypted. It is `repr=False` so no log line, assertion message or traceback can print it.
+    payer_data_action: str | None = None
+    payer_data_kind: str = "document"
+    payer_data_timing: str = "before"
+    payer_data_attempts: int = 0
+    payer_data_answer: str | None = field(default=None, repr=False)
     # --- Brain-Message inline identity (services/pending_identity.py) ----
     # Set on a Brain-Message FIRST contact. The greeting goes out, then
     # `_send_bot_reply` asks brain-api whether this visitor still owes an
@@ -1057,6 +1073,14 @@ async def _route_inbound_turn(
         and parse_code(body) is not None
     ):
         persisted_body = "[código oculto]"
+    elif payer_data.should_redact_inbound(
+        conversation.flow_state, conversation.flow_step, stored_body
+    ):
+        # Decision D7: the answer to "qual é o CPF ou CNPJ / e-mail?" (typed, a transcribed voice
+        # note, a repeat of it) is personal data that must never become a `messages` row, so the
+        # staff console, the patient transcript and the LLM history never hold it. The value
+        # travels ONLY in this turn's in-memory routing variable (`body`), exactly like the code.
+        persisted_body = payer_data.REDACTED_BODY
 
     session.add(
         Message(
@@ -1574,6 +1598,75 @@ async def _route_inbound_turn(
             inbound_body=body or "",
             menu_requested=True,
         )
+
+    # A provider needs a payer field (decision D7) and the patient was asked for it: this message
+    # is the answer. The whole turn belongs to the question (never the router, never the LLM) and
+    # every way out is time-bounded and independent of the patient (skill conversation-flow-state):
+    # a valid answer, the opt-out, the third invalid answer, and this lazy exit for a silence past
+    # the window (no hold or charge exists here, so no cron).
+    if conversation.flow_state == FlowState.AWAITING_PAYER_DATA:
+        info = payer_data.parse_step(conversation.flow_step)
+        if info is None:
+            # A state whose step is unreadable (a row edited by hand): leave it, never guess.
+            info = payer_data.StepInfo("before", "document", 0)
+            reading = payer_data.Reading("expired")
+        else:
+            reading = payer_data.read_turn(
+                info.kind,
+                body,
+                attempts_so_far=info.attempts,
+                last_activity_at=last_activity_at,
+            )
+        logger.info(
+            "conversation_payer_data_turn",
+            conversation_id=str(conversation.id),
+            tenant_id=str(tenant.id),
+            kind=info.kind,
+            timing=info.timing,
+            outcome=reading.kind,
+            attempts=reading.attempts,
+        )
+        turn = {
+            "channel": channel,
+            "conversation_id": conversation.id,
+            "patient_ref": patient_ref,
+            "payer_data_kind": info.kind,
+            "payer_data_timing": info.timing,
+            "payer_data_attempts": reading.attempts,
+        }
+        if reading.kind == "captured" and info.timing == "before":
+            # The value was the missing piece of the "Confirmar" the patient already gave: put the
+            # conversation back on that step and let the router take the turn as that tap.
+            conversation.flow_state = FlowState.SERVICE_CATALOG
+            conversation.flow_step = STEP_AWAITING_CONFIRMATION
+            return _ReplyContext(
+                inbound_body=LABEL_CONFIRM, payer_data_answer=reading.value, **turn
+            )
+        if reading.kind == "captured":
+            # `after`: the consultation already stands; the answer resumes its Pix (the worker
+            # stores the value, then `_resume_after_deposit`).
+            conversation.flow_state = FlowState.IDLE
+            conversation.flow_step = None
+            return _ReplyContext(
+                inbound_body="",
+                payer_data_answer=reading.value,
+                payer_data_action="captured_after",
+                **turn,
+            )
+        if reading.kind == "invalid":
+            conversation.flow_step = payer_data.step_for(info.timing, info.kind, reading.attempts)
+        elif reading.kind == "expired" and info.timing == "before":
+            deposit_wait.park_on_retry(conversation)
+        else:  # "optout" / "exhausted" / "expired" in `after`: nothing else is asked or charged
+            conversation.flow_state = FlowState.IDLE
+            conversation.flow_step = None
+            conversation.flow_selected_type = None
+            conversation.flow_selected_day = None
+            conversation.flow_selected_slot = None
+            conversation.flow_selected_professional_id = None
+            conversation.flow_selected_insurance = None
+            conversation.flow_attendee_name = None
+        return _ReplyContext(inbound_body="", payer_data_action=reading.kind, **turn)
 
     # `before` timing: the slot is HELD and a Pix is open. The whole turn belongs to the wait
     # (never the router, never the LLM: free text must not cost the patient a slot they are
@@ -3539,6 +3632,18 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
         )
         return
 
+    if reply.payer_data_action is not None:
+        await _handle_payer_data(reply, tenant=tenant, waba_token=waba_token, redis=redis)
+        return
+    if reply.payer_data_answer is not None:
+        if not await _keep_payer_data(reply, tenant=tenant, redis=redis):
+            # Fail CLOSED: without a place to keep it the flow cannot go on (never "book anyway").
+            await _payer_data_unavailable(reply, tenant=tenant, waba_token=waba_token, redis=redis)
+            return
+        # The turn goes on as the "Confirmar" the answer completes (`inbound_body` is already that
+        # label); the rest of this function, the flow router, does the booking. Drop the value from
+        # the context now that it is stored.
+        reply = dataclass_replace(reply, payer_data_answer=None)
     if reply.menu_requested:
         await _handle_show_main_menu(
             reply,
@@ -5802,6 +5907,162 @@ async def _tell_payment_check(reply, tenant, deposit, redis, say) -> None:
         await say(deposit_lifecycle.BEFORE_STILL_WAITING_TEXT, "deposit_wait_still_waiting")
 
 
+async def _keep_payer_data(reply: _ReplyContext, *, tenant: Tenant | None, redis) -> bool:
+    """Store the just-given value (encrypted, short TTL). False = it could not be kept."""
+    if tenant is None or reply.conversation_id is None or reply.payer_data_answer is None:
+        return False
+    return await payer_data.remember(
+        redis,
+        tenant_id=tenant.id,
+        conversation_id=reply.conversation_id,
+        kind=reply.payer_data_kind,
+        value=reply.payer_data_answer,
+    )
+
+
+async def _handle_payer_data(
+    reply: _ReplyContext, *, tenant: Tenant | None, waba_token: str | None, redis
+) -> None:
+    """The ends of the payer-data wait (the inbound ladder already moved the state).
+
+    "invalid" asks again with the way out one tap away; "captured_after" stores the answer and
+    resumes the Pix of the consultation that was waiting; "expired" offers the retry card in the
+    `before` timing (the slot can be picked again); "optout", "exhausted" and an `after` "expired"
+    free everything and hand the conversation to a human with a message that says what stood
+    (`before`: the slot was NOT reserved; `after`: the consultation stands). All of them forget
+    whatever was stored. Best-effort sends, like every other reply of the worker.
+    """
+    if tenant is None or reply.conversation_id is None:
+        return
+    action, kind, timing = reply.payer_data_action, reply.payer_data_kind, reply.payer_data_timing
+    if action == "captured_after":
+        if not await _keep_payer_data(reply, tenant=tenant, redis=redis):
+            await _payer_data_unavailable(reply, tenant=tenant, waba_token=waba_token, redis=redis)
+            return
+        await _resume_after_deposit(reply, tenant=tenant, waba_token=waba_token, redis=redis)
+        return
+    if action == "invalid":
+        await _send_buttons_reply(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            body=payer_data.invalid_text(kind),
+            buttons=[(payer_data.OPTOUT_REPLY_ID, payer_data.LABEL_OPTOUT)],
+            event="payer_data_reasked",
+        )
+        return
+    await payer_data.discard(redis, tenant_id=tenant.id, conversation_id=reply.conversation_id)
+    if action == "expired" and timing == "before":
+        await _send_buttons_reply(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            body=payer_data.expired_text("before"),
+            buttons=_retry_buttons(),
+            event="payer_data_expired_notice_sent",
+        )
+        return
+    await _set_conversation_human_active(reply.conversation_id)
+    body = {
+        "optout": payer_data.optout_text(timing, kind),
+        "exhausted": payer_data.exhausted_text(timing),
+    }.get(action or "", payer_data.expired_text(timing))
+    await _send_plain_reply(
+        reply,
+        tenant=tenant,
+        waba_token=waba_token,
+        body=body,
+        event=f"payer_data_{action}_notice_sent",
+    )
+
+
+async def _payer_data_unavailable(
+    reply: _ReplyContext, *, tenant: Tenant | None, waba_token: str | None, redis
+) -> None:
+    """The value could not be kept (Redis unreachable). `before`: a deposit is due and cannot be
+    asked for, so this is the D3 "blocked" outcome (the clinic is told, a human takes over).
+    `after`: the consultation stands; a human takes over the Pix."""
+    if tenant is None or reply.conversation_id is None:
+        return
+    logger.error(
+        "payer_data_store_unavailable",
+        conversation_id=str(reply.conversation_id),
+        tenant_id=str(tenant.id),
+        timing=reply.payer_data_timing,
+    )
+    await _write_flow_state(reply.conversation_id, FlowState.IDLE)
+    await _set_conversation_human_active(reply.conversation_id)
+    if reply.payer_data_timing == "after":
+        body = payer_data.AFTER_FAILED_TEXT
+    else:
+        body = deposit_lifecycle.BEFORE_BLOCKED_TEXT
+    await _send_plain_reply(
+        reply,
+        tenant=tenant,
+        waba_token=waba_token,
+        body=body,
+        event="payer_data_unavailable_notice_sent",
+    )
+
+
+async def _resume_after_deposit(
+    reply: _ReplyContext, *, tenant: Tenant, waba_token: str | None, redis
+) -> None:
+    """`after` timing: the answer is stored; create and send the Pix of the consultation that
+    stands. A Pix that cannot be made is told to the patient and handed to a human (never a
+    silent skip for a patient who was just asked)."""
+    async with async_session_factory() as session:
+        conversation = await session.get(Conversation, reply.conversation_id)
+        patient = await session.get(Patient, conversation.patient_id) if conversation else None
+        fresh = await session.get(Tenant, tenant.id)
+        if conversation is None or patient is None or fresh is None:
+            return
+        verdict = await payer_data_after.resume_after_booking(
+            session,
+            tenant=fresh,
+            patient=patient,
+            conversation_id=reply.conversation_id,
+            waba_token=waba_token,
+            redis=redis,
+        )
+    logger.info(
+        "payer_data_after_resumed", conversation_id=str(reply.conversation_id), verdict=verdict
+    )
+    if verdict in ("failed", "nothing_pending"):
+        await _set_conversation_human_active(reply.conversation_id)
+        await _send_plain_reply(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            body=payer_data.AFTER_FAILED_TEXT,
+            event="payer_data_after_failed_notice_sent",
+        )
+
+
+def _payer_data_request(
+    held, tenant: Tenant, kind: str, provider: str | None
+) -> FlowRouterResult:
+    """Ask for the payer field after the Portal code, replayable: the selection is rebuilt from the
+    reservation that was just released (`flow_selected_slot` is the clinic's local time)."""
+    local = held.start_at.astimezone(_tenant_tzinfo(tenant))
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[
+            MenuBubble(
+                body=payer_data.ask_text(kind, provider), labels=[payer_data.LABEL_OPTOUT]
+            )
+        ],
+        flow_state=FlowState.AWAITING_PAYER_DATA,
+        flow_step=payer_data.step_for("before", kind, 0),
+        flow_selected_type=held.appointment_type,
+        flow_selected_day=local.strftime("%Y-%m-%d"),
+        flow_selected_slot=local.strftime("%Y-%m-%dT%H:%M"),
+        flow_selected_professional_id=held.professional_id,
+        flow_selected_insurance=held.insurance,
+        flow_attendee_name=held.attendee_name,
+    )
+
+
 async def _payment_after_code(
     reply: _ReplyContext, *, tenant: Tenant | None, redis
 ) -> FlowRouterResult | None:
@@ -5848,6 +6109,9 @@ async def _payment_after_code(
 
     if quote.blocked:
         return await blocked(quote.reason)
+    payer = await payer_data.recall_all(
+        redis, tenant_id=tenant.id, conversation_id=reply.conversation_id
+    )
     try:
         payment = await booking_charge.begin_payment(
             tenant_id=tenant.id,
@@ -5861,8 +6125,18 @@ async def _payment_after_code(
             start_at=held.start_at,
             end_at=held.end_at,
             existing_hold=held,
+            payer_document=payer.document,
+            payer_email=payer.email,
         )
     except booking_charge.ChargeStartError as exc:
+        needed = payer_data.kind_for_code(exc.code)
+        if needed is not None and not payer.has(needed):
+            # Decision D12 then D7: the code first (the address is proven), then the payer field.
+            # `begin_payment` already released the reservation; the answer replays "Confirmar".
+            return _payer_data_request(held, tenant, needed, quote.provider)
+        await payer_data.discard(
+            redis, tenant_id=tenant.id, conversation_id=reply.conversation_id
+        )
         return await blocked(exc.code)
     if payment is None:
         return FlowRouterResult(
@@ -5870,6 +6144,7 @@ async def _payment_after_code(
             bubbles=[TextBubble(body=BOOKING_HOLD_EXPIRED_MESSAGE)],
             flow_state=FlowState.IDLE,
         )
+    await payer_data.discard(redis, tenant_id=tenant.id, conversation_id=reply.conversation_id)
     return FlowRouterResult(
         action="reply",
         flow_state=FlowState.AWAITING_DEPOSIT,
@@ -7023,6 +7298,12 @@ async def _handle_show_main_menu(
         )
         return
     await _void_waiting_deposit(reply, tenant)
+    if tenant is not None:
+        # `/menu` also ends a payer-data wait: whatever was given (and, in the `after` timing,
+        # the pointer to the consultation waiting for its Pix) is forgotten with it.
+        await payer_data.discard(
+            redis, tenant_id=tenant.id, conversation_id=reply.conversation_id
+        )
     result = FlowRouterResult(
         action="reply",
         bubbles=[
