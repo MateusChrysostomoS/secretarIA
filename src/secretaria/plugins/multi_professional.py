@@ -48,6 +48,7 @@ from langchain_core.tools import tool
 
 from secretaria.ai.tools import (
     SelectProfessionalRequested,
+    _blocked_by_required_deposit,
     _calendar_for_professional,
     _canonical_appointment_type,
     _localize_window,
@@ -55,6 +56,7 @@ from secretaria.ai.tools import (
     _persist_appointment,
     _tenant_config_ctx,
     _tenant_id_ctx,
+    held_busy_windows,
 )
 from secretaria.core.logging import get_logger
 from secretaria.plugins.base import PluginSpec
@@ -219,7 +221,11 @@ async def list_free_slots_for_professional(
     cal = await _professional_calendar(tenant_id, professional)
     target_day = date.fromisoformat(day)
     day_dt = datetime.combine(target_day, datetime.min.time())
-    slots = await cal.list_free_slots(day=day_dt, max_slots=min(max(max_slots, 1), 10))
+    held = await held_busy_windows(professional.id)  # a code or a Pix pending is busy time
+    extra = {"extra_busy": held} if held else {}
+    slots = await cal.list_free_slots(
+        day=day_dt, max_slots=min(max(max_slots, 1), 10), **extra
+    )
     return _with_professional_context({"slots": slots}, professional)
 
 
@@ -254,6 +260,10 @@ async def create_event_for_professional(
     tenant_id = _tenant_id_ctx.get()
     if tenant_id is None:
         return {"error": "Nenhum profissional configurado para esta clínica."}
+    # `before` timing: a consultation is confirmed by its deposit, never inserted directly.
+    blocked = await _blocked_by_required_deposit("create_event_for_professional")
+    if blocked is not None:
+        return blocked
 
     professionals = await _active_professionals(tenant_id)
     professional = _match_by_name(professionals, professional_name)

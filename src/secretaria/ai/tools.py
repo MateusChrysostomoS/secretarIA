@@ -271,6 +271,77 @@ def _blocked_tenant_level(tool_name: str) -> dict | None:
     return {"error": _MULTI_PROFESSIONAL_TOOL_ERROR}
 
 
+_DEPOSIT_REQUIRED_TOOL_ERROR = (
+    "Esta clínica exige o sinal (Pix) ANTES de confirmar a consulta, então o agendamento não "
+    "pode ser criado por aqui: uma consulta criada direto no calendário ficaria sem o sinal. "
+    "Chame start_guided_booking (ou show_main_menu) para o paciente concluir pelos botões, "
+    "onde o Pix é pedido. NÃO diga ao paciente que a consulta foi marcada."
+)
+TOOL_BLOCK_DEPOSIT_REQUIRED = "deposit_required"
+
+
+async def _blocked_by_required_deposit(tool_name: str) -> dict | None:
+    """Fail-closed guard of the tools that CREATE a consultation (TASK-017). None = allowed.
+
+    A clinic on `before` timing confirms a consultation only after the deposit is paid; the
+    deterministic flow does that (gate + hold + Pix). A tool that inserted the Google event
+    itself would skip all of it, so on such a clinic it refuses BEFORE any Google call or DB
+    write and sends the agent to the button flow (`start_guided_booking` / `show_main_menu`).
+    Fail-closed: if the clinic cannot be read, the answer is "refuse", never "book without the
+    deposit". A clinic that switched deposits off, is on `after`, or lost the add-on is not
+    affected: cancelling the add-on must never stop the agenda.
+    """
+    tenant_id = _tenant_id_ctx.get()
+    if tenant_id is None:
+        return None
+    from secretaria.core.database import async_session_factory
+    from secretaria.models import Tenant
+    from secretaria.services.payments import deposit_gate
+
+    try:
+        async with async_session_factory() as session:
+            tenant = await session.get(Tenant, tenant_id)
+        active = tenant is not None and await deposit_gate.before_gate_active(tenant)
+    except Exception as exc:
+        logger.warning("agent_tool_deposit_guard_failed", error_type=type(exc).__name__)
+        active = True
+    if not active:
+        return None
+    logger.warning(
+        "agent_tool_blocked",
+        tool=tool_name,
+        reason=TOOL_BLOCK_DEPOSIT_REQUIRED,
+        tenant_id=str(tenant_id),
+    )
+    return {"error": _DEPOSIT_REQUIRED_TOOL_ERROR}
+
+
+async def held_busy_windows(professional_id: UUID | None) -> list[tuple[datetime, datetime]]:
+    """Time other conversations HOLD (a code or a Pix pending) on this agenda: busy time that
+    Google has never heard of. Best-effort: a failed read must not hide the agenda."""
+    tenant_id = _tenant_id_ctx.get()
+    if tenant_id is None:
+        return []
+    from secretaria.services.booking_hold import held_windows
+
+    try:
+        return await held_windows(
+            tenant_id, professional_id, exclude_conversation=_conversation_id_ctx.get()
+        )
+    except Exception as exc:
+        logger.warning("agent_tool_held_windows_failed", error_type=type(exc).__name__)
+        return []
+
+
+def _naive_safe(value: datetime, like: datetime) -> datetime:
+    """`value` made comparable with `like` (tz-aware vs naive), for the held-window overlap."""
+    if like.tzinfo is not None and value.tzinfo is None:
+        return value.replace(tzinfo=like.tzinfo)
+    if like.tzinfo is None and value.tzinfo is not None:
+        return value.replace(tzinfo=None)
+    return value
+
+
 def _sole_professional_id() -> UUID | None:
     """The single active professional owning THIS turn's bookings, or None.
 
@@ -672,7 +743,18 @@ async def check_availability(start: str, end: str) -> dict:
         datetime.fromisoformat(start),
         datetime.fromisoformat(end),
     )
-    return {"busy": await _busy_without_foreign_details(busy)}
+    result = await _busy_without_foreign_details(busy)
+    # A slot another patient is holding (a code or a Pix pending) is busy even though Google
+    # has never heard of it. Only the window travels, exactly like any other person's event.
+    window_start, window_end = datetime.fromisoformat(start), datetime.fromisoformat(end)
+    for held_start, held_end in await held_busy_windows(_sole_professional_id()):
+        if held_start < _naive_safe(window_end, held_start) and _naive_safe(
+            window_start, held_start
+        ) < held_end:
+            result.append(
+                {"start": held_start.isoformat(), "end": held_end.isoformat(), "do_paciente": False}
+            )
+    return {"busy": result}
 
 
 @tool
@@ -691,9 +773,12 @@ async def list_free_slots(day: str, max_slots: int = 6) -> dict:
         return blocked
     target_day = date.fromisoformat(day)
     day_dt = datetime.combine(target_day, datetime.min.time())
+    held = await held_busy_windows(_sole_professional_id())
+    extra = {"extra_busy": held} if held else {}
     slots = await _get_calendar().list_free_slots(
         day=day_dt,
         max_slots=min(max(max_slots, 1), 10),
+        **extra,
     )
     return {"slots": slots}
 
@@ -747,6 +832,9 @@ async def create_event(
             deixar em branco.
     """
     blocked = _blocked_tenant_level("create_event")
+    if blocked is not None:
+        return blocked
+    blocked = await _blocked_by_required_deposit("create_event")
     if blocked is not None:
         return blocked
     # Resolved BEFORE the calendar call: an unprovable service must not leave

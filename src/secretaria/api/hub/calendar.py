@@ -33,7 +33,7 @@ from secretaria.schemas.calendar import (
     CalendarInsurancePlanRead,
     CancelPreviewRead,
 )
-from secretaria.services import cancellation_notice
+from secretaria.services import booking_hold, cancellation_notice
 from secretaria.services.appointment_status import SOURCE_HUB, log_status_transition
 from secretaria.services.calendar import CalendarService
 from secretaria.services.insurance_catalog import AppointmentPlan, load_appointment_plans
@@ -42,6 +42,35 @@ from secretaria.services.tenant_config import load_tenant_config
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/tenants/me/calendar", tags=["hub-calendar"])
+
+
+SLOT_HELD_MESSAGE = (
+    "Este horário está reservado: um paciente está pagando o sinal e a consulta será "
+    "confirmada assim que o pagamento cair. Escolha outro horário."
+)
+
+
+async def _refuse_if_slot_is_held(
+    session: AsyncSession,
+    tenant: Tenant,
+    start: datetime,
+    end: datetime,
+    *,
+    professional_id: UUID | None | str = "any",
+) -> None:
+    """409 when a live hold (a code or a Pix pending) overlaps the window (decision D4).
+
+    A manual booking needs no deposit - a human decides, the money may have changed hands at the
+    front desk - but it must never take the slot somebody is paying for. The hub's create route
+    has no professional, so ANY live hold of the clinic blocks it.
+    """
+    if await booking_hold.live_hold_overlaps(
+        session, tenant.id, start, end, professional_id=professional_id
+    ):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"code": "slot_held_awaiting_payment", "message": SLOT_HELD_MESSAGE},
+        )
 
 
 def _appointment_read(
@@ -249,6 +278,7 @@ async def create_appointment(
     session: AsyncSession = Depends(get_session),
 ) -> AppointmentRead:
     cal = await _get_calendar(session, tenant)
+    await _refuse_if_slot_is_held(session, tenant, body.start, body.end)
     event = await cal.create_event(
         start=body.start,
         end=body.end,
@@ -477,6 +507,13 @@ async def reschedule_appointment(
         raise HTTPException(status.HTTP_409_CONFLICT, "Cannot reschedule a cancelled appointment")
 
     cal = await _get_calendar(session, tenant)
+    await _refuse_if_slot_is_held(
+        session,
+        tenant,
+        body.new_start,
+        body.new_end,
+        professional_id=appt.professional_id if appt.professional_id else "any",
+    )
     await cal.update_event(appt.google_event_id, body.new_start, body.new_end)
 
     # BUGFIX (PROMPT S3): this endpoint moved the Calendar event but never

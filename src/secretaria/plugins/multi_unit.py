@@ -31,6 +31,7 @@ from langchain_core.tools import tool
 from sqlalchemy import select
 
 from secretaria.ai.tools import (
+    _blocked_by_required_deposit,
     _blocked_tenant_level,
     _canonical_appointment_type,
     _get_calendar,
@@ -128,6 +129,9 @@ async def create_event_at_unit(
     # the wrong agenda through here; the shared guard refuses before any
     # Google call (ai/tools.py::_blocked_tenant_level).
     blocked = _blocked_tenant_level("create_event_at_unit")
+    if blocked is not None:
+        return blocked
+    blocked = await _blocked_by_required_deposit("create_event_at_unit")
     if blocked is not None:
         return blocked
     tenant_id = _tenant_id_ctx.get()
