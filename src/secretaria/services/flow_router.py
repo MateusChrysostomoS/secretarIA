@@ -3447,9 +3447,10 @@ async def _handle_confirmation(
                 },
             )
         if decision.outcome == "blocked":
-            # A deposit is due and cannot be asked for (spec 7): the booking is NOT made, the
-            # clinic was already alerted by the gate, and a human takes the conversation
-            # (`action="handover"` is the existing "our team was told" path).
+            # A deposit is due and cannot be asked for (spec 7): the booking is NOT made and a
+            # human takes the conversation (`action="handover"`). There is no clinic e-mail for
+            # this (owner answer 13): the log line of the gate is the operational record, so the
+            # copy must not say the clinic was alerted.
             return FlowRouterResult(
                 action="handover",
                 bubbles=[TextBubble(body=BEFORE_BLOCKED_TEXT)],

@@ -476,3 +476,167 @@ async def test_a_failed_send_releases_the_claim_so_the_next_run_can_send(db, env
         tenant = await session.get(type(world.tenant), world.tenant_id)
         deposit = await session.get(PixDeposit, deposit_id)
         assert await fulfillment._send_once(session, tenant, deposit, "texto") == "sent"
+
+
+# ---- review fixes (TASK-017 final review, I1/I2/I3) ----------------------------------------------
+
+
+async def _start_charge(world):
+    return await booking_charge.begin_payment(
+        tenant_id=world.tenant_id,
+        conversation_id=world.conversation.id,
+        patient_id=world.patient.id,
+        quote=QUOTE,
+        professional_id=None,
+        appointment_type="Consulta",
+        insurance=None,
+        attendee_name=None,
+        start_at=SLOT_START,
+        end_at=SLOT_END,
+    )
+
+
+async def _apply_paid_event(db, env, world, deposit_id, *, paid_at=None):
+    """The paid event reaching the event core for a charge that is still AWAITING."""
+    import dataclasses
+
+    from secretaria.services import tenant_config as cfg
+    from secretaria.services.payments import event_processor
+    from tests.payments_support import make_event
+
+    env.provider.state = ChargeState(
+        PaymentStatus.PAID, paid_amount_cents=6000, external_reference=str(deposit_id)
+    )
+    async with db() as session:
+        deposit = await session.get(PixDeposit, deposit_id)
+        tenant = await session.get(type(world.tenant), world.tenant_id)
+        account = await cfg.get_payment_account(session, world.tenant_id, "asaas")
+        event = make_event(
+            charge_id=deposit.provider_charge_id, reference=str(deposit_id), amount=6000
+        )
+        if paid_at is not None:
+            event = dataclasses.replace(event, paid_at=paid_at)
+        result = await event_processor.apply_normalized_event(
+            session,
+            tenant=tenant,
+            account=account,
+            provider=env.provider,
+            event=event,
+        )
+        await session.commit()
+    return result
+
+
+async def test_a_paid_charge_keeps_its_slot_held_while_the_promotion_is_pending(db, env):
+    """I1: the hold must outlive the Pix window once the money is in, or a patient who has not
+    paid can take the slot of one who has."""
+    async with db() as session:
+        world = await make_world(session)
+    started = await _start_charge(world)
+    async with db() as session:  # the Pix window ends an instant before the webhook arrives
+        await session.execute(
+            update(holds.BookingHold).values(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+        )
+        await session.commit()
+
+    result = await _apply_paid_event(db, env, world, started.deposit_id)
+
+    assert result.outcome == "paid_before"
+    async with db() as session:
+        hold = (await session.scalars(select(holds.BookingHold))).one()
+        assert hold.expires_at.replace(tzinfo=UTC) > datetime.now(UTC) + fulfillment.GIVE_UP_AFTER
+        assert await holds.live_hold_overlaps(
+            session, world.tenant_id, SLOT_START, SLOT_END, professional_id=None
+        )
+
+
+async def test_the_retry_window_starts_when_we_learn_of_the_payment_not_at_the_providers_date(
+    db, env
+):
+    """I2: Asaas reports a bare date (00:00 local); measuring the give-up age from it would make
+    the first transient Google error final for every payment after 00:15."""
+    async with db() as session:
+        world = await make_world(session)
+    started = await _start_charge(world)
+    midnight = datetime.now(UTC).astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    await _apply_paid_event(db, env, world, started.deposit_id, paid_at=midnight)
+    async with db() as session:
+        deposit = await session.get(PixDeposit, started.deposit_id)
+        assert deposit.last_payment_check_at is not None  # our own "learned at" stamp
+        assert datetime.now(UTC) - deposit.last_payment_check_at.replace(tzinfo=UTC) < timedelta(
+            minutes=1
+        )
+    env.calendar.unavailable = True
+
+    with pytest.raises(fulfillment.PromotionRetry):  # NOT "promotion_failed"
+        await _fulfill(db, started.deposit_id)
+    _, _, items, _, _ = await _state(db, started.deposit_id)
+    assert items == []
+
+
+async def test_a_payment_never_confirms_a_slot_that_has_already_started(db, env):
+    """I3: a late payment (or a Pix that outlived the slot start) must not create a consultation
+    in the past; it is the `late_slot_taken` case - the clinic will call."""
+    async with db() as session:
+        world = await make_world(session)
+    deposit_id = await _paid_charge(db, world)
+    started = datetime.now(UTC) - timedelta(minutes=10)
+    async with db() as session:
+        deposit = await session.get(PixDeposit, deposit_id)
+        snapshot = dict(deposit.booking_snapshot)
+        snapshot["start_at"] = started.isoformat()
+        snapshot["end_at"] = (started + timedelta(minutes=30)).isoformat()
+        deposit.booking_snapshot = snapshot
+        await session.commit()
+
+    assert await _fulfill(db, deposit_id) == "slot_taken"
+    _, appointments, items, _, _ = await _state(db, deposit_id)
+    assert appointments == [] and env.calendar.created == []
+    assert [i.reason for i in items] == ["late_slot_taken"]
+    assert "A clínica vai falar com você" in env.notices[0][1]
+
+
+async def test_the_hold_and_the_pix_window_end_at_the_slot_start(db, env):
+    """I3: the window is the clinic's 30 minutes, but never longer than the time left."""
+    async with db() as session:
+        world = await make_world(session)
+    soon = datetime.now(UTC) + timedelta(minutes=12)
+    started = await booking_charge.begin_payment(
+        tenant_id=world.tenant_id,
+        conversation_id=world.conversation.id,
+        patient_id=world.patient.id,
+        quote=QUOTE,
+        professional_id=None,
+        appointment_type="Consulta",
+        insurance=None,
+        attendee_name=None,
+        start_at=soon,
+        end_at=soon + timedelta(minutes=30),
+    )
+    assert started is not None
+    assert started.minutes <= 12
+    expires = started.expires_at
+    expires = expires if expires.tzinfo else expires.replace(tzinfo=UTC)
+    assert expires <= soon
+
+
+async def test_a_slot_that_starts_within_the_minute_is_not_reserved_for_a_pix(db, env):
+    async with db() as session:
+        world = await make_world(session)
+    imminent = datetime.now(UTC) + timedelta(seconds=30)
+    result = await booking_charge.begin_payment(
+        tenant_id=world.tenant_id,
+        conversation_id=world.conversation.id,
+        patient_id=world.patient.id,
+        quote=QUOTE,
+        professional_id=None,
+        appointment_type="Consulta",
+        insurance=None,
+        attendee_name=None,
+        start_at=imminent,
+        end_at=imminent + timedelta(minutes=30),
+    )
+    assert result is None  # the router sends the patient back to pick another time
+    async with db() as session:
+        assert list(await session.scalars(select(holds.BookingHold))) == []
+        assert list(await session.scalars(select(PixDeposit))) == []

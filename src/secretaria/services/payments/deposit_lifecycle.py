@@ -1019,7 +1019,8 @@ BEFORE_EXPIRED_TEXT = (
     "O prazo do Pix acabou e o horário foi liberado. Quer escolher outro horário?"
 )
 BEFORE_BLOCKED_TEXT = (
-    "Não consegui iniciar o seu agendamento agora. A clínica foi avisada e vai entrar em contato."
+    "Não consegui iniciar o seu agendamento agora. Vou passar a conversa para a equipe da "
+    "clínica, que continua o seu atendimento por aqui."
 )
 BEFORE_LATE_TAKEN_TEXT = (
     "Recebemos o seu pagamento, mas o horário que você escolheu não está mais disponível. "

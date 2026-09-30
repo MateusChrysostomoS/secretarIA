@@ -189,3 +189,38 @@ Nada aqui trava a execução nem o merge; cada item é uma ação ou uma decisã
 6. Aplicar a migração `e2b7c4a9d1f5`, fazer o deploy na ordem do §4 e conferir `GET /build` (`deploy_parity=match`).
 7. Conferir em produção que os e-mails de "consulta cancelada com sinal já pago" chegam (SMTP configurado) e ajustar
    `attention_alerts.EMAIL_REASONS` se o dono quiser avisar outros motivos.
+
+## 9. Revisão final independente (2026-09-30) e o que saiu dela
+
+Um revisor de contexto novo leu a branch inteira (`8fda1b1..ea4fb41`) e devolveu 6 achados Importantes e 11 Menores. Os seis
+Importantes foram corrigidos numa passada, cada um com um teste que falhou antes (RED -> GREEN) e a suíte inteira verde
+(`3660 passed, 2 failed` = as 2 de baseline, `1 xfailed`):
+
+| # | Defeito | Correção | Teste |
+|---|---|---|---|
+| I1 | Pago a tempo, mas a promoção demora além da janela: o horário voltava a ficar livre e outro paciente (sem ter pago) podia pegá-lo | O evento de pago (`event_processor._on_paid`, ramo `before`) segura o hold por mais 20 min (`PROMOTION_HOLD_MINUTES`), na mesma transação do "pago" | `test_a_paid_charge_keeps_its_slot_held_while_the_promotion_is_pending` |
+| I2 | Com Asaas, "Já paguei"/reconciliação/expiração leem `paymentDate` (data sem hora = 00:00) e a primeira falha do Google virava definitiva | A janela de retry (`GIVE_UP_AFTER`) parte do MAIOR entre `paid_at` e o nosso carimbo `last_payment_check_at` (`fulfillment._promotion_started_at`) | `test_the_retry_window_starts_when_we_learn_of_the_payment_not_at_the_providers_date` |
+| I3 | Consulta confirmada para um horário que já começou (Pix mais longo que o tempo até o horário, ou pagamento muito tardio) | `slot_conflict` devolve `"past"` (vira `late_slot_taken`, a clínica liga); `begin_payment` limita a janela ao tempo que falta e não reserva horário que começa em menos de 1 min | `test_a_payment_never_confirms_a_slot_that_has_already_started`, `test_the_hold_and_the_pix_window_end_at_the_slot_start`, `test_a_slot_that_starts_within_the_minute_is_not_reserved_for_a_pix` |
+| I4 | Quem pagou no último segundo ouvia "O prazo do Pix acabou" (a saída preguiçosa não perguntava ao provedor) | O tratador da saída preguiçosa consulta o provedor (`_expired_but_paid`); pago -> volta a `AWAITING_DEPOSIT` e diz "pagamento encontrado" | `test_a_patient_who_paid_at_the_last_second_is_never_told_the_pix_expired`, `test_a_window_that_really_ended_still_ends_with_the_retry_card` |
+| I5 | O spec 12.2 (R12) põe `pix_deposit_enabled` e a política de sinal como só-gestor; só 3 campos estavam protegidos (uma secretária podia desligar o sinal) | `PAYMENT_WRITE_FIELDS` ganhou os 6 campos (`pix_deposit_enabled`, `pix_deposit_percent`, `pix_refund_window_hours`, `pix_retention_policy`, `pix_partial_refund_percent`, `pix_reschedule_limit`) | `test_a_secretary_cannot_change_the_payment_fields_and_nothing_is_saved` (12 casos) |
+| I6 | "A clínica foi avisada" era falso depois que o e-mail `deposit_required_failed` saiu (resposta 13) | A cópia diz o que acontece de verdade (a conversa vai para a equipe da clínica) | `test_the_blocked_copy_does_not_claim_an_alert_that_is_never_sent` |
+
+O teste de `test_before_interplay.py` usava uma data fixa de julho de 2026 (já passada): o guarda de I3 o revelou e as datas foram
+para 2030.
+
+**Decisões que ficam para o dono (Ruling):**
+- **Sinal obrigatório bloqueado não avisa a clínica** (I6): só há o log `booking_gate_deposit_blocked` e a conversa em humano. Uma causa sistêmica
+  (chave do Asaas revogada, entitlement fora do ar) para TODAS as reservas de uma clínica `before` sem que ela saiba. A resposta 13 fala de
+  e-mail; um sinal na tela (ex.: "agenda bloqueada: motivo X" em `GET /payment-settings`) não a contradiz e precisa de decisão de produto.
+- **Teto da janela vs. piso do Mercado Pago (30 min):** a janela agora nunca passa do início da consulta; para um horário a menos de 30 min o Pix
+  ficaria abaixo do piso do Mercado Pago. A F3 (provedor) deve recusar `before` nesses horários ou cair para `no_deposit`/bloqueio.
+
+**Menores adiados (nenhum entrou na passada de correção):**
+M1 promoção não toma a trava de agenda (corrida estreita entre dois pagadores tardios ou com `POST /appointments` do hub); M2 os hooks de `post_booking`
+podem se perder numa queda entre o commit e o disparo; M3 evento fantasma no Google quando a promoção desiste; M4 o aviso "a clínica vai ligar" não é
+reenviado; M5 conversa pode ficar em `AWAITING_DEPOSIT` com veredito "paid" após queda entre o claim e `leave_wait`; M6 a varredura de e-mail pode
+passar fome com clínicas sem `contact_email` (e `SMTP_HOST` pode estar ausente em produção, o que deixa o único e-mail inerte); **M7 risco de deploy: os
+estados novos `AWAITING_DEPOSIT`/`AWAITING_PAYER_DATA` quebram código anterior ao carregar a conversa (`flow_state` é enum não nativo): fazer o deploy da
+API ANTES do worker e, num rollback, resetar esses dois estados para `IDLE`**; M8 o 422 do Pydantic vem antes do 403 de papel e um `null` explícito em
+`deposit_timing` dá 500; M9 CNPJ alfanumérico; M10 o código Pix só é enviado uma vez; M11 desconectar a conta do provedor com cobrança aberta trava a troca
+de provedor.

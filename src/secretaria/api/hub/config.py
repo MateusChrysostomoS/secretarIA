@@ -46,11 +46,23 @@ from secretaria.services import hub_configuration as hubcfg
 logger = get_logger(__name__)
 router = APIRouter(prefix="/tenants/me", tags=["hub-config"])
 
-# The fields only a clinic MANAGER may write (owner answer 12, TASK-020): which Pix provider the
-# clinic uses, when the deposit is asked for, and how long a slot is held for it. A save that
-# touches none of them (a greeting, the hours) is open to whoever could save it before.
+# The fields only a clinic MANAGER may write (owner answer 12 / spec 12.2 R12, TASK-020): which Pix
+# provider the clinic uses, when the deposit is asked for, how long a slot is held for it, whether
+# a deposit is charged at all and the deposit POLICY (amount, refund window, retention,
+# rescheduling). A save that touches none of them (a greeting, the hours) is open to whoever could
+# save it before.
 PAYMENT_WRITE_FIELDS = frozenset(
-    {"payment_provider", "deposit_timing", "deposit_hold_ttl_minutes"}
+    {
+        "payment_provider",
+        "deposit_timing",
+        "deposit_hold_ttl_minutes",
+        "pix_deposit_enabled",
+        "pix_deposit_percent",
+        "pix_refund_window_hours",
+        "pix_retention_policy",
+        "pix_partial_refund_percent",
+        "pix_reschedule_limit",
+    }
 )
 
 

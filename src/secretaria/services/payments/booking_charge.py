@@ -107,7 +107,8 @@ async def begin_payment(
 ) -> PaymentStart | None:
     """Hold the slot for the deposit window and create its Pix.
 
-    Returns None when somebody else holds the window (`slot_taken`, nothing was created).
+    Returns None when somebody else holds the window or the slot starts within the minute
+    (`slot_taken`, nothing was created).
     Raises `ChargeStartError` when the charge could not be started; the hold is gone by then.
 
     `payer_document` (CPF/CNPJ, digits only) and `payer_email` are the TRANSIENT answers of
@@ -118,12 +119,20 @@ async def begin_payment(
     """
     if patient_id is None:
         raise ChargeStartError("no_patient")
+    # The window is the clinic's, but never longer than the time left before the slot starts (a
+    # consultation cannot be confirmed in the past); a slot that starts within the minute is not
+    # worth a Pix at all, the patient picks another time.
+    start_utc = start_at if start_at.tzinfo else start_at.replace(tzinfo=UTC)
+    minutes_left = int((start_utc - datetime.now(UTC)).total_seconds() // 60)
+    if minutes_left < 1:
+        return None
+    ttl_minutes = min(quote.ttl_minutes, minutes_left)
     deposit_id = uuid4()
 
     hold: HeldSlot | None = None
     if existing_hold is not None:
         hold = await booking_hold.extend_to_payment(
-            existing_hold.id, ttl_minutes=quote.ttl_minutes, charge_id=deposit_id
+            existing_hold.id, ttl_minutes=ttl_minutes, charge_id=deposit_id
         )
     if hold is None:
         try:
@@ -136,7 +145,7 @@ async def begin_payment(
                 insurance=insurance,
                 start_at=start_at,
                 end_at=end_at,
-                ttl_minutes=quote.ttl_minutes,
+                ttl_minutes=ttl_minutes,
                 attendee_name=attendee_name,
                 phase="payment",
                 charge_id=deposit_id,
@@ -152,6 +161,7 @@ async def begin_payment(
             conversation_id=conversation_id,
             patient_id=patient_id,
             quote=quote,
+            ttl_minutes=ttl_minutes,
             deposit_id=deposit_id,
             hold=hold,
             appointment_type=appointment_type,
@@ -176,6 +186,7 @@ async def _create_and_record(
     conversation_id: UUID,
     patient_id: UUID,
     quote: DepositQuote,
+    ttl_minutes: int,
     deposit_id: UUID,
     hold: HeldSlot,
     appointment_type: str,
@@ -290,7 +301,7 @@ async def _create_and_record(
         start_at=hold.start_at,
         end_at=hold.end_at,
         service=appointment_type,
-        minutes=quote.ttl_minutes,
+        minutes=ttl_minutes,
     )
 
 

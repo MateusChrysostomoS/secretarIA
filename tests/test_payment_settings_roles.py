@@ -27,7 +27,24 @@ PAYMENT_PATCHES = [
     {"payment_provider": "asaas"},
     {"deposit_timing": "before"},
     {"deposit_hold_ttl_minutes": 60},
+    # Spec 12.2 (R12): the deposit switch and the deposit POLICY are the manager's too - a
+    # secretary switching `pix_deposit_enabled` off would confirm every booking without a deposit.
+    {"pix_deposit_enabled": False},
+    {"pix_deposit_percent": 80},
+    {"pix_refund_window_hours": 48},
+    {"pix_retention_policy": "partial"},
+    {"pix_partial_refund_percent": 50},
+    {"pix_reschedule_limit": 3},
 ]
+
+PIX_POLICY_COLUMNS = (
+    "pix_deposit_enabled",
+    "pix_deposit_percent",
+    "pix_refund_window_hours",
+    "pix_retention_policy",
+    "pix_partial_refund_percent",
+    "pix_reschedule_limit",
+)
 
 
 @pytest_asyncio.fixture
@@ -106,6 +123,9 @@ async def test_a_secretary_cannot_change_the_payment_fields_and_nothing_is_saved
         before.deposit_timing,
         before.deposit_hold_ttl_minutes,
     )
+    assert [getattr(after, column) for column in PIX_POLICY_COLUMNS] == [
+        getattr(before, column) for column in PIX_POLICY_COLUMNS
+    ]
 
 
 async def test_a_doctor_who_is_not_a_manager_cannot_either(client: AsyncClient, db):
@@ -138,9 +158,11 @@ async def test_a_manager_saves_the_payment_fields(client: AsyncClient, db, role,
 
 async def test_a_save_that_touches_no_payment_field_needs_no_manager(client: AsyncClient, db):
     world = await _world(db)
-    response = await _put(client, world, "secretary", {"pix_reschedule_limit": 2})
+    # `collect_insurance` is a clinic setting that is NOT financial (spec 12.2: the other fields of
+    # the envelope keep their rule): a secretary still saves it.
+    response = await _put(client, world, "secretary", {"collect_insurance": True})
     assert response.status_code == 200
-    assert (await _stored(db, world)).pix_reschedule_limit == 2
+    assert (await _stored(db, world)).collect_insurance is True
 
 
 async def test_the_role_refusal_comes_before_the_payment_rules_and_brain_api(

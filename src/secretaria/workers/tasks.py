@@ -1710,6 +1710,7 @@ async def _route_inbound_turn(
             patient_ref=patient_ref,
             inbound_body=body or "",
             deposit_wait_action="expired",
+            deposit_wait_id=current.id if current is not None else None,
         )
 
     # Greeting-button tap this tenant can't fulfil deterministically:
@@ -5822,6 +5823,13 @@ async def _handle_deposit_wait(
         await _send_plain_reply(reply, tenant=tenant, waba_token=waba_token, body=body, event=event)
 
     if action == "expired":
+        # The window is over by OUR clock, but the provider is the authority on the money: a
+        # patient who paid in the last seconds (webhook still in flight) must never hear that the
+        # Pix expired. Ask first; if it was paid, the chat goes back to waiting for the promotion.
+        if await _expired_but_paid(reply, tenant, redis):
+            await _write_flow_state(reply.conversation_id, FlowState.AWAITING_DEPOSIT)
+            await say(deposit_lifecycle.BEFORE_PAYMENT_FOUND_TEXT, "deposit_wait_payment_found")
+            return
         await _send_buttons_reply(
             reply,
             tenant=tenant,
@@ -5895,6 +5903,23 @@ async def _handle_deposit_wait(
         buttons=list(deposit_lifecycle.DEPOSIT_WAIT_BUTTONS),
         event="deposit_wait_card_repeated",
     )
+
+
+async def _expired_but_paid(reply: _ReplyContext, tenant: Tenant, redis) -> bool:
+    """The lazy exit of `AWAITING_DEPOSIT`: does the provider say the charge was paid after all?
+    Fail-safe: any doubt (no deposit, provider error) is "not paid" and the retry card stands;
+    the reconciliation job still promotes a late payment afterwards."""
+    if reply.deposit_wait_id is None:
+        return False
+    async with async_session_factory() as session:
+        deposit = await session.get(PixDeposit, reply.deposit_wait_id)
+        if deposit is None or deposit.tenant_id != tenant.id:
+            return False
+        if deposit.status == PixDepositStatus.PAID:
+            return True
+        check = await deposit_wait.check_paid(session, tenant, deposit, _arq_enqueue(redis))
+        await session.commit()
+    return check.outcome == "paid"
 
 
 async def _tell_payment_check(reply, tenant, deposit, redis, say) -> None:

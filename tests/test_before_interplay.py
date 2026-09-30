@@ -44,7 +44,7 @@ QUOTE = DepositQuote(
     "required", "required", amount_cents=6000, provider="asaas", ttl_minutes=30,
     service_label="Consulta",
 )
-MONTH_NOW = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
+MONTH_NOW = datetime(2030, 7, 15, 12, 0, tzinfo=UTC)
 
 
 @pytest_asyncio.fixture
@@ -149,7 +149,7 @@ async def test_metering_never_bills_a_reservation_and_bills_the_promotion_exactl
         await session.commit()
     usage = _capture_usage(monkeypatch)
     deposit_id = await _reserve(
-        db, world, start=datetime(2026, 7, 20, 13, 0, tzinfo=UTC), professional_id=professional.id
+        db, world, start=datetime(2030, 7, 20, 13, 0, tzinfo=UTC), professional_id=professional.id
     )
 
     async with db() as session:  # a live reservation: no Appointment, so nothing to bill
@@ -170,7 +170,7 @@ async def test_an_expired_or_abandoned_reservation_never_reaches_metering(db, en
     async with db() as session:
         world = await make_world(session)
     usage = _capture_usage(monkeypatch)
-    deposit_id = await _reserve(db, world, start=datetime(2026, 7, 20, 13, 0, tzinfo=UTC))
+    deposit_id = await _reserve(db, world, start=datetime(2030, 7, 20, 13, 0, tzinfo=UTC))
     async with db() as session:
         await session.execute(
             update(PixDeposit)

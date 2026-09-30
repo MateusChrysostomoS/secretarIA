@@ -497,3 +497,45 @@ async def test_when_the_deposit_cannot_be_asked_the_hold_is_released_and_a_human
     async with db() as session:
         assert list(await session.scalars(select(BookingHold))) == []
     assert env.emails == []  # owner answer 13: no operational e-mail
+
+
+# ---- review fix I4: the lazy expiry asks the provider before it says "expired" ------------------
+
+
+async def _lazy_expiry(world, env, db, reply, *, redis):
+    async with db() as session:
+        tenant = await session.get(type(world.tenant), world.tenant_id)
+    await tasks._handle_deposit_wait(
+        reply, tenant=tenant, waba_token="wt", redis=redis, patient_wa="5511999999999"
+    )
+
+
+async def test_a_patient_who_paid_at_the_last_second_is_never_told_the_pix_expired(db, env):
+    world, deposit_id = await _waiting_world(db, expired=True)
+    env.provider.state = ChargeState(PaymentStatus.PAID, paid_amount_cents=6000)
+    reply = await _inbound("Já paguei")  # the real ladder: the window is over, no cron ran yet
+    assert reply.deposit_wait_action == "expired" and reply.deposit_wait_id == deposit_id
+    pool = FakeArqPool()
+
+    await _lazy_expiry(world, env, db, reply, redis=pool)
+
+    assert env.sender.sent == [("text", deposit_lifecycle.BEFORE_PAYMENT_FOUND_TEXT)]
+    assert [name for name, _a, _k in pool.jobs] == ["process_payment_event"]
+    # the chat waits for the promotion again instead of offering a second booking
+    assert (await _conversation(db, world)).flow_state == FlowState.AWAITING_DEPOSIT
+
+
+@pytest.mark.parametrize("scripted", ["pending", "error"])
+async def test_a_window_that_really_ended_still_ends_with_the_retry_card(db, env, scripted):
+    world, deposit_id = await _waiting_world(db, expired=True)
+    if scripted == "error":
+        env.provider.get_error = ProviderError("http_503", status_code=503, retryable=True)
+    reply = await _inbound("oi")
+    pool = FakeArqPool()
+
+    await _lazy_expiry(world, env, db, reply, redis=pool)
+
+    assert env.sender.sent[0][0] == "buttons"
+    assert deposit_lifecycle.BEFORE_EXPIRED_TEXT in env.sender.sent[0][1]
+    assert pool.jobs == []
+    assert (await _conversation(db, world)).flow_state == FlowState.SERVICE_CATALOG

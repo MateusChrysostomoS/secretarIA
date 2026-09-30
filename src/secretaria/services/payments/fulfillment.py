@@ -260,6 +260,16 @@ async def _after_rollback(session: AsyncSession, tenant: Tenant, deposit: PixDep
     await session.refresh(deposit)
 
 
+def _promotion_started_at(deposit: PixDeposit) -> datetime | None:
+    """When the retry window of a paid `before` charge started: the LATER of the provider's
+    `paid_at` and OUR stamp of when the event core learned of the payment
+    (`last_payment_check_at`, set in `event_processor._on_paid`). Asaas reports a bare date for a
+    payment read back by `get_charge` ("Já paguei", reconciliation, expiry), which parses as
+    00:00 local: measured alone it would end the window before the first retry."""
+    anchors = [_aware(value) for value in (deposit.paid_at, deposit.last_payment_check_at) if value]
+    return max(anchors) if anchors else None
+
+
 async def _retry_or_give_up(
     session: AsyncSession,
     tenant: Tenant,
@@ -271,8 +281,8 @@ async def _retry_or_give_up(
 ) -> str:
     """Raise `PromotionRetry` while the payment is recent; past `GIVE_UP_AFTER` the clinic is
     asked instead and the outcome is `promotion_failed`."""
-    paid_at = deposit.paid_at
-    if paid_at is not None and now - _aware(paid_at) < GIVE_UP_AFTER:
+    started = _promotion_started_at(deposit)
+    if started is not None and now - started < GIVE_UP_AFTER:
         raise PromotionRetry(code) from cause
     logger.error("payment_promotion_gave_up", code=code, tenant_id=str(tenant.id))
     await _hand_to_the_clinic(
@@ -312,8 +322,8 @@ async def _finish(
         tenant, snapshot, patient.name if patient else None, late_reopened=late
     )
     if await _send_once(session, tenant, deposit, text) == "failed":
-        paid_at = deposit.paid_at
-        if paid_at is not None and datetime.now(UTC) - _aware(paid_at) < GIVE_UP_AFTER:
+        started = _promotion_started_at(deposit)
+        if started is not None and datetime.now(UTC) - started < GIVE_UP_AFTER:
             raise PromotionRetry("notice_undeliverable")
         # Past the window (e.g. a late payment outside WhatsApp's 24 h): the appointment exists
         # and is in the agenda; the clinic can reach the patient. Not retried again.

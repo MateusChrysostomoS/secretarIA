@@ -253,3 +253,11 @@ def test_the_late_taken_notice_says_the_clinic_will_call_and_promises_no_money_m
     text = deposit_lifecycle.BEFORE_LATE_TAKEN_TEXT
     assert "A clínica vai falar com você" in text
     assert "resolver o valor" in text
+
+
+def test_the_blocked_copy_does_not_claim_an_alert_that_is_never_sent():
+    """Review fix I6: a blocked deposit hands the chat to a human (no clinic e-mail, owner answer
+    13), so the patient must not be told the clinic "was alerted"."""
+    text = deposit_lifecycle.BEFORE_BLOCKED_TEXT
+    assert "avisada" not in text
+    assert "equipe" in text  # what actually happens: the conversation goes to the clinic's team

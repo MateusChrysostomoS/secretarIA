@@ -22,7 +22,7 @@ caller does the rest, each step behind its own idempotency guard.
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import update
@@ -125,11 +125,18 @@ async def slot_conflict(
 ) -> str | None:
     """Why the slot is no longer bookable, or None when it is free.
 
-    `"calendar"`: an event of somebody else overlaps it on Google (OUR deterministic event does
+    `"past"`: the slot has already started. `"calendar"`: an event of somebody else overlaps
+    it on Google (OUR deterministic event does
     not count: it is the retry of a promotion that already got that far). `"hold"`: another
     reservation holds an overlapping window. Raises `CalendarUnavailableError` untouched: the
     caller retries, it does not guess.
     """
+    start = snapshot.start_at
+    started = start if start.tzinfo else start.replace(tzinfo=UTC)
+    if started <= datetime.now(UTC):
+        # A payment that arrives after the slot began (a Pix that outlived it, or a late payment
+        # of a voided charge) must never create a consultation in the past: the clinic decides.
+        return "past"
     own_event = event_id_for(deposit.id)
     events = await calendar.check_availability(snapshot.start_at, snapshot.end_at)
     if any(event.get("id") != own_event for event in events):

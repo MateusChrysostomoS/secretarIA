@@ -18,7 +18,7 @@ from sqlalchemy import select
 from secretaria.models import Appointment, BookingHold, Conversation, FlowState, Message, PixDeposit
 from secretaria.models.pix_deposit import PixDepositStatus
 from secretaria.services import booking_hold as holds, email, flow_router as fr
-from secretaria.services.payments import booking_charge, deposit_gate, registry
+from secretaria.services.payments import booking_charge, deposit_gate, deposit_lifecycle, registry
 from secretaria.services.payments.provider import ChargeState, PaymentStatus
 from secretaria.services.pending_identity import RequestCodeOutcome, RequestCodeResult
 from secretaria.workers import tasks
@@ -286,10 +286,7 @@ async def test_a_blocked_deposit_makes_no_booking_holds_nothing_and_hands_over(d
         world = await make_world(session, with_account=False, contact_email="c@example.com")
     result = await _confirm(world, env)
     assert result.action == "handover"
-    assert [b.body for b in result.bubbles] == [
-        "Não consegui iniciar o seu agendamento agora. "
-        "A clínica foi avisada e vai entrar em contato."
-    ]
+    assert [b.body for b in result.bubbles] == [deposit_lifecycle.BEFORE_BLOCKED_TEXT]
     assert result.appointment is None and result.deposit_request is None
     assert env.calendar.created == []
     async with db() as session:
