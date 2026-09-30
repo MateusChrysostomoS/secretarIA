@@ -505,6 +505,12 @@ class CalendarService:
             ranges.append((self._ensure_tz(bs), self._ensure_tz(be)))
         return ranges
 
+    def _ensure_ranges(
+        self, ranges: list[tuple[datetime, datetime]] | None
+    ) -> list[tuple[datetime, datetime]]:
+        """Clinic-local, tz-aware copies of externally supplied busy windows."""
+        return [(self._ensure_tz(start), self._ensure_tz(end)) for start, end in ranges or []]
+
     def _walk_free_slots(
         self,
         windows: list[tuple[datetime, datetime]],
@@ -550,6 +556,7 @@ class CalendarService:
         open_hour: int = 8,
         close_hour: int = 18,
         max_slots: int = 6,
+        extra_busy: list[tuple[datetime, datetime]] | None = None,
     ) -> list[dict]:
         """Return free [start, end) slots on `day` within business hours.
 
@@ -559,6 +566,11 @@ class CalendarService:
         the calendar. Returns up to `max_slots` slots so the UI list message
         stays under WhatsApp's 10-row cap. `slot_minutes` defaults to the
         tenant's configured appointment duration.
+
+        `extra_busy` is time that is taken but Google does not know about - the slots other
+        conversations HOLD while they wait for a code or a Pix (`services/booking_hold.py`).
+        It joins the busy list BEFORE the walk, so `max_slots` counts only really free slots
+        (filtering afterwards could leave the list empty while later slots are free).
         """
         day_local = self._ensure_tz(day)
         windows = self._windows_for_day(day_local, open_hour, close_hour)
@@ -568,7 +580,7 @@ class CalendarService:
         busy = await self.check_availability(windows[0][0], windows[-1][1])
         return self._walk_free_slots(
             windows,
-            self._busy_ranges(busy),
+            self._busy_ranges(busy) + self._ensure_ranges(extra_busy),
             timedelta(minutes=slot_minutes or self._default_slot_minutes),
             # Never offer a slot that has already started (matters for "hoje").
             datetime.now(self._tz),
@@ -582,6 +594,7 @@ class CalendarService:
         slot_minutes: int | None = None,
         open_hour: int = 8,
         close_hour: int = 18,
+        extra_busy: list[tuple[datetime, datetime]] | None = None,
     ) -> list[datetime]:
         """Days in [start_day, start_day + `days`) with at least one free slot.
 
@@ -611,7 +624,7 @@ class CalendarService:
             day_windows[-1][1][-1][1],
             max_results=DAY_SCAN_MAX_EVENTS,
         )
-        busy_ranges = self._busy_ranges(busy)
+        busy_ranges = self._busy_ranges(busy) + self._ensure_ranges(extra_busy)
         now = datetime.now(self._tz)
         return [
             day_local
@@ -625,8 +638,17 @@ class CalendarService:
         end: datetime,
         summary: str,
         description: str = "",
+        *,
+        event_id: str | None = None,
     ) -> dict:
-        """Create an event on the clinic's calendar. Returns the inserted event."""
+        """Create an event on the clinic's calendar. Returns the inserted event.
+
+        `event_id` makes the insert IDEMPOTENT: Google accepts an id chosen by the client
+        (lowercase base32hex, 5-1024 chars) and answers 409 when it already exists, so a retry
+        of the same promotion finds the event it created instead of duplicating it. A 409 is
+        therefore success: the existing event is fetched and returned. Without `event_id` the
+        behaviour is exactly what it always was.
+        """
         start_dt = self._ensure_tz(start)
         end_dt = self._ensure_tz(end)
         tz_name = str(self._tz)
@@ -636,6 +658,8 @@ class CalendarService:
             "start": {"dateTime": start_dt.isoformat(), "timeZone": tz_name},
             "end": {"dateTime": end_dt.isoformat(), "timeZone": tz_name},
         }
+        if event_id:
+            body["id"] = event_id
         calendar_id = self._calendar_id
 
         def _insert() -> dict:
@@ -647,6 +671,19 @@ class CalendarService:
                     .execute()
                 )
             except HttpError as exc:
+                if event_id and getattr(getattr(exc, "resp", None), "status", None) == 409:
+                    logger.info("calendar_event_id_already_exists", event_id=event_id)
+                    existing = (
+                        self._client()
+                        .events()
+                        .get(calendarId=calendar_id, eventId=event_id)
+                        .execute()
+                    )
+                    if existing.get("status") == "cancelled":
+                        # The id belongs to an event somebody deleted: Google never frees it,
+                        # and handing it back would point an appointment at a dead event.
+                        raise CalendarUnavailableError("event id is taken") from exc
+                    return existing
                 logger.error("calendar_insert_http_error", error=str(exc))
                 _raise_if_unavailable(exc)
                 raise
