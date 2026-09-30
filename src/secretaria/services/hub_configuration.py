@@ -45,6 +45,7 @@ from secretaria.services.greeting_template import (
     clinic_description_budget,
     greeting_preview_template,
 )
+from secretaria.services.payments import settings as payment_settings
 from secretaria.services.service_catalog import entry_service_id, load_service_catalog
 
 # ---------------------------------------------------------------------------
@@ -92,6 +93,10 @@ class ClinicDescriptionTooLong(ActivationBlocked):
     """
 
 
+class PaymentSettingsInvalid(payment_settings.PaymentSettingsInvalid):
+    """Re-exported so both PUT handlers catch it through this module, like every other rule."""
+
+
 class UnknownServiceIds(Exception):
     """An `appointment_types` patch referenced catalog ids this clinic has none of.
 
@@ -136,6 +141,9 @@ TENANT_SCALAR_FIELDS: tuple[str, ...] = (
     "pix_retention_policy",
     "pix_partial_refund_percent",
     "pix_reschedule_limit",
+    "payment_provider",
+    "deposit_timing",
+    "deposit_hold_ttl_minutes",
 )
 
 PROFESSIONAL_CONFIG_FIELDS: tuple[str, ...] = (
@@ -215,6 +223,18 @@ async def resolve_professional(
 # ---------------------------------------------------------------------------
 # Validation (read-only — safe to run before touching anything)
 # ---------------------------------------------------------------------------
+
+
+async def check_payment_settings(session: AsyncSession, tenant: Tenant, data: dict) -> None:
+    """The payment-settings rules (`services/payments/settings.py`), as a READ before any
+    mutation: it may ask brain-api whether the add-on is active, and the save transaction must
+    not wait on that. Raises `PaymentSettingsInvalid`."""
+    if not ({"payment_provider", "deposit_timing"} & data.keys()):
+        return
+    try:
+        await payment_settings.validate_patch(session, tenant, data)
+    except payment_settings.PaymentSettingsInvalid as exc:
+        raise PaymentSettingsInvalid(exc.code) from None
 
 
 async def check_tenant_activation(session: AsyncSession, tenant: Tenant, data: dict) -> None:
@@ -378,6 +398,9 @@ async def tenant_read_model(session: AsyncSession, tenant: Tenant) -> TenantConf
         pix_retention_policy=tenant.pix_retention_policy,
         pix_partial_refund_percent=tenant.pix_partial_refund_percent,
         pix_reschedule_limit=tenant.pix_reschedule_limit,
+        payment_provider=tenant.payment_provider,
+        deposit_timing=tenant.deposit_timing,
+        deposit_hold_ttl_minutes=tenant.deposit_hold_ttl_minutes,
         asaas_connected=asaas_connected,
     )
 

@@ -31,12 +31,13 @@ until no deployed frontend depends on them.
 
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from secretaria.api.hub.deps import get_current_tenant
+from secretaria.api.hub.deps import ensure_clinic_manager, get_current_tenant, get_hub_claim
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
+from secretaria.core.subscription import SubscriptionClaim
 from secretaria.models import Tenant
 from secretaria.schemas.config import TenantConfigRead, TenantConfigUpdate
 from secretaria.schemas.hub_configuration import HubConfigurationRead, HubConfigurationUpdate
@@ -44,6 +45,36 @@ from secretaria.services import hub_configuration as hubcfg
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/tenants/me", tags=["hub-config"])
+
+# The fields only a clinic MANAGER may write (owner answer 12, TASK-020): which Pix provider the
+# clinic uses, when the deposit is asked for, and how long a slot is held for it. A save that
+# touches none of them (a greeting, the hours) is open to whoever could save it before.
+PAYMENT_WRITE_FIELDS = frozenset(
+    {"payment_provider", "deposit_timing", "deposit_hold_ttl_minutes"}
+)
+
+
+async def _claim_if_authenticated(
+    authorization: str | None = Header(default=None),
+) -> SubscriptionClaim | None:
+    """The verified claim of a caller that sent credentials, else None.
+
+    Deliberately NOT a bare `Depends(get_hub_claim)`: a save that touches no payment field never
+    needed the claim, and `get_current_tenant` has already refused an unauthenticated caller by
+    the time a handler runs, so the claim is only ever read for the three payment fields.
+    """
+    if authorization is None:
+        return None
+    return await get_hub_claim(authorization)
+
+
+def _require_manager_for_payment_fields(claim: SubscriptionClaim | None, patch: dict) -> None:
+    """403 `forbidden_role` / `role_claim_missing` when `patch` touches a payment field and the
+    caller is not a manager. It runs FIRST: before any validation, read or mutation."""
+    if PAYMENT_WRITE_FIELDS & patch.keys():
+        if claim is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
+        ensure_clinic_manager(claim)
 
 
 @router.get("/config", response_model=TenantConfigRead)
@@ -58,6 +89,7 @@ async def get_config(
 async def update_config(
     body: TenantConfigUpdate,
     tenant: Tenant = Depends(get_current_tenant),
+    claim: SubscriptionClaim | None = Depends(_claim_if_authenticated),
     session: AsyncSession = Depends(get_session),
 ) -> TenantConfigRead:
     """LEGACY single-scope save. Superseded by PUT /tenants/me/configuration.
@@ -69,6 +101,7 @@ async def update_config(
     # `exclude_unset` so absent fields are left untouched (partial update). The
     # dumped values are already plain dicts/lists, ready to store as JSON.
     data = body.model_dump(exclude_unset=True)
+    _require_manager_for_payment_fields(claim, data)
 
     # Before any mutation: a `service_id` this clinic does not own would not
     # fail loudly later, it would silently fall back to name matching — see
@@ -89,6 +122,14 @@ async def update_config(
         ) from None
 
     try:
+        await hubcfg.check_payment_settings(session, tenant, data)
+    except hubcfg.PaymentSettingsInvalid as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": exc.code, "message": exc.message},
+        ) from None
+
+    try:
         await hubcfg.apply_tenant_config(session, tenant, data)
     except hubcfg.ActivationBlocked as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, exc.reason) from None
@@ -103,6 +144,7 @@ async def update_config(
 async def update_configuration(
     body: HubConfigurationUpdate,
     tenant: Tenant = Depends(get_current_tenant),
+    claim: SubscriptionClaim | None = Depends(_claim_if_authenticated),
     session: AsyncSession = Depends(get_session),
 ) -> HubConfigurationRead:
     """Save tenant config and one professional's config in ONE transaction.
@@ -131,6 +173,7 @@ async def update_configuration(
     started = time.perf_counter()
 
     tenant_data = body.tenant.model_dump(exclude_unset=True) if body.tenant else {}
+    _require_manager_for_payment_fields(claim, tenant_data)
     professional_data = (
         body.professional.model_dump(exclude_unset=True) if body.professional else {}
     )
@@ -180,6 +223,22 @@ async def update_configuration(
                 ),
                 "service_ids": exc.service_ids,
             },
+        ) from None
+
+    # --- 1c. Payment settings (TASK-017): a read too (it may ask brain-api whether the
+    # add-on is active), so it runs before the transaction mutates anything.
+    try:
+        await hubcfg.check_payment_settings(session, tenant, tenant_data)
+    except hubcfg.PaymentSettingsInvalid as exc:
+        logger.info(
+            "hub_configuration_rejected",
+            tenant_id=tenant_id,
+            reason=exc.code,
+            stage="validate",
+        )
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": exc.code, "message": exc.message},
         ) from None
 
     # --- 2. Mutate both scopes, then commit exactly once -------------------
