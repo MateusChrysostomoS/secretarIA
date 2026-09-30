@@ -8,6 +8,8 @@ call the code makes that a fake does not model fails loudly instead of being ign
 
 from __future__ import annotations
 
+import contextlib
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -108,3 +110,38 @@ def new_charge(charge_id: str = "pay_1", copy_paste: str | None = "PIXCOPIAECOLA
     return CreatedCharge(
         provider_charge_id=charge_id, copy_paste=copy_paste, provider_customer_id="cus_1"
     )
+
+
+@contextlib.contextmanager
+def recorded_logs():
+    """Every log call of every `secretaria.*` module while the block runs, as dicts.
+
+    `structlog.testing.capture_logs()` is NOT used: the app configures structlog with
+    `cache_logger_on_first_use=True`, so a logger that an earlier test already used keeps its real
+    processors and `capture_logs` sees nothing (green alone, red in the full suite). Swapping the
+    module-level `logger` objects is independent of that cache.
+    """
+    logs: list[dict] = []
+
+    class _Recorder:
+        def __getattr__(self, name):
+            if name in ("bind", "new", "unbind"):
+                return lambda *args, **kwargs: self
+            if name in ("debug", "info", "warning", "warn", "error", "critical", "exception"):
+
+                def _log(event=None, *args, **kwargs):
+                    logs.append({"event": event, "log_level": name, **kwargs})
+
+                return _log
+            raise AttributeError(name)
+
+    swapped = []
+    for module_name, module in list(sys.modules.items()):
+        if module_name.startswith("secretaria.") and "logger" in vars(module):
+            swapped.append((module, module.logger))
+            module.logger = _Recorder()
+    try:
+        yield logs
+    finally:
+        for module, original in swapped:
+            module.logger = original

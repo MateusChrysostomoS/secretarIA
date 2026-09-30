@@ -20,7 +20,6 @@ from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
-import structlog
 from sqlalchemy import select, update
 
 from secretaria.ai import graph
@@ -60,6 +59,7 @@ from tests.before_support import (
     entitlement_summary,
     make_world,
     new_charge,
+    recorded_logs,
 )
 from tests.payments_support import FakeProvider, FakeRedis, make_sessionmaker
 
@@ -764,7 +764,7 @@ async def test_no_log_event_of_the_whole_path_carries_the_value(db, env, kind):
         async def set(self, *args, **kwargs):
             raise ConnectionError(f"redis down while storing {value}")
 
-    with structlog.testing.capture_logs() as logs:
+    with recorded_logs() as logs:
         reply = await _inbound(TYPED[kind][0][0])
         # a store that fails with the value IN its exception text: only the type is logged
         assert await tasks._keep_payer_data(reply, tenant=tenant, redis=Down()) is False

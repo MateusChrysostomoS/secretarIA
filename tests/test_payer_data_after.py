@@ -14,7 +14,6 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-import structlog
 from sqlalchemy import select, update
 
 from secretaria.ai import graph
@@ -43,7 +42,7 @@ from secretaria.services.payments import (
 )
 from secretaria.services.payments.provider import ChargeState, PaymentStatus, ProviderError
 from secretaria.workers import tasks
-from tests.before_support import SLOT_END, SLOT_START, make_world, new_charge
+from tests.before_support import SLOT_END, SLOT_START, make_world, new_charge, recorded_logs
 from tests.payments_support import FakeProvider, FakeRedis, make_sessionmaker
 
 PROVIDER = {"document": "asaas", "email": "mercadopago"}
@@ -544,7 +543,7 @@ async def test_no_log_event_of_the_after_path_carries_the_value(db, env, kind):
     await pdata.remember_pending(redis, appointment_id=appointment.id, **_key(world))
     async with db() as session:
         tenant = await session.get(type(world.tenant), world.tenant_id)
-    with structlog.testing.capture_logs() as logs:
+    with recorded_logs() as logs:
         reply = await _inbound(TYPED[kind])
         await tasks._handle_payer_data(reply, tenant=tenant, waba_token="wt", redis=redis)
     assert logs  # non-vacuous

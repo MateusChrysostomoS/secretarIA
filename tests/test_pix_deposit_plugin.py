@@ -176,7 +176,17 @@ async def test_hook_refetches_rows_and_calls_maybe_create_deposit(
     tenant, patient, appointment = await _make_rows(db)
     calls: list = []
 
-    async def _recorder(session, *, tenant, patient, appointment, waba_token):
+    async def _recorder(
+        session,
+        *,
+        tenant,
+        patient,
+        appointment,
+        waba_token,
+        collect_payer_data=False,
+        redis=None,
+        conversation_id=None,
+    ):
         # The rows handed to maybe_create_deposit must be attached to the
         # CURRENT session (re-fetched), not the caller's detached instances.
         assert session.get_bind() is not None
@@ -186,6 +196,7 @@ async def test_hook_refetches_rows_and_calls_maybe_create_deposit(
                 "patient_id": patient.id,
                 "appointment_id": appointment.id,
                 "waba_token": waba_token,
+                "collect_payer_data": collect_payer_data,
             }
         )
         return None
@@ -200,6 +211,9 @@ async def test_hook_refetches_rows_and_calls_maybe_create_deposit(
         "patient_id": patient.id,
         "appointment_id": appointment.id,
         "waba_token": "tok-1",
+        # TASK-017 (decision D7): the post-booking hook is the one caller that lets the provider
+        # ask the patient for a payer field instead of skipping the Pix in silence.
+        "collect_payer_data": True,
     }
 
 
@@ -208,7 +222,7 @@ async def test_hook_commits_deposit_lifecycle_mutations(db, monkeypatch: pytest.
     docstring) - the hook must commit, or a real deposit row would be lost."""
     tenant, patient, appointment = await _make_rows(db)
 
-    async def _mutate(session, *, tenant, patient, appointment, waba_token):
+    async def _mutate(session, *, tenant, patient, appointment, waba_token, **_ignored):
         patient.asaas_customer_id = "cus_committed"
         return None
 
