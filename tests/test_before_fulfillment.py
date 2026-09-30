@@ -446,3 +446,33 @@ def test_the_wait_verdict_separates_waiting_paid_and_over():
     assert deposit_wait.wait_verdict(paid) == "paid"  # never told "your Pix expired"
     expired = PixDeposit(status=PixDepositStatus.EXPIRED, expires_at=now + timedelta(minutes=5))
     assert deposit_wait.wait_verdict(expired) == "over"
+
+
+async def test_the_patient_notice_is_claimed_atomically_so_a_second_run_never_repeats_it(db, env):
+    async with db() as session:
+        world = await make_world(session)
+    deposit_id = await _paid_charge(db, world)
+    async with db() as session:
+        tenant = await session.get(type(world.tenant), world.tenant_id)
+        deposit = await session.get(PixDeposit, deposit_id)
+        first = await fulfillment._send_once(session, tenant, deposit, "texto")
+        second = await fulfillment._send_once(session, tenant, deposit, "texto")
+    assert (first, second) == ("sent", "already")
+    assert len(env.notices) == 1
+
+
+async def test_a_failed_send_releases_the_claim_so_the_next_run_can_send(db, env):
+    async with db() as session:
+        world = await make_world(session)
+    deposit_id = await _paid_charge(db, world)
+    env.notice_error = notify.DeliveryError("send_failed")
+    async with db() as session:
+        tenant = await session.get(type(world.tenant), world.tenant_id)
+        deposit = await session.get(PixDeposit, deposit_id)
+        assert await fulfillment._send_once(session, tenant, deposit, "texto") == "failed"
+    assert (await _state(db, deposit_id))[0].paid_notice_sent_at is None
+    env.notice_error = None
+    async with db() as session:
+        tenant = await session.get(type(world.tenant), world.tenant_id)
+        deposit = await session.get(PixDeposit, deposit_id)
+        assert await fulfillment._send_once(session, tenant, deposit, "texto") == "sent"

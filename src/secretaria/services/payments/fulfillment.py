@@ -23,6 +23,7 @@ honestly and without promising a return, that the CLINIC will get in touch.
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.logging import get_logger
@@ -88,6 +89,43 @@ async def _tell_patient(
     return True
 
 
+async def _send_once(
+    session: AsyncSession, tenant: Tenant, deposit: PixDeposit, text: str
+) -> str:
+    """Send the patient notice AT MOST ONCE across concurrent runs: `sent`, `already` (another
+    run owns it) or `failed` (the claim is released so a retry can send it).
+
+    The claim is an atomic `UPDATE ... WHERE paid_notice_sent_at IS NULL RETURNING`, taken BEFORE
+    the send: two workers running the same promotion (a job and the sweep) can never both send.
+    A crash between the claim and the send loses the message; a failed send is retried.
+    """
+    claimed = await session.execute(
+        update(PixDeposit)
+        .where(
+            PixDeposit.id == deposit.id,
+            PixDeposit.tenant_id == tenant.id,
+            PixDeposit.paid_notice_sent_at.is_(None),
+        )
+        .values(paid_notice_sent_at=datetime.now(UTC))
+        .returning(PixDeposit.id)
+        .execution_options(synchronize_session=False)
+    )
+    won = claimed.scalar_one_or_none() is not None
+    await session.commit()
+    if not won:
+        return "already"
+    if await _tell_patient(session, tenant, deposit, text):
+        return "sent"
+    await session.execute(
+        update(PixDeposit)
+        .where(PixDeposit.id == deposit.id, PixDeposit.tenant_id == tenant.id)
+        .values(paid_notice_sent_at=None)
+        .execution_options(synchronize_session=False)
+    )
+    await session.commit()
+    return "failed"
+
+
 async def _hand_to_the_clinic(
     session: AsyncSession,
     tenant: Tenant,
@@ -112,10 +150,7 @@ async def _hand_to_the_clinic(
     )
     attention.mark_fulfillment(deposit, FULFILLMENT_NEEDS_ATTENTION)
     await session.commit()
-    if deposit.paid_notice_sent_at is None:
-        if await _tell_patient(session, tenant, deposit, notice):
-            deposit.paid_notice_sent_at = datetime.now(UTC)
-            await session.commit()
+    await _send_once(session, tenant, deposit, notice)
     await deposit_wait.leave_wait(session, deposit)
     await session.commit()
 
@@ -272,21 +307,18 @@ async def _finish(
         # Fired ONCE, by the call that created the appointment (a retry never re-fires them).
         await _enqueue_hooks(redis, tenant, appointment)
 
-    if deposit.paid_notice_sent_at is None:
-        patient = await session.get(Patient, deposit.patient_id) if deposit.patient_id else None
-        text = booking_promotion.confirmation_text(
-            tenant, snapshot, patient.name if patient else None, late_reopened=late
-        )
-        if await _tell_patient(session, tenant, deposit, text):
-            deposit.paid_notice_sent_at = datetime.now(UTC)
-        else:
-            paid_at = deposit.paid_at
-            if paid_at is not None and datetime.now(UTC) - _aware(paid_at) < GIVE_UP_AFTER:
-                await session.commit()
-                raise PromotionRetry("notice_undeliverable")
-            # Past the window (e.g. a late payment outside WhatsApp's 24 h): the appointment
-            # exists and is in the agenda; the clinic can reach the patient. Not retried again.
-            logger.warning("payment_confirmation_notice_given_up", tenant_id=str(tenant.id))
+    patient = await session.get(Patient, deposit.patient_id) if deposit.patient_id else None
+    text = booking_promotion.confirmation_text(
+        tenant, snapshot, patient.name if patient else None, late_reopened=late
+    )
+    if await _send_once(session, tenant, deposit, text) == "failed":
+        paid_at = deposit.paid_at
+        if paid_at is not None and datetime.now(UTC) - _aware(paid_at) < GIVE_UP_AFTER:
+            raise PromotionRetry("notice_undeliverable")
+        # Past the window (e.g. a late payment outside WhatsApp's 24 h): the appointment exists
+        # and is in the agenda; the clinic can reach the patient. Not retried again.
+        logger.warning("payment_confirmation_notice_given_up", tenant_id=str(tenant.id))
+    await session.refresh(deposit)
 
     await deposit_wait.leave_wait(session, deposit)
     attention.mark_fulfillment(deposit, FULFILLMENT_CONFIRMED)

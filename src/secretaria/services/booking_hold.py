@@ -30,7 +30,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import delete, or_, select, text, update
 
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
@@ -243,6 +243,29 @@ async def release(hold_id: UUID) -> None:
         logger.warning("booking_hold_release_failed", hold_id=str(hold_id), error=str(exc))
 
 
+def hold_lock_key(tenant_id: UUID, professional_id: UUID | None) -> str:
+    """The advisory-lock key of ONE agenda (a clinic's, or one professional's)."""
+    return f"booking_hold:{tenant_id}:{professional_id}"
+
+
+async def _serialize_agenda(session, tenant_id: UUID, professional_id: UUID | None) -> None:
+    """Postgres only: serialise concurrent `place_hold`s of the SAME agenda.
+
+    The overlap test in `place_hold` is check-then-insert under READ COMMITTED, and there is no
+    UNIQUE constraint to catch a loser (`professional_id` is nullable, so it cannot be one). Two
+    patients confirming the same slot in the same instant could both pass the check and both be
+    charged for it. A transaction-scoped advisory lock closes that window: the second transaction
+    waits for the first to commit and then SEES its row. Released automatically at commit or
+    rollback; a different professional's agenda uses a different key and never waits.
+    """
+    if session.get_bind().dialect.name != "postgresql":
+        return
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": hold_lock_key(tenant_id, professional_id)},
+    )
+
+
 class LiveChargeHoldError(Exception):
     """This conversation's own hold is the reservation behind a Pix that can still be paid.
 
@@ -285,6 +308,7 @@ async def place_hold(
     expires_at = now + timedelta(minutes=ttl_minutes)
     async with async_session_factory() as session:
         async with session.begin():
+            await _serialize_agenda(session, tenant_id, professional_id)
             live_charge = await session.scalar(
                 select(BookingHold.id).where(
                     BookingHold.conversation_id == conversation_id,

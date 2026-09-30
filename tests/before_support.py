@@ -84,10 +84,15 @@ async def make_world(
             external_id=str(uuid4()),
             name="Maria",
         )
-    session.add_all([tenant, patient])
+    # Flushed one at a time: there is no ORM relationship between them, and Postgres enforces
+    # the foreign keys in insertion order.
+    session.add(tenant)
+    await session.flush()
+    session.add(patient)
     await session.flush()
     conversation = Conversation(id=uuid4(), tenant_id=tenant.id, patient_id=patient.id)
     session.add(conversation)
+    await session.flush()
     if with_account:
         row = await accounts.get_or_create_account_row(
             session, tenant_id=tenant.id, provider=provider
