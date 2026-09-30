@@ -12,7 +12,10 @@ from datetime import UTC, datetime
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 
-# Imported for its side effect: it registers the daily Asaas key recheck into `jobs.DAILY_STEPS`.
+# Imported for their side effects: `asaas_connection` registers the daily Asaas key recheck
+# into `jobs.DAILY_STEPS`; `deposit_wait` registers the `before` expiry hook that frees the
+# hold and tells the patient into `jobs.EXPIRY_HOOKS`.
+from secretaria.services import deposit_wait  # noqa: F401
 from secretaria.services.payments import (
     asaas_connection,  # noqa: F401
     jobs,

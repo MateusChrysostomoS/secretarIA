@@ -71,7 +71,11 @@ async def process_payment_event(ctx: dict, event_row_id: str) -> None:
 async def fulfill_paid_charge_job(ctx: dict, deposit_id: str) -> None:
     """arq job: run the post-payment step for one paid deposit (idempotent)."""
     async with async_session_factory() as session:
-        outcome = await fulfillment.fulfill_paid_charge(session, deposit_id=UUID(deposit_id))
+        # `PromotionRetry` (Google down, notice undeliverable) is NOT caught: the job fails so
+        # arq retries it, and the promotion sweep re-enqueues it until the give-up window ends.
+        outcome = await fulfillment.fulfill_paid_charge(
+            session, deposit_id=UUID(deposit_id), redis=ctx.get("redis")
+        )
         await session.commit()
     logger.info("payment_fulfillment_job_done", outcome=outcome)
 

@@ -219,15 +219,11 @@ async def test_fulfilling_an_after_charge_marks_it_confirmed(db):
         assert after.fulfillment_status == FULFILLMENT_CONFIRMED
 
 
-async def test_a_before_charge_is_never_swallowed_while_no_promoter_exists(db):
-    slot = {
-        "start_at": "2026-10-01T13:00:00+00:00",
-        "end_at": "2026-10-01T13:30:00+00:00",
-        "appointment_type": "Consulta",
-    }
-    tenant, deposit, _ = await _seed(
-        db, timing="before", status=PixDepositStatus.PAID, snapshot=slot
-    )
+async def test_a_before_charge_with_an_unreadable_snapshot_is_never_swallowed(db):
+    """F1 pinned `promotion_not_available` here because no promoter existed. TASK-017 IS the
+    promoter (tests/test_before_fulfillment.py); what stays true is that a paid `before` charge
+    is never swallowed: with no snapshot to promote it becomes an orphan-payment item."""
+    tenant, deposit, _ = await _seed(db, timing="before", status=PixDepositStatus.PAID)
     async with db() as session:
         first = await fulfillment.fulfill_paid_charge(session, deposit_id=deposit.id)
         second = await fulfillment.fulfill_paid_charge(session, deposit_id=deposit.id)
@@ -235,10 +231,8 @@ async def test_a_before_charge_is_never_swallowed_while_no_promoter_exists(db):
         items = (await session.scalars(select(PaymentAttentionItem))).all()
         after = await session.get(PixDeposit, deposit.id)
 
-    assert (first, second) == ("promotion_not_available", "noop")
-    assert [i.reason for i in items] == ["promotion_failed"]
-    assert items[0].slot_start is not None
-    assert items[0].service_label == "Consulta"
+    assert (first, second) == ("orphan_payment", "noop")
+    assert [i.reason for i in items] == ["orphan_payment"]
     assert after.fulfillment_status == FULFILLMENT_NEEDS_ATTENTION
 
 

@@ -36,7 +36,12 @@ from secretaria.models.payment_attention_item import (
     REASON_REFUND_DUE_POLICY,
     PaymentAttentionItem,
 )
-from secretaria.models.pix_deposit import DEPOSIT_TIMING_AFTER, PixDeposit, PixDepositStatus
+from secretaria.models.pix_deposit import (
+    DEPOSIT_TIMING_AFTER,
+    DEPOSIT_TIMING_BEFORE,
+    PixDeposit,
+    PixDepositStatus,
+)
 from secretaria.models.processed_asaas_event import ProcessedAsaasEvent
 from secretaria.services import tenant_config as cfg
 from secretaria.services.booking_scope import canonical_service_name
@@ -94,6 +99,10 @@ DEPOSIT_SKIP_ZERO_AMOUNT = "zero_amount"
 # decision 2026-09-25: per clinic AND per plan, never inferred from the
 # operator - see models/insurance.py.
 DEPOSIT_SKIP_INSURANCE_NO_CHARGE = "insurance_no_charge"
+# TASK-017: the clinic charges BEFORE confirming, so this hook has nothing to add; and an
+# appointment that already has a deposit row never gets a second charge.
+DEPOSIT_SKIP_TIMING_BEFORE = "timing_before"
+DEPOSIT_SKIP_ALREADY_CHARGED = "already_charged"
 
 
 def _log_deposit_skip(tenant: Tenant, appointment: Appointment, reason: str) -> None:
@@ -352,6 +361,14 @@ async def maybe_create_deposit(
     """
     if not tenant.pix_deposit_enabled:
         _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_DISABLED)
+        return None
+    if (tenant.deposit_timing or DEPOSIT_TIMING_AFTER) == DEPOSIT_TIMING_BEFORE:
+        # `before` timing charges BEFORE the appointment exists (`booking_charge.py`); the
+        # post-booking hook of the same booking must never ask for a second deposit.
+        _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_TIMING_BEFORE)
+        return None
+    if await get_deposit_for_appointment(session, appointment.id) is not None:
+        _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_ALREADY_CHARGED)
         return None
     if not await _insurance_charges_deposit(session, tenant, appointment):
         _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_INSURANCE_NO_CHARGE)

@@ -3463,6 +3463,9 @@ async def _handle_confirmation(
                 flow_selected_slot=conversation.flow_selected_slot,
                 flow_selected_professional_id=_selected_professional_id(conversation),
                 flow_selected_insurance=insurance,
+                # Carried too: "Trocar horario" must not silently turn a booking for someone
+                # else into one for the patient. `leave_wait` clears it when the booking ends.
+                flow_attendee_name=attendee_name,
                 deposit_request={
                     "deposit_id": payment.deposit_id,
                     "amount_cents": payment.amount_cents,
