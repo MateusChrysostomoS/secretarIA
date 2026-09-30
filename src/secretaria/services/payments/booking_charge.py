@@ -224,6 +224,11 @@ async def _create_and_record(
         except ProviderError as exc:
             raise ChargeStartError(exc.code) from exc
 
+        if not created.provider_charge_id:
+            # Path 9 of the nine silent `None`s (spec 7): an answer with no charge id. There is
+            # nothing to void and nothing to record: the booking is blocked, never confirmed.
+            raise ChargeStartError("no_charge_id")
+
         # The charge exists at the provider from here on: every later failure voids it.
         try:
             if not created.copy_paste:
