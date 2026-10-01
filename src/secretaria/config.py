@@ -232,6 +232,21 @@ class Settings(BaseSettings):
     # content="" (the model "ran out" before producing visible text). 2500 is
     # a safe floor for gpt-5-mini conversational turns with tool calls.
     OPENAI_MAX_TOKENS: int = 2500
+    # Wall-clock budget for ONE whole agent turn (every LLM call + tool call +
+    # the transient retry). The per-call HTTP timeout is 60s with 5 SDK
+    # retries, so without this a stuck turn could outlive arq's 300s job
+    # timeout, which cancels the job and leaves the patient with no answer.
+    LLM_TURN_TIMEOUT_SECONDS: int = 120
+    # Opt-in: log the exact (pseudonymized) conversation the model received and
+    # its reply, plus the rendered system prompt. Off by default - these are
+    # patient words. Turn on in production only while debugging, then turn off.
+    LLM_TRACE_CONTENT: bool = False
+    # Safety net for "the patient never goes unanswered": when a turn ends with
+    # no outbound message, ONE fixed apology (no LLM) is sent, at most
+    # TURN_FALLBACK_MAX_PER_WINDOW times per conversation per window, so a
+    # looping or abusive sender cannot turn the net into an amplifier.
+    TURN_FALLBACK_MAX_PER_WINDOW: int = 3
+    TURN_FALLBACK_WINDOW_SECONDS: int = 600
 
     # --- Audio transcription (transcription-core) ---
     # STT model, NEVER the chat model: the transcription endpoint rejects chat

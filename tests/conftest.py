@@ -23,6 +23,25 @@ os.environ.setdefault(
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 
 
+@pytest.fixture(autouse=True)
+def _no_turn_apology(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the "patient never unanswered" net out of tests that fake the sender.
+
+    The net counts messages that really leave (`WhatsAppClient._post` /
+    `BrainMessageSender._record`). Most older tests replace the client with a
+    fake that never reaches those two points, so their perfectly good turns look
+    silent and would gain a second, unexpected apology. Tests of the net itself
+    (tests/test_turn_safety_net.py) call the real function they captured at
+    import time and exercise it explicitly.
+    """
+    from secretaria.workers import tasks
+
+    async def _noop(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(tasks, "_send_turn_fallback", _noop)
+
+
 @pytest.fixture
 async def client() -> AsyncIterator[AsyncClient]:
     """An httpx AsyncClient bound to the FastAPI app via ASGITransport.

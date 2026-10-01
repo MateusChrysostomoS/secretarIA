@@ -272,6 +272,13 @@ from secretaria.services.tenant_config import (
     resolve_professional_calendar,
     set_waba_token,
 )
+from secretaria.services.turn_safety_net import (
+    TURN_FALLBACK_MESSAGE,
+    begin_turn,
+    end_turn,
+    fallback_allowed,
+    sends_in_turn,
+)
 from secretaria.services.usage_events import emit_usage_event
 from secretaria.services.whatsapp import (
     TenantWhatsAppCredentialMissing,
@@ -2815,7 +2822,108 @@ async def _handle_remove_context_command(
     await _send_consent_notice(reply, tenant=tenant, waba_token=waba_token)
 
 
+async def _send_turn_fallback(reply: _ReplyContext, redis, *, cause: str) -> None:
+    """Send the fixed apology for a turn that ended without an answer. Never raises.
+
+    Re-checks the entitlement itself: the one silence that IS intended is the
+    unentitled tenant (`bot_reply_suppressed_unentitled`), and the net must not
+    turn a deliberate no-reply into a reply from a clinic that is not paying.
+    A tenant whose entitlement cannot be read is treated the same way it is on
+    the main path (fail closed) - but logged as `entitlement_unknown`, not as
+    "unentitled", so an outage at brain-api is not mistaken for churn.
+    """
+    try:
+        tenant_id = reply.tenant_id
+        async with async_session_factory() as session:
+            if tenant_id is None and reply.conversation_id is not None:
+                conversation = await session.get(Conversation, reply.conversation_id)
+                tenant_id = conversation.tenant_id if conversation is not None else None
+            tenant = await session.get(Tenant, tenant_id) if tenant_id is not None else None
+            waba_token = await get_waba_token(session, tenant.id) if tenant is not None else None
+        if tenant is None:
+            logger.error(
+                "turn_fallback_no_tenant",
+                cause=cause,
+                conversation_id=str(reply.conversation_id),
+            )
+            return
+        summary = await get_entitlements(tenant.id, redis)
+        if summary is None or not (summary.active and summary.secretaria_enabled):
+            logger.warning(
+                "turn_fallback_skipped_not_entitled",
+                cause=cause,
+                tenant_id=str(tenant.id),
+                entitlement_unknown=summary is None,
+                conversation_id=str(reply.conversation_id),
+            )
+            return
+        if not await fallback_allowed(redis, reply.conversation_id):
+            logger.warning(
+                "turn_fallback_throttled",
+                cause=cause,
+                tenant_id=str(tenant.id),
+                conversation_id=str(reply.conversation_id),
+            )
+            return
+        await _send_plain_reply(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            body=TURN_FALLBACK_MESSAGE,
+            event="turn_fallback_sent",
+        )
+    except Exception as exc:
+        logger.error(
+            "turn_fallback_failed",
+            cause=cause,
+            error_type=type(exc).__name__,
+            conversation_id=str(reply.conversation_id),
+        )
+
+
 async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
+    """Answer one inbound turn - and guarantee the patient is never left in silence.
+
+    Wraps the real pipeline (`_send_bot_reply_inner`). Two ways a turn used to
+    end with nothing sent: it RAISED (the exception left the arq job and the
+    patient saw no answer), or it RETURNED having sent nothing (a model reply
+    that parsed to zero bubbles, a downstream send that failed and was
+    logged-and-forgotten). Both are caught here by the turn's send ledger (a
+    counter bumped where a message really leaves - see `begin_turn`), and
+    answered with one fixed, LLM-free apology (`services/turn_safety_net.py`,
+    rate-limited per conversation).
+
+    A turn without a conversation (the inactive-tenant degrade) has nobody to
+    rate-limit against and its own dedicated handler, so it is left alone.
+    """
+    token = begin_turn()
+    cause = "silent_return"
+    try:
+        try:
+            await _send_bot_reply_inner(reply, redis=redis)
+        except Exception as exc:
+            cause = "exception"
+            logger.error(
+                "turn_failed",
+                error_type=type(exc).__name__,
+                conversation_id=str(reply.conversation_id),
+                exc_info=True,
+            )
+        sent = sends_in_turn()
+    finally:
+        end_turn(token)
+    if sent > 0 or reply.conversation_id is None:
+        return
+    logger.warning(
+        "turn_unanswered",
+        cause=cause,
+        conversation_id=str(reply.conversation_id),
+        channel=reply.channel,
+    )
+    await _send_turn_fallback(reply, redis, cause=cause)
+
+
+async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
     """Generate a reply, split it into bubbles, send each, and record them."""
     # Reminder action-button tap: a fully self-contained turn (its own
     # tenant/appointment lookup, its own reply) - never falls through to the
@@ -3091,6 +3199,13 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
             "bot_reply_suppressed_unentitled",
             tenant_id=str(tenant.id) if tenant is not None else None,
             status=summary.status if summary is not None else None,
+            # `summary is None` is "could not READ the entitlement" (brain-api
+            # down / no tenant resolved), not "tenant does not pay". The two
+            # look identical to the patient (silence) and opposite to the
+            # operator, so the log has to tell them apart.
+            entitlement_unknown=summary is None,
+            tenant_resolved=tenant is not None,
+            conversation_id=str(reply.conversation_id),
         )
         return
 
@@ -7067,6 +7182,9 @@ async def _handle_set_booking_draft(
         if professional is not None:
             result = _enter_professional_services(professional, tenant_snapshot)
         elif attendee is not None or stored_type is not None:
+            # `attendee is not None` includes ATTENDEE_SELF (""): the patient
+            # already answered "Essa consulta é pra você?" earlier in this
+            # booking, so the hand-back must NOT ask it again.
             result = _start_booking(tenant_snapshot, professional_rows, insurance=insurance)
         else:
             result = enter_booking(tenant_snapshot, professional_rows)

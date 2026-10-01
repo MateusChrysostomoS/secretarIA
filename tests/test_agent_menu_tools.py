@@ -1117,7 +1117,7 @@ async def test_booking_draft_multi_resumes(
 
 
 @pytest.mark.parametrize("multi", [False, True])
-@pytest.mark.parametrize("attendee", [None, "Atendido Teste"])
+@pytest.mark.parametrize("attendee", [None, "", "Atendido Teste"])
 async def test_empty_booking_draft_returns_to_administrative_selection(
     db, _captured_bubbles, _stub_calendar, multi, attendee
 ):
@@ -1142,6 +1142,9 @@ async def test_empty_booking_draft_returns_to_administrative_selection(
     async with db() as session:
         conv = await session.get(Conversation, conversation.id)
         assert conv.flow_state == FlowState.SERVICE_CATALOG
+        # "" = the patient already answered "Sim, é pra mim" earlier in this
+        # booking: the hand-back must continue, NOT ask "Essa consulta é pra você?"
+        # a second time (the 2026-10-01 production report).
         assert conv.flow_step == (
             STEP_AWAITING_ATTENDEE_CHOICE if attendee is None else
             STEP_AWAITING_PROFESSIONAL if multi else STEP_AWAITING_SERVICE
@@ -1304,7 +1307,9 @@ async def test_empty_draft_insurance_survives_complete_attendee_flow(
     async with db() as session:
         conv = await session.get(Conversation, conversation.id)
         assert conv.flow_step == STEP_AWAITING_PROFESSIONAL
-        assert conv.flow_attendee_name == ("Pessoa Teste" if other else None)
+        from secretaria.services.attendee import ATTENDEE_SELF
+
+        assert conv.flow_attendee_name == ("Pessoa Teste" if other else ATTENDEE_SELF)
 
 
 @pytest.mark.parametrize("suffix", ["oops", "[]", "null", '{"t": 7}', '{"p": "invalid"}'])

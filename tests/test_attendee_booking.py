@@ -64,6 +64,7 @@ from secretaria.services.attendee import (  # noqa: E402
     ATTENDEE_NAME_LLM_PLACEHOLDER,
     ATTENDEE_NAME_REQUEST,
     ATTENDEE_QUESTION_BODY,
+    ATTENDEE_SELF,
     CONSENT_KIND_THIRD_PARTY_BOOKING,
     LABEL_ATTENDEE_AUTH_BACK,
     LABEL_ATTENDEE_AUTH_CONFIRM,
@@ -177,7 +178,7 @@ async def test_answered_insurance_survives_attendee_steps_and_resume(other):
         result = await route(_snapshot(resumed), tenant, None, tap)
         assert result.flow_selected_insurance == "Unimed"
     assert result.flow_step == STEP_AWAITING_SERVICE
-    assert result.flow_attendee_name == ("Maria da Silva" if other else None)
+    assert result.flow_attendee_name == ("Maria da Silva" if other else ATTENDEE_SELF)
     assert result.attendee_authorized is other
 
 
@@ -238,7 +239,10 @@ async def test_self_path_books_exactly_what_it_booked_before() -> None:
     assert cal.created[0][2] == "Primeira Consulta - João Conta"
     assert "Paciente:" not in final.bubbles[0].body
     assert not any(r.attendee_authorized for r in results)
-    assert all(r.flow_attendee_name is None for r in results)
+    # Nobody is NAMED on the self path (the "" marker is falsy), and the marker is
+    # gone once the booking ends: the next booking is asked pra-quem again.
+    assert not any(r.flow_attendee_name for r in results)
+    assert final.flow_attendee_name is None
 
 
 async def test_other_path_name_sentence_confirm_and_back() -> None:
@@ -504,7 +508,7 @@ async def test_worker_self_path_writes_no_consent_row(wired) -> None:
     await _wa_turn(tenant, LABEL_ATTENDEE_SELF)
     conversation = await _conversation(db, tenant)
     assert conversation.flow_step == STEP_AWAITING_SERVICE
-    assert conversation.flow_attendee_name is None
+    assert conversation.flow_attendee_name == ATTENDEE_SELF  # answered, not "not asked"
     assert await _consents(db, tenant) == 0
 
 
@@ -794,6 +798,115 @@ async def test_llm_choose_doctor_hand_back_keeps_the_attendee(wired, monkeypatch
     conversation = await _conversation(db, tenant)
     assert conversation.flow_state == FlowState.SERVICE_CATALOG
     assert conversation.flow_attendee_name == "Maria da Silva"
+
+
+async def test_pra_mim_answer_survives_the_llm_detour(wired) -> None:
+    """2026-10-01: "Sim, é pra mim" -> LLM detour -> hand-back asked pra-quem AGAIN.
+
+    The "Não sei" scoped help ends in `_delegate_llm_keeping_draft`, which drops
+    the step: NULL attendee then read as "never asked". The answer must live in
+    the attendee column itself, so it rides every carry site through the LLM.
+    """
+    from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
+    from secretaria.services.flow_router import _delegate_llm_keeping_draft
+
+    db = wired
+    tenant = await _seed_tenant(db)
+    await _onboard(tenant)
+    await _wa_turn(tenant, LABEL_BOOK)
+    await _wa_turn(tenant, LABEL_ATTENDEE_SELF)
+    conversation = await _conversation(db, tenant)
+    assert conversation.flow_attendee_name == ATTENDEE_SELF
+
+    # The router's own detour (what scoped help returns on an unresolved pick).
+    detour = _delegate_llm_keeping_draft(conversation)
+    assert detour.flow_attendee_name == ATTENDEE_SELF
+    async with db() as session:
+        async with session.begin():
+            row = await session.get(Conversation, conversation.id)
+            row.flow_state = detour.flow_state
+            row.flow_step = detour.flow_step
+            row.flow_selected_type = detour.flow_selected_type
+            row.flow_attendee_name = detour.flow_attendee_name
+
+    _WireClient.sends = []
+    reply = tasks._ReplyContext(
+        channel=CHANNEL_WHATSAPP,
+        conversation_id=conversation.id,
+        patient_ref=WA_ID,
+        inbound_body="Tenho incômodo ao olhar para telas. Quero marcar uma avaliação.",
+        tenant_id=tenant.id,
+    )
+    await tasks._handle_set_booking_draft(
+        reply, BOOKING_DRAFT_SENTINEL_PREFIX + "{}", tenant, None, [], WA_ID, waba_token="t"
+    )
+
+    assert not any(ATTENDEE_QUESTION_BODY in (body or "") for _kind, body, _x in _WireClient.sends)
+    conversation = await _conversation(db, tenant)
+    assert conversation.flow_state == FlowState.SERVICE_CATALOG
+    assert conversation.flow_step == STEP_AWAITING_SERVICE
+    assert conversation.flow_attendee_name == ATTENDEE_SELF
+
+
+async def test_hand_back_still_asks_pra_quem_when_it_was_never_answered(wired) -> None:
+    """The control: a booking started from free chat (no answer yet) IS asked."""
+    from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
+
+    db = wired
+    tenant = await _seed_tenant(db)
+    await _onboard(tenant)
+    conversation = await _conversation(db, tenant)
+    reply = tasks._ReplyContext(
+        channel=CHANNEL_WHATSAPP,
+        conversation_id=conversation.id,
+        patient_ref=WA_ID,
+        inbound_body="quero marcar uma consulta",
+        tenant_id=tenant.id,
+    )
+    await tasks._handle_set_booking_draft(
+        reply, BOOKING_DRAFT_SENTINEL_PREFIX + "{}", tenant, None, [], WA_ID, waba_token="t"
+    )
+    conversation = await _conversation(db, tenant)
+    assert conversation.flow_step == STEP_AWAITING_ATTENDEE_CHOICE
+
+
+async def test_chat_booking_consumes_the_pra_mim_marker_and_stores_no_empty_name(
+    wired, monkeypatch
+) -> None:
+    """The marker ("") is consumed by a chat booking and never lands on the row."""
+    from secretaria.ai import tools
+    from secretaria.core import database
+
+    db = wired
+    monkeypatch.setattr(database, "async_session_factory", db)
+    tenant = await _seed_tenant(db)
+    await _onboard(tenant)
+    conversation = await _conversation(db, tenant)
+    async with db() as session:
+        async with session.begin():
+            row = await session.get(Conversation, conversation.id)
+            row.flow_attendee_name = ATTENDEE_SELF
+    tenant_token = tools._tenant_id_ctx.set(tenant.id)
+    conv_token = tools._conversation_id_ctx.set(conversation.id)
+    try:
+        start = datetime(2026, 6, 15, 11, 0, tzinfo=UTC)
+        await tools._persist_appointment(
+            {"id": "evt-self"},
+            start,
+            start + timedelta(minutes=40),
+            "Primeira Consulta",
+            attendee_name=await tools._conversation_attendee_name(),
+        )
+    finally:
+        tools._conversation_id_ctx.reset(conv_token)
+        tools._tenant_id_ctx.reset(tenant_token)
+    async with db() as session:
+        appt = await session.scalar(
+            select(Appointment).where(Appointment.google_event_id == "evt-self")
+        )
+        conv = await session.get(Conversation, conversation.id)
+    assert appt.attendee_name is None
+    assert conv.flow_attendee_name is None
 
 
 async def test_stale_booking_with_an_attendee_expires(wired) -> None:

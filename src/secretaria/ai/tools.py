@@ -491,12 +491,14 @@ async def _persist_appointment(
                     status=AppointmentStatus.SCHEDULED,
                     professional_id=professional_id,
                     unit_id=unit_id,
-                    attendee_name=attendee_name,
+                    attendee_name=attendee_name or None,
                 )
                 session.add(appointment)
                 # The attendee belonged to THIS booking: consumed here, so the
                 # patient's next chat booking ("agora uma pra mim") is theirs.
-                if attendee_name and conversation_id is not None:
+                # Also consumes the "pra mim" marker (""), not only a third party's
+                # name, so the next chat booking is asked pra-quem again.
+                if conversation_id is not None:
                     booked_conversation = await session.get(Conversation, conversation_id)
                     if booked_conversation is not None:
                         booked_conversation.flow_attendee_name = None

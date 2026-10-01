@@ -109,6 +109,32 @@ LLM, sem depender de config do tenant. Necessário porque o passo do nome aceita
 Bite-check refeito para 1, 2, 3 e 5. Suíte final: mesmas 3 falhas do baseline / 2433 ok; ruff os
 mesmos 8.
 
+## Correção 2026-10-01 — "Essa consulta é pra você?" repetida após o retorno da IA
+
+**Sintoma (Portal, console real):** "Sim, é pra mim" → convênio → profissional → "Não sei" → a IA
+responde → a pergunta pra-quem voltava. **Causa:** "é pra mim" era `flow_attendee_name = NULL`,
+indistinguível de "ainda não perguntado". O "Não sei" (ajuda escopada) termina em
+`_delegate_llm_keeping_draft`, que apaga `flow_step`; no retorno da IA,
+`workers/tasks.py::_handle_set_booking_draft` (sem atendido nem serviço guardados) caía em
+`enter_booking`, que pergunta pra-quem. Mesmo caminho nos dois canais (é worker, não canal).
+
+**Correção, sem migração:** a coluna virou tri-estado — `None` = não perguntado, `ATTENDEE_SELF`
+(`""`, falsy de propósito, então todo `if attendee_name:` existente continua tratando como "o
+próprio paciente") = respondeu "pra mim", `"Maria Silva"` = outra pessoa autorizada. Gravado em
+`_attendee_step` (escolha "Sim, é pra mim"); sobrevive à detour da IA porque todo ponto que já
+carrega o nome (`_preserve`, `_delegate_llm_keeping_draft`, `_carry_attendee`, hand-backs) copia o
+valor cru. `real_attendee_name` normaliza `""` → `None` antes de persistir (hold, `Appointment`);
+`_persist_appointment` agora consome o marcador também no "pra mim" (próxima reserva pelo chat
+volta a perguntar); `_expire_stale_llm_state` já o zerava. **Deploy: é worker** (`workers/` +
+`flow_router.py`), e `ai/tools.py` roda no worker também — só a API não basta.
+
+Testes: `test_pra_mim_answer_survives_the_llm_detour`,
+`test_hand_back_still_asks_pra_quem_when_it_was_never_answered` (controle),
+`test_chat_booking_consumes_the_pra_mim_marker_and_stores_no_empty_name`, e o parâmetro `""` em
+`test_empty_booking_draft_returns_to_administrative_selection`. Bite-check feito (sem a gravação do
+marcador o teste da detour falha). Suíte: 2758 passed / 10 skipped; ruff limpo nos arquivos tocados.
+**Não commitado, não deployado, não provado no navegador em produção.**
+
 ## Coordenação
 
 `PROMPT_CONVENIO_CATALOGO_ACEITACAO_1_SECRETARIA.md` ainda não rodou; ele deve inserir o

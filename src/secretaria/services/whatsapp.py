@@ -30,6 +30,7 @@ from secretaria.core.whatsapp_limits import (
     truncate_plain,
 )
 from secretaria.models.tenant import Tenant
+from secretaria.services.turn_safety_net import note_send
 
 logger = get_logger(__name__)
 
@@ -278,6 +279,7 @@ class WhatsAppClient:
             status_class=_status_class(response.status_code),
             message_id=_extract_message_id(data),
         )
+        note_send()
         return data
 
     async def send_text_message(self, to: str, body: str) -> dict:

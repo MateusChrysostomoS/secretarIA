@@ -59,12 +59,14 @@ from secretaria.services.attendee import (
     ATTENDEE_NAME_INVALID,
     ATTENDEE_NAME_REQUEST,
     ATTENDEE_QUESTION_BODY,
+    ATTENDEE_SELF,
     LABEL_ATTENDEE_AUTH_BACK,
     LABEL_ATTENDEE_AUTH_CONFIRM,
     LABEL_ATTENDEE_OTHER,
     LABEL_ATTENDEE_SELF,
     authorization_body,
     parse_attendee_name,
+    real_attendee_name,
 )
 from secretaria.services.booking_hold import BookingGate, overlaps
 from secretaria.services.booking_scope import (
@@ -1049,7 +1051,11 @@ def _selected_insurance(conversation: Conversation) -> str | None:
 
 
 def _attendee_name(conversation: Conversation) -> str | None:
-    """The in-progress booking's attendee name (None = the patient themself)."""
+    """The in-progress booking's pra-quem answer (tri-state, see services/attendee.py).
+
+    None = not asked yet; ATTENDEE_SELF ("") = the patient themself; else the
+    authorized third party's name. Use `real_attendee_name` before persisting.
+    """
     return getattr(conversation, "flow_attendee_name", None)
 
 
@@ -1582,9 +1588,14 @@ def _attendee_step(
     if step == STEP_AWAITING_ATTENDEE_CHOICE:
         if _label_match(body, LABEL_ATTENDEE_SELF):
             logger.info("attendee_choice", choice="self")
-            return _booking_continuation(
+            result = _booking_continuation(
                 next_step, tenant, professionals, insurance=_selected_insurance(conversation)
             )
+            # Remember the answer: NULL would read as "not asked yet" and the
+            # LLM hand-back would ask pra-quem a second time (services/attendee.py).
+            if result.flow_state == FlowState.SERVICE_CATALOG:
+                result.flow_attendee_name = ATTENDEE_SELF
+            return result
         if _label_match(body, LABEL_ATTENDEE_OTHER):
             logger.info("attendee_choice", choice="other")
             return _attendee_name_request(next_step)
@@ -3386,7 +3397,8 @@ async def _handle_confirmation(
 
     # The event is the ATTENDEE's consultation: on a booking for someone else
     # their name titles it, not the name of the account that booked.
-    attendee_name = _attendee_name(conversation)
+    # `real_attendee_name`: the "pra mim" marker ("") must never reach a hold row.
+    attendee_name = real_attendee_name(_attendee_name(conversation))
     event_name = attendee_name or patient_name
     summary = f"{service_type} - {event_name}" if event_name else service_type
 

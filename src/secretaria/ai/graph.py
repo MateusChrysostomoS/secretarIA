@@ -14,6 +14,7 @@ import hashlib
 import json
 import re
 import ssl
+import time
 from collections.abc import Sequence
 from contextvars import ContextVar
 from dataclasses import replace
@@ -54,6 +55,7 @@ from secretaria.ai.tools import (
     list_patient_appointments,
     show_main_menu,
 )
+from secretaria.ai.trace import diagnose, summarize_turn
 from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
@@ -328,11 +330,73 @@ async def invoke_agent(messages: list[BaseMessage]) -> str:
     signature — and every existing test that monkeypatches it with a
     `(messages)`-only fake — stays unchanged.
     """
+    started = time.monotonic()
     result = await build_agent(_extra_tools_ctx.get(), _booking_topology_ctx.get()).ainvoke(
         {"messages": messages}
     )
+    # The input history comes back first; everything after it is what THIS turn
+    # did (model calls, tool calls, tool results).
+    _log_agent_trace(
+        result["messages"][len(messages) :],
+        elapsed_ms=int((time.monotonic() - started) * 1000),
+    )
     last = result["messages"][-1]
     return (getattr(last, "content", "") or "").strip()
+
+
+def _log_agent_trace(new_messages: Sequence[BaseMessage], *, elapsed_ms: int) -> None:
+    """One `llm_turn_trace` line per agent run: the black box, opened.
+
+    Never raises: observability must not be able to fail a turn. A truncated or
+    text-less run is logged at ERROR with a stable `verdict` so it can be counted.
+    """
+    try:
+        summary = summarize_turn(new_messages)
+        verdict = diagnose(summary)
+        log = logger.info if verdict == "ok" else logger.error
+        log(
+            "llm_turn_trace",
+            conversation_id=str(_conversation_id_ctx.get() or ""),
+            model=get_settings().OPENAI_SECRETARIA_MODEL,
+            max_completion_tokens=get_settings().OPENAI_MAX_TOKENS,
+            verdict=verdict,
+            elapsed_ms=elapsed_ms,
+            **summary,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("llm_turn_trace_failed", error_type=type(exc).__name__)
+
+
+def _log_trace_content(
+    history: Sequence[BaseMessage],
+    tenant_config: TenantRuntimeConfig | None,
+    conversation_id: UUID,
+) -> None:
+    """Opt-in (`LLM_TRACE_CONTENT`): exactly what the model is about to read.
+
+    `history` is already pseudonymized (`scrub_messages` runs first), so patient
+    names/phones/e-mails are tokens here. The system prompt is tenant config,
+    not patient data. Two events (prompt, history) so a log backend with a
+    line-size cap cannot truncate one behind the other.
+    """
+    try:
+        prompt = secretary_system_prompt(tenant_config) if tenant_config is not None else None
+        logger.info(
+            "llm_trace_prompt",
+            conversation_id=str(conversation_id),
+            prompt_chars=len(prompt or ""),
+            prompt_sha256=_body_digest(prompt or ""),
+            system_prompt=prompt,
+        )
+        logger.info(
+            "llm_trace_history",
+            conversation_id=str(conversation_id),
+            messages=[
+                {"role": getattr(m, "type", "?"), "text": str(m.content)} for m in history
+            ],
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("llm_trace_content_failed", error_type=type(exc).__name__)
 
 
 async def _invoke_agent_with_retry(
@@ -553,8 +617,52 @@ async def run_agent(
         # system prompt is tenant/professional config — ai/prompts.py — and
         # tool results are masked at the boundary by the wrapper).
         history = scrub_messages(history, pseudonymizer)
-        reply = await _invoke_agent_with_retry(history, conversation_id)
-        reply = rehydrate_reply(reply, pseudonymizer, conversation_id)
+        settings = get_settings()
+        logger.info(
+            "llm_turn_started",
+            conversation_id=str(conversation_id),
+            model=settings.OPENAI_SECRETARIA_MODEL,
+            history_messages=len(history),
+            history_chars=sum(len(str(m.content)) for m in history),
+            # Whether the turn-scoped blocks reached the prompt. A turn that
+            # "ignores the state" is first suspected of never having received it.
+            has_conversation_state=bool(tenant_config and tenant_config.conversation_state),
+            has_appointment_context=bool(tenant_config and tenant_config.appointment_context),
+            has_post_consult_knowledge=bool(tenant_config and tenant_config.post_consult_knowledge),
+            has_tenant_config=tenant_config is not None,
+            timeout_s=settings.LLM_TURN_TIMEOUT_SECONDS,
+        )
+        if settings.LLM_TRACE_CONTENT:
+            _log_trace_content(history, tenant_config, conversation_id)
+        started = time.monotonic()
+        model_reply = await asyncio.wait_for(
+            _invoke_agent_with_retry(history, conversation_id),
+            timeout=settings.LLM_TURN_TIMEOUT_SECONDS,
+        )
+        if settings.LLM_TRACE_CONTENT:
+            # The model-facing form (pseudonymized), logged BEFORE rehydrate so
+            # no real name ever reaches the log even with the trace on.
+            logger.info(
+                "llm_trace_reply", conversation_id=str(conversation_id), reply=model_reply
+            )
+        reply = rehydrate_reply(model_reply, pseudonymizer, conversation_id)
+        logger.info(
+            "llm_turn_finished",
+            conversation_id=str(conversation_id),
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+            reply_len=len(reply or ""),
+            is_sentinel=bool(reply and reply.startswith("__")),
+        )
+    except TimeoutError:
+        # The whole turn blew its wall-clock budget (see LLM_TURN_TIMEOUT_SECONDS).
+        # Answering with the apology beats arq cancelling the job at 300s and the
+        # patient seeing nothing at all.
+        logger.error(
+            "ai_run_agent_turn_timeout",
+            conversation_id=str(conversation_id),
+            timeout_s=get_settings().LLM_TURN_TIMEOUT_SECONDS,
+        )
+        return FALLBACK_REPLY
     except CalendarUnavailableError:
         # A calendar tool failed (token revoked / Google down / 5xx). It
         # propagates unwrapped out of the LangGraph ToolNode, so we catch it by
