@@ -16,6 +16,7 @@ from secretaria.core.build_info import (
 )
 from secretaria.core.database import engine
 from secretaria.core.logging import get_logger, setup_logging
+from secretaria.plugins import booking_notifications  # noqa: F401
 from secretaria.plugins.post_booking import run_post_booking_hooks
 from secretaria.plugins.professional_notification import retry_professional_notification
 from secretaria.plugins.reminders import send_appointment_reminders

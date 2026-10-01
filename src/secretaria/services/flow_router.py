@@ -74,6 +74,7 @@ from secretaria.services.booking_scope import (
 from secretaria.services.calendar import (
     CalendarService,
     CalendarUnavailableError,
+    build_event_description,
     build_patient_calendar_link,
 )
 from secretaria.services.insurance_catalog import match_plan
@@ -1178,6 +1179,24 @@ def _preserve(conversation: Conversation, action: str) -> FlowRouterResult:
     )
 
 
+def _delegate_llm_keeping_draft(conversation: Conversation) -> FlowRouterResult:
+    """Hand the turn to the LLM while preserving the booking draft.
+
+    The worker writes every flow field unconditionally. Keep the answers
+    already collected, but drop the button step and slot so an old selection
+    cannot be resurrected when the agent returns to the guided flow.
+    """
+    return FlowRouterResult(
+        action="delegate_llm",
+        flow_state=FlowState.LLM,
+        flow_selected_type=getattr(conversation, "flow_selected_type", None),
+        flow_selected_day=getattr(conversation, "flow_selected_day", None),
+        flow_selected_professional_id=_selected_professional_id(conversation),
+        flow_selected_insurance=_selected_insurance(conversation),
+        flow_attendee_name=_attendee_name(conversation),
+    )
+
+
 # --------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------
@@ -1254,12 +1273,7 @@ async def _route(
     # show_main_menu tool). The selected professional/insurance survive so the
     # agent keeps that doctor's context across LLM turns.
     if state == FlowState.LLM:
-        return FlowRouterResult(
-            action="delegate_llm",
-            flow_state=FlowState.LLM,
-            flow_selected_professional_id=_selected_professional_id(conversation),
-            flow_selected_insurance=_selected_insurance(conversation),
-        )
+        return _delegate_llm_keeping_draft(conversation)
 
     # Why-not-rebooking (FEAT_34 §8). Keyed on the STEP rather than a state of
     # its own: it is a single question with a single answer, and inventing a
@@ -1345,7 +1359,7 @@ async def _route(
     # place-it-anywhere semantics as the manage label above; identical result
     # to _enter_menu_choice's 3rd slot and _menu_choice_multi's labels[2].
     if _label_match(inbound_body, LABEL_OTHER):
-        return FlowRouterResult(action="delegate_llm", flow_state=FlowState.LLM)
+        return _delegate_llm_keeping_draft(conversation)
 
     if _is_multi_professional(professionals):
         return _menu_choice_multi(conversation, tenant, inbound_body, professionals or [])
@@ -1354,7 +1368,7 @@ async def _route(
     if index is None:
         if state == FlowState.MENU:
             # Free text at the menu -> the patient wants something custom.
-            return FlowRouterResult(action="delegate_llm", flow_state=FlowState.LLM)
+            return _delegate_llm_keeping_draft(conversation)
         # IDLE/BUSINESS_HOURS: (re)present the menu.
         return FlowRouterResult(
             action="reply", bubbles=_menu_bubbles(tenant), flow_state=FlowState.MENU
@@ -1384,10 +1398,10 @@ def _menu_choice_multi(
     if _label_match(body, labels[1]):
         return _ask_attendee_first(ATTENDEE_NEXT_CATALOG, tenant, professionals)
     if _label_match(body, labels[2]):
-        return FlowRouterResult(action="delegate_llm", flow_state=FlowState.LLM)
+        return _delegate_llm_keeping_draft(conversation)
     if conversation.flow_state == FlowState.MENU:
         # Free text at the menu -> the patient wants something custom.
-        return FlowRouterResult(action="delegate_llm", flow_state=FlowState.LLM)
+        return _delegate_llm_keeping_draft(conversation)
     # IDLE/BUSINESS_HOURS: (re)present the effective menu.
     return FlowRouterResult(
         action="reply", bubbles=_menu_bubbles(tenant, professionals), flow_state=FlowState.MENU
@@ -2139,6 +2153,11 @@ def _tenant_insurances(tenant: Tenant) -> list[str]:
     return [str(plan["name"]) for plan in _tenant_insurance_plans(tenant)]
 
 
+def insurance_plan_names(tenant: Tenant) -> list[str]:
+    """Public read of the clinic's convênio names (LLM context, services/llm_context.py)."""
+    return _tenant_insurances(tenant)
+
+
 def _insurance_step_skip_reason(tenant: Tenant) -> str | None:
     """Why the convênio step must be skipped for this tenant, or None to ask.
 
@@ -2175,6 +2194,9 @@ def _match_insurance_plan(tenant: Tenant, body: str | None) -> str | None:
     plan = match_plan(_tenant_insurance_plans(tenant), body)
     return str(plan["name"]) if plan is not None else None
 
+
+
+match_insurance_plan = _match_insurance_plan
 
 def _enter_insurance(
     tenant: Tenant, conversation: Conversation | None = None
@@ -2305,8 +2327,9 @@ async def _handle_insurance(
 # options snapshot this router is holding, never the full agent. Its pick is
 # re-validated here through the same matchers a direct tap uses
 # (_match_professional/_match_service), so the hand-back re-enters the flow
-# exactly like a tap would; anything unresolvable escalates to a human
-# (action="handover") instead of looping. An LLM/network failure degrades to
+# exactly like a tap would; anything unresolvable hands to the LLM with the
+# booking draft intact (the agent decides whether a human is needed via
+# ai/tools.py::request_human_handoff). An LLM/network failure degrades to
 # the general agent (delegate_llm), same as any other unhandled turn.
 
 
@@ -2330,16 +2353,6 @@ def _enter_service_help(conversation: Conversation) -> FlowRouterResult:
         flow_step=STEP_SERVICE_HELP,
         flow_selected_professional_id=_selected_professional_id(conversation),
         flow_selected_insurance=_selected_insurance(conversation),
-    )
-
-
-def _scoped_help_escalate() -> FlowRouterResult:
-    """Bounded exit: fixed message + human handover, flow reset to IDLE."""
-    return FlowRouterResult(
-        action="handover",
-        bubbles=[TextBubble(body=SCOPED_HELP_ESCALATE_MESSAGE)],
-        flow_state=FlowState.IDLE,
-        flow_step=None,
     )
 
 
@@ -2373,7 +2386,7 @@ async def _handle_professional_help(
         # A pick that doesn't resolve against the real roster (hallucinated /
         # deactivated mid-exchange) must never be offered back to the patient.
         logger.warning("flow_professional_help_pick_unresolved")
-        return _scoped_help_escalate()
+        return _delegate_llm_keeping_draft(conversation)
     if outcome.kind == "clarify" and not final_round:
         return FlowRouterResult(
             action="reply",
@@ -2382,7 +2395,7 @@ async def _handle_professional_help(
             flow_step=STEP_PROFESSIONAL_HELP_FINAL,
             flow_selected_insurance=_selected_insurance(conversation),
         )
-    return _scoped_help_escalate()
+    return _delegate_llm_keeping_draft(conversation)
 
 
 async def _handle_service_help(
@@ -2411,7 +2424,7 @@ async def _handle_service_help(
         if service is not None:
             return _enter_service_detail(service, conversation, tenant)
         logger.warning("flow_service_help_pick_unresolved")
-        return _scoped_help_escalate()
+        return _delegate_llm_keeping_draft(conversation)
     if outcome.kind == "clarify" and not final_round:
         return FlowRouterResult(
             action="reply",
@@ -2421,7 +2434,7 @@ async def _handle_service_help(
             flow_selected_professional_id=_selected_professional_id(conversation),
             flow_selected_insurance=_selected_insurance(conversation),
         )
-    return _scoped_help_escalate()
+    return _delegate_llm_keeping_draft(conversation)
 
 
 async def _catalog_step(
@@ -2992,7 +3005,7 @@ async def _handle_day_step(
             conversation, tenant, services, professionals, _row_payload(body) or back_target
         )
     if step == branch.day_escape_step and _control_match(body, LABEL_OTHER):
-        return FlowRouterResult(action="delegate_llm", flow_state=FlowState.LLM)
+        return _delegate_llm_keeping_draft(conversation)
     if _control_match(body, LABEL_MORE_DAYS):
         return await enter_day_picker(
             conversation,
@@ -3417,7 +3430,13 @@ async def _handle_confirmation(
         # "commit" falls through to exactly the code that was here before.
 
     try:
-        event = await calendar.create_event(start=start, end=end, summary=summary)
+        event = await calendar.create_event(
+            start=start, end=end, summary=summary,
+            description=build_event_description(
+                service=canonical_type or service_type, insurance=insurance,
+                attendee_name=attendee_name,
+            ),
+        )
     except CalendarUnavailableError:
         return FlowRouterResult(
             action="calendar_unavailable",

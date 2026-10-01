@@ -99,6 +99,11 @@ class TenantRuntimeConfig:
     # ai/graph.py::run_agent, ai/prompts.py::_format_appointment_context) —
     # NEVER loaded from DB, unlike every other field above.
     appointment_context: str | None = None
+    # Per-turn "ESTADO DA CONVERSA" block, built by the worker
+    # (services/llm_context.py::build_conversation_state) and threaded in by
+    # run_agent's `conversation_state` parameter. NEVER loaded from DB, and
+    # NEVER carries patient/attendee names — only the history is pseudonymized.
+    conversation_state: str | None = None
 
 
 def _filter_active_types(appointment_types: list | None) -> list[dict]:

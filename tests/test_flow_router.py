@@ -25,7 +25,6 @@ from secretaria.services.flow_router import (  # noqa: E402
     LABEL_MANAGE_APPOINTMENT,
     LABEL_OTHER,
     LABEL_RESCHEDULE,
-    SCOPED_HELP_ESCALATE_MESSAGE,
     SERVICE_HELP_OPENER,
     STEP_AWAITING_ATTENDEE_CHOICE,
     STEP_AWAITING_CONFIRMATION,
@@ -1113,9 +1112,9 @@ async def test_service_help_pick_hands_back_to_service_detail(monkeypatch):
     assert captured["final_round"] is False
 
 
-async def test_service_help_pick_outside_catalog_escalates(monkeypatch):
+async def test_service_help_pick_outside_catalog_delegates(monkeypatch):
     """A pick that doesn't resolve against the real catalog is never offered
-    back to the patient - bounded escalation instead."""
+    back to the patient - delegate to the general agent instead."""
 
     async def _fake_help(**kwargs):
         return ScopedHelpOutcome(kind="pick", choice="Serviço Inventado")
@@ -1123,9 +1122,8 @@ async def test_service_help_pick_outside_catalog_escalates(monkeypatch):
     monkeypatch.setattr(flow_router, "run_service_help", _fake_help)
     conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_SERVICE_HELP)
     res = await route(conv, _tenant(), None, "qualquer coisa")
-    assert res.action == "handover"
-    assert res.flow_state == FlowState.IDLE
-    assert res.bubbles[0].body == SCOPED_HELP_ESCALATE_MESSAGE
+    assert res.action == "delegate_llm"
+    assert res.flow_state == FlowState.LLM
 
 
 async def test_service_help_clarify_asks_once_then_final_step(monkeypatch):
@@ -1140,9 +1138,9 @@ async def test_service_help_clarify_asks_once_then_final_step(monkeypatch):
     assert res.bubbles[0].body == "É a sua primeira vez na clínica?"
 
 
-async def test_service_help_clarify_on_final_round_escalates(monkeypatch):
+async def test_service_help_clarify_on_final_round_delegates(monkeypatch):
     """The 1-2 exchange bound lives in the router: even if the node asks for
-    another clarification on the final step, the flow escalates."""
+    another clarification on the final step, the flow delegates to the LLM."""
     captured = {}
 
     async def _fake_help(**kwargs):
@@ -1153,19 +1151,18 @@ async def test_service_help_clarify_on_final_round_escalates(monkeypatch):
     conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_SERVICE_HELP_FINAL)
     res = await route(conv, _tenant(), None, "continuo sem saber")
     assert captured["final_round"] is True
-    assert res.action == "handover"
-    assert res.bubbles[0].body == SCOPED_HELP_ESCALATE_MESSAGE
+    assert res.action == "delegate_llm"
 
 
-async def test_service_help_escalate_hands_over(monkeypatch):
+async def test_service_help_escalate_delegates_to_llm(monkeypatch):
     async def _fake_help(**kwargs):
         return ScopedHelpOutcome(kind="escalate")
 
     monkeypatch.setattr(flow_router, "run_service_help", _fake_help)
     conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_SERVICE_HELP)
     res = await route(conv, _tenant(), None, "quero falar de outra coisa")
-    assert res.action == "handover"
-    assert res.flow_state == FlowState.IDLE
+    assert res.action == "delegate_llm"
+    assert res.flow_state == FlowState.LLM
     assert res.flow_step is None
 
 

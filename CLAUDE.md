@@ -133,6 +133,8 @@ neither" do `README.md`.
 
 ## Documentação
 
+`docs/CHECKPOINT_mvp_portal.md` — TASK-021: contexto/rascunho da LLM, handoff e notificações; não deployado; validação e pendências registradas.
+
 `docs/` é a fonte de verdade deste repo (exemplo do padrão: `docs/CHECKPOINT_plugins.md`). Regra
 geral de quando/como atualizar (CHECKPOINT, âncoras estáveis) em `AI_WORKFLOW.md` — aqui só o que
 diverge, se houver.

@@ -11,6 +11,7 @@ concurrently without interference.
 
 import asyncio
 import hashlib
+import json
 import re
 import ssl
 from collections.abc import Sequence
@@ -33,7 +34,9 @@ from secretaria.ai.pii import (
 )
 from secretaria.ai.prompts import secretary_system_prompt
 from secretaria.ai.tools import (
+    BookingDraftRequested,
     GuidedBookingRequested,
+    HumanHandoffRequested,
     ManageAppointmentRequested,
     SelectProfessionalRequested,
     ShowMainMenuRequested,
@@ -107,6 +110,15 @@ MANAGE_APPOINTMENT_SENTINEL_PREFIX = "__MANAGE_APPOINTMENT__:"
 # mechanism as the others; unlike them it is an OPTIONAL hand-back the model
 # offers, not a request it is obliged to make.
 START_GUIDED_BOOKING_SENTINEL_PREFIX = "__START_GUIDED_BOOKING__:"
+
+# Prefix returned when the agent called set_booking_draft; a compact JSON
+# {"t": service|None, "p": professional_id|None, "i": convênio|None} rides after
+# the colon and workers/tasks.py::_handle_set_booking_draft re-enters the
+# button flow at the first step still missing. Same exception->sentinel
+# mechanism as the others; none of the three values is patient PII.
+HUMAN_HANDOFF_SENTINEL_PREFIX = "__HUMAN_HANDOFF__:"
+BOOKING_DRAFT_SENTINEL_PREFIX = "__BOOKING_DRAFT__:"
+
 
 # Per-async-task TenantRuntimeConfig, used by _prompt_with_today. Defined in
 # ai/tools.py (imported above as `_tenant_config_ctx`) rather than here, so a
@@ -439,9 +451,11 @@ async def run_agent(
     include_post_consult_knowledge: bool = False,
     appointment_context: str | None = None,
     booking_topology: str = BOOKING_TOPOLOGY_UNKNOWN,
+    conversation_state: str | None = None,
 ) -> str:
     """arq-side entry point: build history + run agent + return reply text.
 
+    `conversation_state` is turn-scoped, see services/llm_context.py.
     `tenant_config` provides per-tenant Calendar credentials and prompt data.
     When None, falls back to the single-tenant env-var scaffold (Fase A / dev).
     `extra_tools` are plugin-contributed LangChain tools for THIS tenant's
@@ -489,6 +503,8 @@ async def run_agent(
         # docstring above): only a qualifying turn (see
         # _should_inject_appointment_context) ever passes a value here.
         tenant_config = replace(tenant_config, appointment_context=appointment_context)
+    if tenant_config is not None and conversation_state is not None:
+        tenant_config = replace(tenant_config, conversation_state=conversation_state)
 
     # Build a per-tenant CalendarService and inject it via ContextVar so the
     # cached process-wide agent uses the right credentials for this call.
@@ -550,6 +566,14 @@ async def run_agent(
             conversation_id=str(conversation_id),
         )
         return CALENDAR_UNAVAILABLE_SENTINEL
+    except HumanHandoffRequested as exc:
+        logger.info(
+            "ai_run_agent_human_handoff",
+            conversation_id=str(conversation_id),
+            reason=exc.reason,
+        )
+        return f"{HUMAN_HANDOFF_SENTINEL_PREFIX}{exc.reason}"
+
     except ShowMainMenuRequested:
         # The agent chose to hand the patient back to the button menu — same
         # propagation path as CalendarUnavailableError above.
@@ -572,6 +596,21 @@ async def run_agent(
             action=exc.action,
         )
         return f"{MANAGE_APPOINTMENT_SENTINEL_PREFIX}{exc.action}"
+    except BookingDraftRequested as exc:
+        logger.info(
+            "ai_run_agent_set_booking_draft",
+            conversation_id=str(conversation_id),
+            has_type=exc.appointment_type is not None,
+            has_professional=exc.professional_id is not None,
+            has_insurance=exc.insurance is not None,
+        )
+        return BOOKING_DRAFT_SENTINEL_PREFIX + json.dumps(
+            {
+                "t": exc.appointment_type,
+                "p": str(exc.professional_id) if exc.professional_id else None,
+                "i": exc.insurance,
+            }
+        )
     except GuidedBookingRequested as exc:
         # The agent chose to hand the BOOKING itself to the button flow —
         # same propagation path as the sentinels above. The service name is

@@ -33,6 +33,8 @@ from sqlalchemy import select
 from secretaria.ai.tools import (
     _blocked_tenant_level,
     _canonical_appointment_type,
+    _conversation_attendee_name,
+    _conversation_insurance,
     _get_calendar,
     _localize_window,
     _match_by_name,
@@ -42,7 +44,7 @@ from secretaria.ai.tools import (
 from secretaria.core.logging import get_logger
 from secretaria.plugins.base import PluginSpec
 from secretaria.plugins.registry import register
-from secretaria.services.calendar import build_patient_calendar_link
+from secretaria.services.calendar import build_event_description, build_patient_calendar_link
 
 logger = get_logger(__name__)
 
@@ -146,6 +148,14 @@ async def create_event_at_unit(
 
     cal = _get_calendar()
     fallback_start, fallback_end = _localize_window(start, end, cal)
+    attendee_name = await _conversation_attendee_name()
+    insurance = await _conversation_insurance()
+    auto_description = build_event_description(
+        service=canonical_type, insurance=insurance, attendee_name=attendee_name
+    )
+    description = (
+        f"{auto_description}\n\n{description}".strip() if description else auto_description
+    )
     event = await cal.create_event(
         start=fallback_start,
         end=fallback_end,

@@ -29,7 +29,11 @@ from secretaria.services.booking_scope import (
     canonical_service_name,
     service_names,
 )
-from secretaria.services.calendar import CalendarService, build_patient_calendar_link
+from secretaria.services.calendar import (
+    CalendarService,
+    build_event_description,
+    build_patient_calendar_link,
+)
 from secretaria.services.precheck import HandoffOutcome, request_precheck_handoff
 
 if TYPE_CHECKING:
@@ -149,6 +153,28 @@ class GuidedBookingRequested(Exception):
     def __init__(self, appointment_type: str | None) -> None:
         super().__init__("start guided booking")
         self.appointment_type = appointment_type
+
+
+class BookingDraftRequested(Exception):
+    """Raised by `set_booking_draft`: the agent resolved what the patient wants.
+
+    Same exception->sentinel mechanism as `GuidedBookingRequested`, but it may
+    also carry the doctor (multi-doctor clinics) and the convênio the patient
+    already named. graph.run_agent maps it to BOOKING_DRAFT_SENTINEL_PREFIX;
+    workers/tasks.py::_handle_set_booking_draft re-enters the button flow at the
+    first step still missing. The LLM never writes `flow_selected_*` itself.
+    """
+
+    def __init__(
+        self,
+        appointment_type: str | None,
+        professional_id: UUID | None,
+        insurance: str | None,
+    ) -> None:
+        super().__init__("set booking draft")
+        self.appointment_type = appointment_type
+        self.professional_id = professional_id
+        self.insurance = insurance
 
 
 class SelectProfessionalRequested(Exception):
@@ -719,6 +745,23 @@ async def _conversation_attendee_name() -> str | None:
         return None
 
 
+async def _conversation_insurance() -> str | None:
+    """Read the current conversation's selected insurance, best effort."""
+    conversation_id = _conversation_id_ctx.get()
+    if conversation_id is None or _tenant_id_ctx.get() is None:
+        return None
+    from secretaria.core.database import async_session_factory
+    from secretaria.models import Conversation
+
+    try:
+        async with async_session_factory() as session:
+            conversation = await session.get(Conversation, conversation_id)
+            return conversation.flow_selected_insurance if conversation is not None else None
+    except Exception as exc:
+        logger.warning("tool_insurance_lookup_failed", error_type=type(exc).__name__)
+        return None
+
+
 @tool
 async def create_event(
     start: str,
@@ -765,6 +808,13 @@ async def create_event(
     attendee_name = await _conversation_attendee_name()
     if attendee_name:
         summary = f"{canonical_type or 'Consulta'} - {attendee_name}"
+    insurance = await _conversation_insurance()
+    auto_description = build_event_description(
+        service=canonical_type, insurance=insurance, attendee_name=attendee_name
+    )
+    description = (
+        f"{auto_description}\n\n{description}".strip() if description else auto_description
+    )
     event = await cal.create_event(
         start=fallback_start,
         end=fallback_end,
@@ -1044,3 +1094,113 @@ async def iniciar_pre_consulta() -> str:
     if result.outcome is HandoffOutcome.CONFLICT:
         return _PRECHECK_CONFLICT_TEXT
     return _PRECHECK_TEMPORARY_FAILURE_TEXT
+
+
+@tool
+async def set_booking_draft(service: str = "", professional: str = "", insurance: str = "") -> dict:
+    """Registra o que o paciente já disse (serviço, profissional, convênio) e entrega
+    o agendamento ao fluxo guiado, que PULA as etapas já respondidas e abre a próxima
+    que falta (convênio, dia ou horário). Use quando já dá para saber o serviço e/ou o
+    médico pelo que o paciente descreveu — não precisa repetir as perguntas.
+
+    Args:
+        service: Nome EXATO de um serviço da clínica (ou vazio, se só o médico é
+            conhecido numa clínica com vários profissionais).
+        professional: Nome do profissional, quando o paciente já escolheu um (ou vazio).
+        insurance: Convênio que o paciente citou, se citou (ou vazio).
+    """
+    tenant_id = _tenant_id_ctx.get()
+    if tenant_id is None:
+        return {"error": "Nenhuma clínica configurada para esta conversa."}
+    service = (service or "").strip()
+    professional = (professional or "").strip()
+    insurance = (insurance or "").strip()
+
+    professional_id: UUID | None = None
+    catalog = _effective_service_catalog()
+    if _booking_topology_ctx.get() == BOOKING_TOPOLOGY_MULTI:
+        # Lazy: plugins import this module, so the reverse import must not be top-level.
+        from secretaria.plugins.multi_professional import (
+            _active_professionals,
+            _professional_services,
+            _unknown_professional_error,
+        )
+
+        professionals = await _active_professionals(tenant_id)
+        chosen = None
+        if professional:
+            matches = [
+                p for p in professionals
+                if p.name.strip().casefold() == professional.casefold()
+            ]
+            if len(matches) > 1:
+                return {
+                    "error": "Mais de um profissional tem esse nome. Peça uma escolha inequívoca."
+                }
+            chosen = _match_by_name(professionals, professional)
+            if chosen is None:
+                return _unknown_professional_error(professional, professionals)
+        elif service:
+            offering = []
+            for candidate in professionals:
+                offered = await _professional_services(tenant_id, candidate)
+                if canonical_service_name(offered, service) is not None:
+                    offering.append(candidate)
+            if not offering:
+                return {"error": f"Nenhum profissional da clínica oferece '{service}'."}
+            if len(offering) > 1:
+                names = ", ".join(p.name for p in offering)
+                return {
+                    "error": (
+                        f"Mais de um profissional atende '{service}': {names}. "
+                        "Pergunte com quem o paciente prefere e chame de novo."
+                    )
+                }
+            chosen = offering[0]
+        else:
+            return {"error": "Informe ao menos o serviço ou o profissional."}
+        professional_id = chosen.id
+        catalog = await _professional_services(tenant_id, chosen)
+    elif not service:
+        return {"error": "Informe o serviço (nome exato de um dos serviços da clínica)."}
+
+    canonical_type: str | None = None
+    if service:
+        canonical_type, error = _canonical_appointment_type(service, "set_booking_draft", catalog)
+        if error is not None:
+            return error
+    raise BookingDraftRequested(canonical_type, professional_id, insurance or None)
+
+
+HANDOFF_REASONS = ("patient_requested_human", "clinical_sensitive", "could_not_help")
+
+
+class HumanHandoffRequested(Exception):
+    """Raised by `request_human_handoff`: the agent asks for a person.
+
+    Same exception->sentinel mechanism as the other hand-backs. Carries only a
+    reason CODE (an enum) — never patient text — so nothing sensitive can ride
+    into the operational e-mail that follows.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"human handoff: {reason}")
+        self.reason = reason
+
+
+@tool
+async def request_human_handoff(reason: str) -> dict:
+    """ÚLTIMO RECURSO: passa a conversa para uma pessoa da equipe. Use SOMENTE quando
+    o paciente pediu explicitamente para falar com uma pessoa, quando o assunto exige
+    avaliação humana, ou depois de você ter tentado ajudar de verdade e não conseguir.
+    NUNCA por uma dúvida comum sobre a clínica, serviços, horários ou convênios.
+
+    Args:
+        reason: Exatamente um de: "patient_requested_human" (o paciente pediu uma
+            pessoa), "clinical_sensitive" (assunto que exige avaliação humana),
+            "could_not_help" (você tentou e não conseguiu resolver).
+    """
+    normalized = (reason or "").strip()
+    if normalized not in HANDOFF_REASONS:
+        return {"error": f"Motivo inválido. Use um de: {', '.join(HANDOFF_REASONS)}."}
+    raise HumanHandoffRequested(normalized)

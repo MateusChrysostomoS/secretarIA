@@ -14,6 +14,8 @@ convênio adicionada — faltava por completo). Este arquivo descreve o estado r
 data da última correção — releia antes de confiar nele para decisões novas, porque cada rodada de
 trabalho muda esse mapa.
 
+Atualização pontual em 2026-09-30 (TASK-021): os blocos abaixo estão **construídos, não no ar**; não houve deploy nem prova ao vivo desta rodada.
+
 ---
 
 ## 1. Primeiro contato
@@ -79,11 +81,17 @@ e-mail ao profissional usam o nome de quem vai ser atendido. Só o nome é pedid
 telefone ou data de nascimento do terceiro). Pelo chat livre a secretarIA não marca consulta para
 outra pessoa: ela devolve ao menu para passar por essa pergunta.
 
+### “Outro” e “Não sei” (construído, não no ar — MVP Portal, 2026-09-30)
+Ao tocar “Outro” ou não saber qual profissional/serviço escolher, a conversa livre recebe o contexto e preserva as escolhas já feitas. Orienta dentro dos serviços reais e devolve escolhas ao agendamento, que continua conferindo cada etapa. O toque isolado em “Outro” pede que a pessoa explique o que precisa; perguntas comuns não pedem transferência automaticamente. Pedido explícito de pessoa permite atendimento humano com aviso à clínica. O add-on de atendimento humano do WhatsApp mantém seu comportamento existente.
+
+### Evento e confirmação no Portal (construído, não no ar — 2026-09-30)
+A consulta cria evento com serviço, convênio e, quando autorizado, quem será atendido. A agenda da clínica recebe lembretes; no Portal, paciente com e-mail disponível recebe confirmação e convite para sua própria agenda. Falha de envio ou convite não cancela a consulta. Confirmação operacional à clínica identifica o agendamento sem expor dados pessoais do paciente.
+
 ### Convênio (no ar, quando a clínica ativa — mesma lógica nos dois canais)
 > **Mudando (TASK-006, construído, NÃO deployado):** o convênio passa a ser a PRIMEIRA pergunta
 > depois de "pra quem", antes do profissional; a lista de profissionais mostra todos e marca
 > "✅ Aceita seu convênio" nos que aceitam o plano escolhido; os planos vêm de um catálogo global.
-> Ver `docs/CHECKPOINT_convenio_catalogo.md`. O texto abaixo descreve o que está no ar hoje.
+> Ver `docs/CHECKPOINT_convenio_catalogo.md`. No MVP Portal (TASK-021), contexto e evento também carregam o convênio escolhido: **construído, não no ar**, sem verificação nova de elegibilidade. O texto abaixo descreve o que está no ar hoje.
 
 Depois de confirmar o serviço, se a clínica ligou "perguntar convênio" e cadastrou pelo menos um
 plano aceito, a secretarIA pergunta "Você vai usar convênio?" com uma lista: os planos da clínica

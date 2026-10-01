@@ -210,6 +210,29 @@ def _format_appointment_context(config: TenantRuntimeConfig) -> str:
     )
 
 
+def _format_conversation_state(config: TenantRuntimeConfig) -> str:
+    """Render the "ESTADO DA CONVERSA" block, or "" when this turn has none."""
+    if not config.conversation_state:
+        return ""
+    return (
+        "\n\n================ ESTADO DA CONVERSA (carregado agora) ================\n"
+        "Confie nestes dados, não no que a conversa tenha dito antes:\n"
+        f"{config.conversation_state}\n\n"
+        "COMO USAR:\n"
+        "- Primeiro ENTENDA o que o paciente disse: responda dúvidas sobre a clínica, "
+        "ou relacione o que ele descreveu (sintoma, necessidade, exame) aos serviços e "
+        "médicos listados acima.\n"
+        "- Se ele só tocou no botão e ainda não disse nada útil, pergunte de forma "
+        "aberta, em UMA frase e sem menu: \"O que te traz à clínica?\".\n"
+        "- Se já dá para saber o serviço e/ou o médico, chame set_booking_draft com o "
+        "que você sabe: ele pula as etapas já respondidas e abre a próxima que falta. "
+        "Não repita perguntas cujas respostas estão acima.\n"
+        "- Chamar a equipe humana (request_human_handoff) é ÚLTIMO RECURSO: só quando o "
+        "paciente pede explicitamente uma pessoa, quando o assunto exige avaliação "
+        "humana, ou depois de você tentar ajudar de verdade. Nunca por dúvida comum."
+    )
+
+
 def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
     """Render the full system prompt for a specific tenant."""
     today = date.today().isoformat()
@@ -230,12 +253,13 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
     professional_section = _format_professional_context(config)
     post_consult_section = _format_post_consult_knowledge(config)
     appointment_context_section = _format_appointment_context(config)
+    conversation_state_section = _format_conversation_state(config)
 
     return (
         f"Você é a secretária virtual da {clinic}. Sua função é acolher pacientes "
         f"no WhatsApp e agendar, remarcar ou cancelar consultas no Google Calendar da clínica."
         f"{safety_section}{professional_section}{post_consult_section}"
-        f"{appointment_context_section}\n\n"
+        f"{appointment_context_section}{conversation_state_section}\n\n"
         "CONTEXTO OPERACIONAL:\n"
         f"- Hoje é {today} (timezone {tz}).\n"
         f"- Horário de atendimento:\n{hours_text}\n"

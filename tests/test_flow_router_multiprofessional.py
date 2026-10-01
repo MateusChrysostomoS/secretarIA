@@ -37,7 +37,6 @@ from secretaria.services.flow_router import (  # noqa: E402
     LABEL_MANAGE_APPOINTMENT,
     LABEL_RESCHEDULE,
     PROFESSIONAL_HELP_OPENER,
-    SCOPED_HELP_ESCALATE_MESSAGE,
     STEP_AWAITING_ATTENDEE_CHOICE,
     STEP_AWAITING_CONFIRMATION,
     STEP_AWAITING_DAY,
@@ -907,21 +906,20 @@ async def test_professional_help_pick_hands_back_to_doctor_greeting_and_services
     assert captured["final_round"] is False
 
 
-async def test_professional_help_pick_outside_roster_escalates(monkeypatch):
+async def test_professional_help_pick_outside_roster_delegates(monkeypatch):
     async def _fake_help(**kwargs):
         return ScopedHelpOutcome(kind="pick", choice="Dr. Inventado")
 
     monkeypatch.setattr(flow_router, "run_professional_help", _fake_help)
     conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_PROFESSIONAL_HELP)
     res = await route(conv, _tenant(), None, "sei lá", professionals=_professionals())
-    assert res.action == "handover"
-    assert res.flow_state == FlowState.IDLE
-    assert res.bubbles[0].body == SCOPED_HELP_ESCALATE_MESSAGE
+    assert res.action == "delegate_llm"
+    assert res.flow_state == FlowState.LLM
 
 
-async def test_professional_help_clarify_then_final_then_escalates(monkeypatch):
+async def test_professional_help_clarify_then_final_then_delegates(monkeypatch):
     """Round 1 clarify goes out and arms the FINAL step; a clarify on the
-    final step escalates - the bound is the router's, not the model's."""
+    final step delegates to the LLM - the bound is the router's, not the model's."""
     outcomes = iter(
         [
             ScopedHelpOutcome(kind="clarify", question="É dor no peito ou nas costas?"),
@@ -947,8 +945,8 @@ async def test_professional_help_clarify_then_final_then_escalates(monkeypatch):
         flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_PROFESSIONAL_HELP_FINAL
     )
     res2 = await route(conv2, _tenant(), None, "não sei dizer", professionals=profs)
-    assert res2.action == "handover"
-    assert res2.bubbles[0].body == SCOPED_HELP_ESCALATE_MESSAGE
+    assert res2.action == "delegate_llm"
+    assert res2.flow_state == FlowState.LLM
     assert seen_final_rounds == [False, True]
 
 

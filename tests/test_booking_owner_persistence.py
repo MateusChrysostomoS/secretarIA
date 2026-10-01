@@ -488,6 +488,8 @@ async def test_base_create_event_returns_both_links_and_they_are_different(db):
 
 
 async def test_base_create_event_passes_the_description_into_the_patient_link(db):
+    from urllib.parse import parse_qs, urlparse
+
     clinic = await _seed_sole_professional_clinic(db)
     config = await _tenant_runtime_config(db, clinic.tenant)
     with _agent_context(
@@ -505,7 +507,13 @@ async def test_base_create_event_passes_the_description_into_the_patient_link(db
                 "appointment_type": _SERVICE,
             }
         )
-    assert "details=Trazer%20exames" in result["patient_calendar_link"]
+    details = parse_qs(urlparse(result["patient_calendar_link"]).query)["details"][0]
+    assert details.splitlines() == [
+        f"Servi\u00e7o: {_SERVICE}",
+        "Conv\u00eanio: n\u00e3o informado",
+        "",
+        "Trazer exames",
+    ]
 
 
 async def test_base_create_event_derives_the_type_when_the_catalog_is_unambiguous(db):

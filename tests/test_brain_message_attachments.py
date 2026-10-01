@@ -1162,3 +1162,30 @@ async def test_a_failed_staff_commit_removes_the_uploaded_file(
     assert api.storage.objects == {}
     assert len(api.storage.deleted) == 1
     assert await _rows(db, conversation.id) == []
+
+
+async def test_staff_file_notifies_only_on_first_human_transition(api, db, monkeypatch):
+    from secretaria.services import handoff_notification as hn
+    from secretaria.services.email import EmailOutcome
+    tenant = await _seed_tenant(db)
+    tenant.contact_email = "clinic@example.com"
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.contact_email = tenant.contact_email
+        await session.commit()
+    api.acting["tenant"] = tenant
+    _, conv = await _seed_patient(db, tenant)
+    sent = []
+    async def send(to, template, variables):
+        async with db() as session:
+            row = await session.get(Conversation, conv.id)
+            assert row.handover_state == HandoverState.HUMAN_ACTIVE
+        sent.append(template)
+        return EmailOutcome.SENT
+    monkeypatch.setattr(hn, "async_session_factory", db)
+    monkeypatch.setattr(hn, "send_transactional_email_result", send)
+    for _ in range(2):
+        response = await _staff_send(api, conv.id,
+            files={"file": ("private.pdf", _pdf(), "application/pdf")})
+        assert response.status_code == 200
+    assert sent == ["human_handoff_alert"]

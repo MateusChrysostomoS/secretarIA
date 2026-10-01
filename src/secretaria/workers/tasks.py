@@ -4,6 +4,7 @@ This code runs OUTSIDE the HTTP request/response cycle, so it may safely do
 database writes, handover logic and outbound Cloud API calls.
 """
 
+import json
 import math
 import re
 from dataclasses import dataclass, field
@@ -36,14 +37,21 @@ from secretaria.ai.formatter import (
     parse,
 )
 from secretaria.ai.graph import (
+    BOOKING_DRAFT_SENTINEL_PREFIX,
     CALENDAR_UNAVAILABLE_SENTINEL,
+    HUMAN_HANDOFF_SENTINEL_PREFIX,
     MANAGE_APPOINTMENT_SENTINEL_PREFIX,
     SELECT_PROFESSIONAL_SENTINEL_PREFIX,
     SHOW_MAIN_MENU_SENTINEL,
     START_GUIDED_BOOKING_SENTINEL_PREFIX,
     run_agent,
 )
-from secretaria.ai.tools import manage_existing_appointment, start_guided_booking
+from secretaria.ai.tools import (
+    manage_existing_appointment,
+    request_human_handoff,
+    set_booking_draft,
+    start_guided_booking,
+)
 from secretaria.config import get_settings
 from secretaria.core.attachments import attachment_body
 from secretaria.core.database import async_session_factory
@@ -112,12 +120,14 @@ from secretaria.services.booking_hold import (
 from secretaria.services.booking_scope import (
     BOOKING_TOPOLOGY_MULTI,
     booking_topology,
+    canonical_service_name,
     sole_active_professional,
 )
 from secretaria.services.brain_professionals import fetch_professional_emails
 from secretaria.services.calendar import (
     CalendarService,
     CalendarUnavailableError,
+    build_event_description,
     build_patient_calendar_link,
 )
 from secretaria.services.channel_sender import (
@@ -141,6 +151,7 @@ from secretaria.services.flow_router import (
     LABEL_MANAGE_APPOINTMENT,
     LABEL_OTHER,
     LABEL_RESCHEDULE,
+    SCOPED_HELP_ESCALATE_MESSAGE,
     STEP_AWAITING_ATTENDEE_AUTH,
     STEP_MANAGE_CANCEL_CONFIRM,
     STEP_MANAGE_DAY,
@@ -158,6 +169,7 @@ from secretaria.services.flow_router import (
     flows_enabled,
     llm_state_ttl_minutes,
     manage_label,
+    match_insurance_plan,
     menu_buttons_for,
     menu_label,
     pending_identity_ttl_minutes,
@@ -179,12 +191,14 @@ from secretaria.services.greeting_template import (
     clinic_description_budget,
     render_greeting,
 )
+from secretaria.services.handoff_notification import activate_human_handoff, notify_human_handoff
 from secretaria.services.handover import HandoverManager
 from secretaria.services.insurance_catalog import (
     TenantInsurance,
     load_tenant_insurance,
     resolve_booking_plan_ids,
 )
+from secretaria.services.llm_context import build_conversation_state
 from secretaria.services.message_status import apply_whatsapp_statuses
 from secretaria.services.patient_context import (
     PatientOpeningContext,
@@ -3588,6 +3602,17 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     # hand-back tools the agent may be offered (_flow_handback_tools).
     turn_topology = booking_topology(professional_rows)
 
+    conversation_state_text = build_conversation_state(
+        flow_snapshot[0] if flow_snapshot is not None else None,
+        flow_snapshot[1] if flow_snapshot is not None else None,
+        flow_professionals,
+    )
+    logger.info(
+        "llm_conversation_state_built",
+        conversation_id=str(reply.conversation_id),
+        has_state=conversation_state_text is not None,
+    )
+
     reply_text = await run_agent(
         reply.inbound_body,
         context={"conversation_id": str(reply.conversation_id)},
@@ -3613,6 +3638,7 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
             delegated_to_llm,
         ),
         appointment_context=appointment_context_text,
+        conversation_state=conversation_state_text,
     )
 
     # The model may not announce an action no tool performed. Applied HERE -
@@ -3668,6 +3694,30 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
             waba_token=waba_token,
         )
         return
+    if reply_text.startswith(HUMAN_HANDOFF_SENTINEL_PREFIX):
+        await _handle_human_handoff(
+            reply,
+            reply_text[len(HUMAN_HANDOFF_SENTINEL_PREFIX) :],
+            tenant,
+            flow_snapshot,
+            redis=redis,
+            waba_token=waba_token,
+        )
+        return
+
+    if reply_text.startswith(BOOKING_DRAFT_SENTINEL_PREFIX):
+        await _handle_set_booking_draft(
+            reply,
+            reply_text,
+            tenant,
+            flow_snapshot,
+            flow_professionals,
+            patient_wa,
+            redis=redis,
+            waba_token=waba_token,
+        )
+        return
+
     if reply_text.startswith(START_GUIDED_BOOKING_SENTINEL_PREFIX):
         await _handle_start_guided_booking(
             reply,
@@ -3852,7 +3902,10 @@ def _label_match_body(body: str | None, label: str) -> bool:
 def _flow_handback_tools(tenant: Tenant | None, topology: str, plugin_tools: list) -> list:
     """This turn's `extra_tools`: the plugin set + the flow hand-back tools.
 
-    Both hand-backs re-enter the deterministic flow through a sentinel, so
+    `set_booking_draft` is offered on EVERY topology: it resolves the doctor itself
+    on a multi-doctor clinic.
+
+    All hand-backs re-enter the deterministic flow through a sentinel, so
     neither means anything to a tenant that has no such flow — hence the
     `flows_enabled` gate they have always shared (unconditional since the flows
     became the product, kept because it is the file's pattern and the switch
@@ -3869,7 +3922,7 @@ def _flow_handback_tools(tenant: Tenant | None, topology: str, plugin_tools: lis
     """
     if tenant is None or not flows_enabled(tenant):
         return list(plugin_tools)
-    handbacks = [manage_existing_appointment]
+    handbacks = [manage_existing_appointment, set_booking_draft, request_human_handoff]
     if topology != BOOKING_TOPOLOGY_MULTI:
         handbacks.append(start_guided_booking)
     return [*plugin_tools, *handbacks]
@@ -5029,8 +5082,8 @@ async def _apply_flow_result(
         return True
     # A scoped-help node escalated: flip to human handover FIRST (mirroring
     # _handle_calendar_unavailable's order - if the send below fails, the
-    # human is already on it), then tell the patient. No owner email alert:
-    # nothing is broken, the secretary sees the chat in their WhatsApp app.
+    # human is already on it), then tell the patient. The setter sends the
+    # operational handoff alert after committing the transition.
     if result.action == "handover":
         await _set_conversation_human_active(reply.conversation_id)
         if result.bubbles:
@@ -5398,6 +5451,8 @@ def _is_agent_sentinel(reply_text: str) -> bool:
     return reply_text in (CALENDAR_UNAVAILABLE_SENTINEL, SHOW_MAIN_MENU_SENTINEL) or (
         reply_text.startswith(SELECT_PROFESSIONAL_SENTINEL_PREFIX)
         or reply_text.startswith(MANAGE_APPOINTMENT_SENTINEL_PREFIX)
+        or reply_text.startswith(HUMAN_HANDOFF_SENTINEL_PREFIX)
+        or reply_text.startswith(BOOKING_DRAFT_SENTINEL_PREFIX)
     )
 
 
@@ -5533,7 +5588,13 @@ async def _promote_booking_hold(
     event_name = held.attendee_name or await _patient_display_name(patient_id)
     summary = f"{service_type} - {event_name}" if event_name else service_type
     try:
-        event = await calendar.create_event(start=held.start_at, end=held.end_at, summary=summary)
+        event = await calendar.create_event(
+            start=held.start_at, end=held.end_at, summary=summary,
+            description=build_event_description(
+                service=service_type, insurance=held.insurance,
+                channel=reply.channel, attendee_name=held.attendee_name,
+            ),
+        )
     except CalendarUnavailableError:
         logger.error(
             "booking_hold_promote_calendar_unavailable",
@@ -5576,7 +5637,7 @@ async def _promote_booking_hold(
         # confirmed, hand it to a human to reconcile.
         logger.error(
             "booking_hold_promote_persist_failed",
-            error=str(exc),
+            error_type=type(exc).__name__,
             conversation_id=str(reply.conversation_id),
             tenant_id=str(tenant.id),
         )
@@ -6326,28 +6387,69 @@ async def _send_simple_text(to: str, body: str, *, client: WhatsAppClient) -> No
         )
 
 
-async def _set_conversation_human_active(conversation_id: UUID | None) -> None:
-    """Flip one conversation to human handover, in its own short transaction.
+async def _handle_human_handoff(
+    reply: _ReplyContext,
+    reason: str,
+    tenant: Tenant | None,
+    flow_snapshot: tuple[SimpleNamespace, SimpleNamespace] | None,
+    redis=None,
+    waba_token: str | None = None,
+) -> None:
+    """Commit human ownership, notify staff, then confirm the handoff to the patient.
 
-    The `_apply_flow_result` "handover" branch's seam (scoped-help
-    escalation). Same defensive shape as `_handle_calendar_unavailable`'s
-    handover block, minus the owner alert - a failure is logged, never
-    raised, so the escalation message still goes out.
+    Same order as `_handle_calendar_unavailable` (if a later step fails, a human
+    is already on it). The mail is best-effort: `notify_human_handoff` never
+    raises and logs its own alarm.
     """
+    await _set_conversation_human_active(reply.conversation_id, reason=reason)
+    await _dispatch_bubbles(
+        reply, [TextBubble(body=SCOPED_HELP_ESCALATE_MESSAGE)], tenant=tenant, waba_token=waba_token
+    )
+
+
+async def _set_conversation_human_active(
+    conversation_id: UUID | None, *, reason: str = "could_not_help"
+) -> bool:
+    """Commit human ownership before notifying. State failure is explicit to callers."""
     if conversation_id is None:
-        return
+        raise RuntimeError("handoff_state_not_committed")
     try:
         async with async_session_factory() as session:
             async with session.begin():
                 conversation = await session.get(Conversation, conversation_id)
-                if conversation is not None:
-                    await HandoverManager(session).set_human_active(conversation)
+                if conversation is None:
+                    raise RuntimeError("handoff_conversation_missing")
+                occurrence_id = await activate_human_handoff(
+                    session, conversation, manager=HandoverManager(session)
+                )
+                if occurrence_id is None:
+                    occurrence_id = await session.scalar(
+                        select(ProcessedEvent.id).where(
+                            ProcessedEvent.event_id == f"humanhandoff-active:{conversation_id}"
+                        )
+                    )
+                tenant = await session.get(Tenant, conversation.tenant_id)
+                professional_id = conversation.flow_selected_professional_id
     except Exception as exc:
         logger.error(
-            "worker_scoped_help_handover_failed",
-            error=str(exc),
+            "worker_handoff_state_failed", error_type=type(exc).__name__,
             conversation_id=str(conversation_id),
         )
+        raise RuntimeError("handoff_state_not_committed") from None
+    if occurrence_id is not None and tenant is not None:
+        try:
+            await notify_human_handoff(
+                tenant=tenant, conversation_id=conversation_id,
+                professional_id=professional_id, reason=reason,
+                occurrence_id=occurrence_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "human_handoff_notification_undelivered",
+                alarm="human_handoff_notification_undelivered",
+                conversation_id=str(conversation_id), error_type=type(exc).__name__,
+            )
+    return True
 
 
 async def _handle_calendar_unavailable(
@@ -6360,26 +6462,16 @@ async def _handle_calendar_unavailable(
 
     `tenant`/`waba_token` (already loaded by the caller, if any) select the
     per-tenant WhatsApp client for the patient-facing message below. The
-    clinic-owner alert further down always re-fetches its own tenant row
-    (inside the same transaction as the handover-state update) so it sees the
-    freshest `contact_email`, independent of what the caller passed in.
+    clinic-owner calendar alert re-fetches its own tenant row after the
+    handover commits, independent of what the caller passed in.
     """
     logger.error("worker_calendar_unavailable", conversation_id=str(reply.conversation_id))
-    alert_tenant: Tenant | None = None
-    if reply.conversation_id is not None:
-        try:
-            async with async_session_factory() as session:
-                async with session.begin():
-                    conversation = await session.get(Conversation, reply.conversation_id)
-                    if conversation is not None:
-                        await HandoverManager(session).set_human_active(conversation)
-                        alert_tenant = await session.get(Tenant, conversation.tenant_id)
-        except Exception as exc:
-            logger.error(
-                "worker_calendar_unavailable_handover_failed",
-                error=str(exc),
-                conversation_id=str(reply.conversation_id),
-            )
+    await _set_conversation_human_active(reply.conversation_id)
+    async with async_session_factory() as session:
+        alert_tenant = await session.scalar(
+            select(Tenant).join(Conversation, Conversation.tenant_id == Tenant.id)
+            .where(Conversation.id == reply.conversation_id)
+        )
 
     # Fail closed (PROMPT_FIX_21): the handover above already happened, so a
     # human still sees the conversation even when the patient-facing notice
@@ -6882,6 +6974,148 @@ async def _handle_start_guided_booking(
     )
 
 
+async def _handle_set_booking_draft(
+    reply: _ReplyContext,
+    reply_text: str,
+    tenant: Tenant | None,
+    flow_snapshot: tuple[SimpleNamespace, SimpleNamespace] | None,
+    professionals: list | None,
+    patient_wa: str | None,
+    redis=None,
+    waba_token: str | None = None,
+) -> None:
+    """LLM hand-back: resume the booking at the first step still missing.
+
+    The superset of `_handle_start_guided_booking`: the agent may also name the
+    doctor (multi-doctor clinics, which `start_guided_booking` turns away) and
+    the convênio. Everything is re-read FRESH (same reason as its sibling) and
+    the result goes through `_apply_flow_result`, the one persistence seam.
+    """
+    try:
+        payload = json.loads(reply_text[len(BOOKING_DRAFT_SENTINEL_PREFIX) :])
+        if not isinstance(payload, dict) or any(
+            payload.get(key) is not None and not isinstance(payload[key], str)
+            for key in ("t", "p", "i")
+        ):
+            raise ValueError("Invalid booking draft payload")
+        appointment_type = payload.get("t") or None
+        professional_id = UUID(payload["p"]) if payload.get("p") else None
+        insurance_text = payload.get("i") or None
+    except (ValueError, TypeError, KeyError):
+        logger.warning(
+            "worker_booking_draft_bad_sentinel", conversation_id=str(reply.conversation_id)
+        )
+        await _handle_show_main_menu(
+            reply, tenant, professionals, patient_wa, redis=redis,
+            waba_token=waba_token, source="sentinel_fallback",
+        )
+        return
+    if tenant is None or not flows_enabled(tenant):
+        logger.warning(
+            "worker_booking_draft_without_flows", conversation_id=str(reply.conversation_id)
+        )
+        return
+
+    async with async_session_factory() as session:
+        conversation = await session.get(Conversation, reply.conversation_id)
+        selected_id = professional_id or (
+            conversation.flow_selected_professional_id if conversation is not None else None
+        )
+        stored_insurance = (
+            conversation.flow_selected_insurance if conversation is not None else None
+        )
+        attendee = conversation.flow_attendee_name if conversation is not None else None
+        professional_rows = await list_active_professionals(session, tenant.id)
+        service_catalog = await load_service_catalog(session, tenant.id)
+        tenant_insurance = await load_tenant_insurance(session, tenant.id)
+        booking_calendar = await _appointment_calendar(
+            session,
+            tenant,
+            _appointment_calendar_target({"professional_id": selected_id}, professional_rows),
+        )
+
+    tenant_snapshot = _flow_tenant_snapshot(
+        tenant, professional_rows, service_catalog, tenant_insurance
+    )
+    # A convênio the patient typed only counts when it names a real plan; anything
+    # else is dropped so the flow ASKS instead of storing a made-up label.
+    insurance = (
+        match_insurance_plan(tenant_snapshot, insurance_text)
+        if insurance_text is not None else stored_insurance
+    )
+
+    is_multi = booking_topology(professional_rows) == BOOKING_TOPOLOGY_MULTI
+    professional = next((p for p in professional_rows if p.id == selected_id), None)
+    fresh_services = (
+        professional_appointment_types(professional, tenant_snapshot, service_catalog)
+        if professional is not None else tenant_snapshot.appointment_types
+    )
+    canonical_type = canonical_service_name(fresh_services, appointment_type)
+    if (
+        (appointment_type is not None and canonical_type is None)
+        or (appointment_type is None and (not is_multi or professional_id is None))
+        or (selected_id is not None and professional is None)
+    ):
+        logger.warning(
+            "worker_booking_draft_invalid_selection", conversation_id=str(reply.conversation_id)
+        )
+        await _handle_show_main_menu(
+            reply, tenant, professional_rows, patient_wa, redis=redis,
+            waba_token=waba_token, source="sentinel_fallback",
+        )
+        return
+    appointment_type = canonical_type
+    if is_multi:
+        professional = next((p for p in professional_rows if p.id == selected_id), None)
+        if professional is None:
+            await _handle_show_main_menu(
+                reply, tenant, professionals, patient_wa, redis=redis,
+                waba_token=waba_token, source="sentinel_fallback",
+            )
+            return
+        if appointment_type is None:
+            result = _enter_professional_services(professional, tenant_snapshot)
+            if result.flow_state == FlowState.SERVICE_CATALOG:
+                result.flow_selected_insurance = insurance
+                result.flow_attendee_name = attendee
+        else:
+            result = await enter_guided_booking(
+                tenant_snapshot,
+                booking_calendar,
+                appointment_type,
+                conversation_id=reply.conversation_id,
+                professional_id=selected_id,
+                insurance=insurance,
+                services=professional_appointment_types(
+                    professional, tenant_snapshot, service_catalog
+                ),
+                professionals=professional_rows,
+                attendee_name=attendee,
+            )
+    else:
+        result = await enter_guided_booking(
+            tenant_snapshot,
+            booking_calendar,
+            appointment_type,
+            conversation_id=reply.conversation_id,
+            professional_id=selected_id,
+            insurance=insurance,
+            professionals=professional_rows,
+            attendee_name=attendee,
+        )
+    logger.info(
+        "conversation_booking_draft_entered",
+        conversation_id=str(reply.conversation_id),
+        tenant_id=str(tenant.id),
+        multi=is_multi,
+        has_type=appointment_type is not None,
+        flow_step=result.flow_step,
+    )
+    await _apply_flow_result(
+        reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+    )
+
+
 def _bubble_buttons(
     bubble: TextBubble | ButtonBubble | SlotsBubble | MenuBubble,
 ) -> list[tuple[str, str]] | None:
@@ -7243,7 +7477,15 @@ async def _persist_human_echo(
                         body=body,
                     )
                 )
-                await HandoverManager(session).set_human_active(conversation)
+                occurrence_id = await activate_human_handoff(
+                    session, conversation, manager=HandoverManager(session)
+                )
+            if occurrence_id is not None:
+                await notify_human_handoff(
+                    tenant=tenant, conversation_id=conversation.id,
+                    professional_id=conversation.flow_selected_professional_id,
+                    reason="could_not_help", occurrence_id=occurrence_id,
+                )
         except IntegrityError:
             logger.info("worker_echo_duplicate_race", wam_id=wam_id)
 

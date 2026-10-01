@@ -82,6 +82,7 @@ from secretaria.services.channel_sender import (
     sender_persists_outbound,
     sender_sends_media,
 )
+from secretaria.services.handoff_notification import activate_human_handoff, notify_human_handoff
 from secretaria.services.handover import HandoverManager
 from secretaria.services.tenant_config import get_waba_token
 from secretaria.services.whatsapp import TenantWhatsAppCredentialMissing, WhatsAppClient
@@ -227,6 +228,23 @@ async def _staff_sender(
     return WhatsAppClient.for_tenant(tenant, waba_token), patient.wa_id
 
 
+async def _notify_takeover(tenant, conversation, occurrence_id) -> None:
+    """Notify only after a newly committed human transition."""
+    if occurrence_id is not None:
+        try:
+            await notify_human_handoff(
+                tenant=tenant, conversation_id=conversation.id,
+                professional_id=conversation.flow_selected_professional_id,
+                reason="could_not_help", occurrence_id=occurrence_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "human_handoff_notification_undelivered",
+                alarm="human_handoff_notification_undelivered",
+                conversation_id=str(conversation.id), error_type=type(exc).__name__,
+            )
+
+
 @router.get("", response_model=list[ConversationRead])
 async def list_conversations(
     tenant: Tenant = Depends(get_current_tenant),
@@ -268,12 +286,16 @@ async def update_handover(
     conversation = await _get_conversation(session, tenant, conversation_id)
 
     manager = HandoverManager(session)
+    occurrence_id = None
     if body.state == HandoverState.HUMAN_ACTIVE:
-        await manager.set_human_active(conversation)
+        occurrence_id = await activate_human_handoff(
+            session, conversation, manager=HandoverManager(session)
+        )
     else:
         await manager.set_bot_active(conversation)
     await session.commit()
     await session.refresh(conversation)
+    await _notify_takeover(tenant, conversation, occurrence_id)
 
     patient = await session.get(Patient, conversation.patient_id)
     last_message_at = await _last_message_at(session, conversation.id)
@@ -419,8 +441,11 @@ async def send_message(
         session.add(message)
     # A human send always takes the conversation over, whichever channel carried
     # it and whether it came from the WhatsApp app or from here.
-    await HandoverManager(session).set_human_active(conversation)
+    occurrence_id = await activate_human_handoff(
+        session, conversation, manager=HandoverManager(session)
+    )
     await session.commit()
+    await _notify_takeover(tenant, conversation, occurrence_id)
     await session.refresh(message)
 
     logger.info(
@@ -476,7 +501,9 @@ async def _send_attachment(
     stored_key = message.attachment["r2_object_key"]
     try:
         # A human send always takes the conversation over - a file as much as a text.
-        await HandoverManager(session).set_human_active(conversation)
+        occurrence_id = await activate_human_handoff(
+            session, conversation, manager=HandoverManager(session)
+        )
         await session.commit()
     except Exception:
         # The row rolls back with the session; the bytes would stay behind with nothing
@@ -486,6 +513,7 @@ async def _send_attachment(
         # 404 - rarer, and louder, than a silent orphan.
         await media_storage.delete_object(stored_key)
         raise
+    await _notify_takeover(tenant, conversation, occurrence_id)
     await session.refresh(message)
     logger.info(
         "hub_conversation_message_sent",

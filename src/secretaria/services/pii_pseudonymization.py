@@ -90,6 +90,7 @@ async def load_pseudonymizer(conversation_id: UUID) -> Pseudonymizer:
     tokens: dict[str, str] = {}
     patient_name: str | None = None
     patient_phone: str | None = None
+    patient_email: str | None = None
     attendee_names: list[str] = []
     try:
         async with async_session_factory() as session:
@@ -102,6 +103,7 @@ async def load_pseudonymizer(conversation_id: UUID) -> Pseudonymizer:
                 if patient is not None:
                     patient_name = patient.name
                     patient_phone = patient.wa_id
+                    patient_email = patient.email
             attendee_names = await _attendee_names(session, conversation)
     except Exception as exc:
         # Degrade to a fresh map rather than dropping the turn - see the
@@ -128,6 +130,9 @@ async def load_pseudonymizer(conversation_id: UUID) -> Pseudonymizer:
     # catch most spellings of it anyway; registering it pins ONE token to the
     # canonical form the DB holds instead of minting a new one per spelling.
     p.add_identifier("TELEFONE", patient_phone)
+    # Pin the canonical booking contact across spellings and turns; free-text
+    # addresses still have the shared pattern rule as a safety net.
+    p.add_identifier("EMAIL", patient_email)
     # The name of a third party the patient booked for ("Essa consulta é pra
     # você?" -> "Pra outra pessoa", services/attendee.py). It lives in three
     # columns none of which is Patient.name, so it is registered here, next to

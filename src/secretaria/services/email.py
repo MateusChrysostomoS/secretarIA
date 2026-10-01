@@ -324,6 +324,37 @@ class _SafeDict(dict):
 # lasts), `blocker_reason` (nudge templates only), `days` and `restart_url`
 # (test_window_expired only), `code` (patient_access_otp only).
 _TEMPLATES: dict[str, EmailTemplate] = {
+    # Patient-facing confirmation (Portal). Carries what the patient needs to show
+    # up, plus the public add-to-calendar link; `*_line` fields arrive pre-rendered
+    # (empty when there is nothing to say) because EmailTemplate has no branching.
+    "appointment_booked_patient": EmailTemplate(
+        subject="Consulta confirmada — {when}",
+        body=(
+            "Olá!\n\n"
+            "Sua consulta na {clinic_name} está confirmada:\n\n"
+            "Serviço: {service}\n"
+            "Quando: {when}\n"
+            "{insurance_line}"
+            "\n"
+            "{calendar_line}"
+            "Você também recebe um convite do Google Agenda, com lembrete.\n\n"
+            "— {clinic_name}"
+        ),
+    ),
+    # Clinic-side record of a booking, identified without patient PII.
+    "appointment_booked_clinic": EmailTemplate(
+        subject="Nova consulta marcada — {when}",
+        body=(
+            "Olá!\n\n"
+            "Uma consulta foi marcada na {clinic_name}:\n\n"
+            "Agendamento: {appointment_id}\n"
+            "Serviço: {service}\n"
+            "Quando: {when}\n"
+            "{insurance_line}"
+            "\n"
+            "— Equipe SecretarIA"
+        ),
+    ),
     "professional_invite": EmailTemplate(
         subject="Você foi convidado(a) para a equipe da {clinic_name} no SecretarIA",
         body=(
@@ -527,6 +558,23 @@ _TEMPLATES: dict[str, EmailTemplate] = {
             "— Equipe SecretarIA"
         ),
     ),
+    # Operational alert: a conversation was handed to a person. Carries NO
+    # patient content — only the reason the agent gave (an enum rendered as a
+    # sentence). The secretary opens the console to read the chat, same stance
+    # as `appointment_booked_professional`.
+    "human_handoff_alert": EmailTemplate(
+        subject="Conversa aguardando atendimento humano",
+        body=(
+            "Olá!\n\n"
+            "Uma conversa na SecretarIA foi passada para atendimento humano.\n\n"
+            "Cl\u00ednica: {tenant_id}\n"
+            "Conversa: {conversation_id}\n"
+            "Motivo: {reason}\n\n"
+            "Abra o console de atendimento para responder ao paciente.\n\n"
+            "— Equipe SecretarIA"
+        ),
+    ),
+
 }
 
 
@@ -597,13 +645,17 @@ async def send_transactional_email_result(to: str, template: str, variables: dic
         subject = tpl.subject.format_map(safe_vars)
         body = tpl.body.format_map(safe_vars)
     except Exception as exc:
-        logger.warning("transactional_email_render_failed", template=template, error=str(exc))
+        logger.warning(
+            "transactional_email_render_failed", template=template, error_type=type(exc).__name__
+        )
         return EmailOutcome.RENDER_FAILED
 
     try:
         await asyncio.to_thread(_send_transactional_sync, to, subject, body)
     except Exception as exc:
-        logger.warning("transactional_email_send_failed", template=template, error=str(exc))
+        logger.warning(
+            "transactional_email_send_failed", template=template, error_type=type(exc).__name__
+        )
         return EmailOutcome.SEND_FAILED
 
     logger.info("transactional_email_sent", template=template)

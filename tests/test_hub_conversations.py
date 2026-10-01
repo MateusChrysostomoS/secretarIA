@@ -946,3 +946,40 @@ def test_brain_message_sender_refuses_a_patient_authored_outbound() -> None:
 def test_recorded_message_id_never_reads_as_a_wamid() -> None:
     """The row id travels outside `messages[0].id`, so no caller can store it as `wam_id`."""
     assert hub_conversations._extract_wam_id({RECORDED_MESSAGE_ID: str(uuid4())}) is None
+
+
+@pytest.mark.parametrize("mode", ["manual", "text"])
+async def test_hub_takeover_notifies_only_on_actual_transition(
+    client, db, tenant, monkeypatch, mode
+):
+    from secretaria.services import handoff_notification as hn
+    from secretaria.services.email import EmailOutcome
+    tenant.contact_email = "clinic@example.com"
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.contact_email = tenant.contact_email
+        await session.commit()
+    patient = await _seed_patient(db, tenant, channel="brain_message", wa_id=None,
+        external_id=str(uuid4()))
+    conv = await _seed_conversation(db, tenant, patient)
+    sent = []
+    async def send(to, template, variables):
+        async with db() as session:
+            row = await session.get(Conversation, conv.id)
+            assert row.handover_state == HandoverState.HUMAN_ACTIVE
+        sent.append((to, template, variables))
+        return EmailOutcome.SENT
+    monkeypatch.setattr(hn, "async_session_factory", db)
+    monkeypatch.setattr(hn, "send_transactional_email_result", send)
+    async def takeover():
+        if mode == "manual":
+            return await client.post(f"{ENDPOINT}/{conv.id}/handover",
+                json={"state": "HUMAN_ACTIVE"})
+        return await client.post(f"{ENDPOINT}/{conv.id}/messages", json={"body": "staff text"})
+    assert (await takeover()).status_code == 200
+    assert (await takeover()).status_code == 200
+    assert len(sent) == 1
+    assert (await client.post(f"{ENDPOINT}/{conv.id}/handover",
+        json={"state": "BOT_ACTIVE"})).status_code == 200
+    assert (await takeover()).status_code == 200
+    assert len(sent) == 2

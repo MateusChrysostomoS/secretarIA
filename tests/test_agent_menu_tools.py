@@ -1070,3 +1070,367 @@ async def test_handle_start_guided_booking_turns_a_multi_doctor_clinic_away(
         conv = await session.get(Conversation, conversation.id)
         assert conv.flow_state == FlowState.MENU
         assert conv.flow_step is None
+
+
+async def test_run_agent_maps_booking_draft_to_sentinel(monkeypatch):
+    import json
+
+    from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
+    from secretaria.ai.tools import BookingDraftRequested
+
+    async def _history(_cid):
+        return [HumanMessage(content="oi")]
+
+    async def _boom(_messages, _cid):
+        raise BookingDraftRequested("Limpeza", None, "Unimed")
+
+    monkeypatch.setattr(graph, "_load_history", _history)
+    monkeypatch.setattr(graph, "_invoke_agent_with_retry", _boom)
+    reply = await run_agent("oi", context={"conversation_id": str(uuid4())})
+    assert reply.startswith(BOOKING_DRAFT_SENTINEL_PREFIX)
+    payload = json.loads(reply[len(BOOKING_DRAFT_SENTINEL_PREFIX):])
+    assert payload == {"t": "Limpeza", "p": None, "i": "Unimed"}
+
+
+@pytest.mark.parametrize(
+    "service, expected_step",
+    [("Consulta Geral", STEP_AWAITING_DAY), (None, STEP_AWAITING_SERVICE)],
+)
+async def test_booking_draft_multi_resumes(
+    db, _captured_bubbles, _stub_calendar, service, expected_step
+):
+    import json
+
+    from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation),
+        BOOKING_DRAFT_SENTINEL_PREFIX + json.dumps({"t": service, "p": str(ana.id)}),
+        tenant, None, _snapshots([ana, bruno]), patient.wa_id,
+    )
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.flow_state == FlowState.SERVICE_CATALOG
+        assert conv.flow_step == expected_step
+        assert conv.flow_selected_professional_id == ana.id
+        assert conv.flow_selected_type == service
+
+
+@pytest.mark.parametrize("suffix", ["oops", "[]", "null", '{"t": 7}', '{"p": "invalid"}'])
+async def test_booking_draft_bad_payload_returns_menu(db, _captured_bubbles, suffix):
+    from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation), BOOKING_DRAFT_SENTINEL_PREFIX + suffix,
+        tenant, None, _snapshots([ana, bruno]), patient.wa_id,
+    )
+    assert isinstance(_captured_bubbles[0], MenuBubble)
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.flow_state == FlowState.MENU
+
+
+async def test_booking_draft_round_trip_from_outro_preserves_draft(
+    db, _captured_bubbles, _stub_calendar, monkeypatch
+):
+    from secretaria.services import flow_router
+    tenant, ana, patient, conversation = await _seed_sole(db, selected=True, insurance="Unimed")
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        conv.flow_state = FlowState.SERVICE_CATALOG
+        conv.flow_step = flow_router.BOOKING_DAY_BRANCH.day_escape_step
+        conv.flow_selected_type = "Consulta Geral"
+        conv.flow_attendee_name = "Atendido Teste"
+        await session.commit()
+        tenant_snapshot = tasks._flow_tenant_snapshot(tenant, [ana], [], None)
+        result = await flow_router.route(
+            conv, tenant_snapshot, _stub_calendar, flow_router.LABEL_OTHER
+        )
+    assert result.action == "delegate_llm"
+    await tasks._apply_flow_result(_reply_ctx(conversation), result, patient.wa_id, tenant=tenant)
+    async def _history(_cid):
+        return [HumanMessage(content="continue")]
+
+    async def _invoke(_messages, _cid):
+        return await ai_tools.set_booking_draft.ainvoke({"service": "Consulta Geral"})
+
+    monkeypatch.setattr(graph, "_load_history", _history)
+    monkeypatch.setattr(graph, "_invoke_agent_with_retry", _invoke)
+    config = replace(
+        _tenant_config(tenant.id),
+        appointment_types=[
+            RuntimeAppointmentType(name="Consulta Geral", description=None, duration_min=30)
+        ],
+    )
+    sentinel = await run_agent(
+        "continue", context={"conversation_id": str(conversation.id)},
+        tenant_config=config, booking_topology=BOOKING_TOPOLOGY_SOLE,
+    )
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation), sentinel,
+        tenant, None, _snapshots([ana]), patient.wa_id,
+    )
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.flow_step == STEP_AWAITING_DAY
+        assert conv.flow_selected_type == "Consulta Geral"
+        assert conv.flow_selected_professional_id == ana.id
+        assert conv.flow_selected_insurance == "Unimed"
+        assert conv.flow_attendee_name == "Atendido Teste"
+
+
+@pytest.mark.parametrize("insurance, expected", [("unimed", "Unimed"), ("Inventado", None)])
+async def test_booking_draft_validates_insurance_and_uses_fresh_doctor(
+    db, _captured_bubbles, _stub_calendar, insurance, expected
+):
+    import json
+
+    from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
+
+    tenant, ana, bruno, patient, conversation = await _seed(db, insurance="Unimed")
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.collect_insurance = True
+        row.insurance_mode = "shared"
+        row.insurances = ["Unimed"]
+        await session.commit()
+        await session.refresh(row)
+        tenant = row
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation),
+        BOOKING_DRAFT_SENTINEL_PREFIX + json.dumps(
+            {"t": "Consulta Geral", "p": str(ana.id), "i": insurance}
+        ),
+        tenant, None, [], patient.wa_id,
+    )
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.flow_selected_professional_id == ana.id
+        assert conv.flow_selected_insurance == expected
+        assert conv.flow_step == (STEP_AWAITING_DAY if expected else STEP_AWAITING_INSURANCE)
+
+
+def test_booking_draft_is_a_protocol_sentinel_and_tool_on_every_topology():
+    from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
+
+    assert tasks._is_agent_sentinel(BOOKING_DRAFT_SENTINEL_PREFIX + "{}")
+    tenant = SimpleNamespace(initial_flows={"enabled": True})
+    for topology in (BOOKING_TOPOLOGY_MULTI, BOOKING_TOPOLOGY_SOLE, BOOKING_TOPOLOGY_UNKNOWN):
+        assert "set_booking_draft" in _handback_names(tenant, topology)
+
+
+@pytest.mark.parametrize(
+    "multi, service", [(True, "Consulta Geral"), (False, "Consulta Geral"), (False, None)]
+)
+async def test_booking_draft_rejects_removed_or_missing_service(
+    db, _captured_bubbles, _stub_calendar, multi, service
+):
+    import json
+
+    from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
+
+    if multi:
+        tenant, ana, bruno, patient, conversation = await _seed(db)
+    else:
+        tenant, ana, patient, conversation = await _seed_sole(db)
+    async with db() as session:
+        doctor = await session.get(Professional, ana.id)
+        doctor.appointment_types = []
+        await session.commit()
+    payload = {"t": service, "p": str(ana.id)} if service else {}
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation), BOOKING_DRAFT_SENTINEL_PREFIX + json.dumps(payload),
+        tenant, None, [], patient.wa_id,
+    )
+    assert isinstance(_captured_bubbles[0], MenuBubble)
+    assert _stub_calendar.day_scans == []
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.flow_state == FlowState.MENU
+        assert conv.flow_step is None
+        assert conv.flow_selected_type is None
+
+
+async def test_run_agent_maps_human_handoff_to_sentinel(monkeypatch):
+    from secretaria.ai.graph import HUMAN_HANDOFF_SENTINEL_PREFIX
+    from secretaria.ai.tools import HumanHandoffRequested
+
+    async def _history(_cid):
+        return [HumanMessage(content="oi")]
+
+    async def _boom(_messages, _cid):
+        raise HumanHandoffRequested("patient_requested_human")
+
+    monkeypatch.setattr(graph, "_load_history", _history)
+    monkeypatch.setattr(graph, "_invoke_agent_with_retry", _boom)
+    reply = await run_agent("oi", context={"conversation_id": str(uuid4())})
+    assert reply == f"{HUMAN_HANDOFF_SENTINEL_PREFIX}patient_requested_human"
+
+
+async def test_handle_human_handoff_activates_human_before_notification(
+    db, _captured_bubbles, monkeypatch
+):
+    from secretaria.models import HandoverState
+    from secretaria.services.flow_router import SCOPED_HELP_ESCALATE_MESSAGE
+    tenant, ana, _, patient, conv = await _seed(db, selected=True)
+    calls = []
+    async def notify(**kwargs):
+        async with db() as session:
+            row = await session.get(Conversation, conv.id)
+            assert row.handover_state == HandoverState.HUMAN_ACTIVE
+        assert _captured_bubbles == []
+        calls.append(kwargs)
+        return 1
+    monkeypatch.setattr(tasks, "notify_human_handoff", notify)
+    await tasks._handle_human_handoff(_reply_ctx(conv), "patient_requested_human",
+        tenant, (SimpleNamespace(flow_selected_professional_id=ana.id), SimpleNamespace()))
+    assert _captured_bubbles[0].body == SCOPED_HELP_ESCALATE_MESSAGE
+    assert len(calls) == 1
+    assert calls[0]["professional_id"] == ana.id
+    assert calls[0]["reason"] == "patient_requested_human"
+
+
+async def test_human_handoff_tool_validates_reason():
+    from secretaria.ai.tools import HumanHandoffRequested, request_human_handoff
+    assert "error" in await request_human_handoff.ainvoke({"reason": "private text"})
+    with pytest.raises(HumanHandoffRequested) as exc:
+        await request_human_handoff.ainvoke({"reason": " patient_requested_human "})
+    assert exc.value.reason == "patient_requested_human"
+
+
+def test_human_handoff_is_protocol_sentinel_and_available_tool():
+    from secretaria.ai.graph import HUMAN_HANDOFF_SENTINEL_PREFIX
+    assert tasks._is_agent_sentinel(HUMAN_HANDOFF_SENTINEL_PREFIX + "could_not_help")
+    tenant = SimpleNamespace(initial_flows={"enabled": True})
+    assert "request_human_handoff" in _handback_names(tenant, BOOKING_TOPOLOGY_SOLE)
+
+
+async def test_human_handoff_commit_failure_does_not_confirm_success(
+    db, _captured_bubbles, monkeypatch
+):
+    from sqlalchemy import event
+    tenant, ana, _, _, conv = await _seed(db, selected=True)
+    calls = []
+    async def notify(**kwargs):
+        calls.append(kwargs)
+        return 1
+    monkeypatch.setattr(tasks, "notify_human_handoff", notify)
+    engine = db.kw["bind"].sync_engine
+    def fail_commit(_conn):
+        raise RuntimeError("sensitive database error")
+    event.listen(engine, "commit", fail_commit)
+    try:
+        with pytest.raises(RuntimeError, match="handoff_state_not_committed"):
+            await tasks._handle_human_handoff(_reply_ctx(conv), "could_not_help",
+                tenant, None)
+    finally:
+        event.remove(engine, "commit", fail_commit)
+    assert _captured_bubbles == []
+    assert calls == []
+
+
+async def test_worker_transition_notifies_once_and_later_handoff_again(db, monkeypatch):
+    from secretaria.models import HandoverState
+    from secretaria.services import handoff_notification as hn
+    from secretaria.services.email import EmailOutcome
+    tenant, ana, _, _, conv = await _seed(db, selected=True)
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.contact_email = "clinic@example.com"
+        await session.commit()
+    sent = []
+    async def send(to, template, variables):
+        sent.append((to, template, variables))
+        return EmailOutcome.SENT
+    async def emails(_tid):
+        return {}
+    monkeypatch.setattr(hn, "async_session_factory", db)
+    monkeypatch.setattr(hn, "send_transactional_email_result", send)
+    monkeypatch.setattr(hn, "fetch_professional_emails", emails)
+    assert await tasks._set_conversation_human_active(conv.id) is True
+    assert await tasks._set_conversation_human_active(conv.id) is True
+    assert len(sent) == 1
+    async with db() as session:
+        row = await session.get(Conversation, conv.id)
+        row.handover_state = HandoverState.BOT_ACTIVE
+        await session.commit()
+    assert await tasks._set_conversation_human_active(conv.id) is True
+    assert len(sent) == 2
+
+
+async def test_calendar_fallback_notifies_handoff_after_commit(db, monkeypatch):
+    from secretaria.services import handoff_notification as hn
+    from secretaria.services.email import EmailOutcome
+    tenant, _, _, _, conv = await _seed(db)
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.contact_email = "clinic@example.com"
+        await session.commit()
+    sent = []
+    async def send(to, template, variables):
+        sent.append(template)
+        return EmailOutcome.SENT
+    async def owner(*args):
+        return None
+    monkeypatch.setattr(hn, "async_session_factory", db)
+    monkeypatch.setattr(hn, "send_transactional_email_result", send)
+    monkeypatch.setattr(tasks, "_reply_sender", lambda *args: None)
+    monkeypatch.setattr(tasks, "send_calendar_alert", owner)
+    await tasks._handle_calendar_unavailable(_reply_ctx(conv), tenant=tenant)
+    await tasks._handle_calendar_unavailable(_reply_ctx(conv), tenant=tenant)
+    assert sent == ["human_handoff_alert"]
+
+
+@pytest.mark.parametrize("failure", ["no_calendar", "calendar_unavailable", "persist_failed"])
+async def test_booking_hold_fallback_notifies_handoff(db, monkeypatch, failure):
+    from datetime import UTC, datetime
+
+    from secretaria.services import booking_hold, handoff_notification as hn
+    from secretaria.services.calendar import CalendarUnavailableError
+    from secretaria.services.email import EmailOutcome
+    from tests.test_booking_code_gate import _place, _reply, _seed_conversation, _seed_tenant
+    monkeypatch.setattr(booking_hold, "async_session_factory", db)
+    tenant = await _seed_tenant(db)
+    patient, conv = await _seed_conversation(db, tenant)
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.contact_email = "clinic@example.com"
+        await session.commit()
+    await _place(db, tenant, conv, datetime(2099, 1, 5, 13, 0, tzinfo=UTC), patient=patient)
+    class Calendar:
+        async def create_event(self, **kwargs):
+            if failure == "calendar_unavailable":
+                raise CalendarUnavailableError("test")
+            return {"id": "event"}
+    async def calendar(*args):
+        return None if failure == "no_calendar" else Calendar()
+    async def plans(*args):
+        if failure == "persist_failed":
+            raise RuntimeError("private error")
+        return None, None
+    sent = []
+    async def send(to, template, variables):
+        sent.append(template)
+        return EmailOutcome.SENT
+    monkeypatch.setattr(hn, "async_session_factory", db)
+    monkeypatch.setattr(hn, "send_transactional_email_result", send)
+    monkeypatch.setattr(tasks, "_appointment_calendar", calendar)
+    monkeypatch.setattr(tasks, "resolve_booking_plan_ids", plans)
+    await tasks._promote_booking_hold(_reply(conv), tenant=tenant, waba_token=None,
+        professionals=[], redis=None)
+    assert sent == ["human_handoff_alert"]
+
+
+async def test_notification_failure_keeps_committed_handoff_success(
+    db, _captured_bubbles, monkeypatch
+):
+    from secretaria.models import HandoverState
+    tenant, _, _, _, conv = await _seed(db)
+    async def notify(**kwargs):
+        raise RuntimeError("private mail payload")
+    monkeypatch.setattr(tasks, "notify_human_handoff", notify)
+    await tasks._handle_human_handoff(_reply_ctx(conv), "could_not_help", tenant, None)
+    assert len(_captured_bubbles) == 1
+    async with db() as session:
+        row = await session.get(Conversation, conv.id)
+        assert row.handover_state == HandoverState.HUMAN_ACTIVE

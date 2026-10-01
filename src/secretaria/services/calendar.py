@@ -31,6 +31,42 @@ from secretaria.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+# What the clinic's own calendar shows the owner: a popup a day and an hour
+# before, and an e-mail a day before. The PATIENT is not the owner of this
+# calendar — they get the Google invite (Task 7) and their own reminder defaults.
+DEFAULT_EVENT_REMINDERS: list[dict] = [
+    {"method": "popup", "minutes": 24 * 60},
+    {"method": "popup", "minutes": 60},
+    {"method": "email", "minutes": 24 * 60},
+]
+
+_CHANNEL_LABELS = {"brain_message": "Portal", "whatsapp": "WhatsApp"}
+
+
+def build_event_description(
+    *,
+    service: str | None,
+    insurance: str | None,
+    channel: str | None = None,
+    attendee_name: str | None = None,
+) -> str:
+    """The event's description: what a doctor needs to recognise the booking.
+
+    The convênio is ALWAYS stated (or "não informado"): the clinic asked for it to
+    be explicit in the event. No phone, no e-mail, no clinical text — the summary
+    already carries the name, and this lands on a calendar other people may see.
+    """
+    lines: list[str] = []
+    if service:
+        lines.append(f"Serviço: {service}")
+    lines.append(f"Convênio: {insurance}" if insurance else "Convênio: não informado")
+    if attendee_name:
+        lines.append(f"Consulta para: {attendee_name}")
+    label = _CHANNEL_LABELS.get(channel or "")
+    if label:
+        lines.append(f"Agendado pelo: {label}")
+    return "\n".join(lines)
+
 SCOPES = [
     "https://www.googleapis.com/auth/calendar.events",
     # Covers calendars.insert AND full CRUD on events in calendars the app
@@ -625,6 +661,7 @@ class CalendarService:
         end: datetime,
         summary: str,
         description: str = "",
+        reminders: list[dict] | None = None,
     ) -> dict:
         """Create an event on the clinic's calendar. Returns the inserted event."""
         start_dt = self._ensure_tz(start)
@@ -633,6 +670,10 @@ class CalendarService:
         body = {
             "summary": summary,
             "description": description,
+            "reminders": {
+                "useDefault": False,
+                "overrides": DEFAULT_EVENT_REMINDERS if reminders is None else reminders,
+            },
             "start": {"dateTime": start_dt.isoformat(), "timeZone": tz_name},
             "end": {"dateTime": end_dt.isoformat(), "timeZone": tz_name},
         }
@@ -655,7 +696,7 @@ class CalendarService:
                 raise CalendarUnavailableError("Google Calendar unreachable") from exc
 
         event = await asyncio.to_thread(_insert)
-        logger.info("calendar_event_created", event_id=event.get("id"), summary=summary)
+        logger.info("calendar_event_created", event_id=event.get("id"))
         return event
 
     async def update_event(
@@ -693,6 +734,45 @@ class CalendarService:
         event = await asyncio.to_thread(_patch)
         logger.info("calendar_event_updated", event_id=event_id)
         return event
+
+    async def add_attendee(self, event_id: str, email: str) -> dict:
+        """Invite `email` to an existing event; Google notifies them. Idempotent.
+
+        Reads the current attendee list first (a PATCH replaces the list, so
+        sending only the new one would drop anyone already invited) and does
+        nothing when the address is already there.
+        """
+        calendar_id = self._calendar_id
+
+        def _patch() -> dict:
+            try:
+                client = self._client()
+                current = (
+                    client.events().get(calendarId=calendar_id, eventId=event_id).execute()
+                )
+                attendees = list(current.get("attendees") or [])
+                if any((a.get("email") or "").lower() == email.lower() for a in attendees):
+                    return current
+                attendees.append({"email": email})
+                return (
+                    client.events()
+                    .patch(
+                        calendarId=calendar_id,
+                        eventId=event_id,
+                        body={"attendees": attendees},
+                        sendUpdates="all",
+                    )
+                    .execute()
+                )
+            except HttpError as exc:
+                logger.error("calendar_add_attendee_http_error", error_type=type(exc).__name__)
+                _raise_if_unavailable(exc)
+                raise
+            except _NETWORK_ERRORS as exc:
+                logger.error("calendar_add_attendee_network_error", error_type=type(exc).__name__)
+                raise CalendarUnavailableError("Google Calendar unreachable") from exc
+
+        return await asyncio.to_thread(_patch)
 
     async def cancel_event(self, event_id: str) -> None:
         """Delete an event by id. 404/410 are treated as success (idempotent)."""
