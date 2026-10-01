@@ -222,15 +222,16 @@ LABEL_DONT_KNOW = "Não sei"
 
 # Fixed, scope-specific openers each "Não sei" tap replies with (the LLM only
 # enters on the patient's ANSWER, one turn later). Deliberately two distinct
-# nodes with two distinct questions - "which professional fits my case" and
-# "which service fits my need" are different scopes, and neither is the
+# nodes about the configured professionals or services and booking steps.
+# Neither asks the patient to describe symptoms, and neither is the
 # open-ended "Outro" hand-off (ai/scoped_help.py's module docstring).
 PROFESSIONAL_HELP_OPENER = (
-    "O que você está sentindo, ou o que você precisa? "
-    "Vou te ajudar a escolher o profissional certo."
+    "Posso explicar as opções de profissionais da clínica e como agendar. "
+    "Sobre qual profissional ou etapa do agendamento você quer saber?"
 )
 SERVICE_HELP_OPENER = (
-    "Me conta o que você precisa, que eu te ajudo a escolher o serviço certo."
+    "Posso explicar as opções de serviços da clínica e como agendar uma consulta. "
+    "Sobre qual serviço ou etapa do agendamento você quer saber?"
 )
 # Sent when a scoped-help node gives up (bounded at one clarifying question) -
 # the conversation is then flipped to human handover (action="handover").
@@ -1082,14 +1083,14 @@ def _carry_insurance(conversation: Conversation, result: FlowRouterResult) -> Fl
     scoped-help nodes that follow all know nothing about it - yet
     `_apply_flow_result` writes `flow_selected_insurance` unconditionally.
 
-    Leaves alone: a result that already names one, the steps that come BEFORE
-    the answer exists (pra-quem, the convênio question itself), and anything
+    A validated answer may arrive from the LLM before pra-quem, so it also
+    survives those steps. Leaves alone: a result that already names one,
+    the convênio question itself, and anything
     leaving the booking - so the answer is dropped exactly when its booking
     ends.
     """
     if (
         result.flow_selected_insurance is not None
-        or result.flow_step in ATTENDEE_STEPS
         or result.flow_step == STEP_AWAITING_INSURANCE
     ):
         return result
@@ -1470,7 +1471,11 @@ def _booking_entry(
 
 
 def _booking_continuation(
-    next_step: str | None, tenant: Tenant, professionals: list | None
+    next_step: str | None,
+    tenant: Tenant,
+    professionals: list | None,
+    *,
+    insurance: str | None = None,
 ) -> FlowRouterResult:
     """What a booking entry opens once pra-quem is answered: the convênio first.
 
@@ -1488,6 +1493,10 @@ def _booking_continuation(
     """
     entry = _booking_entry(next_step, tenant, professionals)
     if entry.flow_state != FlowState.SERVICE_CATALOG:
+        return entry
+    if insurance is not None:
+        entry = _start_booking(tenant, professionals, insurance=insurance)
+        entry.flow_selected_insurance = insurance
         return entry
     skip_reason = _insurance_step_skip_reason(tenant)
     if skip_reason is None:
@@ -1573,7 +1582,9 @@ def _attendee_step(
     if step == STEP_AWAITING_ATTENDEE_CHOICE:
         if _label_match(body, LABEL_ATTENDEE_SELF):
             logger.info("attendee_choice", choice="self")
-            return _booking_continuation(next_step, tenant, professionals)
+            return _booking_continuation(
+                next_step, tenant, professionals, insurance=_selected_insurance(conversation)
+            )
         if _label_match(body, LABEL_ATTENDEE_OTHER):
             logger.info("attendee_choice", choice="other")
             return _attendee_name_request(next_step)
@@ -1593,7 +1604,9 @@ def _attendee_step(
         # Back one step, name dropped: the pra-quem question again.
         return _attendee_question(next_step or ATTENDEE_NEXT_BOOK)
     if _label_match(body, LABEL_ATTENDEE_AUTH_CONFIRM):
-        result = _booking_continuation(next_step, tenant, professionals)
+        result = _booking_continuation(
+            next_step, tenant, professionals, insurance=_selected_insurance(conversation)
+        )
         if result.flow_state == FlowState.SERVICE_CATALOG:
             result.flow_attendee_name = name
             result.attendee_authorized = True
@@ -2473,6 +2486,11 @@ async def _catalog_step(
         professional = _match_professional(professionals or [], body)
         if professional is None:
             return _preserve(conversation, "delegate_llm")
+        if conversation.flow_selected_type:
+            # A service may already be chosen when an empty LLM handback
+            # reopens the professional list. Recheck the doctor's catalogue
+            # before continuing to the selected service's detail card.
+            return _handle_service_professional(conversation, tenant, body, professionals or [])
         return _enter_professional_services(professional, tenant)
 
     if step == STEP_AWAITING_CATALOG_SERVICE:

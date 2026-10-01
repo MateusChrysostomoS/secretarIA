@@ -31,6 +31,7 @@ from secretaria.services.brain_patients import fetch_patient_email_result
 from secretaria.services.calendar import CalendarService, build_patient_calendar_link
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.email import EmailOutcome, send_transactional_email_result
+from secretaria.services.insurance_catalog import load_appointment_plans
 from secretaria.services.tenant_config import load_tenant_config, resolve_professional_calendar
 
 logger = get_logger(__name__)
@@ -66,11 +67,30 @@ async def _release(key: str) -> None:
         logger.warning("booking_notification_release_failed", error_type=type(exc).__name__)
 
 
-def _variables(tenant, patient, appointment) -> dict:
+async def _insurance_line(tenant, appointment) -> str:
+    """Only configured, tenant-scoped plan rows may supply an email's plan name."""
     insurance = (getattr(appointment, "insurance", None) or "").strip()
-    # Legacy catalog entries can themselves contain patient text. Operational
-    # emails only report presence; the booking retains the exact insurance.
-    insurance_line = "Convênio informado; consulte o agendamento.\n" if insurance else ""
+    tenant_plan_id = getattr(appointment, "insurance_plan_id", None)
+    professional_plan_id = getattr(appointment, "insurance_professional_plan_id", None)
+    if tenant_plan_id is not None or professional_plan_id is not None:
+        try:
+            async with async_session_factory() as session:
+                plans = await load_appointment_plans(
+                    session,
+                    tenant.id,
+                    tenant_plan_ids=[tenant_plan_id],
+                    professional_plan_ids=[professional_plan_id],
+                )
+            plan = plans.resolve(tenant_plan_id, professional_plan_id)
+            if plan is not None:
+                return f"Convênio: {plan.name}\n"
+        except Exception as exc:
+            logger.warning("booking_notification_plan_lookup_failed", error_type=type(exc).__name__)
+    # Legacy catalog strings and unmatched patient answers are untrusted text.
+    return "Convênio informado; consulte o agendamento.\n" if insurance else ""
+
+
+def _variables(tenant, patient, appointment, insurance_line: str) -> dict:
     return {
         "clinic_name": tenant.clinic_name,
         "appointment_id": str(appointment.id),
@@ -150,7 +170,8 @@ async def _send_once(
 
 async def _post_booking(ctx: PostBookingContext) -> None:
     tenant, patient, appointment = ctx.tenant, ctx.patient, ctx.appointment
-    variables = _variables(tenant, patient, appointment)
+    insurance_line = await _insurance_line(tenant, appointment)
+    variables = _variables(tenant, patient, appointment, insurance_line)
 
     clinic_email = (getattr(tenant, "contact_email", None) or "").strip()
     if clinic_email:

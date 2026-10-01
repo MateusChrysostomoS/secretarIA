@@ -317,3 +317,25 @@ def test_confirm_block_needs_no_limit_because_its_labels_are_fixed():
     bubble = ButtonBubble(body="qualquer coisa")
     assert len(bubble.confirm_label) <= MAX_BUTTON_LABEL_CHARS
     assert len(bubble.cancel_label) <= MAX_BUTTON_LABEL_CHARS
+
+
+def test_symptom_policy_is_administrative_and_preserves_emergency_priority():
+    prompt = secretary_system_prompt(_config())
+    assert "NÃO faça perguntas clínicas" in prompt
+    assert "há quanto tempo" in prompt
+    assert "não afirme que é seguro esperar" in prompt
+    assert "192" in prompt
+
+
+def test_flow_state_requires_draft_even_for_unknown_service():
+    prompt = secretary_system_prompt(_config(conversation_state="- Menu inicial: Outro"))
+    assert 'set_booking_draft(service="", professional="", insurance="")' in prompt
+    assert "prevalecem sobre o fluxo de chat" in prompt
+    assert "NÃO consulte agenda" in prompt
+
+
+def test_legacy_prompt_keeps_calendar_path_without_flow_state():
+    prompt = secretary_system_prompt(_config())
+    assert "check_availability(start, end)" in prompt
+    assert "prevalecem sobre o fluxo de chat" not in prompt
+    assert "ESTADO DA CONVERSA" not in prompt

@@ -1116,6 +1116,197 @@ async def test_booking_draft_multi_resumes(
         assert conv.flow_selected_type == service
 
 
+@pytest.mark.parametrize("multi", [False, True])
+@pytest.mark.parametrize("attendee", [None, "Atendido Teste"])
+async def test_empty_booking_draft_returns_to_administrative_selection(
+    db, _captured_bubbles, _stub_calendar, multi, attendee
+):
+    from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
+    from secretaria.services.flow_router import (
+        STEP_AWAITING_ATTENDEE_CHOICE,
+        STEP_AWAITING_PROFESSIONAL,
+    )
+
+    if multi:
+        tenant, ana, bruno, patient, conversation = await _seed(db)
+    else:
+        tenant, ana, patient, conversation = await _seed_sole(db)
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        conv.flow_attendee_name = attendee
+        await session.commit()
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation), BOOKING_DRAFT_SENTINEL_PREFIX + "{}",
+        tenant, None, [], patient.wa_id,
+    )
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.flow_state == FlowState.SERVICE_CATALOG
+        assert conv.flow_step == (
+            STEP_AWAITING_ATTENDEE_CHOICE if attendee is None else
+            STEP_AWAITING_PROFESSIONAL if multi else STEP_AWAITING_SERVICE
+        )
+        assert conv.flow_attendee_name == attendee
+        assert conv.flow_selected_slot is None
+    assert _stub_calendar.day_scans == []
+
+
+@pytest.mark.parametrize("insurance, expected", [("Unimed", "Unimed"), ("Removed", None)])
+async def test_empty_booking_draft_preserves_only_fresh_valid_draft(
+    db, _captured_bubbles, _stub_calendar, insurance, expected
+):
+    from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
+
+    tenant, ana, bruno, patient, conversation = await _seed(
+        db, selected=True, insurance=insurance
+    )
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.insurances = ["Unimed"]
+        row.collect_insurance = True
+        conv = await session.get(Conversation, conversation.id)
+        conv.flow_selected_type = "Consulta Geral"
+        conv.flow_attendee_name = "Atendido Teste"
+        await session.commit()
+        await session.refresh(row)
+        tenant = row
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation), BOOKING_DRAFT_SENTINEL_PREFIX + "{}",
+        tenant, None, [], patient.wa_id,
+    )
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.flow_step == STEP_AWAITING_SERVICE
+        assert conv.flow_selected_professional_id == ana.id
+        assert conv.flow_selected_type == "Consulta Geral"
+        assert conv.flow_selected_insurance == expected
+        assert conv.flow_attendee_name == "Atendido Teste"
+    assert _stub_calendar.day_scans == []
+
+
+@pytest.mark.parametrize("compatible", [True, False])
+async def test_empty_booking_draft_service_then_professional_keeps_valid_choice(
+    db, _captured_bubbles, _stub_calendar, compatible
+):
+    from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
+    from secretaria.services.flow_router import (
+        STEP_AWAITING_PROFESSIONAL,
+        STEP_AWAITING_SERVICE_CONFIRM,
+        STEP_AWAITING_SERVICE_PROFESSIONAL,
+        route,
+    )
+
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        conv.flow_state = FlowState.LLM
+        conv.flow_step = STEP_AWAITING_SERVICE_PROFESSIONAL
+        conv.flow_selected_type = "Consulta Geral"
+        conv.flow_attendee_name = "Atendido Teste"
+        if not compatible:
+            doctor = await session.get(Professional, ana.id)
+            doctor.appointment_types = [
+                {"name": "Retorno", "duration_min": 30, "is_active": True}
+            ]
+        await session.commit()
+
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation), BOOKING_DRAFT_SENTINEL_PREFIX + "{}",
+        tenant, None, [], patient.wa_id,
+    )
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.flow_step == STEP_AWAITING_PROFESSIONAL
+        assert conv.flow_selected_type == "Consulta Geral"
+        professionals = await tasks.list_active_professionals(session, tenant.id)
+        snapshot = tasks._flow_tenant_snapshot(tenant, professionals, [], None)
+        result = await route(conv, snapshot, None, "Dra. Ana", professionals=professionals)
+
+    assert result.flow_step == (
+        STEP_AWAITING_SERVICE_CONFIRM if compatible else STEP_AWAITING_SERVICE
+    )
+    assert result.flow_selected_type == ("Consulta Geral" if compatible else None)
+    assert result.flow_selected_professional_id == ana.id
+    assert _stub_calendar.day_scans == []
+
+
+async def test_empty_booking_draft_discards_inactive_doctor_without_reading_calendar(
+    db, _captured_bubbles, monkeypatch
+):
+    from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
+    from secretaria.services.flow_router import STEP_AWAITING_PROFESSIONAL
+
+    tenant, ana, bruno, patient, conversation = await _seed(db, selected=True)
+    async with db() as session:
+        doctor = await session.get(Professional, ana.id)
+        doctor.is_active = False
+        session.add(Professional(tenant_id=tenant.id, name="Dra. Clara", is_active=True))
+        conv = await session.get(Conversation, conversation.id)
+        conv.flow_attendee_name = "Atendido Teste"
+        await session.commit()
+
+    async def no_calendar(*args, **kwargs):
+        pytest.fail("Administrative handback must not load a calendar")
+
+    monkeypatch.setattr(tasks, "_appointment_calendar", no_calendar)
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation), BOOKING_DRAFT_SENTINEL_PREFIX + "{}",
+        tenant, None, _snapshots([ana, bruno]), patient.wa_id,
+    )
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.flow_step == STEP_AWAITING_PROFESSIONAL
+        assert conv.flow_selected_professional_id is None
+        assert conv.flow_attendee_name == "Atendido Teste"
+
+
+@pytest.mark.parametrize("other", [False, True])
+async def test_empty_draft_insurance_survives_complete_attendee_flow(
+    db, _captured_bubbles, other
+):
+    import json
+
+    from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
+    from secretaria.services.attendee import (
+        LABEL_ATTENDEE_AUTH_CONFIRM,
+        LABEL_ATTENDEE_OTHER,
+        LABEL_ATTENDEE_SELF,
+    )
+    from secretaria.services.flow_router import STEP_AWAITING_PROFESSIONAL, route
+
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.collect_insurance = True
+        row.insurances = ["Unimed"]
+        await session.commit()
+        await session.refresh(row)
+        tenant = row
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation),
+        BOOKING_DRAFT_SENTINEL_PREFIX + json.dumps({"i": "unimed"}),
+        tenant, None, [], patient.wa_id,
+    )
+    taps = (
+        [LABEL_ATTENDEE_OTHER, "Pessoa Teste", LABEL_ATTENDEE_AUTH_CONFIRM]
+        if other else [LABEL_ATTENDEE_SELF]
+    )
+    for tap in taps:
+        async with db() as session:
+            conv = await session.get(Conversation, conversation.id)
+            assert conv.flow_selected_insurance == "Unimed"
+            snapshot = tasks._flow_tenant_snapshot(tenant, [ana, bruno], [], None)
+            result = await route(conv, snapshot, None, tap, professionals=[ana, bruno])
+        assert result.flow_selected_insurance == "Unimed"
+        await tasks._apply_flow_result(
+            _reply_ctx(conversation), result, patient.wa_id, tenant=tenant
+        )
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.flow_step == STEP_AWAITING_PROFESSIONAL
+        assert conv.flow_attendee_name == ("Pessoa Teste" if other else None)
+
+
 @pytest.mark.parametrize("suffix", ["oops", "[]", "null", '{"t": 7}', '{"p": "invalid"}'])
 async def test_booking_draft_bad_payload_returns_menu(db, _captured_bubbles, suffix):
     from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX

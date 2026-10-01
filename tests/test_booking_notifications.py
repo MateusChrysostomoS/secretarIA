@@ -397,3 +397,116 @@ async def test_legacy_insurance_catalog_never_exposes_patient_text_in_either_ema
         rendered = template.subject.format_map(variables) + template.body.format_map(variables)
         assert insurance not in rendered
         assert "Convênio informado" in rendered
+
+
+async def _persist_plan(ctx, kind, *, tenant_id=None):
+    from secretaria.models import Professional, Tenant
+    from secretaria.models.insurance import (
+        InsuranceCatalog,
+        ProfessionalInsurancePlan,
+        TenantInsurancePlan,
+    )
+
+    owner_id = tenant_id or ctx.tenant.id
+    plan_id = uuid4()
+    async with bn.async_session_factory() as session:
+        session.add(Tenant(id=owner_id, clinic_name="Clinic"))
+        await session.flush()
+        if kind == "catalog":
+            catalog_id = uuid4()
+            session.add(InsuranceCatalog(
+                id=catalog_id, slug="unimed", name="Unimed", normalized_name="unimed",
+                mechanism="desconhecido", note="PRIVATE METADATA",
+            ))
+            await session.flush()
+            session.add(TenantInsurancePlan(
+                id=plan_id, tenant_id=owner_id, catalog_id=catalog_id,
+            ))
+            ctx.appointment.insurance_plan_id = plan_id
+            name = "Unimed"
+        elif kind == "clinic_custom":
+            session.add(TenantInsurancePlan(
+                id=plan_id, tenant_id=owner_id, custom_name="Plano Clínica Especial",
+                custom_payment_note="PRIVATE METADATA",
+            ))
+            ctx.appointment.insurance_plan_id = plan_id
+            name = "Plano Clínica Especial"
+        else:
+            doctor_id = uuid4()
+            session.add(Professional(id=doctor_id, tenant_id=owner_id, name="Doctor"))
+            await session.flush()
+            session.add(ProfessionalInsurancePlan(
+                id=plan_id, tenant_id=owner_id, professional_id=doctor_id,
+                custom_name="Plano Médico Especial", custom_payment_note="PRIVATE METADATA",
+            ))
+            ctx.appointment.insurance_professional_plan_id = plan_id
+            name = "Plano Médico Especial"
+        await session.commit()
+    return name
+
+
+@pytest.mark.parametrize("kind", ["catalog", "clinic_custom", "professional_custom"])
+async def test_persisted_configured_plan_appears_in_both_confirmation_emails(world, kind):
+    sent, _ = world
+    ctx = _ctx()
+    name = await _persist_plan(ctx, kind)
+    ctx.appointment.insurance = "UNTRUSTED PRIVATE TEXT"
+    await bn._post_booking(ctx)
+    assert len(sent) == 2
+    for _, _, variables in sent:
+        assert variables["insurance_line"] == f"Convênio: {name}\n"
+        assert "UNTRUSTED PRIVATE TEXT" not in str(variables)
+        assert "PRIVATE METADATA" not in str(variables)
+
+
+@pytest.mark.parametrize("kind", ["catalog", "clinic_custom", "professional_custom"])
+async def test_other_tenants_plan_is_never_disclosed_in_confirmation(world, kind):
+    sent, _ = world
+    ctx = _ctx()
+    name = await _persist_plan(ctx, kind, tenant_id=uuid4())
+    await bn._post_booking(ctx)
+    assert len(sent) == 2
+    for _, _, variables in sent:
+        assert name not in variables["insurance_line"]
+        assert "Convênio informado" in variables["insurance_line"]
+
+
+async def test_unresolved_professional_plan_does_not_fall_back_to_clinic_plan(world):
+    sent, _ = world
+    ctx = _ctx()
+    await _persist_plan(ctx, "catalog")
+    ctx.appointment.insurance_professional_plan_id = uuid4()
+    await bn._post_booking(ctx)
+    assert all("Convênio informado" in v["insurance_line"] for _, _, v in sent)
+
+
+@pytest.mark.parametrize("insurance", [None, "", "   "])
+async def test_absent_insurance_omits_insurance_line(world, insurance):
+    sent, _ = world
+    ctx = _ctx()
+    ctx.appointment.insurance = insurance
+    await bn._post_booking(ctx)
+    assert all(v["insurance_line"] == "" for _, _, v in sent)
+
+
+async def test_plan_lookup_outage_still_sends_both_emails_without_private_error(
+    world, monkeypatch
+):
+    sent, _ = world
+    ctx = _ctx()
+    ctx.appointment.insurance_plan_id = uuid4()
+    warnings = []
+
+    async def fail(*args, **kwargs):
+        raise RuntimeError("private@example.test")
+
+    monkeypatch.setattr(bn, "load_appointment_plans", fail)
+    monkeypatch.setattr(bn, "logger", SimpleNamespace(
+        warning=lambda event, **kwargs: warnings.append((event, kwargs))
+    ))
+    await bn._post_booking(ctx)
+    assert len(sent) == 2
+    assert all("Convênio informado" in v["insurance_line"] for _, _, v in sent)
+    assert warnings == [
+        ("booking_notification_plan_lookup_failed", {"error_type": "RuntimeError"})
+    ]

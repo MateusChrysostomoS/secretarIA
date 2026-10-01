@@ -155,6 +155,32 @@ async def _drive(taps: list[str], cal: _FakeCalendar, results=None) -> list[Flow
     return results
 
 
+@pytest.mark.parametrize("other", [False, True])
+async def test_answered_insurance_survives_attendee_steps_and_resume(other):
+    from secretaria.services.flow_router import enter_booking, resume_bubbles
+
+    tenant = _tenant()
+    tenant.collect_insurance = True
+    tenant.insurances = ["Unimed"]
+    result = enter_booking(tenant)
+    # The empty booking-draft handback validates this plan before this entry.
+    result.flow_selected_insurance = "Unimed"
+    taps = (
+        [LABEL_ATTENDEE_OTHER, "Maria da Silva", LABEL_ATTENDEE_AUTH_BACK,
+         LABEL_ATTENDEE_OTHER, "123", "Maria da Silva", LABEL_ATTENDEE_AUTH_CONFIRM]
+        if other else [LABEL_ATTENDEE_SELF]
+    )
+    for tap in taps:
+        conv = _snapshot(result)
+        resumed = await resume_bubbles(conv, tenant, None)
+        assert resumed.flow_selected_insurance == "Unimed"
+        result = await route(_snapshot(resumed), tenant, None, tap)
+        assert result.flow_selected_insurance == "Unimed"
+    assert result.flow_step == STEP_AWAITING_SERVICE
+    assert result.flow_attendee_name == ("Maria da Silva" if other else None)
+    assert result.attendee_authorized is other
+
+
 def _row_tap(result: FlowRouterResult) -> str:
     """What tapping the first row of the result's list echoes back."""
     bubble = next(b for b in result.bubbles if isinstance(b, SlotsBubble))

@@ -132,9 +132,20 @@ async def test_multi_doctor_alone_returns_no_service(multi):
     assert exc.value.appointment_type is None
 
 
-async def test_multi_nothing_given_is_an_error(multi):
-    out = await set_booking_draft.ainvoke({})
-    assert "error" in out
+async def test_multi_empty_selection_returns_guided_booking_without_inference(multi):
+    with pytest.raises(BookingDraftRequested) as exc:
+        await set_booking_draft.ainvoke({"insurance": "Unimed"})
+    assert exc.value.appointment_type is None
+    assert exc.value.professional_id is None
+    assert exc.value.insurance == "Unimed"
+
+
+async def test_sole_empty_selection_returns_guided_booking_without_inference(sole):
+    with pytest.raises(BookingDraftRequested) as exc:
+        await set_booking_draft.ainvoke({})
+    assert exc.value.appointment_type is None
+    assert exc.value.professional_id is None
+    assert exc.value.insurance is None
 
 
 async def test_multi_unknown_service_is_a_recoverable_error(multi):

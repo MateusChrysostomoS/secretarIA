@@ -161,7 +161,9 @@ from secretaria.services.flow_router import (
     FlowRouterResult,
     MenuBubble,
     _enter_professional_services,
+    _start_booking,
     classify_yes_no,
+    enter_booking,
     enter_decline_reasons,
     enter_guided_booking,
     enter_manage_action,
@@ -7025,14 +7027,18 @@ async def _handle_set_booking_draft(
             conversation.flow_selected_insurance if conversation is not None else None
         )
         attendee = conversation.flow_attendee_name if conversation is not None else None
+        stored_type = conversation.flow_selected_type if conversation is not None else None
         professional_rows = await list_active_professionals(session, tenant.id)
         service_catalog = await load_service_catalog(session, tenant.id)
         tenant_insurance = await load_tenant_insurance(session, tenant.id)
-        booking_calendar = await _appointment_calendar(
-            session,
-            tenant,
-            _appointment_calendar_target({"professional_id": selected_id}, professional_rows),
-        )
+        selection_only = appointment_type is None and professional_id is None
+        booking_calendar = None
+        if not selection_only:
+            booking_calendar = await _appointment_calendar(
+                session,
+                tenant,
+                _appointment_calendar_target({"professional_id": selected_id}, professional_rows),
+            )
 
     tenant_snapshot = _flow_tenant_snapshot(
         tenant, professional_rows, service_catalog, tenant_insurance
@@ -7051,6 +7057,33 @@ async def _handle_set_booking_draft(
         if professional is not None else tenant_snapshot.appointment_types
     )
     canonical_type = canonical_service_name(fresh_services, appointment_type)
+    if selection_only:
+        # An unspecified service means administrative choices, never an inferred
+        # procedure or a jump to availability. Revalidate stored selections using
+        # this tenant's current roster/catalog rather than the LLM snapshot.
+        stored_type = canonical_service_name(fresh_services, stored_type)
+        if insurance_text is None and stored_insurance is not None:
+            insurance = match_insurance_plan(tenant_snapshot, stored_insurance)
+        if professional is not None:
+            result = _enter_professional_services(professional, tenant_snapshot)
+        elif attendee is not None or stored_type is not None:
+            result = _start_booking(tenant_snapshot, professional_rows, insurance=insurance)
+        else:
+            result = enter_booking(tenant_snapshot, professional_rows)
+        if result.flow_state != FlowState.SERVICE_CATALOG:
+            await _handle_show_main_menu(
+                reply, tenant, professional_rows, patient_wa, redis=redis,
+                waba_token=waba_token, source="sentinel_fallback",
+            )
+            return
+        result.flow_selected_insurance = insurance
+        result.flow_attendee_name = attendee
+        if result.flow_step not in ATTENDEE_STEPS:
+            result.flow_selected_type = stored_type
+        await _apply_flow_result(
+            reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+        )
+        return
     if (
         (appointment_type is not None and canonical_type is None)
         or (appointment_type is None and (not is_multi or professional_id is None))

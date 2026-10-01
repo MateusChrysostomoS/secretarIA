@@ -1100,12 +1100,12 @@ async def iniciar_pre_consulta() -> str:
 async def set_booking_draft(service: str = "", professional: str = "", insurance: str = "") -> dict:
     """Registra o que o paciente já disse (serviço, profissional, convênio) e entrega
     o agendamento ao fluxo guiado, que PULA as etapas já respondidas e abre a próxima
-    que falta (convênio, dia ou horário). Use quando já dá para saber o serviço e/ou o
-    médico pelo que o paciente descreveu — não precisa repetir as perguntas.
+    que falta. Se o paciente quer uma avaliação/consulta, mas não escolheu um serviço
+    ou médico, chame com ambos vazios: o fluxo mostra as escolhas administrativas.
+    Nunca deduza um procedimento a partir de sintomas.
 
     Args:
-        service: Nome EXATO de um serviço da clínica (ou vazio, se só o médico é
-            conhecido numa clínica com vários profissionais).
+        service: Nome EXATO de um serviço escolhido pelo paciente (ou vazio).
         professional: Nome do profissional, quando o paciente já escolheu um (ou vazio).
         insurance: Convênio que o paciente citou, se citou (ou vazio).
     """
@@ -1115,6 +1115,9 @@ async def set_booking_draft(service: str = "", professional: str = "", insurance
     service = (service or "").strip()
     professional = (professional or "").strip()
     insurance = (insurance or "").strip()
+
+    if not service and not professional:
+        raise BookingDraftRequested(None, None, insurance or None)
 
     professional_id: UUID | None = None
     catalog = _effective_service_catalog()

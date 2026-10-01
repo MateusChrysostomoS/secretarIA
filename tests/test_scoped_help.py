@@ -169,3 +169,15 @@ async def test_run_service_maps_decision_through_normalize(monkeypatch):
     assert out == ScopedHelpOutcome(kind="clarify", question="Primeira vez?")
     (messages,) = fake.calls
     assert "Primeira Consulta" in messages[0].content
+
+
+def test_helpers_restrict_clarification_to_administrative_catalog_choices():
+    for prompt in (
+        _professional_help_prompt(_professionals(), False),
+        _service_help_prompt(_services(), False),
+    ):
+        assert "NÃO faça perguntas clínicas" in prompt
+        assert "há quanto tempo" in prompt
+        assert "informação administrativa" in prompt
+        assert "não afirme que é seguro esperar" in prompt
+        assert "action=escalate" in prompt
