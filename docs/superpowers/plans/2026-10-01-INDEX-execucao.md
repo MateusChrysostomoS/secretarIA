@@ -27,6 +27,7 @@ Cada plano é executável sozinho; este índice diz a ORDEM, o que roda em paral
 - B-front depende do contrato de B-brain-api (`superseded` já existe; o front só lê `patientRef`): independente em desenvolvimento, deploy por último.
 - E: depois de C no ar (usa o contrato dele) e começa pela exploração (Task 0).
 - Estrutura de workers pós-TASK-023 (já em `main`): o wrapper do turno é `workers/orchestrator.py`, o job de fusão nasce em `workers/portal/merge.py`, `workers/tasks.py` é só fachada, e os testes trocam nomes com `tests/_patching.py::workers_ns`. Os planos já usam esses caminhos.
+- A deixa uma dependência do front: a rolagem do Portal e a poda de cópias locais descritas em `docs/CHECKPOINT_portal_mensagens_recentes.md` ("Dependência do front") entram em D (trilha T3) como a PRIMEIRA task — D já edita as mesmas dependências de efeito; até lá a prova ao vivo da Task 3 de A não mostra o que o paciente vê.
 
 ## Mapa de paralelismo (Dispatching Parallel Agents)
 

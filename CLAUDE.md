@@ -139,6 +139,8 @@ neither" do `README.md`.
 
 `docs/CHECKPOINT_mvp_portal.md` — TASK-021: contexto/rascunho da LLM, handoff e notificações; não deployado; validação e pendências registradas.
 
+`docs/CHECKPOINT_portal_mensagens_recentes.md` — TASK-028: a API da conversa do Portal devolve as mensagens MAIS RECENTES (`has_more`, `before`); commitado, não deployado; prova ao vivo pendente; o Portal ainda precisa de um ajuste de rolagem no front ("Dependência do front").
+
 `docs/` é a fonte de verdade deste repo (exemplo do padrão: `docs/CHECKPOINT_plugins.md`). Regra
 geral de quando/como atualizar (CHECKPOINT, âncoras estáveis) em `AI_WORKFLOW.md` — aqui só o que
 diverge, se houver.
