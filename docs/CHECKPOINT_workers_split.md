@@ -14,9 +14,9 @@ virou fachada de reexports; `arq_worker.py` e os testes continuam importando del
 | Pasta | O que é | Pode importar |
 |---|---|---|
 | `workers/shared/` | neutro de canal | só `shared/` |
-| `workers/whatsapp/` | código só do WhatsApp | `shared/` |
-| `workers/portal/` | código só do Portal | `shared/` |
-| `workers/turn_router.py`, `workers/orchestrator.py` | composição, ainda com `if channel == ...` | tudo |
+| `workers/whatsapp/` | código só do WhatsApp | `shared/` (+ composição em `inbound`/`audio`) — nunca `portal/` |
+| `workers/portal/` | código só do Portal | `shared/` (+ composição em `inbound`/`open`) — nunca `whatsapp/` |
+| `workers/turn_router.py`, `workers/orchestrator.py` | composição, ainda com `if channel == ...` (`orchestrator` usa `portal/attachments` e `portal/identity`) | tudo |
 
 Ordem: `shared` ← `whatsapp`, `portal` ← `turn_router`, `orchestrator` ← (`tasks`, `arq_worker`). Nada dentro de
 `workers/` importa a fachada `tasks`. Ajustes forçados pela análise de ciclos: `_as_utc` em `shared/text`,

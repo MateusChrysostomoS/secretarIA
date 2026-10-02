@@ -80,9 +80,9 @@ Até a TASK-023 (2026-10-01) tudo vivia em `workers/tasks.py` e a decisão regis
 | Pasta | O que é | Pode importar |
 |---|---|---|
 | `workers/shared/` | neutro de canal (saudação, envio, bolhas, handover, fluxo, ações, jobs) | só `shared/` |
-| `workers/whatsapp/` | webhook, rate limit, áudio, coexistência, remove-context, avisos de cancelamento | `shared/` |
-| `workers/portal/` | entrada brain-message, `open`, identidade/OTP/nome, anexos | `shared/` |
-| `workers/turn_router.py`, `workers/orchestrator.py` | composição: ainda têm os ramos `channel == ...` | tudo |
+| `workers/whatsapp/` | webhook, rate limit, áudio, coexistência, remove-context, avisos de cancelamento | `shared/` (+ composição em `inbound`/`audio`) — nunca `portal/` |
+| `workers/portal/` | entrada brain-message, `open`, identidade/OTP/nome, anexos | `shared/` (+ composição em `inbound`/`open`) — nunca `whatsapp/` |
+| `workers/turn_router.py`, `workers/orchestrator.py` | composição: ainda têm os ramos `channel == ...` (`orchestrator` usa `portal/attachments` e `portal/identity`) | tudo |
 
 Os ramos por canal que restam em `turn_router`/`orchestrator` (≈10) e o `plugins/precheck_handoff.py::_post_booking`
 são a **fase 2** (política de canal), não feita. `services/channel_sender.py` e `flow_router.py` não se moveram:
@@ -161,8 +161,8 @@ Gerados por uma sessão de auditoria (2026-08-21) a partir de uma lista de bugs 
 `/prompt-generator`) — achado registrado em `docs/CHECKPOINT_brain_message_anexos_secretaria.md`
 §8: `models/message.py:107` não tem `none_as_null=True` (ao contrário de `attachment`, linha 118),
 então `interactive=None` numa bolha de texto grava a string `'null'`, não SQL NULL. Consequência:
-`workers/tasks.py::_validated_brain_message_reply_id` (números de linha anteriores à TASK-023; a função agora está em `workers/portal/inbound.py`) (linha 6493, filtro na linha 6527,
-`BRAIN_MESSAGE_TAP_WINDOW=10` na linha 6474) conta as 10 últimas mensagens de qualquer tipo, não
+`workers/tasks.py::_validated_brain_message_reply_id` (linha 6493, filtro na linha 6527,
+`BRAIN_MESSAGE_TAP_WINDOW=10` na linha 6474; números de linha anteriores à TASK-023, a função agora está em `workers/portal/inbound.py`) conta as 10 últimas mensagens de qualquer tipo, não
 os 10 últimos cartões interactive — um cartão seguido de 10+ bolhas de texto teria o toque
 recusado. Confirmado ainda pendente em 2026-09-19. **NÃO EXECUTADO.**
 
