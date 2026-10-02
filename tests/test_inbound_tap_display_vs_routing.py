@@ -24,8 +24,9 @@ picked - the router would be left matching a truncated title.
 DB tests use the in-memory-sqlite-on-StaticPool pattern from
 test_brain_message_pipeline.py / test_bot_reply_gating.py.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -136,14 +137,14 @@ _agent_calls: list[str] = []
 
 @pytest.fixture(autouse=True)
 def _wire(monkeypatch: pytest.MonkeyPatch, db):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     # The agent's two history readers open sessions of their own.
     monkeypatch.setattr(graph, "async_session_factory", db)
     monkeypatch.setattr(scoped_help, "async_session_factory", db)
     # A developer's local allowlist must not silently drop the test patient.
-    monkeypatch.setattr(tasks, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
+    monkeypatch.setattr(workers_ns, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
     _RecordingWhatsAppClient.created = []
-    monkeypatch.setattr(tasks, "WhatsAppClient", _RecordingWhatsAppClient)
+    monkeypatch.setattr(workers_ns, "WhatsAppClient", _RecordingWhatsAppClient)
     _agent_calls.clear()
 
     async def _fake_token(session, tenant_id):
@@ -168,10 +169,10 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db):
         _agent_calls.append(message)
         return "resposta da LLM"
 
-    monkeypatch.setattr(tasks, "get_waba_token", _fake_token)
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_entitlements)
-    monkeypatch.setattr(tasks, "resolve_patient_opening_state", _no_opening_state)
-    monkeypatch.setattr(tasks, "run_agent", _agent)
+    monkeypatch.setattr(workers_ns, "get_waba_token", _fake_token)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_entitlements)
+    monkeypatch.setattr(workers_ns, "resolve_patient_opening_state", _no_opening_state)
+    monkeypatch.setattr(workers_ns, "run_agent", _agent)
     yield
 
 
@@ -182,7 +183,7 @@ def _stop_at_the_reply_seam(monkeypatch: pytest.MonkeyPatch) -> list:
     async def _capture(reply, redis=None):
         replies.append(reply)
 
-    monkeypatch.setattr(tasks, "_send_bot_reply", _capture)
+    monkeypatch.setattr(workers_ns, "_send_bot_reply", _capture)
     return replies
 
 

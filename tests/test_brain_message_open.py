@@ -23,8 +23,9 @@ What this file defends, in order:
 Fixtures follow tests/test_brain_message_pipeline.py (in-memory SQLite on a
 StaticPool, the real ASGI app, a recording queue).
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -125,9 +126,9 @@ def state() -> _State:
 
 @pytest.fixture(autouse=True)
 def _wire(monkeypatch: pytest.MonkeyPatch, db, state):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
-    monkeypatch.setattr(tasks, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
-    monkeypatch.setattr(tasks, "WhatsAppClient", _ExplodingWhatsAppClient)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
+    monkeypatch.setattr(workers_ns, "WhatsAppClient", _ExplodingWhatsAppClient)
 
     async def _fake_resolve(session, tenant_id, patient_id, **kwargs):
         return None
@@ -153,10 +154,10 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db, state):
         state.probed.append(external_id)
         return state.answer
 
-    monkeypatch.setattr(tasks, "resolve_patient_opening_state", _fake_resolve)
-    monkeypatch.setattr(tasks, "get_waba_token", _fake_token)
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_entitlements)
-    monkeypatch.setattr(tasks, "probe_identity", _probe)
+    monkeypatch.setattr(workers_ns, "resolve_patient_opening_state", _fake_resolve)
+    monkeypatch.setattr(workers_ns, "get_waba_token", _fake_token)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_entitlements)
+    monkeypatch.setattr(workers_ns, "probe_identity", _probe)
     yield
 
 
@@ -483,9 +484,9 @@ class _NoIdentityWrites:
             self.calls.append("verify_code")
             raise AssertionError("a verified account was asked for a code")
 
-        monkeypatch.setattr(tasks, "claim_email", _claim)
-        monkeypatch.setattr(tasks, "request_code", _request)
-        monkeypatch.setattr(tasks, "verify_code", _verify)
+        monkeypatch.setattr(workers_ns, "claim_email", _claim)
+        monkeypatch.setattr(workers_ns, "request_code", _request)
+        monkeypatch.setattr(workers_ns, "verify_code", _verify)
 
 
 @pytest.fixture
@@ -497,7 +498,7 @@ def reported(monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
         calls.append((tenant_id, external_id, name))
         return True
 
-    monkeypatch.setattr(tasks, "report_name", _report)
+    monkeypatch.setattr(workers_ns, "report_name", _report)
     return calls
 
 
@@ -654,7 +655,7 @@ async def test_a_name_brain_api_did_not_take_does_not_hold_the_patient(
     async def _refused(tenant_id, external_id, name):
         return False
 
-    monkeypatch.setattr(tasks, "report_name", _refused)
+    monkeypatch.setattr(workers_ns, "report_name", _refused)
     await _open(tenant, name=None)
 
     await _say(tenant, "Ana Souza")

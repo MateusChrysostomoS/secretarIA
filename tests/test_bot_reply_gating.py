@@ -11,8 +11,9 @@ run_agent, get_entitlements and WhatsAppClient are faked so no LLM/network
 call is ever made; only the gating + wiring logic in _send_bot_reply itself
 is under test.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -128,13 +129,13 @@ async def db():
 
 @pytest.fixture(autouse=True)
 def _fakes(monkeypatch: pytest.MonkeyPatch, db):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     _FakeWhatsAppClient.created = []
-    monkeypatch.setattr(tasks, "WhatsAppClient", _FakeWhatsAppClient)
+    monkeypatch.setattr(workers_ns, "WhatsAppClient", _FakeWhatsAppClient)
     # get_waba_token is exercised end-to-end elsewhere (test_waba_encryption.py);
     # here we only care that _send_bot_reply threads whatever it returns into
     # the WhatsApp client, so a fixed decrypted-looking value is enough.
-    monkeypatch.setattr(tasks, "get_waba_token", _fake_get_waba_token)
+    monkeypatch.setattr(workers_ns, "get_waba_token", _fake_get_waba_token)
     yield
 
 
@@ -234,8 +235,8 @@ async def test_entitled_reply_flows_as_before(monkeypatch: pytest.MonkeyPatch, d
         )
         return "Olá! Tudo bem?"
 
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_get_entitlements)
-    monkeypatch.setattr(tasks, "run_agent", _fake_run_agent)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
+    monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
 
     await tasks._send_bot_reply(_reply_context(conversation, patient, _LLM_ESCAPE))
 
@@ -258,8 +259,8 @@ async def test_unentitled_summary_suppresses_reply(monkeypatch: pytest.MonkeyPat
         run_agent_calls.append(kwargs)
         return "should never be sent"
 
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_get_entitlements)
-    monkeypatch.setattr(tasks, "run_agent", _fake_run_agent)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
+    monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
 
     await tasks._send_bot_reply(_reply_context(conversation, patient))
 
@@ -276,8 +277,8 @@ async def test_secretaria_disabled_suppresses_reply(monkeypatch: pytest.MonkeyPa
     async def _fake_run_agent(*args, **kwargs):
         raise AssertionError("run_agent must not be called when suppressed")
 
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_get_entitlements)
-    monkeypatch.setattr(tasks, "run_agent", _fake_run_agent)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
+    monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
 
     await tasks._send_bot_reply(_reply_context(conversation, patient))
 
@@ -293,8 +294,8 @@ async def test_none_summary_suppresses_reply(monkeypatch: pytest.MonkeyPatch, db
     async def _fake_run_agent(*args, **kwargs):
         raise AssertionError("run_agent must not be called when suppressed")
 
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_get_entitlements)
-    monkeypatch.setattr(tasks, "run_agent", _fake_run_agent)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
+    monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
 
     await tasks._send_bot_reply(_reply_context(conversation, patient))
 
@@ -310,8 +311,8 @@ async def test_suppressed_reply_logs_tenant_and_status(monkeypatch: pytest.Monke
     async def _fake_run_agent(*args, **kwargs):
         raise AssertionError("run_agent must not be called when suppressed")
 
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_get_entitlements)
-    monkeypatch.setattr(tasks, "run_agent", _fake_run_agent)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
+    monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
 
     captured: dict = {}
     original_warning = tasks.logger.warning
@@ -349,8 +350,8 @@ async def test_reply_uses_whatsapp_client_for_tenant_with_decrypted_token(
     ):
         return "Oi!"
 
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_get_entitlements)
-    monkeypatch.setattr(tasks, "run_agent", _fake_run_agent)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
+    monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
 
     await tasks._send_bot_reply(_reply_context(conversation, patient))
 
@@ -377,9 +378,9 @@ async def test_run_agent_receives_plugin_tools_for_entitled_addons(
         run_agent_calls.append({"extra_tools": extra_tools})
         return "Oi!"
 
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_get_entitlements)
-    monkeypatch.setattr(tasks, "run_agent", _fake_run_agent)
-    monkeypatch.setattr(tasks, "agent_tools_for", lambda summary: sentinel_tools)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
+    monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
+    monkeypatch.setattr(workers_ns, "agent_tools_for", lambda summary: sentinel_tools)
 
     await tasks._send_bot_reply(_reply_context(conversation, patient, _LLM_ESCAPE))
 
@@ -415,8 +416,8 @@ async def _run_send_bot_reply_capturing_run_agent(
         run_agent_calls.append(kwargs)
         return "Claro, posso ajudar."
 
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_get_entitlements)
-    monkeypatch.setattr(tasks, "run_agent", _fake_run_agent)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
+    monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
 
     await tasks._send_bot_reply(
         tasks._ReplyContext(
@@ -524,8 +525,8 @@ async def _assert_llm_never_called(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _fake_run_agent(*args, **kwargs):
         raise AssertionError("run_agent must not be called for a greeting_button_unavailable reply")
 
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_get_entitlements)
-    monkeypatch.setattr(tasks, "run_agent", _fake_run_agent)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
+    monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
 
 
 @pytest.mark.parametrize(
@@ -616,7 +617,7 @@ async def test_inactive_tenant_fallback_uses_that_tenants_own_credentials(
         return _summary()
 
     # After `_assert_llm_never_called`, which installs its own entitled stub.
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_get_entitlements)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
 
     await tasks._send_bot_reply(
         tasks._ReplyContext(
@@ -648,7 +649,7 @@ async def test_inactive_tenant_fallback_is_entitlement_gated(
         return _summary(active=False, status="past_due")
 
     # After `_assert_llm_never_called`, which installs its own entitled stub.
-    monkeypatch.setattr(tasks, "get_entitlements", _unentitled)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _unentitled)
 
     await tasks._send_bot_reply(
         tasks._ReplyContext(

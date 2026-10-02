@@ -17,8 +17,9 @@ symptom, closed one proof at a time:
 3. The PII proof: the third party's name reaches OpenAI only as an ATENDIDO
    token - through the real history load and the real pseudonymizer.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -374,12 +375,12 @@ class _WireClient:
 
 @pytest.fixture
 def wired(monkeypatch: pytest.MonkeyPatch, db):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     monkeypatch.setattr(graph, "async_session_factory", db)
     monkeypatch.setattr(pii_store, "async_session_factory", db)
-    monkeypatch.setattr(tasks, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
+    monkeypatch.setattr(workers_ns, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
     _WireClient.sends = []
-    monkeypatch.setattr(tasks, "WhatsAppClient", _WireClient)
+    monkeypatch.setattr(workers_ns, "WhatsAppClient", _WireClient)
 
     async def _fake_resolve(session, tenant_id, patient_id, **kwargs):
         return None
@@ -399,9 +400,9 @@ def wired(monkeypatch: pytest.MonkeyPatch, db):
             limits={},
         )
 
-    monkeypatch.setattr(tasks, "resolve_patient_opening_state", _fake_resolve)
-    monkeypatch.setattr(tasks, "get_waba_token", _fake_token)
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_entitlements)
+    monkeypatch.setattr(workers_ns, "resolve_patient_opening_state", _fake_resolve)
+    monkeypatch.setattr(workers_ns, "get_waba_token", _fake_token)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_entitlements)
     return db
 
 

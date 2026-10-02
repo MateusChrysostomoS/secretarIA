@@ -11,8 +11,9 @@ of them without needing to drive the full flow router / a fake Calendar.
 In-memory-sqlite pattern established by test_agent_menu_tools.py /
 test_action_buttons.py.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -95,9 +96,9 @@ class _FakeWhatsAppClient:
 
 @pytest.fixture(autouse=True)
 def _fakes(monkeypatch: pytest.MonkeyPatch, db):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     _FakeWhatsAppClient.created = []
-    monkeypatch.setattr(tasks, "WhatsAppClient", _FakeWhatsAppClient)
+    monkeypatch.setattr(workers_ns, "WhatsAppClient", _FakeWhatsAppClient)
     yield
 
 

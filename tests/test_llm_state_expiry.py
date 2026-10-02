@@ -14,8 +14,9 @@ file pins the CALL SITE — the guard inside `_persist_inbound_message` that the
 bug actually lived in — against a real (in-memory sqlite) DB, mirroring the
 engine/StaticPool pattern from test_bot_allowlist.py.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -73,7 +74,7 @@ async def db():
 
 @pytest.fixture(autouse=True)
 def _wire_db(monkeypatch: pytest.MonkeyPatch, db):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     yield
 
 

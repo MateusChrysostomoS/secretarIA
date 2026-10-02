@@ -18,8 +18,9 @@ Pins §6 of z_prompts/PROMPT_BRAIN_MESSAGE_ANEXOS_SECRETARIA_2_SECRETARIA.md:
 Storage is `FakeStorage`, patched over services/media_storage.py; that module itself is
 exercised against a stubbed boto3 client and httpx's MockTransport. No real bucket.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -173,8 +174,8 @@ class _FakeArqPool:
 
 @pytest.fixture(autouse=True)
 def _wire(monkeypatch: pytest.MonkeyPatch, db):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
-    monkeypatch.setattr(tasks, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
 
     async def _fake_resolve(session, tenant_id, patient_id, **kwargs):
         return None
@@ -194,10 +195,10 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db):
             limits={},
         )
 
-    monkeypatch.setattr(tasks, "resolve_patient_opening_state", _fake_resolve)
-    monkeypatch.setattr(tasks, "get_waba_token", _fake_token)
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_entitlements)
-    monkeypatch.setattr(tasks, "WhatsAppClient", _ExplodingWhatsAppClient)
+    monkeypatch.setattr(workers_ns, "resolve_patient_opening_state", _fake_resolve)
+    monkeypatch.setattr(workers_ns, "get_waba_token", _fake_token)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_entitlements)
+    monkeypatch.setattr(workers_ns, "WhatsAppClient", _ExplodingWhatsAppClient)
 
 
 @pytest_asyncio.fixture
@@ -1091,7 +1092,7 @@ async def test_a_file_the_worker_cannot_record_is_reported_with_its_key(
     db, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     events: list[dict] = []
-    monkeypatch.setattr(tasks, "logger", _RecordingLogger(events))
+    monkeypatch.setattr(workers_ns, "logger", _RecordingLogger(events))
     tenant = await _seed_tenant(db)
     _, conversation = await _seed_patient(db, tenant)
 

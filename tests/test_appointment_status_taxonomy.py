@@ -18,8 +18,9 @@ This module pins the unified definition end to end:
   * tenant isolation;
   * the regression half: CANCELLED / ATTENDED / NO_SHOW stay out.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -210,7 +211,7 @@ async def db():
 
 @pytest.fixture(autouse=True)
 def _wire(monkeypatch: pytest.MonkeyPatch, db):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     yield
 
 
@@ -477,7 +478,7 @@ async def test_flow_reschedule_logs_the_transition(db, monkeypatch: pytest.Monke
     def _capture(**kwargs):
         calls.append(kwargs)
 
-    monkeypatch.setattr(tasks, "log_status_transition", _capture)
+    monkeypatch.setattr(workers_ns, "log_status_transition", _capture)
 
     await _run_flow_reschedule(db, seeded, new_start=NOW + timedelta(days=6))
 

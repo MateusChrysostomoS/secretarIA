@@ -23,8 +23,9 @@ DB tests mirror the in-memory-sqlite pattern from test_bot_allowlist.py /
 test_bot_reply_gating.py: a real aiosqlite engine on StaticPool, monkeypatched
 in place of `workers.tasks.async_session_factory`.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -229,25 +230,25 @@ async def db():
 
 @pytest.fixture(autouse=True)
 def _wire(monkeypatch: pytest.MonkeyPatch, db):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     _FakeWhatsAppClient.sent = []
-    monkeypatch.setattr(tasks, "WhatsAppClient", _FakeWhatsAppClient)
+    monkeypatch.setattr(workers_ns, "WhatsAppClient", _FakeWhatsAppClient)
 
     async def _fake_get_entitlements(tenant_id, redis):
         return _summary()
 
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_get_entitlements)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
 
     async def _fake_get_waba_token(session, tenant_id):
         return "tenant-waba-token"
 
-    monkeypatch.setattr(tasks, "get_waba_token", _fake_get_waba_token)
+    monkeypatch.setattr(workers_ns, "get_waba_token", _fake_get_waba_token)
     yield
 
 
 def _set_allowlist(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
     fake_settings = Settings(BOT_ALLOWLIST_WA_IDS=raw)
-    monkeypatch.setattr(tasks, "get_settings", lambda: fake_settings)
+    monkeypatch.setattr(workers_ns, "get_settings", lambda: fake_settings)
 
 
 def _value(body: str, *, wam_id: str, wa_id: str = WA_ID) -> WebhookValue:
@@ -484,7 +485,7 @@ async def test_no_delete_statement_is_reachable_from_the_webhook(
     def _explode(*args, **kwargs):
         raise AssertionError("a DELETE is reachable from the patient webhook path")
 
-    monkeypatch.setattr(tasks, "delete", _explode)
+    monkeypatch.setattr(workers_ns, "delete", _explode)
 
     for command in ("/menu", "/reset", "/recomeçar", "/inicio", "oi", "Agendar"):
         await tasks._handle_patient_messages(_value(command, wam_id=f"wamid.nodelete.{command}"))
@@ -541,7 +542,7 @@ async def test_menu_unentitled_sends_nothing(db, monkeypatch: pytest.MonkeyPatch
     async def _unentitled(tenant_id, redis):
         return _summary(active=False, status="past_due")
 
-    monkeypatch.setattr(tasks, "get_entitlements", _unentitled)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _unentitled)
 
     await tasks._handle_patient_messages(_value("/menu", wam_id="wamid.menu.unpaid"))
 

@@ -23,8 +23,9 @@ Fixtures follow tests/test_brain_message_email_otp_inline.py (in-memory SQLite
 on a StaticPool), because these two files describe two halves of one flow and
 a second harness would let them drift.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -131,9 +132,9 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db, calls):
     # Both modules bind the factory at import time, so both are substituted:
     # the worker leg (promotion, the inbound transaction) and the service leg
     # (the gate's own hold writes, which run from the router).
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     monkeypatch.setattr(holds, "async_session_factory", db)
-    monkeypatch.setattr(tasks, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
+    monkeypatch.setattr(workers_ns, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
 
     async def _fake_resolve(session, tenant_id, patient_id, **kwargs):
         return None
@@ -153,9 +154,9 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db, calls):
             limits={},
         )
 
-    monkeypatch.setattr(tasks, "resolve_patient_opening_state", _fake_resolve)
-    monkeypatch.setattr(tasks, "get_waba_token", _fake_token)
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_entitlements)
+    monkeypatch.setattr(workers_ns, "resolve_patient_opening_state", _fake_resolve)
+    monkeypatch.setattr(workers_ns, "get_waba_token", _fake_token)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_entitlements)
 
     async def _request(tenant_id, external_id):
         calls.code_requests.append(external_id)
@@ -166,13 +167,13 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db, calls):
         return VerifyResult(VerifyOutcome.VERIFIED if code == "123456" else VerifyOutcome.INVALID)
 
     monkeypatch.setattr(holds, "request_code", _request)
-    monkeypatch.setattr(tasks, "request_code", _request)
-    monkeypatch.setattr(tasks, "verify_code", _verify)
+    monkeypatch.setattr(workers_ns, "request_code", _request)
+    monkeypatch.setattr(workers_ns, "verify_code", _verify)
 
     async def _enqueue(redis, tenant_id, appointment_id, source):
         calls.hooks.append((str(appointment_id), source))
 
-    monkeypatch.setattr(tasks, "enqueue_post_booking_hooks", _enqueue)
+    monkeypatch.setattr(workers_ns, "enqueue_post_booking_hooks", _enqueue)
     yield
 
 
@@ -551,7 +552,7 @@ async def test_the_gate_arms_on_the_real_reply_path(db, calls, monkeypatch):
         seen["gate"] = kwargs.get("gate")
         return fr.FlowRouterResult(action="delegate_llm")
 
-    monkeypatch.setattr(tasks, "route", _capture)
+    monkeypatch.setattr(workers_ns, "route", _capture)
 
     # Exactly the shape production builds for an ordinary turn: no tenant_id.
     reply = tasks._ReplyContext(
@@ -589,7 +590,7 @@ async def test_the_gate_stays_disarmed_on_whatsapp(db, calls, monkeypatch):
         seen["gate"] = kwargs.get("gate")
         return fr.FlowRouterResult(action="delegate_llm")
 
-    monkeypatch.setattr(tasks, "route", _capture)
+    monkeypatch.setattr(workers_ns, "route", _capture)
     reply = tasks._ReplyContext(
         conversation_id=conversation.id,
         patient_ref="5511988887777",
@@ -631,7 +632,7 @@ async def test_the_verified_code_is_what_creates_the_appointment(db, calls, monk
     start = datetime(2099, 1, 5, 13, 0, tzinfo=UTC)
     await _place(db, tenant, conversation, start, patient=patient)
     monkeypatch.setattr(
-        tasks, "_appointment_calendar", lambda *a, **k: _async(_FakeCalendar(calls))
+        workers_ns, "_appointment_calendar", lambda *a, **k: _async(_FakeCalendar(calls))
     )
 
     extra = await tasks._promote_booking_hold(
@@ -671,7 +672,7 @@ async def test_an_expired_reservation_is_never_promoted(db, calls, monkeypatch):
     await _place(db, tenant, conversation, datetime(2099, 1, 5, 13, 0, tzinfo=UTC), patient=patient)
     await _expire(db, conversation)
     monkeypatch.setattr(
-        tasks, "_appointment_calendar", lambda *a, **k: _async(_FakeCalendar(calls))
+        workers_ns, "_appointment_calendar", lambda *a, **k: _async(_FakeCalendar(calls))
     )
 
     extra = await tasks._promote_booking_hold(
@@ -780,8 +781,8 @@ async def test_the_worker_never_delivers_an_llm_verification_claim(db, monkeypat
     async def _hallucinate(*args, **kwargs):
         return HALLUCINATION
 
-    monkeypatch.setattr(tasks, "_run_flow", _delegate)
-    monkeypatch.setattr(tasks, "run_agent", _hallucinate)
+    monkeypatch.setattr(workers_ns, "_run_flow", _delegate)
+    monkeypatch.setattr(workers_ns, "run_agent", _hallucinate)
 
     reply = await tasks._persist_brain_message_inbound(
         tenant_id=tenant.id, external_id=EXTERNAL_ID, text="123456", patient_name="Maria"

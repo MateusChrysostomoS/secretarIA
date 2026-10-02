@@ -17,10 +17,11 @@ not by reading the code.
 Fixtures follow tests/test_brain_message_email_otp_inline.py (in-memory SQLite
 on a StaticPool, rows read back as the delivery on Brain-Message).
 """
-
 import json
 import os
 import re
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -169,12 +170,12 @@ class _WireClient:
 
 @pytest.fixture(autouse=True)
 def _wire(monkeypatch: pytest.MonkeyPatch, db, calls):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     monkeypatch.setattr(graph, "async_session_factory", db)
     monkeypatch.setattr(pii_store, "async_session_factory", db)
-    monkeypatch.setattr(tasks, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
+    monkeypatch.setattr(workers_ns, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
     _WireClient.sends = []
-    monkeypatch.setattr(tasks, "WhatsAppClient", _WireClient)
+    monkeypatch.setattr(workers_ns, "WhatsAppClient", _WireClient)
 
     async def _fake_resolve(session, tenant_id, patient_id, **kwargs):
         return None
@@ -194,9 +195,9 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db, calls):
             limits={},
         )
 
-    monkeypatch.setattr(tasks, "resolve_patient_opening_state", _fake_resolve)
-    monkeypatch.setattr(tasks, "get_waba_token", _fake_token)
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_entitlements)
+    monkeypatch.setattr(workers_ns, "resolve_patient_opening_state", _fake_resolve)
+    monkeypatch.setattr(workers_ns, "get_waba_token", _fake_token)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_entitlements)
 
     async def _probe(tenant_id, external_id):
         calls.probed.append(external_id)
@@ -222,11 +223,11 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db, calls):
         calls.reported.append((external_id, name))
         return True
 
-    monkeypatch.setattr(tasks, "report_name", _report)
-    monkeypatch.setattr(tasks, "probe_identity", _probe)
-    monkeypatch.setattr(tasks, "claim_email", _claim)
-    monkeypatch.setattr(tasks, "verify_code", _verify)
-    monkeypatch.setattr(tasks, "request_code", _request)
+    monkeypatch.setattr(workers_ns, "report_name", _report)
+    monkeypatch.setattr(workers_ns, "probe_identity", _probe)
+    monkeypatch.setattr(workers_ns, "claim_email", _claim)
+    monkeypatch.setattr(workers_ns, "verify_code", _verify)
+    monkeypatch.setattr(workers_ns, "request_code", _request)
     yield
 
 
@@ -625,7 +626,7 @@ async def test_a_first_contact_that_sends_nothing_does_not_arm_the_name_wait(
     async def _lapsed(tenant_id, redis):
         return None
 
-    monkeypatch.setattr(tasks, "get_entitlements", _lapsed)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _lapsed)
     tenant = await _seed_tenant(db)
 
     await _wa_turn(tenant, "oi")
@@ -779,7 +780,7 @@ async def test_portal_known_email_whose_code_cannot_be_checked_continues_to_cons
         calls.verified.append(code)
         return VerifyResult(VerifyOutcome.UNAVAILABLE)
 
-    monkeypatch.setattr(tasks, "verify_code", _down)
+    monkeypatch.setattr(workers_ns, "verify_code", _down)
     tenant = await _seed_tenant(db)
     await _bm_turn(tenant, "oi")
     await _bm_turn(tenant, EMAIL)

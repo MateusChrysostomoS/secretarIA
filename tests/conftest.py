@@ -1,10 +1,11 @@
 """Shared pytest fixtures and deterministic test environment."""
-
 import os
 from collections.abc import AsyncIterator
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+
+from tests._patching import workers_ns
 
 # Configure a deterministic environment BEFORE any `secretaria` import, so that
 # Settings() picks these values up. Real env vars take precedence over `.env`.
@@ -34,12 +35,11 @@ def _no_turn_apology(monkeypatch: pytest.MonkeyPatch) -> None:
     (tests/test_turn_safety_net.py) call the real function they captured at
     import time and exercise it explicitly.
     """
-    from secretaria.workers import tasks
 
     async def _noop(*_args, **_kwargs) -> None:
         return None
 
-    monkeypatch.setattr(tasks, "_send_turn_fallback", _noop)
+    monkeypatch.setattr(workers_ns, "_send_turn_fallback", _noop)
 
 
 @pytest.fixture

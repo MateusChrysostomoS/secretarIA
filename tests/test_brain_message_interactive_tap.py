@@ -24,8 +24,9 @@ Layout:
 Fixtures follow tests/test_brain_message_pipeline.py (in-memory SQLite on a
 StaticPool; a WhatsApp client that fails the test if anything builds it).
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -122,11 +123,11 @@ _agent_calls: list[str] = []
 
 @pytest.fixture(autouse=True)
 def _wire(monkeypatch: pytest.MonkeyPatch, db):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     monkeypatch.setattr(graph, "async_session_factory", db)
     monkeypatch.setattr(scoped_help, "async_session_factory", db)
-    monkeypatch.setattr(tasks, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
-    monkeypatch.setattr(tasks, "WhatsAppClient", _ExplodingWhatsAppClient)
+    monkeypatch.setattr(workers_ns, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
+    monkeypatch.setattr(workers_ns, "WhatsAppClient", _ExplodingWhatsAppClient)
     _agent_calls.clear()
 
     async def _no_opening_state(session, tenant_id, patient_id, **kwargs):
@@ -151,10 +152,10 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db):
         _agent_calls.append(message)
         return "resposta da LLM"
 
-    monkeypatch.setattr(tasks, "resolve_patient_opening_state", _no_opening_state)
-    monkeypatch.setattr(tasks, "get_waba_token", _fake_token)
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_entitlements)
-    monkeypatch.setattr(tasks, "run_agent", _agent)
+    monkeypatch.setattr(workers_ns, "resolve_patient_opening_state", _no_opening_state)
+    monkeypatch.setattr(workers_ns, "get_waba_token", _fake_token)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_entitlements)
+    monkeypatch.setattr(workers_ns, "run_agent", _agent)
     yield
 
 
@@ -230,7 +231,7 @@ def _stop_at_the_reply_seam(monkeypatch: pytest.MonkeyPatch) -> list:
     async def _capture(reply, redis=None):
         replies.append(reply)
 
-    monkeypatch.setattr(tasks, "_send_bot_reply", _capture)
+    monkeypatch.setattr(workers_ns, "_send_bot_reply", _capture)
     return replies
 
 

@@ -17,8 +17,9 @@ DB tests mirror the in-memory-sqlite pattern from test_action_buttons.py /
 test_handover_echoes.py: a real aiosqlite engine on StaticPool, monkeypatched
 in place of `workers.tasks.async_session_factory`.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -105,7 +106,7 @@ async def db():
 
 @pytest.fixture(autouse=True)
 def _wire_db(monkeypatch: pytest.MonkeyPatch, db):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
 
     # The greeting-adaptation path does its own indexed reads; stub it out
     # exactly like test_patient_context.py's opening-router test so these
@@ -113,13 +114,13 @@ def _wire_db(monkeypatch: pytest.MonkeyPatch, db):
     async def _fake_resolve(session, tenant_id, patient_id, **kwargs):
         return None
 
-    monkeypatch.setattr(tasks, "resolve_patient_opening_state", _fake_resolve)
+    monkeypatch.setattr(workers_ns, "resolve_patient_opening_state", _fake_resolve)
     yield
 
 
 def _set_allowlist(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
     fake_settings = Settings(BOT_ALLOWLIST_WA_IDS=raw)
-    monkeypatch.setattr(tasks, "get_settings", lambda: fake_settings)
+    monkeypatch.setattr(workers_ns, "get_settings", lambda: fake_settings)
 
 
 async def _seed_tenant(db, **kwargs) -> Tenant:
