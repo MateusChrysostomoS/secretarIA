@@ -54,7 +54,10 @@ The request flows in one direction — keep it that way:
 `api/` (HTTP) → `workers/` (orchestration) → `services/` + `ai/` (business logic) → `models/` (ORM) → `core/` (infra).
 
 - **`api/`** — thin HTTP layer only: parse/validate input, call a service, shape the response. No business logic, no DB transactions beyond trivial reads. Each module exposes one `APIRouter` registered in `main.py`.
-- **`workers/`** — async orchestration (arq jobs). `tasks.py` decides *which brain* answers; it does not contain calendar/whatsapp logic itself — it calls `services/`.
+- **`workers/`** — async orchestration (arq jobs). Desde a TASK-023 é um pacote: `shared/` (neutro de canal),
+  `whatsapp/`, `portal/`, e os dois módulos de composição `turn_router.py` / `orchestrator.py` (únicos que conhecem
+  os dois canais). `tasks.py` é só uma fachada de reexports (`arq_worker.py` e os testes ainda importam dele).
+  Regras de camada em `tests/test_workers_layering.py`. Não contém lógica de calendário/whatsapp — chama `services/`.
 - **`services/`** — business logic, reusable by both brains (flow router AND the LLM agent). Calendar/availability logic lives ONLY in `services/calendar.py`.
 - **`ai/`** — everything LLM-specific (the agent, prompts, tools, formatter). No business-specific clinic facts here (see the Eye Company rule above).
 - **`core/`** — framework-agnostic infra (db engine, crypto, security, logging). Must not import from `api/`, `services/`, or `ai/`.
@@ -69,22 +72,21 @@ Current `api/` domains (for reference when it grows):
 
 When you restructure, do it as a dedicated change (move files + fix imports in `main.py` + fix `tests/`), then run `graphify update .` — never bundle a structural move with a behavioural change.
 
-### Onde vive o código do Portal (Brain-Message)
+### Onde vive o código do Portal e do WhatsApp (workers)
 
-O dono perguntou (2026-09-20, TASK-004) se cada peça do Portal não deveria virar uma pasta
-`portal/` própria, como o PreCheck tem. A decisão foi **não mover nada** — e esta seção existe
-para que uma sessão futura não reabra a proposta sem saber que ela já foi avaliada e recusada.
-As três peças, e o motivo de cada uma:
+Até a TASK-023 (2026-10-01) tudo vivia em `workers/tasks.py` e a decisão registrada era *não* criar `portal/`
+(TASK-004, 2026-09-20). O dono reverteu isso. Estrutura atual — fonte de verdade: `docs/CHECKPOINT_workers_split.md`:
 
-| Peça | Natureza | Por que fica onde está |
+| Pasta | O que é | Pode importar |
 |---|---|---|
-| `services/channel_sender.py::BrainMessageSender` | exclusiva do Portal, **dentro de arquivo compartilhado** | o que está acima dela no arquivo (o Protocol `ChannelSender`, `MediaChannelSender` e os helpers `interactive_history_body` / `sender_persists_outbound` / `sender_sends_media`) é dos DOIS canais, porque `WhatsAppClient` satisfaz o mesmo Protocol estruturalmente. Tirar só o sender parte o seam em duas metades incompletas. |
-| `plugins/precheck_handoff.py::_post_booking` | **ramo por canal dentro de uma função só** | `portal = ctx.patient.channel == CHANNEL_BRAIN_MESSAGE` decide tudo depois dele; é o padrão `channel-aware-dispatch` (um ponto de decisão, nunca os dois ramos disparando). Separar exigiria duplicar a função. |
-| `plugins/pending_identity.py` | **100% do Portal** (guarda `ctx.patient.channel != CHANNEL_BRAIN_MESSAGE` no topo) | é 1 arquivo só. A regra de granularidade logo acima promove um domínio a subpacote com ~3+ arquivos; uma pasta para 1 arquivo furaria a própria regra do repo. |
+| `workers/shared/` | neutro de canal (saudação, envio, bolhas, handover, fluxo, ações, jobs) | só `shared/` |
+| `workers/whatsapp/` | webhook, rate limit, áudio, coexistência, remove-context, avisos de cancelamento | `shared/` |
+| `workers/portal/` | entrada brain-message, `open`, identidade/OTP/nome, anexos | `shared/` |
+| `workers/turn_router.py`, `workers/orchestrator.py` | composição: ainda têm os ramos `channel == ...` | tudo |
 
-Do lado do PreCheck a pasta **existe** e não segue este padrão: `app/services/brain_message/`
-(`store.py` / `agent_client.py` / `conductor.py`) é do Portal de ponta a ponta — nenhum nó do n8n
-a chama. Ou seja, o pedido do dono já está atendido lá; não renomeie nem recrie.
+Os ramos por canal que restam em `turn_router`/`orchestrator` (≈10) e o `plugins/precheck_handoff.py::_post_booking`
+são a **fase 2** (política de canal), não feita. `services/channel_sender.py` e `flow_router.py` não se moveram:
+o primeiro tem o Protocol dos dois canais, o segundo é 100% neutro.
 
 ### General
 - Pure decision functions over side-effects: prefer the `flow_router.route()` pattern — return a result object, let the caller persist/send. Easier to test without network/DB.
@@ -133,6 +135,8 @@ neither" do `README.md`.
 
 ## Documentação
 
+`docs/CHECKPOINT_workers_split.md` — TASK-023: divisão de `workers/tasks.py` (mapa nome → módulo, camadas, como provar).
+
 `docs/CHECKPOINT_mvp_portal.md` — TASK-021: contexto/rascunho da LLM, handoff e notificações; não deployado; validação e pendências registradas.
 
 `docs/` é a fonte de verdade deste repo (exemplo do padrão: `docs/CHECKPOINT_plugins.md`). Regra
@@ -157,7 +161,7 @@ Gerados por uma sessão de auditoria (2026-08-21) a partir de uma lista de bugs 
 `/prompt-generator`) — achado registrado em `docs/CHECKPOINT_brain_message_anexos_secretaria.md`
 §8: `models/message.py:107` não tem `none_as_null=True` (ao contrário de `attachment`, linha 118),
 então `interactive=None` numa bolha de texto grava a string `'null'`, não SQL NULL. Consequência:
-`workers/tasks.py::_validated_brain_message_reply_id` (linha 6493, filtro na linha 6527,
+`workers/tasks.py::_validated_brain_message_reply_id` (números de linha anteriores à TASK-023; a função agora está em `workers/portal/inbound.py`) (linha 6493, filtro na linha 6527,
 `BRAIN_MESSAGE_TAP_WINDOW=10` na linha 6474) conta as 10 últimas mensagens de qualquer tipo, não
 os 10 últimos cartões interactive — um cartão seguido de 10+ bolhas de texto teria o toque
 recusado. Confirmado ainda pendente em 2026-09-19. **NÃO EXECUTADO.**
