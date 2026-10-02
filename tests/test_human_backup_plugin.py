@@ -18,6 +18,7 @@ os.environ.setdefault("ENCRYPTION_KEY", "gBSpATEZoI21UX0_59nHvxdUDJ4drCttg2RAEaP
 
 from datetime import UTC, datetime  # noqa: E402
 from uuid import uuid4  # noqa: E402
+from zoneinfo import ZoneInfo  # noqa: E402
 
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
@@ -34,6 +35,8 @@ from secretaria.plugins import human_backup  # noqa: E402
 from secretaria.plugins.base import InboundContext  # noqa: E402
 from secretaria.plugins.registry import run_on_inbound  # noqa: E402
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
+
+_NOW_UTC = datetime(2026, 10, 2, 1, 0, tzinfo=UTC)
 
 _ALL_ADDONS_OFF = {
     "reactivation_pack": False,
@@ -98,6 +101,14 @@ async def db():
 
 @pytest.fixture(autouse=True)
 def _fakes(monkeypatch: pytest.MonkeyPatch, db):
+    # Keep every scenario independent of the wall clock, including the UTC/local
+    # date mismatch that used to make the inside-hours hook test flaky.
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _NOW_UTC.astimezone(tz) if tz else _NOW_UTC.replace(tzinfo=None)
+
+    monkeypatch.setattr(human_backup, "datetime", FixedDatetime)
     monkeypatch.setattr(human_backup, "async_session_factory", db)
     _FakeWhatsAppClient.created = []
     monkeypatch.setattr(human_backup, "WhatsAppClient", _FakeWhatsAppClient)
@@ -138,8 +149,8 @@ def _ctx(tenant: Tenant, conversation: Conversation) -> InboundContext:
     )
 
 
-def _today_key() -> str:
-    return human_backup._WEEKDAY_KEYS[datetime.now(UTC).weekday()]
+def _today_key(timezone: str = "UTC") -> str:
+    return human_backup._WEEKDAY_KEYS[_NOW_UTC.astimezone(ZoneInfo(timezone)).weekday()]
 
 
 # --------------------------------------------------------------------------
@@ -150,7 +161,7 @@ def _today_key() -> str:
 def test_outside_hours_true_when_closed_all_day():
     # Hours ARE configured (on a different weekday) but today's own list is
     # empty -> closed today specifically, distinct from "nothing configured".
-    other_day = human_backup._WEEKDAY_KEYS[(datetime.now(UTC).weekday() + 1) % 7]
+    other_day = human_backup._WEEKDAY_KEYS[(_NOW_UTC.weekday() + 1) % 7]
     tenant = Tenant(
         clinic_name="C",
         phone_number_id="1",
@@ -185,6 +196,28 @@ def test_empty_business_hours_never_outside():
     assert human_backup._is_outside_business_hours(tenant) is False
 
 
+@pytest.mark.parametrize(
+    ("now_utc", "open_day", "outside"),
+    [
+        (datetime(2026, 10, 1, 23, 59, tzinfo=UTC), "thursday", False),
+        (datetime(2026, 10, 2, 0, 0, tzinfo=UTC), "thursday", False),
+        (datetime(2026, 10, 2, 1, 0, tzinfo=UTC), "thursday", False),
+        (datetime(2026, 10, 2, 2, 59, tzinfo=UTC), "thursday", False),
+        (datetime(2026, 10, 2, 3, 0, tzinfo=UTC), "thursday", True),
+        (datetime(2026, 10, 5, 1, 0, tzinfo=UTC), "sunday", False),
+        (datetime(2026, 10, 5, 3, 0, tzinfo=UTC), "sunday", True),
+    ],
+)
+def test_business_hours_use_local_weekday_across_utc_midnight(now_utc, open_day, outside):
+    tenant = Tenant(
+        clinic_name="C",
+        phone_number_id="1",
+        business_hours={open_day: [{"start": "00:00", "end": "23:59"}]},
+        timezone="America/Sao_Paulo",
+    )
+    assert human_backup._is_outside_business_hours(tenant, now_utc=now_utc) is outside
+
+
 # --------------------------------------------------------------------------
 # _on_inbound — full hook behavior
 # --------------------------------------------------------------------------
@@ -195,7 +228,7 @@ async def test_on_inbound_outside_hours_flips_handover_and_acks(
 ):
     tenant, patient, conversation = await _make_conversation(
         db,
-        business_hours={_today_key(): [{"start": "00:00", "end": "00:01"}]},
+        business_hours={_today_key("America/Sao_Paulo"): [{"start": "00:00", "end": "00:01"}]},
         contact_email="owner@example.com",
     )
     alert_calls: list[tuple] = []
@@ -222,7 +255,8 @@ async def test_on_inbound_outside_hours_flips_handover_and_acks(
 
 async def test_on_inbound_inside_hours_returns_false(db):
     tenant, patient, conversation = await _make_conversation(
-        db, business_hours={_today_key(): [{"start": "00:00", "end": "23:59"}]}
+        db,
+        business_hours={_today_key("America/Sao_Paulo"): [{"start": "00:00", "end": "23:59"}]},
     )
 
     handled = await human_backup._on_inbound(_ctx(tenant, conversation))
@@ -246,7 +280,7 @@ async def test_on_inbound_empty_business_hours_never_fires(db):
 async def test_on_inbound_no_contact_email_skips_alert_but_still_handles(db):
     tenant, patient, conversation = await _make_conversation(
         db,
-        business_hours={_today_key(): [{"start": "00:00", "end": "00:01"}]},
+        business_hours={_today_key("America/Sao_Paulo"): [{"start": "00:00", "end": "00:01"}]},
         contact_email=None,
     )
 
@@ -262,7 +296,8 @@ async def test_on_inbound_no_contact_email_skips_alert_but_still_handles(db):
 
 async def test_addon_off_hook_never_runs(db):
     tenant, patient, conversation = await _make_conversation(
-        db, business_hours={_today_key(): [{"start": "00:00", "end": "00:01"}]}
+        db,
+        business_hours={_today_key("America/Sao_Paulo"): [{"start": "00:00", "end": "00:01"}]},
     )
     summary = _summary(addons=dict(_ALL_ADDONS_OFF))  # human_backup_24_7 = False
 
@@ -277,7 +312,8 @@ async def test_addon_off_hook_never_runs(db):
 
 async def test_addon_on_and_outside_hours_handles_via_registry(db, monkeypatch: pytest.MonkeyPatch):
     tenant, patient, conversation = await _make_conversation(
-        db, business_hours={_today_key(): [{"start": "00:00", "end": "00:01"}]}
+        db,
+        business_hours={_today_key("America/Sao_Paulo"): [{"start": "00:00", "end": "00:01"}]},
     )
 
     async def _noop_alert(*args, **kwargs):

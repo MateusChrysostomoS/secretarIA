@@ -80,3 +80,32 @@ reply) existed and works per tenant (`ai/graph.py`, `services/calendar.py`,
   as live integrations.
 - The outbound WhatsApp rate limiter (~5 msg/s cap) is still a TODO in
   `services/whatsapp.py`.
+
+## Testes determinísticos de horário (2026-10-02)
+
+Correção local, sem commit ou deploy, apenas em `tests/test_human_backup_plugin.py`.
+O teste `test_on_inbound_inside_hours_returns_false` configurava o dia da semana
+em UTC para um tenant de `America/Sao_Paulo`. Entre 00h e 03h UTC, a clínica
+ainda está no dia anterior: o plugin corretamente via um dia sem expediente.
+A falha original foi reproduzida com relógio em `2026-10-02T01:00:00Z`
+(1 failed, 9 passed), sem modificar a implementação do plugin.
+
+O relógio do plugin agora é fixado somente neste módulo de testes; os horários
+dos tenants usam o dia local correspondente. Os testes puros em UTC continuam
+usando o dia UTC. Sete casos explícitos cobrem antes/depois da meia-noite UTC,
+00h, 01h, 02h59, 03h e a virada de domingo para segunda-feira.
+
+Validação: módulo **17 passed**; suíte completa **2805 passed, 10 skipped**, com
+11 avisos de depreciação preexistentes. A conta anterior da TASK-023 era
+2797 aprovados + 1 falha; o teste corrigido e os 7 casos novos explicam o total.
+No Windows, os comandos foram executados via `uv run python -m pytest` porque
+o Controle de Aplicativo bloqueia o executável `pytest` diretamente. Para a
+suíte completa, `BOT_ALLOWLIST_WA_IDS=""` foi definido apenas no processo de
+teste: a restrição do ambiente local bloqueava os pacientes fictícios em
+outros módulos. Nenhuma configuração persistente foi alterada.
+
+`ruff check .` passou; o arquivo alterado passou em `ruff format --check`.
+A checagem geral de formato aponta 128 arquivos preexistentes fora desta
+correção. O Graphify inicialmente INVALID foi atualizado e validado sem
+arestas duplicadas ou pendentes; o status fica STALE enquanto houver código
+local não commitado, conforme a política da workspace.
