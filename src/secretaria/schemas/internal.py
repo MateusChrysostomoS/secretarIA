@@ -214,3 +214,6 @@ class BrainMessageMessageList(BaseModel):
     """`GET /internal/brain-message/conversations/{external_id}/messages` response."""
 
     data: list[BrainMessageMessage]
+    # True when older messages exist beyond this page (only meaningful without `since`).
+    # Additive and defaulted: callers that never read it keep working.
+    has_more: bool = False
