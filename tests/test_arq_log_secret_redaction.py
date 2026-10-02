@@ -11,7 +11,7 @@ secret is in none of the captured lines.
 """
 import inspect
 import logging
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 from arq.utils import args_to_string
@@ -79,12 +79,11 @@ async def _run_real_job_capturing(
     caplog.set_level(logging.DEBUG)
     structlog_events: list[str] = []
     monkeypatch.setattr(workers_ns, "logger", _RecordingLogger(structlog_events))
-    with patch(
-        "secretaria.workers.tasks.send_transactional_email_message",
-        new=AsyncMock(return_value=True),
-    ):
-        _emit_arq_job_start_line("send_transactional_email", (template, _ADDRESS, variables))
-        await tasks.send_transactional_email({}, template, _ADDRESS, variables)
+    monkeypatch.setattr(
+        workers_ns, "send_transactional_email_message", AsyncMock(return_value=True)
+    )
+    _emit_arq_job_start_line("send_transactional_email", (template, _ADDRESS, variables))
+    await tasks.send_transactional_email({}, template, _ADDRESS, variables)
     captured = capsys.readouterr()
     # Everything that reached ANY sink: stdlib records (arq), the job's own
     # structlog events, and raw stdout/stderr.
