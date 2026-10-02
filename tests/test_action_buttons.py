@@ -10,8 +10,9 @@ Two layers:
     in place (both `core.database`'s and `workers.tasks`'s own module-level
     binding — tasks.py imports it at module scope).
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -186,10 +187,10 @@ def _fakes(monkeypatch: pytest.MonkeyPatch, db):
     # source); workers/tasks imports it at module level (patch the attribute)
     # — same split as test_agent_menu_tools.py.
     monkeypatch.setattr(core_database, "async_session_factory", db)
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     _FakeWhatsAppClient.created = []
-    monkeypatch.setattr(tasks, "WhatsAppClient", _FakeWhatsAppClient)
-    monkeypatch.setattr(tasks, "get_waba_token", _fake_get_waba_token)
+    monkeypatch.setattr(workers_ns, "WhatsAppClient", _FakeWhatsAppClient)
+    monkeypatch.setattr(workers_ns, "get_waba_token", _fake_get_waba_token)
     yield
 
 
@@ -513,7 +514,7 @@ async def test_apptresched_under_limit_enters_manage_flow_preselected(db, monkey
     tenant, patient, conversation, appt = await _seed(db, pix_reschedule_limit=2)
     await _seed_deposit(db, appt, status=PixDepositStatus.PAID, reschedule_count=0)
     monkeypatch.setattr(
-        tasks, "_appointment_calendar", _async_return(_RescheduleDayCalendar())
+        workers_ns, "_appointment_calendar", _async_return(_RescheduleDayCalendar())
     )
 
     await tasks._handle_action_button(_reply_ctx(conversation), "apptresched", str(appt.id))
@@ -536,7 +537,7 @@ async def test_apptresched_without_a_resolvable_calendar_hands_off(db, monkeypat
     """No agenda for the appointment (owner gone, or the build failed): hand to
     a human. Never a day list off some other calendar, never the LLM."""
     tenant, patient, conversation, appt = await _seed(db, pix_reschedule_limit=2)
-    monkeypatch.setattr(tasks, "_appointment_calendar", _async_return(None))
+    monkeypatch.setattr(workers_ns, "_appointment_calendar", _async_return(None))
 
     await tasks._handle_action_button(_reply_ctx(conversation), "apptresched", str(appt.id))
 

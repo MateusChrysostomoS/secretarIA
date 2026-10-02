@@ -24,9 +24,10 @@ renders them — a stronger statement than "the sender was called".
 Fixtures follow tests/test_brain_message_pipeline.py (in-memory SQLite on a
 StaticPool).
 """
-
 import json
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -185,9 +186,9 @@ def calls() -> _Calls:
 
 @pytest.fixture(autouse=True)
 def _wire(monkeypatch: pytest.MonkeyPatch, db, calls):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     monkeypatch.setattr(plugin, "async_session_factory", db)
-    monkeypatch.setattr(tasks, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
+    monkeypatch.setattr(workers_ns, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
 
     async def _fake_resolve(session, tenant_id, patient_id, **kwargs):
         return None
@@ -207,9 +208,9 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db, calls):
             limits={},
         )
 
-    monkeypatch.setattr(tasks, "resolve_patient_opening_state", _fake_resolve)
-    monkeypatch.setattr(tasks, "get_waba_token", _fake_token)
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_entitlements)
+    monkeypatch.setattr(workers_ns, "resolve_patient_opening_state", _fake_resolve)
+    monkeypatch.setattr(workers_ns, "get_waba_token", _fake_token)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_entitlements)
 
     # Default identity leg: a brand-new visit that owes an address, every call
     # succeeding. Individual tests override one function at a time, so what a
@@ -234,18 +235,18 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db, calls):
         calls.cancelled.append(external_id)
         return True
 
-    monkeypatch.setattr(tasks, "probe_identity", _probe)
-    monkeypatch.setattr(tasks, "claim_email", _claim)
-    monkeypatch.setattr(tasks, "verify_code", _verify)
-    monkeypatch.setattr(tasks, "request_code", _request)
+    monkeypatch.setattr(workers_ns, "probe_identity", _probe)
+    monkeypatch.setattr(workers_ns, "claim_email", _claim)
+    monkeypatch.setattr(workers_ns, "verify_code", _verify)
+    monkeypatch.setattr(workers_ns, "request_code", _request)
     monkeypatch.setattr(plugin, "request_code", _request)
-    monkeypatch.setattr(tasks, "cancel_pending_code", _cancel)
+    monkeypatch.setattr(workers_ns, "cancel_pending_code", _cancel)
 
     async def _report(tenant_id, external_id, name):
         # The name-to-brain-api leg (2026-09-24): no network from this suite.
         return True
 
-    monkeypatch.setattr(tasks, "report_name", _report)
+    monkeypatch.setattr(workers_ns, "report_name", _report)
     yield
 
 
@@ -547,7 +548,7 @@ async def test_a_brain_api_outage_on_the_claim_does_not_advance_to_consent(
         calls.claimed.append(email)
         return ClaimResult(ClaimOutcome.UNAVAILABLE)
 
-    monkeypatch.setattr(tasks, "claim_email", _down)
+    monkeypatch.setattr(workers_ns, "claim_email", _down)
     await _bm_turn(tenant, EMAIL)
 
     assert calls.claimed == [EMAIL]
@@ -571,8 +572,8 @@ async def test_claim_race_reprobes_and_accepts_an_already_verified_account(
         calls.claimed.append(email)
         return ClaimResult(ClaimOutcome.NOT_PENDING)
 
-    monkeypatch.setattr(tasks, "probe_identity", _probe)
-    monkeypatch.setattr(tasks, "claim_email", _already_done)
+    monkeypatch.setattr(workers_ns, "probe_identity", _probe)
+    monkeypatch.setattr(workers_ns, "claim_email", _already_done)
     tenant = await _seed_tenant(db)
 
     await _bm_turn(tenant, "oi")
@@ -598,7 +599,7 @@ async def test_a_verified_visitor_skips_both_email_and_account_lgpd(db, calls, m
         calls.probed.append(external_id)
         return IdentityState.VERIFIED
 
-    monkeypatch.setattr(tasks, "probe_identity", _probe)
+    monkeypatch.setattr(workers_ns, "probe_identity", _probe)
     tenant = await _seed_tenant(db)
 
     await _bm_turn(tenant, "oi")
@@ -625,7 +626,7 @@ async def test_a_non_verified_visitor_with_no_email_step_still_gets_lgpd(
         calls.probed.append(external_id)
         return state
 
-    monkeypatch.setattr(tasks, "probe_identity", _probe)
+    monkeypatch.setattr(workers_ns, "probe_identity", _probe)
     tenant = await _seed_tenant(db)
 
     await _bm_turn(tenant, "oi")
@@ -641,7 +642,7 @@ async def test_an_unreachable_probe_falls_back_to_todays_behaviour(db, monkeypat
     async def _probe(tenant_id, external_id):
         return IdentityState.UNAVAILABLE
 
-    monkeypatch.setattr(tasks, "probe_identity", _probe)
+    monkeypatch.setattr(workers_ns, "probe_identity", _probe)
     tenant = await _seed_tenant(db)
 
     await _bm_turn(tenant, "oi")
@@ -680,7 +681,7 @@ async def test_whatsapp_first_contact_is_byte_for_byte_unchanged(db, calls) -> N
             return {}
 
     original = tasks._tenant_client
-    tasks._tenant_client = lambda tenant_, waba_token: _RecordingClient()
+    workers_ns._tenant_client = lambda tenant_, waba_token: _RecordingClient()
     try:
         reply = await tasks._persist_inbound_message(
             phone_number_id=tenant.phone_number_id,
@@ -701,7 +702,7 @@ async def test_whatsapp_first_contact_is_byte_for_byte_unchanged(db, calls) -> N
         assert name_reply is not None
         await tasks._send_bot_reply(name_reply, redis=None)
     finally:
-        tasks._tenant_client = original
+        workers_ns._tenant_client = original
 
     assert len(sent_bodies) == 3, sent_bodies
     assert sent_bodies[0].startswith("👋 Olá! Bem-vindo(a) à Clinic!")
@@ -823,7 +824,7 @@ async def test_a_dead_end_says_the_appointment_stands_and_frees_the_conversation
     async def _gone(tenant_id, external_id, code):
         return VerifyResult(VerifyOutcome.UNAVAILABLE)
 
-    monkeypatch.setattr(tasks, "verify_code", _gone)
+    monkeypatch.setattr(workers_ns, "verify_code", _gone)
     tenant = await _seed_tenant(db)
     await _ready_for_code(db, tenant)
 
@@ -1415,7 +1416,7 @@ async def test_a_resend_that_cannot_be_mailed_frees_the_conversation(db, monkeyp
     async def _no(tenant_id, external_id):
         return RequestCodeResult(RequestCodeOutcome.UNAVAILABLE)
 
-    monkeypatch.setattr(tasks, "request_code", _no)
+    monkeypatch.setattr(workers_ns, "request_code", _no)
 
     await _bm_tap(tenant, "Reenviar codigo", IDENTITY_RESEND_ACTION)
 

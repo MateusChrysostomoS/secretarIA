@@ -17,8 +17,9 @@ beyond the accidental trigger:
 
 Same in-memory-sqlite pattern as tests/test_menu_command.py.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -130,19 +131,19 @@ async def db():
 
 @pytest.fixture(autouse=True)
 def _wire(monkeypatch: pytest.MonkeyPatch, db):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     _FakeWhatsAppClient.sent = []
-    monkeypatch.setattr(tasks, "WhatsAppClient", _FakeWhatsAppClient)
+    monkeypatch.setattr(workers_ns, "WhatsAppClient", _FakeWhatsAppClient)
 
     async def _fake_get_waba_token(session, tenant_id):
         return "tenant-waba-token"
 
-    monkeypatch.setattr(tasks, "get_waba_token", _fake_get_waba_token)
+    monkeypatch.setattr(workers_ns, "get_waba_token", _fake_get_waba_token)
 
     async def _entitled(tenant_id, redis):
         return SimpleNamespace(active=True, secretaria_enabled=True, status="active")
 
-    monkeypatch.setattr(tasks, "get_entitlements", _entitled)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _entitled)
 
     # No external system may be touched by a chat command.
     class _NoCalendar:
@@ -153,7 +154,7 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db):
         def from_tenant_config(cls, *args, **kwargs):
             raise AssertionError("the reset must never call Google Calendar")
 
-    monkeypatch.setattr(tasks, "CalendarService", _NoCalendar)
+    monkeypatch.setattr(workers_ns, "CalendarService", _NoCalendar)
     yield
 
 
@@ -451,7 +452,7 @@ async def test_audit_row_is_written_even_with_nothing_to_delete(db) -> None:
 
 async def test_logs_carry_no_phone_number(db, monkeypatch: pytest.MonkeyPatch) -> None:
     recorder = _RecordingLogger()
-    monkeypatch.setattr(tasks, "logger", recorder)
+    monkeypatch.setattr(workers_ns, "logger", recorder)
     await _seed(db)
 
     await tasks._handle_patient_messages(_value(COMMAND, wam_id="wamid.wipe.logs"))
@@ -492,7 +493,7 @@ async def test_off_allowlist_sender_gets_nothing_and_wipes_nothing(
     Coexistence window an off-allowlist number cannot make the platform act."""
     seeded = await _seed(db)
     fake_settings = Settings(BOT_ALLOWLIST_WA_IDS="5521900000000")
-    monkeypatch.setattr(tasks, "get_settings", lambda: fake_settings)
+    monkeypatch.setattr(workers_ns, "get_settings", lambda: fake_settings)
 
     await tasks._handle_patient_messages(_value(COMMAND, wam_id="wamid.wipe.denied"))
 
@@ -518,7 +519,7 @@ async def test_unentitled_tenant_wipes_but_sends_nothing(
     async def _unentitled(tenant_id, redis):
         return SimpleNamespace(active=False, secretaria_enabled=False, status="past_due")
 
-    monkeypatch.setattr(tasks, "get_entitlements", _unentitled)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _unentitled)
 
     await tasks._handle_patient_messages(_value(COMMAND, wam_id="wamid.wipe.unpaid"))
 
@@ -548,14 +549,14 @@ async def test_near_miss_never_reaches_the_destructive_handler(
     async def _explode(**kwargs):
         raise AssertionError(f"{body!r} reached the destructive handler")
 
-    monkeypatch.setattr(tasks, "_handle_remove_context_command", _explode)
+    monkeypatch.setattr(workers_ns, "_handle_remove_context_command", _explode)
 
     # The non-destructive path needs the normal turn dependencies; stub the
     # reply leg out entirely - this test is only about WHICH handler fires.
     async def _noop_reply(reply, redis=None):
         return None
 
-    monkeypatch.setattr(tasks, "_send_bot_reply", _noop_reply)
+    monkeypatch.setattr(workers_ns, "_send_bot_reply", _noop_reply)
 
     await tasks._handle_patient_messages(_value(body, wam_id=f"wamid.nearmiss.{body}"))
 

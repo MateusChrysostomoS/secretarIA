@@ -5,8 +5,9 @@ Same in-memory-sqlite pattern as test_handover_echoes.py / test_resolve_tenant.p
 a real aiosqlite engine (StaticPool), monkeypatched in place of the
 Postgres-backed `secretaria.workers.tasks.async_session_factory`.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -121,7 +122,7 @@ async def db():
 
 @pytest.fixture(autouse=True)
 def _wire_db(monkeypatch: pytest.MonkeyPatch, db):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     yield
 
 
@@ -366,7 +367,7 @@ async def test_state_sync_never_logs_contact_pii(db, monkeypatch: pytest.MonkeyP
     any log call this handler makes (LGPD - contract v1 §10)."""
     await _seed_tenant(db)
     capture = _CapturingLogger()
-    monkeypatch.setattr(tasks, "logger", capture)
+    monkeypatch.setattr(workers_ns, "logger", capture)
 
     value = _state_sync_value(
         entries=[
@@ -390,7 +391,7 @@ async def test_history_never_logs_thread_content(db, monkeypatch: pytest.MonkeyP
     must never appear in a log call."""
     await _seed_tenant(db)
     capture = _CapturingLogger()
-    monkeypatch.setattr(tasks, "logger", capture)
+    monkeypatch.setattr(workers_ns, "logger", capture)
 
     secret_message = "Minha consulta é sobre um problema confidencial de saúde"
     value = _history_value(

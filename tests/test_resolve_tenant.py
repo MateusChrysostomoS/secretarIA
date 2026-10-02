@@ -12,8 +12,9 @@ Uses the in-memory-sqlite pattern shared by test_handover_echoes.py /
 test_hub_professionals.py: a real aiosqlite engine (StaticPool), monkeypatched
 in place of the Postgres-backed `secretaria.workers.tasks.async_session_factory`.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -60,7 +61,7 @@ async def db():
 
 @pytest.fixture(autouse=True)
 def _wire_db(monkeypatch: pytest.MonkeyPatch, db):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     yield
 
 

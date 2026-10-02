@@ -9,7 +9,6 @@ These tests prove ABSENCE, and do so non-vacuously: each one first asserts that
 the job line WAS logged (job name + template visible), then that the synthetic
 secret is in none of the captured lines.
 """
-
 import inspect
 import logging
 from unittest.mock import AsyncMock, patch
@@ -25,6 +24,7 @@ from secretaria.core.logging import (
     redact_free_text,
 )
 from secretaria.workers import tasks
+from tests._patching import workers_ns
 
 # Synthetic, distinctive values — never anything from production.
 _OTP = "918273"
@@ -78,7 +78,7 @@ async def _run_real_job_capturing(
 ) -> str:
     caplog.set_level(logging.DEBUG)
     structlog_events: list[str] = []
-    monkeypatch.setattr(tasks, "logger", _RecordingLogger(structlog_events))
+    monkeypatch.setattr(workers_ns, "logger", _RecordingLogger(structlog_events))
     with patch(
         "secretaria.workers.tasks.send_transactional_email_message",
         new=AsyncMock(return_value=True),

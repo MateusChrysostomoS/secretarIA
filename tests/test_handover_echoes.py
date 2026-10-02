@@ -10,8 +10,9 @@ call inside the worker sees the same in-memory DB), monkeypatched in place
 of the Postgres-backed `secretaria.workers.tasks.async_session_factory`. The
 env-var setup block below matches test_hub_professionals.py.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -114,7 +115,7 @@ async def db():
 
 @pytest.fixture(autouse=True)
 def _wire_db(monkeypatch: pytest.MonkeyPatch, db):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     yield
 
 

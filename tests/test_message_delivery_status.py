@@ -14,8 +14,9 @@ Pins §5 of z_prompts/PROMPT_BRAIN_MESSAGE_STATUS_ENTREGA_1_SECRETARIA.md:
     first fetched (the cursor is `updated_at`);
   * the patient's phone number (`recipient_id`) never reaches the worker or a log.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -101,8 +102,8 @@ class _ExplodingWhatsAppClient:
 
 @pytest.fixture(autouse=True)
 def _wire(monkeypatch: pytest.MonkeyPatch, db):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
-    monkeypatch.setattr(tasks, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
 
     async def _fake_resolve(session, tenant_id, patient_id, **kwargs):
         return None
@@ -119,9 +120,9 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db):
             limits={},
         )
 
-    monkeypatch.setattr(tasks, "resolve_patient_opening_state", _fake_resolve)
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_entitlements)
-    monkeypatch.setattr(tasks, "WhatsAppClient", _ExplodingWhatsAppClient)
+    monkeypatch.setattr(workers_ns, "resolve_patient_opening_state", _fake_resolve)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_entitlements)
+    monkeypatch.setattr(workers_ns, "WhatsAppClient", _ExplodingWhatsAppClient)
 
 
 @pytest_asyncio.fixture

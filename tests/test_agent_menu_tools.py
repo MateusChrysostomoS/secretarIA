@@ -14,8 +14,9 @@ Covers the two exception->sentinel tools and their worker-side handlers:
 DB-backed pieces use the in-memory-sqlite pattern from
 test_multi_professional_plugin.py / test_bot_reply_gating.py.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -121,7 +122,7 @@ def _patch_session_factory(monkeypatch: pytest.MonkeyPatch, db):
     # ai/tools + the plugin import async_session_factory lazily (patch the
     # source); workers/tasks imports it at module level (patch the attribute).
     monkeypatch.setattr(core_database, "async_session_factory", db)
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     yield
 
 
@@ -432,7 +433,7 @@ def _captured_bubbles(monkeypatch: pytest.MonkeyPatch):
         captured.extend(bubbles)
         return len(bubbles)
 
-    monkeypatch.setattr(tasks, "_dispatch_bubbles", _fake_dispatch)
+    monkeypatch.setattr(workers_ns, "_dispatch_bubbles", _fake_dispatch)
     return captured
 
 
@@ -784,7 +785,7 @@ def _stub_calendar(monkeypatch: pytest.MonkeyPatch) -> _StubCalendar:
     async def _fake(session, tenant, target):
         return calendar
 
-    monkeypatch.setattr(tasks, "_appointment_calendar", _fake)
+    monkeypatch.setattr(workers_ns, "_appointment_calendar", _fake)
     return calendar
 
 
@@ -928,13 +929,13 @@ async def test_handle_start_guided_booking_hands_off_when_the_agenda_is_unknown(
     async def _no_calendar(session, tenant, target):
         return None
 
-    monkeypatch.setattr(tasks, "_appointment_calendar", _no_calendar)
+    monkeypatch.setattr(workers_ns, "_appointment_calendar", _no_calendar)
     handed_off: list = []
 
     async def _fake_unavailable(reply, redis=None, tenant=None, waba_token=None):
         handed_off.append(reply.conversation_id)
 
-    monkeypatch.setattr(tasks, "_handle_calendar_unavailable", _fake_unavailable)
+    monkeypatch.setattr(workers_ns, "_handle_calendar_unavailable", _fake_unavailable)
 
     await tasks._handle_start_guided_booking(
         _reply_ctx(conversation),
@@ -1251,7 +1252,7 @@ async def test_empty_booking_draft_discards_inactive_doctor_without_reading_cale
     async def no_calendar(*args, **kwargs):
         pytest.fail("Administrative handback must not load a calendar")
 
-    monkeypatch.setattr(tasks, "_appointment_calendar", no_calendar)
+    monkeypatch.setattr(workers_ns, "_appointment_calendar", no_calendar)
     await tasks._handle_set_booking_draft(
         _reply_ctx(conversation), BOOKING_DRAFT_SENTINEL_PREFIX + "{}",
         tenant, None, _snapshots([ana, bruno]), patient.wa_id,
@@ -1477,7 +1478,7 @@ async def test_handle_human_handoff_activates_human_before_notification(
         assert _captured_bubbles == []
         calls.append(kwargs)
         return 1
-    monkeypatch.setattr(tasks, "notify_human_handoff", notify)
+    monkeypatch.setattr(workers_ns, "notify_human_handoff", notify)
     await tasks._handle_human_handoff(_reply_ctx(conv), "patient_requested_human",
         tenant, (SimpleNamespace(flow_selected_professional_id=ana.id), SimpleNamespace()))
     assert _captured_bubbles[0].body == SCOPED_HELP_ESCALATE_MESSAGE
@@ -1510,7 +1511,7 @@ async def test_human_handoff_commit_failure_does_not_confirm_success(
     async def notify(**kwargs):
         calls.append(kwargs)
         return 1
-    monkeypatch.setattr(tasks, "notify_human_handoff", notify)
+    monkeypatch.setattr(workers_ns, "notify_human_handoff", notify)
     engine = db.kw["bind"].sync_engine
     def fail_commit(_conn):
         raise RuntimeError("sensitive database error")
@@ -1570,8 +1571,8 @@ async def test_calendar_fallback_notifies_handoff_after_commit(db, monkeypatch):
         return None
     monkeypatch.setattr(hn, "async_session_factory", db)
     monkeypatch.setattr(hn, "send_transactional_email_result", send)
-    monkeypatch.setattr(tasks, "_reply_sender", lambda *args: None)
-    monkeypatch.setattr(tasks, "send_calendar_alert", owner)
+    monkeypatch.setattr(workers_ns, "_reply_sender", lambda *args: None)
+    monkeypatch.setattr(workers_ns, "send_calendar_alert", owner)
     await tasks._handle_calendar_unavailable(_reply_ctx(conv), tenant=tenant)
     await tasks._handle_calendar_unavailable(_reply_ctx(conv), tenant=tenant)
     assert sent == ["human_handoff_alert"]
@@ -1610,8 +1611,8 @@ async def test_booking_hold_fallback_notifies_handoff(db, monkeypatch, failure):
         return EmailOutcome.SENT
     monkeypatch.setattr(hn, "async_session_factory", db)
     monkeypatch.setattr(hn, "send_transactional_email_result", send)
-    monkeypatch.setattr(tasks, "_appointment_calendar", calendar)
-    monkeypatch.setattr(tasks, "resolve_booking_plan_ids", plans)
+    monkeypatch.setattr(workers_ns, "_appointment_calendar", calendar)
+    monkeypatch.setattr(workers_ns, "resolve_booking_plan_ids", plans)
     await tasks._promote_booking_hold(_reply(conv), tenant=tenant, waba_token=None,
         professionals=[], redis=None)
     assert sent == ["human_handoff_alert"]
@@ -1624,7 +1625,7 @@ async def test_notification_failure_keeps_committed_handoff_success(
     tenant, _, _, _, conv = await _seed(db)
     async def notify(**kwargs):
         raise RuntimeError("private mail payload")
-    monkeypatch.setattr(tasks, "notify_human_handoff", notify)
+    monkeypatch.setattr(workers_ns, "notify_human_handoff", notify)
     await tasks._handle_human_handoff(_reply_ctx(conv), "could_not_help", tenant, None)
     assert len(_captured_bubbles) == 1
     async with db() as session:
