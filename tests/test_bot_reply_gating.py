@@ -50,7 +50,7 @@ from secretaria.services.flow_router import (  # noqa: E402
     SCOPED_HELP_ESCALATE_MESSAGE,
     FlowRouterResult,
 )
-from secretaria.workers import tasks  # noqa: E402
+from secretaria.workers import orchestrator, tasks  # noqa: E402
 
 _ALL_ADDONS_OFF = {
     "reactivation_pack": False,
@@ -315,7 +315,7 @@ async def test_suppressed_reply_logs_tenant_and_status(monkeypatch: pytest.Monke
     monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
 
     captured: dict = {}
-    original_warning = tasks.logger.warning
+    original_warning = orchestrator.logger.warning
 
     def _capture(event, **kwargs):
         if event == "bot_reply_suppressed_unentitled":
@@ -323,7 +323,7 @@ async def test_suppressed_reply_logs_tenant_and_status(monkeypatch: pytest.Monke
             captured.update(kwargs)
         return original_warning(event, **kwargs)
 
-    monkeypatch.setattr(tasks.logger, "warning", _capture)
+    monkeypatch.setattr(orchestrator.logger, "warning", _capture)
 
     await tasks._send_bot_reply(_reply_context(conversation, patient))
 
