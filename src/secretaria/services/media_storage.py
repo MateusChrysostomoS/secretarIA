@@ -146,6 +146,17 @@ async def put_object(key: str, body: BinaryIO, content_type: str) -> None:
         raise MediaStorageUnavailable("upload failed") from exc
 
 
+async def delete_object_required(key: str) -> None:
+    """Strict idempotent deletion for erasure; keep DB references on failure."""
+    def _delete() -> None:
+        _r2().delete_object(Bucket=_bucket(), Key=key)
+
+    try:
+        await anyio.to_thread.run_sync(_delete)
+    except (BotoCoreError, ClientError) as exc:
+        raise MediaStorageUnavailable("delete failed") from exc
+
+
 async def delete_object(key: str) -> None:
     """Best effort, never raises: the cleanup of an upload whose message was never written."""
 

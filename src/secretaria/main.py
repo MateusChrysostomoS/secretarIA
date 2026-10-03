@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from secretaria.api import (
     health,
     internal,
+    internal_patient_cleanup,
     internal_privacy,
     internal_provisioning,
     webhook,
@@ -107,6 +108,7 @@ def create_app() -> FastAPI:
     app.include_router(internal.router)
     # LGPD privacy endpoints (export/erase), same X-Internal-Api-Key gate.
     app.include_router(internal_privacy.router)
+    app.include_router(internal_patient_cleanup.router)
     # Onboarding/provisioning endpoints (contract v1 §4), same X-Internal-Api-Key gate.
     app.include_router(internal_provisioning.router)
     app.include_router(panel.router, tags=["admin"])

@@ -1,11 +1,11 @@
 ﻿{
     "metadata_schema":  "brain.graphify-metadata/v1",
     "repository":  "secretarIA",
-    "repository_path":  "C:\\TECH\\BRAIN\\secretarIA",
-    "branch":  "main",
-    "commit":  "916587e6aa0ac21384106580baebc78f7a0717e2",
-    "generated_at":  "2026-10-02T15:09:12.3413440Z",
+    "repository_path":  "C:\\TECH\\BRAIN-worktrees\\TASK-029\\secretarIA",
+    "branch":  "task/TASK-029-patient-cleanup",
+    "commit":  "b0ac5ee4edccd98ab805e7c27ed7d213ce5f0835",
+    "generated_at":  "2026-10-03T15:47:52.8857843Z",
     "graphify_version":  "0.9.5",
     "graph_schema":  "networkx-node-link (unversioned upstream)",
-    "graph_sha256":  "fe02d281177cdf0a49305ffd9a296b532505f187be8ce328e34d127f3feea690"
+    "graph_sha256":  "45aaac341ae1df651ad74fd60d6310b67f39264911e35cf77722fb465e99ad01"
 }
