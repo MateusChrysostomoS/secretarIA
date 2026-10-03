@@ -73,6 +73,7 @@ A IA **não** escreve nome de terceiro (a captura do nome é determinística, pa
 ### 4.3 Guardar o rascunho enquanto o paciente responde "pra quem"
 
 Coluna nova e aditiva **`conversations.flow_draft` (JSON, NULL)** com o rascunho já validado (serviço, médico, convênio, dia, horário). É lida quando o paciente termina as etapas de nome/autorização: a continuação **roda o resolvedor de novo** sobre o rascunho (o mundo pode ter mudado em dois minutos) e segue. É apagada ao consumir, ao voltar ao menu e pela expiração de estado (todo estado precisa de saída por tempo — skill `conversation-flow-state`). Os marcadores de `flow_selected_type` continuam como estão no caminho de botões.
+**Regra do orquestrador (2026-10-03, vinda do P2):** o rascunho guardado espera **qualquer** pergunta que o fluxo faça — convênio, médico e serviço também, não só "pra quem". Quando o paciente responde, o resolvedor roda de novo sobre o rascunho (validação fresca), de modo que "quinta às 10h com o Dr. X, pra mim" não perde o dia e o horário se o convênio for perguntado no meio. A implementação desse trecho fica no P3.
 Migração: **antes** da API e do worker (ambos mapeiam `Conversation`; coluna nula e aditiva — skill `frozen-contract-migration`).
 
 ### 4.4 Confirmação expressa
