@@ -18,7 +18,7 @@ Hoje a IA da secretarIA só consegue devolver o paciente ao fluxo guiado por cin
 1. **Sem limite de profundidade:** a IA pode levar o paciente a qualquer etapa e até o cartão de confirmação, quando tiver as informações.
 2. **Abordagem 1 — rascunho mais rico + um resolvedor.** Rejeitadas: uma ferramenta nova por porta; a IA nomear a etapa.
 3. **"Pra quem" desconhecido → o fluxo pergunta** ("Essa consulta é pra você?"). Isso fecha o buraco de hoje (§3).
-4. **A IA mantém leitura da agenda, só de horários livres**, por uma ferramenta própria. Perde as ferramentas de criar/cancelar evento e a que mostra intervalos ocupados.
+4. **A IA mantém leitura da agenda só de horários livres**, por uma ferramenta própria, e **mantém as ferramentas de criar e cancelar — em versão cega** (decisão de 2026-10-03, revisando a original): elas nunca escrevem na agenda nem aceitam texto livre; só levam o paciente ao cartão de confirmação/cancelamento, e o toque do paciente é quem agenda ou cancela. O requisito duro: **a IA nunca vê nome nem dado de outro paciente, pseudonimizado ou não.** Perde só as ferramentas que mostram intervalos ocupados ou eventos.
 5. **O detalhe da consulta mostra tudo o que existir:** preço, o que levar/preparo, descrição do serviço e endereço da clínica (este só quando a clínica tiver).
 6. **Seis planos, nesta ordem:** log, rascunho+resolvedor, confirmação expressa, ferramenta de disponibilidade, prompt e regras, tela do Portal.
 
@@ -92,7 +92,10 @@ Pré-condições: os seis itens válidos e "pra quem" respondido (`me`, ou `othe
 - **Ficam:** `set_booking_draft` (v2), `show_main_menu`, `manage_existing_appointment` (v2), `request_human_handoff`, ferramentas de plugin que não agendam.
 - **Entram no rascunho e saem como ferramentas separadas:** `select_professional_and_continue` e `start_guided_booking` (removidas no plano 5, depois que o prompt deixar de citá-las).
 - **Nova — `get_availability(professional, service, day_from, day_to)`:** devolve **só janelas livres** `{day, start, end}` (agenda do profissional − reservas, duração do serviço, no máximo 14 dias e 30 janelas no total). Calculada pelo mesmo código dos seletores. **Nenhum campo de evento** (título, participantes, id, bloco ocupado) sai da camada de calendário. Ferramenta dentro do worker, não endpoint público; rota interna pode vir depois, se outro produto precisar.
-- **Saem:** `check_availability`, `list_free_slots`, `create_event`, `create_event_for_professional`, `cancel_event` e similares (as funções continuam para uso interno do fluxo).
+- **Saem (leitura de agenda):** `check_availability`, `list_free_slots` e as variantes que mostram intervalos ocupados ou eventos (as funções continuam para uso interno do fluxo).
+- **Ficam, em versão cega que só prepara o cartão:** `create_event(start, service, professional)` leva o paciente ao cartão de confirmação com o horário pedido; `cancel_event(appointment)` leva ao cartão de cancelamento de uma consulta **do próprio paciente**. Nenhuma das duas escreve na agenda nem aceita título, descrição, horário final ou id de evento; o toque do paciente agenda/cancela pelo caminho de sempre (portão de código do Portal, reservas e autorização para terceiros incluídos). O título do evento é montado pelo servidor a partir do cadastro, nunca pela IA.
+- **Cegueira por construção:** cada ferramenta devolve só campos de uma lista permitida (nenhum retorno cru do Google); a IA nunca digita nome; cancelar só aceita a referência de uma consulta do próprio paciente (resolvida por paciente e clínica do contexto da conversa); testes com **iscas** (títulos, e-mails e telefones únicos num calendário de teste, mais dados de outro tenant) passam por todas as ferramentas e falham se qualquer isca chegar à IA. A pseudonimização continua como segunda barreira, mas **não é a primária** — ela não mascara o nome de um terceiro desconhecido.
+- **Correção de segurança para todas as clínicas (fora do interruptor):** o `cancel_event` atual apaga qualquer id de evento que a IA passar, sem checar de quem é; passa a exigir que o evento seja de uma consulta deste paciente e desta clínica.
 - A IA pode **mencionar** horários que recebeu da ferramenta; o agendamento em si só acontece pelo rascunho e pelo toque do paciente.
 
 ### 4.7 O que a IA enxerga ("ESTADO DA CONVERSA")
@@ -105,7 +108,7 @@ LGPD, nome, e-mail e código do Portal (rodam antes da IA); nome de terceiro e f
 
 ### 4.9 Observabilidade
 
-Evento único `conversation_handback_entered` em **todo** hand-back (sucesso e fallback): `source_tool` (rascunho/menu/gerenciar/humano), `landing_step`, `supplied` (nomes dos campos), `accepted`, `dropped` (campo → código de motivo), `fallback` (motivo ou nulo), `topology`, `channel`. **Sem valores, sem PII.** Os eventos atuais (`conversation_booking_draft_entered`, `conversation_guided_booking_entered`, `conversation_menu_rendered`) continuam. `llm_turn_trace` ganha `tools_called` (só nomes, em ordem).
+Evento único `conversation_handback_entered` em **todo** hand-back (sucesso e fallback): `source_tool` (rascunho/menu/gerenciar/humano), `landing_step`, `supplied` (nomes dos campos), `accepted`, `dropped` (campo → código de motivo), `fallback` (motivo ou nulo), `topology`, `channel`. **Sem valores, sem PII.** Os eventos atuais (`conversation_booking_draft_entered`, `conversation_guided_booking_entered`, `conversation_menu_rendered`) continuam. `llm_turn_trace` ganha `tools_called` (só nomes, em ordem). Criar e cancelar cegas registram-se como hand-back de rascunho/gerenciar; só `tools_called` mostra qual ferramenta o modelo de fato chamou.
 
 ### 4.10 Prompt e regras
 
@@ -114,7 +117,7 @@ A IA recebe: preencha o rascunho com tudo o que o paciente já disse e não repi
 ### 4.11 Liberação
 
 - **Interruptor por tenant** (lido ao lado de `flows_enabled`), **desligado por padrão**, para o rascunho v2, o conjunto novo de ferramentas e o prompt novo. Ligar primeiro na "Chrysostomo For Eyes"; observar pelos logs; depois todos; depois remover o caminho antigo.
-- **Fora do interruptor** (correção de segurança): "pra quem" desconhecido passa a **perguntar**, também nos hand-backs antigos. Muda o comportamento de todos os tenants (um toque a mais para quem só diz "quero cirurgia de catarata"); decisão do dono.
+- **Fora do interruptor** (correção de segurança): "pra quem" desconhecido passa a **perguntar**, também nos hand-backs antigos. Muda o comportamento de todos os tenants (um toque a mais para quem só diz "quero cirurgia de catarata"); decisão do dono. Também **fora do interruptor**: a checagem de dono do `cancel_event` atual (§4.6).
 - **Ordem de deploy:** migração → API **e** worker juntos (README: "Deploy both services, or neither"; a paridade em `GET /build` deve voltar `match`).
 
 ## 5. Critérios de sucesso (verificáveis)
@@ -123,7 +126,7 @@ A IA recebe: preencha o rascunho com tudo o que o paciente já disse e não repi
 2. "Quinta às 10h com o Dr. X pela Unimed, pra mim", horário livre → mensagem de detalhes + cartão de confirmação; Confirmar agenda pelo caminho de hoje (portão do Portal incluído).
 3. Mesmo pedido com horário ocupado → lista de horários daquele dia, não erro.
 4. Médico/serviço/convênio inválido → o fluxo pergunta **a partir daquela etapa**, não o menu.
-5. A IA nunca recebe título, participante ou id de evento: teste que serializa a saída de `get_availability` e falha se aparecer qualquer chave além de `day`/`start`/`end`.
+5. A IA nunca recebe título, participante, id de evento nem dado de outro paciente: teste que serializa a saída de `get_availability` e falha se aparecer qualquer chave além de `day`/`start`/`end`, e testes com iscas em **todas** as ferramentas da IA (inclusive criar/cancelar cegas) que falham se uma isca chegar à IA; `cancel_event` recusa evento que não seja do próprio paciente.
 6. Nenhum caminho da IA chega à confirmação sem horário re-derivado da agenda fresca menos reservas; o portão e as reservas valem.
 7. 100% dos hand-backs geram `conversation_handback_entered`.
 8. O toque em Confirmar continua sendo o único jeito de criar a consulta.
@@ -143,7 +146,7 @@ Unitários por pouso (cada etapa) e por item inválido; isolamento de tenant (ro
 | `_is_agent_sentinel` não lista o sentinel de `start_guided_booking` | P2 |
 | `selection_only` perde o alerta `professional_config_incomplete`; convênio "Outro" digitado é descartado | P2 (decidir e testar) |
 | `manage_slot`/`manage_confirm` fora da pré-checagem de depósito | P3 |
-| `create_event` & cia. como porta dos fundos | P4 |
+| `create_event`/`cancel_event` como porta dos fundos; `cancel_event` sem checagem de dono | P4 (versões cegas que só preparam o cartão; checagem de dono em todas as clínicas) |
 | Defeitos do estado da conversa (marcador interno, rótulos faltando) | P2 |
 | Hand-backs não registram a etapa | P1 |
 

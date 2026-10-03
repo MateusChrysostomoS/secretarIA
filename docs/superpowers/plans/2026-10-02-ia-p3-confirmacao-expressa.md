@@ -5623,7 +5623,8 @@ Criar `docs/CHECKPOINT_ia_confirmacao_expressa.md`:
 
 ## 5. Pendências
 
-P4 (`get_availability` sobre `services/availability.py`, retirada das ferramentas de calendário) e P5 (prompt:
+P4 (`get_availability` sobre `services/availability.py`, retirada das leitoras de horário ocupado, e `create_event`/`cancel_event`
+cegos que só levantam este mesmo pedido de gerenciar / o rascunho — decisão do dono de 2026-10-03) e P5 (prompt:
 ensinar `for_whom`, `day`/`time`, a `ref` das consultas, "nunca descreva opções do fluxo").
 
 ## 6. Deploy (quando o dono pedir)

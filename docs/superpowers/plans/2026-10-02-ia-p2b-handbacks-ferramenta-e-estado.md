@@ -1285,8 +1285,9 @@ EOF
   - `BookingDraftRequested(appointment_type, professional_id, insurance, *, attendee=None, day=None, time=None)` com a propriedade `draft -> BookingDraft`.
   - `set_booking_draft_v2` — `StructuredTool` de nome `"set_booking_draft"`, args `service, professional, insurance, for_whom, day, time` (todos `str = ""`), `metadata = {"cache_variant": "draft_v2"}`.
   - `TOOL_BLOCK_BAD_FOR_WHOM = "bad_for_whom"`, `TOOL_BLOCK_BAD_DAY = "bad_day"`, `TOOL_BLOCK_BAD_TIME = "bad_time"`; evento `booking_draft_tool_item_dropped` (`field`, `reason` ∈ {`unknown_professional`, `ambiguous_professional`}).
+  - `async def _draft_professional_id(tenant_id: UUID, name: str) -> UUID | None` (em `ai/tools.py`, definida no Step 3 abaixo) — **o P4 a consome** no `create_event` cego (`ai/staging_tools.py`, revisão de 2026-10-03): não renomeie nem mude a assinatura.
   - `graph._tool_cache_key(tool) -> str`.
-  - `_flow_handback_tools(tenant, topology, plugin_tools)` entrega `set_booking_draft_v2` quando `ai_draft_v2_enabled(tenant)`, senão `set_booking_draft` (P4 acrescenta `get_availability` no mesmo ponto; P5 troca o prompt pelo mesmo interruptor).
+  - `_flow_handback_tools(tenant, topology, plugin_tools)` entrega `set_booking_draft_v2` quando `ai_draft_v2_enabled(tenant)`, senão `set_booking_draft` (P4 acrescenta `get_availability` e os `create_event`/`cancel_event` cegos no mesmo ponto; P5 troca o prompt pelo mesmo interruptor).
 
 - [ ] **Step 1: Write the failing tests**
 
