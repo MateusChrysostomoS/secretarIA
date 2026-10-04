@@ -21,6 +21,9 @@ POST /tenants/me/conversations/{id}/messages/read   - staff has seen the
                                                        thread up to a cursor
                                                        (Brain-Message only).
 
+GET  /tenants/me/conversations/{id}/typing          - read automation/patient typing.
+POST /tenants/me/conversations/{id}/typing          - staff heartbeat (Portal only).
+
 The state flip itself is never reimplemented here — it goes through
 `services/handover.py::HandoverManager`, which also stamps
 `last_human_message_at` when a human takes over (that timestamp starts the
@@ -70,6 +73,8 @@ from secretaria.schemas.conversation import (
     MessageSendForm,
     MessagesReadMark,
     MessagesReadResult,
+    TypingBeat,
+    TypingRead,
     attachment_read_or_none,
     interactive_read_or_none,
 )
@@ -85,6 +90,7 @@ from secretaria.services.channel_sender import (
 from secretaria.services.handoff_notification import activate_human_handoff, notify_human_handoff
 from secretaria.services.handover import HandoverManager
 from secretaria.services.tenant_config import get_waba_token
+from secretaria.services.typing_indicator import clear_typing, mark_typing, typing_by
 from secretaria.services.whatsapp import TenantWhatsAppCredentialMissing, WhatsAppClient
 
 logger = get_logger(__name__)
@@ -218,9 +224,7 @@ async def _staff_sender(
             conversation_id=conversation.id,
             session=session,
             author=MessageSender.HUMAN,
-            media_key_prefix=media_storage.object_key_prefix(
-                conversation.tenant_id, patient.id
-            ),
+            media_key_prefix=media_storage.object_key_prefix(conversation.tenant_id, patient.id),
         )
         return sender, patient.external_id
 
@@ -233,15 +237,18 @@ async def _notify_takeover(tenant, conversation, occurrence_id) -> None:
     if occurrence_id is not None:
         try:
             await notify_human_handoff(
-                tenant=tenant, conversation_id=conversation.id,
+                tenant=tenant,
+                conversation_id=conversation.id,
                 professional_id=conversation.flow_selected_professional_id,
-                reason="could_not_help", occurrence_id=occurrence_id,
+                reason="could_not_help",
+                occurrence_id=occurrence_id,
             )
         except Exception as exc:
             logger.error(
                 "human_handoff_notification_undelivered",
                 alarm="human_handoff_notification_undelivered",
-                conversation_id=str(conversation.id), error_type=type(exc).__name__,
+                conversation_id=str(conversation.id),
+                error_type=type(exc).__name__,
             )
 
 
@@ -324,6 +331,43 @@ async def list_messages(
         )
     ).all()
     return [_message_read_model(message) for message in rows]
+
+
+@router.get("/{conversation_id}/typing", response_model=TypingRead)
+async def get_typing(
+    conversation_id: str,
+    request: Request,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> TypingRead:
+    """A cheap poll beside the transcript (which is a bare list, with no room for a flag)."""
+    conversation = await _get_conversation(session, tenant, conversation_id)
+    patient = await session.get(Patient, conversation.patient_id)
+    if patient is None or patient.channel != CHANNEL_BRAIN_MESSAGE:
+        return TypingRead(typing=False, by=None)
+    pool = getattr(request.app.state, "arq_pool", None)
+    by = await typing_by(pool, conversation.id, viewer="staff")
+    return TypingRead(typing=by is not None, by=by)
+
+
+@router.post("/{conversation_id}/typing", response_model=TypingBeat)
+async def staff_typing(
+    conversation_id: str,
+    request: Request,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> TypingBeat:
+    """A heartbeat while a person types in the console: the Portal patient sees "digitando".
+
+    Only a Brain-Message patient has a screen to show it on; a WhatsApp conversation answers
+    `applied: false` and nothing is written.
+    """
+    conversation = await _get_conversation(session, tenant, conversation_id)
+    patient = await session.get(Patient, conversation.patient_id)
+    if patient is None or patient.channel != CHANNEL_BRAIN_MESSAGE:
+        return TypingBeat(applied=False)
+    await mark_typing(getattr(request.app.state, "arq_pool", None), conversation.id, "staff")
+    return TypingBeat(applied=True)
 
 
 @router.post("/{conversation_id}/messages/read", response_model=MessagesReadResult)
@@ -445,6 +489,7 @@ async def send_message(
         session, conversation, manager=HandoverManager(session)
     )
     await session.commit()
+    await clear_typing(getattr(request.app.state, "arq_pool", None), conversation.id, "staff")
     await _notify_takeover(tenant, conversation, occurrence_id)
     await session.refresh(message)
 
@@ -482,9 +527,7 @@ async def _send_attachment(
             checked = await checked_upload(upload)
             sender, to = await _staff_sender(session, tenant, conversation, patient)
             if not sender_sends_media(sender):  # Brain-Message only, checked above
-                raise attachments.AttachmentRefused(
-                    attachments.ATTACHMENT_UNSUPPORTED_FOR_CHANNEL
-                )
+                raise attachments.AttachmentRefused(attachments.ATTACHMENT_UNSUPPORTED_FOR_CHANNEL)
             send_response = await sender.send_media(
                 to, file=upload.file, attachment=checked, caption=fields.body
             )
@@ -513,6 +556,7 @@ async def _send_attachment(
         # 404 - rarer, and louder, than a silent orphan.
         await media_storage.delete_object(stored_key)
         raise
+    await clear_typing(getattr(request.app.state, "arq_pool", None), conversation.id, "staff")
     await _notify_takeover(tenant, conversation, occurrence_id)
     await session.refresh(message)
     logger.info(

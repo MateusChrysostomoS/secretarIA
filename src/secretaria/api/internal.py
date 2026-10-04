@@ -47,7 +47,14 @@ from secretaria.config import get_settings
 from secretaria.core import attachments
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
-from secretaria.models import Appointment, Conversation, Message, MessageDirection, Patient
+from secretaria.models import (
+    Appointment,
+    Conversation,
+    HandoverState,
+    Message,
+    MessageDirection,
+    Patient,
+)
 from secretaria.models.message import status_of
 from secretaria.schemas.conversation import (
     MessagesReadResult,
@@ -62,13 +69,16 @@ from secretaria.schemas.internal import (
     BrainMessageMessageList,
     BrainMessageOpen,
     BrainMessageReadMark,
+    BrainMessageTyping,
     InternalAppointment,
     InternalAppointmentList,
     InternalPatient,
     InternalPatientList,
+    TypingAck,
 )
 from secretaria.services import media_storage, message_status
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
+from secretaria.services.typing_indicator import mark_typing, typing_by as typing_by_for
 
 logger = get_logger(__name__)
 
@@ -653,6 +663,7 @@ async def brain_message_open(
     responses=_INTERNAL_RESPONSES,
 )
 async def list_brain_message_messages(
+    request: Request,
     external_id: Annotated[str, Path(description="The patient's id on the Brain-Message channel.")],
     tenant_id: Annotated[UUID, Query(description="Tenant UUID — REQUIRED; the outer scope.")],
     since: Annotated[
@@ -722,14 +733,17 @@ async def list_brain_message_messages(
         logger.info("brain_message_messages_unknown_patient", tenant_id=str(tenant_id))
         return BrainMessageMessageList(data=[])
 
-    conversation_id = await session.scalar(
-        select(Conversation.id).where(
-            Conversation.tenant_id == tenant_id,
-            Conversation.patient_id == patient.id,
+    found = (
+        await session.execute(
+            select(Conversation.id, Conversation.handover_state).where(
+                Conversation.tenant_id == tenant_id,
+                Conversation.patient_id == patient.id,
+            )
         )
-    )
-    if conversation_id is None:
+    ).one_or_none()
+    if found is None:
         return BrainMessageMessageList(data=[])
+    conversation_id, handover_state = found
 
     stmt = select(Message).where(Message.conversation_id == conversation_id)
     has_more = False
@@ -818,6 +832,9 @@ async def list_brain_message_messages(
         conversation_id=str(conversation_id),
         count=len(rows),
     )
+    typer = await typing_by_for(
+        getattr(request.app.state, "arq_pool", None), conversation_id, viewer="patient"
+    )
     return BrainMessageMessageList(
         data=[
             BrainMessageMessage(
@@ -837,6 +854,9 @@ async def list_brain_message_messages(
             for row in rows
         ],
         has_more=has_more,
+        typing=typer is not None,
+        typing_by=typer,
+        accepts_typing=handover_state == HandoverState.HUMAN_ACTIVE,
     )
 
 
@@ -969,3 +989,41 @@ async def get_brain_message_media(
     if record is None:
         logger.info("brain_message_media_not_found", tenant_id=str(tenant_id))
     return await stream_attachment(record)
+
+
+@router.post(
+    "/brain-message/typing",
+    response_model=TypingAck,
+    summary="The patient is typing - recorded only while a human conducts (internal)",
+    description=(
+        "A heartbeat from the patient's client. Recorded ONLY when a human conducts the "
+        "conversation (the clinic's console is the only reader); with the automation "
+        "conducting nothing is written and `applied` is false. Unknown patient: `applied: "
+        "false`, never 404. Requires the X-Internal-Api-Key header."
+    ),
+    responses=_INTERNAL_RESPONSES,
+)
+async def patient_typing(
+    payload: BrainMessageTyping,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> TypingAck:
+    found = (
+        await session.execute(
+            select(Conversation.id, Conversation.handover_state)
+            .join(Patient, Patient.id == Conversation.patient_id)
+            .where(
+                Conversation.tenant_id == payload.tenant_id,
+                Patient.tenant_id == payload.tenant_id,
+                Patient.channel == CHANNEL_BRAIN_MESSAGE,
+                Patient.external_id == payload.external_id,
+            )
+        )
+    ).one_or_none()
+    if found is None:
+        return TypingAck(applied=False)
+    conversation_id, handover_state = found
+    if handover_state != HandoverState.HUMAN_ACTIVE:
+        return TypingAck(applied=False)
+    await mark_typing(getattr(request.app.state, "arq_pool", None), conversation_id, "patient")
+    return TypingAck(applied=True)

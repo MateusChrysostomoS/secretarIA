@@ -182,7 +182,13 @@ async def test_before_pages_backwards_without_overlap(client, db) -> None:
 async def test_empty_conversation_is_empty_not_an_error(client, db) -> None:
     tenant = await _seed(db, 0)
     body = (await client.get(_url(), params={"tenant_id": str(tenant.id)}, headers=KEY)).json()
-    assert body == {"data": [], "has_more": False}
+    assert body == {
+        "data": [],
+        "has_more": False,
+        "typing": False,
+        "typing_by": None,
+        "accepts_typing": False,
+    }
 
 
 async def test_since_and_before_together_are_refused(client, db) -> None:
@@ -212,7 +218,13 @@ async def test_since_branch_keeps_its_old_behaviour(client, db) -> None:
 async def test_a_whatsapp_patient_with_the_same_string_is_unreachable(client, db) -> None:
     tenant = await _seed(db, 3, channel="whatsapp")
     body = (await client.get(_url(), params={"tenant_id": str(tenant.id)}, headers=KEY)).json()
-    assert body == {"data": [], "has_more": False}
+    assert body == {
+        "data": [],
+        "has_more": False,
+        "typing": False,
+        "typing_by": None,
+        "accepts_typing": False,
+    }
 
 
 async def test_a_tie_group_straddling_the_page_boundary_is_neither_lost_nor_split(

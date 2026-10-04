@@ -149,6 +149,7 @@ async def _get_message_rows(db, conversation_id) -> list[Message]:
 class _FakeWhatsAppClient:
     """Records constructed instances + sends; installed in place of the real
     client — same idiom as test_deposit_lifecycle.py's fake."""
+
     # Mirrors WhatsAppClient: the CALLER records the outbound row.
     persists_outbound = False
 
@@ -954,32 +955,121 @@ async def test_hub_takeover_notifies_only_on_actual_transition(
 ):
     from secretaria.services import handoff_notification as hn
     from secretaria.services.email import EmailOutcome
+
     tenant.contact_email = "clinic@example.com"
     async with db() as session:
         row = await session.get(Tenant, tenant.id)
         row.contact_email = tenant.contact_email
         await session.commit()
-    patient = await _seed_patient(db, tenant, channel="brain_message", wa_id=None,
-        external_id=str(uuid4()))
+    patient = await _seed_patient(
+        db, tenant, channel="brain_message", wa_id=None, external_id=str(uuid4())
+    )
     conv = await _seed_conversation(db, tenant, patient)
     sent = []
+
     async def send(to, template, variables):
         async with db() as session:
             row = await session.get(Conversation, conv.id)
             assert row.handover_state == HandoverState.HUMAN_ACTIVE
         sent.append((to, template, variables))
         return EmailOutcome.SENT
+
     monkeypatch.setattr(hn, "async_session_factory", db)
     monkeypatch.setattr(hn, "send_transactional_email_result", send)
+
     async def takeover():
         if mode == "manual":
-            return await client.post(f"{ENDPOINT}/{conv.id}/handover",
-                json={"state": "HUMAN_ACTIVE"})
+            return await client.post(
+                f"{ENDPOINT}/{conv.id}/handover", json={"state": "HUMAN_ACTIVE"}
+            )
         return await client.post(f"{ENDPOINT}/{conv.id}/messages", json={"body": "staff text"})
+
     assert (await takeover()).status_code == 200
     assert (await takeover()).status_code == 200
     assert len(sent) == 1
-    assert (await client.post(f"{ENDPOINT}/{conv.id}/handover",
-        json={"state": "BOT_ACTIVE"})).status_code == 200
+    assert (
+        await client.post(f"{ENDPOINT}/{conv.id}/handover", json={"state": "BOT_ACTIVE"})
+    ).status_code == 200
     assert (await takeover()).status_code == 200
     assert len(sent) == 2
+
+
+@pytest_asyncio.fixture
+async def typing_pool(monkeypatch):
+    from secretaria.main import app
+    from tests.test_typing_indicator import _Redis
+
+    pool = _Redis()
+    monkeypatch.setattr(app.state, "arq_pool", pool, raising=False)
+    return pool
+
+
+async def test_hub_typing_read_and_staff_heartbeat(client, db, tenant, typing_pool):
+    from secretaria.services import typing_indicator as ti
+
+    patient = await _seed_patient(
+        db, tenant, channel="brain_message", external_id="typing-hub", wa_id=None
+    )
+    conv = await _seed_conversation(db, tenant, patient)
+    url = f"{ENDPOINT}/{conv.id}/typing"
+    assert (await client.get(url)).json() == {"typing": False, "by": None}
+    assert (await client.post(url)).json() == {"applied": True}
+    assert await ti.typing_by(typing_pool, conv.id, viewer="patient") == "staff"
+    assert (await client.get(url)).json() == {"typing": False, "by": None}
+    await ti.mark_typing(typing_pool, conv.id, "patient")
+    assert (await client.get(url)).json() == {"typing": True, "by": "patient"}
+    await ti.mark_typing(typing_pool, conv.id, "automation")
+    assert (await client.get(url)).json() == {"typing": True, "by": "automation"}
+
+
+async def test_hub_whatsapp_typing_is_never_exposed(client, db, tenant, typing_pool):
+    from secretaria.services import typing_indicator as ti
+
+    patient = await _seed_patient(db, tenant)
+    conv = await _seed_conversation(db, tenant, patient)
+    url = f"{ENDPOINT}/{conv.id}/typing"
+    assert (await client.post(url)).json() == {"applied": False}
+    assert typing_pool.data == {}
+    await ti.mark_typing(typing_pool, conv.id, "automation")
+    assert (await client.get(url)).json() == {"typing": False, "by": None}
+
+
+async def test_hub_typing_cross_tenant_is_404(client, db, typing_pool):
+    async with db() as session:
+        other = Tenant(id=uuid4(), clinic_name="Other", phone_number_id="typing-other")
+        session.add(other)
+        await session.commit()
+    patient = await _seed_patient(db, other)
+    conv = await _seed_conversation(db, other, patient)
+    url = f"{ENDPOINT}/{conv.id}/typing"
+    assert (await client.get(url)).status_code == 404
+    assert (await client.post(url)).status_code == 404
+
+
+async def test_successful_staff_send_clears_typing(client, db, tenant, typing_pool):
+    from secretaria.services import typing_indicator as ti
+
+    patient = await _seed_patient(
+        db, tenant, channel="brain_message", external_id="typing-send", wa_id=None
+    )
+    conv = await _seed_conversation(db, tenant, patient)
+    await ti.mark_typing(typing_pool, conv.id, "staff")
+    resp = await client.post(f"{ENDPOINT}/{conv.id}/messages", json={"body": "Test reply"})
+    assert resp.status_code == 200
+    assert await ti.typing_by(typing_pool, conv.id, viewer="patient") is None
+
+
+async def test_failed_staff_send_does_not_clear_typing(
+    client, db, tenant, typing_pool, monkeypatch
+):
+    from secretaria.services import typing_indicator as ti
+
+    monkeypatch.setattr(hub_conversations, "BrainMessageSender", _FailingBrainMessageSender)
+    patient = await _seed_patient(
+        db, tenant, channel="brain_message", external_id="typing-fail", wa_id=None
+    )
+    conv = await _seed_conversation(db, tenant, patient)
+    await ti.mark_typing(typing_pool, conv.id, "staff")
+    with pytest.raises(SQLAlchemyError):
+        await client.post(f"{ENDPOINT}/{conv.id}/messages", json={"body": "Test reply"})
+    assert await ti.typing_by(typing_pool, conv.id, viewer="patient") == "staff"

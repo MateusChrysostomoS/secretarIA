@@ -1190,3 +1190,20 @@ async def test_staff_file_notifies_only_on_first_human_transition(api, db, monke
             files={"file": ("private.pdf", _pdf(), "application/pdf")})
         assert response.status_code == 200
     assert sent == ["human_handoff_alert"]
+
+
+async def test_staff_attachment_clears_typing_after_success(api, db, monkeypatch):
+    from secretaria.main import app
+    from secretaria.services import typing_indicator as ti
+    from tests.test_typing_indicator import _Redis
+    tenant = await _seed_tenant(db)
+    api.acting["tenant"] = tenant
+    patient, conversation = await _seed_patient(db, tenant)
+    pool = _Redis()
+    monkeypatch.setattr(app.state, "arq_pool", pool)
+    await ti.mark_typing(pool, conversation.id, "staff")
+    response = await _staff_send(
+        api, conversation.id, files={"file": ("test.pdf", _pdf(), "application/pdf")}
+    )
+    assert response.status_code == 200
+    assert await ti.typing_by(pool, conversation.id, viewer="patient") is None
