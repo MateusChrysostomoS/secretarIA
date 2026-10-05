@@ -23,6 +23,7 @@ Shipped product configures each tenant with at minimum:
 - **Language**: conversation language (pt-BR default, en, es, ...)
 - **Google Calendar**: encrypted `refresh_token` + `calendar_id` (per tenant, obtained via a hosted OAuth onboarding flow, not the dev `scripts/gcal_auth.py`)
 - **WhatsApp Coexistence**: `phone_number_id` + `access_token` (already on `tenants`)
+- **Clinic facts** (TASK-025): `clinic_facts` (JSON, nullable: parking, how to arrive, payment methods, cancellation policy, documents, accessibility, FAQ, notes) — quoted by the LLM in the "SOBRE A CLÍNICA" prompt block; the address stays in `address`
 
 All of the above now lives on `Tenant` (and, for the professional-level fields — specialty/about/context message/business hours/services/Calendar credential — on `Professional`, one or more rows per tenant). The schema migration, onboarding flow, and encryption at rest are DONE; see `docs/CHECKPOINT_onboarding_multiprofessional.md` for the per-professional layer and `docs/CHECKPOINT_plugins.md` for the encryption-at-rest / multi-tenant round that came before it.
 
@@ -141,6 +142,8 @@ neither" do `README.md`.
 `docs/CHECKPOINT_mvp_portal.md` — TASK-021: contexto/rascunho da LLM, handoff e notificações; não deployado; validação e pendências registradas.
 
 `docs/CHECKPOINT_portal_mensagens_recentes.md` — TASK-028: a API da conversa do Portal devolve as mensagens MAIS RECENTES (`has_more`, `before`); commitado, não deployado; prova ao vivo pendente; o Portal ainda precisa de um ajuste de rolagem no front ("Dependência do front").
+
+`docs/CHECKPOINT_clinic_context.md` — TASK-025: endereço e fatos da clínica (`clinic_facts`) no prompt da LLM, tool `get_service_info` e completude do contexto; mesclado em main e deployado em 2026-10-05; correção das orientações por serviço em clínicas com 2+ profissionais registrada no checkpoint.
 
 `docs/` é a fonte de verdade deste repo (exemplo do padrão: `docs/CHECKPOINT_plugins.md`). Regra
 geral de quando/como atualizar (CHECKPOINT, âncoras estáveis) em `AI_WORKFLOW.md` — aqui só o que
@@ -503,3 +506,8 @@ Rules:
 - If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
 - Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+
+
+docs/CHECKPOINT_digitando_backend.md — TASK-033: indicador universal no backend Portal/console; local, sem deploy; validação e provas pendentes registradas.
+
+TASK-034: Portal visit discard on account promotion; local validation and deployment order: `docs/CHECKPOINT_portal_visita_fundida.md`. Not deployed.

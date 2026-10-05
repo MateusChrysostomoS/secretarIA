@@ -87,8 +87,6 @@ from secretaria.services.booking_scope import (  # noqa: E402
 )
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
-    BTN_CHOOSE_PROFESSIONAL,
-    BTN_CHOOSE_SERVICE,
     STEP_AWAITING_DAY,
     STEP_AWAITING_INSURANCE,
     STEP_AWAITING_SERVICE,
@@ -450,7 +448,8 @@ async def test_handle_show_main_menu_resets_flow_without_deleting(db, _captured_
     assert len(_captured_bubbles) == 1
     menu = _captured_bubbles[0]
     assert isinstance(menu, MenuBubble)
-    assert menu.labels == [BTN_CHOOSE_PROFESSIONAL, BTN_CHOOSE_SERVICE, "Outro"]
+    # TASK-035: the main menu draws only [Agendar, Outro] on every clinic.
+    assert menu.labels == ["🗓️ Agendar", "Outro"]
 
     async with db() as session:
         conv = await session.get(Conversation, conversation.id)

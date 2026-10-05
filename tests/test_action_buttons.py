@@ -546,9 +546,12 @@ async def test_apptresched_without_a_resolvable_calendar_hands_off(db, monkeypat
         assert conv.handover_state == HandoverState.HUMAN_ACTIVE
 
 
-async def test_apptresched_without_deposit_and_flows_enters_manage_flow(db):
+async def test_apptresched_without_deposit_and_flows_enters_manage_flow(db, monkeypatch):
     """No deposit at all -> never blocked, straight into the day-ask."""
     tenant, patient, conversation, appt = await _seed(db)
+    monkeypatch.setattr(
+        workers_ns, "_appointment_calendar", _async_return(_RescheduleDayCalendar())
+    )
 
     await tasks._handle_action_button(_reply_ctx(conversation), "apptresched", str(appt.id))
 
@@ -558,7 +561,7 @@ async def test_apptresched_without_deposit_and_flows_enters_manage_flow(db):
         assert conv.flow_managing_appointment_id == appt.id
 
 
-async def test_apptresched_enters_manage_flow_on_an_unconfigured_tenant(db):
+async def test_apptresched_enters_manage_flow_on_an_unconfigured_tenant(db, monkeypatch):
     """Replaces the old polite-fallback case, whose premise is gone.
 
     A clinic that never had `initial_flows` written (`_seed`'s default `{}` — the
@@ -567,6 +570,9 @@ async def test_apptresched_enters_manage_flow_on_an_unconfigured_tenant(db):
     flow to enter. It now behaves exactly like the configured tenant above.
     """
     tenant, patient, conversation, appt = await _seed(db)
+    monkeypatch.setattr(
+        workers_ns, "_appointment_calendar", _async_return(_RescheduleDayCalendar())
+    )
 
     await tasks._handle_action_button(_reply_ctx(conversation), "apptresched", str(appt.id))
 

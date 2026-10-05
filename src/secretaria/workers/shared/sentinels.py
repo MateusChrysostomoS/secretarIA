@@ -1,6 +1,7 @@
 """sentinels - split out of workers/tasks.py (TASK-023)."""
 
 import json
+from collections.abc import Mapping, Sequence
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -31,8 +32,8 @@ from secretaria.services.flow_router import (
     enter_guided_booking,
     enter_manage_action,
     flows_enabled,
+    main_menu_buttons,
     match_insurance_plan,
-    menu_buttons_for,
     menu_label,
 )
 from secretaria.services.insurance_catalog import (
@@ -48,6 +49,7 @@ from secretaria.services.tenant_config import (
     list_active_professionals,
     professional_appointment_types,
 )
+from secretaria.workers.shared import handback_log as hb
 from secretaria.workers.shared.context import (
     _ReplyContext,
 )
@@ -64,6 +66,10 @@ from secretaria.workers.shared.llm_context import (
 
 logger = get_logger(__name__)
 
+# `_handle_show_main_menu`'s `source` when the agent's own `show_main_menu` tool asked for the
+# menu - the only caller of that function that is an AI hand-back.
+_AGENT_TOOL_SOURCE = "agent_tool"
+
 
 async def _handle_show_main_menu(
     reply: _ReplyContext,
@@ -72,8 +78,8 @@ async def _handle_show_main_menu(
     patient_wa: str | None,
     redis=None,
     waba_token: str | None = None,
-    source: str = "agent_tool",
-) -> None:
+    source: str = _AGENT_TOOL_SOURCE,
+) -> bool:
     """Non-destructive menu return. The ONE way back to the menu.
 
     Shared by the agent's `show_main_menu` tool (`source="agent_tool"`), the
@@ -91,6 +97,12 @@ async def _handle_show_main_menu(
     Idempotent by construction: it consumes no input and derives the menu from
     the tenant + roster, so running it twice sends the same menu twice and
     leaves the same state.
+
+    Hand-back accounting: only `source="agent_tool"` records a
+    `conversation_handback_entered` event here. `/menu`, the name step and the
+    identity cards render the same menu without the AI being involved, and the
+    malformed-sentinel fallbacks are recorded by the handler that fell back
+    (`_fallback_to_menu`), so one hand-back is never counted twice.
     """
     if tenant is None:
         logger.warning(
@@ -98,17 +110,38 @@ async def _handle_show_main_menu(
             conversation_id=str(reply.conversation_id),
             source=source,
         )
-        return
+        if source == _AGENT_TOOL_SOURCE:
+            hb.log_handback_entered(
+                conversation_id=reply.conversation_id,
+                tenant_id=reply.tenant_id,
+                source_tool=hb.SOURCE_SHOW_MAIN_MENU,
+                landing_step=None,
+                fallback=hb.FALLBACK_NO_TENANT,
+                topology=booking_topology(professionals),
+                channel=reply.channel,
+            )
+        return False
     result = FlowRouterResult(
         action="reply",
         bubbles=[
             MenuBubble(
                 body=menu_label(tenant),
-                labels=menu_buttons_for(tenant, len(professionals or []) > 1),
+                labels=main_menu_buttons(),
             )
         ],
         flow_state=FlowState.MENU,
     )
+    if source == _AGENT_TOOL_SOURCE:
+        # Logged before the write and the send, so a failure there cannot erase the fact
+        # that the hand-back reached the menu.
+        hb.log_handback_entered(
+            conversation_id=reply.conversation_id,
+            tenant_id=tenant.id,
+            source_tool=hb.SOURCE_SHOW_MAIN_MENU,
+            landing_step=hb.LANDING_MENU,
+            topology=booking_topology(professionals),
+            channel=reply.channel,
+        )
     rendered = await _apply_flow_result(
         reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
     )
@@ -123,6 +156,155 @@ async def _handle_show_main_menu(
         handover="bot_active",
         rendered=rendered,
     )
+    return rendered
+
+
+async def _fallback_to_menu(
+    reply: _ReplyContext,
+    *,
+    source_tool: str,
+    reason: str,
+    tenant: Tenant | None,
+    professionals: list | None,
+    patient_wa: str | None,
+    redis=None,
+    waba_token: str | None = None,
+    supplied: Sequence[str] = (),
+    accepted: Sequence[str] = (),
+    dropped: Mapping[str, str] | None = None,
+    topology: str | None = None,
+) -> None:
+    """A hand-back that could not land: record it ONCE, then show the plain menu.
+
+    The menu itself goes through `_handle_show_main_menu(source="sentinel_fallback")`, which
+    records no hand-back event of its own - this is the single place the fallback is counted,
+    so a hand-back is never logged twice or not at all. `landing_step` is None without a
+    tenant: `_handle_show_main_menu` renders nothing then, so nothing landed.
+    """
+    hb.log_handback_entered(
+        conversation_id=reply.conversation_id,
+        tenant_id=tenant.id if tenant is not None else reply.tenant_id,
+        source_tool=source_tool,
+        landing_step=hb.LANDING_MENU if tenant is not None else None,
+        supplied=supplied,
+        accepted=accepted,
+        dropped=dropped,
+        fallback=reason,
+        topology=topology if topology is not None else booking_topology(professionals),
+        channel=reply.channel,
+    )
+    await _handle_show_main_menu(
+        reply,
+        tenant,
+        professionals,
+        patient_wa,
+        redis=redis,
+        waba_token=waba_token,
+        source="sentinel_fallback",
+    )
+
+
+async def _land_handback(
+    reply: _ReplyContext,
+    result: FlowRouterResult,
+    patient_wa: str | None,
+    *,
+    source_tool: str,
+    tenant: Tenant | None,
+    professionals: list | None,
+    redis=None,
+    waba_token: str | None = None,
+    supplied: Sequence[str] = (),
+    accepted: Sequence[str] = (),
+    dropped: Mapping[str, str] | None = None,
+    fallback: str | None = None,
+    topology: str | None = None,
+) -> bool:
+    """Record where a hand-back lands, THEN persist the flow state and send the bubbles.
+
+    The event goes first on purpose: `_apply_flow_result` writes the flow row and talks to
+    WhatsApp / the Portal, and a failure there must not erase the fact that the hand-back
+    reached a step. `fallback` names a bounce the CALLER detected (e.g. nothing to manage);
+    otherwise the result itself decides - a calendar outage or an unbookable doctor is a
+    fallback too (`handback_log.landing_of`).
+    """
+    landing_step, result_fallback = hb.landing_of(result)
+    hb.log_handback_entered(
+        conversation_id=reply.conversation_id,
+        tenant_id=tenant.id if tenant is not None else reply.tenant_id,
+        source_tool=source_tool,
+        landing_step=landing_step,
+        supplied=supplied,
+        accepted=accepted,
+        dropped=dropped,
+        fallback=fallback or result_fallback,
+        topology=topology if topology is not None else booking_topology(professionals),
+        channel=reply.channel,
+    )
+    return await _apply_flow_result(
+        reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+    )
+
+
+def _log_no_landing(
+    reply: _ReplyContext,
+    *,
+    source_tool: str,
+    reason: str,
+    tenant: Tenant | None,
+    professionals: list | None,
+    supplied: Sequence[str] = (),
+    accepted: Sequence[str] = (),
+    topology: str | None = None,
+) -> None:
+    """A hand-back that did nothing at all - no menu, no flow step - still gets its event."""
+    hb.log_handback_entered(
+        conversation_id=reply.conversation_id,
+        tenant_id=tenant.id if tenant is not None else reply.tenant_id,
+        source_tool=source_tool,
+        landing_step=None,
+        supplied=supplied,
+        accepted=accepted,
+        fallback=reason,
+        topology=topology if topology is not None else booking_topology(professionals),
+        channel=reply.channel,
+    )
+
+
+def _draft_verdicts(
+    *,
+    appointment_type: str | None,
+    canonical_type: str | None,
+    professional_id: UUID | None,
+    professional: object | None,
+    insurance_text: str | None,
+    insurance: str | None,
+) -> tuple[tuple[str, ...], dict[str, str]]:
+    """Which of the fields the agent supplied survived validation, and why the rest did not.
+
+    Pure and value-free: it returns field NAMES and reason CODES (`handback_log`), never the
+    service, doctor or convênio themselves. A field the agent did not supply is in neither
+    result - a convênio already stored on the conversation is not "supplied".
+    """
+    accepted: list[str] = []
+    dropped: dict[str, str] = {}
+    if appointment_type is not None:
+        if canonical_type is not None:
+            accepted.append(hb.FIELD_SERVICE)
+        else:
+            dropped[hb.FIELD_SERVICE] = hb.DROP_NOT_IN_CATALOG
+    if professional_id is not None:
+        if professional is not None:
+            accepted.append(hb.FIELD_PROFESSIONAL)
+        else:
+            dropped[hb.FIELD_PROFESSIONAL] = hb.DROP_UNKNOWN_PROFESSIONAL
+    if insurance_text is not None:
+        if insurance is not None:
+            accepted.append(hb.FIELD_INSURANCE)
+        else:
+            dropped[hb.FIELD_INSURANCE] = hb.DROP_UNMATCHED_PLAN
+    return tuple(accepted), dropped
+
 
 async def _handle_select_professional(
     reply: _ReplyContext,
@@ -143,9 +325,11 @@ async def _handle_select_professional(
     """
     raw_id = reply_text[len(SELECT_PROFESSIONAL_SENTINEL_PREFIX) :]
     professional = None
+    bad_sentinel = False
     try:
         professional_id = UUID(raw_id)
     except ValueError:
+        bad_sentinel = True
         logger.error("worker_select_professional_bad_sentinel", raw=raw_id[:64])
     else:
         professional = next((p for p in professionals or [] if p.id == professional_id), None)
@@ -155,14 +339,32 @@ async def _handle_select_professional(
             "worker_select_professional_unresolved",
             conversation_id=str(reply.conversation_id),
         )
-        await _handle_show_main_menu(
+        # Most specific reason first: a malformed id, a doctor who is no longer on the
+        # active roster, or no tenant to render a menu for.
+        supplied: tuple[str, ...] = ()
+        accepted: tuple[str, ...] = ()
+        dropped: dict[str, str] = {}
+        if bad_sentinel:
+            reason = hb.FALLBACK_BAD_SENTINEL
+        elif professional is None:
+            reason = hb.FALLBACK_UNKNOWN_PROFESSIONAL
+            supplied = (hb.FIELD_PROFESSIONAL,)
+            dropped = {hb.FIELD_PROFESSIONAL: hb.DROP_UNKNOWN_PROFESSIONAL}
+        else:
+            reason = hb.FALLBACK_NO_TENANT
+            supplied = accepted = (hb.FIELD_PROFESSIONAL,)
+        await _fallback_to_menu(
             reply,
-            tenant,
-            professionals,
-            patient_wa,
+            source_tool=hb.SOURCE_SELECT_PROFESSIONAL,
+            reason=reason,
+            tenant=tenant,
+            professionals=professionals,
+            patient_wa=patient_wa,
             redis=redis,
             waba_token=waba_token,
-            source="sentinel_fallback",
+            supplied=supplied,
+            accepted=accepted,
+            dropped=dropped,
         )
         return
     result = _enter_professional_services(professional, tenant_snapshot)
@@ -174,8 +376,17 @@ async def _handle_select_professional(
         result.flow_selected_insurance = getattr(
             flow_snapshot[0], "flow_selected_insurance", None
         )
-    await _apply_flow_result(
-        reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+    await _land_handback(
+        reply,
+        result,
+        patient_wa,
+        source_tool=hb.SOURCE_SELECT_PROFESSIONAL,
+        tenant=tenant,
+        professionals=professionals,
+        redis=redis,
+        waba_token=waba_token,
+        supplied=(hb.FIELD_PROFESSIONAL,),
+        accepted=(hb.FIELD_PROFESSIONAL,),
     )
 
 async def _handle_manage_appointment(
@@ -207,20 +418,30 @@ async def _handle_manage_appointment(
     """
     if action not in ("reschedule", "cancel"):
         logger.warning("worker_manage_appointment_bad_action", action=action[:32])
-        await _handle_show_main_menu(
+        await _fallback_to_menu(
             reply,
-            tenant,
-            professionals,
-            patient_wa,
+            source_tool=hb.SOURCE_MANAGE_EXISTING_APPOINTMENT,
+            reason=hb.FALLBACK_BAD_SENTINEL,
+            tenant=tenant,
+            professionals=professionals,
+            patient_wa=patient_wa,
             redis=redis,
             waba_token=waba_token,
-            source="sentinel_fallback",
         )
         return
     if tenant is None or not flows_enabled(tenant):
         logger.warning(
             "worker_manage_appointment_without_flows",
             conversation_id=str(reply.conversation_id),
+        )
+        _log_no_landing(
+            reply,
+            source_tool=hb.SOURCE_MANAGE_EXISTING_APPOINTMENT,
+            reason=hb.FALLBACK_NO_TENANT if tenant is None else hb.FALLBACK_WITHOUT_FLOWS,
+            tenant=tenant,
+            professionals=professionals,
+            supplied=(hb.FIELD_ACTION,),
+            accepted=(hb.FIELD_ACTION,),
         )
         return
 
@@ -231,6 +452,15 @@ async def _handle_manage_appointment(
             logger.warning(
                 "worker_manage_appointment_no_patient",
                 conversation_id=str(reply.conversation_id),
+            )
+            _log_no_landing(
+                reply,
+                source_tool=hb.SOURCE_MANAGE_EXISTING_APPOINTMENT,
+                reason=hb.FALLBACK_NO_PATIENT,
+                tenant=tenant,
+                professionals=professionals,
+                supplied=(hb.FIELD_ACTION,),
+                accepted=(hb.FIELD_ACTION,),
             )
             return
         appointments = await load_upcoming_appointments(session, tenant.id, patient_id)
@@ -250,8 +480,20 @@ async def _handle_manage_appointment(
     result = await enter_manage_action(
         action, tenant, appointments, professionals, calendar=manage_calendar
     )
-    await _apply_flow_result(
-        reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+    await _land_handback(
+        reply,
+        result,
+        patient_wa,
+        source_tool=hb.SOURCE_MANAGE_EXISTING_APPOINTMENT,
+        tenant=tenant,
+        professionals=professionals,
+        redis=redis,
+        waba_token=waba_token,
+        supplied=(hb.FIELD_ACTION,),
+        accepted=(hb.FIELD_ACTION,),
+        # A patient with nothing to manage lands on the menu with an explanation: the
+        # hand-back worked, just not where the agent meant it to.
+        fallback=None if appointments else hb.FALLBACK_NO_APPOINTMENTS,
     )
 
 async def _handle_start_guided_booking(
@@ -296,12 +538,24 @@ async def _handle_start_guided_booking(
     the menu instead of a picker built on the clinic-level agenda.
     """
     appointment_type = reply_text[len(START_GUIDED_BOOKING_SENTINEL_PREFIX) :].strip() or None
+    # The tool already proved the service against the catalog, so it is both supplied and
+    # accepted; None means the clinic has no catalog and nothing was supplied.
+    supplied = (hb.FIELD_SERVICE,) if appointment_type is not None else ()
     if tenant is None or not flows_enabled(tenant):
         # The tool is only ever exposed to flow-enabled tenants, so this is a
         # defensive count-only warning, same style as _handle_manage_appointment.
         logger.warning(
             "worker_start_guided_booking_without_flows",
             conversation_id=str(reply.conversation_id),
+        )
+        _log_no_landing(
+            reply,
+            source_tool=hb.SOURCE_START_GUIDED_BOOKING,
+            reason=hb.FALLBACK_NO_TENANT if tenant is None else hb.FALLBACK_WITHOUT_FLOWS,
+            tenant=tenant,
+            professionals=professionals,
+            supplied=supplied,
+            accepted=supplied,
         )
         return
 
@@ -338,14 +592,18 @@ async def _handle_start_guided_booking(
             conversation_id=str(reply.conversation_id),
             tenant_id=str(tenant.id),
         )
-        await _handle_show_main_menu(
+        await _fallback_to_menu(
             reply,
-            tenant,
-            professionals,
-            patient_wa,
+            source_tool=hb.SOURCE_START_GUIDED_BOOKING,
+            reason=hb.FALLBACK_MULTI_PROFESSIONAL,
+            tenant=tenant,
+            professionals=professionals,
+            patient_wa=patient_wa,
             redis=redis,
             waba_token=waba_token,
-            source="sentinel_fallback",
+            supplied=supplied,
+            accepted=supplied,
+            topology=booking_topology(professional_rows),
         )
         return
 
@@ -380,8 +638,18 @@ async def _handle_start_guided_booking(
         has_type=appointment_type is not None,
         flow_step=result.flow_step,
     )
-    await _apply_flow_result(
-        reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+    await _land_handback(
+        reply,
+        result,
+        patient_wa,
+        source_tool=hb.SOURCE_START_GUIDED_BOOKING,
+        tenant=tenant,
+        professionals=professionals,
+        redis=redis,
+        waba_token=waba_token,
+        supplied=supplied,
+        accepted=supplied,
+        topology=booking_topology(professional_rows),
     )
 
 async def _handle_set_booking_draft(
@@ -400,6 +668,11 @@ async def _handle_set_booking_draft(
     doctor (multi-doctor clinics, which `start_guided_booking` turns away) and
     the convênio. Everything is re-read FRESH (same reason as its sibling) and
     the result goes through `_apply_flow_result`, the one persistence seam.
+
+    Every exit records ONE `conversation_handback_entered`
+    (workers/shared/handback_log.py): the landing step on success, a `fallback`
+    code on every bounce to the menu and on every silent return. Field NAMES and
+    reason codes only - never the service, convênio or doctor the agent wrote.
     """
     try:
         payload = json.loads(reply_text[len(BOOKING_DRAFT_SENTINEL_PREFIX) :])
@@ -415,14 +688,38 @@ async def _handle_set_booking_draft(
         logger.warning(
             "worker_booking_draft_bad_sentinel", conversation_id=str(reply.conversation_id)
         )
-        await _handle_show_main_menu(
-            reply, tenant, professionals, patient_wa, redis=redis,
-            waba_token=waba_token, source="sentinel_fallback",
+        await _fallback_to_menu(
+            reply,
+            source_tool=hb.SOURCE_SET_BOOKING_DRAFT,
+            reason=hb.FALLBACK_BAD_SENTINEL,
+            tenant=tenant,
+            professionals=professionals,
+            patient_wa=patient_wa,
+            redis=redis,
+            waba_token=waba_token,
         )
         return
+    # The field NAMES the agent filled in - the only thing about the draft that is logged.
+    supplied = tuple(
+        name
+        for name, value in (
+            (hb.FIELD_SERVICE, appointment_type),
+            (hb.FIELD_PROFESSIONAL, professional_id),
+            (hb.FIELD_INSURANCE, insurance_text),
+        )
+        if value is not None
+    )
     if tenant is None or not flows_enabled(tenant):
         logger.warning(
             "worker_booking_draft_without_flows", conversation_id=str(reply.conversation_id)
+        )
+        _log_no_landing(
+            reply,
+            source_tool=hb.SOURCE_SET_BOOKING_DRAFT,
+            reason=hb.FALLBACK_NO_TENANT if tenant is None else hb.FALLBACK_WITHOUT_FLOWS,
+            tenant=tenant,
+            professionals=professionals,
+            supplied=supplied,
         )
         return
 
@@ -458,13 +755,22 @@ async def _handle_set_booking_draft(
         if insurance_text is not None else stored_insurance
     )
 
-    is_multi = booking_topology(professional_rows) == BOOKING_TOPOLOGY_MULTI
+    topology = booking_topology(professional_rows)
+    is_multi = topology == BOOKING_TOPOLOGY_MULTI
     professional = next((p for p in professional_rows if p.id == selected_id), None)
     fresh_services = (
         professional_appointment_types(professional, tenant_snapshot, service_catalog)
         if professional is not None else tenant_snapshot.appointment_types
     )
     canonical_type = canonical_service_name(fresh_services, appointment_type)
+    accepted, dropped = _draft_verdicts(
+        appointment_type=appointment_type,
+        canonical_type=canonical_type,
+        professional_id=professional_id,
+        professional=professional,
+        insurance_text=insurance_text,
+        insurance=insurance,
+    )
     if selection_only:
         # An unspecified service means administrative choices, never an inferred
         # procedure or a jump to availability. Revalidate stored selections using
@@ -482,17 +788,44 @@ async def _handle_set_booking_draft(
         else:
             result = enter_booking(tenant_snapshot, professional_rows)
         if result.flow_state != FlowState.SERVICE_CATALOG:
-            await _handle_show_main_menu(
-                reply, tenant, professional_rows, patient_wa, redis=redis,
-                waba_token=waba_token, source="sentinel_fallback",
+            await _fallback_to_menu(
+                reply,
+                source_tool=hb.SOURCE_SET_BOOKING_DRAFT,
+                # A doctor with no services ends in the config-incomplete result, whose
+                # alert this branch does not send (it renders the menu instead).
+                reason=(
+                    hb.FALLBACK_PROFESSIONAL_CONFIG_INCOMPLETE
+                    if result.action == "professional_config_incomplete"
+                    else hb.FALLBACK_NO_BOOKABLE_CATALOG
+                ),
+                tenant=tenant,
+                professionals=professional_rows,
+                patient_wa=patient_wa,
+                redis=redis,
+                waba_token=waba_token,
+                supplied=supplied,
+                accepted=accepted,
+                dropped=dropped,
+                topology=topology,
             )
             return
         result.flow_selected_insurance = insurance
         result.flow_attendee_name = attendee
         if result.flow_step not in ATTENDEE_STEPS:
             result.flow_selected_type = stored_type
-        await _apply_flow_result(
-            reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+        await _land_handback(
+            reply,
+            result,
+            patient_wa,
+            source_tool=hb.SOURCE_SET_BOOKING_DRAFT,
+            tenant=tenant,
+            professionals=professional_rows,
+            redis=redis,
+            waba_token=waba_token,
+            supplied=supplied,
+            accepted=accepted,
+            dropped=dropped,
+            topology=topology,
         )
         return
     if (
@@ -503,18 +836,39 @@ async def _handle_set_booking_draft(
         logger.warning(
             "worker_booking_draft_invalid_selection", conversation_id=str(reply.conversation_id)
         )
-        await _handle_show_main_menu(
-            reply, tenant, professional_rows, patient_wa, redis=redis,
-            waba_token=waba_token, source="sentinel_fallback",
+        await _fallback_to_menu(
+            reply,
+            source_tool=hb.SOURCE_SET_BOOKING_DRAFT,
+            reason=hb.FALLBACK_INVALID_SELECTION,
+            tenant=tenant,
+            professionals=professional_rows,
+            patient_wa=patient_wa,
+            redis=redis,
+            waba_token=waba_token,
+            supplied=supplied,
+            accepted=accepted,
+            dropped=dropped,
+            topology=topology,
         )
         return
     appointment_type = canonical_type
     if is_multi:
         professional = next((p for p in professional_rows if p.id == selected_id), None)
         if professional is None:
-            await _handle_show_main_menu(
-                reply, tenant, professionals, patient_wa, redis=redis,
-                waba_token=waba_token, source="sentinel_fallback",
+            # A service without a doctor on a multi-doctor clinic: no one to book with yet.
+            await _fallback_to_menu(
+                reply,
+                source_tool=hb.SOURCE_SET_BOOKING_DRAFT,
+                reason=hb.FALLBACK_MISSING_PROFESSIONAL,
+                tenant=tenant,
+                professionals=professionals,
+                patient_wa=patient_wa,
+                redis=redis,
+                waba_token=waba_token,
+                supplied=supplied,
+                accepted=accepted,
+                dropped=dropped,
+                topology=topology,
             )
             return
         if appointment_type is None:
@@ -555,6 +909,17 @@ async def _handle_set_booking_draft(
         has_type=appointment_type is not None,
         flow_step=result.flow_step,
     )
-    await _apply_flow_result(
-        reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+    await _land_handback(
+        reply,
+        result,
+        patient_wa,
+        source_tool=hb.SOURCE_SET_BOOKING_DRAFT,
+        tenant=tenant,
+        professionals=professional_rows,
+        redis=redis,
+        waba_token=waba_token,
+        supplied=supplied,
+        accepted=accepted,
+        dropped=dropped,
+        topology=topology,
     )

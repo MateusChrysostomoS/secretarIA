@@ -214,6 +214,10 @@ class Tenant(Base):
     # Accepted health-insurance plan names, e.g. ["Unimed", "Amil"]. NULL/empty
     # = the clinic does not take insurance, or hasn't configured the list yet.
     insurances: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Bounded facts the LLM may quote (parking, how to arrive, payment methods, cancellation
+    # policy, documents, FAQ). Shape: schemas/clinic_facts.py::ClinicFacts. NULL = never
+    # filled in. The ADDRESS is not duplicated here: it stays in `address`. (TASK-025)
+    clinic_facts: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # Whether the bot should ask patients for their insurance during booking.
     collect_insurance: Mapped[bool] = mapped_column(
         Boolean, server_default=text("false"), default=False

@@ -1,6 +1,7 @@
 """orchestrator - split out of workers/tasks.py (TASK-023)."""
 
 from types import SimpleNamespace
+from uuid import uuid4
 
 from secretaria.ai.formatter import (
     parse,
@@ -44,8 +45,8 @@ from secretaria.services.flow_router import (
     FlowRouterResult,
     MenuBubble,
     flows_enabled,
+    main_menu_buttons,
     manage_label,
-    menu_buttons_for,
     menu_label,
     resume_bubbles,
 )
@@ -105,6 +106,7 @@ from secretaria.services.turn_safety_net import (
     fallback_allowed,
     sends_in_turn,
 )
+from secretaria.services.typing_indicator import clear_typing, mark_typing
 from secretaria.workers.portal.attachments import (
     _handle_attachment_received,
 )
@@ -248,8 +250,12 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     rate-limit against and its own dedicated handler, so it is left alone.
     """
     token = begin_turn()
+    typing_on = reply.channel == CHANNEL_BRAIN_MESSAGE and reply.conversation_id is not None
+    typing_turn_id = uuid4().hex if typing_on else None
     cause = "silent_return"
     try:
+        if typing_on:
+            await mark_typing(redis, reply.conversation_id, "automation", turn_id=typing_turn_id)
         try:
             await _send_bot_reply_inner(reply, redis=redis)
         except Exception as exc:
@@ -263,6 +269,8 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
         sent = sends_in_turn()
     finally:
         end_turn(token)
+        if typing_on:
+            await clear_typing(redis, reply.conversation_id, "automation", turn_id=typing_turn_id)
     if sent > 0 or reply.conversation_id is None:
         return
     logger.warning(
@@ -962,7 +970,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                 bubbles=[
                     MenuBubble(
                         body=menu_label(tenant_snapshot),
-                        labels=menu_buttons_for(tenant_snapshot, len(flow_professionals or []) > 1),
+                        labels=main_menu_buttons(),
                     )
                 ],
                 flow_state=FlowState.MENU,

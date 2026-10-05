@@ -317,10 +317,12 @@ from secretaria.workers.portal.inbound import (
     offered_reply_ids,
     process_brain_message_inbound,
 )
+from secretaria.workers.portal.merge import merge_brain_message_visit
 from secretaria.workers.portal.open import (
     _open_brain_message_conversation,
     _open_ledger_key,
     _portal_conversation_has,
+    process_brain_message_enter,
     process_brain_message_open,
 )
 from secretaria.workers.shared.actions import (

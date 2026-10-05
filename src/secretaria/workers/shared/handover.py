@@ -29,6 +29,7 @@ from secretaria.services.flow_router import (
 )
 from secretaria.services.handoff_notification import activate_human_handoff, notify_human_handoff
 from secretaria.services.handover import HandoverManager
+from secretaria.workers.shared import handback_log as hb
 from secretaria.workers.shared.context import (
     _ReplyContext,
 )
@@ -59,8 +60,21 @@ async def _handle_human_handoff(
     Same order as `_handle_calendar_unavailable` (if a later step fails, a human
     is already on it). The mail is best-effort: `notify_human_handoff` never
     raises and logs its own alarm.
+
+    The hand-back event is recorded after the human state is committed and before the
+    patient's confirmation goes out: a handoff that could not commit raised above and
+    landed nowhere, so it is not counted as a landing.
     """
     await _set_conversation_human_active(reply.conversation_id, reason=reason)
+    hb.log_handback_entered(
+        conversation_id=reply.conversation_id,
+        tenant_id=tenant.id if tenant is not None else reply.tenant_id,
+        source_tool=hb.SOURCE_REQUEST_HUMAN_HANDOFF,
+        landing_step=hb.LANDING_HUMAN_HANDOVER,
+        supplied=(hb.FIELD_REASON,),
+        accepted=(hb.FIELD_REASON,),
+        channel=reply.channel,
+    )
     await _dispatch_bubbles(
         reply, [TextBubble(body=SCOPED_HELP_ESCALATE_MESSAGE)], tenant=tenant, waba_token=waba_token
     )

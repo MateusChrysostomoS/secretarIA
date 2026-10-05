@@ -44,6 +44,9 @@ from secretaria.workers.shared.dispatch import (
     _send_consent_notice,
     _send_plain_reply,
 )
+from secretaria.workers.shared.opening import (
+    _send_context_opening,
+)
 from secretaria.workers.shared.sentinels import (
     _handle_show_main_menu,
 )
@@ -497,10 +500,11 @@ async def _handle_pre_consent_identity(
             event="verified_account_name_requested",
         )
         return True
-    await _handle_show_main_menu(
+    # A known account: the context-aware opening (upcoming appointment, the
+    # first visit after a consult, or the menu) instead of the bare menu.
+    await _send_context_opening(
         reply,
         tenant,
-        professionals,
         patient_wa,
         redis=redis,
         waba_token=waba_token,

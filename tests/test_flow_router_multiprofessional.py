@@ -204,7 +204,8 @@ async def test_multi_menu_replaces_buttons():
     assert res.action == "reply"
     assert res.flow_state == FlowState.MENU
     assert isinstance(res.bubbles[0], MenuBubble)
-    assert res.bubbles[0].labels == [BTN_CHOOSE_PROFESSIONAL, BTN_CHOOSE_SERVICE, "Outro"]
+    # TASK-035: drawn as [Agendar, Outro]; the trio stays reachable by typing.
+    assert res.bubbles[0].labels == ["🗓️ Agendar", "Outro"]
     # Labels must survive WhatsApp's 20-char button-title cap untruncated.
     assert all(len(label) <= 20 for label in res.bubbles[0].labels)
 
@@ -212,7 +213,7 @@ async def test_multi_menu_replaces_buttons():
 async def test_single_professional_keeps_configured_menu():
     profs = _professionals()[:1]
     res = await route(_conversation(), _tenant(), None, "oi", professionals=profs)
-    assert res.bubbles[0].labels == ["Serviços e Custo", "Horários", "Outro"]
+    assert res.bubbles[0].labels == ["🗓️ Agendar", "Outro"]
 
 
 def test_menu_buttons_for_helper():
@@ -744,7 +745,7 @@ async def test_retry_menu_shows_multi_menu():
     )
     res = await route(conv, _tenant(), _FakeCalendar(), "Menu principal", professionals=profs)
     assert res.flow_state == FlowState.MENU
-    assert res.bubbles[0].labels == [BTN_CHOOSE_PROFESSIONAL, BTN_CHOOSE_SERVICE, "Outro"]
+    assert res.bubbles[0].labels == ["🗓️ Agendar", "Outro"]
 
 
 # --------------------------------------------------------------------------
@@ -985,3 +986,44 @@ async def test_service_help_scoped_to_selected_professional(monkeypatch):
     assert res.flow_selected_type == "Consulta Cardio"
     # The professional selection survives the hand-back.
     assert res.flow_selected_professional_id == profs[0].id
+
+
+
+async def _agendar_tap(count):
+    profs = _professionals()[:count]
+    return await route(
+        _conversation(flow_state=FlowState.MENU), _tenant(), None, "🗓️ Agendar", professionals=profs
+    )
+
+
+async def test_main_menu_agendar_tap_opens_pra_quem_on_single_doctor():
+    """TASK-035: the drawn "🗓️ Agendar" starts the usual flow ("Essa consulta é pra você?")."""
+    from secretaria.services.attendee import ATTENDEE_QUESTION_BODY
+
+    res = await _agendar_tap(1)
+    assert res.action == "reply"
+    assert res.bubbles[0].body == ATTENDEE_QUESTION_BODY
+
+
+async def test_main_menu_agendar_tap_opens_pra_quem_on_multi_doctor():
+    """Matched before the multi-doctor trio dispatch, so it works there too."""
+    from secretaria.services.attendee import ATTENDEE_QUESTION_BODY
+
+    res = await _agendar_tap(2)
+    assert res.action == "reply"
+    assert res.bubbles[0].body == ATTENDEE_QUESTION_BODY
+
+
+async def test_old_trio_label_still_routes_when_typed():
+    """No longer drawn, but a typed (or older on-screen) "Escolher médico" still books."""
+    from secretaria.services.attendee import ATTENDEE_QUESTION_BODY
+
+    res = await route(
+        _conversation(flow_state=FlowState.MENU),
+        _tenant(),
+        None,
+        BTN_CHOOSE_PROFESSIONAL,
+        professionals=_professionals(),
+    )
+    assert res.action == "reply"
+    assert res.bubbles[0].body == ATTENDEE_QUESTION_BODY

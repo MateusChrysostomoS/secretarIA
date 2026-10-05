@@ -360,6 +360,8 @@ def test_worker_registry_is_complete() -> None:
         "process_webhook_event",
         "process_brain_message_inbound",
         "process_brain_message_open",
+        "process_brain_message_enter",
+        "merge_brain_message_visit",
         "process_message_statuses",
         "send_cancellation_notice",
         "send_patient_notification",
@@ -391,7 +393,7 @@ async def test_worker_startup_logs_identity_and_registry(
         event, fields = recorder.records[0]
         assert event == "worker_started"
         assert {"build_sha", "built_at", "alembic_head", "source_fingerprint"} <= set(fields)
-        assert len(fields["functions"]) == 11
+        assert len(fields["functions"]) == 13
         assert len(fields["cron_jobs"]) == 5
 
         rendered = json.dumps(fields, default=str)
