@@ -326,9 +326,9 @@ def _service_guides() -> list:
     """The clinic-wide service orientations of THIS turn's tenant (read-only info).
 
     Unlike `_effective_service_catalog` this is NOT what a booking is validated against: it
-    holds every active catalog service that has orientations, including ones only reachable
-    through a professional's own list (a 2+ professional clinic's effective catalog is the
-    tenant's). Empty for dev scripts with no config in context.
+    holds every active catalog service that has orientations AND that somebody offers,
+    including ones only reachable through a professional's own list (a 2+ professional clinic's
+    effective catalog is the tenant's). Empty for dev scripts with no config in context.
     """
     config = _tenant_config_ctx.get()
     return list(getattr(config, "service_guides", None) or [])
@@ -1225,7 +1225,7 @@ async def get_service_info(service_name: str) -> dict:
 
     Use quando o paciente perguntar o que precisa fazer ou levar para um serviço, quanto dura
     ou o que inclui. Ferramenta SOMENTE-LEITURA: não agenda nada. Se duracao_min ou preco vierem
-    vazios, o valor depende do profissional: não invente, diga que confirma com a equipe.
+    vazios, não invente: diga que confirma com a equipe.
 
     Args:
         service_name: Nome do serviço como aparece na lista de serviços da clínica.

@@ -76,12 +76,19 @@ async def _clinic(
     catalog: list[dict],
     tenant_extra: tuple[str, ...] = (),
     clinic_name: str = "Clínica Teste",
+    offered_by: tuple[bool, ...] | None = None,
+    entry_active: bool = True,
 ) -> cfg.TenantRuntimeConfig:
     """Seed one clinic the way the hub does and return its loaded runtime config.
 
     `catalog` rows go to the canonical `services` table AND to each professional's own list (with
     `service_id`), exactly what the hub's service POST/PATCH + professional PUT write. The TENANT
     list only gets "Consulta", plus the names in `tenant_extra` (legacy tenant-level services).
+
+    `offered_by` says, per professional, whether their own list carries the catalog services at
+    all (default: everyone does). A service the hub just created is in the catalog only, until a
+    professional ticks it, so `False` is the DEFAULT state of a new service. `entry_active=False`
+    keeps the entry but marks it not offered (a professional who unticked the service).
     """
     async with maker() as session:
         tenant_types = [{"name": "Consulta", "duration_min": 40, "is_active": True}]
@@ -112,7 +119,9 @@ async def _clinic(
             session.add(row)
             rows.append(row)
         await session.flush()
-        for doctor in ("Dr. Diogo Raposo", "Dr. Rafael Teixeira")[:professionals]:
+        doctors = ("Dr. Diogo Raposo", "Dr. Rafael Teixeira")[:professionals]
+        for index, doctor in enumerate(doctors):
+            carries = True if offered_by is None else offered_by[index]
             own = [{"name": "Consulta", "duration_min": 40, "is_active": True}]
             own += [
                 {
@@ -120,10 +129,10 @@ async def _clinic(
                     "name": row.name,
                     "duration_min": 90,
                     "price": "R$ 3.000,00",
-                    "is_active": True,
+                    "is_active": entry_active,
                     "sort_order": row.sort_order,
                 }
-                for row in rows
+                for row in (rows if carries else [])
             ]
             session.add(
                 Professional(
@@ -424,14 +433,88 @@ async def test_the_name_is_matched_ignoring_accents_on_the_effective_catalog_too
 # ------------------------------------------------------------------ (H) zero professionals
 
 
-async def test_a_clinic_with_no_professional_still_loads_and_exposes_the_guides(maker) -> None:
+async def test_a_clinic_with_no_professional_still_loads_and_offers_only_its_tenant_list(
+    maker,
+) -> None:
+    # Nobody can book a catalog-only service when there is no professional: no guide for it.
     config = await _clinic(maker, professionals=0, catalog=[CATARATA])
-
     assert config.professional_id is None
     assert [t.name for t in config.appointment_types] == ["Consulta"]
+    assert config.service_guides == []
+    assert GUIDES_LINE not in prompts.secretary_system_prompt(config)
+
+    # What the TENANT list offers is bookable, so its orientations are known (and flagged on the
+    # service line, not repeated in the extra line).
+    config = await _clinic(maker, professionals=0, catalog=[CATARATA], tenant_extra=(SVC,))
+    assert [g.name for g in config.service_guides] == [SVC]
+    prompt = prompts.secretary_system_prompt(config)
+    assert MARKER in prompt and GUIDES_LINE not in prompt
+    assert (await _tool(config, SVC))["orientacoes"] == REQS
+
+
+# ----------------------------------------------- a guide needs someone who OFFERS the service
+# `POST /tenants/me/services` writes a catalog row only; a service reaches a professional through
+# a separate edit of that professional's own list. So "in the catalog, offered by nobody" is the
+# default state of every new service (and of one a professional just unticked): it is not
+# bookable, so neither the prompt nor the tool may bring it up.
+
+def _nothing_about_the_service(config) -> None:
+    assert config.service_guides == []
+    prompt = prompts.secretary_system_prompt(config)
+    assert GUIDES_LINE not in prompt and SVC not in prompt
+    assert prompt == _without_guides(config)
+
+
+@pytest.mark.parametrize(
+    "professionals, offered_by, entry_active",
+    [
+        (1, (False,), True),  # the sole professional's list is only "Consulta"
+        (2, (False, False), True),  # neither of two offers it
+        (1, (True,), False),  # the sole professional unticked it (entry kept, not offered)
+        (2, (True, True), False),  # both unticked it
+    ],
+    ids=["sole-professional-lacks-it", "no-professional-has-it", "sole-unticked", "both-unticked"],
+)
+async def test_a_catalog_service_nobody_offers_is_not_a_guide(
+    maker, professionals, offered_by, entry_active
+) -> None:
+    config = await _clinic(
+        maker,
+        professionals=professionals,
+        catalog=[CATARATA],
+        offered_by=offered_by,
+        entry_active=entry_active,
+    )
+    _nothing_about_the_service(config)
+    assert await _tool(config, SVC) == {
+        "error": f"Serviço '{SVC}' não existe nesta clínica. Serviços disponíveis: Consulta."
+    }
+
+
+async def test_a_service_only_one_of_two_professionals_offers_keeps_its_guide(maker) -> None:
+    # The production scenario: it must keep working after the offered-by-someone limit.
+    config = await _clinic(
+        maker, professionals=2, catalog=[CATARATA], offered_by=(True, False)
+    )
     assert [g.name for g in config.service_guides] == [SVC]
     assert f"{GUIDES_LINE}{SVC}" in prompts.secretary_system_prompt(config)
     assert (await _tool(config, SVC))["orientacoes"] == REQS
+
+
+async def test_only_the_offered_services_of_a_mixed_catalog_become_guides(maker) -> None:
+    # Two catalog services with orientations. The tenant list offers the catarata; no
+    # professional carries either, and nobody offers the ressonância at all.
+    config = await _clinic(
+        maker,
+        professionals=2,
+        catalog=[CATARATA, RESSONANCIA],
+        tenant_extra=(SVC,),
+        offered_by=(False, False),
+    )
+    assert [g.name for g in config.service_guides] == [SVC]
+    prompt = prompts.secretary_system_prompt(config)
+    assert "Ressonância" not in prompt and GUIDES_LINE not in prompt  # catarata is a type already
+    assert "error" in await _tool(config, "Ressonância Magnética")
 
 
 # ------------------------------------------------------------ defaults keep old callers valid
