@@ -19,6 +19,7 @@ os.environ.setdefault("META_PHONE_NUMBER_ID", "1234567890")
 os.environ.setdefault("ENCRYPTION_KEY", "gBSpATEZoI21UX0_59nHvxdUDJ4drCttg2RAEaPJc1w=")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
+import json  # noqa: E402
 from datetime import UTC, datetime, timedelta  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 from uuid import uuid4  # noqa: E402
@@ -34,6 +35,7 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from secretaria.ai.graph import (  # noqa: E402
+    BOOKING_DRAFT_SENTINEL_PREFIX,
     SELECT_PROFESSIONAL_SENTINEL_PREFIX,
     START_GUIDED_BOOKING_SENTINEL_PREFIX,
 )
@@ -698,3 +700,320 @@ async def test_guided_booking_with_no_agenda_lands_on_a_person(
     assert event["landing_step"] == "human_handover"
     assert event["fallback"] == "calendar_unavailable"
     assert handed_off == [conversation.id]
+
+
+# --------------------------------------------------------------------------
+# set_booking_draft
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("multi", [False, True])
+@pytest.mark.parametrize("attendee", [None, "", "Atendido Teste"])
+async def test_selection_only_draft_logs_the_administrative_step_it_lands_on(
+    db, _captured_bubbles, _stub_calendar, log, multi, attendee
+) -> None:
+    """The most common hand-back: an empty draft. It used to log nothing about where it landed."""
+    if multi:
+        tenant, ana, bruno, patient, conversation = await _seed(db)
+    else:
+        tenant, ana, patient, conversation = await _seed_sole(db)
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        conv.flow_attendee_name = attendee
+        await session.commit()
+
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation),
+        BOOKING_DRAFT_SENTINEL_PREFIX + "{}",
+        tenant,
+        None,
+        [],
+        patient.wa_id,
+    )
+
+    expected = (
+        "awaiting_attendee_choice"
+        if attendee is None
+        else "awaiting_professional"
+        if multi
+        else "awaiting_service"
+    )
+    (event,) = _events(log)
+    assert event["source_tool"] == "set_booking_draft"
+    assert event["landing_step"] == expected
+    assert event["supplied"] == []
+    assert event["accepted"] == []
+    assert event["dropped"] == {}
+    assert event["fallback"] is None
+    assert event["topology"] == ("multi" if multi else "sole")
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+    assert conv.flow_step == event["landing_step"]
+
+
+async def test_selection_only_draft_on_a_clinic_with_no_bookable_catalog_is_a_counted_fallback(
+    db, _captured_bubbles, _stub_calendar, log
+) -> None:
+    tenant, ana, patient, conversation = await _seed_sole(db)
+    async with db() as session:
+        doctor = await session.get(Professional, ana.id)
+        doctor.appointment_types = []
+        await session.commit()
+
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation),
+        BOOKING_DRAFT_SENTINEL_PREFIX + "{}",
+        tenant,
+        None,
+        [],
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["fallback"] == "no_bookable_catalog"
+    assert event["landing_step"] == "menu"
+    assert isinstance(_captured_bubbles[0], MenuBubble)
+
+
+@pytest.mark.parametrize(
+    "multi, build, fallback, supplied, accepted, dropped",
+    [
+        pytest.param(
+            True,
+            lambda ana: {"t": "Botox", "p": str(ana.id)},
+            "invalid_selection",
+            ["service", "professional"],
+            ["professional"],
+            {"service": "not_in_catalog"},
+            id="service_not_in_catalog",
+        ),
+        pytest.param(
+            True,
+            lambda ana: {"t": "Consulta Geral", "p": str(uuid4())},
+            "invalid_selection",
+            ["service", "professional"],
+            ["service"],
+            {"professional": "unknown_professional"},
+            id="professional_not_on_the_roster",
+        ),
+        pytest.param(
+            True,
+            lambda ana: {"t": "Consulta Geral"},
+            "missing_professional",
+            ["service"],
+            ["service"],
+            {},
+            id="multi_clinic_service_without_doctor",
+        ),
+        pytest.param(
+            False,
+            lambda ana: {"p": str(ana.id)},
+            "invalid_selection",
+            ["professional"],
+            ["professional"],
+            {},
+            id="sole_clinic_doctor_without_service",
+        ),
+    ],
+)
+async def test_a_draft_that_cannot_land_bounces_to_the_menu_with_its_reason(
+    db, _captured_bubbles, _stub_calendar, log, multi, build, fallback, supplied, accepted, dropped
+) -> None:
+    if multi:
+        tenant, ana, bruno, patient, conversation = await _seed(db)
+    else:
+        tenant, ana, patient, conversation = await _seed_sole(db)
+
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation),
+        BOOKING_DRAFT_SENTINEL_PREFIX + json.dumps(build(ana)),
+        tenant,
+        None,
+        [],
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)  # exactly one: the menu fallback is not a second hand-back
+    assert event["fallback"] == fallback
+    assert event["landing_step"] == "menu"
+    assert event["supplied"] == supplied
+    assert event["accepted"] == accepted
+    assert event["dropped"] == dropped
+    assert isinstance(_captured_bubbles[0], MenuBubble)
+
+
+@pytest.mark.parametrize(
+    "service, landing, accepted",
+    [
+        ("Consulta Geral", "awaiting_day", ["service", "professional"]),
+        (None, "awaiting_service", ["professional"]),
+    ],
+)
+async def test_a_draft_that_lands_logs_the_step_and_keeps_the_old_event(
+    db, _captured_bubbles, _stub_calendar, log, service, landing, accepted
+) -> None:
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation),
+        BOOKING_DRAFT_SENTINEL_PREFIX + json.dumps({"t": service, "p": str(ana.id)}),
+        tenant,
+        None,
+        _snapshots([ana, bruno]),
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["landing_step"] == landing
+    assert event["supplied"] == accepted
+    assert event["accepted"] == accepted
+    assert event["fallback"] is None
+    assert event["topology"] == "multi"
+    assert len(_events(log, "conversation_booking_draft_entered")) == 1
+
+
+@pytest.mark.parametrize(
+    "typed, accepted, dropped",
+    [
+        ("unimed", ["insurance"], {}),
+        ("Inventado", [], {"insurance": "unmatched_plan"}),
+    ],
+)
+async def test_a_typed_convenio_is_accepted_or_dropped_by_name_only(
+    db, _captured_bubbles, _stub_calendar, log, typed, accepted, dropped
+) -> None:
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.collect_insurance = True
+        row.insurances = ["Unimed"]
+        await session.commit()
+        await session.refresh(row)
+        tenant = row
+
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation),
+        BOOKING_DRAFT_SENTINEL_PREFIX + json.dumps({"i": typed}),
+        tenant,
+        None,
+        [],
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["supplied"] == ["insurance"]
+    assert event["accepted"] == accepted
+    assert event["dropped"] == dropped
+    assert event["fallback"] is None
+
+
+@pytest.mark.parametrize("suffix", ["oops", "[]", "null", '{"t": 7}', '{"p": "invalid"}'])
+async def test_a_corrupt_draft_is_a_bad_sentinel_with_nothing_trusted(
+    db, _captured_bubbles, log, suffix
+) -> None:
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation),
+        BOOKING_DRAFT_SENTINEL_PREFIX + suffix,
+        tenant,
+        None,
+        _snapshots([ana, bruno]),
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["fallback"] == "bad_sentinel"
+    assert event["landing_step"] == "menu"
+    assert event["supplied"] == []
+    assert event["accepted"] == []
+    assert event["dropped"] == {}
+
+
+@pytest.mark.parametrize("reason", ["no_tenant", "without_flows"])
+async def test_a_draft_that_cannot_run_is_counted_not_silent(
+    db, _captured_bubbles, log, monkeypatch, reason
+) -> None:
+    if reason == "without_flows":
+        # `flows_enabled` is always True today; the guard is defensive and still has to count.
+        monkeypatch.setattr(sentinels, "flows_enabled", lambda _tenant: False)
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation),
+        BOOKING_DRAFT_SENTINEL_PREFIX + json.dumps({"t": "Consulta Geral"}),
+        None if reason == "no_tenant" else tenant,
+        None,
+        _snapshots([ana, bruno]),
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["fallback"] == reason
+    assert event["landing_step"] is None
+    assert event["supplied"] == ["service"]
+    assert _captured_bubbles == []
+
+
+async def test_no_hand_back_event_carries_what_the_patient_or_the_model_wrote(
+    db, _captured_bubbles, _stub_calendar, log
+) -> None:
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+    typed_service = "Limpeza da Maria Silva"
+    typed_plan = "Plano da Maria joao@example.com 11999998888"
+    payload = {"t": typed_service, "p": str(ana.id), "i": typed_plan}
+
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation),
+        BOOKING_DRAFT_SENTINEL_PREFIX + json.dumps(payload),
+        tenant,
+        None,
+        _snapshots([ana, bruno]),
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["fallback"] == "invalid_selection"
+    assert event["dropped"] == {"service": "not_in_catalog", "insurance": "unmatched_plan"}
+    rendered = repr(event)
+    for secret in (
+        typed_service,
+        typed_plan,
+        "Silva",
+        "joao@example.com",
+        "11999998888",
+        str(ana.id),
+        str(bruno.id),
+        str(patient.id),
+        patient.wa_id,
+        patient.name,
+    ):
+        assert secret not in rendered, secret
+
+
+def test_draft_verdicts_names_what_survived_and_why_the_rest_did_not() -> None:
+    accepted, dropped = sentinels._draft_verdicts(
+        appointment_type="Botox",
+        canonical_type=None,
+        professional_id=uuid4(),
+        professional=SimpleNamespace(),
+        insurance_text="Inventado",
+        insurance=None,
+    )
+
+    assert accepted == ("professional",)
+    assert dropped == {"service": "not_in_catalog", "insurance": "unmatched_plan"}
+
+
+def test_draft_verdicts_ignores_what_the_agent_did_not_supply() -> None:
+    # A convênio already stored on the conversation is not something the agent supplied.
+    accepted, dropped = sentinels._draft_verdicts(
+        appointment_type=None,
+        canonical_type=None,
+        professional_id=None,
+        professional=None,
+        insurance_text=None,
+        insurance="Unimed",
+    )
+
+    assert (accepted, dropped) == ((), {})
