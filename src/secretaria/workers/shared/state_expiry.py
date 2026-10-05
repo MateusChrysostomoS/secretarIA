@@ -257,6 +257,8 @@ def _expire_stale_llm_state(
     # booking, and a later chat booking must never inherit a third party's
     # name from a conversation that went quiet mid-flow (services/attendee.py).
     conversation.flow_attendee_name = None
+    # The AI's parked draft belongs to the same abandoned booking (TASK-030 P2).
+    conversation.flow_draft = None
     # `flow_selected_professional_id` / `flow_selected_insurance` are NOT
     # cleared here, unlike the "Não" answer which drops everything. They say WHO
     # the patient is dealing with, not where they were in a form, and the agent
@@ -305,6 +307,7 @@ def _expire_stale_attendee_step(
     conversation.flow_selected_day = None
     conversation.flow_selected_slot = None
     conversation.flow_attendee_name = None
+    conversation.flow_draft = None
     return True
 
 async def _write_flow_state(conversation_id: UUID | None, state: FlowState) -> None:

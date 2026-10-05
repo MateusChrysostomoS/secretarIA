@@ -543,6 +543,15 @@ class FlowRouterResult:
     # authorization sentence; the caller writes one
     # ConsentEvent(kind="third_party_booking_authorized") for it.
     attendee_authorized: bool = False
+    # The AI's booking draft parked while the patient answers pra-quem (TASK-030 P2,
+    # services/booking_draft.py record shape). Written unconditionally by the caller like
+    # every field above; `_carry_booking` keeps it ONLY on the attendee steps, so it is
+    # cleared the moment the conversation leaves them.
+    flow_draft: dict | None = None
+    # True on the result of the tap that answers pra-quem while a draft is parked: the
+    # worker (workers/shared/draft_resolution.py::_resume_booking_draft) re-runs the
+    # resolver over the draft instead of showing this result's list. Never persisted.
+    resume_draft: bool = False
     # WHICH static config the professional is missing, on an
     # action="professional_config_incomplete" result and nowhere else. WHO it
     # is missing rides on `flow_selected_professional_id` above rather than in
@@ -1140,9 +1149,23 @@ def _carry_insurance(conversation: Conversation, result: FlowRouterResult) -> Fl
     return result
 
 
+def _carry_draft(conversation: Conversation, result: FlowRouterResult) -> FlowRouterResult:
+    """Keep the AI's parked draft while the patient is still on the pra-quem steps.
+
+    `_apply_flow_result` writes `flow_draft` unconditionally, so any result that does not
+    name it clears it - which is the point: the draft only waits for pra-quem (spec §4.3),
+    and a result on any other step (the menu, the LLM, a list) ends that wait.
+    """
+    if result.flow_draft is None and result.flow_step in ATTENDEE_STEPS:
+        result.flow_draft = getattr(conversation, "flow_draft", None)
+    return result
+
+
 def _carry_booking(conversation: Conversation, result: FlowRouterResult) -> FlowRouterResult:
-    """Both carries, applied once per public entry (route, resume, hand-back)."""
-    return _carry_insurance(conversation, _carry_attendee(conversation, result))
+    """The three carries, applied once per public entry (route, resume, hand-back)."""
+    return _carry_draft(
+        conversation, _carry_insurance(conversation, _carry_attendee(conversation, result))
+    )
 
 
 def _selected_managing_appointment_id(conversation: Conversation) -> UUID | None:
