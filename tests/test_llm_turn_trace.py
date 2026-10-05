@@ -98,3 +98,58 @@ async def test_a_turn_that_outlives_its_budget_answers_with_the_fallback(
         monkeypatch.delenv("LLM_TURN_TIMEOUT_SECONDS")
         get_settings.cache_clear()
     assert reply == graph.FALLBACK_REPLY
+
+
+class _LogRecorder:
+    """Records every structlog call (`caplog` is empty for structlog in this suite)."""
+
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str, dict]] = []
+
+    def __getattr__(self, level: str):
+        def _log(event: str, **fields) -> None:
+            self.records.append((level, event, fields))
+
+        return _log
+
+
+def test_tools_called_lists_names_in_call_order_without_arguments() -> None:
+    msgs = [
+        _ai(tool_calls=[{"name": "list_free_slots", "args": {"date": "2026-10-03"}, "id": "c1"}]),
+        ToolMessage(content="[...]", name="list_free_slots", tool_call_id="c1"),
+        _ai(
+            tool_calls=[
+                {"name": "set_booking_draft", "args": {"service": "Limpeza da Maria"}, "id": "c2"},
+                {"name": "list_free_slots", "args": {}, "id": "c3"},
+            ]
+        ),
+        ToolMessage(content="ok", name="set_booking_draft", tool_call_id="c2"),
+        ToolMessage(content="[...]", name="list_free_slots", tool_call_id="c3"),
+        _ai(content="Pronto."),
+    ]
+
+    summary = summarize_turn(msgs)
+
+    assert summary["tools_called"] == ["list_free_slots", "set_booking_draft", "list_free_slots"]
+    assert "2026-10-03" not in str(summary["tools_called"])
+    assert "Maria" not in str(summary["tools_called"])
+
+
+def test_a_turn_without_tools_lists_none() -> None:
+    assert summarize_turn([_ai(content="Olá!")])["tools_called"] == []
+
+
+def test_the_llm_turn_trace_event_carries_tools_called(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = _LogRecorder()
+    monkeypatch.setattr(graph, "logger", recorder)
+    msgs = [
+        _ai(tool_calls=[{"name": "show_main_menu", "args": {}, "id": "c1"}]),
+        ToolMessage(content="ok", name="show_main_menu", tool_call_id="c1"),
+        _ai(content="Aqui está o menu."),
+    ]
+
+    graph._log_agent_trace(msgs, elapsed_ms=12)
+
+    (fields,) = [f for _level, event, f in recorder.records if event == "llm_turn_trace"]
+    assert fields["tools_called"] == ["show_main_menu"]
+    assert fields["tool_calls"] == [{"name": "show_main_menu", "arg_keys": []}]
