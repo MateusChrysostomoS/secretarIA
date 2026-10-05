@@ -226,7 +226,9 @@ LABEL_NO = decorate(EMOJI_NEGATIVE, "Não")
 # end ("Você não tem nenhuma consulta agendada no momento."), and a patient
 # who DOES have one is already served by the Remarcar/Cancelar pair. It stays
 # a first-class route() entry regardless - the label is still tappable in any
-# older WhatsApp thread, and typing it still works.
+# older WhatsApp thread, and typing it still works. It IS offered on the main
+# menu, but only to a patient with a live future appointment
+# (`main_menu_buttons(has_upcoming=True)`), where it cannot dead-end.
 LABEL_BOOK = "Agendar"
 LABEL_MANAGE_APPOINTMENT = "Gerenciar consulta"
 
@@ -861,7 +863,7 @@ def menu_buttons_for(tenant: Tenant, multi_professional: bool) -> list[str]:
     return menu_buttons(tenant)
 
 
-def main_menu_buttons() -> list[str]:
+def main_menu_buttons(has_upcoming: bool = False) -> list[str]:
     """The buttons RENDERED under the main menu: [🗓️ Agendar, Outro], for every clinic.
 
     Owner, 2026-10-05: the booking flow now starts with "Essa consulta é pra
@@ -872,8 +874,32 @@ def main_menu_buttons() -> list[str]:
     tap on an older card still on screen) routes exactly as before. Both
     labels are matched in `route()` ahead of the multi-doctor and index
     dispatch, so this pair works on single- and multi-doctor clinics alike.
+
+    `has_upcoming`: the patient has a live future appointment, so the menu
+    also offers "Gerenciar consulta" in the middle slot (3 buttons, WhatsApp's
+    cap). Without it the pair above left that patient no visible way to
+    reschedule or cancel from the menu - found live on the Portal on
+    2026-10-05, and the WhatsApp side effect the TASK-035 checkpoint recorded
+    as pending. The label is the one `route()` already dispatches to
+    `_enter_manage` (one appointment: straight to its Remarcar/Cancelar card),
+    so nothing new is routed. The router never knows the answer itself (it
+    does no DB I/O): the worker decides it right before sending, after this
+    turn's own cancel/booking committed - see
+    workers/shared/flow_runner.py::_offer_manage_on_main_menu.
     """
+    if has_upcoming:
+        return [decorate(EMOJI_SCHEDULE, LABEL_BOOK), LABEL_MANAGE_APPOINTMENT, LABEL_OTHER]
     return [decorate(EMOJI_SCHEDULE, LABEL_BOOK), LABEL_OTHER]
+
+
+def is_main_menu(bubble) -> bool:
+    """True for a card that IS the main menu (`main_menu_buttons()` as drawn).
+
+    Matched by its labels because every surface builds it the same way -
+    `_menu_bubbles`, `/menu` and the agent's `show_main_menu` - so the worker
+    can offer the manage entry on all of them at one seam.
+    """
+    return isinstance(bubble, MenuBubble) and list(bubble.labels) == main_menu_buttons()
 
 
 def menu_label(tenant: Tenant) -> str:

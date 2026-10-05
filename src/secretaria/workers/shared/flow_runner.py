@@ -38,10 +38,15 @@ from secretaria.services.flow_router import (
     STEP_EDIT_ATT_AUTH,
     FlowRouterResult,
     is_generic_menu_result,
+    is_main_menu,
+    main_menu_buttons,
     route,
 )
 from secretaria.services.insurance_catalog import (
     resolve_booking_plan_ids,
+)
+from secretaria.services.patient_context import (
+    has_upcoming_appointment,
 )
 from secretaria.services.payments import deposit_lifecycle
 from secretaria.services.pii_pseudonymization import remember_attendee_name
@@ -599,6 +604,43 @@ async def _apply_flow_result(
             if replaced is not None and persisted and tenant is not None:
                 notice = _replaced_notice(tenant, replaced)
                 result.bubbles[-1].body = f"{result.bubbles[-1].body}\n\n{notice}"
+            await _offer_manage_on_main_menu(reply, result.bubbles)
             await _dispatch_bubbles(reply, result.bubbles, tenant=tenant, waba_token=waba_token)
         return True
     return False  # delegate_llm
+
+
+async def _offer_manage_on_main_menu(reply: _ReplyContext, bubbles: list) -> None:
+    """Add "Gerenciar consulta" to the main menu when the patient has something booked.
+
+    HERE, at the one seam every menu passes through - the router's own menus,
+    `/menu`, the reactivation "Não" and the agent's `show_main_menu` hand-back
+    all arrive through `_apply_flow_result` - and AFTER this turn's write
+    committed, so a menu that follows the patient's last cancellation drops
+    the entry and one that follows a booking gains it. Read fresh from the
+    database rather than from the turn's snapshot for exactly that reason.
+
+    Fail-open: on any error the plain menu goes out, which is what every
+    patient saw before (Agendar + Outro; typing "Remarcar" still works).
+    """
+    menus = [bubble for bubble in bubbles if is_main_menu(bubble)]
+    if not menus or reply.conversation_id is None:
+        return
+    try:
+        async with async_session_factory() as session:
+            conversation = await session.get(Conversation, reply.conversation_id)
+            if conversation is None or conversation.patient_id is None:
+                return
+            upcoming = await has_upcoming_appointment(
+                session, conversation.tenant_id, conversation.patient_id
+            )
+    except Exception as exc:
+        logger.warning(
+            "main_menu_upcoming_lookup_failed",
+            error_type=type(exc).__name__,
+            conversation_id=str(reply.conversation_id),
+        )
+        return
+    if upcoming:
+        for menu in menus:
+            menu.labels = main_menu_buttons(has_upcoming=True)
