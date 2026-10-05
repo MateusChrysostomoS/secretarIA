@@ -48,6 +48,7 @@ from secretaria.services.tenant_config import (
     list_active_professionals,
     professional_appointment_types,
 )
+from secretaria.workers.shared import handback_log as hb
 from secretaria.workers.shared.context import (
     _ReplyContext,
 )
@@ -64,6 +65,10 @@ from secretaria.workers.shared.llm_context import (
 
 logger = get_logger(__name__)
 
+# `_handle_show_main_menu`'s `source` when the agent's own `show_main_menu` tool asked for the
+# menu - the only caller of that function that is an AI hand-back.
+_AGENT_TOOL_SOURCE = "agent_tool"
+
 
 async def _handle_show_main_menu(
     reply: _ReplyContext,
@@ -72,7 +77,7 @@ async def _handle_show_main_menu(
     patient_wa: str | None,
     redis=None,
     waba_token: str | None = None,
-    source: str = "agent_tool",
+    source: str = _AGENT_TOOL_SOURCE,
 ) -> bool:
     """Non-destructive menu return. The ONE way back to the menu.
 
@@ -91,6 +96,12 @@ async def _handle_show_main_menu(
     Idempotent by construction: it consumes no input and derives the menu from
     the tenant + roster, so running it twice sends the same menu twice and
     leaves the same state.
+
+    Hand-back accounting: only `source="agent_tool"` records a
+    `conversation_handback_entered` event here. `/menu`, the name step and the
+    identity cards render the same menu without the AI being involved, and the
+    malformed-sentinel fallbacks are recorded by the handler that fell back
+    (`_fallback_to_menu`), so one hand-back is never counted twice.
     """
     if tenant is None:
         logger.warning(
@@ -98,6 +109,16 @@ async def _handle_show_main_menu(
             conversation_id=str(reply.conversation_id),
             source=source,
         )
+        if source == _AGENT_TOOL_SOURCE:
+            hb.log_handback_entered(
+                conversation_id=reply.conversation_id,
+                tenant_id=reply.tenant_id,
+                source_tool=hb.SOURCE_SHOW_MAIN_MENU,
+                landing_step=None,
+                fallback=hb.FALLBACK_NO_TENANT,
+                topology=booking_topology(professionals),
+                channel=reply.channel,
+            )
         return False
     result = FlowRouterResult(
         action="reply",
@@ -109,6 +130,17 @@ async def _handle_show_main_menu(
         ],
         flow_state=FlowState.MENU,
     )
+    if source == _AGENT_TOOL_SOURCE:
+        # Logged before the write and the send, so a failure there cannot erase the fact
+        # that the hand-back reached the menu.
+        hb.log_handback_entered(
+            conversation_id=reply.conversation_id,
+            tenant_id=tenant.id,
+            source_tool=hb.SOURCE_SHOW_MAIN_MENU,
+            landing_step=hb.LANDING_MENU,
+            topology=booking_topology(professionals),
+            channel=reply.channel,
+        )
     rendered = await _apply_flow_result(
         reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
     )
