@@ -24,6 +24,7 @@ from secretaria.core.whatsapp_limits import (
     MAX_LIST_ROW_TITLE_CHARS,
     decorated_text_budget,
 )
+from secretaria.services.service_catalog import missing_from
 
 if TYPE_CHECKING:
     from secretaria.services.tenant_config import TenantRuntimeConfig
@@ -72,6 +73,27 @@ def _format_appointment_types(types: list, default_duration: int) -> str:
         )
         lines.append(f"- {t.name} ({dur} min){price}{desc}{guide}")
     return "\n".join(lines)
+
+
+def _format_service_guides(config: TenantRuntimeConfig) -> str:
+    """The "Serviços com orientações" line, or "" when there is nothing to add.
+
+    `_format_appointment_types` flags a service that has orientations, but it only sees
+    `config.appointment_types`: with 2+ active professionals that is the tenant's list, and a
+    service that exists only in the clinic's catalog is not on it. `config.service_guides`
+    (clinic-wide, from the catalog) carries those; this names the ones the list above does not
+    already flag, so the model knows to call get_service_info instead of saying there is no
+    orientation. A service already on the list gets its marker there and is never repeated, so
+    a clinic with one professional, or whose list is complete, renders exactly as before.
+    """
+    guides = missing_from(
+        getattr(config, "service_guides", None) or [], config.appointment_types
+    )
+    if not guides:
+        return ""
+    return "\n- Serviços com orientações (use get_service_info): " + ", ".join(
+        guide.name for guide in guides
+    )
 
 
 def _format_safety_rules() -> str:
@@ -352,6 +374,7 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
     types_text = _format_appointment_types(
         config.appointment_types, config.appointment_duration_min
     )
+    service_guides_line = _format_service_guides(config)
     # What a [SLOTS] label may actually contain. ai/formatter.py::_parse_slot_rows
     # prepends the calendar emoji itself, so the model writes against a budget
     # three characters smaller than the raw row cap - the calendar emoji carries
@@ -374,7 +397,7 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
         "CONTEXTO OPERACIONAL:\n"
         f"- Hoje é {today} (timezone {tz}).\n"
         f"- Horário de atendimento:\n{hours_text}\n"
-        f"- Tipos de consulta disponíveis:\n{types_text}\n\n"
+        f"- Tipos de consulta disponíveis:\n{types_text}{service_guides_line}\n\n"
         "================ COMO ESCREVER NO WHATSAPP ================\n"
         "Cada resposta sua é entregue como uma sequência de balões curtos no "
         "WhatsApp do paciente. Para deixar a conversa leve e legível:\n\n"

@@ -34,6 +34,7 @@ from secretaria.core.logging import get_logger
 from secretaria.models import Tenant
 from secretaria.models.professional import Professional
 from secretaria.models.professional_credentials import ProfessionalCredentials
+from secretaria.models.service import Service
 from secretaria.models.tenant_credentials import TenantCredentials
 from secretaria.services.calendar import (
     CalendarService,
@@ -59,6 +60,21 @@ class RuntimeAppointmentType:
     price: str | None = None
     long_description: str | None = None
     # Pre-consult orientations shown to the patient, e.g. "Jejum de 8 horas".
+    requirements: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RuntimeServiceGuide:
+    """What the CLINIC says a service needs from the patient (jejum, exames, preparo).
+
+    Read from the canonical catalog, which is clinic-wide: the preparation for a service
+    does not depend on which professional performs it. Carries no price or duration — those
+    vary per professional and live only in `TenantRuntimeConfig.appointment_types`.
+    """
+
+    name: str
+    description: str | None = None
+    long_description: str | None = None
     requirements: list[str] = field(default_factory=list)
 
 
@@ -108,6 +124,13 @@ class TenantRuntimeConfig:
     # run_agent's `conversation_state` parameter. NEVER loaded from DB, and
     # NEVER carries patient/attendee names — only the history is pseudonymized.
     conversation_state: str | None = None
+    # Clinic-wide orientations of every ACTIVE catalog service that has any, whichever
+    # professional offers it. `appointment_types` only holds the tenant's list (or the single
+    # active professional's), so with 2+ professionals a service that exists only in the
+    # catalog is absent from it; `get_service_info` and the prompt (ai/tools.py,
+    # ai/prompts.py) read this alongside it so its orientations stay reachable. Defaulted so
+    # every existing constructor keeps working.
+    service_guides: list[RuntimeServiceGuide] = field(default_factory=list)
 
 
 def _filter_active_types(appointment_types: list | None) -> list[dict]:
@@ -130,6 +153,25 @@ def active_appointment_types(tenant: Tenant, services: Sequence | None = None) -
     stored entries exactly as before.
     """
     return _filter_active_types(resolve_entries(tenant.appointment_types, services))
+
+
+def runtime_service_guides(services: Sequence[Service] | None) -> list[RuntimeServiceGuide]:
+    """Orientations of the clinic's ACTIVE catalog services that have any, in catalog order.
+
+    `services` is the tenant's own catalog (`load_service_catalog(session, tenant.id)`), so
+    isolation between clinics is inherited from that single read. A service with neither
+    `requirements` nor `long_description` has nothing to tell the patient and is left out.
+    """
+    return [
+        RuntimeServiceGuide(
+            name=row.name,
+            description=row.description,
+            long_description=row.long_description,
+            requirements=list(row.requirements or []),
+        )
+        for row in services or []
+        if row.is_active and (row.requirements or row.long_description)
+    ]
 
 
 def active_business_hours(tenant: Tenant) -> dict:
@@ -904,6 +946,7 @@ async def load_tenant_config(session: AsyncSession, tenant: Tenant) -> TenantRun
         post_consult_knowledge=tenant.post_consult_knowledge,
         address=tenant.address,
         clinic_facts=tenant.clinic_facts,
+        service_guides=runtime_service_guides(services),
     )
 
 
