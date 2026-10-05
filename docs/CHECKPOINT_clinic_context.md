@@ -2,8 +2,8 @@
 
 Spec: `C:\TECH\BRAIN\tasks\TASK-025\SPEC.md` (BRAIN, fora deste repo). Plano: `tasks/TASK-025/` (BRAIN). Executado em 2026-10-04.
 
-**Estado: pronto e validado, local + commitado, NÃO mesclado em `main`, NÃO pushado, NÃO deployado, migração NÃO aplicada em nenhum Postgres real (não havia banco disponível).**
-Branch `task/TASK-025-clinic-context` (base `main@1b3b7a6`, HEAD `c029714`). Commits: `4a0edd4` (arquivo de referência do
+**Estado (atualizado em 2026-10-05): mesclado em `main` como `f7a903e` e pushado em 2026-10-05; deployado pelo dono no mesmo dia. A versão no ar (`main@f7a903e`) tinha a lacuna das orientações por serviço em clínicas com 2+ profissionais, descrita e corrigida na §9.** A migração `e5a1c9d3b7f2` está APLICADA em produção desde o deploy de 2026-10-05 (confirmado ao vivo: salvar `clinic_facts` pelo hub persistiu e voltou); a ordem de deploy da §6 é histórica.
+Branch de origem `task/TASK-025-clinic-context` (base `main@1b3b7a6`, HEAD `c029714`). Commits: `4a0edd4` (arquivo de referência do
 prompt), `527155f` (migração `e5a1c9d3b7f2`), `95a88c5` (código + testes), `93702ad` (este documento), `b20de90` (leitores
 tolerantes a `clinic_facts` malformado + higiene dos testes), `c029714` (correções de docs). Suíte completa: 2948 passed,
 10 skipped, 0 falhas (base `1b3b7a6`: 2855); `ruff` limpo; prompt de referência byte a byte idêntico para um tenant sem
@@ -32,6 +32,7 @@ CLÍNICA" assim que o código novo rodar — é o objetivo, mas é uma mudança 
 | Dados disponíveis para o prompt | `services/tenant_config.py::TenantRuntimeConfig.address` e `.clinic_facts`, preenchidos em `load_tenant_config` |
 | Bloco do prompt | `ai/prompts.py::_format_clinic_facts`, `_clinic_fact_lines`, `CLINIC_FACTS_BUDGET`; inserido em `secretary_system_prompt` entre o contexto profissional e o conhecimento pós-consulta |
 | Marcador de orientações no serviço | `ai/prompts.py::_format_appointment_types` |
+| Orientações da clínica inteira (§9) | `services/tenant_config.py::TenantRuntimeConfig.service_guides`, `RuntimeServiceGuide`, `runtime_service_guides`; linha no prompt em `ai/prompts.py::_format_service_guides`; casamento de nomes em `services/service_catalog.py::find_by_name` e `missing_from` |
 | Tool somente-leitura | `ai/tools.py::get_service_info`, registrada em `ai/graph.py::_SCOPE_FREE_TOOLS` |
 | Completude | `services/context_completeness.py::compute_completeness`; rota `api/hub/context_completeness.py` (`GET /tenants/me/context-completeness`), incluída em `main.py::create_app` |
 
@@ -85,10 +86,11 @@ arredondado. Determinística, sem LLM, sem gate de entitlement.
   confirmar com a equipe."
 - Serviços: `requirements` e `long_description` NÃO entram no prompt. A linha do serviço ganha o sufixo ` (há orientações: use
   get_service_info)` só quando o serviço tem um dos dois.
-- `get_service_info(service_name)`: lê SÓ o catálogo efetivo da conversa em curso (`_tenant_config_ctx` via
-  `_effective_service_catalog` — o catálogo do profissional quando há um único profissional ativo, senão o do tenant) e casa o
-  nome com `_match_by_name`. Não consulta o banco: o isolamento entre clínicas vem do contexto, não de filtro. Nome desconhecido
-  devolve um erro que lista os serviços da clínica. Devolve `servico`, `duracao_min`, `preco`, `descricao`,
+- `get_service_info(service_name)`: lê o catálogo efetivo da conversa em curso (`_tenant_config_ctx` via
+  `_effective_service_catalog` — o catálogo do profissional quando há um único profissional ativo, senão o do tenant) e, desde
+  2026-10-05, também `service_guides` (§9). Casa o nome com `_match_by_name` e, se não achar, ignorando acento e espaço interno.
+  Não consulta o banco: o isolamento entre clínicas vem do contexto, não de filtro. Nome desconhecido devolve um erro que lista
+  os serviços da clínica (a união das duas fontes, sem repetir). Devolve `servico`, `duracao_min`, `preco`, `descricao`,
   `descricao_completa`, `orientacoes`.
 - Os fatos entram no prompt sem pseudonimização (informação comercial pública, como os demais campos do tenant). Texto vindo de
   fontes externas (TASK-026) sempre passa por revisão do gestor antes de virar `clinic_facts`; esta tarefa só lê o que o gestor
@@ -110,16 +112,21 @@ arredondado. Determinística, sem LLM, sem gate de entitlement.
 - Prova no navegador (2026-10-05): export estático do frontend falando com os routers reais do hub deste backend (SQLite em
   memória, não o ambiente deployado). Cobre o ciclo de salvar/limpar `clinic_facts` e a rota de completude; detalhes no
   checkpoint do frontend (`docs/CHECKPOINT_contexto_clinic_facts.md`, Brain-Message-Frontend).
-- **Não feito:** migração aplicada em banco real (sem Postgres descartável disponível; o SQLite dos testes cria o schema por
-  `create_all`); prova ao vivo com a LLM respondendo com os fatos.
+- **Não feito na validação de 2026-10-04 (superado):** migração aplicada em banco real — ela foi aplicada em produção no deploy
+  de 2026-10-05 (ver §6); o SQLite dos testes cria o schema por `create_all`. Também não feita: prova ao vivo com a LLM
+  respondendo com os fatos.
 
-## 6. Ordem de deploy e reversão
+## 6. Ordem de deploy (histórica) e reversão
 
-Deploy (regra `frozen-contract-migration`): **migração `e5a1c9d3b7f2` primeiro** (aditiva, coluna nullable sem default), depois
-**API e worker** (deploys separados — o worker lê o modelo e não pode rodar a versão nova antes da coluna existir). Entre a
-migração e o código novo nada muda para o paciente.
+**Obsoleto desde 2026-10-05:** a migração `e5a1c9d3b7f2` JÁ está aplicada em produção (deploy do dono em 2026-10-05; confirmado ao
+vivo: salvar `clinic_facts` pelo hub persistiu e voltou). A ordem e os cuidados abaixo ficam como registro do que foi feito; só a
+parte de Reversão ainda orienta uma ação futura.
 
-Cuidados antes de rodar a migração:
+Deploy realizado (regra `frozen-contract-migration`; ordem histórica, já cumprida): **migração `e5a1c9d3b7f2` primeiro** (aditiva,
+coluna nullable sem default), depois **API e worker** (deploys separados — o worker lê o modelo e não pode rodar a versão nova
+antes da coluna existir). Entre a migração e o código novo nada muda para o paciente.
+
+Cuidados que valiam antes de rodar a migração (obsoletos, ela já foi aplicada):
 
 - Confira em `pg_stat_activity` se há sessões `idle in transaction` e rode a migração com um `lock_timeout` curto:
   `ALTER TABLE ... ADD COLUMN` pega por um instante um lock exclusivo em `tenants`, a tabela mais quente, e toda leitura de
@@ -145,8 +152,9 @@ Reversão:
 - Ingestão dos fatos por site/documento/texto: TASK-026 (esta tarefa não escreve `clinic_facts` por conta própria).
 - Parte B: fatia `clinicFacts` e cartão "O que falta?" na tela `/contexto` do Brain-Message-Frontend (contrato da §3) — construída
   e validada no branch `task/TASK-025-clinic-context-ui`, não mesclada; vai por último no deploy (ver o checkpoint dela).
-- Aplicar a migração em um Postgres descartável antes do deploy real.
-- Merge em `main` e push/deploy: exigem pedido explícito do dono.
+- (Resolvido em 2026-10-05) A migração `e5a1c9d3b7f2` foi aplicada em produção no deploy; não há mais o que testar em Postgres
+  descartável antes do deploy.
+- Merge em `main` (`f7a903e`), push e deploy: feitos em 2026-10-05 (deploy pelo dono). Fica pendente o deploy da correção da §9.
 
 ## 8. Limites conhecidos
 
@@ -163,3 +171,51 @@ Conhecidos e aceitos nesta entrega (nenhum é regressão; só aparecem com dado 
   cortado; o frontend mostra um aviso de uma linha. Um medidor usado/orçamento exigiria um endpoint novo.
 - Um tenant que já tem endereço passa a receber o bloco "SOBRE A CLÍNICA" no deploy (previsto na SPEC §5), sem feature flag. O
   fecho promete "vai confirmar com a equipe" e nada acompanha essa promessa depois (fora de escopo, SPEC "A").
+
+## 9. Correção (2026-10-05): orientações por serviço em clínicas com 2+ profissionais
+
+**Sintoma.** Numa clínica com 2 ou mais profissionais ativos, a LLM respondia "no registro não há orientação" para um serviço
+que tinha orientações cadastradas (ex.: "Jejum de 8 horas") e descrição completa. Com exatamente 1 profissional ativo funcionava.
+Confirmado em produção e reproduzido localmente. A versão deployada em 2026-10-05 (`main@f7a903e`) tinha essa lacuna.
+
+**Causa raiz.** `get_service_info` e o sufixo " (há orientações: use get_service_info)" do prompt liam só
+`TenantRuntimeConfig.appointment_types`. `load_tenant_config` preenche isso com a lista do TENANT e só troca pela lista do
+profissional quando há EXATAMENTE UM profissional ativo. O hub grava um serviço novo apenas no catálogo canônico (`services`); ele
+só chega à lista própria de um profissional por uma edição separada desse profissional, e nunca é gravado na lista do tenant.
+Com 2+ profissionais, um serviço oferecido só pelas listas próprias ficava fora do catálogo efetivo, embora `requirements` e
+`long_description` estivessem salvos no catálogo.
+
+**Correção (aditiva, sem migração).**
+
+- `TenantRuntimeConfig.service_guides` (lista de `RuntimeServiceGuide`, com padrão vazio — todo construtor antigo continua
+  válido), preenchida em `load_tenant_config` a partir do catálogo que ele JÁ carrega (`load_service_catalog(session, tenant.id)`,
+  então o isolamento entre clínicas é o mesmo; nenhuma consulta nova): só serviços ATIVOS com `requirements` ou
+  `long_description` que pelo menos um profissional ativo (ou a lista do tenant) OFERECE — a lista de nomes oferecidos vem de
+  `professional_appointment_types` de cada profissional ativo mais a lista efetiva, e `runtime_service_guides(services, offered)`
+  filtra por ela. Sem esse filtro, todo serviço recém-criado no hub (que só entra no catálogo) apareceria no prompt e na
+  ferramenta sem ser agendável. As orientações são da clínica inteira, não de um profissional.
+- `get_service_info` procura o nome primeiro no catálogo efetivo (resultado idêntico ao de antes) e depois em `service_guides`.
+  Serviço só dos guias devolve as mesmas chaves, com `duracao_min` e `preco` vazios (variam por profissional). O erro de
+  "serviço desconhecido" mantém o texto e lista a união das duas fontes, sem repetir. O casamento de nome mantém a regra antiga
+  (sem diferenciar maiúsculas) e, se não achar, também ignora acento e espaço interno, como a identidade do catálogo
+  (`service_catalog.normalize`).
+- Prompt: uma linha, "- Serviços com orientações (use get_service_info): X, Y", logo abaixo dos tipos de consulta, só com os
+  guias que NÃO estão na lista de tipos (comparação por nome normalizado). Com 1 profissional ou com a lista completa, o prompt
+  é byte a byte o de antes (`tests/golden/system_prompt_default.txt` intocado). `_format_appointment_types` e o orçamento de
+  1.800 caracteres do bloco "SOBRE A CLÍNICA" não mudaram.
+
+**Deploy da correção.** API + worker (deploys separados; ambos montam o prompt e rodam a ferramenta), **sem migração**: nenhuma
+coluna nova, só leitura do catálogo que já existia.
+
+**Validação.** `tests/test_service_guides_multipro.py` (30 testes, escritos antes do código; vistos falhar antes e passando
+depois): 2 profissionais com serviço só nas listas próprias, 1 profissional (sem mudança), 2 profissionais com o serviço também
+na lista do tenant (sem linha duplicada), serviço inativo ou sem orientação (fora dos guias), isolamento entre duas clínicas,
+erro com a união dos nomes, nome com maiúsculas/acento, clínica sem nenhum profissional (só a lista do tenant conta) e serviço que
+NINGUÉM oferece (profissional único sem ele, dois sem ele, entrada desmarcada: não vira guia, nem linha no prompt, nem resposta da
+ferramenta; um de dois oferecendo: o guia fica). Suíte completa: 2998 passed, 10 skipped, 0 falhas (base `f7a903e`: 2968).
+
+**Limites conhecidos.** Os guias se limitam a serviços ATIVOS do catálogo, com orientações, que pelo menos um profissional ativo
+(ou a lista do tenant) oferece. Um serviço criado no hub e ainda não marcado em nenhum profissional não aparece no prompt nem na
+ferramenta (não é agendável); a lista "Tipos de consulta disponíveis" continua sendo a fonte do que se agenda. Duração e preço de
+um serviço só dos guias vêm vazios na ferramenta (a descrição da ferramenta manda a LLM confirmar com a equipe em vez de
+inventar).

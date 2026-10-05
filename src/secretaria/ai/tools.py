@@ -35,6 +35,7 @@ from secretaria.services.calendar import (
     build_patient_calendar_link,
 )
 from secretaria.services.precheck import HandoffOutcome, request_precheck_handoff
+from secretaria.services.service_catalog import find_by_name, missing_from
 
 if TYPE_CHECKING:
     from secretaria.services.tenant_config import TenantRuntimeConfig
@@ -321,6 +322,18 @@ def _effective_service_catalog() -> list:
     return list(getattr(config, "appointment_types", None) or [])
 
 
+def _service_guides() -> list:
+    """The clinic-wide service orientations of THIS turn's tenant (read-only info).
+
+    Unlike `_effective_service_catalog` this is NOT what a booking is validated against: it
+    holds every active catalog service that has orientations AND that somebody offers,
+    including ones only reachable through a professional's own list (a 2+ professional clinic's
+    effective catalog is the tenant's). Empty for dev scripts with no config in context.
+    """
+    config = _tenant_config_ctx.get()
+    return list(getattr(config, "service_guides", None) or [])
+
+
 def _canonical_appointment_type(
     candidate: str, tool_name: str, catalog: list | None = None
 ) -> tuple[str | None, dict | None]:
@@ -390,6 +403,18 @@ def _match_by_name(items: Sequence[Any], name: str) -> Any | None:
         if item.name.strip().casefold() == target:
             return item
     return None
+
+
+def _lookup_service(items: Sequence[Any], name: str) -> Any | None:
+    """A service of `items` by the name the patient or the LLM used.
+
+    `_match_by_name` first — the exact, case-insensitive rule `get_service_info` has always
+    used, so anything it matched still resolves to the very same entry — then the catalog's own
+    identity rule (`service_catalog.find_by_name`), which also ignores accents and inner
+    spacing, so "ressonancia magnetica" finds "Ressonância Magnética".
+    """
+    found = _match_by_name(items, name)
+    return found if found is not None else find_by_name(items, name)
 
 
 def _event_window(
@@ -1199,28 +1224,45 @@ async def get_service_info(service_name: str) -> dict:
     (jejum, exames, documentos, preparo), a descrição completa, a duração e o preço.
 
     Use quando o paciente perguntar o que precisa fazer ou levar para um serviço, quanto dura
-    ou o que inclui. Ferramenta SOMENTE-LEITURA: não agenda nada.
+    ou o que inclui. Ferramenta SOMENTE-LEITURA: não agenda nada. Se duracao_min ou preco vierem
+    vazios, não invente: diga que confirma com a equipe.
 
     Args:
         service_name: Nome do serviço como aparece na lista de serviços da clínica.
     """
+    asked = service_name or ""
     catalog = _effective_service_catalog()
-    match = _match_by_name(catalog, service_name or "")
-    if match is None:
-        names = ", ".join(t.name for t in catalog) or "nenhum"
+    # Two sources, because the effective catalog only lists what THIS turn books from (the
+    # tenant's list, or the one professional's), while the orientations are clinic-wide.
+    match = _lookup_service(catalog, asked)
+    if match is not None:
+        return {
+            "servico": match.name,
+            "duracao_min": match.duration_min,
+            "preco": match.price,
+            "descricao": match.description,
+            "descricao_completa": getattr(match, "long_description", None),
+            "orientacoes": list(getattr(match, "requirements", None) or []),
+        }
+    guides = _service_guides()
+    guide = _lookup_service(guides, asked)
+    if guide is None:
+        listed = [t.name for t in catalog] + [g.name for g in missing_from(guides, catalog)]
         return {
             "error": (
-                f"Serviço '{(service_name or '').strip()}' não existe nesta clínica. "
-                f"Serviços disponíveis: {names}."
+                f"Serviço '{asked.strip()}' não existe nesta clínica. "
+                f"Serviços disponíveis: {', '.join(listed) or 'nenhum'}."
             )
         }
+    # Known to the clinic but not in this turn's catalog: duration and price vary per
+    # professional, so they are not guessed here.
     return {
-        "servico": match.name,
-        "duracao_min": match.duration_min,
-        "preco": match.price,
-        "descricao": match.description,
-        "descricao_completa": getattr(match, "long_description", None),
-        "orientacoes": list(getattr(match, "requirements", None) or []),
+        "servico": guide.name,
+        "duracao_min": None,
+        "preco": None,
+        "descricao": guide.description,
+        "descricao_completa": guide.long_description,
+        "orientacoes": list(guide.requirements or []),
     }
 
 

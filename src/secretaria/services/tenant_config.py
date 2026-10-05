@@ -34,13 +34,14 @@ from secretaria.core.logging import get_logger
 from secretaria.models import Tenant
 from secretaria.models.professional import Professional
 from secretaria.models.professional_credentials import ProfessionalCredentials
+from secretaria.models.service import Service
 from secretaria.models.tenant_credentials import TenantCredentials
 from secretaria.services.calendar import (
     CalendarService,
     CalendarUnavailableError,
     GoogleTokenRevokedError,
 )
-from secretaria.services.service_catalog import load_service_catalog, resolve_entries
+from secretaria.services.service_catalog import load_service_catalog, normalize, resolve_entries
 
 logger = get_logger(__name__)
 
@@ -59,6 +60,21 @@ class RuntimeAppointmentType:
     price: str | None = None
     long_description: str | None = None
     # Pre-consult orientations shown to the patient, e.g. "Jejum de 8 horas".
+    requirements: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RuntimeServiceGuide:
+    """What the CLINIC says a service needs from the patient (jejum, exames, preparo).
+
+    Read from the canonical catalog, which is clinic-wide: the preparation for a service
+    does not depend on which professional performs it. Carries no price or duration — those
+    vary per professional and live only in `TenantRuntimeConfig.appointment_types`.
+    """
+
+    name: str
+    description: str | None = None
+    long_description: str | None = None
     requirements: list[str] = field(default_factory=list)
 
 
@@ -108,6 +124,14 @@ class TenantRuntimeConfig:
     # run_agent's `conversation_state` parameter. NEVER loaded from DB, and
     # NEVER carries patient/attendee names — only the history is pseudonymized.
     conversation_state: str | None = None
+    # Clinic-wide orientations of every ACTIVE catalog service that has any AND that somebody
+    # offers (the tenant list or an active professional's own), whichever professional it is.
+    # `appointment_types` only holds the tenant's list (or the single active professional's),
+    # so with 2+ professionals a service offered only through the professionals' own lists is
+    # absent from it; `get_service_info` and the prompt (ai/tools.py, ai/prompts.py) read this
+    # alongside it so its orientations stay reachable. Defaulted so every existing constructor
+    # keeps working.
+    service_guides: list[RuntimeServiceGuide] = field(default_factory=list)
 
 
 def _filter_active_types(appointment_types: list | None) -> list[dict]:
@@ -130,6 +154,35 @@ def active_appointment_types(tenant: Tenant, services: Sequence | None = None) -
     stored entries exactly as before.
     """
     return _filter_active_types(resolve_entries(tenant.appointment_types, services))
+
+
+def runtime_service_guides(
+    services: Sequence[Service] | None, offered: set[str] | None = None
+) -> list[RuntimeServiceGuide]:
+    """Orientations of the clinic's ACTIVE catalog services that have any, in catalog order.
+
+    `services` is the tenant's own catalog (`load_service_catalog(session, tenant.id)`), so
+    isolation between clinics is inherited from that single read. A service with neither
+    `requirements` nor `long_description` has nothing to tell the patient and is left out.
+
+    `offered` is the set of NORMALIZED names somebody can book (the tenant list plus every
+    active professional's own list). A catalog service nobody offers is not bookable and the
+    agent must not bring it up: creating a service in the hub writes the catalog only, so
+    "catalog but offered by nobody" is the default state of every new service. `None` means no
+    restriction.
+    """
+    return [
+        RuntimeServiceGuide(
+            name=row.name,
+            description=row.description,
+            long_description=row.long_description,
+            requirements=list(row.requirements or []),
+        )
+        for row in services or []
+        if row.is_active
+        and (row.requirements or row.long_description)
+        and (offered is None or (row.normalized_name or normalize(row.name)) in offered)
+    ]
 
 
 def active_business_hours(tenant: Tenant) -> dict:
@@ -887,6 +940,15 @@ async def load_tenant_config(session: AsyncSession, tenant: Tenant) -> TenantRun
         )
         for t in active_types
     ]
+    # What somebody can actually book: the effective list (the tenant's, or the sole
+    # professional's) plus every active professional's own. `professional_appointment_types`
+    # already honours NULL-vs-empty and drops inactive entries and retired catalog rows.
+    offered = {normalize(t.get("name")) for t in active_types}
+    for professional in active_professionals:
+        offered |= {
+            normalize(t.get("name"))
+            for t in professional_appointment_types(professional, tenant, services)
+        }
     return TenantRuntimeConfig(
         tenant_id=tenant.id,
         clinic_name=tenant.clinic_name,
@@ -904,6 +966,7 @@ async def load_tenant_config(session: AsyncSession, tenant: Tenant) -> TenantRun
         post_consult_knowledge=tenant.post_consult_knowledge,
         address=tenant.address,
         clinic_facts=tenant.clinic_facts,
+        service_guides=runtime_service_guides(services, offered),
     )
 
 
