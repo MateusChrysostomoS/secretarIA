@@ -1,8 +1,10 @@
 """tenants.clinic_facts: bounded facts about the clinic that the LLM may quote (TASK-025).
 
-Additive and nullable (NULL = never filled in), so the order of deploy does not matter for
-correctness: run this migration first, then roll the API and the worker in any order. The
-worker reads the model, so it must not run a version that expects the column before this runs.
+Additive and nullable (NULL = never filled in). Run this migration BEFORE the code that maps
+the column: the API and the worker both select `tenants.clinic_facts` on every Tenant load, so
+new code against an unmigrated database fails on every request and every turn. The reverse is
+safe (code from before this revision ignores the extra nullable column), and once the
+migration has run the API and the worker can be rolled in any order.
 
 Revision ID: e5a1c9d3b7f2
 Revises: c3a9e5f1d7b2

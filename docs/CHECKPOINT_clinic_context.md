@@ -44,8 +44,9 @@ objeto SUBSTITUI o anterior inteiro, não faz merge):
     "faq": [{"question": "string", "answer": "string"}], "notes": "string|null" } } }
 ```
 
-`GET /tenants/me/configuration` (e o legado `GET /tenants/me/config`) devolvem o mesmo objeto em `tenant.clinic_facts` (`null`
-se nunca salvo).
+`GET /tenants/me/config` devolve `clinic_facts` no topo; a resposta do `PUT /tenants/me/configuration` o devolve em
+`tenant.clinic_facts`; `null` se nunca salvo. (`GET /tenants/me/configuration` não existe: só o `PUT`.) Campos de lista não
+aceitam `null` (422), e o GET devolve o objeto exatamente como foi salvo (só as chaves enviadas, sem preencher padrões).
 
 Limites (rejeitados com 422 no servidor): `parking` ≤300; `how_to_arrive` ≤400; `payment_methods` ≤10 itens de ≤60;
 `cancellation_policy` ≤500; `documents_to_bring` ≤10 itens de ≤120; `accessibility` ≤300; `faq` ≤15 itens
@@ -110,8 +111,25 @@ Deploy (regra `frozen-contract-migration`): **migração `e5a1c9d3b7f2` primeiro
 **API e worker** (deploys separados — o worker lê o modelo e não pode rodar a versão nova antes da coluna existir). Entre a
 migração e o código novo nada muda para o paciente.
 
-Reversão: primeiro voltar API e worker ao código anterior (`git revert` dos commits `95a88c5` e `527155f`, e deploy dos dois);
-só depois `alembic downgrade -1` (derruba a coluna — o código novo a mapeia, então não derrube a coluna com ele no ar).
+Cuidados antes de rodar a migração:
+
+- Confira em `pg_stat_activity` se há sessões `idle in transaction` e rode a migração com um `lock_timeout` curto:
+  `ALTER TABLE ... ADD COLUMN` pega por um instante um lock exclusivo em `tenants`, a tabela mais quente, e toda leitura de
+  Tenant fica na fila atrás dele (foi o que travou a migração do incidente de 2026-09-27, presa atrás de conexões zumbi
+  `idle in transaction`).
+- A ordem do README ("rode `alembic upgrade head` depois de cada deploy") está ERRADA para esta mudança: código novo antes da
+  migração faz toda leitura de Tenant levantar `UndefinedColumn`. Se os serviços fazem deploy automático no push para `main`,
+  aplique a migração em produção ANTES do push — o que exige autorização explícita do dono, porque mexe no banco de produção.
+
+Reversão:
+
+1. Volte API e worker ao código anterior: redeploy do commit/imagem anterior a `95a88c5` (ex.: `1b3b7a6`) nos dois serviços.
+   Se for por `git revert`, reverta SÓ `95a88c5` (é ele que mapeia a coluna) e NÃO reverta `527155f`, para o script da
+   migração continuar no repositório e o `alembic upgrade head` seguinte não quebrar.
+2. Normalmente pare aí: o código antigo ignora a coluna nullable e os fatos já salvos ficam preservados.
+3. Só se for preciso derrubar a coluna (apaga todos os `clinic_facts` salvos), com API e worker já no código antigo e a partir
+   de um checkout que ainda tenha `migrations/versions/e5a1c9d3b7f2_tenant_clinic_facts.py`:
+   `alembic downgrade c3a9e5f1d7b2` (revisão explícita; `-1` é relativo e erra se houver migração posterior).
 
 ## 7. Pendências
 
