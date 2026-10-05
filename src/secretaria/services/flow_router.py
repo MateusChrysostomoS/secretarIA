@@ -847,6 +847,12 @@ def llm_state_ttl_minutes(tenant: Tenant) -> int:
 # sits inside the outer bound and comfortably outside the inner one.
 PENDING_IDENTITY_TTL_MINUTES = 60
 
+# How long the AI's parked booking draft (`Conversation.flow_draft`, TASK-030 P2) stays
+# usable while the patient answers "Essa consulta é pra você?". Past it, the answer simply
+# continues the button flow: two minutes is a pause, half an hour is another conversation.
+# Not per-tenant, for the same reason PENDING_IDENTITY_TTL_MINUTES is not.
+FLOW_DRAFT_TTL_MINUTES = 30
+
 
 def pending_identity_ttl_minutes(tenant: Tenant) -> int:
     """Silence budget for AWAITING_EMAIL / AWAITING_EMAIL_CODE / AWAITING_NAME, in minutes.
