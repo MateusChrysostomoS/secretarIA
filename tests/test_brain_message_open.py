@@ -64,7 +64,7 @@ from secretaria.services.channel_sender import (  # noqa: E402
     CHANNEL_WHATSAPP,
 )
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
-from secretaria.services.flow_router import menu_buttons_for, menu_label  # noqa: E402
+from secretaria.services.flow_router import main_menu_buttons, menu_label  # noqa: E402
 from secretaria.services.greeting_template import (  # noqa: E402
     CONSENT_REMINDER_MESSAGE,
     LGPD_CONSENT_MESSAGE,
@@ -265,10 +265,13 @@ async def test_a_visitor_who_has_not_written_gets_a_queued_greeting(api, db) -> 
 
 
 async def test_a_conversation_that_already_started_is_never_greeted_again(api, db) -> None:
-    """200 `exists`, and NOTHING is queued — the contract's second answer.
+    """200 `exists`, and no GREETING is queued — the contract's second answer.
 
     The patient wrote first; an unsolicited greeting on top of a live thread
-    would read as the clinic forgetting the conversation it is in.
+    would read as the clinic forgetting the conversation it is in. Since
+    TASK-035 the ENTRY job is queued instead: it decides whether the
+    context-aware opening is due (and is silent on a live thread like this
+    one — see tests/test_portal_context_opening.py).
     """
     client, pool = api
     tenant = await _seed_tenant(db)
@@ -285,7 +288,7 @@ async def test_a_conversation_that_already_started_is_never_greeted_again(api, d
 
     assert response.status_code == 200, response.text
     assert response.json() == {"status": "exists"}
-    assert pool.jobs == []
+    assert pool.jobs == [("process_brain_message_enter", (str(tenant.id), EXTERNAL_ID), {})]
 
 
 async def test_the_route_is_behind_the_same_key_as_every_other_internal_route(api, db) -> None:
@@ -533,7 +536,7 @@ async def _say(tenant: Tenant, text: str) -> None:
 
 def _menu_body(tenant: Tenant) -> str:
     """The menu bubble as a Brain-Message transcript stores it (flattened card)."""
-    labels = menu_buttons_for(tenant, False)
+    labels = main_menu_buttons()
     return f"{menu_label(tenant)}\n(opções: {', '.join(labels)})"
 
 
@@ -727,7 +730,7 @@ async def test_a_known_accounts_first_tap_on_the_menu_is_served_not_gated(
     await _open(tenant, name="Maria Silva")
     opened = await _bodies(db, tenant, MessageDirection.OUTBOUND)
 
-    await _say(tenant, menu_buttons_for(tenant, False)[0])
+    await _say(tenant, main_menu_buttons()[0])
 
     after = (await _bodies(db, tenant, MessageDirection.OUTBOUND))[len(opened) :]
     assert after, "the tap went unanswered"

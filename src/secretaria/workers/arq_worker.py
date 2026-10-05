@@ -29,6 +29,7 @@ from secretaria.workers.payments_tasks import process_asaas_event
 from secretaria.workers.tasks import (
     check_handover_timeouts,
     merge_brain_message_visit,
+    process_brain_message_enter,
     process_brain_message_inbound,
     process_brain_message_open,
     process_message_statuses,
@@ -108,6 +109,9 @@ class WorkerSettings:
         # automation greets first, with no inbound message behind it. Enqueued
         # by POST /internal/brain-message/open. See workers/tasks.py.
         process_brain_message_open,
+        # A known patient entered a conversation that already has history: the
+        # context-aware opening, when it is due. Enqueued by the same route.
+        process_brain_message_enter,
         # A Portal visit superseded by an existing account.
         merge_brain_message_visit,
         # The one deferred second look at WhatsApp delivery receipts that overtook

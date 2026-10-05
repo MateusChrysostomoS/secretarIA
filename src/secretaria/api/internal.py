@@ -607,6 +607,19 @@ async def brain_message_open(
     """
     if await _brain_message_conversation_started(session, payload.tenant_id, payload.external_id):
         response.status_code = status.HTTP_200_OK
+        # A patient ENTERING a conversation that already has history (owner,
+        # 2026-10-05): the worker decides whether the context-aware opening is
+        # due (`workers/portal/open.py::_brain_message_entry_decision`) - it
+        # stays silent mid-flow, mid-onboarding and right after the last
+        # message. Best effort on purpose: the answer is still `exists`, and a
+        # Redis hiccup here costs one opening, never the patient's visit.
+        await session.close()
+        try:
+            await _arq_pool_or_503(request).enqueue_job(
+                "process_brain_message_enter", str(payload.tenant_id), payload.external_id
+            )
+        except Exception as exc:
+            logger.warning("brain_message_enter_enqueue_failed", error_type=type(exc).__name__)
         logger.info(
             "brain_message_open_exists",
             tenant_id=str(payload.tenant_id),

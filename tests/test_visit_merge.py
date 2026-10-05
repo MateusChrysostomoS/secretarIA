@@ -296,7 +296,9 @@ async def test_job_is_idempotent_with_the_real_ledger(db, _worker, monkeypatch):
     for _ in range(2):
         await tasks.merge_brain_message_visit({}, str(tenant.id), VISIT, ACCOUNT)
     assert await _count(db, Message) == 6
-    assert await _count(db, ProcessedEvent) == 1
+    # The merge's own key + the entry-opening key it shares with the entry trigger
+    # (TASK-035), so a concurrent entry cannot send the opening a second time.
+    assert await _count(db, ProcessedEvent) == 2
 
 
 async def test_job_discards_without_menu_when_entitlement_unknown(db, _worker, monkeypatch):
@@ -368,7 +370,7 @@ async def test_failed_merge_releases_claim_and_retries(db, _worker, monkeypatch,
     target = {
         "claim": "_claim_event",
         "discard": "discard_visit",
-        "menu": "_handle_show_main_menu",
+        "menu": "_send_context_opening",
         "open": "process_brain_message_open",
     }[stage]
     real = getattr(merge_job, target)
@@ -394,7 +396,8 @@ async def test_failed_merge_releases_claim_and_retries(db, _worker, monkeypatch,
     await tasks.merge_brain_message_visit({}, str(tenant.id), VISIT, ACCOUNT)
     assert await _count(db, Patient) == 1
     assert await _count(db, Message) == (1 if stage == "open" else 6)
-    assert await _count(db, ProcessedEvent) == 1
+    # + the shared entry-opening key whenever the account had history (TASK-035).
+    assert await _count(db, ProcessedEvent) == (1 if stage == "open" else 2)
 
 
 async def test_unsent_menu_is_retryable(db, _worker, monkeypatch):
@@ -411,7 +414,7 @@ async def test_unsent_menu_is_retryable(db, _worker, monkeypatch):
     async def unsent(*args, **kwargs):
         return False
 
-    monkeypatch.setattr(merge_job, "_handle_show_main_menu", unsent)
+    monkeypatch.setattr(merge_job, "_send_context_opening", unsent)
     with pytest.raises(Retry):
         await tasks.merge_brain_message_visit({}, str(tenant.id), VISIT, ACCOUNT)
     assert await _count(db, Patient) == 1

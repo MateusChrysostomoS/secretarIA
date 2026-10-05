@@ -45,8 +45,8 @@ from secretaria.services.flow_router import (
     FlowRouterResult,
     MenuBubble,
     flows_enabled,
+    main_menu_buttons,
     manage_label,
-    menu_buttons_for,
     menu_label,
     resume_bubbles,
 )
@@ -970,7 +970,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                 bubbles=[
                     MenuBubble(
                         body=menu_label(tenant_snapshot),
-                        labels=menu_buttons_for(tenant_snapshot, len(flow_professionals or []) > 1),
+                        labels=main_menu_buttons(),
                     )
                 ],
                 flow_state=FlowState.MENU,

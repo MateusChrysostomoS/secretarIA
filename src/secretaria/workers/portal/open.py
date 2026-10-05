@@ -1,15 +1,20 @@
 """open - split out of workers/tasks.py (TASK-023)."""
 
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import (
     ConsentEvent,
     Conversation,
+    FlowState,
+    HandoverState,
     Message,
     MessageDirection,
     Patient,
@@ -18,6 +23,8 @@ from secretaria.models import (
 from secretaria.services.channel_sender import (
     CHANNEL_BRAIN_MESSAGE,
 )
+from secretaria.services.entitlements_client import get_entitlements
+from secretaria.services.flow_router import reactivation_gap_minutes
 from secretaria.workers.orchestrator import (
     _send_bot_reply,
 )
@@ -34,6 +41,12 @@ from secretaria.workers.shared.greeting import (
 from secretaria.workers.shared.jobs import (
     _claim_event,
     _release_event,
+)
+from secretaria.workers.shared.opening import (
+    _send_context_opening,
+)
+from secretaria.workers.shared.text import (
+    _as_utc,
 )
 
 logger = get_logger(__name__)
@@ -265,3 +278,175 @@ async def process_brain_message_open(
         tenant_id=tenant_id,
         external_id=external_id,
     )
+
+
+def _enter_ledger_key(conversation_id: UUID, last_message_id: UUID) -> str:
+    """One entry opening per (conversation, latest message).
+
+    Keyed on the latest message rather than on time: two concurrent entries (a
+    double refresh) see the same latest message and only one can insert the
+    key, and once ANY message lands after the opening - the patient's answer
+    or the opening itself - a later entry is a new key. 20 + 36 + 1 + 36 = 93
+    characters, inside `ProcessedEvent.event_id`'s 128.
+    """
+    return f"brain_message_enter:{conversation_id}:{last_message_id}"
+
+
+_IDENTITY_WAITS = (FlowState.AWAITING_NAME, FlowState.AWAITING_EMAIL, FlowState.AWAITING_EMAIL_CODE)
+
+
+@dataclass(frozen=True)
+class _EntryDecision:
+    reply: _ReplyContext
+    tenant: Tenant
+    ledger_key: str
+    last_message_id: UUID
+
+
+async def _latest_message(session, conversation_id: UUID):
+    return (
+        await session.execute(
+            select(Message.id, Message.created_at)
+            .where(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at.desc(), Message.id.desc())
+            .limit(1)
+        )
+    ).first()
+
+
+async def _brain_message_entry_decision(
+    tenant_id: UUID, external_id: str, *, now: datetime | None = None
+) -> _EntryDecision | None:
+    """Should a patient who ENTERS an already-started conversation be spoken to?
+
+    The rule, in order (owner, 2026-10-05: speak first on entry, by context -
+    without ever talking over a conversation that is still going):
+
+      * nobody to speak to: unknown tenant/patient/conversation, or an empty
+        thread (that is `process_brain_message_open`'s first contact);
+      * a human from the clinic owns the conversation -> silence;
+      * consent not given yet, or an identity step (name, e-mail, code) still
+        open -> silence: those steps carry their own messages and resume offer;
+      * the last message is younger than `PORTAL_ENTRY_QUIET_MINUTES` ->
+        silence: a refresh mid-chat, or the opening the login itself just sent;
+      * a flow still in progress (anything but IDLE/MENU) younger than the
+        clinic's reactivation gap -> silence: never cut a booking in half.
+
+    Otherwise the context-aware opening goes out (`workers/shared/opening.py`).
+    """
+    now = now or datetime.now(UTC)
+    settings = get_settings()
+    async with async_session_factory() as session:
+        tenant = await session.get(Tenant, tenant_id)
+        if tenant is None:
+            return None
+        patient = await session.scalar(
+            select(Patient).where(
+                Patient.tenant_id == tenant_id,
+                Patient.channel == CHANNEL_BRAIN_MESSAGE,
+                Patient.external_id == external_id,
+            )
+        )
+        if patient is None:
+            return None
+        conversation = await session.scalar(
+            select(Conversation).where(
+                Conversation.tenant_id == tenant_id, Conversation.patient_id == patient.id
+            )
+        )
+        if conversation is None:
+            return None
+        latest = await _latest_message(session, conversation.id)
+        if latest is None:
+            return None
+        age = now - _as_utc(latest.created_at)
+        flow_running = conversation.flow_state not in (FlowState.IDLE, FlowState.MENU)
+        reason = None
+        if conversation.handover_state == HandoverState.HUMAN_ACTIVE:
+            reason = "human_active"
+        elif patient.lgpd_accepted_at is None:
+            reason = "consent_pending"
+        elif conversation.flow_state in _IDENTITY_WAITS:
+            # Never skipped by an opening, however old: the name/e-mail/code
+            # step is required (the clinic needs the name for the event, the
+            # e-mail and the PreCheck hand-off) and has its own resume offer.
+            reason = "identity_step_pending"
+        elif age < timedelta(minutes=settings.PORTAL_ENTRY_QUIET_MINUTES):
+            reason = "recent_activity"
+        elif flow_running and age < timedelta(minutes=reactivation_gap_minutes(tenant)):
+            reason = "flow_in_progress"
+        if reason is not None:
+            logger.info(
+                "brain_message_enter_silent",
+                tenant_id=str(tenant_id),
+                conversation_id=str(conversation.id),
+                reason=reason,
+            )
+            return None
+        return _EntryDecision(
+            reply=_ReplyContext(
+                channel=CHANNEL_BRAIN_MESSAGE,
+                conversation_id=conversation.id,
+                tenant_id=tenant_id,
+                patient_ref=external_id,
+                inbound_body="",
+            ),
+            tenant=tenant,
+            ledger_key=_enter_ledger_key(conversation.id, latest.id),
+            last_message_id=latest.id,
+        )
+
+
+async def process_brain_message_enter(ctx: dict, tenant_id: str, external_id: str) -> None:
+    """arq job: a known patient entered a conversation that already has history.
+
+    The sibling of `process_brain_message_open` for the case that one refuses
+    (`exists`): the decision is `_brain_message_entry_decision`, the message is
+    `_send_context_opening`. Same discipline as the open job: claim, re-read
+    right before speaking (an inbound that landed meanwhile wins), and hand
+    the claim back when nothing reached the patient.
+    """
+    tenant_uuid = UUID(tenant_id)
+    decision = await _brain_message_entry_decision(tenant_uuid, external_id)
+    if decision is None:
+        return
+    summary = await get_entitlements(tenant_uuid, ctx.get("redis"))
+    if summary is None or not (summary.active and summary.secretaria_enabled):
+        logger.warning(
+            "bot_reply_suppressed_unentitled",
+            tenant_id=tenant_id,
+            entitlement_unknown=summary is None,
+            conversation_id=str(decision.reply.conversation_id),
+        )
+        return
+    if not await _claim_event(decision.ledger_key):
+        logger.info("brain_message_enter_already_claimed", tenant_id=tenant_id)
+        return
+
+
+    async def _still_current() -> bool:
+        # Asked immediately before the write: a turn that landed meanwhile (a
+        # tap on an older card as the page loaded) wins, never the opening.
+        async with async_session_factory() as session:
+            latest = await _latest_message(session, decision.reply.conversation_id)
+        return latest is not None and latest.id == decision.last_message_id
+
+    try:
+        rendered = await _send_context_opening(
+            decision.reply,
+            decision.tenant,
+            external_id,
+            redis=ctx.get("redis"),
+            source="portal_entry",
+            still_current=_still_current,
+        )
+    except Exception:
+        # Same key on the next entry (nothing new was written): leaving it
+        # claimed would silence this conversation until the patient types.
+        await _release_event(decision.ledger_key, event="brain_message_enter_release_failed")
+        raise
+    if rendered is None:
+        logger.info("brain_message_enter_superseded", tenant_id=tenant_id)
+    elif not rendered:
+        await _release_event(decision.ledger_key, event="brain_message_enter_release_failed")
+        logger.warning("brain_message_enter_nothing_sent", tenant_id=tenant_id)

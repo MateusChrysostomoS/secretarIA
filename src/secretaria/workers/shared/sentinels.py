@@ -31,8 +31,8 @@ from secretaria.services.flow_router import (
     enter_guided_booking,
     enter_manage_action,
     flows_enabled,
+    main_menu_buttons,
     match_insurance_plan,
-    menu_buttons_for,
     menu_label,
 )
 from secretaria.services.insurance_catalog import (
@@ -104,7 +104,7 @@ async def _handle_show_main_menu(
         bubbles=[
             MenuBubble(
                 body=menu_label(tenant),
-                labels=menu_buttons_for(tenant, len(professionals or []) > 1),
+                labels=main_menu_buttons(),
             )
         ],
         flow_state=FlowState.MENU,

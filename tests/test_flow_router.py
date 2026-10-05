@@ -178,8 +178,8 @@ async def test_flows_run_even_when_never_configured():
         res = await route(_conversation(), tenant, None, "oi")
         assert res.action == "reply", initial_flows
         assert res.flow_state == FlowState.MENU, initial_flows
-        # No configured buttons on these rows -> the router's own defaults.
-        assert res.bubbles[0].labels == ["Serviços e Custo", "Remarcar/Cancelar", "Outro"]
+        # TASK-035: the drawn menu is always [Agendar, Outro].
+        assert res.bubbles[0].labels == ["🗓️ Agendar", "Outro"]
 
 
 async def test_idle_unmatched_shows_menu():
@@ -187,7 +187,7 @@ async def test_idle_unmatched_shows_menu():
     assert res.action == "reply"
     assert res.flow_state == FlowState.MENU
     assert isinstance(res.bubbles[0], MenuBubble)
-    assert res.bubbles[0].labels == ["Serviços e Custo", "Horários", "Outro"]
+    assert res.bubbles[0].labels == ["🗓️ Agendar", "Outro"]
 
 
 async def test_menu_select_services_lists_catalog():

@@ -322,6 +322,7 @@ from secretaria.workers.portal.open import (
     _open_brain_message_conversation,
     _open_ledger_key,
     _portal_conversation_has,
+    process_brain_message_enter,
     process_brain_message_open,
 )
 from secretaria.workers.shared.actions import (

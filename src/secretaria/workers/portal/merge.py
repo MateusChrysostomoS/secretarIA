@@ -1,25 +1,29 @@
 """Discard a Portal visit superseded by the clinic's existing account."""
 
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from arq import Retry
 from sqlalchemy import select
 
+from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import Conversation, Message, MessageDirection, Patient, Tenant
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.entitlements_client import get_entitlements
-from secretaria.services.tenant_config import list_active_professionals
 from secretaria.services.visit_merge import discard_visit
 from secretaria.workers.portal.open import (
+    _enter_ledger_key,
+    _latest_message,
     _open_ledger_key,
     _portal_conversation_has,
     process_brain_message_open,
 )
 from secretaria.workers.shared.context import _ReplyContext
 from secretaria.workers.shared.jobs import _claim_event, _release_event
-from secretaria.workers.shared.sentinels import _handle_show_main_menu
+from secretaria.workers.shared.opening import _send_context_opening
+from secretaria.workers.shared.text import _as_utc
 
 logger = get_logger(__name__)
 
@@ -98,9 +102,6 @@ async def _finish_merge(
             is not None
         )
         tenant = await session.get(Tenant, tenant_uuid)
-        professionals = (
-            await list_active_professionals(session, tenant_uuid) if tenant is not None else []
-        )
 
     if tenant is None:
         return
@@ -136,13 +137,35 @@ async def _finish_merge(
         inbound_body="",
         tenant_id=tenant_uuid,
     )
-    rendered = await _handle_show_main_menu(
-        reply,
-        tenant,
-        professionals,
-        into_external_id,
-        redis=ctx.get("redis"),
-        source="merged_visit",
-    )
+    # Same ledger key as the entry trigger: the screen switches to this very
+    # conversation right after the code and announces the entry, and whichever
+    # of the two runs first is the one that speaks - the patient never gets the
+    # opening twice.
+    async with async_session_factory() as session:
+        latest = await _latest_message(session, conversation.id)
+    quiet = timedelta(minutes=get_settings().PORTAL_ENTRY_QUIET_MINUTES)
+    if datetime.now(UTC) - _as_utc(latest.created_at) < quiet:
+        # The entry trigger already spoke here (or the conversation is live):
+        # the patient lands on that message, never on a second opening.
+        logger.info("brain_message_merge_opening_recent", tenant_id=tenant_id)
+        return
+    entry_key = _enter_ledger_key(conversation.id, latest.id)
+    if not await _claim_event(entry_key):
+        logger.info("brain_message_merge_opening_already_sent", tenant_id=tenant_id)
+        return
+    try:
+        rendered = await _send_context_opening(
+            reply,
+            tenant,
+            into_external_id,
+            redis=ctx.get("redis"),
+            source="merged_visit",
+        )
+    except Exception:
+        # The retry must be able to speak: a key left claimed here would turn
+        # every later attempt into "already sent" and the patient into silence.
+        await _release_event(entry_key, event="brain_message_merge_opening_release_failed")
+        raise
     if not rendered:
+        await _release_event(entry_key, event="brain_message_merge_opening_release_failed")
         raise RuntimeError("merge_menu_not_sent")

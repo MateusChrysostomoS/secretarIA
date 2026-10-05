@@ -705,6 +705,21 @@ def menu_buttons_for(tenant: Tenant, multi_professional: bool) -> list[str]:
     return menu_buttons(tenant)
 
 
+def main_menu_buttons() -> list[str]:
+    """The buttons RENDERED under the main menu: [🗓️ Agendar, Outro], for every clinic.
+
+    Owner, 2026-10-05: the booking flow now starts with "Essa consulta é pra
+    você?" → convênio → médico → serviço, so the old entries ("Escolher
+    médico"/"Escolher serviço", or a clinic's own "Serviços e Custo") offered
+    a choice the flow itself makes later. Only what is DRAWN changes:
+    `menu_buttons_for` keeps the full vocabulary, so a typed old label (or a
+    tap on an older card still on screen) routes exactly as before. Both
+    labels are matched in `route()` ahead of the multi-doctor and index
+    dispatch, so this pair works on single- and multi-doctor clinics alike.
+    """
+    return [decorate(EMOJI_SCHEDULE, LABEL_BOOK), LABEL_OTHER]
+
+
 def menu_label(tenant: Tenant) -> str:
     """The question shown above the menu buttons."""
     return str((tenant.initial_flows or {}).get("menu_label") or DEFAULT_MENU_LABEL)
@@ -1035,9 +1050,8 @@ def _slot_iso_from_body(body: str | None) -> datetime | None:
 
 
 def _menu_bubbles(tenant: Tenant, professionals: list | None = None) -> list:
-    """The menu prompt rendered as a single reply-button card."""
-    labels = menu_buttons_for(tenant, _is_multi_professional(professionals))
-    return [MenuBubble(body=menu_label(tenant), labels=labels)]
+    """The menu prompt rendered as a single reply-button card (`main_menu_buttons`)."""
+    return [MenuBubble(body=menu_label(tenant), labels=main_menu_buttons())]
 
 
 def _selected_professional_id(conversation: Conversation) -> UUID | None:
