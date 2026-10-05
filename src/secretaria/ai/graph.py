@@ -50,6 +50,7 @@ from secretaria.ai.tools import (
     cancel_event,
     check_availability,
     create_event,
+    get_service_info,
     iniciar_pre_consulta,
     list_free_slots,
     list_patient_appointments,
@@ -202,6 +203,7 @@ _TENANT_LEVEL_CALENDAR_TOOLS = (
 # it is what a degraded turn falls back to.
 _SCOPE_FREE_TOOLS = (
     iniciar_pre_consulta,
+    get_service_info,
     list_patient_appointments,
     show_main_menu,
 )

@@ -93,6 +93,10 @@ class TenantRuntimeConfig:
     # on non-qualifying turns (ai/graph.py) so the prompt stays turn-
     # appropriate - see ai/prompts.py::_format_post_consult_knowledge.
     post_consult_knowledge: str | None = None
+    # TASK-025: what the LLM may say about the clinic itself. Loaded from the tenant, rendered
+    # by ai/prompts.py::_format_clinic_facts. Defaults keep every other constructor valid.
+    address: dict | None = None
+    clinic_facts: dict | None = None
     # Per-turn rendered "consultas marcadas" block, set by the worker
     # (workers/tasks.py::_appointment_context_text) via run_agent's
     # `appointment_context` parameter for a qualifying turn (see
@@ -898,6 +902,8 @@ async def load_tenant_config(session: AsyncSession, tenant: Tenant) -> TenantRun
         specialty=specialty,
         about=about,
         post_consult_knowledge=tenant.post_consult_knowledge,
+        address=tenant.address,
+        clinic_facts=tenant.clinic_facts,
     )
 
 

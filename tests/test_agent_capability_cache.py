@@ -80,6 +80,7 @@ def test_build_agent_base_tools_unchanged():
         "list_free_slots",
         "create_event",
         "cancel_event",
+        "get_service_info",
         "iniciar_pre_consulta",
         "list_patient_appointments",
         "show_main_menu",
