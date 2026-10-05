@@ -1017,3 +1017,53 @@ def test_draft_verdicts_ignores_what_the_agent_did_not_supply() -> None:
     )
 
     assert (accepted, dropped) == ((), {})
+
+
+# --------------------------------------------------------------------------
+# request_human_handoff
+# --------------------------------------------------------------------------
+
+
+async def test_human_handoff_is_a_counted_hand_back_to_a_person(
+    db, _captured_bubbles, log, monkeypatch
+) -> None:
+    async def _notify(**_kwargs):
+        return 1
+
+    monkeypatch.setattr(workers_ns, "notify_human_handoff", _notify)
+    tenant, ana, _bruno, _patient, conversation = await _seed(db, selected=True)
+
+    await tasks._handle_human_handoff(
+        _reply_ctx(conversation), "patient_requested_human", tenant, None
+    )
+
+    (event,) = _events(log)
+    assert event == {
+        "conversation_id": str(conversation.id),
+        "tenant_id": str(tenant.id),
+        "source_tool": "request_human_handoff",
+        "landing_step": "human_handover",
+        "supplied": ["reason"],
+        "accepted": ["reason"],
+        "dropped": {},
+        "fallback": None,
+        "topology": None,
+        "channel": "whatsapp",
+    }
+    assert len(_captured_bubbles) == 1  # the patient's confirmation still goes out
+
+
+async def test_a_handoff_that_could_not_commit_logs_no_hand_back(
+    db, _captured_bubbles, log, monkeypatch
+) -> None:
+    async def _not_committed(*_args, **_kwargs):
+        raise RuntimeError("handoff_state_not_committed")
+
+    monkeypatch.setattr(workers_ns, "_set_conversation_human_active", _not_committed)
+    tenant, _ana, _bruno, _patient, conversation = await _seed(db)
+
+    with pytest.raises(RuntimeError, match="handoff_state_not_committed"):
+        await tasks._handle_human_handoff(_reply_ctx(conversation), "could_not_help", tenant, None)
+
+    assert _events(log) == []
+    assert _captured_bubbles == []
