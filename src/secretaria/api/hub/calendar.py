@@ -19,7 +19,14 @@ from secretaria.api.hub.deps import get_current_tenant
 from secretaria.config import get_settings
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
-from secretaria.models import Appointment, AppointmentStatus, Professional, Tenant
+from secretaria.models import (
+    TERMINAL_APPOINTMENT_STATUSES,
+    Appointment,
+    AppointmentReminder,
+    AppointmentStatus,
+    Professional,
+    Tenant,
+)
 from secretaria.models.patient import Patient
 from secretaria.schemas.calendar import (
     AppointmentCancel,
@@ -31,12 +38,14 @@ from secretaria.schemas.calendar import (
     CalendarDepositRead,
     CalendarEventRead,
     CalendarInsurancePlanRead,
+    CalendarReminderRead,
     CancelPreviewRead,
 )
-from secretaria.services import cancellation_notice
+from secretaria.services import cancellation_notice, reminder_schedule
 from secretaria.services.appointment_status import SOURCE_HUB, log_status_transition
 from secretaria.services.calendar import CalendarService
 from secretaria.services.insurance_catalog import AppointmentPlan, load_appointment_plans
+from secretaria.services.patient_context import as_utc
 from secretaria.services.payments import deposit_lifecycle
 from secretaria.services.tenant_config import load_tenant_config
 
@@ -62,6 +71,7 @@ def _appointment_read(
         end_at=appt.end_at,
         phone=appt.phone,
         status=appt.status,
+        confirmation_count=appt.confirmation_count,
         created_at=appt.created_at,
         updated_at=appt.updated_at,
         deposit_status=deposit_status,
@@ -155,6 +165,31 @@ def _deposit_read(
     return CalendarDepositRead(status=view.status.value, amount_cents=view.amount_cents)
 
 
+def _reminder_read(reminder: AppointmentReminder) -> CalendarReminderRead:
+    def _opt(value: datetime | None) -> datetime | None:
+        return as_utc(value) if value is not None else None
+
+    return CalendarReminderRead(
+        kind=reminder.kind,
+        status=reminder.status,
+        due_at=as_utc(reminder.due_at),
+        sent_at=_opt(reminder.sent_at),
+        answered_at=_opt(reminder.answered_at),
+        answer=reminder.answer,
+        warned_at=_opt(reminder.warned_at),
+        warn_kind=reminder.warn_kind,
+    )
+
+
+def _current_reminders(row: Row, reminders: list[AppointmentReminder]) -> list[AppointmentReminder]:
+    """Only the rows of the appointment's current start, oldest due first."""
+    reminders = [r for r in reminders if r.invalidated_at is None]
+    if row.start_at is not None:
+        current_start = as_utc(row.start_at)
+        reminders = [r for r in reminders if as_utc(r.appointment_start_at) == current_start]
+    return sorted(reminders, key=lambda r: as_utc(r.due_at))
+
+
 @router.get("/events", response_model=list[CalendarEventRead])
 async def list_events(
     start: datetime,
@@ -191,6 +226,9 @@ async def list_events(
                 Appointment.insurance,
                 Appointment.insurance_plan_id,
                 Appointment.insurance_professional_plan_id,
+                Appointment.status,
+                Appointment.confirmation_count,
+                Appointment.start_at,
             ).where(
                 Appointment.tenant_id == tenant.id,
                 Appointment.google_event_id.in_(google_ids),
@@ -214,6 +252,20 @@ async def list_events(
         session, tenant.id, [row.id for row in booked.values()]
     )
 
+    # ONE tenant-scoped query for the whole page's reminder rows (never one per
+    # event); rows of another clinic never resolve.
+    reminders_by_appointment: dict[UUID, list[AppointmentReminder]] = {}
+    if booked:
+        reminder_rows = await session.scalars(
+            select(AppointmentReminder).where(
+                AppointmentReminder.tenant_id == tenant.id,
+                AppointmentReminder.invalidated_at.is_(None),
+                AppointmentReminder.appointment_id.in_([row.id for row in booked.values()]),
+            )
+        )
+        for reminder in reminder_rows:
+            reminders_by_appointment.setdefault(reminder.appointment_id, []).append(reminder)
+
     reads: list[CalendarEventRead] = []
     for e in events:
         row = booked.get(e["id"])
@@ -222,6 +274,12 @@ async def list_events(
             if row is not None
             else None
         )
+        current = (
+            _current_reminders(row, reminders_by_appointment.get(row.id, []))
+            if row is not None
+            else None
+        )
+        state = reminder_schedule.display_state(row, current) if row is not None else None
         reads.append(
             CalendarEventRead(
                 id=e["id"],
@@ -232,6 +290,13 @@ async def list_events(
                 insurance=_insurance_label(row.insurance) if row is not None else None,
                 insurance_plan=_insurance_plan_read(plan),
                 deposit=_deposit_read(deposits.get(row.id)) if row is not None else None,
+                status=row.status if row is not None else None,
+                confirmation_count=row.confirmation_count if row is not None else None,
+                display_state=state,
+                attention=(state == reminder_schedule.DISPLAY_ATTENTION)
+                if state is not None
+                else None,
+                reminders=[_reminder_read(r) for r in current] if current is not None else None,
             )
         )
     return reads
@@ -558,6 +623,24 @@ async def update_appointment_status(
     elif body.status == AppointmentStatus.NO_SHOW:
         deposit_outcome = await deposit_lifecycle.on_no_show(
             session, tenant=tenant, appointment=appt
+        )
+
+    # TASK-032: the reminder schedule follows the status. The status above is
+    # still assigned exactly as before (no new transition validation).
+    now = datetime.now(UTC)
+    if body.status == AppointmentStatus.CONFIRMED:
+        await reminder_schedule.register_confirmation(
+            session,
+            appointment=appt,
+            reminder_id=None,
+            source=reminder_schedule.CONFIRMATION_SOURCE_STAFF,
+            now=now,
+        )
+    elif body.status == AppointmentStatus.SCHEDULED:
+        reminder_schedule.reset_confirmation(appt)
+    elif body.status in TERMINAL_APPOINTMENT_STATUSES:
+        await reminder_schedule.cancel_reminders(
+            session, appt.id, reason=f"status_{body.status.value}"
         )
 
     await session.commit()

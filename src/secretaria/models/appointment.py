@@ -51,7 +51,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, String, func
+from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, Integer, String, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from secretaria.core.database import Base
@@ -191,6 +191,19 @@ class Appointment(Base):
         ),
         default=AppointmentStatus.SCHEDULED,
         server_default="scheduled",
+    )
+    # TASK-032 (spec 4.1): how many DISTINCT reminders/prompts the patient (or
+    # staff) confirmed, capped at 2 by services/reminder_schedule.py - the only
+    # writer. `status == CONFIRMED` follows `confirmation_count >= 1`;
+    # rescheduling zeroes it. Two confirmations stop the confirmation prompts.
+    confirmation_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0")
+    )
+    first_confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

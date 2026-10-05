@@ -46,6 +46,26 @@ class CalendarDepositRead(BaseModel):
     # two keys, and a consumer must ignore any key it does not know.
 
 
+class CalendarReminderRead(BaseModel):
+    """One reminder of the appointment's CURRENT start, as the agenda shows it.
+
+    Datetimes are always aware UTC on the wire (skill naive-timestamp-
+    serialization). `kind`/`status`/`answer`/`warn_kind` are plain strings (the
+    constants of models/appointment_reminder.py) so a value added later never
+    breaks an older client. No message text, no phone, no error text: the only
+    failure detail is a code kept server-side.
+    """
+
+    kind: str
+    status: str
+    due_at: datetime
+    sent_at: datetime | None = None
+    answered_at: datetime | None = None
+    answer: str | None = None
+    warned_at: datetime | None = None
+    warn_kind: str | None = None
+
+
 class CalendarEventRead(BaseModel):
     """A Google Calendar event as returned by the agenda view.
 
@@ -83,6 +103,19 @@ class CalendarEventRead(BaseModel):
     # asks for a deposit), a clinic/plan without deposit, or a charge that could
     # not be created. The backend does not tell those apart and neither does the UI.
     deposit: CalendarDepositRead | None = None
+    # TASK-032 (spec 4.4). Additive; all None for an event with no local
+    # Appointment (a block, or something typed into Google). `status` is the
+    # appointment status VALUE; `display_state` is one of "unconfirmed",
+    # "confirmed", "confirmed_twice", "attention" (terminal appointments are
+    # always "unconfirmed" - colour them by `status`); `attention` is
+    # `display_state == "attention"`; `reminders` lists only the rows of the
+    # appointment's current start, ordered by due time. A consumer must ignore
+    # any key it does not know.
+    status: AppointmentStatus | None = None
+    confirmation_count: int | None = None
+    display_state: str | None = None
+    attention: bool | None = None
+    reminders: list[CalendarReminderRead] | None = None
 
 
 class AppointmentCreate(BaseModel):
@@ -182,6 +215,9 @@ class AppointmentRead(BaseModel):
     end_at: datetime | None = None
     phone: str | None
     status: AppointmentStatus
+    # TASK-032: how many distinct confirmations (0..2) the booking has. Additive;
+    # 0 for every row from before the counter existed.
+    confirmation_count: int = 0
     created_at: datetime
     updated_at: datetime
     # The PixDeposit status VALUE for this appointment (e.g. "confirmado_pago"),

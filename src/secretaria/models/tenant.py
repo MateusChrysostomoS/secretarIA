@@ -232,4 +232,14 @@ class Tenant(Base):
     # services/tenant_config.py::insurance_mode_configured.
     insurance_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
+    # TASK-032 (spec 4.5): master switch of the reminder schedule / confirmation
+    # state. Default OFF for every clinic; turn it on per clinic after the test
+    # clinic proves it. While False nothing is scheduled and nothing is sent by
+    # the new engine.
+    reminders_v2_enabled: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false"), default=False
+    )
+    # TASK-032 (spec 4.5): lead time, in minutes before the appointment, of the
+    # clinic-configured ("custom") reminder. NULL = the clinic has no extra one.
+    reminder_extra_lead_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

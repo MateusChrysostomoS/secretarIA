@@ -134,6 +134,7 @@ hora no worker. Ver `core/build_info.py` e a seção "Deploy both services, or
 neither" do `README.md`.
 
 ## Documentação
+- Lembretes/confirmação (TASK-032 R1): `docs/CHECKPOINT_lembretes_r1.md`.
 
 `docs/CHECKPOINT_workers_split.md` — TASK-023: divisão de `workers/tasks.py` (mapa nome → módulo, camadas, como provar).
 
