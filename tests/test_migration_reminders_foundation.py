@@ -47,7 +47,7 @@ def _run(engine: sa.Engine, fn_name: str) -> None:
 def test_there_is_exactly_one_head_and_it_is_ours():
     script = ScriptDirectory.from_config(Config(str(ROOT / "alembic.ini")))
     assert script.get_heads() == ["b8d3f1a6c2e5"]
-    assert _load().down_revision == "c3a9e5f1d7b2"
+    assert _load().down_revision == "e5a1c9d3b7f2"
 
 
 def test_upgrade_adds_columns_and_table_then_downgrade_removes_them():

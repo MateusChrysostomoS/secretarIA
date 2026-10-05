@@ -7,7 +7,7 @@ migrated database (it simply never reads the new columns). Deploy order:
 migration first, then API and worker together.
 
 Revision ID: b8d3f1a6c2e5
-Revises: c3a9e5f1d7b2
+Revises: e5a1c9d3b7f2
 """
 
 from collections.abc import Sequence
@@ -16,7 +16,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "b8d3f1a6c2e5"
-down_revision: str | None = "c3a9e5f1d7b2"
+down_revision: str | None = "e5a1c9d3b7f2"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -88,7 +88,9 @@ def test_a_legacy_event_gains_three_null_fields_and_loses_nothing():
 
     dumped = event.model_dump()
 
-    assert set(dumped) == LEGACY_EVENT_KEYS | {"insurance", "insurance_plan", "deposit"} | NEW_EVENT_KEYS
+    assert set(dumped) == (
+        LEGACY_EVENT_KEYS | {"insurance", "insurance_plan", "deposit"} | NEW_EVENT_KEYS
+    )
     assert dumped["insurance"] is None
     assert dumped["insurance_plan"] is None
     assert dumped["deposit"] is None
@@ -827,7 +829,9 @@ async def test_the_event_wire_only_grew_by_three_optional_keys(client: AsyncClie
 
     body = (await _events(client)).json()[0]
 
-    assert set(body) == LEGACY_EVENT_KEYS | {"insurance", "insurance_plan", "deposit"} | NEW_EVENT_KEYS
+    assert set(body) == (
+        LEGACY_EVENT_KEYS | {"insurance", "insurance_plan", "deposit"} | NEW_EVENT_KEYS
+    )
     assert body["id"] == "evt-1"
     assert body["summary"] == "Consulta"
     assert body["appointment_id"] == str(appt.id)

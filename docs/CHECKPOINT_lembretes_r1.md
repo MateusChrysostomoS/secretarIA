@@ -2,11 +2,11 @@
 
 ## Estado
 
-**Follow-up de 2026-10-05:** o dono autorizou commit, integração em `main` e push. A integração está em andamento; a descrição local abaixo registra a primeira entrega, antes dessa autorização. Deploy e SQL remoto não autorizados ao agente. Resultado final na seção de integração e no registro TASK-032 da workspace.
+**Follow-up de 2026-10-05:** o dono autorizou commit, integração em `main` e push. Deploy e SQL remoto não autorizados ao agente. Os SHAs e o resultado da publicação ficam no registro TASK-032 da workspace.
 
-Implementado LOCALMENTE no worktree `C:\TECH\BRAIN-worktrees\TASK-032\secretarIA`, branch `task/TASK-032-lembretes-e-confirmacao`, base `9278716`. Alterações NÃO commitadas, NÃO mescladas, NÃO enviadas e NÃO deployadas, conforme as instruções do dono. R1 não envia mensagens nem ativa clínicas.
+Implementado no worktree `C:\TECH\BRAIN-worktrees\TASK-032\secretarIA`, branch `task/TASK-032-lembretes-e-confirmacao`, base `9278716`. Fundação commitada em `9784450`; integrada à base atual da `main` (`583c8dc`) em `8bdc5db`, com o ajuste de migração descrito abaixo. R1 não envia mensagens nem ativa clínicas.
 
-Migração `b8d3f1a6c2e5` validada em SQLite descartável; NÃO aplicada a bancos persistentes/remotos. **Postgres run NOT done:** Docker instalado, porém daemon indisponível (pipe dockerDesktopLinuxEngine ausente). Validar em Postgres descartável antes de integrar/deployar.
+Migração `b8d3f1a6c2e5` validada em SQLite descartável; NÃO aplicada a bancos persistentes/remotos. **Postgres run NOT done:** Docker instalado, porém daemon indisponível (pipe dockerDesktopLinuxEngine ausente). Validar em Postgres descartável antes de deployar.
 
 ## O que entrou onde
 
@@ -15,7 +15,7 @@ Migração `b8d3f1a6c2e5` validada em SQLite descartável; NÃO aplicada a banco
 | `models/appointment_reminder.py` | Tabela `appointment_reminders`, vocabulários, índices de envio/aviso, `invalidated_at` e unicidade parcial de linhas ativas por consulta/tipo/horário |
 | `models/appointment.py` | `confirmation_count`, `first_confirmed_at`, `last_confirmed_at` |
 | `models/tenant.py` | `reminders_v2_enabled` (false), `reminder_extra_lead_minutes` (nullable) |
-| `migrations/versions/b8d3f1a6c2e5_appointment_reminders_foundation.py` | Migração aditiva sobre `c3a9e5f1d7b2`; head único |
+| `migrations/versions/b8d3f1a6c2e5_appointment_reminders_foundation.py` | Migração aditiva sobre `e5a1c9d3b7f2`; head único após integração com a `main` |
 | `services/reminder_schedule.py` | `schedule_reminders`, `cancel_reminders`, `reschedule_reminders`, `register_confirmation`, `reset_confirmation`, `display_state`, `ReminderMismatchError` |
 | `schemas/calendar.py`, `api/hub/calendar.py` | GET `/events`: `status`, `confirmation_count`, `display_state`, `attention`, `reminders`; resumo da versão atual, datas UTC; `AppointmentRead.confirmation_count`; PATCH confirmado conta uma vez, scheduled zera, terminal cancela pendências |
 
@@ -37,8 +37,8 @@ Decisões do plano, transcritas literalmente:
 
 ## Ajustes de execução
 
-- Commits/atribuições do plano omitidos por instrução explícita do dono; os artefatos permanecem locais.
-- Suíte completa não executada: o plano proíbe; validação proporcional nas sete suítes nomeadas.
+- Primeira entrega: commits/atribuições do plano omitidos por instrução explícita do dono. No follow-up, commit, integração em `main` e push foram autorizados.
+- Primeira entrega: suíte completa não executada conforme o plano; validação proporcional nas sete suítes nomeadas. A validação adicional da integração está registrada abaixo.
 - O teste antigo de depósito que exigia ausência de `status` passou a verificar `scheduled` e contador 0: pagamento não confirma presença.
 - Imports e supressões de fixtures ajustados para lint; nenhuma formatação ampla em arquivos existentes.
 - Graphify INVALID por bloqueio do executável pelo App Control; evidência obtida do código e testes.
@@ -80,6 +80,14 @@ SQLite demonstra recarga/deduplicação e preservação de estado. Não demonstr
 
 `uvx ruff check` em todos os arquivos Python criados/modificados: sem erros. `git diff --check`: sem erros. Arquivos existentes têm mudanças pontuais.
 
-## Ordem de liberação (não autorizada)
+## Integração em `main` (follow-up autorizado)
+
+- Fundação: `9784450`; incorporação da `main` em `583c8dc`: merge `8bdc5db`.
+- A `main` trouxe a migração `e5a1c9d3b7f2` (clinic facts). O teste de head único falhou com dois heads antes do ajuste; a nova migração R1 passou a depender dela, mantendo o head `b8d3f1a6c2e5`. Nenhuma migração existente foi alterada.
+- Sete suítes do plano na versão integrada: **127 passed**, um aviso anterior do Alembic. Ruff da versão fixada pelo repositório: sem erros, após quebrar duas assertions longas em linhas menores.
+- As alterações preexistentes da `main` em `docs/CHECKPOINT_portal_mensagens_recentes.md` e `docs/superpowers/plans/2026-10-01-digitando-frontend.md` não entram nos commits R1; integridade verificada por SHA256.
+- Suíte completa adicional na versão integrada: **3181 passed, 10 skipped, 14 warnings**, nenhuma falha (450,87s). Avisos de depreciação FastAPI/HTTP 422 e configuração Alembic; nenhum ajuste fora do escopo foi necessário. O SHA final da `main` e a confirmação do push ficam no registro TASK-032 da workspace.
+
+## Ordem de liberação (não autorizada ao agente)
 
 Migração primeiro; API e worker em seguida; interruptor desligado até R2 e prova na clínica de teste; front depois. Não executar downgrade em banco usado por imagem nova. Deployment: **NOT AUTHORIZED**.
