@@ -75,7 +75,6 @@ from secretaria.services.patient_name import (
 )
 from secretaria.services.pending_identity import (
     CODE_ACCEPTED_MESSAGE,
-    CODE_GIVE_UP_MESSAGE,
     CODE_INVALID_MESSAGE,
     CODE_NOTICE_BUTTONS,
     EMAIL_CLAIM_RETRY_MESSAGE,
@@ -90,6 +89,7 @@ from secretaria.services.pending_identity import (
     VerifyResult,
     booking_gate_reprompt_body,
     claim_email,
+    code_give_up_message,
     report_name,
     request_code,
     verify_code,
@@ -119,6 +119,7 @@ from secretaria.workers.portal.attachments import (
 )
 from secretaria.workers.portal.identity import (
     _account_code_dead_end,
+    _code_wait_booking,
     _continue_after_email_claim,
     _finish_account_code_before_consent,
     _handle_identity_card_action,
@@ -625,12 +626,13 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
         origin = FlowState(reply.reactivation.origin)
         if reply.reactivation.kind == "reset":
             # A code wait BEFORE consent has no consultation to reassure
-            # about: it pauses exactly like the e-mail step it came from.
-            body = (
-                EMAIL_PAUSED_MESSAGE
-                if origin == FlowState.AWAITING_EMAIL or patient_owes_consent
-                else CODE_GIVE_UP_MESSAGE
-            )
+            # about: it pauses exactly like the e-mail step it came from. After
+            # consent, only a booking that really stands is reassured about.
+            if origin == FlowState.AWAITING_EMAIL or patient_owes_consent:
+                body = EMAIL_PAUSED_MESSAGE
+            else:
+                stands, _held = await _code_wait_booking(reply.conversation_id)
+                body = code_give_up_message(stands)
             await _send_plain_reply(
                 reply,
                 tenant=tenant,
@@ -675,11 +677,12 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                 event="pending_code_reactivation_resolved",
             )
             return
+        stands, _held = await _code_wait_booking(reply.conversation_id)
         await _send_plain_reply(
             reply,
             tenant=tenant,
             waba_token=waba_token,
-            body=CODE_GIVE_UP_MESSAGE,
+            body=code_give_up_message(stands),
             event="pending_code_reactivation_resolved",
         )
         return
@@ -902,8 +905,10 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
         else:
             # NOT_PENDING / NO_EMAIL / UNAVAILABLE: nothing the patient can act
             # on. Leave the state so the conversation is usable again, and say
-            # the appointment stands — the fact they actually need.
-            body, next_state = CODE_GIVE_UP_MESSAGE, FlowState.IDLE
+            # whether a booking stands — the fact they actually need. Behind a
+            # gated hold it does not: the slot was never booked.
+            stands, _held = await _code_wait_booking(reply.conversation_id)
+            body, next_state = code_give_up_message(stands), FlowState.IDLE
         if next_state is not FlowState.AWAITING_EMAIL_CODE:
             await _write_flow_state(reply.conversation_id, next_state)
         await _send_plain_reply(

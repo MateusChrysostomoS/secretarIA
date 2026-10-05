@@ -35,6 +35,7 @@ from sqlalchemy import delete, or_, select
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import BookingHold
+from secretaria.services.patient_context import load_upcoming_appointments
 from secretaria.services.pending_identity import RequestCodeOutcome, request_code
 
 logger = get_logger(__name__)
@@ -464,3 +465,34 @@ class BookingGate:
             hold_id=str(held.id),
         )
         return GateDecision("held", email_masked=result.email_masked, hold_id=held.id)
+
+
+async def appointment_stands_in(
+    session, *, tenant_id: UUID, patient_id: UUID, conversation_id: UUID
+) -> bool:
+    """Whether a real appointment stands behind this conversation's code wait.
+
+    The question every "sua consulta continua marcada" has to answer first
+    (live test, 2026-10-05). Since the gate, a Portal code wait normally has
+    NOTHING behind it but a ten-minute hold; an appointment exists only on the
+    paths that still book before the code - a booking the gate stood down on
+    (fail-open, see `BookingGate`) followed by the post-booking code notice,
+    or a booking committed before the gate shipped.
+
+    True when the patient has a live upcoming appointment AND, if this
+    conversation still carries a hold row, one of those appointments sits on
+    the held window: a hold row means the LATEST booking attempt was gated and
+    never promoted (promotion drops the row), so an older appointment must not
+    make the new, unconfirmed slot read as booked. Read on the caller's
+    session, like `live_hold_in`.
+    """
+    upcoming = await load_upcoming_appointments(session, tenant_id, patient_id)
+    if not upcoming:
+        return False
+    held = await latest_hold_in(session, conversation_id)
+    if held is None:
+        return True
+    return any(
+        isinstance(appt["start_at"], datetime) and _aware(appt["start_at"]) == held.start_at
+        for appt in upcoming
+    )

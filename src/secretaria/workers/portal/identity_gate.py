@@ -22,6 +22,9 @@ from secretaria.services.pending_identity import (
     parse_code,
     parse_email,
 )
+from secretaria.workers.portal.identity import (
+    _code_appointment_stands_in,
+)
 from secretaria.workers.shared.context import (
     _ReactivationDirective,
     _ReplyContext,
@@ -91,6 +94,9 @@ async def run_identity_gate(
             FlowState(origin),
             channel=channel,
             pre_consent=patient.lgpd_accepted_at is None,
+            appointment_stands=await _code_appointment_stands_in(
+                session, conversation, patient, FlowState(origin)
+            ),
         )
 
     # The time-based floor runs FIRST, before the state is
@@ -113,6 +119,9 @@ async def run_identity_gate(
             pending_origin,
             channel=channel,
             pre_consent=patient.lgpd_accepted_at is None,
+            appointment_stands=await _code_appointment_stands_in(
+                session, conversation, patient, pending_origin
+            ),
         )
 
     if conversation.flow_state == FlowState.AWAITING_EMAIL_CODE:
