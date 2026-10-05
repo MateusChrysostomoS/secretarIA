@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 )
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
+from secretaria.ai.graph import SELECT_PROFESSIONAL_SENTINEL_PREFIX  # noqa: E402
 from secretaria.core import database as core_database  # noqa: E402
 from secretaria.core.database import Base  # noqa: E402
 from secretaria.models import (  # noqa: E402
@@ -302,3 +303,153 @@ async def test_a_menu_rendered_for_any_other_reason_is_not_a_hand_back(
     assert _events(log) == []
     (rendered,) = _events(log, "conversation_menu_rendered")
     assert rendered["source"] == source
+
+
+# --------------------------------------------------------------------------
+# select_professional_and_continue
+# --------------------------------------------------------------------------
+
+
+async def test_select_professional_logs_the_step_it_landed_on(db, _captured_bubbles, log) -> None:
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+
+    await tasks._handle_select_professional(
+        _reply_ctx(conversation),
+        f"{SELECT_PROFESSIONAL_SENTINEL_PREFIX}{ana.id}",
+        tenant,
+        None,
+        _snapshots([ana, bruno]),
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["source_tool"] == "select_professional"
+    assert event["landing_step"] == "awaiting_service"
+    assert event["supplied"] == ["professional"]
+    assert event["accepted"] == ["professional"]
+    assert event["dropped"] == {}
+    assert event["fallback"] is None
+    assert event["topology"] == "multi"
+    assert event["tenant_id"] == str(tenant.id)
+
+
+async def test_an_unknown_professional_falls_back_to_the_menu_and_is_counted_once(
+    db, _captured_bubbles, log
+) -> None:
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+
+    await tasks._handle_select_professional(
+        _reply_ctx(conversation),
+        f"{SELECT_PROFESSIONAL_SENTINEL_PREFIX}{uuid4()}",  # not on the roster
+        tenant,
+        None,
+        _snapshots([ana, bruno]),
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["fallback"] == "unknown_professional"
+    assert event["landing_step"] == "menu"
+    assert event["supplied"] == ["professional"]
+    assert event["accepted"] == []
+    assert event["dropped"] == {"professional": "unknown_professional"}
+    # The menu the fallback renders is the pre-existing event - NOT a second hand-back.
+    (rendered,) = _events(log, "conversation_menu_rendered")
+    assert rendered["source"] == "sentinel_fallback"
+    assert len(_captured_bubbles) == 1
+    assert isinstance(_captured_bubbles[0], MenuBubble)
+
+
+async def test_a_malformed_professional_id_is_a_bad_sentinel(db, _captured_bubbles, log) -> None:
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+
+    await tasks._handle_select_professional(
+        _reply_ctx(conversation),
+        f"{SELECT_PROFESSIONAL_SENTINEL_PREFIX}not-a-uuid",
+        tenant,
+        None,
+        _snapshots([ana, bruno]),
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["fallback"] == "bad_sentinel"
+    assert event["landing_step"] == "menu"
+    assert event["supplied"] == []
+    assert event["dropped"] == {}
+
+
+async def test_select_professional_without_a_tenant_is_counted_not_silent(
+    db, _captured_bubbles, log
+) -> None:
+    _tenant, ana, bruno, patient, conversation = await _seed(db)
+
+    await tasks._handle_select_professional(
+        _reply_ctx(conversation),
+        f"{SELECT_PROFESSIONAL_SENTINEL_PREFIX}{ana.id}",
+        None,
+        None,
+        _snapshots([ana, bruno]),
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["fallback"] == "no_tenant"
+    assert event["landing_step"] is None  # no tenant, so no menu was rendered either
+    assert event["accepted"] == ["professional"]
+    assert event["tenant_id"] is None
+    assert _captured_bubbles == []
+
+
+async def test_a_doctor_with_no_services_lands_on_the_config_alert(
+    db, _captured_bubbles, log, monkeypatch
+) -> None:
+    alerted: list = []
+
+    async def _fake_alert(reply, result, **_kwargs):
+        alerted.append(result.professional_config_gap)
+
+    monkeypatch.setattr(workers_ns, "_handle_professional_config_incomplete", _fake_alert)
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+    snapshots = _snapshots([ana, bruno])
+    snapshots[0].appointment_types = []  # her own empty list: nothing to book
+
+    await tasks._handle_select_professional(
+        _reply_ctx(conversation),
+        f"{SELECT_PROFESSIONAL_SENTINEL_PREFIX}{ana.id}",
+        tenant,
+        None,
+        snapshots,
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["landing_step"] == "config_incomplete"
+    assert event["fallback"] == "professional_config_incomplete"
+    assert event["accepted"] == ["professional"]
+    assert alerted == ["services"]
+
+
+async def test_the_event_is_logged_before_the_flow_state_is_written(
+    db, _captured_bubbles, log, monkeypatch
+) -> None:
+    """A failure while persisting/sending must not erase the fact that the hand-back landed."""
+
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError("persist exploded")
+
+    monkeypatch.setattr(workers_ns, "_apply_flow_result", _boom)
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+
+    with pytest.raises(RuntimeError, match="persist exploded"):
+        await tasks._handle_select_professional(
+            _reply_ctx(conversation),
+            f"{SELECT_PROFESSIONAL_SENTINEL_PREFIX}{ana.id}",
+            tenant,
+            None,
+            _snapshots([ana, bruno]),
+            patient.wa_id,
+        )
+
+    (event,) = _events(log)
+    assert event["landing_step"] == "awaiting_service"

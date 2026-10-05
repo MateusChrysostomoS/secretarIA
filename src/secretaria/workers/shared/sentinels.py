@@ -1,6 +1,7 @@
 """sentinels - split out of workers/tasks.py (TASK-023)."""
 
 import json
+from collections.abc import Mapping, Sequence
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -157,6 +158,94 @@ async def _handle_show_main_menu(
     )
     return rendered
 
+
+async def _fallback_to_menu(
+    reply: _ReplyContext,
+    *,
+    source_tool: str,
+    reason: str,
+    tenant: Tenant | None,
+    professionals: list | None,
+    patient_wa: str | None,
+    redis=None,
+    waba_token: str | None = None,
+    supplied: Sequence[str] = (),
+    accepted: Sequence[str] = (),
+    dropped: Mapping[str, str] | None = None,
+    topology: str | None = None,
+) -> None:
+    """A hand-back that could not land: record it ONCE, then show the plain menu.
+
+    The menu itself goes through `_handle_show_main_menu(source="sentinel_fallback")`, which
+    records no hand-back event of its own - this is the single place the fallback is counted,
+    so a hand-back is never logged twice or not at all. `landing_step` is None without a
+    tenant: `_handle_show_main_menu` renders nothing then, so nothing landed.
+    """
+    hb.log_handback_entered(
+        conversation_id=reply.conversation_id,
+        tenant_id=tenant.id if tenant is not None else reply.tenant_id,
+        source_tool=source_tool,
+        landing_step=hb.LANDING_MENU if tenant is not None else None,
+        supplied=supplied,
+        accepted=accepted,
+        dropped=dropped,
+        fallback=reason,
+        topology=topology if topology is not None else booking_topology(professionals),
+        channel=reply.channel,
+    )
+    await _handle_show_main_menu(
+        reply,
+        tenant,
+        professionals,
+        patient_wa,
+        redis=redis,
+        waba_token=waba_token,
+        source="sentinel_fallback",
+    )
+
+
+async def _land_handback(
+    reply: _ReplyContext,
+    result: FlowRouterResult,
+    patient_wa: str | None,
+    *,
+    source_tool: str,
+    tenant: Tenant | None,
+    professionals: list | None,
+    redis=None,
+    waba_token: str | None = None,
+    supplied: Sequence[str] = (),
+    accepted: Sequence[str] = (),
+    dropped: Mapping[str, str] | None = None,
+    fallback: str | None = None,
+    topology: str | None = None,
+) -> bool:
+    """Record where a hand-back lands, THEN persist the flow state and send the bubbles.
+
+    The event goes first on purpose: `_apply_flow_result` writes the flow row and talks to
+    WhatsApp / the Portal, and a failure there must not erase the fact that the hand-back
+    reached a step. `fallback` names a bounce the CALLER detected (e.g. nothing to manage);
+    otherwise the result itself decides - a calendar outage or an unbookable doctor is a
+    fallback too (`handback_log.landing_of`).
+    """
+    landing_step, result_fallback = hb.landing_of(result)
+    hb.log_handback_entered(
+        conversation_id=reply.conversation_id,
+        tenant_id=tenant.id if tenant is not None else reply.tenant_id,
+        source_tool=source_tool,
+        landing_step=landing_step,
+        supplied=supplied,
+        accepted=accepted,
+        dropped=dropped,
+        fallback=fallback or result_fallback,
+        topology=topology if topology is not None else booking_topology(professionals),
+        channel=reply.channel,
+    )
+    return await _apply_flow_result(
+        reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+    )
+
+
 async def _handle_select_professional(
     reply: _ReplyContext,
     reply_text: str,
@@ -176,9 +265,11 @@ async def _handle_select_professional(
     """
     raw_id = reply_text[len(SELECT_PROFESSIONAL_SENTINEL_PREFIX) :]
     professional = None
+    bad_sentinel = False
     try:
         professional_id = UUID(raw_id)
     except ValueError:
+        bad_sentinel = True
         logger.error("worker_select_professional_bad_sentinel", raw=raw_id[:64])
     else:
         professional = next((p for p in professionals or [] if p.id == professional_id), None)
@@ -188,14 +279,32 @@ async def _handle_select_professional(
             "worker_select_professional_unresolved",
             conversation_id=str(reply.conversation_id),
         )
-        await _handle_show_main_menu(
+        # Most specific reason first: a malformed id, a doctor who is no longer on the
+        # active roster, or no tenant to render a menu for.
+        supplied: tuple[str, ...] = ()
+        accepted: tuple[str, ...] = ()
+        dropped: dict[str, str] = {}
+        if bad_sentinel:
+            reason = hb.FALLBACK_BAD_SENTINEL
+        elif professional is None:
+            reason = hb.FALLBACK_UNKNOWN_PROFESSIONAL
+            supplied = (hb.FIELD_PROFESSIONAL,)
+            dropped = {hb.FIELD_PROFESSIONAL: hb.DROP_UNKNOWN_PROFESSIONAL}
+        else:
+            reason = hb.FALLBACK_NO_TENANT
+            supplied = accepted = (hb.FIELD_PROFESSIONAL,)
+        await _fallback_to_menu(
             reply,
-            tenant,
-            professionals,
-            patient_wa,
+            source_tool=hb.SOURCE_SELECT_PROFESSIONAL,
+            reason=reason,
+            tenant=tenant,
+            professionals=professionals,
+            patient_wa=patient_wa,
             redis=redis,
             waba_token=waba_token,
-            source="sentinel_fallback",
+            supplied=supplied,
+            accepted=accepted,
+            dropped=dropped,
         )
         return
     result = _enter_professional_services(professional, tenant_snapshot)
@@ -207,8 +316,17 @@ async def _handle_select_professional(
         result.flow_selected_insurance = getattr(
             flow_snapshot[0], "flow_selected_insurance", None
         )
-    await _apply_flow_result(
-        reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+    await _land_handback(
+        reply,
+        result,
+        patient_wa,
+        source_tool=hb.SOURCE_SELECT_PROFESSIONAL,
+        tenant=tenant,
+        professionals=professionals,
+        redis=redis,
+        waba_token=waba_token,
+        supplied=(hb.FIELD_PROFESSIONAL,),
+        accepted=(hb.FIELD_PROFESSIONAL,),
     )
 
 async def _handle_manage_appointment(
