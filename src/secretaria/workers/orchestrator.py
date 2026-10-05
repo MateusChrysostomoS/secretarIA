@@ -888,7 +888,6 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                 reply,
                 tenant=tenant,
                 waba_token=waba_token,
-                professionals=flow_professionals,
                 redis=redis,
             )
             if promoted is not None:

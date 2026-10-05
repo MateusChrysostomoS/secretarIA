@@ -1622,7 +1622,7 @@ async def test_booking_hold_fallback_notifies_handoff(db, monkeypatch, failure):
     monkeypatch.setattr(workers_ns, "_appointment_calendar", calendar)
     monkeypatch.setattr(workers_ns, "resolve_booking_plan_ids", plans)
     await tasks._promote_booking_hold(_reply(conv), tenant=tenant, waba_token=None,
-        professionals=[], redis=None)
+        redis=None)
     assert sent == ["human_handoff_alert"]
 
 

@@ -4630,7 +4630,18 @@ async def _manage_reschedule(
 
     try:
         await calendar.update_event(event_id, start=start, end=end)
-    except CalendarUnavailableError:
+    except Exception as exc:
+        # Any refusal to move the event (an outage, OR Google answering 404
+        # because the event is not on this agenda / was deleted by hand) is a
+        # job for a person. Letting a raw HttpError escape made the runner
+        # delegate to the LLM, which re-opened the day picker: the patient
+        # looped on "Confirmar" forever and nobody was told.
+        if not isinstance(exc, CalendarUnavailableError):
+            logger.warning(
+                "flow_manage_reschedule_update_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
         return FlowRouterResult(
             action="calendar_unavailable",
             flow_state=FlowState.MANAGE_BOOKING,

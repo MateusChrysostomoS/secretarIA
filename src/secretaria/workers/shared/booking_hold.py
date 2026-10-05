@@ -56,6 +56,9 @@ from secretaria.services.pending_identity import (
     CODE_NOTICE_BUTTONS,
     booking_gate_body,
 )
+from secretaria.services.tenant_config import (
+    list_active_professionals,
+)
 from secretaria.workers.shared.context import (
     _ReplyContext,
 )
@@ -191,7 +194,6 @@ async def _promote_booking_hold(
     *,
     tenant: Tenant | None,
     waba_token: str | None,
-    professionals: list | None,
     redis,
 ) -> str | None:
     """Turn this conversation's reservation into a real appointment.
@@ -228,8 +230,18 @@ async def _promote_booking_hold(
         )
         return BOOKING_HOLD_EXPIRED_MESSAGE
 
-    target = _appointment_calendar_target({"professional_id": held.professional_id}, professionals)
     async with async_session_factory() as session:
+        # The owner is resolved against ORM rows read here, never against the
+        # flow router's roster snapshot: those are SimpleNamespace copies, and
+        # `_appointment_calendar` only recognises a real `Professional`. A
+        # snapshot used to fall through to the CLINIC calendar, so every gated
+        # Portal booking at a multi-doctor clinic landed off the doctor's own
+        # agenda - the slot stayed free there (double booking) and the
+        # reschedule, which acts on the doctor's agenda, hit a 404 and looped.
+        target = _appointment_calendar_target(
+            {"professional_id": held.professional_id},
+            await list_active_professionals(session, tenant.id),
+        )
         calendar = await _appointment_calendar(session, tenant, target)
         patient_id = await session.scalar(
             select(Conversation.patient_id).where(Conversation.id == reply.conversation_id)

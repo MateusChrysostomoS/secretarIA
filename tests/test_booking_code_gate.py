@@ -638,7 +638,7 @@ async def test_the_verified_code_is_what_creates_the_appointment(db, calls, monk
     )
 
     extra = await tasks._promote_booking_hold(
-        _reply(conversation), tenant=tenant, waba_token=None, professionals=[], redis=None
+        _reply(conversation), tenant=tenant, waba_token=None, redis=None
     )
 
     # The event and the row exist NOW, and not one moment earlier.
@@ -678,7 +678,7 @@ async def test_an_expired_reservation_is_never_promoted(db, calls, monkeypatch):
     )
 
     extra = await tasks._promote_booking_hold(
-        _reply(conversation), tenant=tenant, waba_token=None, professionals=[], redis=None
+        _reply(conversation), tenant=tenant, waba_token=None, redis=None
     )
 
     assert extra == BOOKING_HOLD_EXPIRED_MESSAGE
@@ -695,7 +695,7 @@ async def test_an_ungated_conversation_is_left_exactly_as_it_was(db, calls):
     _, conversation = await _seed_conversation(db, tenant)
     assert (
         await tasks._promote_booking_hold(
-            _reply(conversation), tenant=tenant, waba_token=None, professionals=[], redis=None
+            _reply(conversation), tenant=tenant, waba_token=None, redis=None
         )
         is None
     )
@@ -888,7 +888,7 @@ async def test_a_promoted_reservation_plans_its_reminders_only_with_the_switch_o
     )
 
     await tasks._promote_booking_hold(
-        _reply(conversation), tenant=tenant, waba_token=None, professionals=[], redis=None
+        _reply(conversation), tenant=tenant, waba_token=None, redis=None
     )
 
     rows = await _appointments(db, tenant)

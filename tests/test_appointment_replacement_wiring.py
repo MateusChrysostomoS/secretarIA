@@ -158,7 +158,7 @@ async def test_the_portal_promotion_replaces_the_original_too(db, calendar):  # 
     )
 
     extra = await tasks._promote_booking_hold(
-        reply, tenant=world.tenant, waba_token=None, professionals=[], redis=None
+        reply, tenant=world.tenant, waba_token=None, redis=None
     )
 
     assert "Pronto! Seu agendamento está confirmado." in extra
