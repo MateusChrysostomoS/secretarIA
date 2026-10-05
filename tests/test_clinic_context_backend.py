@@ -260,3 +260,25 @@ def test_the_ready_made_messages_are_listed_with_the_section_that_edits_them() -
     assert items["post_consult_message"].section == "post_consult"
     assert items["post_consult_knowledge"].section == "post_consult"
     assert all(items[k].hint for k in items if items[k].status != "done")
+
+
+# ------------------------------------------------- malformed stored facts (JSON columns)
+
+
+@pytest.mark.parametrize("facts", [["parking"], "Estacionamento ao lado", 42, True])
+def test_clinic_facts_that_are_not_a_mapping_do_not_break_the_completeness(facts) -> None:
+    result = compute_completeness(_tenant(clinic_facts=facts), [])
+    assert _status(result)["parking_or_arrival"] == "missing"
+    assert result.score == 0
+
+
+@pytest.mark.parametrize("address", ["Rua A, Recife", ["Rua A"], 42, True])
+def test_an_address_that_is_not_a_mapping_counts_as_missing(address) -> None:
+    result = compute_completeness(_tenant(address=address), [])
+    assert _status(result)["address"] == "missing"
+
+
+@pytest.mark.parametrize("faq", ["abc", 5, True, {"question": "q", "answer": "a"}])
+def test_a_faq_that_is_not_a_list_neither_counts_nor_breaks(faq) -> None:
+    result = compute_completeness(_tenant(clinic_facts={"faq": faq}), [])
+    assert _status(result)["faq"] == "optional"

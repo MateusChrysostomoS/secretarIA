@@ -284,25 +284,42 @@ def _address_line(address: dict | None) -> str | None:
     return ", ".join(parts) or None
 
 
+def _texts(value: object) -> list[str]:
+    """The usable strings of a stored list; anything else (not a list, non-strings) is dropped."""
+    if not isinstance(value, list):
+        return []
+    return [s.strip() for s in value if isinstance(s, str) and s.strip()]
+
+
 def _clinic_fact_lines(config: TenantRuntimeConfig) -> list[str]:
-    facts = config.clinic_facts or {}
+    # Both columns are JSON, so a row written outside the schema can hold any shape. A bad
+    # shape is ignored (valid parts still render): it must never break the turn.
+    facts = config.clinic_facts if isinstance(config.clinic_facts, dict) else {}
     lines: list[str] = []
-    address = _address_line(config.address)
+    address = _address_line(config.address if isinstance(config.address, dict) else None)
     if address:
         lines.append(f"- Endereço: {address}")
     for key, label in (("how_to_arrive", "Como chegar"), ("parking", "Estacionamento")):
         if facts.get(key):
             lines.append(f"- {label}: {facts[key]}")
-    if facts.get("payment_methods"):
-        lines.append("- Formas de pagamento: " + ", ".join(facts["payment_methods"]))
+    payment_methods = _texts(facts.get("payment_methods"))
+    if payment_methods:
+        lines.append("- Formas de pagamento: " + ", ".join(payment_methods))
     if facts.get("cancellation_policy"):
         lines.append(f"- Cancelamento e remarcação: {facts['cancellation_policy']}")
-    if facts.get("documents_to_bring"):
-        lines.append("- Documentos a levar: " + ", ".join(facts["documents_to_bring"]))
+    documents = _texts(facts.get("documents_to_bring"))
+    if documents:
+        lines.append("- Documentos a levar: " + ", ".join(documents))
     if facts.get("accessibility"):
         lines.append(f"- Acessibilidade: {facts['accessibility']}")
-    for item in facts.get("faq") or []:
-        lines.append(f"- Pergunta frequente — {item['question']} Resposta: {item['answer']}")
+    faq = facts.get("faq")
+    for item in faq if isinstance(faq, list) else []:
+        if (
+            isinstance(item, dict)
+            and isinstance(item.get("question"), str)
+            and isinstance(item.get("answer"), str)
+        ):
+            lines.append(f"- Pergunta frequente — {item['question']} Resposta: {item['answer']}")
     if facts.get("notes"):
         lines.append(f"- Observações: {facts['notes']}")
     return lines

@@ -109,23 +109,44 @@ async def test_configuration_envelope_carries_the_facts_too(client: AsyncClient)
     assert put.json()["tenant"]["clinic_facts"]["how_to_arrive"] == FACTS["how_to_arrive"]
 
 
-async def test_a_save_without_the_field_leaves_the_facts_untouched(client: AsyncClient) -> None:
-    await client.put(CONFIG, json={"clinic_facts": FACTS})
-    await client.put(CONFIG, json={"persona_notes": "Seja cordial."})
+PUT_ROUTES = pytest.mark.parametrize(
+    "route", [CONFIG, CONFIGURATION], ids=["config", "configuration"]
+)
+
+
+async def _put(client: AsyncClient, route: str, **tenant_fields):
+    """PUT tenant fields through either hub route; the frontend saves through /configuration."""
+    body = tenant_fields if route == CONFIG else {"tenant": tenant_fields}
+    response = await client.put(route, json=body)
+    assert response.status_code == 200, response.text
+    return response
+
+
+@PUT_ROUTES
+async def test_a_save_without_the_field_leaves_the_facts_untouched(
+    client: AsyncClient, route: str
+) -> None:
+    await _put(client, route, clinic_facts=FACTS)
+    await _put(client, route, persona_notes="Seja cordial.")
     assert (await client.get(CONFIG)).json()["clinic_facts"]["parking"] == FACTS["parking"]
 
 
-async def test_null_clears_the_facts(client: AsyncClient) -> None:
-    await client.put(CONFIG, json={"clinic_facts": FACTS})
-    await client.put(CONFIG, json={"clinic_facts": None})
+@PUT_ROUTES
+async def test_null_clears_the_facts(client: AsyncClient, route: str) -> None:
+    await _put(client, route, clinic_facts=FACTS)
+    await _put(client, route, clinic_facts=None)
     assert (await client.get(CONFIG)).json()["clinic_facts"] is None
 
 
-async def test_the_put_replaces_the_whole_object_it_does_not_merge(client: AsyncClient) -> None:
-    await client.put(CONFIG, json={"clinic_facts": FACTS})
-    await client.put(CONFIG, json={"clinic_facts": {"parking": "Só isto."}})
+@PUT_ROUTES
+async def test_the_put_replaces_the_whole_object_it_does_not_merge(
+    client: AsyncClient, route: str
+) -> None:
+    await _put(client, route, clinic_facts=FACTS)
+    await _put(client, route, clinic_facts={"parking": "Só isto."})
     got = (await client.get(CONFIG)).json()["clinic_facts"]
     assert got["parking"] == "Só isto." and got.get("payment_methods") in (None, [])
+    assert got == {"parking": "Só isto."}  # exactly as saved: no defaults are filled in
 
 
 @pytest.mark.parametrize(
@@ -134,6 +155,9 @@ async def test_the_put_replaces_the_whole_object_it_does_not_merge(client: Async
         {"parking": "p" * 301},
         {"payment_methods": ["Pix"] * 11},
         {"faq": [{"question": "", "answer": "a"}]},
+        {"payment_methods": None},
+        {"documents_to_bring": None},
+        {"faq": None},
     ],
 )
 async def test_oversized_or_malformed_facts_are_rejected(client: AsyncClient, bad) -> None:

@@ -64,7 +64,11 @@ def _guidance_gap(active_services: list[Any]) -> list[str]:
 
 
 def compute_completeness(tenant: Any, services: list[Any]) -> Completeness:
-    facts = getattr(tenant, "clinic_facts", None) or {}
+    # JSON column: a row written outside the schema can hold any shape; ignore a bad one.
+    stored = getattr(tenant, "clinic_facts", None)
+    facts = stored if isinstance(stored, dict) else {}
+    faq = facts.get("faq")
+    faq_count = len(faq) if isinstance(faq, list) else 0
     active = [s for s in services if getattr(s, "is_active", True)]
     gap = _guidance_gap(active)
 
@@ -169,7 +173,7 @@ def compute_completeness(tenant: Any, services: list[Any]) -> Completeness:
             "faq",
             f"Perguntas frequentes (pelo menos {FAQ_TARGET})",
             RECOMMENDED_WEIGHT,
-            len(facts.get("faq") or []) >= FAQ_TARGET,
+            faq_count >= FAQ_TARGET,
             "Registre as perguntas que os pacientes mais fazem, com a resposta.",
             "facts",
         ),
