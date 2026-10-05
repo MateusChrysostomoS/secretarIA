@@ -83,6 +83,7 @@ def test_tasks_is_a_pure_facade() -> None:
         "secretaria.workers.whatsapp.inbound",
         "secretaria.workers.portal.inbound",
         "secretaria.workers.shared.sentinels",
+        "secretaria.workers.shared.handback_log",
     ],
 )
 def test_each_entry_point_imports_alone(module: str) -> None:

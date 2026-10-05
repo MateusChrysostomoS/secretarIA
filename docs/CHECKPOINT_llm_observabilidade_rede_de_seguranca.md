@@ -18,9 +18,10 @@ Eventos estruturados (nunca texto de paciente, nunca valores de argumento):
 | Evento | Quando | Campos que respondem à pergunta |
 |---|---|---|
 | `llm_turn_started` | antes de chamar o modelo | `has_conversation_state`, `has_appointment_context`, `has_tenant_config`, `history_messages`, `history_chars` — o bloco de estado chegou ao prompt? |
-| `llm_turn_trace` | depois de cada run do agente | `verdict`, `model_calls`, `tool_calls[{name,arg_keys}]`, `tool_errors`, `input_tokens`, `output_tokens`, `reasoning_tokens`, `finish_reasons`, `truncated`, `elapsed_ms` |
+| `llm_turn_trace` | depois de cada run do agente que termina em texto | `verdict`, `model_calls`, `tool_calls[{name,arg_keys}]`, `tools_called` (só nomes, em ordem), `tool_errors`, `input_tokens`, `output_tokens`, `reasoning_tokens`, `finish_reasons`, `truncated`, `elapsed_ms` |
 | `llm_turn_finished` | turno ok | `elapsed_ms`, `reply_len`, `is_sentinel` |
 | `ai_run_agent_turn_timeout` | estourou `LLM_TURN_TIMEOUT_SECONDS` (120) | — |
+| `conversation_handback_entered` | todo hand-back da IA ao fluxo guiado (pouso OU fallback), no worker, antes de gravar o estado | `source_tool`, `landing_step`, `supplied`, `accepted`, `dropped`, `fallback`, `topology`, `channel` — onde o paciente caiu |
 
 `verdict` (ERROR quando ≠ `ok`, agrupável): `ok`, `truncated_no_text` (gpt-5 gastou todo o
 `max_completion_tokens` raciocinando — hipótese mais provável de "resposta vazia"), `truncated_partial_text`,
@@ -55,6 +56,33 @@ pontos de envio reais); `tests/test_turn_safety_net.py` exercita a função real
 
 `run_agent` envolve o turno em `asyncio.wait_for(LLM_TURN_TIMEOUT_SECONDS=120)`. Antes: timeout HTTP 60 s × 5
 retries do SDK × passos do ReAct podia passar dos 300 s do job do arq, que cancela o job sem resposta alguma.
+
+### 4. Hand-backs da IA (TASK-030, plano P1) — `workers/shared/handback_log.py`
+
+Um evento `conversation_handback_entered` por hand-back, com **só ids, nomes de campo e códigos** (nunca o
+serviço, o convênio, o nome ou o horário que a IA escreveu; valor fora do vocabulário vira `"other"`). Emitido
+por `log_handback_entered(...)`, chamado de `sentinels.py` (menu, médico, gerenciar, guiado, rascunho) e de
+`handover.py` (pessoa). Os eventos antigos (`conversation_booking_draft_entered`,
+`conversation_guided_booking_entered`, `conversation_menu_rendered`, `ai_run_agent_*`) continuam.
+
+- `source_tool`: `set_booking_draft`, `show_main_menu`, `manage_existing_appointment`, `select_professional`,
+  `start_guided_booking`, `request_human_handoff`. No menu só conta a chamada da ferramenta
+  (`source="agent_tool"`); `/menu`, passo do nome e cartões de identidade não são hand-back.
+- `landing_step`: o `flow_step` do resultado, ou o estado em minúsculas (`menu`), ou `human_handover`
+  (agenda fora do ar / transferência), `config_incomplete` (médico sem serviços/horários); `null` = nada pousou.
+- `fallback` (`null` = pousou onde a ferramenta pediu): `bad_sentinel`, `no_tenant`, `without_flows`,
+  `no_patient`, `invalid_selection`, `missing_professional`, `unknown_professional`, `no_bookable_catalog`,
+  `multi_professional`, `no_appointments`, `calendar_unavailable`, `professional_config_incomplete`.
+- `dropped` (campo → motivo): `not_in_catalog`, `unknown_professional`, `unmatched_plan`.
+
+Perguntas que o evento responde: em que etapa caem os pacientes (`landing_step`), quantos voltam ao menu e por
+quê (`fallback`), qual item do rascunho a IA erra mais (`dropped`).
+
+Limites conhecidos: (a) turno que termina em hand-back levanta a exceção da ferramenta e nunca emite
+`llm_turn_trace` — `tools_called` só existe em turno que termina em texto; nos de hand-back, `source_tool` é a
+ferramenta final; (b) falha de infraestrutura ANTES de o pouso ser conhecido (leitura no banco) propaga como
+sempre e não gera evento — a diferença entre as contagens de `ai_run_agent_*` e de
+`conversation_handback_entered` a revela; (c) `without_flows` é defensivo (`flows_enabled` é sempre verdadeiro).
 
 ## Como investigar um caso (roteiro)
 

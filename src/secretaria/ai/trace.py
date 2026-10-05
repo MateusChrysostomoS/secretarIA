@@ -89,6 +89,9 @@ def summarize_turn(new_messages: Sequence[BaseMessage]) -> dict[str, Any]:
         "model_calls": model_calls,
         "tool_call_count": len(tool_calls),
         "tool_calls": tool_calls,
+        # Names only, in the order the model asked for them: the flat list a log search can
+        # filter on ("every turn that called set_booking_draft") without unpacking tool_calls.
+        "tools_called": [str(call["name"]) for call in tool_calls if call.get("name")],
         "tool_outcomes": tool_outcomes,
         "tool_errors": sum(1 for o in tool_outcomes if o["status"] == "error"),
         "input_tokens": input_tokens,
