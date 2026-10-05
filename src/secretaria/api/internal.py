@@ -70,6 +70,7 @@ from secretaria.schemas.internal import (
     BrainMessageOpen,
     BrainMessageReadMark,
     BrainMessageTyping,
+    BrainMessageVisitMerge,
     InternalAppointment,
     InternalAppointmentList,
     InternalPatient,
@@ -1027,3 +1028,36 @@ async def patient_typing(
         return TypingAck(applied=False)
     await mark_typing(getattr(request.app.state, "arq_pool", None), conversation_id, "patient")
     return TypingAck(applied=True)
+
+
+@router.post(
+    "/brain-message/visits/merge",
+    response_model=BrainMessageAck,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="A Portal visit was merged into an existing account (internal)",
+    description=(
+        "brain-api calls this after a visit's code proved an address that already had an "
+        "identity at the clinic. The visit's own conversation is discarded and the account's "
+        "conversation gets the menu (or, if the account never had one, the normal opening). "
+        "Idempotent; returns 202 immediately, the work runs in the worker. Requires the "
+        "X-Internal-Api-Key header."
+    ),
+    responses={**_INTERNAL_RESPONSES, 422: {"description": "Visit and account are the same."}},
+)
+async def merge_brain_message_visit_route(
+    payload: BrainMessageVisitMerge, request: Request
+) -> BrainMessageAck:
+    if payload.visit_external_id == payload.into_external_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="A visit cannot be merged into itself.",
+        )
+    pool = _arq_pool_or_503(request)
+    await pool.enqueue_job(
+        "merge_brain_message_visit",
+        str(payload.tenant_id),
+        payload.visit_external_id,
+        payload.into_external_id,
+    )
+    logger.info("brain_message_visit_merge_queued", tenant_id=str(payload.tenant_id))
+    return BrainMessageAck(status="queued")

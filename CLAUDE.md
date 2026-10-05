@@ -505,3 +505,5 @@ Rules:
 
 
 docs/CHECKPOINT_digitando_backend.md — TASK-033: indicador universal no backend Portal/console; local, sem deploy; validação e provas pendentes registradas.
+
+TASK-034: Portal visit discard on account promotion; local validation and deployment order: `docs/CHECKPOINT_portal_visita_fundida.md`. Not deployed.

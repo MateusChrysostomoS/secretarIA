@@ -73,7 +73,7 @@ async def _handle_show_main_menu(
     redis=None,
     waba_token: str | None = None,
     source: str = "agent_tool",
-) -> None:
+) -> bool:
     """Non-destructive menu return. The ONE way back to the menu.
 
     Shared by the agent's `show_main_menu` tool (`source="agent_tool"`), the
@@ -98,7 +98,7 @@ async def _handle_show_main_menu(
             conversation_id=str(reply.conversation_id),
             source=source,
         )
-        return
+        return False
     result = FlowRouterResult(
         action="reply",
         bubbles=[
@@ -123,6 +123,7 @@ async def _handle_show_main_menu(
         handover="bot_active",
         rendered=rendered,
     )
+    return rendered
 
 async def _handle_select_professional(
     reply: _ReplyContext,

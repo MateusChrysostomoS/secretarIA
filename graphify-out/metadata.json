@@ -1,11 +1,11 @@
 ﻿{
     "metadata_schema":  "brain.graphify-metadata/v1",
     "repository":  "secretarIA",
-    "repository_path":  "C:\\TECH\\BRAIN-worktrees\\TASK-029\\secretarIA",
-    "branch":  "task/TASK-029-patient-cleanup",
-    "commit":  "b0ac5ee4edccd98ab805e7c27ed7d213ce5f0835",
-    "generated_at":  "2026-10-03T15:47:52.8857843Z",
+    "repository_path":  "C:\\TECH\\BRAIN-worktrees\\TASK-034\\secretarIA",
+    "branch":  "task/TASK-034-portal-visita",
+    "commit":  "1b3b7a68453ee17d831c6dfab8b91146d8ae32f6",
+    "generated_at":  "2026-10-05T01:25:28.1145691Z",
     "graphify_version":  "0.9.5",
     "graph_schema":  "networkx-node-link (unversioned upstream)",
-    "graph_sha256":  "45aaac341ae1df651ad74fd60d6310b67f39264911e35cf77722fb465e99ad01"
+    "graph_sha256":  "e2cb48e0f1be979d5631707770d50ad3ca64f9ee14e00020a58e5b0e0cf173a0"
 }

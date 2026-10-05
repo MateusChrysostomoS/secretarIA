@@ -234,3 +234,13 @@ class BrainMessageTyping(BaseModel):
 
 class TypingAck(BaseModel):
     applied: bool
+
+
+class BrainMessageVisitMerge(BaseModel):
+    """brain-api merged a Portal visit into an existing account: drop the visit's chat."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: UUID
+    visit_external_id: str = Field(min_length=1, max_length=64)
+    into_external_id: str = Field(min_length=1, max_length=64)
