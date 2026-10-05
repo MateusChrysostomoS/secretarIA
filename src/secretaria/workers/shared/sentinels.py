@@ -246,6 +246,31 @@ async def _land_handback(
     )
 
 
+def _log_no_landing(
+    reply: _ReplyContext,
+    *,
+    source_tool: str,
+    reason: str,
+    tenant: Tenant | None,
+    professionals: list | None,
+    supplied: Sequence[str] = (),
+    accepted: Sequence[str] = (),
+    topology: str | None = None,
+) -> None:
+    """A hand-back that did nothing at all - no menu, no flow step - still gets its event."""
+    hb.log_handback_entered(
+        conversation_id=reply.conversation_id,
+        tenant_id=tenant.id if tenant is not None else reply.tenant_id,
+        source_tool=source_tool,
+        landing_step=None,
+        supplied=supplied,
+        accepted=accepted,
+        fallback=reason,
+        topology=topology if topology is not None else booking_topology(professionals),
+        channel=reply.channel,
+    )
+
+
 async def _handle_select_professional(
     reply: _ReplyContext,
     reply_text: str,
@@ -358,20 +383,30 @@ async def _handle_manage_appointment(
     """
     if action not in ("reschedule", "cancel"):
         logger.warning("worker_manage_appointment_bad_action", action=action[:32])
-        await _handle_show_main_menu(
+        await _fallback_to_menu(
             reply,
-            tenant,
-            professionals,
-            patient_wa,
+            source_tool=hb.SOURCE_MANAGE_EXISTING_APPOINTMENT,
+            reason=hb.FALLBACK_BAD_SENTINEL,
+            tenant=tenant,
+            professionals=professionals,
+            patient_wa=patient_wa,
             redis=redis,
             waba_token=waba_token,
-            source="sentinel_fallback",
         )
         return
     if tenant is None or not flows_enabled(tenant):
         logger.warning(
             "worker_manage_appointment_without_flows",
             conversation_id=str(reply.conversation_id),
+        )
+        _log_no_landing(
+            reply,
+            source_tool=hb.SOURCE_MANAGE_EXISTING_APPOINTMENT,
+            reason=hb.FALLBACK_NO_TENANT if tenant is None else hb.FALLBACK_WITHOUT_FLOWS,
+            tenant=tenant,
+            professionals=professionals,
+            supplied=(hb.FIELD_ACTION,),
+            accepted=(hb.FIELD_ACTION,),
         )
         return
 
@@ -382,6 +417,15 @@ async def _handle_manage_appointment(
             logger.warning(
                 "worker_manage_appointment_no_patient",
                 conversation_id=str(reply.conversation_id),
+            )
+            _log_no_landing(
+                reply,
+                source_tool=hb.SOURCE_MANAGE_EXISTING_APPOINTMENT,
+                reason=hb.FALLBACK_NO_PATIENT,
+                tenant=tenant,
+                professionals=professionals,
+                supplied=(hb.FIELD_ACTION,),
+                accepted=(hb.FIELD_ACTION,),
             )
             return
         appointments = await load_upcoming_appointments(session, tenant.id, patient_id)
@@ -401,8 +445,20 @@ async def _handle_manage_appointment(
     result = await enter_manage_action(
         action, tenant, appointments, professionals, calendar=manage_calendar
     )
-    await _apply_flow_result(
-        reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+    await _land_handback(
+        reply,
+        result,
+        patient_wa,
+        source_tool=hb.SOURCE_MANAGE_EXISTING_APPOINTMENT,
+        tenant=tenant,
+        professionals=professionals,
+        redis=redis,
+        waba_token=waba_token,
+        supplied=(hb.FIELD_ACTION,),
+        accepted=(hb.FIELD_ACTION,),
+        # A patient with nothing to manage lands on the menu with an explanation: the
+        # hand-back worked, just not where the agent meant it to.
+        fallback=None if appointments else hb.FALLBACK_NO_APPOINTMENTS,
     )
 
 async def _handle_start_guided_booking(

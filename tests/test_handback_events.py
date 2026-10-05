@@ -19,7 +19,7 @@ os.environ.setdefault("META_PHONE_NUMBER_ID", "1234567890")
 os.environ.setdefault("ENCRYPTION_KEY", "gBSpATEZoI21UX0_59nHvxdUDJ4drCttg2RAEaPJc1w=")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
-from datetime import timedelta  # noqa: E402
+from datetime import UTC, datetime, timedelta  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 from uuid import uuid4  # noqa: E402
 from zoneinfo import ZoneInfo  # noqa: E402
@@ -50,7 +50,7 @@ from secretaria.models import (  # noqa: E402
 )
 from secretaria.services.flow_router import MenuBubble  # noqa: E402
 from secretaria.workers import tasks  # noqa: E402
-from secretaria.workers.shared import handback_log  # noqa: E402
+from secretaria.workers.shared import handback_log, sentinels  # noqa: E402
 
 
 @pytest_asyncio.fixture
@@ -453,3 +453,146 @@ async def test_the_event_is_logged_before_the_flow_state_is_written(
 
     (event,) = _events(log)
     assert event["landing_step"] == "awaiting_service"
+
+
+# --------------------------------------------------------------------------
+# manage_existing_appointment
+# --------------------------------------------------------------------------
+
+
+async def test_manage_logs_the_step_it_landed_on(db, _captured_bubbles, log) -> None:
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+    await _seed_future_appointment(
+        db, tenant, patient, start_at=datetime.now(UTC) + timedelta(days=2)
+    )
+
+    await tasks._handle_manage_appointment(
+        _reply_ctx(conversation), "cancel", tenant, _snapshots([ana, bruno]), patient.wa_id
+    )
+
+    (event,) = _events(log)
+    assert event["source_tool"] == "manage_existing_appointment"
+    assert event["landing_step"] == "manage_cancel_confirm"
+    assert event["supplied"] == ["action"]
+    assert event["accepted"] == ["action"]
+    assert event["fallback"] is None
+    assert event["topology"] == "multi"
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+    assert conv.flow_step == event["landing_step"]
+
+
+async def test_manage_with_two_appointments_lands_on_the_pick_list(
+    db, _captured_bubbles, log
+) -> None:
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+    now = datetime.now(UTC)
+    await _seed_future_appointment(db, tenant, patient, start_at=now + timedelta(days=1))
+    await _seed_future_appointment(db, tenant, patient, start_at=now + timedelta(days=5))
+
+    await tasks._handle_manage_appointment(
+        _reply_ctx(conversation), "cancel", tenant, _snapshots([ana, bruno]), patient.wa_id
+    )
+
+    (event,) = _events(log)
+    assert event["landing_step"] == "manage_pick_cancel"
+    assert event["fallback"] is None
+
+
+async def test_manage_with_nothing_to_manage_lands_on_the_menu_and_says_why(
+    db, _captured_bubbles, log
+) -> None:
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+
+    await tasks._handle_manage_appointment(
+        _reply_ctx(conversation), "reschedule", tenant, _snapshots([ana, bruno]), patient.wa_id
+    )
+
+    (event,) = _events(log)
+    assert event["landing_step"] == "menu"
+    assert event["fallback"] == "no_appointments"
+    assert event["accepted"] == ["action"]
+
+
+async def test_manage_with_an_unknown_action_is_a_bad_sentinel(db, _captured_bubbles, log) -> None:
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+
+    await tasks._handle_manage_appointment(
+        _reply_ctx(conversation), "excluir", tenant, _snapshots([ana, bruno]), patient.wa_id
+    )
+
+    (event,) = _events(log)
+    assert event["fallback"] == "bad_sentinel"
+    assert event["landing_step"] == "menu"
+    assert event["supplied"] == []
+    assert isinstance(_captured_bubbles[0], MenuBubble)
+
+
+async def test_manage_without_a_tenant_is_counted_not_silent(db, _captured_bubbles, log) -> None:
+    _tenant, ana, bruno, patient, conversation = await _seed(db)
+
+    await tasks._handle_manage_appointment(
+        _reply_ctx(conversation), "cancel", None, _snapshots([ana, bruno]), patient.wa_id
+    )
+
+    (event,) = _events(log)
+    assert event["fallback"] == "no_tenant"
+    assert event["landing_step"] is None
+    assert event["tenant_id"] is None
+    assert _captured_bubbles == []
+
+
+async def test_manage_without_flows_is_counted_not_silent(
+    db, _captured_bubbles, log, monkeypatch
+) -> None:
+    # `flows_enabled` is always True today; the guard is defensive and still has to count.
+    monkeypatch.setattr(sentinels, "flows_enabled", lambda _tenant: False)
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+
+    await tasks._handle_manage_appointment(
+        _reply_ctx(conversation), "cancel", tenant, _snapshots([ana, bruno]), patient.wa_id
+    )
+
+    (event,) = _events(log)
+    assert event["fallback"] == "without_flows"
+    assert event["landing_step"] is None
+    assert _captured_bubbles == []
+
+
+async def test_manage_for_a_conversation_without_a_patient_is_counted_not_silent(
+    db, _captured_bubbles, log
+) -> None:
+    tenant, ana, bruno, patient, _conversation = await _seed(db)
+    orphan = tasks._ReplyContext(
+        conversation_id=uuid4(), patient_ref=patient.wa_id, inbound_body="tanto faz"
+    )
+
+    await tasks._handle_manage_appointment(
+        orphan, "cancel", tenant, _snapshots([ana, bruno]), patient.wa_id
+    )
+
+    (event,) = _events(log)
+    assert event["fallback"] == "no_patient"
+    assert event["landing_step"] is None
+    assert _captured_bubbles == []
+
+
+async def test_a_failure_before_the_landing_is_known_propagates_and_logs_no_event(
+    db, _captured_bubbles, log, monkeypatch
+) -> None:
+    """Decision (plan P1): an infrastructure failure before the landing is known is not a
+    landing. It propagates exactly as before (the job fails, the turn safety net answers);
+    the gap between `ai_run_agent_manage_appointment` and this event is how it is spotted."""
+
+    async def _db_down(*_args, **_kwargs):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(workers_ns, "load_upcoming_appointments", _db_down)
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await tasks._handle_manage_appointment(
+            _reply_ctx(conversation), "cancel", tenant, _snapshots([ana, bruno]), patient.wa_id
+        )
+
+    assert _events(log) == []
