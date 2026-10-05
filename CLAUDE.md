@@ -142,7 +142,7 @@ neither" do `README.md`.
 
 `docs/CHECKPOINT_portal_mensagens_recentes.md` — TASK-028: a API da conversa do Portal devolve as mensagens MAIS RECENTES (`has_more`, `before`); commitado, não deployado; prova ao vivo pendente; o Portal ainda precisa de um ajuste de rolagem no front ("Dependência do front").
 
-`docs/CHECKPOINT_clinic_context.md` — TASK-025: endereço e fatos da clínica (`clinic_facts`) no prompt da LLM, tool `get_service_info` e completude do contexto; commitado, não deployado; migração `e5a1c9d3b7f2` antes de API + worker.
+`docs/CHECKPOINT_clinic_context.md` — TASK-025: endereço e fatos da clínica (`clinic_facts`) no prompt da LLM, tool `get_service_info` e completude do contexto; mesclado em main e deployado em 2026-10-05; correção das orientações por serviço em clínicas com 2+ profissionais registrada no checkpoint.
 
 `docs/` é a fonte de verdade deste repo (exemplo do padrão: `docs/CHECKPOINT_plugins.md`). Regra
 geral de quando/como atualizar (CHECKPOINT, âncoras estáveis) em `AI_WORKFLOW.md` — aqui só o que
