@@ -2,10 +2,14 @@
 
 Spec: `C:\TECH\BRAIN\tasks\TASK-025\SPEC.md` (BRAIN, fora deste repo). Plano: `tasks/TASK-025/` (BRAIN). Executado em 2026-10-04.
 
-**Estado: local + commitado, NÃO mesclado em `main`, NÃO pushado, NÃO deployado, migração NÃO aplicada em banco real.**
-Branch `task/TASK-025-clinic-context` (base `main@1b3b7a6`). Commits: `4a0edd4` (arquivo de referência do prompt),
-`527155f` (migração `e5a1c9d3b7f2`), `95a88c5` (código + testes). A parte de frontend (fatia `clinicFacts` na tela `/contexto`
-do Brain-Message-Frontend) é a Parte B do mesmo plano e fica em outro repo.
+**Estado: pronto e validado, local + commitado, NÃO mesclado em `main`, NÃO pushado, NÃO deployado, migração NÃO aplicada em nenhum Postgres real (não havia banco disponível).**
+Branch `task/TASK-025-clinic-context` (base `main@1b3b7a6`, HEAD `c029714`). Commits: `4a0edd4` (arquivo de referência do
+prompt), `527155f` (migração `e5a1c9d3b7f2`), `95a88c5` (código + testes), `93702ad` (este documento), `b20de90` (leitores
+tolerantes a `clinic_facts` malformado + higiene dos testes), `c029714` (correções de docs). Suíte completa: 2948 passed,
+10 skipped, 0 falhas (base `1b3b7a6`: 2855); `ruff` limpo; prompt de referência byte a byte idêntico para um tenant sem
+endereço, sem fatos e sem orientações de serviço. Prova no navegador em 2026-10-05 contra os routers reais do hub DESTE
+backend (SQLite em memória) + o export estático do frontend — não contra o ambiente deployado. A parte de frontend (fatia
+`clinicFacts` na tela `/contexto` do Brain-Message-Frontend) é a Parte B do mesmo plano e fica em outro repo.
 
 ## 1. O que mudou para o paciente
 
@@ -97,13 +101,17 @@ arredondado. Determinística, sem LLM, sem gate de entitlement.
   `get_service_info` com duas configurações (sem vazamento entre clínicas), `PUT` (ausente preserva / `null` limpa / objeto
   substitui / acima do limite é 422), completude e mensagens prontas.
 - TDD: os testes novos falharam antes do código (11 falhas + 2 erros de coleta na base `1b3b7a6`) e passaram depois (48).
-- Suíte completa: **2903 passed, 10 skipped, 0 falhas** (base `1b3b7a6`: 2855 passed, 10 skipped) — exatamente +48.
+- Suíte completa na primeira rodada (HEAD `95a88c5`): **2903 passed, 10 skipped, 0 falhas** (base `1b3b7a6`: 2855 passed,
+  10 skipped) — exatamente +48. Após a revisão final (`b20de90`, HEAD `c029714`): **2948 passed, 10 skipped, 0 falhas**.
 - Dois testes antigos fixavam o conjunto de tools; só a constante esperada ganhou `get_service_info`
   (`tests/test_agent_tool_enforcement.py::_SCOPE_FREE_TOOLS`, `tests/test_agent_capability_cache.py::test_build_agent_base_tools_unchanged`).
 - `ruff check src tests`: limpo. Cabeça única do alembic: `e5a1c9d3b7f2`. SQL offline da migração conferido
   (`ALTER TABLE tenants ADD COLUMN clinic_facts JSON` / `DROP COLUMN`).
+- Prova no navegador (2026-10-05): export estático do frontend falando com os routers reais do hub deste backend (SQLite em
+  memória, não o ambiente deployado). Cobre o ciclo de salvar/limpar `clinic_facts` e a rota de completude; detalhes no
+  checkpoint do frontend (`docs/CHECKPOINT_contexto_clinic_facts.md`, Brain-Message-Frontend).
 - **Não feito:** migração aplicada em banco real (sem Postgres descartável disponível; o SQLite dos testes cria o schema por
-  `create_all`); prova ao vivo com a LLM respondendo com os fatos; Parte B (frontend).
+  `create_all`); prova ao vivo com a LLM respondendo com os fatos.
 
 ## 6. Ordem de deploy e reversão
 
@@ -124,8 +132,9 @@ Cuidados antes de rodar a migração:
 Reversão:
 
 1. Volte API e worker ao código anterior: redeploy do commit/imagem anterior a `95a88c5` (ex.: `1b3b7a6`) nos dois serviços.
-   Se for por `git revert`, reverta SÓ `95a88c5` (é ele que mapeia a coluna) e NÃO reverta `527155f`, para o script da
-   migração continuar no repositório e o `alembic upgrade head` seguinte não quebrar.
+   Se for por `git revert`, reverta `c029714` (docs, opcional), `b20de90` e `95a88c5`, nessa ordem (o mais novo primeiro; é o
+   `95a88c5` que mapeia a coluna), e NUNCA `527155f` (a migração), para o script da migração continuar no repositório e o
+   `alembic upgrade head` seguinte não quebrar.
 2. Normalmente pare aí: o código antigo ignora a coluna nullable e os fatos já salvos ficam preservados.
 3. Só se for preciso derrubar a coluna (apaga todos os `clinic_facts` salvos), com API e worker já no código antigo e a partir
    de um checkout que ainda tenha `migrations/versions/e5a1c9d3b7f2_tenant_clinic_facts.py`:
@@ -134,6 +143,23 @@ Reversão:
 ## 7. Pendências
 
 - Ingestão dos fatos por site/documento/texto: TASK-026 (esta tarefa não escreve `clinic_facts` por conta própria).
-- Parte B: fatia `clinicFacts` e cartão "O que falta?" na tela `/contexto` do Brain-Message-Frontend (contrato da §3).
+- Parte B: fatia `clinicFacts` e cartão "O que falta?" na tela `/contexto` do Brain-Message-Frontend (contrato da §3) — construída
+  e validada no branch `task/TASK-025-clinic-context-ui`, não mesclada; vai por último no deploy (ver o checkpoint dela).
 - Aplicar a migração em um Postgres descartável antes do deploy real.
 - Merge em `main` e push/deploy: exigem pedido explícito do dono.
+
+## 8. Limites conhecidos
+
+Conhecidos e aceitos nesta entrega (nenhum é regressão; só aparecem com dado fora do esquema ou por desenho):
+
+- `GET /tenants/me/config` e as respostas do `PUT` falham na validação de resposta (500) se `clinic_facts` ou `address` estiver
+  gravado como não-dict, porque `TenantConfigRead.clinic_facts` é tipado `dict | None`. Só se chega nisso escrevendo fora do
+  esquema — vira relevante quando a TASK-026 adicionar um segundo escritor.
+- Os fatos escalares (`parking`, `how_to_arrive`, `cancellation_policy`, `accessibility`, `notes`) não têm guarda de tipo no
+  prompt: um valor que não seja texto é impresso como seu `repr`.
+- O checklist (`compute_completeness`) conta `payment_methods` como feito mesmo que o valor gravado seja inutilizável (por
+  exemplo, uma string).
+- Os máximos do esquema (>12.000 caracteres somados) são maiores que o bloco do prompt (1.800) e nada avisa o gestor do que foi
+  cortado; o frontend mostra um aviso de uma linha. Um medidor usado/orçamento exigiria um endpoint novo.
+- Um tenant que já tem endereço passa a receber o bloco "SOBRE A CLÍNICA" no deploy (previsto na SPEC §5), sem feature flag. O
+  fecho promete "vai confirmar com a equipe" e nada acompanha essa promessa depois (fora de escopo, SPEC "A").
