@@ -337,6 +337,16 @@ class Settings(BaseSettings):
         base = self.BRAIN_MESSAGE_PUBLIC_URL.strip().rstrip("/")
         return f"{base}/agenda" if base else ""
 
+    # The staff chat console on the same portal, linked from the "conversa
+    # aguardando atendimento humano" mail (services/handoff_notification.py)
+    # with `?conversationId=<id>` appended, which opens that very thread. The
+    # trailing slash is the static export's own route form. Empty base = the
+    # plain "abra o console" sentence and no link.
+    @property
+    def STAFF_CONSOLE_URL(self) -> str:
+        base = self.BRAIN_MESSAGE_PUBLIC_URL.strip().rstrip("/")
+        return f"{base}/chat/" if base else ""
+
     # --- Reminders plugin (CORE capability, billed per-send via the reminders
     # Stripe meter outside the 24h window — see plugins/reminders.py) ---
     # Name of the pre-approved Meta utility (HSM) template used for reminders

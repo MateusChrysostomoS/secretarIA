@@ -439,17 +439,26 @@ _TEMPLATES: dict[str, EmailTemplate] = {
         ),
     ),
     # Clinic-side record of a booking, identified without patient PII.
+    #
+    # Identified the way the clinic thinks about it - which doctor, which
+    # service, when - plus the agenda link (`agenda_line`, DOCTOR_AGENDA_URL).
+    # The appointment id used to head the list ("Agendamento: <uuid>"), which
+    # nobody at a clinic can read; it survives only as the footer reference,
+    # for support. `professional_line`/`agenda_line` arrive pre-rendered
+    # (empty when unknown), the same flat-template rule as the lines below.
     "appointment_booked_clinic": EmailTemplate(
         subject="Nova consulta marcada — {when}",
         body=(
             "Olá!\n\n"
             "Uma consulta foi marcada na {clinic_name}:\n\n"
-            "Agendamento: {appointment_id}\n"
+            "{professional_line}"
             "Serviço: {service}\n"
             "Quando: {when}\n"
             "{insurance_line}"
             "\n"
-            "— Equipe SecretarIA"
+            "{agenda_line}"
+            "— Equipe SecretarIA\n\n"
+            "Ref.: {appointment_id}"
         ),
     ),
     # TASK-032 R2: a Portal patient's appointment reminder (workers/reminder_engine.py).
@@ -697,16 +706,22 @@ _TEMPLATES: dict[str, EmailTemplate] = {
     # patient content — only the reason the agent gave (an enum rendered as a
     # sentence). The secretary opens the console to read the chat, same stance
     # as `appointment_booked_professional`.
+    #
+    # The clinic by NAME and, when STAFF_CONSOLE_URL is set, a link straight to
+    # the conversation (`console_line`, pre-rendered by
+    # services/handoff_notification.py, which also carries the plain
+    # instruction when there is no link). It used to print the tenant and
+    # conversation UUIDs as if they were information; the conversation id is
+    # now only the footer reference.
     "human_handoff_alert": EmailTemplate(
-        subject="Conversa aguardando atendimento humano",
+        subject="Conversa aguardando atendimento humano — {clinic_name}",
         body=(
             "Olá!\n\n"
-            "Uma conversa na SecretarIA foi passada para atendimento humano.\n\n"
-            "Cl\u00ednica: {tenant_id}\n"
-            "Conversa: {conversation_id}\n"
+            "Uma conversa na {clinic_name} foi passada para atendimento humano.\n\n"
             "Motivo: {reason}\n\n"
-            "Abra o console de atendimento para responder ao paciente.\n\n"
-            "— Equipe SecretarIA"
+            "{console_line}"
+            "— Equipe SecretarIA\n\n"
+            "Ref. da conversa: {conversation_id}"
         ),
     ),
 }

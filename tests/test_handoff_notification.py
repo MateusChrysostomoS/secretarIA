@@ -173,15 +173,64 @@ async def test_deduplicates_case_insensitive_recipient(sent, monkeypatch):
         professional_id=doctor_id, reason="could_not_help") == 1
 
 
-async def test_email_variables_only_contain_ids_and_reason(sent):
+async def test_email_variables_carry_no_patient_content(sent):
     tenant, conv = _tenant(), uuid4()
     await hn.notify_human_handoff(tenant=tenant, conversation_id=conv,
         professional_id=None, reason="private patient text")
     variables = sent[0][2]
-    assert set(variables) == {"tenant_id", "conversation_id", "reason"}
-    assert variables["tenant_id"] == str(tenant.id)
+    assert set(variables) == {"clinic_name", "conversation_id", "reason", "console_line"}
     assert variables["conversation_id"] == str(conv)
     assert "private patient text" not in str(variables)
+
+
+def _render(variables):
+    from secretaria.services.email import _TEMPLATES, _SafeDict
+
+    tpl = _TEMPLATES[hn.TEMPLATE_ID]
+    safe = _SafeDict(variables)
+    return tpl.subject.format_map(safe), tpl.body.format_map(safe)
+
+
+async def test_email_names_the_clinic_and_keeps_ids_out_of_the_body(sent, monkeypatch):
+    """Live 2026-10-05: the mail read "Clínica: <uuid> Conversa: <uuid>"."""
+    from secretaria.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "BRAIN_MESSAGE_PUBLIC_URL", "", raising=False)
+    tenant = SimpleNamespace(
+        id=uuid4(), clinic_name="Chrysostomo For Eyes", contact_email="clinica@example.com"
+    )
+    conv = uuid4()
+    await hn.notify_human_handoff(tenant=tenant, conversation_id=conv,
+        professional_id=None, reason="patient_requested_human")
+    subject, body = _render(sent[0][2])
+    assert "Chrysostomo For Eyes" in subject
+    assert "Uma conversa na Chrysostomo For Eyes" in body
+    assert str(tenant.id) not in body
+    assert "Abra o console de atendimento" in body
+    # The conversation id survives only as the last line (support reference).
+    assert body.rstrip().splitlines()[-1] == f"Ref. da conversa: {conv}"
+    assert body.count(str(conv)) == 1
+
+
+async def test_console_url_links_straight_to_the_conversation(sent, monkeypatch):
+    from secretaria.config import get_settings
+
+    monkeypatch.setattr(
+        get_settings(), "BRAIN_MESSAGE_PUBLIC_URL", "https://console.example.com/", raising=False
+    )
+    conv = uuid4()
+    await hn.notify_human_handoff(tenant=_tenant(), conversation_id=conv,
+        professional_id=None, reason="could_not_help")
+    _subject, body = _render(sent[0][2])
+    assert f"https://console.example.com/chat/?conversationId={conv}" in body
+
+
+def test_console_url_comes_from_the_portal_base():
+    from secretaria.config import Settings
+
+    settings = Settings(_env_file=None, BRAIN_MESSAGE_PUBLIC_URL=" https://portal.example/ ")
+    assert settings.STAFF_CONSOLE_URL == "https://portal.example/chat/"
+    assert Settings(_env_file=None, BRAIN_MESSAGE_PUBLIC_URL="").STAFF_CONSOLE_URL == ""
 
 
 async def test_sender_exception_retries_and_releases_claim(sent, monkeypatch):

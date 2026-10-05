@@ -8,11 +8,13 @@ changes. Mail happens after commit; successful recipient claims survive replay.
 import asyncio
 import hashlib
 from datetime import UTC, datetime
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
+from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import Conversation, HandoverState, ProcessedEvent
@@ -78,6 +80,27 @@ async def _current_occurrence(tenant_id: UUID, conversation_id: UUID) -> UUID:
     return current or uuid5(NAMESPACE_URL, f"humanhandoff-legacy:{tenant_id}:{conversation_id}")
 
 
+def _clinic_name(tenant) -> str:
+    return (getattr(tenant, "clinic_name", None) or "").strip() or "sua clínica"
+
+
+def _console_line(conversation_id) -> str:
+    """The "open this conversation" sentence, linked when the console URL is known.
+
+    `STAFF_CONSOLE_URL` is the staff chat console (Brain-Message-Frontend
+    `/chat`), which opens a thread from its `conversationId` query parameter -
+    the same id this service gives the console. Unset (the default) keeps the
+    plain instruction: a mail with no link is fine, a broken link is not.
+    """
+    base = (get_settings().STAFF_CONSOLE_URL or "").strip()
+    if not base:
+        return "Abra o console de atendimento para responder ao paciente.\n\n"
+    parts = urlsplit(base)
+    query = urlencode([*parse_qsl(parts.query), ("conversationId", str(conversation_id))])
+    link = urlunsplit(parts._replace(query=query))
+    return f"Para responder ao paciente, abra a conversa no console:\n{link}\n\n"
+
+
 def _ledger_key(occurrence_id: UUID) -> str:
     return f"humanhandoff:{occurrence_id}"
 
@@ -124,9 +147,13 @@ async def notify_human_handoff(
             except Exception as exc:
                 logger.warning("human_handoff_contact_lookup_failed", error_type=type(exc).__name__)
         variables = {
-            "tenant_id": str(tenant.id),
+            # Who and where, in words the secretary reads: the clinic's NAME and
+            # a link to the conversation itself. The conversation id survives
+            # only as the mail's footer reference (support), never as a field.
+            "clinic_name": _clinic_name(tenant),
             "conversation_id": str(conversation_id),
             "reason": _REASON_TEXT.get(reason, _REASON_TEXT["could_not_help"]),
+            "console_line": _console_line(conversation_id),
         }
         occurrence_id = occurrence_id or await _current_occurrence(tenant.id, conversation_id)
         window_key = _ledger_key(occurrence_id)

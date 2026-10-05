@@ -21,6 +21,7 @@ from uuid import UUID
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
+from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import Patient, ProcessedEvent, Professional
@@ -90,13 +91,50 @@ async def _insurance_line(tenant, appointment) -> str:
     return "Convênio informado; consulte o agendamento.\n" if insurance else ""
 
 
-def _variables(tenant, patient, appointment, insurance_line: str) -> dict:
+async def professional_line(tenant, appointment) -> str:
+    """The "Profissional: <name>" line for the appointment's owner, or "" when unknown.
+
+    Tenant-scoped (a mis-set id never names another clinic's doctor) and
+    best-effort: a failed lookup only drops the line.
+    """
+    professional_id = getattr(appointment, "professional_id", None)
+    if professional_id is None:
+        return ""
+    try:
+        async with async_session_factory() as session:
+            name = await session.scalar(
+                select(Professional.name).where(
+                    Professional.id == professional_id,
+                    Professional.tenant_id == tenant.id,
+                )
+            )
+    except Exception as exc:
+        logger.warning(
+            "booking_notification_professional_lookup_failed", error_type=type(exc).__name__
+        )
+        return ""
+    name = (name or "").strip()
+    return f"Profissional: {name}\n" if name else ""
+
+
+def agenda_line() -> str:
+    """The clinic's agenda screen (DOCTOR_AGENDA_URL), or "" when not configured."""
+    url = (get_settings().DOCTOR_AGENDA_URL or "").strip()
+    return f"Ver na agenda:\n{url}\n\n" if url else ""
+
+
+def _variables(
+    tenant, patient, appointment, insurance_line: str, professional: str = ""
+) -> dict:
     return {
         "clinic_name": tenant.clinic_name,
+        # Footer reference only (support) - see the clinic template.
         "appointment_id": str(appointment.id),
         "service": appointment.appointment_type or "Consulta",
         "when": _local_when(appointment.start_at, tenant.timezone),
         "insurance_line": insurance_line,
+        "professional_line": professional,
+        "agenda_line": agenda_line(),
     }
 
 
@@ -171,7 +209,9 @@ async def _send_once(
 async def _post_booking(ctx: PostBookingContext) -> None:
     tenant, patient, appointment = ctx.tenant, ctx.patient, ctx.appointment
     insurance_line = await _insurance_line(tenant, appointment)
-    variables = _variables(tenant, patient, appointment, insurance_line)
+    variables = _variables(
+        tenant, patient, appointment, insurance_line, await professional_line(tenant, appointment)
+    )
 
     clinic_email = (getattr(tenant, "contact_email", None) or "").strip()
     if clinic_email:
