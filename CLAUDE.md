@@ -23,6 +23,7 @@ Shipped product configures each tenant with at minimum:
 - **Language**: conversation language (pt-BR default, en, es, ...)
 - **Google Calendar**: encrypted `refresh_token` + `calendar_id` (per tenant, obtained via a hosted OAuth onboarding flow, not the dev `scripts/gcal_auth.py`)
 - **WhatsApp Coexistence**: `phone_number_id` + `access_token` (already on `tenants`)
+- **Clinic facts** (TASK-025): `clinic_facts` (JSON, nullable: parking, how to arrive, payment methods, cancellation policy, documents, accessibility, FAQ, notes) — quoted by the LLM in the "SOBRE A CLÍNICA" prompt block; the address stays in `address`
 
 All of the above now lives on `Tenant` (and, for the professional-level fields — specialty/about/context message/business hours/services/Calendar credential — on `Professional`, one or more rows per tenant). The schema migration, onboarding flow, and encryption at rest are DONE; see `docs/CHECKPOINT_onboarding_multiprofessional.md` for the per-professional layer and `docs/CHECKPOINT_plugins.md` for the encryption-at-rest / multi-tenant round that came before it.
 
@@ -140,6 +141,8 @@ neither" do `README.md`.
 `docs/CHECKPOINT_mvp_portal.md` — TASK-021: contexto/rascunho da LLM, handoff e notificações; não deployado; validação e pendências registradas.
 
 `docs/CHECKPOINT_portal_mensagens_recentes.md` — TASK-028: a API da conversa do Portal devolve as mensagens MAIS RECENTES (`has_more`, `before`); commitado, não deployado; prova ao vivo pendente; o Portal ainda precisa de um ajuste de rolagem no front ("Dependência do front").
+
+`docs/CHECKPOINT_clinic_context.md` — TASK-025: endereço e fatos da clínica (`clinic_facts`) no prompt da LLM, tool `get_service_info` e completude do contexto; commitado, não deployado; migração `e5a1c9d3b7f2` antes de API + worker.
 
 `docs/` é a fonte de verdade deste repo (exemplo do padrão: `docs/CHECKPOINT_plugins.md`). Regra
 geral de quando/como atualizar (CHECKPOINT, âncoras estáveis) em `AI_WORKFLOW.md` — aqui só o que
