@@ -539,6 +539,14 @@ async def _route_inbound_turn(
                 conversation_id=str(conversation.id),
                 tenant_id=str(tenant.id),
             )
+        # The reply below IS the service menu, so an idle conversation is now
+        # AT the menu - exactly as `/menu` and the opening leave it. Left IDLE,
+        # the patient's first free-text request ("quero marcar com o Dr. X")
+        # only re-presented the menu instead of reaching the LLM (live,
+        # 2026-10-05). A conversation that was doing something else is still
+        # left untouched, per the paragraph above.
+        if conversation.flow_state in (None, FlowState.IDLE):
+            conversation.flow_state = FlowState.MENU
         # The FIRST message of the conversation to carry buttons.
         return _ReplyContext(
             channel=channel,

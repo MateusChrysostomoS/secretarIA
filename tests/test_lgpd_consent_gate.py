@@ -53,6 +53,7 @@ from secretaria.core.whatsapp_limits import EMOJI_SCHEDULE, decorate  # noqa: E4
 from secretaria.models import (  # noqa: E402
     ConsentEvent,
     Conversation,
+    FlowState,
     HandoverState,
     Patient,
     Tenant,
@@ -263,6 +264,23 @@ async def test_acceptance_is_idempotent(db) -> None:
     assert (await _patient(db)).lgpd_accepted_at == stamped
     assert second.greeting_override == first.greeting_override
     assert second.greeting_buttons == first.greeting_buttons
+
+
+async def test_acceptance_leaves_an_idle_conversation_at_the_menu(db) -> None:
+    """The acceptance reply IS the service menu, so the conversation is AT it.
+
+    Left IDLE (live, 2026-10-05), the patient's first free-text request after
+    consent only re-presented the menu: free text is delegated to the LLM from
+    MENU, but merely re-answered with the menu from IDLE.
+    """
+    tenant = await _seed_tenant(db)
+    await _open(tenant)
+
+    await _inbound(tenant, "✅ Concordo", "wamid.accept")
+
+    async with db() as session:
+        conversation = await session.scalar(select(Conversation))
+    assert conversation.flow_state == FlowState.MENU
 
 
 # --------------------------------------------------------------------------
