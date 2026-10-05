@@ -128,6 +128,8 @@ def _reactivation_offer(
     body: str | None,
     last_activity_at: datetime | None,
     origin: FlowState,
+    *,
+    channel: str,
 ) -> _ReplyContext | None:
     """Maybe offer a returning patient to resume, after a silence gap.
 
@@ -144,6 +146,12 @@ def _reactivation_offer(
     just-expired LLM conversation look like it had nothing to resume, and the
     patient would be silently rerouted instead of asked. The caller passes it
     explicitly for exactly that reason.
+
+    `channel` is required for the same reason as on
+    `_pending_identity_reactivation_offer`: the offer is a reply, and the
+    `_ReplyContext` default is WhatsApp. A Portal patient back after the gap
+    had their "quer continuar?" handed to the WhatsApp sender and saw nothing
+    (live test, 2026-10-05) - `channel-aware-dispatch`.
     """
     if last_activity_at is None:
         return None
@@ -179,6 +187,7 @@ def _reactivation_offer(
         prompt = reactivation_continue_prompt(tenant)
         body_text = f"{greeting}\n\n{prompt}".strip() if greeting else prompt
         return _ReplyContext(
+            channel=channel,
             conversation_id=conversation.id,
             patient_ref=wa_id,
             inbound_body=body or "",
@@ -195,6 +204,7 @@ def _reactivation_offer(
     if not greeting or not reactivation_enabled(tenant):
         return None
     return _ReplyContext(
+        channel=channel,
         conversation_id=conversation.id,
         patient_ref=wa_id,
         inbound_body=body or "",

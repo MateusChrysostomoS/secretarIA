@@ -827,6 +827,7 @@ async def _route_inbound_turn(
             body,
             last_activity_at,
             resumable_origin,
+            channel=channel,
         )
         if offer is not None:
             return offer

@@ -947,6 +947,64 @@ async def test_an_abandoned_code_step_can_stop_without_touching_the_booking(db) 
         assert await session.get(Appointment, appointment.id) is not None
 
 
+async def _age_conversation(db, hours: int) -> None:
+    """Push every message `hours` into the past: `last_activity_at` is
+    max(Message.created_at), read before the next inbound is written."""
+    async with db() as session:
+        async with session.begin():
+            for message in (await session.scalars(select(Message))).all():
+                message.created_at = datetime.now(UTC) - timedelta(hours=hours)
+
+
+async def test_a_returning_portal_patient_gets_the_resume_offer_on_the_portal(db) -> None:
+    """The generic "quer continuar?" leaves by Brain-Message, not by WhatsApp.
+
+    Live test, 2026-10-05: a Portal patient back after 6h of silence with a
+    resumable state (LLM here) never saw the question - `_reactivation_offer`
+    built its reply on the `_ReplyContext` default channel and `_reply_sender`
+    handed it to the WhatsApp client. The WhatsApp client is replaced by a
+    recorder so the old behaviour fails here instead of reaching Meta.
+    """
+    tenant = await _seed_tenant(db)
+    await _bm_turn(tenant, "oi")
+    await _bm_turn(tenant, EMAIL)
+    await _bm_turn(tenant, NAME)
+    await _bm_turn(tenant, CONSENT_BUTTON_LABEL)
+    async with db() as session:
+        async with session.begin():
+            conversation = await session.scalar(
+                select(Conversation).where(Conversation.tenant_id == tenant.id)
+            )
+            conversation.flow_state = FlowState.LLM
+    await _age_conversation(db, hours=7)
+
+    whatsapp_sends: list[str] = []
+
+    class _WhatsAppRecorder:
+        persists_outbound = False
+
+        async def send_text_message(self, to, body):
+            whatsapp_sends.append(body)
+            return {}
+
+        async def send_buttons(self, to, body, buttons):
+            whatsapp_sends.append(body)
+            return {}
+
+    original = tasks._tenant_client
+    workers_ns._tenant_client = lambda tenant_, waba_token: _WhatsAppRecorder()
+    try:
+        reply = await _bm_turn(tenant, "oi de novo")
+    finally:
+        workers_ns._tenant_client = original
+
+    assert reply is not None and reply.channel == CHANNEL_BRAIN_MESSAGE
+    assert whatsapp_sends == []
+    offer = (await _outbound(db, tenant))[-1]
+    assert "última conversa" in offer
+    assert "✅ Sim" in offer and "❌ Não" in offer
+
+
 # --------------------------------------------------------------------------
 # 7. The post-booking hook, and the PreCheck handoff beside it
 # --------------------------------------------------------------------------
