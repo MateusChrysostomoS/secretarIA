@@ -68,7 +68,8 @@ from secretaria.services.attendee import (
     parse_attendee_name,
     real_attendee_name,
 )
-from secretaria.services.booking_hold import BookingGate, overlaps
+from secretaria.services.availability import available_day_starts, without_holds
+from secretaria.services.booking_hold import BookingGate
 from secretaria.services.booking_scope import (
     canonical_service_name,
     resolve_booking_owner_id,
@@ -468,6 +469,20 @@ async def _hold_windows(professional_id: UUID | None) -> list[tuple[datetime, da
     if gate is None:
         return []
     return await gate.busy_windows(professional_id)
+
+
+def _hold_owner(conversation: Conversation, professionals: list | None) -> UUID | None:
+    """WHOSE holds a slot list must hide: the agenda a booking would be placed on.
+
+    The doctor the conversation selected; with none selected, the clinic's sole active
+    professional - because that is the `professional_id` a hold is PLACED with
+    (`_handle_confirmation` -> `resolve_booking_owner_id`). Looking holds up under None on
+    a single-professional clinic missed every one of them (TASK-030 P2).
+    """
+    selected = _selected_professional_id(conversation)
+    if selected is not None:
+        return selected
+    return resolve_booking_owner_id(professionals, None)
 
 
 @dataclass
@@ -2816,10 +2831,13 @@ async def enter_day_picker(
     if calendar is None:
         return _calendar_unavailable(conversation, branch, step)
     try:
-        days = await calendar.list_available_days(
-            start_day=datetime.now(calendar.tzinfo),
-            days=DAY_PICKER_WINDOW_DAYS,
-            slot_minutes=duration_minutes,
+        # No holds on purpose: the picker lists every day with free Google time and the
+        # slot step hides held slots (services/availability.py's module note).
+        days = await available_day_starts(
+            calendar,
+            start=datetime.now(calendar.tzinfo),
+            window_days=DAY_PICKER_WINDOW_DAYS,
+            duration_minutes=duration_minutes,
         )
     except CalendarUnavailableError:
         return _calendar_unavailable(conversation, branch, step)
@@ -2877,19 +2895,6 @@ async def enter_day_picker(
     )
 
 
-def _slot_dt(raw, calendar: CalendarService | None) -> datetime:
-    """A slot's start as an AWARE datetime, whatever shape the calendar gave.
-
-    `list_free_slots` hands back whatever `CalendarService` built; a naive
-    value is read in the clinic's own timezone, which is the only reading that
-    can be right - the slot was computed from that clinic's business hours.
-    """
-    value = raw if isinstance(raw, datetime) else datetime.fromisoformat(str(raw))
-    if value.tzinfo is None and calendar is not None:
-        return value.replace(tzinfo=calendar.tzinfo)
-    return value
-
-
 async def _enter_slot_picker(
     conversation: Conversation,
     tenant: Tenant,
@@ -2923,23 +2928,12 @@ async def _enter_slot_picker(
     # both branches (first booking and reschedule) - a reservation half the
     # surfaces ignore is not a reservation. The patient's own hold is excluded
     # upstream, so their own choice stays visible to them.
-    reserved = await _hold_windows(_selected_professional_id(conversation))
+    reserved = await _hold_windows(_hold_owner(conversation, professionals))
     if reserved:
         before = len(slots)
-        slots = [
-            slot
-            for slot in slots
-            if not any(
-                overlaps(
-                    _slot_dt(slot["start"], calendar),
-                    _slot_dt(slot["start"], calendar)
-                    + timedelta(minutes=duration_minutes or 0),
-                    held_start,
-                    held_end,
-                )
-                for held_start, held_end in reserved
-            )
-        ]
+        slots = without_holds(
+            slots, reserved, duration_minutes=duration_minutes, tz=calendar.tzinfo
+        )
         if len(slots) != before:
             logger.info(
                 "flow_slots_hidden_by_hold",
