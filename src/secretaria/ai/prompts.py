@@ -65,7 +65,12 @@ def _format_appointment_types(types: list, default_duration: int) -> str:
         dur = t.duration_min
         price = f" - {t.price}" if getattr(t, "price", None) else ""
         desc = f" — {t.description}" if t.description else ""
-        lines.append(f"- {t.name} ({dur} min){price}{desc}")
+        guide = (
+            " (há orientações: use get_service_info)"
+            if getattr(t, "requirements", None) or getattr(t, "long_description", None)
+            else ""
+        )
+        lines.append(f"- {t.name} ({dur} min){price}{desc}{guide}")
     return "\n".join(lines)
 
 
@@ -254,6 +259,73 @@ def _format_conversation_state(config: TenantRuntimeConfig) -> str:
     )
 
 
+# TASK-025. The block is bounded: whatever the clinic typed, it costs at most this many
+# characters of prompt. Items are rendered in priority order and the first one that does not
+# fit ends the list, so a full block drops the FAQ and the free notes, never the address.
+CLINIC_FACTS_BUDGET = 1800
+_CLINIC_FACTS_HEADING = "\n\n================ SOBRE A CLÍNICA ================\n"
+_CLINIC_FACTS_FOOTER = (
+    "\nSe a informação pedida não estiver acima nem vier de get_service_info, "
+    "não invente: diga que vai confirmar com a equipe."
+)
+
+
+def _address_line(address: dict | None) -> str | None:
+    if not address:
+        return None
+    street = [address.get(key) for key in ("line", "complement", "neighborhood")]
+    city_state = " - ".join(
+        str(part).strip()
+        for part in (address.get("city"), address.get("state"))
+        if part and str(part).strip()
+    )
+    postal = address.get("postal_code")
+    parts = [str(p).strip() for p in [*street, city_state, postal] if p and str(p).strip()]
+    return ", ".join(parts) or None
+
+
+def _clinic_fact_lines(config: TenantRuntimeConfig) -> list[str]:
+    facts = config.clinic_facts or {}
+    lines: list[str] = []
+    address = _address_line(config.address)
+    if address:
+        lines.append(f"- Endereço: {address}")
+    for key, label in (("how_to_arrive", "Como chegar"), ("parking", "Estacionamento")):
+        if facts.get(key):
+            lines.append(f"- {label}: {facts[key]}")
+    if facts.get("payment_methods"):
+        lines.append("- Formas de pagamento: " + ", ".join(facts["payment_methods"]))
+    if facts.get("cancellation_policy"):
+        lines.append(f"- Cancelamento e remarcação: {facts['cancellation_policy']}")
+    if facts.get("documents_to_bring"):
+        lines.append("- Documentos a levar: " + ", ".join(facts["documents_to_bring"]))
+    if facts.get("accessibility"):
+        lines.append(f"- Acessibilidade: {facts['accessibility']}")
+    for item in facts.get("faq") or []:
+        lines.append(f"- Pergunta frequente — {item['question']} Resposta: {item['answer']}")
+    if facts.get("notes"):
+        lines.append(f"- Observações: {facts['notes']}")
+    return lines
+
+
+def _format_clinic_facts(config: TenantRuntimeConfig) -> str:
+    """The "SOBRE A CLÍNICA" block, or "" when the clinic told us nothing (prompt unchanged)."""
+    lines = _clinic_fact_lines(config)
+    if not lines:
+        return ""
+    used = len(_CLINIC_FACTS_HEADING) + len(_CLINIC_FACTS_FOOTER)
+    kept: list[str] = []
+    for line in lines:
+        if used + len(line) + 1 > CLINIC_FACTS_BUDGET:
+            if not kept:  # a single item bigger than the whole budget: cut it, do not drop it
+                room = CLINIC_FACTS_BUDGET - used - 2
+                kept.append(line[: max(room, 0)].rstrip() + "…")
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return _CLINIC_FACTS_HEADING + "\n".join(kept) + _CLINIC_FACTS_FOOTER
+
+
 def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
     """Render the full system prompt for a specific tenant."""
     today = date.today().isoformat()
@@ -272,6 +344,7 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
     slot_label_chars = decorated_text_budget(EMOJI_SCHEDULE, MAX_LIST_ROW_TITLE_CHARS)
     safety_section = _format_safety_rules()
     professional_section = _format_professional_context(config)
+    clinic_facts_section = _format_clinic_facts(config)
     post_consult_section = _format_post_consult_knowledge(config)
     appointment_context_section = _format_appointment_context(config)
     conversation_state_section = _format_conversation_state(config)
@@ -279,7 +352,7 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
     return (
         f"Você é a secretária virtual da {clinic}. Sua função é acolher pacientes "
         f"no WhatsApp e agendar, remarcar ou cancelar consultas no Google Calendar da clínica."
-        f"{safety_section}{professional_section}{post_consult_section}"
+        f"{safety_section}{professional_section}{clinic_facts_section}{post_consult_section}"
         f"{appointment_context_section}{conversation_state_section}\n\n"
         "CONTEXTO OPERACIONAL:\n"
         f"- Hoje é {today} (timezone {tz}).\n"

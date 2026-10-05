@@ -17,6 +17,7 @@ from secretaria.core.whatsapp_limits import (
     MAX_BUTTONS_PER_MESSAGE as MAX_GREETING_BUTTONS,
     MAX_INTERACTIVE_BODY_CHARS,
 )
+from secretaria.schemas.clinic_facts import ClinicFacts
 
 # Convention: lowercase English weekday names, Monday-first.
 WEEKDAYS: tuple[str, ...] = (
@@ -184,6 +185,7 @@ class TenantConfigUpdate(BaseModel):
     # Clinic physical address. NULL/omitted = leave untouched (or "not
     # collected yet" on first save).
     address: TenantAddress | None = None
+    clinic_facts: ClinicFacts | None = None
     # TASK-008: `insurances` (free-text convênio names) is GONE from this
     # payload on purpose - it used to pass through `sync_legacy_insurances`,
     # which could silently re-derive the clinic's `tenant_insurance_plans` set
@@ -312,6 +314,7 @@ class TenantConfigRead(BaseModel):
     appointment_types: list
     initial_flows: dict
     address: dict | None
+    clinic_facts: dict | None = None
     collect_insurance: bool
     is_active: bool
     # True when a Google Calendar refresh token is stored for this tenant.
