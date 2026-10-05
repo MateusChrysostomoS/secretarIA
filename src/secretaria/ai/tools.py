@@ -1194,6 +1194,37 @@ class HumanHandoffRequested(Exception):
 
 
 @tool
+async def get_service_info(service_name: str) -> dict:
+    """Consulta as orientações de UM serviço da clínica: o que o paciente precisa saber antes
+    (jejum, exames, documentos, preparo), a descrição completa, a duração e o preço.
+
+    Use quando o paciente perguntar o que precisa fazer ou levar para um serviço, quanto dura
+    ou o que inclui. Ferramenta SOMENTE-LEITURA: não agenda nada.
+
+    Args:
+        service_name: Nome do serviço como aparece na lista de serviços da clínica.
+    """
+    catalog = _effective_service_catalog()
+    match = _match_by_name(catalog, service_name or "")
+    if match is None:
+        names = ", ".join(t.name for t in catalog) or "nenhum"
+        return {
+            "error": (
+                f"Serviço '{(service_name or '').strip()}' não existe nesta clínica. "
+                f"Serviços disponíveis: {names}."
+            )
+        }
+    return {
+        "servico": match.name,
+        "duracao_min": match.duration_min,
+        "preco": match.price,
+        "descricao": match.description,
+        "descricao_completa": getattr(match, "long_description", None),
+        "orientacoes": list(getattr(match, "requirements", None) or []),
+    }
+
+
+@tool
 async def request_human_handoff(reason: str) -> dict:
     """ÚLTIMO RECURSO: passa a conversa para uma pessoa da equipe. Use SOMENTE quando
     o paciente pediu explicitamente para falar com uma pessoa, quando o assunto exige
