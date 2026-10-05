@@ -503,12 +503,24 @@ async def _handle_start_guided_booking(
     the menu instead of a picker built on the clinic-level agenda.
     """
     appointment_type = reply_text[len(START_GUIDED_BOOKING_SENTINEL_PREFIX) :].strip() or None
+    # The tool already proved the service against the catalog, so it is both supplied and
+    # accepted; None means the clinic has no catalog and nothing was supplied.
+    supplied = (hb.FIELD_SERVICE,) if appointment_type is not None else ()
     if tenant is None or not flows_enabled(tenant):
         # The tool is only ever exposed to flow-enabled tenants, so this is a
         # defensive count-only warning, same style as _handle_manage_appointment.
         logger.warning(
             "worker_start_guided_booking_without_flows",
             conversation_id=str(reply.conversation_id),
+        )
+        _log_no_landing(
+            reply,
+            source_tool=hb.SOURCE_START_GUIDED_BOOKING,
+            reason=hb.FALLBACK_NO_TENANT if tenant is None else hb.FALLBACK_WITHOUT_FLOWS,
+            tenant=tenant,
+            professionals=professionals,
+            supplied=supplied,
+            accepted=supplied,
         )
         return
 
@@ -545,14 +557,18 @@ async def _handle_start_guided_booking(
             conversation_id=str(reply.conversation_id),
             tenant_id=str(tenant.id),
         )
-        await _handle_show_main_menu(
+        await _fallback_to_menu(
             reply,
-            tenant,
-            professionals,
-            patient_wa,
+            source_tool=hb.SOURCE_START_GUIDED_BOOKING,
+            reason=hb.FALLBACK_MULTI_PROFESSIONAL,
+            tenant=tenant,
+            professionals=professionals,
+            patient_wa=patient_wa,
             redis=redis,
             waba_token=waba_token,
-            source="sentinel_fallback",
+            supplied=supplied,
+            accepted=supplied,
+            topology=booking_topology(professional_rows),
         )
         return
 
@@ -587,8 +603,18 @@ async def _handle_start_guided_booking(
         has_type=appointment_type is not None,
         flow_step=result.flow_step,
     )
-    await _apply_flow_result(
-        reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+    await _land_handback(
+        reply,
+        result,
+        patient_wa,
+        source_tool=hb.SOURCE_START_GUIDED_BOOKING,
+        tenant=tenant,
+        professionals=professionals,
+        redis=redis,
+        waba_token=waba_token,
+        supplied=supplied,
+        accepted=supplied,
+        topology=booking_topology(professional_rows),
     )
 
 async def _handle_set_booking_draft(

@@ -33,7 +33,10 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 )
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from secretaria.ai.graph import SELECT_PROFESSIONAL_SENTINEL_PREFIX  # noqa: E402
+from secretaria.ai.graph import (  # noqa: E402
+    SELECT_PROFESSIONAL_SENTINEL_PREFIX,
+    START_GUIDED_BOOKING_SENTINEL_PREFIX,
+)
 from secretaria.core import database as core_database  # noqa: E402
 from secretaria.core.database import Base  # noqa: E402
 from secretaria.models import (  # noqa: E402
@@ -596,3 +599,102 @@ async def test_a_failure_before_the_landing_is_known_propagates_and_logs_no_even
         )
 
     assert _events(log) == []
+
+
+# --------------------------------------------------------------------------
+# start_guided_booking
+# --------------------------------------------------------------------------
+
+
+async def test_guided_booking_logs_the_step_it_landed_on(
+    db, _captured_bubbles, _stub_calendar, log
+) -> None:
+    tenant, ana, patient, conversation = await _seed_sole(db)
+
+    await tasks._handle_start_guided_booking(
+        _reply_ctx(conversation),
+        f"{START_GUIDED_BOOKING_SENTINEL_PREFIX}Consulta Geral",
+        tenant,
+        _snapshots([ana]),
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["source_tool"] == "start_guided_booking"
+    assert event["landing_step"] == "awaiting_day"
+    assert event["supplied"] == ["service"]
+    assert event["accepted"] == ["service"]
+    assert event["fallback"] is None
+    assert event["topology"] == "sole"
+    # The pre-existing event keeps being emitted, once.
+    assert len(_events(log, "conversation_guided_booking_entered")) == 1
+
+
+async def test_guided_booking_turns_a_multi_doctor_clinic_away_and_says_so(
+    db, _captured_bubbles, _stub_calendar, log
+) -> None:
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+
+    await tasks._handle_start_guided_booking(
+        _reply_ctx(conversation),
+        f"{START_GUIDED_BOOKING_SENTINEL_PREFIX}Consulta Geral",
+        tenant,
+        _snapshots([ana, bruno]),
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["fallback"] == "multi_professional"
+    assert event["landing_step"] == "menu"
+    assert event["topology"] == "multi"
+    assert event["supplied"] == ["service"]
+    assert isinstance(_captured_bubbles[0], MenuBubble)
+
+
+async def test_guided_booking_without_a_tenant_is_counted_not_silent(
+    db, _captured_bubbles, _stub_calendar, log
+) -> None:
+    _tenant, ana, patient, conversation = await _seed_sole(db)
+
+    await tasks._handle_start_guided_booking(
+        _reply_ctx(conversation),
+        f"{START_GUIDED_BOOKING_SENTINEL_PREFIX}Consulta Geral",
+        None,
+        _snapshots([ana]),
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["fallback"] == "no_tenant"
+    assert event["landing_step"] is None
+    assert event["supplied"] == ["service"]
+    assert _captured_bubbles == []
+
+
+async def test_guided_booking_with_no_agenda_lands_on_a_person(
+    db, _captured_bubbles, log, monkeypatch
+) -> None:
+    handed_off: list = []
+
+    async def _no_calendar(session, tenant, target):
+        return None
+
+    async def _fake_unavailable(reply, redis=None, tenant=None, waba_token=None):
+        handed_off.append(reply.conversation_id)
+
+    monkeypatch.setattr(workers_ns, "_appointment_calendar", _no_calendar)
+    monkeypatch.setattr(workers_ns, "_handle_calendar_unavailable", _fake_unavailable)
+    tenant, ana, patient, conversation = await _seed_sole(db)
+
+    await tasks._handle_start_guided_booking(
+        _reply_ctx(conversation),
+        f"{START_GUIDED_BOOKING_SENTINEL_PREFIX}Consulta Geral",
+        tenant,
+        _snapshots([ana]),
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["landing_step"] == "human_handover"
+    assert event["fallback"] == "calendar_unavailable"
+    assert handed_off == [conversation.id]
