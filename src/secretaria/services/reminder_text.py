@@ -201,7 +201,10 @@ async def load_reminder_content(
     service_name = (appointment.appointment_type or "").strip() or DEFAULT_SERVICE_NAME
     requirements: tuple[str, ...] = ()
     try:
-        services = await load_service_catalog(session, tenant.id)
+        # A SAVEPOINT: on Postgres a failed statement aborts the whole
+        # transaction, and the engine's later queries would die with it.
+        async with session.begin_nested():
+            services = await load_service_catalog(session, tenant.id)
         catalog = (
             professional_appointment_types(owner, tenant, services)
             if owner is not None
@@ -239,8 +242,8 @@ async def load_reminder_content(
 # appointment, so a tap can be checked against the patient who tapped
 # (workers/shared/reminder_actions.py) - the older "apptconfirm|<appointment_id>"
 # family can only be checked against the tenant. The decoder side lists the
-# same prefixes in schemas/webhook.py::_ACTION_BUTTON_PREFIXES; a test pins
-# that both agree.
+# same prefixes in schemas/webhook.py::_ACTION_BUTTON_PREFIXES; tests/
+# test_reminder_v2_text.py pins that both lists agree.
 ACTION_CONFIRM = "remconfirm"
 ACTION_CANCEL = "remcancel"
 ACTION_OTHER = "remother"

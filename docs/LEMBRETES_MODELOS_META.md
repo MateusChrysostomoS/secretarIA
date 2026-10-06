@@ -3,7 +3,7 @@
 Folha para submeter à Meta (WhatsApp Manager → Ferramentas da conta → Modelos de mensagem).
 Modelos são aprovados **por conta do WhatsApp Business (WABA)**: submeta em cada WABA de clínica
 que vai ligar o lembrete novo. A aprovação é externa (minutos a dias). Enquanto o modelo novo não
-estiver aprovado, o sistema continua funcionando com o modelo simples de hoje (seção 3).
+estiver aprovado, o sistema continua funcionando com o modelo simples de hoje (seção 2).
 
 ## 1. Modelo novo com 3 botões — `lembrete_consulta_v2`
 

@@ -115,7 +115,7 @@ próprio canal Brain-Message chegando a um tenant real:**
 | local | o quê |
 |---|---|
 | `api/hub/conversations.py` → `_send_via_whatsapp()` | **RESOLVIDO** — `5b8bfdf` (2026-09-09) conteve o 502; em 2026-09-18 virou `_staff_sender`, despacho por `Patient.channel` via `ChannelSender`; `to=patient.wa_id` só sobrevive no ramo WhatsApp |
-| `plugins/reminders.py:214, 221, 239, 280, 285` | 5 envios `to=patient.wa_id`; desde a TASK-032 R2 a consulta filtra `wa_id IS NOT NULL` (paciente do Portal é lembrado por `workers/reminder_engine.py`, por e-mail) |
+| `plugins/reminders.py:214, 221, 239, 280, 285` | 5 envios `to=patient.wa_id`; desde a TASK-032 R2 a consulta filtra `wa_id IS NOT NULL` (paciente do Portal é lembrado por `workers/reminder_engine.py`, por e-mail, quando o interruptor da clínica está ligado) |
 | `services/payments/deposit_lifecycle.py:194, 253` | envio e `create_customer(...)` no Asaas com o telefone |
 
 ### Corrigidos

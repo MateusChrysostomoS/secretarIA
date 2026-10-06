@@ -10,7 +10,12 @@ import pytest
 from secretaria.config import get_settings
 from secretaria.core.whatsapp_limits import MAX_BUTTON_LABEL_CHARS, MAX_INTERACTIVE_BODY_CHARS
 from secretaria.models import Appointment, Tenant
-from secretaria.schemas.webhook import WebhookMessage, decode_action_id, extract_action_button
+from secretaria.schemas.webhook import (
+    _ACTION_BUTTON_PREFIXES,
+    WebhookMessage,
+    decode_action_id,
+    extract_action_button,
+)
 from secretaria.services import email as email_service, reminder_text as rt
 from secretaria.services.email import EmailOutcome
 from tests._reminder_fixtures import db  # noqa: F401
@@ -225,6 +230,12 @@ def test_builders_and_decoder_agree():
     ]
     assert [label for _, label in buttons] == ["Confirmar", "Cancelar", "Outro"]
     assert rt.button_payloads(buttons) == [bid for bid, _ in buttons]
+
+
+def test_the_decoder_prefix_list_and_the_builders_name_the_same_reminder_actions():
+    prefixes = {p for p in _ACTION_BUTTON_PREFIXES if p.startswith("rem")}
+    assert prefixes == {f"{action}|" for action in rt.REMINDER_ACTIONS}
+    assert all(f"{action}|" in _ACTION_BUTTON_PREFIXES for action in rt.REMINDER_ACTIONS)
 
 
 def test_every_label_fits_a_whatsapp_button():
