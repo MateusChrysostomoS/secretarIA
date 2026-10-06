@@ -3,11 +3,14 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select  # noqa: F401  (used by the Task 8 tests)
+from sqlalchemy import select
 
 from secretaria.core import database as core_database
-from secretaria.models import AppointmentReminder, AppointmentStatus
+from secretaria.models import AppointmentReminder, AppointmentStatus, Conversation
 from secretaria.services import reminder_delivery
+from secretaria.services.brain_patients import PatientEmailResult
+from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
+from secretaria.services.email import EmailOutcome
 from secretaria.services.entitlements_client import EntitlementSummary
 from secretaria.workers import reminder_engine
 from tests._reminder_fixtures import db  # noqa: F401
@@ -18,6 +21,8 @@ from tests._reminders_v2 import (
     entitled,
     fake_waba_token,
     get_reminder,
+    outbound_messages,
+    seed_paid_deposit,
     seed_world,
 )
 
@@ -317,3 +322,282 @@ async def test_a_switch_off_clinics_stuck_row_is_untouched(db):  # noqa: F811
 
     assert await reminder_engine.reclaim_stuck_reminders(NOW) == 0
     assert (await get_reminder(db, rid)).status == "sending"
+
+
+# --------------------------------------------------------------------------
+# Outcomes (Task 8)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def usage(monkeypatch):
+    calls: list[dict] = []
+
+    async def _emit(**kwargs):
+        calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(reminder_engine, "emit_usage_event", _emit)
+    return calls
+
+
+async def test_a_failing_send_is_retried_then_marked_delivery_failed(db, usage):  # noqa: F811
+    FakeWhatsAppClient.fail_everything = True
+    world = await seed_world(db, last_inbound_at=NOW - timedelta(hours=1))
+    rid = await add_reminder(db, world)
+
+    for attempt in (1, 2, 3):
+        report = await _tick(NOW + timedelta(minutes=attempt))
+        row = await get_reminder(db, rid)
+        assert report.retried == 1
+        assert (row.status, row.attempts, row.last_error_code) == (
+            "pending",
+            attempt,
+            "RuntimeError",
+        )
+        assert row.warn_kind is None
+
+    final = NOW + timedelta(minutes=4)
+    report = await _tick(final)
+
+    row = await get_reminder(db, rid)
+    assert report.failed == 1
+    assert (row.status, row.attempts, row.warn_kind) == ("failed", 4, "delivery_failed")
+    assert _utc(row.warn_due_at) == final
+    assert usage == []
+    assert await outbound_messages(db, world.conversation.id) == []
+
+
+async def test_a_send_that_recovers_on_the_second_attempt_is_sent(db):  # noqa: F811
+    FakeWhatsAppClient.fail_everything = True
+    world = await seed_world(db, last_inbound_at=NOW - timedelta(hours=1))
+    rid = await add_reminder(db, world)
+    await _tick()
+    FakeWhatsAppClient.fail_everything = False
+
+    await _tick(NOW + timedelta(minutes=1))
+
+    row = await get_reminder(db, rid)
+    assert (row.status, row.attempts, row.last_error_code) == ("sent", 2, None)
+
+
+async def test_a_patient_without_any_channel_fails_at_once_and_warns(db):  # noqa: F811
+    world = await seed_world(db, wa_id=None)
+    rid = await add_reminder(db, world)
+
+    await _tick()
+
+    row = await get_reminder(db, rid)
+    assert (row.status, row.attempts, row.last_error_code, row.warn_kind) == (
+        "failed",
+        1,
+        "no_channel",
+        "delivery_failed",
+    )
+
+
+async def test_a_sent_prompt_keeps_the_clinic_warning_armed(db):  # noqa: F811
+    world = await seed_world(db, last_inbound_at=NOW - timedelta(hours=1))
+    rid = await add_reminder(db, world)
+    planned_warning = _utc((await get_reminder(db, rid)).warn_due_at)
+
+    await _tick()
+
+    row = await get_reminder(db, rid)
+    assert (row.status, row.with_prompt, row.warn_kind) == ("sent", True, "unconfirmed")
+    assert _utc(row.warn_due_at) == planned_warning
+
+
+async def test_after_two_confirmations_the_reminder_has_no_buttons_and_warns_nobody(db):  # noqa: F811
+    world = await seed_world(db, confirmation_count=2, last_inbound_at=NOW - timedelta(hours=1))
+    rid = await add_reminder(db, world, with_prompt=True)  # planned before the 2nd confirmation
+
+    await _tick()
+
+    [(kind, _to, body)] = FakeWhatsAppClient.all_sent()
+    assert kind == "text" and body.startswith("LEMBRE-SE:")
+    row = await get_reminder(db, rid)
+    assert (row.status, row.with_prompt, row.warn_kind, row.warn_due_at) == (
+        "sent",
+        False,
+        None,
+        None,
+    )
+
+
+async def test_a_whatsapp_reminder_is_recorded_in_the_conversation(db):  # noqa: F811
+    world = await seed_world(db, last_inbound_at=NOW - timedelta(hours=1))
+    await add_reminder(db, world)
+
+    await _tick()
+
+    [row] = await outbound_messages(db, world.conversation.id)
+    assert row.wam_id == "wamid.buttons"
+    assert row.body.endswith("(opções: Confirmar, Cancelar, Outro)")
+    assert row.interactive["kind"] == "buttons"
+    async with db() as session:
+        conversation = await session.get(Conversation, world.conversation.id)
+    assert conversation.last_bot_message_at is not None
+
+
+async def test_only_a_template_send_is_metered(db, usage):  # noqa: F811
+    outside = await seed_world(db)  # never wrote: template
+    inside = await seed_world(
+        db, phone_number_id="pnid-2", last_inbound_at=NOW - timedelta(hours=1)
+    )
+    rid_outside = await add_reminder(db, outside)
+    await add_reminder(db, inside)
+
+    await _tick()
+
+    assert usage == [
+        {
+            "tenant_id": str(outside.tenant.id),
+            "feature": "reminders",
+            "amount": 1,
+            "event_id": f"reminder:v2:{rid_outside}",
+        }
+    ]
+
+
+async def test_a_metering_failure_never_unsends_the_reminder(db, monkeypatch):  # noqa: F811
+    async def _boom(**kwargs):
+        raise RuntimeError("brain-api unreachable")
+
+    monkeypatch.setattr(reminder_engine, "emit_usage_event", _boom)
+    world = await seed_world(db)
+    rid = await add_reminder(db, world)
+
+    await _tick()
+
+    assert (await get_reminder(db, rid)).status == "sent"
+
+
+async def test_a_row_cancelled_while_in_flight_stays_cancelled(db, monkeypatch):  # noqa: F811
+    """R1's cancel_reminders also cancels 'sending' rows; finishing must not resurrect it."""
+    world = await seed_world(db, last_inbound_at=NOW - timedelta(hours=1))
+    rid = await add_reminder(db, world)
+    real_deliver = reminder_engine.deliver_reminder
+
+    async def _deliver_while_cancelled(job):
+        await _set(db, rid, status="cancelled", warn_due_at=None)
+        return await real_deliver(job)
+
+    monkeypatch.setattr(reminder_engine, "deliver_reminder", _deliver_while_cancelled)
+
+    report = await _tick()
+
+    row = await get_reminder(db, rid)
+    assert report.closed == 1
+    assert (row.status, row.sent_at, row.warn_kind) == ("cancelled", None, None)
+    assert len(await outbound_messages(db, world.conversation.id)) == 1  # it did reach the patient
+
+
+async def test_a_portal_patient_is_reminded_by_chat_and_email(db, monkeypatch):  # noqa: F811
+    async def _fetch(tenant_id, external_id):
+        return PatientEmailResult(available=True, email="maria@example.com")
+
+    async def _send(to, template, variables):
+        return EmailOutcome.SENT
+
+    monkeypatch.setattr(reminder_delivery, "fetch_patient_email_result", _fetch)
+    monkeypatch.setattr(reminder_delivery, "send_transactional_email_result", _send)
+    world = await seed_world(db, channel=CHANNEL_BRAIN_MESSAGE)
+    rid = await add_reminder(db, world)
+
+    await _tick()
+
+    row = await get_reminder(db, rid)
+    assert (row.status, row.channel) == ("sent", "email")
+    assert FakeWhatsAppClient.created == []
+    assert len(await outbound_messages(db, world.conversation.id)) == 1  # written by the sender
+
+
+async def test_a_pix_paid_appointment_keeps_its_three_button_variant(db):  # noqa: F811
+    world = await seed_world(db, last_inbound_at=NOW - timedelta(hours=1))
+    await seed_paid_deposit(db, world)
+    rid = await add_reminder(db, world)
+
+    await _tick()
+
+    [(_kind, _to, _body, buttons)] = FakeWhatsAppClient.all_sent()
+    assert [label for _, label in buttons] == ["Confirmar", "Reagendar", "Cancelar"]
+    assert buttons[0][0] == f"remconfirm|{rid}"
+    assert buttons[1][0] == f"apptresched|{world.appointment.id}"
+
+
+async def test_rows_are_never_read_across_clinics(db):  # noqa: F811
+    off = await seed_world(db, v2=False, last_inbound_at=NOW - timedelta(hours=1))
+    on = await seed_world(db, phone_number_id="pnid-2", last_inbound_at=NOW - timedelta(hours=1))
+    rid_off = await add_reminder(db, off)
+    await add_reminder(db, on)
+
+    await _tick()
+
+    async with db() as session:
+        statuses = dict(
+            (
+                await session.execute(select(AppointmentReminder.id, AppointmentReminder.status))
+            ).all()
+        )
+    assert statuses[rid_off] == "pending"
+    assert sorted(statuses.values()) == ["pending", "sent"]
+
+
+# ---- delivered but the bookkeeping failed: never a duplicate (controller ruling) ----
+
+
+async def test_bookkeeping_failure_after_an_ok_send_never_resends(db, monkeypatch, usage):  # noqa: F811
+    world = await seed_world(db, last_inbound_at=NOW - timedelta(hours=1))
+    rid = await add_reminder(db, world)
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("db blip")
+
+    monkeypatch.setattr(reminder_engine, "_finish", _boom)
+
+    first = await _tick()
+    second = await _tick(NOW + timedelta(minutes=1))
+
+    assert len(FakeWhatsAppClient.all_sent()) == 1
+    row = await get_reminder(db, rid)
+    assert (row.status, row.attempts) == ("sent", 1)
+    assert _utc(row.sent_at) == NOW
+    assert (row.warn_kind, row.last_error_code) == ("unconfirmed", None)
+    assert (first.sent, second.claimed) == (1, 0)
+
+
+async def test_when_even_the_rescue_fails_the_row_stays_sending_not_pending(db, monkeypatch):  # noqa: F811
+    world = await seed_world(db, last_inbound_at=NOW - timedelta(hours=1))
+    rid = await add_reminder(db, world)
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("db down")
+
+    def _boom_sync(*args, **kwargs):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(reminder_engine, "_finish", _boom)
+    monkeypatch.setattr(reminder_engine, "_mark_sent", _boom_sync)
+
+    await _tick()
+    await _tick(NOW + timedelta(minutes=1))
+
+    assert len(FakeWhatsAppClient.all_sent()) == 1
+    assert (await get_reminder(db, rid)).status == "sending"
+
+
+async def test_a_crash_before_the_send_still_goes_back_to_pending(db, monkeypatch):  # noqa: F811
+    world = await seed_world(db, last_inbound_at=NOW - timedelta(hours=1))
+    rid = await add_reminder(db, world)
+
+    async def _boom(job):
+        raise RuntimeError("before send")
+
+    monkeypatch.setattr(reminder_engine, "deliver_reminder", _boom)
+
+    await _tick()
+
+    row = await get_reminder(db, rid)
+    assert (row.status, row.last_error_code) == ("pending", "engine_error")
+    assert FakeWhatsAppClient.all_sent() == []

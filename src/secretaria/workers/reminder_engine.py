@@ -41,6 +41,9 @@ from secretaria.models import (
     Appointment,
     AppointmentReminder,
     Conversation,
+    Message,
+    MessageDirection,
+    MessageSender,
     Patient,
     PixDepositStatus,
     Tenant,
@@ -58,6 +61,7 @@ from secretaria.models.appointment_reminder import (
     REMINDER_STATUS_SENT,
     REMINDER_STATUS_SKIPPED,
     REMINDER_WARN_DELIVERY_FAILED,
+    REMINDER_WARN_UNCONFIRMED,
 )
 from secretaria.services import cancellation_notice
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
@@ -71,6 +75,7 @@ from secretaria.services.reminder_delivery import (
 from secretaria.services.reminder_schedule import MAX_CONFIRMATIONS
 from secretaria.services.reminder_text import load_reminder_content
 from secretaria.services.tenant_config import get_waba_token
+from secretaria.services.usage_events import emit_usage_event
 
 logger = get_logger(__name__)
 
@@ -248,25 +253,120 @@ async def _prepare(reminder_id: UUID, attempt: int, now: datetime) -> ReminderJo
             )
 
 
+def _mark_sent(
+    reminder: AppointmentReminder, job: ReminderJob, outcome: DeliveryOutcome, now: datetime
+) -> None:
+    reminder.status = REMINDER_STATUS_SENT
+    reminder.sent_at = now
+    reminder.channel = outcome.channel
+    reminder.with_prompt = job.with_prompt
+    # Informational on a success: "plain_template" = the buttons could not go
+    # outside the window (template not approved / refused).
+    reminder.last_error_code = outcome.error_code
+    if job.with_prompt:
+        # R1 already set warn_due_at (due + delay); R4 warns the clinic then if
+        # the counter is still 0.
+        reminder.warn_kind = REMINDER_WARN_UNCONFIRMED
+    else:
+        # No question was asked, so there is nothing to be unanswered (spec §4.2 "Parada").
+        reminder.warn_kind = None
+        reminder.warn_due_at = None
+
+
+async def _record_history(
+    session, job: ReminderJob, outcome: DeliveryOutcome, now: datetime
+) -> None:
+    """WhatsApp's history copy (the Portal sender wrote its own): console + LLM history."""
+    session.add(
+        Message(
+            conversation_id=job.conversation_id,
+            direction=MessageDirection.OUTBOUND,
+            sender=MessageSender.BOT,
+            wam_id=outcome.wam_id,
+            body=outcome.history_body,
+            interactive=outcome.history_interactive,
+        )
+    )
+    conversation = await session.get(Conversation, job.conversation_id)
+    if conversation is not None:
+        conversation.last_bot_message_at = now
+
+
+async def _emit_usage(job: ReminderJob) -> None:
+    """One billed template = one meter tick. Fail-open: the message already went out."""
+    event_id = f"reminder:v2:{job.reminder_id}"
+    try:
+        recorded = await emit_usage_event(
+            tenant_id=str(job.tenant.id), feature="reminders", amount=1, event_id=event_id
+        )
+        if not recorded:
+            logger.warning("usage_emit_failed", event_id=event_id, tenant_id=str(job.tenant.id))
+    except Exception as exc:
+        logger.warning("usage_emit_failed", event_id=event_id, error_type=type(exc).__name__)
+
+
 async def _finish(
     reminder_id: UUID, job: ReminderJob, outcome: DeliveryOutcome, now: datetime
 ) -> str:
-    """Book the outcome. Returns the TickReport field to count it under."""
+    """Book the outcome. Returns the TickReport field to count it under.
+
+    * delivered -> `sent` (+ the WhatsApp history row; + usage when billed);
+    * failed, permanent or 4th attempt -> `failed` + delivery_failed warning;
+    * failed otherwise -> back to `pending`; the next tick (one minute) retries;
+    * the row stopped being `sending` meanwhile (R1's cancel_reminders retired
+      it) -> left as it is; a message that did go out is still recorded.
+    """
     async with core_database.async_session_factory() as session:
         async with session.begin():
             reminder = await session.get(AppointmentReminder, reminder_id)
-            if reminder is None:
-                return "closed"
-            if outcome.ok:
-                reminder.status = REMINDER_STATUS_SENT
-                reminder.sent_at = now
+            if outcome.ok and job.conversation_id is not None and outcome.history_body is not None:
+                await _record_history(session, job, outcome, now)
+            if reminder is None or reminder.status != REMINDER_STATUS_SENDING:
+                logger.info("reminder_v2_retired_in_flight", reminder_id=str(reminder_id))
+                result = "closed"
+            elif outcome.ok:
+                _mark_sent(reminder, job, outcome, now)
+                result = "sent"
+            elif outcome.permanent or job.attempt >= MAX_ATTEMPTS:
                 reminder.channel = outcome.channel
-                reminder.with_prompt = job.with_prompt
+                _fail(reminder, outcome.error_code or "send_failed", now)
+                result = "failed"
+            else:
+                reminder.status = REMINDER_STATUS_PENDING
                 reminder.last_error_code = outcome.error_code
-                return "sent"
-            reminder.status = REMINDER_STATUS_PENDING
-            reminder.last_error_code = outcome.error_code
-            return "retried"
+                result = "retried"
+    if outcome.ok and outcome.billable:
+        await _emit_usage(job)
+    return result
+
+
+async def _rescue_after_delivery(
+    reminder_id: UUID, job: ReminderJob, outcome: DeliveryOutcome, now: datetime
+) -> str | None:
+    """The patient already has the reminder but the bookkeeping blew up.
+
+    Never back to `pending` (that would send a duplicate). Best effort: book it
+    `sent` in a fresh transaction. If even that fails the row stays `sending`
+    for the reaper, and only ids are logged. Returns "sent" when booked.
+    """
+    try:
+        async with core_database.async_session_factory() as session:
+            async with session.begin():
+                reminder = await session.get(AppointmentReminder, reminder_id)
+                if reminder is None or reminder.status != REMINDER_STATUS_SENDING:
+                    return None
+                _mark_sent(reminder, job, outcome, now)
+    except Exception as exc:
+        logger.error(
+            "reminder_v2_sent_but_unbooked",
+            reminder_id=str(reminder_id),
+            tenant_id=str(job.tenant.id),
+            error_type=type(exc).__name__,
+        )
+        return None
+    if outcome.billable:
+        await _emit_usage(job)
+    return "sent"
 
 
 def _release(reminder: AppointmentReminder, attempt: int, now: datetime) -> None:
@@ -352,6 +452,7 @@ async def run_reminder_tick(*, now: datetime, redis=None) -> TickReport:
         logger.warning("reminder_v2_reclaim_failed", error_type=type(exc).__name__)
     for reminder_id, tenant_id in await due_reminder_ids(now, limit=limit):
         attempt: int | None = None
+        delivered: tuple[ReminderJob, DeliveryOutcome] | None = None
         try:
             if tenant_id not in entitlements:
                 entitlements[tenant_id] = await get_entitlements(tenant_id, redis)
@@ -374,6 +475,8 @@ async def run_reminder_tick(*, now: datetime, redis=None) -> TickReport:
                 report.add("closed")
                 continue
             outcome = await deliver_reminder(job)
+            if outcome.ok:
+                delivered = (job, outcome)
             report.add(await _finish(reminder_id, job, outcome, now))
         except Exception as exc:
             logger.warning(
@@ -381,7 +484,12 @@ async def run_reminder_tick(*, now: datetime, redis=None) -> TickReport:
                 reminder_id=str(reminder_id),
                 error_type=type(exc).__name__,
             )
-            if attempt is not None:
+            if delivered is not None:
+                # Already delivered: never re-queue (a retry would duplicate it).
+                rescued = await _rescue_after_delivery(reminder_id, *delivered, now)
+                if rescued:
+                    report.add(rescued)
+            elif attempt is not None:
                 await _release_after_crash(reminder_id, attempt, now)
     logger.info("reminder_v2_tick", **asdict(report))
     return report
