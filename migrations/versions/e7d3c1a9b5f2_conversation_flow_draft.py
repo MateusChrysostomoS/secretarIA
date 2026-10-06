@@ -24,11 +24,11 @@ old code, so:
        services, or neither"; `GET /build` must report parity `match`).
 
 Rollback narrows, so it goes the other way round: the OLD code on both services first,
-then `alembic downgrade e5a1c9d3b7f2`. The only data lost is a draft parked in between; that
+then `alembic downgrade b8d3f1a6c2e5`. The only data lost is a draft parked in between; that
 patient's pra-quem answer then continues the plain button flow.
 
 Revision ID: e7d3c1a9b5f2
-Revises: e5a1c9d3b7f2 (tenant_clinic_facts, the head when this was written)
+Revises: b8d3f1a6c2e5 (appointment_reminders_foundation, main at P2a integration)
 Create Date: 2026-10-02
 """
 
@@ -38,7 +38,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "e7d3c1a9b5f2"
-down_revision: str | None = "e5a1c9d3b7f2"
+down_revision: str | None = "b8d3f1a6c2e5"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

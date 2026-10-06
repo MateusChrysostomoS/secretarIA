@@ -47,11 +47,11 @@ def _migration():
     return module
 
 
-def test_the_migration_is_the_single_head_on_top_of_clinic_facts():
+def test_the_migration_is_the_single_head_on_top_of_reminder_foundation():
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "migrations"))
     assert ScriptDirectory.from_config(config).get_heads() == [REVISION]
-    assert _migration().down_revision == "e5a1c9d3b7f2"
+    assert _migration().down_revision == "b8d3f1a6c2e5"
 
 
 def test_the_migration_adds_and_drops_a_nullable_json_column_on_sqlite(tmp_path):
