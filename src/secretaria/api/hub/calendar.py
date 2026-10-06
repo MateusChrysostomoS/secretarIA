@@ -41,7 +41,7 @@ from secretaria.schemas.calendar import (
     CalendarReminderRead,
     CancelPreviewRead,
 )
-from secretaria.services import cancellation_notice, reminder_schedule
+from secretaria.services import cancellation_notice, reminder_hooks, reminder_schedule
 from secretaria.services.appointment_status import SOURCE_HUB, log_status_transition
 from secretaria.services.calendar import CalendarService
 from secretaria.services.insurance_catalog import AppointmentPlan, load_appointment_plans
@@ -353,6 +353,10 @@ async def create_appointment(
     session.add(appt)
     await session.commit()
     await session.refresh(appt)
+    # TASK-032 R2: plan the reminders of a consultation booked for a known
+    # patient (a phone-only booking has nobody the engine can resolve).
+    if appt.patient_id is not None and reminder_hooks.enabled_for(tenant):
+        await reminder_hooks.after_appointment_booked(appt.id)
     logger.info(
         "calendar_appointment_created",
         appointment_id=str(appt.id),
@@ -489,6 +493,8 @@ async def cancel_appointment(
 
     await session.commit()
     await session.refresh(appt)
+    if reminder_hooks.enabled_for(tenant):
+        await reminder_hooks.after_appointment_closed(appt.id, reason="cancelled")
 
     # Notify the patient. UNCONDITIONAL now — this used to fire only when the
     # doctor typed something, so a blank box meant the patient found out by
@@ -570,6 +576,10 @@ async def reschedule_appointment(
     # module docstring on why a reschedule never re-points the deposit's FK).
     await session.commit()
     await session.refresh(appt)
+    # TASK-032 R2: retire the old reminders and plan the new ones; with the
+    # switch OFF only when there is a confirmation count to zero.
+    if reminder_hooks.enabled_for(tenant) or (appt.confirmation_count or 0) > 0:
+        await reminder_hooks.after_appointment_rescheduled(appt.id)
 
     if appt.phone and body.custom_message:
         arq_pool = getattr(request.app.state, "arq_pool", None)

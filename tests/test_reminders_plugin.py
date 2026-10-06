@@ -19,6 +19,7 @@ os.environ.setdefault("ENCRYPTION_KEY", "gBSpATEZoI21UX0_59nHvxdUDJ4drCttg2RAEaP
 
 from datetime import UTC, datetime, timedelta  # noqa: E402
 from uuid import uuid4  # noqa: E402
+from zoneinfo import ZoneInfo  # noqa: E402
 
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
@@ -682,3 +683,58 @@ async def test_no_deposit_at_all_gets_todays_plain_behavior(db, monkeypatch: pyt
 
     client = _FakeWhatsAppClient.created[0]
     assert client.sent[0][0] == "text"
+
+
+# --------------------------------------------------------------------------
+# TASK-032 R2: the switch, and the Portal error loop
+# --------------------------------------------------------------------------
+
+
+async def test_a_clinic_on_the_v2_engine_is_left_to_it(db, monkeypatch: pytest.MonkeyPatch):
+    tenant, patient, appointment = await _make_scenario(db, lead=timedelta(hours=1))
+    async with db() as session:
+        (await session.get(Tenant, tenant.id)).reminders_v2_enabled = True
+        await session.commit()
+    monkeypatch.setattr(reminders, "get_entitlements", _entitled_fake())
+
+    await reminders.send_appointment_reminders({"redis": None})
+
+    assert _FakeWhatsAppClient.created == []
+    assert await _ledger_count(db, reminders._reminder_key("1h", appointment.id)) == 0
+
+
+async def test_a_portal_patient_is_never_claimed_nor_sent(db, monkeypatch: pytest.MonkeyPatch):
+    """It used to claim the ledger first and then fail on wa_id=None at every sweep."""
+    tenant, patient, appointment = await _make_scenario(db, lead=timedelta(hours=1))
+    async with db() as session:
+        row = await session.get(Patient, patient.id)
+        row.wa_id = None
+        row.channel = "brain_message"
+        row.external_id = str(uuid4())
+        await session.commit()
+    monkeypatch.setattr(reminders, "get_entitlements", _entitled_fake())
+
+    await reminders.send_appointment_reminders({"redis": None})
+
+    assert _FakeWhatsAppClient.created == []
+    assert await _ledger_count(db, reminders._reminder_key("1h", appointment.id)) == 0
+
+
+async def test_with_the_switch_off_the_text_is_byte_identical_to_today(
+    db, monkeypatch: pytest.MonkeyPatch
+):
+    tenant, patient, appointment = await _make_scenario(
+        db, lead=timedelta(hours=1), last_inbound_ago=timedelta(hours=2)
+    )
+    monkeypatch.setattr(reminders, "get_entitlements", _entitled_fake())
+
+    await reminders.send_appointment_reminders({"redis": None})
+
+    when = (
+        appointment.start_at.replace(tzinfo=UTC)
+        .astimezone(ZoneInfo("America/Sao_Paulo"))
+        .strftime("%d/%m/%Y às %H:%M")
+    )
+    assert _FakeWhatsAppClient.created[0].sent == [
+        ("text", "5511999999", f"Lembrete: você tem Consulta agendado(a) para {when} na Clinic.")
+    ]

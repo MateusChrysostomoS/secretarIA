@@ -396,6 +396,26 @@ class Settings(BaseSettings):
     # this setting only names it ahead of time.
     REMINDER_DEPOSIT_TEMPLATE_NAME: str = "appointment_reminder_deposit"
 
+    # --- Reminder engine v2 (TASK-032 R2, workers/reminder_engine.py) ---
+    # Approved Meta utility template with 6 body parameters and 3 quick-reply
+    # buttons (Confirmar / Cancelar / Outro). The exact texts to submit are in
+    # docs/LEMBRETES_MODELOS_META.md. Templates are approved per WABA.
+    REMINDER_V2_TEMPLATE_NAME: str = "lembrete_consulta_v2"
+    # False until Meta has approved REMINDER_V2_TEMPLATE_NAME on the WABAs in
+    # use. While False, a reminder that must go OUTSIDE the 24h window is sent
+    # with the plain REMINDER_TEMPLATE_NAME (one variable, no buttons) and the
+    # patient answers through the chat. When True and Meta still refuses the
+    # template on some WABA, the engine falls back to the plain template too.
+    REMINDER_V2_TEMPLATE_APPROVED: bool = False
+    # Rows claimed per one-minute tick, so one tick never outlives the next.
+    REMINDER_V2_BATCH_SIZE: int = 200
+    # Base URL of the Brain-Message patient portal - the SAME value brain-api
+    # has under this name. The Portal reminder e-mail links to
+    # {BRAIN_MESSAGE_PORTAL_URL}/clinicas/?convite=<tenant_id>, the invite shape
+    # brain-api's core/invite_codes.py::parse_invite accepts. Empty = the
+    # e-mail carries no link (it tells the patient to open the portal).
+    BRAIN_MESSAGE_PORTAL_URL: str = ""
+
     # --- Brain-Message attachments (docs/CHECKPOINT_brain_message_anexos_secretaria.md) ---
     # secretarIA's OWN Cloudflare R2 bucket for the files patients and clinic staff
     # exchange on the Brain-Message channel (services/media_storage.py). Deliberately not

@@ -687,6 +687,13 @@ _ACTION_BUTTON_PREFIXES: tuple[str, ...] = (
     "rebooksame|",
     "rebookother|",
     "rebookno|",
+    # TASK-032 R2: the reminder buttons. The trailing id is an
+    # `appointment_reminders` ROW id, not an appointment id -
+    # workers/shared/reminder_actions.py resolves it and honours the tap only
+    # for the patient of the conversation that tapped.
+    "remconfirm|",
+    "remcancel|",
+    "remother|",
 )
 
 
@@ -712,18 +719,28 @@ def extract_action_button(msg: WebhookMessage) -> tuple[str, str] | None:
         raw = msg.interactive.button_reply.id
     elif msg.button is not None:
         raw = msg.button.payload
+    return decode_action_id(raw)
+
+
+def decode_action_id(raw: str | None) -> tuple[str, str] | None:
+    """Decode one "<action>|<uuid>" id or payload, whatever carried it.
+
+    The channel-neutral half of `extract_action_button`: a WhatsApp tap reaches
+    it through the webhook shapes above; a Portal tap (TASK-032 R3) through the
+    stored `Message.interactive_reply_id`. None for an unknown prefix, or when
+    the trailing part is not a UUID - a malformed or tampered id must never
+    crash routing, and the action alone is useless to every caller.
+    """
     if not raw:
         return None
-
     for prefix in _ACTION_BUTTON_PREFIXES:
         if raw.startswith(prefix):
-            action = prefix[:-1]  # drop the trailing "|"
-            appointment_id = raw[len(prefix) :]
+            target_id = raw[len(prefix) :]
             try:
-                UUID(appointment_id)
+                UUID(target_id)
             except ValueError:
                 return None
-            return action, appointment_id
+            return prefix[:-1], target_id
     return None
 
 

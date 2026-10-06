@@ -91,3 +91,5 @@ SQLite demonstra recarga/deduplicação e preservação de estado. Não demonstr
 ## Ordem de liberação (não autorizada ao agente)
 
 Migração primeiro; API e worker em seguida; interruptor desligado até R2 e prova na clínica de teste; front depois. Não executar downgrade em banco usado por imagem nova. Deployment: **NOT AUTHORIZED**.
+
+R2 (motor de lembretes) construído: ver docs/CHECKPOINT_lembretes_r2.md.

@@ -66,6 +66,7 @@ from secretaria.models import (  # noqa: E402
 from secretaria.services import (
     booking_hold as holds,  # noqa: E402
     flow_router as fr,  # noqa: E402
+    reminder_hooks,  # noqa: E402
 )
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE  # noqa: E402
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
@@ -88,6 +89,7 @@ from secretaria.services.sensitive_claim_guard import (  # noqa: E402
     unbacked_claim,
 )
 from secretaria.workers import tasks  # noqa: E402
+from tests._reminders_v2 import HookSpy  # noqa: E402
 
 EXTERNAL_ID = "00000000-0000-4000-8000-000000000001"
 OTHER_EXTERNAL_ID = "00000000-0000-4000-8000-000000000002"
@@ -862,3 +864,32 @@ async def test_without_a_reservation_free_text_still_ends_the_wait(db):
             select(Conversation.flow_state).where(Conversation.id == conversation.id)
         )
     assert state is FlowState.IDLE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("v2", [True, False])
+async def test_a_promoted_reservation_plans_its_reminders_only_with_the_switch_on(
+    db, calls, monkeypatch, v2
+):
+    """TASK-032 R2: the Portal booking is born here, so its reminders are planned here."""
+    spy = HookSpy().install(monkeypatch, reminder_hooks)
+    tenant = await _seed_tenant(db)
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.reminders_v2_enabled = v2
+        await session.commit()
+    tenant.reminders_v2_enabled = v2
+    patient, conversation = await _seed_conversation(
+        db, tenant, flow_state=FlowState.AWAITING_EMAIL_CODE
+    )
+    await _place(db, tenant, conversation, datetime(2099, 1, 5, 13, 0, tzinfo=UTC), patient=patient)
+    monkeypatch.setattr(
+        workers_ns, "_appointment_calendar", lambda *a, **k: _async(_FakeCalendar(calls))
+    )
+
+    await tasks._promote_booking_hold(
+        _reply(conversation), tenant=tenant, waba_token=None, professionals=[], redis=None
+    )
+
+    rows = await _appointments(db, tenant)
+    assert spy.calls == ([("booked", rows[0].id)] if v2 else [])

@@ -19,6 +19,7 @@ from secretaria.models import (
     Tenant,
     is_live_status,
 )
+from secretaria.services import reminder_hooks
 from secretaria.services.appointment_status import (
     SOURCE_BUTTON,
     log_status_transition,
@@ -37,6 +38,7 @@ from secretaria.services.patient_context import (
     load_upcoming_appointments,
 )
 from secretaria.services.payments import deposit_lifecycle
+from secretaria.services.reminder_text import REMINDER_ACTIONS
 from secretaria.services.service_catalog import (
     load_service_catalog,
 )
@@ -64,6 +66,7 @@ from secretaria.workers.shared.llm_context import (
     _appointment_calendar,
     _appointment_calendar_target,
 )
+from secretaria.workers.shared.reminder_actions import handle_reminder_button
 from secretaria.workers.shared.sender import (
     _reply_sender,
     _send_simple_text,
@@ -196,6 +199,12 @@ async def _handle_action_button(
     except ValueError:
         return  # already validated by extract_action_button; defensive only
 
+    # TASK-032 R2: the reminder buttons carry a REMINDER row id, not an
+    # appointment id; their handler checks the row against the patient.
+    if action in REMINDER_ACTIONS:
+        await handle_reminder_button(reply, action, appointment_id, redis=redis)
+        return
+
     # Set only on the "enter the reschedule sub-flow" path (apptresched,
     # under the limit) - handled AFTER this session closes, mirroring
     # _handle_manage_appointment's own short-read-session-then-handoff shape.
@@ -280,6 +289,8 @@ async def _handle_action_button(
                 session, tenant, tenant_config, appointment, waba_token
             )
             await session.commit()
+            if reminder_hooks.enabled_for(tenant):
+                await reminder_hooks.after_appointment_closed(appointment.id, reason="cancelled")
             await client.send_text_message(to=reply.patient_ref, body=text)
             return
 
@@ -289,6 +300,8 @@ async def _handle_action_button(
                 session, tenant, tenant_config, appointment, waba_token
             )
             await session.commit()
+            if reminder_hooks.enabled_for(tenant):
+                await reminder_hooks.after_appointment_closed(appointment.id, reason="cancelled")
             await client.send_text_message(to=reply.patient_ref, body=text)
             return
 

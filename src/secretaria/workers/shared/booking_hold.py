@@ -25,6 +25,7 @@ from secretaria.models import (
     Tenant,
 )
 from secretaria.plugins.post_booking import enqueue_post_booking_hooks
+from secretaria.services import reminder_hooks
 from secretaria.services.appointment_status import (
     SOURCE_FLOW,
 )
@@ -308,6 +309,9 @@ async def _promote_booking_hold(
     # runs too and skips on its own, because brain-api answers NOT_PENDING for
     # a visitor who just verified - no second card, no parallel mechanism.
     await enqueue_post_booking_hooks(redis, tenant.id, appointment.id, source="flow")
+    # TASK-032 R2: the Portal booking is born here, so its reminders are planned here.
+    if reminder_hooks.enabled_for(tenant):
+        await reminder_hooks.after_appointment_booked(appointment.id)
 
     tz = _tenant_tzinfo(tenant)
     local_start = held.start_at.astimezone(tz)
