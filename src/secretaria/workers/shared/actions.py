@@ -38,6 +38,7 @@ from secretaria.services.patient_context import (
     load_upcoming_appointments,
 )
 from secretaria.services.payments import deposit_lifecycle
+from secretaria.services.reminder_text import REMINDER_ACTIONS
 from secretaria.services.service_catalog import (
     load_service_catalog,
 )
@@ -65,6 +66,7 @@ from secretaria.workers.shared.llm_context import (
     _appointment_calendar,
     _appointment_calendar_target,
 )
+from secretaria.workers.shared.reminder_actions import handle_reminder_button
 from secretaria.workers.shared.sender import (
     _reply_sender,
     _send_simple_text,
@@ -196,6 +198,12 @@ async def _handle_action_button(
         appt_uuid = UUID(appointment_id)
     except ValueError:
         return  # already validated by extract_action_button; defensive only
+
+    # TASK-032 R2: the reminder buttons carry a REMINDER row id, not an
+    # appointment id; their handler checks the row against the patient.
+    if action in REMINDER_ACTIONS:
+        await handle_reminder_button(reply, action, appointment_id, redis=redis)
+        return
 
     # Set only on the "enter the reschedule sub-flow" path (apptresched,
     # under the limit) - handled AFTER this session closes, mirroring
