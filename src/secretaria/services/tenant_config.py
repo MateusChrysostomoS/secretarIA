@@ -41,6 +41,7 @@ from secretaria.services.calendar import (
     CalendarUnavailableError,
     GoogleTokenRevokedError,
 )
+from secretaria.services.channel_sender import CHANNEL_WHATSAPP
 from secretaria.services.service_catalog import load_service_catalog, normalize, resolve_entries
 
 logger = get_logger(__name__)
@@ -124,6 +125,10 @@ class TenantRuntimeConfig:
     # run_agent's `conversation_state` parameter. NEVER loaded from DB, and
     # NEVER carries patient/attendee names — only the history is pseudonymized.
     conversation_state: str | None = None
+    # Per-turn: the channel this conversation is on (`_ReplyContext.channel`),
+    # threaded in by run_agent's `channel` parameter so the prompt names the
+    # surface the patient is actually on (ai/prompts.py). NEVER loaded from DB.
+    channel: str = CHANNEL_WHATSAPP
     # Clinic-wide orientations of every ACTIVE catalog service that has any AND that somebody
     # offers (the tenant list or an active professional's own), whichever professional it is.
     # `appointment_types` only holds the tenant's list (or the single active professional's),

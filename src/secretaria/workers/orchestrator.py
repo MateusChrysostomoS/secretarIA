@@ -1189,6 +1189,9 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             conversation_state=conversation_state_text,
             toolset_v2=_ai_toolset_v2(tenant),
             editing=editing,
+            # The prompt names the surface the patient is on: "chat da clínica"
+            # on the Portal, never "WhatsApp" (live test, 2026-10-05).
+            channel=reply.channel,
         )
     except Exception as exc:
         if not editing:

@@ -25,6 +25,7 @@ from secretaria.core.whatsapp_limits import (
     decorated_text_budget,
 )
 from secretaria.services.booking_dates import date_context
+from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE, CHANNEL_WHATSAPP
 from secretaria.services.service_catalog import missing_from
 
 if TYPE_CHECKING:
@@ -427,9 +428,33 @@ def _format_clinic_facts(config: TenantRuntimeConfig) -> str:
     return _CLINIC_FACTS_HEADING + "\n".join(kept) + _CLINIC_FACTS_FOOTER
 
 
+# How the prompt names the surface the patient is on, keyed by
+# `TenantRuntimeConfig.channel`. The WhatsApp wording is the historical text,
+# pinned byte for byte by tests/golden/system_prompt_default.txt; on the Portal
+# (Brain-Message) the agent introduced itself as a WhatsApp attendant (live
+# test, 2026-10-05). Any other value reads as WhatsApp, the default channel.
+_CHANNEL_WORDING: dict[str, dict[str, str]] = {
+    CHANNEL_WHATSAPP: {
+        "where": "no WhatsApp",
+        "heading": "WHATSAPP",
+        "bubbles": "WhatsApp do paciente",
+        "cards": "no WhatsApp",
+        "cutter": "O WhatsApp",
+    },
+    CHANNEL_BRAIN_MESSAGE: {
+        "where": "no chat da clínica",
+        "heading": "CHAT DA CLÍNICA",
+        "bubbles": "chat da clínica",
+        "cards": "no chat da clínica",
+        "cutter": "O chat",
+    },
+}
+
+
 def secretary_system_prompt(config: TenantRuntimeConfig, *, now: datetime | None = None) -> str:
     """Render the full system prompt for a specific tenant."""
     tz = config.timezone
+    surface = _CHANNEL_WORDING.get(config.channel, _CHANNEL_WORDING[CHANNEL_WHATSAPP])
     clinic = config.clinic_name
     hours_text = _format_business_hours(config.business_hours)
     types_text = _format_appointment_types(
@@ -453,16 +478,17 @@ def secretary_system_prompt(config: TenantRuntimeConfig, *, now: datetime | None
 
     return (
         f"Você é a secretária virtual da {clinic}. Sua função é acolher pacientes "
-        f"no WhatsApp e agendar, remarcar ou cancelar consultas no Google Calendar da clínica."
+        f"{surface['where']} e agendar, remarcar ou cancelar consultas no Google Calendar "
+        "da clínica."
         f"{safety_section}{priorities_section}{professional_section}{clinic_facts_section}{post_consult_section}"
         f"{appointment_context_section}{conversation_state_section}\n\n"
         "CONTEXTO OPERACIONAL:\n"
         f"{date_context(tz, now=now)}"
         f"- Horário de atendimento:\n{hours_text}\n"
         f"- Tipos de consulta disponíveis:\n{types_text}{service_guides_line}\n\n"
-        "================ COMO ESCREVER NO WHATSAPP ================\n"
+        f"================ COMO ESCREVER NO {surface['heading']} ================\n"
         "Cada resposta sua é entregue como uma sequência de balões curtos no "
-        "WhatsApp do paciente. Para deixar a conversa leve e legível:\n\n"
+        f"{surface['bubbles']}. Para deixar a conversa leve e legível:\n\n"
         "1) FRASES CURTAS. Escreva em parágrafos curtos (1-3 linhas), nunca "
         "um bloco enorme. Use `---` numa linha sozinha para dividir a "
         "resposta em até 3 balões.\n"
@@ -479,7 +505,7 @@ def secretary_system_prompt(config: TenantRuntimeConfig, *, now: datetime | None
         "para o paciente.\n\n"
         "================ MARCAÇÕES INTERATIVAS ================\n"
         "Use estas marcações para abrir botões clicáveis. Elas viram cards "
-        "interativos no WhatsApp — não escreva nada parecido em outros "
+        f"interativos {surface['cards']} — não escreva nada parecido em outros "
         "momentos, pois qualquer ocorrência será interpretada como botão.\n\n"
         "A) BOTÃO DE CONFIRMAÇÃO (use SEMPRE que pedir confirmação para "
         "agendar ou cancelar):\n"
@@ -509,7 +535,7 @@ def secretary_system_prompt(config: TenantRuntimeConfig, *, now: datetime | None
         "   2026-05-29T16:30:00|16:30\n"
         "   [/SLOTS]\n\n"
         "   O rótulo é o que o paciente TOCA. NÃO escreva emoji nele: o "
-        "sistema prepende 🗓️ a cada linha sozinho. O WhatsApp corta "
+        f"sistema prepende 🗓️ a cada linha sozinho. {surface['cutter']} corta "
         f"qualquer rótulo acima de {slot_label_chars} caracteres "
         "— escreva só a hora (\"14:00\") ou hora + uma palavra "
         "(\"14:00 Retorno\"), nunca uma frase.\n"
