@@ -108,3 +108,81 @@ async def test_an_agent_booking_plans_reminders_only_with_the_switch_on(db, spy,
 
     expected = [("booked", await _appointment_id(db, "evt-agent"))] if v2 else []
     assert spy.calls == expected
+
+
+# ---- move and cancel paths (Task 11) ----------------------------------------
+
+
+@pytest.mark.parametrize("v2", [True, False])
+async def test_a_flow_cancel_cancels_the_reminders_only_with_the_switch_on(db, spy, v2):  # noqa: F811
+    world = await seed_world(db, v2=v2)
+
+    await _flow(
+        db,
+        world,
+        FlowRouterResult(
+            action="reply", bubbles=[], appointment_cancel_id=world.appointment.google_event_id
+        ),
+    )
+
+    assert spy.calls == ([("closed", world.appointment.id, "cancelled")] if v2 else [])
+
+
+@pytest.mark.parametrize(
+    ("v2", "confirmations", "expected"),
+    [(True, 0, True), (False, 0, False), (False, 1, True)],
+)
+async def test_a_flow_reschedule_replans_when_on_or_when_there_is_a_count_to_zero(
+    db,  # noqa: F811
+    spy,
+    v2,
+    confirmations,
+    expected,  # noqa: F811
+):
+    world = await seed_world(db, v2=v2, confirmation_count=confirmations)
+    new_start = world.start_at + timedelta(days=2)
+
+    await _flow(
+        db,
+        world,
+        FlowRouterResult(
+            action="reply",
+            bubbles=[],
+            appointment_reschedule={
+                "google_event_id": world.appointment.google_event_id,
+                "start_at": new_start,
+                "end_at": new_start + timedelta(minutes=30),
+            },
+        ),
+    )
+
+    assert spy.calls == ([("moved", world.appointment.id)] if expected else [])
+
+
+@pytest.mark.parametrize("action", ["apptcancel", "apptcancelyes"])
+async def test_a_cancel_button_cancels_the_reminders(db, spy, action):  # noqa: F811
+    world = await seed_world(db, google_event_id="")  # no Google event: no calendar call
+
+    await tasks._handle_action_button(_reply(world), action, str(world.appointment.id))
+
+    assert spy.calls == [("closed", world.appointment.id, "cancelled")]
+
+
+async def test_a_cancel_button_with_the_switch_off_touches_nothing(db, spy):  # noqa: F811
+    world = await seed_world(db, v2=False, google_event_id="")
+
+    await tasks._handle_action_button(_reply(world), "apptcancel", str(world.appointment.id))
+
+    assert spy.calls == []
+
+
+@pytest.mark.parametrize("v2", [True, False])
+async def test_an_agent_cancel_cancels_the_reminders_only_with_the_switch_on(db, spy, v2):  # noqa: F811
+    world = await seed_world(db, v2=v2)
+    tenant_token = tools._tenant_id_ctx.set(world.tenant.id)
+    try:
+        await tools._mark_appointment_cancelled(world.appointment.google_event_id)
+    finally:
+        tools._tenant_id_ctx.reset(tenant_token)
+
+    assert spy.calls == ([("closed", world.appointment.id, "cancelled")] if v2 else [])

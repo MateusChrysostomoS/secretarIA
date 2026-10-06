@@ -595,9 +595,11 @@ async def _mark_appointment_cancelled(event_id: str) -> str | None:
 
     from secretaria.core.database import async_session_factory
     from secretaria.models import Appointment, AppointmentStatus, Tenant
+    from secretaria.services import reminder_hooks
     from secretaria.services.payments import deposit_lifecycle
 
     notice: str | None = None
+    closed_id = None
     try:
         async with async_session_factory() as session:
             async with session.begin():
@@ -617,6 +619,8 @@ async def _mark_appointment_cancelled(event_id: str) -> str | None:
                 )
                 if appointment is not None:
                     tenant = await session.get(Tenant, tenant_id)
+                    if tenant is not None and reminder_hooks.enabled_for(tenant):
+                        closed_id = appointment.id
                     if tenant is not None:
                         outcome = await deposit_lifecycle.on_appointment_cancelled(
                             session, tenant=tenant, appointment=appointment
@@ -629,6 +633,8 @@ async def _mark_appointment_cancelled(event_id: str) -> str | None:
                                 notice = deposit_lifecycle.cancellation_notice(
                                     outcome, tenant, deposit
                                 )
+        if closed_id is not None:
+            await reminder_hooks.after_appointment_closed(closed_id, reason="cancelled")
         logger.info("tool_appointment_cancelled", event_id=event_id, rows=result.rowcount)
     except Exception as exc:
         logger.warning("tool_appointment_cancel_persist_failed", error=str(exc), event_id=event_id)

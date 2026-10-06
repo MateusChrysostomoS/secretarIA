@@ -493,6 +493,8 @@ async def cancel_appointment(
 
     await session.commit()
     await session.refresh(appt)
+    if reminder_hooks.enabled_for(tenant):
+        await reminder_hooks.after_appointment_closed(appt.id, reason="cancelled")
 
     # Notify the patient. UNCONDITIONAL now — this used to fire only when the
     # doctor typed something, so a blank box meant the patient found out by
@@ -574,6 +576,10 @@ async def reschedule_appointment(
     # module docstring on why a reschedule never re-points the deposit's FK).
     await session.commit()
     await session.refresh(appt)
+    # TASK-032 R2: retire the old reminders and plan the new ones; with the
+    # switch OFF only when there is a confirmation count to zero.
+    if reminder_hooks.enabled_for(tenant) or (appt.confirmation_count or 0) > 0:
+        await reminder_hooks.after_appointment_rescheduled(appt.id)
 
     if appt.phone and body.custom_message:
         arq_pool = getattr(request.app.state, "arq_pool", None)

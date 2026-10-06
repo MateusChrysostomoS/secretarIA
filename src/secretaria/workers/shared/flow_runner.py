@@ -188,6 +188,10 @@ async def _apply_flow_result(
     persisted = True
     booked_appointment: Appointment | None = None
     cancellation_note: str | None = None
+    # TASK-032 R2: the appointments this turn closed or moved, for the
+    # reminder hooks that run after the commit.
+    closed_appointment_id = None
+    moved_appointment_id = None
     try:
         async with async_session_factory() as session:
             async with session.begin():
@@ -290,6 +294,7 @@ async def _apply_flow_result(
                                 source=SOURCE_FLOW,
                                 idempotency_key=f"cancel:{result.appointment_cancel_id}",
                             )
+                            closed_appointment_id = cancelled_appt.id
                         # Money hook: resolve the deposit's outcome for this
                         # cancellation and carry the honest notice through to
                         # the reply dispatched below (PROMPT S3 section 4).
@@ -378,6 +383,14 @@ async def _apply_flow_result(
                                     f":{resched['start_at'].isoformat()}"
                                 ),
                             )
+                            # A moved booking is unconfirmed again even with
+                            # the switch OFF (R1 reschedule_reminders zeroes
+                            # the counter), so a count > 0 also calls the hook.
+                            if (
+                                reminder_hooks.enabled_for(tenant)
+                                or (resched_appt.confirmation_count or 0) > 0
+                            ):
+                                moved_appointment_id = resched_appt.id
                         # Money hook: count this reschedule against the
                         # deposit's limit. Non-crashing on a race (entry was
                         # already pre-checked by _apply_deposit_awareness /
@@ -414,6 +427,10 @@ async def _apply_flow_result(
         # booking committed - a reminder problem never costs a booking.
         if reminder_hooks.enabled_for(tenant):
             await reminder_hooks.after_appointment_booked(booked_appointment.id)
+    if persisted and closed_appointment_id is not None and reminder_hooks.enabled_for(tenant):
+        await reminder_hooks.after_appointment_closed(closed_appointment_id, reason="cancelled")
+    if persisted and moved_appointment_id is not None:
+        await reminder_hooks.after_appointment_rescheduled(moved_appointment_id)
 
     # A HELD slot, not a booking: the router reserved the window and brain-api
     # mailed a code. Nothing was created on Google Calendar and no appointment

@@ -19,6 +19,7 @@ from secretaria.models import (
     Tenant,
     is_live_status,
 )
+from secretaria.services import reminder_hooks
 from secretaria.services.appointment_status import (
     SOURCE_BUTTON,
     log_status_transition,
@@ -280,6 +281,8 @@ async def _handle_action_button(
                 session, tenant, tenant_config, appointment, waba_token
             )
             await session.commit()
+            if reminder_hooks.enabled_for(tenant):
+                await reminder_hooks.after_appointment_closed(appointment.id, reason="cancelled")
             await client.send_text_message(to=reply.patient_ref, body=text)
             return
 
@@ -289,6 +292,8 @@ async def _handle_action_button(
                 session, tenant, tenant_config, appointment, waba_token
             )
             await session.commit()
+            if reminder_hooks.enabled_for(tenant):
+                await reminder_hooks.after_appointment_closed(appointment.id, reason="cancelled")
             await client.send_text_message(to=reply.patient_ref, body=text)
             return
 

@@ -165,3 +165,55 @@ async def test_hub_booking_without_a_patient_and_blocks_plan_nothing(
 
     assert (phone_only.status_code, block.status_code) == (201, 201)
     assert spy.calls == []
+
+
+# ---- cancel and reschedule (Task 11) ----------------------------------------
+
+
+async def test_hub_cancel_cancels_the_reminders(client: AsyncClient, db, tenant, spy):  # noqa: F811
+    appt = await _appointment(db, tenant)
+
+    response = await client.post(
+        f"{CALENDAR}/appointments/{appt.id}/cancel", json={"confirm": True}
+    )
+
+    assert response.status_code == 200
+    assert spy.calls == [("closed", appt.id, "cancelled")]
+
+
+async def test_hub_cancel_with_the_switch_off_touches_nothing(client: AsyncClient, db, tenant, spy):  # noqa: F811
+    await _switch(db, tenant, False)
+    appt = await _appointment(db, tenant)
+
+    await client.post(f"{CALENDAR}/appointments/{appt.id}/cancel", json={"confirm": True})
+
+    assert spy.calls == []
+
+
+@pytest.mark.parametrize(
+    ("on", "confirmations", "expected"),
+    [(True, 0, True), (False, 0, False), (False, 1, True)],
+)
+async def test_hub_reschedule_replans_when_on_or_when_there_is_a_count_to_zero(
+    client: AsyncClient,
+    db,  # noqa: F811
+    tenant,
+    spy,
+    on,
+    confirmations,
+    expected,  # noqa: F811
+):
+    await _switch(db, tenant, on)
+    appt = await _appointment(db, tenant, confirmation_count=confirmations)
+    new_start = datetime.now(UTC) + timedelta(days=6)
+
+    response = await client.post(
+        f"{CALENDAR}/appointments/{appt.id}/reschedule",
+        json={
+            "new_start": new_start.isoformat(),
+            "new_end": (new_start + timedelta(minutes=30)).isoformat(),
+        },
+    )
+
+    assert response.status_code == 200
+    assert spy.calls == ([("moved", appt.id)] if expected else [])
