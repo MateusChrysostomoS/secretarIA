@@ -231,3 +231,51 @@ async def load_reminder_content(
         attendee_name=appointment.attendee_name,
         requirements=requirements,
     )
+
+
+# --- Buttons ------------------------------------------------------------------
+# "<action>|<reminder_id>": the reminder ROW id carries tenant, patient and
+# appointment, so a tap can be checked against the patient who tapped
+# (workers/shared/reminder_actions.py) - the older "apptconfirm|<appointment_id>"
+# family can only be checked against the tenant. The decoder side lists the
+# same prefixes in schemas/webhook.py::_ACTION_BUTTON_PREFIXES; a test pins
+# that both agree.
+ACTION_CONFIRM = "remconfirm"
+ACTION_CANCEL = "remcancel"
+ACTION_OTHER = "remother"
+REMINDER_ACTIONS: tuple[str, ...] = (ACTION_CONFIRM, ACTION_CANCEL, ACTION_OTHER)
+
+# <= 20 characters each (core/whatsapp_limits.py::MAX_BUTTON_LABEL_CHARS). The
+# approved template's quick replies carry these exact labels, in this order.
+LABEL_CONFIRM = "Confirmar"
+LABEL_CANCEL = "Cancelar"
+LABEL_OTHER = "Outro"
+# The Pix paid-deposit variant keeps its historic trio
+# (plugins/reminders.py::_DEPOSIT_REMINDER_BUTTONS). Only Confirmar moves to the
+# reminder id (so it counts); Reagendar/Cancelar keep the appointment-scoped ids
+# whose handlers apply the Pix reschedule limit and refund window
+# (workers/shared/actions.py).
+LABEL_DEPOSIT_RESCHEDULE = "Reagendar"
+
+
+def reminder_buttons(reminder_id) -> list[tuple[str, str]]:
+    """(id, label) pairs of a reminder: Confirmar / Cancelar / Outro."""
+    return [
+        (f"{ACTION_CONFIRM}|{reminder_id}", LABEL_CONFIRM),
+        (f"{ACTION_CANCEL}|{reminder_id}", LABEL_CANCEL),
+        (f"{ACTION_OTHER}|{reminder_id}", LABEL_OTHER),
+    ]
+
+
+def deposit_reminder_buttons(reminder_id, appointment_id) -> list[tuple[str, str]]:
+    """The Pix paid-deposit trio: Confirmar / Reagendar / Cancelar."""
+    return [
+        (f"{ACTION_CONFIRM}|{reminder_id}", LABEL_CONFIRM),
+        (f"apptresched|{appointment_id}", LABEL_DEPOSIT_RESCHEDULE),
+        (f"apptcancel|{appointment_id}", LABEL_CANCEL),
+    ]
+
+
+def button_payloads(buttons: list[tuple[str, str]]) -> list[str]:
+    """Just the ids, for a template's quick-reply `button_payloads` (same order)."""
+    return [button_id for button_id, _label in buttons]

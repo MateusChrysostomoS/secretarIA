@@ -1,9 +1,13 @@
 """services/reminder_text.py — the words of the reminder (TASK-032 R2, spec §4.2)."""
 
 from datetime import UTC, datetime
+from uuid import uuid4
 
-from secretaria.core.whatsapp_limits import MAX_INTERACTIVE_BODY_CHARS
+import pytest
+
+from secretaria.core.whatsapp_limits import MAX_BUTTON_LABEL_CHARS, MAX_INTERACTIVE_BODY_CHARS
 from secretaria.models import Appointment, Tenant
+from secretaria.schemas.webhook import WebhookMessage, decode_action_id, extract_action_button
 from secretaria.services import reminder_text as rt
 from tests._reminder_fixtures import db  # noqa: F401
 from tests._reminders_v2 import seed_world
@@ -153,3 +157,81 @@ async def test_a_service_missing_from_the_catalog_keeps_its_name_without_require
         content = await rt.load_reminder_content(session, tenant, appointment)
     assert content.service_name == "Retorno"
     assert content.requirements == ()
+
+
+# --------------------------------------------------------------------------
+# Button ids (Task 3)
+# --------------------------------------------------------------------------
+
+
+def _interactive(button_id: str) -> WebhookMessage:
+    return WebhookMessage.model_validate(
+        {
+            "id": "wamid.1",
+            "from": "5511999999999",
+            "type": "interactive",
+            "interactive": {
+                "type": "button_reply",
+                "button_reply": {"id": button_id, "title": "x"},
+            },
+        }
+    )
+
+
+def _quick_reply(payload: str) -> WebhookMessage:
+    return WebhookMessage.model_validate(
+        {
+            "id": "wamid.2",
+            "from": "5511999999999",
+            "type": "button",
+            "button": {"payload": payload, "text": "x"},
+        }
+    )
+
+
+@pytest.mark.parametrize("action", ["remconfirm", "remcancel", "remother"])
+def test_reminder_ids_decode_on_both_whatsapp_carriers(action):
+    reminder_id = str(uuid4())
+    raw = f"{action}|{reminder_id}"
+    assert extract_action_button(_interactive(raw)) == (action, reminder_id)
+    assert extract_action_button(_quick_reply(raw)) == (action, reminder_id)
+    assert decode_action_id(raw) == (action, reminder_id)
+
+
+@pytest.mark.parametrize(
+    "raw", [None, "", "remconfirm|not-a-uuid", f"remconfirmx|{uuid4()}", f"rem|{uuid4()}"]
+)
+def test_a_tampered_or_unknown_id_decodes_to_none(raw):
+    assert decode_action_id(raw) is None
+
+
+@pytest.mark.parametrize(
+    "action", ["apptconfirm", "apptresched", "apptcancelyes", "apptcancel", "rebooksame"]
+)
+def test_the_old_ids_still_decode(action):
+    appointment_id = str(uuid4())
+    assert decode_action_id(f"{action}|{appointment_id}") == (action, appointment_id)
+
+
+def test_builders_and_decoder_agree():
+    reminder_id = uuid4()
+    buttons = rt.reminder_buttons(reminder_id)
+    assert [decode_action_id(bid) for bid, _ in buttons] == [
+        (action, str(reminder_id)) for action in rt.REMINDER_ACTIONS
+    ]
+    assert [label for _, label in buttons] == ["Confirmar", "Cancelar", "Outro"]
+    assert rt.button_payloads(buttons) == [bid for bid, _ in buttons]
+
+
+def test_every_label_fits_a_whatsapp_button():
+    labels = [rt.LABEL_CONFIRM, rt.LABEL_CANCEL, rt.LABEL_OTHER, rt.LABEL_DEPOSIT_RESCHEDULE]
+    assert all(0 < len(label) <= MAX_BUTTON_LABEL_CHARS for label in labels)
+
+
+def test_the_pix_paid_variant_keeps_its_trio_and_pix_scoped_ids():
+    reminder_id, appointment_id = uuid4(), uuid4()
+    assert rt.deposit_reminder_buttons(reminder_id, appointment_id) == [
+        (f"remconfirm|{reminder_id}", "Confirmar"),
+        (f"apptresched|{appointment_id}", "Reagendar"),
+        (f"apptcancel|{appointment_id}", "Cancelar"),
+    ]
