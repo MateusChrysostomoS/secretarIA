@@ -601,3 +601,39 @@ async def test_a_crash_before_the_send_still_goes_back_to_pending(db, monkeypatc
     row = await get_reminder(db, rid)
     assert (row.status, row.last_error_code) == ("pending", "engine_error")
     assert FakeWhatsAppClient.all_sent() == []
+
+
+# --------------------------------------------------------------------------
+# Cron entry points (Task 12)
+# --------------------------------------------------------------------------
+
+
+async def test_the_minute_cron_sends_what_is_due_now(db):  # noqa: F811
+    now = datetime.now(UTC)
+    world = await seed_world(
+        db, start_at=now + timedelta(days=2), last_inbound_at=now - timedelta(hours=1)
+    )
+    rid = await add_reminder(db, world, due_at=now - timedelta(minutes=1))
+
+    await reminder_engine.process_appointment_reminders({"redis": None})
+
+    assert (await get_reminder(db, rid)).status == "sent"
+
+
+async def test_the_reconcile_cron_plans_missing_rows(db):  # noqa: F811
+    now = datetime.now(UTC)
+    world = await seed_world(db, start_at=now + timedelta(days=3))
+
+    await reminder_engine.reconcile_appointment_reminders({})
+
+    async with db() as session:
+        kinds = sorted(
+            (
+                await session.scalars(
+                    select(AppointmentReminder.kind).where(
+                        AppointmentReminder.appointment_id == world.appointment.id
+                    )
+                )
+            ).all()
+        )
+    assert kinds == ["day", "hour"]

@@ -63,7 +63,7 @@ from secretaria.models.appointment_reminder import (
     REMINDER_WARN_DELIVERY_FAILED,
     REMINDER_WARN_UNCONFIRMED,
 )
-from secretaria.services import cancellation_notice
+from secretaria.services import cancellation_notice, reminder_hooks
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.entitlements_client import EntitlementSummary, get_entitlements
 from secretaria.services.payments import deposit_lifecycle
@@ -498,3 +498,9 @@ async def run_reminder_tick(*, now: datetime, redis=None) -> TickReport:
 async def process_appointment_reminders(ctx: dict) -> None:
     """arq cron (every minute, workers/arq_worker.py): send the due reminders."""
     await run_reminder_tick(now=datetime.now(UTC), redis=ctx.get("redis"))
+
+
+async def reconcile_appointment_reminders(ctx: dict) -> None:
+    """arq cron (every 10 minutes): plan what a crash or a fresh switch-ON left
+    without reminder rows - the backfill (services/reminder_hooks.py)."""
+    await reminder_hooks.reconcile_missing_reminders(now=datetime.now(UTC))

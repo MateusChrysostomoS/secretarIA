@@ -26,6 +26,10 @@ from secretaria.workers.onboarding_cron import (
     run_patient_usage_metering,
 )
 from secretaria.workers.payments_tasks import process_asaas_event
+from secretaria.workers.reminder_engine import (
+    process_appointment_reminders,
+    reconcile_appointment_reminders,
+)
 from secretaria.workers.tasks import (
     check_handover_timeouts,
     merge_brain_message_visit,
@@ -157,6 +161,12 @@ class WorkerSettings:
             send_appointment_reminders,
             minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
         ),
+        # TASK-032 R2: the reminder engine for clinics with reminders_v2_enabled
+        # (the cron above skips them). Every minute - the atomic claim makes an
+        # overlapping tick harmless. The reconcile plans rows a crash or a fresh
+        # switch-ON left missing (the backfill), offset from every other minute.
+        cron(process_appointment_reminders, minute=set(range(60))),
+        cron(reconcile_appointment_reminders, minute={4, 14, 24, 34, 44, 54}),
         cron(run_onboarding_nudges, minute={10}),
         cron(run_patient_usage_metering, hour={3}, minute={30}),
         cron(check_deploy_parity_cron, minute={7}),
