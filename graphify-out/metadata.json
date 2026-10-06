@@ -1,11 +1,11 @@
 ﻿{
     "metadata_schema":  "brain.graphify-metadata/v1",
     "repository":  "secretarIA",
-    "repository_path":  "C:\\TECH\\BRAIN-worktrees\\TASK-034\\secretarIA",
-    "branch":  "task/TASK-034-portal-visita",
-    "commit":  "1b3b7a68453ee17d831c6dfab8b91146d8ae32f6",
-    "generated_at":  "2026-10-05T01:25:28.1145691Z",
+    "repository_path":  "C:\\TECH\\BRAIN-worktrees\\TASK-030\\secretarIA",
+    "branch":  "task/TASK-030-ia-entra-em-qualquer-etapa",
+    "commit":  "9ac99a668582e0f95fee9b80742d2831510db192",
+    "generated_at":  "2026-10-06T23:33:06.2477883Z",
     "graphify_version":  "0.9.5",
     "graph_schema":  "networkx-node-link (unversioned upstream)",
-    "graph_sha256":  "e2cb48e0f1be979d5631707770d50ad3ca64f9ee14e00020a58e5b0e0cf173a0"
+    "graph_sha256":  "6991ff433cc754127daa0b6a47b7b12450abfb9d64729688886702a19e98f933"
 }
