@@ -8,8 +8,12 @@ due ones. Per tick:
    `reminders_v2_enabled`. A clinic with the switch OFF is never even read
    (plugins/reminders.py keeps serving it exactly as before).
 2. Entitlement gate per clinic, the old cron's rule: subscription active and
-   secretarIA enabled. A gated row is NOT claimed - it waits, and the lateness
-   guard retires it if the clinic stays gated for too long.
+   secretarIA enabled. A gated row is NOT claimed while it is still within its
+   MAX_LATENESS window - it waits untouched. Once it is later than that, the
+   engine claims it and closes it `too_late` (the same retirement the guard
+   does), so a clinic that stays gated cannot fill the batch forever.
+   Before step 1, `reclaim_stuck_reminders` returns rows whose worker died
+   mid-send (`sending` for longer than STUCK_SENDING_AFTER) to the queue.
 3. `claim_reminder` - `UPDATE ... SET status='sending', attempts=attempts+1
    WHERE id=:id AND status='pending'`. Only the statement that flips the row
    sees rowcount 1 (Postgres re-checks the WHERE after the row lock), so two
@@ -81,6 +85,9 @@ MAX_LATENESS: dict[str, timedelta] = {
     REMINDER_KIND_HOUR: timedelta(minutes=30),
 }
 DEFAULT_MAX_LATENESS = timedelta(minutes=30)
+# A claim is released or booked within seconds; a row still `sending` after this
+# long belongs to a worker that died (deploy / OOM) between claim and finish.
+STUCK_SENDING_AFTER = timedelta(minutes=10)
 
 
 @dataclass
@@ -262,6 +269,15 @@ async def _finish(
             return "retried"
 
 
+def _release(reminder: AppointmentReminder, attempt: int, now: datetime) -> None:
+    """Back to the queue, or failed (+ clinic warning) once the attempts are spent."""
+    if attempt >= MAX_ATTEMPTS:
+        _fail(reminder, "engine_error", now)
+    else:
+        reminder.status = REMINDER_STATUS_PENDING
+        reminder.last_error_code = "engine_error"
+
+
 async def _release_after_crash(reminder_id: UUID, attempt: int, now: datetime) -> None:
     """A bug between claim and finish must not strand the row in 'sending'."""
     try:
@@ -270,11 +286,7 @@ async def _release_after_crash(reminder_id: UUID, attempt: int, now: datetime) -
                 reminder = await session.get(AppointmentReminder, reminder_id)
                 if reminder is None or reminder.status != REMINDER_STATUS_SENDING:
                     return
-                if attempt >= MAX_ATTEMPTS:
-                    _fail(reminder, "engine_error", now)
-                else:
-                    reminder.status = REMINDER_STATUS_PENDING
-                    reminder.last_error_code = "engine_error"
+                _release(reminder, attempt, now)
     except Exception as exc:
         logger.warning(
             "reminder_v2_release_failed",
@@ -283,11 +295,61 @@ async def _release_after_crash(reminder_id: UUID, attempt: int, now: datetime) -
         )
 
 
+async def reclaim_stuck_reminders(now: datetime) -> int:
+    """Release rows a dead worker left in 'sending'. Switch-OFF clinics are not touched."""
+    cutoff = now - STUCK_SENDING_AFTER
+    async with core_database.async_session_factory() as session:
+        async with session.begin():
+            rows = (
+                await session.scalars(
+                    select(AppointmentReminder)
+                    .join(Tenant, Tenant.id == AppointmentReminder.tenant_id)
+                    .where(
+                        Tenant.reminders_v2_enabled.is_(True),
+                        AppointmentReminder.status == REMINDER_STATUS_SENDING,
+                        AppointmentReminder.updated_at < cutoff,
+                    )
+                    .with_for_update(skip_locked=True)
+                )
+            ).all()
+            for reminder in rows:
+                _release(reminder, reminder.attempts or 0, now)
+                logger.warning(
+                    "reminder_v2_reclaimed",
+                    reminder_id=str(reminder.id),
+                    status=reminder.status,
+                    attempts=reminder.attempts,
+                )
+            return len(rows)
+
+
+async def _gated_too_late(reminder_id: UUID, now: datetime) -> bool:
+    """True when a gated row is past its lateness window and must be retired."""
+    async with core_database.async_session_factory() as session:
+        row = await session.get(AppointmentReminder, reminder_id)
+        if row is None or row.status != REMINDER_STATUS_PENDING:
+            return False
+        return now - _as_utc(row.due_at) > MAX_LATENESS.get(row.kind, DEFAULT_MAX_LATENESS)
+
+
+async def _retire_too_late(reminder_id: UUID) -> None:
+    """Close a claimed, gated row exactly as the lateness guard would."""
+    async with core_database.async_session_factory() as session:
+        async with session.begin():
+            reminder = await session.get(AppointmentReminder, reminder_id)
+            if reminder is not None and reminder.status == REMINDER_STATUS_SENDING:
+                _close(reminder, REMINDER_STATUS_SKIPPED, "too_late")
+
+
 async def run_reminder_tick(*, now: datetime, redis=None) -> TickReport:
     """One pass over the due rows. One bad row never stops the others."""
     report = TickReport()
     entitlements: dict[UUID, EntitlementSummary | None] = {}
     limit = get_settings().REMINDER_V2_BATCH_SIZE
+    try:
+        await reclaim_stuck_reminders(now)
+    except Exception as exc:
+        logger.warning("reminder_v2_reclaim_failed", error_type=type(exc).__name__)
     for reminder_id, tenant_id in await due_reminder_ids(now, limit=limit):
         attempt: int | None = None
         try:
@@ -295,7 +357,13 @@ async def run_reminder_tick(*, now: datetime, redis=None) -> TickReport:
                 entitlements[tenant_id] = await get_entitlements(tenant_id, redis)
             summary = entitlements[tenant_id]
             if summary is None or not summary.active or not summary.secretaria_enabled:
-                report.add("deferred")
+                if await _gated_too_late(reminder_id, now) and (
+                    await claim_reminder(reminder_id) is not None
+                ):
+                    await _retire_too_late(reminder_id)
+                    report.add("closed")
+                else:
+                    report.add("deferred")
                 continue
             attempt = await claim_reminder(reminder_id)
             if attempt is None:

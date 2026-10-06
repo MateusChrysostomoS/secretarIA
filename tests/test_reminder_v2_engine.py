@@ -240,3 +240,80 @@ async def test_a_row_without_patient_fails_and_warns_the_clinic(db):  # noqa: F8
         "delivery_failed",
     )
     assert _utc(row.warn_due_at) == NOW
+
+
+# ---- gated rows are retired once too late -----------------------------------
+
+
+async def test_a_gated_row_past_its_lateness_is_closed_too_late(db, monkeypatch):  # noqa: F811
+    async def _inactive(tenant_id, redis):
+        return EntitlementSummary(
+            tenant_id=str(tenant_id),
+            status="canceled",
+            active=False,
+            secretaria_enabled=True,
+            plan="bronze",
+            secretaria_tier="basico",
+            addons={},
+            limits={},
+        )
+
+    monkeypatch.setattr(reminder_engine, "get_entitlements", _inactive)
+    world = await seed_world(db)
+    rid = await add_reminder(db, world, kind="day", due_at=NOW - timedelta(hours=4))
+
+    report = await _tick()
+
+    row = await get_reminder(db, rid)
+    assert report.closed == 1
+    assert (row.status, row.last_error_code, row.warn_due_at) == ("skipped", "too_late", None)
+    assert FakeWhatsAppClient.created == []
+
+
+# ---- reaper for rows a dead worker left in 'sending' -------------------------
+
+
+async def _stuck(db, *, v2=True, attempts=1, age_min=11):  # noqa: F811
+    world = await seed_world(db, v2=v2)
+    rid = await add_reminder(
+        db, world, status="sending", attempts=attempts, due_at=NOW + timedelta(hours=1)
+    )
+    await _set(db, rid, updated_at=NOW - timedelta(minutes=age_min))
+    return rid
+
+
+async def test_a_stuck_sending_row_goes_back_to_pending(db):  # noqa: F811
+    rid = await _stuck(db)
+
+    assert await reminder_engine.reclaim_stuck_reminders(NOW) == 1
+
+    row = await get_reminder(db, rid)
+    assert (row.status, row.attempts, row.last_error_code) == ("pending", 1, "engine_error")
+
+
+async def test_a_stuck_row_at_the_attempt_cap_fails_and_warns(db):  # noqa: F811
+    rid = await _stuck(db, attempts=4)
+
+    await reminder_engine.reclaim_stuck_reminders(NOW)
+
+    row = await get_reminder(db, rid)
+    assert (row.status, row.last_error_code, row.warn_kind) == (
+        "failed",
+        "engine_error",
+        "delivery_failed",
+    )
+    assert _utc(row.warn_due_at) == NOW
+
+
+async def test_a_fresh_sending_row_is_left_alone(db):  # noqa: F811
+    rid = await _stuck(db, age_min=1)
+
+    assert await reminder_engine.reclaim_stuck_reminders(NOW) == 0
+    assert (await get_reminder(db, rid)).status == "sending"
+
+
+async def test_a_switch_off_clinics_stuck_row_is_untouched(db):  # noqa: F811
+    rid = await _stuck(db, v2=False, age_min=30)
+
+    assert await reminder_engine.reclaim_stuck_reminders(NOW) == 0
+    assert (await get_reminder(db, rid)).status == "sending"
