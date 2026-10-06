@@ -153,8 +153,11 @@ class WorkerSettings:
     # (daily at 03:30 UTC) — contract v1 §11. See workers/onboarding_cron.py.
     # check_deploy_parity_cron (hourly at :07) re-announces this worker's build
     # identity and WARNs when the API is running different code — FIX_01 §5.2.
-    # The minute is offset from every other cron above so the parity check
-    # never shares a tick with real work.
+    # process_appointment_reminders (TASK-032 R2 engine) runs every minute and
+    # reconcile_appointment_reminders at minutes 4,14,...,54. The parity check's
+    # minute (:07) is offset from every other cron except the every-minute
+    # engine, so it shares a tick only with that cheap cron, never with the
+    # other real work.
     cron_jobs = [
         cron(check_handover_timeouts, minute={0, 15, 30, 45}),
         cron(
