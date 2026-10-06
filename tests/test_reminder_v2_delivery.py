@@ -55,6 +55,7 @@ def _job(
     attempt=1,
     waba_token="decrypted-waba-token",
     reminder_id=None,
+    chat_written=False,
 ) -> ReminderJob:
     content = ReminderContent(
         clinic_name=world.tenant.clinic_name,
@@ -78,6 +79,7 @@ def _job(
         waba_token=waba_token,
         last_inbound_at=(NOW - inbound_ago) if inbound_ago is not None else None,
         now=NOW,
+        chat_written=chat_written,
     )
 
 
@@ -283,14 +285,40 @@ async def test_portal_patient_without_email_keeps_the_chat_copy_and_fails_perman
     )
 
 
-async def test_a_portal_retry_sends_the_email_again_but_never_a_second_chat_copy(db, mail):  # noqa: F811
+async def test_a_portal_retry_with_the_card_already_there_writes_no_second_copy(db, mail):  # noqa: F811
     sent, _ = mail
     world = await seed_world(db, channel=CHANNEL_BRAIN_MESSAGE)
 
-    await deliver_reminder(_job(world, attempt=2))
+    await deliver_reminder(_job(world, attempt=2, chat_written=True))
 
     assert await outbound_messages(db, world.conversation.id) == []
     assert len(sent) == 1
+
+
+async def test_a_portal_retry_without_the_card_writes_it(db, mail):  # noqa: F811
+    sent, _ = mail
+    world = await seed_world(db, channel=CHANNEL_BRAIN_MESSAGE)
+
+    await deliver_reminder(_job(world, attempt=2, chat_written=False))
+
+    assert len(await outbound_messages(db, world.conversation.id)) == 1
+    assert len(sent) == 1
+
+
+async def test_a_crash_reports_the_patients_own_channel(db, monkeypatch):  # noqa: F811
+    async def _boom(job):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(reminder_delivery, "_deliver_portal", _boom)
+    monkeypatch.setattr(reminder_delivery, "_deliver_whatsapp", _boom)
+    portal = await seed_world(db, channel=CHANNEL_BRAIN_MESSAGE)
+    wa = await seed_world(db, phone_number_id="pnid-2")
+
+    portal_outcome = await deliver_reminder(_job(portal))
+    wa_outcome = await deliver_reminder(_job(wa))
+
+    assert (portal_outcome.ok, portal_outcome.channel) == (False, "email")
+    assert (wa_outcome.ok, wa_outcome.channel) == (False, "whatsapp")
 
 
 async def test_a_transient_mail_failure_is_retryable(db, mail):  # noqa: F811

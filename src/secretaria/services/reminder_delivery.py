@@ -18,7 +18,10 @@ never reach the Graph API):
   against losing the reminder.
 * Portal: the reminder is written into the conversation (where it waits as
   the first thing the patient sees) and mailed with the clinic's link. The
-  chat copy is written on the FIRST attempt only; retries repeat the e-mail.
+  chat copy is written once: the engine finds out from the data whether the
+  conversation already holds it (`ReminderJob.chat_written`), so a retry
+  repeats the e-mail but never the card - and a first attempt that died
+  before the card was written does not lose it.
 
 Returns a `DeliveryOutcome`; never raises. The engine books the outcome
 (status, retries, warnings, the WhatsApp history row, usage). Logs carry ids
@@ -87,6 +90,9 @@ class ReminderJob:
     waba_token: str | None
     last_inbound_at: datetime | None
     now: datetime
+    # Portal only: the conversation already holds this reminder's card (found
+    # by the engine from the data, not inferred from the attempt number).
+    chat_written: bool = False
 
 
 @dataclass(frozen=True)
@@ -158,9 +164,12 @@ async def deliver_reminder(job: ReminderJob) -> DeliveryOutcome:
             reminder_id=str(job.reminder_id),
             error_type=type(exc).__name__,
         )
-        return DeliveryOutcome(
-            ok=False, channel=REMINDER_CHANNEL_WHATSAPP, error_code=_error_code(exc)
+        channel = (
+            REMINDER_CHANNEL_EMAIL
+            if job.patient.channel == CHANNEL_BRAIN_MESSAGE
+            else REMINDER_CHANNEL_WHATSAPP
         )
+        return DeliveryOutcome(ok=False, channel=channel, error_code=_error_code(exc))
 
 
 async def _deliver_whatsapp(job: ReminderJob) -> DeliveryOutcome:
@@ -249,7 +258,7 @@ async def _deliver_portal(job: ReminderJob) -> DeliveryOutcome:
             ok=False, channel=REMINDER_CHANNEL_EMAIL, error_code="no_conversation", permanent=True
         )
     body = build_reminder_body(job.content)
-    if job.attempt == 1:
+    if not job.chat_written:
         sender = BrainMessageSender(
             conversation_id=job.conversation_id,
             session_factory=core_database.async_session_factory,

@@ -6,7 +6,7 @@ Plano: `docs/superpowers/plans/2026-10-03-lembretes-r2-motor.md`. Base: R1 (`doc
 ## Estado
 
 - Local + commitado na branch `task/TASK-032-lembretes-e-confirmacao`. **Não pushado, não deployado.**
-- Interruptor `Tenant.reminders_v2_enabled` desligado em todas as clínicas: nada muda para ninguém até ligar.
+- Interruptor `Tenant.reminders_v2_enabled` desligado em todas as clínicas. Com ele desligado, as únicas mudanças de comportamento são: o cron antigo não tenta mais pacientes do Portal (não tinham `wa_id` e só geravam erro) e a remarcação zera o contador de confirmações (R1).
 - Modelo `lembrete_consulta_v2` ainda **não submetido/aprovado** na Meta (folha: `docs/LEMBRETES_MODELOS_META.md`).
 
 ## O que entrou onde
@@ -38,12 +38,13 @@ Plano: `docs/superpowers/plans/2026-10-03-lembretes-r2-motor.md`. Base: R1 (`doc
 12. Linhas de um horário antigo (gancho de remarcação perdido) nunca são enviadas: a guarda `stale_version` do motor as cancela. A reconciliação cura linhas que faltam, mas não aposenta as velhas, e o contador de confirmações não é zerado se o gancho de remarcação se perdeu.
 13. O webhook de pagamento vencido/removido do Asaas que cancela uma consulta com sinal (`deposit_lifecycle`) não chama o gancho de fechamento (mesma isenção da varredura de expiração): as linhas são fechadas pela guarda `appointment_closed` na hora do envio.
 14. Toque `rem*` em linha aposentada/cancelada não grava nada e responde `Essa consulta não está mais ativa.`; Confirmar só diz "Presença confirmada!" quando a linha ficou de fato registrada como confirmada.
+15. Portal: a cópia no chat é decidida pelos dados, não pelo número da tentativa (`ReminderJob.chat_written`, `_chat_copy_exists`): com botões, mensagem enviada cujo cartão tem um id terminando em `|<id do lembrete>`; sem botões, mensagem enviada com o texto idêntico criada em/depois do `due_at` da linha. Assim uma 1ª tentativa que morreu antes do cartão não o perde, e uma nova tentativa nunca o duplica.
 
 ## Pendências
 
 - Dono: submeter `lembrete_consulta_v2` à Meta; depois da aprovação ligar `REMINDER_V2_TEMPLATE_APPROVED=true` (API e worker).
 - R3: decodificar no Portal os toques `rem*` (chamar `decode_action_id` + `handle_reminder_button`), cartão de três opções do Cancelar, Outro → IA, mensagem de abertura (`kind='chat'`).
-- R4: avisos à clínica lendo `warn_due_at`/`warn_kind` — só linhas `sent`/`failed`; `failed` + `delivery_failed` = falha de entrega.
+- R4: avisos à clínica lendo `warn_due_at`/`warn_kind` — só linhas `sent`/`failed`; `failed` + `delivery_failed` = falha de entrega. Ler `warn_due_at` como está: o motor já o ajusta num envio atrasado (em `sent` com botões vale `max(prazo do R1, envio + atraso do R1)`, ou seja, hora +20 min, dia +2 h, extra +2 h contados do envio real; envio no horário mantém o valor do R1).
 - TASK-030 P5: o prompt e o filtro da IA ainda proíbem falar de lembretes.
 - `reminder_opt_out` continua sem tela para o paciente gravar (fora de escopo, spec §7).
 - Dívida conhecida: a gravação da resposta em `remcancel`/`remother` é ler-modificar-gravar sem trava de linha.

@@ -637,3 +637,107 @@ async def test_the_reconcile_cron_plans_missing_rows(db):  # noqa: F811
             ).all()
         )
     assert kinds == ["day", "hour"]
+
+
+# ---- review fixes: chat copy from data, late-send warning, per-row clock ----
+
+
+@pytest.fixture
+def portal_mail(monkeypatch):
+    state = {"outcome": EmailOutcome.SENT}
+
+    async def _fetch(tenant_id, external_id):
+        return PatientEmailResult(available=True, email="maria@example.com")
+
+    async def _send(to, template, variables):
+        return state["outcome"]
+
+    monkeypatch.setattr(reminder_delivery, "fetch_patient_email_result", _fetch)
+    monkeypatch.setattr(reminder_delivery, "send_transactional_email_result", _send)
+    return state
+
+
+async def test_a_portal_first_attempt_that_died_before_the_card_still_writes_it_on_retry(
+    db,  # noqa: F811
+    monkeypatch,
+    portal_mail,
+):
+    world = await seed_world(db, channel=CHANNEL_BRAIN_MESSAGE)
+    rid = await add_reminder(db, world)
+    real_deliver = reminder_engine.deliver_reminder
+    calls = {"n": 0}
+
+    async def _crash_once(job):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("worker blip before the sender")
+        return await real_deliver(job)
+
+    monkeypatch.setattr(reminder_engine, "deliver_reminder", _crash_once)
+
+    await _tick()
+    assert (await get_reminder(db, rid)).status == "pending"
+    assert await outbound_messages(db, world.conversation.id) == []
+
+    await _tick(NOW + timedelta(minutes=1))
+
+    row = await get_reminder(db, rid)
+    assert (row.status, row.attempts) == ("sent", 2)
+    [card] = await outbound_messages(db, world.conversation.id)
+    assert card.interactive["options"][0]["id"] == f"remconfirm|{rid}"
+
+
+@pytest.mark.parametrize("with_prompt", [True, False])
+async def test_a_portal_retry_after_the_card_was_written_never_writes_a_second_one(
+    db,  # noqa: F811
+    portal_mail,
+    with_prompt,
+):
+    world = await seed_world(db, channel=CHANNEL_BRAIN_MESSAGE)
+    rid = await add_reminder(db, world, with_prompt=with_prompt)
+    portal_mail["outcome"] = EmailOutcome.SEND_FAILED  # card written, e-mail fails -> retry
+
+    await _tick()
+    assert (await get_reminder(db, rid)).status == "pending"
+    portal_mail["outcome"] = EmailOutcome.SENT
+    await _tick(NOW + timedelta(minutes=1))
+
+    row = await get_reminder(db, rid)
+    assert (row.status, row.attempts) == ("sent", 2)
+    assert len(await outbound_messages(db, world.conversation.id)) == 1
+
+
+async def test_an_on_time_send_leaves_the_warning_deadline_as_r1_wrote_it(db):  # noqa: F811
+    world = await seed_world(db, last_inbound_at=NOW - timedelta(hours=1))
+    rid = await add_reminder(db, world)  # due 1 min ago, warn = due + 2 h
+    planned = _utc((await get_reminder(db, rid)).warn_due_at)
+
+    await _tick()
+
+    assert _utc((await get_reminder(db, rid)).warn_due_at) == planned
+
+
+async def test_a_late_send_moves_the_warning_deadline_to_send_time_plus_the_r1_delay(db):  # noqa: F811
+    world = await seed_world(db, last_inbound_at=NOW + timedelta(hours=1))
+    due = NOW - timedelta(hours=2)
+    rid = await add_reminder(db, world, kind="day", due_at=due)  # warn = due + 2 h = NOW
+    assert _utc((await get_reminder(db, rid)).warn_due_at) == NOW
+
+    await _tick()
+
+    row = await get_reminder(db, rid)
+    assert (row.status, row.warn_kind) == ("sent", "unconfirmed")
+    assert _utc(row.warn_due_at) == NOW + timedelta(hours=2)
+
+
+async def test_each_row_is_judged_against_the_clock_at_that_moment(db, monkeypatch):  # noqa: F811
+    world = await seed_world(db, last_inbound_at=NOW - timedelta(hours=1))
+    rid = await add_reminder(db, world, kind="hour")  # may be at most 30 min late
+    readings = iter([NOW, NOW + timedelta(hours=1)])  # tick start, then the row's turn
+    monkeypatch.setattr(reminder_engine, "_utcnow", lambda: next(readings))
+
+    report = await reminder_engine.run_reminder_tick()
+
+    row = await get_reminder(db, rid)
+    assert (row.status, row.last_error_code) == ("skipped", "too_late")
+    assert report.closed == 1 and FakeWhatsAppClient.all_sent() == []

@@ -73,7 +73,7 @@ from secretaria.services.reminder_delivery import (
     deliver_reminder,
 )
 from secretaria.services.reminder_schedule import MAX_CONFIRMATIONS
-from secretaria.services.reminder_text import load_reminder_content
+from secretaria.services.reminder_text import build_reminder_body, load_reminder_content
 from secretaria.services.tenant_config import get_waba_token
 from secretaria.services.usage_events import emit_usage_event
 
@@ -93,6 +93,11 @@ DEFAULT_MAX_LATENESS = timedelta(minutes=30)
 # A claim is released or booked within seconds; a row still `sending` after this
 # long belongs to a worker that died (deploy / OOM) between claim and finish.
 STUCK_SENDING_AFTER = timedelta(minutes=10)
+# A send within this of its due time keeps R1's clinic-warning deadline as
+# written; a later one (up to MAX_LATENESS) shifts it (`_mark_sent`).
+ON_TIME_TOLERANCE = timedelta(minutes=5)
+# Outbound rows scanned when looking for this reminder's chat copy.
+CHAT_COPY_SCAN_LIMIT = 50
 
 
 @dataclass
@@ -194,6 +199,46 @@ def _fail(reminder: AppointmentReminder, code: str, now: datetime) -> None:
     )
 
 
+async def _chat_copy_exists(
+    session, conversation_id: UUID | None, reminder: AppointmentReminder, body: str
+) -> bool:
+    """Does the Portal conversation already hold THIS reminder's card?
+
+    Decided from the data, never from the attempt number (an attempt that died
+    before the card was written must not lose it, and a retry must not
+    duplicate it). Buttons: an outbound row whose card carries an option id
+    ending `|<reminder_id>` (every variant of the buttons does). No buttons: an
+    outbound row with exactly the reminder's text created at or after the row's
+    `due_at` (the day and hour reminders share their sentence, so the time bound
+    keeps an earlier reminder's text from counting).
+    """
+    if conversation_id is None:
+        return False
+    rows = await session.execute(
+        select(Message.body, Message.interactive, Message.created_at)
+        .where(
+            Message.conversation_id == conversation_id,
+            Message.direction == MessageDirection.OUTBOUND,
+        )
+        .order_by(Message.created_at.desc())
+        .limit(CHAT_COPY_SCAN_LIMIT)
+    )
+    suffix = f"|{reminder.id}"
+    due = _as_utc(reminder.due_at)
+    for message_body, interactive, created_at in rows:
+        options = interactive.get("options") if isinstance(interactive, dict) else None
+        if options and any(str(opt.get("id", "")).endswith(suffix) for opt in options):
+            return True
+        if (
+            not options
+            and message_body == body
+            and created_at is not None
+            and _as_utc(created_at) >= due
+        ):
+            return True
+    return False
+
+
 async def _prepare(reminder_id: UUID, attempt: int, now: datetime) -> ReminderJob | None:
     """Load and guard one claimed row. None = it was closed here; nothing to send."""
     async with core_database.async_session_factory() as session:
@@ -233,6 +278,9 @@ async def _prepare(reminder_id: UUID, attempt: int, now: datetime) -> ReminderJo
                 else await cancellation_notice.last_inbound_at(session, tenant.id, patient.id)
             )
             waba_token = None if portal else await get_waba_token(session, tenant.id)
+            chat_written = portal and await _chat_copy_exists(
+                session, conversation_id, reminder, build_reminder_body(content)
+            )
             return ReminderJob(
                 reminder_id=reminder.id,
                 kind=reminder.kind,
@@ -250,6 +298,7 @@ async def _prepare(reminder_id: UUID, attempt: int, now: datetime) -> ReminderJo
                 waba_token=waba_token,
                 last_inbound_at=last_inbound,
                 now=now,
+                chat_written=chat_written,
             )
 
 
@@ -264,9 +313,14 @@ def _mark_sent(
     # outside the window (template not approved / refused).
     reminder.last_error_code = outcome.error_code
     if job.with_prompt:
-        # R1 already set warn_due_at (due + delay); R4 warns the clinic then if
-        # the counter is still 0.
+        # R1 wrote warn_due_at = due_at + delay; R4 warns the clinic then if the
+        # counter is still 0. A late send (up to MAX_LATENESS) would leave that
+        # deadline already past, so the same delay is measured from the real send.
         reminder.warn_kind = REMINDER_WARN_UNCONFIRMED
+        if reminder.warn_due_at is not None and now - _as_utc(reminder.due_at) > ON_TIME_TOLERANCE:
+            planned = _as_utc(reminder.warn_due_at)
+            delay = planned - _as_utc(reminder.due_at)
+            reminder.warn_due_at = max(planned, now + delay)
     else:
         # No question was asked, so there is nothing to be unanswered (spec §4.2 "Parada").
         reminder.warn_kind = None
@@ -441,16 +495,29 @@ async def _retire_too_late(reminder_id: UUID) -> None:
                 _close(reminder, REMINDER_STATUS_SKIPPED, "too_late")
 
 
-async def run_reminder_tick(*, now: datetime, redis=None) -> TickReport:
-    """One pass over the due rows. One bad row never stops the others."""
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+async def run_reminder_tick(*, now: datetime | None = None, redis=None) -> TickReport:
+    """One pass over the due rows. One bad row never stops the others.
+
+    Clock: a tick can hold 200 rows doing network I/O, so a single `now` would
+    let the `appointment_started` and lateness guards go stale. With no `now`
+    (production) every row reads a fresh clock; a `now` passed in (tests) is
+    honored for the whole tick.
+    """
     report = TickReport()
+    injected = now
+    tick_start = injected if injected is not None else _utcnow()
     entitlements: dict[UUID, EntitlementSummary | None] = {}
     limit = get_settings().REMINDER_V2_BATCH_SIZE
     try:
-        await reclaim_stuck_reminders(now)
+        await reclaim_stuck_reminders(tick_start)
     except Exception as exc:
         logger.warning("reminder_v2_reclaim_failed", error_type=type(exc).__name__)
-    for reminder_id, tenant_id in await due_reminder_ids(now, limit=limit):
+    for reminder_id, tenant_id in await due_reminder_ids(tick_start, limit=limit):
+        now = injected if injected is not None else _utcnow()
         attempt: int | None = None
         delivered: tuple[ReminderJob, DeliveryOutcome] | None = None
         try:
@@ -497,7 +564,7 @@ async def run_reminder_tick(*, now: datetime, redis=None) -> TickReport:
 
 async def process_appointment_reminders(ctx: dict) -> None:
     """arq cron (every minute, workers/arq_worker.py): send the due reminders."""
-    await run_reminder_tick(now=datetime.now(UTC), redis=ctx.get("redis"))
+    await run_reminder_tick(redis=ctx.get("redis"))
 
 
 async def reconcile_appointment_reminders(ctx: dict) -> None:
