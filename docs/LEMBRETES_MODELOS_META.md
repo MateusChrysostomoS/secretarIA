@@ -1,0 +1,61 @@
+# Modelos do WhatsApp para os lembretes (TASK-032 R2)
+
+Folha para submeter à Meta (WhatsApp Manager → Ferramentas da conta → Modelos de mensagem).
+Modelos são aprovados **por conta do WhatsApp Business (WABA)**: submeta em cada WABA de clínica
+que vai ligar o lembrete novo. A aprovação é externa (minutos a dias). Enquanto o modelo novo não
+estiver aprovado, o sistema continua funcionando com o modelo simples de hoje (seção 3).
+
+## 1. Modelo novo com 3 botões — `lembrete_consulta_v2`
+
+| Campo | Valor |
+|---|---|
+| Nome | `lembrete_consulta_v2` |
+| Categoria | Utilidade (Utility) |
+| Idioma | Português (BR) — `pt_BR` |
+| Cabeçalho | nenhum |
+| Rodapé | nenhum |
+
+Corpo (copiar exatamente, em uma única linha):
+
+> LEMBRE-SE: {{1}} com {{2}} está marcada para o dia {{3}} às {{4}} para {{5}}. {{6}} Toque em um dos botões abaixo para responder.
+
+Exemplos que a Meta pede para cada variável:
+
+| Variável | O que entra | Exemplo para a Meta |
+|---|---|---|
+| `{{1}}` | de quem é a consulta | `Sua consulta` (consulta marcada para outra pessoa: `A consulta de João Pedro`) |
+| `{{2}}` | médico(a) | `Dra. Ana Souza` (sem médico cadastrado: `a equipe da Clínica Olhar`) |
+| `{{3}}` | data, no fuso da clínica | `10/10/2026` |
+| `{{4}}` | hora, no fuso da clínica | `14:30` |
+| `{{5}}` | serviço | `Consulta oftalmológica` |
+| `{{6}}` | orientações do serviço, numa linha só | `Orientações: jejum de 8 horas; trazer exames anteriores.` (sem orientações: `Sem orientações especiais.`) |
+
+Botões — tipo **Resposta rápida** (quick reply), **nesta ordem** (o sistema envia o código de
+cada botão pela posição):
+
+1. `Confirmar`
+2. `Cancelar`
+3. `Outro`
+
+O que o sistema já garante (não precisa configurar): nenhuma variável vai vazia, com quebra de
+linha, tabulação ou mais de 4 espaços seguidos (regra da Meta); as orientações vêm achatadas numa
+linha e cortadas em 400 caracteres; os rótulos dos botões têm no máximo 20 caracteres.
+
+## 2. Modelos que já existem e continuam em uso
+
+| Nome | Uso no lembrete novo |
+|---|---|
+| `appointment_reminder` | Modelo simples de hoje (1 variável, sem botões). Usado fora da janela de 24 h enquanto o modelo novo não está aprovado, se a Meta recusar o modelo novo numa WABA, e sempre que o paciente já confirmou duas vezes (lembrete sem pedido de confirmação). A variável recebe agora o texto novo numa linha: `LEMBRE-SE: Sua consulta com … às 14:30 para Consulta. Orientações: …` |
+| `appointment_reminder_deposit` | Consulta com sinal Pix pago: 1 variável (o mesmo texto numa linha) + 3 respostas rápidas `Confirmar` / `Reagendar` / `Cancelar`, como hoje. |
+
+## 3. Configuração e ativação (quem faz: o dono, no painel; nenhuma automação mexe em variáveis)
+
+| Variável de ambiente (API **e** worker) | Valor | Quando |
+|---|---|---|
+| `REMINDER_V2_TEMPLATE_NAME` | `lembrete_consulta_v2` | só se o nome aprovado for outro |
+| `REMINDER_V2_TEMPLATE_APPROVED` | `false` → `true` | trocar para `true` só depois da aprovação na(s) WABA(s) das clínicas ligadas |
+| `BRAIN_MESSAGE_PORTAL_URL` | o mesmo valor que o brain-api usa | para o e-mail do Portal levar o link "abrir minha conversa" |
+
+Enquanto `REMINDER_V2_TEMPLATE_APPROVED=false`: dentro da janela de 24 h o paciente recebe a
+mensagem com os 3 botões normalmente; fora dela recebe o modelo simples (sem botões) e responde
+pela conversa — a mensagem de abertura do chat (plano R3) mostra os botões quando ele escrever.

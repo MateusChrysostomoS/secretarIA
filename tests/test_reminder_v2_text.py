@@ -1,10 +1,13 @@
 """services/reminder_text.py — the words of the reminder (TASK-032 R2, spec §4.2)."""
 
+import re
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
+from secretaria.config import get_settings
 from secretaria.core.whatsapp_limits import MAX_BUTTON_LABEL_CHARS, MAX_INTERACTIVE_BODY_CHARS
 from secretaria.models import Appointment, Tenant
 from secretaria.schemas.webhook import WebhookMessage, decode_action_id, extract_action_button
@@ -235,3 +238,30 @@ def test_the_pix_paid_variant_keeps_its_trio_and_pix_scoped_ids():
         (f"apptresched|{appointment_id}", "Reagendar"),
         (f"apptcancel|{appointment_id}", "Cancelar"),
     ]
+
+
+# --------------------------------------------------------------------------
+# The Meta submission sheet stays in step with the code (Task 4)
+# --------------------------------------------------------------------------
+
+META_DOC = Path(__file__).resolve().parent.parent / "docs" / "LEMBRETES_MODELOS_META.md"
+
+
+def test_the_meta_sheet_matches_the_code():
+    text = META_DOC.read_text(encoding="utf-8")
+    settings = get_settings()
+
+    assert f"`{settings.REMINDER_V2_TEMPLATE_NAME}`" in text
+    assert f"`{settings.REMINDER_TEMPLATE_NAME}`" in text
+    assert f"`{settings.REMINDER_DEPOSIT_TEMPLATE_NAME}`" in text
+
+    body = next(line for line in text.splitlines() if line.startswith("> LEMBRE-SE:"))
+    placeholders = re.findall(r"\{\{(\d+)\}\}", body)
+    assert placeholders == [str(i) for i in range(1, rt.TEMPLATE_PARAM_COUNT + 1)]
+    # Meta refuses a body that starts or ends with a variable.
+    assert not body.removeprefix("> ").startswith("{{")
+    assert not body.rstrip().endswith("}}")
+
+    for label in (rt.LABEL_CONFIRM, rt.LABEL_CANCEL, rt.LABEL_OTHER):
+        assert f"`{label}`" in text
+    assert f"`{rt.NO_REQUIREMENTS_PARAM}`" in text
