@@ -29,6 +29,7 @@ from secretaria.models.appointment_reminder import (
     REMINDER_ANSWER_CANCEL,
     REMINDER_ANSWER_CONFIRM,
     REMINDER_ANSWER_OTHER,
+    REMINDER_STATUS_CANCELLED,
 )
 from secretaria.services import reminder_schedule
 from secretaria.services.reminder_text import ACTION_CANCEL, ACTION_CONFIRM, REMINDER_ACTIONS
@@ -117,6 +118,12 @@ async def handle_reminder_button(
             await client.send_text_message(to=reply.patient_ref, body=MOVED_TEXT.format(when=when))
             return
 
+        if reminder.invalidated_at is not None or reminder.status == REMINDER_STATUS_CANCELLED:
+            # A retired row (same rules as register_confirmation's `stale`): no
+            # write, and never a claim of confirmation.
+            await client.send_text_message(to=reply.patient_ref, body=NOT_ACTIVE_TEXT)
+            return
+
         if action == ACTION_CONFIRM:
             try:
                 await reminder_schedule.register_confirmation(
@@ -131,6 +138,11 @@ async def handle_reminder_button(
                 await client.send_text_message(to=reply.patient_ref, body=NOT_FOUND_TEXT)
                 return
             await session.commit()
+            if reminder.answer != REMINDER_ANSWER_CONFIRM:
+                # Nothing was recorded (e.g. the row went stale in a race): do not
+                # tell the patient they are confirmed.
+                await client.send_text_message(to=reply.patient_ref, body=NOT_ACTIVE_TEXT)
+                return
             await client.send_text_message(
                 to=reply.patient_ref, body=CONFIRMED_TEXT.format(when=when)
             )

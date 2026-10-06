@@ -226,3 +226,46 @@ async def test_a_malformed_reminder_id_is_ignored_silently(db):  # noqa: F811
     await tasks._handle_action_button(_reply(world.conversation.id), "remconfirm", "not-a-uuid")
 
     assert FakeWhatsAppClient.created == []
+
+
+async def _retired_row(db, world):  # noqa: F811
+    rid = await add_reminder(db, world, status="cancelled")
+    return rid
+
+
+async def test_confirm_on_a_retired_row_claims_nothing_and_writes_nothing(db):  # noqa: F811
+    world = await seed_world(db, start_at=_future())
+    rid = await _retired_row(db, world)
+
+    await _tap(world.conversation.id, "remconfirm", rid)
+
+    assert _texts() == ["Essa consulta não está mais ativa."]
+    row = await get_reminder(db, rid)
+    assert (row.answer, row.answered_at) == (None, None)
+    assert (await reload_appointment(db, world.appointment.id)).confirmation_count == 0
+
+
+@pytest.mark.parametrize("action", ["remcancel", "remother"])
+async def test_cancel_and_other_on_a_retired_row_write_nothing(db, action):  # noqa: F811
+    world = await seed_world(db, start_at=_future())
+    rid = await _retired_row(db, world)
+
+    await _tap(world.conversation.id, action, rid)
+
+    assert _texts() == ["Essa consulta não está mais ativa."]
+    row = await get_reminder(db, rid)
+    assert (row.answer, row.answered_at) == (None, None)
+
+
+async def test_confirm_on_an_invalidated_row_claims_nothing(db):  # noqa: F811
+    world = await seed_world(db, start_at=_future())
+    rid = await add_reminder(db, world)
+    async with db() as session:
+        row = await session.get(type(await get_reminder(db, rid)), rid)
+        row.invalidated_at = datetime.now(UTC)
+        await session.commit()
+
+    await _tap(world.conversation.id, "remconfirm", rid)
+
+    assert _texts() == ["Essa consulta não está mais ativa."]
+    assert (await reload_appointment(db, world.appointment.id)).confirmation_count == 0
