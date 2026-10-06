@@ -355,6 +355,21 @@ _TEMPLATES: dict[str, EmailTemplate] = {
             "— Equipe SecretarIA"
         ),
     ),
+    # TASK-032 R2: a Portal patient's appointment reminder (workers/reminder_engine.py).
+    # `reminder_text` is services/reminder_text.py::build_reminder_body - the very
+    # words the chat shows; `link_line` arrives pre-rendered (the clinic invite
+    # link, or a sentence when BRAIN_MESSAGE_PORTAL_URL is unset). Nothing beyond
+    # what the patient already received when booking.
+    "appointment_reminder_patient": EmailTemplate(
+        subject="Lembrete de consulta — {when}",
+        body=(
+            "Olá!\n\n"
+            "{reminder_text}\n\n"
+            "Para confirmar, cancelar ou falar com a {clinic_name}, abra a sua conversa:\n"
+            "{link_line}\n"
+            "— {clinic_name}"
+        ),
+    ),
     "professional_invite": EmailTemplate(
         subject="Você foi convidado(a) para a equipe da {clinic_name} no SecretarIA",
         body=(

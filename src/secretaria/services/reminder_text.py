@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
 from secretaria.core.whatsapp_limits import MAX_INTERACTIVE_BODY_CHARS
 from secretaria.models import Appointment, Professional, Tenant
@@ -279,3 +280,16 @@ def deposit_reminder_buttons(reminder_id, appointment_id) -> list[tuple[str, str
 def button_payloads(buttons: list[tuple[str, str]]) -> list[str]:
     """Just the ids, for a template's quick-reply `button_payloads` (same order)."""
     return [button_id for button_id, _label in buttons]
+
+
+def portal_conversation_link(tenant_id) -> str | None:
+    """Where the reminder e-mail sends a Portal patient: the clinic's invite link.
+
+    `{BRAIN_MESSAGE_PORTAL_URL}/clinicas/?convite=<tenant uuid>` is a shape
+    brain-api already accepts (core/invite_codes.py::parse_invite reads a bare
+    clinic UUID; tenant ids are shared across the mesh), so no brain-api call
+    and no new contract. A patient with a live session lands in the
+    conversation; one without signs in first. None while the URL is unset.
+    """
+    base = (get_settings().BRAIN_MESSAGE_PORTAL_URL or "").strip().rstrip("/")
+    return f"{base}/clinicas/?convite={tenant_id}" if base else None

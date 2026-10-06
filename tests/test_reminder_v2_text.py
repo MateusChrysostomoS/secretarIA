@@ -11,7 +11,8 @@ from secretaria.config import get_settings
 from secretaria.core.whatsapp_limits import MAX_BUTTON_LABEL_CHARS, MAX_INTERACTIVE_BODY_CHARS
 from secretaria.models import Appointment, Tenant
 from secretaria.schemas.webhook import WebhookMessage, decode_action_id, extract_action_button
-from secretaria.services import reminder_text as rt
+from secretaria.services import email as email_service, reminder_text as rt
+from secretaria.services.email import EmailOutcome
 from tests._reminder_fixtures import db  # noqa: F401
 from tests._reminders_v2 import seed_world
 
@@ -265,3 +266,53 @@ def test_the_meta_sheet_matches_the_code():
     for label in (rt.LABEL_CONFIRM, rt.LABEL_CANCEL, rt.LABEL_OTHER):
         assert f"`{label}`" in text
     assert f"`{rt.NO_REQUIREMENTS_PARAM}`" in text
+
+
+# --------------------------------------------------------------------------
+# Portal e-mail (Task 5)
+# --------------------------------------------------------------------------
+
+
+def test_portal_link_is_the_clinic_invite_link(monkeypatch):
+    tenant_id = uuid4()
+    monkeypatch.setattr(
+        get_settings(), "BRAIN_MESSAGE_PORTAL_URL", "https://portal.exemplo/", raising=False
+    )
+    assert (
+        rt.portal_conversation_link(tenant_id)
+        == f"https://portal.exemplo/clinicas/?convite={tenant_id}"
+    )
+
+
+def test_portal_link_is_none_while_unconfigured(monkeypatch):
+    monkeypatch.setattr(get_settings(), "BRAIN_MESSAGE_PORTAL_URL", "", raising=False)
+    assert rt.portal_conversation_link(uuid4()) is None
+
+
+async def test_reminder_email_renders_the_reminder_and_the_link(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "EMAIL_ENABLED", True, raising=False)
+    monkeypatch.setattr(settings, "SMTP_HOST", "smtp.test", raising=False)
+    captured: dict = {}
+
+    def _fake_send(to_email, subject, body):
+        captured.update(to=to_email, subject=subject, body=body)
+
+    monkeypatch.setattr(email_service, "_send_transactional_sync", _fake_send)
+
+    outcome = await email_service.send_transactional_email_result(
+        to="maria@example.com",
+        template="appointment_reminder_patient",
+        variables={
+            "clinic_name": "Clínica Olhar",
+            "when": "10/10/2026 às 14:30",
+            "reminder_text": SENTENCE,
+            "link_line": "https://portal.exemplo/clinicas/?convite=abc\n",
+        },
+    )
+
+    assert outcome is EmailOutcome.SENT
+    assert captured["subject"] == "Lembrete de consulta — 10/10/2026 às 14:30"
+    assert SENTENCE in captured["body"]
+    assert "https://portal.exemplo/clinicas/?convite=abc" in captured["body"]
+    assert "{" not in captured["body"]  # every placeholder was filled
