@@ -1,10 +1,11 @@
 # TASK-030 — IA entra em qualquer etapa: P2a
 
-Atualizado em 2026-10-05. **P2a A1–A6 implementado e validado localmente.** A1–A3 já estavam
-commitados no início da retomada (`7a62e47`, `10d4844`, `33597f9`); A4–A6 e as correções da
-revisão ficam **sem novo commit**, no worktree `C:\TECH\BRAIN-worktrees\TASK-030\secretarIA`,
-branch `task/TASK-030-ia-entra-em-qualquer-etapa`. Nada desta retomada foi mesclado, enviado
-ou implantado. P2b e os demais planos continuam pendentes.
+Atualizado em 2026-10-05. **P2a A1–A6 implementado, commitado e integrado em main.** A1–A3
+já estavam commitados no início da retomada (`7a62e47`, `10d4844`, `33597f9`); A4–A6 e as
+correções da revisão foram commitados em `91e61c8`. O dono autorizou expressamente os merges
+e pushes para fazer seu deploy. A main atual foi incorporada em `f503a21`, e a sequência
+das migrações foi corrigida em `166e582`. Worktree e branch TASK-030 preservados para P2b.
+Nenhum deploy ou SQL remoto realizado pelo agente. P2b e os demais planos continuam pendentes.
 
 Plano executado: `superpowers/plans/2026-10-02-ia-p2a-rascunho-coluna-e-resolvedor.md`.
 Spec: `superpowers/specs/2026-10-02-ia-entra-em-qualquer-etapa-design.md`, §4.1–4.3, §6–7.
@@ -67,6 +68,16 @@ Testes sempre pelo Git Bash, com `BOT_ALLOWLIST_WA_IDS="" uv run python -m pytes
   antes→depois: flow_router 22→22; greeting 12→11; orchestrator 2→2; flow_runner 2→2.
 - `git diff --check`: clean; nenhum arquivo antigo aparece como reescrito inteiro.
 
+Validação da integração autorizada, depois da retomada:
+
+- Antes de commitar A4–A6: **3.202 passed, 10 skipped, 14 warnings**, em 209,30 s.
+- Na main integrada, com R1 e a cadeia corrigida: **3.276 passed, 10 skipped, 15 warnings**,
+  em 338,34 s; nenhuma falha. Os avisos continuam nas mesmas categorias de depreciação.
+- Ruff em `src/secretaria` e nos testes afetados: clean; diff commitado contra a main anterior:
+  clean. As únicas mudanças depois dessa suíte são documentação e marcação do plano.
+- Os quatro arquivos com alterações anteriores na main ficaram byte a byte idênticos
+  (SHA256 antes/depois), fora dos commits desta tarefa. Nenhum stash, reset ou force-push.
+
 A primeira suíte completa da retomada terminou em **8 failed, 3.186 passed, 10 skipped**:
 os oito casos `test_each_entry_point_imports_alone` tiveram subprocesso Python encerrado no
 Windows com código `0xC0000142` e stderr vazio. A repetição imediata de `test_workers_layering.py`
@@ -84,8 +95,17 @@ retomada, PostgreSQL 16 local descartável comprovou a cadeia completa de migrat
 
 Container exclusivo removido no fim. Porta local dinâmica ligada apenas a 127.0.0.1 para
 evitar interferência com qualquer banco existente. Nenhum SQL remoto ou produção acessado.
-O parent real da migração é `e5a1c9d3b7f2`, corrigindo o parent desatualizado do plano e
-preservando um único head Alembic.
+Na prova inicial, o parent era `e5a1c9d3b7f2`, corrigindo o parent desatualizado do plano.
+Na integração posterior, a main já continha a fundação dos lembretes R1. A migração P2a,
+ainda não publicada nem implantada naquele momento, passou a seguir `b8d3f1a6c2e5`, sem
+alterar a migração de R1. Head único final: `e7d3c1a9b5f2`.
+
+A prova PostgreSQL da integração começou em R1 (`upgrade b8d3f1a6c2e5`), avançou para P2a,
+voltou a R1 (`downgrade -1`) e avançou novamente. A coluna `flow_draft` é removida e
+restaurada corretamente, e a tabela de lembretes permanece. Container descartável removido.
+Os testes que detectavam dois heads falharam antes do ajuste; depois, **9 passed**.
+O teste de R1 agora confirma head único e presença de sua revisão na cadeia, permitindo
+novas migrações descendentes. Rollback apenas do P2a: `alembic downgrade b8d3f1a6c2e5`.
 
 Quando houver pedido de implantação do P2 inteiro: migração primeiro, API e worker juntos.
 Rollback: código antigo nos dois serviços antes de remover a coluna. **Deployment: NOT AUTHORIZED.**
@@ -94,8 +114,9 @@ Rollback: código antigo nos dois serviços antes de remover a coluna. **Deploym
 
 - Preservado o worktree existente e os arquivos parciais de A4. A prova RED contra A3 usou
   cópia em scratch; não é um registro original de test-first dessa sessão interrompida.
-- Sem commit novo por instrução atual do dono; ledger e provas em
-  `.superpowers/sdd/2026-10-02-ia-p2a-rascunho-coluna-e-resolvedor/` permanecem necessários.
+- A retomada inicial preservou as mudanças sem commit; após pedido explícito de integração,
+  o código e a documentação foram commitados. Worktree, ledger e provas permanecem para
+  a continuação sequencial em P2b e para preservar o registro da sessão interrompida.
 - Próximo plano: P2b, **não iniciado nesta retomada**. O P2a sozinho não habilita ferramenta,
   interruptor ou prompt; custo do adiamento: a melhoria ampla ainda não está disponível ao paciente.
 - P3 continua dono da confirmação expressa e da retenção em outras perguntas; custo do

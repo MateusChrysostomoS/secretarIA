@@ -14,11 +14,13 @@
 
 ## Estado de execução — 2026-10-05
 
-**A1–A6 implementados e validados localmente.** A1–A3 já commitados até `33597f9`;
-A4–A6 e correções da revisão permanecem sem novo commit, conforme instrução atual do dono.
-As caixas de lint/commit de A4–A6 ficam abertas apenas pela ausência do commit; lint passou.
-Suíte final: **3.202 passed, 10 skipped**, Ruff clean. Migração comprovada em SQLite e
-PostgreSQL 16 descartável (upgrade/downgrade/re-upgrade). Sem merge, push ou deploy.
+**A1–A6 implementados, validados e commitados.** A1–A3 já commitados até `33597f9`;
+A4–A6 e correções da revisão em `91e61c8`, após autorização explícita de merge/push do dono.
+Main atual incorporada em `f503a21`; migração encadeada após R1 em `166e582`.
+Suíte P2a isolado: **3.202 passed, 10 skipped**; main integrada: **3.276 passed, 10 skipped**.
+Ruff clean. Migração comprovada em SQLite e
+PostgreSQL 16 descartável (upgrade/downgrade/re-upgrade), incluindo atualização a partir de R1.
+Integrado em main; publicação autorizada. Nenhum deploy ou SQL remoto pelo agente.
 
 Fonte de verdade, revisão/correções e handoff: `docs/CHECKPOINT_ia_p2a_rascunho_resolvedor.md`.
 Na revisão, quatro premissas deste plano precisaram de ajuste: nome capturado não equivale
@@ -2528,7 +2530,7 @@ async def _land_day(
 Run: `BOT_ALLOWLIST_WA_IDS="" uv run python -m pytest tests/test_booking_draft_resolver.py tests/test_booking_draft.py tests/test_flow_router.py tests/test_flow_router_insurance.py tests/test_convenio_catalogo_flow.py tests/test_flow_router_multiprofessional.py tests/test_insurance_mode_matrix.py -q`
 Expected: PASS (os 24 novos e os antigos de convênio/multi-médico).
 
-- [ ] **Step 6: Lint and commit**
+- [x] **Step 6: Lint and commit**
 
 ```bash
 uvx ruff format src/secretaria/services/booking_draft.py tests/test_booking_draft_resolver.py
@@ -2954,7 +2956,7 @@ async def _express_confirmation(
 Run: `BOT_ALLOWLIST_WA_IDS="" uv run python -m pytest tests/test_booking_draft_resolver.py tests/test_flow_day_picker.py tests/test_flow_router.py tests/test_availability.py -q`
 Expected: PASS (todos os do resolvedor, 40 com os parametrizados, e os seletores inalterados).
 
-- [ ] **Step 6: Lint and commit**
+- [x] **Step 6: Lint and commit**
 
 ```bash
 uvx ruff format src/secretaria/services/booking_draft.py tests/test_booking_draft_resolver.py
@@ -3695,7 +3697,7 @@ async def _apply_flow_result(
 Run: `BOT_ALLOWLIST_WA_IDS="" uv run python -m pytest tests/test_booking_draft_continuation.py tests/test_attendee_booking.py tests/test_booking_code_gate.py tests/test_workers_layering.py tests/test_agent_menu_tools.py tests/test_handback_events.py -q`
 Expected: PASS (os 5 novos; o portão continua armando no Portal; camadas respeitadas; os hand-backs do P1 inalterados).
 
-- [ ] **Step 7: Lint and commit**
+- [x] **Step 7: Lint and commit**
 
 ```bash
 uvx ruff format src/secretaria/workers/shared/draft_resolution.py tests/test_booking_draft_continuation.py
