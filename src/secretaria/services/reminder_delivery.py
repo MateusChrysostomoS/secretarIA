@@ -12,8 +12,10 @@ never reach the Graph API):
   `REMINDER_V2_TEMPLATE_APPROVED`, the Pix deposit template for a paid deposit,
   and the plain one-variable template otherwise - also as the fallback when Meta
   refuses either of the other two (precedent: plugins/reminders.py's deposit
-  fallback). Never a duplicate: a refused template raised before anything
-  reached the patient.
+  fallback). The fallback fires on ANY send error, so an ambiguous failure
+  (timeout/5xx after Meta already accepted the template) can in rare cases
+  produce a second reminder: at-least-once delivery, an accepted trade-off
+  against losing the reminder.
 * Portal: the reminder is written into the conversation (where it waits as
   the first thing the patient sees) and mailed with the clinic's link. The
   chat copy is written on the FIRST attempt only; retries repeat the e-mail.
@@ -193,7 +195,8 @@ async def _deliver_whatsapp(job: ReminderJob) -> DeliveryOutcome:
 
 
 async def _send_outside_window(client, job: ReminderJob, to: str, buttons) -> DeliveryOutcome:
-    """Template send (billed). The plain template is both the default and the fallback."""
+    """Template send (billed). The plain template is both the default and the fallback
+    (taken on any send error, so delivery is at-least-once)."""
     settings = get_settings()
     lang = cancellation_notice.meta_language_code(job.tenant.language)
     line = single_line_text(job.content)
