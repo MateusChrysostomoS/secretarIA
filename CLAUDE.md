@@ -135,6 +135,7 @@ hora no worker. Ver `core/build_info.py` e a seção "Deploy both services, or
 neither" do `README.md`.
 
 ## Documentação
+- Lembretes/confirmação (TASK-032 R1): `docs/CHECKPOINT_lembretes_r1.md`.
 
 `docs/CHECKPOINT_ia_p2a_rascunho_resolvedor.md` — TASK-030 P2a A1–A6 validado localmente; A4–A6 sem novo commit; revisão corrigida e migração SQLite/PostgreSQL comprovada; ler antes de P2b/P3 para preservar as correções.
 
