@@ -20,10 +20,13 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
+from sqlalchemy import func, select
+
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
-from secretaria.models import Conversation, FlowState, Tenant
+from secretaria.models import Conversation, FlowState, Tenant, Unit
 from secretaria.services.attendee import real_attendee_name
+from secretaria.services.booking_details import clinic_address_line
 from secretaria.services.booking_draft import (
     DRAFT_ATTENDEE_OTHER,
     DRAFT_ATTENDEE_SELF,
@@ -37,7 +40,14 @@ from secretaria.services.booking_hold import BookingGate
 from secretaria.services.booking_scope import BOOKING_TOPOLOGY_MULTI, booking_topology
 from secretaria.services.calendar import CalendarService
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
-from secretaria.services.flow_router import FlowRouterResult, booking_gate_scope
+from secretaria.services.flow_router import (
+    ATTENDEE_STEPS,
+    STEP_AWAITING_INSURANCE,
+    STEP_AWAITING_PROFESSIONAL,
+    STEP_AWAITING_SERVICE,
+    FlowRouterResult,
+    booking_gate_scope,
+)
 from secretaria.services.insurance_catalog import load_tenant_insurance
 from secretaria.services.service_catalog import load_service_catalog
 from secretaria.services.tenant_config import list_active_professionals
@@ -104,6 +114,17 @@ async def _load_draft_context(reply: _ReplyContext, tenant: Tenant) -> DraftCont
         professional_rows = await list_active_professionals(session, tenant.id)
         service_catalog = await load_service_catalog(session, tenant.id)
         tenant_insurance = await load_tenant_insurance(session, tenant.id)
+        active_units = await session.scalar(
+            select(func.count())
+            .select_from(Unit)
+            .where(Unit.tenant_id == tenant.id, Unit.is_active.is_(True))
+        )
+    tenant_snapshot = _flow_tenant_snapshot(
+        tenant, professional_rows, service_catalog, tenant_insurance
+    )
+    tenant_snapshot.clinic_address = (
+        None if active_units else clinic_address_line(getattr(tenant, "address", None))
+    )
     return DraftContext(
         tenant=tenant,
         conversation=snapshot,
@@ -111,9 +132,7 @@ async def _load_draft_context(reply: _ReplyContext, tenant: Tenant) -> DraftCont
         professionals=_flow_professionals(professional_rows, service_catalog),
         service_catalog=service_catalog,
         tenant_insurance=tenant_insurance,
-        tenant_snapshot=_flow_tenant_snapshot(
-            tenant, professional_rows, service_catalog, tenant_insurance
-        ),
+        tenant_snapshot=tenant_snapshot,
         topology=booking_topology(professional_rows),
     )
 
@@ -184,6 +203,32 @@ async def _resolve_draft(
         )
 
 
+def _fold_answer(
+    draft: BookingDraft, answered_step: str | None, result: FlowRouterResult
+) -> BookingDraft:
+    """Write the patient's answer INTO the draft: it is the newest thing they said.
+
+    Pra-quem (P2): the answer decides `attendee` ("Sim, é pra mim" after the AI said
+    "other" means the patient). Doctor / service (TASK-030 P3): the one tapped replaces the
+    draft's, so the resolver re-checks everything else against it - a stored service the
+    new doctor does not offer is dropped and asked again from its own step. Convênio: the
+    answer is recorded on the conversation exactly as given (a typed "Outro convênio"
+    included) and the draft's own convênio text gives way to it.
+    """
+    if answered_step in ATTENDEE_STEPS:
+        answered_other = real_attendee_name(result.flow_attendee_name) is not None
+        return replace(
+            draft, attendee=DRAFT_ATTENDEE_OTHER if answered_other else DRAFT_ATTENDEE_SELF
+        )
+    if answered_step == STEP_AWAITING_INSURANCE:
+        return replace(draft, insurance=None)
+    if answered_step == STEP_AWAITING_PROFESSIONAL and result.flow_selected_professional_id:
+        return replace(draft, professional_id=result.flow_selected_professional_id)
+    if answered_step == STEP_AWAITING_SERVICE and result.flow_selected_type:
+        return replace(draft, service=result.flow_selected_type)
+    return draft
+
+
 async def _resume_booking_draft(
     reply: _ReplyContext,
     tenant: Tenant,
@@ -191,16 +236,18 @@ async def _resume_booking_draft(
     *,
     gate: BookingGate | None = None,
 ) -> FlowRouterResult:
-    """Pra-quem was just answered: land the parked AI draft instead of the next list.
+    """An answer to a question the AI draft was waiting on: land the draft, not the next list.
 
-    `result` is what `route()` computed for the answer (the plain button continuation);
-    it is the fallback for a missing, expired or corrupt draft and for ANY resolver
-    failure - the patient always gets the next question, never nothing. The patient's
-    answer wins over the draft's `w` ("Sim, é pra mim" after the AI said "other" means
-    the patient). The authorization of a third party stays recorded exactly as the plain
-    path would have recorded it.
+    Pra-quem (P2) and, since TASK-030 P3, the convênio, doctor and service questions
+    (`flow_router.DRAFT_WAIT_STEPS`). `result` is what `route()` computed for the answer
+    (the plain button continuation); it is the fallback for a missing, expired or corrupt
+    draft and for ANY resolver failure - the patient always gets the next question, never
+    nothing. The answer is folded into the draft (`_fold_answer`) and the resolver checks
+    everything again against FRESH data. The authorization of a third party stays recorded
+    exactly as the plain path would have recorded it.
     """
     plain = replace(result, flow_draft=None, resume_draft=False)
+    answered_step: str | None = None
     try:
         ctx = await _load_draft_context(reply, tenant)
         stored = ctx.conversation.flow_draft if ctx is not None else None
@@ -213,15 +260,18 @@ async def _resume_booking_draft(
                 reason="expired_or_invalid" if stored else "missing",
             )
             return plain
-        answered_other = real_attendee_name(result.flow_attendee_name) is not None
-        draft = replace(
-            draft, attendee=DRAFT_ATTENDEE_OTHER if answered_other else DRAFT_ATTENDEE_SELF
-        )
-        # The deterministic answer is already approved, but has not been persisted yet.
-        ctx.conversation.flow_state = result.flow_state
-        ctx.conversation.flow_step = result.flow_step
-        ctx.conversation.flow_attendee_name = result.flow_attendee_name
-        ctx.conversation.flow_selected_insurance = result.flow_selected_insurance
+        # The conversation row is still on the question being answered: route()'s result
+        # has not been persisted yet.
+        answered_step = ctx.conversation.flow_step
+        draft = _fold_answer(draft, answered_step, result)
+        if answered_step in ATTENDEE_STEPS:
+            # Preserve the approved attendee transition from P2a. For catalog answers,
+            # leave the original question step until its new details are actually sent.
+            ctx.conversation.flow_state = result.flow_state
+            ctx.conversation.flow_step = result.flow_step
+            ctx.conversation.flow_attendee_name = result.flow_attendee_name
+        if result.flow_selected_insurance is not None:
+            ctx.conversation.flow_selected_insurance = result.flow_selected_insurance
         resolution = await _resolve_draft(reply, tenant, draft, ctx, gate=gate)
     except Exception as exc:
         logger.warning(
@@ -238,6 +288,7 @@ async def _resume_booking_draft(
         "booking_draft_resumed",
         conversation_id=str(reply.conversation_id),
         tenant_id=str(tenant.id),
+        answered_step=answered_step,
         landing_step=resolution.landing_step,
         accepted=list(resolution.accepted),
         dropped=dict(resolution.dropped),

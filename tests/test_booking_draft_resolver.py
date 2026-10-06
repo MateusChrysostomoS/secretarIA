@@ -455,7 +455,8 @@ async def test_the_express_hook_result_wins_and_keeps_every_answer(monkeypatch):
     assert res.result.flow_attendee_name == "Maria da Silva"
 
 
-async def test_p2_has_no_express_confirmation_yet():
+async def test_express_confirmation_needs_the_clinic_switch():
+    """P3 filled the hook; without `initial_flows.ai_draft_v2` it still answers None."""
     assert (
         await bd._express_confirmation(
             state=None,

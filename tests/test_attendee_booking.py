@@ -56,6 +56,7 @@ from secretaria.models import (  # noqa: E402
     FlowState,
     Message,
     Patient,
+    Professional,
     Tenant,
 )
 from secretaria.plugins import professional_notification, reminders  # noqa: E402
@@ -768,19 +769,26 @@ async def test_chat_booking_consumes_the_attendee(wired, monkeypatch) -> None:
 
 
 async def test_llm_choose_doctor_hand_back_keeps_the_attendee(wired, monkeypatch) -> None:
-    """Finding 3: `select_professional_and_continue` bypasses route()."""
     db = wired
     tenant = await _seed_tenant(db)
     await _onboard(tenant)
+    async with db() as session:
+        async with session.begin():
+            doctor = Professional(
+                tenant_id=tenant.id,
+                name="Dra. Ana",
+                specialty="Cardiologia",
+                is_active=True,
+                appointment_types=[
+                    {"name": "Primeira Consulta", "duration_min": 40, "is_active": True}
+                ],
+            )
+            session.add(doctor)
     conversation = await _conversation(db, tenant)
-    professional = SimpleNamespace(
-        id=uuid4(),
-        name="Dra. Ana",
-        specialty="Cardiologia",
-        about=None,
-        appointment_types=[{"name": "Primeira Consulta", "duration_min": 40, "is_active": True}],
-        business_hours=None,
-    )
+    async with db() as session:
+        async with session.begin():
+            row = await session.get(Conversation, conversation.id)
+            row.flow_attendee_name = "Maria da Silva"
     reply = tasks._ReplyContext(
         channel=CHANNEL_WHATSAPP,
         conversation_id=conversation.id,
@@ -788,13 +796,14 @@ async def test_llm_choose_doctor_hand_back_keeps_the_attendee(wired, monkeypatch
         inbound_body="quero a Dra. Ana",
         tenant_id=tenant.id,
     )
-    snapshot = (SimpleNamespace(flow_attendee_name="Maria da Silva"), _tenant())
+    # The turn-start snapshot is stale on purpose: the ROW is what counts now.
+    snapshot = (SimpleNamespace(flow_attendee_name=None), _tenant())
     await tasks._handle_select_professional(
         reply,
-        f"{tasks.SELECT_PROFESSIONAL_SENTINEL_PREFIX}{professional.id}",
+        f"{tasks.SELECT_PROFESSIONAL_SENTINEL_PREFIX}{doctor.id}",
         tenant,
         snapshot,
-        [professional],
+        [doctor],
         WA_ID,
         waba_token="t",
     )

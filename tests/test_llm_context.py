@@ -15,7 +15,11 @@ os.environ.setdefault("META_PHONE_NUMBER_ID", "1234567890")
 
 from secretaria.ai.prompts import secretary_system_prompt  # noqa: E402
 from secretaria.models import FlowState  # noqa: E402
-from secretaria.services import flow_router as fr  # noqa: E402
+from secretaria.services import (
+    flow_router as fr,  # noqa: E402
+    llm_context,  # noqa: E402
+)
+from secretaria.services.attendee import ATTENDEE_SELF  # noqa: E402
 from secretaria.services.llm_context import build_conversation_state  # noqa: E402
 from secretaria.services.tenant_config import TenantRuntimeConfig  # noqa: E402
 from tests.test_flow_router import _conversation, _tenant  # noqa: E402
@@ -176,3 +180,80 @@ def test_day_picker_escape_and_retry_keep_day_context(step):
     state = build_conversation_state(conv, _tenant(), [])
     assert "escolha do dia" in state
     assert "menu inicial" not in state
+
+
+# --------------------------------------------------------------------------
+# TASK-030 P2: what the model sees about the workflow
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("step", fr.ATTENDEE_STEPS)
+@pytest.mark.parametrize("marker", [fr.ATTENDEE_NEXT_BOOK, fr.ATTENDEE_NEXT_CATALOG])
+def test_no_internal_marker_ever_reaches_the_model_text(step, marker):
+    conv = _conversation(
+        flow_state=FlowState.SERVICE_CATALOG, flow_step=step, flow_selected_type=marker
+    )
+    state = build_conversation_state(conv, _tenant(), [])
+    prompt = secretary_system_prompt(_config(conversation_state=state))
+    assert "__" not in state
+    assert "attendee_next" not in prompt
+    assert "Serviço já escolhido" not in state
+
+
+def test_every_workflow_step_has_a_label():
+    steps = {value for name, value in vars(fr).items() if name.startswith("STEP_")}
+    assert steps <= set(llm_context._STEP_LABELS)
+
+
+@pytest.mark.parametrize(
+    "step",
+    [
+        fr.STEP_AWAITING_ATTENDEE_CHOICE,
+        fr.STEP_MANAGE_ACTION,
+        fr.STEP_MANAGE_SLOT,
+        fr.STEP_DECLINE_REASON,
+        fr.STEP_AWAITING_CATALOG_SERVICE,
+    ],
+)
+def test_steps_that_used_to_read_as_the_menu_are_named(step):
+    conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=step)
+    assert "menu inicial" not in build_conversation_state(conv, _tenant(), [])
+
+
+def test_the_pra_quem_question_is_named():
+    conv = _conversation(
+        flow_state=FlowState.SERVICE_CATALOG, flow_step=fr.STEP_AWAITING_ATTENDEE_CHOICE
+    )
+    assert "Essa consulta é pra você?" in build_conversation_state(conv, _tenant(), [])
+
+
+@pytest.mark.parametrize(
+    "attendee, expected",
+    [
+        (None, "Pra quem é a consulta: ainda não respondido."),
+        (ATTENDEE_SELF, "Pra quem é a consulta: para o próprio paciente."),
+        ("Joaquim Segredo", "Pra quem é a consulta: OUTRA pessoa"),
+    ],
+)
+def test_the_pra_quem_answer_is_spelled_out_without_the_name(attendee, expected):
+    state = build_conversation_state(_conversation(flow_attendee_name=attendee), _tenant(), [])
+    assert expected in state
+    assert "Joaquim" not in state
+
+
+def test_the_chosen_time_is_shown():
+    conv = _conversation(flow_selected_day="2026-10-08", flow_selected_slot="2026-10-08T10:00")
+    assert "Horário já escolhido: 08/10/2026 às 10:00" in build_conversation_state(
+        conv, _tenant(), []
+    )
+
+
+def test_a_single_doctor_clinic_says_so_with_its_services():
+    doctor = _professional("Dra. Ana", ["Consulta Ortopédica", "Retorno"])
+    state = build_conversation_state(_conversation(), _tenant(), [doctor])
+    assert "um só médico: Dra. Ana. Serviços: Consulta Ortopédica, Retorno." in state
+
+
+def test_a_clinic_without_professionals_lists_its_services():
+    state = build_conversation_state(_conversation(), _tenant(), [])
+    assert "Serviços da clínica: Primeira Consulta." in state

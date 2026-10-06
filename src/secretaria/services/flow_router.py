@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from secretaria.ai.formatter import (
     MAX_LIST_BODY_CHARS,
@@ -47,6 +48,7 @@ from secretaria.core.whatsapp_limits import (
     EMOJI_NEGATIVE,
     EMOJI_SCHEDULE,
     EMOJI_SERVICE,
+    MAX_INTERACTIVE_BODY_CHARS,
     MAX_LIST_ROW_DESCRIPTION_CHARS,
     decorate,
     decorate_and_truncate,
@@ -75,6 +77,7 @@ from secretaria.services.availability import (
     slot_scan_limit,
     without_holds,
 )
+from secretaria.services.booking_details import price_text
 from secretaria.services.booking_hold import BookingGate
 from secretaria.services.booking_scope import (
     canonical_service_name,
@@ -87,6 +90,7 @@ from secretaria.services.calendar import (
     build_patient_calendar_link,
 )
 from secretaria.services.insurance_catalog import match_plan
+from secretaria.services.patient_context import as_utc
 from secretaria.services.pending_identity import BOOKING_SLOT_TAKEN_MESSAGE
 from secretaria.services.service_catalog import normalize, professionals_offering
 from secretaria.services.tenant_config import (
@@ -278,6 +282,17 @@ ATTENDEE_STEPS = (
 )
 ATTENDEE_NEXT_BOOK = "__attendee_next_book__"
 ATTENDEE_NEXT_CATALOG = "__attendee_next_catalog__"
+
+# The steps an AI booking draft may wait on (`Conversation.flow_draft`, TASK-030): the
+# pra-quem steps (P2) and, by the owner's 2026-10-03 ruling, the convênio, doctor and
+# service questions (P3). The patient's answer to any of them resumes the draft
+# (`_attendee_step`, `_resume_parked_draft`); every other step drops it (`_carry_draft`).
+DRAFT_WAIT_STEPS = (
+    *ATTENDEE_STEPS,
+    STEP_AWAITING_INSURANCE,
+    STEP_AWAITING_PROFESSIONAL,
+    STEP_AWAITING_SERVICE,
+)
 STEP_AWAITING_SERVICE_PROFESSIONAL = "awaiting_service_professional"
 # Scoped-help ("Não sei") steps, still within SERVICE_CATALOG. The *_FINAL
 # variant marks the last allowed exchange: entered after the node's single
@@ -727,6 +742,25 @@ def flows_enabled(tenant: Tenant) -> bool:
     return True
 
 
+# Per-clinic switch for the AI draft v2 (TASK-030): the six-field `set_booking_draft`, every
+# hand-back landed by the resolver (services/booking_draft.py) and, from P3-P5 on, the
+# express confirmation, the availability tool and the new prompt. Lives in the same
+# `initial_flows` JSON as `menu_label`/`buttons`/`reactivation`. NOT part of the switch:
+# asking pra-quem when it is unknown - that safety fix applies to every clinic.
+AI_DRAFT_V2_FLAG = "ai_draft_v2"
+
+
+def ai_draft_v2_enabled(tenant: Any) -> bool:
+    """True only when the clinic's `initial_flows` holds the JSON literal `true`.
+
+    OFF by default and by every malformed value (a string "true" included): the owner turns
+    it on for one clinic by a data change and watches the logs before anyone else. A hub
+    save that ever rewrites `initial_flows` without the key turns it OFF - the safe side.
+    """
+    flows = getattr(tenant, "initial_flows", None) or {}
+    return isinstance(flows, dict) and flows.get(AI_DRAFT_V2_FLAG) is True
+
+
 def menu_buttons(tenant: Tenant) -> list[str]:
     """The up-to-3 menu button labels (falls back to the MVP defaults)."""
     buttons = (tenant.initial_flows or {}).get("buttons") or DEFAULT_MENU_BUTTONS
@@ -1171,13 +1205,15 @@ def _carry_insurance(conversation: Conversation, result: FlowRouterResult) -> Fl
 
 
 def _carry_draft(conversation: Conversation, result: FlowRouterResult) -> FlowRouterResult:
-    """Keep the AI's parked draft while the patient is still on the pra-quem steps.
+    """Keep the AI's parked draft while the patient is still on a step it waits on.
 
     `_apply_flow_result` writes `flow_draft` unconditionally, so any result that does not
-    name it clears it - which is the point: the draft only waits for pra-quem (spec §4.3),
-    and a result on any other step (the menu, the LLM, a list) ends that wait.
+    name it clears it - which is the point: the draft waits only on `DRAFT_WAIT_STEPS`
+    (pra-quem, and since TASK-030 P3 the convênio, doctor and service questions), and a
+    result on any other step (the menu, the LLM, a help node, a list further on) ends that
+    wait.
     """
-    if result.flow_draft is None and result.flow_step in ATTENDEE_STEPS:
+    if result.flow_draft is None and result.flow_step in DRAFT_WAIT_STEPS:
         result.flow_draft = getattr(conversation, "flow_draft", None)
     return result
 
@@ -1651,6 +1687,26 @@ def _attendee_authorization_card(next_step: str | None, name: str) -> FlowRouter
 def _has_draft(conversation: Conversation) -> bool:
     """Whether an AI draft is parked on the conversation (TASK-030 P2)."""
     return bool(getattr(conversation, "flow_draft", None))
+
+
+def _resume_parked_draft(conversation: Conversation, result: FlowRouterResult) -> FlowRouterResult:
+    """The answer to a question an AI draft is waiting on: the worker resumes the draft.
+
+    Set on the convênio answer and on the doctor / service taps (`_catalog_step`) when a
+    draft is parked (TASK-030 P3; the pra-quem answer is P2's, in `_attendee_step`).
+    workers/shared/draft_resolution.py::_resume_booking_draft folds the answer into the
+    draft and re-runs the resolver over FRESH data; on any failure it keeps `result`. A
+    result still ON the convênio step ("Outro convênio" asks for the name, an empty answer
+    re-asks) has not answered yet and keeps waiting.
+    """
+    if (
+        _has_draft(conversation)
+        and result.action == "reply"
+        and result.flow_state is FlowState.SERVICE_CATALOG
+        and result.flow_step != STEP_AWAITING_INSURANCE
+    ):
+        result.resume_draft = True
+    return result
 
 
 def _attendee_step(
@@ -2604,8 +2660,13 @@ async def _catalog_step(
             # A service may already be chosen when an empty LLM handback
             # reopens the professional list. Recheck the doctor's catalogue
             # before continuing to the selected service's detail card.
-            return _handle_service_professional(conversation, tenant, body, professionals or [])
-        return _enter_professional_services(professional, tenant)
+            return _resume_parked_draft(
+                conversation,
+                _handle_service_professional(conversation, tenant, body, professionals or []),
+            )
+        return _resume_parked_draft(
+            conversation, _enter_professional_services(professional, tenant)
+        )
 
     if step == STEP_AWAITING_CATALOG_SERVICE:
         return _handle_catalog_service(conversation, tenant, body, professionals or [])
@@ -2622,7 +2683,9 @@ async def _catalog_step(
         service = _match_service(services, body)
         if service is None:
             return _preserve(conversation, "delegate_llm")
-        return _enter_service_detail(service, conversation, tenant)
+        return _resume_parked_draft(
+            conversation, _enter_service_detail(service, conversation, tenant)
+        )
 
     if step in (STEP_SERVICE_HELP, STEP_SERVICE_HELP_FINAL):
         return await _handle_service_help(conversation, tenant, body, services)
@@ -2656,9 +2719,10 @@ async def _catalog_step(
         return _preserve(conversation, "delegate_llm")
 
     if step == STEP_AWAITING_INSURANCE:
-        return await _handle_insurance(
+        answered = await _handle_insurance(
             conversation, tenant, body, calendar, services, professionals
         )
+        return _resume_parked_draft(conversation, answered)
 
     if step in _BOOKING_DAY_STEPS:
         return await _handle_day_step(
@@ -2685,7 +2749,13 @@ async def _catalog_step(
             back_target=BACK_TARGET_SERVICE,
             professionals=professionals,
         )
-        return control if control is not None else _handle_slot(conversation, body)
+        if control is not None:
+            return control
+        return _handle_slot(
+            conversation,
+            body,
+            professional=_recap_professional(conversation, tenant, professionals),
+        )
 
     if step == STEP_AWAITING_CONFIRMATION:
         return await _handle_confirmation(
@@ -2711,14 +2781,9 @@ async def _catalog_step(
 
 def _service_detail_text(service: dict, tenant: Tenant) -> str:
     name = str(service.get("name", "Consulta"))
-    price = service.get("price")
+    price = price_text(service.get("price"))
     long_description = service.get("long_description") or service.get("description")
-    parts = [name]
-    if price:
-        price_text = str(price).strip()
-        if not price_text.upper().startswith("R$"):
-            price_text = f"R${price_text}"
-        parts[0] = f"{name} {price_text}"
+    parts = [f"{name} {price}" if price else name]
     if long_description:
         parts.append(str(long_description))
     parts.append("Deseja agendar esse serviço?")
@@ -3399,15 +3464,16 @@ async def _relist_stored_day(
     )
 
 
-def _handle_slot(conversation: Conversation, body: str) -> FlowRouterResult:
+def _handle_slot(
+    conversation: Conversation, body: str, *, professional: Any | None = None
+) -> FlowRouterResult:
     start = _slot_iso_from_body(body)
     if start is None:
         return _preserve(conversation, "delegate_llm")
     slot_iso = start.replace(tzinfo=None).isoformat(timespec="minutes")
-    recap = _recap_text(conversation, start)
     return FlowRouterResult(
         action="reply",
-        bubbles=[ButtonBubble(body=recap, confirm_label=LABEL_CONFIRM, cancel_label=LABEL_CANCEL)],
+        bubbles=[_confirmation_card(conversation, start, professional=professional)],
         flow_state=FlowState.SERVICE_CATALOG,
         flow_step=STEP_AWAITING_CONFIRMATION,
         flow_selected_type=conversation.flow_selected_type,
@@ -3633,19 +3699,28 @@ async def _handle_confirmation(
 # --------------------------------------------------------------------------
 
 
-def _appt_row_label(appt: dict) -> str:
-    """Compact list-row title for one appointment (WhatsApp caps titles at 24)."""
+def _appointment_local_start(appt: dict, tenant: Tenant | None) -> datetime | None:
+    """Display the persisted instant in the clinic zone; never rewrite the appointment."""
     start = appt.get("start_at")
-    when = start.strftime("%d/%m %H:%M") if isinstance(start, datetime) else "?"
+    if not isinstance(start, datetime):
+        return None
+    timezone = ZoneInfo(getattr(tenant, "timezone", None) or "America/Sao_Paulo")
+    return as_utc(start).astimezone(timezone)
+
+
+def _appt_row_label(appt: dict, tenant: Tenant | None = None) -> str:
+    """Compact list-row title for one appointment (WhatsApp caps titles at 24)."""
+    start = _appointment_local_start(appt, tenant)
+    when = start.strftime("%d/%m %H:%M") if start is not None else "?"
     appt_type = str(appt.get("appointment_type") or "Consulta")
     return truncate_list_row_title(f"{when} {appt_type}")
 
 
-def _appt_summary(appt: dict) -> str:
-    """Full one-line description used in confirmation bubbles."""
-    start = appt.get("start_at")
+def _appt_summary(appt: dict, tenant: Tenant | None = None) -> str:
+    """Full one-line description used in confirmation bubbles, in the clinic zone."""
+    start = _appointment_local_start(appt, tenant)
     label = str(appt.get("appointment_type") or "Consulta")
-    if isinstance(start, datetime):
+    if start is not None:
         return f"{label}\n{start.strftime('%d/%m/%Y às %H:%M')}"
     return label
 
@@ -3695,7 +3770,9 @@ def _appt_uuid(appt: dict) -> UUID | None:
         return None
 
 
-def _manage_pick_list_bubble(appointments: list[dict], body: str) -> SlotsBubble:
+def _manage_pick_list_bubble(
+    appointments: list[dict], body: str, *, tenant: Tenant | None = None
+) -> SlotsBubble:
     """The tappable list of the patient's future appointments.
 
     Factored out of `_enter_manage` so `enter_manage_action`'s multi-
@@ -3712,7 +3789,7 @@ def _manage_pick_list_bubble(appointments: list[dict], body: str) -> SlotsBubble
             shown=MAX_MANAGE_APPOINTMENT_ROWS,
         )
     rows = [
-        (f"slot|{appt['start_at'].isoformat()}", _appt_row_label(appt))
+        (f"slot|{appt['start_at'].isoformat()}", _appt_row_label(appt, tenant))
         for appt in valid[:MAX_MANAGE_APPOINTMENT_ROWS]
     ]
     return SlotsBubble(
@@ -3749,7 +3826,7 @@ def _enter_manage(
         appt = appointments[0]
         return FlowRouterResult(
             action="reply",
-            bubbles=_manage_action_card(appt),
+            bubbles=_manage_action_card(appt, tenant),
             flow_state=FlowState.MANAGE_BOOKING,
             flow_step=STEP_MANAGE_ACTION,
             flow_managing_appointment_id=_appt_uuid(appt),
@@ -3757,7 +3834,9 @@ def _enter_manage(
     return FlowRouterResult(
         action="reply",
         bubbles=[
-            _manage_pick_list_bubble(appointments, "Qual consulta você quer remarcar ou cancelar?")
+            _manage_pick_list_bubble(
+                appointments, "Qual consulta você quer remarcar ou cancelar?", tenant=tenant
+            )
         ],
         flow_state=FlowState.MANAGE_BOOKING,
         flow_step=STEP_MANAGE_PICK,
@@ -3806,7 +3885,7 @@ async def enter_manage_action(
                 return await _begin_reschedule(
                     managing_id, preselected, tenant, calendar, professionals
                 )
-            return _begin_cancel(managing_id, preselected)
+            return _begin_cancel(managing_id, preselected, tenant=tenant)
     if not appointments:
         return _enter_manage(tenant, appointments, professionals)
     if len(appointments) == 1:
@@ -3814,7 +3893,7 @@ async def enter_manage_action(
         managing_id = _appt_uuid(appt)
         if intent == "reschedule":
             return await _begin_reschedule(managing_id, appt, tenant, calendar, professionals)
-        return _begin_cancel(managing_id, appt)
+        return _begin_cancel(managing_id, appt, tenant=tenant)
     prompt = (
         "Qual consulta você quer remarcar?"
         if intent == "reschedule"
@@ -3823,17 +3902,17 @@ async def enter_manage_action(
     step = STEP_MANAGE_PICK_RESCHEDULE if intent == "reschedule" else STEP_MANAGE_PICK_CANCEL
     return FlowRouterResult(
         action="reply",
-        bubbles=[_manage_pick_list_bubble(appointments, prompt)],
+        bubbles=[_manage_pick_list_bubble(appointments, prompt, tenant=tenant)],
         flow_state=FlowState.MANAGE_BOOKING,
         flow_step=step,
     )
 
 
-def _manage_action_card(appt: dict) -> list:
+def _manage_action_card(appt: dict, tenant: Tenant | None = None) -> list:
     """The Remarcar / Cancelar / Voltar choices for the picked appointment."""
     return [
         MenuBubble(
-            body=f"{_appt_summary(appt)}\n\nO que você gostaria de fazer?",
+            body=f"{_appt_summary(appt, tenant)}\n\nO que você gostaria de fazer?",
             labels=[LABEL_RESCHEDULE, LABEL_CANCEL_APPT, LABEL_BACK],
         )
     ]
@@ -3875,7 +3954,9 @@ async def _begin_reschedule(
     )
 
 
-def _begin_cancel(managing_id: UUID | None, appt: dict | None) -> FlowRouterResult:
+def _begin_cancel(
+    managing_id: UUID | None, appt: dict | None, *, tenant: Tenant | None = None
+) -> FlowRouterResult:
     """Ask Sim/Não to confirm cancelling `managing_id` (`appt` drives the summary text).
 
     Shared by STEP_MANAGE_ACTION's "Cancelar" branch and
@@ -3884,7 +3965,7 @@ def _begin_cancel(managing_id: UUID | None, appt: dict | None) -> FlowRouterResu
     confirmation still proceeds with a generic summary, matching what
     STEP_MANAGE_ACTION always did.
     """
-    summary = _appt_summary(appt) if appt else "essa consulta"
+    summary = _appt_summary(appt, tenant) if appt else "essa consulta"
     return FlowRouterResult(
         action="reply",
         bubbles=[
@@ -3915,7 +3996,7 @@ async def _manage_step(
             return _preserve(conversation, "delegate_llm")
         return FlowRouterResult(
             action="reply",
-            bubbles=_manage_action_card(appt),
+            bubbles=_manage_action_card(appt, tenant),
             flow_state=FlowState.MANAGE_BOOKING,
             flow_step=STEP_MANAGE_ACTION,
             flow_managing_appointment_id=_appt_uuid(appt),
@@ -3933,7 +4014,7 @@ async def _manage_step(
         appt = _find_appt_by_iso(appointments, body)
         if appt is None:
             return _preserve(conversation, "delegate_llm")
-        return _begin_cancel(_appt_uuid(appt), appt)
+        return _begin_cancel(_appt_uuid(appt), appt, tenant=tenant)
 
     if step == STEP_MANAGE_ACTION:
         if _norm(body) == _norm(LABEL_BACK):
@@ -3945,7 +4026,7 @@ async def _manage_step(
         managing_id = _selected_managing_appointment_id(conversation)
         appt = _find_appt_by_id(appointments, _managing_appt_id_str(conversation))
         if _norm(body) == _norm(LABEL_CANCEL_APPT):
-            return _begin_cancel(managing_id, appt)
+            return _begin_cancel(managing_id, appt, tenant=tenant)
         if _norm(body) == _norm(LABEL_RESCHEDULE):
             return await _begin_reschedule(managing_id, appt, tenant, calendar, professionals)
         return _preserve(conversation, "delegate_llm")
@@ -4170,16 +4251,28 @@ def _attendee_line(conversation: Conversation) -> str:
     return f"Paciente: {name}\n" if name else ""
 
 
-def _recap_text(conversation: Conversation, start: datetime) -> str:
-    """The recap card body; unchanged (byte for byte) when there is no attendee."""
+def _professional_line(professional: Any | None) -> str:
+    """ "Profissional: <name>" plus a newline, or "" when there is nobody to name."""
+    name = str(getattr(professional, "name", "") or "").strip() if professional is not None else ""
+    return f"Profissional: {name}\n" if name else ""
+
+
+def _recap_text(
+    conversation: Conversation, start: datetime, *, professional: Any | None = None
+) -> str:
+    """The recap card body; unchanged (byte for byte) when there is no attendee and no
+    `professional` (TASK-030 P3: whom the booking is with, see `_recap_professional`)."""
     return (
         f"{conversation.flow_selected_type or 'Consulta'}\n"
+        f"{_professional_line(professional)}"
         f"{_attendee_line(conversation)}"
         f"{start.strftime('%d/%m/%Y às %H:%M')}"
     )
 
 
-def _confirmation_recap(conversation: Conversation) -> str | None:
+def _confirmation_recap(
+    conversation: Conversation, *, professional: Any | None = None
+) -> str | None:
     """Rebuild the confirmation recap text from the stored slot, or None."""
     slot = conversation.flow_selected_slot
     if not slot:
@@ -4188,7 +4281,39 @@ def _confirmation_recap(conversation: Conversation) -> str | None:
         start = datetime.fromisoformat(slot)
     except ValueError:
         return None
-    return _recap_text(conversation, start)
+    return _recap_text(conversation, start, professional=professional)
+
+
+def _recap_professional(
+    conversation: Conversation, tenant: Tenant, professionals: list | None
+) -> Any | None:
+    """Whom the confirmation card names (TASK-030 P3, spec §4.4.2: "agora com o médico").
+
+    The booking's own professional (`_booking_professional`: the doctor the patient picked,
+    or a single-professional clinic's only one) on clinics with the AI draft v2 switch;
+    None elsewhere, so the card stays byte for byte today's until the clinic is switched on.
+    """
+    if not ai_draft_v2_enabled(tenant):
+        return None
+    return _booking_professional(conversation, professionals)
+
+
+def _confirmation_card(
+    conversation: Conversation, start: datetime, *, professional: Any | None = None
+) -> ButtonBubble:
+    """The Confirmar/Cancelar card - the ONE builder for the slot tap and the AI's express
+    confirmation (services/booking_draft.py::_express_confirmation), so both read alike.
+
+    "Confirmar" on it is routed by `_handle_confirmation`, whichever path drew it.
+    """
+    return ButtonBubble(
+        body=truncate_plain(
+            _recap_text(conversation, start, professional=professional),
+            MAX_INTERACTIVE_BODY_CHARS,
+        ),
+        confirm_label=LABEL_CONFIRM,
+        cancel_label=LABEL_CANCEL,
+    )
 
 
 async def resume_bubbles(
@@ -4317,7 +4442,9 @@ async def _resume_bubbles(
         return await _relist_stored_day(conversation, tenant, calendar, services, professionals)
 
     if step == STEP_AWAITING_CONFIRMATION:
-        recap = _confirmation_recap(conversation)
+        recap = _confirmation_recap(
+            conversation, professional=_recap_professional(conversation, tenant, professionals)
+        )
         if recap is None:
             # Lost the slot somehow: re-ask the day.
             return await _ask_day(conversation, tenant, calendar, services, professionals)

@@ -53,7 +53,17 @@ from secretaria.models import (  # noqa: E402
     Professional,
     Tenant,
 )
-from secretaria.services.flow_router import MenuBubble  # noqa: E402
+from secretaria.services import (  # noqa: E402
+    booking_draft as bd,
+    booking_hold as booking_hold_service,
+)
+from secretaria.services.attendee import ATTENDEE_QUESTION_BODY, ATTENDEE_SELF  # noqa: E402
+from secretaria.services.flow_router import (  # noqa: E402
+    ATTENDEE_NEXT_BOOK,
+    FlowRouterResult,
+    MenuBubble,
+    ai_draft_v2_enabled,
+)
 from secretaria.workers import tasks  # noqa: E402
 from secretaria.workers.shared import handback_log, sentinels  # noqa: E402
 
@@ -81,7 +91,7 @@ def _patch_session_factory(monkeypatch: pytest.MonkeyPatch, db):
     yield
 
 
-async def _seed(db, *, flow_state=FlowState.LLM, selected=None, insurance=None):
+async def _seed(db, *, flow_state=FlowState.LLM, selected=None, insurance=None, attendee=None):
     """A two-doctor clinic (Dra. Ana, Dr. Bruno), one patient, one conversation."""
     async with db() as session:
         tenant = Tenant(
@@ -117,6 +127,7 @@ async def _seed(db, *, flow_state=FlowState.LLM, selected=None, insurance=None):
             flow_state=flow_state,
             flow_selected_professional_id=(ana.id if selected else None),
             flow_selected_insurance=insurance,
+            flow_attendee_name=attendee,
         )
         session.add(conversation)
         await session.flush()
@@ -316,7 +327,7 @@ async def test_a_menu_rendered_for_any_other_reason_is_not_a_hand_back(
 
 
 async def test_select_professional_logs_the_step_it_landed_on(db, _captured_bubbles, log) -> None:
-    tenant, ana, bruno, patient, conversation = await _seed(db)
+    tenant, ana, bruno, patient, conversation = await _seed(db, attendee=ATTENDEE_SELF)
 
     await tasks._handle_select_professional(
         _reply_ctx(conversation),
@@ -416,8 +427,12 @@ async def test_a_doctor_with_no_services_lands_on_the_config_alert(
 
     monkeypatch.setattr(workers_ns, "_handle_professional_config_incomplete", _fake_alert)
     tenant, ana, bruno, patient, conversation = await _seed(db)
+    # Her own empty list: nothing to book. Set on the ROW - the handler reads fresh.
+    async with db() as session:
+        doctor = await session.get(Professional, ana.id)
+        doctor.appointment_types = []
+        await session.commit()
     snapshots = _snapshots([ana, bruno])
-    snapshots[0].appointment_types = []  # her own empty list: nothing to book
 
     await tasks._handle_select_professional(
         _reply_ctx(conversation),
@@ -444,7 +459,7 @@ async def test_the_event_is_logged_before_the_flow_state_is_written(
         raise RuntimeError("persist exploded")
 
     monkeypatch.setattr(workers_ns, "_apply_flow_result", _boom)
-    tenant, ana, bruno, patient, conversation = await _seed(db)
+    tenant, ana, bruno, patient, conversation = await _seed(db, attendee=ATTENDEE_SELF)
 
     with pytest.raises(RuntimeError, match="persist exploded"):
         await tasks._handle_select_professional(
@@ -611,7 +626,7 @@ async def test_a_failure_before_the_landing_is_known_propagates_and_logs_no_even
 async def test_guided_booking_logs_the_step_it_landed_on(
     db, _captured_bubbles, _stub_calendar, log
 ) -> None:
-    tenant, ana, patient, conversation = await _seed_sole(db)
+    tenant, ana, patient, conversation = await _seed_sole(db, attendee=ATTENDEE_SELF)
 
     await tasks._handle_start_guided_booking(
         _reply_ctx(conversation),
@@ -686,7 +701,7 @@ async def test_guided_booking_with_no_agenda_lands_on_a_person(
 
     monkeypatch.setattr(workers_ns, "_appointment_calendar", _no_calendar)
     monkeypatch.setattr(workers_ns, "_handle_calendar_unavailable", _fake_unavailable)
-    tenant, ana, patient, conversation = await _seed_sole(db)
+    tenant, ana, patient, conversation = await _seed_sole(db, attendee=ATTENDEE_SELF)
 
     await tasks._handle_start_guided_booking(
         _reply_ctx(conversation),
@@ -820,9 +835,9 @@ async def test_a_draft_that_cannot_land_bounces_to_the_menu_with_its_reason(
     db, _captured_bubbles, _stub_calendar, log, multi, build, fallback, supplied, accepted, dropped
 ) -> None:
     if multi:
-        tenant, ana, bruno, patient, conversation = await _seed(db)
+        tenant, ana, bruno, patient, conversation = await _seed(db, attendee=ATTENDEE_SELF)
     else:
-        tenant, ana, patient, conversation = await _seed_sole(db)
+        tenant, ana, patient, conversation = await _seed_sole(db, attendee=ATTENDEE_SELF)
 
     await tasks._handle_set_booking_draft(
         _reply_ctx(conversation),
@@ -852,7 +867,7 @@ async def test_a_draft_that_cannot_land_bounces_to_the_menu_with_its_reason(
 async def test_a_draft_that_lands_logs_the_step_and_keeps_the_old_event(
     db, _captured_bubbles, _stub_calendar, log, service, landing, accepted
 ) -> None:
-    tenant, ana, bruno, patient, conversation = await _seed(db)
+    tenant, ana, bruno, patient, conversation = await _seed(db, attendee=ATTENDEE_SELF)
 
     await tasks._handle_set_booking_draft(
         _reply_ctx(conversation),
@@ -958,7 +973,7 @@ async def test_a_draft_that_cannot_run_is_counted_not_silent(
 async def test_no_hand_back_event_carries_what_the_patient_or_the_model_wrote(
     db, _captured_bubbles, _stub_calendar, log
 ) -> None:
-    tenant, ana, bruno, patient, conversation = await _seed(db)
+    tenant, ana, bruno, patient, conversation = await _seed(db, attendee=ATTENDEE_SELF)
     typed_service = "Limpeza da Maria Silva"
     typed_plan = "Plano da Maria joao@example.com 11999998888"
     payload = {"t": typed_service, "p": str(ana.id), "i": typed_plan}
@@ -1067,3 +1082,327 @@ async def test_a_handoff_that_could_not_commit_logs_no_hand_back(
 
     assert _events(log) == []
     assert _captured_bubbles == []
+
+
+# --------------------------------------------------------------------------
+# TASK-030 P2: set_booking_draft through the resolver (safety fix + switch)
+# --------------------------------------------------------------------------
+
+
+class _SlotAgenda(_StubCalendar):
+    """The stub agenda with two free times on every day."""
+
+    async def list_free_slots(self, day, slot_minutes=None, max_slots=6):
+        iso = day.date().isoformat()
+        return [{"start": f"{iso}T{t}", "end": "", "label": t} for t in ("10:00", "10:40")][
+            :max_slots
+        ]
+
+
+@pytest.fixture
+def _slot_agenda(monkeypatch: pytest.MonkeyPatch, db) -> _SlotAgenda:
+    agenda = _SlotAgenda()
+
+    async def _fake(session, tenant, target):
+        return agenda
+
+    monkeypatch.setattr(workers_ns, "_appointment_calendar", _fake)
+    # The gate's hold lookups read the same test database.
+    monkeypatch.setattr(booking_hold_service, "async_session_factory", db)
+    return agenda
+
+
+async def _switch_on(db, tenant) -> Tenant:
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.initial_flows = {**(row.initial_flows or {}), "ai_draft_v2": True}
+        await session.commit()
+        await session.refresh(row)
+        return row
+
+
+async def test_unknown_pra_quem_is_asked_first_even_with_the_switch_off(
+    db, _captured_bubbles, log
+) -> None:
+    tenant, ana, bruno, patient, conversation = await _seed(db)  # pra-quem never answered
+
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation),
+        BOOKING_DRAFT_SENTINEL_PREFIX + json.dumps({"t": "Consulta Geral", "p": str(ana.id)}),
+        tenant,
+        None,
+        _snapshots([ana, bruno]),
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["landing_step"] == "awaiting_attendee_choice"
+    assert event["supplied"] == ["service", "professional"]
+    assert event["accepted"] == ["service", "professional"]
+    assert event["fallback"] is None
+    assert _captured_bubbles[0].body == ATTENDEE_QUESTION_BODY
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+    assert conv.flow_step == "awaiting_attendee_choice"
+    assert conv.flow_selected_type == ATTENDEE_NEXT_BOOK
+    assert conv.flow_selected_professional_id is None
+    assert (conv.flow_draft["t"], conv.flow_draft["p"]) == ("Consulta Geral", str(ana.id))
+
+
+async def test_switch_on_lands_a_full_draft_on_the_confirmation_card(
+    db, _captured_bubbles, _slot_agenda, log
+) -> None:
+    """TASK-030 P3: a free time on a switched-on clinic is the express confirmation."""
+    tenant, ana, patient, conversation = await _seed_sole(db)
+    tenant = await _switch_on(db, tenant)
+    day = (datetime.now(ZoneInfo("America/Sao_Paulo")) + timedelta(days=3)).date()
+    payload = {"t": "Consulta Geral", "w": "self", "d": day.isoformat(), "h": "10:00"}
+
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation),
+        BOOKING_DRAFT_SENTINEL_PREFIX + json.dumps(payload),
+        tenant,
+        None,
+        _snapshots([ana]),
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["landing_step"] == "awaiting_confirmation"
+    assert event["accepted"] == ["service", "for_whom", "day", "time"]
+    assert event["topology"] == "sole"
+    assert len(_events(log, "conversation_booking_draft_entered")) == 1
+    assert [type(bubble).__name__ for bubble in _captured_bubbles] == ["TextBubble", "ButtonBubble"]
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+    assert conv.flow_step == "awaiting_confirmation"
+    assert conv.flow_selected_day == day.isoformat()
+    assert conv.flow_selected_slot == f"{day.isoformat()}T10:00"
+    assert conv.flow_attendee_name == ATTENDEE_SELF
+
+
+async def test_selection_only_reaches_the_clinic_alert_for_a_doctor_with_no_services(
+    db, _captured_bubbles, log, monkeypatch
+) -> None:
+    alerted: list = []
+
+    async def _fake_alert(reply, result, **_kwargs):
+        alerted.append(result.professional_config_gap)
+
+    monkeypatch.setattr(workers_ns, "_handle_professional_config_incomplete", _fake_alert)
+    tenant, ana, bruno, patient, conversation = await _seed(
+        db, selected=True, attendee=ATTENDEE_SELF
+    )
+    async with db() as session:
+        doctor = await session.get(Professional, ana.id)
+        doctor.appointment_types = []
+        await session.commit()
+
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation),
+        BOOKING_DRAFT_SENTINEL_PREFIX + "{}",
+        tenant,
+        None,
+        [],
+        patient.wa_id,
+    )
+
+    assert alerted == ["services"]  # it used to be swallowed by the menu fallback
+    (event,) = _events(log)
+    assert event["landing_step"] == "config_incomplete"
+    assert event["fallback"] == "professional_config_incomplete"
+
+
+async def test_selection_only_keeps_a_typed_convenio(db, _captured_bubbles, log) -> None:
+    tenant, ana, bruno, patient, conversation = await _seed(
+        db, insurance="Amil Dental", attendee=ATTENDEE_SELF
+    )
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.collect_insurance = True
+        row.insurance_mode = "shared"
+        row.insurances = ["Unimed"]
+        await session.commit()
+        await session.refresh(row)
+        tenant = row
+
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation),
+        BOOKING_DRAFT_SENTINEL_PREFIX + "{}",
+        tenant,
+        None,
+        [],
+        patient.wa_id,
+    )
+
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+    assert conv.flow_step == "awaiting_professional"
+    assert conv.flow_selected_insurance == "Amil Dental"  # the patient's typed answer
+
+
+async def test_another_tenants_doctor_is_dropped_never_used(db, _captured_bubbles, log) -> None:
+    tenant, ana, bruno, patient, conversation = await _seed(db, attendee=ATTENDEE_SELF)
+    tenant = await _switch_on(db, tenant)
+    _other_tenant, foreign_doctor, _b, _p, _c = await _seed(db)
+
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation),
+        BOOKING_DRAFT_SENTINEL_PREFIX
+        + json.dumps({"t": "Consulta Geral", "p": str(foreign_doctor.id)}),
+        tenant,
+        None,
+        [],
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["dropped"] == {"professional": "unknown_professional"}
+    assert event["landing_step"] == "awaiting_professional"
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+    assert conv.flow_selected_professional_id is None
+
+
+def test_the_resolver_speaks_the_hand_back_vocabulary() -> None:
+    assert set(bd.DROP_REASONS) <= handback_log.DROP_REASONS
+    assert set(bd.FALLBACK_REASONS) <= handback_log.FALLBACK_REASONS
+    assert set(bd.FIELD_NAMES) <= handback_log.FIELD_NAMES
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        FlowRouterResult(
+            action="reply", flow_state=FlowState.SERVICE_CATALOG, flow_step="awaiting_slot"
+        ),
+        FlowRouterResult(action="reply", flow_state=FlowState.MENU),
+        FlowRouterResult(
+            action="calendar_unavailable",
+            flow_state=FlowState.SERVICE_CATALOG,
+            flow_step="awaiting_day",
+        ),
+        FlowRouterResult(action="professional_config_incomplete", flow_state=FlowState.IDLE),
+    ],
+)
+def test_the_resolver_names_landings_like_the_hand_back_log(result) -> None:
+    assert bd.landing_step(result) == handback_log.landing_of(result)[0]
+
+
+@pytest.mark.parametrize(
+    "flows, expected",
+    [
+        ({}, False),
+        (None, False),
+        ({"ai_draft_v2": False}, False),
+        ({"ai_draft_v2": "true"}, False),
+        ({"ai_draft_v2": True}, True),
+    ],
+)
+def test_the_switch_reads_only_an_explicit_true(flows, expected) -> None:
+    assert ai_draft_v2_enabled(SimpleNamespace(initial_flows=flows)) is expected
+
+
+# --------------------------------------------------------------------------
+# TASK-030 P2: the doctor and guided hand-backs read fresh and ask pra-quem
+# --------------------------------------------------------------------------
+
+
+async def test_select_professional_asks_pra_quem_first_when_unknown(
+    db, _captured_bubbles, log
+) -> None:
+    tenant, ana, bruno, patient, conversation = await _seed(db)
+
+    await tasks._handle_select_professional(
+        _reply_ctx(conversation),
+        f"{SELECT_PROFESSIONAL_SENTINEL_PREFIX}{ana.id}",
+        tenant,
+        None,
+        _snapshots([ana, bruno]),
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["source_tool"] == "select_professional"
+    assert event["landing_step"] == "awaiting_attendee_choice"
+    assert event["accepted"] == ["professional"]
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+    assert conv.flow_draft["p"] == str(ana.id)
+    assert conv.flow_selected_professional_id is None
+
+
+@pytest.mark.parametrize(
+    "stored, in_snapshot, landing",
+    [
+        ("Maria da Silva", None, "awaiting_service"),
+        (None, "Maria da Silva", "awaiting_attendee_choice"),
+    ],
+)
+async def test_select_professional_reads_the_attendee_fresh(
+    db, _captured_bubbles, log, stored, in_snapshot, landing
+) -> None:
+    """The turn-start snapshot may be several tool calls old: the row decides."""
+    tenant, ana, bruno, patient, conversation = await _seed(db, attendee=stored)
+    stale = (
+        SimpleNamespace(flow_attendee_name=in_snapshot, flow_selected_insurance=None),
+        tenant,
+    )
+
+    await tasks._handle_select_professional(
+        _reply_ctx(conversation),
+        f"{SELECT_PROFESSIONAL_SENTINEL_PREFIX}{ana.id}",
+        tenant,
+        stale,
+        _snapshots([ana, bruno]),
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["landing_step"] == landing
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+    assert conv.flow_attendee_name == stored
+
+
+async def test_guided_booking_asks_pra_quem_first_when_unknown(
+    db, _captured_bubbles, _stub_calendar, log
+) -> None:
+    tenant, ana, patient, conversation = await _seed_sole(db)
+
+    await tasks._handle_start_guided_booking(
+        _reply_ctx(conversation),
+        f"{START_GUIDED_BOOKING_SENTINEL_PREFIX}Consulta Geral",
+        tenant,
+        _snapshots([ana]),
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["landing_step"] == "awaiting_attendee_choice"
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+    assert conv.flow_draft["t"] == "Consulta Geral"
+
+
+async def test_guided_booking_recanonicalizes_against_the_fresh_catalog(
+    db, _captured_bubbles, _stub_calendar, log
+) -> None:
+    """The tool proved the name against ITS turn's catalog; the service may be gone now."""
+    tenant, ana, patient, conversation = await _seed_sole(db, attendee=ATTENDEE_SELF)
+
+    await tasks._handle_start_guided_booking(
+        _reply_ctx(conversation),
+        f"{START_GUIDED_BOOKING_SENTINEL_PREFIX}Consulta Removida",
+        tenant,
+        _snapshots([ana]),
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["landing_step"] == "awaiting_service"  # the service list, never typeless
+    assert event["dropped"] == {"service": "not_in_catalog"}
+
+
+def test_the_guided_sentinel_is_a_protocol_string() -> None:
+    assert tasks._is_agent_sentinel(f"{START_GUIDED_BOOKING_SENTINEL_PREFIX}Consulta Geral")

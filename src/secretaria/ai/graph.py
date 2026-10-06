@@ -11,7 +11,6 @@ concurrently without interference.
 
 import asyncio
 import hashlib
-import json
 import re
 import ssl
 import time
@@ -114,11 +113,11 @@ MANAGE_APPOINTMENT_SENTINEL_PREFIX = "__MANAGE_APPOINTMENT__:"
 # offers, not a request it is obliged to make.
 START_GUIDED_BOOKING_SENTINEL_PREFIX = "__START_GUIDED_BOOKING__:"
 
-# Prefix returned when the agent called set_booking_draft; a compact JSON
-# {"t": service|None, "p": professional_id|None, "i": convênio|None} rides after
-# the colon and workers/tasks.py::_handle_set_booking_draft re-enters the
-# button flow at the first step still missing. Same exception->sentinel
-# mechanism as the others; none of the three values is patient PII.
+# Prefix returned when the agent called set_booking_draft (v1 or v2); the draft rides
+# after the colon as compact JSON - keys t/p/i/w/d/h, null for absent
+# (services/booking_draft.py::BookingDraft) - and
+# workers/shared/sentinels.py::_handle_set_booking_draft lands it. None of the values is a
+# patient's or a third party's name: "w" is only "self"/"other".
 HUMAN_HANDOFF_SENTINEL_PREFIX = "__HUMAN_HANDOFF__:"
 BOOKING_DRAFT_SENTINEL_PREFIX = "__BOOKING_DRAFT__:"
 
@@ -273,6 +272,19 @@ def _prompt_with_today(state: dict) -> list[BaseMessage]:
     return [SystemMessage(content=content), *state["messages"]]
 
 
+def _tool_cache_key(tool: Any) -> str:
+    """A tool's identity in `_AGENTS`: its NAME, plus a declared variant.
+
+    Two implementations may share one model-facing name - TASK-030's v1 and v2
+    `set_booking_draft`, picked per clinic. Keyed by name alone, whichever compiled first
+    would serve every clinic. A tool declares `metadata={"cache_variant": ...}` to be told
+    apart; every other tool keys exactly as before.
+    """
+    name = getattr(tool, "name", str(tool))
+    variant = (getattr(tool, "metadata", None) or {}).get("cache_variant")
+    return f"{name}#{variant}" if variant else name
+
+
 def build_agent(extra_tools: Sequence = (), topology: str = BOOKING_TOPOLOGY_UNKNOWN) -> Any:
     """Compile (or fetch from cache) the ReAct agent for THIS turn's capabilities.
 
@@ -284,7 +296,7 @@ def build_agent(extra_tools: Sequence = (), topology: str = BOOKING_TOPOLOGY_UNK
     no `create_event` in it.
     """
     tools = [*base_tools_for(topology), *extra_tools]
-    key = frozenset(getattr(t, "name", str(t)) for t in tools)
+    key = frozenset(_tool_cache_key(t) for t in tools)
     cached = _AGENTS.get(key)
     if cached is not None:
         return cached
@@ -707,20 +719,18 @@ async def run_agent(
         )
         return f"{MANAGE_APPOINTMENT_SENTINEL_PREFIX}{exc.action}"
     except BookingDraftRequested as exc:
+        draft = exc.draft
         logger.info(
             "ai_run_agent_set_booking_draft",
             conversation_id=str(conversation_id),
-            has_type=exc.appointment_type is not None,
-            has_professional=exc.professional_id is not None,
-            has_insurance=exc.insurance is not None,
+            has_type=draft.service is not None,
+            has_professional=draft.professional_id is not None,
+            has_insurance=draft.insurance is not None,
+            has_for_whom=draft.attendee is not None,
+            has_day=draft.day is not None,
+            has_time=draft.time is not None,
         )
-        return BOOKING_DRAFT_SENTINEL_PREFIX + json.dumps(
-            {
-                "t": exc.appointment_type,
-                "p": str(exc.professional_id) if exc.professional_id else None,
-                "i": exc.insurance,
-            }
-        )
+        return BOOKING_DRAFT_SENTINEL_PREFIX + draft.to_payload()
     except GuidedBookingRequested as exc:
         # The agent chose to hand the BOOKING itself to the button flow —
         # same propagation path as the sentinels above. The service name is

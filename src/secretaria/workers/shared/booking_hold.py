@@ -14,6 +14,7 @@ from secretaria.ai.graph import (
     MANAGE_APPOINTMENT_SENTINEL_PREFIX,
     SELECT_PROFESSIONAL_SENTINEL_PREFIX,
     SHOW_MAIN_MENU_SENTINEL,
+    START_GUIDED_BOOKING_SENTINEL_PREFIX,
 )
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
@@ -106,6 +107,7 @@ def _is_agent_sentinel(reply_text: str) -> bool:
         or reply_text.startswith(MANAGE_APPOINTMENT_SENTINEL_PREFIX)
         or reply_text.startswith(HUMAN_HANDOFF_SENTINEL_PREFIX)
         or reply_text.startswith(BOOKING_DRAFT_SENTINEL_PREFIX)
+        or reply_text.startswith(START_GUIDED_BOOKING_SENTINEL_PREFIX)
     )
 
 def _hold_minutes_left(held: HeldSlot) -> int:

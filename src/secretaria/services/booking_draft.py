@@ -30,14 +30,17 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
+from secretaria.ai.formatter import TextBubble
 from secretaria.models import FlowState
 from secretaria.services import flow_router as fr
 from secretaria.services.attendee import ATTENDEE_SELF, real_attendee_name
 from secretaria.services.availability import free_slots_for_day
+from secretaria.services.booking_details import booking_details_text
 from secretaria.services.booking_hold import BookingGate
 from secretaria.services.booking_scope import sole_active_professional
 from secretaria.services.calendar import CalendarUnavailableError
 from secretaria.services.flow_router import FlowRouterResult
+from secretaria.services.service_catalog import normalize as normalize_service_name
 from secretaria.services.tenant_config import (
     active_appointment_types,
     professional_appointment_types,
@@ -584,15 +587,37 @@ async def _resolve(
         result = ask(fr.ATTENDEE_NEXT_BOOK)
         result.flow_draft = draft_record(_pending(draft, checked), saved_at=now)
         return done(result, *FIELD_NAMES)
+
+    def asked(result: FlowRouterResult, *names: str) -> DraftResolution:
+        """A convênio, doctor or service question: what comes after it waits in flow_draft.
+
+        TASK-030 P3 (owner's ruling of 2026-10-03), behind the AI draft v2 switch: when the
+        pending draft still holds a service or a day, it is parked on the question, and the
+        patient's answer re-runs the resolver over it (`flow_router._resume_parked_draft`,
+        `draft_resolution._resume_booking_draft`) instead of falling into the next button
+        step - so neither the day nor the booking details get lost on the way. With nothing
+        after the question to keep, nothing waits.
+        """
+        pending = _pending(draft, checked)
+        if (
+            fr.ai_draft_v2_enabled(tenant)
+            and (pending.service is not None or pending.day is not None)
+            and result.flow_state is FlowState.SERVICE_CATALOG
+            and result.flow_step in fr.DRAFT_WAIT_STEPS
+        ):
+            result.flow_draft = draft_record(pending, saved_at=now)
+            names = (*names, FIELD_DAY, FIELD_TIME)
+        return done(result, *names)
+
     # 2. Convênio, when the clinic collects it.
     if fr._insurance_step_skip_reason(tenant) is None and checked.insurance is None:
-        return done(
+        return asked(
             fr._enter_insurance(tenant, state), FIELD_FOR_WHOM, FIELD_PROFESSIONAL, FIELD_SERVICE
         )
     # 3. Profissional (multi-doctor clinics; implicit otherwise).
     if checked.multi and checked.professional is None:
         result = fr._enter_professional_list(tenant, professionals, insurance=checked.insurance)
-        return done(result, FIELD_FOR_WHOM, FIELD_INSURANCE, FIELD_SERVICE)
+        return asked(result, FIELD_FOR_WHOM, FIELD_INSURANCE, FIELD_SERVICE)
     # 4. Serviço.
     if checked.service is None:
         result = (
@@ -600,12 +625,13 @@ async def _resolve(
             if checked.multi
             else fr._start_booking(tenant, professionals, insurance=checked.insurance)
         )
-        return done(result, FIELD_FOR_WHOM, FIELD_INSURANCE, FIELD_PROFESSIONAL)
+        return asked(result, FIELD_FOR_WHOM, FIELD_INSURANCE, FIELD_PROFESSIONAL)
     # 5-6. Dia e horário.
     return await _land_day(
         draft,
         checked,
         state,
+        conversation=conversation,
         tenant=tenant,
         professionals=professionals,
         service_catalog=service_catalog,
@@ -615,11 +641,90 @@ async def _resolve(
     )
 
 
+# Steps the service-detail card has already been shown by the time a conversation sits on
+# them, in the button flow: "Sim" on that card is the only way past it. On clinics with the
+# AI draft v2 switch, every landing of the resolver past that card (day picker, slot list,
+# express card) carries the booking details message instead (`_land_day`), so reaching one
+# of these steps means the details were shown on BOTH paths.
+DETAILS_SEEN_STEPS = (
+    fr.STEP_AWAITING_SERVICE_CONFIRM,
+    fr.STEP_AWAITING_DAY,
+    fr.STEP_AWAITING_DAY_RETRY,
+    fr.STEP_AWAITING_DAY_ESCAPE,
+    fr.STEP_AWAITING_SLOT,
+    fr.STEP_AWAITING_CONFIRMATION,
+    fr.STEP_AWAITING_RETRY,
+)
+
+
+def details_already_shown(
+    conversation: Any, *, service_name: str | None, professional_id: Any
+) -> bool:
+    """Whether this patient already saw THIS booking's details (spec §4.4.2).
+
+    True only when the FRESH conversation sits on a step past the service-detail card
+    (`DETAILS_SEEN_STEPS`) for the same service (accent- and case-insensitive) and the same
+    doctor. Anything else - the LLM state (no step), a pra-quem, convênio, doctor or service
+    question, another service or another doctor - means the details go out.
+    """
+    if conversation is None or not service_name:
+        return False
+    if getattr(conversation, "flow_state", None) is not FlowState.SERVICE_CATALOG:
+        return False
+    if getattr(conversation, "flow_step", None) not in DETAILS_SEEN_STEPS:
+        return False
+    recorded = _recorded_service(conversation)
+    if recorded is None or normalize_service_name(recorded) != normalize_service_name(service_name):
+        return False
+    return getattr(conversation, "flow_selected_professional_id", None) == professional_id
+
+
+def _booking_details(
+    checked: _Checked, state: Any, *, conversation: Any, tenant: Any, owner: Any | None
+) -> str | None:
+    """The details message for a landing past the service card, or None.
+
+    None on a clinic without the AI draft v2 switch (P2's landings stay exactly as they
+    were), without a resolved service, or when the patient already saw this booking's
+    details. `tenant.clinic_address` is the line workers/shared/draft_resolution.py put on
+    the snapshot (None when the clinic has none, or has units).
+    """
+    if not fr.ai_draft_v2_enabled(tenant) or checked.service is None:
+        return None
+    if details_already_shown(
+        conversation,
+        service_name=str(checked.service.get("name") or ""),
+        professional_id=state.flow_selected_professional_id,
+    ):
+        return None
+    return booking_details_text(
+        service=checked.service,
+        professional=owner,
+        insurance=state.flow_selected_insurance,
+        attendee_name=state.flow_attendee_name,
+        address=getattr(tenant, "clinic_address", None),
+    )
+
+
+def _with_details(result: FlowRouterResult, details: str | None) -> FlowRouterResult:
+    """Open a booking landing past the service card with the details message."""
+    if (
+        details is None
+        or result.action != "reply"
+        or result.flow_state is not FlowState.SERVICE_CATALOG
+        or result.flow_step not in DETAILS_SEEN_STEPS
+    ):
+        return result
+    result.bubbles = [TextBubble(body=details), *result.bubbles]
+    return result
+
+
 async def _land_day(
     draft: BookingDraft,
     checked: _Checked,
     state: Any,
     *,
+    conversation: Any,
     tenant: Any,
     professionals: list,
     service_catalog: list | None,
@@ -631,9 +736,12 @@ async def _land_day(
 
     Nothing the AI sends becomes a time without passing through the agenda's own free
     slots for that day, minus the slots other conversations are holding (spec §4.4.1).
-    A valid time is offered to `_express_confirmation` (P3); without it - in P2, always -
-    the patient lands on that day's slot list. An invalid day lands on the day picker,
-    an invalid time on the slot list of its day.
+    An invalid day lands on the day picker, an invalid time on the slot list of its day.
+
+    TASK-030 P3, on clinics with the AI draft v2 switch: a valid time lands on the express
+    confirmation (`_express_confirmation`); and every landing here skips the service-detail
+    card, so each one - day picker, slot list, express card - opens with the booking
+    details message, unless this patient already saw them (`details_already_shown`).
     """
     dropped = checked.dropped
     base = (FIELD_FOR_WHOM, FIELD_INSURANCE, FIELD_PROFESSIONAL, FIELD_SERVICE)
@@ -645,11 +753,17 @@ async def _land_day(
     if owner is not None and not professional_business_hours(owner, tenant):
         return done(fr._professional_config_incomplete(owner, fr.PROFESSIONAL_GAP_HOURS), *base)
 
+    details = _booking_details(
+        checked, state, conversation=conversation, tenant=tenant, owner=owner
+    )
     cal = await calendar(checked.professional if checked.multi else None)
+
+    def land(result: FlowRouterResult, *names: str) -> DraftResolution:
+        return done(_with_details(result, details), *names)
 
     async def day_picker(prefix: str | None = None) -> DraftResolution:
         result = await fr._ask_day(state, tenant, cal, services, professionals, prefix=prefix)
-        return done(result, *base)
+        return land(result, *base)
 
     def dropped_day(reason: str) -> None:
         dropped[FIELD_DAY] = reason
@@ -697,6 +811,7 @@ async def _land_day(
                 duration_minutes=duration,
                 calendar=cal,
                 professionals=professionals,
+                details=details,
             )
             if express is not None:
                 return done(express, *names)
@@ -712,7 +827,7 @@ async def _land_day(
         back_target=fr.BACK_TARGET_SERVICE,
         professionals=professionals,
     )
-    return done(result, *names)
+    return land(result, *names)
 
 
 async def _express_confirmation(
@@ -725,18 +840,39 @@ async def _express_confirmation(
     duration_minutes: int,
     calendar: CalendarService,
     professionals: list,
+    details: str | None = None,
 ) -> FlowRouterResult | None:
-    """P3 HOOK - straight to the confirmation card when every item is valid. P2: None.
+    """Straight to the confirmation card when every item is valid (spec §4.4) - or None.
 
-    Called only with pra-quem answered (`state.flow_attendee_name` is ATTENDEE_SELF or an
-    authorized name), the service known, and `slot_start` re-derived from the agenda's
-    free slots minus holds (aware, clinic timezone). `state` is the resolver's
-    `_DayPickerState` (id, flow_selected_type, flow_selected_professional_id,
-    flow_selected_insurance, flow_attendee_name); `professional` is the booking owner
-    (`_booking_professional`), None on a tenant without professionals.
+    Only on clinics with the AI draft v2 switch (`flow_router.ai_draft_v2_enabled`); None
+    elsewhere, and the patient lands on the day's slot list exactly as in P2.
 
-    A non-None result must be a SERVICE_CATALOG result at STEP_AWAITING_CONFIRMATION that
-    names flow_selected_day and flow_selected_slot (naive ISO minutes, like `_handle_slot`);
-    the resolver's `_carry` fills type, professional, convênio and attendee.
+    Called only with pra-quem answered, the service known, and `slot_start` re-derived from
+    the agenda's free slots minus holds (aware). `state` is the resolver's `_DayPickerState`;
+    `professional` is the booking owner, named on the card. The bubbles are the booking
+    details (`details`, when the patient has not seen them) and the card
+    (`flow_router._confirmation_card`: service, doctor, who, date/time; Confirmar/Cancelar).
+
+    NOTHING is booked here - no event, no appointment, no hold. "Confirmar" is routed by
+    `flow_router._handle_confirmation`, exactly as for the card the slot tap draws (the
+    Portal's code gate, the holds, the event, the row and the deposit hooks included).
+    `flow_selected_slot` is the naive ISO minute of `slot_start` in the agenda's timezone,
+    the same instant the card prints (skill date-derived-ui-labels); the resolver's `_carry`
+    fills type, professional, convênio and attendee.
     """
-    return None
+    if not fr.ai_draft_v2_enabled(tenant):
+        return None
+    start = (
+        slot_start.astimezone(calendar.tzinfo)
+        if calendar is not None and slot_start.tzinfo is not None
+        else slot_start
+    )
+    card = fr._confirmation_card(state, start, professional=professional)
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[TextBubble(body=details), card] if details else [card],
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=fr.STEP_AWAITING_CONFIRMATION,
+        flow_selected_day=start.date().isoformat(),
+        flow_selected_slot=start.replace(tzinfo=None).isoformat(timespec="minutes"),
+    )

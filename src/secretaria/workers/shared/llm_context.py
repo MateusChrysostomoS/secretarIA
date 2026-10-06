@@ -8,6 +8,7 @@ from secretaria.ai.tools import (
     manage_existing_appointment,
     request_human_handoff,
     set_booking_draft,
+    set_booking_draft_v2,
     start_guided_booking,
 )
 from secretaria.core.logging import get_logger
@@ -28,6 +29,7 @@ from secretaria.services.calendar import (
 )
 from secretaria.services.flow_router import (
     LABEL_RESCHEDULE,
+    ai_draft_v2_enabled,
     flows_enabled,
 )
 from secretaria.services.patient_context import (
@@ -222,7 +224,9 @@ def _flow_handback_tools(tenant: Tenant | None, topology: str, plugin_tools: lis
     """
     if tenant is None or not flows_enabled(tenant):
         return list(plugin_tools)
-    handbacks = [manage_existing_appointment, set_booking_draft, request_human_handoff]
+    # TASK-030: same model-facing name, two implementations; the clinic's switch picks one.
+    draft_tool = set_booking_draft_v2 if ai_draft_v2_enabled(tenant) else set_booking_draft
+    handbacks = [manage_existing_appointment, draft_tool, request_human_handoff]
     if topology != BOOKING_TOPOLOGY_MULTI:
         handbacks.append(start_guided_booking)
     return [*plugin_tools, *handbacks]

@@ -347,6 +347,7 @@ def _flow_tenant_snapshot(
 
     return SimpleNamespace(
         initial_flows=tenant.initial_flows,
+        timezone=getattr(tenant, "timezone", None),
         appointment_types=appointment_types,
         appointment_duration_min=tenant.appointment_duration_min,
         business_hours=business_hours,

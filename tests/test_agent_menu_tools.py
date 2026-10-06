@@ -80,6 +80,7 @@ from secretaria.models import (  # noqa: E402
 )
 from secretaria.plugins import multi_professional as mp, registry as reg  # noqa: E402
 from secretaria.schemas.webhook import inbound_routing_text  # noqa: E402
+from secretaria.services.attendee import ATTENDEE_SELF  # noqa: E402
 from secretaria.services.booking_scope import (  # noqa: E402
     BOOKING_TOPOLOGY_MULTI,
     BOOKING_TOPOLOGY_SOLE,
@@ -147,16 +148,14 @@ def _tenant_config(tenant_id) -> TenantRuntimeConfig:
     )
 
 
-async def _seed(db, *, flow_state=FlowState.LLM, selected=None, insurance=None):
+async def _seed(db, *, flow_state=FlowState.LLM, selected=None, insurance=None, attendee=None):
     async with db() as session:
         tenant = Tenant(
             id=uuid4(),
             clinic_name="Clinic",
             phone_number_id=str(uuid4())[:12],
             initial_flows={"enabled": True, "menu_label": "Como posso ajudar?"},
-            appointment_types=[
-                {"name": "Consulta Geral", "duration_min": 30, "is_active": True}
-            ],
+            appointment_types=[{"name": "Consulta Geral", "duration_min": 30, "is_active": True}],
             # A clinic that can actually take a booking. Both professionals
             # below inherit these (their own column is NULL), which is what
             # keeps the day picker reachable: it now refuses to open for a
@@ -188,6 +187,7 @@ async def _seed(db, *, flow_state=FlowState.LLM, selected=None, insurance=None):
             flow_state=flow_state,
             flow_selected_professional_id=(ana.id if selected else None),
             flow_selected_insurance=insurance,
+            flow_attendee_name=attendee,
         )
         session.add(conversation)
         await session.flush()
@@ -467,7 +467,9 @@ async def test_handle_show_main_menu_resets_flow_without_deleting(db, _captured_
 
 
 async def test_handle_select_professional_reenters_flow_at_doctor(db, _captured_bubbles):
-    tenant, ana, bruno, patient, conversation = await _seed(db, flow_state=FlowState.LLM)
+    tenant, ana, bruno, patient, conversation = await _seed(
+        db, flow_state=FlowState.LLM, attendee=ATTENDEE_SELF
+    )
     professionals = _snapshots([ana, bruno])
     sentinel = f"{SELECT_PROFESSIONAL_SENTINEL_PREFIX}{ana.id}"
 
@@ -804,7 +806,7 @@ async def test_handle_start_guided_booking_opens_the_day_picker(
     """The common case: the clinic does not collect convênio, so the hand-back
     lands exactly where the "Sim, agendar" tap would — the tappable day list,
     with the service the LLM resolved carried forward."""
-    tenant, ana, patient, conversation = await _seed_sole(db)
+    tenant, ana, patient, conversation = await _seed_sole(db, attendee=ATTENDEE_SELF)
     sentinel = f"{START_GUIDED_BOOKING_SENTINEL_PREFIX}Consulta Geral"
 
     await tasks._handle_start_guided_booking(
@@ -832,7 +834,7 @@ async def test_handle_start_guided_booking_asks_convenio_first_when_configured(
     other than this patient arriving through the LLM — so the step the button
     flow would have shown is shown here too, and the calendar is not even read.
     """
-    tenant, ana, patient, conversation = await _seed_sole(db)
+    tenant, ana, patient, conversation = await _seed_sole(db, attendee=ATTENDEE_SELF)
     async with db() as session:
         row = await session.get(Tenant, tenant.id)
         row.collect_insurance = True
@@ -864,7 +866,9 @@ async def test_handle_start_guided_booking_keeps_an_answered_convenio(
 ):
     """A convênio already on the conversation rides through the day picker
     instead of being cleared by the unconditional field writes."""
-    tenant, ana, patient, conversation = await _seed_sole(db, insurance="Unimed")
+    tenant, ana, patient, conversation = await _seed_sole(
+        db, insurance="Unimed", attendee=ATTENDEE_SELF
+    )
     sentinel = f"{START_GUIDED_BOOKING_SENTINEL_PREFIX}Consulta Geral"
 
     await tasks._handle_start_guided_booking(
@@ -882,7 +886,7 @@ async def test_handle_start_guided_booking_without_a_type_still_reaches_the_pick
 ):
     """The empty suffix (a clinic with no catalog): the booking proceeds
     typeless on the tenant's default duration rather than being dropped."""
-    tenant, ana, patient, conversation = await _seed_sole(db)
+    tenant, ana, patient, conversation = await _seed_sole(db, attendee=ATTENDEE_SELF)
 
     await tasks._handle_start_guided_booking(
         _reply_ctx(conversation),
@@ -923,7 +927,7 @@ async def test_handle_start_guided_booking_hands_off_when_the_agenda_is_unknown(
 ):
     """A selection that no longer resolves yields no calendar. The picker then
     answers `calendar_unavailable` — a human, never a guessed day list."""
-    tenant, ana, patient, conversation = await _seed_sole(db)
+    tenant, ana, patient, conversation = await _seed_sole(db, attendee=ATTENDEE_SELF)
 
     async def _no_calendar(session, tenant, target):
         return None
@@ -962,7 +966,7 @@ async def test_the_next_tap_after_the_handback_actually_advances(
     """
     from secretaria.services import flow_router
 
-    tenant, ana, patient, conversation = await _seed_sole(db)
+    tenant, ana, patient, conversation = await _seed_sole(db, attendee=ATTENDEE_SELF)
 
     await tasks._handle_start_guided_booking(
         _reply_ctx(conversation),
@@ -1008,7 +1012,7 @@ async def test_handle_start_guided_booking_slots_on_the_sole_doctors_own_duratio
     fall back to `tenant.appointment_duration_min`, and offer the patient days
     sliced at the wrong length. 50 != 30 is what makes that visible.
     """
-    tenant, ana, patient, conversation = await _seed_sole(db)
+    tenant, ana, patient, conversation = await _seed_sole(db, attendee=ATTENDEE_SELF)
     async with db() as session:
         t = await session.get(Tenant, tenant.id)
         t.appointment_types = []  # legacy column empty — everything is per-doctor
@@ -1089,7 +1093,8 @@ async def test_run_agent_maps_booking_draft_to_sentinel(monkeypatch):
     reply = await run_agent("oi", context={"conversation_id": str(uuid4())})
     assert reply.startswith(BOOKING_DRAFT_SENTINEL_PREFIX)
     payload = json.loads(reply[len(BOOKING_DRAFT_SENTINEL_PREFIX):])
-    assert payload == {"t": "Limpeza", "p": None, "i": "Unimed"}
+    # v1 raise sites now serialize through BookingDraft: the three v2 keys go out as null.
+    assert payload == {"t": "Limpeza", "p": None, "i": "Unimed", "w": None, "d": None, "h": None}
 
 
 @pytest.mark.parametrize(
@@ -1102,7 +1107,7 @@ async def test_booking_draft_multi_resumes(
     import json
 
     from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
-    tenant, ana, bruno, patient, conversation = await _seed(db)
+    tenant, ana, bruno, patient, conversation = await _seed(db, attendee=ATTENDEE_SELF)
     await tasks._handle_set_booking_draft(
         _reply_ctx(conversation),
         BOOKING_DRAFT_SENTINEL_PREFIX + json.dumps({"t": service, "p": str(ana.id)}),
@@ -1154,7 +1159,9 @@ async def test_empty_booking_draft_returns_to_administrative_selection(
     assert _stub_calendar.day_scans == []
 
 
-@pytest.mark.parametrize("insurance, expected", [("Unimed", "Unimed"), ("Removed", None)])
+# TASK-030 P2: a STORED convênio is the patient's own answer (a typed "Outro convênio"
+# included) and is kept verbatim; only a convênio the AGENT supplies must name a plan.
+@pytest.mark.parametrize("insurance, expected", [("Unimed", "Unimed"), ("Removed", "Removed")])
 async def test_empty_booking_draft_preserves_only_fresh_valid_draft(
     db, _captured_bubbles, _stub_calendar, insurance, expected
 ):
@@ -1383,7 +1390,9 @@ async def test_booking_draft_validates_insurance_and_uses_fresh_doctor(
 
     from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
 
-    tenant, ana, bruno, patient, conversation = await _seed(db, insurance="Unimed")
+    tenant, ana, bruno, patient, conversation = await _seed(
+        db, insurance="Unimed", attendee=ATTENDEE_SELF
+    )
     async with db() as session:
         row = await session.get(Tenant, tenant.id)
         row.collect_insurance = True
@@ -1426,9 +1435,9 @@ async def test_booking_draft_rejects_removed_or_missing_service(
     from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
 
     if multi:
-        tenant, ana, bruno, patient, conversation = await _seed(db)
+        tenant, ana, bruno, patient, conversation = await _seed(db, attendee=ATTENDEE_SELF)
     else:
-        tenant, ana, patient, conversation = await _seed_sole(db)
+        tenant, ana, patient, conversation = await _seed_sole(db, attendee=ATTENDEE_SELF)
     async with db() as session:
         doctor = await session.get(Professional, ana.id)
         doctor.appointment_types = []
@@ -1630,3 +1639,25 @@ async def test_notification_failure_keeps_committed_handoff_success(
     async with db() as session:
         row = await session.get(Conversation, conv.id)
         assert row.handover_state == HandoverState.HUMAN_ACTIVE
+
+async def test_run_agent_maps_a_v2_booking_draft_to_its_sentinel(monkeypatch):
+    import datetime as dt
+
+    from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
+    from secretaria.ai.tools import BookingDraftRequested
+    from secretaria.services.booking_draft import BookingDraft
+
+    async def _history(_cid):
+        return [HumanMessage(content="oi")]
+
+    async def _boom(_messages, _cid):
+        raise BookingDraftRequested(
+            "Limpeza", None, None, attendee="other", day=dt.date(2026, 10, 8), time=dt.time(10, 0)
+        )
+
+    monkeypatch.setattr(graph, "_load_history", _history)
+    monkeypatch.setattr(graph, "_invoke_agent_with_retry", _boom)
+    reply = await run_agent("oi", context={"conversation_id": str(uuid4())})
+    assert BookingDraft.from_payload(reply[len(BOOKING_DRAFT_SENTINEL_PREFIX) :]) == BookingDraft(
+        service="Limpeza", attendee="other", day=dt.date(2026, 10, 8), time=dt.time(10, 0)
+    )

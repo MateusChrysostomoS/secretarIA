@@ -81,6 +81,7 @@ FALLBACK_MULTI_PROFESSIONAL = "multi_professional"
 FALLBACK_NO_APPOINTMENTS = "no_appointments"
 FALLBACK_CALENDAR_UNAVAILABLE = "calendar_unavailable"
 FALLBACK_PROFESSIONAL_CONFIG_INCOMPLETE = "professional_config_incomplete"
+FALLBACK_NO_FREE_DAYS = "no_free_days"
 FALLBACK_REASONS = frozenset(
     {
         FALLBACK_BAD_SENTINEL,
@@ -95,6 +96,7 @@ FALLBACK_REASONS = frozenset(
         FALLBACK_NO_APPOINTMENTS,
         FALLBACK_CALENDAR_UNAVAILABLE,
         FALLBACK_PROFESSIONAL_CONFIG_INCOMPLETE,
+        FALLBACK_NO_FREE_DAYS,
     }
 )
 
@@ -128,7 +130,24 @@ FIELD_NAMES = frozenset(
 DROP_NOT_IN_CATALOG = "not_in_catalog"
 DROP_UNKNOWN_PROFESSIONAL = "unknown_professional"
 DROP_UNMATCHED_PLAN = "unmatched_plan"
-DROP_REASONS = frozenset({DROP_NOT_IN_CATALOG, DROP_UNKNOWN_PROFESSIONAL, DROP_UNMATCHED_PLAN})
+# TASK-030 P2: the resolver's own reasons (services/booking_draft.py DROP_*, same strings).
+DROP_NOT_OFFERED_BY_PROFESSIONAL = "not_offered_by_professional"
+DROP_OUT_OF_WINDOW = "out_of_window"
+DROP_DAY_UNAVAILABLE = "day_unavailable"
+DROP_NO_FREE_SLOT = "no_free_slot"
+DROP_MISSING_DAY = "missing_day"
+DROP_REASONS = frozenset(
+    {
+        DROP_NOT_IN_CATALOG,
+        DROP_UNKNOWN_PROFESSIONAL,
+        DROP_UNMATCHED_PLAN,
+        DROP_NOT_OFFERED_BY_PROFESSIONAL,
+        DROP_OUT_OF_WINDOW,
+        DROP_DAY_UNAVAILABLE,
+        DROP_NO_FREE_SLOT,
+        DROP_MISSING_DAY,
+    }
+)
 
 TOPOLOGIES = frozenset(
     {
