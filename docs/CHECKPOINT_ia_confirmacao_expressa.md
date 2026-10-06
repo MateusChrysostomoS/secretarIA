@@ -1,6 +1,6 @@
 # CHECKPOINT — confirmação expressa, retomada do rascunho e gerenciamento v2 (TASK-030 P3)
 
-**Estado atual:** P3 Tasks 1–9 concluídas e validadas localmente. Tasks 1–5 já publicadas em `6faf720`/`9e72ca5`; conclusão das Tasks 6–9 sem commit, merge, push ou deploy. Revisão independente corrigida. Interruptor desligado por padrão; liberação depende de P4/P5. Nenhuma consulta de produção alterada nesta execução.
+**Estado atual:** P3 Tasks 1–9 concluídas e commitadas. Tasks 1–5 já publicadas em `6faf720`/`9e72ca5`; Tasks 6–9 em `244ead1`, com a main remota de lembretes R2 incorporada em `9ac99a6` e suíte conjunta aprovada. Integração/publicação autorizadas pelo dono em 2026-10-06; registro dos SHAs e verificação remota em `C:/TECH/BRAIN/tasks/TASK-030/results/p3-integration-codex.md`. Deploy pelo dono pendente; interruptor desligado por padrão e liberação completa depende de P4/P5. Nenhuma consulta de produção alterada pelo agente.
 
 **Planos:** `docs/superpowers/plans/2026-10-02-ia-p2b-handbacks-ferramenta-e-estado.md` e `docs/superpowers/plans/2026-10-02-ia-p3-confirmacao-expressa.md`. **Spec:** `docs/superpowers/specs/2026-10-02-ia-entra-em-qualquer-etapa-design.md`, §4.1–4.5, §4.7, §4.11 e §7 (pré-checagem da remarcação).
 
@@ -83,3 +83,9 @@ P4 (ferramentas cegas e privacidade em todas as tools) e P5 (prompt e avaliaçõ
 Preservados: corrida existente do WhatsApp ao Confirmar e remarcação sem releitura final; confirmação concorrente/recuperação Calendar–banco não auditadas; lacuna legada de autorização de terceiros com flag OFF; fallback legado de sentinel malformado com par interno inconsistente. São limites existentes/separados, não garantias certificadas por este P3. Deploy, SQL remoto, configuração e consultas reais ficaram intocados.
 
 Relatório da conclusão e decisões: `C:/TECH/BRAIN/tasks/TASK-030/results/p3-completion-codex.md`. Worktree/branch TASK-030 preservados, mudanças locais revisáveis e scratch ledger mantido até integração autorizada.
+
+## Integração/publicação autorizadas — 2026-10-06
+
+O dono solicitou merges e push para realizar o deploy. Commit P3 `244ead1`; merge da main remota `e23cbe4` em `9ac99a6`, preservando os lembretes R2 e os hooks existentes; sem conflitos de código. Suíte completa do código combinado: **3668 passed, 10 skipped, 15 warnings in 437.86s (0:07:17)**. Ruff dos quinze Python do P3 e diff-check limpos. O índice Graphify foi reconstruído para o código combinado e versionado em `6c45912`; seu SHA de geração é o merge de código, anterior ao commit de índice/documentação.
+
+Os documentos locais da main foram protegidos antes da integração; suas alterações não fazem parte desta publicação. Fonte/testes/dependências da main devem ser idênticos aos blobs validados, conforme manifesto do relatório de integração. Worktree TASK-030 e scratch mantidos. A publicação prepara o deploy conjunto de API e worker pelo dono; não é prova de deploy, migração, ativação ou comportamento real. P4/P5 permanecem pendentes.
