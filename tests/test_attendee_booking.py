@@ -56,6 +56,7 @@ from secretaria.models import (  # noqa: E402
     FlowState,
     Message,
     Patient,
+    Professional,
     Tenant,
 )
 from secretaria.plugins import professional_notification, reminders  # noqa: E402
@@ -73,9 +74,11 @@ from secretaria.services.attendee import (  # noqa: E402
     LABEL_ATTENDEE_SELF,
     authorization_body,
 )
+from secretaria.services.booking_draft import BookingDraft, draft_record  # noqa: E402
 from secretaria.services.channel_sender import CHANNEL_WHATSAPP  # noqa: E402
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
+    ATTENDEE_NEXT_BOOK,
     LABEL_BOOK,
     LABEL_BOOK_SERVICE,
     LABEL_CONFIRM,
@@ -766,19 +769,26 @@ async def test_chat_booking_consumes_the_attendee(wired, monkeypatch) -> None:
 
 
 async def test_llm_choose_doctor_hand_back_keeps_the_attendee(wired, monkeypatch) -> None:
-    """Finding 3: `select_professional_and_continue` bypasses route()."""
     db = wired
     tenant = await _seed_tenant(db)
     await _onboard(tenant)
+    async with db() as session:
+        async with session.begin():
+            doctor = Professional(
+                tenant_id=tenant.id,
+                name="Dra. Ana",
+                specialty="Cardiologia",
+                is_active=True,
+                appointment_types=[
+                    {"name": "Primeira Consulta", "duration_min": 40, "is_active": True}
+                ],
+            )
+            session.add(doctor)
     conversation = await _conversation(db, tenant)
-    professional = SimpleNamespace(
-        id=uuid4(),
-        name="Dra. Ana",
-        specialty="Cardiologia",
-        about=None,
-        appointment_types=[{"name": "Primeira Consulta", "duration_min": 40, "is_active": True}],
-        business_hours=None,
-    )
+    async with db() as session:
+        async with session.begin():
+            row = await session.get(Conversation, conversation.id)
+            row.flow_attendee_name = "Maria da Silva"
     reply = tasks._ReplyContext(
         channel=CHANNEL_WHATSAPP,
         conversation_id=conversation.id,
@@ -786,13 +796,14 @@ async def test_llm_choose_doctor_hand_back_keeps_the_attendee(wired, monkeypatch
         inbound_body="quero a Dra. Ana",
         tenant_id=tenant.id,
     )
-    snapshot = (SimpleNamespace(flow_attendee_name="Maria da Silva"), _tenant())
+    # The turn-start snapshot is stale on purpose: the ROW is what counts now.
+    snapshot = (SimpleNamespace(flow_attendee_name=None), _tenant())
     await tasks._handle_select_professional(
         reply,
-        f"{tasks.SELECT_PROFESSIONAL_SENTINEL_PREFIX}{professional.id}",
+        f"{tasks.SELECT_PROFESSIONAL_SENTINEL_PREFIX}{doctor.id}",
         tenant,
         snapshot,
-        [professional],
+        [doctor],
         WA_ID,
         waba_token="t",
     )
@@ -932,3 +943,120 @@ async def test_stale_booking_with_an_attendee_expires(wired) -> None:
     conversation = await _conversation(db, tenant)
     assert conversation.flow_attendee_name is None
     assert conversation.flow_step != "awaiting_service_confirm"
+
+
+# --------------------------------------------------------------------------
+# 5. TASK-030 P2: the AI draft parked on the conversation (flow_draft)
+# --------------------------------------------------------------------------
+
+
+async def _park_with_draft(db, tenant, *, step, attendee=None):
+    conversation = await _conversation(db, tenant)
+    async with db() as session:
+        async with session.begin():
+            row = await session.get(Conversation, conversation.id)
+            row.flow_state = FlowState.SERVICE_CATALOG
+            row.flow_step = step
+            row.flow_selected_type = ATTENDEE_NEXT_BOOK
+            row.flow_attendee_name = attendee
+            row.flow_draft = draft_record(
+                BookingDraft(service="Primeira Consulta"), saved_at=datetime.now(UTC)
+            )
+    return conversation
+
+
+async def test_worker_apply_writes_and_clears_the_draft(wired) -> None:
+    db = wired
+    tenant = await _seed_tenant(db)
+    await _onboard(tenant)
+    conversation = await _conversation(db, tenant)
+    reply = tasks._ReplyContext(
+        channel=CHANNEL_WHATSAPP,
+        conversation_id=conversation.id,
+        patient_ref=WA_ID,
+        inbound_body="x",
+        tenant_id=tenant.id,
+    )
+    record = draft_record(BookingDraft(service="Primeira Consulta"), saved_at=datetime.now(UTC))
+    parked = FlowRouterResult(
+        action="reply",
+        bubbles=[TextBubble(body="ok")],
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=STEP_AWAITING_ATTENDEE_CHOICE,
+        flow_draft=record,
+    )
+    await tasks._apply_flow_result(reply, parked, WA_ID, redis=None, tenant=tenant, waba_token="t")
+    assert (await _conversation(db, tenant)).flow_draft == record
+
+    moved_on = FlowRouterResult(
+        action="reply",
+        bubbles=[TextBubble(body="ok")],
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=STEP_AWAITING_SERVICE,
+    )
+    await tasks._apply_flow_result(
+        reply, moved_on, WA_ID, redis=None, tenant=tenant, waba_token="t"
+    )
+    assert (await _conversation(db, tenant)).flow_draft is None
+
+
+async def test_worker_snapshot_carries_the_draft_into_the_name_step(wired) -> None:
+    db = wired
+    tenant = await _seed_tenant(db)
+    await _onboard(tenant)
+    await _park_with_draft(db, tenant, step=STEP_AWAITING_ATTENDEE_CHOICE)
+
+    await _wa_turn(tenant, LABEL_ATTENDEE_OTHER)
+
+    conversation = await _conversation(db, tenant)
+    assert conversation.flow_step == STEP_AWAITING_ATTENDEE_NAME
+    assert conversation.flow_draft["t"] == "Primeira Consulta"
+
+
+async def test_worker_attendee_floor_drops_the_draft(wired) -> None:
+    db = wired
+    tenant = await _seed_tenant(db)
+    await _onboard(tenant)
+    conversation = await _park_with_draft(
+        db, tenant, step=STEP_AWAITING_ATTENDEE_AUTH, attendee="Maria da Silva"
+    )
+    async with db() as session:
+        async with session.begin():
+            await session.execute(
+                update(Message)
+                .where(Message.conversation_id == conversation.id)
+                .values(created_at=datetime.now(UTC) - timedelta(days=3))
+            )
+    # Only the inbound leg: the in-place expiry is what is under test, not the reply.
+    await tasks._persist_inbound_message(
+        phone_number_id=tenant.phone_number_id,
+        wa_id=WA_ID,
+        patient_name="Perfil",
+        wam_id=f"wamid.in.{next(_wam_seq)}",
+        body="Maria bom dia",
+    )
+    conversation = await _conversation(db, tenant)
+    assert conversation.flow_draft is None
+    assert conversation.flow_attendee_name is None
+
+
+async def test_worker_no_to_quer_continuar_drops_the_draft(wired) -> None:
+    db = wired
+    tenant = await _seed_tenant(db)
+    await _onboard(tenant)
+    conversation = await _park_with_draft(db, tenant, step=STEP_AWAITING_ATTENDEE_CHOICE)
+    async with db() as session:
+        async with session.begin():
+            row = await session.get(Conversation, conversation.id)
+            row.reactivation_origin = FlowState.SERVICE_CATALOG.value
+
+    await tasks._persist_inbound_message(
+        phone_number_id=tenant.phone_number_id,
+        wa_id=WA_ID,
+        patient_name="Perfil",
+        wam_id=f"wamid.in.{next(_wam_seq)}",
+        body="Não",
+    )
+    conversation = await _conversation(db, tenant)
+    assert conversation.reactivation_origin is None
+    assert conversation.flow_draft is None

@@ -12,6 +12,23 @@
 
 **Depende de:** P1 (`docs/superpowers/plans/2026-10-02-ia-p1-registro-de-handbacks.md`) já executado neste worktree (`workers/shared/handback_log.py`, `_land_handback`, `_fallback_to_menu`, `tests/test_handback_events.py`). P2b depende deste arquivo; P3 e P4 leem as interfaces daqui.
 
+## Estado de execução — 2026-10-05
+
+**A1–A6 implementados, validados e commitados.** A1–A3 já commitados até `33597f9`;
+A4–A6 e correções da revisão em `91e61c8`, após autorização explícita de merge/push do dono.
+Main atual incorporada em `f503a21`; migração encadeada após R1 em `166e582`.
+Suíte P2a isolado: **3.202 passed, 10 skipped**; main integrada: **3.276 passed, 10 skipped**.
+Ruff clean. Migração comprovada em SQLite e
+PostgreSQL 16 descartável (upgrade/downgrade/re-upgrade), incluindo atualização a partir de R1.
+Integrado em main; publicação autorizada. Nenhum deploy ou SQL remoto pelo agente.
+
+Fonte de verdade, revisão/correções e handoff: `docs/CHECKPOINT_ia_p2a_rascunho_resolvedor.md`.
+Na revisão, quatro premissas deste plano precisaram de ajuste: nome capturado não equivale
+a autorização; reservas são descontadas antes do limite de exibição; tenant também deve
+ser relido e levado em `DraftContext.tenant`; 96 posições são piso, expandido pela duração
+de serviços curtos. Os exemplos originais abaixo são históricos; usar o código e os
+testes finais como base para P2b/P3, preservando essas correções.
+
 ## Global Constraints
 
 - Worktree `C:\TECH\BRAIN-worktrees\TASK-030\secretarIA` (branch da TASK-030). Tarefas **sequenciais**: P1 → P2a → P2b → P3 editam os mesmos arquivos (`flow_router.py`, `sentinels.py`); nunca dois agentes ao mesmo tempo.
@@ -151,12 +168,12 @@ def _flow_professionals(professional_rows: list[Professional], services: list | 
 - Consumes: `secretaria.services.booking_hold.overlaps`; `secretaria.services.booking_scope.resolve_booking_owner_id`; `CalendarService.list_available_days(start_day, days, slot_minutes)` e `list_free_slots(day, slot_minutes, max_slots)`.
 - Produces: `FREE_SLOT_SCAN_MAX`, `Window`, `slot_start`, `without_holds`, `available_day_starts`, `days_with_free_slots`, `free_slots_for_day` (assinaturas em "Interfaces"); `flow_router._hold_owner(conversation, professionals) -> UUID | None`.
 
-- [ ] **Step 0: Baseline da suíte (uma vez, antes de qualquer edição do P2a)**
+- [x] **Step 0: Baseline da suíte (uma vez, antes de qualquer edição do P2a)**
 
 Run: `BOT_ALLOWLIST_WA_IDS="" uv run python -m pytest -q 2>&1 | tail -5`
 Expected: a linha final `N passed[, M failed]`. Anote N, M e os nomes das falhas (se houver) no relatório do worker — são as falhas pré-existentes contra as quais a Task B5 compara.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Criar `tests/test_availability.py`:
 
@@ -379,12 +396,12 @@ async def test_a_sole_professionals_hold_is_looked_up_by_their_id():
     assert "slot|2026-10-05T08:00" not in [row[0] for row in res.bubbles[0].rows]
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `BOT_ALLOWLIST_WA_IDS="" uv run python -m pytest tests/test_availability.py -q`
 Expected: erro de coleta — `ImportError: cannot import name 'availability' from 'secretaria.services'`.
 
-- [ ] **Step 3: Write the module**
+- [x] **Step 3: Write the module**
 
 Criar `src/secretaria/services/availability.py`:
 
@@ -535,12 +552,12 @@ async def days_with_free_slots(
     return [day_start.date() for day_start in starts]
 ```
 
-- [ ] **Step 4: Run the module tests**
+- [x] **Step 4: Run the module tests**
 
 Run: `BOT_ALLOWLIST_WA_IDS="" uv run python -m pytest tests/test_availability.py -q`
 Expected: os 5 testes do módulo e os 3 de "byte-identical"/"held hidden" PASS; `test_a_sole_professionals_hold_is_looked_up_by_their_id` FAIL (`assert [None] == [UUID(...)]`) — o seletor ainda procura reservas sob `None`.
 
-- [ ] **Step 5: Route the pickers through the module and fix the hold owner**
+- [x] **Step 5: Route the pickers through the module and fix the hold owner**
 
 Em `src/secretaria/services/flow_router.py`:
 
@@ -629,12 +646,12 @@ por
 
 (o `logger.info("flow_slots_hidden_by_hold", ...)` que segue fica igual; o comentário acima de `reserved` também.)
 
-- [ ] **Step 6: Run the tests to verify they pass, plus every picker suite**
+- [x] **Step 6: Run the tests to verify they pass, plus every picker suite**
 
 Run: `BOT_ALLOWLIST_WA_IDS="" uv run python -m pytest tests/test_availability.py tests/test_flow_day_picker.py tests/test_flow_router.py tests/test_booking_code_gate.py tests/test_rebooking_flow.py tests/test_flow_router_multiprofessional.py -q`
 Expected: PASS (os 9 novos e todos os antigos dos seletores).
 
-- [ ] **Step 7: Lint and commit**
+- [x] **Step 7: Lint and commit**
 
 ```bash
 uvx ruff format src/secretaria/services/availability.py tests/test_availability.py
@@ -668,7 +685,7 @@ EOF
 - Consumes: nada novo.
 - Produces: `DRAFT_ATTENDEE_SELF`, `DRAFT_ATTENDEE_OTHER`, `FIELD_*`, `FIELD_NAMES`, `DRAFT_RECORD_SAVED_AT`, `BookingDraft` (com `to_dict`, `to_payload`, `from_dict`, `from_payload`, `supplied_fields`), `draft_record`, `draft_from_record`; `flow_router.FLOW_DRAFT_TTL_MINUTES = 30`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Criar `tests/test_booking_draft.py`:
 
@@ -788,12 +805,12 @@ def test_draft_record_refuses_a_naive_timestamp():
         draft_record(BookingDraft(), saved_at=dt.datetime(2026, 10, 5, 12, 0))
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `BOT_ALLOWLIST_WA_IDS="" uv run python -m pytest tests/test_booking_draft.py -q`
 Expected: erro de coleta — `ModuleNotFoundError: No module named 'secretaria.services.booking_draft'`.
 
-- [ ] **Step 3: Add the TTL constant**
+- [x] **Step 3: Add the TTL constant**
 
 Em `src/secretaria/services/flow_router.py`, logo depois da função `pending_identity_ttl_minutes` (antes de `def reactivation_continue_prompt`), inserir:
 
@@ -805,7 +822,7 @@ Em `src/secretaria/services/flow_router.py`, logo depois da função `pending_id
 FLOW_DRAFT_TTL_MINUTES = 30
 ```
 
-- [ ] **Step 4: Write the module**
+- [x] **Step 4: Write the module**
 
 Criar `src/secretaria/services/booking_draft.py`:
 
@@ -975,12 +992,12 @@ def draft_from_record(record: Any, *, now: dt.datetime) -> BookingDraft | None:
     return draft
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `BOT_ALLOWLIST_WA_IDS="" uv run python -m pytest tests/test_booking_draft.py -q`
 Expected: PASS (23 testes, contando os parametrizados).
 
-- [ ] **Step 6: Lint and commit**
+- [x] **Step 6: Lint and commit**
 
 ```bash
 uvx ruff format src/secretaria/services/booking_draft.py tests/test_booking_draft.py
@@ -1018,7 +1035,7 @@ EOF
 - Consumes: A2 (`BookingDraft`, `draft_record`).
 - Produces: `Conversation.flow_draft: Mapped[dict | None]`; `FlowRouterResult.flow_draft: dict | None = None`, `FlowRouterResult.resume_draft: bool = False`; `flow_router._carry_draft(conversation, result) -> FlowRouterResult`; revisão Alembic `e7d3c1a9b5f2` (`down_revision = "c3a9e5f1d7b2"`).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Criar `tests/test_flow_draft_column.py`:
 
@@ -1300,12 +1317,12 @@ async def test_worker_no_to_quer_continuar_drops_the_draft(wired) -> None:
     assert conversation.flow_draft is None
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `BOT_ALLOWLIST_WA_IDS="" uv run python -m pytest tests/test_flow_draft_column.py tests/test_attendee_booking.py -q`
 Expected: FAIL — o arquivo da migração não existe (`FileNotFoundError` no `_migration()`), `FlowRouterResult.__init__() got an unexpected keyword argument 'flow_draft'`, e `AttributeError: 'Conversation' object has no attribute 'flow_draft'` nos testes de worker.
 
-- [ ] **Step 3: Model column and migration**
+- [x] **Step 3: Model column and migration**
 
 Em `src/secretaria/models/conversation.py`, trocar `from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, String, UniqueConstraint, func` por
 
@@ -1382,7 +1399,7 @@ def downgrade() -> None:
     op.drop_column("conversations", "flow_draft")
 ```
 
-- [ ] **Step 4: Router fields and the carry**
+- [x] **Step 4: Router fields and the carry**
 
 Em `src/secretaria/services/flow_router.py`:
 
@@ -1422,7 +1439,7 @@ def _carry_booking(conversation: Conversation, result: FlowRouterResult) -> Flow
     )
 ```
 
-- [ ] **Step 5: Persist, expire, reset and snapshot**
+- [x] **Step 5: Persist, expire, reset and snapshot**
 
 1. `src/secretaria/workers/shared/flow_runner.py`, em `_apply_flow_result`, logo depois de `conv.flow_attendee_name = result.flow_attendee_name`, inserir:
 
@@ -1455,12 +1472,12 @@ e em `_expire_stale_attendee_step`, logo depois de `conversation.flow_attendee_n
                             flow_draft=conversation.flow_draft,
 ```
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [x] **Step 6: Run the tests to verify they pass**
 
 Run: `BOT_ALLOWLIST_WA_IDS="" uv run python -m pytest tests/test_flow_draft_column.py tests/test_attendee_booking.py tests/test_llm_state_expiry.py tests/test_reactivation.py tests/test_flow_router.py -q`
 Expected: PASS.
 
-- [ ] **Step 7: Prove the migration on a disposable Postgres (port 5433)**
+- [x] **Step 7: Prove the migration on a disposable Postgres (port 5433)**
 
 ```bash
 docker run -d --rm --name task030-pg -e POSTGRES_USER=secretaria -e POSTGRES_PASSWORD=secretaria -e POSTGRES_DB=secretaria -p 5433:5432 postgres:16-alpine
@@ -1476,7 +1493,7 @@ docker stop task030-pg
 
 Expected: o primeiro `grep` mostra ` flow_draft | json |` (nullable, sem default); o `grep -c` depois do downgrade imprime `0`; o segundo `upgrade head` termina sem erro. Se a porta 5433 já estiver ocupada pelo `brain-postgres`, use um banco descartável nele: `docker exec brain-postgres createdb -U brain task030_draft`, troque o `DATABASE_URL` por `postgresql+asyncpg://brain:brain@127.0.0.1:5433/task030_draft`, rode os mesmos comandos (com `psql -U brain -d task030_draft`) e termine com `docker exec brain-postgres dropdb -U brain task030_draft`. Cole a saída no relatório do worker.
 
-- [ ] **Step 8: Lint and commit**
+- [x] **Step 8: Lint and commit**
 
 ```bash
 uvx ruff format tests/test_flow_draft_column.py
@@ -1508,7 +1525,7 @@ EOF
 - Consumes: A2 (`BookingDraft`, `draft_record`, `FIELD_*`); A3 (`FlowRouterResult.flow_draft`); flow_router (`_DayPickerState`, `_attendee_question`, `_attendee_name_request`, `_enter_insurance`, `_enter_professional_list`, `_enter_professional_services`, `_start_booking`, `_ask_day`, `_match_service`, `_find_professional_by_id`, `_insurance_step_skip_reason`, `match_insurance_plan`, `_menu_bubbles`, `ATTENDEE_NEXT_BOOK`).
 - Produces: `DROP_*`, `DROP_REASONS`, `FALLBACK_*`, `FALLBACK_REASONS`; `DraftResolution`; `landing_step(result) -> str`; `CalendarSource`; `resolve_booking_draft(...)` (assinatura em "Interfaces"; o pouso na etapa do dia nesta tarefa é o seletor de dias — A5 completa dia e horário); `flow_router.booking_gate_scope(gate)`; `flow_router._clinic_service_catalog(tenant, professionals, services=None)`; `flow_router._professionals_offering(tenant, professionals, service_name, services=None)`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Criar `tests/test_booking_draft_resolver.py`:
 
@@ -1900,12 +1917,12 @@ async def test_the_insurance_answer_with_a_service_but_no_doctor_lists_the_docto
     assert res.flow_selected_insurance == "Unimed"
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `BOT_ALLOWLIST_WA_IDS="" uv run python -m pytest tests/test_booking_draft_resolver.py -q`
 Expected: erro de coleta — `ImportError: cannot import name 'resolve_booking_draft' from 'secretaria.services.booking_draft'`.
 
-- [ ] **Step 3: Router support**
+- [x] **Step 3: Router support**
 
 Em `src/secretaria/services/flow_router.py`:
 
@@ -2040,7 +2057,7 @@ por
 
 (o corpo do `if result.flow_state != FlowState.SERVICE_CATALOG:` — comentário e `result = None` — e o `if result is None:` seguinte ficam iguais.)
 
-- [ ] **Step 4: The resolver (pra quem → convênio → profissional → serviço → seletor de dias)**
+- [x] **Step 4: The resolver (pra quem → convênio → profissional → serviço → seletor de dias)**
 
 Em `src/secretaria/services/booking_draft.py`:
 
@@ -2508,12 +2525,12 @@ async def _land_day(
     return done(result, FIELD_FOR_WHOM, FIELD_INSURANCE, FIELD_PROFESSIONAL, FIELD_SERVICE)
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `BOT_ALLOWLIST_WA_IDS="" uv run python -m pytest tests/test_booking_draft_resolver.py tests/test_booking_draft.py tests/test_flow_router.py tests/test_flow_router_insurance.py tests/test_convenio_catalogo_flow.py tests/test_flow_router_multiprofessional.py tests/test_insurance_mode_matrix.py -q`
 Expected: PASS (os 24 novos e os antigos de convênio/multi-médico).
 
-- [ ] **Step 6: Lint and commit**
+- [x] **Step 6: Lint and commit**
 
 ```bash
 uvx ruff format src/secretaria/services/booking_draft.py tests/test_booking_draft_resolver.py
@@ -2546,7 +2563,7 @@ EOF
 - Consumes: A1 (`free_slots_for_day`, `_hold_owner`), A4 (todo o resolvedor), flow_router (`_booking_professional`, `_booking_duration`, `_calendar_unavailable`, `_enter_slot_picker`, `_professional_config_incomplete`, `PROFESSIONAL_GAP_HOURS`, `DAY_PICKER_WINDOW_DAYS`, `BOOKING_DAY_BRANCH`, `BACK_TARGET_SERVICE`).
 - Produces: `DRAFT_DAY_OUT_OF_WINDOW_PREFIX`, `DRAFT_DAY_UNAVAILABLE_PREFIX`; `async def _express_confirmation(*, state, tenant, professional, service, slot_start, duration_minutes, calendar, professionals) -> FlowRouterResult | None` (P2: sempre `None`); `fr._ask_day(..., *, prefix: str | None = None)`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Ao fim de `tests/test_booking_draft_resolver.py`, acrescentar:
 
@@ -2732,12 +2749,12 @@ async def test_ask_day_without_a_prefix_is_unchanged():
     assert res.bubbles[0].body == fr.DAY_PICKER_BODY
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `BOT_ALLOWLIST_WA_IDS="" uv run python -m pytest tests/test_booking_draft_resolver.py -q`
 Expected: os novos FAIL (`AttributeError: module 'secretaria.services.booking_draft' has no attribute '_express_confirmation'` / landing `awaiting_day` onde se espera `awaiting_slot`); os da Task A4 continuam PASS.
 
-- [ ] **Step 3: `_ask_day` gains an optional prefix**
+- [x] **Step 3: `_ask_day` gains an optional prefix**
 
 Em `src/secretaria/services/flow_router.py`, trocar a assinatura de `_ask_day`
 
@@ -2767,7 +2784,7 @@ async def _ask_day(
 
 e, no `return await enter_day_picker(...)` do fim da função, acrescentar o argumento `prefix=prefix,` depois de `professionals=professionals,`. Acrescentar ao fim da docstring: `` `prefix` (TASK-030: why the AI's day was not kept) prepends one short line; None renders exactly as before.``
 
-- [ ] **Step 4: Day, time, holds and the P3 hook**
+- [x] **Step 4: Day, time, holds and the P3 hook**
 
 Em `src/secretaria/services/booking_draft.py`:
 
@@ -2934,12 +2951,12 @@ async def _express_confirmation(
     return None
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `BOT_ALLOWLIST_WA_IDS="" uv run python -m pytest tests/test_booking_draft_resolver.py tests/test_flow_day_picker.py tests/test_flow_router.py tests/test_availability.py -q`
 Expected: PASS (todos os do resolvedor, 40 com os parametrizados, e os seletores inalterados).
 
-- [ ] **Step 6: Lint and commit**
+- [x] **Step 6: Lint and commit**
 
 ```bash
 uvx ruff format src/secretaria/services/booking_draft.py tests/test_booking_draft_resolver.py
@@ -2976,7 +2993,7 @@ EOF
 - Consumes: A2 (`draft_from_record`, `DRAFT_ATTENDEE_*`), A3 (`flow_draft`, `resume_draft`), A4/A5 (`resolve_booking_draft`, `DraftResolution`), flow_router (`booking_gate_scope`), `llm_context._appointment_calendar`, `greeting._flow_tenant_snapshot`.
 - Produces: `DraftContext`, `_load_draft_context`, `_turn_booking_gate`, `_draft_calendar_source`, `_resolve_draft`, `_resume_booking_draft` (assinaturas em "Interfaces"); `greeting._flow_professionals(professional_rows, services)`; eventos `booking_draft_resumed` (`conversation_id`, `tenant_id`, `landing_step`, `accepted`, `dropped`, `fallback`), `booking_draft_resume_skipped` (`reason`: `missing` | `expired_or_invalid`), `booking_draft_resume_failed` (`error_type`).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Criar `tests/test_booking_draft_continuation.py`:
 
@@ -3288,12 +3305,12 @@ async def test_a_conversation_of_another_tenant_is_never_loaded(wired) -> None:
     assert await draft_resolution._load_draft_context(reply, stranger) is None
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `BOT_ALLOWLIST_WA_IDS="" uv run python -m pytest tests/test_booking_draft_continuation.py -q`
 Expected: erro de coleta — `ImportError: cannot import name 'draft_resolution' from 'secretaria.workers.shared'`.
 
-- [ ] **Step 3: `_flow_professionals` in greeting.py, used by the orchestrator**
+- [x] **Step 3: `_flow_professionals` in greeting.py, used by the orchestrator**
 
 Em `src/secretaria/workers/shared/greeting.py`, logo antes de `def _flow_tenant_snapshot(`, inserir:
 
@@ -3337,7 +3354,7 @@ Em `src/secretaria/workers/orchestrator.py`, trocar o `flow_professionals = [Sim
 
 e acrescentar `_flow_professionals,` ao import de `secretaria.workers.shared.greeting` do orchestrator (em ordem alfabética dentro do parêntese). Se `SimpleNamespace` deixar de ser usado no orchestrator, o `uvx ruff check` acusa `F401`: remova o import só nesse caso.
 
-- [ ] **Step 4: The worker module**
+- [x] **Step 4: The worker module**
 
 Criar `src/secretaria/workers/shared/draft_resolution.py`:
 
@@ -3584,7 +3601,7 @@ async def _resume_booking_draft(
     return resumed
 ```
 
-- [ ] **Step 5: The router flags the answer, the runner continues**
+- [x] **Step 5: The router flags the answer, the runner continues**
 
 1. `src/secretaria/services/flow_router.py`, logo antes de `def _attendee_step(`, inserir:
 
@@ -3675,12 +3692,12 @@ async def _apply_flow_result(
 
    - remova os imports `BookingGate` (bloco `from secretaria.services.booking_hold import (BookingGate,)`) e `CHANNEL_BRAIN_MESSAGE` (bloco `from secretaria.services.channel_sender import (...)`) SOMENTE se `uvx ruff check src/secretaria/workers/shared/flow_runner.py` os acusar como não usados (`F401`).
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [x] **Step 6: Run the tests to verify they pass**
 
 Run: `BOT_ALLOWLIST_WA_IDS="" uv run python -m pytest tests/test_booking_draft_continuation.py tests/test_attendee_booking.py tests/test_booking_code_gate.py tests/test_workers_layering.py tests/test_agent_menu_tools.py tests/test_handback_events.py -q`
 Expected: PASS (os 5 novos; o portão continua armando no Portal; camadas respeitadas; os hand-backs do P1 inalterados).
 
-- [ ] **Step 7: Lint and commit**
+- [x] **Step 7: Lint and commit**
 
 ```bash
 uvx ruff format src/secretaria/workers/shared/draft_resolution.py tests/test_booking_draft_continuation.py

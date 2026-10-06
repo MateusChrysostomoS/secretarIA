@@ -10,6 +10,7 @@ table is created/updated so the platform has a record independent of Google
 Calendar. This is wrapped so a DB hiccup never fails the calendar operation.
 """
 
+import re
 from collections.abc import Sequence
 from contextvars import ContextVar
 from dataclasses import replace
@@ -22,6 +23,7 @@ from langchain_core.tools import tool
 
 from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
+from secretaria.services.booking_draft import BookingDraft
 from secretaria.services.booking_scope import (
     BOOKING_TOPOLOGY_MULTI,
     BOOKING_TOPOLOGY_SOLE,
@@ -157,13 +159,13 @@ class GuidedBookingRequested(Exception):
 
 
 class BookingDraftRequested(Exception):
-    """Raised by `set_booking_draft`: the agent resolved what the patient wants.
+    """Raised by `set_booking_draft` (v1 and v2): the agent resolved what the patient wants.
 
-    Same exception->sentinel mechanism as `GuidedBookingRequested`, but it may
-    also carry the doctor (multi-doctor clinics) and the convênio the patient
-    already named. graph.run_agent maps it to BOOKING_DRAFT_SENTINEL_PREFIX;
-    workers/tasks.py::_handle_set_booking_draft re-enters the button flow at the
-    first step still missing. The LLM never writes `flow_selected_*` itself.
+    Same exception->sentinel mechanism as `GuidedBookingRequested`. graph.run_agent
+    serializes `draft` (services/booking_draft.py) after BOOKING_DRAFT_SENTINEL_PREFIX;
+    workers/shared/sentinels.py::_handle_set_booking_draft lands it. The LLM never writes
+    `flow_selected_*` itself, and never a third party's name: `attendee` is only
+    "self"/"other" (TASK-030 P2).
     """
 
     def __init__(
@@ -171,11 +173,29 @@ class BookingDraftRequested(Exception):
         appointment_type: str | None,
         professional_id: UUID | None,
         insurance: str | None,
+        *,
+        attendee: str | None = None,
+        day: date | None = None,
+        time: Any = None,
     ) -> None:
         super().__init__("set booking draft")
         self.appointment_type = appointment_type
         self.professional_id = professional_id
         self.insurance = insurance
+        self.attendee = attendee
+        self.day = day
+        self.time = time
+
+    @property
+    def draft(self) -> BookingDraft:
+        return BookingDraft(
+            service=self.appointment_type,
+            professional_id=self.professional_id,
+            insurance=self.insurance,
+            attendee=self.attendee,  # type: ignore[arg-type]
+            day=self.day,
+            time=self.time,
+        )
 
 
 class SelectProfessionalRequested(Exception):
@@ -1213,6 +1233,114 @@ async def set_booking_draft(service: str = "", professional: str = "", insurance
         if error is not None:
             return error
     raise BookingDraftRequested(canonical_type, professional_id, insurance or None)
+
+
+# --- set_booking_draft v2 (TASK-030 P2) ----------------------------------------------------
+# Same model-facing NAME as the v1 tool above; the clinic's switch picks one
+# (`flow_router.ai_draft_v2_enabled`, workers/shared/llm_context.py::_flow_handback_tools).
+# It checks FORMATS only. Whether a service, convênio or doctor exists is the worker-side
+# resolver's call (services/booking_draft.py), which drops just the invalid item and asks
+# from that step - so "not in the catalog" is never an error the model would answer in text.
+TOOL_BLOCK_BAD_FOR_WHOM = "bad_for_whom"
+TOOL_BLOCK_BAD_DAY = "bad_day"
+TOOL_BLOCK_BAD_TIME = "bad_time"
+_FOR_WHOM_VALUES: dict[str, str | None] = {"": None, "me": "self", "other": "other"}
+_FOR_WHOM_ERROR = (
+    'for_whom aceita só "me" (a consulta é para o próprio paciente), "other" (é para outra '
+    "pessoa) ou vazio (ele não disse). Nunca escreva um nome nesse campo."
+)
+_DAY_FORMAT_ERROR = "day precisa estar no formato AAAA-MM-DD (ex.: 2026-10-08), no fuso da clínica."
+_TIME_FORMAT_ERROR = "time precisa estar no formato HH:MM (ex.: 10:00)."
+_ISO_DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_HHMM_RE = re.compile(r"\d{2}:\d{2}")
+_DRAFT_TEXT_MAX = 120
+
+
+async def _draft_professional_id(tenant_id: UUID, name: str) -> UUID | None:
+    """The ACTIVE professional with exactly this name, or None (counted, never an error)."""
+    if not name:
+        return None
+    # Lazy: plugins import this module, so the reverse import must not be top-level.
+    from secretaria.plugins.multi_professional import _active_professionals
+
+    roster = await _active_professionals(tenant_id)
+    matches = [p for p in roster if p.name.strip().casefold() == name.casefold()]
+    if len(matches) == 1:
+        return matches[0].id
+    logger.info(
+        "booking_draft_tool_item_dropped",
+        field="professional",
+        reason="ambiguous_professional" if matches else "unknown_professional",
+    )
+    return None
+
+
+@tool("set_booking_draft")
+async def set_booking_draft_v2(
+    service: str = "",
+    professional: str = "",
+    insurance: str = "",
+    for_whom: str = "",
+    day: str = "",
+    time: str = "",
+) -> dict:
+    """Entrega o agendamento ao fluxo guiado com TUDO o que o paciente já disse. O fluxo
+    confere cada item com os dados reais da clínica e abre a próxima etapa que falta - pode
+    ir até a lista de horários do dia pedido. Preencha só o que o paciente disse e deixe o
+    resto vazio; não repita uma pergunta que ele já respondeu. Nunca deduza um procedimento
+    a partir de sintomas e nunca invente dia ou horário.
+
+    Args:
+        service: Nome EXATO de um serviço da clínica escolhido pelo paciente (ou vazio).
+        professional: Nome do profissional que o paciente escolheu (ou vazio).
+        insurance: Convênio que o paciente citou (ou vazio).
+        for_whom: "me" se a consulta é para o próprio paciente, "other" se é para outra
+            pessoa, vazio se ele não disse. NUNCA escreva um nome aqui.
+        day: Dia pedido no formato AAAA-MM-DD, no fuso da clínica (ou vazio).
+        time: Horário pedido no formato HH:MM (ou vazio). Sem `day`, é ignorado.
+    """
+    tenant_id = _tenant_id_ctx.get()
+    if tenant_id is None:
+        return {"error": "Nenhuma clínica configurada para esta conversa."}
+    who = (for_whom or "").strip().casefold()
+    if who not in _FOR_WHOM_VALUES:
+        # The value itself is never logged nor echoed: it may be a third party's name.
+        logger.info("agent_tool_blocked", tool="set_booking_draft", reason=TOOL_BLOCK_BAD_FOR_WHOM)
+        return {"error": _FOR_WHOM_ERROR}
+    day_text = (day or "").strip()
+    parsed_day: date | None = None
+    if day_text:
+        try:
+            if not _ISO_DAY_RE.fullmatch(day_text):
+                raise ValueError(day_text)
+            parsed_day = date.fromisoformat(day_text)
+        except ValueError:
+            logger.info("agent_tool_blocked", tool="set_booking_draft", reason=TOOL_BLOCK_BAD_DAY)
+            return {"error": _DAY_FORMAT_ERROR}
+    time_text = (time or "").strip()
+    parsed_time = None
+    if time_text:
+        try:
+            if not _HHMM_RE.fullmatch(time_text):
+                raise ValueError(time_text)
+            parsed_time = datetime.strptime(time_text, "%H:%M").time()
+        except ValueError:
+            logger.info("agent_tool_blocked", tool="set_booking_draft", reason=TOOL_BLOCK_BAD_TIME)
+            return {"error": _TIME_FORMAT_ERROR}
+    professional_id = await _draft_professional_id(tenant_id, (professional or "").strip())
+    raise BookingDraftRequested(
+        (service or "").strip()[:_DRAFT_TEXT_MAX] or None,
+        professional_id,
+        (insurance or "").strip()[:_DRAFT_TEXT_MAX] or None,
+        attendee=_FOR_WHOM_VALUES[who],
+        day=parsed_day,
+        time=parsed_time,
+    )
+
+
+# Read by ai/graph.py::_tool_cache_key: the v1 and v2 tools share the name
+# "set_booking_draft" and must never share a compiled agent.
+set_booking_draft_v2.metadata = {"cache_variant": "draft_v2"}
 
 
 HANDOFF_REASONS = ("patient_requested_human", "clinical_sensitive", "could_not_help")

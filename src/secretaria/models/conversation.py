@@ -4,7 +4,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, String, UniqueConstraint, func
+from sqlalchemy import JSON, DateTime, Enum as SAEnum, ForeignKey, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from secretaria.core.database import Base
@@ -153,6 +153,12 @@ class Conversation(Base):
     # above. PII: registered as the ATENDIDO identifier by
     # `services/pii_pseudonymization.py::load_pseudonymizer`.
     flow_attendee_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # The AI's booking draft parked while the patient answers "Essa consulta é pra você?"
+    # (TASK-030 P2, services/booking_draft.py): {"t", "p", "i", "w", "d", "h", "saved_at"},
+    # never a third party's name ("w" is only self/other). NULL whenever no draft waits.
+    # Written unconditionally by `_apply_flow_result` like every flow field, and carried
+    # only on the attendee steps (`flow_router._carry_draft`).
+    flow_draft: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # Set while a returning patient is mid-"quer continuar?" prompt: holds the
     # FlowState value to resume to AND marks that the next inbound is the Sim/Não
     # answer. NULL whenever no reactivation prompt is pending.

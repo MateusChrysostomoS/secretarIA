@@ -129,3 +129,15 @@ async def test_run_agent_caches_distinct_agents_per_extra_tools_set(
     await graph.run_agent("oi", context=ctx, extra_tools=(_fake_tool_a,))
     assert len(graph._AGENTS) == 2
     assert len(build_calls) == 2
+
+
+def test_two_draft_tools_never_share_a_compiled_agent(_clean_agent_cache_and_fakes):
+    """v1 and v2 share the model-facing NAME `set_booking_draft` (TASK-030 P2); keyed by
+    name alone, the first compiled would serve every clinic."""
+    from secretaria.ai.tools import set_booking_draft, set_booking_draft_v2
+
+    v1 = graph.build_agent(extra_tools=[set_booking_draft])
+    v2 = graph.build_agent(extra_tools=[set_booking_draft_v2])
+    assert v1 is not v2
+    assert graph.build_agent(extra_tools=[set_booking_draft_v2]) is v2
+    assert len(_clean_agent_cache_and_fakes) == 2

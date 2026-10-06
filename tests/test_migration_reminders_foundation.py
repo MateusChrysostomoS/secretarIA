@@ -44,9 +44,12 @@ def _run(engine: sa.Engine, fn_name: str) -> None:
             getattr(module, fn_name)()
 
 
-def test_there_is_exactly_one_head_and_it_is_ours():
+def test_there_is_one_head_and_reminder_foundation_is_in_its_history():
     script = ScriptDirectory.from_config(Config(str(ROOT / "alembic.ini")))
-    assert script.get_heads() == ["b8d3f1a6c2e5"]
+    heads = script.get_heads()
+    assert len(heads) == 1
+    history = {revision.revision for revision in script.walk_revisions(base="base", head=heads[0])}
+    assert _load().revision in history
     assert _load().down_revision == "e5a1c9d3b7f2"
 
 

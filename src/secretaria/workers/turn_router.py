@@ -760,6 +760,7 @@ async def _route_inbound_turn(
             conversation.flow_selected_insurance = None
             conversation.flow_managing_appointment_id = None
             conversation.flow_attendee_name = None
+            conversation.flow_draft = None
             return _ReplyContext(
                 channel=channel,
                 conversation_id=conversation.id,

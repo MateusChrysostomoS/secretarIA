@@ -69,6 +69,11 @@ MAX_INTERACTIVE_REPLY_ID_CHARS = max(MAX_BUTTON_ID_CHARS, MAX_LIST_ROW_ID_CHARS)
 # 4096), so a greeting that carries buttons must stay within the smaller limit.
 MAX_INTERACTIVE_BODY_CHARS = 1024
 
+# A plain TEXT message caps at 4096 characters (Meta). The longest text the deterministic
+# flow composes - the booking details before an AI express confirmation
+# (services/booking_details.py) - is trimmed to it.
+MAX_TEXT_MESSAGE_CHARS = 4096
+
 # Marks a cut so it reads as "shortened", not as a typo. One code unit, so it
 # costs exactly one character of the budget.
 TRUNCATION_MARK = "…"

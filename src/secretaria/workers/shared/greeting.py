@@ -263,6 +263,38 @@ def _greeting_buttons_for(
     # never the constraint: "🗓️ Agendar Consulta" is 19 of the 20 allowed.
     return [decorate(EMOJI_SCHEDULE, LABEL_BOOK), LABEL_OTHER]
 
+
+def _flow_professionals(
+    professional_rows: list[Professional], services: list | None
+) -> list[SimpleNamespace]:
+    """The router-shaped ACTIVE roster: plain snapshots, catalog already resolved.
+
+    What `route()` receives as `professionals`. `appointment_types` resolves through the
+    clinic catalog (one spelling per service); `None` is preserved as `None`, never
+    flattened to `[]`, because that is the ONLY thing that makes
+    `professional_appointment_types` fall back to the tenant's legacy list - a
+    professional whose own list is `[]` offers nothing. `business_hours` is verbatim, NULL
+    and all: `professional_business_hours` reads the NULL-versus-EMPTY distinction to tell
+    "inherits the clinic's hours" from "has none at all".
+    """
+    return [
+        SimpleNamespace(
+            id=p.id,
+            name=p.name,
+            specialty=p.specialty,
+            about=p.about,
+            context_doctor_message=p.context_doctor_message,
+            appointment_types=(
+                resolve_entries(p.appointment_types, services)
+                if p.appointment_types
+                else p.appointment_types
+            ),
+            business_hours=p.business_hours,
+        )
+        for p in professional_rows
+    ]
+
+
 def _flow_tenant_snapshot(
     tenant: Tenant,
     professionals: list[Professional],
@@ -315,6 +347,7 @@ def _flow_tenant_snapshot(
 
     return SimpleNamespace(
         initial_flows=tenant.initial_flows,
+        timezone=getattr(tenant, "timezone", None),
         appointment_types=appointment_types,
         appointment_duration_min=tenant.appointment_duration_min,
         business_hours=business_hours,

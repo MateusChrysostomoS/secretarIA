@@ -91,7 +91,6 @@ from secretaria.services.pending_identity import (
 from secretaria.services.sensitive_claim_guard import guard_reply
 from secretaria.services.service_catalog import (
     load_service_catalog,
-    resolve_entries,
 )
 from secretaria.services.tenant_config import (
     get_waba_token,
@@ -146,6 +145,7 @@ from secretaria.workers.shared.flow_runner import (
     _run_flow,
 )
 from secretaria.workers.shared.greeting import (
+    _flow_professionals,
     _flow_tenant_snapshot,
 )
 from secretaria.workers.shared.handover import (
@@ -411,28 +411,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                     # clinic's plans and which doctor takes which, so the pure
                     # router can mark doctors without a query of its own.
                     tenant_insurance = await load_tenant_insurance(session, tenant.id)
-                    flow_professionals = [
-                        SimpleNamespace(
-                            id=p.id,
-                            name=p.name,
-                            specialty=p.specialty,
-                            about=p.about,
-                            context_doctor_message=p.context_doctor_message,
-                            appointment_types=(
-                                resolve_entries(p.appointment_types, service_catalog)
-                                if p.appointment_types
-                                else p.appointment_types
-                            ),
-                            # Verbatim, NULL and all — no catalog to resolve
-                            # against, and the NULL-versus-EMPTY distinction is
-                            # exactly what `professional_business_hours` reads
-                            # to tell "inherits the clinic's hours" from "has
-                            # none at all", which is what the day picker's
-                            # config-gap check now turns on.
-                            business_hours=p.business_hours,
-                        )
-                        for p in professional_rows
-                    ]
+                    flow_professionals = _flow_professionals(professional_rows, service_catalog)
                     selected_id = conversation.flow_selected_professional_id
                     if selected_id is not None:
                         selected_row = next(
@@ -480,6 +459,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                                 conversation.flow_managing_appointment_id
                             ),
                             flow_attendee_name=conversation.flow_attendee_name,
+                            flow_draft=conversation.flow_draft,
                             patient_id=conversation.patient_id,
                         ),
                         _flow_tenant_snapshot(

@@ -46,3 +46,5 @@ Ordem original: **migração `patients.email` → brain-api → secretarIA API +
 ## Escopo
 
 Pix/sinal e Tasks 016/020 pertencem a `feature/out-of-mvp`. Envio automático pós-consulta e trabalho específico de WhatsApp ficam fora deste MVP. Decisão de escopo: add-on WhatsApp `plugins/human_backup` preservado, sem novo e-mail. Caminhos compartilhados existentes de transferência/confirmação mantêm seus canais; confirmação ao paciente/convite novos são do Portal. Implantação, credenciais e avaliação real continuam pendentes.
+
+> TASK-030 P2: `set_booking_draft` ganhou a v2 (pra quem, dia, horário) atrás do interruptor `initial_flows.ai_draft_v2` e passa pelo resolvedor — ver `docs/CHECKPOINT_ia_rascunho_v2_resolvedor.md`.
