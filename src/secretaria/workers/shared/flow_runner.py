@@ -24,14 +24,8 @@ from secretaria.services.attendee import (
     CONSENT_KIND_THIRD_PARTY_BOOKING,
     CONSENT_LEGAL_BASIS_THIRD_PARTY_BOOKING,
 )
-from secretaria.services.booking_hold import (
-    BookingGate,
-)
 from secretaria.services.calendar import (
     CalendarService,
-)
-from secretaria.services.channel_sender import (
-    CHANNEL_BRAIN_MESSAGE,
 )
 from secretaria.services.flow_router import (
     STEP_AWAITING_ATTENDEE_AUTH,
@@ -55,6 +49,10 @@ from secretaria.workers.shared.deposit import (
 )
 from secretaria.workers.shared.dispatch import (
     _dispatch_bubbles,
+)
+from secretaria.workers.shared.draft_resolution import (
+    _resume_booking_draft,
+    _turn_booking_gate,
 )
 from secretaria.workers.shared.handover import (
     _handle_calendar_unavailable,
@@ -110,28 +108,9 @@ async def _run_flow(
         if manage_calendar_owned
         else _flow_turn_calendar(conv_snapshot, tenant_config, flow_calendar)
     )
-    # The booking gate for THIS turn. Armed only on Brain-Message, and only
-    # then does "Confirmar" become a reservation plus a mailed code instead of
-    # an appointment (`services/booking_hold.py`). Built unarmed on WhatsApp
-    # rather than left as None because the hold LOOKUPS must still happen
-    # there: a slot a Portal visitor is holding has to be invisible to a
-    # WhatsApp patient too, or the reservation only half exists.
-    gate = BookingGate(
-        # `tenant` (already loaded by the caller), NOT `reply.tenant_id`.
-        # `_ReplyContext.tenant_id` is populated only on the branches that need
-        # it downstream — the identity legs and the degrade paths — and the
-        # ORDINARY turn, which is the one that books, leaves it None (see the
-        # terminal `_ReplyContext` of `_route_inbound_turn`). Reading it here
-        # disarmed the gate on exactly the path it exists for, and did it
-        # SILENTLY: an unarmed gate emits no log line at all, so production
-        # looked identical to the pre-gate build. Proved in production on
-        # 2026-09-21 and pinned by `test_the_gate_arms_on_the_real_reply_path`.
-        tenant_id=tenant.id if tenant is not None else reply.tenant_id,
-        conversation_id=reply.conversation_id,
-        patient_id=None,
-        external_id=reply.patient_ref,
-        armed=reply.channel == CHANNEL_BRAIN_MESSAGE,
-    )
+    # The booking gate for THIS turn (workers/shared/draft_resolution.py explains the
+    # arming rule and the production bug it pins).
+    gate = _turn_booking_gate(reply, tenant)
     try:
         result = await route(
             conv_snapshot,
@@ -151,6 +130,10 @@ async def _run_flow(
         )
         return False
 
+    if result.resume_draft and tenant is not None:
+        # Pra-quem answered with an AI draft parked: the resolver lands it instead of the
+        # list `result` would show (falls back to `result` on any failure).
+        result = await _resume_booking_draft(reply, tenant, result, gate=gate)
     return await _apply_flow_result(
         reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
     )

@@ -136,6 +136,8 @@ neither" do `README.md`.
 
 ## Documentação
 
+`docs/CHECKPOINT_ia_p2a_rascunho_resolvedor.md` — TASK-030 P2a A1–A6 validado localmente; A4–A6 sem novo commit; revisão corrigida e migração SQLite/PostgreSQL comprovada; ler antes de P2b/P3 para preservar as correções.
+
 `docs/CHECKPOINT_workers_split.md` — TASK-023: divisão de `workers/tasks.py` (mapa nome → módulo, camadas, como provar).
 
 `docs/CHECKPOINT_mvp_portal.md` — TASK-021: contexto/rascunho da LLM, handoff e notificações; não deployado; validação e pendências registradas.

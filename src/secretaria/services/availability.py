@@ -29,12 +29,17 @@ from secretaria.services.booking_hold import overlaps
 if TYPE_CHECKING:
     from secretaria.services.calendar import CalendarService
 
-# Slots read for ONE day when the question is "is this exact time free?" rather than
-# "what can I show?": 96 = every 15-minute slot of a 24-hour day, so no real agenda is
-# cut short (the slot picker reads 8, `flow_router.SLOT_PICKER_MAX_SLOTS`).
+# Compatibility floor for a full-day scan. Shorter services need more positions;
+# `slot_scan_limit` expands this to the configured duration (which can be one minute).
 FREE_SLOT_SCAN_MAX = 96
 
 Window = tuple[datetime, datetime]
+
+
+def slot_scan_limit(duration_minutes: int) -> int:
+    """Enough positions for a full day at any accepted positive minute duration."""
+    minutes = max(1, duration_minutes)
+    return max(FREE_SLOT_SCAN_MAX, (24 * 60 + minutes - 1) // minutes)
 
 
 def slot_start(raw: datetime | str, tz: tzinfo | None) -> datetime:
@@ -87,7 +92,7 @@ async def free_slots_for_day(
     slots = await calendar.list_free_slots(
         day=datetime(day.year, day.month, day.day),
         slot_minutes=duration_minutes,
-        max_slots=max_slots,
+        max_slots=max(max_slots, slot_scan_limit(duration_minutes)),
     )
     kept = without_holds(slots, holds, duration_minutes=duration_minutes, tz=tz)
     return [slot_start(slot["start"], tz).astimezone(tz) for slot in kept]

@@ -22,6 +22,8 @@ Design:
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -68,7 +70,11 @@ from secretaria.services.attendee import (
     parse_attendee_name,
     real_attendee_name,
 )
-from secretaria.services.availability import available_day_starts, without_holds
+from secretaria.services.availability import (
+    available_day_starts,
+    slot_scan_limit,
+    without_holds,
+)
 from secretaria.services.booking_hold import BookingGate
 from secretaria.services.booking_scope import (
     canonical_service_name,
@@ -483,6 +489,21 @@ def _hold_owner(conversation: Conversation, professionals: list | None) -> UUID 
     if selected is not None:
         return selected
     return resolve_booking_owner_id(professionals, None)
+
+
+@contextmanager
+def booking_gate_scope(gate: BookingGate | None) -> Iterator[None]:
+    """Publish `gate` on `_ACTIVE_GATE` for the block, and ALWAYS take it down again.
+
+    `route()` runs inside one; so does the AI draft resolver (services/booking_draft.py),
+    which runs OUTSIDE `route()` and would otherwise see a slot another conversation is
+    holding as free (TASK-030 P2, spec §7).
+    """
+    token = _ACTIVE_GATE.set(gate)
+    try:
+        yield
+    finally:
+        _ACTIVE_GATE.reset(token)
 
 
 @dataclass
@@ -1285,8 +1306,7 @@ async def route(
     See `_ACTIVE_GATE` for why the gate travels this way rather than as an
     argument on every function between here and the slot picker.
     """
-    token = _ACTIVE_GATE.set(gate)
-    try:
+    with booking_gate_scope(gate):
         result = await _route(
             conversation,
             tenant,
@@ -1298,8 +1318,6 @@ async def route(
             gate=gate,
         )
         return _carry_booking(conversation, result)
-    finally:
-        _ACTIVE_GATE.reset(token)
 
 
 async def _route(
@@ -1630,6 +1648,11 @@ def _attendee_authorization_card(next_step: str | None, name: str) -> FlowRouter
     )
 
 
+def _has_draft(conversation: Conversation) -> bool:
+    """Whether an AI draft is parked on the conversation (TASK-030 P2)."""
+    return bool(getattr(conversation, "flow_draft", None))
+
+
 def _attendee_step(
     conversation: Conversation, tenant: Tenant, body: str, professionals: list | None
 ) -> FlowRouterResult:
@@ -1653,6 +1676,8 @@ def _attendee_step(
             # LLM hand-back would ask pra-quem a second time (services/attendee.py).
             if result.flow_state == FlowState.SERVICE_CATALOG:
                 result.flow_attendee_name = ATTENDEE_SELF
+                # A parked AI draft continues from here (workers/shared/draft_resolution.py).
+                result.resume_draft = _has_draft(conversation)
             return result
         if _label_match(body, LABEL_ATTENDEE_OTHER):
             logger.info("attendee_choice", choice="other")
@@ -1679,6 +1704,7 @@ def _attendee_step(
         if result.flow_state == FlowState.SERVICE_CATALOG:
             result.flow_attendee_name = name
             result.attendee_authorized = True
+            result.resume_draft = _has_draft(conversation)
         return result
     return _preserve(conversation, "delegate_llm")
 
@@ -1914,7 +1940,9 @@ def _enter_professional_list(
 # --------------------------------------------------------------------------
 
 
-def _clinic_service_catalog(tenant: Tenant, professionals: list) -> list[dict]:
+def _clinic_service_catalog(
+    tenant: Tenant, professionals: list, services: list | None = None
+) -> list[dict]:
     """The clinic's unified bookable catalog: every active doctor's services.
 
     Union over `professional_appointment_types(p, tenant)`, deduplicated by
@@ -1923,11 +1951,13 @@ def _clinic_service_catalog(tenant: Tenant, professionals: list) -> list[dict]:
     sort_order, then name. Tenant-scoped by construction: `professionals` is
     THIS tenant's active roster and every fallback is to THIS tenant's own
     appointment_types, so no other clinic's services can enter here.
+    `services` is the clinic's canonical catalog; omitted, the entries are read as
+    stored (every pre-TASK-030 caller).
     """
     seen: set[str] = set()
     union: list[dict] = []
     for professional in professionals or []:
-        for service in professional_appointment_types(professional, tenant):
+        for service in professional_appointment_types(professional, tenant, services):
             name = str(service.get("name", "")).strip()
             key = _norm(name)
             if not key or key in seen:
@@ -1937,13 +1967,15 @@ def _clinic_service_catalog(tenant: Tenant, professionals: list) -> list[dict]:
     return sorted(union, key=lambda s: (s.get("sort_order", 0), s.get("name", "")))
 
 
-def _professionals_offering(tenant: Tenant, professionals: list, service_name: str) -> list:
+def _professionals_offering(
+    tenant: Tenant, professionals: list, service_name: str, services: list | None = None
+) -> list:
     """The active professionals whose own catalog contains `service_name`."""
     return [
         professional
         for professional in professionals or []
         if canonical_service_name(
-            professional_appointment_types(professional, tenant), service_name
+            professional_appointment_types(professional, tenant, services), service_name
         )
         is not None
     ]
@@ -2374,7 +2406,20 @@ async def _handle_insurance(
         stored=stored is not None,
     )
     result = None
-    if not conversation.flow_selected_type:
+    selected = _find_professional_by_id(professionals, _selected_professional_id(conversation))
+    multi = _is_multi_professional(professionals)
+    if not conversation.flow_selected_type and multi and selected is not None:
+        # The doctor is already chosen (an AI draft landed here with the doctor in hand,
+        # TASK-030): their own services next - never the doctor list again. A doctor with
+        # nothing configured ends in the clinic alert, returned as-is.
+        result = _enter_professional_services(selected, tenant)
+    elif conversation.flow_selected_type and multi and selected is None:
+        # The service is known but not the doctor (an AI draft whose service two or more
+        # doctors offer): the doctor list with the service kept, so the tap lands on that
+        # service's card (STEP_AWAITING_PROFESSIONAL with a stored type).
+        result = _enter_professional_list(tenant, professionals or [], insurance=stored)
+        result.flow_selected_type = conversation.flow_selected_type
+    elif not conversation.flow_selected_type:
         result = _start_booking(tenant, professionals, insurance=stored)
         if result.flow_state != FlowState.SERVICE_CATALOG:
             # The button flow never asks the convênio in front of a clinic with
@@ -2944,9 +2989,12 @@ async def _enter_slot_picker(
     """
     if calendar is None:
         return _calendar_unavailable(conversation, branch, branch.day_step)
+    reserved = await _hold_windows(_hold_owner(conversation, professionals))
     try:
         slots = await calendar.list_free_slots(
-            day=target, slot_minutes=duration_minutes, max_slots=SLOT_PICKER_MAX_SLOTS
+            day=target,
+            slot_minutes=duration_minutes,
+            max_slots=slot_scan_limit(duration_minutes) if reserved else SLOT_PICKER_MAX_SLOTS,
         )
     except CalendarUnavailableError:
         return _calendar_unavailable(conversation, branch, branch.day_step)
@@ -2957,7 +3005,6 @@ async def _enter_slot_picker(
     # both branches (first booking and reschedule) - a reservation half the
     # surfaces ignore is not a reservation. The patient's own hold is excluded
     # upstream, so their own choice stays visible to them.
-    reserved = await _hold_windows(_hold_owner(conversation, professionals))
     if reserved:
         before = len(slots)
         slots = without_holds(
@@ -2969,6 +3016,8 @@ async def _enter_slot_picker(
                 hidden=before - len(slots),
                 conversation_id=str(getattr(conversation, "id", None)),
             )
+        # Reserve the final two rows for the day and service navigation controls.
+        slots = slots[:SLOT_PICKER_MAX_SLOTS]
 
     if not slots:
         return await enter_day_picker(
@@ -3198,6 +3247,8 @@ async def _ask_day(
     calendar: CalendarService | None,
     services: list[dict] | None = None,
     professionals: list | None = None,
+    *,
+    prefix: str | None = None,
 ) -> FlowRouterResult:
     """Open the booking branch's day picker (the step after service/convênio).
 
@@ -3215,6 +3266,8 @@ async def _ask_day(
     `enter_day_picker`'s `if not days:` branch: that one fires both for "no
     hours configured" and for "configured but fully booked", and only the first
     is somebody's mistake.
+
+    `prefix` explains why a supplied draft day was dropped; None renders as before.
     """
     professional = _booking_professional(conversation, professionals)
     if professional is not None and not professional_business_hours(professional, tenant):
@@ -3227,6 +3280,7 @@ async def _ask_day(
         branch=BOOKING_DAY_BRANCH,
         back_target=BACK_TARGET_SERVICE,
         professionals=professionals,
+        prefix=prefix,
     )
 
 
