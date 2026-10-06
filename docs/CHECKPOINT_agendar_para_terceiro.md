@@ -139,3 +139,5 @@ marcador o teste da detour falha). Suíte: 2758 passed / 10 skipped; ruff limpo 
 
 `PROMPT_CONVENIO_CATALOGO_ACEITACAO_1_SECRETARIA.md` ainda não rodou; ele deve inserir o
 convênio DEPOIS de `_attendee_step` (a pergunta pra-quem é o passo mais externo).
+
+> TASK-030 P2: todo hand-back da IA que agenda pergunta "pra quem" quando ninguém respondeu, e o rascunho espera em `conversations.flow_draft` — ver `docs/CHECKPOINT_ia_rascunho_v2_resolvedor.md`.

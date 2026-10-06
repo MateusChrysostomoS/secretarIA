@@ -102,3 +102,7 @@ sempre e não gera evento — a diferença entre as contagens de `ai_run_agent_*
 - Falha de envio real continua sem retry (`_send_simple_text`, `_send_plain_reply` só logam); a apologia tenta
   de novo uma vez, mas se o canal está fora ela também falha (logado).
 - Tenant sem entitlement continua sem resposta por desenho.
+
+> TASK-030 P2: códigos novos no vocabulário de `conversation_handback_entered` e os eventos da continuação do rascunho — ver `docs/CHECKPOINT_ia_rascunho_v2_resolvedor.md` §4.
+
+> TASK-030 P3 parcial: pouso expresso em `awaiting_confirmation` e `answered_step` em `booking_draft_resumed` — ver `docs/CHECKPOINT_ia_confirmacao_expressa.md`. Sem novos códigos de gerenciamento v2 nesta correção.
