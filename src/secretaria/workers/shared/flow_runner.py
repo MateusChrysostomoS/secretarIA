@@ -16,6 +16,7 @@ from secretaria.models import (
     Tenant,
 )
 from secretaria.plugins.post_booking import enqueue_post_booking_hooks
+from secretaria.services import reminder_hooks
 from secretaria.services.appointment_status import (
     SOURCE_FLOW,
     log_status_transition,
@@ -409,6 +410,10 @@ async def _apply_flow_result(
     if booked_appointment is not None and persisted and tenant is not None:
         _log_booking_scope(booked_appointment, tenant.id, source=SOURCE_FLOW)
         await enqueue_post_booking_hooks(redis, tenant.id, booked_appointment.id, source="flow")
+        # TASK-032 R2: plan the reminders, in their own transaction AFTER the
+        # booking committed - a reminder problem never costs a booking.
+        if reminder_hooks.enabled_for(tenant):
+            await reminder_hooks.after_appointment_booked(booked_appointment.id)
 
     # A HELD slot, not a booking: the router reserved the window and brain-api
     # mailed a code. Nothing was created on Google Calendar and no appointment

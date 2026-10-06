@@ -486,9 +486,11 @@ async def _persist_appointment(
     # Imported lazily to keep this module importable without a DB/ORM in the
     # dev terminal, and to avoid an import cycle through models -> services.
     from secretaria.core.database import async_session_factory
-    from secretaria.models import Appointment, AppointmentStatus, Conversation, Patient
+    from secretaria.models import Appointment, AppointmentStatus, Conversation, Patient, Tenant
+    from secretaria.services import reminder_hooks
 
     appointment: Any | None = None
+    plan_reminders = False
     try:
         async with async_session_factory() as session:
             async with session.begin():
@@ -519,6 +521,9 @@ async def _persist_appointment(
                     attendee_name=attendee_name or None,
                 )
                 session.add(appointment)
+                # TASK-032 R2: read the clinic's reminder switch in this same
+                # transaction; the hook itself runs after the commit, below.
+                plan_reminders = reminder_hooks.enabled_for(await session.get(Tenant, tenant_id))
                 # The attendee belonged to THIS booking: consumed here, so the
                 # patient's next chat booking ("agora uma pra mim") is theirs.
                 # Also consumes the "pra mim" marker (""), not only a third party's
@@ -563,6 +568,8 @@ async def _persist_appointment(
         await enqueue_post_booking_hooks(
             _redis_ctx.get(), tenant_id, appointment.id, source="agent"
         )
+        if plan_reminders:
+            await reminder_hooks.after_appointment_booked(appointment.id)
 
 
 async def _mark_appointment_cancelled(event_id: str) -> str | None:

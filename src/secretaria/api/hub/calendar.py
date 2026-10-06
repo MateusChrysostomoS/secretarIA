@@ -41,7 +41,7 @@ from secretaria.schemas.calendar import (
     CalendarReminderRead,
     CancelPreviewRead,
 )
-from secretaria.services import cancellation_notice, reminder_schedule
+from secretaria.services import cancellation_notice, reminder_hooks, reminder_schedule
 from secretaria.services.appointment_status import SOURCE_HUB, log_status_transition
 from secretaria.services.calendar import CalendarService
 from secretaria.services.insurance_catalog import AppointmentPlan, load_appointment_plans
@@ -353,6 +353,10 @@ async def create_appointment(
     session.add(appt)
     await session.commit()
     await session.refresh(appt)
+    # TASK-032 R2: plan the reminders of a consultation booked for a known
+    # patient (a phone-only booking has nobody the engine can resolve).
+    if appt.patient_id is not None and reminder_hooks.enabled_for(tenant):
+        await reminder_hooks.after_appointment_booked(appt.id)
     logger.info(
         "calendar_appointment_created",
         appointment_id=str(appt.id),
