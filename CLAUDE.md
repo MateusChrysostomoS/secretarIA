@@ -135,6 +135,8 @@ hora no worker. Ver `core/build_info.py` e a seção "Deploy both services, or
 neither" do `README.md`.
 
 ## Documentação
+
+`docs/CHECKPOINT_ia_confirmacao_expressa.md` — TASK-030 P3 completo localmente: confirmação expressa, retomada e gerenciamento v2; revisão corrigida, validação e limites, sem commit/deploy desta conclusão; ler antes de P4/P5.
 - Lembretes/confirmação (TASK-032 R1): `docs/CHECKPOINT_lembretes_r1.md`.
 
 `docs/CHECKPOINT_ia_p2a_rascunho_resolvedor.md` — TASK-030 P2a A1–A6 commitado e integrado em main; revisão corrigida e migração SQLite/PostgreSQL comprovada, encadeada após R1; deploy pelo dono pendente; ler antes de P2b/P3 para preservar as correções.

@@ -331,6 +331,7 @@ STEP_MANAGE_CONFIRM = "manage_confirm"
 # resolves straight into the picked intent instead of the neutral action card.
 STEP_MANAGE_PICK_RESCHEDULE = "manage_pick_reschedule"
 STEP_MANAGE_PICK_CANCEL = "manage_pick_cancel"
+MANAGE_APPOINTMENT_PAYLOAD_PREFIX = "appointment:"
 
 _WEEKDAY_PT = {
     "monday": "Segunda",
@@ -3735,6 +3736,11 @@ def _appt_duration_minutes(appt: dict, tenant: Tenant) -> int:
 
 def _find_appt_by_iso(appointments: list[dict], body: str) -> dict | None:
     """Resolve the appointment whose start matches the tapped slot-row ISO."""
+    payload = _row_payload(body)
+    if payload and payload.startswith(MANAGE_APPOINTMENT_PAYLOAD_PREFIX):
+        # AI v2 pick lists use IDs to distinguish simultaneous appointments. Resolve
+        # only against the caller's current patient-scoped list, never a global lookup.
+        return _find_appt_by_id(appointments, payload[len(MANAGE_APPOINTMENT_PAYLOAD_PREFIX) :])
     tapped = _slot_iso_from_body(body)
     if tapped is None:
         return None
@@ -4137,26 +4143,40 @@ def _manage_duration(
     return _appt_duration_minutes(appt, tenant)
 
 
+def _manage_confirm_result(
+    managing_id: UUID | None, appt: dict | None, start: datetime, selected_day: str | None
+) -> FlowRouterResult:
+    """The "Remarcar para:" Confirmar/Cancelar card - the ONE builder for the slot tap and
+    the AI's manage hand-back (services/manage_request.py, TASK-030 P3).
+
+    `start` is printed and stored as the same instant (naive ISO minute), and "Confirmar"
+    on the card is routed by `_manage_reschedule` whichever path drew it.
+    """
+    appt_type = str(appt.get("appointment_type") or "Consulta") if appt else "Consulta"
+    recap = f"Remarcar para:\n{appt_type}\n{start.strftime('%d/%m/%Y às %H:%M')}"
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[ButtonBubble(body=recap, confirm_label=LABEL_CONFIRM, cancel_label=LABEL_CANCEL)],
+        flow_state=FlowState.MANAGE_BOOKING,
+        flow_step=STEP_MANAGE_CONFIRM,
+        flow_managing_appointment_id=managing_id,
+        flow_selected_day=selected_day,
+        flow_selected_slot=start.replace(tzinfo=None).isoformat(timespec="minutes"),
+    )
+
+
 def _manage_handle_slot(
     conversation: Conversation, appointments: list[dict], body: str
 ) -> FlowRouterResult:
     start = _slot_iso_from_body(body)
     if start is None:
         return _preserve(conversation, "delegate_llm")
-    slot_iso = start.replace(tzinfo=None).isoformat(timespec="minutes")
     appt = _find_appt_by_id(appointments, _managing_appt_id_str(conversation))
-    appt_type = str(appt.get("appointment_type") or "Consulta") if appt else "Consulta"
-    recap = f"Remarcar para:\n{appt_type}\n{start.strftime('%d/%m/%Y às %H:%M')}"
-    return FlowRouterResult(
-        action="reply",
-        bubbles=[
-            ButtonBubble(body=recap, confirm_label=LABEL_CONFIRM, cancel_label=LABEL_CANCEL)
-        ],
-        flow_state=FlowState.MANAGE_BOOKING,
-        flow_step=STEP_MANAGE_CONFIRM,
-        flow_managing_appointment_id=_selected_managing_appointment_id(conversation),
-        flow_selected_day=conversation.flow_selected_day,
-        flow_selected_slot=slot_iso,
+    return _manage_confirm_result(
+        _selected_managing_appointment_id(conversation),
+        appt,
+        start,
+        conversation.flow_selected_day,
     )
 
 

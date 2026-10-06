@@ -49,11 +49,14 @@ from secretaria.models import (  # noqa: E402
 )
 from secretaria.services.flow_router import (  # noqa: E402
     STEP_MANAGE_CANCEL_CONFIRM,
+    STEP_MANAGE_CONFIRM,
     STEP_MANAGE_DAY,
+    STEP_MANAGE_SLOT,
     FlowRouterResult,
     MenuBubble,
 )
 from secretaria.workers import tasks  # noqa: E402
+from secretaria.workers.shared.deposit import _reschedule_limit_hit  # noqa: E402
 
 
 @pytest_asyncio.fixture
@@ -452,3 +455,64 @@ async def test_reschedule_completion_race_never_crashes_flow(db):
             select(PixDeposit).where(PixDeposit.appointment_id == appt.id)
         )
         assert deposit.reschedule_count == 1  # not incremented further
+
+
+# --------------------------------------------------------------------------
+# TASK-030 P3: the AI can land a reschedule past the day picker
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("step", [STEP_MANAGE_SLOT, STEP_MANAGE_CONFIRM])
+async def test_a_reschedule_landing_past_the_day_picker_is_prechecked_too(db, step):
+    tenant, patient, conversation, appt = await _seed(db, pix_reschedule_limit=1)
+    await _seed_deposit(db, appt, status=PixDepositStatus.PAID, reschedule_count=1)
+
+    result = FlowRouterResult(
+        action="reply",
+        bubbles=[TextBubble(body="Remarcar para:\nConsulta\n15/10/2026 às 14:00")],
+        flow_state=FlowState.MANAGE_BOOKING,
+        flow_step=step,
+        flow_managing_appointment_id=appt.id,
+    )
+    await tasks._apply_flow_result(
+        _reply_ctx(conversation), result, patient.wa_id, redis=None, tenant=tenant, waba_token="tok"
+    )
+
+    kind, _to, _body, buttons = _FakeWhatsAppClient.created[-1].sent[0]
+    assert kind == "buttons"
+    assert [bid for bid, _label in buttons] == [f"apptconfirm|{appt.id}", f"apptcancel|{appt.id}"]
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.flow_state == FlowState.MENU
+        assert conv.flow_managing_appointment_id is None
+
+
+@pytest.mark.parametrize("step", [STEP_MANAGE_SLOT, STEP_MANAGE_CONFIRM])
+async def test_an_unblocked_reschedule_past_the_day_picker_is_untouched(db, step):
+    tenant, patient, conversation, appt = await _seed(db, pix_reschedule_limit=2)
+    await _seed_deposit(db, appt, status=PixDepositStatus.PAID, reschedule_count=0)
+    body = "Remarcar para:\nConsulta\n15/10/2026 às 14:00"
+    result = FlowRouterResult(
+        action="reply",
+        bubbles=[TextBubble(body=body)],
+        flow_state=FlowState.MANAGE_BOOKING,
+        flow_step=step,
+        flow_managing_appointment_id=appt.id,
+    )
+    await tasks._apply_flow_result(
+        _reply_ctx(conversation), result, patient.wa_id, redis=None, tenant=tenant, waba_token="tok"
+    )
+
+    assert _FakeWhatsAppClient.created[-1].sent[0][2] == body
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        assert conv.flow_step == step
+
+
+async def test_the_limit_check_is_read_only(db):
+    tenant, _patient, _conversation, appt = await _seed(db, pix_reschedule_limit=1)
+    assert await _reschedule_limit_hit(tenant, appt.id) is None  # no deposit at all
+    deposit = await _seed_deposit(db, appt, status=PixDepositStatus.PAID, reschedule_count=1)
+    assert await _reschedule_limit_hit(tenant, appt.id) == (1, 1)
+    async with db() as session:
+        assert (await session.get(PixDeposit, deposit.id)).reschedule_count == 1

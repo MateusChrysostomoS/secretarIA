@@ -44,6 +44,7 @@ from secretaria.services.flow_router import (
     LABEL_RESCHEDULE,
     FlowRouterResult,
     MenuBubble,
+    ai_draft_v2_enabled,
     flows_enabled,
     main_menu_buttons,
     manage_label,
@@ -1036,6 +1037,8 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             tenant_config.timezone if tenant_config is not None else None,
             professional_names,
             tenant_config.appointment_types if tenant_config is not None else [],
+            # TASK-030 P3: the "(ref ...)" manage_existing_appointment v2 takes.
+            with_refs=ai_draft_v2_enabled(tenant),
         )
 
     # Every LLM turn is either a deliberate escape hatch ("Outro") or a gap in

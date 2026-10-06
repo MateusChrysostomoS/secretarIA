@@ -99,7 +99,8 @@ SHOW_MAIN_MENU_SENTINEL = "__SHOW_MAIN_MENU__"
 # the deterministic flow at that doctor's greeting + services.
 SELECT_PROFESSIONAL_SENTINEL_PREFIX = "__SELECT_PROFESSIONAL__:"
 # Prefix returned when the agent called manage_existing_appointment; the
-# canonical action ("reschedule" or "cancel") rides after the colon and the
+# canonical action ("reschedule" or "cancel"), or the v2 ManageRequest JSON,
+# rides after the colon and the
 # worker re-enters the deterministic manage (cancel/reschedule) flow via
 # services/flow_router.py::enter_manage_action instead of ever executing the
 # reschedule/cancel itself. Same exception->sentinel mechanism as the others.
@@ -711,13 +712,18 @@ async def run_agent(
     except ManageAppointmentRequested as exc:
         # The agent chose to hand a reschedule/cancel request back to the
         # deterministic manage flow — same propagation path as the sentinels
-        # above; it NEVER performs the action itself.
+        # above; it NEVER performs the action itself. A v1 request (action only)
+        # serializes to the bare action, byte for byte (services/manage_request.py).
+        request = exc.request
         logger.info(
             "ai_run_agent_manage_appointment",
             conversation_id=str(conversation_id),
-            action=exc.action,
+            action=request.action,
+            has_appointment=request.appointment is not None,
+            has_day=request.day is not None,
+            has_time=request.time is not None,
         )
-        return f"{MANAGE_APPOINTMENT_SENTINEL_PREFIX}{exc.action}"
+        return f"{MANAGE_APPOINTMENT_SENTINEL_PREFIX}{request.to_payload()}"
     except BookingDraftRequested as exc:
         draft = exc.draft
         logger.info(

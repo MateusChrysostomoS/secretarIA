@@ -36,6 +36,7 @@ from secretaria.services.calendar import (
     build_event_description,
     build_patient_calendar_link,
 )
+from secretaria.services.manage_request import ManageRequest, parse_appointment_ref
 from secretaria.services.precheck import HandoffOutcome, request_precheck_handoff
 from secretaria.services.service_catalog import find_by_name, missing_from
 
@@ -131,9 +132,28 @@ class ManageAppointmentRequested(Exception):
     The LLM itself NEVER performs the reschedule/cancel — it only requests it.
     """
 
-    def __init__(self, action: str) -> None:
+    def __init__(
+        self,
+        action: str,
+        *,
+        appointment: datetime | None = None,
+        day: date | None = None,
+        time: Any = None,
+    ) -> None:
         super().__init__(f"manage appointment: {action}")
         self.action = action
+        # TASK-030 P3 (v2 tool only): WHICH appointment, by its clinic-local start, and for
+        # a reschedule the new day and time. Formats only - the worker validates the rest.
+        self.appointment = appointment
+        self.day = day
+        self.time = time
+
+    @property
+    def request(self) -> ManageRequest:
+        """What graph.run_agent serializes (services/manage_request.py)."""
+        return ManageRequest(
+            action=self.action, appointment=self.appointment, day=self.day, time=self.time
+        )
 
 
 class GuidedBookingRequested(Exception):
@@ -1328,6 +1348,105 @@ async def set_booking_draft_v2(
 # Read by ai/graph.py::_tool_cache_key: the v1 and v2 tools share the name
 # "set_booking_draft" and must never share a compiled agent.
 set_booking_draft_v2.metadata = {"cache_variant": "draft_v2"}
+
+
+# --- manage_existing_appointment v2 (TASK-030 P3) ---------------------------------------------
+# Same model-facing NAME as the v1 tool above; the clinic's switch picks one
+# (`flow_router.ai_draft_v2_enabled`, workers/shared/llm_context.py::_flow_handback_tools).
+# Formats only, like set_booking_draft v2: whether the appointment is THIS patient's and
+# whether the new time is free is the worker's call (services/manage_request.py), which
+# never goes further than the confirmation card the buttons show.
+TOOL_BLOCK_BAD_ACTION = "bad_action"
+TOOL_BLOCK_BAD_APPOINTMENT = "bad_appointment"
+_MANAGE_ACTIONS: dict[str, str] = {
+    "reschedule": "reschedule",
+    "remarcar": "reschedule",
+    "cancel": "cancel",
+    "cancelar": "cancel",
+}
+_MANAGE_ACTION_ERROR = (
+    "Ação não reconhecida. Use 'reschedule' para remarcar ou 'cancel' para cancelar."
+)
+_APPOINTMENT_REF_ERROR = (
+    'appointment precisa ser a referência da consulta que aparece em "consultas marcadas" '
+    "(ref AAAA-MM-DD HH:MM), ou vazio."
+)
+
+
+def _tool_day(text: str) -> date | None:
+    """`day` as the hand-back tools accept it (AAAA-MM-DD); None when empty, else ValueError."""
+    value = (text or "").strip()
+    if not value:
+        return None
+    if not _ISO_DAY_RE.fullmatch(value):
+        raise ValueError("day must be YYYY-MM-DD")
+    return date.fromisoformat(value)
+
+
+def _tool_time(text: str) -> Any:
+    """`time` as the hand-back tools accept it (HH:MM); None when empty, else ValueError."""
+    value = (text or "").strip()
+    if not value:
+        return None
+    if not _HHMM_RE.fullmatch(value):
+        raise ValueError("time must be HH:MM")
+    return datetime.strptime(value, "%H:%M").time()
+
+
+@tool("manage_existing_appointment")
+async def manage_existing_appointment_v2(
+    action: str, appointment: str = "", day: str = "", time: str = ""
+) -> dict:
+    """Leva o paciente ao fluxo de remarcar ou cancelar uma consulta JÁ MARCADA dele. O
+    fluxo confere tudo e para no cartão de confirmação: quem confirma é o paciente, tocando
+    no botão. NUNCA remarque nem cancele você mesma pelo chat.
+
+    Args:
+        action: "reschedule" (ou "remarcar") ou "cancel" (ou "cancelar").
+        appointment: QUAL consulta, pela referência "(ref AAAA-MM-DD HH:MM)" mostrada em
+            "consultas marcadas". Vazio se o paciente não disse qual.
+        day: Só para remarcar: o novo dia, AAAA-MM-DD, no fuso da clínica (ou vazio).
+        time: Só para remarcar: o novo horário, HH:MM (ou vazio). Sem `day`, é ignorado.
+    """
+    canonical = _MANAGE_ACTIONS.get((action or "").strip().casefold())
+    if canonical is None:
+        # The value is never echoed nor logged: it may carry the patient's own words.
+        logger.info(
+            "agent_tool_blocked", tool="manage_existing_appointment", reason=TOOL_BLOCK_BAD_ACTION
+        )
+        return {"error": _MANAGE_ACTION_ERROR}
+    reference_text = (appointment or "").strip()
+    try:
+        reference = parse_appointment_ref(reference_text) if reference_text else None
+    except ValueError:
+        logger.info(
+            "agent_tool_blocked",
+            tool="manage_existing_appointment",
+            reason=TOOL_BLOCK_BAD_APPOINTMENT,
+        )
+        return {"error": _APPOINTMENT_REF_ERROR}
+    new_day = new_time = None
+    if canonical == "reschedule":
+        try:
+            new_day = _tool_day(day)
+        except ValueError:
+            logger.info(
+                "agent_tool_blocked", tool="manage_existing_appointment", reason=TOOL_BLOCK_BAD_DAY
+            )
+            return {"error": _DAY_FORMAT_ERROR}
+        try:
+            new_time = _tool_time(time)
+        except ValueError:
+            logger.info(
+                "agent_tool_blocked", tool="manage_existing_appointment", reason=TOOL_BLOCK_BAD_TIME
+            )
+            return {"error": _TIME_FORMAT_ERROR}
+    raise ManageAppointmentRequested(canonical, appointment=reference, day=new_day, time=new_time)
+
+
+# Read by ai/graph.py::_tool_cache_key: the v1 and v2 tools share the name
+# "manage_existing_appointment" and must never share a compiled agent.
+manage_existing_appointment_v2.metadata = {"cache_variant": "manage_v2"}
 
 
 HANDOFF_REASONS = ("patient_requested_human", "clinical_sensitive", "could_not_help")

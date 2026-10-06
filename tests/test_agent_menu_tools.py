@@ -1661,3 +1661,33 @@ async def test_run_agent_maps_a_v2_booking_draft_to_its_sentinel(monkeypatch):
     assert BookingDraft.from_payload(reply[len(BOOKING_DRAFT_SENTINEL_PREFIX) :]) == BookingDraft(
         service="Limpeza", attendee="other", day=dt.date(2026, 10, 8), time=dt.time(10, 0)
     )
+
+
+async def test_run_agent_maps_a_v2_manage_request_to_its_sentinel(monkeypatch: pytest.MonkeyPatch):
+    import datetime as dt
+
+    from secretaria.services.manage_request import ManageRequest
+
+    async def _fake_history(conversation_id):
+        return [HumanMessage(content="remarca a de quinta pra dia 15 às 14h")]
+
+    async def _raise(messages, conversation_id):
+        raise ManageAppointmentRequested(
+            "reschedule",
+            appointment=dt.datetime(2026, 10, 8, 10, 0),
+            day=dt.date(2026, 10, 15),
+            time=dt.time(14, 0),
+        )
+
+    monkeypatch.setattr(graph, "_load_history", _fake_history)
+    monkeypatch.setattr(graph, "_invoke_agent_with_retry", _raise)
+    reply = await run_agent("oi", context={"conversation_id": str(uuid4())})
+    assert reply.startswith(MANAGE_APPOINTMENT_SENTINEL_PREFIX)
+    assert ManageRequest.from_payload(reply[len(MANAGE_APPOINTMENT_SENTINEL_PREFIX) :]) == (
+        ManageRequest(
+            "reschedule",
+            appointment=dt.datetime(2026, 10, 8, 10, 0),
+            day=dt.date(2026, 10, 15),
+            time=dt.time(14, 0),
+        )
+    )

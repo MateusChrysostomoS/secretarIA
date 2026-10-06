@@ -74,4 +74,4 @@ Migração `e7d3c1a9b5f2` primeiro (one-off da imagem nova), depois `secretaria_
 
 Validação final conjunta P2b/P3 e fuso: **3442 passed, 10 skipped, 15 warnings in 431.43s (0:07:11)**. Os testes focados e as fases RED→GREEN constam no ledger da execução. Nenhuma consulta de produção foi criada, alterada ou cancelada durante a correção. O teste real anterior permanece em 16/10/2026 às 14:40 (America/Sao_Paulo).
 
-> TASK-030: P3 Tasks 1–5 e correção de fuso implementados localmente; resultado consolidado, validação e limites em `docs/CHECKPOINT_ia_confirmacao_expressa.md`. Gerenciamento v2 (Tasks 6–8) pendente.
+> TASK-030 P3: Tasks 1–9 concluídas, incluindo detalhes/cartão, retomada de qualquer pergunta e gerenciamento v2; validação, revisão, limites e estado local/publicado em `docs/CHECKPOINT_ia_confirmacao_expressa.md`.

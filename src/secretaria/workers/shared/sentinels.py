@@ -1,8 +1,10 @@
 """sentinels - split out of workers/tasks.py (TASK-023)."""
 
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from secretaria.ai.graph import (
     BOOKING_DRAFT_SENTINEL_PREFIX,
@@ -24,17 +26,26 @@ from secretaria.services.booking_scope import (
 )
 from secretaria.services.flow_router import (
     ATTENDEE_STEPS,
+    STEP_MANAGE_DAY,
     FlowRouterResult,
     MenuBubble,
+    _appt_uuid,
     _enter_professional_services,
     _start_booking,
     ai_draft_v2_enabled,
+    booking_gate_scope,
     enter_guided_booking,
     enter_manage_action,
     flows_enabled,
     main_menu_buttons,
     match_insurance_plan,
     menu_label,
+)
+from secretaria.services.manage_request import (
+    ACTION_RESCHEDULE,
+    ManageRequest,
+    manage_target,
+    resolve_manage_request,
 )
 from secretaria.services.patient_context import (
     load_upcoming_appointments,
@@ -47,10 +58,14 @@ from secretaria.workers.shared import handback_log as hb
 from secretaria.workers.shared.context import (
     _ReplyContext,
 )
+from secretaria.workers.shared.deposit import (
+    _reschedule_limit_hit,
+)
 from secretaria.workers.shared.draft_resolution import (
     DraftContext,
     _load_draft_context,
     _resolve_draft,
+    _turn_booking_gate,
 )
 from secretaria.workers.shared.flow_runner import (
     _apply_flow_result,
@@ -420,24 +435,28 @@ async def _handle_manage_appointment(
 ) -> None:
     """LLM hand-back: re-enter the deterministic manage (cancel/reschedule) flow.
 
-    `manage_existing_appointment` (ai/tools.py) already normalizes/validates
-    `action` to "reschedule"/"cancel" before raising ManageAppointmentRequested,
-    so an unrecognized suffix here means a malformed sentinel; fall back to the
-    plain menu instead of dropping the turn, mirroring
-    `_handle_select_professional`'s guard on a bad professional id. The tool
-    itself is only ever exposed to flow-enabled tenants (see the `extra_tools`
-    wiring in `_send_bot_reply`), so `tenant` being None or not
-    `flows_enabled` here should not normally happen - guarded defensively with
-    a count-only warning, same style as `_handle_show_main_menu`.
+    `action` is the sentinel payload after MANAGE_APPOINTMENT_SENTINEL_PREFIX: the bare
+    action ("reschedule"/"cancel", v1) or the v2 JSON naming which appointment and, for a
+    reschedule, the new day and time (services/manage_request.py). Anything else is a
+    malformed sentinel and falls back to the plain menu.
 
-    Re-loads the patient's upcoming appointments FRESH in its own session
-    (authoritative regardless of what this turn preloaded - the LLM may have
-    taken several tool-call turns since) before handing off to
-    `enter_manage_action`, the exact same deterministic entry a direct
-    "Remarcar"/"Cancelar" button tap uses.
+    TASK-030 P3, behind the AI draft v2 switch (OFF = v1 exactly: the extra fields are
+    ignored): `resolve_manage_request` lands on the same steps the buttons use - the cancel
+    confirmation card (never further), the reschedule day picker, that day's slot list, or
+    the "Remarcar para:" card - with the new time re-derived from the owning agenda's FRESH
+    free slots minus held slots. The appointment is only ever resolved among THIS patient's
+    upcoming appointments. A reschedule whose deposit is at its reschedule limit gets the
+    buttons' keep-or-cancel answer BEFORE any new day is computed.
+
+    Re-loads the patient's upcoming appointments FRESH (the model may have taken several
+    tool-call turns since this turn preloaded them). Every exit records ONE
+    `conversation_handback_entered`.
     """
-    if action not in ("reschedule", "cancel"):
-        logger.warning("worker_manage_appointment_bad_action", action=action[:32])
+    try:
+        request = ManageRequest.from_payload(action)
+    except ValueError:
+        # Never the payload itself: a v2 one carries the patient's appointment times.
+        logger.warning("worker_manage_appointment_bad_action", payload_chars=len(action or ""))
         await _fallback_to_menu(
             reply,
             source_tool=hb.SOURCE_MANAGE_EXISTING_APPOINTMENT,
@@ -460,14 +479,24 @@ async def _handle_manage_appointment(
             reason=hb.FALLBACK_NO_TENANT if tenant is None else hb.FALLBACK_WITHOUT_FLOWS,
             tenant=tenant,
             professionals=professionals,
-            supplied=(hb.FIELD_ACTION,),
+            supplied=request.supplied_fields(),
             accepted=(hb.FIELD_ACTION,),
         )
         return
-
     async with async_session_factory() as session:
         conversation = await session.get(Conversation, reply.conversation_id)
-        patient_id = conversation.patient_id if conversation is not None else None
+        fresh_tenant = await session.get(Tenant, tenant.id)
+        if fresh_tenant is not None:
+            tenant = fresh_tenant
+        v2 = ai_draft_v2_enabled(tenant)
+        if not v2:
+            request = ManageRequest(action=request.action)
+        supplied = request.supplied_fields()
+        patient_id = (
+            conversation.patient_id
+            if conversation is not None and conversation.tenant_id == tenant.id
+            else None
+        )
         if patient_id is None:
             logger.warning(
                 "worker_manage_appointment_no_patient",
@@ -479,41 +508,96 @@ async def _handle_manage_appointment(
                 reason=hb.FALLBACK_NO_PATIENT,
                 tenant=tenant,
                 professionals=professionals,
-                supplied=(hb.FIELD_ACTION,),
+                supplied=supplied,
                 accepted=(hb.FIELD_ACTION,),
             )
             return
         appointments = await load_upcoming_appointments(session, tenant.id, patient_id)
-        # Only the single-appointment reschedule opens the day picker in this
-        # turn; every other branch (cancel, or 2+ appointments to pick from)
-        # needs no agenda at all, so nothing is built for them.
-        manage_calendar = None
-        if action == "reschedule" and len(appointments) == 1:
+        professional_rows = await list_active_professionals(session, tenant.id) if v2 else []
+        if v2:
+            professionals = professional_rows
+        tz = ZoneInfo(tenant.timezone or "America/Sao_Paulo")
+        target = manage_target(request, appointments, tz)
+        owner = target if request.action == ACTION_RESCHEDULE else None
+
+    if owner is not None and await _reschedule_limit_hit(tenant, _appt_uuid(owner)) is not None:
+        # Publish the existing deposit pre-check step without touching the calendar.
+        # _apply_flow_result sends its usual keep-or-cancel buttons and resets to MENU.
+        result = FlowRouterResult(
+            action="reply",
+            flow_state=FlowState.MANAGE_BOOKING,
+            flow_step=STEP_MANAGE_DAY,
+            flow_managing_appointment_id=_appt_uuid(owner),
+        )
+        hb.log_handback_entered(
+            conversation_id=reply.conversation_id,
+            tenant_id=tenant.id,
+            source_tool=hb.SOURCE_MANAGE_EXISTING_APPOINTMENT,
+            landing_step=hb.LANDING_MENU,
+            supplied=supplied,
+            accepted=(hb.FIELD_ACTION,),
+            fallback=hb.FALLBACK_RESCHEDULE_LIMIT,
+            topology=booking_topology(professionals),
+            channel=reply.channel,
+        )
+        await _apply_flow_result(
+            reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+        )
+        return
+
+    manage_calendar = None
+    if owner is not None:
+        async with async_session_factory() as session:
+            if not v2:
+                professional_rows = await list_active_professionals(session, tenant.id)
             manage_calendar = await _appointment_calendar(
-                session,
-                tenant,
-                _appointment_calendar_target(
-                    appointments[0], await list_active_professionals(session, tenant.id)
-                ),
+                session, tenant, _appointment_calendar_target(owner, professional_rows)
             )
 
-    result = await enter_manage_action(
-        action, tenant, appointments, professionals, calendar=manage_calendar
-    )
+    if not v2:
+        # Preserve the existing entry and its event vocabulary when the switch is OFF.
+        result = await enter_manage_action(
+            request.action, tenant, appointments, professionals, calendar=manage_calendar
+        )
+        await _land_handback(
+            reply,
+            result,
+            patient_wa,
+            source_tool=hb.SOURCE_MANAGE_EXISTING_APPOINTMENT,
+            tenant=tenant,
+            professionals=professionals,
+            redis=redis,
+            waba_token=waba_token,
+            supplied=supplied,
+            accepted=(hb.FIELD_ACTION,),
+            fallback=None if appointments else hb.FALLBACK_NO_APPOINTMENTS,
+        )
+        return
+
+    with booking_gate_scope(_turn_booking_gate(reply, tenant)):
+        resolution = await resolve_manage_request(
+            request,
+            tenant=tenant,
+            appointments=appointments,
+            professionals=professionals,
+            calendar=manage_calendar,
+            conversation_id=reply.conversation_id,
+            tz=tz,
+            now=datetime.now(UTC),
+        )
     await _land_handback(
         reply,
-        result,
+        resolution.result,
         patient_wa,
         source_tool=hb.SOURCE_MANAGE_EXISTING_APPOINTMENT,
         tenant=tenant,
         professionals=professionals,
         redis=redis,
         waba_token=waba_token,
-        supplied=(hb.FIELD_ACTION,),
-        accepted=(hb.FIELD_ACTION,),
-        # A patient with nothing to manage lands on the menu with an explanation: the
-        # hand-back worked, just not where the agent meant it to.
-        fallback=None if appointments else hb.FALLBACK_NO_APPOINTMENTS,
+        supplied=supplied,
+        accepted=resolution.accepted,
+        dropped=resolution.dropped,
+        fallback=resolution.fallback,
     )
 
 async def _handle_start_guided_booking(

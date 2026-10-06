@@ -12,9 +12,11 @@ from secretaria.models import (
 )
 from secretaria.services.flow_router import (
     STEP_MANAGE_CANCEL_CONFIRM,
+    STEP_MANAGE_CONFIRM,
     STEP_MANAGE_DAY,
     STEP_MANAGE_DAY_ESCAPE,
     STEP_MANAGE_DAY_RETRY,
+    STEP_MANAGE_SLOT,
     FlowRouterResult,
 )
 from secretaria.services.payments import deposit_lifecycle
@@ -39,13 +41,40 @@ logger = get_logger(__name__)
 # renders are the SAME step of the flow as STEP_MANAGE_DAY, just re-drawn
 # after an unreadable free-text date, so the reschedule-limit pre-check has to
 # recognise them too — otherwise a blocked target could slip past the gate by
-# mistyping a date once.
+# mistyping a date once. The slot list and the reschedule confirmation card
+# joined in TASK-030 P3: the AI's manage hand-back can land a reschedule
+# straight on them, skipping the day picker where the pre-check used to run.
+# For the buttons it changes nothing in practice - a target already at the
+# limit never got past the day picker - and it catches a limit reached between
+# the day pick and the time pick.
 _RESCHEDULE_PRECHECK_STEPS = (
     STEP_MANAGE_CANCEL_CONFIRM,
     STEP_MANAGE_DAY,
     STEP_MANAGE_DAY_RETRY,
     STEP_MANAGE_DAY_ESCAPE,
+    STEP_MANAGE_SLOT,
+    STEP_MANAGE_CONFIRM,
 )
+
+
+def _at_reschedule_limit(deposit, tenant: Tenant) -> bool:
+    """Whether `deposit` has used up the clinic's reschedule allowance."""
+    return deposit is not None and deposit.reschedule_count >= tenant.pix_reschedule_limit
+
+
+async def _reschedule_limit_hit(tenant: Tenant, appointment_id) -> tuple[int, int] | None:
+    """`(count, limit)` when this appointment can no longer be rescheduled, else None.
+
+    The read-only half of `_apply_deposit_awareness`'s reschedule pre-check, for a caller
+    that must know BEFORE it builds a landing: the AI's manage hand-back (TASK-030 P3)
+    computes no new day for a reschedule the clinic will refuse. Non-incrementing.
+    """
+    async with async_session_factory() as session:
+        deposit = await deposit_lifecycle.get_deposit_for_appointment(session, appointment_id)
+    if not _at_reschedule_limit(deposit, tenant):
+        return None
+    return deposit.reschedule_count, tenant.pix_reschedule_limit
+
 
 def _pix_retention_warning_line(tenant: Tenant, deposit) -> str:
     """The pt-BR retention-policy line for a cancellation landing inside the
@@ -120,7 +149,7 @@ async def _apply_deposit_awareness(
         untouched — tapping "Sim" still runs `_manage_cancel`, which this
         module's cancel-site hook (below, in `_apply_flow_result`) makes
         deposit-aware too.
-      - a freshly-targeted STEP_MANAGE_DAY (a reschedule was just begun):
+      - a reschedule render (STEP_MANAGE_DAY*, STEP_MANAGE_SLOT / STEP_MANAGE_CONFIRM):
         when the target is AT/OVER `pix_reschedule_limit`, replace the
         day-ask with the SAME keep-or-cancel button message
         (`_send_reschedule_limit_buttons`) the reminder's own blocked-
@@ -165,8 +194,8 @@ async def _apply_deposit_awareness(
             if hours_until is None or hours_until > tenant.pix_refund_window_hours:
                 return result
             warning = _pix_retention_warning_line(tenant, deposit)
-        else:  # any STEP_MANAGE_DAY* render
-            if deposit is None or deposit.reschedule_count < tenant.pix_reschedule_limit:
+        else:  # any reschedule render: day picker, slot list or the confirmation card
+            if not _at_reschedule_limit(deposit, tenant):
                 return result
             limit_count = deposit.reschedule_count
             limit_value = tenant.pix_reschedule_limit

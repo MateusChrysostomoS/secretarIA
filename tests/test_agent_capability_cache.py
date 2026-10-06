@@ -141,3 +141,14 @@ def test_two_draft_tools_never_share_a_compiled_agent(_clean_agent_cache_and_fak
     assert v1 is not v2
     assert graph.build_agent(extra_tools=[set_booking_draft_v2]) is v2
     assert len(_clean_agent_cache_and_fakes) == 2
+
+
+def test_two_manage_tools_never_share_a_compiled_agent(_clean_agent_cache_and_fakes):
+    """v1 and v2 share the model-facing NAME `manage_existing_appointment` (TASK-030 P3)."""
+    from secretaria.ai.tools import manage_existing_appointment, manage_existing_appointment_v2
+
+    v1 = graph.build_agent(extra_tools=[manage_existing_appointment])
+    v2 = graph.build_agent(extra_tools=[manage_existing_appointment_v2])
+    assert v1 is not v2
+    assert graph.build_agent(extra_tools=[manage_existing_appointment_v2]) is v2
+    assert len(_clean_agent_cache_and_fakes) == 2

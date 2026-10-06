@@ -82,6 +82,9 @@ FALLBACK_NO_APPOINTMENTS = "no_appointments"
 FALLBACK_CALENDAR_UNAVAILABLE = "calendar_unavailable"
 FALLBACK_PROFESSIONAL_CONFIG_INCOMPLETE = "professional_config_incomplete"
 FALLBACK_NO_FREE_DAYS = "no_free_days"
+# TASK-030 P3: a reschedule the deposit's reschedule limit refuses (keep-or-cancel card).
+FALLBACK_RESCHEDULE_LIMIT = "reschedule_limit"
+FALLBACK_AMBIGUOUS_APPOINTMENT = "ambiguous_appointment"
 FALLBACK_REASONS = frozenset(
     {
         FALLBACK_BAD_SENTINEL,
@@ -97,12 +100,14 @@ FALLBACK_REASONS = frozenset(
         FALLBACK_CALENDAR_UNAVAILABLE,
         FALLBACK_PROFESSIONAL_CONFIG_INCOMPLETE,
         FALLBACK_NO_FREE_DAYS,
+        FALLBACK_RESCHEDULE_LIMIT,
+        FALLBACK_AMBIGUOUS_APPOINTMENT,
     }
 )
 
 # --- field names (supplied / accepted / dropped keys) -------------------------------------
-# `for_whom`, `day`, `time` and `appointment` are reserved for the draft v2 and the manage
-# v2 (TASK-030 P2/P3); the tools do not carry them yet.
+# `for_whom`, `day` and `time` are carried by the draft v2 (TASK-030 P2);
+# `appointment`, `day` and `time` by the manage request v2 (P3).
 FIELD_SERVICE = "service"
 FIELD_PROFESSIONAL = "professional"
 FIELD_INSURANCE = "insurance"
@@ -136,6 +141,9 @@ DROP_OUT_OF_WINDOW = "out_of_window"
 DROP_DAY_UNAVAILABLE = "day_unavailable"
 DROP_NO_FREE_SLOT = "no_free_slot"
 DROP_MISSING_DAY = "missing_day"
+# TASK-030 P3: the manage request's own (services/manage_request.py DROP_*, same strings).
+DROP_UNKNOWN_APPOINTMENT = "unknown_appointment"
+DROP_APPOINTMENT_NOT_CHOSEN = "appointment_not_chosen"
 DROP_REASONS = frozenset(
     {
         DROP_NOT_IN_CATALOG,
@@ -146,6 +154,8 @@ DROP_REASONS = frozenset(
         DROP_DAY_UNAVAILABLE,
         DROP_NO_FREE_SLOT,
         DROP_MISSING_DAY,
+        DROP_UNKNOWN_APPOINTMENT,
+        DROP_APPOINTMENT_NOT_CHOSEN,
     }
 )
 
@@ -239,6 +249,8 @@ def landing_of(result: "FlowRouterResult") -> tuple[str, str | None]:
     calendar outage hands them to a person, and a doctor with no configured services or
     hours ends in an alert.
     """
+    if result.action == "handover":
+        return LANDING_HUMAN_HANDOVER, None
     if result.action == "calendar_unavailable":
         return LANDING_HUMAN_HANDOVER, FALLBACK_CALENDAR_UNAVAILABLE
     if result.action == "professional_config_incomplete":

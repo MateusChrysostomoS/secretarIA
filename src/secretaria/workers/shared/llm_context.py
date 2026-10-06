@@ -3,9 +3,11 @@
 from types import SimpleNamespace
 from typing import Literal
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from secretaria.ai.tools import (
     manage_existing_appointment,
+    manage_existing_appointment_v2,
     request_human_handoff,
     set_booking_draft,
     set_booking_draft_v2,
@@ -32,6 +34,7 @@ from secretaria.services.flow_router import (
     ai_draft_v2_enabled,
     flows_enabled,
 )
+from secretaria.services.manage_request import appointment_ref
 from secretaria.services.patient_context import (
     PatientOpeningState,
 )
@@ -123,6 +126,8 @@ def _appointment_context_text(
     tz_name: str | None,
     professional_names: dict[str, str],
     appointment_types: list[RuntimeAppointmentType],
+    *,
+    with_refs: bool = False,
 ) -> str | None:
     """Render the per-turn "consultas marcadas" block for the LLM prompt.
 
@@ -149,9 +154,17 @@ def _appointment_context_text(
     doctor name (`_appointment_doctor_name` degrades to None on a miss).
     `appointment_types` is `TenantRuntimeConfig.appointment_types`, matched
     against the nearest appointment's stored service name by casefold/strip.
+
+    `with_refs` (TASK-030 P3, clinics with the AI draft v2 switch): every appointment line
+    ends with "(ref AAAA-MM-DD HH:MM)" - the reference `manage_existing_appointment` v2
+    takes to name WHICH appointment (services/manage_request.py::appointment_ref).
     """
     if not future_appointments:
         return None
+    tz = ZoneInfo(tz_name or "America/Sao_Paulo")
+
+    def ref(appointment: dict) -> str:
+        return f" (ref {appointment_ref(appointment['start_at'], tz)})" if with_refs else ""
 
     nearest = future_appointments[0]
     when = _format_appointment_when(nearest["start_at"], tz_name)
@@ -171,6 +184,7 @@ def _appointment_context_text(
         nearest_line += f" — {doctor}"
     if matched and matched.price:
         nearest_line += f" — {matched.price}"
+    nearest_line += ref(nearest)
 
     lines = [nearest_line]
     if matched and matched.requirements:
@@ -182,7 +196,7 @@ def _appointment_context_text(
         appt_doctor = _appointment_doctor_name(appt, professional_names)
         if appt_doctor:
             line += f" — {appt_doctor}"
-        lines.append(line)
+        lines.append(line + ref(appt))
 
     return "\n".join(lines)
 
@@ -224,9 +238,12 @@ def _flow_handback_tools(tenant: Tenant | None, topology: str, plugin_tools: lis
     """
     if tenant is None or not flows_enabled(tenant):
         return list(plugin_tools)
-    # TASK-030: same model-facing name, two implementations; the clinic's switch picks one.
-    draft_tool = set_booking_draft_v2 if ai_draft_v2_enabled(tenant) else set_booking_draft
-    handbacks = [manage_existing_appointment, draft_tool, request_human_handoff]
+    # TASK-030: same model-facing names, two implementations each; the clinic's switch
+    # picks both (P2: the booking draft; P3: the manage request).
+    v2 = ai_draft_v2_enabled(tenant)
+    draft_tool = set_booking_draft_v2 if v2 else set_booking_draft
+    manage_tool = manage_existing_appointment_v2 if v2 else manage_existing_appointment
+    handbacks = [manage_tool, draft_tool, request_human_handoff]
     if topology != BOOKING_TOPOLOGY_MULTI:
         handbacks.append(start_guided_booking)
     return [*plugin_tools, *handbacks]

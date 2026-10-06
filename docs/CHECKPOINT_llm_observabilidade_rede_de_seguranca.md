@@ -105,4 +105,4 @@ sempre e não gera evento — a diferença entre as contagens de `ai_run_agent_*
 
 > TASK-030 P2: códigos novos no vocabulário de `conversation_handback_entered` e os eventos da continuação do rascunho — ver `docs/CHECKPOINT_ia_rascunho_v2_resolvedor.md` §4.
 
-> TASK-030 P3 parcial: pouso expresso em `awaiting_confirmation` e `answered_step` em `booking_draft_resumed` — ver `docs/CHECKPOINT_ia_confirmacao_expressa.md`. Sem novos códigos de gerenciamento v2 nesta correção.
+> TASK-030 P3: `unknown_appointment`, `appointment_not_chosen`, `reschedule_limit`, `ambiguous_appointment` em `conversation_handback_entered`, além do pouso expresso e `answered_step` na retomada — ver `docs/CHECKPOINT_ia_confirmacao_expressa.md`.
