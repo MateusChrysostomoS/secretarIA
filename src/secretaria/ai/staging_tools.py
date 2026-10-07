@@ -189,8 +189,8 @@ async def cancel_event_v2(appointment: str, message: str = "") -> dict:
     consulta continua marcada - nunca diga que foi cancelada.
 
     Args:
-        appointment: QUAL consulta, pela referência "(ref AAAA-MM-DD HH:MM)" mostrada em
-            "consultas marcadas" (ex.: 2026-10-13 10:00). Nunca um id de evento.
+        appointment: QUAL consulta: copie só AAAA-MM-DD HH:MM de "consultas marcadas",
+            sem parênteses nem a palavra ref (ex.: 2026-10-13 10:00). Nunca um id de evento.
         message: Frase curta para o paciente, enviada ANTES do cart?o; n?o confirma o cancelamento.
     """
     tenant_id = _tenant_id_ctx.get()

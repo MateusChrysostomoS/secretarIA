@@ -131,6 +131,10 @@ def test_the_names_are_the_legacy_ones_and_the_arguments_carry_no_free_text():
     assert "Nunca um id de evento" in cancel_event_v2.description
 
 
+def test_cancellation_description_matches_the_reference_parser():
+    assert "sem parênteses nem a palavra ref" in cancel_event_v2.description
+
+
 def test_the_compiled_agent_cache_tells_them_apart_from_the_legacy_tools():
     assert graph._tool_cache_key(create_event_v2) == "create_event#blind_v2"
     assert graph._tool_cache_key(cancel_event_v2) == "cancel_event#blind_v2"

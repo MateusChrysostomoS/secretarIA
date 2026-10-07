@@ -34,8 +34,10 @@ from secretaria.ai.pii import (
     wrap_tools_with_pseudonymizer,
 )
 from secretaria.ai.prompts import secretary_system_prompt
+from secretaria.ai.prompts_v2 import secretary_system_prompt_v2
 from secretaria.ai.tool_output import wrap_tools_with_output_allowlist
 from secretaria.ai.tools import (
+    AI_TOOLSET_V2_RETIRED,
     AI_TOOLSET_V2_STAGING,
     AI_TOOLSET_V2_WITHHELD,
     BLIND_STAGING_VARIANT,
@@ -293,7 +295,7 @@ def _kept_on_v2(tool: Any) -> bool:
     refusal (`ai/tools.py::_blocked_by_toolset_v2`).
     """
     name = getattr(tool, "name", str(tool))
-    if name in AI_TOOLSET_V2_WITHHELD:
+    if name in AI_TOOLSET_V2_WITHHELD or name in AI_TOOLSET_V2_RETIRED:
         return False
     if name in AI_TOOLSET_V2_STAGING:
         variant = (getattr(tool, "metadata", None) or {}).get("cache_variant")
@@ -324,15 +326,42 @@ def effective_tools(topology: str, extra_tools: Sequence = (), *, toolset_v2: bo
 _AGENTS: dict[frozenset[str], Any] = {}
 
 
+def _turn_tool_names() -> frozenset[str]:
+    """The tool NAMES of THIS turn's agent, from the assembly `build_agent` uses.
+
+    Read from the context vars `run_agent` sets (topology, extra tools, v2 switch), so the
+    prompt rendered for a turn can only name tools that turn's agent was built with.
+    """
+    tools = effective_tools(
+        _booking_topology_ctx.get(),
+        _extra_tools_ctx.get(),
+        toolset_v2=_ai_toolset_v2_ctx.get(),
+    )
+    return frozenset(getattr(t, "name", str(t)) for t in tools)
+
+
+def _turn_system_prompt(config: TenantRuntimeConfig) -> str:
+    """The system prompt of THIS turn: v2 on a v2 turn (TASK-030 P5), else the v1 one.
+
+    Decided on every model call from `_ai_toolset_v2_ctx` - the per-clinic switch the
+    worker hands to `run_agent(toolset_v2=...)` - and never frozen into a cached agent.
+    With the switch off this is `secretary_system_prompt(config)`, byte for byte.
+    """
+    if not _ai_toolset_v2_ctx.get():
+        return secretary_system_prompt(config)
+    return secretary_system_prompt_v2(config, tool_names=_turn_tool_names())
+
+
 def _prompt_with_today(state: dict) -> list[BaseMessage]:
     """Prepend a freshly-rendered system prompt so today's date is current.
 
-    Reads TenantRuntimeConfig from the ContextVar set by run_agent. Falls back
-    to a settings-based prompt for dev scripts (Fase A convenience).
+    Reads TenantRuntimeConfig from the ContextVar set by run_agent; which prompt (v1 or
+    the TASK-030 v2) is `_turn_system_prompt`'s call, made here on every model call.
+    Falls back to a settings-based prompt for dev scripts (Fase A convenience).
     """
     config = _tenant_config_ctx.get()
     if config is not None:
-        content = secretary_system_prompt(config)
+        content = _turn_system_prompt(config)
     else:
         # Dev fallback: single-tenant prompt from env vars.
         from secretaria.services.tenant_config import TenantRuntimeConfig as _RC
@@ -493,7 +522,7 @@ def _log_trace_content(
     line-size cap cannot truncate one behind the other.
     """
     try:
-        prompt = secretary_system_prompt(tenant_config) if tenant_config is not None else None
+        prompt = _turn_system_prompt(tenant_config) if tenant_config is not None else None
         logger.info(
             "llm_trace_prompt",
             conversation_id=str(conversation_id),

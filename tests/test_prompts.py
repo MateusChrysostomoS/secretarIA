@@ -6,7 +6,9 @@ populated the professional-context fields on `TenantRuntimeConfig`),
 post-consult knowledge, and appointment context.
 """
 
+import hashlib
 import os
+from datetime import UTC, datetime
 from uuid import uuid4
 
 os.environ.setdefault("APP_ENV", "test")
@@ -14,6 +16,8 @@ os.environ.setdefault("META_APP_SECRET", "test-app-secret")
 os.environ.setdefault("META_VERIFY_TOKEN", "test-verify-token")
 os.environ.setdefault("META_ACCESS_TOKEN", "test-access-token")
 os.environ.setdefault("META_PHONE_NUMBER_ID", "1234567890")
+
+import pytest  # noqa: E402
 
 from secretaria.ai.prompts import (  # noqa: E402
     _format_appointment_context,
@@ -25,7 +29,10 @@ from secretaria.core.whatsapp_limits import (  # noqa: E402
     MAX_LIST_ROW_TITLE_CHARS,
     decorated_text_budget,
 )
-from secretaria.services.tenant_config import TenantRuntimeConfig  # noqa: E402
+from secretaria.services.tenant_config import (  # noqa: E402
+    RuntimeAppointmentType,
+    TenantRuntimeConfig,
+)
 
 _SAFETY_HEADING = "REGRAS INEGOCIÁVEIS DE SEGURANÇA E CONDUTA"
 
@@ -339,3 +346,60 @@ def test_legacy_prompt_keeps_calendar_path_without_flow_state():
     assert "check_availability(start, end)" in prompt
     assert "prevalecem sobre o fluxo de chat" not in prompt
     assert "ESTADO DA CONVERSA" not in prompt
+
+
+# --------------------------------------------------------------------------
+# TASK-030 P5: the v1 prompt is frozen byte for byte (the switch-off path)
+# --------------------------------------------------------------------------
+
+# With `initial_flows.ai_draft_v2` off, a turn must get EXACTLY the prompt it got before
+# P5. P5 writes the v2 prompt in ai/prompts_v2.py and never edits ai/prompts.py; these
+# digests (rendered at 1c1ce2c, the day pinned to 2026-10-08) catch a drift of one character.
+# Changing the v1 prompt on purpose = re-render, update the digest, say so in the commit.
+_V1_DIGESTS = {
+    "minimal": (13667, "46d0c547f01a8de2d53ecf491353dcbebc5cc3d85223671238c1e018ef36892b"),
+    "full": (19318, "ffb121c4820f1299fad7cea61bab7d78e3379a888eeef4e79ef50f9774824069"),
+}
+
+
+_PINNED_NOW = datetime(2026, 10, 8, 12, tzinfo=UTC)
+
+
+def _v1_case(name: str) -> TenantRuntimeConfig:
+    if name == "minimal":
+        return _config()
+    return _config(
+        business_hours={
+            "monday": [{"start": "08:00", "end": "12:00"}, {"start": "14:00", "end": "18:00"}],
+            "thursday": [{"start": "08:00", "end": "17:00"}],
+        },
+        appointment_types=[
+            RuntimeAppointmentType(
+                name="Consulta", description="Avaliação geral", duration_min=30, price="R$ 250,00"
+            ),
+            RuntimeAppointmentType(name="Limpeza", description=None, duration_min=40),
+        ],
+        professional_id=uuid4(),
+        specialty="Oftalmologia",
+        about="Atende há 15 anos.",
+        context_doctor_message="Fala pausadamente.",
+        post_consult_knowledge="Retorno em 7 dias.",
+        appointment_context="Próxima consulta: 13/10 às 10:00 — Consulta — Dra. Ana",
+        conversation_state="- Onde o paciente estava: no menu inicial",
+    )
+
+
+def _digest(text: str) -> tuple[int, str]:
+    return len(text), hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+@pytest.mark.parametrize("case", sorted(_V1_DIGESTS))
+def test_the_v1_prompt_is_byte_identical_to_before_p5(case):
+    assert _digest(secretary_system_prompt(_v1_case(case), now=_PINNED_NOW)) == _V1_DIGESTS[case]
+
+
+def test_the_v1_digest_catches_a_one_character_drift(monkeypatch):
+    safety = _format_safety_rules()
+    monkeypatch.setattr("secretaria.ai.prompts._format_safety_rules", lambda: safety + " ")
+    prompt = secretary_system_prompt(_v1_case("minimal"), now=_PINNED_NOW)
+    assert _digest(prompt) != _V1_DIGESTS["minimal"]

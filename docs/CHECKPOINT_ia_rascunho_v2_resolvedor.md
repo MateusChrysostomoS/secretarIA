@@ -78,3 +78,5 @@ Validação final conjunta P2b/P3 e fuso: **3442 passed, 10 skipped, 15 warnings
 
 
 > TASK-030 P4: a IA v2 lê horários só por `get_availability` (janelas livres); `create_event`/`cancel_event` viram ferramentas cegas que só levantam este mesmo rascunho / o pedido de gerenciar (o toque do paciente é que marca/cancela) — ver `docs/CHECKPOINT_ia_get_availability.md`.
+
+> TASK-030 P5: prompt v2 alinhado ao rascunho e ao atendimento atual; validado localmente, sem ativacao ? ver `docs/CHECKPOINT_ia_prompt_v2.md`.

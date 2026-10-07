@@ -80,3 +80,5 @@ O que ela NÃO cobre (e foi justamente onde o paciente ficou sem resposta visív
    deve abrir a conversa onde o menu foi renderizado?
 3. Limite de entrada do Portal (L6): onde (brain-api por paciente/min?) e qual teto.
 4. Prompt: proibir prometer capacidade inexistente (L3/L5) e dar à LLM os fatos que faltam (L4).
+
+> TASK-030 P5: L3/L5 e fala de L4 cobertos pelo prompt v2; fatos/preparo atuais preservados; avaliacoes reais preparadas, nao executadas ? ver `docs/CHECKPOINT_ia_prompt_v2.md`.

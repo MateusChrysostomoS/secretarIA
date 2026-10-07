@@ -91,9 +91,13 @@ _STAGING = {"create_event", "cancel_event"}
 _V2_READS_AND_STAGING = {"get_availability", *_STAGING}
 _PLUGIN_TOOLS_KEPT = {"list_professionals", "select_professional_and_continue", "list_units"}
 _HANDBACKS = {
-    "manage_existing_appointment", "set_booking_draft",
-    "request_human_handoff", "offer_human_handoff",
+    "manage_existing_appointment",
+    "set_booking_draft",
+    "request_human_handoff",
+    "offer_human_handoff",
 }
+
+_RETIRED = {"start_guided_booking", "select_professional_and_continue"}
 
 _ADDONS_OFF = {
     "reactivation_pack": False,
@@ -232,9 +236,7 @@ def test_switch_off_is_exactly_todays_composition(topology):
 @pytest.mark.parametrize("topology", TOPOLOGIES)
 def test_switch_on_swaps_the_busy_readers_for_get_availability_and_the_blind_writers(topology):
     tools = _turn_tools(TENANT_ON, topology)
-    expected = _SCOPE_FREE | _PLUGIN_TOOLS_KEPT | _HANDBACKS | _V2_READS_AND_STAGING
-    if topology != BOOKING_TOPOLOGY_MULTI:
-        expected |= {"start_guided_booking"}
+    expected = (_SCOPE_FREE | _PLUGIN_TOOLS_KEPT | _HANDBACKS | _V2_READS_AND_STAGING) - _RETIRED
     assert _names(tools) == expected
     assert _names(tools).isdisjoint(_WITHHELD)
     # Same names as the legacy writers, but the blind implementations - on every topology,
@@ -263,7 +265,7 @@ def test_a_staging_name_passes_only_as_its_blind_variant(topology):
 
 def test_without_the_addons_the_v2_set_still_has_the_way_back_to_the_flow():
     names = _names(_turn_tools(TENANT_ON, BOOKING_TOPOLOGY_SOLE, addons=_summary()))
-    assert names == _SCOPE_FREE | _HANDBACKS | _V2_READS_AND_STAGING | {"start_guided_booking"}
+    assert names == _SCOPE_FREE | _HANDBACKS | _V2_READS_AND_STAGING
 
 
 @pytest.mark.parametrize("topology", TOPOLOGIES)
@@ -406,3 +408,20 @@ async def test_a_calendar_outage_inside_get_availability_reaches_the_handover_se
         toolset_v2=True,
     )
     assert reply == graph.CALENDAR_UNAVAILABLE_SENTINEL
+
+
+# --------------------------------------------------------------------------
+# TASK-030 P5: the older hand-backs leave the v2 set (never the v1 one)
+# --------------------------------------------------------------------------
+
+
+def test_the_retired_list_is_exactly_the_two_older_handbacks():
+    assert set(ai_tools.AI_TOOLSET_V2_RETIRED) == _RETIRED
+
+
+@pytest.mark.parametrize("topology", TOPOLOGIES)
+def test_switch_on_retires_them_even_when_a_caller_passes_them(topology):
+    extras = [*reg.agent_tools_for(ALL_ADDONS), ai_tools.start_guided_booking]
+    assert _names(graph.effective_tools(topology, extras, toolset_v2=True)).isdisjoint(_RETIRED)
+    # Switch off: today's set, both still there (the v1 prompt names them).
+    assert _RETIRED <= _names(graph.effective_tools(topology, extras))

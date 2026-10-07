@@ -179,3 +179,32 @@ async def test_v2_refuses_a_time_of_today_that_already_passed(clinic):
             {"service": "limpeza", "for_whom": "me", "day": "2026-10-07", "time": "15:00"}
         )
     assert later_today.value.draft.day == dt.date(2026, 10, 7)
+
+
+# --------------------------------------------------------------------------
+# TASK-030 P5: the final model-facing wording of the v2 tool
+# --------------------------------------------------------------------------
+
+
+def test_the_v2_description_teaches_what_the_prompt_relies_on():
+    text = set_booking_draft_v2.description
+    for phrase in (
+        "Chamar esta ferramenta NÃO marca nada",
+        "nunca diga que algo foi marcado, reservado ou confirmado",
+        "ESTADO DA CONVERSA",
+        '"other" se é para outra',
+        "NUNCA escreva um nome",
+        "lista PRÓXIMOS DIAS",
+    ):
+        assert phrase in text
+    # Name and arguments are a contract with the prompt and the sentinel: unchanged.
+    assert set_booking_draft_v2.name == "set_booking_draft"
+    assert set(set_booking_draft_v2.args) == {
+        "service",
+        "professional",
+        "insurance",
+        "for_whom",
+        "day",
+        "time",
+        "message",
+    }

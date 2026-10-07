@@ -407,6 +407,10 @@ AI_TOOLSET_V2_WITHHELD = (
     "create_event_at_unit",
 )
 AI_TOOLSET_V2_STAGING = ("create_event", "cancel_event")
+
+# P5: the draft carries service and professional; keep these only for v1.
+AI_TOOLSET_V2_RETIRED = ("start_guided_booking", "select_professional_and_continue")
+
 BLIND_STAGING_VARIANT = "blind_v2"
 
 TOOL_BLOCK_TOOLSET_V2 = "toolset_v2"
@@ -1512,20 +1516,26 @@ async def set_booking_draft_v2(
     time: str = "",
     message: str = "",
 ) -> dict:
-    """Entrega o agendamento ao fluxo guiado com TUDO o que o paciente já disse. O fluxo
-    confere cada item com os dados reais da clínica e abre a próxima etapa que falta - pode
-    ir até a lista de horários do dia pedido. Preencha só o que o paciente disse e deixe o
-    resto vazio; não repita uma pergunta que ele já respondeu. Nunca deduza um procedimento
-    a partir de sintomas e nunca invente dia ou horário.
+    """Entrega o agendamento ao fluxo guiado com TUDO o que o paciente já disse nesta
+    conversa e o que o ESTADO DA CONVERSA já mostra. O fluxo confere cada item com os dados
+    reais da clínica, pergunta só o que falta e, com tudo válido, mostra os detalhes e o
+    cartão com o botão Confirmar. Chamar esta ferramenta NÃO marca nada: quem confirma é o
+    paciente, tocando no botão - nunca diga que algo foi marcado, reservado ou confirmado.
+    Preencha só o que o paciente disse e deixe o resto vazio; não repita uma pergunta que
+    ele já respondeu. Nunca deduza um serviço a partir de sintomas e nunca invente dia ou
+    horário.
 
     Args:
         service: Nome EXATO de um serviço da clínica escolhido pelo paciente (ou vazio).
         professional: Nome do profissional que o paciente escolheu (ou vazio).
-        insurance: Convênio que o paciente citou (ou vazio).
-        for_whom: "me" se a consulta é para o próprio paciente, "other" se é para outra
-            pessoa, vazio se ele não disse. NUNCA escreva um nome aqui.
-        day: Dia pedido no formato AAAA-MM-DD, no fuso da clínica (ou vazio).
-        time: Horário pedido no formato HH:MM (ou vazio). Sem `day`, é ignorado.
+        insurance: Convênio que o paciente citou (ou vazio). Se o estado diz que o convênio
+            já foi informado, deixe vazio: ele já está guardado.
+        for_whom: "me" se a consulta é para o próprio paciente; "other" se é para outra
+            pessoa (mãe, filho, cônjuge...); vazio se ele não disse. NUNCA escreva um nome
+            aqui nem peça o nome: o fluxo pede o nome e a autorização.
+        day: Dia pedido, AAAA-MM-DD, no fuso da clínica - converta "amanhã", "quinta" pela
+            lista PRÓXIMOS DIAS do prompt (ou vazio).
+        time: Horário pedido, HH:MM em 24 horas (ou vazio). Sem `day`, é ignorado.
         message: UMA ou duas frases curtas para o paciente, enviadas ANTES dos botões:
             responda o que ele perguntou ou contou, sem anunciar qual lista vem a
             seguir (o fluxo decide e mostra logo abaixo); se nenhuma opção da
