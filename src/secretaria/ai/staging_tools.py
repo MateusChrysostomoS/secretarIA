@@ -46,6 +46,7 @@ from secretaria.ai.tools import (
     _draft_professional_id,
     _tenant_config_ctx,
     _tenant_id_ctx,
+    handback_message,
 )
 from secretaria.core.logging import get_logger
 from secretaria.services.manage_request import (
@@ -139,7 +140,9 @@ async def _own_upcoming(tenant_id: UUID, conversation_id: UUID) -> list[dict] | 
 
 
 @tool("create_event")
-async def create_event_v2(start: str, service: str = "", professional: str = "") -> dict:
+async def create_event_v2(
+    start: str, service: str = "", professional: str = "", message: str = ""
+) -> dict:
     """Prepara a marcação de uma consulta no horário `start` e leva o paciente ao cartão de
     confirmação. NÃO marca nada: quem marca é o paciente, tocando em Confirmar no cartão;
     até lá, nada está marcado nem reservado. O fluxo confere serviço, profissional, dia e se
@@ -153,6 +156,7 @@ async def create_event_v2(start: str, service: str = "", professional: str = "")
             de preferência dentro de uma janela devolvida por get_availability.
         service: Nome EXATO de um serviço da clínica (ou vazio).
         professional: Nome do profissional (ou vazio).
+        message: Frase curta para o paciente, enviada ANTES do cart?o; n?o confirma a marca??o.
     """
     tenant_id = _tenant_id_ctx.get()
     if tenant_id is None:
@@ -174,11 +178,12 @@ async def create_event_v2(start: str, service: str = "", professional: str = "")
         day=day,
         time=at,
         professional_unresolved=bool((professional or "").strip()) and professional_id is None,
+        intro=handback_message(message),
     )
 
 
 @tool("cancel_event")
-async def cancel_event_v2(appointment: str) -> dict:
+async def cancel_event_v2(appointment: str, message: str = "") -> dict:
     """Leva o paciente ao cartão "Confirmar o cancelamento?" de UMA consulta JÁ MARCADA
     dele. NÃO cancela nada: quem cancela é o paciente, tocando em Sim no cartão; até lá a
     consulta continua marcada - nunca diga que foi cancelada.
@@ -186,6 +191,7 @@ async def cancel_event_v2(appointment: str) -> dict:
     Args:
         appointment: QUAL consulta, pela referência "(ref AAAA-MM-DD HH:MM)" mostrada em
             "consultas marcadas" (ex.: 2026-10-13 10:00). Nunca um id de evento.
+        message: Frase curta para o paciente, enviada ANTES do cart?o; n?o confirma o cancelamento.
     """
     tenant_id = _tenant_id_ctx.get()
     conversation_id = _conversation_id_ctx.get()
@@ -216,7 +222,9 @@ async def cancel_event_v2(appointment: str) -> dict:
         return _blocked("cancel_event", TOOL_BLOCK_AMBIGUOUS_APPOINTMENT, _AMBIGUOUS_REF_ERROR)
     # The same request manage_existing_appointment v2 sends (P3): the worker re-reads the
     # patient's appointments FRESH and stops at the cancel confirmation card.
-    raise ManageAppointmentRequested(ACTION_CANCEL, appointment=reference)
+    raise ManageAppointmentRequested(
+        ACTION_CANCEL, appointment=reference, intro=handback_message(message)
+    )
 
 
 # Read by ai/graph.py: `_tool_cache_key` keeps these apart from the legacy tools of the same

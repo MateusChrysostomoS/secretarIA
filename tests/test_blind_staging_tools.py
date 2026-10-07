@@ -121,8 +121,8 @@ def _turn(tenant_id, conversation_id=None, *, timezone="America/Sao_Paulo"):
 def test_the_names_are_the_legacy_ones_and_the_arguments_carry_no_free_text():
     assert create_event_v2.name == ai_tools.create_event.name == "create_event"
     assert cancel_event_v2.name == ai_tools.cancel_event.name == "cancel_event"
-    assert set(create_event_v2.args) == {"start", "service", "professional"}
-    assert set(cancel_event_v2.args) == {"appointment"}
+    assert set(create_event_v2.args) == {"start", "service", "professional", "message"}
+    assert set(cancel_event_v2.args) == {"appointment", "message"}
     for tool in (create_event_v2, cancel_event_v2):
         assert tool.metadata == {"cache_variant": ai_tools.BLIND_STAGING_VARIANT}
         assert "NÃO" in tool.description
@@ -475,3 +475,26 @@ async def test_cancel_lands_exactly_like_the_manage_request(db, world, monkeypat
     )
     assert staged.startswith(graph.MANAGE_APPOINTMENT_SENTINEL_PREFIX)
     assert staged == managed
+
+
+@pytest.mark.parametrize(
+    "message, expected",
+    [(" Entendi seu pedido. ", "Entendi seu pedido."), ("[PACIENTE_ab12]", None)],
+)
+async def test_blind_create_preserves_the_main_handback_intro(roster, message, expected):
+    with _turn(uuid4()), pytest.raises(BookingDraftRequested) as caught:
+        await create_event_v2.ainvoke({"start": "2026-10-08T10:00", "message": message})
+    assert caught.value.intro == expected
+
+
+@pytest.mark.parametrize(
+    "message, expected",
+    [(" Entendi seu pedido. ", "Entendi seu pedido."), ("[PACIENTE_ab12]", None)],
+)
+async def test_blind_cancel_preserves_the_main_handback_intro(db, world, message, expected):
+    with (
+        _turn(world.tenant_a, world.mine.conversation_id),
+        pytest.raises(ManageAppointmentRequested) as caught,
+    ):
+        await cancel_event_v2.ainvoke({"appointment": _ref(5, 14), "message": message})
+    assert caught.value.intro == expected
