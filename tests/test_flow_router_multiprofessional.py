@@ -237,7 +237,7 @@ async def test_multi_menu_freetext_delegates_llm():
     assert res.flow_state == FlowState.LLM
 
 
-async def test_multi_menu_outro_delegates_llm():
+async def test_multi_menu_outro_asks_fixed_opener():
     res = await route(
         _conversation(flow_state=FlowState.MENU),
         _tenant(),
@@ -245,7 +245,8 @@ async def test_multi_menu_outro_delegates_llm():
         "Outro",
         professionals=_professionals(),
     )
-    assert res.action == "delegate_llm"
+    assert res.action == "reply"
+    assert [b.body for b in res.bubbles] == [flow_router.OTHER_OPENER]
     assert res.flow_state == FlowState.LLM
 
 

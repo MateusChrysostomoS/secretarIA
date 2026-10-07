@@ -241,6 +241,17 @@ def test_the_pra_quem_answer_is_spelled_out_without_the_name(attendee, expected)
     assert "Joaquim" not in state
 
 
+def test_an_unanswered_pra_quem_tells_the_model_not_to_ask_it():
+    """Owner, 2026-10-06: the bare "ainda não respondido" made the model open the
+    free chat with "Essa consulta é pra você?"; the guided flow asks it itself."""
+    state = build_conversation_state(_conversation(flow_attendee_name=None), _tenant(), [])
+    assert "Não pergunte isso você: o fluxo guiado pergunta na hora de marcar." in state
+    answered = build_conversation_state(
+        _conversation(flow_attendee_name=ATTENDEE_SELF), _tenant(), []
+    )
+    assert "Não pergunte isso você" not in answered
+
+
 def test_the_chosen_time_is_shown():
     conv = _conversation(flow_selected_day="2026-10-08", flow_selected_slot="2026-10-08T10:00")
     assert "Horário já escolhido: 08/10/2026 às 10:00" in build_conversation_state(

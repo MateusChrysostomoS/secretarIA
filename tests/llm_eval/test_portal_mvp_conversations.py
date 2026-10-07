@@ -33,7 +33,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 STATE = (
-    "- Onde o paciente estava: no menu inicial — tocou em 'Outro' ou escreveu livremente\n"
+    "- Onde o paciente estava: no menu inicial — escreveu livremente\n"
     "- Convênios aceitos pela clínica: Unimed, Bradesco Saúde\n"
     "- Serviços de cada médico:\n"
     "  - Dra. Ana: Consulta Ortopédica\n"

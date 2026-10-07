@@ -25,6 +25,7 @@ from secretaria.services.flow_router import (  # noqa: E402
     LABEL_MANAGE_APPOINTMENT,
     LABEL_OTHER,
     LABEL_RESCHEDULE,
+    OTHER_OPENER,
     SERVICE_HELP_OPENER,
     STEP_AWAITING_ATTENDEE_CHOICE,
     STEP_AWAITING_CONFIRMATION,
@@ -211,10 +212,21 @@ async def test_menu_select_hours_one_shot():
     assert "Segunda" in res.bubbles[0].body
 
 
-async def test_menu_outro_delegates_llm():
+async def test_menu_outro_asks_fixed_opener_then_parks_in_llm():
+    """ "Outro" never reaches the model: the fixed question goes out and the
+    conversation waits in LLM mode, so the model runs on the ANSWER."""
     res = await route(_conversation(flow_state=FlowState.MENU), _tenant(), None, "Outro")
-    assert res.action == "delegate_llm"
+    assert res.action == "reply"
+    assert [b.body for b in res.bubbles] == [OTHER_OPENER]
+    assert OTHER_OPENER == "O que te traz à clínica?"
     assert res.flow_state == FlowState.LLM
+    assert res.flow_step is None
+
+    answer = await route(
+        _conversation(flow_state=res.flow_state), _tenant(), None, "minha vista está embaçada"
+    )
+    assert answer.action == "delegate_llm"
+    assert answer.flow_state == FlowState.LLM
 
 
 async def test_menu_freetext_delegates_llm():
@@ -935,15 +947,26 @@ async def test_route_idle_cancel_label_enters_directly():
     assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)
 
 
-async def test_route_idle_outro_label_delegates_llm_even_off_menu():
-    """"Outro" from the greeting trio reaches the LLM even when the tenant's
-    configured single-doctor menu buttons don't include it — the index-based
-    menu mapping only knows the configured labels, so the explicit match must
-    win first (same place-it-anywhere semantics as the manage label)."""
+async def test_route_idle_outro_label_opens_free_chat_even_off_menu():
+    """ "Outro" from the greeting trio opens the free conversation even when the
+    tenant's configured single-doctor menu buttons don't include it — the
+    index-based menu mapping only knows the configured labels, so the explicit
+    match must win first (same place-it-anywhere semantics as the manage label)."""
     tenant = _tenant()
     tenant.initial_flows["buttons"] = ["Agendar", "Horários", "Falar com a equipe"]
     res = await route(_conversation(flow_state=FlowState.IDLE), tenant, None, LABEL_OTHER)
-    assert res.action == "delegate_llm"
+    assert res.action == "reply"
+    assert [b.body for b in res.bubbles] == [OTHER_OPENER]
+    assert res.flow_state == FlowState.LLM
+
+
+async def test_menu_third_configured_button_asks_fixed_opener():
+    """The configured 3rd slot is the same escape: fixed question, no model call."""
+    tenant = _tenant()
+    tenant.initial_flows["buttons"] = ["Serviços e Custo", "Horários", "Falar com a equipe"]
+    res = await route(_conversation(flow_state=FlowState.MENU), tenant, None, "Falar com a equipe")
+    assert res.action == "reply"
+    assert [b.body for b in res.bubbles] == [OTHER_OPENER]
     assert res.flow_state == FlowState.LLM
 
 

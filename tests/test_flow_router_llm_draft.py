@@ -40,7 +40,9 @@ async def test_menu_outro_keeps_existing_draft():
         flow_selected_insurance="Particular",
     )
     res = await route(conv, _tenant(), None, LABEL_OTHER)
-    assert res.action == "delegate_llm"
+    # The tap itself is the fixed question (no model call); the draft still survives.
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.LLM
     assert res.flow_selected_type == "Primeira Consulta"
     assert res.flow_selected_professional_id == pid
     assert res.flow_selected_insurance == "Particular"

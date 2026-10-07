@@ -246,6 +246,11 @@ SERVICE_HELP_OPENER = (
     "Posso explicar as opções de serviços da clínica e como agendar uma consulta. "
     "Sobre qual serviço ou etapa do agendamento você quer saber?"
 )
+# The fixed question an "Outro" tap on the menu replies with (owner, 2026-10-06). The tap
+# never reaches the model: left to it, the opener drifted (sometimes "Essa consulta é pra
+# você?", a booking question the flow asks itself later). The LLM runs one turn later, on
+# the patient's ANSWER, with this question already in the history as its context.
+OTHER_OPENER = "O que te traz à clínica?"
 # Sent when a scoped-help node gives up (bounded at one clarifying question) -
 # the conversation is then flipped to human handover (action="handover").
 SCOPED_HELP_ESCALATE_MESSAGE = (
@@ -1320,6 +1325,23 @@ def _delegate_llm_keeping_draft(conversation: Conversation) -> FlowRouterResult:
     )
 
 
+def _enter_other(conversation: Conversation | None = None) -> FlowRouterResult:
+    """ "Outro" on the menu: ask `OTHER_OPENER` and park in LLM mode for the answer.
+
+    Lands exactly where a delegation would (with `conversation`, the booking answers
+    survive like `_delegate_llm_keeping_draft`), but this turn is a plain reply: the
+    model only runs on what the patient says next.
+    """
+    result = (
+        _delegate_llm_keeping_draft(conversation)
+        if conversation is not None
+        else FlowRouterResult(action="delegate_llm", flow_state=FlowState.LLM)
+    )
+    result.action = "reply"
+    result.bubbles = [TextBubble(body=OTHER_OPENER)]
+    return result
+
+
 # --------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------
@@ -1473,13 +1495,14 @@ async def _route(
             "cancel", tenant, upcoming_appointments or [], professionals
         )
 
-    # "Outro" from the greeting trio must always reach the LLM, even on a
-    # single-doctor tenant whose configured menu buttons don't include it
+    # "Outro" from the greeting trio must always open the free conversation, even
+    # on a single-doctor tenant whose configured menu buttons don't include it
     # (the index-based mapping below only knows the configured labels). Same
-    # place-it-anywhere semantics as the manage label above; identical result
-    # to _enter_menu_choice's 3rd slot and _menu_choice_multi's labels[2].
+    # place-it-anywhere semantics as the manage label above; the same fixed
+    # question as _enter_menu_choice's 3rd slot and _menu_choice_multi's
+    # labels[2] (only this path carries the booking draft along).
     if _label_match(inbound_body, LABEL_OTHER):
-        return _delegate_llm_keeping_draft(conversation)
+        return _enter_other(conversation)
 
     if _is_multi_professional(professionals):
         return _menu_choice_multi(conversation, tenant, inbound_body, professionals or [])
@@ -1518,7 +1541,7 @@ def _menu_choice_multi(
     if _label_match(body, labels[1]):
         return _ask_attendee_first(ATTENDEE_NEXT_CATALOG, tenant, professionals)
     if _label_match(body, labels[2]):
-        return _delegate_llm_keeping_draft(conversation)
+        return _enter_other(conversation)
     if conversation.flow_state == FlowState.MENU:
         # Free text at the menu -> the patient wants something custom.
         return _delegate_llm_keeping_draft(conversation)
@@ -1556,8 +1579,8 @@ async def _enter_menu_choice(
         return FlowRouterResult(
             action="reply", bubbles=[TextBubble(body=text)], flow_state=FlowState.IDLE
         )
-    # "Outro" (or any 3rd button): hand to the LLM.
-    return FlowRouterResult(action="delegate_llm", flow_state=FlowState.LLM)
+    # "Outro" (or any 3rd button): the fixed question, then the LLM on the answer.
+    return _enter_other()
 
 
 def enter_booking(tenant: Tenant, professionals: list | None = None) -> FlowRouterResult:
