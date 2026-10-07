@@ -23,6 +23,7 @@ from secretaria.ai.tools import (  # noqa: E402
     set_booking_draft_v2,
 )
 from secretaria.plugins import multi_professional as mp  # noqa: E402
+from secretaria.services import booking_dates  # noqa: E402
 from secretaria.services.booking_draft import BookingDraft  # noqa: E402
 from secretaria.services.booking_scope import BOOKING_TOPOLOGY_SOLE  # noqa: E402
 from secretaria.workers.shared.llm_context import _flow_handback_tools  # noqa: E402
@@ -42,6 +43,12 @@ class _Log:
         return _log
 
 
+class _PinnedClock(dt.datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return dt.datetime(2026, 10, 7, 14, 13, tzinfo=dt.UTC)  # Wed 07/10, 11:13 BRT
+
+
 @pytest.fixture
 def clinic(monkeypatch):
     roster = [ANA, BETO]
@@ -50,6 +57,9 @@ def clinic(monkeypatch):
         return list(roster)
 
     monkeypatch.setattr(mp, "_active_professionals", _pros)
+    # The tool refuses a time of TODAY that already passed (TASK-038); pin the clinic
+    # clock so the fixed dates in these tests never become "today" on the real calendar.
+    monkeypatch.setattr(booking_dates, "datetime", _PinnedClock)
     log = _Log()
     monkeypatch.setattr(ai_tools, "logger", log)
     token = ai_tools._tenant_id_ctx.set(uuid4())
@@ -57,7 +67,7 @@ def clinic(monkeypatch):
     ai_tools._tenant_id_ctx.reset(token)
 
 
-def test_the_v2_tool_is_named_set_booking_draft_with_six_string_args():
+def test_the_v2_tool_is_named_set_booking_draft_with_its_string_args():
     assert set_booking_draft_v2.name == "set_booking_draft"
     assert set(set_booking_draft_v2.args) == {
         "service",
@@ -66,6 +76,7 @@ def test_the_v2_tool_is_named_set_booking_draft_with_six_string_args():
         "for_whom",
         "day",
         "time",
+        "message",  # TASK-038: the agent's words for the patient, sent before the card
     }
 
 
@@ -151,3 +162,20 @@ def test_the_clinic_switch_picks_the_draft_tool():
     assert sorted(t.name for t in on) == sorted(
         [*(t.name for t in off), "get_availability", "create_event", "cancel_event"]
     )
+
+
+
+async def test_v2_refuses_a_time_of_today_that_already_passed(clinic):
+    """Owner, 2026-10-07: "quarta às 10" said on a Wednesday at 11h is next Wednesday -
+    the model is told to correct itself instead of opening today's past hour."""
+    out = await set_booking_draft_v2.ainvoke(
+        {"service": "limpeza", "for_whom": "me", "day": "2026-10-07", "time": "10:00"}
+    )
+    assert "já passou" in out["error"]
+    assert "semana que vem" in out["error"]
+
+    with pytest.raises(BookingDraftRequested) as later_today:
+        await set_booking_draft_v2.ainvoke(
+            {"service": "limpeza", "for_whom": "me", "day": "2026-10-07", "time": "15:00"}
+        )
+    assert later_today.value.draft.day == dt.date(2026, 10, 7)

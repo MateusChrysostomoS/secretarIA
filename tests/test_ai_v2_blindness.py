@@ -57,6 +57,7 @@ from secretaria.ai.tool_output import (  # noqa: E402
 from secretaria.ai.tools import (  # noqa: E402
     BookingDraftRequested,
     GuidedBookingRequested,
+    HumanHandoffOfferRequested,
     HumanHandoffRequested,
     ManageAppointmentRequested,
     SelectProfessionalRequested,
@@ -134,6 +135,7 @@ CANARIES = (
 _HANDBACKS = (
     BookingDraftRequested,
     GuidedBookingRequested,
+    HumanHandoffOfferRequested,
     HumanHandoffRequested,
     ManageAppointmentRequested,
     SelectProfessionalRequested,
@@ -375,7 +377,8 @@ def _scripted_calls(own_ref: str, other_ref: str) -> dict[str, list[dict]]:
         ],
         "set_booking_draft": [{"service": "Consulta", "day": last, "time": "09:00"}],
         "manage_existing_appointment": [{"action": "cancel", "appointment": own_ref}],
-        "request_human_handoff": [{"reason": "nenhum"}],
+        "request_human_handoff": [{"reason": "nenhum"}, {"reason": "could_not_help"}],
+        "offer_human_handoff": [{"message": "N?o tenho essa informa??o."}],
         "create_event": [
             {"start": f"{last}T09:00", "service": "Consulta"},
             {"start": "amanhã às 10"},

@@ -53,3 +53,33 @@ def test_tomorrow_handles_leap_day_and_month_rollover():
 def test_relative_dates_are_isolated_between_clinics():
     assert resolve_booking_day("hoje", timezone="Asia/Tokyo", now=NOW) == date(2026, 10, 7)
     assert resolve_booking_day("hoje", timezone="America/Sao_Paulo", now=NOW) == date(2026, 10, 6)
+
+
+WED_11H13 = datetime(2026, 10, 7, 14, 13, tzinfo=UTC)  # Wednesday 07/10, 11:13 in São Paulo
+WED_08H = datetime(2026, 10, 7, 11, 0, tzinfo=UTC)  # Wednesday 07/10, 08:00 in São Paulo
+
+
+@pytest.mark.parametrize(
+    "text, at, now, expected",
+    [
+        # Owner, 2026-10-07: "quarta às 10" said on a Wednesday at 11h is NEXT Wednesday.
+        ("quarta", "10:00", WED_11H13, date(2026, 10, 14)),
+        ("quarta", "15:00", WED_11H13, date(2026, 10, 7)),  # still ahead today
+        ("quarta", None, WED_11H13, date(2026, 10, 7)),  # no time: nearest, as before
+        ("quarta", "10:00", WED_08H, date(2026, 10, 7)),  # said before 10h: today
+        ("hoje", "10:00", WED_11H13, date(2026, 10, 7)),  # "hoje" stays today
+        ("quinta", "10:00", WED_11H13, date(2026, 10, 8)),
+    ],
+)
+def test_a_weekday_equal_to_today_moves_a_week_when_its_time_has_passed(text, at, now, expected):
+    assert resolve_booking_day(text, timezone="America/Sao_Paulo", now=now, at=at) == expected
+
+
+def test_time_has_passed_today_only_speaks_about_today():
+    from secretaria.services.booking_dates import time_has_passed_today
+
+    tz = "America/Sao_Paulo"
+    assert time_has_passed_today(date(2026, 10, 7), "10:00", timezone=tz, now=WED_11H13)
+    assert not time_has_passed_today(date(2026, 10, 7), "15:00", timezone=tz, now=WED_11H13)
+    assert not time_has_passed_today(date(2026, 10, 8), "10:00", timezone=tz, now=WED_11H13)
+    assert not time_has_passed_today(date(2026, 10, 7), None, timezone=tz, now=WED_11H13)

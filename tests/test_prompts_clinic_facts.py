@@ -15,7 +15,7 @@ from secretaria.services.tenant_config import RuntimeAppointmentType, TenantRunt
 
 GOLDEN = Path(__file__).parent / "golden" / "system_prompt_default.txt"
 HEADING = "SOBRE A CLÍNICA"
-FOOTER = "não invente: diga que vai confirmar com a equipe."
+FOOTER = "não invente: diga que não tem essa informação e chame offer_human_handoff."
 HEADING_PREFIX = "\n\n================ "
 
 

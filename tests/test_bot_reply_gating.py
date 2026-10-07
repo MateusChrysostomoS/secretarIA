@@ -36,6 +36,11 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from secretaria.ai.formatter import TextBubble  # noqa: E402
+from secretaria.ai.graph import (  # noqa: E402
+    HUMAN_HANDOFF_OFFER_SENTINEL,
+    SHOW_MAIN_MENU_SENTINEL,
+    with_handback_intro,
+)
 from secretaria.core.database import Base  # noqa: E402
 from secretaria.models import (  # noqa: E402
     Appointment,
@@ -50,8 +55,10 @@ from secretaria.models import (  # noqa: E402
 )
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
+    HUMAN_OFFER_BODY,
     OTHER_OPENER,
     SCOPED_HELP_ESCALATE_MESSAGE,
+    STEP_HUMAN_OFFER,
     FlowRouterResult,
 )
 from secretaria.workers import orchestrator, tasks  # noqa: E402
@@ -801,3 +808,91 @@ async def test_a_clinic_without_the_switch_keeps_todays_toolset(
     names = {t.name for t in call["extra_tools"]}
     # Neither the agenda read nor a blind writer: the legacy create/cancel come from the base set.
     assert names.isdisjoint({"get_availability", "create_event", "cancel_event"})
+
+# TASK-038: the agent's words travel with its hand-back to the buttons
+# --------------------------------------------------------------------------
+
+
+async def _run_hand_back_with_intro(monkeypatch, db, intro: str) -> tuple[Patient, list]:
+    _tenant_row, patient, conversation = await _make_conversation(db, flow_state=FlowState.LLM)
+
+    async def _fake_get_entitlements(tenant_id, redis):
+        return _summary()
+
+    async def _fake_run_agent(message, context, **kwargs):
+        return with_handback_intro(SHOW_MAIN_MENU_SENTINEL, intro)
+
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
+    monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
+    await tasks._send_bot_reply(_reply_context(conversation, patient, _LLM_ANSWER))
+    return patient, [sent for client in _FakeWhatsAppClient.created for sent in client.sent]
+
+
+async def test_hand_back_words_are_sent_before_the_card(monkeypatch, db) -> None:
+    """Owner, 2026-10-07: the patient who asked something reads the answer first,
+    then the buttons - never the same list again as if unheard."""
+    words = "Claro! Para isso, escolha abaixo como prefere seguir."
+    patient, sent = await _run_hand_back_with_intro(monkeypatch, db, words)
+    assert sent[0] == ("text", patient.wa_id, words)
+    assert any(kind == "buttons" for kind, *_ in sent[1:])
+
+
+async def test_hand_back_words_claiming_an_unproven_action_are_dropped(monkeypatch, db) -> None:
+    _patient, sent = await _run_hand_back_with_intro(
+        monkeypatch, db, "Seu pagamento foi confirmado, escolha abaixo."
+    )
+    assert all("pagamento" not in str(item) for item in sent)
+    assert any(kind == "buttons" for kind, *_ in sent)  # the card itself still goes
+
+
+async def test_hand_back_words_never_go_out_alone(monkeypatch, db) -> None:
+    """Review of TASK-038: a hand-back that ends up sending no card must still get the
+    safety-net apology - never just the agent's words ("escolha abaixo") over nothing."""
+
+    async def _sends_nothing(*args, **kwargs):
+        return None
+
+    fallback_causes: list[str] = []
+
+    async def _fallback(reply, redis, *, cause):
+        fallback_causes.append(cause)
+
+    monkeypatch.setattr(workers_ns, "_handle_show_main_menu", _sends_nothing)
+    monkeypatch.setattr(workers_ns, "_send_turn_fallback", _fallback)
+    _patient, sent = await _run_hand_back_with_intro(monkeypatch, db, "Claro! Escolha abaixo.")
+    assert sent == []  # the words were held for a card that never came
+    assert fallback_causes == ["silent_return"]  # so the safety net answers
+
+
+
+async def test_the_human_offer_card_then_yes_hands_over(monkeypatch, db) -> None:
+    """TASK-038 end to end: the agent offers, the patient taps "✅ Sim", a human owns it."""
+    _tenant_row, patient, conversation = await _make_conversation(db, flow_state=FlowState.LLM)
+
+    async def _fake_get_entitlements(tenant_id, redis):
+        return _summary()
+
+    async def _fake_run_agent(message, context, **kwargs):
+        return with_handback_intro(HUMAN_HANDOFF_OFFER_SENTINEL, "Não tenho esse valor aqui.")
+
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
+    monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
+
+    await tasks._send_bot_reply(_reply_context(conversation, patient, "quanto custa a cirurgia?"))
+    offered = [sent for client in _FakeWhatsAppClient.created for sent in client.sent]
+    assert offered[0] == ("text", patient.wa_id, "Não tenho esse valor aqui.")
+    kind, _to, body, buttons = offered[1]
+    assert (kind, body) == ("buttons", HUMAN_OFFER_BODY)
+    assert [label for _id, label in buttons] == ["✅ Sim", "❌ Não"]
+    async with db() as session:
+        stored = await session.get(Conversation, conversation.id)
+        assert stored.flow_state == FlowState.LLM
+        assert stored.flow_step == STEP_HUMAN_OFFER
+
+    _FakeWhatsAppClient.created = []
+    await tasks._send_bot_reply(_reply_context(conversation, patient, "✅ Sim"))
+    answered = [sent for client in _FakeWhatsAppClient.created for sent in client.sent]
+    assert answered == [("text", patient.wa_id, SCOPED_HELP_ESCALATE_MESSAGE)]
+    async with db() as session:
+        stored = await session.get(Conversation, conversation.id)
+        assert stored.handover_state == HandoverState.HUMAN_ACTIVE

@@ -36,11 +36,13 @@ async def test_dont_know_opener_stays_administrative_before_scoped_answer(monkey
     assert opener.action == "reply"
     assert opener.flow_step == getattr(flow_router, f"STEP_{scope.upper()}_HELP")
     text = opener.bubbles[0].body.casefold()
-    assert "opções" in text
-    assert "clínica" in text
+    # Worded like a person (owner, 2026-10-07, TASK-038), still administrative: it
+    # offers choices like a first visit or a return, never asks about symptoms.
+    assert text.startswith("sem problema, eu te ajudo a escolher!")
+    assert "retorno" in text
     assert "sentindo" not in text
-    assert "precisa" not in text
-    assert "certo" not in text
+    assert "sintoma" not in text
+    assert "precisa" not in text  # TASK-022's removed wording stays out
 
     async def fake_help(**kwargs):
         return ScopedHelpOutcome(kind="escalate")

@@ -102,6 +102,7 @@ V2_TOOL_OUTPUTS: Mapping[str, OutputAllowlist] = {
     "set_booking_draft": _ERROR_ONLY,
     "manage_existing_appointment": _ERROR_ONLY,
     "request_human_handoff": _ERROR_ONLY,
+    "offer_human_handoff": _ERROR_ONLY,
     "show_main_menu": _ERROR_ONLY,
     "start_guided_booking": _ERROR_ONLY,
     "select_professional_and_continue": _ERROR_ONLY,

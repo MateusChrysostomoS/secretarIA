@@ -1,5 +1,6 @@
 """dispatch - split out of workers/tasks.py (TASK-023)."""
 
+from secretaria.ai.formatter import TextBubble
 from secretaria.core.logging import get_logger
 from secretaria.core.whatsapp_limits import (
     MAX_INTERACTIVE_BODY_CHARS,
@@ -23,6 +24,7 @@ from secretaria.services.greeting_template import (
     CONSENT_BUTTON_LABEL,
     LGPD_CONSENT_MESSAGE,
 )
+from secretaria.services.turn_safety_net import take_held_intro
 from secretaria.services.whatsapp import (
     interactive_buttons_record,
 )
@@ -65,6 +67,11 @@ async def _dispatch_bubbles(
             bubbles=len(bubbles),
         )
         return 0
+    # The agent's words held for a hand-back's card (TASK-038) go out in front of
+    # the first batch this turn sends - with the card, never on their own.
+    intro = take_held_intro() if bubbles else None
+    if intro:
+        bubbles = [TextBubble(body=intro), *bubbles]
     sent_count = 0
     for index, bubble in enumerate(bubbles):
         try:

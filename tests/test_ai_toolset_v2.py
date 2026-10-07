@@ -90,7 +90,10 @@ _WITHHELD = {
 _STAGING = {"create_event", "cancel_event"}
 _V2_READS_AND_STAGING = {"get_availability", *_STAGING}
 _PLUGIN_TOOLS_KEPT = {"list_professionals", "select_professional_and_continue", "list_units"}
-_HANDBACKS = {"manage_existing_appointment", "set_booking_draft", "request_human_handoff"}
+_HANDBACKS = {
+    "manage_existing_appointment", "set_booking_draft",
+    "request_human_handoff", "offer_human_handoff",
+}
 
 _ADDONS_OFF = {
     "reactivation_pack": False,

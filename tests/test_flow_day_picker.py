@@ -538,34 +538,39 @@ async def test_understood_free_text_still_lists_that_days_slots():
     assert calendar.slot_calls  # it really asked the calendar for that day
 
 
-@pytest.mark.parametrize("gibberish", ["blá blá", "sei lá", "quando der"])
-async def test_unreadable_free_text_never_delegates_on_the_first_two_tries(gibberish):
-    """The single biggest LLM leak this feature closes. Try 1 re-asks; try 2
-    re-asks AND surfaces an explicit, countable escape. Neither spends an
-    agent call."""
+@pytest.mark.parametrize("attempt", ["dia 35", "31/02"])
+async def test_an_unreadable_date_attempt_re_asks_twice_then_offers_the_escape(attempt):
+    """A date the patient TRIED to type: try 1 re-asks; try 2 re-asks AND surfaces
+    an explicit, countable escape. Neither spends an agent call."""
     tenant, calendar = _tenant(), _Calendar()
 
-    first = await route(_conversation(flow_step=STEP_AWAITING_DAY), tenant, calendar, gibberish)
+    first = await route(_conversation(flow_step=STEP_AWAITING_DAY), tenant, calendar, attempt)
     assert first.action == "reply"
     assert first.flow_step == STEP_AWAITING_DAY_RETRY
     assert first.bubbles[0].body.startswith("Não entendi a data.")
     assert LABEL_OTHER not in _row_labels(first.bubbles[0])
 
     second = await route(
-        _conversation(flow_step=STEP_AWAITING_DAY_RETRY), tenant, calendar, gibberish
+        _conversation(flow_step=STEP_AWAITING_DAY_RETRY), tenant, calendar, attempt
     )
     assert second.action == "reply"
     assert second.flow_step == STEP_AWAITING_DAY_ESCAPE
     assert _row_labels(second.bubbles[0])[-1] == LABEL_OTHER
 
 
-async def test_the_escape_row_is_the_only_way_the_day_step_reaches_the_llm():
+@pytest.mark.parametrize("talk", ["blá blá", "sei lá", "quando der", LABEL_OTHER])
+async def test_talk_that_is_not_a_date_gets_one_model_turn_on_the_same_step(talk):
+    """Owner, 2026-10-07 (TASK-038) reversed "never the model" for text that never
+    tried to be a date: it is answered, and the picker above stays the answer."""
     tenant, calendar = _tenant(), _Calendar()
+    result = await route(_conversation(flow_step=STEP_AWAITING_DAY), tenant, calendar, talk)
+    assert result.action == "delegate_llm"
+    assert result.flow_state == FlowState.SERVICE_CATALOG
+    assert result.flow_step == STEP_AWAITING_DAY
 
-    # Typed before the escape is offered: still just a re-ask.
-    early = await route(_conversation(flow_step=STEP_AWAITING_DAY), tenant, calendar, LABEL_OTHER)
-    assert early.action == "reply"
-    assert early.flow_step == STEP_AWAITING_DAY_RETRY
+
+async def test_the_escape_row_hands_the_whole_conversation_to_the_llm():
+    tenant, calendar = _tenant(), _Calendar()
 
     # Tapped once it IS offered: a deliberate hand-off, logged under a step
     # name that tells it apart from a silent leak at `awaiting_day`.
@@ -581,7 +586,7 @@ async def test_further_misses_stay_on_the_escape_render_forever():
     keeps re-offering it instead of eventually giving up to the model."""
     tenant, calendar = _tenant(), _Calendar()
     result = await route(
-        _conversation(flow_step=STEP_AWAITING_DAY_ESCAPE), tenant, calendar, "ainda não sei"
+        _conversation(flow_step=STEP_AWAITING_DAY_ESCAPE), tenant, calendar, "dia 40"
     )
     assert result.action == "reply"
     assert result.flow_step == STEP_AWAITING_DAY_ESCAPE
@@ -670,15 +675,24 @@ async def test_the_manage_branch_escalates_free_text_the_same_bounded_way():
         flow_step=STEP_MANAGE_DAY,
         flow_managing_appointment_id=UUID(_APPT_ID),
     )
-    first = await route(conv, tenant, calendar, "blá blá", upcoming_appointments=[_appt()])
+    first = await route(conv, tenant, calendar, "dia 35", upcoming_appointments=[_appt()])
     assert first.action == "reply"
     assert first.flow_step == STEP_MANAGE_DAY_RETRY
     assert first.flow_managing_appointment_id == UUID(_APPT_ID)
 
     conv.flow_step = STEP_MANAGE_DAY_RETRY
-    second = await route(conv, tenant, calendar, "blá blá", upcoming_appointments=[_appt()])
+    second = await route(conv, tenant, calendar, "dia 35", upcoming_appointments=[_appt()])
     assert second.flow_step == STEP_MANAGE_DAY_ESCAPE
     assert _row_labels(second.bubbles[0])[-1] == LABEL_OTHER
+
+    # Talk on the manage day step: one model turn, the appointment being moved kept.
+    conv.flow_step = STEP_MANAGE_DAY
+    talk = await route(
+        conv, tenant, calendar, "vocês abrem no feriado?", upcoming_appointments=[_appt()]
+    )
+    assert talk.action == "delegate_llm"
+    assert talk.flow_step == STEP_MANAGE_DAY
+    assert talk.flow_managing_appointment_id == UUID(_APPT_ID)
 
 
 async def test_the_manage_branch_slots_on_the_original_appointment_length():

@@ -11,6 +11,7 @@ concurrently without interference.
 
 import asyncio
 import hashlib
+import json
 import re
 import ssl
 import time
@@ -40,6 +41,7 @@ from secretaria.ai.tools import (
     BLIND_STAGING_VARIANT,
     BookingDraftRequested,
     GuidedBookingRequested,
+    HumanHandoffOfferRequested,
     HumanHandoffRequested,
     ManageAppointmentRequested,
     SelectProfessionalRequested,
@@ -126,6 +128,43 @@ START_GUIDED_BOOKING_SENTINEL_PREFIX = "__START_GUIDED_BOOKING__:"
 # patient's or a third party's name: "w" is only "self"/"other".
 HUMAN_HANDOFF_SENTINEL_PREFIX = "__HUMAN_HANDOFF__:"
 BOOKING_DRAFT_SENTINEL_PREFIX = "__BOOKING_DRAFT__:"
+# Returned when the agent called offer_human_handoff (TASK-038): the worker sends the
+# fixed "quer que eu chame nosso atendente humano?" card with ✅ Sim / ❌ Não
+# (workers/shared/sentinels.py::_handle_offer_human_handoff); the tap decides.
+HUMAN_HANDOFF_OFFER_SENTINEL = "__HUMAN_HANDOFF_OFFER__"
+
+# TASK-038: a hand-back may carry the agent's own words for the patient (the tool's
+# `message`, ai/tools.py::handback_message). They ride IN FRONT of the sentinel as one
+# JSON string line - `__INTRO__:"..."` + newline + the sentinel - so every sentinel
+# keeps its exact shape after `split_handback_intro` and the worker can send the words
+# before the flow's card. JSON escapes any newline inside the text, so the first one
+# always ends the envelope.
+HANDBACK_INTRO_PREFIX = "__INTRO__:"
+
+
+def with_handback_intro(sentinel: str, intro: str | None) -> str:
+    """`sentinel`, prefixed by the intro envelope when the agent left words for the patient."""
+    if not (intro or "").strip():
+        return sentinel
+    return f"{HANDBACK_INTRO_PREFIX}{json.dumps(intro.strip(), ensure_ascii=False)}\n{sentinel}"
+
+
+def split_handback_intro(reply: str) -> tuple[str | None, str]:
+    """(intro, rest) - the inverse of `with_handback_intro`; (None, reply) without one.
+
+    A malformed envelope drops the intro and keeps the sentinel: the card must still
+    reach the patient even if the words cannot.
+    """
+    if not reply.startswith(HANDBACK_INTRO_PREFIX):
+        return None, reply
+    head, _, rest = reply.partition("\n")
+    try:
+        intro = json.loads(head[len(HANDBACK_INTRO_PREFIX) :])
+    except ValueError:
+        return None, rest
+    if not isinstance(intro, str) or not intro.strip():
+        return None, rest
+    return intro.strip(), rest
 
 
 # Per-async-task TenantRuntimeConfig, used by _prompt_with_today. Defined in
@@ -764,19 +803,33 @@ async def run_agent(
             reason=exc.reason,
         )
         return f"{HUMAN_HANDOFF_SENTINEL_PREFIX}{exc.reason}"
+    except HumanHandoffOfferRequested as exc:
+        logger.info(
+            "ai_run_agent_human_handoff_offer",
+            conversation_id=str(conversation_id),
+            has_intro=bool(exc.intro),
+        )
+        return with_handback_intro(HUMAN_HANDOFF_OFFER_SENTINEL, exc.intro)
 
-    except ShowMainMenuRequested:
+    except ShowMainMenuRequested as exc:
         # The agent chose to hand the patient back to the button menu — same
         # propagation path as CalendarUnavailableError above.
-        logger.info("ai_run_agent_show_main_menu", conversation_id=str(conversation_id))
-        return SHOW_MAIN_MENU_SENTINEL
+        logger.info(
+            "ai_run_agent_show_main_menu",
+            conversation_id=str(conversation_id),
+            has_intro=bool(exc.intro),
+        )
+        return with_handback_intro(SHOW_MAIN_MENU_SENTINEL, exc.intro)
     except SelectProfessionalRequested as exc:
         logger.info(
             "ai_run_agent_select_professional",
             conversation_id=str(conversation_id),
             professional_id=str(exc.professional_id),
+            has_intro=bool(exc.intro),
         )
-        return f"{SELECT_PROFESSIONAL_SENTINEL_PREFIX}{exc.professional_id}"
+        return with_handback_intro(
+            f"{SELECT_PROFESSIONAL_SENTINEL_PREFIX}{exc.professional_id}", exc.intro
+        )
     except ManageAppointmentRequested as exc:
         # The agent chose to hand a reschedule/cancel request back to the
         # deterministic manage flow — same propagation path as the sentinels
@@ -790,8 +843,11 @@ async def run_agent(
             has_appointment=request.appointment is not None,
             has_day=request.day is not None,
             has_time=request.time is not None,
+            has_intro=bool(exc.intro),
         )
-        return f"{MANAGE_APPOINTMENT_SENTINEL_PREFIX}{request.to_payload()}"
+        return with_handback_intro(
+            f"{MANAGE_APPOINTMENT_SENTINEL_PREFIX}{request.to_payload()}", exc.intro
+        )
     except BookingDraftRequested as exc:
         draft = exc.draft
         logger.info(
@@ -803,8 +859,9 @@ async def run_agent(
             has_for_whom=draft.attendee is not None,
             has_day=draft.day is not None,
             has_time=draft.time is not None,
+            has_intro=bool(exc.intro),
         )
-        return BOOKING_DRAFT_SENTINEL_PREFIX + draft.to_payload()
+        return with_handback_intro(BOOKING_DRAFT_SENTINEL_PREFIX + draft.to_payload(), exc.intro)
     except GuidedBookingRequested as exc:
         # The agent chose to hand the BOOKING itself to the button flow —
         # same propagation path as the sentinels above. The service name is
@@ -815,8 +872,11 @@ async def run_agent(
             "ai_run_agent_start_guided_booking",
             conversation_id=str(conversation_id),
             has_type=exc.appointment_type is not None,
+            has_intro=bool(exc.intro),
         )
-        return f"{START_GUIDED_BOOKING_SENTINEL_PREFIX}{exc.appointment_type or ''}"
+        return with_handback_intro(
+            f"{START_GUIDED_BOOKING_SENTINEL_PREFIX}{exc.appointment_type or ''}", exc.intro
+        )
     except Exception as exc:
         logger.error(
             "ai_run_agent_failed",

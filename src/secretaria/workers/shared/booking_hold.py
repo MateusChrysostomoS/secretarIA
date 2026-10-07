@@ -10,6 +10,7 @@ from sqlalchemy import select
 from secretaria.ai.graph import (
     BOOKING_DRAFT_SENTINEL_PREFIX,
     CALENDAR_UNAVAILABLE_SENTINEL,
+    HUMAN_HANDOFF_OFFER_SENTINEL,
     HUMAN_HANDOFF_SENTINEL_PREFIX,
     MANAGE_APPOINTMENT_SENTINEL_PREFIX,
     SELECT_PROFESSIONAL_SENTINEL_PREFIX,
@@ -103,7 +104,11 @@ def _is_agent_sentinel(reply_text: str) -> bool:
     them. Listed in ONE place so a new sentinel cannot be forgotten by the
     filter and silently rewritten into an apology.
     """
-    return reply_text in (CALENDAR_UNAVAILABLE_SENTINEL, SHOW_MAIN_MENU_SENTINEL) or (
+    return reply_text in (
+        CALENDAR_UNAVAILABLE_SENTINEL,
+        SHOW_MAIN_MENU_SENTINEL,
+        HUMAN_HANDOFF_OFFER_SENTINEL,
+    ) or (
         reply_text.startswith(SELECT_PROFESSIONAL_SENTINEL_PREFIX)
         or reply_text.startswith(MANAGE_APPOINTMENT_SENTINEL_PREFIX)
         or reply_text.startswith(HUMAN_HANDOFF_SENTINEL_PREFIX)
