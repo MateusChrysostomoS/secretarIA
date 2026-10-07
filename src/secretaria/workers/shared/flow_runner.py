@@ -190,6 +190,7 @@ async def _apply_flow_result(
                     conv.flow_managing_appointment_id = result.flow_managing_appointment_id
                     conv.flow_attendee_name = result.flow_attendee_name
                     conv.flow_draft = result.flow_draft
+                    conv.flow_replaces_appointment_id = result.flow_replaces_appointment_id
                     if result.attendee_authorized and tenant is not None:
                         # The explicit "Confirmar" under the authorization
                         # sentence (services/attendee.py): the audit row, in

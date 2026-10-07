@@ -466,6 +466,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                             ),
                             flow_attendee_name=conversation.flow_attendee_name,
                             flow_draft=conversation.flow_draft,
+                            flow_replaces_appointment_id=conversation.flow_replaces_appointment_id,
                             patient_id=conversation.patient_id,
                         ),
                         _flow_tenant_snapshot(

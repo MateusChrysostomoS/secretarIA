@@ -557,6 +557,8 @@ async def _route_inbound_turn(
                     pending_code_reprompt=held,
                 )
             conversation.flow_state = FlowState.IDLE
+            # TASK-032 R3: leaving the code wait ends a "Marcar outra" booking too.
+            conversation.flow_replaces_appointment_id = None
             logger.info(
                 "conversation_pending_code_abandoned",
                 conversation_id=str(conversation.id),
@@ -761,6 +763,7 @@ async def _route_inbound_turn(
             conversation.flow_managing_appointment_id = None
             conversation.flow_attendee_name = None
             conversation.flow_draft = None
+            conversation.flow_replaces_appointment_id = None
             return _ReplyContext(
                 channel=channel,
                 conversation_id=conversation.id,
