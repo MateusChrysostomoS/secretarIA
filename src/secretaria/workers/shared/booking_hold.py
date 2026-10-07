@@ -27,6 +27,10 @@ from secretaria.models import (
 )
 from secretaria.plugins.post_booking import enqueue_post_booking_hooks
 from secretaria.services import reminder_hooks
+from secretaria.services.appointment_replacement import (
+    ReplacedAppointment,
+    cancel_replaced_appointment,
+)
 from secretaria.services.appointment_status import (
     SOURCE_FLOW,
 )
@@ -64,6 +68,10 @@ from secretaria.workers.shared.handover import (
 from secretaria.workers.shared.llm_context import (
     _appointment_calendar,
     _appointment_calendar_target,
+)
+from secretaria.workers.shared.replacement import (
+    _finish_replacement,
+    _replaced_notice,
 )
 
 logger = get_logger(__name__)
@@ -277,6 +285,8 @@ async def _promote_booking_hold(
         insurance=held.insurance,
         attendee_name=held.attendee_name,
     )
+    # TASK-032 R3: the appointment a "Marcar outra" booking replaced, if any.
+    replaced: ReplacedAppointment | None = None
     try:
         async with async_session_factory() as session:
             async with session.begin():
@@ -287,6 +297,23 @@ async def _promote_booking_hold(
                     session, tenant.id, held.insurance, held.professional_id
                 )
                 session.add(appointment)
+                # The Portal booking is confirmed HERE (the code gate), so the
+                # original goes in this same transaction (spec §4.3).
+                conversation = await session.get(Conversation, reply.conversation_id)
+                if (
+                    conversation is not None
+                    and conversation.flow_replaces_appointment_id is not None
+                ):
+                    await session.flush()
+                    replaced = await cancel_replaced_appointment(
+                        session,
+                        tenant=tenant,
+                        patient_id=conversation.patient_id,
+                        replaced_id=conversation.flow_replaces_appointment_id,
+                        new_appointment_id=appointment.id,
+                        waba_token=waba_token,
+                    )
+                    conversation.flow_replaces_appointment_id = None
     except Exception as exc:
         # The event EXISTS on Google and the row does not. Same answer the
         # flow path gives in the same situation: never tell the patient it is
@@ -318,10 +345,13 @@ async def _promote_booking_hold(
     if reminder_hooks.enabled_for(tenant):
         await reminder_hooks.after_appointment_booked(appointment.id)
 
+    if replaced is not None:
+        await _finish_replacement(tenant, replaced)
+
     tz = _tenant_tzinfo(tenant)
     local_start = held.start_at.astimezone(tz)
     local_end = held.end_at.astimezone(tz)
-    return (
+    confirmation = (
         "Pronto! Seu agendamento está confirmado. \u2705\n\n"
         f"{service_type}\n"
         + (f"Paciente: {held.attendee_name}\n" if held.attendee_name else "")
@@ -329,6 +359,9 @@ async def _promote_booking_hold(
         "Adicionar à sua agenda:\n"
         f"{build_patient_calendar_link(local_start, local_end, summary, tz=tz)}"
     )
+    if replaced is not None:
+        confirmation = f"{confirmation}\n\n{_replaced_notice(tenant, replaced)}"
+    return confirmation
 
 async def _release_hold(hold_id) -> None:
     """Drop the reservation, on THIS module's session factory. Best-effort.

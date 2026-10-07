@@ -259,6 +259,9 @@ def _expire_stale_llm_state(
     conversation.flow_attendee_name = None
     # The AI's parked draft belongs to the same abandoned booking (TASK-030 P2).
     conversation.flow_draft = None
+    # A "Marcar outra" booking abandoned in LLM mode: the original stays
+    # (TASK-032 R3) - the marker belongs to the booking that just expired.
+    conversation.flow_replaces_appointment_id = None
     # `flow_selected_professional_id` / `flow_selected_insurance` are NOT
     # cleared here, unlike the "Não" answer which drops everything. They say WHO
     # the patient is dealing with, not where they were in a form, and the agent
@@ -308,6 +311,7 @@ def _expire_stale_attendee_step(
     conversation.flow_selected_slot = None
     conversation.flow_attendee_name = None
     conversation.flow_draft = None
+    conversation.flow_replaces_appointment_id = None
     return True
 
 async def _write_flow_state(conversation_id: UUID | None, state: FlowState) -> None:

@@ -694,6 +694,14 @@ _ACTION_BUTTON_PREFIXES: tuple[str, ...] = (
     "remconfirm|",
     "remcancel|",
     "remother|",
+    # TASK-032 R3: the "Cancelar" path of a reminder. Same row-id scoping as the
+    # three above (workers/shared/reminder_actions.py). The trailing bar keeps
+    # "remgiveupyes|" from ever matching as "remgiveup|".
+    "remresched|",
+    "remnew|",
+    "remgiveup|",
+    "remgiveupyes|",
+    "remkeep|",
 )
 
 

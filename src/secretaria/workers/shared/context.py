@@ -144,3 +144,9 @@ class _ReplyContext:
     name_captured: bool = False
     # The answer did not look like a name; the re-ask is the whole turn.
     name_invalid: bool = False
+    # --- TASK-032 R3: the reminder that opens a returning patient's chat -----
+    # The appointment the card is about (services/reminder_opening.py). The
+    # card goes out first (`workers/shared/reminder_opening.py`), then the
+    # patient's message is answered as usual - minus the generic menu, which
+    # the card's "Outro" already covers (`_run_flow`, `show_main_menu`).
+    reminder_opening_appointment_id: UUID | None = None

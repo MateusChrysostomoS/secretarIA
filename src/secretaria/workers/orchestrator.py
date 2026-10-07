@@ -108,6 +108,7 @@ from secretaria.services.turn_safety_net import (
     fallback_allowed,
     hold_intro,
     sends_in_turn,
+    take_held_intro,
 )
 from secretaria.services.typing_indicator import clear_typing, mark_typing
 from secretaria.workers.portal.attachments import (
@@ -166,6 +167,9 @@ from secretaria.workers.shared.llm_context import (
     _manage_owner_calendar_target,
     _should_inject_appointment_context,
     _should_inject_post_consult_knowledge,
+)
+from secretaria.workers.shared.reminder_opening import (
+    _send_reminder_opening,
 )
 from secretaria.workers.shared.sentinels import (
     _handle_manage_appointment,
@@ -466,6 +470,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                             ),
                             flow_attendee_name=conversation.flow_attendee_name,
                             flow_draft=conversation.flow_draft,
+                            flow_replaces_appointment_id=conversation.flow_replaces_appointment_id,
                             patient_id=conversation.patient_id,
                         ),
                         _flow_tenant_snapshot(
@@ -905,6 +910,13 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             await _send_consent_notice(reply, tenant=tenant, waba_token=waba_token)
         return
 
+    # TASK-032 R3: the appointment reminder opens the chat. Past the entitlement
+    # gate on purpose (an unentitled clinic sends nothing and plans no row); the
+    # patient's own message is then answered by everything below, minus the
+    # generic menu (`_run_flow`, and the `show_main_menu` hand-back further down).
+    if reply.reminder_opening_appointment_id is not None and tenant is not None:
+        await _send_reminder_opening(reply, tenant=tenant, waba_token=waba_token)
+
     # Optional-addon inbound interception (e.g. human_backup_24_7's
     # outside-business-hours handover). Runs once entitlement is confirmed,
     # BEFORE any flow logic decides what the bot would say. A hook that
@@ -1044,6 +1056,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             tenant_config.appointment_types if tenant_config is not None else [],
             # TASK-030 P3: the "(ref ...)" manage_existing_appointment v2 takes.
             with_refs=ai_draft_v2_enabled(tenant),
+            service_guides=tenant_config.service_guides if tenant_config is not None else None,
         )
 
     # Every LLM turn is either a deliberate escape hatch ("Outro") or a gap in
@@ -1148,6 +1161,25 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
     # non-destructive menu return, or re-entry at a confirmed doctor's
     # greeting + services. Mirrors the calendar sentinel short-circuit above.
     if reply_text == SHOW_MAIN_MENU_SENTINEL:
+        if reply.reminder_opening_appointment_id is not None:
+            # The reminder card that opened this turn already offers "Outro".
+            logger.info(
+                "reminder_opening_menu_suppressed",
+                source="agent",
+                conversation_id=str(reply.conversation_id),
+            )
+            # The agent's short answer rode in as a held intro for the menu card
+            # that is not coming: send it on its own so the question is answered.
+            held = take_held_intro()
+            if held and tenant is not None:
+                await _send_plain_reply(
+                    reply,
+                    tenant=tenant,
+                    waba_token=waba_token,
+                    body=held,
+                    event="reminder_opening_held_intro_sent",
+                )
+            return
         await _handle_show_main_menu(
             reply, tenant, flow_professionals, patient_wa, redis=redis, waba_token=waba_token
         )

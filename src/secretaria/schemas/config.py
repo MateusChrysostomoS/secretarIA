@@ -7,7 +7,7 @@ services/tenant_config.py instead.
 """
 
 from datetime import time
-from typing import Literal
+from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -313,8 +313,10 @@ class TenantConfigRead(BaseModel):
     business_hours: dict
     appointment_types: list
     initial_flows: dict
-    address: dict | None
-    clinic_facts: dict | None = None
+    # Whatever is stored, in any shape: the AI reads these as free text, so a value that is
+    # not an object must not turn the whole configuration read into a 500.
+    address: Any = None
+    clinic_facts: Any = None
     collect_insurance: bool
     is_active: bool
     # True when a Google Calendar refresh token is stored for this tenant.

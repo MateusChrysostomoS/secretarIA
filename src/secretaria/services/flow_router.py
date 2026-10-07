@@ -649,6 +649,13 @@ class FlowRouterResult:
     # When set, the matching appointment row should be moved (RESCHEDULED):
     # {"google_event_id", "start_at", "end_at"}.
     appointment_reschedule: dict | None = None
+    # TASK-032 R3 ("Marcar outra consulta"): the live appointment the booking in
+    # progress REPLACES. Written unconditionally by `_apply_flow_result` like
+    # every flow field; `_carry_replacement` keeps it only while the
+    # conversation stays inside the booking, and the booking tail cancels the
+    # original in the same transaction as the new row
+    # (services/appointment_replacement.py).
+    flow_replaces_appointment_id: UUID | None = None
 
 
 @dataclass
@@ -1260,6 +1267,29 @@ def _menu_bubbles(tenant: Tenant, professionals: list | None = None) -> list:
     return [MenuBubble(body=menu_label(tenant), labels=main_menu_buttons())]
 
 
+def is_generic_menu_result(result: FlowRouterResult) -> bool:
+    """True for the plain menu card `route()` shows when a message from IDLE means nothing specific.
+
+    TASK-032 R3: on the turn the chat opens with the appointment reminder, that
+    card (whose "Outro" already offers everything the menu would) replaces this
+    one, so the worker skips it (`workers/shared/flow_runner.py::_run_flow`).
+    Anything that records, books, moves, cancels or asks a specific question is
+    NOT generic and is always answered.
+    """
+    return (
+        result.action == "reply"
+        and result.flow_state == FlowState.MENU
+        and result.flow_step is None
+        and result.appointment is None
+        and result.appointment_cancel_id is None
+        and result.appointment_reschedule is None
+        and result.decline_reason is None
+        and result.booking_hold is None
+        and bool(result.bubbles)
+        and all(isinstance(bubble, MenuBubble) for bubble in result.bubbles)
+    )
+
+
 def _selected_professional_id(conversation: Conversation) -> UUID | None:
     """The conversation's picked professional (getattr: snapshots may predate it)."""
     return getattr(conversation, "flow_selected_professional_id", None)
@@ -1339,10 +1369,57 @@ def _carry_draft(conversation: Conversation, result: FlowRouterResult) -> FlowRo
     return result
 
 
+# The states a "Marcar outra" booking may pass through (TASK-032 R3): the
+# booking itself, the AI answering a question in the middle of it (TASK-030
+# hands back to the same card), and the Portal's code wait after "Confirmar"
+# (the appointment is born at `_promote_booking_hold`).
+REPLACEMENT_KEEP_STATES: tuple[FlowState, ...] = (
+    FlowState.SERVICE_CATALOG,
+    FlowState.LLM,
+    FlowState.AWAITING_EMAIL_CODE,
+)
+REPLACEMENT_NOTICE = "Ao confirmar, sua consulta anterior será cancelada."
+
+
+def _replaces_appointment_id(conversation: Conversation) -> UUID | None:
+    """The appointment a booking in progress replaces (getattr: snapshots may predate it)."""
+    return getattr(conversation, "flow_replaces_appointment_id", None)
+
+
+def _carry_replacement(conversation: Conversation, result: FlowRouterResult) -> FlowRouterResult:
+    """Keep the "Marcar outra" marker while the patient is still booking.
+
+    `_apply_flow_result` writes `flow_replaces_appointment_id` unconditionally,
+    so a result that does not name it clears it - which is the point: the
+    marker must never outlive the booking it belongs to (an abandoned "Marcar
+    outra" leaves the original untouched). Kept only when the conversation is
+    ALREADY in one of `REPLACEMENT_KEEP_STATES` and the result stays in one, so
+    a marker left behind on an IDLE conversation can never ride into a booking
+    started later from the menu. A result that books (`appointment`) never
+    carries it: the caller consumes the stored value in that same transaction.
+    """
+    if result.flow_replaces_appointment_id is not None or result.appointment is not None:
+        return result
+    if (
+        getattr(conversation, "flow_state", None) in REPLACEMENT_KEEP_STATES
+        and result.flow_state in REPLACEMENT_KEEP_STATES
+    ):
+        result.flow_replaces_appointment_id = _replaces_appointment_id(conversation)
+    return result
+
+
+def _replacement_line(conversation: Conversation) -> str:
+    """The confirmation card's warning while a "Marcar outra" booking is in progress."""
+    return f"\n\n{REPLACEMENT_NOTICE}" if _replaces_appointment_id(conversation) else ""
+
+
 def _carry_booking(conversation: Conversation, result: FlowRouterResult) -> FlowRouterResult:
-    """The three carries, applied once per public entry (route, resume, hand-back)."""
-    return _carry_draft(
-        conversation, _carry_insurance(conversation, _carry_attendee(conversation, result))
+    """The carries, applied once per public entry (route, resume, hand-back)."""
+    return _carry_replacement(
+        conversation,
+        _carry_draft(
+            conversation, _carry_insurance(conversation, _carry_attendee(conversation, result))
+        ),
     )
 
 
@@ -4524,6 +4601,7 @@ def _recap_text(
         f"{_professional_line(professional)}"
         f"{_attendee_line(conversation)}"
         f"{start.strftime('%d/%m/%Y às %H:%M')}"
+        f"{_replacement_line(conversation)}"
     )
 
 

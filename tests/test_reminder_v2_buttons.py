@@ -165,18 +165,19 @@ async def test_a_tap_on_a_message_about_the_old_time_points_to_the_new_one(db): 
     assert (await reload_appointment(db, world.appointment.id)).confirmation_count == 0
 
 
-async def test_cancel_offers_reschedule_or_give_up_on_this_appointment(db):  # noqa: F811
+async def test_cancel_offers_the_three_way_card(db):  # noqa: F811
+    # TASK-032 R3 replaced R2's interim Remarcar / Não vou mais card.
+    from secretaria.services.reminder_text import cancel_path_buttons
+    from secretaria.workers.shared.reminder_actions import CANCEL_PATH_TEXT
+
     world = await seed_world(db, start_at=_future())
     rid = await add_reminder(db, world)
 
     await _tap(world.conversation.id, "remcancel", rid)
 
     [(kind, _to, body, buttons)] = FakeWhatsAppClient.all_sent()
-    assert (kind, body) == ("buttons", "O que você prefere?")
-    assert buttons == [
-        (f"apptresched|{world.appointment.id}", "Remarcar"),
-        (f"apptcancel|{world.appointment.id}", "Não vou mais"),
-    ]
+    assert (kind, body) == ("buttons", CANCEL_PATH_TEXT)
+    assert buttons == cancel_path_buttons(rid)
     row = await get_reminder(db, rid)
     assert row.answer == "cancel" and row.answered_at is not None
     assert (

@@ -122,6 +122,17 @@ Relatório dos testes: `docs/TESTES_REAIS_task037_038_2026-10-07.md`.
   nunca virem "hoje"). Suíte: 3777 passed, 0 failed. Ainda aberto: a fala que acompanha o cartão às vezes
   anuncia o passo errado (relatório, ponto A).
 
+## Canais: WhatsApp e Portal (conferido em 2026-10-07, a pedido do dono)
+
+Tudo desta tarefa e da TASK-037 vale igual nos dois canais, sem código por canal: o roteador
+(`services/flow_router.py`), a IA (`ai/`), o envelope da fala e o envio (`_apply_flow_result` →
+`_dispatch_bubbles`, que escolhe o remetente pelo canal) são compartilhados, e o WhatsApp (texto e áudio
+transcrito) entra pelo mesmo `_send_bot_reply`. No WhatsApp o cartão da oferta sai como botões de resposta
+(`menu|0`/`menu|1`) e o toque volta como o título ("✅ Sim"/"❌ Não"), que o roteador lê igual ao Portal.
+Provas: os testes de worker de `tests/test_bot_reply_gating.py` rodam com o cliente WhatsApp (fala antes do
+cartão, oferta → Sim → humano) e `test_a_whatsapp_tap_on_the_offer_routes_like_the_portal` cobre o toque.
+Testes reais só no Portal até agora (dono, 2026-10-07: WhatsApp fica para depois).
+
 ## Integração com a `main` de 2026-10-07
 
 Outra sessão publicou em `main` a captura de dia/horário/"pra quem" pela IA (8a1aaf9, `set_booking_draft`

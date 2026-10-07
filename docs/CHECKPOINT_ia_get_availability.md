@@ -103,3 +103,7 @@ Preservadas a oferta de atendente com Sim/N?o, a frase antes dos cart?es e as co
 Valida??o final da integra??o (`33989cc`, com os mesmos 394 blobs ap?s os commits s? de docs/?ndice): **4009 passed, 22 skipped, 15 warnings in 464.63s (0:07:44)**. Ruff dos 23 arquivos Python e diff-check limpos. Reteste documentado da main `de61e22` preservado no merge `285ea72`; nenhuma mudan?a adicional de c?digo.
 
 > TASK-030 P5: prompt por turno/conjunto real de ferramentas, ate tres ofertas com dia, criar/cancelar cegos sem declarar acao concluida ? ver `docs/CHECKPOINT_ia_prompt_v2.md`.
+
+## 13. Deploy comprovado e reteste real — 2026-10-07
+
+Código Python do P4 comprovado em API e worker por fingerprint 95aa4c547749, paridade match. Reteste do Portal: cartões/desistência/consulta original preservada PASS. Consulta de horários não listou opções; remarcação por texto ainda repete dia. Leitura do hub comprovou ai_draft_v2=false: as ferramentas novas do P4 não foram exercitadas ao vivo; P5 antes de ativar. Nenhuma configuração alterada ou consulta confirmada. Provas/limites e envio real WhatsApp pendente em `docs/TESTES_REAIS_p4_posdeploy_2026-10-07.md`. Estado BUILT/commitado/publicado acima agora tem código DEPLOYADO comprovado; ativação e certificação v2 continuam pendentes.
