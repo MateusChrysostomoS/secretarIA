@@ -25,6 +25,10 @@ from secretaria.services.attendee import (
     CONSENT_KIND_THIRD_PARTY_BOOKING,
     CONSENT_LEGAL_BASIS_THIRD_PARTY_BOOKING,
 )
+from secretaria.services.appointment_replacement import (
+    ReplacedAppointment,
+    cancel_replaced_appointment,
+)
 from secretaria.services.calendar import (
     CalendarService,
 )
@@ -62,6 +66,10 @@ from secretaria.workers.shared.handover import (
 )
 from secretaria.workers.shared.llm_context import (
     _flow_turn_calendar,
+)
+from secretaria.workers.shared.replacement import (
+    _finish_replacement,
+    _replaced_notice,
 )
 
 logger = get_logger(__name__)
@@ -171,6 +179,8 @@ async def _apply_flow_result(
     persisted = True
     booked_appointment: Appointment | None = None
     cancellation_note: str | None = None
+    # TASK-032 R3: the appointment a "Marcar outra" booking replaced, if any.
+    replaced: ReplacedAppointment | None = None
     # TASK-032 R2: the appointments this turn closed or moved, for the
     # reminder hooks that run after the commit.
     closed_appointment_id = None
@@ -180,6 +190,8 @@ async def _apply_flow_result(
             async with session.begin():
                 conv = await session.get(Conversation, reply.conversation_id)
                 if conv is not None:
+                    # TASK-032 R3: read BEFORE the writes below overwrite it.
+                    replaced_id = conv.flow_replaces_appointment_id
                     conv.flow_state = result.flow_state
                     conv.flow_step = result.flow_step
                     conv.flow_selected_type = result.flow_selected_type
@@ -245,6 +257,20 @@ async def _apply_flow_result(
                             **result.appointment,
                         )
                         session.add(booked_appointment)
+                        # TASK-032 R3 ("Marcar outra consulta"): the original is
+                        # cancelled HERE - same transaction as the new row, and
+                        # only now that the new booking is confirmed. A failed
+                        # persist rolls both back together.
+                        if replaced_id is not None and tenant is not None:
+                            await session.flush()
+                            replaced = await cancel_replaced_appointment(
+                                session,
+                                tenant=tenant,
+                                patient_id=conv.patient_id,
+                                replaced_id=replaced_id,
+                                new_appointment_id=booked_appointment.id,
+                                waba_token=waba_token,
+                            )
                     # Cancel/reschedule mirror the calendar action onto the
                     # platform row, scoped by tenant_id (google_event_id is
                     # indexed but not globally unique). Best-effort: the calendar
@@ -408,6 +434,8 @@ async def _apply_flow_result(
     if booked_appointment is not None and persisted and tenant is not None:
         _log_booking_scope(booked_appointment, tenant.id, source=SOURCE_FLOW)
         await enqueue_post_booking_hooks(redis, tenant.id, booked_appointment.id, source="flow")
+        if replaced is not None:
+            await _finish_replacement(tenant, replaced)
         # TASK-032 R2: plan the reminders, in their own transaction AFTER the
         # booking committed - a reminder problem never costs a booking.
         if reminder_hooks.enabled_for(tenant):
@@ -461,6 +489,9 @@ async def _apply_flow_result(
         if result.bubbles:
             if cancellation_note:
                 result.bubbles[-1].body = f"{result.bubbles[-1].body}\n\n{cancellation_note}"
+            if replaced is not None and persisted and tenant is not None:
+                notice = _replaced_notice(tenant, replaced)
+                result.bubbles[-1].body = f"{result.bubbles[-1].body}\n\n{notice}"
             await _dispatch_bubbles(reply, result.bubbles, tenant=tenant, waba_token=waba_token)
         return True
     return False  # delegate_llm
