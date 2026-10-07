@@ -35,6 +35,7 @@ from secretaria.services.calendar import (
 from secretaria.services.flow_router import (
     STEP_AWAITING_ATTENDEE_AUTH,
     FlowRouterResult,
+    is_generic_menu_result,
     route,
 )
 from secretaria.services.insurance_catalog import (
@@ -143,6 +144,16 @@ async def _run_flow(
         # Pra-quem answered with an AI draft parked: the resolver lands it instead of the
         # list `result` would show (falls back to `result` on any failure).
         result = await _resume_booking_draft(reply, tenant, result, gate=gate)
+    if reply.reminder_opening_appointment_id is not None and is_generic_menu_result(result):
+        # TASK-032 R3: the reminder card that opened this turn replaces the plain
+        # menu (its "Outro" covers it). Nothing is persisted: the conversation
+        # stays where it was.
+        logger.info(
+            "reminder_opening_menu_suppressed",
+            source="flow",
+            conversation_id=str(reply.conversation_id),
+        )
+        return True
     return await _apply_flow_result(
         reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
     )
