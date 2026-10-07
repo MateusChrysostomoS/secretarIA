@@ -14,7 +14,7 @@ In-memory sqlite (same pattern as tests/test_service_catalog.py). No network.
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -26,7 +26,7 @@ from secretaria.ai import prompts, tools as ai_tools
 from secretaria.core.database import Base
 from secretaria.models import Professional, Tenant
 from secretaria.models.service import Service
-from secretaria.services import tenant_config as cfg
+from secretaria.services import booking_dates, tenant_config as cfg
 from secretaria.services.service_catalog import normalize
 
 SVC = "Cirurgia de Catarata"
@@ -45,15 +45,15 @@ RESSONANCIA = {
 }
 
 
-class _FixedDate(date):
+class _FixedDateTime(datetime):
     @classmethod
-    def today(cls) -> date:  # type: ignore[override]
-        return date(2026, 1, 15)
+    def now(cls, tz=None) -> datetime:
+        return datetime(2026, 1, 15, 12, tzinfo=UTC)
 
 
 @pytest.fixture(autouse=True)
 def _frozen_today(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(prompts, "date", _FixedDate)
+    monkeypatch.setattr(booking_dates, "datetime", _FixedDateTime)
 
 
 @pytest_asyncio.fixture

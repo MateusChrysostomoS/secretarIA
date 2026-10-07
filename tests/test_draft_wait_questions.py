@@ -204,7 +204,7 @@ async def test_a_convenio_question_parks_the_day_and_time_with_the_switch_on():
     assert res.accepted == ("service", "day", "time")
 
 
-async def test_without_the_switch_the_question_parks_nothing():
+async def test_an_explicit_day_and_time_survive_the_question_without_the_switch():
     tenant = _resolver_tenant(
         collect_insurance=True, insurance_mode="shared", insurances=["Unimed"]
     )
@@ -212,8 +212,9 @@ async def test_without_the_switch_the_question_parks_nothing():
         BookingDraft(service="Consulta", day=DAY, time=dt.time(10, 0)), tenant=tenant
     )
     assert res.landing_step == fr.STEP_AWAITING_INSURANCE
-    assert res.result.flow_draft is None
-    assert res.accepted == ("service",)
+    parked = draft_from_record(res.result.flow_draft, now=NOW)
+    assert (parked.service, parked.day, parked.time) == ("Consulta", DAY, dt.time(10, 0))
+    assert res.accepted == ("service", "day", "time")
 
 
 async def test_a_service_alone_also_waits_so_the_details_are_not_skipped():

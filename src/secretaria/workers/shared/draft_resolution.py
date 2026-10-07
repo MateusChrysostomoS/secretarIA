@@ -223,7 +223,10 @@ def _fold_answer(
     if answered_step == STEP_AWAITING_INSURANCE:
         return replace(draft, insurance=None)
     if answered_step == STEP_AWAITING_PROFESSIONAL and result.flow_selected_professional_id:
-        return replace(draft, professional_id=result.flow_selected_professional_id)
+        return replace(
+            draft, professional_id=result.flow_selected_professional_id,
+            professional_unresolved=False,
+        )
     if answered_step == STEP_AWAITING_SERVICE and result.flow_selected_type:
         return replace(draft, service=result.flow_selected_type)
     return draft

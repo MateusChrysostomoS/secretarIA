@@ -1001,8 +1001,8 @@ async def _handle_set_booking_draft(
     TASK-030 P2. Everything is re-read FRESH (`_load_draft_context`); `flow_snapshot`
     stays in the signature for the caller and is no longer read. Who decides the landing:
 
-      * the resolver (`resolve_booking_draft`) when the clinic's draft v2 switch is on -
-        AND, for every clinic, whenever pra-quem is still unknown: the workflow asks it
+      * the resolver (`resolve_booking_draft`) when the clinic's draft v2 switch is on,
+        the request includes day/time/for-whom, or pra-quem is still unknown: it asks it
         first and parks the rest in `flow_draft` (spec §4.11, the safety fix);
       * otherwise the v1 landing (`_legacy_booking_draft`).
 
@@ -1057,7 +1057,11 @@ async def _handle_set_booking_draft(
         return
     # The loader re-read the tenant too; do not restore a stale switch/config.
     tenant = ctx.tenant
-    if ai_draft_v2_enabled(tenant) or _pra_quem_unknown(ctx.conversation, draft):
+    if (
+        ai_draft_v2_enabled(tenant)
+        or draft.has_capture_fields()
+        or _pra_quem_unknown(ctx.conversation, draft)
+    ):
         await _apply_draft_resolution(
             reply,
             tenant,

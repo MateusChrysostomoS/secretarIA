@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
 
-from secretaria.ai import prompts
 from secretaria.ai.prompts import CLINIC_FACTS_BUDGET, secretary_system_prompt
+from secretaria.services import booking_dates
 from secretaria.services.tenant_config import RuntimeAppointmentType, TenantRuntimeConfig
 
 GOLDEN = Path(__file__).parent / "golden" / "system_prompt_default.txt"
@@ -19,15 +19,15 @@ FOOTER = "não invente: diga que vai confirmar com a equipe."
 HEADING_PREFIX = "\n\n================ "
 
 
-class _FixedDate(date):
+class _FixedDateTime(datetime):
     @classmethod
-    def today(cls) -> date:  # type: ignore[override]
-        return date(2026, 1, 15)
+    def now(cls, tz=None) -> datetime:
+        return datetime(2026, 1, 15, 12, tzinfo=UTC)
 
 
 @pytest.fixture(autouse=True)
 def _frozen_today(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(prompts, "date", _FixedDate)
+    monkeypatch.setattr(booking_dates, "datetime", _FixedDateTime)
 
 
 def _config(**overrides) -> TenantRuntimeConfig:
@@ -47,7 +47,7 @@ def _config(**overrides) -> TenantRuntimeConfig:
 
 
 def test_prompt_without_clinic_context_is_unchanged() -> None:
-    """The reference file was generated BEFORE the change (tools/make_golden_prompt.py)."""
+    """Clinic-context isolation, with the approved clinic-local calendar reference."""
     expected = GOLDEN.read_text(encoding="utf-8").replace("\r\n", "\n")
     assert secretary_system_prompt(_config()).replace("\r\n", "\n") == expected
 

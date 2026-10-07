@@ -178,10 +178,10 @@ async def test_a_different_service_shows_the_details_again():
     assert _kinds(res) == ["TextBubble", "ButtonBubble"]
 
 
-async def test_without_the_switch_the_patient_lands_on_the_slot_list_as_in_p2():
+async def test_an_explicit_full_request_also_confirms_without_the_rollout_switch():
     res = await _resolve(BookingDraft(service="Consulta", day=DAY, time=TEN), pros=[_sole()])
-    assert res.landing_step == fr.STEP_AWAITING_SLOT
-    assert _kinds(res) == ["SlotsBubble"]
+    assert res.landing_step == fr.STEP_AWAITING_CONFIRMATION
+    assert _kinds(res) == ["ButtonBubble"]
 
 
 async def test_a_time_held_on_the_sole_doctors_agenda_lands_on_the_slot_list():

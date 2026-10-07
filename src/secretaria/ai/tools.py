@@ -23,6 +23,7 @@ from langchain_core.tools import tool
 
 from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
+from secretaria.services.booking_dates import resolve_booking_day
 from secretaria.services.booking_draft import BookingDraft
 from secretaria.services.booking_scope import (
     BOOKING_TOPOLOGY_MULTI,
@@ -197,6 +198,7 @@ class BookingDraftRequested(Exception):
         attendee: str | None = None,
         day: date | None = None,
         time: Any = None,
+        professional_unresolved: bool = False,
     ) -> None:
         super().__init__("set booking draft")
         self.appointment_type = appointment_type
@@ -205,6 +207,7 @@ class BookingDraftRequested(Exception):
         self.attendee = attendee
         self.day = day
         self.time = time
+        self.professional_unresolved = professional_unresolved
 
     @property
     def draft(self) -> BookingDraft:
@@ -215,6 +218,7 @@ class BookingDraftRequested(Exception):
             attendee=self.attendee,  # type: ignore[arg-type]
             day=self.day,
             time=self.time,
+            professional_unresolved=self.professional_unresolved,
         )
 
 
@@ -1177,7 +1181,10 @@ async def iniciar_pre_consulta() -> str:
 
 
 @tool
-async def set_booking_draft(service: str = "", professional: str = "", insurance: str = "") -> dict:
+async def set_booking_draft(
+    service: str = "", professional: str = "", insurance: str = "",
+    for_whom: str = "", day: str = "", time: str = "",
+) -> dict:
     """Registra o que o paciente já disse (serviço, profissional, convênio) e entrega
     o agendamento ao fluxo guiado, que PULA as etapas já respondidas e abre a próxima
     que falta. Se o paciente quer uma avaliação/consulta, mas não escolheu um serviço
@@ -1188,7 +1195,31 @@ async def set_booking_draft(service: str = "", professional: str = "", insurance
         service: Nome EXATO de um serviço escolhido pelo paciente (ou vazio).
         professional: Nome do profissional, quando o paciente já escolheu um (ou vazio).
         insurance: Convênio que o paciente citou, se citou (ou vazio).
+            Sem convênio / particular / não tenho convênio: use "Particular".
+        for_whom: "me" se disse que é para si; "other" se é para outra pessoa;
+            vazio se não informou. Nunca envie nome de paciente aqui.
+        day: Dia explicitamente informado, AAAA-MM-DD, ou expressão como 07/10,
+            amanhã, quinta da semana que vem. Use a data e o calendário da clínica
+            no prompt. Não invente nem perca a data já escolhida.
+        time: HH:MM, apenas quando informado. Ao receber só o horário, envie
+            também o day já escolhido no ESTADO DA CONVERSA.
     """
+    # Existing three-field calls retain their old validation/landing. Only an
+    # explicit date/attendee preference opts into the complete capture request.
+    if any((value or "").strip() for value in (for_whom, day, time)):
+        normalized_day = (day or "").strip()
+        if normalized_day:
+            config = _tenant_config_ctx.get()
+            timezone = config.timezone if config is not None else get_settings().CLINIC_TIMEZONE
+            try:
+                normalized_day = resolve_booking_day(normalized_day, timezone=timezone).isoformat()
+            except ValueError:
+                logger.info("agent_tool_blocked", tool="set_booking_draft", reason="bad_day")
+                return {"error": "Não consegui identificar a data. Peça o dia e mês sem adivinhar."}
+        return await set_booking_draft_v2.coroutine(
+            service=service, professional=professional, insurance=insurance,
+            for_whom=for_whom, day=normalized_day, time=time,
+        )
     tenant_id = _tenant_id_ctx.get()
     if tenant_id is None:
         return {"error": "Nenhuma clínica configurada para esta conversa."}
@@ -1285,6 +1316,15 @@ async def _draft_professional_id(tenant_id: UUID, name: str) -> UUID | None:
 
     roster = await _active_professionals(tenant_id)
     matches = [p for p in roster if p.name.strip().casefold() == name.casefold()]
+    if not matches:
+        # The patient may say only a first name. A subset of complete name tokens
+        # is safe only when it identifies exactly one ACTIVE professional.
+        def tokens(value: str) -> set[str]:
+            return set(re.findall(r"[^\W\d_]+", value.casefold())) - {"dr", "dra"}
+
+        requested = tokens(name)
+        if requested:
+            matches = [p for p in roster if requested <= tokens(p.name)]
     if len(matches) == 1:
         return matches[0].id
     logger.info(
@@ -1355,6 +1395,7 @@ async def set_booking_draft_v2(
         attendee=_FOR_WHOM_VALUES[who],
         day=parsed_day,
         time=parsed_time,
+        professional_unresolved=bool((professional or "").strip()) and professional_id is None,
     )
 
 

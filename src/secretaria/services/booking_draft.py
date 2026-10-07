@@ -96,9 +96,17 @@ class BookingDraft:
     attendee: Literal["self", "other"] | None = None
     day: dt.date | None = None
     time: dt.time | None = None
+    professional_unresolved: bool = False
 
-    def to_dict(self) -> dict[str, str | None]:
-        return {
+    def has_capture_fields(self) -> bool:
+        """Explicit preferences absent from the historical three-field request."""
+        return (
+            self.attendee is not None or self.day is not None
+            or self.time is not None or self.professional_unresolved
+        )
+
+    def to_dict(self) -> dict[str, str | bool | None]:
+        data: dict[str, str | bool | None] = {
             "t": self.service,
             "p": str(self.professional_id) if self.professional_id is not None else None,
             "i": self.insurance,
@@ -106,6 +114,11 @@ class BookingDraft:
             "d": self.day.isoformat() if self.day is not None else None,
             "h": self.time.strftime("%H:%M") if self.time is not None else None,
         }
+        # No raw doctor name on the wire. The marker distinguishes an explicitly
+        # rejected choice from an omitted choice; normal six-key payloads stay unchanged.
+        if self.professional_unresolved:
+            data["p_unresolved"] = True
+        return data
 
     def to_payload(self) -> str:
         return json.dumps(self.to_dict())
@@ -116,6 +129,9 @@ class BookingDraft:
         if not isinstance(data, dict):
             raise ValueError("booking draft must be a JSON object")
         raw_professional = _text(data, "p")
+        unresolved = data.get("p_unresolved", False)
+        if not isinstance(unresolved, bool) or (unresolved and raw_professional is not None):
+            raise ValueError("booking draft professional choice is inconsistent")
         attendee = _text(data, "w")
         if attendee not in (None, DRAFT_ATTENDEE_SELF, DRAFT_ATTENDEE_OTHER):
             raise ValueError("booking draft 'w' must be 'self', 'other' or null")
@@ -132,6 +148,7 @@ class BookingDraft:
             attendee=attendee,  # type: ignore[arg-type]
             day=dt.date.fromisoformat(raw_day) if raw_day else None,
             time=dt.time.fromisoformat(raw_time) if raw_time else None,
+            professional_unresolved=unresolved,
         )
 
     @classmethod
@@ -153,11 +170,12 @@ class BookingDraft:
             self.time,
         )
         return tuple(
-            name for name, value in zip(FIELD_NAMES, values, strict=True) if value is not None
+            name for name, value in zip(FIELD_NAMES, values, strict=True)
+            if value is not None or (name == FIELD_PROFESSIONAL and self.professional_unresolved)
         )
 
 
-def draft_record(draft: BookingDraft, *, saved_at: dt.datetime) -> dict[str, str | None]:
+def draft_record(draft: BookingDraft, *, saved_at: dt.datetime) -> dict[str, str | bool | None]:
     """The `Conversation.flow_draft` value: the wire keys plus an aware UTC `saved_at`."""
     if saved_at.tzinfo is None:
         raise ValueError("saved_at must be timezone-aware")
@@ -325,7 +343,10 @@ def _check(
 
     # Profissional: on a multi-doctor clinic, the draft's doctor (or the recorded one);
     # otherwise implicit - the sole professional, or nobody on a tenant without any.
-    if multi:
+    if draft.professional_unresolved:
+        professional = None
+        dropped[FIELD_PROFESSIONAL] = DROP_UNKNOWN_PROFESSIONAL
+    elif multi:
         if draft.professional_id is not None:
             professional = fr._find_professional_by_id(professionals, draft.professional_id)
             if professional is None:
@@ -348,6 +369,7 @@ def _check(
             getattr(professional, "id", None) != draft.professional_id
         ):
             dropped[FIELD_PROFESSIONAL] = DROP_UNKNOWN_PROFESSIONAL
+            professional = None
 
     # Serviço: canonical in the catalog the booking will use. A recorded service that no
     # longer resolves is silently ignored - only a SUPPLIED item can be "dropped".
@@ -372,7 +394,7 @@ def _check(
                 offering = fr._professionals_offering(
                     tenant, professionals, str(known.get("name", "")), service_catalog
                 )
-                if len(offering) == 1:
+                if len(offering) == 1 and FIELD_PROFESSIONAL not in dropped:
                     professional = offering[0]
                     service = fr._match_service(own(professional), text)
                 else:
@@ -428,6 +450,9 @@ def _pending(draft: BookingDraft, checked: _Checked) -> BookingDraft:
         attendee=draft.attendee,
         day=draft.day,
         time=draft.time if draft.day is not None else None,
+        professional_unresolved=(
+            draft.professional_unresolved or FIELD_PROFESSIONAL in checked.dropped
+        ),
     )
 
 
@@ -591,7 +616,7 @@ async def _resolve(
     def asked(result: FlowRouterResult, *names: str) -> DraftResolution:
         """A convênio, doctor or service question: what comes after it waits in flow_draft.
 
-        TASK-030 P3 (owner's ruling of 2026-10-03), behind the AI draft v2 switch: when the
+        TASK-030 P3 and explicit-capture requests: when the
         pending draft still holds a service or a day, it is parked on the question, and the
         patient's answer re-runs the resolver over it (`flow_router._resume_parked_draft`,
         `draft_resolution._resume_booking_draft`) instead of falling into the next button
@@ -600,7 +625,7 @@ async def _resolve(
         """
         pending = _pending(draft, checked)
         if (
-            fr.ai_draft_v2_enabled(tenant)
+            (fr.ai_draft_v2_enabled(tenant) or draft.has_capture_fields())
             and (pending.service is not None or pending.day is not None)
             and result.flow_state is FlowState.SERVICE_CATALOG
             and result.flow_step in fr.DRAFT_WAIT_STEPS
@@ -615,7 +640,9 @@ async def _resolve(
             fr._enter_insurance(tenant, state), FIELD_FOR_WHOM, FIELD_PROFESSIONAL, FIELD_SERVICE
         )
     # 3. Profissional (multi-doctor clinics; implicit otherwise).
-    if checked.multi and checked.professional is None:
+    if (
+        checked.multi or FIELD_PROFESSIONAL in checked.dropped
+    ) and checked.professional is None:
         result = fr._enter_professional_list(tenant, professionals, insurance=checked.insurance)
         return asked(result, FIELD_FOR_WHOM, FIELD_INSURANCE, FIELD_SERVICE)
     # 4. Serviço.
@@ -738,7 +765,7 @@ async def _land_day(
     slots for that day, minus the slots other conversations are holding (spec §4.4.1).
     An invalid day lands on the day picker, an invalid time on the slot list of its day.
 
-    TASK-030 P3, on clinics with the AI draft v2 switch: a valid time lands on the express
+    TASK-030 P3 and the explicit-capture correction: a valid time lands on the express
     confirmation (`_express_confirmation`); and every landing here skips the service-detail
     card, so each one - day picker, slot list, express card - opens with the booking
     details message, unless this patient already saw them (`details_already_shown`).
@@ -812,6 +839,7 @@ async def _land_day(
                 calendar=cal,
                 professionals=professionals,
                 details=details,
+                explicit_request=draft.has_capture_fields(),
             )
             if express is not None:
                 return done(express, *names)
@@ -841,11 +869,12 @@ async def _express_confirmation(
     calendar: CalendarService,
     professionals: list,
     details: str | None = None,
+    explicit_request: bool = False,
 ) -> FlowRouterResult | None:
     """Straight to the confirmation card when every item is valid (spec §4.4) - or None.
 
-    Only on clinics with the AI draft v2 switch (`flow_router.ai_draft_v2_enabled`); None
-    elsewhere, and the patient lands on the day's slot list exactly as in P2.
+    Enabled by the clinic's v2 rollout or by an explicit capture request on the
+    current tool. An old three-field request cannot bypass the missing preferences.
 
     Called only with pra-quem answered, the service known, and `slot_start` re-derived from
     the agenda's free slots minus holds (aware). `state` is the resolver's `_DayPickerState`;
@@ -860,7 +889,7 @@ async def _express_confirmation(
     the same instant the card prints (skill date-derived-ui-labels); the resolver's `_carry`
     fills type, professional, convênio and attendee.
     """
-    if not fr.ai_draft_v2_enabled(tenant):
+    if not fr.ai_draft_v2_enabled(tenant) and not explicit_request:
         return None
     start = (
         slot_start.astimezone(calendar.tzinfo)
