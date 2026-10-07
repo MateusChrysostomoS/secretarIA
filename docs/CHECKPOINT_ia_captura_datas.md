@@ -63,3 +63,9 @@ Ao encerrar, a main local estava limpa em 0ca17ac, incluindo TASK-037 (Outro com
 Commit da correção `8a1aaf9`; merge da main `0ca17ac` em `83dc2a4`. Código sem conflito; único conflito no checkpoint P3 resolvido preservando o reteste real e a correção em ordem cronológica. Alteração de Outro (TASK-037) e todos os documentos já commitados na main preservados.
 
 Suíte completa combinada: **3709 passed, 22 skipped, 15 warnings in 164.86s (0:02:44)**. Ruff nos Python do range integrado e diff-check limpos. Índice AST combinado em `bdc21d3`, gerado no SHA do merge de código. Os commits posteriores ao merge contêm apenas índice/docs; publicação prepara deploy de API e worker juntos pelo dono, sem migração nova desta correção. Integração só encerra após main/task remotos coincidirem com o head validado, conforme relatório central. A produção ainda requer deploy/retete; os resultados de modelo são a amostra sintética descrita acima, não esse reteste de produção.
+
+## Prova real após deploy — 2026-10-07
+
+Objetivo de captura até o cartão **PASS** na Chrysostomo For Eyes: mensagem original pergunta somente horário; resposta 14:40 por texto abre cartão de 07/10. Pedidos completos com amanhã e quinta da semana que vem abrem diretamente os cartões de 08/10 e 15/10 às 14:40. Correção só da data conserva os demais campos. Nenhum Confirmar acionado; consulta original de 16/10 às 15:20 preservada antes/depois de reload, sem consulta futura adicional exibida.
+
+API/worker comprovados no fingerprint `6f4fae0d2333`, equivalente ao código `2455431` que inclui esta captura e TASK-038, paridade match. Prova/limites em `docs/TESTES_REAIS_captura_datas_2026-10-07.md`. Sem mudança de código, configuração, deploy, SQL remoto, commit ou push nesta rodada. Não certifica criação final nem o restante de P4/P5.

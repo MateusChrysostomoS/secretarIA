@@ -136,6 +136,8 @@ neither" do `README.md`.
 
 ## Documentação
 
+`docs/TESTES_REAIS_captura_datas_2026-10-07.md` — captura real até o cartão PASS: mensagem original pergunta só horário; amanhã/quinta da próxima semana vão direto ao cartão; consulta existente preservada, sem confirmação nova. Versão/paridade e limites da prova registrados.
+
 `docs/CHECKPOINT_ia_get_availability.md` — TASK-030 P4: horários livres, criar/cancelar cegos, proteção de dono e filtro de saída; reutilizado por WhatsApp e Portal, commitado e compat?vel com TASK-038, publica??o autorizada, sem deploy; P5 antes de ativar.
 
 `docs/CHECKPOINT_ia_atende_como_pessoa.md` — TASK-038: texto livre no convênio/dia vai à IA na mesma etapa ("ter" em frase não é terça), a fala da IA sai junto do cartão ao devolver aos botões (envelope `__INTRO__:`, segurada até o cartão), "Não sei" humano, bloco "COMO ATENDER" no prompt e oferta de atendente com Sim/Não (`offer_human_handoff`, cartão fixo); deploy API+worker juntos.
@@ -527,3 +529,5 @@ docs/CHECKPOINT_digitando_backend.md — TASK-033: indicador universal no backen
 TASK-034: Portal visit discard on account promotion; local validation and deployment order: `docs/CHECKPOINT_portal_visita_fundida.md`. Not deployed.
 
 `docs/CHECKPOINT_ia_captura_datas.md` — TASK-030: correção aprovada de captura completa no caminho atual, datas explícitas/relativas no fuso da clínica e escolha segura de médico; validação conjunta com TASK-037/avaliações reais, publicação autorizada e deploy pelo dono pendente; ler antes de P4/P5 e novo reteste.
+
+`docs/TESTES_REAIS_p4_posdeploy_2026-10-07.md` — TASK-030: código P4 comprovado em API/worker, Portal cartões/desistência PASS; ai_draft_v2=false, disponibilidade natural/remarcação textual ainda limitadas; P5 antes de ativar, WhatsApp real pendente.
