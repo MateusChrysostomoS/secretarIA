@@ -1,4 +1,7 @@
-"""Cancelar → Remarcar Consulta / Agendar Outra / Cancelar Consulta; Outro → AI (TASK-032 R3, spec §4.3)."""
+"""The Cancelar path: Remarcar Consulta / Agendar Outra / Cancelar Consulta; Outro to the AI.
+
+TASK-032 R3, spec §4.3.
+"""
 
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
