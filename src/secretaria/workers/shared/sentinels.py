@@ -35,6 +35,7 @@ from secretaria.services.flow_router import (
     ai_draft_v2_enabled,
     booking_gate_scope,
     enter_guided_booking,
+    enter_human_offer,
     enter_manage_action,
     flows_enabled,
     main_menu_buttons,
@@ -1077,5 +1078,40 @@ async def _handle_set_booking_draft(
         patient_wa=patient_wa,
         professionals=professionals,
         redis=redis,
+        waba_token=waba_token,
+    )
+
+
+async def _handle_offer_human_handoff(
+    reply: _ReplyContext,
+    tenant: Tenant | None,
+    flow_snapshot: tuple[SimpleNamespace, SimpleNamespace] | None,
+    patient_wa: str | None,
+    redis=None,
+    waba_token: str | None = None,
+) -> bool:
+    """The agent's offer_human_handoff hand-back: send the fixed "quer que eu chame nosso
+    atendente humano?" card (TASK-038). The patient's tap decides - see
+    services/flow_router.py::_handle_human_offer. No tenant: nothing is sent and the
+    turn's safety net answers instead.
+    """
+    if tenant is None:
+        logger.warning(
+            "worker_human_offer_without_tenant", conversation_id=str(reply.conversation_id)
+        )
+        return False
+    conversation = flow_snapshot[0] if flow_snapshot is not None else None
+    logger.info(
+        "human_offer_presented",
+        conversation_id=str(reply.conversation_id),
+        tenant_id=str(tenant.id),
+        channel=reply.channel,
+    )
+    return await _apply_flow_result(
+        reply,
+        enter_human_offer(conversation),
+        patient_wa,
+        redis=redis,
+        tenant=tenant,
         waba_token=waba_token,
     )

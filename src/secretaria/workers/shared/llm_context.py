@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from secretaria.ai.tools import (
     manage_existing_appointment,
     manage_existing_appointment_v2,
+    offer_human_handoff,
     request_human_handoff,
     set_booking_draft,
     set_booking_draft_v2,
@@ -245,7 +246,7 @@ def _flow_handback_tools(tenant: Tenant | None, topology: str, plugin_tools: lis
     v2 = ai_draft_v2_enabled(tenant)
     draft_tool = set_booking_draft_v2 if v2 else set_booking_draft
     manage_tool = manage_existing_appointment_v2 if v2 else manage_existing_appointment
-    handbacks = [manage_tool, draft_tool, request_human_handoff]
+    handbacks = [manage_tool, draft_tool, request_human_handoff, offer_human_handoff]
     if topology != BOOKING_TOPOLOGY_MULTI:
         handbacks.append(start_guided_booking)
     return [*plugin_tools, *handbacks]

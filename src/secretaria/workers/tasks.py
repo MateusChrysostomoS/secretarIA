@@ -434,6 +434,7 @@ from secretaria.workers.shared.sender import (
 )
 from secretaria.workers.shared.sentinels import (
     _handle_manage_appointment,
+    _handle_offer_human_handoff,
     _handle_select_professional,
     _handle_set_booking_draft,
     _handle_show_main_menu,

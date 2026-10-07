@@ -37,6 +37,7 @@ from secretaria.ai.prompts import secretary_system_prompt
 from secretaria.ai.tools import (
     BookingDraftRequested,
     GuidedBookingRequested,
+    HumanHandoffOfferRequested,
     HumanHandoffRequested,
     ManageAppointmentRequested,
     SelectProfessionalRequested,
@@ -122,6 +123,10 @@ START_GUIDED_BOOKING_SENTINEL_PREFIX = "__START_GUIDED_BOOKING__:"
 # patient's or a third party's name: "w" is only "self"/"other".
 HUMAN_HANDOFF_SENTINEL_PREFIX = "__HUMAN_HANDOFF__:"
 BOOKING_DRAFT_SENTINEL_PREFIX = "__BOOKING_DRAFT__:"
+# Returned when the agent called offer_human_handoff (TASK-038): the worker sends the
+# fixed "quer que eu chame nosso atendente humano?" card with ✅ Sim / ❌ Não
+# (workers/shared/sentinels.py::_handle_offer_human_handoff); the tap decides.
+HUMAN_HANDOFF_OFFER_SENTINEL = "__HUMAN_HANDOFF_OFFER__"
 
 # TASK-038: a hand-back may carry the agent's own words for the patient (the tool's
 # `message`, ai/tools.py::handback_message). They ride IN FRONT of the sentinel as one
@@ -730,6 +735,13 @@ async def run_agent(
             reason=exc.reason,
         )
         return f"{HUMAN_HANDOFF_SENTINEL_PREFIX}{exc.reason}"
+    except HumanHandoffOfferRequested as exc:
+        logger.info(
+            "ai_run_agent_human_handoff_offer",
+            conversation_id=str(conversation_id),
+            has_intro=bool(exc.intro),
+        )
+        return with_handback_intro(HUMAN_HANDOFF_OFFER_SENTINEL, exc.intro)
 
     except ShowMainMenuRequested as exc:
         # The agent chose to hand the patient back to the button menu — same

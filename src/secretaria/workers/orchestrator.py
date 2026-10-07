@@ -9,6 +9,7 @@ from secretaria.ai.formatter import (
 from secretaria.ai.graph import (
     BOOKING_DRAFT_SENTINEL_PREFIX,
     CALENDAR_UNAVAILABLE_SENTINEL,
+    HUMAN_HANDOFF_OFFER_SENTINEL,
     HUMAN_HANDOFF_SENTINEL_PREFIX,
     MANAGE_APPOINTMENT_SENTINEL_PREFIX,
     SELECT_PROFESSIONAL_SENTINEL_PREFIX,
@@ -167,6 +168,7 @@ from secretaria.workers.shared.llm_context import (
 )
 from secretaria.workers.shared.sentinels import (
     _handle_manage_appointment,
+    _handle_offer_human_handoff,
     _handle_select_professional,
     _handle_set_booking_draft,
     _handle_show_main_menu,
@@ -1167,6 +1169,16 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             action,
             tenant,
             flow_professionals,
+            patient_wa,
+            redis=redis,
+            waba_token=waba_token,
+        )
+        return
+    if reply_text == HUMAN_HANDOFF_OFFER_SENTINEL:
+        await _handle_offer_human_handoff(
+            reply,
+            tenant,
+            flow_snapshot,
             patient_wa,
             redis=redis,
             waba_token=waba_token,

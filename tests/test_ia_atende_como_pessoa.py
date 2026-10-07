@@ -272,7 +272,8 @@ def test_the_prompt_states_the_order_of_service_for_every_clinic():
     assert first < then < last
     assert "secretária de verdade" in block[first:then]
     assert "`message`" in block[then:last]
-    assert "POR ÚLTIMO, chamar uma pessoa da equipe" in block[last:]
+    assert "POR ÚLTIMO, uma pessoa da equipe" in block[last:]
+    assert "offer_human_handoff" in block[last:]
     assert "Não ofereça o que você não pode fazer neste turno" in block
 
 
@@ -329,3 +330,118 @@ def test_held_words_go_out_once_and_never_outlive_the_turn():
     net.hold_intro("de novo")
     net.end_turn(token)
     assert net.take_held_intro() is None  # the safety-net apology never carries them
+
+
+
+# --------------------------------------------------------------------------
+# 5. "Quer que eu chame nosso atendente humano?" - asked, never assumed
+# --------------------------------------------------------------------------
+
+
+def _offer_pending(**kw):
+    return _conversation(
+        flow_state=FlowState.LLM, flow_step=flow_router.STEP_HUMAN_OFFER, **kw
+    )
+
+
+def test_the_offer_card_is_the_fixed_question_with_yes_and_no():
+    res = flow_router.enter_human_offer(
+        _conversation(flow_state=FlowState.LLM, flow_selected_insurance="Unimed")
+    )
+    assert res.action == "reply"
+    card = res.bubbles[0]
+    assert card.body == flow_router.HUMAN_OFFER_BODY
+    assert card.body.startswith("Não sou capaz de atender essa sua necessidade")
+    assert "(Pode demorar alguns minutos)" in card.body
+    assert card.labels == ["✅ Sim", "❌ Não"]
+    assert res.flow_state == FlowState.LLM
+    assert res.flow_step == flow_router.STEP_HUMAN_OFFER
+    assert res.flow_selected_insurance == "Unimed"  # the booking answers survive
+
+
+@pytest.mark.parametrize("tap", ["✅ Sim", "sim", "Sim"])
+async def test_yes_hands_the_conversation_to_the_team(tap):
+    res = await route(_offer_pending(), _tenant(), None, tap)
+    assert res.action == "handover"
+    assert [b.body for b in res.bubbles] == [flow_router.SCOPED_HELP_ESCALATE_MESSAGE]
+
+
+@pytest.mark.parametrize("tap", ["❌ Não", "não"])
+async def test_no_brings_the_menu_back(tap):
+    res = await route(_offer_pending(), _tenant(), None, tap)
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.MENU
+    assert res.bubbles[0].body == flow_router.HUMAN_OFFER_DECLINED_BODY
+    assert res.bubbles[0].labels == flow_router.main_menu_buttons()
+
+
+async def test_carrying_on_talking_drops_the_offer_and_reaches_the_model():
+    res = await route(
+        _offer_pending(flow_selected_type="Primeira Consulta"),
+        _tenant(),
+        None,
+        "na verdade queria saber do estacionamento",
+    )
+    assert res.action == "delegate_llm"
+    assert res.flow_state == FlowState.LLM
+    assert res.flow_step is None
+    assert res.flow_selected_type == "Primeira Consulta"
+
+
+async def test_the_offer_tool_raises_with_the_agents_line():
+    from secretaria.ai.tools import HumanHandoffOfferRequested, offer_human_handoff
+
+    with pytest.raises(HumanHandoffOfferRequested) as raised:
+        await offer_human_handoff.ainvoke({"message": "Não tenho o valor dessa cirurgia aqui."})
+    assert raised.value.intro == "Não tenho o valor dessa cirurgia aqui."
+
+
+async def test_could_not_help_asks_first_and_an_explicit_request_goes_straight():
+    from secretaria.ai.tools import (
+        HumanHandoffOfferRequested,
+        HumanHandoffRequested,
+        request_human_handoff,
+    )
+
+    with pytest.raises(HumanHandoffOfferRequested):
+        await request_human_handoff.ainvoke({"reason": "could_not_help"})
+    with pytest.raises(HumanHandoffRequested):
+        await request_human_handoff.ainvoke({"reason": "patient_requested_human"})
+
+
+async def test_run_agent_maps_the_offer_to_its_sentinel(monkeypatch):
+    from uuid import uuid4
+
+    from langchain_core.messages import HumanMessage
+
+    from secretaria.ai import graph
+    from secretaria.ai.graph import HUMAN_HANDOFF_OFFER_SENTINEL, run_agent
+    from secretaria.ai.tools import HumanHandoffOfferRequested
+
+    async def _history(conversation_id):
+        return [HumanMessage(content="quanto custa a cirurgia?")]
+
+    async def _raise(messages, conversation_id):
+        raise HumanHandoffOfferRequested(intro="Não tenho esse valor aqui.")
+
+    monkeypatch.setattr(graph, "_load_history", _history)
+    monkeypatch.setattr(graph, "_invoke_agent_with_retry", _raise)
+    reply = await run_agent("quanto custa?", context={"conversation_id": str(uuid4())})
+    assert split_handback_intro(reply) == (
+        "Não tenho esse valor aqui.",
+        HUMAN_HANDOFF_OFFER_SENTINEL,
+    )
+
+
+def test_the_offer_is_a_protocol_string_and_a_tool_the_agent_gets():
+    from secretaria.ai.graph import HUMAN_HANDOFF_OFFER_SENTINEL
+    from secretaria.services.booking_scope import BOOKING_TOPOLOGY_SOLE
+    from secretaria.workers import tasks
+
+    assert tasks._is_agent_sentinel(HUMAN_HANDOFF_OFFER_SENTINEL)
+    names = [
+        getattr(t, "name", str(t))
+        for t in tasks._flow_handback_tools(_tenant(), BOOKING_TOPOLOGY_SOLE, [])
+    ]
+    assert "offer_human_handoff" in names
+    assert "request_human_handoff" in names

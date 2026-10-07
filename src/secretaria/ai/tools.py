@@ -1552,6 +1552,21 @@ class HumanHandoffRequested(Exception):
         self.reason = reason
 
 
+class HumanHandoffOfferRequested(Exception):
+    """Raised by `offer_human_handoff` (and by `request_human_handoff` for "could_not_help").
+
+    Owner, 2026-10-07 (TASK-038): when the agent lacks what it needs to answer, it does
+    not hand the patient to a person behind their back - the flow ASKS, with the fixed
+    card `services/flow_router.py::HUMAN_OFFER_BODY` and ✅ Sim / ❌ Não. Same
+    exception->sentinel path as the other hand-backs; `intro` is the agent's one-line
+    "what I don't have", sent in front of the card.
+    """
+
+    def __init__(self, *, intro: str | None = None) -> None:
+        super().__init__("offer human handoff")
+        self.intro = intro
+
+
 @tool
 async def get_service_info(service_name: str) -> dict:
     """Consulta as orientações de UM serviço da clínica: o que o paciente precisa saber antes
@@ -1559,7 +1574,7 @@ async def get_service_info(service_name: str) -> dict:
 
     Use quando o paciente perguntar o que precisa fazer ou levar para um serviço, quanto dura
     ou o que inclui. Ferramenta SOMENTE-LEITURA: não agenda nada. Se duracao_min ou preco vierem
-    vazios, não invente: diga que confirma com a equipe.
+    vazios, não invente: diga que não tem essa informação e chame offer_human_handoff.
 
     Args:
         service_name: Nome do serviço como aparece na lista de serviços da clínica.
@@ -1602,17 +1617,39 @@ async def get_service_info(service_name: str) -> dict:
 
 @tool
 async def request_human_handoff(reason: str) -> dict:
-    """ÚLTIMO RECURSO: passa a conversa para uma pessoa da equipe. Use SOMENTE quando
-    o paciente pediu explicitamente para falar com uma pessoa, quando o assunto exige
-    avaliação humana, ou depois de você ter tentado ajudar de verdade e não conseguir.
-    NUNCA por uma dúvida comum sobre a clínica, serviços, horários ou convênios.
+    """ÚLTIMO RECURSO: passa a conversa DIRETO para uma pessoa da equipe. Use SOMENTE
+    quando o paciente pediu explicitamente para falar com uma pessoa, ou quando o assunto
+    exige avaliação humana. Se você apenas não tem a informação ou não consegue fazer o
+    que ele pediu, use offer_human_handoff (pergunta ao paciente antes). NUNCA por uma
+    dúvida comum sobre a clínica, serviços, horários ou convênios.
 
     Args:
         reason: Exatamente um de: "patient_requested_human" (o paciente pediu uma
-            pessoa), "clinical_sensitive" (assunto que exige avaliação humana),
-            "could_not_help" (você tentou e não conseguiu resolver).
+            pessoa), "clinical_sensitive" (assunto que exige avaliação humana).
     """
     normalized = (reason or "").strip()
     if normalized not in HANDOFF_REASONS:
         return {"error": f"Motivo inválido. Use um de: {', '.join(HANDOFF_REASONS)}."}
+    if normalized == "could_not_help":
+        # TASK-038: "I could not help" never transfers behind the patient's back -
+        # the flow asks first (offer_human_handoff's card).
+        raise HumanHandoffOfferRequested()
     raise HumanHandoffRequested(normalized)
+
+
+@tool
+async def offer_human_handoff(message: str = "") -> dict:
+    """Use quando você NÃO tem a informação ou NÃO consegue fazer o que o paciente pediu
+    (ex.: um preço ou dado que não está no seu contexto, um pedido fora do que você
+    resolve por aqui). O sistema mostra ao paciente a pergunta padrão "Não sou capaz de
+    atender essa sua necessidade por aqui. Quer que eu chame nosso atendente humano?"
+    com os botões Sim/Não; se ele tocar Sim, a equipe assume a conversa. NUNCA diga
+    "vou confirmar com a equipe" ou "vou verificar" sem chamar esta ferramenta. Antes,
+    tente de verdade com o que você sabe.
+
+    Args:
+        message: UMA frase curta dizendo o que você não tem ou não consegue (ex.: "Não
+            tenho o valor dessa cirurgia aqui."), enviada antes da pergunta. Deixe vazio
+            se não houver nada a dizer.
+    """
+    raise HumanHandoffOfferRequested(intro=handback_message(message))

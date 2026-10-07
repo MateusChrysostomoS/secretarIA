@@ -255,6 +255,20 @@ SERVICE_HELP_OPENER = (
 # você?", a booking question the flow asks itself later). The LLM runs one turn later, on
 # the patient's ANSWER, with this question already in the history as its context.
 OTHER_OPENER = "O que te traz à clínica?"
+# TASK-038 (owner, 2026-10-07): the fixed question the agent's offer_human_handoff
+# hand-back renders, with LABEL_YES / LABEL_NO. Asked, never assumed: "✅ Sim" hands
+# the conversation to the team (the same path as a scoped-help escalation, staff alert
+# included); "❌ Não" re-offers the menu; anything else is the patient carrying on, so
+# the model answers it and the offer is dropped. The wait is FlowState.LLM +
+# STEP_HUMAN_OFFER, so the LLM-state expiry bounds it like any free conversation.
+STEP_HUMAN_OFFER = "awaiting_human_offer"
+HUMAN_OFFER_BODY = (
+    "Não sou capaz de atender essa sua necessidade por aqui. Quer que eu chame nosso "
+    "atendente humano? (Pode demorar alguns minutos)"
+)
+HUMAN_OFFER_DECLINED_BODY = (
+    "Tudo bem! Se quiser, me conta de outro jeito o que você precisa, ou escolha uma opção:"
+)
 # Sent when a scoped-help node gives up (bounded at one clarifying question) -
 # the conversation is then flipped to human handover (action="handover").
 SCOPED_HELP_ESCALATE_MESSAGE = (
@@ -1440,6 +1454,53 @@ def _enter_other(conversation: Conversation | None = None) -> FlowRouterResult:
     return result
 
 
+def enter_human_offer(conversation: Conversation | None = None) -> FlowRouterResult:
+    """The fixed "quer que eu chame nosso atendente humano?" card (TASK-038).
+
+    Waits in LLM mode on STEP_HUMAN_OFFER, keeping the booking answers like any
+    delegation; `_handle_human_offer` reads the tap.
+    """
+    result = (
+        _delegate_llm_keeping_draft(conversation)
+        if conversation is not None
+        else FlowRouterResult(action="delegate_llm", flow_state=FlowState.LLM)
+    )
+    result.action = "reply"
+    result.bubbles = [MenuBubble(body=HUMAN_OFFER_BODY, labels=[LABEL_YES, LABEL_NO])]
+    result.flow_step = STEP_HUMAN_OFFER
+    return result
+
+
+def _handle_human_offer(
+    conversation: Conversation, tenant: Tenant, body: str, professionals: list | None
+) -> FlowRouterResult:
+    """The patient's answer to `enter_human_offer`'s card."""
+    if _label_match(body, LABEL_YES):
+        logger.info(
+            "human_offer_answered",
+            accepted=True,
+            conversation_id=str(getattr(conversation, "id", None)),
+        )
+        # action="handover": workers/shared/flow_runner.py commits the human state and
+        # alerts the clinic BEFORE this message goes out.
+        return FlowRouterResult(
+            action="handover", bubbles=[TextBubble(body=SCOPED_HELP_ESCALATE_MESSAGE)]
+        )
+    if _label_match(body, LABEL_NO):
+        logger.info(
+            "human_offer_answered",
+            accepted=False,
+            conversation_id=str(getattr(conversation, "id", None)),
+        )
+        return FlowRouterResult(
+            action="reply",
+            bubbles=[MenuBubble(body=HUMAN_OFFER_DECLINED_BODY, labels=main_menu_buttons())],
+            flow_state=FlowState.MENU,
+        )
+    # Neither: the patient kept talking - the model answers, the offer is dropped.
+    return _delegate_llm_keeping_draft(conversation)
+
+
 # --------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------
@@ -1508,6 +1569,11 @@ async def _route(
         return _preserve(conversation, "delegate_llm")
 
     state = conversation.flow_state
+
+    # The open "quer que eu chame nosso atendente humano?" card (TASK-038). Checked
+    # before the sticky LLM branch below, which would otherwise swallow the tap.
+    if state == FlowState.LLM and conversation.flow_step == STEP_HUMAN_OFFER:
+        return _handle_human_offer(conversation, tenant, inbound_body, professionals)
 
     # Once in full LLM mode, stay there until a /menu reset (or the agent's
     # show_main_menu tool). The selected professional/insurance survive so the

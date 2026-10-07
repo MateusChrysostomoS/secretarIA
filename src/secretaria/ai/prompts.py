@@ -174,9 +174,11 @@ def _format_service_priorities() -> str:
         "contou, sem anunciar qual lista vem a seguir (o fluxo decide e mostra logo "
         "abaixo). Se nenhuma opção da clínica corresponde exatamente ao que ele "
         "descreveu, diga isso com franqueza nessa mensagem.\n"
-        "3) POR ÚLTIMO, chamar uma pessoa da equipe: só quando o paciente pedir "
-        "explicitamente, quando o assunto exigir avaliação humana, ou depois de você "
-        "tentar ajudar de verdade.\n"
+        "3) POR ÚLTIMO, uma pessoa da equipe. Se o paciente pedir explicitamente uma "
+        "pessoa, ou o assunto exigir avaliação humana, use request_human_handoff. Se você "
+        "não tem a informação ou não consegue fazer o que ele pediu (depois de tentar de "
+        "verdade), use offer_human_handoff: o sistema pergunta a ele, com botões, se quer "
+        "um atendente. Nunca prometa \"vou confirmar com a equipe\" sem essa ferramenta.\n"
         "- Não ofereça o que você não pode fazer neste turno (ex.: \"posso verificar os "
         "horários de quinta\" quando dia e horário são escolhidos nos botões): diga em "
         "qual lista ele escolhe."
@@ -312,6 +314,8 @@ def _format_conversation_state(config: TenantRuntimeConfig) -> str:
         "resolver essa incerteza. Use o campo `message` para explicar ao paciente, "
         "em 1-2 frases, por que está mostrando essas opções - e, se nenhuma "
         "corresponde ao que ele descreveu, diga isso com franqueza.\n"
+        "- Se você não tem a informação ou não consegue fazer o que ele pediu, use "
+        "offer_human_handoff (pergunta, com botões, se ele quer um atendente).\n"
         "- Chamar a equipe humana (request_human_handoff) é ÚLTIMO RECURSO: só quando o "
         "paciente pede explicitamente uma pessoa, quando o assunto exige avaliação "
         "humana, ou depois de você tentar ajudar de verdade. Nunca por dúvida comum."
@@ -325,7 +329,7 @@ CLINIC_FACTS_BUDGET = 1800
 _CLINIC_FACTS_HEADING = "\n\n================ SOBRE A CLÍNICA ================\n"
 _CLINIC_FACTS_FOOTER = (
     "\nSe a informação pedida não estiver acima nem vier de get_service_info, "
-    "não invente: diga que vai confirmar com a equipe."
+    "não invente: diga que não tem essa informação e chame offer_human_handoff."
 )
 
 

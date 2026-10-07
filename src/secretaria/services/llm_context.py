@@ -67,6 +67,9 @@ _STEP_LABELS: dict[str, str] = {
     fr.STEP_MANAGE_CONFIRM: f"a confirmação da remarcação {_MANAGE}",
     # Depois de o médico cancelar.
     fr.STEP_DECLINE_REASON: "a pergunta do motivo de não remarcar depois que o médico cancelou",
+    # TASK-038. Only read if a turn ever reaches the model mid-offer; the open card
+    # itself is answered by the flow (flow_router._handle_human_offer).
+    fr.STEP_HUMAN_OFFER: "a pergunta se quer que chamemos um atendente humano",
 }
 
 
