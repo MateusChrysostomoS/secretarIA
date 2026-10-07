@@ -45,3 +45,19 @@ toques por clique no DOM, leitura recarregando a conversa. Nenhuma consulta conf
   (`HANDOVER_TIMEOUT_MINUTES`).
 - A clínica de teste não tem estacionamento/descontos cadastrados nos fatos da clínica; por isso a oferta
   de atendente apareceu (comportamento esperado).
+
+## Reteste dos ajustes do dono (c11f4ad), 12:49–12:54 BRT
+
+Deploy: API e worker com fingerprint `78622db587aa` = `main` `c11f4ad`, `deploy_parity=match`. A conversa de
+teste, entregue à equipe no teste 13, voltou sozinha ao robô após o tempo limite (respondeu `/menu`).
+
+| # | O que o paciente fez | O que aconteceu | Veredito |
+|---|---|---|---|
+| R1 | "Outro" → "Estou enxergando embaçado de perto… avaliar a vista" | Fala + cartão do convênio, sem dizer que não há médico de olhos | Esperado com estes dados: o Dr. Diogo (Clínica Geral) oferece "Cirurgia de Catarata", serviço de olhos — para a IA, algo da clínica corresponde |
+| R2 | "…uma mancha na pele, vocês têm dermatologista?" | "A clínica não tem dermatologista. Temos Clínica Geral (Dr. Diogo Raposo) e Cardiologia. Quer agendar uma Consulta com o Dr. Diogo…?" | PASS na franqueza; PARCIAL: mostrou o cartão do convênio sem esperar a resposta |
+| R3 | "Vocês têm estacionamento aí?" → oferta → "❌ Não" | "Tudo bem! Pode continuar me contando o que você precisa que eu sigo te ajudando por aqui." — sem menu | PASS |
+| R4 | Em seguida: "…com o Dr. Diogo pra mim, particular, quarta às 10" (quarta, 12h53) | IA seguiu a conversa; após escolher o serviço, horários de **14/10** (próxima quarta) | PASS |
+
+Ainda abertos: a fala às vezes anuncia o passo errado (ponto A) e, no caso R2, a IA devolveu aos botões antes
+da resposta do paciente apesar da instrução.
+
