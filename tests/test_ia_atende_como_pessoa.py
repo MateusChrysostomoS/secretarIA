@@ -506,3 +506,26 @@ def test_the_state_names_each_doctors_specialty_and_asks_for_frankness():
     prompt = secretary_system_prompt(_config(conversation_state=state))
     assert "Se NENHUM médico ou serviço da clínica corresponde" in prompt
     assert "não devolva aos botões antes da resposta dele" in prompt
+
+
+@pytest.mark.parametrize(
+    "button_id, title, expected_action",
+    [("menu|0", "✅ Sim", "handover"), ("menu|1", "❌ Não", "reply")],
+)
+async def test_a_whatsapp_tap_on_the_offer_routes_like_the_portal(
+    button_id, title, expected_action
+):
+    """The offer goes out on WhatsApp as reply buttons with ids menu|0 / menu|1
+    (workers/shared/bubbles.py::_bubble_buttons); the tap comes back as id + title and
+    turn_router rebuilds the routed text with inbound_routing_text. Same answer as the
+    Portal tap: no channel-specific code in this feature (owner asked, 2026-10-07)."""
+    from secretaria.schemas.webhook import inbound_routing_text
+    from secretaria.workers.shared.bubbles import _bubble_buttons
+
+    card = flow_router.enter_human_offer().bubbles[0]
+    assert (button_id, title) in _bubble_buttons(card)
+    routed = inbound_routing_text(title, button_id)
+    assert routed == title
+    res = await route(_offer_pending(), _tenant(), None, routed)
+    assert res.action == expected_action
+
