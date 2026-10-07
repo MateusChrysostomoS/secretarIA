@@ -100,6 +100,28 @@ chame nosso atendente humano? (Pode demorar alguns minutos)" com **✅ Sim / ❌
   (médico escolhido apagado antes do aviso no "Sim") corrigido com teste; sem evento de hand-back próprio
   para a oferta (só log `human_offer_presented`/`human_offer_answered`) — aceito.
 
+## 6. Ajustes depois dos testes reais (dono, 2026-10-07)
+
+Relatório dos testes: `docs/TESTES_REAIS_task037_038_2026-10-07.md`.
+
+- **"❌ Não" na oferta continua a conversa com a IA** (antes voltava ao menu e o agendamento em andamento
+  se perdia): resposta fixa `HUMAN_OFFER_DECLINED_BODY` ("Tudo bem! Pode continuar me contando o que você
+  precisa que eu sigo te ajudando por aqui."), estado LLM com todas as respostas do agendamento mantidas;
+  a próxima mensagem vai à IA.
+- **Quando nenhum médico/serviço serve** (ex.: problema de visão sem oftalmologista): a ficha da IA agora
+  traz a especialidade de cada médico (`services/llm_context.py::_doctor_label`) e o bloco de estado manda
+  dizer isso com franqueza, citar o que a clínica oferece e perguntar se quer agendar mesmo assim, sem
+  devolver aos botões antes da resposta.
+- **"quarta às 10" dito numa quarta depois das 10h = próxima quarta** (regra do dono, a lista de dias já
+  fazia assim): `services/booking_dates.py::time_has_passed_today`; `resolve_booking_day(..., at=)` passa
+  para a semana seguinte quando o horário de hoje já passou; a ferramenta `set_booking_draft` (v1 e v2)
+  recusa dia de hoje com horário já passado e explica à IA como corrigir; o calendário do prompt
+  (`date_context`) traz a regra. Sem horário, ou com horário ainda à frente, continua sendo hoje.
+- Testes: `tests/test_ia_atende_como_pessoa.py`, `tests/test_booking_date_language.py`,
+  `tests/test_set_booking_draft_v2.py` (o relógio dos testes da ferramenta foi fixado para que datas fixas
+  nunca virem "hoje"). Suíte: 3777 passed, 0 failed. Ainda aberto: a fala que acompanha o cartão às vezes
+  anuncia o passo errado (relatório, ponto A).
+
 ## Integração com a `main` de 2026-10-07
 
 Outra sessão publicou em `main` a captura de dia/horário/"pra quem" pela IA (8a1aaf9, `set_booking_draft`

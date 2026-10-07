@@ -258,7 +258,8 @@ OTHER_OPENER = "O que te traz à clínica?"
 # TASK-038 (owner, 2026-10-07): the fixed question the agent's offer_human_handoff
 # hand-back renders, with LABEL_YES / LABEL_NO. Asked, never assumed: "✅ Sim" hands
 # the conversation to the team (the same path as a scoped-help escalation, staff alert
-# included); "❌ Não" re-offers the menu; anything else is the patient carrying on, so
+# included); "❌ Não" keeps the free conversation going; anything else is the patient
+# carrying on, so
 # the model answers it and the offer is dropped. The wait is FlowState.LLM +
 # STEP_HUMAN_OFFER, so the LLM-state expiry bounds it like any free conversation.
 STEP_HUMAN_OFFER = "awaiting_human_offer"
@@ -266,8 +267,10 @@ HUMAN_OFFER_BODY = (
     "Não sou capaz de atender essa sua necessidade por aqui. Quer que eu chame nosso "
     "atendente humano? (Pode demorar alguns minutos)"
 )
+# "❌ Não" keeps the conversation with the AI (owner, 2026-10-07): no menu, so a
+# patient who was mid-booking does not lose what they had chosen.
 HUMAN_OFFER_DECLINED_BODY = (
-    "Tudo bem! Se quiser, me conta de outro jeito o que você precisa, ou escolha uma opção:"
+    "Tudo bem! Pode continuar me contando o que você precisa que eu sigo te ajudando por aqui."
 )
 # Sent when a scoped-help node gives up (bounded at one clarifying question) -
 # the conversation is then flipped to human handover (action="handover").
@@ -1496,11 +1499,12 @@ def _handle_human_offer(
             accepted=False,
             conversation_id=str(getattr(conversation, "id", None)),
         )
-        return FlowRouterResult(
-            action="reply",
-            bubbles=[MenuBubble(body=HUMAN_OFFER_DECLINED_BODY, labels=main_menu_buttons())],
-            flow_state=FlowState.MENU,
-        )
+        # Stay in the free conversation with every booking answer kept; the model
+        # takes the patient's next message.
+        result = _delegate_llm_keeping_draft(conversation)
+        result.action = "reply"
+        result.bubbles = [TextBubble(body=HUMAN_OFFER_DECLINED_BODY)]
+        return result
     # Neither: the patient kept talking - the model answers, the offer is dropped.
     return _delegate_llm_keeping_draft(conversation)
 

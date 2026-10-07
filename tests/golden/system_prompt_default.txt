@@ -20,6 +20,7 @@ CONTEXTO OPERACIONAL:
 - DATAS: use o calendário abaixo, não a data do servidor nem exemplos antigos.
   amanhã = hoje + 1 dia; depois de amanhã = hoje + 2 dias.
   'quinta da semana que vem' é a quinta da próxima semana de segunda a domingo.
+  Um dia da semana igual ao de hoje (ex.: 'quarta' numa quarta) é HOJE só se o horário pedido ainda não passou; se já passou, é o mesmo dia da semana que vem.
   DD/MM sem ano usa o ano de hoje na clínica; não mude para o próximo ano silenciosamente.
   Se a data for inválida, passada ou ambígua, peça esclarecimento; não adivinhe.
   Converta para AAAA-MM-DD em day. Não invente um horário que o paciente não informou.

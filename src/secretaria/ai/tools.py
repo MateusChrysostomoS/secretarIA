@@ -24,7 +24,7 @@ from pseudonymize_core import has_unresolved_tokens
 
 from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
-from secretaria.services.booking_dates import resolve_booking_day
+from secretaria.services.booking_dates import resolve_booking_day, time_has_passed_today
 from secretaria.services.booking_draft import BookingDraft
 from secretaria.services.booking_scope import (
     BOOKING_TOPOLOGY_MULTI,
@@ -1266,7 +1266,9 @@ async def set_booking_draft(
             config = _tenant_config_ctx.get()
             timezone = config.timezone if config is not None else get_settings().CLINIC_TIMEZONE
             try:
-                normalized_day = resolve_booking_day(normalized_day, timezone=timezone).isoformat()
+                normalized_day = resolve_booking_day(
+                    normalized_day, timezone=timezone, at=(time or "").strip() or None
+                ).isoformat()
             except ValueError:
                 logger.info("agent_tool_blocked", tool="set_booking_draft", reason="bad_day")
                 return {"error": "Não consegui identificar a data. Peça o dia e mês sem adivinhar."}
@@ -1357,6 +1359,13 @@ _FOR_WHOM_ERROR = (
 )
 _DAY_FORMAT_ERROR = "day precisa estar no formato AAAA-MM-DD (ex.: 2026-10-08), no fuso da clínica."
 _TIME_FORMAT_ERROR = "time precisa estar no formato HH:MM (ex.: 10:00)."
+TOOL_BLOCK_PAST_TIME = "past_time"
+# Owner, 2026-10-07: "quarta às 10" said on a Wednesday at 11h is next Wednesday.
+_PAST_TIME_ERROR = (
+    "Esse horário de hoje já passou. Se o paciente disse um dia da semana igual ao de "
+    "hoje (ex.: 'quarta' numa quarta), use o mesmo dia da semana que vem; se ele disse "
+    "'hoje', avise que esse horário já passou e pergunte outro."
+)
 _ISO_DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _HHMM_RE = re.compile(r"\d{2}:\d{2}")
 _DRAFT_TEXT_MAX = 120
@@ -1448,6 +1457,14 @@ async def set_booking_draft_v2(
         except ValueError:
             logger.info("agent_tool_blocked", tool="set_booking_draft", reason=TOOL_BLOCK_BAD_TIME)
             return {"error": _TIME_FORMAT_ERROR}
+    if parsed_day is not None and parsed_time is not None:
+        config = _tenant_config_ctx.get()
+        clinic_tz = config.timezone if config is not None else get_settings().CLINIC_TIMEZONE
+        if time_has_passed_today(parsed_day, parsed_time, timezone=clinic_tz):
+            logger.info(
+                "agent_tool_blocked", tool="set_booking_draft", reason=TOOL_BLOCK_PAST_TIME
+            )
+            return {"error": _PAST_TIME_ERROR}
     professional_id = await _draft_professional_id(tenant_id, (professional or "").strip())
     raise BookingDraftRequested(
         (service or "").strip()[:_DRAFT_TEXT_MAX] or None,

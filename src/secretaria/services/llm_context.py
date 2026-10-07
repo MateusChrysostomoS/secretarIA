@@ -117,20 +117,29 @@ def _service_names(services: list[dict]) -> str:
     return ", ".join(str(s.get("name")) for s in services if s.get("name"))
 
 
+def _doctor_label(professional) -> str:
+    """ "Dr. Fulano (Cardiologia)" - the specialty lets the model tell, and say, when no
+    doctor of the clinic fits what the patient described (owner, 2026-10-07)."""
+    specialty = str(getattr(professional, "specialty", None) or "").strip()
+    return f"{professional.name} ({specialty})" if specialty else str(professional.name)
+
+
 def _topology_lines(tenant, professionals) -> list[str]:
     roster = list(professionals or [])
     if tenant is None or not hasattr(tenant, "appointment_types"):
         return []
     if len(roster) > 1:
-        lines = ["- A clínica tem vários médicos. Serviços de cada médico:"]
+        lines = ["- A clínica tem vários médicos. Especialidade e serviços de cada um:"]
         for professional in roster:
             names = _service_names(fr.professional_appointment_types(professional, tenant))
-            lines.append(f"  - {professional.name}: {names or 'sem serviços cadastrados'}")
+            lines.append(
+                f"  - {_doctor_label(professional)}: {names or 'sem serviços cadastrados'}"
+            )
         return lines
     if len(roster) == 1:
         names = _service_names(fr.professional_appointment_types(roster[0], tenant))
         return [
-            f"- A clínica atende com um só médico: {roster[0].name}. "
+            f"- A clínica atende com um só médico: {_doctor_label(roster[0])}. "
             f"Serviços: {names or 'sem serviços cadastrados'}."
         ]
     names = _service_names(fr.active_appointment_types(tenant))

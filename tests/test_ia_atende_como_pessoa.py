@@ -386,12 +386,27 @@ async def test_yes_keeps_the_chosen_doctor_so_the_alert_reaches_them():
 
 
 @pytest.mark.parametrize("tap", ["❌ Não", "não"])
-async def test_no_brings_the_menu_back(tap):
-    res = await route(_offer_pending(), _tenant(), None, tap)
+async def test_no_keeps_the_conversation_with_the_ai(tap):
+    """Owner, 2026-10-07: "Não" continues the free conversation - no menu, and a
+    booking in progress keeps what the patient had already chosen."""
+    res = await route(
+        _offer_pending(flow_selected_type="Cirurgia de Catarata", flow_selected_insurance="Unimed"),
+        _tenant(),
+        None,
+        tap,
+    )
     assert res.action == "reply"
-    assert res.flow_state == FlowState.MENU
-    assert res.bubbles[0].body == flow_router.HUMAN_OFFER_DECLINED_BODY
-    assert res.bubbles[0].labels == flow_router.main_menu_buttons()
+    assert [b.body for b in res.bubbles] == [flow_router.HUMAN_OFFER_DECLINED_BODY]
+    assert not hasattr(res.bubbles[0], "labels")  # plain text, no menu card
+    assert res.flow_state == FlowState.LLM
+    assert res.flow_step is None
+    assert res.flow_selected_type == "Cirurgia de Catarata"
+    assert res.flow_selected_insurance == "Unimed"
+
+    nxt = await route(
+        _conversation(flow_state=res.flow_state), _tenant(), None, "pode ser na quinta"
+    )
+    assert nxt.action == "delegate_llm"
 
 
 async def test_carrying_on_talking_drops_the_offer_and_reaches_the_model():
@@ -464,3 +479,30 @@ def test_the_offer_is_a_protocol_string_and_a_tool_the_agent_gets():
     ]
     assert "offer_human_handoff" in names
     assert "request_human_handoff" in names
+
+
+def test_the_state_names_each_doctors_specialty_and_asks_for_frankness():
+    """Owner, 2026-10-07: with no eye doctor, the AI must say so, not present the list as
+    "indicated" - it needs each doctor's specialty to know."""
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from secretaria.services.llm_context import build_conversation_state
+
+    doctors = [
+        SimpleNamespace(
+            id=uuid4(), name="Dr. Diogo", specialty="Clínica Geral",
+            appointment_types=None, about=None,
+        ),
+        SimpleNamespace(
+            id=uuid4(), name="Dr. Rafael", specialty="Cardiologia",
+            appointment_types=None, about=None,
+        ),
+    ]
+    state = build_conversation_state(_conversation(flow_state=FlowState.LLM), _tenant(), doctors)
+    assert "Dr. Diogo (Clínica Geral)" in state
+    assert "Dr. Rafael (Cardiologia)" in state
+
+    prompt = secretary_system_prompt(_config(conversation_state=state))
+    assert "Se NENHUM médico ou serviço da clínica corresponde" in prompt
+    assert "não devolva aos botões antes da resposta dele" in prompt
