@@ -136,7 +136,7 @@ neither" do `README.md`.
 
 ## Documentação
 
-`docs/CHECKPOINT_ia_get_availability.md` — TASK-030 P4: horários livres, criar/cancelar cegos, proteção de dono e filtro de saída; reutilizado por WhatsApp e Portal, local sem commit/deploy, P5 antes de ativar.
+`docs/CHECKPOINT_ia_get_availability.md` — TASK-030 P4: horários livres, criar/cancelar cegos, proteção de dono e filtro de saída; reutilizado por WhatsApp e Portal, commitado e compat?vel com TASK-038, publica??o autorizada, sem deploy; P5 antes de ativar.
 
 `docs/CHECKPOINT_ia_atende_como_pessoa.md` — TASK-038: texto livre no convênio/dia vai à IA na mesma etapa ("ter" em frase não é terça), a fala da IA sai junto do cartão ao devolver aos botões (envelope `__INTRO__:`, segurada até o cartão), "Não sei" humano, bloco "COMO ATENDER" no prompt e oferta de atendente com Sim/Não (`offer_human_handoff`, cartão fixo); deploy API+worker juntos.
 
