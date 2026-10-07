@@ -3,9 +3,9 @@
     "repository":  "secretarIA",
     "repository_path":  "C:\\TECH\\BRAIN-worktrees\\TASK-030\\secretarIA",
     "branch":  "task/TASK-030-ia-entra-em-qualquer-etapa",
-    "commit":  "83dc2a4472e7b2ae05aeba7950855371718f5472",
-    "generated_at":  "2026-10-07T12:31:21.9800598Z",
+    "commit":  "33989cc89b57d3e842354cea80dd55a0704faad2",
+    "generated_at":  "2026-10-07T15:59:48.2871727Z",
     "graphify_version":  "0.9.5",
     "graph_schema":  "networkx-node-link (unversioned upstream)",
-    "graph_sha256":  "cc0f6c4a24284f271d251705f056ec50562171022f5431adbe4d8869a471e95c"
+    "graph_sha256":  "6f3b5d0117035794a06d0c9ec2e9123e5f7c5da25c32b711b76227aa1beef64b"
 }
