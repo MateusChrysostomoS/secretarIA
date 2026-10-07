@@ -51,6 +51,11 @@ from secretaria.services.pending_identity import (
     parse_code,
     parse_email,
 )
+from secretaria.services.reminder_opening import (
+    OPEN,
+    SKIP_SWITCH_OFF,
+    decide_reminder_opening,
+)
 from secretaria.workers.shared.context import (
     _ReactivationDirective,
     _ReplyContext,
@@ -557,6 +562,8 @@ async def _route_inbound_turn(
                     pending_code_reprompt=held,
                 )
             conversation.flow_state = FlowState.IDLE
+            # TASK-032 R3: leaving the code wait ends a "Marcar outra" booking too.
+            conversation.flow_replaces_appointment_id = None
             logger.info(
                 "conversation_pending_code_abandoned",
                 conversation_id=str(conversation.id),
@@ -761,6 +768,7 @@ async def _route_inbound_turn(
             conversation.flow_managing_appointment_id = None
             conversation.flow_attendee_name = None
             conversation.flow_draft = None
+            conversation.flow_replaces_appointment_id = None
             return _ReplyContext(
                 channel=channel,
                 conversation_id=conversation.id,
@@ -846,6 +854,45 @@ async def _route_inbound_turn(
             tenant_id=str(tenant.id),
             ttl_minutes=llm_state_ttl_minutes(tenant),
         )
+
+    # --- TASK-032 R3: the appointment reminder as the chat's first message ----
+    # After the consent gate, /menu, the pending "quer continuar?" answer and
+    # the two silence floors above (so a stale LLM/attendee state is already
+    # dropped), and INSTEAD of the returning-patient offer below: a patient with
+    # a live future appointment who writes after the reactivation gap sees that
+    # appointment's reminder card first (spec §4.3). The patient's message is
+    # still answered right after it (`_send_bot_reply_inner`). Returns without a
+    # query when the clinic's switch is off.
+    if greeting_override is None:
+        opening = await decide_reminder_opening(
+            session,
+            tenant=tenant,
+            patient_id=patient.id,
+            last_activity_at=last_activity_at,
+            now=datetime.now(UTC),
+        )
+        if opening.reason == OPEN and opening.appointment_id is not None:
+            logger.info(
+                "reminder_opening_chosen",
+                conversation_id=str(conversation.id),
+                tenant_id=str(tenant.id),
+                appointment_id=str(opening.appointment_id),
+            )
+            return _ReplyContext(
+                channel=channel,
+                conversation_id=conversation.id,
+                tenant_id=tenant.id,
+                patient_ref=patient_ref,
+                inbound_body=body or "",
+                reminder_opening_appointment_id=opening.appointment_id,
+            )
+        if opening.reason != SKIP_SWITCH_OFF:
+            logger.info(
+                "reminder_opening_skipped",
+                reason=opening.reason,
+                conversation_id=str(conversation.id),
+                tenant_id=str(tenant.id),
+            )
 
     # Returning after a silence gap (and not already greeting on
     # first contact): offer to resume the prior workflow, or

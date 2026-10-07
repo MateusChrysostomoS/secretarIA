@@ -285,6 +285,53 @@ def button_payloads(buttons: list[tuple[str, str]]) -> list[str]:
     return [button_id for button_id, _label in buttons]
 
 
+# --- The "Cancelar" path (TASK-032 R3, spec §4.3) -------------------------------
+# Same "<action>|<reminder_id>" shape as the trio above, so every tap of the
+# path is checked against the patient who tapped
+# (workers/shared/reminder_actions.py). `REMINDER_ACTIONS` stays the trio the
+# reminder itself carries; the dispatcher and the Portal decoder use the union.
+ACTION_RESCHEDULE_THIS = "remresched"
+ACTION_BOOK_ANOTHER = "remnew"
+ACTION_GIVE_UP = "remgiveup"
+ACTION_GIVE_UP_CONFIRM = "remgiveupyes"
+ACTION_KEEP = "remkeep"
+CANCEL_PATH_ACTIONS: tuple[str, ...] = (
+    ACTION_RESCHEDULE_THIS,
+    ACTION_BOOK_ANOTHER,
+    ACTION_GIVE_UP,
+    ACTION_GIVE_UP_CONFIRM,
+    ACTION_KEEP,
+)
+REMINDER_ROW_ACTIONS: tuple[str, ...] = REMINDER_ACTIONS + CANCEL_PATH_ACTIONS
+
+# <= 20 characters each. The owner asked for "Remarcar Consulta", "Agendar Outra
+# Consulta" and "Cancelar Consulta" (2026-10-07); the middle one is 22 characters
+# and a WhatsApp reply button holds 20, so the button says "Agendar Outra" and the
+# full phrase goes in the card body (reminder_actions.CANCEL_PATH_TEXT).
+LABEL_RESCHEDULE_THIS = "Remarcar Consulta"
+LABEL_BOOK_ANOTHER = "Agendar Outra"
+LABEL_GIVE_UP = "Cancelar Consulta"
+LABEL_GIVE_UP_CONFIRM = "Sim, cancelar"
+LABEL_KEEP = "Manter consulta"
+
+
+def cancel_path_buttons(reminder_id) -> list[tuple[str, str]]:
+    """The "O que você prefere?" card: Remarcar Consulta / Agendar Outra / Cancelar Consulta."""
+    return [
+        (f"{ACTION_RESCHEDULE_THIS}|{reminder_id}", LABEL_RESCHEDULE_THIS),
+        (f"{ACTION_BOOK_ANOTHER}|{reminder_id}", LABEL_BOOK_ANOTHER),
+        (f"{ACTION_GIVE_UP}|{reminder_id}", LABEL_GIVE_UP),
+    ]
+
+
+def give_up_confirm_buttons(reminder_id) -> list[tuple[str, str]]:
+    """The give-up confirmation: Sim, cancelar / Manter consulta."""
+    return [
+        (f"{ACTION_GIVE_UP_CONFIRM}|{reminder_id}", LABEL_GIVE_UP_CONFIRM),
+        (f"{ACTION_KEEP}|{reminder_id}", LABEL_KEEP),
+    ]
+
+
 def portal_conversation_link(tenant_id) -> str | None:
     """Where the reminder e-mail sends a Portal patient: the clinic's invite link.
 

@@ -234,7 +234,8 @@ def test_builders_and_decoder_agree():
 
 def test_the_decoder_prefix_list_and_the_builders_name_the_same_reminder_actions():
     prefixes = {p for p in _ACTION_BUTTON_PREFIXES if p.startswith("rem")}
-    assert prefixes == {f"{action}|" for action in rt.REMINDER_ACTIONS}
+    # TASK-032 R3 added the cancel-path ids, so the decoder knows the union.
+    assert prefixes == {f"{action}|" for action in rt.REMINDER_ROW_ACTIONS}
     assert all(f"{action}|" in _ACTION_BUTTON_PREFIXES for action in rt.REMINDER_ACTIONS)
 
 

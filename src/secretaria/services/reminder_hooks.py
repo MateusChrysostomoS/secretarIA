@@ -37,6 +37,7 @@ from secretaria.models import (
     AppointmentReminder,
     Tenant,
 )
+from secretaria.models.appointment_reminder import REMINDER_KIND_CHAT
 from secretaria.services import reminder_schedule
 
 logger = get_logger(__name__)
@@ -129,6 +130,9 @@ async def reconcile_missing_reminders(*, now: datetime, limit: int = RECONCILE_L
             .where(
                 AppointmentReminder.appointment_id == Appointment.id,
                 AppointmentReminder.appointment_start_at == Appointment.start_at,
+                # TASK-032 R3: a `chat` row (the opening card) is not a plan -
+                # an appointment that only has one still needs its cron rows.
+                AppointmentReminder.kind != REMINDER_KIND_CHAT,
             )
             .exists()
         )

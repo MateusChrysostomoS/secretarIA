@@ -17,6 +17,10 @@ from secretaria.models import (
 )
 from secretaria.plugins.post_booking import enqueue_post_booking_hooks
 from secretaria.services import reminder_hooks
+from secretaria.services.appointment_replacement import (
+    ReplacedAppointment,
+    cancel_replaced_appointment,
+)
 from secretaria.services.appointment_status import (
     SOURCE_FLOW,
     log_status_transition,
@@ -31,6 +35,7 @@ from secretaria.services.calendar import (
 from secretaria.services.flow_router import (
     STEP_AWAITING_ATTENDEE_AUTH,
     FlowRouterResult,
+    is_generic_menu_result,
     route,
 )
 from secretaria.services.insurance_catalog import (
@@ -62,6 +67,10 @@ from secretaria.workers.shared.handover import (
 )
 from secretaria.workers.shared.llm_context import (
     _flow_turn_calendar,
+)
+from secretaria.workers.shared.replacement import (
+    _finish_replacement,
+    _replaced_notice,
 )
 
 logger = get_logger(__name__)
@@ -135,6 +144,16 @@ async def _run_flow(
         # Pra-quem answered with an AI draft parked: the resolver lands it instead of the
         # list `result` would show (falls back to `result` on any failure).
         result = await _resume_booking_draft(reply, tenant, result, gate=gate)
+    if reply.reminder_opening_appointment_id is not None and is_generic_menu_result(result):
+        # TASK-032 R3: the reminder card that opened this turn replaces the plain
+        # menu (its "Outro" covers it). Nothing is persisted: the conversation
+        # stays where it was.
+        logger.info(
+            "reminder_opening_menu_suppressed",
+            source="flow",
+            conversation_id=str(reply.conversation_id),
+        )
+        return True
     return await _apply_flow_result(
         reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
     )
@@ -171,6 +190,8 @@ async def _apply_flow_result(
     persisted = True
     booked_appointment: Appointment | None = None
     cancellation_note: str | None = None
+    # TASK-032 R3: the appointment a "Marcar outra" booking replaced, if any.
+    replaced: ReplacedAppointment | None = None
     # TASK-032 R2: the appointments this turn closed or moved, for the
     # reminder hooks that run after the commit.
     closed_appointment_id = None
@@ -180,6 +201,8 @@ async def _apply_flow_result(
             async with session.begin():
                 conv = await session.get(Conversation, reply.conversation_id)
                 if conv is not None:
+                    # TASK-032 R3: read BEFORE the writes below overwrite it.
+                    replaced_id = conv.flow_replaces_appointment_id
                     conv.flow_state = result.flow_state
                     conv.flow_step = result.flow_step
                     conv.flow_selected_type = result.flow_selected_type
@@ -190,6 +213,7 @@ async def _apply_flow_result(
                     conv.flow_managing_appointment_id = result.flow_managing_appointment_id
                     conv.flow_attendee_name = result.flow_attendee_name
                     conv.flow_draft = result.flow_draft
+                    conv.flow_replaces_appointment_id = result.flow_replaces_appointment_id
                     if result.attendee_authorized and tenant is not None:
                         # The explicit "Confirmar" under the authorization
                         # sentence (services/attendee.py): the audit row, in
@@ -244,6 +268,20 @@ async def _apply_flow_result(
                             **result.appointment,
                         )
                         session.add(booked_appointment)
+                        # TASK-032 R3 ("Marcar outra consulta"): the original is
+                        # cancelled HERE - same transaction as the new row, and
+                        # only now that the new booking is confirmed. A failed
+                        # persist rolls both back together.
+                        if replaced_id is not None and tenant is not None:
+                            await session.flush()
+                            replaced = await cancel_replaced_appointment(
+                                session,
+                                tenant=tenant,
+                                patient_id=conv.patient_id,
+                                replaced_id=replaced_id,
+                                new_appointment_id=booked_appointment.id,
+                                waba_token=waba_token,
+                            )
                     # Cancel/reschedule mirror the calendar action onto the
                     # platform row, scoped by tenant_id (google_event_id is
                     # indexed but not globally unique). Best-effort: the calendar
@@ -407,6 +445,8 @@ async def _apply_flow_result(
     if booked_appointment is not None and persisted and tenant is not None:
         _log_booking_scope(booked_appointment, tenant.id, source=SOURCE_FLOW)
         await enqueue_post_booking_hooks(redis, tenant.id, booked_appointment.id, source="flow")
+        if replaced is not None:
+            await _finish_replacement(tenant, replaced)
         # TASK-032 R2: plan the reminders, in their own transaction AFTER the
         # booking committed - a reminder problem never costs a booking.
         if reminder_hooks.enabled_for(tenant):
@@ -460,6 +500,9 @@ async def _apply_flow_result(
         if result.bubbles:
             if cancellation_note:
                 result.bubbles[-1].body = f"{result.bubbles[-1].body}\n\n{cancellation_note}"
+            if replaced is not None and persisted and tenant is not None:
+                notice = _replaced_notice(tenant, replaced)
+                result.bubbles[-1].body = f"{result.bubbles[-1].body}\n\n{notice}"
             await _dispatch_bubbles(reply, result.bubbles, tenant=tenant, waba_token=waba_token)
         return True
     return False  # delegate_llm

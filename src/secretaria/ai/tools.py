@@ -677,6 +677,12 @@ async def _persist_appointment(
                     booked_conversation = await session.get(Conversation, conversation_id)
                     if booked_conversation is not None:
                         booked_conversation.flow_attendee_name = None
+                        # TASK-032 R3: "Marcar outra" replaces the original only
+                        # through the flow's confirmation card, which warns about
+                        # it. A booking the agent made by itself showed no such
+                        # warning, so it never cancels anything; the marker of an
+                        # unfinished "Marcar outra" ends here.
+                        booked_conversation.flow_replaces_appointment_id = None
         logger.info("tool_appointment_persisted", event_id=event.get("id"))
     except Exception as exc:
         # The calendar event already exists; a missing DB row is recoverable

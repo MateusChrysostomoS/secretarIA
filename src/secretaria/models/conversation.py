@@ -159,6 +159,16 @@ class Conversation(Base):
     # Written unconditionally by `_apply_flow_result` like every flow field, and carried
     # only on the attendee steps (`flow_router._carry_draft`).
     flow_draft: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # TASK-032 R3 ("Marcar outra consulta", spec §4.3): the live appointment the
+    # booking in progress REPLACES. The original is cancelled only in the same
+    # transaction that writes the new appointment
+    # (services/appointment_replacement.py). Written unconditionally by
+    # `_apply_flow_result` like every flow field and carried only while the
+    # conversation stays in the booking (`flow_router._carry_replacement`).
+    # SET NULL so deleting the appointment never breaks the conversation row.
+    flow_replaces_appointment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("appointments.id", ondelete="SET NULL"), nullable=True
+    )
     # Set while a returning patient is mid-"quer continuar?" prompt: holds the
     # FlowState value to resume to AND marks that the next inbound is the Sim/Não
     # answer. NULL whenever no reactivation prompt is pending.
