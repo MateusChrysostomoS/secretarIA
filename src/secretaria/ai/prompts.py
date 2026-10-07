@@ -16,7 +16,7 @@ edited per clinic.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from secretaria.core.whatsapp_limits import (
@@ -24,6 +24,7 @@ from secretaria.core.whatsapp_limits import (
     MAX_LIST_ROW_TITLE_CHARS,
     decorated_text_budget,
 )
+from secretaria.services.booking_dates import date_context
 from secretaria.services.service_catalog import missing_from
 
 if TYPE_CHECKING:
@@ -303,6 +304,21 @@ def _format_conversation_state(config: TenantRuntimeConfig) -> str:
         "- Se já dá para saber o serviço e/ou o médico, chame set_booking_draft com o "
         "que você sabe: ele pula as etapas já respondidas e abre a próxima que falta. "
         "Não repita perguntas cujas respostas estão acima.\n"
+        "- CAPTURE TODOS os campos já informados antes de devolver ao fluxo: serviço, "
+        "médico, convênio, for_whom, day e time. Não perca dia e atendido ao chamar a ferramenta. "
+        "'Para mim', 'para mim mesmo' e equivalentes viram for_whom=\"me\"; outra pessoa "
+        "vira \"other\", sem nome no argumento. 'Não tenho convênio', 'sem convênio' e "
+        "pagamento particular viram insurance=\"Particular\". Não suponha esses campos se "
+        "não foram respondidos.\n"
+        "- Converta a data explícita ou relativa pelo calendário operacional em day "
+        "(AAAA-MM-DD). Preserve a última correção do paciente e as escolhas compatíveis "
+        "do ESTADO DA CONVERSA. Se faltar horário, deixe time vazio: o fluxo pergunta "
+        "somente o que falta. Ao receber apenas HH:MM, envie time com o dia já escolhido. "
+        "Nunca peça de novo quem será atendido ou o dia quando já foram informados.\n"
+        "- Com este ESTADO DA CONVERSA, use set_booking_draft também quando o paciente "
+        "nomeia um médico: use o nome completo do catálogo se a escolha for inequívoca. "
+        "Não use select_professional_and_continue para descartar os demais dados. "
+        "A ferramenta só prepara o fluxo/cartão; ela não confirma uma consulta.\n"
         "- Se há sintoma ou necessidade de avaliação, mas o catálogo não permite "
         "identificar serviço/médico com segurança, chame neste turno "
         "set_booking_draft(service=\"\", professional=\"\", insurance=\"\"). "
@@ -406,9 +422,8 @@ def _format_clinic_facts(config: TenantRuntimeConfig) -> str:
     return _CLINIC_FACTS_HEADING + "\n".join(kept) + _CLINIC_FACTS_FOOTER
 
 
-def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
+def secretary_system_prompt(config: TenantRuntimeConfig, *, now: datetime | None = None) -> str:
     """Render the full system prompt for a specific tenant."""
-    today = date.today().isoformat()
     tz = config.timezone
     clinic = config.clinic_name
     hours_text = _format_business_hours(config.business_hours)
@@ -437,7 +452,7 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
         f"{safety_section}{priorities_section}{professional_section}{clinic_facts_section}{post_consult_section}"
         f"{appointment_context_section}{conversation_state_section}\n\n"
         "CONTEXTO OPERACIONAL:\n"
-        f"- Hoje é {today} (timezone {tz}).\n"
+        f"{date_context(tz, now=now)}"
         f"- Horário de atendimento:\n{hours_text}\n"
         f"- Tipos de consulta disponíveis:\n{types_text}{service_guides_line}\n\n"
         "================ COMO ESCREVER NO WHATSAPP ================\n"

@@ -366,6 +366,25 @@ async def test_yes_hands_the_conversation_to_the_team(tap):
     assert [b.body for b in res.bubbles] == [flow_router.SCOPED_HELP_ESCALATE_MESSAGE]
 
 
+async def test_yes_keeps_the_chosen_doctor_so_the_alert_reaches_them():
+    """Review of TASK-038: the handover writes the flow fields BEFORE the staff alert reads
+    the selected doctor back - a bare result erased it and the doctor's e-mail was lost."""
+    from uuid import uuid4
+
+    doctor_id = uuid4()
+    res = await route(
+        _offer_pending(
+            flow_selected_professional_id=doctor_id, flow_selected_insurance="Unimed"
+        ),
+        _tenant(),
+        None,
+        "✅ Sim",
+    )
+    assert res.action == "handover"
+    assert res.flow_selected_professional_id == doctor_id
+    assert res.flow_selected_insurance == "Unimed"
+
+
 @pytest.mark.parametrize("tap", ["❌ Não", "não"])
 async def test_no_brings_the_menu_back(tap):
     res = await route(_offer_pending(), _tenant(), None, tap)

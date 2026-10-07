@@ -43,8 +43,8 @@ from secretaria.services.flow_router import (  # noqa: E402
     ATTENDEE_NEXT_BOOK,
     STEP_AWAITING_ATTENDEE_AUTH,
     STEP_AWAITING_ATTENDEE_CHOICE,
+    STEP_AWAITING_CONFIRMATION,
     STEP_AWAITING_SERVICE,
-    STEP_AWAITING_SLOT,
 )
 from secretaria.services.greeting_template import CONSENT_BUTTON_LABEL  # noqa: E402
 from secretaria.workers import tasks  # noqa: E402
@@ -225,7 +225,7 @@ _FULL_OTHER = BookingDraft(
 )
 
 
-async def test_authorizing_a_third_party_lands_the_parked_draft_on_its_slot_list(wired) -> None:
+async def test_authorizing_a_third_party_lands_the_full_parked_draft_on_its_card(wired) -> None:
     db = wired
     tenant = await _seed_tenant(db)
     await _onboard(tenant)
@@ -236,15 +236,15 @@ async def test_authorizing_a_third_party_lands_the_parked_draft_on_its_slot_list
     await _wa_turn(tenant, LABEL_ATTENDEE_AUTH_CONFIRM)
 
     conversation = await _conversation(db, tenant)
-    assert conversation.flow_step == STEP_AWAITING_SLOT
+    assert conversation.flow_step == STEP_AWAITING_CONFIRMATION
     assert conversation.flow_selected_type == "Primeira Consulta"
     assert conversation.flow_selected_day == DAY.isoformat()
     assert conversation.flow_attendee_name == "Maria da Silva"
     assert conversation.flow_draft is None  # consumed
     assert await _consents(db, tenant) == 1  # the authorization is still recorded, once
     kind, body = _WireClient.sends[-1]
-    assert kind == "list"
-    assert body.startswith(f"Horários livres em {DAY.strftime('%d/%m')}")
+    assert kind == "buttons"
+    assert f"{DAY.strftime('%d/%m/%Y')} às 10:00" in body
 
 
 async def test_answering_pra_mim_overrides_a_parked_other(wired) -> None:
@@ -256,7 +256,7 @@ async def test_answering_pra_mim_overrides_a_parked_other(wired) -> None:
     await _wa_turn(tenant, LABEL_ATTENDEE_SELF)
 
     conversation = await _conversation(db, tenant)
-    assert conversation.flow_step == STEP_AWAITING_SLOT  # no name is asked
+    assert conversation.flow_step == STEP_AWAITING_CONFIRMATION  # no name is asked
     assert conversation.flow_attendee_name == ATTENDEE_SELF
     assert await _consents(db, tenant) == 0
 

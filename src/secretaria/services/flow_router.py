@@ -1482,10 +1482,14 @@ def _handle_human_offer(
             conversation_id=str(getattr(conversation, "id", None)),
         )
         # action="handover": workers/shared/flow_runner.py commits the human state and
-        # alerts the clinic BEFORE this message goes out.
-        return FlowRouterResult(
-            action="handover", bubbles=[TextBubble(body=SCOPED_HELP_ESCALATE_MESSAGE)]
-        )
+        # alerts the clinic BEFORE this message goes out. Built on the conversation's own
+        # answers, exactly what a direct request_human_handoff leaves behind: the flow
+        # fields are written first, and the alert reads the chosen doctor back from them
+        # (workers/shared/handover.py) - a bare result would erase whom to e-mail.
+        result = _delegate_llm_keeping_draft(conversation)
+        result.action = "handover"
+        result.bubbles = [TextBubble(body=SCOPED_HELP_ESCALATE_MESSAGE)]
+        return result
     if _label_match(body, LABEL_NO):
         logger.info(
             "human_offer_answered",

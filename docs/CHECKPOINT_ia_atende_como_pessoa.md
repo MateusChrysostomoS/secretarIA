@@ -72,10 +72,39 @@ a pergunta feita numa etapa com lista e convidar a escolher na lista que já est
 volta…"). A foto do prompt padrão (`tests/golden/system_prompt_default.txt`) foi regerada: muda só o
 bloco novo e essa última linha.
 
-**Fora do escopo, decisão do dono pendente:** a regra "se a informação não estiver aqui, diga que vai
-confirmar com a equipe" (`_CLINIC_FACTS_FOOTER`, TASK-025) continua; hoje nada avisa a equipe nesse
-caso (teste real T12). Opções: criar um aviso real à recepção, ou a IA dizer que não tem a informação
-e como obtê-la.
+## 5. Oferta de atendente com Sim/Não (pedido do dono, 2026-10-07)
+
+Quando a IA não tem o contexto para fazer ou responder o que o paciente pediu, ela não promete mais
+"vou confirmar com a equipe" (teste real T12): chama `ai/tools.py::offer_human_handoff` (com `message`
+opcional — "Não tenho o valor dessa cirurgia aqui.") e o fluxo envia o cartão fixo
+`flow_router.HUMAN_OFFER_BODY`: "Não sou capaz de atender essa sua necessidade por aqui. Quer que eu
+chame nosso atendente humano? (Pode demorar alguns minutos)" com **✅ Sim / ❌ Não**.
+
+- Caminho: `HumanHandoffOfferRequested` → `ai/graph.py::HUMAN_HANDOFF_OFFER_SENTINEL` (com o envelope
+  `__INTRO__:` quando há fala) → `workers/shared/sentinels.py::_handle_offer_human_handoff` →
+  `flow_router.enter_human_offer`. A conversa espera em `FlowState.LLM` + `STEP_HUMAN_OFFER` (a expiração
+  do modo LLM limita a espera); o rascunho do agendamento é preservado.
+- `flow_router._handle_human_offer` (checado em `_route` antes do ramo LLM): **Sim** → `action="handover"`
+  — o mesmo caminho da escalada do "Não sei": a equipe assume e a clínica é avisada (inclusive o médico
+  já escolhido: o resultado preserva os campos da conversa, como o pedido direto), depois sai "Vou te
+  conectar com alguém da nossa equipe…"; **Não** → "Tudo bem! Se quiser, me conta de outro jeito o que
+  você precisa, ou escolha uma opção:" com o menu; **qualquer outro texto** → a oferta cai e a IA responde.
+- `request_human_handoff`: pedido explícito de pessoa e assunto clínico continuam indo direto para a
+  equipe; o motivo "could_not_help" agora pergunta antes (vira a oferta).
+- Prompt: item 3 do "COMO ATENDER", bloco de estado, rodapé dos fatos da clínica e `get_service_info`
+  apontam para `offer_human_handoff`. Isso resolve a pendência anterior ("vou confirmar com a equipe"
+  sem mecanismo).
+- Testes: `tests/test_ia_atende_como_pessoa.py` §5 e
+  `tests/test_bot_reply_gating.py::test_the_human_offer_card_then_yes_hands_over` (cartão → Sim → humano
+  no banco). Desligar cada peça faz o teste correspondente falhar. Revisão independente: 1 achado médio
+  (médico escolhido apagado antes do aviso no "Sim") corrigido com teste; sem evento de hand-back próprio
+  para a oferta (só log `human_offer_presented`/`human_offer_answered`) — aceito.
+
+## Integração com a `main` de 2026-10-07
+
+Outra sessão publicou em `main` a captura de dia/horário/"pra quem" pela IA (8a1aaf9, `set_booking_draft`
+v1 com `for_whom`/`day`/`time`). A junção manteve as duas coisas: a ferramenta v1 tem os campos dela e o
+`message` desta tarefa (repassado à v2), e a exceção carrega `professional_unresolved` e `intro`.
 
 ## Validação e estado
 

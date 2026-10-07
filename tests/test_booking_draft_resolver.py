@@ -652,10 +652,12 @@ async def test_reserved_early_slots_do_not_hide_later_free_times():
             BookingDraft(service="Consulta", day=DAY, time=dt.time(12, 0)),
             cal=_Cal({DAY: times}),
         )
-    assert res.landing_step == fr.STEP_AWAITING_SLOT
+        picker = await _resolve(BookingDraft(service="Consulta", day=DAY), cal=_Cal({DAY: times}))
+    assert res.landing_step == fr.STEP_AWAITING_CONFIRMATION
+    assert res.result.flow_selected_slot == "2026-10-08T12:00"
     assert res.result.flow_selected_day == "2026-10-08"
     assert res.dropped == {}
-    assert [row[0] for row in res.result.bubbles[0].rows if row[0].startswith("slot|")] == [
+    assert [row[0] for row in picker.result.bubbles[0].rows if row[0].startswith("slot|")] == [
         "slot|2026-10-08T12:00",
         "slot|2026-10-08T12:30",
     ]
@@ -708,7 +710,8 @@ async def test_a_short_service_can_accept_a_free_time_beyond_the_first_96_slots(
     )
     assert res.dropped == {}
     assert res.accepted == ("service", "day", "time")
-    assert res.landing_step == fr.STEP_AWAITING_SLOT
+    assert res.landing_step == fr.STEP_AWAITING_CONFIRMATION
+    assert res.result.flow_selected_slot == "2026-10-08T17:00"
 
 
 async def test_a_short_service_keeps_a_day_with_only_late_free_slots_after_holds():
@@ -722,6 +725,12 @@ async def test_a_short_service_keeps_a_day_with_only_late_free_slots_after_holds
             tenant=_tenant(appointment_types=[{"name": "Consulta curta", "duration_min": 5}]),
             cal=_five_minute_agenda(),
         )
+        picker = await _resolve(
+            BookingDraft(service="Consulta curta", day=DAY),
+            tenant=_tenant(appointment_types=[{"name": "Consulta curta", "duration_min": 5}]),
+            cal=_five_minute_agenda(),
+        )
     assert res.dropped == {}
-    assert res.landing_step == fr.STEP_AWAITING_SLOT
-    assert res.result.bubbles[0].rows[0][0] == "slot|2026-10-08T16:00"
+    assert res.landing_step == fr.STEP_AWAITING_CONFIRMATION
+    assert res.result.flow_selected_slot == "2026-10-08T17:00"
+    assert picker.result.bubbles[0].rows[0][0] == "slot|2026-10-08T16:00"

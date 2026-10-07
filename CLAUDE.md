@@ -136,7 +136,7 @@ neither" do `README.md`.
 
 ## Documentação
 
-`docs/CHECKPOINT_ia_atende_como_pessoa.md` — TASK-038: texto livre no convênio/dia vai à IA na mesma etapa ("ter" em frase não é terça), a fala da IA sai junto do cartão ao devolver aos botões (envelope `__INTRO__:`, segurada até o cartão), "Não sei" humano e bloco "COMO ATENDER" no prompt; deploy API+worker juntos.
+`docs/CHECKPOINT_ia_atende_como_pessoa.md` — TASK-038: texto livre no convênio/dia vai à IA na mesma etapa ("ter" em frase não é terça), a fala da IA sai junto do cartão ao devolver aos botões (envelope `__INTRO__:`, segurada até o cartão), "Não sei" humano, bloco "COMO ATENDER" no prompt e oferta de atendente com Sim/Não (`offer_human_handoff`, cartão fixo); deploy API+worker juntos.
 
 `docs/CHECKPOINT_outro_pergunta_fixa.md` — TASK-037: "Outro" do menu responde a pergunta fixa "O que te traz à clínica?" sem a IA (a IA começa na resposta); 12 testes reais dos outros pontos de entrada da IA e as recomendações.
 
@@ -523,3 +523,5 @@ Rules:
 docs/CHECKPOINT_digitando_backend.md — TASK-033: indicador universal no backend Portal/console; local, sem deploy; validação e provas pendentes registradas.
 
 TASK-034: Portal visit discard on account promotion; local validation and deployment order: `docs/CHECKPOINT_portal_visita_fundida.md`. Not deployed.
+
+`docs/CHECKPOINT_ia_captura_datas.md` — TASK-030: correção aprovada de captura completa no caminho atual, datas explícitas/relativas no fuso da clínica e escolha segura de médico; validação conjunta com TASK-037/avaliações reais, publicação autorizada e deploy pelo dono pendente; ler antes de P4/P5 e novo reteste.
