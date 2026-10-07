@@ -17,6 +17,10 @@ from secretaria.models import (
 )
 from secretaria.plugins.post_booking import enqueue_post_booking_hooks
 from secretaria.services import reminder_hooks
+from secretaria.services.appointment_replacement import (
+    ReplacedAppointment,
+    cancel_replaced_appointment,
+)
 from secretaria.services.appointment_status import (
     SOURCE_FLOW,
     log_status_transition,
@@ -24,10 +28,6 @@ from secretaria.services.appointment_status import (
 from secretaria.services.attendee import (
     CONSENT_KIND_THIRD_PARTY_BOOKING,
     CONSENT_LEGAL_BASIS_THIRD_PARTY_BOOKING,
-)
-from secretaria.services.appointment_replacement import (
-    ReplacedAppointment,
-    cancel_replaced_appointment,
 )
 from secretaria.services.calendar import (
     CalendarService,
