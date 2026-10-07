@@ -25,6 +25,7 @@ from tests._reminders_r3 import (
     consent,
     get_conversation,
     sent,
+    set_conversation,
     turn,
     wire,
 )
@@ -221,3 +222,28 @@ async def test_outro_on_the_card_hands_the_next_message_to_the_ai(db):  # noqa: 
 
     assert (await get_conversation(db, world)).flow_state == FlowState.LLM
     assert sent()[-1][2] == AGENT_REPLY
+
+
+async def test_the_ais_short_answer_is_not_lost_when_the_menu_is_suppressed(
+    db,  # noqa: F811
+    monkeypatch,
+):
+    # The AI answers a question and hands back to the menu with its answer held as
+    # an intro. On the opening turn the menu is suppressed, but the answer must still
+    # reach the patient (review finding).
+    from secretaria.ai.graph import SHOW_MAIN_MENU_SENTINEL
+    from secretaria.services.turn_safety_net import hold_intro
+    from tests._patching import workers_ns
+
+    async def _agent(message, *args, **kwargs):
+        hold_intro("Sim, atendemos aos sábados.")
+        return SHOW_MAIN_MENU_SENTINEL
+
+    monkeypatch.setattr(workers_ns, "run_agent", _agent)
+    world = await _quiet_world(db)
+    await set_conversation(db, world, flow_state=FlowState.MENU)
+
+    await turn(db, world, "vocês atendem sábado?")
+
+    texts = [item[2] for item in sent()]
+    assert "Sim, atendemos aos sábados." in texts

@@ -175,3 +175,42 @@ async def test_the_reconcile_still_plans_an_appointment_that_only_has_a_chat_row
         )
     assert created >= 2
     assert {"chat", "day", "hour"} <= kinds
+
+
+async def test_a_button_less_cron_reminder_does_not_block_the_opening(db):  # noqa: F811
+    # Outside the 24 h window the cron sends the plain template: the patient never
+    # saw Confirmar, so the chat must still offer it (review finding, spec §4.2).
+    world = await seed_world(db)
+    await _row(
+        db,
+        world,
+        kind="day",
+        status="sent",
+        sent_at=QUIET,
+        warn_kind="unconfirmed",
+        last_error_code="plain_template",
+    )
+    assert (await _decide(db, world)).reason == ro.OPEN
+
+
+async def test_a_retired_chat_row_neither_blocks_nor_is_reused(db):  # noqa: F811
+    # A reschedule back to the same start retires every row (R1); the new version
+    # starts clean, so a confirmed-then-retired card must not suppress the opening
+    # and must not be re-shown (its taps would answer "não está mais ativa").
+    world = await seed_world(db)
+    retired = await _row(
+        db,
+        world,
+        status="sent",
+        sent_at=NOW - timedelta(days=1),
+        answer="confirm",
+        invalidated_at=NOW - timedelta(hours=2),
+    )
+    assert (await _decide(db, world)).reason == ro.OPEN
+    async with db() as session:
+        appointment = await ro.nearest_live_appointment(
+            session, world.tenant.id, world.patient.id, now=NOW
+        )
+        fresh = await ro.ensure_chat_reminder(session, appointment, now=NOW)
+        await session.commit()
+    assert fresh.id != retired

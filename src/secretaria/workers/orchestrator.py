@@ -108,6 +108,7 @@ from secretaria.services.turn_safety_net import (
     fallback_allowed,
     hold_intro,
     sends_in_turn,
+    take_held_intro,
 )
 from secretaria.services.typing_indicator import clear_typing, mark_typing
 from secretaria.workers.portal.attachments import (
@@ -1166,6 +1167,17 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                 source="agent",
                 conversation_id=str(reply.conversation_id),
             )
+            # The agent's short answer rode in as a held intro for the menu card
+            # that is not coming: send it on its own so the question is answered.
+            held = take_held_intro()
+            if held and tenant is not None:
+                await _send_plain_reply(
+                    reply,
+                    tenant=tenant,
+                    waba_token=waba_token,
+                    body=held,
+                    event="reminder_opening_held_intro_sent",
+                )
             return
         await _handle_show_main_menu(
             reply, tenant, flow_professionals, patient_wa, redis=redis, waba_token=waba_token

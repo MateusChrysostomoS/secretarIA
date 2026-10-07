@@ -58,6 +58,8 @@ SKIP_REMINDER_WAITING = "reminder_waiting"
 # A reminder sent this close to the conversation's last activity IS that
 # activity (send and record happen a moment apart).
 REMINDER_WAITING_TOLERANCE = timedelta(minutes=5)
+# `reminder_delivery` stores this in `last_error_code` when the buttons could not go out.
+PLAIN_TEMPLATE_CODE = "plain_template"
 
 
 @dataclass(frozen=True)
@@ -94,6 +96,9 @@ async def _current_version_rows(
         select(AppointmentReminder).where(
             AppointmentReminder.tenant_id == appointment.tenant_id,
             AppointmentReminder.appointment_id == appointment.id,
+            # A retired row (R1: a reschedule, even back to the same start) is
+            # history, not state: it neither blocks nor is re-shown.
+            AppointmentReminder.invalidated_at.is_(None),
         )
     )
     start = as_utc(appointment.start_at)
@@ -132,6 +137,9 @@ async def decide_reminder_opening(
             row.status == REMINDER_STATUS_SENT
             and row.answer is None
             and row.warn_kind == REMINDER_WARN_UNCONFIRMED
+            # The plain template (no buttons, outside the 24 h window) never showed
+            # Confirmar, so it is not "the card in front of the patient".
+            and row.last_error_code != PLAIN_TEMPLATE_CODE
             and row.sent_at is not None
             and as_utc(row.sent_at) >= last_activity - REMINDER_WAITING_TOLERANCE
         ):
