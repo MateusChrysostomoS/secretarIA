@@ -7,6 +7,28 @@ e pushes para fazer seu deploy. A main atual foi incorporada em `f503a21`, e a s
 das migrações foi corrigida em `166e582`. Worktree e branch TASK-030 preservados para P2b.
 Nenhum deploy ou SQL remoto realizado pelo agente. P2b e os demais planos continuam pendentes.
 
+**Pós-deploy — 2026-10-06:** o dono informou deploy e migração. API e worker comprovados
+com o fingerprint do código publicado (`43086a2439e5`) e head embarcado `e7d3c1a9b5f2`.
+Prova real pelo agent-browser: mensagens persistidas, pra quem/autorização/reload e escolhas
+até serviço PASS. A falha inicial da agenda deixou de ocorrer após correção informada pelo dono.
+Reteste às 11:48–12:01 BRT PASS para dias, mais dias, oito horários, reload/reabrir clínica,
+outro dia, resumo e cancelar somente o rascunho/voltar ao menu. Outra conversa QA da mesma
+clínica foi usada; console autenticado e chat antigo já automatizado, sem troca de modo.
+Smoke inicial não destrutivo aprovado até resumo; naquele percurso não houve criação.
+Causa/configuração da falha inicial não inspecionadas; P2b continua pendente.
+Ver `docs/TESTES_REAIS_ia_p2a_2026-10-06.md`. Migração real informada pelo dono, sem leitura
+direta do stamp/schema remoto pelo agente.
+
+**Teste posterior com LLM — 2026-10-06, 12:30–12:45 BRT:** uma consulta de catarata
+criada pelo toque em Confirmar para 16/10/2026 às 14:40 e mantida, por escolha do dono.
+Recordação de serviço/Particular/data/hora e correção da preferência PASS; ao iniciar o
+fluxo, data/hora precisaram ser repetidas (ferramenta P1 ainda tem só três campos;
+P2b/P3 pendentes). Persistência comprovada pelo cartão determinístico de gerenciamento.
+Esse cartão mostra 17:40 em vez de 14:40: exibição UTC sem conversão, achado aberto.
+FAQ de duração/estacionamento não concluída; perguntas livres no seletor de dia não
+retornam à LLM. Sem OTP novo nesta identidade já autenticada. Código não alterado.
+Prova: `docs/TESTES_REAIS_llm_agendamento_2026-10-06.md`.
+
 Plano executado: `superpowers/plans/2026-10-02-ia-p2a-rascunho-coluna-e-resolvedor.md`.
 Spec: `superpowers/specs/2026-10-02-ia-entra-em-qualquer-etapa-design.md`, §4.1–4.3, §6–7.
 
@@ -108,7 +130,8 @@ O teste de R1 agora confirma head único e presença de sua revisão na cadeia, 
 novas migrações descendentes. Rollback apenas do P2a: `alembic downgrade b8d3f1a6c2e5`.
 
 Quando houver pedido de implantação do P2 inteiro: migração primeiro, API e worker juntos.
-Rollback: código antigo nos dois serviços antes de remover a coluna. **Deployment: NOT AUTHORIZED.**
+Rollback: código antigo nos dois serviços antes de remover a coluna. Deploy P2a realizado
+pelo dono e reportado; nenhum novo deploy ou SQL remoto autorizado ao agente.
 
 ## Decisões e pendências para a continuação
 

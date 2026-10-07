@@ -93,3 +93,11 @@ SQLite demonstra recarga/deduplicação e preservação de estado. Não demonstr
 Migração primeiro; API e worker em seguida; interruptor desligado até R2 e prova na clínica de teste; front depois. Não executar downgrade em banco usado por imagem nova. Deployment: **NOT AUTHORIZED**.
 
 R2 (motor de lembretes) construído: ver docs/CHECKPOINT_lembretes_r2.md.
+
+## Follow-up: deploy informado pelo dono e testes reais
+
+Em 2026-10-05 o dono informou que havia deployado e autorizou testes reais na Chrysostomo For Eyes. Identidade do código API/worker `c90df58` comprovada pelo fingerprint `81d7bd8766ec`; validação funcional **incompleta/não aprovada**: duas mensagens aceitas não voltaram no histórico nem geraram resposta durante a observação, e a agenda exigiu uma sessão de equipe ausente. O head da imagem não prova migração aplicada. Evidências, limites e próximos passos em [TESTES_REAIS_lembretes_r1_2026-10-05.md](TESTES_REAIS_lembretes_r1_2026-10-05.md). Nenhum deploy adicional ou SQL remoto realizado pelo agente.
+
+Reteste autorizado em 2026-10-06: **persistência e reload passaram**; as duas sondas agora permanecem no histórico. Nenhuma resposta bot posterior em 138s; agenda ainda sem sessão de equipe. API/worker em paridade no fingerprint `43086a2439e5` (head embarcado `e7d3c1a9b5f2`). Validação funcional completa permanece não aprovada; relatório atualizado com timestamps do servidor.
+
+Terceira execução em 2026-10-06, após autenticação/correções informadas pelo dono: **PASS nos casos reais executados**. Mensagem persistida, duas respostas novas em cerca de 9s, todas preservadas após reload. Agenda autenticada: campos R1 do GET, confirmação staff 0→1, repetição permanece 1, reset 1→0, terminal unconfirmed e recusas 404/422 verificados. Consulta de teste passada/sem depósito restaurada a cancelled/0, sem tocar no Google Calendar ou enviar notificação. Cronograma com linhas, segunda confirmação por lembretes distintos, atenção/avisos e concorrência controlada não provados ao vivo. Relatório acima contém evidências e limites; as falhas das execuções anteriores não se repetiram nestes casos.
