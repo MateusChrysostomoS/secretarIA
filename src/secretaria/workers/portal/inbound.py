@@ -18,9 +18,11 @@ from secretaria.models import (
     ProcessedEvent,
     Tenant,
 )
+from secretaria.schemas.webhook import decode_action_id
 from secretaria.services.channel_sender import (
     CHANNEL_BRAIN_MESSAGE,
 )
+from secretaria.services.reminder_text import REMINDER_ROW_ACTIONS
 from secretaria.workers.orchestrator import (
     _send_bot_reply,
 )
@@ -233,6 +235,16 @@ async def _persist_brain_message_inbound(
                     interactive_reply_id = await _validated_brain_message_reply_id(
                         session, tenant=tenant, patient=patient, reply_id=interactive_reply_id
                     )
+                # TASK-032 R3: a reminder button tapped in the Portal is an ACTION,
+                # as on WhatsApp - decoded only AFTER the line above proved the id
+                # was on one of THIS conversation's recent cards, and only for the
+                # reminder-row family, whose handler checks the row against the
+                # conversation's patient again (workers/shared/reminder_actions.py).
+                # Older action ids keep today's title routing on this channel.
+                action_button = None
+                decoded = decode_action_id(interactive_reply_id) if interactive_reply_id else None
+                if decoded is not None and decoded[0] in REMINDER_ROW_ACTIONS:
+                    action_button = decoded
 
                 return await _route_inbound_turn(
                     session,
@@ -250,6 +262,7 @@ async def _persist_brain_message_inbound(
                     # No Meta id exists for a message Meta never carried.
                     inbound_wam_id=None,
                     interactive_reply_id=interactive_reply_id,
+                    action_button=action_button,
                     attachment=attachment,
                 )
         except IntegrityError:

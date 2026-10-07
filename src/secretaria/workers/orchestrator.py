@@ -156,9 +156,6 @@ from secretaria.workers.shared.handover import (
     _handle_calendar_unavailable,
     _handle_human_handoff,
 )
-from secretaria.workers.shared.reminder_opening import (
-    _send_reminder_opening,
-)
 from secretaria.workers.shared.llm_context import (
     _ai_toolset_v2,
     _appointment_context_text,
@@ -169,6 +166,9 @@ from secretaria.workers.shared.llm_context import (
     _manage_owner_calendar_target,
     _should_inject_appointment_context,
     _should_inject_post_consult_knowledge,
+)
+from secretaria.workers.shared.reminder_opening import (
+    _send_reminder_opening,
 )
 from secretaria.workers.shared.sentinels import (
     _handle_manage_appointment,
