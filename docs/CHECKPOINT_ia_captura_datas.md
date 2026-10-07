@@ -2,7 +2,7 @@
 
 ## Estado
 
-Correção aprovada pelo dono em 06/10, concluída localmente em 07/10/2026, no worktree `C:/TECH/BRAIN-worktrees/TASK-030/secretarIA`, branch `task/TASK-030-ia-entra-em-qualquer-etapa`, base `01f2af7`. Código/testes/docs sem commit, merge, push ou deploy desta correção. Nenhuma configuração/interruptor, SQL remoto ou consulta real alterada. A main com documentos locais protegidos ficou intocada durante a implementação.
+Correção aprovada pelo dono e commitada em `8a1aaf9`. Merge/push autorizados em 07/10/2026; a main `0ca17ac` (TASK-037 e registros reais) foi incorporada em `83dc2a4`. Código combinado validado; sem deploy pelo agente, configuração, SQL remoto ou alteração de consulta real. Registro dos SHAs publicados em `C:/TECH/BRAIN/tasks/TASK-030/results/booking-date-integration-codex.md`.
 
 ## Problema e comportamento novo
 
@@ -57,3 +57,9 @@ A produção continua no deploy anterior até publicação/deploy autorizados. P
 ## Movimento concorrente da main
 
 Ao encerrar, a main local estava limpa em 0ca17ac, incluindo TASK-037 (Outro com pergunta fixa) e registros de testes reais integrados por outra execucao. Este executor nao alterou esses commits. Esta correcao foi validada no worktree sobre 01f2af7; a futura integracao deve incorporar/preservar a TASK-037 e validar o resultado combinado antes de publicar.
+
+## Integração/publicação autorizadas — 2026-10-07
+
+Commit da correção `8a1aaf9`; merge da main `0ca17ac` em `83dc2a4`. Código sem conflito; único conflito no checkpoint P3 resolvido preservando o reteste real e a correção em ordem cronológica. Alteração de Outro (TASK-037) e todos os documentos já commitados na main preservados.
+
+Suíte completa combinada: **3709 passed, 22 skipped, 15 warnings in 164.86s (0:02:44)**. Ruff nos Python do range integrado e diff-check limpos. Índice AST combinado em `bdc21d3`, gerado no SHA do merge de código. Os commits posteriores ao merge contêm apenas índice/docs; publicação prepara deploy de API e worker juntos pelo dono, sem migração nova desta correção. Integração só encerra após main/task remotos coincidirem com o head validado, conforme relatório central. A produção ainda requer deploy/retete; os resultados de modelo são a amostra sintética descrita acima, não esse reteste de produção.

@@ -522,4 +522,4 @@ docs/CHECKPOINT_digitando_backend.md — TASK-033: indicador universal no backen
 
 TASK-034: Portal visit discard on account promotion; local validation and deployment order: `docs/CHECKPOINT_portal_visita_fundida.md`. Not deployed.
 
-`docs/CHECKPOINT_ia_captura_datas.md` — TASK-030: correção aprovada de captura completa no caminho atual, datas explícitas/relativas no fuso da clínica e escolha segura de médico; validação local/avaliações reais, publicação e deploy pendentes; ler antes de P4/P5 e novo reteste.
+`docs/CHECKPOINT_ia_captura_datas.md` — TASK-030: correção aprovada de captura completa no caminho atual, datas explícitas/relativas no fuso da clínica e escolha segura de médico; validação conjunta com TASK-037/avaliações reais, publicação autorizada e deploy pelo dono pendente; ler antes de P4/P5 e novo reteste.
