@@ -1,6 +1,7 @@
 # CHECKPOINT — IA v2: prompt e regras (TASK-030 P5)
 
-Estado em 2026-10-07: **implementado e validado localmente**, sem commit, merge, push ou deploy.
+Estado em 2026-10-07: **implementado, commitado e validado com a main atual**;
+merge/push para main autorizados pelo dono. Sem deploy ou ativação por clínica.
 Worktree `C:/TECH/BRAIN-worktrees/TASK-030/secretarIA`, branch
 `task/TASK-030-ia-entra-em-qualquer-etapa`, base `1c1ce2c`. Nenhuma clínica foi ativada
 ou configuração de produção consultada/alterada nesta execução. Deployment **NOT AUTHORIZED**.
@@ -133,5 +134,21 @@ de produção para afirmações de agendamento permanece fora do P5.
 
 Relatório consolidado: `C:/TECH/BRAIN/tasks/TASK-030/results/p5-completion-codex.md`.
 Revisão: `C:/TECH/BRAIN/tasks/TASK-030/results/p5-review-codex.md`.
-Ledger/logs preservados em `.superpowers/sdd/2026-10-02-ia-p5-prompt-e-regras/`
-porque não houve commits. Branch e worktree mantidos para integração futura autorizada.
+Ledger/logs preservados em `.superpowers/sdd/2026-10-02-ia-p5-prompt-e-regras/`.
+Branch e worktree mantidos para o reteste após deploy.
+
+## 8. Integração autorizada — 2026-10-07
+
+Implementação P5 `5ace5e5`; incorporada a main `3f27fd0` (lembretes R3, correção de contexto
+`5b07f86` e registros das provas reais) pelo merge `d6e8d77`. Conflitos somente em documentação,
+com os dois lados preservados. Código v1 intocado contra essa main; limpeza do marcador de
+substituição de consulta dos lembretes preservada na ferramenta legada.
+
+Suíte conjunta: **4266 passed, 49 skipped, 16 warnings in 506,55 s**. Ruff do escopo e
+diff check contra main limpos. Os skips continuam avaliações reais opt-in; provas anteriores
+com modelo real estão na §5. P5 não acrescenta migração; manter as migrações já exigidas por R3.
+
+Fingerprint esperado da API **e** do worker após deploy: **d301f7e027b3** (210 fontes Python
+do commit Git). Código novo exige deploy dos dois serviços e paridade `match`.
+Para testar o atendimento v2 é necessária também a ativação da clínica piloto; publicar
+o código não altera `initial_flows.ai_draft_v2`. Nenhum agente ativou clínica ou executou deploy.

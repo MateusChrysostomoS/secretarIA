@@ -136,7 +136,7 @@ neither" do `README.md`.
 
 ## Documentação
 
-`docs/CHECKPOINT_ia_prompt_v2.md` - TASK-030 P5 adaptado ao atendimento atual: prompt por turno, fatos/preparo/datas/oferta humana preservados; 4165 testes verdes; modelo real e jornada continua testados, Portal legado ate cartao; local sem commit/deploy/ativacao, piloto v2 publicado ainda pendente.
+`docs/CHECKPOINT_ia_prompt_v2.md` - TASK-030 P5 adaptado ao atendimento atual: prompt por turno, fatos/preparo/datas/oferta humana preservados; 4266 testes verdes na integracao; modelo real e jornada continua testados; commitado, merge/push autorizados, sem deploy/ativacao; fingerprint esperado d301f7e027b3, piloto v2 pendente.
 
 `docs/TESTES_REAIS_captura_datas_2026-10-07.md` — captura real até o cartão PASS: mensagem original pergunta só horário; amanhã/quinta da próxima semana vão direto ao cartão; consulta existente preservada, sem confirmação nova. Versão/paridade e limites da prova registrados.
 
