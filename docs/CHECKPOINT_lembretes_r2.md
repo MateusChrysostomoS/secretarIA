@@ -44,6 +44,7 @@ Plano: `docs/superpowers/plans/2026-10-03-lembretes-r2-motor.md`. Base: R1 (`doc
 
 - Dono: submeter `lembrete_consulta_v2` à Meta; depois da aprovação ligar `REMINDER_V2_TEMPLATE_APPROVED=true` (API e worker).
 - R3: decodificar no Portal os toques `rem*` (chamar `decode_action_id` + `handle_reminder_button`), cartão de três opções do Cancelar, Outro → IA, mensagem de abertura (`kind='chat'`).
+- R3 executado: ver docs/CHECKPOINT_lembretes_r3.md (abertura do chat, caminho do Cancelar, botões no Portal).
 - R4: avisos à clínica lendo `warn_due_at`/`warn_kind` — só linhas `sent`/`failed`; `failed` + `delivery_failed` = falha de entrega. Ler `warn_due_at` como está: o motor já o ajusta num envio atrasado (em `sent` com botões vale `max(prazo do R1, envio + atraso do R1)`, ou seja, hora +20 min, dia +2 h, extra +2 h contados do envio real; envio no horário mantém o valor do R1).
 - TASK-030 P5: o prompt e o filtro da IA ainda proíbem falar de lembretes.
 - `reminder_opt_out` continua sem tela para o paciente gravar (fora de escopo, spec §7).
