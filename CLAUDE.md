@@ -136,10 +136,14 @@ neither" do `README.md`.
 
 ## Documentação
 
+`docs/CHECKPOINT_outro_pergunta_fixa.md` — TASK-037: "Outro" do menu responde a pergunta fixa "O que te traz à clínica?" sem a IA (a IA começa na resposta); 12 testes reais dos outros pontos de entrada da IA e as recomendações.
+
+`docs/TESTES_REAIS_p3_posdeploy_2026-10-06.md` — P3 `01f2af7` comprovado em API/worker; cartões/desistências e consulta preservada PASS, linguagem natural/v2 ainda não aprovadas; ler os limites antes de P4/P5 e novo reteste.
+
 `docs/CHECKPOINT_ia_confirmacao_expressa.md` — TASK-030 P3 commitado: confirmação expressa, retomada e gerenciamento v2; revisão corrigida, validação conjunta com lembretes R2, publicação autorizada e deploy pelo dono pendente; ler antes de P4/P5.
 - Lembretes/confirmação (TASK-032 R1): `docs/CHECKPOINT_lembretes_r1.md`.
 
-`docs/CHECKPOINT_ia_p2a_rascunho_resolvedor.md` — TASK-030 P2a A1–A6 commitado e integrado em main; revisão corrigida e migração SQLite/PostgreSQL comprovada, encadeada após R1; deploy pelo dono pendente; ler antes de P2b/P3 para preservar as correções.
+`docs/CHECKPOINT_ia_p2a_rascunho_resolvedor.md` — TASK-030 P2a A1–A6 commitado e integrado em main; deploy/migração informados pelo dono, paridade comprovada. Smoke até resumo em `docs/TESTES_REAIS_ia_p2a_2026-10-06.md`. Teste posterior pela LLM criou e manteve uma consulta em 16/10/2026 às 14:40: memória/correção PASS, transferência de data/hora incompleta (P2b/P3 pendentes) e cartão de gerenciamento exibe UTC 17:40; prova em `docs/TESTES_REAIS_llm_agendamento_2026-10-06.md`. Ler antes de P2b/P3 para preservar as correções.
 
 `docs/CHECKPOINT_workers_split.md` — TASK-023: divisão de `workers/tasks.py` (mapa nome → módulo, camadas, como provar).
 

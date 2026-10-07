@@ -1,7 +1,7 @@
 """Turn-scoped "ESTADO DA CONVERSA" block for the agent's system prompt.
 
-The LLM used to arrive at a turn blind: a tap on "Outro"/"Não sei" reaches it as
-the bare text, with no hint of which list the patient was on, which doctor or
+The LLM used to arrive at a turn blind: free text or a "Não sei" answer reaches it
+with no hint of which list the patient was on, which doctor or
 service was already chosen, or what each doctor offers. This renders that state
 as plain Portuguese for `ai/prompts.py::_format_conversation_state`.
 
@@ -76,7 +76,9 @@ def _where(state: FlowState | None, step: str | None) -> str:
     label = _STEP_LABELS.get(step or "")
     if label:
         return f"{label} — e escolheu 'Outro', 'Não sei' ou escreveu por conta própria"
-    return "no menu inicial — tocou em 'Outro' ou escreveu livremente"
+    # "Outro" never lands here any more: the flow answers the tap with OTHER_OPENER
+    # and the model first runs in LLM mode (the branch above).
+    return "no menu inicial — escreveu livremente"
 
 
 def _is_internal_marker(value: object) -> bool:
@@ -88,7 +90,12 @@ def _is_internal_marker(value: object) -> bool:
 
 def _pra_quem_line(attendee: str | None) -> str:
     if attendee is None:
-        return "- Pra quem é a consulta: ainda não respondido."
+        # Stated so the model does not ask it itself: "Outro" used to open with
+        # "Essa consulta é pra você?" because of this very line (owner, 2026-10-06).
+        return (
+            "- Pra quem é a consulta: ainda não respondido. Não pergunte isso você: "
+            "o fluxo guiado pergunta na hora de marcar."
+        )
     if attendee == ATTENDEE_SELF:
         return "- Pra quem é a consulta: para o próprio paciente."
     return "- Pra quem é a consulta: OUTRA pessoa (o nome dela é omitido de propósito)."

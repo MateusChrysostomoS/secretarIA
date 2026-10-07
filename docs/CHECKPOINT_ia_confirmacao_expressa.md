@@ -90,6 +90,12 @@ O dono solicitou merges e push para realizar o deploy. Commit P3 `244ead1`; merg
 
 Os documentos locais da main foram protegidos antes da integração; suas alterações não fazem parte desta publicação. Fonte/testes/dependências da main devem ser idênticos aos blobs validados, conforme manifesto do relatório de integração. Worktree TASK-030 e scratch mantidos. A publicação prepara o deploy conjunto de API e worker pelo dono; não é prova de deploy, migração, ativação ou comportamento real. P4/P5 permanecem pendentes.
 
+## Reteste após deploy informado pelo dono — 2026-10-06
+
+API/worker comprovados pelo fingerprint `a069f15823c2`, equivalente às fontes Python de `01f2af7`, paridade `match`. Na Chrysostomo For Eyes, agendamento e remarcação por seleção chegaram ao cartão; desistências preservaram a consulta existente de 16/10 às 15:20, inclusive após reload. Gerenciamento/cancelamento exibiram horário local correto nesta sessão. Não houve nova confirmação, remarcação efetiva ou cancelamento efetivo.
+
+Percurso em linguagem natural ainda não aprovado: dados completos repetiram atendido/dia; `14:40` digitado voltou ao dia, enquanto o botão funcionou. Interruptor v2 não consultado/alterado, então esta rodada não certifica a confirmação expressa nem o gerenciamento v2. P4/P5 e teste com ativação explícita seguem pendentes. Prova, limites e observações de automação/aba após reload em `docs/TESTES_REAIS_p3_posdeploy_2026-10-06.md`. Sem deploy pelo agente, SQL remoto, mudança de configuração, código, commit ou push nesta prova.
+
 ## Correção da captura no caminho atual — 2026-10-07
 
 Correção aprovada após reteste real: a ferramenta atual passa dia/horário/atendido, usa data fresca no fuso da clínica e preserva preferências até o cartão, sem depender da liberação completa v2. Médico ambíguo/removido exige escolha explícita. Implementação e validação locais, sem nova publicação/deploy/ativação. Detalhes e limites em `docs/CHECKPOINT_ia_captura_datas.md`; esta correção supersede a preservação anterior da captura de três campos, mantendo o restante do rollout P4/P5 separado.

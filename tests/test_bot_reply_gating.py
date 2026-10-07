@@ -27,6 +27,7 @@ from uuid import uuid4
 
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
+from sqlalchemy import select  # noqa: E402
 from sqlalchemy.ext.asyncio import (  # noqa: E402
     AsyncSession,
     async_sessionmaker,
@@ -42,11 +43,14 @@ from secretaria.models import (  # noqa: E402
     Conversation,
     FlowState,
     HandoverState,
+    Message,
+    MessageSender,
     Patient,
     Tenant,
 )
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
+    OTHER_OPENER,
     SCOPED_HELP_ESCALATE_MESSAGE,
     FlowRouterResult,
 )
@@ -198,9 +202,11 @@ def _reply_context(
     """A turn to feed `_send_bot_reply`.
 
     The default body is unmatched free text, which the router answers itself.
-    Tests that need to observe the LLM leg must pass `_LLM_ESCAPE` — since
-    flow_router.flows_enabled became unconditional, "Outro" (and an already-LLM
-    conversation) are the only ways a turn still reaches `run_agent`.
+    Tests that need to observe the LLM leg start the conversation in
+    `FlowState.LLM` and pass `_LLM_ANSWER` — since flow_router.flows_enabled
+    became unconditional, and an "Outro" tap answers with a fixed question
+    (owner, 2026-10-06), the patient's ANSWER in LLM mode is how a turn reaches
+    `run_agent`.
     """
     return tasks._ReplyContext(
         conversation_id=conversation.id,
@@ -209,8 +215,9 @@ def _reply_context(
     )
 
 
-# The "Outro" button — the product's deliberate, patient-initiated LLM hand-off.
-_LLM_ESCAPE = "Outro"
+# The patient's answer to the fixed question an "Outro" tap asks (the product's
+# deliberate, patient-initiated LLM hand-off): the first turn the model sees.
+_LLM_ANSWER = "minha vista está embaçada"
 
 
 # --------------------------------------------------------------------------
@@ -219,7 +226,7 @@ _LLM_ESCAPE = "Outro"
 
 
 async def test_entitled_reply_flows_as_before(monkeypatch: pytest.MonkeyPatch, db) -> None:
-    tenant, patient, conversation = await _make_conversation(db)
+    tenant, patient, conversation = await _make_conversation(db, flow_state=FlowState.LLM)
 
     async def _fake_get_entitlements(tenant_id, redis):
         assert tenant_id == tenant.id
@@ -238,7 +245,7 @@ async def test_entitled_reply_flows_as_before(monkeypatch: pytest.MonkeyPatch, d
     monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
     monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
 
-    await tasks._send_bot_reply(_reply_context(conversation, patient, _LLM_ESCAPE))
+    await tasks._send_bot_reply(_reply_context(conversation, patient, _LLM_ANSWER))
 
     assert len(run_agent_calls) == 1
     assert len(_FakeWhatsAppClient.created) == 1
@@ -364,7 +371,7 @@ async def test_reply_uses_whatsapp_client_for_tenant_with_decrypted_token(
 async def test_run_agent_receives_plugin_tools_for_entitled_addons(
     monkeypatch: pytest.MonkeyPatch, db
 ) -> None:
-    tenant, patient, conversation = await _make_conversation(db)
+    tenant, patient, conversation = await _make_conversation(db, flow_state=FlowState.LLM)
     sentinel_tools = ["sentinel-tool"]
 
     async def _fake_get_entitlements(tenant_id, redis):
@@ -382,10 +389,10 @@ async def test_run_agent_receives_plugin_tools_for_entitled_addons(
     monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
     monkeypatch.setattr(workers_ns, "agent_tools_for", lambda summary: sentinel_tools)
 
-    await tasks._send_bot_reply(_reply_context(conversation, patient, _LLM_ESCAPE))
+    await tasks._send_bot_reply(_reply_context(conversation, patient, _LLM_ANSWER))
 
     # The entitled add-on's tools are threaded through. `manage_existing_appointment`
-    # rides along too — the hand-back tool is offered on every "Outro" delegation now
+    # rides along too — the hand-back tool is offered on every LLM turn now
     # that the manage flow exists for every tenant — so this asserts inclusion rather
     # than an exact list; the hand-back tool has its own tests above.
     assert len(run_agent_calls) == 1
@@ -393,7 +400,7 @@ async def test_run_agent_receives_plugin_tools_for_entitled_addons(
 
 
 # --------------------------------------------------------------------------
-# Appointment-context injection wiring ("Outro" -> LLM handoff)
+# Appointment-context injection wiring ("Outro" -> fixed question -> LLM)
 # --------------------------------------------------------------------------
 
 
@@ -429,14 +436,14 @@ async def _run_send_bot_reply_capturing_run_agent(
     return run_agent_calls
 
 
-async def test_run_agent_receives_appointment_context_on_outro_tap_with_upcoming_appointment(
+async def test_run_agent_receives_appointment_context_on_answer_after_outro(
     monkeypatch: pytest.MonkeyPatch, db
 ) -> None:
-    tenant, patient, conversation = await _make_conversation(db)
+    tenant, patient, conversation = await _make_conversation(db, flow_state=FlowState.LLM)
     await _seed_future_appointment(db, tenant, patient, start_at=_days_from_now(2))
 
     calls = await _run_send_bot_reply_capturing_run_agent(
-        monkeypatch, conversation, patient, "Outro"
+        monkeypatch, conversation, patient, _LLM_ANSWER
     )
 
     assert len(calls) == 1
@@ -446,6 +453,37 @@ async def test_run_agent_receives_appointment_context_on_outro_tap_with_upcoming
     # The reschedule/cancel hand-back tool is offered because the manage flow
     # exists — which it now does for every tenant (flow_router.flows_enabled).
     assert "manage_existing_appointment" in {t.name for t in calls[0]["extra_tools"]}
+
+
+async def test_outro_tap_sends_fixed_question_without_calling_the_llm(
+    monkeypatch: pytest.MonkeyPatch, db
+) -> None:
+    """Owner, 2026-10-06: the "Outro" tap is answered by the flow with the fixed
+    "O que te traz à clínica?" and parks the conversation in LLM mode; the model
+    runs only on the patient's answer (next test), never on the tap itself."""
+    tenant, patient, conversation = await _make_conversation(db)
+    await _seed_future_appointment(db, tenant, patient, start_at=_days_from_now(2))
+
+    calls = await _run_send_bot_reply_capturing_run_agent(
+        monkeypatch, conversation, patient, "Outro"
+    )
+
+    assert calls == []
+    assert [sent[2] for sent in _FakeWhatsAppClient.created[-1].sent] == [OTHER_OPENER]
+    async with db() as session:
+        stored = await session.get(Conversation, conversation.id)
+        # The question is recorded as the bot's message: the next turn's model
+        # reads it from the history (ai/graph.py::_load_history) as its context.
+        bot_bodies = list(
+            await session.scalars(
+                select(Message.body).where(
+                    Message.conversation_id == conversation.id,
+                    Message.sender == MessageSender.BOT,
+                )
+            )
+        )
+    assert stored.flow_state == FlowState.LLM
+    assert bot_bodies == [OTHER_OPENER]
 
 
 async def test_run_agent_receives_appointment_context_when_already_in_llm_mode(
@@ -491,12 +529,12 @@ async def test_unmatched_free_text_never_reaches_the_llm(
 async def test_run_agent_receives_no_appointment_context_for_new_patient_without_appointments(
     monkeypatch: pytest.MonkeyPatch, db
 ) -> None:
-    # Flows enabled and delegated to the LLM via "Outro", but this (new)
-    # patient has no upcoming appointments - the gate's non-empty check loses.
-    tenant, patient, conversation = await _make_conversation(db)
+    # In LLM mode after "Outro", but this (new) patient has no upcoming
+    # appointments - the gate's non-empty check loses.
+    tenant, patient, conversation = await _make_conversation(db, flow_state=FlowState.LLM)
 
     calls = await _run_send_bot_reply_capturing_run_agent(
-        monkeypatch, conversation, patient, "Outro"
+        monkeypatch, conversation, patient, _LLM_ANSWER
     )
 
     assert len(calls) == 1

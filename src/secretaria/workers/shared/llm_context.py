@@ -61,9 +61,11 @@ def _llm_activation_reason(
     every activation is worth naming, and the names are chosen to be acted on:
 
     - `sticky_llm_mode`: the conversation is already parked in FlowState.LLM
-      (the patient tapped "Outro" earlier and nothing handed them back). A high
-      count here means the hand-backs (`show_main_menu`, select-professional,
-      manage-appointment) are not firing often enough.
+      (the patient tapped "Outro" earlier and nothing handed them back). Since
+      2026-10-06 the "Outro" tap itself is answered by the flow with a fixed
+      question, so the patient's FIRST answer after it is also counted here. A
+      high count beyond that means the hand-backs (`show_main_menu`,
+      select-professional, manage-appointment) are not firing often enough.
     - `router_delegated`: the router saw this turn and gave up on it. This is
       the number to drive to zero - each one is a flow node that needs a
       deterministic answer. Pair with `flow_state`/`flow_step` to find it.
