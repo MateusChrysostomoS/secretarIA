@@ -109,3 +109,6 @@ A checagem geral de formato aponta 128 arquivos preexistentes fora desta
 correção. O Graphify inicialmente INVALID foi atualizado e validado sem
 arestas duplicadas ou pendentes; o status fica STALE enquanto houver código
 local não commitado, conforme a política da workspace.
+
+
+> TASK-030 P4: com `initial_flows.ai_draft_v2` ligado, `create_event_for_professional` (dobrada no `create_event` cego), `list_free_slots_for_professional` e `create_event_at_unit` saem do conjunto da IA — ver `docs/CHECKPOINT_ia_get_availability.md`.

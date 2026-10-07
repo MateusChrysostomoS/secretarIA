@@ -154,6 +154,7 @@ from secretaria.workers.shared.handover import (
     _handle_human_handoff,
 )
 from secretaria.workers.shared.llm_context import (
+    _ai_toolset_v2,
     _appointment_context_text,
     _flow_handback_tools,
     _flow_turn_calendar,
@@ -1097,6 +1098,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
         ),
         appointment_context=appointment_context_text,
         conversation_state=conversation_state_text,
+        toolset_v2=_ai_toolset_v2(tenant),
     )
 
     # The model may not announce an action no tool performed. Applied HERE -

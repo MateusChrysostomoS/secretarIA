@@ -756,3 +756,48 @@ async def test_apply_flow_result_handover_flips_to_human_and_sends_message(db) -
         assert conv.handover_state == HandoverState.HUMAN_ACTIVE
         assert conv.flow_state == FlowState.IDLE
         assert conv.flow_step is None
+
+
+# --------------------------------------------------------------------------
+# TASK-030 P4: the per-clinic switch reaches run_agent (toolset v2)
+# --------------------------------------------------------------------------
+
+
+async def _flows_of(db, tenant: Tenant, flows: dict) -> None:
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.initial_flows = flows
+        await session.commit()
+
+
+async def test_a_clinic_with_the_v2_switch_gets_the_new_toolset(
+    monkeypatch: pytest.MonkeyPatch, db
+) -> None:
+    from secretaria.ai.staging_tools import cancel_event_v2, create_event_v2
+
+    tenant, patient, conversation = await _make_conversation(db, flow_state=FlowState.LLM)
+    await _flows_of(db, tenant, {"ai_draft_v2": True})
+
+    (call,) = await _run_send_bot_reply_capturing_run_agent(
+        monkeypatch, conversation, patient, _LLM_ANSWER
+    )
+
+    assert call["toolset_v2"] is True
+    assert "get_availability" in {t.name for t in call["extra_tools"]}
+    assert create_event_v2 in call["extra_tools"] and cancel_event_v2 in call["extra_tools"]
+
+
+async def test_a_clinic_without_the_switch_keeps_todays_toolset(
+    monkeypatch: pytest.MonkeyPatch, db
+) -> None:
+    tenant, patient, conversation = await _make_conversation(db, flow_state=FlowState.LLM)
+    await _flows_of(db, tenant, {"ai_draft_v2": "true"})  # only the JSON literal true counts
+
+    (call,) = await _run_send_bot_reply_capturing_run_agent(
+        monkeypatch, conversation, patient, _LLM_ANSWER
+    )
+
+    assert call["toolset_v2"] is False
+    names = {t.name for t in call["extra_tools"]}
+    # Neither the agenda read nor a blind writer: the legacy create/cancel come from the base set.
+    assert names.isdisjoint({"get_availability", "create_event", "cancel_event"})

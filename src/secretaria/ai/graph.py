@@ -33,13 +33,18 @@ from secretaria.ai.pii import (
     wrap_tools_with_pseudonymizer,
 )
 from secretaria.ai.prompts import secretary_system_prompt
+from secretaria.ai.tool_output import wrap_tools_with_output_allowlist
 from secretaria.ai.tools import (
+    AI_TOOLSET_V2_STAGING,
+    AI_TOOLSET_V2_WITHHELD,
+    BLIND_STAGING_VARIANT,
     BookingDraftRequested,
     GuidedBookingRequested,
     HumanHandoffRequested,
     ManageAppointmentRequested,
     SelectProfessionalRequested,
     ShowMainMenuRequested,
+    _ai_toolset_v2_ctx,
     _booking_topology_ctx,
     _calendar_ctx,
     _conversation_id_ctx,
@@ -212,7 +217,7 @@ _SCOPE_FREE_TOOLS = (
 _BASE_TOOLS = (*_TENANT_LEVEL_CALENDAR_TOOLS, *_SCOPE_FREE_TOOLS)
 
 
-def base_tools_for(topology: str) -> tuple:
+def base_tools_for(topology: str, *, toolset_v2: bool = False) -> tuple:
     """The base tools a turn on `topology` may use (services/booking_scope.py).
 
     Capability is decided by the tenant's REAL shape, not by an entitlement
@@ -228,10 +233,47 @@ def base_tools_for(topology: str) -> tuple:
     the read-only tools. Failing closed to the button flow is the point — the
     old behaviour degraded to the tenant-level agenda instead, which is
     precisely the wrong agenda.
+
+    On the AI toolset v2 (TASK-030 P4, `toolset_v2`) NO topology gets a tenant-level
+    calendar tool: the AI reads availability through `get_availability` and its
+    `create_event`/`cancel_event` are the blind staging tools the worker hands it
+    (ai/staging_tools.py), so the base set is the scope-free one everywhere.
     """
-    if topology == BOOKING_TOPOLOGY_MULTI:
+    if toolset_v2 or topology == BOOKING_TOPOLOGY_MULTI:
         return _SCOPE_FREE_TOOLS
     return _BASE_TOOLS
+
+
+def _kept_on_v2(tool: Any) -> bool:
+    """Whether an extra tool may join a v2 turn (lock one of two).
+
+    Never a tool in `AI_TOOLSET_V2_WITHHELD`. For a name in `AI_TOOLSET_V2_STAGING`
+    (`create_event`, `cancel_event`), only its blind variant - ai/staging_tools.py, marked
+    `metadata["cache_variant"] == BLIND_STAGING_VARIANT` -, never the legacy implementation
+    of the same name, which writes to the agenda. The second lock is each legacy tool's own
+    refusal (`ai/tools.py::_blocked_by_toolset_v2`).
+    """
+    name = getattr(tool, "name", str(tool))
+    if name in AI_TOOLSET_V2_WITHHELD:
+        return False
+    if name in AI_TOOLSET_V2_STAGING:
+        variant = (getattr(tool, "metadata", None) or {}).get("cache_variant")
+        return variant == BLIND_STAGING_VARIANT
+    return True
+
+
+def effective_tools(topology: str, extra_tools: Sequence = (), *, toolset_v2: bool = False) -> list:
+    """THE tool list of one turn: base set + the tenant's extra tools.
+
+    One assembly for `build_agent` and for the `agent_capabilities_resolved` log, so what
+    is logged is what ran. With `toolset_v2` the extras are filtered by `_kept_on_v2` (no
+    busy reader, no legacy writer; the blind create/cancel pass). With it off this is
+    exactly `[*base_tools_for(topology), *extra_tools]`, as it always was.
+    """
+    if not toolset_v2:
+        return [*base_tools_for(topology), *extra_tools]
+    kept = [t for t in extra_tools if _kept_on_v2(t)]
+    return [*base_tools_for(topology, toolset_v2=True), *kept]
 
 
 # Compiled agent cache, keyed by the frozenset of tool NAMES the agent was
@@ -286,7 +328,12 @@ def _tool_cache_key(tool: Any) -> str:
     return f"{name}#{variant}" if variant else name
 
 
-def build_agent(extra_tools: Sequence = (), topology: str = BOOKING_TOPOLOGY_UNKNOWN) -> Any:
+def build_agent(
+    extra_tools: Sequence = (),
+    topology: str = BOOKING_TOPOLOGY_UNKNOWN,
+    *,
+    toolset_v2: bool = False,
+) -> Any:
     """Compile (or fetch from cache) the ReAct agent for THIS turn's capabilities.
 
     The capability set is `base_tools_for(topology)` + `extra_tools` (the
@@ -296,8 +343,12 @@ def build_agent(extra_tools: Sequence = (), topology: str = BOOKING_TOPOLOGY_UNK
     both can never share a graph: a multi-professional tenant's key simply has
     no `create_event` in it.
     """
-    tools = [*base_tools_for(topology), *extra_tools]
+    tools = effective_tools(topology, extra_tools, toolset_v2=toolset_v2)
     key = frozenset(_tool_cache_key(t) for t in tools)
+    if toolset_v2:
+        # TASK-030 P4: a v2 agent's tools are wrapped differently (below), so it never
+        # shares a cache entry with a v1 agent of the same names (a multi clinic, no extras).
+        key = key | {"#toolset_v2"}
     cached = _AGENTS.get(key)
     if cached is not None:
         return cached
@@ -306,6 +357,11 @@ def build_agent(extra_tools: Sequence = (), topology: str = BOOKING_TOPOLOGY_UNK
     # masked before they re-enter the model's context. The wrapper preserves
     # every tool's name, so `key` above — computed on the originals — still
     # describes this agent exactly.
+    if toolset_v2:
+        # TASK-030 P4: every answer passes its tool's declared allowlist (ai/tool_output.py)
+        # BEFORE the pseudonymization guard sees it. The guard is the second wall, not the
+        # first: it cannot mask a third party's name it has never seen.
+        tools = list(wrap_tools_with_output_allowlist(tools))
     tools = list(wrap_tools_with_pseudonymizer(tools))
 
     s = get_settings()
@@ -346,9 +402,12 @@ async def invoke_agent(messages: list[BaseMessage]) -> str:
     `(messages)`-only fake — stays unchanged.
     """
     started = time.monotonic()
-    result = await build_agent(_extra_tools_ctx.get(), _booking_topology_ctx.get()).ainvoke(
-        {"messages": messages}
+    agent = build_agent(
+        _extra_tools_ctx.get(),
+        _booking_topology_ctx.get(),
+        toolset_v2=_ai_toolset_v2_ctx.get(),
     )
+    result = await agent.ainvoke({"messages": messages})
     # The input history comes back first; everything after it is what THIS turn
     # did (model calls, tool calls, tool results).
     _log_agent_trace(
@@ -531,6 +590,7 @@ async def run_agent(
     appointment_context: str | None = None,
     booking_topology: str = BOOKING_TOPOLOGY_UNKNOWN,
     conversation_state: str | None = None,
+    toolset_v2: bool = False,
 ) -> str:
     """arq-side entry point: build history + run agent + return reply text.
 
@@ -566,6 +626,11 @@ async def run_agent(
     `tenant_config.appointment_context` at its normal unset state, since unlike
     post_consult_knowledge this field is NEVER populated by `load_tenant_config`
     (see services/tenant_config.py::TenantRuntimeConfig.appointment_context).
+    `toolset_v2` is the per-clinic switch `flow_router.ai_draft_v2_enabled`, decided by the
+    worker (workers/shared/llm_context.py::_ai_toolset_v2): True builds the agent without
+    the tools that read busy intervals or write to the agenda (`effective_tools`; the
+    blind create/cancel the worker hands over stay) and makes each of them refuse if one
+    arrives anyway. False (the default) changes nothing.
     """
     conversation_id = UUID(context["conversation_id"])
     tenant_config = _config_with_selected_professional(tenant_config, selected_professional)
@@ -599,6 +664,7 @@ async def run_agent(
     tok_tools = _extra_tools_ctx.set(extra_tools)
     tok_redis = _redis_ctx.set(redis)
     tok_topology = _booking_topology_ctx.set(booking_topology)
+    tok_toolset_v2 = _ai_toolset_v2_ctx.set(toolset_v2)
     # Seeded from this conversation's stored map, so a phone tokenized last
     # week keeps its token today. Installed in a ContextVar because the tool
     # wrapper (ai/pii.py) runs deep inside the ReAct loop, in a context
@@ -608,13 +674,15 @@ async def run_agent(
     tok_pii = _pseudonymizer_ctx.set(pseudonymizer)
 
     capabilities = [
-        getattr(t, "name", str(t)) for t in (*base_tools_for(booking_topology), *extra_tools)
+        getattr(t, "name", str(t))
+        for t in effective_tools(booking_topology, extra_tools, toolset_v2=toolset_v2)
     ]
     logger.info(
         "agent_capabilities_resolved",
         conversation_id=str(conversation_id),
         tenant_id=str(tenant_config.tenant_id) if tenant_config is not None else None,
         topology=booking_topology,
+        toolset_v2=toolset_v2,
         # Tool NAMES are product surface, not tenant data — safe to log, and
         # the only way to prove after the fact which set a turn actually ran
         # with. Nothing from the prompt or the arguments is included.
@@ -765,6 +833,7 @@ async def run_agent(
         _extra_tools_ctx.reset(tok_tools)
         _redis_ctx.reset(tok_redis)
         _booking_topology_ctx.reset(tok_topology)
+        _ai_toolset_v2_ctx.reset(tok_toolset_v2)
         _pseudonymizer_ctx.reset(tok_pii)
         # In `finally`, not on the happy path: the map has already grown by the
         # time any of the sentinel exceptions above fires, and re-minting those

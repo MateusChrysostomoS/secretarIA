@@ -75,3 +75,6 @@ Migração `e7d3c1a9b5f2` primeiro (one-off da imagem nova), depois `secretaria_
 Validação final conjunta P2b/P3 e fuso: **3442 passed, 10 skipped, 15 warnings in 431.43s (0:07:11)**. Os testes focados e as fases RED→GREEN constam no ledger da execução. Nenhuma consulta de produção foi criada, alterada ou cancelada durante a correção. O teste real anterior permanece em 16/10/2026 às 14:40 (America/Sao_Paulo).
 
 > TASK-030 P3: Tasks 1–9 concluídas, incluindo detalhes/cartão, retomada de qualquer pergunta e gerenciamento v2; validação, revisão, limites e estado local/publicado em `docs/CHECKPOINT_ia_confirmacao_expressa.md`.
+
+
+> TASK-030 P4: a IA v2 lê horários só por `get_availability` (janelas livres); `create_event`/`cancel_event` viram ferramentas cegas que só levantam este mesmo rascunho / o pedido de gerenciar (o toque do paciente é que marca/cancela) — ver `docs/CHECKPOINT_ia_get_availability.md`.

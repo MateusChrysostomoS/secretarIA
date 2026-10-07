@@ -94,6 +94,16 @@ _booking_topology_ctx: ContextVar[str] = ContextVar(
     "_booking_topology", default=BOOKING_TOPOLOGY_UNKNOWN
 )
 
+# True when THIS turn runs on the AI toolset v2 (TASK-030 P4, per-clinic switch
+# `flow_router.ai_draft_v2_enabled`): the agent was built without the tools that read busy
+# intervals and without the legacy agenda writers (`AI_TOOLSET_V2_WITHHELD`,
+# `AI_TOOLSET_V2_STAGING`); it has `get_availability` and the blind `create_event` /
+# `cancel_event` of ai/staging_tools.py instead. Set by graph.run_agent; read by
+# `_blocked_by_toolset_v2`, the second lock inside each of those tools. Lives here, like the
+# vars above, so a plugin tool module can read it without importing graph.py. The default
+# (False) keeps every tool exactly as it was.
+_ai_toolset_v2_ctx: ContextVar[bool] = ContextVar("_ai_toolset_v2", default=False)
+
 # Note on calendar outages: a tool that hits CalendarUnavailableError simply
 # lets it propagate. LangGraph's ToolNode re-raises it out of the agent's
 # ainvoke (it is not a ToolInvocationError), and graph.run_agent catches it by
@@ -342,6 +352,58 @@ def _blocked_tenant_level(tool_name: str) -> dict | None:
     return {"error": _MULTI_PROFESSIONAL_TOOL_ERROR}
 
 
+# The AI toolset v2 (TASK-030 P4, owner's decision of 2026-10-03): the AI never reads a busy
+# interval, an event or another patient's data, and nothing it types reaches the agenda. Both
+# lists are withheld in ai/graph.py::effective_tools (lock one) and refused again inside each
+# tool by `_blocked_by_toolset_v2` (lock two):
+#   - AI_TOOLSET_V2_WITHHELD: no v2 variant at all - the busy/raw-slot readers
+#     (`list_free_slots_for_professional` has no holds subtracted, so it would offer a slot
+#     another patient is confirming) and the two plugin writers (the professional is a field
+#     of the blind `create_event`; a unit is not part of the draft at all).
+#   - AI_TOOLSET_V2_STAGING: the NAMES stay, the implementation changes - on v2 they are the
+#     blind tools of ai/staging_tools.py (metadata cache_variant BLIND_STAGING_VARIANT), which
+#     only stage the patient's confirmation card. The legacy implementations below, which
+#     write to the agenda, never run on a v2 turn.
+AI_TOOLSET_V2_WITHHELD = (
+    "check_availability",
+    "list_free_slots",
+    "list_free_slots_for_professional",
+    "create_event_for_professional",
+    "create_event_at_unit",
+)
+AI_TOOLSET_V2_STAGING = ("create_event", "cancel_event")
+BLIND_STAGING_VARIANT = "blind_v2"
+
+TOOL_BLOCK_TOOLSET_V2 = "toolset_v2"
+
+_TOOLSET_V2_ERROR = (
+    "Esta ferramenta não está disponível para você nesta clínica. Para ver horários livres "
+    "use get_availability; para marcar, use create_event ou set_booking_draft; para "
+    "cancelar, use cancel_event; para remarcar, use manage_existing_appointment. Todas só "
+    "preparam o cartão: quem confirma é o paciente."
+)
+
+
+def _blocked_by_toolset_v2(tool_name: str) -> dict | None:
+    """Second lock of the v2 toolset. None = allowed (the switch is off for this turn).
+
+    Same two-lock shape as `_blocked_tenant_level`: graph.build_agent already leaves these
+    tools out of a v2 turn's tool set; this catches the paths a tool set cannot - a stale
+    cached graph, a hand-rolled invocation, a future caller - and returns BEFORE any Google
+    call or DB write.
+    """
+    if not _ai_toolset_v2_ctx.get():
+        return None
+    tenant_id = _tenant_id_ctx.get()
+    logger.warning(
+        "agent_tool_blocked",
+        tool=tool_name,
+        reason=TOOL_BLOCK_TOOLSET_V2,
+        tenant_id=str(tenant_id) if tenant_id else None,
+    )
+    return {"error": _TOOLSET_V2_ERROR}
+
+
 def _sole_professional_id() -> UUID | None:
     """The single active professional owning THIS turn's bookings, or None.
 
@@ -427,8 +489,12 @@ def _canonical_appointment_type(
         logger.info("agent_tool_blocked", tool=tool_name, reason=TOOL_BLOCK_UNKNOWN_SERVICE)
         return None, {
             "error": (
-                f"Serviço '{text}' não existe nesta clínica. Serviços "
-                f"disponíveis: {', '.join(names)}."
+                (
+                    "Serviço não encontrado nesta clínica. Serviços "
+                    if _ai_toolset_v2_ctx.get()
+                    else f"Serviço '{text}' não existe nesta clínica. Serviços "
+                )
+                + f"disponíveis: {', '.join(names)}."
             )
         }
     return canonical, None
@@ -775,6 +841,9 @@ async def check_availability(start: str, end: str) -> dict:
         start: Início da janela em ISO 8601 (ex: 2026-05-27T14:00:00).
         end: Fim da janela em ISO 8601.
     """
+    blocked = _blocked_by_toolset_v2("check_availability")
+    if blocked is not None:
+        return blocked
     blocked = _blocked_tenant_level("check_availability")
     if blocked is not None:
         return blocked
@@ -796,6 +865,9 @@ async def list_free_slots(day: str, max_slots: int = 6) -> dict:
         day: Dia no formato YYYY-MM-DD (ex: 2026-05-29).
         max_slots: Quantidade máxima de slots a retornar (default 6, máx 10).
     """
+    blocked = _blocked_by_toolset_v2("list_free_slots")
+    if blocked is not None:
+        return blocked
     blocked = _blocked_tenant_level("list_free_slots")
     if blocked is not None:
         return blocked
@@ -873,6 +945,9 @@ async def create_event(
             com o nome do paciente. Se a clínica tiver só um serviço, pode
             deixar em branco.
     """
+    blocked = _blocked_by_toolset_v2("create_event")
+    if blocked is not None:
+        return blocked
     blocked = _blocked_tenant_level("create_event")
     if blocked is not None:
         return blocked
@@ -935,18 +1010,46 @@ async def create_event(
     }
 
 
+# TASK-030 P4: `cancel_event` acts only on an event of THIS conversation's patient in THIS
+# turn's tenant. Before, any Google event id the model passed was deleted - a third party's
+# consultation included. Reason code for `agent_tool_blocked`; never the id itself.
+TOOL_BLOCK_NOT_PATIENTS_EVENT = "not_patients_event"
+
+_NOT_PATIENTS_EVENT_ERROR = (
+    "Essa consulta não está entre as consultas deste paciente, então não posso cancelá-la. "
+    'Para cancelar uma consulta dele, chame manage_existing_appointment com action "cancel": '
+    "o fluxo mostra as consultas dele e pede a confirmação."
+)
+
+
 @tool
 async def cancel_event(event_id: str) -> dict:
     """Cancela (deleta) um evento existente pelo seu id. Se o resultado trouxer
     um campo "note", repasse essa frase ao paciente literalmente — é a
     informação honesta sobre reembolso/retenção do sinal (Pix), quando houver.
+    Só cancela uma consulta DESTE paciente; qualquer outro id é recusado.
 
     Args:
         event_id: ID do evento no Google Calendar.
     """
+    blocked = _blocked_by_toolset_v2("cancel_event")
+    if blocked is not None:
+        return blocked
     blocked = _blocked_tenant_level("cancel_event")
     if blocked is not None:
         return blocked
+    # Ownership BEFORE any Google call or DB write: the same proof `check_availability`
+    # uses for `do_paciente` (an `Appointment` of this patient in this tenant carries the
+    # id). Fails closed: no tenant, no conversation, no patient or a DB error -> refused.
+    if event_id not in await _own_google_event_ids([event_id]):
+        tenant_id = _tenant_id_ctx.get()
+        logger.warning(
+            "agent_tool_blocked",
+            tool="cancel_event",
+            reason=TOOL_BLOCK_NOT_PATIENTS_EVENT,
+            tenant_id=str(tenant_id) if tenant_id else None,
+        )
+        return {"error": _NOT_PATIENTS_EVENT_ERROR}
     await _get_calendar().cancel_event(event_id)
     notice = await _mark_appointment_cancelled(event_id)
     result: dict = {"status": "cancelled"}
@@ -1551,8 +1654,12 @@ async def get_service_info(service_name: str) -> dict:
         listed = [t.name for t in catalog] + [g.name for g in missing_from(guides, catalog)]
         return {
             "error": (
-                f"Serviço '{asked.strip()}' não existe nesta clínica. "
-                f"Serviços disponíveis: {', '.join(listed) or 'nenhum'}."
+                (
+                    "Serviço não encontrado nesta clínica. "
+                    if _ai_toolset_v2_ctx.get()
+                    else f"Serviço '{asked.strip()}' não existe nesta clínica. "
+                )
+                + f"Serviços disponíveis: {', '.join(listed) or 'nenhum'}."
             )
         }
     # Known to the clinic but not in this turn's catalog: duration and price vary per

@@ -35,6 +35,8 @@ from secretaria.core.database import Base  # noqa: E402
 from secretaria.models import (  # noqa: E402
     Appointment,
     AppointmentStatus,
+    Conversation,
+    Patient,
     PixDeposit,
     PixDepositStatus,
     Tenant,
@@ -75,12 +77,15 @@ class _FakeCalendarService:
 
 
 @contextmanager
-def _agent_context(tenant_id, calendar=None):
+def _agent_context(tenant_id, calendar=None, conversation_id=None):
     tok_tid = ai_tools._tenant_id_ctx.set(tenant_id)
     tok_cal = ai_tools._calendar_ctx.set(calendar)
+    # TASK-030 P4: cancel_event acts only on THIS conversation's patient's own event.
+    tok_conv = ai_tools._conversation_id_ctx.set(conversation_id)
     try:
         yield
     finally:
+        ai_tools._conversation_id_ctx.reset(tok_conv)
         ai_tools._tenant_id_ctx.reset(tok_tid)
         ai_tools._calendar_ctx.reset(tok_cal)
 
@@ -104,8 +109,16 @@ async def _seed(
         )
         session.add(tenant)
         await session.flush()
+        patient = Patient(tenant_id=tenant.id, wa_id="5511900000001", name="Paciente")
+        session.add(patient)
+        await session.flush()
+        conversation = Conversation(tenant_id=tenant.id, patient_id=patient.id)
+        session.add(conversation)
+        await session.flush()
         appointment = Appointment(
             tenant_id=tenant.id,
+            patient_id=patient.id,
+            conversation_id=conversation.id,
             google_event_id="evt-cancel-1",
             appointment_type="Consulta",
             start_at=start_at,
@@ -147,7 +160,7 @@ async def test_cancel_event_appends_deposit_notice_to_note_field(db):
     await _seed_deposit(db, appt, status=PixDepositStatus.PAID)
     calendar = _FakeCalendarService()
 
-    with _agent_context(tenant.id, calendar=calendar):
+    with _agent_context(tenant.id, calendar=calendar, conversation_id=appt.conversation_id):
         result = await ai_tools.cancel_event.ainvoke({"event_id": "evt-cancel-1"})
 
     assert result["status"] == "cancelled"
@@ -167,7 +180,7 @@ async def test_cancel_event_without_deposit_has_no_note_field(db):
     tenant, appt = await _seed(db)
     calendar = _FakeCalendarService()
 
-    with _agent_context(tenant.id, calendar=calendar):
+    with _agent_context(tenant.id, calendar=calendar, conversation_id=appt.conversation_id):
         result = await ai_tools.cancel_event.ainvoke({"event_id": "evt-cancel-1"})
 
     assert result == {"status": "cancelled"}

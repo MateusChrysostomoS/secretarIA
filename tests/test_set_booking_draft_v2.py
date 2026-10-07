@@ -147,4 +147,7 @@ def test_the_clinic_switch_picks_the_draft_tool():
     )
     assert set_booking_draft in off and set_booking_draft_v2 not in off
     assert set_booking_draft_v2 in on and set_booking_draft not in on
-    assert sorted(t.name for t in on) == sorted(t.name for t in off)
+    # TASK-030 P4: the v2 set also carries the agenda read and the two blind staging tools.
+    assert sorted(t.name for t in on) == sorted(
+        [*(t.name for t in off), "get_availability", "create_event", "cancel_event"]
+    )

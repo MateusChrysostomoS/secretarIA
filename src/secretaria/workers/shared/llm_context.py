@@ -5,6 +5,8 @@ from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
+from secretaria.ai.availability_tool import get_availability
+from secretaria.ai.staging_tools import cancel_event_v2, create_event_v2
 from secretaria.ai.tools import (
     manage_existing_appointment,
     manage_existing_appointment_v2,
@@ -217,6 +219,18 @@ def _label_match_body(body: str | None, label: str) -> bool:
         or target == strip_decoration(truncate_button_label(label)).casefold()
     )
 
+def _ai_toolset_v2(tenant: Tenant | None) -> bool:
+    """Whether THIS tenant's agent runs on the v2 toolset (TASK-030 P4, spec §4.6).
+
+    The per-clinic switch (`flow_router.ai_draft_v2_enabled`) AND the flow existing at all:
+    on v2 the agent books and cancels only by handing back to the flow (its create_event /
+    cancel_event are blind staging tools), so a tenant without those hand-backs must never
+    swap the legacy `create_event` for the blind one. Read once per turn, here, and handed
+    to `run_agent(toolset_v2=...)`.
+    """
+    return tenant is not None and flows_enabled(tenant) and ai_draft_v2_enabled(tenant)
+
+
 def _flow_handback_tools(tenant: Tenant | None, topology: str, plugin_tools: list) -> list:
     """This turn's `extra_tools`: the plugin set + the flow hand-back tools.
 
@@ -237,6 +251,11 @@ def _flow_handback_tools(tenant: Tenant | None, topology: str, plugin_tools: lis
     two-lock shape the calendar tools use: withheld from the tool set here,
     and refused again inside the tool by `_blocked_tenant_level` if it ever
     arrives anyway.
+
+    On the v2 toolset (`_ai_toolset_v2`) the AI also gets `get_availability`, its only
+    agenda read (free windows, never events), and the blind `create_event` /
+    `cancel_event` (ai/staging_tools.py), which only stage the patient's confirmation card;
+    the tools it loses are withheld in ai/graph.py::effective_tools, not here.
     """
     if tenant is None or not flows_enabled(tenant):
         return list(plugin_tools)
@@ -248,7 +267,10 @@ def _flow_handback_tools(tenant: Tenant | None, topology: str, plugin_tools: lis
     handbacks = [manage_tool, draft_tool, request_human_handoff]
     if topology != BOOKING_TOPOLOGY_MULTI:
         handbacks.append(start_guided_booking)
-    return [*plugin_tools, *handbacks]
+    v2_tools = (
+        [get_availability, create_event_v2, cancel_event_v2] if _ai_toolset_v2(tenant) else []
+    )
+    return [*plugin_tools, *handbacks, *v2_tools]
 
 def _flow_turn_calendar(
     conv_snapshot: SimpleNamespace,

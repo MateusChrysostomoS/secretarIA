@@ -422,6 +422,16 @@ class CalendarService:
         """The clinic-local timezone this service interprets naive times in."""
         return self._tz
 
+    @property
+    def default_slot_minutes(self) -> int:
+        """The slot length this agenda walks when no service is named.
+
+        The tenant's default, or - for a professional's agenda - the first active service's
+        duration (`for_professional`). The AI availability tool reads it when the model names
+        no service (ai/availability_tool.py).
+        """
+        return self._default_slot_minutes
+
     def _ensure_tz(self, dt: datetime) -> datetime:
         return dt if dt.tzinfo else dt.replace(tzinfo=self._tz)
 

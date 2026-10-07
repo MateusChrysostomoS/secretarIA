@@ -31,6 +31,7 @@ from langchain_core.tools import tool
 from sqlalchemy import select
 
 from secretaria.ai.tools import (
+    _blocked_by_toolset_v2,
     _blocked_tenant_level,
     _canonical_appointment_type,
     _conversation_attendee_name,
@@ -123,6 +124,9 @@ async def create_event_at_unit(
             agendado. Não invente e não use o nome do paciente. Se a clínica
             tiver só um serviço, pode deixar em branco.
     """
+    blocked = _blocked_by_toolset_v2("create_event_at_unit")
+    if blocked is not None:
+        return blocked
     # This books on the CLINIC's own calendar with no professional in the
     # loop, so it is a tenant-level mutation exactly like the base
     # `create_event` — and just as wrong for a multi-professional tenant.

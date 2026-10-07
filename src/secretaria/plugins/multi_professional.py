@@ -48,6 +48,8 @@ from langchain_core.tools import tool
 
 from secretaria.ai.tools import (
     SelectProfessionalRequested,
+    _ai_toolset_v2_ctx,
+    _blocked_by_toolset_v2,
     _calendar_for_professional,
     _canonical_appointment_type,
     _conversation_attendee_name,
@@ -128,7 +130,12 @@ async def _professional_calendar(tenant_id: UUID, professional) -> "CalendarServ
 
 def _unknown_professional_error(name: str, professionals: list) -> dict:
     names = ", ".join(p.name for p in professionals) or "nenhum profissional cadastrado"
-    return {"error": f"Profissional '{name}' não encontrado. Profissionais disponíveis: {names}."}
+    prefix = (
+        "Profissional não encontrado. "
+        if _ai_toolset_v2_ctx.get()
+        else f"Profissional '{name}' não encontrado. "
+    )
+    return {"error": prefix + f"Profissionais disponíveis: {names}."}
 
 
 def _with_professional_context(result: dict, professional) -> dict:
@@ -207,6 +214,9 @@ async def list_free_slots_for_professional(
         day: Dia no formato YYYY-MM-DD (ex: 2026-05-29).
         max_slots: Quantidade máxima de slots a retornar (default 6, máx 10).
     """
+    blocked = _blocked_by_toolset_v2("list_free_slots_for_professional")
+    if blocked is not None:
+        return blocked
     from datetime import date, datetime
 
     tenant_id = _tenant_id_ctx.get()
@@ -253,6 +263,9 @@ async def create_event_for_professional(
             sendo agendado. Não invente e não use o nome do paciente. Se o
             profissional tiver só um serviço, pode deixar em branco.
     """
+    blocked = _blocked_by_toolset_v2("create_event_for_professional")
+    if blocked is not None:
+        return blocked
     tenant_id = _tenant_id_ctx.get()
     if tenant_id is None:
         return {"error": "Nenhum profissional configurado para esta clínica."}
