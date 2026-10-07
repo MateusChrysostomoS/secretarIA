@@ -1056,6 +1056,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             tenant_config.appointment_types if tenant_config is not None else [],
             # TASK-030 P3: the "(ref ...)" manage_existing_appointment v2 takes.
             with_refs=ai_draft_v2_enabled(tenant),
+            service_guides=tenant_config.service_guides if tenant_config is not None else None,
         )
 
     # Every LLM turn is either a deliberate escape hatch ("Outro") or a gap in

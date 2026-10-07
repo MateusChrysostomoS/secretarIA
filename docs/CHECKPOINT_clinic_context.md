@@ -219,3 +219,9 @@ ferramenta; um de dois oferecendo: o guia fica). Suíte completa: 2998 passed, 1
 ferramenta (não é agendável); a lista "Tipos de consulta disponíveis" continua sendo a fonte do que se agenda. Duração e preço de
 um serviço só dos guias vêm vazios na ferramenta (a descrição da ferramenta manda a LLM confirmar com a equipe em vez de
 inventar).
+
+
+## 10. Rodada de 2026-10-07 (direto na `main`, local, sem push)
+
+- A linha "Orientações:" do agendamento mais próximo (`workers/shared/llm_context.py::_appointment_context_text`) agora cai nas orientações do catálogo (`TenantRuntimeConfig.service_guides`) quando o serviço não está em `appointment_types` (clínica com 2+ profissionais). `plugins/multi_professional.py::_professional_services` foi revisada e NÃO tem esse defeito: ela resolve o catálogo de UM profissional para provar que o serviço existe, não para orientações.
+- `GET /tenants/me/config` não dá mais 500 quando `address`/`clinic_facts` estão guardados em qualquer formato (campos de resposta `Any`): o endereço é texto livre para a IA.

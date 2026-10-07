@@ -182,3 +182,22 @@ async def test_completeness_follows_what_was_saved(client: AsyncClient) -> None:
     assert status["address"] == "done" and status["parking_or_arrival"] == "done"
     assert status["payment_methods"] == "done" and status["cancellation_policy"] == "done"
     assert status["hours"] == "missing" and 0 < body["score"] < 100
+
+
+@pytest.mark.parametrize("stored", ["Rua A, 10", 123, ["x"]], ids=["text", "number", "list"])
+async def test_get_config_survives_an_address_or_facts_stored_in_any_shape(
+    client: AsyncClient, db, tenant: Tenant, stored
+) -> None:
+    # The AI reads these fields as free text, so the hub must hand back whatever is stored
+    # instead of failing the whole configuration screen with a 500.
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.address = stored
+        row.clinic_facts = stored
+        await session.commit()
+
+    response = await client.get(CONFIG)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["address"] == stored
+    assert response.json()["clinic_facts"] == stored

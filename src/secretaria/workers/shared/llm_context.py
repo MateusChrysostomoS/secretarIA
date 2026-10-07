@@ -43,6 +43,7 @@ from secretaria.services.patient_context import (
 )
 from secretaria.services.tenant_config import (
     RuntimeAppointmentType,
+    RuntimeServiceGuide,
     load_tenant_config,
     resolve_professional_calendar,
 )
@@ -133,6 +134,7 @@ def _appointment_context_text(
     appointment_types: list[RuntimeAppointmentType],
     *,
     with_refs: bool = False,
+    service_guides: list[RuntimeServiceGuide] | None = None,
 ) -> str | None:
     """Render the per-turn "consultas marcadas" block for the LLM prompt.
 
@@ -163,6 +165,10 @@ def _appointment_context_text(
     `with_refs` (TASK-030 P3, clinics with the AI draft v2 switch): every appointment line
     ends with "(ref AAAA-MM-DD HH:MM)" - the reference `manage_existing_appointment` v2
     takes to name WHICH appointment (services/manage_request.py::appointment_ref).
+
+    `service_guides` (TenantRuntimeConfig.service_guides): the clinic-wide orientations from the
+    canonical catalog. `appointment_types` misses a service that only the professionals' own lists
+    offer (2+ active professionals), so the "Orientações" line falls back to the matching guide.
     """
     if not future_appointments:
         return None
@@ -192,8 +198,19 @@ def _appointment_context_text(
     nearest_line += ref(nearest)
 
     lines = [nearest_line]
-    if matched and matched.requirements:
-        lines.append("Orientações: " + "; ".join(matched.requirements))
+    requirements = matched.requirements if matched else []
+    if not requirements:
+        guide = next(
+            (
+                g
+                for g in service_guides or []
+                if g.name.strip().casefold() == service_name.strip().casefold()
+            ),
+            None,
+        )
+        requirements = list(guide.requirements or []) if guide else []
+    if requirements:
+        lines.append("Orientações: " + "; ".join(requirements))
 
     for appt in future_appointments[1:]:
         appt_when = _format_appointment_when(appt["start_at"], tz_name)

@@ -17,7 +17,10 @@ import pytest  # noqa: E402
 
 from secretaria.models import FlowState  # noqa: E402
 from secretaria.services.email import send_calendar_alert  # noqa: E402
-from secretaria.services.tenant_config import RuntimeAppointmentType  # noqa: E402
+from secretaria.services.tenant_config import (  # noqa: E402
+    RuntimeAppointmentType,
+    RuntimeServiceGuide,
+)
 from secretaria.workers.tasks import (  # noqa: E402
     _appointment_context_text,
     _flow_tenant_snapshot,
@@ -344,6 +347,22 @@ def _appt(start_at, appointment_type="Consulta Geral", professional_id=None):
         "end_at": start_at + timedelta(minutes=30),
         "professional_id": professional_id,
     }
+
+
+def test_appointment_context_text_takes_orientations_from_the_clinic_catalog_guides():
+    # With 2+ professionals the tenant list lacks a service offered only through the
+    # professionals' lists; its orientations live in the canonical catalog guides.
+    start = datetime(2026, 8, 3, 14, 0, tzinfo=UTC)
+    text = _appointment_context_text(
+        [_appt(start, appointment_type="Cirurgia de Catarata")],
+        _TZ,
+        {},
+        [],
+        service_guides=[
+            RuntimeServiceGuide(name="cirurgia de catarata ", requirements=["Jejum de 8 horas"])
+        ],
+    )
+    assert "Orientações: Jejum de 8 horas" in text
 
 
 def test_appointment_context_text_none_on_empty():
