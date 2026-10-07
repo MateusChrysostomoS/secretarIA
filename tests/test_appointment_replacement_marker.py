@@ -153,7 +153,7 @@ async def test_an_abandoned_portal_code_wait_drops_the_marker(db):  # noqa: F811
     assert conversation.flow_replaces_appointment_id is None
 
 
-async def _prior_message(db, world) -> None:
+async def _prior_message(db, world) -> None:  # noqa: F811
     """An earlier inbound, so the turn under test is not the conversation's first contact."""
     async with db() as session:
         session.add(
