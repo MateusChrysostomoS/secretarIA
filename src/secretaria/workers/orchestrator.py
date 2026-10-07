@@ -15,6 +15,7 @@ from secretaria.ai.graph import (
     SHOW_MAIN_MENU_SENTINEL,
     START_GUIDED_BOOKING_SENTINEL_PREFIX,
     run_agent,
+    split_handback_intro,
 )
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
@@ -104,6 +105,7 @@ from secretaria.services.turn_safety_net import (
     begin_turn,
     end_turn,
     fallback_allowed,
+    hold_intro,
     sends_in_turn,
 )
 from secretaria.services.typing_indicator import clear_typing, mark_typing
@@ -1107,12 +1109,30 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
     # agent has no identity/payment tool at all today; the day one exists it
     # passes its own key and the sentence becomes sayable. See
     # services/sensitive_claim_guard.py for the production incident.
+    # A hand-back may carry the agent's own words for the patient (TASK-038,
+    # ai/graph.py::HANDBACK_INTRO_PREFIX): split them off first so every sentinel
+    # below matches exactly as before.
+    handback_intro, reply_text = split_handback_intro(reply_text)
     if not _is_agent_sentinel(reply_text):
         reply_text = guard_reply(
             reply_text,
             proven_actions=frozenset(),
             conversation_id=str(reply.conversation_id),
         )
+    elif handback_intro:
+        # Goes out in front of the card the hand-back renders (held until then, see
+        # services/turn_safety_net.py::hold_intro), so the patient reads the answer to
+        # what they asked instead of the same list again as if unheard - and a
+        # hand-back that sends nothing still gets the safety-net apology. Same honesty
+        # filter as any LLM prose; words it would rewrite are dropped, never apologised
+        # for in front of a card.
+        guarded = guard_reply(
+            handback_intro,
+            proven_actions=frozenset(),
+            conversation_id=str(reply.conversation_id),
+        )
+        if guarded == handback_intro:
+            hold_intro(handback_intro)
 
     # A tool failed because the calendar is unreachable: tell the patient and
     # hand the conversation to a human secretary instead of faking success.

@@ -57,6 +57,7 @@ from secretaria.ai.tools import (
     _persist_appointment,
     _tenant_config_ctx,
     _tenant_id_ctx,
+    handback_message,
 )
 from secretaria.core.logging import get_logger
 from secretaria.plugins.base import PluginSpec
@@ -171,7 +172,7 @@ async def list_professionals() -> dict:
 
 
 @tool
-async def select_professional_and_continue(professional_name: str) -> dict:
+async def select_professional_and_continue(professional_name: str, message: str = "") -> dict:
     """Confirma a escolha de UM profissional e devolve o paciente ao fluxo
     guiado de botões (a saudação do profissional + a lista de serviços dele).
     Use SOMENTE depois que o paciente confirmar com qual profissional quer
@@ -179,6 +180,10 @@ async def select_professional_and_continue(professional_name: str) -> dict:
 
     Args:
         professional_name: Nome do profissional confirmado (ex: 'Dra. Ana').
+        message: UMA ou duas frases curtas para o paciente, enviadas ANTES dos botões:
+            responda o que ele perguntou ou contou, sem anunciar qual lista vem a
+            seguir (o fluxo decide e mostra logo abaixo). Deixe vazio só se não
+            houver nada a dizer.
     """
     tenant_id = _tenant_id_ctx.get()
     if tenant_id is None:
@@ -191,7 +196,9 @@ async def select_professional_and_continue(professional_name: str) -> dict:
         return _unknown_professional_error(professional_name, professionals)
     # Exception->sentinel hand-back (see ai/tools.SelectProfessionalRequested):
     # the worker re-enters the deterministic flow at this doctor's greeting.
-    raise SelectProfessionalRequested(professional.id, professional.name)
+    raise SelectProfessionalRequested(
+        professional.id, professional.name, intro=handback_message(message)
+    )
 
 
 @tool

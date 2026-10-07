@@ -136,6 +136,8 @@ neither" do `README.md`.
 
 ## Documentação
 
+`docs/CHECKPOINT_ia_atende_como_pessoa.md` — TASK-038: texto livre no convênio/dia vai à IA na mesma etapa ("ter" em frase não é terça), a fala da IA sai junto do cartão ao devolver aos botões (envelope `__INTRO__:`, segurada até o cartão), "Não sei" humano e bloco "COMO ATENDER" no prompt; deploy API+worker juntos.
+
 `docs/CHECKPOINT_outro_pergunta_fixa.md` — TASK-037: "Outro" do menu responde a pergunta fixa "O que te traz à clínica?" sem a IA (a IA começa na resposta); 12 testes reais dos outros pontos de entrada da IA e as recomendações.
 
 `docs/TESTES_REAIS_p3_posdeploy_2026-10-06.md` — P3 `01f2af7` comprovado em API/worker; cartões/desistências e consulta preservada PASS, linguagem natural/v2 ainda não aprovadas; ler os limites antes de P4/P5 e novo reteste.

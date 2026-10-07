@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from secretaria.ai.formatter import TextBubble  # noqa: E402
+from secretaria.ai.graph import SHOW_MAIN_MENU_SENTINEL, with_handback_intro  # noqa: E402
 from secretaria.core.database import Base  # noqa: E402
 from secretaria.models import (  # noqa: E402
     Appointment,
@@ -756,3 +757,59 @@ async def test_apply_flow_result_handover_flips_to_human_and_sends_message(db) -
         assert conv.handover_state == HandoverState.HUMAN_ACTIVE
         assert conv.flow_state == FlowState.IDLE
         assert conv.flow_step is None
+
+
+# --------------------------------------------------------------------------
+# TASK-038: the agent's words travel with its hand-back to the buttons
+# --------------------------------------------------------------------------
+
+
+async def _run_hand_back_with_intro(monkeypatch, db, intro: str) -> tuple[Patient, list]:
+    _tenant_row, patient, conversation = await _make_conversation(db, flow_state=FlowState.LLM)
+
+    async def _fake_get_entitlements(tenant_id, redis):
+        return _summary()
+
+    async def _fake_run_agent(message, context, **kwargs):
+        return with_handback_intro(SHOW_MAIN_MENU_SENTINEL, intro)
+
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
+    monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
+    await tasks._send_bot_reply(_reply_context(conversation, patient, _LLM_ANSWER))
+    return patient, [sent for client in _FakeWhatsAppClient.created for sent in client.sent]
+
+
+async def test_hand_back_words_are_sent_before_the_card(monkeypatch, db) -> None:
+    """Owner, 2026-10-07: the patient who asked something reads the answer first,
+    then the buttons - never the same list again as if unheard."""
+    words = "Claro! Para isso, escolha abaixo como prefere seguir."
+    patient, sent = await _run_hand_back_with_intro(monkeypatch, db, words)
+    assert sent[0] == ("text", patient.wa_id, words)
+    assert any(kind == "buttons" for kind, *_ in sent[1:])
+
+
+async def test_hand_back_words_claiming_an_unproven_action_are_dropped(monkeypatch, db) -> None:
+    _patient, sent = await _run_hand_back_with_intro(
+        monkeypatch, db, "Seu pagamento foi confirmado, escolha abaixo."
+    )
+    assert all("pagamento" not in str(item) for item in sent)
+    assert any(kind == "buttons" for kind, *_ in sent)  # the card itself still goes
+
+
+async def test_hand_back_words_never_go_out_alone(monkeypatch, db) -> None:
+    """Review of TASK-038: a hand-back that ends up sending no card must still get the
+    safety-net apology - never just the agent's words ("escolha abaixo") over nothing."""
+
+    async def _sends_nothing(*args, **kwargs):
+        return None
+
+    fallback_causes: list[str] = []
+
+    async def _fallback(reply, redis, *, cause):
+        fallback_causes.append(cause)
+
+    monkeypatch.setattr(workers_ns, "_handle_show_main_menu", _sends_nothing)
+    monkeypatch.setattr(workers_ns, "_send_turn_fallback", _fallback)
+    _patient, sent = await _run_hand_back_with_intro(monkeypatch, db, "Claro! Escolha abaixo.")
+    assert sent == []  # the words were held for a card that never came
+    assert fallback_causes == ["silent_return"]  # so the safety net answers

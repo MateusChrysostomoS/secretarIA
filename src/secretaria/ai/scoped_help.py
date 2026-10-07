@@ -70,6 +70,8 @@ class ScopedHelpOutcome:
 
     kind="pick"     -> `choice` is the option's name as the model wrote it;
                        the router still re-validates it against the real list.
+                       `message` (optional, TASK-038) is one short sentence to the
+                       patient on why that option fits - sent before its card.
     kind="clarify"  -> `question` is the single follow-up to send.
     kind="escalate" -> hand the conversation to a human.
     """
@@ -77,6 +79,7 @@ class ScopedHelpOutcome:
     kind: Literal["pick", "clarify", "escalate"]
     choice: str | None = None
     question: str | None = None
+    message: str | None = None
 
 
 class _ScopedHelpDecision(BaseModel):
@@ -96,6 +99,13 @@ class _ScopedHelpDecision(BaseModel):
     question: str | None = Field(
         default=None,
         description="Para action=clarify: UMA pergunta curta e específica ao paciente.",
+    )
+    message: str | None = Field(
+        default=None,
+        description=(
+            "Para action=pick: UMA frase curta e acolhedora ao paciente dizendo por que "
+            "essa opção atende o que ele descreveu (sem diagnóstico)."
+        ),
     )
 
 
@@ -165,7 +175,9 @@ _SCOPED_RULES = (
     "- Você SÓ pode indicar opções da lista acima. Nunca invente, sugira ou "
     "mencione qualquer opção fora dela.\n"
     "- Se a descrição do paciente já permite escolher com confiança, use "
-    "action=pick com o nome EXATO de uma opção da lista.\n"
+    "action=pick com o nome EXATO de uma opção da lista e, em message, UMA "
+    "frase curta e acolhedora dizendo por que essa opção atende o que ele "
+    "contou.\n"
     "- Se falta UMA informação administrativa para decidir, use action=clarify "
     "com uma pergunta curta e específica, explicando as opções pertinentes "
     "do catálogo (ex.: primeira consulta ou retorno, preferência de profissional). "
@@ -244,7 +256,11 @@ def _normalize(decision: _ScopedHelpDecision, final_round: bool) -> ScopedHelpOu
     enforced HERE, not left to the prompt.
     """
     if decision.action == "pick" and (decision.choice or "").strip():
-        return ScopedHelpOutcome(kind="pick", choice=decision.choice.strip())
+        return ScopedHelpOutcome(
+            kind="pick",
+            choice=decision.choice.strip(),
+            message=(decision.message or "").strip() or None,
+        )
     if (
         decision.action == "clarify"
         and not final_round
@@ -301,6 +317,12 @@ async def _run(
     outcome = _normalize(decision, final_round)
     if outcome.kind == "clarify" and outcome.question:
         outcome = ScopedHelpOutcome(kind="clarify", question=p.rehydrate(outcome.question))
+    if outcome.kind == "pick" and outcome.message:
+        # Free prose sent verbatim before the picked option's card: same re-hydration
+        # as the clarify question (module docstring of `_run`).
+        outcome = ScopedHelpOutcome(
+            kind="pick", choice=outcome.choice, message=p.rehydrate(outcome.message)
+        )
     return outcome
 
 

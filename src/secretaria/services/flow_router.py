@@ -92,6 +92,7 @@ from secretaria.services.calendar import (
 from secretaria.services.insurance_catalog import match_plan
 from secretaria.services.patient_context import as_utc
 from secretaria.services.pending_identity import BOOKING_SLOT_TAKEN_MESSAGE
+from secretaria.services.sensitive_claim_guard import unbacked_claim
 from secretaria.services.service_catalog import normalize, professionals_offering
 from secretaria.services.tenant_config import (
     active_appointment_types,
@@ -236,15 +237,18 @@ LABEL_DONT_KNOW = "Não sei"
 # Fixed, scope-specific openers each "Não sei" tap replies with (the LLM only
 # enters on the patient's ANSWER, one turn later). Deliberately two distinct
 # nodes about the configured professionals or services and booking steps.
-# Neither asks the patient to describe symptoms, and neither is the
-# open-ended "Outro" hand-off (ai/scoped_help.py's module docstring).
+# Neither asks the patient to describe symptoms (TASK-022: "o que você está
+# sentindo?" drew the model into clinical questions), and neither is the
+# open-ended "Outro" hand-off (ai/scoped_help.py's module docstring). Worded
+# like a person, with administrative examples (owner, 2026-10-07, TASK-038).
 PROFESSIONAL_HELP_OPENER = (
-    "Posso explicar as opções de profissionais da clínica e como agendar. "
-    "Sobre qual profissional ou etapa do agendamento você quer saber?"
+    "Sem problema, eu te ajudo a escolher! É uma primeira consulta, um retorno ou "
+    "um atendimento específico? Me conta o que você procura que eu te indico o "
+    "profissional certo."
 )
 SERVICE_HELP_OPENER = (
-    "Posso explicar as opções de serviços da clínica e como agendar uma consulta. "
-    "Sobre qual serviço ou etapa do agendamento você quer saber?"
+    "Sem problema, eu te ajudo a escolher! É uma primeira consulta, um retorno ou "
+    "um exame? Me conta que eu te indico o serviço certo."
 )
 # The fixed question an "Outro" tap on the menu replies with (owner, 2026-10-06). The tap
 # never reaches the model: left to it, the opener drifted (sometimes "Essa consulta é pra
@@ -1082,6 +1086,75 @@ def _parse_day(body: str | None, now: datetime) -> datetime | None:
     return None
 
 
+# --------------------------------------------------------------------------
+# Free text that is talk, not an answer (TASK-038)
+# --------------------------------------------------------------------------
+#
+# Owner, 2026-10-07: a message that is not an answer to the step reaches the model
+# for one turn - the step and its card stay, so the next tap still works - instead
+# of being swallowed as an answer ("qual o endereço?" stored as the convênio) or
+# met with "Não entendi a data". Deliberately small and conservative: an answer the
+# step can read always wins, and these only decide what happens to what it cannot.
+
+_QUESTION_OPENERS = frozenset(
+    {
+        "qual", "quais", "quanto", "quanta", "quantos", "quantas", "como", "onde",
+        "aonde", "quando", "porque", "pq", "quem", "voces", "vcs", "vc", "voce",
+    }
+)
+_CONVERSATION_PREFIXES = ("por que", "o que", "nao sei")
+# More words than any plan name or date answer a patient types.
+_CONVERSATION_MIN_WORDS = 7
+
+
+def _reads_as_conversation(text: str | None) -> bool:
+    """True for a question or a sentence - talk to answer, not a value to store."""
+    key = normalize(text)
+    if not key:
+        return False
+    words = key.split()
+    return (
+        "?" in key
+        or len(words) >= _CONVERSATION_MIN_WORDS
+        or words[0] in _QUESTION_OPENERS
+        or key.startswith(_CONVERSATION_PREFIXES)
+    )
+
+
+_NO_INSURANCE_ANSWERS = frozenset(
+    {"nao", "nenhum", "nenhuma", "nao tenho", "nao uso", "sem convenio", "nao tenho convenio"}
+)
+
+
+def _says_no_insurance(text: str | None) -> bool:
+    """ "não tenho" / "sem convênio" at the convênio question: that is Particular."""
+    return normalize(text).strip(" .!") in _NO_INSURANCE_ANSWERS
+
+
+_MONTH_NAMES = frozenset(
+    {
+        "janeiro", "fevereiro", "marco", "abril", "maio", "junho", "julho", "agosto",
+        "setembro", "outubro", "novembro", "dezembro",
+    }
+)
+
+
+def _looks_like_date_attempt(text: str | None) -> bool:
+    """Whether unreadable text still TRIED to name a day ("dia 35", "31/02").
+
+    Those keep the "Não entendi a data" re-ask; anything else is talk for the model.
+    """
+    key = normalize(text)
+    if any(ch.isdigit() for ch in key):
+        return True
+    words = set(re.findall(r"[a-z]+(?:-feira)?", key))
+    full_names = _WEEKDAY_KEYS - _WEEKDAY_ABBREVIATIONS
+    return bool(
+        words & (full_names | _MONTH_NAMES | {"hoje", "amanha"})
+        or _bare_weekday_abbreviations(key)
+    )
+
+
 _WEEKDAY_WORDS = {
     "segunda": 0, "segunda-feira": 0, "seg": 0,
     "terça": 1, "terca": 1, "terça-feira": 1, "terca-feira": 1, "ter": 1,
@@ -1091,6 +1164,28 @@ _WEEKDAY_WORDS = {
     "sábado": 5, "sabado": 5, "sab": 5,
     "domingo": 6, "dom": 6,
 }
+_WEEKDAY_KEYS = frozenset(normalize(word) for word in _WEEKDAY_WORDS)
+# The 3-letter forms are also everyday words ("posso TER desconto?" read as a
+# Tuesday in production, 2026-10-06), so they only count when they ARE the answer:
+# alone, or with filler like "na", "pode ser", "dia" and time words ("qua às 10",
+# "sex de manhã", "seg 14h" - digits never count as words here).
+_WEEKDAY_ABBREVIATIONS = frozenset({"seg", "ter", "qua", "qui", "sex", "sab", "dom"})
+_DAY_ANSWER_FILLER = frozenset(
+    {
+        "a", "o", "e", "ou", "na", "no", "da", "do", "de", "dia", "pode", "ser",
+        "prefiro", "proxima", "proximo", "que", "vem", "essa", "esta", "nessa", "nesta",
+        "feira", "as", "pela", "pelo", "manha", "tarde", "noite", "cedo", "h", "hs",
+        "hr", "hrs", "hora", "horas", "min",
+    }
+)
+
+
+def _bare_weekday_abbreviations(text: str) -> frozenset[str]:
+    """The abbreviations when they ARE the answer ("ter", "na sex", "ter ou qua"), else none."""
+    words = [w for w in re.findall(r"[a-z]+", normalize(text)) if w not in _DAY_ANSWER_FILLER]
+    if words and all(w in _WEEKDAY_ABBREVIATIONS for w in words):
+        return frozenset(words)
+    return frozenset()
 
 
 def _parse_day_manual(text: str, now: datetime) -> datetime | None:
@@ -1119,7 +1214,10 @@ def _parse_day_manual(text: str, now: datetime) -> datetime | None:
         except ValueError:
             return None
 
+    bare_abbreviations = _bare_weekday_abbreviations(text)
     for word, weekday in _WEEKDAY_WORDS.items():
+        if word in _WEEKDAY_ABBREVIATIONS and word not in bare_abbreviations:
+            continue
         if re.search(rf"\b{re.escape(word)}\b", text):
             ahead = (weekday - base.weekday()) % 7
             if ahead == 0:
@@ -2451,9 +2549,11 @@ async def _handle_insurance(
     """Record the convênio answer, then continue the booking. Never filters.
 
     Tapping "Outro convênio" asks for the plan's name and stays on this step;
-    anything else — a listed plan's tap, "Particular", or free text — is
-    stored as-is (canonicalized to the full plan name when it matches one)
-    and copied onto the appointment at booking time.
+    a listed plan's tap, "Particular" ("não tenho" counts as Particular), or a
+    typed plan name is stored as-is (canonicalized to the full plan name when it
+    matches one) and copied onto the appointment at booking time. A question or
+    a sentence is NOT a plan name: it gets one model turn on this same step
+    (owner, 2026-10-07, TASK-038 - "qual o endereço?" used to be stored here).
 
     What comes next depends on whether the service is already chosen:
     normally it is NOT (the convênio is the first question), so the answer
@@ -2472,6 +2572,14 @@ async def _handle_insurance(
             flow_selected_professional_id=_selected_professional_id(conversation),
         )
     matched = _match_insurance_plan(tenant, body)
+    if matched is None and _says_no_insurance(body):
+        matched = LABEL_INSURANCE_PARTICULAR
+    if matched is None and _reads_as_conversation(body):
+        logger.info(
+            "insurance_free_text_to_llm",
+            conversation_id=str(getattr(conversation, "id", None)),
+        )
+        return _preserve(conversation, "delegate_llm")
     stored = (matched or (body or "").strip())[:120] or None
     if stored is None:
         # No text at all (e.g. a media message): re-ask here, rather than walk
@@ -2563,6 +2671,23 @@ def _enter_service_help(conversation: Conversation) -> FlowRouterResult:
     )
 
 
+# Same cap as a hand-back tool's words (ai/tools.py::HANDBACK_MESSAGE_MAX).
+_PICK_MESSAGE_MAX = 600
+
+
+def _with_pick_message(result: FlowRouterResult, message: str | None) -> FlowRouterResult:
+    """The help node's one-line reason, in front of the picked option's card (TASK-038).
+
+    Without it the patient who explained what they need saw a list or card with no word
+    about it. Model prose, so it passes the same unbacked-claim check as any LLM reply;
+    a sentence that check would rewrite is dropped - the card alone still answers.
+    """
+    text = (message or "").strip()[:_PICK_MESSAGE_MAX].rstrip()
+    if text and result.action == "reply" and unbacked_claim(text) is None:
+        result.bubbles = [TextBubble(body=text), *result.bubbles]
+    return result
+
+
 async def _handle_professional_help(
     conversation: Conversation, tenant: Tenant, body: str, professionals: list
 ) -> FlowRouterResult:
@@ -2589,7 +2714,9 @@ async def _handle_professional_help(
     if outcome.kind == "pick":
         professional = _match_professional(professionals, outcome.choice)
         if professional is not None:
-            return _enter_professional_services(professional, tenant)
+            return _with_pick_message(
+                _enter_professional_services(professional, tenant), outcome.message
+            )
         # A pick that doesn't resolve against the real roster (hallucinated /
         # deactivated mid-exchange) must never be offered back to the patient.
         logger.warning("flow_professional_help_pick_unresolved")
@@ -2629,7 +2756,9 @@ async def _handle_service_help(
     if outcome.kind == "pick":
         service = _match_service(services, outcome.choice)
         if service is not None:
-            return _enter_service_detail(service, conversation, tenant)
+            return _with_pick_message(
+                _enter_service_detail(service, conversation, tenant), outcome.message
+            )
         logger.warning("flow_service_help_pick_unresolved")
         return _delegate_llm_keeping_draft(conversation)
     if outcome.kind == "clarify" and not final_round:
@@ -3199,9 +3328,10 @@ async def _handle_day_step(
 ) -> FlowRouterResult:
     """One inbound turn on a day step (plain, retry, or escape render).
 
-    Never returns `delegate_llm` on its own: a date it cannot read re-asks
-    with the picker and escalates the step, and only the escape row — visible
-    to the patient, and logged under its own `flow_step` — reaches the model.
+    A date it cannot read re-asks with the picker and escalates the step (the
+    escape row then reaches the model). Talk that is not a date attempt at all
+    ("vocês têm estacionamento?") gets ONE model turn on the same step instead
+    (owner, 2026-10-07, TASK-038): the picker stays tappable.
     """
     step = conversation.flow_step or branch.day_step
     if _control_match(body, _day_back_label(back_target)):
@@ -3242,8 +3372,18 @@ async def _handle_day_step(
             professionals=professionals,
         )
 
-    # Unreadable. Re-ask with the same tappable list, one step further along
-    # the bounded escalation - never a silent hand-off to the model.
+    if _reads_as_conversation(body) or not _looks_like_date_attempt(body):
+        # A question or chat, not a failed date: the model answers it and the
+        # patient is still on this step (TASK-038).
+        logger.info(
+            "flow_day_free_text_to_llm",
+            conversation_id=str(getattr(conversation, "id", None)),
+            step=step,
+        )
+        return _preserve(conversation, "delegate_llm")
+
+    # Unreadable date attempt. Re-ask with the same tappable list, one step
+    # further along the bounded escalation.
     next_step = (
         branch.day_retry_step if step == branch.day_step else branch.day_escape_step
     )

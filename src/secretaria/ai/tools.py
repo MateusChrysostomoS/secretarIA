@@ -20,6 +20,7 @@ from urllib.parse import quote
 from uuid import UUID
 
 from langchain_core.tools import tool
+from pseudonymize_core import has_unresolved_tokens
 
 from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
@@ -102,6 +103,28 @@ _booking_topology_ctx: ContextVar[str] = ContextVar(
 # to run_agent.
 
 
+# TASK-038 (owner, 2026-10-07): a hand-back used to drop whatever the agent meant to
+# say, so the patient only saw the same list again, as if unheard. Every hand-back
+# tool now takes the agent's own short words (`message`); the exception carries them
+# as `intro`, graph.run_agent puts them in front of the sentinel
+# (`HANDBACK_INTRO_PREFIX`) and the worker sends them BEFORE the flow's card.
+HANDBACK_MESSAGE_MAX = 600
+
+
+def handback_message(message: str | None) -> str | None:
+    """The patient-facing words a hand-back tool was given, trimmed and capped (or None).
+
+    The tool boundary already re-hydrated them (ai/pii.py); a token the map could not
+    resolve (the model invented or mangled one) would be printed to the patient as
+    "[PACIENTE_...]", so such words are dropped - the card alone still answers.
+    """
+    text = (message or "").strip()[:HANDBACK_MESSAGE_MAX].rstrip()
+    if text and has_unresolved_tokens(text):
+        logger.warning("handback_message_unresolved_tokens", message_len=len(text))
+        return None
+    return text or None
+
+
 class ShowMainMenuRequested(Exception):
     """Raised by the `show_main_menu` tool: the patient wants the button menu back.
 
@@ -118,6 +141,10 @@ class ShowMainMenuRequested(Exception):
     used to trigger now lives behind the exact literal
     `/dangerously-remove-context` and is unreachable from this tool.
     """
+
+    def __init__(self, *, intro: str | None = None) -> None:
+        super().__init__("show main menu")
+        self.intro = intro
 
 
 class ManageAppointmentRequested(Exception):
@@ -139,9 +166,11 @@ class ManageAppointmentRequested(Exception):
         appointment: datetime | None = None,
         day: date | None = None,
         time: Any = None,
+        intro: str | None = None,
     ) -> None:
         super().__init__(f"manage appointment: {action}")
         self.action = action
+        self.intro = intro
         # TASK-030 P3 (v2 tool only): WHICH appointment, by its clinic-local start, and for
         # a reschedule the new day and time. Formats only - the worker validates the rest.
         self.appointment = appointment
@@ -173,9 +202,10 @@ class GuidedBookingRequested(Exception):
     prove one against, which the flow handles exactly as it does elsewhere.
     """
 
-    def __init__(self, appointment_type: str | None) -> None:
+    def __init__(self, appointment_type: str | None, *, intro: str | None = None) -> None:
         super().__init__("start guided booking")
         self.appointment_type = appointment_type
+        self.intro = intro
 
 
 class BookingDraftRequested(Exception):
@@ -197,8 +227,10 @@ class BookingDraftRequested(Exception):
         attendee: str | None = None,
         day: date | None = None,
         time: Any = None,
+        intro: str | None = None,
     ) -> None:
         super().__init__("set booking draft")
+        self.intro = intro
         self.appointment_type = appointment_type
         self.professional_id = professional_id
         self.insurance = insurance
@@ -227,10 +259,13 @@ class SelectProfessionalRequested(Exception):
     greeting + services (flow_router._enter_professional_services).
     """
 
-    def __init__(self, professional_id: UUID, professional_name: str) -> None:
+    def __init__(
+        self, professional_id: UUID, professional_name: str, *, intro: str | None = None
+    ) -> None:
         super().__init__(f"select professional {professional_name}")
         self.professional_id = professional_id
         self.professional_name = professional_name
+        self.intro = intro
 
 
 def _get_calendar() -> CalendarService:
@@ -954,16 +989,22 @@ async def cancel_event(event_id: str) -> dict:
 
 
 @tool
-async def show_main_menu() -> str:
+async def show_main_menu(message: str = "") -> str:
     """Volta a conversa para o menu inicial de botões da clínica. Use quando o
     paciente quiser recomeçar, "voltar ao início", trocar de profissional ou
     ver as opções de novo. Não apaga nada da conversa — apenas reabre o menu.
+
+    Args:
+        message: UMA ou duas frases curtas para o paciente, enviadas ANTES dos botões:
+            responda o que ele perguntou ou contou, sem anunciar qual lista vem a
+            seguir (o fluxo decide e mostra logo abaixo). Deixe vazio só se não
+            houver nada a dizer.
     """
-    raise ShowMainMenuRequested()
+    raise ShowMainMenuRequested(intro=handback_message(message))
 
 
 @tool
-async def manage_existing_appointment(action: str) -> dict:
+async def manage_existing_appointment(action: str, message: str = "") -> dict:
     """Aciona o fluxo de remarcação/cancelamento de uma consulta JÁ MARCADA
     deste paciente. Chame SEMPRE que o paciente quiser remarcar ou cancelar
     uma consulta existente — NUNCA remarque ou cancele você mesma pelo chat
@@ -974,12 +1015,16 @@ async def manage_existing_appointment(action: str) -> dict:
     Args:
         action: "reschedule" (ou "remarcar") para remarcar, "cancel" (ou
             "cancelar") para cancelar.
+        message: UMA ou duas frases curtas para o paciente, enviadas ANTES dos botões:
+            responda o que ele perguntou ou contou, sem anunciar qual lista vem a
+            seguir (o fluxo decide e mostra logo abaixo). Deixe vazio só se não
+            houver nada a dizer.
     """
     normalized = (action or "").strip().casefold()
     if normalized in {"reschedule", "remarcar"}:
-        raise ManageAppointmentRequested("reschedule")
+        raise ManageAppointmentRequested("reschedule", intro=handback_message(message))
     if normalized in {"cancel", "cancelar"}:
-        raise ManageAppointmentRequested("cancel")
+        raise ManageAppointmentRequested("cancel", intro=handback_message(message))
     return {
         "error": (
             f"Ação '{action}' não reconhecida. Use 'reschedule' para remarcar "
@@ -989,7 +1034,7 @@ async def manage_existing_appointment(action: str) -> dict:
 
 
 @tool
-async def start_guided_booking(appointment_type: str) -> dict:
+async def start_guided_booking(appointment_type: str, message: str = "") -> dict:
     """Entrega o agendamento ao fluxo guiado de botões, abrindo direto a lista
     de dias disponíveis (ou a pergunta de convênio, quando a clínica pede).
     A partir daí o fluxo de botões conduz dia, horário e confirmação — você
@@ -1008,6 +1053,10 @@ async def start_guided_booking(appointment_type: str) -> dict:
             (um dos "Tipos de consulta disponíveis" do seu contexto, ex:
             'Primeira Consulta'). Não invente, não traduza e não misture com
             o nome do paciente.
+        message: UMA ou duas frases curtas para o paciente, enviadas ANTES dos botões:
+            responda o que ele perguntou ou contou, sem anunciar qual lista vem a
+            seguir (o fluxo decide e mostra logo abaixo). Deixe vazio só se não
+            houver nada a dizer.
     """
     blocked = _blocked_tenant_level("start_guided_booking")
     if blocked is not None:
@@ -1023,7 +1072,7 @@ async def start_guided_booking(appointment_type: str) -> dict:
     )
     if error is not None:
         return error
-    raise GuidedBookingRequested(canonical_type)
+    raise GuidedBookingRequested(canonical_type, intro=handback_message(message))
 
 
 _PATIENT_UNRESOLVED_TEXT = (
@@ -1177,7 +1226,9 @@ async def iniciar_pre_consulta() -> str:
 
 
 @tool
-async def set_booking_draft(service: str = "", professional: str = "", insurance: str = "") -> dict:
+async def set_booking_draft(
+    service: str = "", professional: str = "", insurance: str = "", message: str = ""
+) -> dict:
     """Registra o que o paciente já disse (serviço, profissional, convênio) e entrega
     o agendamento ao fluxo guiado, que PULA as etapas já respondidas e abre a próxima
     que falta. Se o paciente quer uma avaliação/consulta, mas não escolheu um serviço
@@ -1188,6 +1239,11 @@ async def set_booking_draft(service: str = "", professional: str = "", insurance
         service: Nome EXATO de um serviço escolhido pelo paciente (ou vazio).
         professional: Nome do profissional, quando o paciente já escolheu um (ou vazio).
         insurance: Convênio que o paciente citou, se citou (ou vazio).
+        message: UMA ou duas frases curtas para o paciente, enviadas ANTES dos botões:
+            responda o que ele perguntou ou contou, sem anunciar qual lista vem a
+            seguir (o fluxo decide e mostra logo abaixo); se nenhuma opção da
+            clínica corresponde exatamente ao que ele descreveu, diga isso.
+            Deixe vazio só se não houver nada a dizer.
     """
     tenant_id = _tenant_id_ctx.get()
     if tenant_id is None:
@@ -1196,8 +1252,9 @@ async def set_booking_draft(service: str = "", professional: str = "", insurance
     professional = (professional or "").strip()
     insurance = (insurance or "").strip()
 
+    intro = handback_message(message)
     if not service and not professional:
-        raise BookingDraftRequested(None, None, insurance or None)
+        raise BookingDraftRequested(None, None, insurance or None, intro=intro)
 
     professional_id: UUID | None = None
     catalog = _effective_service_catalog()
@@ -1252,7 +1309,7 @@ async def set_booking_draft(service: str = "", professional: str = "", insurance
         canonical_type, error = _canonical_appointment_type(service, "set_booking_draft", catalog)
         if error is not None:
             return error
-    raise BookingDraftRequested(canonical_type, professional_id, insurance or None)
+    raise BookingDraftRequested(canonical_type, professional_id, insurance or None, intro=intro)
 
 
 # --- set_booking_draft v2 (TASK-030 P2) ----------------------------------------------------
@@ -1303,6 +1360,7 @@ async def set_booking_draft_v2(
     for_whom: str = "",
     day: str = "",
     time: str = "",
+    message: str = "",
 ) -> dict:
     """Entrega o agendamento ao fluxo guiado com TUDO o que o paciente já disse. O fluxo
     confere cada item com os dados reais da clínica e abre a próxima etapa que falta - pode
@@ -1318,6 +1376,11 @@ async def set_booking_draft_v2(
             pessoa, vazio se ele não disse. NUNCA escreva um nome aqui.
         day: Dia pedido no formato AAAA-MM-DD, no fuso da clínica (ou vazio).
         time: Horário pedido no formato HH:MM (ou vazio). Sem `day`, é ignorado.
+        message: UMA ou duas frases curtas para o paciente, enviadas ANTES dos botões:
+            responda o que ele perguntou ou contou, sem anunciar qual lista vem a
+            seguir (o fluxo decide e mostra logo abaixo); se nenhuma opção da
+            clínica corresponde exatamente ao que ele descreveu, diga isso.
+            Deixe vazio só se não houver nada a dizer.
     """
     tenant_id = _tenant_id_ctx.get()
     if tenant_id is None:
@@ -1355,6 +1418,7 @@ async def set_booking_draft_v2(
         attendee=_FOR_WHOM_VALUES[who],
         day=parsed_day,
         time=parsed_time,
+        intro=handback_message(message),
     )
 
 
@@ -1408,7 +1472,7 @@ def _tool_time(text: str) -> Any:
 
 @tool("manage_existing_appointment")
 async def manage_existing_appointment_v2(
-    action: str, appointment: str = "", day: str = "", time: str = ""
+    action: str, appointment: str = "", day: str = "", time: str = "", message: str = ""
 ) -> dict:
     """Leva o paciente ao fluxo de remarcar ou cancelar uma consulta JÁ MARCADA dele. O
     fluxo confere tudo e para no cartão de confirmação: quem confirma é o paciente, tocando
@@ -1420,6 +1484,10 @@ async def manage_existing_appointment_v2(
             "consultas marcadas". Vazio se o paciente não disse qual.
         day: Só para remarcar: o novo dia, AAAA-MM-DD, no fuso da clínica (ou vazio).
         time: Só para remarcar: o novo horário, HH:MM (ou vazio). Sem `day`, é ignorado.
+        message: UMA ou duas frases curtas para o paciente, enviadas ANTES dos botões:
+            responda o que ele perguntou ou contou, sem anunciar qual lista vem a
+            seguir (o fluxo decide e mostra logo abaixo). Deixe vazio só se não
+            houver nada a dizer.
     """
     canonical = _MANAGE_ACTIONS.get((action or "").strip().casefold())
     if canonical is None:
@@ -1454,7 +1522,13 @@ async def manage_existing_appointment_v2(
                 "agent_tool_blocked", tool="manage_existing_appointment", reason=TOOL_BLOCK_BAD_TIME
             )
             return {"error": _TIME_FORMAT_ERROR}
-    raise ManageAppointmentRequested(canonical, appointment=reference, day=new_day, time=new_time)
+    raise ManageAppointmentRequested(
+        canonical,
+        appointment=reference,
+        day=new_day,
+        time=new_time,
+        intro=handback_message(message),
+    )
 
 
 # Read by ai/graph.py::_tool_cache_key: the v1 and v2 tools share the name

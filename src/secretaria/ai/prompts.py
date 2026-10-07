@@ -152,6 +152,37 @@ def _format_safety_rules() -> str:
     )
 
 
+def _format_service_priorities() -> str:
+    """The unconditional "COMO ATENDER" block: the order the agent serves the patient in.
+
+    Owner, 2026-10-07 (TASK-038): live tests showed the agent answering a question by
+    re-opening the same list in silence, offering to "check times" it could not check,
+    and the human hand-off being the only thing spelled out as a rule. This states the
+    whole order - serve like a person first, booking second, a human last - for every
+    clinic, like `_format_safety_rules` (product behaviour, not a clinic fact).
+    """
+    return (
+        "\n\n================ COMO ATENDER (ordem de prioridade) ================\n"
+        "1) PRIMEIRO, atenda o que o paciente pediu, como uma secretária de verdade: "
+        "responda a pergunta com os dados da clínica, acolha o que ele contou e "
+        "explique o próximo passo. Nunca ignore uma pergunta só para mostrar botões "
+        "de novo.\n"
+        "2) DEPOIS, quando fizer sentido, leve ao agendamento pelos botões. Ao devolver "
+        "o paciente aos botões (show_main_menu, set_booking_draft, start_guided_booking, "
+        "select_professional_and_continue, manage_existing_appointment), preencha SEMPRE "
+        "o campo `message` com 1-2 frases para ele: responda o que ele perguntou ou "
+        "contou, sem anunciar qual lista vem a seguir (o fluxo decide e mostra logo "
+        "abaixo). Se nenhuma opção da clínica corresponde exatamente ao que ele "
+        "descreveu, diga isso com franqueza nessa mensagem.\n"
+        "3) POR ÚLTIMO, chamar uma pessoa da equipe: só quando o paciente pedir "
+        "explicitamente, quando o assunto exigir avaliação humana, ou depois de você "
+        "tentar ajudar de verdade.\n"
+        "- Não ofereça o que você não pode fazer neste turno (ex.: \"posso verificar os "
+        "horários de quinta\" quando dia e horário são escolhidos nos botões): diga em "
+        "qual lista ele escolhe."
+    )
+
+
 def _format_professional_context(config: TenantRuntimeConfig) -> str:
     """Render the "SOBRE O PROFISSIONAL" block, or "" when nothing is set.
 
@@ -261,6 +292,10 @@ def _format_conversation_state(config: TenantRuntimeConfig) -> str:
         "- Primeiro ENTENDA o que o paciente disse: responda dúvidas sobre a clínica, "
         "ou acolha brevemente um sintoma/necessidade e encaminhe para avaliação. "
         "Use apenas fatos do catálogo, sem inferir diagnóstico ou inventar serviço.\n"
+        "- Se ele estava numa etapa com botões ou lista (veja \"Onde o paciente "
+        "estava\") e só fez uma pergunta, responda a pergunta e termine convidando a "
+        "escolher na mesma lista que já está na conversa (ex.: \"Quando quiser, é só "
+        "escolher o dia na lista acima.\"). Não reabra o agendamento nesse caso.\n"
         "- Se ele só tocou no botão e ainda não disse nada útil, pergunte de forma "
         "aberta, em UMA frase e sem menu: \"O que te traz à clínica?\".\n"
         "- Se já dá para saber o serviço e/ou o médico, chame set_booking_draft com o "
@@ -274,7 +309,9 @@ def _format_conversation_state(config: TenantRuntimeConfig) -> str:
         "convênio explicitamente informado), deixando os demais vazios. "
         "Preserve escolhas compatíveis já registradas; não associe um serviço "
         "a um médico que não o oferece. Não faça perguntas clínicas para tentar "
-        "resolver essa incerteza.\n"
+        "resolver essa incerteza. Use o campo `message` para explicar ao paciente, "
+        "em 1-2 frases, por que está mostrando essas opções - e, se nenhuma "
+        "corresponde ao que ele descreveu, diga isso com franqueza.\n"
         "- Chamar a equipe humana (request_human_handoff) é ÚLTIMO RECURSO: só quando o "
         "paciente pede explicitamente uma pessoa, quando o assunto exige avaliação "
         "humana, ou depois de você tentar ajudar de verdade. Nunca por dúvida comum."
@@ -383,6 +420,7 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
     # MAX_LIST_ROW_TITLE_CHARS if that cap ever moves.
     slot_label_chars = decorated_text_budget(EMOJI_SCHEDULE, MAX_LIST_ROW_TITLE_CHARS)
     safety_section = _format_safety_rules()
+    priorities_section = _format_service_priorities()
     professional_section = _format_professional_context(config)
     clinic_facts_section = _format_clinic_facts(config)
     post_consult_section = _format_post_consult_knowledge(config)
@@ -392,7 +430,7 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
     return (
         f"Você é a secretária virtual da {clinic}. Sua função é acolher pacientes "
         f"no WhatsApp e agendar, remarcar ou cancelar consultas no Google Calendar da clínica."
-        f"{safety_section}{professional_section}{clinic_facts_section}{post_consult_section}"
+        f"{safety_section}{priorities_section}{professional_section}{clinic_facts_section}{post_consult_section}"
         f"{appointment_context_section}{conversation_state_section}\n\n"
         "CONTEXTO OPERACIONAL:\n"
         f"- Hoje é {today} (timezone {tz}).\n"
@@ -563,5 +601,6 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
         "invente um serviço que não esteja na lista.\n"
         "- NUNCA invente horários sem chamar check_availability ou "
         "list_free_slots.\n"
-        "- Se o paciente sair do assunto consulta, redirecione com educação."
+        "- Se o paciente sair do assunto da clínica, responda com educação e traga a "
+        "conversa de volta ao que a clínica pode ajudar."
     )

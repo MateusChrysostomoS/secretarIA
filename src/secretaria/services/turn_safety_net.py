@@ -38,6 +38,14 @@ logger = get_logger(__name__)
 _turn_sends: ContextVar[list[int] | None] = ContextVar("turn_sends", default=None)
 
 
+# TASK-038: the agent's own words for the patient on a hand-back to the buttons
+# (ai/graph.py::HANDBACK_INTRO_PREFIX). Held, never sent alone: the next bubble batch
+# the turn sends (workers/shared/dispatch.py::_dispatch_bubbles) takes them in front of
+# the card. A hand-back that ends up sending nothing leaves them unsent - the turn
+# stays silent and the apology below still answers - and `end_turn` drops them.
+_held_intro: ContextVar[list[str] | None] = ContextVar("held_intro", default=None)
+
+
 def begin_turn() -> Token:
     """Open a fresh send ledger for one inbound turn; reset it with `end_turn`."""
     return _turn_sends.set([0])
@@ -45,6 +53,19 @@ def begin_turn() -> Token:
 
 def end_turn(token: Token) -> None:
     _turn_sends.reset(token)
+    _held_intro.set(None)
+
+
+def hold_intro(text: str) -> None:
+    """Hold words to go out in front of this turn's next card. No-op outside a turn."""
+    if _turn_sends.get() is not None:
+        _held_intro.set([text])
+
+
+def take_held_intro() -> str | None:
+    """The held words, once (the first batch to ask gets them), or None."""
+    box = _held_intro.get()
+    return box.pop() if box else None
 
 
 def note_send() -> None:

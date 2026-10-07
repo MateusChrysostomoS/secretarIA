@@ -157,9 +157,16 @@ def test_manage_target_never_replaces_a_wrong_reference_with_a_guess():
 # --------------------------------------------------------------------------
 
 
-def test_the_v2_tool_has_the_v1_name_and_four_args():
+def test_the_v2_tool_has_the_v1_name_and_its_args():
     assert manage_existing_appointment_v2.name == manage_existing_appointment.name
-    assert set(manage_existing_appointment_v2.args) == {"action", "appointment", "day", "time"}
+    # `message` (TASK-038): the agent's words for the patient, sent before the card.
+    assert set(manage_existing_appointment_v2.args) == {
+        "action",
+        "appointment",
+        "day",
+        "time",
+        "message",
+    }
 
 
 async def test_the_v2_tool_carries_every_field_of_a_reschedule():

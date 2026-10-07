@@ -57,7 +57,7 @@ def clinic(monkeypatch):
     ai_tools._tenant_id_ctx.reset(token)
 
 
-def test_the_v2_tool_is_named_set_booking_draft_with_six_string_args():
+def test_the_v2_tool_is_named_set_booking_draft_with_its_string_args():
     assert set_booking_draft_v2.name == "set_booking_draft"
     assert set(set_booking_draft_v2.args) == {
         "service",
@@ -66,6 +66,7 @@ def test_the_v2_tool_is_named_set_booking_draft_with_six_string_args():
         "for_whom",
         "day",
         "time",
+        "message",  # TASK-038: the agent's words for the patient, sent before the card
     }
 
 

@@ -73,7 +73,7 @@ classificar demora de exibição desta rodada como defeito do Portal.
 - Transferência direta para humano sem IA: só falha de agenda e o add-on de atendimento humano fora
   do horário — nunca por causa do texto do paciente.
 
-## 4. O que deve ser feito (recomendação, não executado)
+## 4. O que deve ser feito (recomendação — os itens 1, 2, 3 e 5 foram EXECUTADOS na TASK-038, ver `docs/CHECKPOINT_ia_atende_como_pessoa.md`; o item 4 aguarda decisão do dono)
 
 1. **Regra única para texto livre em qualquer etapa:** se é uma resposta válida da etapa, segue; se
    não é, a IA responde como pessoa e devolve a MESMA pergunta/botões, sem perder nada. Falta em
