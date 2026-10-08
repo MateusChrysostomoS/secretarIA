@@ -40,7 +40,10 @@ def _migration():
 def test_the_migration_is_the_single_head_on_top_of_the_previous_one():
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "migrations"))
-    assert ScriptDirectory.from_config(config).get_heads() == [REVISION]
+    script = ScriptDirectory.from_config(config)
+    # Later revisions may sit on top; this migration stays in a single chain.
+    assert len(script.get_heads()) == 1
+    assert REVISION in {rev.revision for rev in script.walk_revisions()}
     assert _migration().down_revision == DOWN_REVISION
 
 

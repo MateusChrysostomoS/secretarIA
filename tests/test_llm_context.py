@@ -205,6 +205,19 @@ def test_every_workflow_step_has_a_label():
     assert steps <= set(llm_context._STEP_LABELS)
 
 
+def test_edit_detour_explains_the_parked_confirmation_without_identifiers():
+    conv = _conversation(flow_state=FlowState.EDIT_BOOKING, flow_step=fr.STEP_EDIT_CONFIRM)
+    conv.flow_edit_draft = {"current": {
+        "service": "Retorno", "start_at": "2030-10-15T16:00", "insurance": "Plano Confidencial",
+        "attendee_name": "Joaquim Segredo",
+    }}
+    text = build_conversation_state(conv, _tenant(), [])
+    assert "confirmação das alterações" in text
+    assert "Retorno" in text and "15/10/2030 às 16:00" in text
+    assert "OUTRA pessoa" in text
+    assert "Joaquim Segredo" not in text and "Plano Confidencial" not in text
+
+
 @pytest.mark.parametrize(
     "step",
     [

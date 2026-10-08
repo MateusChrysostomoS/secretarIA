@@ -98,11 +98,11 @@ async def test_inside_the_window_the_reminder_carries_the_three_buttons(db):  # 
     assert buttons == [
         (f"remconfirm|{job.reminder_id}", "Confirmar"),
         (f"remcancel|{job.reminder_id}", "Cancelar"),
-        (f"remother|{job.reminder_id}", "Outro"),
+        (f"remedit|{job.reminder_id}", "Alterar Dados"),
     ]
     assert outcome.ok and not outcome.billable and outcome.channel == "whatsapp"
     assert outcome.wam_id == "wamid.buttons"
-    assert outcome.history_body.endswith("(opções: Confirmar, Cancelar, Outro)")
+    assert outcome.history_body.endswith("(opções: Confirmar, Cancelar, Alterar Dados)")
     assert outcome.history_interactive["kind"] == "buttons"
 
 
@@ -145,7 +145,7 @@ async def test_outside_the_window_once_approved_the_v2_template_has_the_buttons(
     assert payloads == [
         f"remconfirm|{job.reminder_id}",
         f"remcancel|{job.reminder_id}",
-        f"remother|{job.reminder_id}",
+        f"remedit|{job.reminder_id}",
     ]
     assert outcome.ok and outcome.billable and outcome.error_code is None
 
@@ -256,7 +256,7 @@ async def test_portal_patient_gets_the_chat_card_and_the_email_with_the_link(db,
     assert [o["id"] for o in row.interactive["options"]] == [
         f"remconfirm|{job.reminder_id}",
         f"remcancel|{job.reminder_id}",
-        f"remother|{job.reminder_id}",
+        f"remedit|{job.reminder_id}",
     ]
     [mail_sent] = sent
     assert mail_sent["to"] == "maria@example.com"

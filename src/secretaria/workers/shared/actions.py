@@ -7,7 +7,6 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from secretaria.ai.formatter import TextBubble
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import (
@@ -21,6 +20,8 @@ from secretaria.models import (
     is_live_status,
 )
 from secretaria.services import reminder_hooks
+from secretaria.services.appointment_edit import EditContext
+from secretaria.services.appointment_edit_flow import enter_edit_menu
 from secretaria.services.appointment_status import (
     SOURCE_BUTTON,
     log_status_transition,
@@ -29,7 +30,6 @@ from secretaria.services.calendar import (
     CalendarService,
 )
 from secretaria.services.flow_router import (
-    enter_booking,
     enter_decline_reasons,
     enter_manage_action,
     enter_rebooking,
@@ -50,6 +50,7 @@ from secretaria.services.tenant_config import (
     load_tenant_config,
     resolve_professional_calendar,
 )
+from secretaria.workers.shared.appointment_edit_support import edit_guards
 from secretaria.workers.shared.context import (
     _ReplyContext,
 )
@@ -69,10 +70,8 @@ from secretaria.workers.shared.llm_context import (
     _appointment_calendar_target,
 )
 from secretaria.workers.shared.reminder_actions import (
-    BOOK_ANOTHER_INTRO,
-    CONTINUE_BOOK_ANOTHER,
     CONTINUE_CANCEL_AND_ASK_WHY,
-    _retention_warning,
+    CONTINUE_EDIT,
     handle_reminder_button,
 )
 from secretaria.workers.shared.sender import (
@@ -228,8 +227,7 @@ async def _handle_action_button(
     # after it closes.
     rebooking_handoff: tuple | None = None
     decline_handoff: tuple | None = None
-    # TASK-032 R3 "Agendar Outra": the booking entry, applied after the session.
-    book_another_handoff: tuple | None = None
+    edit_handoff: tuple | None = None
 
     async with async_session_factory() as session:
         conversation = await session.get(Conversation, reply.conversation_id)
@@ -336,43 +334,28 @@ async def _handle_action_button(
             await client.send_text_message(to=reply.patient_ref, body=text)
             decline_handoff = (tenant, waba_token, appointment.id)
 
-        if action == CONTINUE_BOOK_ANOTHER:
-            # TASK-032 R3: "Agendar Outra" - a NEW booking that replaces this
-            # appointment only once it is confirmed (the flow tail / the Portal
-            # promotion cancel it, services/appointment_replacement.py).
-            if not flows_enabled(tenant):
-                await client.send_text_message(
-                    to=reply.patient_ref,
-                    body="Para marcar outra consulta, entre em contato com a nossa equipe.",
-                )
-                return
-            professional_rows = await list_active_professionals(session, tenant.id)
-            professionals = [
-                SimpleNamespace(
-                    id=p.id,
-                    name=p.name,
-                    specialty=p.specialty,
-                    about=p.about,
-                    context_doctor_message=p.context_doctor_message,
-                    appointment_types=p.appointment_types,
-                    # Verbatim, NULL and all - see the rebooking branch below.
-                    business_hours=p.business_hours,
-                )
-                for p in professional_rows
-            ]
-            result = enter_booking(tenant, professionals)
-            if result.flow_state == FlowState.SERVICE_CATALOG:
-                # Only a booking that really opened carries the marker; a dead
-                # end (no services) is answered as it is today.
-                result.flow_replaces_appointment_id = appointment.id
-                intro = BOOK_ANOTHER_INTRO.format(
-                    when=_format_appointment_when(appointment.start_at, tenant.timezone)
-                )
-                warning = await _retention_warning(session, tenant, appointment, datetime.now(UTC))
-                if warning:
-                    intro = f"{intro}\n\n{warning}"
-                result.bubbles = [TextBubble(body=intro), *result.bubbles]
-            book_another_handoff = (tenant, waba_token, result)
+        if action == CONTINUE_EDIT:
+            # TASK-032 R6: "Alterar Dados" on a reminder (the row was checked against this
+            # patient by handle_reminder_button). A fresh draft + the menu; nothing changes yet.
+            paid, blocked = await edit_guards(session, tenant, appointment)
+            appt_view = {
+                "id": str(appointment.id),
+                "appointment_type": appointment.appointment_type,
+                "start_at": appointment.start_at,
+                "end_at": appointment.end_at,
+                "professional_id": (
+                    str(appointment.professional_id) if appointment.professional_id else None
+                ),
+                "insurance": appointment.insurance,
+                "attendee_name": appointment.attendee_name,
+            }
+            edit_handoff = (
+                tenant,
+                waba_token,
+                enter_edit_menu(
+                    tenant, appt_view, EditContext(paid_deposit=paid, reschedule_blocked=blocked)
+                ),
+            )
 
         if action == "rebookno":
             # The patient does not want to rebook. Ask WHY — deterministically,
@@ -517,15 +500,10 @@ async def _handle_action_button(
                 reschedule_calendar,
             )
 
-    if book_another_handoff is not None:
-        ba_tenant, ba_waba_token, ba_result = book_another_handoff
+    if edit_handoff is not None:
+        e_tenant, e_waba, e_result = edit_handoff
         await _apply_flow_result(
-            reply,
-            ba_result,
-            reply.patient_ref,
-            redis=redis,
-            tenant=ba_tenant,
-            waba_token=ba_waba_token,
+            reply, e_result, reply.patient_ref, redis=redis, tenant=e_tenant, waba_token=e_waba
         )
         return
 

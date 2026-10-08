@@ -15,6 +15,7 @@ from secretaria.models import (
     Patient,
 )
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
+from secretaria.services.flow_router import menu_label
 from secretaria.workers import tasks
 from secretaria.workers.shared.greeting import _format_appointment_when
 from tests._patching import workers_ns
@@ -165,10 +166,10 @@ async def test_a_tap_on_a_message_about_the_old_time_points_to_the_new_one(db): 
     assert (await reload_appointment(db, world.appointment.id)).confirmation_count == 0
 
 
-async def test_cancel_offers_the_three_way_card(db):  # noqa: F811
-    # TASK-032 R3 replaced R2's interim Remarcar / Não vou mais card.
-    from secretaria.services.reminder_text import cancel_path_buttons
-    from secretaria.workers.shared.reminder_actions import CANCEL_PATH_TEXT
+async def test_cancel_asks_for_confirmation_on_this_appointment(db):  # noqa: F811
+    # TASK-032 R6 asks directly before cancelling the appointment.
+    from secretaria.services.reminder_text import give_up_confirm_buttons
+    from secretaria.workers.shared.reminder_actions import GIVE_UP_CONFIRM_TEXT
 
     world = await seed_world(db, start_at=_future())
     rid = await add_reminder(db, world)
@@ -176,8 +177,13 @@ async def test_cancel_offers_the_three_way_card(db):  # noqa: F811
     await _tap(world.conversation.id, "remcancel", rid)
 
     [(kind, _to, body, buttons)] = FakeWhatsAppClient.all_sent()
-    assert (kind, body) == ("buttons", CANCEL_PATH_TEXT)
-    assert buttons == cancel_path_buttons(rid)
+    assert (kind, body) == (
+        "buttons",
+        GIVE_UP_CONFIRM_TEXT.format(
+            when=_format_appointment_when(world.start_at, "America/Sao_Paulo")
+        ),
+    )
+    assert buttons == give_up_confirm_buttons(rid)
     row = await get_reminder(db, rid)
     assert row.answer == "cancel" and row.answered_at is not None
     assert (
@@ -185,13 +191,14 @@ async def test_cancel_offers_the_three_way_card(db):  # noqa: F811
     ).status == AppointmentStatus.SCHEDULED
 
 
-async def test_other_invites_the_patient_to_write(db):  # noqa: F811
+async def test_legacy_other_opens_the_edit_menu(db):  # noqa: F811
     world = await seed_world(db, start_at=_future())
     rid = await add_reminder(db, world)
 
     await _tap(world.conversation.id, "remother", rid)
 
-    assert _texts() == ["Claro! Me conta como posso te ajudar com a sua consulta."]
+    card = FakeWhatsAppClient.all_sent()[0]
+    assert card[0] == "list" and card[2].startswith("*Alterar Dados*")
     assert (await get_reminder(db, rid)).answer == "other"
 
 
@@ -217,7 +224,10 @@ async def test_a_portal_tap_is_answered_in_the_portal(db):  # noqa: F811
                 )
             )
         )
-    assert bodies == [_confirmed_text(world)]
+    assert bodies == [
+        _confirmed_text(world),
+        menu_label(world.tenant) + "\n(opções: 🗓️ Agendar, Outro)",
+    ]
     assert (await reload_appointment(db, world.appointment.id)).confirmation_count == 1
 
 

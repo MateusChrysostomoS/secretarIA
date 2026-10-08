@@ -99,6 +99,8 @@ async def load_upcoming_appointments(
             "id": str(appt.id),
             "google_event_id": appt.google_event_id,
             "appointment_type": appt.appointment_type,
+            "insurance": appt.insurance,
+            "attendee_name": appt.attendee_name,
             "start_at": appt.start_at,
             "end_at": appt.end_at,
             # Which professional owns this booking (None = tenant-level) - lets

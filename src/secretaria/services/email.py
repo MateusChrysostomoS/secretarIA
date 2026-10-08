@@ -324,6 +324,27 @@ class _SafeDict(dict):
 # lasts), `blocker_reason` (nudge templates only), `days` and `restart_url`
 # (test_window_expired only), `code` (patient_access_otp only).
 _TEMPLATES: dict[str, EmailTemplate] = {
+    # Confirmed R6 edits: static copy, populated from committed data only; no LLM.
+    "appointment_changed_professional": EmailTemplate(
+        subject="Consulta alterada — {when}",
+        body=(
+            "Olá, {professional_name}!\n\n"
+            "A consulta de {attendee_name} mudou para:\n{changes}\n\n"
+            "Dados atualizados da consulta:\n"
+            "Clínica: {clinic_name}\n"
+            "Médico: {professional_name}\n"
+            "Paciente: {attendee_name}\n"
+            "Agendado por: {patient_name}\n"
+            "Serviço: {service}\n"
+            "Convênio: {insurance}\n"
+            "Data: {date}\n"
+            "Horário: {time}\n"
+            "Término: {end_time}\n"
+            "{unit_line}\n"
+            "{agenda_line}{calendar_line}"
+            "— Equipe SecretarIA"
+        ),
+    ),
     # Patient-facing confirmation (Portal). Carries what the patient needs to show
     # up, plus the public add-to-calendar link; `*_line` fields arrive pre-rendered
     # (empty when there is nothing to say) because EmailTemplate has no branching.

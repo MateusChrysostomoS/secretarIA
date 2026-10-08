@@ -15,6 +15,7 @@ from secretaria.models import (
     Patient,
 )
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
+from secretaria.services.flow_router import menu_label
 from secretaria.workers.orchestrator import _send_bot_reply
 from secretaria.workers.portal.inbound import _persist_brain_message_inbound
 from secretaria.workers.shared import reminder_actions as ra
@@ -67,17 +68,18 @@ async def test_a_portal_tap_on_the_opening_card_confirms(db):  # noqa: F811
     assert (await reload_appointment(db, world.appointment.id)).confirmation_count == 1
     when = _format_appointment_when(world.start_at, "America/Sao_Paulo")
     bodies = [m.body for m in await outbound_messages(db, world.conversation.id)]
-    assert bodies[-1] == ra.CONFIRMED_TEXT.format(when=when)
+    assert bodies[-2:] == [
+        ra.CONFIRMED_TEXT.format(when=when),
+        menu_label(world.tenant) + "\n(opções: 🗓️ Agendar, Outro)",
+    ]
 
 
 async def test_a_portal_tap_on_the_cancel_path_reaches_its_step(db):  # noqa: F811
     world = await _portal_world(db)
     await turn(db, world, "oi")
     [chat] = await chat_rows(db, world.appointment.id)
-    # Each step's id is on the card the previous step recorded: Cancelar -> the
-    # three-way card (remgiveup) -> the confirmation card (remkeep).
+    # Cancelar directly records the confirmation card carrying remkeep.
     await _send_bot_reply(await _portal_tap(world, f"remcancel|{chat.id}", "Cancelar"))
-    await _send_bot_reply(await _portal_tap(world, f"remgiveup|{chat.id}", "Cancelar Consulta"))
 
     reply = await _portal_tap(world, f"remkeep|{chat.id}", "Manter consulta")
     await _send_bot_reply(reply)

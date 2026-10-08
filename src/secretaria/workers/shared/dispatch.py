@@ -31,6 +31,8 @@ from secretaria.services.whatsapp import (
 from secretaria.workers.shared.bubbles import (
     _bubble_history_body,
     _bubble_interactive,
+    _client_max_buttons,
+    _for_client,
     _send_bubble,
 )
 from secretaria.workers.shared.context import (
@@ -75,7 +77,8 @@ async def _dispatch_bubbles(
     sent_count = 0
     for index, bubble in enumerate(bubbles):
         try:
-            result = await _send_bubble(client, reply.patient_ref, bubble)
+            shown = _for_client(bubble, client)
+            result = await _send_bubble(client, reply.patient_ref, shown)
         except Exception as exc:
             logger.error(
                 "worker_bot_reply_failed",
@@ -100,7 +103,7 @@ async def _dispatch_bubbles(
                 reply.conversation_id,
                 _bubble_history_body(bubble),
                 result,
-                interactive=_bubble_interactive(bubble),
+                interactive=_bubble_interactive(shown, max_buttons=_client_max_buttons(client)),
             )
         except Exception as exc:
             logger.error(

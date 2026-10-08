@@ -78,6 +78,7 @@ from secretaria.workers.shared.greeting import (
 )
 from secretaria.workers.shared.state_expiry import (
     _expire_stale_attendee_step,
+    _expire_stale_edit_state,
     _expire_stale_llm_state,
     _expire_stale_pending_identity_state,
     _pending_identity_reactivation_offer,
@@ -564,6 +565,7 @@ async def _route_inbound_turn(
             conversation.flow_state = FlowState.IDLE
             # TASK-032 R3: leaving the code wait ends a "Marcar outra" booking too.
             conversation.flow_replaces_appointment_id = None
+            conversation.flow_edit_draft = None
             logger.info(
                 "conversation_pending_code_abandoned",
                 conversation_id=str(conversation.id),
@@ -769,6 +771,7 @@ async def _route_inbound_turn(
             conversation.flow_attendee_name = None
             conversation.flow_draft = None
             conversation.flow_replaces_appointment_id = None
+            conversation.flow_edit_draft = None
             return _ReplyContext(
                 channel=channel,
                 conversation_id=conversation.id,
@@ -850,6 +853,13 @@ async def _route_inbound_turn(
     if _expire_stale_attendee_step(conversation, tenant, last_activity_at):
         logger.info(
             "conversation_attendee_step_expired",
+            conversation_id=str(conversation.id),
+            tenant_id=str(tenant.id),
+            ttl_minutes=llm_state_ttl_minutes(tenant),
+        )
+    if _expire_stale_edit_state(conversation, tenant, last_activity_at):
+        logger.info(
+            "conversation_edit_state_expired",
             conversation_id=str(conversation.id),
             tenant_id=str(tenant.id),
             ttl_minutes=llm_state_ttl_minutes(tenant),

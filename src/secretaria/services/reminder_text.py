@@ -247,13 +247,19 @@ async def load_reminder_content(
 ACTION_CONFIRM = "remconfirm"
 ACTION_CANCEL = "remcancel"
 ACTION_OTHER = "remother"
-REMINDER_ACTIONS: tuple[str, ...] = (ACTION_CONFIRM, ACTION_CANCEL, ACTION_OTHER)
+ACTION_EDIT = "remedit"
+REMINDER_ACTIONS: tuple[str, ...] = (ACTION_CONFIRM, ACTION_CANCEL, ACTION_EDIT)
 
 # <= 20 characters each (core/whatsapp_limits.py::MAX_BUTTON_LABEL_CHARS). The
-# approved template's quick replies carry these exact labels, in this order.
+# approved template keeps its legacy third label until resubmission to Meta.
 LABEL_CONFIRM = "Confirmar"
 LABEL_CANCEL = "Cancelar"
 LABEL_OTHER = "Outro"
+# TASK-032 R6 (owner, 2026-10-07): the third button of the reminder is "Alterar Dados".
+# The approved WhatsApp TEMPLATE (used outside the 24 h window) still carries "Outro" until
+# the owner resubmits it to Meta; its payload is positional, so that button already acts as
+# "Alterar Dados" (docs/LEMBRETES_MODELOS_META.md).
+LABEL_EDIT = "Alterar Dados"
 # The Pix paid-deposit variant keeps its historic trio
 # (plugins/reminders.py::_DEPOSIT_REMINDER_BUTTONS). Only Confirmar moves to the
 # reminder id (so it counts); Reagendar/Cancelar keep the appointment-scoped ids
@@ -263,11 +269,11 @@ LABEL_DEPOSIT_RESCHEDULE = "Reagendar"
 
 
 def reminder_buttons(reminder_id) -> list[tuple[str, str]]:
-    """(id, label) pairs of a reminder: Confirmar / Cancelar / Outro."""
+    """(id, label) pairs of a reminder: Confirmar / Cancelar / Alterar Dados."""
     return [
         (f"{ACTION_CONFIRM}|{reminder_id}", LABEL_CONFIRM),
         (f"{ACTION_CANCEL}|{reminder_id}", LABEL_CANCEL),
-        (f"{ACTION_OTHER}|{reminder_id}", LABEL_OTHER),
+        (f"{ACTION_EDIT}|{reminder_id}", LABEL_EDIT),
     ]
 
 
@@ -295,33 +301,24 @@ ACTION_BOOK_ANOTHER = "remnew"
 ACTION_GIVE_UP = "remgiveup"
 ACTION_GIVE_UP_CONFIRM = "remgiveupyes"
 ACTION_KEEP = "remkeep"
-CANCEL_PATH_ACTIONS: tuple[str, ...] = (
+# Ids R2/R3 put on cards a patient may still have on screen (or in a template tapped
+# later): they keep working (workers/shared/reminder_actions.py maps them) but no new card
+# carries them. `remgiveup` is today's "Cancelar"; the other three open the edit flow.
+LEGACY_REMINDER_ACTIONS: tuple[str, ...] = (
+    ACTION_OTHER,
     ACTION_RESCHEDULE_THIS,
     ACTION_BOOK_ANOTHER,
     ACTION_GIVE_UP,
-    ACTION_GIVE_UP_CONFIRM,
-    ACTION_KEEP,
 )
-REMINDER_ROW_ACTIONS: tuple[str, ...] = REMINDER_ACTIONS + CANCEL_PATH_ACTIONS
+# The two steps of the cancel confirmation card (`give_up_confirm_buttons`).
+CANCEL_PATH_ACTIONS: tuple[str, ...] = (ACTION_GIVE_UP_CONFIRM, ACTION_KEEP)
+REMINDER_ROW_ACTIONS: tuple[str, ...] = (
+    REMINDER_ACTIONS + LEGACY_REMINDER_ACTIONS + CANCEL_PATH_ACTIONS
+)
 
-# <= 20 characters each. The owner asked for "Remarcar Consulta", "Agendar Outra
-# Consulta" and "Cancelar Consulta" (2026-10-07); the middle one is 22 characters
-# and a WhatsApp reply button holds 20, so the button says "Agendar Outra" and the
-# full phrase goes in the card body (reminder_actions.CANCEL_PATH_TEXT).
-LABEL_RESCHEDULE_THIS = "Remarcar Consulta"
-LABEL_BOOK_ANOTHER = "Agendar Outra"
-LABEL_GIVE_UP = "Cancelar Consulta"
+# Labels of the cancel confirmation card: <= 20 characters each.
 LABEL_GIVE_UP_CONFIRM = "Sim, cancelar"
 LABEL_KEEP = "Manter consulta"
-
-
-def cancel_path_buttons(reminder_id) -> list[tuple[str, str]]:
-    """The "O que você prefere?" card: Remarcar Consulta / Agendar Outra / Cancelar Consulta."""
-    return [
-        (f"{ACTION_RESCHEDULE_THIS}|{reminder_id}", LABEL_RESCHEDULE_THIS),
-        (f"{ACTION_BOOK_ANOTHER}|{reminder_id}", LABEL_BOOK_ANOTHER),
-        (f"{ACTION_GIVE_UP}|{reminder_id}", LABEL_GIVE_UP),
-    ]
 
 
 def give_up_confirm_buttons(reminder_id) -> list[tuple[str, str]]:

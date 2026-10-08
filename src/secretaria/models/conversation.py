@@ -47,6 +47,9 @@ class FlowState(enum.StrEnum):
                       a first contact. Brain-Message: right after an e-mail
                       that belongs to no account. Always before LGPD.
 
+    EDIT_BOOKING    - patient is editing an existing appointment through a draft
+                      (services/appointment_edit_flow.py).
+
     The two e-mail states are the ONLY ones a WhatsApp conversation can never
     enter (`workers/tasks.py` gates both on `channel`); AWAITING_NAME is
     channel-neutral on purpose. All three are pre-/post-consent identity waits
@@ -71,6 +74,10 @@ class FlowState(enum.StrEnum):
     AWAITING_EMAIL_CODE = "AWAITING_EMAIL_CODE"
     # Same reasoning, same absence of a migration: 13 characters.
     AWAITING_NAME = "AWAITING_NAME"
+    # TASK-032 R6 ("Alterar Dados" on a reminder): the patient is changing date, time,
+    # service, doctor, convênio or patient of ONE existing appointment through a draft
+    # (`flow_edit_draft`). Same reasoning, same absence of a migration: 12 characters.
+    EDIT_BOOKING = "EDIT_BOOKING"
 
 
 def _handover_values(enum_cls: type[enum.Enum]) -> list[str]:
@@ -169,6 +176,14 @@ class Conversation(Base):
     flow_replaces_appointment_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("appointments.id", ondelete="SET NULL"), nullable=True
     )
+    # TASK-032 R6: the "Alterar Dados" draft - {"appointment_id", "current", "original",
+    # "stage"} (services/appointment_edit.py::EditDraft.to_json). The real appointment is
+    # never touched until the final Confirmar. Written unconditionally by
+    # `_apply_flow_result` like every flow field and carried only while the conversation
+    # stays in `EDIT_BOOKING` (`flow_router._carry_edit_draft`). Third-party names appear
+    # only inside `current["attendee_name"]` / `original["attendee_name"]` (same PII rule as
+    # `flow_attendee_name`).
+    flow_edit_draft: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # Set while a returning patient is mid-"quer continuar?" prompt: holds the
     # FlowState value to resume to AND marks that the next inbound is the Sim/Não
     # answer. NULL whenever no reactivation prompt is pending.

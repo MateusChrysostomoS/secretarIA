@@ -34,6 +34,7 @@ from secretaria.services.calendar import (
 )
 from secretaria.services.flow_router import (
     STEP_AWAITING_ATTENDEE_AUTH,
+    STEP_EDIT_ATT_AUTH,
     FlowRouterResult,
     is_generic_menu_result,
     route,
@@ -43,6 +44,15 @@ from secretaria.services.insurance_catalog import (
 )
 from secretaria.services.payments import deposit_lifecycle
 from secretaria.services.pii_pseudonymization import remember_attendee_name
+from secretaria.workers.shared.appointment_edit_apply import (
+    AppliedEdit,
+    _finish_edit,
+    apply_appointment_edit,
+    compensate_appointment_edit,
+)
+from secretaria.workers.shared.appointment_edit_notification import (
+    enqueue_professional_edit_notification,
+)
 from secretaria.workers.shared.booking_hold import (
     _log_booking_scope,
     _send_booking_gate_notice,
@@ -91,6 +101,7 @@ async def _run_flow(
     flow_calendar: CalendarService | None = None,
     manage_calendar: CalendarService | None = None,
     manage_calendar_owned: bool = False,
+    edit_context=None,
 ) -> bool:
     """Run the deterministic flow router for this turn.
 
@@ -131,6 +142,7 @@ async def _run_flow(
             upcoming_appointments=upcoming_appointments,
             professionals=professionals,
             gate=gate,
+            edit_context=edit_context,
         )
     except Exception as exc:
         logger.warning(
@@ -183,8 +195,18 @@ async def _apply_flow_result(
     # A third party's name was just captured (the authorization card): pin it
     # into the PII token map now, so it stays masked for the LLM even if this
     # booking is cancelled or abandoned before any row carries it.
-    if result.flow_step == STEP_AWAITING_ATTENDEE_AUTH and result.flow_attendee_name:
+    if (
+        result.flow_step in (STEP_AWAITING_ATTENDEE_AUTH, STEP_EDIT_ATT_AUTH)
+        and result.flow_attendee_name
+    ):
         await remember_attendee_name(reply.conversation_id, result.flow_attendee_name)
+    if isinstance(result.flow_edit_draft, dict):
+        # Editing an existing booking can introduce a name without asking for it again.
+        names = {part.get("attendee_name") for key in ("current", "original")
+                 if isinstance(part := result.flow_edit_draft.get(key), dict)}
+        for name in names:
+            if isinstance(name, str) and name:
+                await remember_attendee_name(reply.conversation_id, name)
 
     # Persist the new flow state (+ any booked appointment) in one short txn.
     persisted = True
@@ -192,14 +214,24 @@ async def _apply_flow_result(
     cancellation_note: str | None = None
     # TASK-032 R3: the appointment a "Marcar outra" booking replaced, if any.
     replaced: ReplacedAppointment | None = None
+    applied_edit: AppliedEdit | None = None
     # TASK-032 R2: the appointments this turn closed or moved, for the
     # reminder hooks that run after the commit.
     closed_appointment_id = None
     moved_appointment_id = None
+    edit_patient_id = None
     try:
         async with async_session_factory() as session:
             async with session.begin():
-                conv = await session.get(Conversation, reply.conversation_id)
+                if result.appointment_edit is not None:
+                    conv = await session.scalar(select(Conversation).where(
+                        Conversation.id == reply.conversation_id,
+                    ).with_for_update())
+                    if conv is None:
+                        raise ValueError("edit_conversation_missing")
+                    edit_patient_id = conv.patient_id
+                else:
+                    conv = await session.get(Conversation, reply.conversation_id)
                 if conv is not None:
                     # TASK-032 R3: read BEFORE the writes below overwrite it.
                     replaced_id = conv.flow_replaces_appointment_id
@@ -214,6 +246,7 @@ async def _apply_flow_result(
                     conv.flow_attendee_name = result.flow_attendee_name
                     conv.flow_draft = result.flow_draft
                     conv.flow_replaces_appointment_id = result.flow_replaces_appointment_id
+                    conv.flow_edit_draft = result.flow_edit_draft
                     if result.attendee_authorized and tenant is not None:
                         # The explicit "Confirmar" under the authorization
                         # sentence (services/attendee.py): the audit row, in
@@ -429,11 +462,25 @@ async def _apply_flow_result(
                                         tenant_id=str(tenant.id),
                                         appointment_id=str(resched_appt.id),
                                     )
+                    if result.appointment_edit:
+                        # TASK-032 R6: the confirmed "Alterar Dados" edit - the SAME row, the
+                        # same transaction as the flow state it closes.
+                        applied_edit = await apply_appointment_edit(
+                            session,
+                            tenant=tenant,
+                            tenant_id=conv.tenant_id,
+                            patient_id=conv.patient_id,
+                            edit=result.appointment_edit,
+                        )
+                        if applied_edit is None:
+                            raise ValueError("edit_no_longer_allowed")
+                        if applied_edit is not None and applied_edit.moved:
+                            moved_appointment_id = applied_edit.appointment_id
     except Exception as exc:
         persisted = False
         logger.error(
             "worker_flow_persist_failed",
-            error=str(exc),
+            error=(type(exc).__name__ if result.appointment_edit else str(exc)),
             conversation_id=str(reply.conversation_id),
         )
 
@@ -442,6 +489,11 @@ async def _apply_flow_result(
     # plugins/post_booking.py. Only when the appointment row actually made it
     # to the DB (never on a persist failure) and `tenant` is loaded (always
     # true here — the flow engine only runs once `tenant` is resolved).
+    if result.appointment_edit is not None and not persisted:
+        if tenant is not None:
+            await compensate_appointment_edit(tenant, edit_patient_id, result.appointment_edit)
+        await _handle_calendar_unavailable(reply, redis=redis, tenant=tenant, waba_token=waba_token)
+        return True
     if booked_appointment is not None and persisted and tenant is not None:
         _log_booking_scope(booked_appointment, tenant.id, source=SOURCE_FLOW)
         await enqueue_post_booking_hooks(redis, tenant.id, booked_appointment.id, source="flow")
@@ -455,6 +507,9 @@ async def _apply_flow_result(
         await reminder_hooks.after_appointment_closed(closed_appointment_id, reason="cancelled")
     if persisted and moved_appointment_id is not None:
         await reminder_hooks.after_appointment_rescheduled(moved_appointment_id)
+    if persisted and applied_edit is not None and tenant is not None:
+        await _finish_edit(tenant, applied_edit)
+        await enqueue_professional_edit_notification(redis, tenant.id, applied_edit)
 
     # A HELD slot, not a booking: the router reserved the window and brain-api
     # mailed a code. Nothing was created on Google Calendar and no appointment

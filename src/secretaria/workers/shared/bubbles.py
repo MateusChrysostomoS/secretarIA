@@ -7,6 +7,7 @@ from secretaria.ai.formatter import (
     SlotsBubble,
     TextBubble,
 )
+from secretaria.core.whatsapp_limits import MAX_BUTTONS_PER_MESSAGE
 from secretaria.services.flow_router import (
     MenuBubble,
 )
@@ -39,12 +40,42 @@ def _slots_rows(bubble: SlotsBubble) -> list[tuple[str, str, str | None]]:
     # Rows are (id, title) or (id, title, description) — see SlotsBubble.
     return [(row[0], row[1], row[2] if len(row) > 2 else None) for row in bubble.rows]
 
+WIDE_MENU_BUTTON_LABEL = "Ver opções"
+WIDE_MENU_SECTION_TITLE = "Opções"
+
+
+def _client_max_buttons(client) -> int:
+    """How many reply buttons `client`'s channel draws (WhatsApp 3, the Portal more)."""
+    return int(getattr(client, "MAX_BUTTONS", MAX_BUTTONS_PER_MESSAGE))
+
+
+def _for_client(
+    bubble: TextBubble | ButtonBubble | SlotsBubble | MenuBubble, client
+) -> TextBubble | ButtonBubble | SlotsBubble | MenuBubble:
+    """A menu with more labels than `client` has buttons becomes a tappable list.
+
+    The router stays channel-neutral: it asks for N options as a `MenuBubble`. WhatsApp
+    would silently cut anything past three (`interactive_buttons_record`), so there the
+    same options go out as a list - same ids ("menu|<i>"), same titles, so the tap comes
+    back as the label exactly like a button's. Idempotent: a list is returned as is.
+    """
+    if isinstance(bubble, MenuBubble) and len(bubble.labels) > _client_max_buttons(client):
+        return SlotsBubble(
+            body=bubble.body,
+            rows=[(f"menu|{index}", label, None) for index, label in enumerate(bubble.labels)],
+            button_label=WIDE_MENU_BUTTON_LABEL,
+            section_title=WIDE_MENU_SECTION_TITLE,
+        )
+    return bubble
+
+
 async def _send_bubble(
     client: WhatsAppClient,
     to: str,
     bubble: TextBubble | ButtonBubble | SlotsBubble | MenuBubble,
 ) -> dict:
     """Dispatch a single bubble to the right WhatsAppClient method."""
+    bubble = _for_client(bubble, client)
     buttons = _bubble_buttons(bubble)
     if buttons is not None:
         return await client.send_buttons(to=to, body=bubble.body, buttons=buttons)
@@ -77,6 +108,8 @@ def _bubble_history_body(bubble: TextBubble | ButtonBubble | SlotsBubble | MenuB
 
 def _bubble_interactive(
     bubble: TextBubble | ButtonBubble | SlotsBubble | MenuBubble,
+    *,
+    max_buttons: int = MAX_BUTTONS_PER_MESSAGE,
 ) -> dict | None:
     """What an outbound bubble put on the patient's screen, for `Message.interactive`.
 
@@ -90,7 +123,7 @@ def _bubble_interactive(
     """
     buttons = _bubble_buttons(bubble)
     if buttons:
-        return interactive_buttons_record(bubble.body, buttons)
+        return interactive_buttons_record(bubble.body, buttons, max_buttons=max_buttons)
     if isinstance(bubble, SlotsBubble) and bubble.rows:
         return interactive_list_record(
             bubble.body, bubble.button_label, _slots_rows(bubble), bubble.section_title

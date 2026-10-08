@@ -313,6 +313,20 @@ class CalendarService:
         self._business_hours: dict = {}
         self._default_slot_minutes: int = 30
 
+    def references_same_calendar(self, other: object) -> bool:
+        """Identify the physical agenda without exporting credentials.
+
+        Named calendar ids are global. The alias 'primary' refers to the connected
+        account, so matching aliases alone must never merge two doctors' calendars.
+        """
+        if not isinstance(other, CalendarService) or self._calendar_id != other._calendar_id:
+            return False
+        if self._calendar_id != "primary":
+            return True
+        own = self._refresh_token_override or self._settings.GOOGLE_REFRESH_TOKEN
+        theirs = other._refresh_token_override or other._settings.GOOGLE_REFRESH_TOKEN
+        return bool(own and own == theirs)
+
     @classmethod
     def from_tenant_config(cls, config: "TenantRuntimeConfig") -> "CalendarService":
         """Build a CalendarService using per-tenant credentials.
@@ -716,13 +730,35 @@ class CalendarService:
         end: datetime,
     ) -> dict:
         """Move an existing event to a new [start, end) window. Returns the updated event."""
-        start_dt = self._ensure_tz(start)
-        end_dt = self._ensure_tz(end)
+        return await self._patch_event(event_id, self._window_body(start, end))
+
+    async def update_event_details(
+        self,
+        event_id: str,
+        start: datetime,
+        end: datetime,
+        summary: str,
+        description: str = "",
+    ) -> dict:
+        """Move an event AND rewrite its title and description (TASK-032 R6, "Alterar Dados").
+
+        The same single patch `update_event` does, plus the two fields that carry the
+        service, the convênio and the attendee - so editing any of them leaves the doctor's
+        agenda telling the truth.
+        """
+        body = self._window_body(start, end)
+        body["summary"] = summary
+        body["description"] = description
+        return await self._patch_event(event_id, body)
+
+    def _window_body(self, start: datetime, end: datetime) -> dict:
         tz_name = str(self._tz)
-        body = {
-            "start": {"dateTime": start_dt.isoformat(), "timeZone": tz_name},
-            "end": {"dateTime": end_dt.isoformat(), "timeZone": tz_name},
+        return {
+            "start": {"dateTime": self._ensure_tz(start).isoformat(), "timeZone": tz_name},
+            "end": {"dateTime": self._ensure_tz(end).isoformat(), "timeZone": tz_name},
         }
+
+    async def _patch_event(self, event_id: str, body: dict) -> dict:
         calendar_id = self._calendar_id
 
         def _patch() -> dict:
@@ -744,6 +780,30 @@ class CalendarService:
         event = await asyncio.to_thread(_patch)
         logger.info("calendar_event_updated", event_id=event_id)
         return event
+
+    async def is_slot_free(
+        self, start: datetime, end: datetime, *, ignore_event_id: str | None = None
+    ) -> bool:
+        """Whether [start, end) is bookable: in the future, inside the hours, nothing overlapping.
+
+        Unlike `list_free_slots` this does NOT require `start` to sit on the service-length
+        grid: an existing appointment keeps its time when only its doctor or service changes,
+        and that time may be off the new grid. `ignore_event_id` names the event being
+        edited, so an appointment never "conflicts" with itself. Raises
+        `CalendarUnavailableError` like the other reads.
+        """
+        start_dt, end_dt = self._ensure_tz(start), self._ensure_tz(end)
+        if start_dt <= datetime.now(self._tz):
+            return False
+        windows = self._windows_for_day(start_dt, 8, 18)
+        if not any(
+            window_start <= start_dt and end_dt <= window_end
+            for window_start, window_end in windows
+        ):
+            return False
+        events = await self.check_availability(start_dt, end_dt)
+        busy = self._busy_ranges([ev for ev in events if ev.get("id") != ignore_event_id])
+        return not any(busy_start < end_dt and busy_end > start_dt for busy_start, busy_end in busy)
 
     async def add_attendee(self, event_id: str, email: str) -> dict:
         """Invite `email` to an existing event; Google notifies them. Idempotent.

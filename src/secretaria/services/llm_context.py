@@ -70,6 +70,22 @@ _STEP_LABELS: dict[str, str] = {
     # TASK-038. Only read if a turn ever reaches the model mid-offer; the open card
     # itself is answered by the flow (flow_router._handle_human_offer).
     fr.STEP_HUMAN_OFFER: "a pergunta se quer que chamemos um atendente humano",
+    # R6: a question during an edit is one model turn on the same draft step.
+    fr.STEP_EDIT_MENU: "o menu de alterações da consulta já marcada",
+    fr.STEP_EDIT_MORE: "as outras opções de alteração da consulta já marcada",
+    fr.STEP_EDIT_DAY: "a escolha do novo dia da consulta já marcada",
+    fr.STEP_EDIT_DAY_RETRY: "a escolha do novo dia da consulta já marcada",
+    fr.STEP_EDIT_DAY_ESCAPE: "a escolha do novo dia da consulta já marcada",
+    fr.STEP_EDIT_SLOT: "a escolha do novo horário da consulta já marcada",
+    fr.STEP_EDIT_TIME_TOO: "a pergunta se quer mudar o horário também",
+    fr.STEP_EDIT_SERVICE: "a escolha do novo serviço da consulta já marcada",
+    fr.STEP_EDIT_DOCTOR: "a escolha do novo médico da consulta já marcada",
+    fr.STEP_EDIT_INSURANCE: "a escolha do convênio da consulta já marcada",
+    fr.STEP_EDIT_INSURANCE_OTHER: "o pedido de outro convênio da consulta já marcada",
+    fr.STEP_EDIT_ATT_CHOICE: "a pergunta para quem será a consulta já marcada",
+    fr.STEP_EDIT_ATT_NAME: "o pedido do nome de quem vai ser atendido",
+    fr.STEP_EDIT_ATT_AUTH: "a autorização para alterar o paciente da consulta já marcada",
+    fr.STEP_EDIT_CONFIRM: "a confirmação das alterações da consulta já marcada",
 }
 
 
@@ -150,6 +166,15 @@ def build_conversation_state(conversation, tenant, professionals) -> str | None:
     """The state block, or None when there is no conversation snapshot."""
     if conversation is None:
         return None
+    raw_edit = getattr(conversation, "flow_edit_draft", None)
+    current = {}
+    if (
+        getattr(conversation, "flow_state", None) == FlowState.EDIT_BOOKING
+        and isinstance(raw_edit, dict)
+    ):
+        candidate = raw_edit.get("current")
+        if isinstance(candidate, dict):
+            current = candidate
     lines = [
         "- Onde o paciente estava: "
         + _where(
@@ -161,16 +186,21 @@ def build_conversation_state(conversation, tenant, professionals) -> str | None:
     )
     if professional is not None:
         lines.append(f"- Médico já escolhido: {professional.name}")
-    selected_type = getattr(conversation, "flow_selected_type", None)
+    selected_type = current.get("service") or getattr(conversation, "flow_selected_type", None)
     if selected_type and not _is_internal_marker(selected_type):
         lines.append(f"- Serviço já escolhido: {selected_type}")
-    lines.append(_pra_quem_line(getattr(conversation, "flow_attendee_name", None)))
-    if getattr(conversation, "flow_selected_insurance", None):
+    attendee = (
+        current.get("attendee_name") or ATTENDEE_SELF
+        if current
+        else getattr(conversation, "flow_attendee_name", None)
+    )
+    lines.append(_pra_quem_line(attendee))
+    if current.get("insurance") or getattr(conversation, "flow_selected_insurance", None):
         # Even catalog names can be verbatim legacy PII; SYSTEM is not scrubbed.
         lines.append("- Convênio já informado (valor omitido).")
     if getattr(conversation, "flow_selected_day", None):
         lines.append(f"- Dia já escolhido: {conversation.flow_selected_day}")
-    when = _slot_text(getattr(conversation, "flow_selected_slot", None))
+    when = _slot_text(current.get("start_at") or getattr(conversation, "flow_selected_slot", None))
     if when:
         lines.append(f"- Horário já escolhido: {when}")
     plans = fr.insurance_plan_names(tenant) if tenant is not None else []

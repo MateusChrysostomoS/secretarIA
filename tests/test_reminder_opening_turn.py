@@ -137,7 +137,7 @@ async def test_two_appointments_open_with_the_nearest_and_the_answer_names_the_o
     assert sent()[0][2] == _card_body(world)
     when = _format_appointment_when(world.start_at, "America/Sao_Paulo")
     other_when = _format_appointment_when(other.start_at, "America/Sao_Paulo")
-    assert sent()[-1][2] == (
+    assert sent()[-2][2] == (
         f"{ra.CONFIRMED_TEXT.format(when=when)}\n\n"
         f"{ra.ALSO_SCHEDULED_TEXT.format(whens=other_when)}"
     )
@@ -212,7 +212,7 @@ async def test_the_same_chat_card_reshown_later_counts_once(db):  # noqa: F811
     assert (await reload_appointment(db, world.appointment.id)).confirmation_count == 1
 
 
-async def test_outro_on_the_card_hands_the_next_message_to_the_ai(db):  # noqa: F811
+async def test_legacy_outro_keeps_the_edit_draft_while_free_text_goes_to_the_ai(db):  # noqa: F811
     world = await _quiet_world(db)
 
     await turn(db, world, "oi")
@@ -220,7 +220,8 @@ async def test_outro_on_the_card_hands_the_next_message_to_the_ai(db):  # noqa: 
     await _tap(world, "remother", chat.id)
     await turn(db, world, "quanto custa a consulta?")
 
-    assert (await get_conversation(db, world)).flow_state == FlowState.LLM
+    row = await get_conversation(db, world)
+    assert row.flow_state == FlowState.EDIT_BOOKING and row.flow_edit_draft is not None
     assert sent()[-1][2] == AGENT_REPLY
 
 

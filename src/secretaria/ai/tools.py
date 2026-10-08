@@ -687,6 +687,7 @@ async def _persist_appointment(
                         # warning, so it never cancels anything; the marker of an
                         # unfinished "Marcar outra" ends here.
                         booked_conversation.flow_replaces_appointment_id = None
+                        booked_conversation.flow_edit_draft = None
         logger.info("tool_appointment_persisted", event_id=event.get("id"))
     except Exception as exc:
         # The calendar event already exists; a missing DB row is recoverable

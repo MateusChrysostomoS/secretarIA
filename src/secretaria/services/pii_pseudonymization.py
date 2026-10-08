@@ -171,6 +171,12 @@ async def _attendee_names(session, conversation: Conversation | None) -> list[st
     if conversation is None:
         return []
     names = {conversation.flow_attendee_name}
+    edit = getattr(conversation, "flow_edit_draft", None)
+    if isinstance(edit, dict):
+        for key in ("current", "original"):
+            part = edit.get(key)
+            if isinstance(part, dict) and isinstance(part.get("attendee_name"), str):
+                names.add(part["attendee_name"])
     for model in (Appointment, BookingHold):
         rows = await session.scalars(
             select(model.attendee_name).where(

@@ -1,4 +1,4 @@
-"""A tap on a reminder button (TASK-032 R2 + R3).
+"""A tap on a reminder button (TASK-032 R6).
 
 The id after the bar is an `appointment_reminders` ROW id. The older
 `apptconfirm|<appointment_id>` family can only be checked against the TENANT;
@@ -6,22 +6,17 @@ the row names the patient too, so a tap is honoured only when the row's tenant
 AND patient are the tapping conversation's. Anything else gets the same polite
 miss, whichever check failed - never reveal whose row it is.
 
-R2 (the reminder itself): Confirmar / Cancelar / Outro.
-R3 (spec §4.3, the "Cancelar" path), every step on the same row id:
-    Cancelar           -> "O que você prefere?": Remarcar Consulta / Agendar Outra /
-                          Cancelar Consulta
-    Remarcar Consulta  -> the existing reschedule of THIS appointment (Pix limits apply)
-    Agendar Outra      -> a new booking that replaces this one only once confirmed
-    Cancelar Consulta  -> "Tem certeza?" (Pix retention line inside the refund window)
-                          -> Sim, cancelar -> cancel + "por quê?" / Manter consulta
-    Outro              -> the conversation goes to the AI (TASK-030's hand-backs bring
-                          it back to the flow)
+R6 (spec 2026-10-07, "Alterar Dados"), every step on the same row id:
+    Confirmar     -> "Presença confirmada" + the returning-patient menu (Agendar / Outro)
+    Cancelar      -> "Tem certeza?" (Pix retention line inside the refund window)
+                     -> Sim, cancelar -> cancel + "por quê?" / Manter consulta
+    Alterar Dados -> the edit flow (services/appointment_edit_flow.py)
+The R3 ids ("remother", "remresched", "remnew", "remgiveup") still resolve for cards
+already on screen: "remgiveup" is "Cancelar"; the other three are "Alterar Dados".
 
-Three of those steps need the appointment-scoped machinery in
-`workers/shared/actions.py` (reschedule entry with the Pix limit, the cancel,
-the booking entry). This module validates the row and returns a CONTINUATION
-`(action, appointment_id)`; `_handle_action_button` then runs its own branch for
-it. The continuation names are not button prefixes, so nobody can send one.
+This module validates the row and returns a CONTINUATION `(action, appointment_id)`
+for the appointment-scoped cancellation machinery in workers/shared/actions.py.
+The continuation name is not a button prefix, so nobody can send one.
 
 Channel-neutral: replies go through `_reply_sender`, so a Portal tap
 (workers/portal/inbound.py) is answered in the Portal. Runs before the
@@ -40,7 +35,6 @@ from secretaria.models import (
     Appointment,
     AppointmentReminder,
     Conversation,
-    FlowState,
     PixDepositStatus,
     Tenant,
     is_live_status,
@@ -52,26 +46,25 @@ from secretaria.models.appointment_reminder import (
     REMINDER_KIND_CHAT,
     REMINDER_STATUS_CANCELLED,
 )
-from secretaria.services import reminder_schedule
-from secretaria.services.flow_router import FlowRouterResult
+from secretaria.services import reminder_hooks, reminder_schedule
+from secretaria.services.flow_router import main_menu_buttons, menu_label
 from secretaria.services.payments import deposit_lifecycle
 from secretaria.services.reminder_text import (
     ACTION_BOOK_ANOTHER,
     ACTION_CANCEL,
     ACTION_CONFIRM,
+    ACTION_EDIT,
     ACTION_GIVE_UP,
     ACTION_GIVE_UP_CONFIRM,
     ACTION_KEEP,
     ACTION_OTHER,
     ACTION_RESCHEDULE_THIS,
     REMINDER_ROW_ACTIONS,
-    cancel_path_buttons,
     give_up_confirm_buttons,
 )
 from secretaria.services.tenant_config import get_waba_token
 from secretaria.workers.shared.context import _ReplyContext
 from secretaria.workers.shared.deposit import _hours_until_start, _pix_retention_warning_line
-from secretaria.workers.shared.flow_runner import _apply_flow_result
 from secretaria.workers.shared.greeting import _format_appointment_when
 from secretaria.workers.shared.sender import _reply_sender
 from secretaria.workers.shared.text import _as_utc
@@ -82,30 +75,12 @@ NOT_FOUND_TEXT = "Não encontrei essa consulta."
 NOT_ACTIVE_TEXT = "Essa consulta não está mais ativa."
 CONFIRMED_TEXT = "Presença confirmada! ✅ Até {when}."
 MOVED_TEXT = "Essa mensagem era sobre um horário antigo. Sua consulta agora é em {when}."
-# The buttons are 20 characters at most (WhatsApp), so "Agendar Outra" is the short
-# form of the owner's "Agendar Outra Consulta"; the body says it in full.
-CANCEL_PATH_TEXT = (
-    "O que você prefere?\n\n"
-    "• *Remarcar Consulta*: mudar o dia ou o horário desta consulta.\n"
-    "• *Agendar Outra*: agendar outra consulta diferente. Esta só é cancelada "
-    "quando a nova for confirmada.\n"
-    "• *Cancelar Consulta*: cancelar esta consulta."
-)
-OTHER_TEXT = "Claro! Me conta como posso te ajudar com a sua consulta."
 GIVE_UP_CONFIRM_TEXT = "Tem certeza que quer cancelar a consulta de {when}?"
 KEPT_TEXT = "Combinado! Sua consulta continua marcada para {when}."
 ALSO_SCHEDULED_TEXT = "Você também tem consulta em {whens}."
-BOOK_ANOTHER_INTRO = (
-    "Combinado! Vamos agendar a outra consulta. A de {when} só será cancelada "
-    "quando você confirmar a nova."
-)
-
-# Continuations run by workers/shared/actions.py::_handle_action_button after
-# this module checked the row. "apptresched" IS that module's existing branch
-# (reschedule entry + the Pix reschedule limit); the other two are R3's.
-CONTINUE_RESCHEDULE = "apptresched"
+# Internal continuations after reminder-row validation.
+CONTINUE_EDIT = "reminder_edit"
 CONTINUE_CANCEL_AND_ASK_WHY = "reminder_cancel_and_ask_why"
-CONTINUE_BOOK_ANOTHER = "reminder_book_another"
 
 # How many other appointments the "você também tem consulta" line names.
 _ALSO_SCHEDULED_LIMIT = 3
@@ -152,6 +127,27 @@ async def _also_scheduled(session, tenant: Tenant, appointment: Appointment, now
     return f"\n\n{ALSO_SCHEDULED_TEXT.format(whens=joined)}"
 
 
+_EDIT_ACTIONS = (ACTION_EDIT, ACTION_OTHER, ACTION_RESCHEDULE_THIS, ACTION_BOOK_ANOTHER)
+
+
+async def _send_recurring_menu(client, patient_ref: str, tenant: Tenant) -> None:
+    """The returning-patient menu (the greeting card: Agendar / Outro) after a confirmation."""
+    await client.send_buttons(
+        patient_ref,
+        menu_label(tenant),
+        [(f"menu|{index}", label) for index, label in enumerate(main_menu_buttons())],
+    )
+
+
+async def _ask_to_cancel(session, client, reply, tenant, appointment, reminder, when, now) -> None:
+    """"Tem certeza?" (+ the Pix retention line inside the refund window), nothing cancelled yet."""
+    body = GIVE_UP_CONFIRM_TEXT.format(when=when)
+    warning = await _retention_warning(session, tenant, appointment, now)
+    if warning:
+        body = f"{warning} {body}"
+    await client.send_buttons(reply.patient_ref, body, give_up_confirm_buttons(reminder.id))
+
+
 async def handle_reminder_button(
     reply: _ReplyContext, action: str, reminder_id: str, redis=None
 ) -> tuple[str, str] | None:
@@ -168,11 +164,12 @@ async def handle_reminder_button(
     except ValueError:
         return None
     now = datetime.now(UTC)
-    hand_to_ai_text: str | None = None
     async with async_session_factory() as session:
         conversation = await session.get(Conversation, reply.conversation_id)
         tenant = await session.get(Tenant, conversation.tenant_id) if conversation else None
         if tenant is None:
+            return None
+        if not reminder_hooks.enabled_for(tenant):
             return None
         waba_token = await get_waba_token(session, tenant.id)
         client = _reply_sender(reply, tenant, waba_token)
@@ -244,9 +241,10 @@ async def handle_reminder_button(
             await client.send_text_message(
                 to=reply.patient_ref, body=CONFIRMED_TEXT.format(when=when) + also
             )
+            await _send_recurring_menu(client, reply.patient_ref, tenant)
             return None
 
-        if action in (ACTION_CANCEL, ACTION_OTHER):
+        if action in (ACTION_CANCEL, *_EDIT_ACTIONS):
             if reminder.answer != REMINDER_ANSWER_CONFIRM:
                 # A confirmation already counted stays recorded: overwriting it
                 # would let the same message count twice (R1 dedupes on it).
@@ -254,50 +252,23 @@ async def handle_reminder_button(
                     REMINDER_ANSWER_CANCEL if action == ACTION_CANCEL else REMINDER_ANSWER_OTHER
                 )
                 reminder.answered_at = now
-            also = (
-                await _also_scheduled(session, tenant, appointment, now)
-                if from_chat and action == ACTION_OTHER
-                else ""
-            )
             await session.commit()
             if action == ACTION_CANCEL:
-                await client.send_buttons(
-                    reply.patient_ref, CANCEL_PATH_TEXT, cancel_path_buttons(reminder.id)
+                await _ask_to_cancel(
+                    session, client, reply, tenant, appointment, reminder, when, now
                 )
                 return None
-            hand_to_ai_text = OTHER_TEXT + also
+            return CONTINUE_EDIT, str(appointment.id)
 
         elif action == ACTION_KEEP:
             await client.send_text_message(to=reply.patient_ref, body=KEPT_TEXT.format(when=when))
             return None
 
-        elif action == ACTION_GIVE_UP:
-            body = GIVE_UP_CONFIRM_TEXT.format(when=when)
-            warning = await _retention_warning(session, tenant, appointment, now)
-            if warning:
-                body = f"{warning} {body}"
-            await client.send_buttons(reply.patient_ref, body, give_up_confirm_buttons(reminder.id))
+        elif action == ACTION_GIVE_UP:  # the legacy "Não vou mais" = today's "Cancelar"
+            await _ask_to_cancel(session, client, reply, tenant, appointment, reminder, when, now)
             return None
 
-        elif action == ACTION_RESCHEDULE_THIS:
-            return CONTINUE_RESCHEDULE, str(appointment.id)
         elif action == ACTION_GIVE_UP_CONFIRM:
             return CONTINUE_CANCEL_AND_ASK_WHY, str(appointment.id)
-        elif action == ACTION_BOOK_ANOTHER:
-            return CONTINUE_BOOK_ANOTHER, str(appointment.id)
 
-    if hand_to_ai_text is not None:
-        # "Outro": full LLM mode through the one persistence seam (a result that
-        # names nothing else also drops any half-made booking), then the
-        # invitation. The patient's next message reaches the agent with the
-        # appointment context (orchestrator: flow_state == LLM).
-        await _apply_flow_result(
-            reply,
-            FlowRouterResult(action="delegate_llm", flow_state=FlowState.LLM),
-            reply.patient_ref,
-            redis=redis,
-            tenant=tenant,
-            waba_token=waba_token,
-        )
-        await client.send_text_message(to=reply.patient_ref, body=hand_to_ai_text)
     return None

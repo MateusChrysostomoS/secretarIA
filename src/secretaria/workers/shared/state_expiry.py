@@ -262,6 +262,7 @@ def _expire_stale_llm_state(
     # A "Marcar outra" booking abandoned in LLM mode: the original stays
     # (TASK-032 R3) - the marker belongs to the booking that just expired.
     conversation.flow_replaces_appointment_id = None
+    conversation.flow_edit_draft = None
     # `flow_selected_professional_id` / `flow_selected_insurance` are NOT
     # cleared here, unlike the "Não" answer which drops everything. They say WHO
     # the patient is dealing with, not where they were in a form, and the agent
@@ -312,7 +313,38 @@ def _expire_stale_attendee_step(
     conversation.flow_attendee_name = None
     conversation.flow_draft = None
     conversation.flow_replaces_appointment_id = None
+    conversation.flow_edit_draft = None
     return True
+
+def _expire_stale_edit_state(
+    conversation: Conversation,
+    tenant: Tenant,
+    last_activity_at: datetime | None,
+) -> bool:
+    """Drop a long-idle "Alterar Dados" edit so the next turn re-opens the menu.
+
+    TASK-032 R6, skill conversation-flow-state: every non-IDLE state needs a
+    time-bounded exit that does not depend on tenant config. The draft never touched
+    the real appointment, so dropping it loses nothing but the patient's unfinished
+    choices. Silent, in place, `flow_*` only - the shape of the two floors above.
+    """
+    if conversation.flow_state != FlowState.EDIT_BOOKING:
+        return False
+    if last_activity_at is None:
+        return False
+    gap = datetime.now(UTC) - _as_utc(last_activity_at)
+    if gap < timedelta(minutes=llm_state_ttl_minutes(tenant)):
+        return False
+    conversation.flow_state = FlowState.IDLE
+    conversation.flow_step = None
+    conversation.flow_selected_type = None
+    conversation.flow_selected_day = None
+    conversation.flow_selected_slot = None
+    conversation.flow_managing_appointment_id = None
+    conversation.flow_attendee_name = None
+    conversation.flow_edit_draft = None
+    return True
+
 
 async def _write_flow_state(conversation_id: UUID | None, state: FlowState) -> None:
     """Move `flow_state` from OUTSIDE the inbound transaction. Best-effort.

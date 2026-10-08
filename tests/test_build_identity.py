@@ -368,6 +368,7 @@ def test_worker_registry_is_complete() -> None:
         "transcribe_audio_message",
         "run_post_booking_hooks",
         "retry_professional_notification",
+        "send_professional_edit_notification",
         "send_transactional_email",
         "process_asaas_event",
     ]
@@ -395,7 +396,7 @@ async def test_worker_startup_logs_identity_and_registry(
         event, fields = recorder.records[0]
         assert event == "worker_started"
         assert {"build_sha", "built_at", "alembic_head", "source_fingerprint"} <= set(fields)
-        assert len(fields["functions"]) == 13
+        assert len(fields["functions"]) == 14
         assert len(fields["cron_jobs"]) == 7
 
         rendered = json.dumps(fields, default=str)

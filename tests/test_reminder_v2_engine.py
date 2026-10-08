@@ -433,7 +433,7 @@ async def test_a_whatsapp_reminder_is_recorded_in_the_conversation(db):  # noqa:
 
     [row] = await outbound_messages(db, world.conversation.id)
     assert row.wam_id == "wamid.buttons"
-    assert row.body.endswith("(opções: Confirmar, Cancelar, Outro)")
+    assert row.body.endswith("(opções: Confirmar, Cancelar, Alterar Dados)")
     assert row.interactive["kind"] == "buttons"
     async with db() as session:
         conversation = await session.get(Conversation, world.conversation.id)

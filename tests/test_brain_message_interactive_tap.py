@@ -53,7 +53,6 @@ from secretaria.ai import graph, scoped_help  # noqa: E402
 from secretaria.config import Settings  # noqa: E402
 from secretaria.core.database import Base  # noqa: E402
 from secretaria.core.whatsapp_limits import (  # noqa: E402
-    MAX_BUTTONS_PER_MESSAGE,
     MAX_INTERACTIVE_REPLY_ID_CHARS,
     MAX_LIST_ROWS,
 )
@@ -75,7 +74,6 @@ from secretaria.services.channel_sender import (  # noqa: E402
 )
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
 from secretaria.services.whatsapp import (  # noqa: E402
-    interactive_buttons_record,
     interactive_list_record,
 )
 from secretaria.workers import tasks  # noqa: E402
@@ -247,19 +245,23 @@ async def _turn(tenant: Tenant, text: str, reply_id: str | None) -> None:
 # --------------------------------------------------------------------------
 
 
-async def test_send_buttons_records_the_card_whatsapp_would(db) -> None:
-    """Same builder, same caps: a fourth button is dropped here as on WhatsApp,
-    and the history body is the flattened line it always was."""
+async def test_send_buttons_records_all_five_portal_options(db) -> None:
+    """A wide Portal card keeps every option and its flattened history."""
     _, _, conversation = await _seed(db)
     sender = BrainMessageSender(conversation_id=conversation.id, session_factory=db)
-    buttons = [(f"menu|{i}", f"Opção {i}") for i in range(MAX_BUTTONS_PER_MESSAGE + 1)]
+    buttons = [(f"menu|{i}", f"Opção {i}") for i in range(5)]
 
     await sender.send_buttons(to=EXTERNAL_ID, body="Como posso ajudar?", buttons=buttons)
 
     [row] = await _rows(db, conversation.id)
-    assert row.interactive == interactive_buttons_record("Como posso ajudar?", buttons)
+    assert row.interactive["body"] == "Como posso ajudar?"
     assert row.interactive["kind"] == "buttons"
-    assert [o["id"] for o in row.interactive["options"]] == ["menu|0", "menu|1", "menu|2"]
+    assert [o["id"] for o in row.interactive["options"]] == [
+        "menu|0", "menu|1", "menu|2", "menu|3", "menu|4"
+    ]
+    assert [o["title"] for o in row.interactive["options"]] == [
+        "Opção 0", "Opção 1", "Opção 2", "Opção 3", "Opção 4"
+    ]
     assert row.body == interactive_history_body("Como posso ajudar?", [b[1] for b in buttons])
     assert row.direction == MessageDirection.OUTBOUND and row.sender == MessageSender.BOT
 

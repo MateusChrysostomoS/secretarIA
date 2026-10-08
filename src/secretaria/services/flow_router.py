@@ -59,6 +59,7 @@ from secretaria.core.whatsapp_limits import (
     truncate_plain,
 )
 from secretaria.models import FlowState
+from secretaria.services.appointment_edit import EditContext
 from secretaria.services.attendee import (
     ATTENDEE_NAME_INVALID,
     ATTENDEE_NAME_REQUEST,
@@ -357,6 +358,25 @@ STEP_MANAGE_CONFIRM = "manage_confirm"
 # resolves straight into the picked intent instead of the neutral action card.
 STEP_MANAGE_PICK_RESCHEDULE = "manage_pick_reschedule"
 STEP_MANAGE_PICK_CANCEL = "manage_pick_cancel"
+
+# TASK-032 R6 ("Alterar Dados"): the steps of FlowState.EDIT_BOOKING
+# (services/appointment_edit_flow.py). The day/slot steps belong to EDIT_DAY_BRANCH.
+STEP_EDIT_MENU = "edit_menu"
+STEP_EDIT_MORE = "edit_more"
+STEP_EDIT_DAY = "edit_day"
+STEP_EDIT_DAY_RETRY = "edit_day_retry"
+STEP_EDIT_DAY_ESCAPE = "edit_day_escape"
+STEP_EDIT_SLOT = "edit_slot"
+STEP_EDIT_TIME_TOO = "edit_time_too"
+STEP_EDIT_SERVICE = "edit_service"
+STEP_EDIT_DOCTOR = "edit_doctor"
+STEP_EDIT_INSURANCE = "edit_insurance"
+STEP_EDIT_INSURANCE_OTHER = "edit_insurance_other"
+STEP_EDIT_ATT_CHOICE = "edit_att_choice"
+STEP_EDIT_ATT_NAME = "edit_att_name"
+STEP_EDIT_ATT_AUTH = "edit_att_auth"
+STEP_EDIT_CONFIRM = "edit_confirm"
+
 MANAGE_APPOINTMENT_PAYLOAD_PREFIX = "appointment:"
 
 _WEEKDAY_PT = {
@@ -656,6 +676,17 @@ class FlowRouterResult:
     # original in the same transaction as the new row
     # (services/appointment_replacement.py).
     flow_replaces_appointment_id: UUID | None = None
+    # TASK-032 R6 ("Alterar Dados"): the edit draft (`EditDraft.to_json()`), written
+    # unconditionally by `_apply_flow_result` like every flow field and kept by
+    # `_carry_edit_draft` only while the conversation stays in `EDIT_BOOKING`.
+    flow_edit_draft: dict | None = None
+    # TASK-032 R6: the confirmed edit, applied to the SAME appointment row by
+    # `workers/shared/appointment_edit_apply.py` in `_apply_flow_result`'s transaction:
+    # {"appointment_id": UUID, "old_google_event_id", "google_event_id", "google_event_link",
+    #  "appointment_type", "professional_id": UUID | None, "old_professional_id": UUID | None,
+    #  "insurance", "attendee_name", "start_at", "end_at", "time_changed": bool,
+    #  "doctor_changed": bool}. Never persisted on the conversation.
+    appointment_edit: dict | None = None
 
 
 @dataclass
@@ -712,10 +743,21 @@ MANAGE_DAY_BRANCH = DayBranch(
     slot_body_prefix="Novos horários em",
 )
 
+EDIT_DAY_BRANCH = DayBranch(
+    flow_state=FlowState.EDIT_BOOKING,
+    day_step=STEP_EDIT_DAY,
+    day_retry_step=STEP_EDIT_DAY_RETRY,
+    day_escape_step=STEP_EDIT_DAY_ESCAPE,
+    slot_step=STEP_EDIT_SLOT,
+    day_body="Qual o novo dia da consulta?",
+    slot_body_prefix="Horários livres em",
+)
+
 # Every step that the day branch owns, per branch — used by `_catalog_step` /
 # `_manage_step` to dispatch the retry/escape renders to the same handler.
 _BOOKING_DAY_STEPS = (STEP_AWAITING_DAY, STEP_AWAITING_DAY_RETRY, STEP_AWAITING_DAY_ESCAPE)
 _MANAGE_DAY_STEPS = (STEP_MANAGE_DAY, STEP_MANAGE_DAY_RETRY, STEP_MANAGE_DAY_ESCAPE)
+_EDIT_DAY_STEPS = (STEP_EDIT_DAY, STEP_EDIT_DAY_RETRY, STEP_EDIT_DAY_ESCAPE)
 
 
 @dataclass
@@ -738,6 +780,7 @@ class _DayPickerState:
     flow_selected_insurance: str | None = None
     flow_managing_appointment_id: UUID | None = None
     flow_attendee_name: str | None = None
+    flow_edit_draft: dict | None = None
 
 
 # --------------------------------------------------------------------------
@@ -1413,14 +1456,32 @@ def _replacement_line(conversation: Conversation) -> str:
     return f"\n\n{REPLACEMENT_NOTICE}" if _replaces_appointment_id(conversation) else ""
 
 
+def _carry_edit_draft(conversation: Conversation, result: FlowRouterResult) -> FlowRouterResult:
+    """Keep the "Alterar Dados" draft while the edit continues (TASK-032 R6).
+
+    `_apply_flow_result` writes `flow_edit_draft` unconditionally, so a result that does
+    not name it clears it - exactly right for a result that LEAVES the edit (menu, idle,
+    the AI). A result that stays in `EDIT_BOOKING` without naming a draft (a scoped-help
+    or day-picker result built without it) keeps the conversation's own.
+    """
+    if result.flow_edit_draft is not None:
+        return result
+    if (
+        getattr(conversation, "flow_state", None) == FlowState.EDIT_BOOKING
+        and result.flow_state == FlowState.EDIT_BOOKING
+    ):
+        result.flow_edit_draft = getattr(conversation, "flow_edit_draft", None)
+    return result
+
+
 def _carry_booking(conversation: Conversation, result: FlowRouterResult) -> FlowRouterResult:
     """The carries, applied once per public entry (route, resume, hand-back)."""
-    return _carry_replacement(
+    return _carry_edit_draft(conversation, _carry_replacement(
         conversation,
         _carry_draft(
             conversation, _carry_insurance(conversation, _carry_attendee(conversation, result))
         ),
-    )
+    ))
 
 
 def _selected_managing_appointment_id(conversation: Conversation) -> UUID | None:
@@ -1487,6 +1548,7 @@ def _preserve(conversation: Conversation, action: str) -> FlowRouterResult:
     """Keep the conversation's current flow fields (used for delegate_llm)."""
     return FlowRouterResult(
         action=action,  # type: ignore[arg-type]
+        flow_edit_draft=getattr(conversation, "flow_edit_draft", None),
         flow_state=conversation.flow_state,
         flow_step=conversation.flow_step,
         flow_selected_type=conversation.flow_selected_type,
@@ -1600,6 +1662,7 @@ async def route(
     upcoming_appointments: list[dict] | None = None,
     professionals: list | None = None,
     gate: BookingGate | None = None,
+    edit_context: EditContext | None = None,
 ) -> FlowRouterResult:
     """Route one turn with `gate` in scope for every listing/booking branch.
 
@@ -1619,6 +1682,7 @@ async def route(
             upcoming_appointments=upcoming_appointments,
             professionals=professionals,
             gate=gate,
+            edit_context=edit_context,
         )
         return _carry_booking(conversation, result)
 
@@ -1632,6 +1696,7 @@ async def _route(
     upcoming_appointments: list[dict] | None = None,
     professionals: list | None = None,
     gate: BookingGate | None = None,
+    edit_context: EditContext | None = None,
 ) -> FlowRouterResult:
     """Decide the next deterministic step for this inbound turn.
 
@@ -1682,6 +1747,14 @@ async def _route(
     if state == FlowState.MANAGE_BOOKING:
         return await _manage_step(
             conversation, tenant, calendar, inbound_body, upcoming_appointments or [], professionals
+        )
+
+    if state == FlowState.EDIT_BOOKING:
+        from secretaria.services.appointment_edit_flow import edit_step
+
+        return await edit_step(
+            conversation, tenant, inbound_body, upcoming_appointments or [], professionals,
+            edit_context, patient_name,
         )
 
     # AWAITING_EMAIL / AWAITING_EMAIL_CODE / AWAITING_NAME should never reach
@@ -3212,6 +3285,12 @@ def _day_branch_fields(conversation: Conversation, branch: DayBranch) -> dict:
     keep the service/doctor/convênio it has already collected; the manage
     branch must keep the appointment it is rescheduling.
     """
+    if branch.flow_state is FlowState.EDIT_BOOKING:
+        return {
+            "flow_managing_appointment_id": _selected_managing_appointment_id(conversation),
+            "flow_selected_professional_id": _selected_professional_id(conversation),
+            "flow_edit_draft": getattr(conversation, "flow_edit_draft", None),
+        }
     if branch.flow_state is FlowState.MANAGE_BOOKING:
         return {
             "flow_managing_appointment_id": _selected_managing_appointment_id(conversation)
@@ -3252,8 +3331,11 @@ async def enter_day_picker(
     prefix: str | None = None,
     step: str | None = None,
     professionals: list | None = None,
+    anchor: datetime | None = None,
 ) -> FlowRouterResult:
     """Render the tappable day list: only days that actually have a free slot.
+
+    `anchor` centres the scan on the current appointment, showing the nearest days.
 
     Costs ONE calendar call for the whole window
     (`CalendarService.list_available_days`), never one per day. Rows:
@@ -3270,18 +3352,37 @@ async def enter_day_picker(
     built as one screen. `step` overrides the step written (the retry/escape
     renders reuse this function verbatim), `prefix` prepends one short line.
     """
+    if anchor is None and branch.flow_state is FlowState.EDIT_BOOKING:
+        raw = getattr(conversation, "flow_edit_draft", None)
+        if isinstance(raw, dict):
+            value = (raw.get("current") or {}).get("start_at")
+            if isinstance(value, str):
+                try:
+                    anchor = datetime.fromisoformat(value)
+                except ValueError:
+                    pass
     step = step or branch.day_step
     if calendar is None:
         return _calendar_unavailable(conversation, branch, step)
     try:
         # No holds on purpose: the picker lists every day with free Google time and the
         # slot step hides held slots (services/availability.py's module note).
+        start = datetime.now(calendar.tzinfo)
+        if anchor is not None:
+            anchor_aware = anchor if anchor.tzinfo else anchor.replace(tzinfo=calendar.tzinfo)
+            start = max(start, anchor_aware - timedelta(days=DAY_PICKER_WINDOW_DAYS // 2))
         days = await available_day_starts(
             calendar,
-            start=datetime.now(calendar.tzinfo),
+            start=start,
             window_days=DAY_PICKER_WINDOW_DAYS,
             duration_minutes=duration_minutes,
         )
+        if anchor is not None:
+            # The days NEAREST the current one come first (ties: the earlier day), so
+            # pagination ("Ver mais dias") walks outwards; the page itself is shown in
+            # calendar order.
+            anchor_day = anchor.date()
+            days = sorted(days, key=lambda day: (abs((day.date() - anchor_day).days), day))
     except CalendarUnavailableError:
         return _calendar_unavailable(conversation, branch, step)
 
@@ -3302,6 +3403,8 @@ async def enter_day_picker(
     if offset >= len(days):  # stale cursor (availability shrank): restart.
         page, offset = 0, 0
     shown = days[offset : offset + DAY_PICKER_PAGE_SIZE]
+    if anchor is not None:
+        shown = sorted(shown)
     rows: list[tuple[str, str]] = [
         (f"{ROW_DAY_PREFIX}{day.date().isoformat()}|{page}", _day_row_label(day))
         for day in shown

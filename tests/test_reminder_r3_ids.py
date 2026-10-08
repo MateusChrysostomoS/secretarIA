@@ -30,18 +30,6 @@ def test_a_longer_id_never_decodes_as_its_shorter_sibling():
     assert decode_action_id(f"remgiveup|{reminder_id}") == ("remgiveup", reminder_id)
 
 
-def test_the_cancel_card_is_the_three_way_choice():
-    reminder_id = uuid4()
-    # Owner's wording (2026-10-07). "Agendar Outra Consulta" is 22 characters and a
-    # WhatsApp reply button holds 20, so the button says "Agendar Outra" and the
-    # card body carries the full phrase.
-    assert rt.cancel_path_buttons(reminder_id) == [
-        (f"remresched|{reminder_id}", "Remarcar Consulta"),
-        (f"remnew|{reminder_id}", "Agendar Outra"),
-        (f"remgiveup|{reminder_id}", "Cancelar Consulta"),
-    ]
-
-
 def test_the_give_up_confirmation_card():
     reminder_id = uuid4()
     assert rt.give_up_confirm_buttons(reminder_id) == [
@@ -50,11 +38,18 @@ def test_the_give_up_confirmation_card():
     ]
 
 
+def test_the_reminder_card_replaces_the_three_way_choice_with_edit():
+    reminder_id = uuid4()
+    assert rt.reminder_buttons(reminder_id) == [
+        (f"remconfirm|{reminder_id}", "Confirmar"),
+        (f"remcancel|{reminder_id}", "Cancelar"),
+        (f"remedit|{reminder_id}", "Alterar Dados"),
+    ]
+
+
 def test_every_new_label_fits_a_whatsapp_button():
     labels = [
-        rt.LABEL_RESCHEDULE_THIS,
-        rt.LABEL_BOOK_ANOTHER,
-        rt.LABEL_GIVE_UP,
+        rt.LABEL_EDIT,
         rt.LABEL_GIVE_UP_CONFIRM,
         rt.LABEL_KEEP,
     ]
@@ -64,5 +59,7 @@ def test_every_new_label_fits_a_whatsapp_button():
 def test_the_row_actions_are_exactly_the_rem_prefixes_the_decoder_knows():
     known = {prefix[:-1] for prefix in webhook._ACTION_BUTTON_PREFIXES if prefix.startswith("rem")}
     assert known == set(rt.REMINDER_ROW_ACTIONS)
-    assert rt.REMINDER_ACTIONS == ("remconfirm", "remcancel", "remother")
-    assert rt.REMINDER_ROW_ACTIONS == rt.REMINDER_ACTIONS + rt.CANCEL_PATH_ACTIONS
+    assert rt.REMINDER_ACTIONS == ("remconfirm", "remcancel", "remedit")
+    assert rt.REMINDER_ROW_ACTIONS == (
+        rt.REMINDER_ACTIONS + rt.LEGACY_REMINDER_ACTIONS + rt.CANCEL_PATH_ACTIONS
+    )

@@ -112,3 +112,5 @@ Só o cartão novo do caminho do Cancelar mudou. O menu antigo de gerenciar cons
 - TASK-030 P5 (prompt/filtro da IA ainda proíbem falar de lembretes); R4 (avisos e liberar horário) e R5 (front).
 - Deploy: banco primeiro (`alembic upgrade head`), depois `secretaria_api` e `secretaria-worker` juntos
   (`GET /build` com paridade `match`). Nada foi pushado nem deployado.
+
+- R6 (2026-10-07): o caminho do Cancelar e o Agendar Outra foram substituídos por Alterar Dados; ver docs/CHECKPOINT_lembretes_r6.md (local, validado, sem commit/deploy).

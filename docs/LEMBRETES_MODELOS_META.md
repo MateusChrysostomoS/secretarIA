@@ -35,7 +35,13 @@ cada botão pela posição):
 
 1. `Confirmar`
 2. `Cancelar`
-3. `Outro`
+3. `Alterar Dados`
+
+Desde 2026-10-07 (R6), o terceiro botão do cartão interativo chama-se **Alterar Dados** e
+abre o menu de mudança da consulta. Se este modelo já tiver sido aprovado com **Outro**, o
+botão continua funcionando: o código é enviado pela posição e já é o de Alterar Dados.
+O rótulo na Meta só muda reenviando o modelo; enquanto isso, fora da janela de 24 h o paciente
+pode continuar vendo **Outro**. Nenhum modelo foi submetido ou alterado nesta execução local.
 
 O que o sistema já garante (não precisa configurar): nenhuma variável vai vazia, com quebra de
 linha, tabulação ou mais de 4 espaços seguidos (regra da Meta); as orientações vêm achatadas numa

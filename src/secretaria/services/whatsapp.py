@@ -35,11 +35,14 @@ from secretaria.services.turn_safety_net import note_send
 logger = get_logger(__name__)
 
 
-def interactive_buttons_record(body: str, buttons: list[tuple[str, str]]) -> dict:
+def interactive_buttons_record(
+    body: str, buttons: list[tuple[str, str]], *, max_buttons: int = MAX_BUTTONS_PER_MESSAGE
+) -> dict:
     """What `send_buttons` puts on the patient's screen, as data.
 
     The reply-button card exactly as WhatsApp draws it - body and titles after
-    the payload's caps, buttons past MAX_BUTTONS_PER_MESSAGE dropped - in the
+    the payload's caps, buttons past `max_buttons` (WhatsApp's 3 by default;
+    the Portal draws more) dropped - in the
     shape `Message.interactive` stores and the staff console renders:
     `{"kind": "buttons", "body", "options": [{"id", "title"}]}`.
 
@@ -53,7 +56,7 @@ def interactive_buttons_record(body: str, buttons: list[tuple[str, str]]) -> dic
         "body": truncate_plain(body, MAX_INTERACTIVE_BODY_CHARS),
         "options": [
             {"id": bid[:MAX_BUTTON_ID_CHARS], "title": truncate_button_label(title)}
-            for bid, title in buttons[:MAX_BUTTONS_PER_MESSAGE]
+            for bid, title in buttons[:max_buttons]
         ],
     }
 
@@ -144,6 +147,10 @@ class WhatsAppClient:
     `send_*` methods below ARE that protocol, which is why introducing a second
     channel needed no edit to any of them.
     """
+
+    # How many reply buttons this channel draws; a wider menu goes out as a list
+    # (workers/shared/bubbles.py::_for_client). WhatsApp's hard limit.
+    MAX_BUTTONS = MAX_BUTTONS_PER_MESSAGE
 
     # This class does not write the `messages` row for what it sends; the caller
     # does, afterwards, from the send response. See ChannelSender's docstring -

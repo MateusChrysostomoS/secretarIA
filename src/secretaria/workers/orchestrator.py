@@ -29,6 +29,7 @@ from secretaria.models import (
 )
 from secretaria.plugins.base import InboundContext
 from secretaria.plugins.registry import agent_tools_for, run_on_inbound
+from secretaria.services.appointment_edit import EditContext
 from secretaria.services.booking_scope import (
     booking_topology,
 )
@@ -126,6 +127,7 @@ from secretaria.workers.shared.actions import (
     _handle_action_button,
     _handle_greeting_button_unavailable,
 )
+from secretaria.workers.shared.appointment_edit_support import build_edit_context
 from secretaria.workers.shared.booking_hold import (
     _hold_minutes_left,
     _hold_when,
@@ -344,6 +346,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
     # None the router degrades on instead of falling back to the wrong agenda.
     manage_calendar: CalendarService | None = None
     manage_calendar_owned = False
+    edit_context: EditContext | None = None
     patient_name = None
     patient_wa = reply.patient_ref
     # Whether this patient still owes LGPD consent. Only the identity turns
@@ -471,6 +474,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                             flow_attendee_name=conversation.flow_attendee_name,
                             flow_draft=conversation.flow_draft,
                             flow_replaces_appointment_id=conversation.flow_replaces_appointment_id,
+                            flow_edit_draft=conversation.flow_edit_draft,
                             patient_id=conversation.patient_id,
                         ),
                         _flow_tenant_snapshot(
@@ -489,7 +493,9 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                     # prompt can list/resolve them without any of them doing
                     # their own DB I/O.
                     wants_upcoming_appointments = (
-                        conversation.flow_state in (FlowState.MANAGE_BOOKING, FlowState.LLM)
+                        conversation.flow_state in (
+                            FlowState.MANAGE_BOOKING, FlowState.LLM, FlowState.EDIT_BOOKING,
+                        )
                         or _label_match_body(reply.inbound_body, manage_label(tenant))
                         or _label_match_body(reply.inbound_body, LABEL_MANAGE_APPOINTMENT)
                         or _label_match_body(reply.inbound_body, LABEL_RESCHEDULE)
@@ -530,6 +536,12 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                             CalendarService.from_tenant_config(tenant_config)
                             if tenant_config
                             else None
+                        )
+                    if conversation.flow_state == FlowState.EDIT_BOOKING:
+                        # TASK-032 R6: every agenda the edit may touch + the Pix guards.
+                        edit_context = await build_edit_context(
+                            session, tenant, tenant_config, conversation,
+                            professional_rows, upcoming_appointments,
                         )
     except Exception as exc:
         logger.warning(
@@ -1035,6 +1047,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             flow_calendar=flow_calendar,
             manage_calendar=manage_calendar,
             manage_calendar_owned=manage_calendar_owned,
+            edit_context=edit_context,
         ):
             return
 

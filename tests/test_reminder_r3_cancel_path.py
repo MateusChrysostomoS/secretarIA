@@ -1,4 +1,4 @@
-"""The Cancelar path: Remarcar Consulta / Agendar Outra / Cancelar Consulta; Outro to the AI.
+"""Direct Cancelar and legacy edit cards (TASK-032 R3 compatibility after R6).
 
 TASK-032 R3, spec §4.3.
 """
@@ -9,7 +9,6 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import select, update
 
-from secretaria.core.whatsapp_limits import MAX_INTERACTIVE_BODY_CHARS
 from secretaria.models import (
     AppointmentStatus,
     Conversation,
@@ -18,7 +17,8 @@ from secretaria.models import (
     PixDeposit,
     Tenant,
 )
-from secretaria.services.reminder_text import cancel_path_buttons, give_up_confirm_buttons
+from secretaria.services.appointment_edit import LABEL_EDIT_DATE, LABEL_EDIT_TIME
+from secretaria.services.reminder_text import give_up_confirm_buttons
 from secretaria.workers import tasks
 from secretaria.workers.shared import reminder_actions as ra
 from secretaria.workers.shared.deposit import _pix_retention_warning_line
@@ -69,31 +69,6 @@ async def _deposit_and_tenant(db, world):  # noqa: F811
         return deposit, await session.get(Tenant, world.tenant.id)
 
 
-async def test_cancel_offers_the_three_way_card(db):  # noqa: F811
-    world = await seed_world(db, start_at=_future())
-    rid = await add_reminder(db, world)
-
-    await _tap(world, "remcancel", rid)
-
-    [(kind, _to, body, buttons)] = sent()
-    assert (kind, body) == ("buttons", ra.CANCEL_PATH_TEXT)
-    assert buttons == cancel_path_buttons(rid)
-    assert len(ra.CANCEL_PATH_TEXT) <= MAX_INTERACTIVE_BODY_CHARS
-    assert (await get_reminder(db, rid)).answer == "cancel"
-    assert (
-        await reload_appointment(db, world.appointment.id)
-    ).status == AppointmentStatus.SCHEDULED
-
-
-async def test_the_three_way_card_names_each_button_in_its_body(db):  # noqa: F811
-    # The body explains the buttons; "Agendar Outra" is shortened to fit a WhatsApp
-    # button, so the body is where the full "agendar outra consulta" lives.
-    assert "*Remarcar Consulta*" in ra.CANCEL_PATH_TEXT
-    assert "*Agendar Outra*" in ra.CANCEL_PATH_TEXT
-    assert "agendar outra consulta" in ra.CANCEL_PATH_TEXT.lower()
-    assert "*Cancelar Consulta*" in ra.CANCEL_PATH_TEXT
-
-
 async def test_give_up_asks_for_confirmation_first(db):  # noqa: F811
     world = await seed_world(db, start_at=_future())
     rid = await add_reminder(db, world)
@@ -107,6 +82,58 @@ async def test_give_up_asks_for_confirmation_first(db):  # noqa: F811
     assert (
         await reload_appointment(db, world.appointment.id)
     ).status == AppointmentStatus.SCHEDULED
+
+
+async def test_cancel_asks_directly_and_keeps_appointment_until_yes(db):  # noqa: F811
+    world = await seed_world(db, start_at=_future())
+    rid = await add_reminder(db, world)
+    await _tap(world, "remcancel", rid)
+    assert (await get_reminder(db, rid)).answer == "cancel"
+    assert (
+        await reload_appointment(db, world.appointment.id)
+    ).status == AppointmentStatus.SCHEDULED
+    assert len(sent()) == 1 and sent()[0][0] == "buttons"
+
+
+async def test_cancel_question_shows_the_date_and_both_outcomes(db):  # noqa: F811
+    world = await seed_world(db, start_at=_future())
+    rid = await add_reminder(db, world)
+    await _tap(world, "remcancel", rid)
+    assert _when(world.start_at) in sent()[0][2]
+    assert sent()[0][3] == [(f"remgiveupyes|{rid}", "Sim, cancelar"),
+                            (f"remkeep|{rid}", "Manter consulta")]
+
+
+async def test_legacy_reschedule_opens_a_draft_for_the_same_appointment(db):  # noqa: F811
+    world = await seed_world(db, start_at=_future())
+    rid = await add_reminder(db, world)
+    await _tap(world, "remresched", rid)
+    conv = await get_conversation(db, world)
+    assert conv.flow_state == FlowState.EDIT_BOOKING
+    assert conv.flow_managing_appointment_id == world.appointment.id
+    assert conv.flow_edit_draft["appointment_id"] == str(world.appointment.id)
+    assert (
+        await reload_appointment(db, world.appointment.id)
+    ).status == AppointmentStatus.SCHEDULED
+
+
+async def test_legacy_reschedule_still_respects_the_pix_limit(db):  # noqa: F811
+    world = await seed_world(db, start_at=_future())
+    await seed_paid_deposit(db, world)
+    async with db() as session:
+        await session.execute(
+            update(PixDeposit)
+            .where(PixDeposit.appointment_id == world.appointment.id)
+            .values(reschedule_count=world.tenant.pix_reschedule_limit)
+        )
+        await session.commit()
+    rid = await add_reminder(db, world)
+    await _tap(world, "remresched", rid)
+    assert sent()[0][0] == "buttons"
+    labels = [label for _id, label in sent()[0][3]]
+    assert LABEL_EDIT_DATE not in labels and LABEL_EDIT_TIME not in labels
+    row = await reload_appointment(db, world.appointment.id)
+    assert row.start_at == world.appointment.start_at
 
 
 async def test_give_up_inside_the_refund_window_warns_about_the_deposit_first(db):  # noqa: F811
@@ -134,44 +161,15 @@ async def test_keep_leaves_the_appointment_and_says_so(db):  # noqa: F811
     ).status == AppointmentStatus.SCHEDULED
 
 
-async def test_other_hands_the_conversation_to_the_ai(db):  # noqa: F811
+async def test_legacy_other_opens_the_edit_menu(db):  # noqa: F811
     world = await seed_world(db, start_at=_future())
     rid = await add_reminder(db, world)
 
     await _tap(world, "remother", rid)
 
-    assert _texts() == [ra.OTHER_TEXT]
-    assert (await get_conversation(db, world)).flow_state == FlowState.LLM
+    assert sent()[0][0] == "list" and sent()[0][2].startswith("*Alterar Dados*")
+    assert (await get_conversation(db, world)).flow_state == FlowState.EDIT_BOOKING
     assert (await get_reminder(db, rid)).answer == "other"
-
-
-async def test_remarcar_consulta_enters_the_reschedule_of_this_appointment(db):  # noqa: F811
-    world = await seed_world(db, start_at=_future())
-    rid = await add_reminder(db, world)
-
-    await _tap(world, "remresched", rid)
-
-    conversation = await get_conversation(db, world)
-    assert conversation.flow_state == FlowState.MANAGE_BOOKING
-    assert conversation.flow_managing_appointment_id == world.appointment.id
-
-
-async def test_remarcar_consulta_respects_the_pix_reschedule_limit(db):  # noqa: F811
-    world = await seed_world(db, start_at=_future())
-    await seed_paid_deposit(db, world)
-    async with db() as session:
-        await session.execute(
-            update(PixDeposit)
-            .where(PixDeposit.appointment_id == world.appointment.id)
-            .values(reschedule_count=world.tenant.pix_reschedule_limit)
-        )
-        await session.commit()
-    rid = await add_reminder(db, world)
-
-    await _tap(world, "remresched", rid)
-
-    assert [item[0] for item in sent()] == ["buttons"]
-    assert (await get_conversation(db, world)).flow_state == FlowState.IDLE
 
 
 async def test_cancel_path_taps_are_checked_against_the_patient_and_the_version(db):  # noqa: F811
@@ -187,7 +185,7 @@ async def test_cancel_path_taps_are_checked_against_the_patient_and_the_version(
         session.add(intruder_conversation)
         await session.commit()
 
-    for action in ("remresched", "remnew", "remgiveup", "remgiveupyes", "remkeep"):
+    for action in ("remgiveup", "remgiveupyes", "remkeep"):
         await _tap(
             world,
             action,
@@ -200,7 +198,7 @@ async def test_cancel_path_taps_are_checked_against_the_patient_and_the_version(
     )
     await _tap(world, "remgiveupyes", old)
 
-    assert _texts() == [ra.NOT_FOUND_TEXT] * 5 + [ra.MOVED_TEXT.format(when=_when(world.start_at))]
+    assert _texts() == [ra.NOT_FOUND_TEXT] * 3 + [ra.MOVED_TEXT.format(when=_when(world.start_at))]
     assert (
         await reload_appointment(db, world.appointment.id)
     ).status == AppointmentStatus.SCHEDULED

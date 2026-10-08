@@ -30,6 +30,9 @@ from secretaria.workers.reminder_engine import (
     process_appointment_reminders,
     reconcile_appointment_reminders,
 )
+from secretaria.workers.shared.appointment_edit_notification import (
+    send_professional_edit_notification,
+)
 from secretaria.workers.tasks import (
     check_handover_timeouts,
     merge_brain_message_visit,
@@ -136,6 +139,7 @@ class WorkerSettings:
         # cannot retry a single hook: registry.run_post_booking contains hook
         # exceptions by contract. See plugins/professional_notification.py.
         retry_professional_notification,
+        send_professional_edit_notification,
         # Onboarding transactional email (contract v1 §4 endpoint 6), enqueued
         # by POST /internal/notifications/email. See workers/tasks.py and
         # services/email.py.

@@ -232,6 +232,10 @@ class BrainMessageSender:
     senders never send files and leave it unset.
     """
 
+    # The Portal draws as many buttons as the card carries (owner, 2026-10-07: "é o nosso
+    # portal"), so a wide menu stays buttons here and becomes a list only on WhatsApp.
+    MAX_BUTTONS = 8
+
     persists_outbound = True
 
     def __init__(
@@ -357,7 +361,7 @@ class BrainMessageSender:
         # exactly the ids a WhatsApp patient could.
         return await self._record(
             interactive_history_body(body, [label for _, label in buttons]),
-            interactive=interactive_buttons_record(body, buttons),
+            interactive=interactive_buttons_record(body, buttons, max_buttons=self.MAX_BUTTONS),
         )
 
     async def send_list(

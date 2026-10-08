@@ -228,7 +228,7 @@ def test_builders_and_decoder_agree():
     assert [decode_action_id(bid) for bid, _ in buttons] == [
         (action, str(reminder_id)) for action in rt.REMINDER_ACTIONS
     ]
-    assert [label for _, label in buttons] == ["Confirmar", "Cancelar", "Outro"]
+    assert [label for _, label in buttons] == ["Confirmar", "Cancelar", "Alterar Dados"]
     assert rt.button_payloads(buttons) == [bid for bid, _ in buttons]
 
 
@@ -275,7 +275,7 @@ def test_the_meta_sheet_matches_the_code():
     assert not body.removeprefix("> ").startswith("{{")
     assert not body.rstrip().endswith("}}")
 
-    for label in (rt.LABEL_CONFIRM, rt.LABEL_CANCEL, rt.LABEL_OTHER):
+    for label in (rt.LABEL_CONFIRM, rt.LABEL_CANCEL, rt.LABEL_EDIT):
         assert f"`{label}`" in text
     assert f"`{rt.NO_REQUIREMENTS_PARAM}`" in text
 

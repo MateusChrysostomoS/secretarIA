@@ -1,11 +1,11 @@
 ﻿{
     "metadata_schema":  "brain.graphify-metadata/v1",
-    "repository":  "secretarIA",
-    "repository_path":  "C:\\TECH\\BRAIN-worktrees\\TASK-030\\secretarIA",
-    "branch":  "task/TASK-030-ia-entra-em-qualquer-etapa",
-    "commit":  "33989cc89b57d3e842354cea80dd55a0704faad2",
-    "generated_at":  "2026-10-07T15:59:48.2871727Z",
+    "repository":  "secretarIA-r6",
+    "repository_path":  "C:\\TECH\\BRAIN-worktrees\\TASK-032\\secretarIA-r6",
+    "branch":  "task/TASK-032-r6-alterar-dados",
+    "commit":  "9ef32396caeea1611c7fe2b74ca37017635cee95",
+    "generated_at":  "2026-10-08T02:32:07.7262035Z",
     "graphify_version":  "0.9.5",
     "graph_schema":  "networkx-node-link (unversioned upstream)",
-    "graph_sha256":  "6f3b5d0117035794a06d0c9ec2e9123e5f7c5da25c32b711b76227aa1beef64b"
+    "graph_sha256":  "596101f1f18478b18aa9842146d188d337485aa5deb08179f12aa1285055672f"
 }
