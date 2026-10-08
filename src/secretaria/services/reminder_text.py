@@ -48,6 +48,9 @@ DEFAULT_TIMEZONE = "America/Sao_Paulo"
 DEFAULT_SERVICE_NAME = "Consulta"
 REQUIREMENTS_HEADER = "Orientações para a consulta:"
 NO_REQUIREMENTS_PARAM = "Sem orientações especiais."
+REMINDER_TERMINAL_TEXT = (
+    "Essa consulta não está mais ativa. Fale com a clínica se precisar de ajuda."
+)
 # Display-only caps (nothing matches against these strings, so a plain marked
 # cut is right - skill third-party-text-limits). A Meta template body is at
 # most 1024 characters INCLUDING its fixed text, so the variables stay well
@@ -329,7 +332,7 @@ def give_up_confirm_buttons(reminder_id) -> list[tuple[str, str]]:
     ]
 
 
-def portal_conversation_link(tenant_id) -> str | None:
+def portal_conversation_link(tenant_id, reminder_id=None) -> str | None:
     """Where the reminder e-mail sends a Portal patient: the clinic's invite link.
 
     `{BRAIN_MESSAGE_PORTAL_URL}/clinicas/?convite=<tenant uuid>` is a shape
@@ -339,4 +342,7 @@ def portal_conversation_link(tenant_id) -> str | None:
     conversation; one without signs in first. None while the URL is unset.
     """
     base = (get_settings().BRAIN_MESSAGE_PORTAL_URL or "").strip().rstrip("/")
-    return f"{base}/clinicas/?convite={tenant_id}" if base else None
+    if not base:
+        return None
+    link = f"{base}/clinicas/?convite={tenant_id}"
+    return f"{link}&produto=secretaria&lembrete={reminder_id}" if reminder_id else link

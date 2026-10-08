@@ -17,6 +17,7 @@ from secretaria.models import (
 )
 from secretaria.plugins.post_booking import enqueue_post_booking_hooks
 from secretaria.services import reminder_hooks
+from secretaria.services.appointment_edit import EditDraft
 from secretaria.services.appointment_replacement import (
     ReplacedAppointment,
     cancel_replaced_appointment,
@@ -44,9 +45,11 @@ from secretaria.services.insurance_catalog import (
 )
 from secretaria.services.payments import deposit_lifecycle
 from secretaria.services.pii_pseudonymization import remember_attendee_name
+from secretaria.services.professional_edit_outbox import record_professional_edit
 from secretaria.workers.shared.appointment_edit_apply import (
     AppliedEdit,
     _finish_edit,
+    _row_draft,
     apply_appointment_edit,
     compensate_appointment_edit,
 )
@@ -170,6 +173,7 @@ async def _run_flow(
         reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
     )
 
+
 async def _apply_flow_result(
     reply: _ReplyContext,
     result: FlowRouterResult,
@@ -202,8 +206,11 @@ async def _apply_flow_result(
         await remember_attendee_name(reply.conversation_id, result.flow_attendee_name)
     if isinstance(result.flow_edit_draft, dict):
         # Editing an existing booking can introduce a name without asking for it again.
-        names = {part.get("attendee_name") for key in ("current", "original")
-                 if isinstance(part := result.flow_edit_draft.get(key), dict)}
+        names = {
+            part.get("attendee_name")
+            for key in ("current", "original")
+            if isinstance(part := result.flow_edit_draft.get(key), dict)
+        }
         for name in names:
             if isinstance(name, str) and name:
                 await remember_attendee_name(reply.conversation_id, name)
@@ -224,9 +231,13 @@ async def _apply_flow_result(
         async with async_session_factory() as session:
             async with session.begin():
                 if result.appointment_edit is not None:
-                    conv = await session.scalar(select(Conversation).where(
-                        Conversation.id == reply.conversation_id,
-                    ).with_for_update())
+                    conv = await session.scalar(
+                        select(Conversation)
+                        .where(
+                            Conversation.id == reply.conversation_id,
+                        )
+                        .with_for_update()
+                    )
                     if conv is None:
                         raise ValueError("edit_conversation_missing")
                     edit_patient_id = conv.patient_id
@@ -278,13 +289,14 @@ async def _apply_flow_result(
                             booking_patient = await session.get(Patient, conv.patient_id)
                             if booking_patient is not None:
                                 booking_phone = booking_patient.wa_id
-                        booking_insurance_plan_id, booking_insurance_professional_plan_id = (
-                            await resolve_booking_plan_ids(
-                                session,
-                                conv.tenant_id,
-                                result.appointment.get("insurance"),
-                                result.appointment.get("professional_id"),
-                            )
+                        (
+                            booking_insurance_plan_id,
+                            booking_insurance_professional_plan_id,
+                        ) = await resolve_booking_plan_ids(
+                            session,
+                            conv.tenant_id,
+                            result.appointment.get("insurance"),
+                            result.appointment.get("professional_id"),
                         )
                         booked_appointment = Appointment(
                             tenant_id=conv.tenant_id,
@@ -399,12 +411,20 @@ async def _apply_flow_result(
                         # Read BEFORE the write (same reason as the cancel
                         # branch above) and reuse the row for the money hook.
                         resched_appt = await session.scalar(
-                            select(Appointment).where(
+                            select(Appointment)
+                            .where(
                                 Appointment.google_event_id == resched["google_event_id"],
                                 Appointment.tenant_id == conv.tenant_id,
+                                Appointment.patient_id == conv.patient_id,
                             )
+                            .with_for_update()
                         )
                         previous_status = resched_appt.status if resched_appt is not None else None
+                        before_reschedule = (
+                            _row_draft(resched_appt, tenant.timezone)
+                            if resched_appt is not None and tenant is not None
+                            else None
+                        )
                         # The SAME row moves to the new window and stays LIVE -
                         # RESCHEDULED is not a tombstone (PROMPT_FIX_16, see the
                         # taxonomy on models/appointment.py). Its id,
@@ -416,6 +436,7 @@ async def _apply_flow_result(
                             .where(
                                 Appointment.google_event_id == resched["google_event_id"],
                                 Appointment.tenant_id == conv.tenant_id,
+                                Appointment.patient_id == conv.patient_id,
                             )
                             .values(
                                 start_at=resched["start_at"],
@@ -424,6 +445,26 @@ async def _apply_flow_result(
                             )
                         )
                         if resched_appt is not None:
+                            if before_reschedule is not None:
+                                after_reschedule = _row_draft(resched_appt, tenant.timezone)
+                                fields = EditDraft(
+                                    str(resched_appt.id),
+                                    after_reschedule.current,
+                                    before_reschedule.current,
+                                ).changed()
+                                notice = await record_professional_edit(
+                                    session, resched_appt, fields
+                                )
+                                if notice is not None:
+                                    applied_edit = AppliedEdit(
+                                        appointment_id=resched_appt.id,
+                                        moved=True,
+                                        old_event_id=None,
+                                        old_professional_id=resched_appt.professional_id,
+                                        notice_id=str(notice.id),
+                                        notice_version=notice.version,
+                                        changed_fields=tuple(fields),
+                                    )
                             log_status_transition(
                                 appointment_id=resched_appt.id,
                                 tenant_id=conv.tenant_id,

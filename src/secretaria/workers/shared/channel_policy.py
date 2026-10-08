@@ -41,6 +41,8 @@ class ChannelPolicy:
     shows_typing_indicator: bool
     # Where the LGPD consent was given, as written in the audit record.
     consent_scope: str
+    # The clinic's is_active flag enables WhatsApp go-live, not Portal service.
+    requires_whatsapp_activation: bool
     # (patient, is_returning_patient) -> ask "qual o seu nome?" at first contact.
     asks_name_at_first_contact: Callable[[Any, bool], bool]
 
@@ -63,6 +65,7 @@ WHATSAPP = ChannelPolicy(
     reports_name_to_account=False,
     shows_typing_indicator=False,
     consent_scope="no WhatsApp",
+    requires_whatsapp_activation=True,
     asks_name_at_first_contact=_whatsapp_asks_name,
 )
 
@@ -76,6 +79,7 @@ PORTAL = ChannelPolicy(
     reports_name_to_account=True,
     shows_typing_indicator=True,
     consent_scope="no Portal Brain-Message",
+    requires_whatsapp_activation=False,
     asks_name_at_first_contact=_portal_asks_name,
 )
 

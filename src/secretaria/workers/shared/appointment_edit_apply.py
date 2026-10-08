@@ -9,7 +9,7 @@ logged and never undoes the edit the patient just confirmed.
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import UUID, uuid4
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -31,6 +31,7 @@ from secretaria.services.calendar import build_event_description
 from secretaria.services.insurance_catalog import resolve_booking_plan_ids
 from secretaria.services.patient_context import as_utc
 from secretaria.services.payments import deposit_lifecycle
+from secretaria.services.professional_edit_outbox import record_professional_edit
 from secretaria.services.tenant_config import list_active_professionals
 from secretaria.workers.shared.appointment_edit_support import edit_guards
 from secretaria.workers.shared.llm_context import (
@@ -55,11 +56,15 @@ class AppliedEdit:
 def _row_draft(appointment, timezone) -> EditDraft:
     return EditDraft.from_appointment(
         {
-            "id": str(appointment.id), "appointment_type": appointment.appointment_type,
-            "professional_id": appointment.professional_id, "start_at": appointment.start_at,
-            "end_at": appointment.end_at, "insurance": appointment.insurance,
+            "id": str(appointment.id),
+            "appointment_type": appointment.appointment_type,
+            "professional_id": appointment.professional_id,
+            "start_at": appointment.start_at,
+            "end_at": appointment.end_at,
+            "insurance": appointment.insurance,
             "attendee_name": appointment.attendee_name,
-        }, ZoneInfo(timezone or "America/Sao_Paulo"),
+        },
+        ZoneInfo(timezone or "America/Sao_Paulo"),
     )
 
 
@@ -154,6 +159,7 @@ async def apply_appointment_edit(
     )
     after = _row_draft(appointment, current_tenant.timezone)
     fields = EditDraft(str(appointment.id), after.current, before.current).changed()
+    notice = await record_professional_edit(session, appointment, fields)
     return AppliedEdit(
         appointment_id=appointment.id,
         moved=moved,
@@ -161,7 +167,7 @@ async def apply_appointment_edit(
         if edit.get("calendar_changed", edit["doctor_changed"])
         else None,
         old_professional_id=edit.get("old_professional_id"),
-        notice_id=str(uuid4()) if fields else None,
+        notice_id=str(notice.id) if notice else None,
         notice_version=appointment_email_version(appointment) if fields else None,
         changed_fields=tuple(fields),
     )

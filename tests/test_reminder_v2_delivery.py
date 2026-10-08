@@ -262,7 +262,8 @@ async def test_portal_patient_gets_the_chat_card_and_the_email_with_the_link(db,
     assert mail_sent["to"] == "maria@example.com"
     assert mail_sent["template"] == "appointment_reminder_patient"
     assert mail_sent["variables"]["link_line"] == (
-        f"https://portal.exemplo/clinicas/?convite={world.tenant.id}\n"
+        f"https://portal.exemplo/clinicas/?convite={world.tenant.id}"
+        f"&produto=secretaria&lembrete={job.reminder_id}\n"
     )
     assert mail_sent["variables"]["reminder_text"].startswith("LEMBRE-SE:")
     assert outcome.ok and outcome.channel == "email" and outcome.history_body is None

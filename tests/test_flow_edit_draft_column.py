@@ -46,7 +46,9 @@ def _migration():
 def test_the_migration_is_the_single_head_on_top_of_r3():
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "migrations"))
-    assert ScriptDirectory.from_config(config).get_heads() == [REVISION]
+    scripts = ScriptDirectory.from_config(config)
+    assert scripts.get_heads() == ["c2d5f8a1e4b6"]
+    assert REVISION in {r.revision for r in scripts.walk_revisions()}
     assert _migration().down_revision == DOWN_REVISION
 
 

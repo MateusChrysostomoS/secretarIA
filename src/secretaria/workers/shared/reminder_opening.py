@@ -53,6 +53,7 @@ async def _prepare_opening(
             )
             if (
                 conversation is None
+                or conversation.tenant_id != tenant.id
                 or appointment is None
                 or appointment.patient_id is None
                 or appointment.patient_id != conversation.patient_id
@@ -71,7 +72,10 @@ async def _prepare_opening(
 
 
 async def _send_reminder_opening(
-    reply: _ReplyContext, *, tenant: Tenant, waba_token: str | None,
+    reply: _ReplyContext,
+    *,
+    tenant: Tenant,
+    waba_token: str | None,
     still_current: Callable[[], Awaitable[bool]] | None = None,
 ) -> bool | None:
     """Send the opening card. Returns False (logged) when it no longer applies."""
@@ -93,11 +97,14 @@ async def _send_reminder_opening(
     if still_current is not None and not await still_current():
         # Preparing the row/body awaits another transaction. A patient action
         # that arrived meanwhile supersedes this unsolicited entry opening.
-        logger.info("reminder_opening_superseded", conversation_id=str(reply.conversation_id),
-                    tenant_id=str(tenant.id))
+        logger.info(
+            "reminder_opening_superseded",
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(tenant.id),
+        )
         return None
     body, buttons = prepared
-    await _send_buttons_reply(
+    rendered = await _send_buttons_reply(
         reply,
         tenant=tenant,
         waba_token=waba_token,
@@ -105,4 +112,4 @@ async def _send_reminder_opening(
         buttons=buttons,
         event="reminder_opening_sent",
     )
-    return True
+    return rendered

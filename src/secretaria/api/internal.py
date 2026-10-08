@@ -605,7 +605,11 @@ async def brain_message_open(
     Fail-closed on a missing queue with 503, like `/inbound`: answering 202
     with nothing enqueued would promise a greeting that never comes.
     """
-    if await _brain_message_conversation_started(session, payload.tenant_id, payload.external_id):
+    if payload.entry_context is not None or await _brain_message_conversation_started(
+        session,
+        payload.tenant_id,
+        payload.external_id,
+    ):
         response.status_code = status.HTTP_200_OK
         # A patient ENTERING a conversation that already has history (owner,
         # 2026-10-05): the worker decides whether the context-aware opening is
@@ -615,8 +619,16 @@ async def brain_message_open(
         # Redis hiccup here costs one opening, never the patient's visit.
         await session.close()
         try:
+            kwargs = (
+                {"entry_context": payload.entry_context.model_dump(mode="json")}
+                if payload.entry_context is not None
+                else {}
+            )
             await _arq_pool_or_503(request).enqueue_job(
-                "process_brain_message_enter", str(payload.tenant_id), payload.external_id
+                "process_brain_message_enter",
+                str(payload.tenant_id),
+                payload.external_id,
+                **kwargs,
             )
         except Exception as exc:
             logger.warning("brain_message_enter_enqueue_failed", error_type=type(exc).__name__)
