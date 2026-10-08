@@ -75,6 +75,28 @@ Ordem: `shared` ← `whatsapp`, `portal` ← `turn_router`, `orchestrator` ← (
 
 ## 6. Pendências
 
-- Fase 2: política de canal substituindo os `if channel ==` em `turn_router`/`orchestrator` e em
-  `plugins/precheck_handoff.py::_post_booking`.
+- Fase 2 feita na TASK-024 (ver seção 7); resta fora dela só o que é de canal por natureza (lista no `CLAUDE.md`).
 - Deploy não feito; exigiria o `secretaria-worker` (de preferência junto com a API).
+
+## 7. Fase 2 (TASK-024) — política de canal
+
+O código neutro (`shared/`, `turn_router`, `orchestrator`) não compara mais o canal: lê `shared/channel_policy.py::policy_for(channel)`.
+Canal desconhecido ou `None` recebe a política do WhatsApp (era o que o `== CHANNEL_BRAIN_MESSAGE` antigo fazia).
+
+| Campo | WhatsApp | Portal |
+|---|---|---|
+| `stamps_delivery_on_inbound` | False | True |
+| `redacts_email_code` | False | True |
+| `has_inline_identity` | False | True |
+| `arms_booking_gate` | False | True |
+| `greets_by_name` | False | True |
+| `reports_name_to_account` | False | True |
+| `shows_typing_indicator` | False | True |
+| `consent_scope` | "no WhatsApp" | "no Portal Brain-Message" |
+| `asks_name_at_first_contact(patient, is_returning)` | `not is_returning or not patient.name` | sempre False |
+
+- O bloco de identidade do Portal (~177 linhas) saiu de `turn_router._route_inbound_turn` para `portal/identity_gate.py::run_identity_gate`.
+  Ele devolve `NO_DECISION` quando o roteador deve seguir; qualquer outro valor — inclusive `None` — é o retorno do roteador.
+  O roteador compara sempre com `is NO_DECISION`, nunca por truthiness (mutação para `if gate:` derruba 39 testes de identidade).
+- Catraca: `tests/test_channel_branches.py` varre `shared/`, `turn_router` e `orchestrator`; a allowlist final é só `shared/sender.py::_reply_sender`.
+- Como desfazer: cada etapa é um commit (política+catraca, campos, `asks_name`, extração); `git revert` por etapa, do mais novo ao mais antigo.

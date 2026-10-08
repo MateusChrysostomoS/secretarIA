@@ -83,11 +83,13 @@ Até a TASK-023 (2026-10-01) tudo vivia em `workers/tasks.py` e a decisão regis
 | `workers/shared/` | neutro de canal (saudação, envio, bolhas, handover, fluxo, ações, jobs) | só `shared/` |
 | `workers/whatsapp/` | webhook, rate limit, áudio, coexistência, remove-context, avisos de cancelamento | `shared/` (+ composição em `inbound`/`audio`) — nunca `portal/` |
 | `workers/portal/` | entrada brain-message, `open`, identidade/OTP/nome, anexos | `shared/` (+ composição em `inbound`/`open`) — nunca `whatsapp/` |
-| `workers/turn_router.py`, `workers/orchestrator.py` | composição: ainda têm os ramos `channel == ...` (`orchestrator` usa `portal/attachments` e `portal/identity`) | tudo |
+| `workers/turn_router.py`, `workers/orchestrator.py` | composição: chamam o bloco de identidade do Portal e conhecem os dois canais (`orchestrator` usa `portal/attachments` e `portal/identity`) | tudo |
 
-Os ramos por canal que restam em `turn_router`/`orchestrator` (≈10) e o `plugins/precheck_handoff.py::_post_booking`
-são a **fase 2** (política de canal), não feita. `services/channel_sender.py` e `flow_router.py` não se moveram:
-o primeiro tem o Protocol dos dois canais, o segundo é 100% neutro.
+Desde a TASK-024 o código neutro não compara o canal: lê `workers/shared/channel_policy.py` (`policy_for(channel)`; uma tabela, uma linha por canal).
+`tests/test_channel_branches.py` impede o retrocesso. Os únicos lugares que ainda decidem por canal são intencionais: `shared/sender.py::_reply_sender`
+(o ponto único que escolhe o remetente), `plugins/precheck_handoff.py::_post_booking`, `plugins/booking_notifications.py`, `plugins/pending_identity.py`
+e as rotas por canal de `api/`. Para mudar o comportamento de um canal, mude o campo da política (e o teste que o fixa).
+`services/channel_sender.py` e `flow_router.py` não se moveram: o primeiro tem o Protocol dos dois canais, o segundo é 100% neutro.
 
 ### General
 - Pure decision functions over side-effects: prefer the `flow_router.route()` pattern — return a result object, let the caller persist/send. Easier to test without network/DB.
