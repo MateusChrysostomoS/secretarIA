@@ -4,11 +4,13 @@
 
 Pedido do dono em 2026-10-07: reenviar aviso ao médico quando o paciente confirmar a alteração,
 com a frase “A consulta de {{NM_DO_PACIENTE}} mudou para: {{Mudanças}}” e os dados completos.
-**Implementado e validado localmente**, sem LLM, no worktree R6 já existente. Sem stage, commit,
-push, integração, deploy, SQL remoto ou envio de e-mail real. A entrega anterior de R6 foi
-preservada; este complemento não muda migrações nem contratos HTTP.
+**Commitado e validado para integração**, sem LLM. O dono autorizou posteriormente os merges
+e pushes. Entrega funcional no commit `6de2878`; main `8b4a5ee` incorporada sem conflitos
+em `a132f3a`. Suíte da candidata: **4411 passed, 49 skipped, 17 warnings**, 227,84 s.
+Publicação Git autorizada, deploy/SQL remoto/envio de e-mail real não executados. A entrega
+anterior de R6 foi preservada; este complemento não muda migrações nem contratos HTTP.
 
-Validação final: **4410 passed, 49 skipped, 17 warnings**, nenhuma falha, em 174,90 s.
+Validação antes da integração: **4410 passed, 49 skipped, 17 warnings**, nenhuma falha, em 174,90 s.
 Os 21 casos novos usam SQLite real e o template real, substituindo apenas e-mail, identidade
 Brain e transporte Redis por doubles. Baseline escopado: 78 passed; integração intermediária:
 126 passed. Ruff dos nove arquivos Python desta rodada e `git diff --check` limpos.
@@ -111,8 +113,8 @@ por troca de médico é outro aviso, não solicitado nesta rodada.
 
 Lock de linha ainda precisa de prova em PostgreSQL descartável (Docker indisponível nesta
 execução); SMTP/brain-api reais não foram acionados. Exige destinatário profissional conhecido
-no Brain, SMTP habilitado/configurado e worker atualizado. Liberação/publicação continuam
-dependendo de pedido explícito; a ordem de migração/API+worker da R6 original permanece.
+no Brain, SMTP habilitado/configurado e worker atualizado. Commit/merge/push foram autorizados;
+deploy continua sem autorização. A ordem de migração/API+worker da R6 original permanece.
 
 ## Correções encontradas pela validação ampla
 
@@ -123,5 +125,6 @@ da suíte anterior: agora verifica o rótulo atual “Alterar Dados”. Nenhum t
 para obter a validação verde.
 
 Snapshots anteriores ao complemento, logs e decisões:
-`.superpowers/sdd/r6-email-followup/` no worktree. Graphify atualizado por AST; estado formal
-STALE porque todo o trabalho continua uncommitted.
+`.superpowers/sdd/r6-email-followup/` no worktree. Graphify da candidata reconstruído por AST;
+proveniência registrada em `a132f3a`. O commit posterior do próprio índice muda HEAD sem mudar
+o código; conferir freshness antes de usar o grafo como evidência primária.

@@ -4,9 +4,15 @@
 
 Complemento autorizado depois desta entrega: e-mail fixo ao médico ao confirmar alteração,
 sem LLM, com mudanças e dados completos. Validação conjunta atual: 4410 passed, 49 skipped,
-17 warnings; ver `docs/CHECKPOINT_email_alteracao_consulta.md`. Trabalho permanece local.
+17 warnings; ver `docs/CHECKPOINT_email_alteracao_consulta.md`.
 
-Implementado e validado localmente no worktree `C:\TECH\BRAIN-worktrees\TASK-032\secretarIA-r6`, branch `task/TASK-032-r6-alterar-dados`, base `9ef32396caeea1611c7fe2b74ca37017635cee95`. **Sem stage, commit, integração, push, deploy ou SQL remoto.** Os passos de commit do plano foram omitidos para respeitar a instrução explícita da workspace. A versão de produção não foi alterada.
+**Integração autorizada posteriormente pelo dono:** entrega funcional commitada em `6de2878`,
+main `8b4a5ee` incorporada em `a132f3a`, sem conflitos. Candidata validada com **4411 passed,
+49 skipped, 17 warnings** em 227,84 s. Commit/merge/push autorizados; deploy e SQL remoto não.
+Os dois planos futuros R4/R5 em edição no checkout original ficaram fora do commit e
+permaneceram no lugar. Índice Graphify da candidata reconstruído e diagnosticado.
+
+Implementação original no worktree `C:\TECH\BRAIN-worktrees\TASK-032\secretarIA-r6`, branch `task/TASK-032-r6-alterar-dados`, base `9ef32396caeea1611c7fe2b74ca37017635cee95`. Naquela rodada os passos de commit/publicação ficaram pendentes; o pedido posterior autorizou a integração descrita acima. A versão de produção não foi alterada pelo agente.
 
 Migração aditiva `b1c4e7a2d9f3`, acima de `a7e2c9d4f1b6`: uma coluna JSON nullable em `conversations`. Head único, metadados e upgrade/downgrade SQLite comprovados; nenhuma migração anterior reescrita. **Postgres run NOT done:** `docker info` encontrou o pipe do Docker Desktop Linux engine ausente. Não foi usado banco externo.
 
@@ -14,7 +20,7 @@ Validação final: **4388 passed, 49 skipped, 17 warnings**, em 292,86 s (4 min 
 
 Revisão independente antes das correções: `C:\TECH\BRAIN\tasks\TASK-032\results\r6-review.md`. Nove achados Important corrigidos em um passe, com testes RED→GREEN; o relatório original foi preservado. Evidências completas e decisões: diretório `.superpowers/sdd/2026-10-07-lembretes-alterar-dados/` no worktree. Mantido porque não há commits que preservem esse histórico.
 
-Graphify atualizado via AST, sem LLM; consultas encontram os módulos de edição e aplicação, diagnóstico sem duplicatas nem endpoints soltos. Proveniência registrada. O estado formal continua STALE porque o código está propositalmente uncommitted; código/testes continuam a evidência primária.
+Graphify atualizado via AST, sem LLM; consultas encontram os módulos de edição e aplicação, diagnóstico sem duplicatas nem endpoints soltos. Proveniência da candidata registrada em `a132f3a`. O commit posterior do índice muda HEAD sem mudar código; conferir freshness antes de confiar no grafo.
 
 ## O que entrou onde
 

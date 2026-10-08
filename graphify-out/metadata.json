@@ -1,11 +1,11 @@
 ﻿{
     "metadata_schema":  "brain.graphify-metadata/v1",
-    "repository":  "secretarIA-r6",
-    "repository_path":  "C:\\TECH\\BRAIN-worktrees\\TASK-032\\secretarIA-r6",
-    "branch":  "task/TASK-032-r6-alterar-dados",
-    "commit":  "9ef32396caeea1611c7fe2b74ca37017635cee95",
-    "generated_at":  "2026-10-08T02:32:07.7262035Z",
+    "repository":  "secretarIA-r6-integracao",
+    "repository_path":  "C:\\TECH\\BRAIN-worktrees\\TASK-032\\secretarIA-r6-integracao",
+    "branch":  "task/TASK-032-r6-integracao",
+    "commit":  "a132f3ace7c20779f2d54da2f8e6e733996248cc",
+    "generated_at":  "2026-10-08T02:51:35.5069288Z",
     "graphify_version":  "0.9.5",
     "graph_schema":  "networkx-node-link (unversioned upstream)",
-    "graph_sha256":  "596101f1f18478b18aa9842146d188d337485aa5deb08179f12aa1285055672f"
+    "graph_sha256":  "54f2aafb4d08134878f8c1426ae393c0f77cced4af05fe3cbbdf00cef8e0e362"
 }

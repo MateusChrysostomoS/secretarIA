@@ -136,9 +136,9 @@ neither" do `README.md`.
 
 ## Documentação
 
-`docs/CHECKPOINT_email_alteracao_consulta.md` — complemento R6: e-mail fixo ao médico atual após alteração confirmada, mudanças e dados completos, sem LLM; 4410 testes passaram; local, sem commit/deploy.
+`docs/CHECKPOINT_email_alteracao_consulta.md` — complemento R6: e-mail fixo ao médico atual após alteração confirmada, mudanças e dados completos, sem LLM; commitado, candidato validado com 4411 testes; merge/push autorizados, sem deploy.
 
-`docs/CHECKPOINT_lembretes_r6.md` — TASK-032 R6: Confirmar / Cancelar / Alterar Dados e edição por rascunho; 4388 testes passaram, alterações locais sem commit/deploy; migração aditiva `b1c4e7a2d9f3`. Revisão, decisões e verificações antes da liberação no checkpoint.
+`docs/CHECKPOINT_lembretes_r6.md` — TASK-032 R6: Confirmar / Cancelar / Alterar Dados e edição por rascunho; entrega commitada, candidata validada com 4411 testes; merge/push autorizados, sem deploy; migração aditiva `b1c4e7a2d9f3`. Revisão e verificações antes da liberação no checkpoint.
 
 `docs/CHECKPOINT_ia_prompt_v2.md` - TASK-030 P5 adaptado ao atendimento atual: prompt por turno, fatos/preparo/datas/oferta humana preservados; 4266 testes verdes na integracao; modelo real e jornada continua testados; commitado, merge/push autorizados, sem deploy/ativacao; fingerprint esperado d301f7e027b3, piloto v2 pendente.
 
