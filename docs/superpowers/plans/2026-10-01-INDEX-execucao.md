@@ -17,7 +17,7 @@ Cada plano é executável sozinho; este índice diz a ORDEM, o que roda em paral
 | B | `2026-10-01-portal-visita-fundida-na-conta.md` | secretarIA, brain-api, front | Cadastro repetido não deixa uma conversa por cadastro; a visita é descartada e a pessoa cai na conversa antiga com o menu; apresentação só na primeira vez. |
 | C | `2026-10-01-digitando-backend.md` | secretarIA + brain-api | "Digitando" universal, igual WhatsApp: automação, equipe da clínica e paciente (este só quando um humano conduz); contrato único para qualquer produto (campos na listagem, batimento do paciente, uma linha para registrar um produto novo). |
 | D | `2026-10-01-digitando-frontend.md` | front | Bolha "digitando…" no Portal e no console, regra pura em `lib/typing.ts` (produto novo = uma entrada), teclado do paciente e da equipe avisando. |
-| E | `2026-10-01-digitando-precheck.md` | PreCheck | Só a AUTOMAÇÃO do PreCheck digitando (paciente digitando não é processado no PreCheck, decisão do dono). Começa por uma exploração do código do PreCheck; mexe só no condutor do Portal. |
+| E | `2026-10-01-digitando-precheck.md` | PreCheck | Só a AUTOMAÇÃO do PreCheck digitando (paciente digitando não é processado no PreCheck, decisão do dono). Reescrito e explorado em 2026-10-08 (o Portal do PreCheck roda no n8n, não no condutor Python): o indicador é derivado do histórico de mensagens, sem estado novo; mexe só em `app/services/brain_message/` e na rota de listagem. Depende de autorização do dono para tocar o PreCheck. |
 
 ## Dependências
 
