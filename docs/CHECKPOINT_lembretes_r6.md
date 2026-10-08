@@ -2,6 +2,10 @@
 
 ## Estado
 
+Seguimento de 2026-10-08: primeira mensagem contextual e primeiro contato WhatsApp elegível
+unificados com o cartão/ações do lembrete. Validação atual: 4427 passed, 49 skipped, 17 warnings;
+ver `docs/CHECKPOINT_primeira_mensagem_lembrete.md`. Sem nova migration/deploy.
+
 Complemento autorizado depois desta entrega: e-mail fixo ao médico ao confirmar alteração,
 sem LLM, com mudanças e dados completos. Validação conjunta atual: 4410 passed, 49 skipped,
 17 warnings; ver `docs/CHECKPOINT_email_alteracao_consulta.md`.

@@ -136,6 +136,8 @@ neither" do `README.md`.
 
 ## Documentação
 
+`docs/CHECKPOINT_primeira_mensagem_lembrete.md` — 2026-10-08: primeira mensagem com consulta reutiliza exatamente o cartão/ações de lembrete no Portal e WhatsApp; 4427 testes passaram; privacidade e concorrência verificadas; sem deploy.
+
 `docs/CHECKPOINT_email_alteracao_consulta.md` — complemento R6: e-mail fixo ao médico atual após alteração confirmada, mudanças e dados completos, sem LLM; commitado, candidato validado com 4411 testes; merge/push autorizados, sem deploy.
 
 `docs/CHECKPOINT_lembretes_r6.md` — TASK-032 R6: Confirmar / Cancelar / Alterar Dados e edição por rascunho; entrega commitada, candidata validada com 4411 testes; merge/push autorizados, sem deploy; migração aditiva `b1c4e7a2d9f3`. Revisão e verificações antes da liberação no checkpoint.

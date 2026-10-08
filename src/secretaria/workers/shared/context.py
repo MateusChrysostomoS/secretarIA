@@ -150,3 +150,6 @@ class _ReplyContext:
     # patient's message is answered as usual - minus the generic menu, which
     # the card's "Outro" already covers (`_run_flow`, `show_main_menu`).
     reminder_opening_appointment_id: UUID | None = None
+    # An explicit first/context opening keeps management available even after
+    # two confirmations; register_confirmation still enforces its counter cap.
+    reminder_opening_first_contact: bool = False

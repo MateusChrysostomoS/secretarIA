@@ -178,9 +178,15 @@ async def _attendee_names(session, conversation: Conversation | None) -> list[st
             if isinstance(part, dict) and isinstance(part.get("attendee_name"), str):
                 names.add(part["attendee_name"])
     for model in (Appointment, BookingHold):
+        scope = model.conversation_id == conversation.id
+        if model is Appointment and conversation.patient_id is not None:
+            # A staff-origin booking may never have named a conversation. Its
+            # attendee still appears in this patient's opening/reminder history.
+            scope = model.patient_id == conversation.patient_id
         rows = await session.scalars(
             select(model.attendee_name).where(
-                model.conversation_id == conversation.id,
+                model.tenant_id == conversation.tenant_id,
+                scope,
                 model.attendee_name.is_not(None),
             )
         )

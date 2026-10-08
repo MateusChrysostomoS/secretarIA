@@ -1,6 +1,7 @@
 """turn_router - split out of workers/tasks.py (TASK-023)."""
 
 from datetime import UTC, datetime
+from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +19,7 @@ from secretaria.models import (
 from secretaria.schemas.webhook import (
     inbound_routing_text,
 )
+from secretaria.services import reminder_hooks
 from secretaria.services.booking_hold import (
     live_hold_in,
 )
@@ -873,6 +875,22 @@ async def _route_inbound_turn(
     # appointment's reminder card first (spec §4.3). The patient's message is
     # still answered right after it (`_send_bot_reply_inner`). Returns without a
     # query when the clinic's switch is off.
+    if (
+        greeting_override is not None and opening_context is not None
+        and opening_context.future_appointments
+        and opening_context.state in (
+            PatientOpeningState.HAS_UPCOMING_SOON, PatientOpeningState.HAS_UPCOMING,
+        )
+        and reminder_hooks.enabled_for(tenant)
+    ):
+        # The known patient's first greeting uses the same reminder as a later
+        # quiet return. Consent/identity/handover gates have already run above.
+        return _ReplyContext(
+            channel=channel, conversation_id=conversation.id, tenant_id=tenant.id,
+            patient_ref=patient_ref, inbound_body=body or "",
+            reminder_opening_appointment_id=UUID(opening_context.future_appointments[0]["id"]),
+            reminder_opening_first_contact=True,
+        )
     if greeting_override is None:
         opening = await decide_reminder_opening(
             session,

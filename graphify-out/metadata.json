@@ -2,10 +2,10 @@
     "metadata_schema":  "brain.graphify-metadata/v1",
     "repository":  "secretarIA-r6-integracao",
     "repository_path":  "C:\\TECH\\BRAIN-worktrees\\TASK-032\\secretarIA-r6-integracao",
-    "branch":  "task/TASK-032-r6-integracao",
-    "commit":  "a132f3ace7c20779f2d54da2f8e6e733996248cc",
-    "generated_at":  "2026-10-08T02:51:35.5069288Z",
+    "branch":  "task/TASK-032-first-message",
+    "commit":  "b9d5cd14726d073fc9aa6041e1b9745190615a11",
+    "generated_at":  "2026-10-08T11:33:02.4095846Z",
     "graphify_version":  "0.9.5",
     "graph_schema":  "networkx-node-link (unversioned upstream)",
-    "graph_sha256":  "54f2aafb4d08134878f8c1426ae393c0f77cced4af05fe3cbbdf00cef8e0e362"
+    "graph_sha256":  "e34eadab86895e5faf1f3b841e0e2b15626b5738394fbe2e8a285b011814224c"
 }

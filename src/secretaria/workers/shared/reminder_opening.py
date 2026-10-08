@@ -5,7 +5,9 @@ The decision was taken inside the inbound transaction
 `_send_bot_reply_inner`, after the entitlement gate, so an unentitled clinic
 creates no row and sends nothing. Everything is re-checked here because time
 passed since the decision: the appointment must still be this conversation's
-patient's, live, in the future and below two confirmations.
+patient's, live and in the future. Automatic quiet returns stop at two
+confirmations; an explicit context/first-contact card keeps management actions
+available while the shared confirmation writer still enforces the cap.
 
 The card is the SAME text and buttons as a cron reminder (R2's builders), on
 the `chat` row of this appointment version - created now or re-shown. It goes
@@ -14,6 +16,7 @@ and records the card (the Portal's tap check reads that record,
 workers/portal/inbound.py).
 """
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -56,7 +59,10 @@ async def _prepare_opening(
                 or not is_live_status(appointment.status)
                 or appointment.start_at is None
                 or _as_utc(appointment.start_at) <= now
-                or appointment.confirmation_count >= reminder_schedule.MAX_CONFIRMATIONS
+                or (
+                    appointment.confirmation_count >= reminder_schedule.MAX_CONFIRMATIONS
+                    and not reply.reminder_opening_first_contact
+                )
             ):
                 return None
             row = await ensure_chat_reminder(session, appointment, now=now)
@@ -65,8 +71,9 @@ async def _prepare_opening(
 
 
 async def _send_reminder_opening(
-    reply: _ReplyContext, *, tenant: Tenant, waba_token: str | None
-) -> bool:
+    reply: _ReplyContext, *, tenant: Tenant, waba_token: str | None,
+    still_current: Callable[[], Awaitable[bool]] | None = None,
+) -> bool | None:
     """Send the opening card. Returns False (logged) when it no longer applies."""
     if reply.reminder_opening_appointment_id is None or reply.conversation_id is None:
         return False
@@ -83,6 +90,12 @@ async def _send_reminder_opening(
             tenant_id=str(tenant.id),
         )
         return False
+    if still_current is not None and not await still_current():
+        # Preparing the row/body awaits another transaction. A patient action
+        # that arrived meanwhile supersedes this unsolicited entry opening.
+        logger.info("reminder_opening_superseded", conversation_id=str(reply.conversation_id),
+                    tenant_id=str(tenant.id))
+        return None
     body, buttons = prepared
     await _send_buttons_reply(
         reply,
