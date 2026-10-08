@@ -1,5 +1,7 @@
 # SecretarIA
 
+Plano preparado (2026-10-08): [avisos ao médico, entrada por lembrete e QA R6](../z_prompts/PROMPT_CORRECAO_EMAIL_MEDICO_ENTRADA_LEMBRETE_R6.md), com [especificação](docs/superpowers/specs/2026-10-08-email-medico-entrada-lembrete-r6-design.md). Decisão do dono: mostrar os três botões ao abrir o link preservando o rascunho. Apenas planejamento; correção/QA completa ainda não executadas.
+
 ## Product vision
 
 SecretarIA is a **multi-tenant SaaS** that drops a conversational appointment-booking secretary into any service business's existing WhatsApp number, via the WhatsApp **Cloud API Coexistence** model (bot and human agent share the same line, the bot stays quiet when the human picks up). Initial target market is clinics, but the product is service-agnostic — clients self-schedule with the business through their own WhatsApp.

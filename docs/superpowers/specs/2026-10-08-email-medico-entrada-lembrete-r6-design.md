@@ -57,7 +57,7 @@ e localizar a quebra na execução atual.
 7. Link antigo só de clínica continua funcionando: seleção segura da consulta
    futura pertinente após login, sem inventar alvo quando houver ambiguidade.
    Link de outra pessoa/clínica não mostra nem altera dados alheios.
-8. **Proposta padrão para revisão do dono:** entrada explícita pelo lembrete
+8. **Decisão confirmada pelo dono em 08/10/2026:** entrada explícita pelo lembrete
    mostra o cartão preservando rascunho em andamento. Exibir/recuperar cartão não
    pode resetar MENU nem apagar estado da edição. Retomar Alterar Dados da mesma
    consulta preserva as escolhas; mudar para outra consulta não perde o rascunho
