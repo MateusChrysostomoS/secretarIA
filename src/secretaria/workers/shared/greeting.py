@@ -23,9 +23,6 @@ from secretaria.models import (
 from secretaria.services.booking_scope import (
     sole_active_professional,
 )
-from secretaria.services.channel_sender import (
-    CHANNEL_BRAIN_MESSAGE,
-)
 from secretaria.services.flow_router import (
     LABEL_BOOK,
     LABEL_CANCEL_APPT,
@@ -102,9 +99,7 @@ def _asks_name_at_first_contact(channel: str, patient: Patient, is_returning_pat
         only because the history was wiped): only if we still have no name.
         A returning patient whose name we already hold is never asked again.
     """
-    if channel == CHANNEL_BRAIN_MESSAGE:
-        return False
-    return not is_returning_patient or not patient.name
+    return policy_for(channel).asks_name_at_first_contact(patient, is_returning_patient)
 
 def _first_contact_reply(
     *,

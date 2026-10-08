@@ -23,7 +23,6 @@ ROOT = Path(workers_pkg.__file__).parent
 # (path relative to workers/, function) -> number of channel comparisons.
 # INITIAL inventory (main @ b9d5cd1). Delete entries as the stages remove the branches.
 ALLOWED: dict[tuple[str, str], int] = {
-    ("shared/greeting.py", "_asks_name_at_first_contact"): 1,
     ("shared/sender.py", "_reply_sender"): 1,
     ("turn_router.py", "_route_inbound_turn"): 1,
 }
