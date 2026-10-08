@@ -24,7 +24,6 @@ ROOT = Path(workers_pkg.__file__).parent
 # INITIAL inventory (main @ b9d5cd1). Delete entries as the stages remove the branches.
 ALLOWED: dict[tuple[str, str], int] = {
     ("shared/sender.py", "_reply_sender"): 1,
-    ("turn_router.py", "_route_inbound_turn"): 1,
 }
 
 

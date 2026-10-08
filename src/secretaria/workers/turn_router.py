@@ -20,12 +20,6 @@ from secretaria.schemas.webhook import (
     inbound_routing_text,
 )
 from secretaria.services import reminder_hooks
-from secretaria.services.booking_hold import (
-    live_hold_in,
-)
-from secretaria.services.channel_sender import (
-    CHANNEL_BRAIN_MESSAGE,
-)
 from secretaria.services.flow_router import (
     classify_yes_no,
     flows_enabled,
@@ -47,17 +41,14 @@ from secretaria.services.patient_name import (
     parse_patient_name,
 )
 from secretaria.services.pending_identity import (
-    IDENTITY_BACK_ACTION,
-    IDENTITY_CHANGE_EMAIL_ACTION,
-    identity_action_or_none,
     parse_code,
-    parse_email,
 )
 from secretaria.services.reminder_opening import (
     OPEN,
     SKIP_SWITCH_OFF,
     decide_reminder_opening,
 )
+from secretaria.workers.portal.identity_gate import NO_DECISION, run_identity_gate
 from secretaria.workers.shared.channel_policy import policy_for
 from secretaria.workers.shared.context import (
     _ReactivationDirective,
@@ -432,183 +423,20 @@ async def _route_inbound_turn(
     # already the identity. That is the non-regression this
     # feature turns on, so it is expressed as ONE guard at the top
     # rather than as a condition repeated on each branch.
-    if channel == CHANNEL_BRAIN_MESSAGE:
-        # The time-based exit below reuses the product's existing
-        # "quer continuar?" gate. Its answer must be consumed here, before the
-        # LGPD gate: AWAITING_EMAIL lives before consent, while
-        # AWAITING_EMAIL_CODE lives after booking. The generic reactivation
-        # branch further down cannot know that ordering.
-        if conversation.reactivation_origin in (
-            FlowState.AWAITING_EMAIL.value,
-            FlowState.AWAITING_EMAIL_CODE.value,
-        ):
-            origin = conversation.reactivation_origin
-            answer = classify_yes_no(body, tenant)
-            if answer in ("yes", "no"):
-                conversation.reactivation_origin = None
-                return _ReplyContext(
-                    channel=channel,
-                    conversation_id=conversation.id,
-                    tenant_id=tenant.id,
-                    patient_ref=patient_ref,
-                    inbound_body=body or "",
-                    reactivation=_ReactivationDirective(
-                        kind="resume" if answer == "yes" else "reset",
-                        origin=origin,
-                    ),
-                )
-            # Keep the bounded gate armed and repeat the two explicit choices;
-            # an unrelated sentence must not be mistaken for an e-mail or OTP.
-            return _pending_identity_reactivation_offer(
-                conversation,
-                tenant,
-                patient_ref,
-                body,
-                FlowState(origin),
-                channel=channel,
-                pre_consent=patient.lgpd_accepted_at is None,
-            )
-
-        # The time-based floor runs FIRST, before the state is
-        # read, exactly as `_expire_stale_llm_state` runs before
-        # the state is used further down. A visitor who abandoned
-        # the e-mail question an hour ago is not still answering it.
-        pending_origin = conversation.flow_state
-        if _expire_stale_pending_identity_state(conversation, tenant, last_activity_at):
-            logger.info(
-                "conversation_pending_identity_state_expired",
-                conversation_id=str(conversation.id),
-                tenant_id=str(tenant.id),
-                ttl_minutes=pending_identity_ttl_minutes(tenant),
-            )
-            return _pending_identity_reactivation_offer(
-                conversation,
-                tenant,
-                patient_ref,
-                body,
-                pending_origin,
-                channel=channel,
-                pre_consent=patient.lgpd_accepted_at is None,
-            )
-
-        if conversation.flow_state == FlowState.AWAITING_EMAIL_CODE:
-            # A TAP on the code notice's own card, checked BEFORE the six
-            # digits because the two cannot collide and the tap is the more
-            # specific signal: `identity_action_or_none` only ever matches an
-            # id this module minted, and `interactive_reply_id` arrived here
-            # already revalidated against the cards this conversation offered
-            # (`_validated_brain_message_reply_id`), so a forged id is None by
-            # the time it gets here. The LABEL is never consulted — a tap on
-            # "⬅️ Voltar" routes on `identity_back`, not on the arrow.
-            action = identity_action_or_none(interactive_reply_id)
-            if action is not None:
-                # The state moves HERE, inside the inbound transaction, for
-                # the two actions whose destination does not depend on
-                # brain-api. `identity_resend` is the exception: it stays in
-                # AWAITING_EMAIL_CODE and `_send_bot_reply` rewrites it only
-                # once a new challenge is confirmed, exactly as the
-                # reactivation branch does.
-                if action == IDENTITY_CHANGE_EMAIL_ACTION:
-                    conversation.flow_state = FlowState.AWAITING_EMAIL
-                elif action == IDENTITY_BACK_ACTION:
-                    conversation.flow_state = FlowState.IDLE
-                logger.info(
-                    "pending_identity_card_tapped",
-                    action=action,
-                    conversation_id=str(conversation.id),
-                    tenant_id=str(tenant.id),
-                )
-                return _ReplyContext(
-                    channel=channel,
-                    conversation_id=conversation.id,
-                    tenant_id=tenant.id,
-                    patient_ref=patient_ref,
-                    inbound_body=body or "",
-                    identity_action=action,
-                )
-            code = parse_code(body)
-            if code is not None:
-                return _ReplyContext(
-                    channel=channel,
-                    conversation_id=conversation.id,
-                    tenant_id=tenant.id,
-                    patient_ref=patient_ref,
-                    inbound_body=body or "",
-                    pending_code=code,
-                )
-            # Anything that is not six digits. What happens next depends on
-            # whether this wait is a GATE or an OFFER, and the thing that
-            # tells them apart is a live hold.
-            #
-            #   hold  -> the appointment does NOT exist yet and the slot is
-            #            reserved (`services/booking_hold.py`). Dropping the
-            #            state here would silently cost the patient the very
-            #            window they just chose, so the card is repeated with
-            #            the reservation spelled out. Not a trap: the card's
-            #            back button leaves in one tap, and the silence floor
-            #            above still expires the state on the clock.
-            #   none  -> the pre-2026-09-20 behaviour, unchanged: the account
-            #            is an offer, the appointment is already committed, and
-            #            a patient with a different question must not have to
-            #            answer this one first.
-            held = await live_hold_in(session, conversation.id)
-            if held is not None:
-                logger.info(
-                    "conversation_pending_code_reprompted",
-                    conversation_id=str(conversation.id),
-                    tenant_id=str(tenant.id),
-                )
-                return _ReplyContext(
-                    channel=channel,
-                    conversation_id=conversation.id,
-                    tenant_id=tenant.id,
-                    patient_ref=patient_ref,
-                    inbound_body=body or "",
-                    pending_code_reprompt=held,
-                )
-            conversation.flow_state = FlowState.IDLE
-            # TASK-032 R3: leaving the code wait ends a "Marcar outra" booking too.
-            conversation.flow_replaces_appointment_id = None
-            conversation.flow_edit_draft = None
-            logger.info(
-                "conversation_pending_code_abandoned",
-                conversation_id=str(conversation.id),
-                tenant_id=str(tenant.id),
-            )
-
-        elif conversation.flow_state == FlowState.AWAITING_EMAIL:
-            email = parse_email(body)
-            if email is None:
-                # No "skip" affordance, deliberately: the owner's
-                # words fix the e-mail as step 1 of the flow and
-                # say nothing about opting out, and the prompt that
-                # ordered this work says to treat an unsignalled
-                # escape as blocking rather than invent one. The
-                # exit that DOES exist is the silence floor above:
-                # it drops the active state after
-                # `pending_identity_ttl_minutes` and asks whether to
-                # resume. A later consent turn probes brain-api again,
-                # so the pause is bounded without becoming a bypass.
-                return _ReplyContext(
-                    channel=channel,
-                    conversation_id=conversation.id,
-                    tenant_id=tenant.id,
-                    patient_ref=patient_ref,
-                    inbound_body=body or "",
-                    pending_email_invalid=True,
-                )
-            # Keep the state until brain-api ACKs the claim. The wire call is
-            # made after this transaction commits; `_send_bot_reply` clears it
-            # only on CLAIMED. This makes the owner's ordering enforceable:
-            # e-mail claimed -> LGPD, never best-effort claim -> LGPD.
-            return _ReplyContext(
-                channel=channel,
-                conversation_id=conversation.id,
-                tenant_id=tenant.id,
-                patient_ref=patient_ref,
-                inbound_body=body or "",
-                pending_email_claim=email,
-            )
+    if policy.has_inline_identity:
+        gate = await run_identity_gate(
+            session=session,
+            tenant=tenant,
+            patient=patient,
+            patient_ref=patient_ref,
+            channel=channel,
+            conversation=conversation,
+            body=body,
+            interactive_reply_id=interactive_reply_id,
+            last_activity_at=last_activity_at,
+        )
+        if gate is not NO_DECISION:
+            return gate
 
     # --- LGPD consent gate -------------------------------------
     # Sits ABOVE `/menu`, the greeting and normal dispatch, and
