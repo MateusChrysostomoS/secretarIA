@@ -36,9 +36,6 @@ from secretaria.services.booking_scope import (
 from secretaria.services.calendar import (
     CalendarService,
 )
-from secretaria.services.channel_sender import (
-    CHANNEL_BRAIN_MESSAGE,
-)
 from secretaria.services.entitlements_client import get_entitlements
 from secretaria.services.flow_router import (
     LABEL_CANCEL_APPT,
@@ -134,6 +131,7 @@ from secretaria.workers.shared.booking_hold import (
     _is_agent_sentinel,
     _promote_booking_hold,
 )
+from secretaria.workers.shared.channel_policy import policy_for
 from secretaria.workers.shared.context import (
     _ReplyContext,
 )
@@ -262,7 +260,9 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     rate-limit against and its own dedicated handler, so it is left alone.
     """
     token = begin_turn()
-    typing_on = reply.channel == CHANNEL_BRAIN_MESSAGE and reply.conversation_id is not None
+    typing_on = (
+        policy_for(reply.channel).shows_typing_indicator and reply.conversation_id is not None
+    )
     typing_turn_id = uuid4().hex if typing_on else None
     cause = "silent_return"
     try:
@@ -733,7 +733,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
         # the next clinic this ACCOUNT opens (`report_name`); best effort, after
         # the commit, so a failure costs one future question and nothing now.
         if (
-            reply.channel == CHANNEL_BRAIN_MESSAGE
+            policy_for(reply.channel).reports_name_to_account
             and reply.tenant_id is not None
             and (patient_name or "").strip()
         ):

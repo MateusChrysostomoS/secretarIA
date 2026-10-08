@@ -56,6 +56,7 @@ from secretaria.services.tenant_config import (
     professional_appointment_types,
     professional_business_hours,
 )
+from secretaria.workers.shared.channel_policy import policy_for
 from secretaria.workers.shared.context import (
     _ReplyContext,
 )
@@ -152,7 +153,7 @@ def _first_contact_reply(
         greeting_buttons=[],
         send_consent_notice=not ask_name,
         send_name_request=ask_name,
-        probe_pending_identity=(channel == CHANNEL_BRAIN_MESSAGE),
+        probe_pending_identity=policy_for(channel).has_inline_identity,
     )
 
 def _select_greeting(
@@ -185,7 +186,7 @@ def _select_greeting(
     return render_greeting(
         tenant.clinic_name,
         _fit_clinic_description(tenant),
-        patient_name=patient.name if patient.channel == CHANNEL_BRAIN_MESSAGE else None,
+        patient_name=patient.name if policy_for(patient.channel).greets_by_name else None,
     )
 
 def _fit_clinic_description(tenant: Tenant) -> str:

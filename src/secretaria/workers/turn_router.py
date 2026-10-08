@@ -58,6 +58,7 @@ from secretaria.services.reminder_opening import (
     SKIP_SWITCH_OFF,
     decide_reminder_opening,
 )
+from secretaria.workers.shared.channel_policy import policy_for
 from secretaria.workers.shared.context import (
     _ReactivationDirective,
     _ReplyContext,
@@ -199,9 +200,10 @@ async def _route_inbound_turn(
     # console / patient transcript receives a fixed redaction. This check is
     # deliberately state- and channel-bound so an ordinary six-digit message
     # elsewhere keeps its original meaning and display.
+    policy = policy_for(channel)
     persisted_body = stored_body
     if (
-        channel == CHANNEL_BRAIN_MESSAGE
+        policy.redacts_email_code
         and conversation.flow_state == FlowState.AWAITING_EMAIL_CODE
         and parse_code(body) is not None
     ):
@@ -220,7 +222,7 @@ async def _route_inbound_turn(
             # Brain-Message: reaching this row IS delivery to the clinic - same
             # INSERT, same now() as `created_at` (services/message_status.py).
             # WhatsApp inbound keeps NULL: its receipt is the patient's, not ours.
-            delivered_at=func.now() if channel == CHANNEL_BRAIN_MESSAGE else None,
+            delivered_at=func.now() if policy.stamps_delivery_on_inbound else None,
         )
     )
 
@@ -649,11 +651,7 @@ async def _route_inbound_turn(
                     legal_basis=(
                         "consentimento (art. 7º, I) — aceite explícito dos "
                         "Termos de Uso e Política de Privacidade "
-                        + (
-                            "no Portal Brain-Message"
-                            if channel == CHANNEL_BRAIN_MESSAGE
-                            else "no WhatsApp"
-                        )
+                        + policy.consent_scope
                     ),
                 )
             )
@@ -707,7 +705,7 @@ async def _route_inbound_turn(
             # consent while brain-api still owns the authoritative visit
             # state. Re-probe on Brain-Message so "Não" pauses the flow without
             # ever becoming a hidden way to skip the required e-mail step.
-            probe_pending_identity=(channel == CHANNEL_BRAIN_MESSAGE),
+            probe_pending_identity=policy.has_inline_identity,
         )
 
     if is_menu_command(body):

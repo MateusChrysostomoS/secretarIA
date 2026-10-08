@@ -39,7 +39,6 @@ from secretaria.services.booking_draft import (
 from secretaria.services.booking_hold import BookingGate
 from secretaria.services.booking_scope import BOOKING_TOPOLOGY_MULTI, booking_topology
 from secretaria.services.calendar import CalendarService
-from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.flow_router import (
     ATTENDEE_STEPS,
     STEP_AWAITING_INSURANCE,
@@ -51,6 +50,7 @@ from secretaria.services.flow_router import (
 from secretaria.services.insurance_catalog import load_tenant_insurance
 from secretaria.services.service_catalog import load_service_catalog
 from secretaria.services.tenant_config import list_active_professionals
+from secretaria.workers.shared.channel_policy import policy_for
 from secretaria.workers.shared.context import _ReplyContext
 from secretaria.workers.shared.greeting import _flow_professionals, _flow_tenant_snapshot
 from secretaria.workers.shared.llm_context import _appointment_calendar
@@ -157,7 +157,7 @@ def _turn_booking_gate(reply: _ReplyContext, tenant: Tenant | None) -> BookingGa
         conversation_id=reply.conversation_id,
         patient_id=None,
         external_id=reply.patient_ref,
-        armed=reply.channel == CHANNEL_BRAIN_MESSAGE,
+        armed=policy_for(reply.channel).arms_booking_gate,
     )
 
 
