@@ -284,7 +284,7 @@ async def _deliver_portal(job: ReminderJob) -> DeliveryOutcome:
         return DeliveryOutcome(
             ok=False, channel=REMINDER_CHANNEL_EMAIL, error_code="no_email", permanent=True
         )
-    link = portal_conversation_link(job.tenant.id)
+    link = portal_conversation_link(job.tenant.id, job.reminder_id)
     variables = {
         "clinic_name": job.tenant.clinic_name,
         "when": local_start(job.content).strftime("%d/%m/%Y às %H:%M"),

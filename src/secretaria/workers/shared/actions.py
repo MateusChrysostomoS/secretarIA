@@ -20,7 +20,7 @@ from secretaria.models import (
     is_live_status,
 )
 from secretaria.services import reminder_hooks
-from secretaria.services.appointment_edit import EditContext
+from secretaria.services.appointment_edit import EditContext, EditDraft
 from secretaria.services.appointment_edit_flow import enter_edit_menu
 from secretaria.services.appointment_status import (
     SOURCE_BUTTON,
@@ -87,6 +87,7 @@ logger = get_logger(__name__)
 
 _APPOINTMENT_NOT_FOUND_TEXT = "Não encontrei essa consulta."
 
+
 async def _calendar_for_appointment(
     session: AsyncSession,
     tenant: Tenant,
@@ -123,6 +124,7 @@ async def _calendar_for_appointment(
             )
             return None
     return CalendarService.from_tenant_config(tenant_config) if tenant_config else None
+
 
 async def _execute_appointment_cancel(
     session: AsyncSession,
@@ -180,6 +182,7 @@ async def _execute_appointment_cancel(
             appointment_id=str(appointment.id),
         )
     return text
+
 
 async def _handle_action_button(
     reply: _ReplyContext, action: str, appointment_id: str, redis=None
@@ -338,6 +341,20 @@ async def _handle_action_button(
             # TASK-032 R6: "Alterar Dados" on a reminder (the row was checked against this
             # patient by handle_reminder_button). A fresh draft + the menu; nothing changes yet.
             paid, blocked = await edit_guards(session, tenant, appointment)
+            existing = (
+                EditDraft.from_json(conversation.flow_edit_draft)
+                if conversation.flow_state == FlowState.EDIT_BOOKING
+                else None
+            )
+            if existing is not None and existing.appointment_id != str(appointment.id):
+                await client.send_text_message(
+                    to=reply.patient_ref,
+                    body=(
+                        "Você está alterando outra consulta. "
+                        "Termine ou cancele essa edição antes de alterar esta."
+                    ),
+                )
+                return
             appt_view = {
                 "id": str(appointment.id),
                 "appointment_type": appointment.appointment_type,
@@ -353,7 +370,10 @@ async def _handle_action_button(
                 tenant,
                 waba_token,
                 enter_edit_menu(
-                    tenant, appt_view, EditContext(paid_deposit=paid, reschedule_blocked=blocked)
+                    tenant,
+                    appt_view,
+                    EditContext(paid_deposit=paid, reschedule_blocked=blocked),
+                    draft=existing,
                 ),
             )
 
@@ -583,6 +603,7 @@ async def _handle_action_button(
             waba_token=handoff_waba_token,
         )
 
+
 # Fixed pt-BR degrade per known greeting-button action, for a tenant with
 # flows disabled (flow_router.flows_enabled) - see
 # _handle_greeting_button_unavailable. There is no non-flow equivalent to
@@ -602,6 +623,7 @@ _GREETING_ACTION_UNAVAILABLE_DEFAULT = (
     "Não consigo processar esse pedido automaticamente. "
     "Entre em contato com a nossa equipe, por favor."
 )
+
 
 async def _handle_greeting_button_unavailable(reply: _ReplyContext, suffix: str) -> None:
     """Deterministic degrade for a greeting-button tap a flows-disabled

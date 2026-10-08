@@ -305,9 +305,17 @@ async def test_a_change_during_address_lookup_prevents_a_stale_email(
                     update(Tenant).where(Tenant.id == world.tenant.id).values(is_active=False)
                 )
             else:
+                doctor_id = uuid4()
+                if alter == "doctor":
+                    session.add(
+                        Professional(
+                            id=doctor_id, tenant_id=world.tenant.id, name="QA replacement doctor"
+                        )
+                    )
+                    await session.flush()
                 values = {
                     "cancelled": {"status": AppointmentStatus.CANCELLED},
-                    "doctor": {"professional_id": uuid4()},
+                    "doctor": {"professional_id": doctor_id},
                     "insurance": {"insurance": "Correção da clínica"},
                 }[alter]
                 await session.execute(

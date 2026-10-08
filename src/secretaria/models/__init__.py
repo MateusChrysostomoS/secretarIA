@@ -32,6 +32,7 @@ from secretaria.models.processed_asaas_event import ProcessedAsaasEvent
 from secretaria.models.processed_event import ProcessedEvent
 from secretaria.models.professional import Professional
 from secretaria.models.professional_credentials import ProfessionalCredentials
+from secretaria.models.professional_edit_notice import ProfessionalEditNotice
 from secretaria.models.rebooking_decline import RebookingDecline
 from secretaria.models.service import Service
 from secretaria.models.tenant import Tenant
@@ -65,6 +66,7 @@ __all__ = [
     "ProcessedAsaasEvent",
     "ProcessedEvent",
     "Professional",
+    "ProfessionalEditNotice",
     "RebookingDecline",
     "ProfessionalCredentials",
     "ProfessionalInsurancePlan",

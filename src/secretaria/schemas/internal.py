@@ -127,6 +127,14 @@ class BrainMessageInboundForm(BrainMessageInbound):
     dedupe_id: None = None
 
 
+class ConversationEntryContext(BaseModel):
+    """Untrusted presentation intent; never a patient/tenant authorization."""
+
+    model_config = ConfigDict(extra="forbid")
+    source: Literal["navigation", "clinic_link", "reminder_link"] = "navigation"
+    reminder_id: UUID | None = None
+
+
 class BrainMessageOpen(BaseModel):
     """`POST /internal/brain-message/open` — start the conversation, unasked.
 
@@ -151,6 +159,7 @@ class BrainMessageOpen(BaseModel):
     # ever used to fill a patient row that has no name yet — never to overwrite
     # one, and never required.
     patient_name: str | None = Field(default=None, max_length=255)
+    entry_context: ConversationEntryContext | None = None
 
 
 class BrainMessageAck(BaseModel):

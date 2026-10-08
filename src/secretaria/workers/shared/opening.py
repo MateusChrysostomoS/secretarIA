@@ -24,6 +24,7 @@ dispatches through the reply's channel like every other turn.
 import enum
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -39,6 +40,7 @@ from secretaria.models import (
     Patient,
     Professional,
     Tenant,
+    is_live_status,
 )
 from secretaria.services import reminder_hooks
 from secretaria.services.flow_router import (
@@ -56,12 +58,14 @@ from secretaria.services.reminder_text import (
     LABEL_CANCEL,
     LABEL_CONFIRM,
     LABEL_EDIT,
+    REMINDER_TERMINAL_TEXT,
     build_reminder_body,
     load_reminder_content,
 )
 from secretaria.workers.shared.context import (
     _ReplyContext,
 )
+from secretaria.workers.shared.dispatch import _send_plain_reply
 from secretaria.workers.shared.flow_runner import (
     _apply_flow_result,
 )
@@ -138,7 +142,8 @@ async def resolve_opening_message(conversation_id: UUID, tenant: Tenant) -> Open
     async with async_session_factory() as session:
         conversation = await session.get(Conversation, conversation_id)
         if (
-            conversation is None or conversation.patient_id is None
+            conversation is None
+            or conversation.patient_id is None
             or conversation.tenant_id != tenant.id
         ):
             return None
@@ -156,15 +161,18 @@ async def resolve_opening_message(conversation_id: UUID, tenant: Tenant) -> Open
                 appointment = await session.scalar(
                     select(Appointment).where(
                         Appointment.id == UUID(context.future_appointments[0]["id"]),
-                        Appointment.tenant_id == tenant.id, Appointment.patient_id == patient.id,
+                        Appointment.tenant_id == tenant.id,
+                        Appointment.patient_id == patient.id,
                     )
                 )
                 if appointment is None:
                     return None
                 content = await load_reminder_content(session, tenant, appointment)
                 return OpeningMessage(
-                    kind=OpeningKind.UPCOMING, body=build_reminder_body(content),
-                    labels=[LABEL_CONFIRM, LABEL_CANCEL, LABEL_EDIT], appointment_id=appointment.id,
+                    kind=OpeningKind.UPCOMING,
+                    body=build_reminder_body(content),
+                    labels=[LABEL_CONFIRM, LABEL_CANCEL, LABEL_EDIT],
+                    appointment_id=appointment.id,
                 )
             data = await _load_upcoming_greeting_data(session, tenant, context.future_appointments)
             body = _adapt_greeting_has_upcoming(
@@ -199,6 +207,7 @@ async def _send_context_opening(
     waba_token: str | None = None,
     source: str = "portal_entry",
     still_current: Callable[[], Awaitable[bool]] | None = None,
+    appointment_id: UUID | None = None,
 ) -> bool | None:
     """Send the context-aware first message; True when it was rendered.
 
@@ -215,7 +224,35 @@ async def _send_context_opening(
     """
     if tenant is None:
         return False
-    opening = await resolve_opening_message(reply.conversation_id, tenant)
+    if appointment_id is not None:
+        async with async_session_factory() as session:
+            target = await session.scalar(
+                select(Appointment)
+                .join(Conversation, Conversation.patient_id == Appointment.patient_id)
+                .where(
+                    Appointment.id == appointment_id,
+                    Appointment.tenant_id == tenant.id,
+                    Conversation.id == reply.conversation_id,
+                    Conversation.tenant_id == tenant.id,
+                )
+            )
+            if target is None:
+                return False
+            if not is_live_status(target.status) or _as_utc(target.start_at) <= datetime.now(UTC):
+                if still_current is not None and not await still_current():
+                    return None
+                return await _send_plain_reply(
+                    reply,
+                    tenant=tenant,
+                    waba_token=waba_token,
+                    body=REMINDER_TERMINAL_TEXT,
+                    event="reminder_entry_terminal",
+                )
+    opening = (
+        OpeningMessage(kind=OpeningKind.UPCOMING, body="", appointment_id=appointment_id)
+        if appointment_id is not None
+        else await resolve_opening_message(reply.conversation_id, tenant)
+    )
     if opening is None:
         logger.warning(
             "conversation_opening_unresolved",
@@ -233,17 +270,29 @@ async def _send_context_opening(
     if opening.kind == OpeningKind.UPCOMING and opening.appointment_id is not None:
         # Same body, row ids, transport and action handlers as the cron reminder.
         card_reply = replace(
-            reply, reminder_opening_appointment_id=opening.appointment_id,
+            reply,
+            reminder_opening_appointment_id=opening.appointment_id,
             reminder_opening_first_contact=True,
         )
         # Persist before delivery, like every flow result. A patient can tap the
         # card as soon as it lands; never clear that action with a later MENU write.
-        await _apply_flow_result(
-            reply, FlowRouterResult(action="reply", flow_state=FlowState.MENU),
-            patient_wa, redis=redis, tenant=tenant, waba_token=waba_token,
-        )
+        async with async_session_factory() as session:
+            conversation = await session.get(Conversation, reply.conversation_id)
+            editing = conversation is not None and conversation.flow_state == FlowState.EDIT_BOOKING
+        if not editing and source not in ("reminder_link", "clinic_link"):
+            await _apply_flow_result(
+                reply,
+                FlowRouterResult(action="reply", flow_state=FlowState.MENU),
+                patient_wa,
+                redis=redis,
+                tenant=tenant,
+                waba_token=waba_token,
+            )
         return await _send_reminder_opening(
-            card_reply, tenant=tenant, waba_token=waba_token, still_current=still_current,
+            card_reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            still_current=still_current,
         )
     rendered = await _apply_flow_result(
         reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token

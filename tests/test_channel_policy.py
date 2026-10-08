@@ -24,6 +24,7 @@ def test_portal_policy_values() -> None:
     assert PORTAL.reports_name_to_account is True
     assert PORTAL.shows_typing_indicator is True
     assert PORTAL.consent_scope == "no Portal Brain-Message"
+    assert PORTAL.requires_whatsapp_activation is False
 
 
 def test_whatsapp_policy_values() -> None:
@@ -36,6 +37,7 @@ def test_whatsapp_policy_values() -> None:
     assert WHATSAPP.reports_name_to_account is False
     assert WHATSAPP.shows_typing_indicator is False
     assert WHATSAPP.consent_scope == "no WhatsApp"
+    assert WHATSAPP.requires_whatsapp_activation is True
 
 
 @pytest.mark.parametrize("channel", [None, "", "telegram", "WHATSAPP"])

@@ -121,6 +121,7 @@ async def _dispatch_bubbles(
         )
     return sent_count
 
+
 # Semantic payload-id suffix for each of the greeting's FIXED, product-defined
 # action buttons (see _greeting_buttons_for) - used by _send_greeting below and
 # read back by schemas/webhook.py::extract_greeting_button. Deliberately only
@@ -141,6 +142,7 @@ _GREETING_ACTION_IDS: dict[str, str] = {
 # short-circuit deliberately lets through: "Outro" promises the LLM, and the
 # flows-disabled cohort's normal path IS the LLM.
 _GREETING_LLM_ESCAPE_SUFFIX = _GREETING_ACTION_IDS[LABEL_OTHER]
+
 
 async def _send_greeting(
     reply: _ReplyContext,
@@ -230,6 +232,7 @@ async def _send_greeting(
         await _record_outbound(reply.conversation_id, body, result, interactive=interactive)
     logger.info("worker_greeting_sent", conversation_id=str(reply.conversation_id))
 
+
 async def _send_consent_notice(
     reply: _ReplyContext,
     *,
@@ -292,6 +295,7 @@ async def _send_consent_notice(
         )
     logger.info("worker_consent_notice_sent", conversation_id=str(reply.conversation_id))
 
+
 async def _send_plain_reply(
     reply: _ReplyContext,
     *,
@@ -299,7 +303,7 @@ async def _send_plain_reply(
     waba_token: str | None,
     body: str,
     event: str,
-) -> None:
+) -> bool:
     """Send one button-free message on this turn's channel. Best-effort.
 
     The text-only twin of `_send_consent_notice`: same sender resolution, same
@@ -319,7 +323,7 @@ async def _send_plain_reply(
             conversation_id=str(reply.conversation_id),
             tenant_id=str(tenant.id),
         )
-        return
+        return False
     try:
         result = await client.send_text_message(to=reply.patient_ref, body=body)
     except Exception as exc:
@@ -328,10 +332,12 @@ async def _send_plain_reply(
             error=str(exc),
             conversation_id=str(reply.conversation_id),
         )
-        return
+        return False
     if reply.conversation_id is not None and not sender_persists_outbound(client):
         await _record_outbound(reply.conversation_id, body, result)
     logger.info(event, conversation_id=str(reply.conversation_id))
+    return True
+
 
 async def _send_buttons_reply(
     reply: _ReplyContext,
@@ -341,7 +347,7 @@ async def _send_buttons_reply(
     body: str,
     buttons: list[tuple[str, str]],
     event: str,
-) -> None:
+) -> bool:
     """Send one CARD (body + tappable options) on this turn's channel. Best-effort.
 
     The button-carrying twin of `_send_plain_reply`, with the same sender
@@ -364,7 +370,7 @@ async def _send_buttons_reply(
             conversation_id=str(reply.conversation_id),
             tenant_id=str(tenant.id),
         )
-        return
+        return False
     try:
         result = await client.send_buttons(to=reply.patient_ref, body=body, buttons=buttons)
     except Exception as exc:
@@ -378,7 +384,7 @@ async def _send_buttons_reply(
             error_type=type(exc).__name__,
             conversation_id=str(reply.conversation_id),
         )
-        return
+        return False
     if reply.conversation_id is not None and not sender_persists_outbound(client):
         await _record_outbound(
             reply.conversation_id,
@@ -387,3 +393,4 @@ async def _send_buttons_reply(
             interactive=interactive_buttons_record(body, buttons),
         )
     logger.info(event, conversation_id=str(reply.conversation_id))
+    return True

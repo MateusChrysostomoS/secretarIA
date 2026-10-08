@@ -31,6 +31,7 @@ from secretaria.workers.reminder_engine import (
     reconcile_appointment_reminders,
 )
 from secretaria.workers.shared.appointment_edit_notification import (
+    dispatch_pending_professional_edits,
     send_professional_edit_notification,
 )
 from secretaria.workers.tasks import (
@@ -173,6 +174,7 @@ class WorkerSettings:
         # overlapping tick harmless. The reconcile plans rows a crash or a fresh
         # switch-ON left missing (the backfill), offset from every other minute.
         cron(process_appointment_reminders, minute=set(range(60))),
+        cron(dispatch_pending_professional_edits, minute=set(range(60))),
         cron(reconcile_appointment_reminders, minute={4, 14, 24, 34, 44, 54}),
         cron(run_onboarding_nudges, minute={10}),
         cron(run_patient_usage_metering, hour={3}, minute={30}),

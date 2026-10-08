@@ -376,6 +376,7 @@ def test_worker_registry_is_complete() -> None:
         "cron:check_handover_timeouts",
         "cron:send_appointment_reminders",
         "cron:process_appointment_reminders",
+        "cron:dispatch_pending_professional_edits",
         "cron:reconcile_appointment_reminders",
         "cron:run_onboarding_nudges",
         "cron:run_patient_usage_metering",
@@ -397,7 +398,7 @@ async def test_worker_startup_logs_identity_and_registry(
         assert event == "worker_started"
         assert {"build_sha", "built_at", "alembic_head", "source_fingerprint"} <= set(fields)
         assert len(fields["functions"]) == 14
-        assert len(fields["cron_jobs"]) == 7
+        assert len(fields["cron_jobs"]) == 8
 
         rendered = json.dumps(fields, default=str)
         for secret in configured_secrets():

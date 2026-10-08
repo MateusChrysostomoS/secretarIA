@@ -185,9 +185,15 @@ def _more_result(draft: ae.EditDraft, ctx: ae.EditContext) -> fr.FlowRouterResul
     return _result(draft, [fr.MenuBubble(body=ae.EDIT_MORE_BODY, labels=labels)], fr.STEP_EDIT_MORE)
 
 
-def enter_edit_menu(tenant, appt: dict, ctx: ae.EditContext | None = None) -> fr.FlowRouterResult:
+def enter_edit_menu(
+    tenant,
+    appt: dict,
+    ctx: ae.EditContext | None = None,
+    *,
+    draft: ae.EditDraft | None = None,
+) -> fr.FlowRouterResult:
     """The entry from the reminder's "Alterar Dados": a fresh draft + the 5-option menu."""
-    draft = ae.EditDraft.from_appointment(appt, _tz(tenant))
+    draft = draft or ae.EditDraft.from_appointment(appt, _tz(tenant))
     return _menu_result(draft, ctx or ae.EditContext())
 
 

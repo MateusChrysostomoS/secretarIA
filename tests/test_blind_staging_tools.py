@@ -449,18 +449,21 @@ async def _sentinel(monkeypatch, tool, args, *, tenant_id, conversation_id) -> s
 
 
 async def test_create_lands_exactly_like_the_draft_with_day_and_time(db, roster, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
     monkeypatch.setattr(store, "async_session_factory", db)
+    day = (datetime.now(UTC) + timedelta(days=7)).date().isoformat()
     ids = {"tenant_id": uuid4(), "conversation_id": uuid4()}
     staged = await _sentinel(
         monkeypatch,
         create_event_v2,
-        {"start": "2026-10-08T10:00", "service": "Consulta", "professional": "Dra. Ana"},
+        {"start": f"{day}T10:00", "service": "Consulta", "professional": "Dra. Ana"},
         **ids,
     )
     drafted = await _sentinel(
         monkeypatch,
         set_booking_draft_v2,
-        {"service": "Consulta", "professional": "Dra. Ana", "day": "2026-10-08", "time": "10:00"},
+        {"service": "Consulta", "professional": "Dra. Ana", "day": day, "time": "10:00"},
         **ids,
     )
     assert staged.startswith(graph.BOOKING_DRAFT_SENTINEL_PREFIX)

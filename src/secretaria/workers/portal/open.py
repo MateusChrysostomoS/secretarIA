@@ -11,6 +11,8 @@ from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import (
+    Appointment,
+    AppointmentReminder,
     ConsentEvent,
     Conversation,
     FlowState,
@@ -19,12 +21,16 @@ from secretaria.models import (
     MessageDirection,
     Patient,
     Tenant,
+    is_live_status,
 )
+from secretaria.schemas.internal import ConversationEntryContext
+from secretaria.services import reminder_hooks
 from secretaria.services.channel_sender import (
     CHANNEL_BRAIN_MESSAGE,
 )
 from secretaria.services.entitlements_client import get_entitlements
 from secretaria.services.flow_router import reactivation_gap_minutes
+from secretaria.services.reminder_text import REMINDER_TERMINAL_TEXT
 from secretaria.workers.orchestrator import (
     _send_bot_reply,
 )
@@ -68,6 +74,7 @@ def _open_ledger_key(tenant_id: UUID, external_id: str) -> str:
     """
     return f"brain_message_open:{tenant_id}:{external_id}"
 
+
 async def _portal_conversation_has(
     tenant_id: UUID, external_id: str, *, direction: MessageDirection | None = None
 ) -> bool:
@@ -98,6 +105,7 @@ async def _portal_conversation_has(
         stmt = stmt.where(Message.direction == direction)
     async with async_session_factory() as session:
         return await session.scalar(stmt.limit(1)) is not None
+
 
 async def _open_brain_message_conversation(
     *,
@@ -206,6 +214,7 @@ async def _open_brain_message_conversation(
             logger.info("brain_message_open_race", tenant_id=str(tenant_id))
             return None
 
+
 async def process_brain_message_open(
     ctx: dict,
     tenant_id: str,
@@ -300,7 +309,9 @@ class _EntryDecision:
     reply: _ReplyContext
     tenant: Tenant
     ledger_key: str
-    last_message_id: UUID
+    last_message_id: UUID | None
+    appointment_id: UUID | None = None
+    source: str = "portal_entry"
 
 
 async def _latest_message(session, conversation_id: UUID):
@@ -315,7 +326,11 @@ async def _latest_message(session, conversation_id: UUID):
 
 
 async def _brain_message_entry_decision(
-    tenant_id: UUID, external_id: str, *, now: datetime | None = None
+    tenant_id: UUID,
+    external_id: str,
+    *,
+    now: datetime | None = None,
+    entry_context: ConversationEntryContext | None = None,
 ) -> _EntryDecision | None:
     """Should a patient who ENTERS an already-started conversation be spoken to?
 
@@ -336,10 +351,15 @@ async def _brain_message_entry_decision(
     """
     now = now or datetime.now(UTC)
     settings = get_settings()
+    # Only a reminder link overrides the silence rules. `clinic_link` is sent
+    # by the frontend on every `convite=` URL load (F5, back to the clinic), so
+    # it must keep the ordinary navigation guards.
+    explicit = entry_context is not None and entry_context.source == "reminder_link"
     async with async_session_factory() as session:
         tenant = await session.get(Tenant, tenant_id)
         if tenant is None:
             return None
+        explicit = explicit and reminder_hooks.enabled_for(tenant)
         patient = await session.scalar(
             select(Patient).where(
                 Patient.tenant_id == tenant_id,
@@ -357,9 +377,9 @@ async def _brain_message_entry_decision(
         if conversation is None:
             return None
         latest = await _latest_message(session, conversation.id)
-        if latest is None:
+        if latest is None and not explicit:
             return None
-        age = now - _as_utc(latest.created_at)
+        age = now - _as_utc(latest.created_at) if latest is not None else timedelta(0)
         flow_running = conversation.flow_state not in (FlowState.IDLE, FlowState.MENU)
         reason = None
         if conversation.handover_state == HandoverState.HUMAN_ACTIVE:
@@ -371,9 +391,13 @@ async def _brain_message_entry_decision(
             # step is required (the clinic needs the name for the event, the
             # e-mail and the PreCheck hand-off) and has its own resume offer.
             reason = "identity_step_pending"
-        elif age < timedelta(minutes=settings.PORTAL_ENTRY_QUIET_MINUTES):
+        elif not explicit and age < timedelta(minutes=settings.PORTAL_ENTRY_QUIET_MINUTES):
             reason = "recent_activity"
-        elif flow_running and age < timedelta(minutes=reactivation_gap_minutes(tenant)):
+        elif (
+            not explicit
+            and flow_running
+            and age < timedelta(minutes=reactivation_gap_minutes(tenant))
+        ):
             reason = "flow_in_progress"
         if reason is not None:
             logger.info(
@@ -383,6 +407,67 @@ async def _brain_message_entry_decision(
                 reason=reason,
             )
             return None
+        appointment_id = None
+        if explicit and entry_context.source == "reminder_link":
+            # The opaque row is only context. Ownership is checked using the
+            # patient resolved from the authenticated gateway identity.
+            appointment = await session.scalar(
+                select(Appointment)
+                .join(AppointmentReminder, AppointmentReminder.appointment_id == Appointment.id)
+                .where(
+                    AppointmentReminder.id == entry_context.reminder_id,
+                    AppointmentReminder.tenant_id == tenant_id,
+                    Appointment.tenant_id == tenant_id,
+                    Appointment.patient_id == patient.id,
+                )
+            )
+            if appointment is None:
+                logger.info(
+                    "brain_message_enter_silent",
+                    reason="invalid_or_terminal_reminder",
+                    conversation_id=str(conversation.id),
+                )
+                return None
+            appointment_id = appointment.id
+        if explicit and latest is not None:
+            message = await session.get(Message, latest.id)
+            # Keep the current visible card on reload. If it has fallen out
+            # of the latest page/tap window, present a new one once.
+            if message is not None and isinstance(message.interactive, dict):
+                for option in message.interactive.get("options", []):
+                    raw = option.get("id", "")
+                    if raw.startswith("remedit|"):
+                        try:
+                            row_id = UUID(raw.split("|", 1)[1])
+                        except ValueError:
+                            continue
+                        row = await session.get(AppointmentReminder, row_id)
+                        current = (
+                            await session.get(Appointment, row.appointment_id)
+                            if row is not None
+                            else None
+                        )
+                        if (
+                            row is not None
+                            and current is not None
+                            and current.patient_id == patient.id
+                            and current.tenant_id == tenant_id
+                            and is_live_status(current.status)
+                            and _as_utc(current.start_at) > now
+                            and _as_utc(current.start_at) == _as_utc(row.appointment_start_at)
+                            and row.tenant_id == tenant_id
+                            and row.invalidated_at is None
+                            and (appointment_id is None or row.appointment_id == appointment_id)
+                        ):
+                            return None
+            if (
+                appointment_id is not None
+                and message is not None
+                and message.body == REMINDER_TERMINAL_TEXT
+                and (not is_live_status(appointment.status) or _as_utc(appointment.start_at) <= now)
+            ):
+                return None
+        latest_id = latest.id if latest is not None else None
         return _EntryDecision(
             reply=_ReplyContext(
                 channel=CHANNEL_BRAIN_MESSAGE,
@@ -392,12 +477,24 @@ async def _brain_message_entry_decision(
                 inbound_body="",
             ),
             tenant=tenant,
-            ledger_key=_enter_ledger_key(conversation.id, latest.id),
-            last_message_id=latest.id,
+            ledger_key=(
+                f"reminder_entry:{conversation.id}:"
+                f"{entry_context.reminder_id or 'clinic'}:{latest_id}"
+                if explicit
+                else _enter_ledger_key(conversation.id, latest_id)
+            ),
+            last_message_id=latest_id,
+            appointment_id=appointment_id,
+            source=entry_context.source if explicit else "portal_entry",
         )
 
 
-async def process_brain_message_enter(ctx: dict, tenant_id: str, external_id: str) -> None:
+async def process_brain_message_enter(
+    ctx: dict,
+    tenant_id: str,
+    external_id: str,
+    entry_context: dict | None = None,
+) -> None:
     """arq job: a known patient entered a conversation that already has history.
 
     The sibling of `process_brain_message_open` for the case that one refuses
@@ -407,8 +504,19 @@ async def process_brain_message_enter(ctx: dict, tenant_id: str, external_id: st
     the claim back when nothing reached the patient.
     """
     tenant_uuid = UUID(tenant_id)
-    decision = await _brain_message_entry_decision(tenant_uuid, external_id)
+    context = (
+        ConversationEntryContext.model_validate(entry_context)
+        if entry_context is not None
+        else None
+    )
+    decision = await _brain_message_entry_decision(tenant_uuid, external_id, entry_context=context)
     if decision is None:
+        if (
+            context is not None
+            and context.source == "clinic_link"
+            and not await _portal_conversation_has(tenant_uuid, external_id)
+        ):
+            await process_brain_message_open(ctx, tenant_id, external_id)
         return
     summary = await get_entitlements(tenant_uuid, ctx.get("redis"))
     if summary is None or not (summary.active and summary.secretaria_enabled):
@@ -423,13 +531,12 @@ async def process_brain_message_enter(ctx: dict, tenant_id: str, external_id: st
         logger.info("brain_message_enter_already_claimed", tenant_id=tenant_id)
         return
 
-
     async def _still_current() -> bool:
         # Asked immediately before the write: a turn that landed meanwhile (a
         # tap on an older card as the page loaded) wins, never the opening.
         async with async_session_factory() as session:
             latest = await _latest_message(session, decision.reply.conversation_id)
-        return latest is not None and latest.id == decision.last_message_id
+        return (latest.id if latest is not None else None) == decision.last_message_id
 
     try:
         rendered = await _send_context_opening(
@@ -437,8 +544,9 @@ async def process_brain_message_enter(ctx: dict, tenant_id: str, external_id: st
             decision.tenant,
             external_id,
             redis=ctx.get("redis"),
-            source="portal_entry",
+            source=decision.source,
             still_current=_still_current,
+            **({"appointment_id": decision.appointment_id} if decision.appointment_id else {}),
         )
     except Exception:
         # Same key on the next entry (nothing new was written): leaving it
