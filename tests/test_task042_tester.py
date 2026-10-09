@@ -38,6 +38,7 @@ from secretaria.services.pending_identity import (
 )
 from secretaria.services.visit_merge import discard_empty_visit
 from secretaria.workers import tasks
+from secretaria.workers.portal import identity_gate
 from tests.test_patient_name_step import (  # noqa: F401 - fixtures + harness
     EMAIL,
     EMAIL_MASKED,
@@ -149,17 +150,25 @@ async def test_j_the_wait_still_has_a_clock_exit(db, calls) -> None:
     assert (await _outbound(db, tenant))[-1] != CARD
 
 
-async def test_j_the_log_carries_only_kind_and_length(db, calls, capsys) -> None:
+async def test_j_the_log_carries_only_kind_and_length(db, calls, monkeypatch) -> None:
+    # A spy on the module's logger, not capsys: setup_logging() caches each logger
+    # with the stdout live on first use, so an earlier app-importing test hid the line.
     tenant = await _in_known_account_code_wait(db, calls)
-    capsys.readouterr()
+    logs: list[tuple[str, dict]] = []
+
+    class _Spy:
+        def __getattr__(self, _level):
+            return lambda event, **fields: logs.append((event, fields))
+
+    monkeypatch.setattr(identity_gate, "logger", _Spy())
 
     await _bm_turn(tenant, "meu cpf 123.456.789-00")
 
-    out = (lambda c: c.out + c.err)(capsys.readouterr())
-    assert "conversation_pending_code_unrecognized" in out
-    assert "kind" in out and "length" in out
+    [fields] = [f for e, f in logs if e == "conversation_pending_code_unrecognized"]
+    assert "kind" in fields and "length" in fields
+    rendered = repr(logs)
     for leaked in ("cpf", "123.456", "789-00"):
-        assert leaked not in out, "the text of the message reached the log"
+        assert leaked not in rendered, "the text of the message reached the log"
 
 
 async def test_j_the_post_consent_code_wait_keeps_its_old_behaviour_and_abandons(db, calls) -> None:
