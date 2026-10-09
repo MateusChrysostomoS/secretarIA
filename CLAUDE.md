@@ -2,6 +2,10 @@
 
 Plano preparado (2026-10-08): [avisos ao médico, entrada por lembrete e QA R6](../z_prompts/PROMPT_CORRECAO_EMAIL_MEDICO_ENTRADA_LEMBRETE_R6.md), com [especificação](docs/superpowers/specs/2026-10-08-email-medico-entrada-lembrete-r6-design.md). Decisão do dono: mostrar os três botões ao abrir o link preservando o rascunho. Apenas planejamento; correção/QA completa ainda não executadas.
 
+Prompt pendente (2026-10-09): [visitas vazias somem em 24 h, e-mail digitado nunca é apagado, conta só com código](../z_prompts/PROMPT_PORTAL_VISITA_RETENCAO_E_CONTA_SO_COM_CODIGO.md) — **NÃO EXECUTADO.** O incidente "código não leva à conta (cai no LGPD)" de 2026-10-09 (`conversation_pending_code_abandoned`, nenhuma chamada de verificação ao brain-api) voltou a funcionar após deploy em andamento; o prompt [PROMPT_PORTAL_CODIGO_NAO_RECONHECIDO_URGENTE.md](../z_prompts/PROMPT_PORTAL_CODIGO_NAO_RECONHECIDO_URGENTE.md) só deve rodar se reaparecer, ou apenas no passo 6 (não derrubar a espera de código de conta conhecida para o LGPD).
+
+Prompt pendente (2026-10-08): [IA dentro de "Alterar Dados" não pode sair da edição nem perder a consulta atual](../z_prompts/PROMPT_EDICAO_ALTERAR_DADOS_IA_NAO_PERDE_RASCUNHO.md) — texto livre na edição vai à IA, que hoje só tem ferramentas da remarcação antiga e descarta o rascunho. Decisões do dono fechadas no prompt. **NÃO EXECUTADO.**
+
 ## Product vision
 
 SecretarIA is a **multi-tenant SaaS** that drops a conversational appointment-booking secretary into any service business's existing WhatsApp number, via the WhatsApp **Cloud API Coexistence** model (bot and human agent share the same line, the bot stays quiet when the human picks up). Initial target market is clinics, but the product is service-agnostic — clients self-schedule with the business through their own WhatsApp.

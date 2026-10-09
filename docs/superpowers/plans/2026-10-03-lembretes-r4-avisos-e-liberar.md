@@ -8,7 +8,9 @@
 
 **Tech Stack:** Python 3.12, FastAPI, SQLAlchemy 2 async (Postgres in prod, in-memory SQLite in tests), arq cron, WhatsApp Cloud API (`services/whatsapp.py`), Brain-Message sender (`services/channel_sender.py`), SMTP e-mail (`services/email.py`), pytest + pytest-asyncio.
 
-**Spec:** `docs/superpowers/specs/2026-10-03-lembretes-e-confirmacao-design.md` — §4.4 (warning, red state, release, message, manual confirm), §5 criteria 8-10, §7 rows "Horário liberado só no status deixa o Google ocupado" and "Sinal Pix pago retido ao liberar". Code base: `main` b72c4ad + spec commit 3c39bd0 + R1 + R2 (both must be merged before Task 1). Worktree: `C:\TECH\BRAIN-worktrees\TASK-032\secretarIA`; all paths are relative to it; Python package root `src/secretaria/`.
+**Spec:** `docs/superpowers/specs/2026-10-03-lembretes-e-confirmacao-design.md` — §4.4 (warning, red state, release, message, manual confirm), §5 criteria 8-10, §7 rows "Horário liberado só no status deixa o Google ocupado" and "Sinal Pix pago retido ao liberar". Code base (revalidated 2026-10-08): `main` 99b9769, which already contains R1, R2, R3, R6 and the R6 remediation (professional-edit outbox, reminder-link entry). Cut a fresh worktree from `main` for this plan (`C:\TECH\BRAIN-worktrees\TASK-0NN\secretarIA`, branch `task/TASK-0NN-lembretes-r4-avisos`, NN = next free task id; the last used was TASK-041); never run it in the main checkout, which carries unrelated uncommitted edits. All paths are relative to the worktree; Python package root `src/secretaria/`.
+
+**Drift fixed on 2026-10-08 (read before Task 1):** (a) the R6 remediation added the cron `dispatch_pending_professional_edits`, so the registry is now 8 crons and R4 takes it to **9** (Task 3 below); (b) R1/R2 now retire reminder rows with `AppointmentReminder.invalidated_at` (reschedule or R6 edit of day/time), so every R4 query on reminder rows also filters `invalidated_at IS NULL` (Task 2); (c) the warning e-mail link carries `&data=YYYY-MM-DD` so R5's agenda lands on the right week (Task 3); (d) a release while the patient has an open R6 "Alterar Dados" draft on that appointment is pinned by a test (Task 6).
 
 **Order constraint (from R1):** R2 must be merged before R4 starts: R2 and R4 both edit `api/hub/calendar.py`, `services/email.py` and `workers/arq_worker.py`. R4 only appends to those files and never touches R2's lines.
 
@@ -22,7 +24,8 @@
 - Staff actions (`release`, `message`) are manual clinic decisions and work regardless of `Tenant.reminders_v2_enabled` (the switch gates only what the system does by itself). Every query on appointments, patients, conversations and reminders filters by `tenant_id`; a foreign appointment id is a 404.
 - Patient-facing and clinic-facing text in Portuguese; code, comments and log event names in English. Logs carry ids, kinds and error classes only — never a name, phone, e-mail, message text or the agenda link.
 - Layering (`CLAUDE.md`): `api -> workers -> services -> models -> core`; `services/*` never imports `workers/*` or `plugins/*`.
-- No migration in R4 (R1 owns the schema). No new setting: the agenda link reuses `Settings.DOCTOR_AGENDA_URL` (`<url>?consulta=<appointment_id>`; R5 must open the appointment drawer from that query parameter).
+- No migration in R4 (R1 owns the schema). No new setting: the agenda link reuses `Settings.DOCTOR_AGENDA_URL` (`<url>?consulta=<appointment_id>&data=<YYYY-MM-DD in the clinic zone>`; R5 must open the appointment drawer from `consulta`, and the agenda already honours `data`).
+- Every query on reminder rows filters `invalidated_at IS NULL` (rows retired by a reschedule or an R6 edit never warn).
 - Tests are run from Git Bash: `BOT_ALLOWLIST_WA_IDS="" uv run python -m pytest <file> -q`. Never `ruff format .` (lint is red at HEAD): `uvx ruff format <file>` then `uvx ruff check --fix <file>` **only on files this plan creates**; on files it modifies run `uvx ruff check <file>` only and fix findings in the lines you touched by hand. Files this plan modifies are CRLF in the working tree: after each task run `git diff --stat` and confirm only the touched lines changed (a whole-file diff means the line endings flipped — `git checkout -- <file>` and redo the edit).
 - Commit with `git add <explicit paths>` (never `git add -A`; parallel sessions share worktrees). Every commit message ends with `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`.
 
@@ -47,7 +50,7 @@ Errors: **409** `{"code":"retention_ack_required","message":"<texto de retençã
 200 `{"delivery": "whatsapp_text" | "whatsapp_template" | "portal_chat", "email_nudge": null | "sent" | "no_email" | "not_sent", "message_id": "<uuid>" | null}` (`email_nudge` is only non-null for `portal_chat`).
 Errors: **409** `{"code":"outside_window_not_authorised","message":...,"template_cost_brl":"","whatsapp_link":"https://wa.me/..."|null}` (WhatsApp patient outside 24 h and `notify_outside_window` false: offer the paid template or the free `wa.me` link); **422** `{"code":"no_channel",...}` (no patient, no number, or a Portal patient with no conversation yet); **502** `{"code":"delivery_failed",...}`; **422** (pydantic) for blank/too long text.
 
-**Warning e-mail** (clinic side, not an endpoint): link `DOCTOR_AGENDA_URL` + `?consulta=<appointment_id>` (or `&consulta=` when the URL already has a query). R5 opens the drawer of that appointment when `consulta` is present.
+**Warning e-mail** (clinic side, not an endpoint): link `DOCTOR_AGENDA_URL` + `?consulta=<appointment_id>&data=<YYYY-MM-DD>` (or `&consulta=` when the URL already has a query; `data` is the appointment's day in the clinic's timezone). R5 opens the drawer of that appointment when `consulta` is present and the week of `data`.
 
 ## Review Focus
 
@@ -92,7 +95,7 @@ Each line is pinned by a test in the task named in brackets. The first eleven ar
 | `tests/test_staff_patient_message.py` | create | the message service |
 | `tests/test_hub_release.py` | create | the release endpoint |
 | `tests/test_hub_staff_message.py` | create | the message endpoint |
-| `tests/test_build_identity.py` | modify | cron registry (7 -> 8) |
+| `tests/test_build_identity.py` | modify | cron registry (8 -> 9) |
 | `docs/CHECKPOINT_lembretes_r4.md` | create | state, what lives where, decisions, pending |
 
 ---
@@ -718,6 +721,8 @@ async def due_candidates(
             AppointmentReminder.warn_due_at.is_not(None),
             AppointmentReminder.warn_due_at <= now,
             AppointmentReminder.warned_at.is_(None),
+            # Retired rows (reschedule / R6 edit of day or time) never warn.
+            AppointmentReminder.invalidated_at.is_(None),
             # Only the row of the appointment's CURRENT start: a reschedule
             # cancelled the older ones.
             AppointmentReminder.appointment_start_at == Appointment.start_at,
@@ -756,6 +761,7 @@ async def claim_warning(session: AsyncSession, candidate: WarningCandidate, now:
             AppointmentReminder.appointment_id == candidate.appointment_id,
             AppointmentReminder.tenant_id == candidate.tenant_id,
             AppointmentReminder.appointment_start_at == candidate.start_version,
+            AppointmentReminder.invalidated_at.is_(None),
             AppointmentReminder.warned_at.is_not(None),
         )
     )
@@ -766,6 +772,7 @@ async def claim_warning(session: AsyncSession, candidate: WarningCandidate, now:
         .where(
             AppointmentReminder.id == candidate.reminder_id,
             AppointmentReminder.tenant_id == candidate.tenant_id,
+            AppointmentReminder.invalidated_at.is_(None),
             AppointmentReminder.warned_at.is_(None),
             AppointmentReminder.status.in_(_WARNABLE_ROW_STATUSES),
             AppointmentReminder.appointment_id.in_(
@@ -885,7 +892,8 @@ async def test_the_warning_names_what_the_clinic_needs_and_nothing_clinical(db, 
     assert kwargs["service_name"] == "Consulta"
     assert kwargs["when_text"] == "08/10/2026 às 09:00"  # 12:00 UTC in America/Sao_Paulo
     assert kwargs["reminder_label"] == "lembrete de 1 dia antes"
-    assert kwargs["agenda_link"] == f"{AGENDA}?consulta={world.appointment.id}"
+    # start 2026-10-08 12:00 UTC = 09:00 in America/Sao_Paulo: the date is the clinic's day
+    assert kwargs["agenda_link"] == f"{AGENDA}?consulta={world.appointment.id}&data=2026-10-08"
     assert "jejum" not in repr(kwargs)  # requirements are clinical-adjacent: never mailed
 
 
@@ -1015,11 +1023,12 @@ async def test_an_error_on_one_appointment_does_not_stop_the_others(db, alert, m
 
 def test_the_agenda_link_handles_an_existing_query_and_an_unset_url(monkeypatch):
     monkeypatch.setattr(cw, "get_settings", lambda: SimpleNamespace(DOCTOR_AGENDA_URL=""))
-    assert cw._agenda_link("abc") is None
+    assert cw._agenda_link("abc", "2026-10-08") is None
     monkeypatch.setattr(
         cw, "get_settings", lambda: SimpleNamespace(DOCTOR_AGENDA_URL="https://x.y/agenda?v=1")
     )
-    assert cw._agenda_link("abc") == "https://x.y/agenda?v=1&consulta=abc"
+    assert cw._agenda_link("abc", "2026-10-08") == "https://x.y/agenda?v=1&consulta=abc&data=2026-10-08"
+    assert cw._agenda_link("abc", None) == "https://x.y/agenda?v=1&consulta=abc"  # no start: no date
 
 
 async def test_the_cron_entry_point_runs_a_tick(db, alert, monkeypatch):  # noqa: F811
@@ -1113,8 +1122,23 @@ def _when_text(start_at: datetime | None, timezone: str | None) -> str:
     return aware.astimezone(tz).strftime("%d/%m/%Y às %H:%M")
 
 
-def _agenda_link(appointment_id) -> str | None:
-    """The agenda URL the deployment configured + `consulta=<id>`; None when unset.
+def _clinic_day(start_at: datetime | None, timezone: str | None) -> str | None:
+    """`YYYY-MM-DD` of the start in the CLINIC's zone (the agenda's `?data=`)."""
+    if start_at is None:
+        return None
+    try:
+        tz = ZoneInfo(timezone or _DEFAULT_TIMEZONE)
+    except Exception:
+        tz = ZoneInfo(_DEFAULT_TIMEZONE)
+    aware = start_at if start_at.tzinfo is not None else start_at.replace(tzinfo=UTC)
+    return aware.astimezone(tz).strftime("%Y-%m-%d")
+
+
+def _agenda_link(appointment_id, day: str | None = None) -> str | None:
+    """The agenda URL the deployment configured + `consulta=<id>[&data=<day>]`; None when unset.
+
+    `data` makes R5's agenda open the week that contains the appointment (the
+    screen only selects an appointment inside the range it loaded).
 
     `DOCTOR_AGENDA_URL` is a full URL on purpose (the two frontends serve the
     agenda at different paths); a mail with no link is fine, a broken one is not.
@@ -1123,7 +1147,8 @@ def _agenda_link(appointment_id) -> str | None:
     if not base:
         return None
     separator = "&" if "?" in base else "?"
-    return f"{base}{separator}consulta={appointment_id}"
+    link = f"{base}{separator}consulta={appointment_id}"
+    return f"{link}&data={day}" if day else link
 
 
 def _patient_label(appointment: Appointment, patient: Patient | None) -> str:
@@ -1186,7 +1211,7 @@ async def _notify_clinic(candidate: WarningCandidate, report: WarningTickReport)
         service_name=appointment.appointment_type or "Consulta",
         when_text=_when_text(appointment.start_at, tenant.timezone),
         reminder_label=REMINDER_LABELS.get(candidate.kind, "lembrete"),
-        agenda_link=_agenda_link(appointment.id),
+        agenda_link=_agenda_link(appointment.id, _clinic_day(appointment.start_at, tenant.timezone)),
     )
     if sent:
         report.emailed += 1
@@ -1252,7 +1277,7 @@ In `src/secretaria/workers/arq_worker.py`, after R2's import block `from secreta
 from secretaria.workers.confirmation_warnings import process_confirmation_warnings
 ```
 
-(keep the import block sorted: `confirmation_warnings` sorts before `deploy_parity` — place it directly after `from secretaria.plugins.reminders import send_appointment_reminders`'s block and before `from secretaria.workers.deploy_parity import ...`), and in `cron_jobs`, right after R2's line `cron(reconcile_appointment_reminders, minute={4, 14, 24, 34, 44, 54}),` add:
+(keep the import block sorted: `confirmation_warnings` sorts before `deploy_parity` — place it directly after `from secretaria.plugins.reminders import send_appointment_reminders`'s block and before `from secretaria.workers.deploy_parity import ...`), and in `cron_jobs`, right after the line `cron(reconcile_appointment_reminders, minute={4, 14, 24, 34, 44, 54}),` (which now follows R6's `cron(dispatch_pending_professional_edits, minute=set(range(60))),`) add:
 
 ```python
         # TASK-032 R4: warn the clinic about reminded-but-unconfirmed appointments
@@ -1261,7 +1286,7 @@ from secretaria.workers.confirmation_warnings import process_confirmation_warnin
         cron(process_confirmation_warnings, minute=set(range(60))),
 ```
 
-In `tests/test_build_identity.py`, in `test_worker_registry_is_complete` replace
+In `tests/test_build_identity.py`, the expected list of `registered_cron_names()` currently is (check it first; it must match `cron_jobs` order): `check_handover_timeouts`, `send_appointment_reminders`, `process_appointment_reminders`, `dispatch_pending_professional_edits`, `reconcile_appointment_reminders`, `run_onboarding_nudges`, `run_patient_usage_metering`, `check_deploy_parity_cron`. Replace
 
 ```python
         "cron:reconcile_appointment_reminders",
@@ -1274,7 +1299,7 @@ with
         "cron:process_confirmation_warnings",
 ```
 
-and in `test_worker_startup_logs_identity_and_registry` replace `assert len(fields["cron_jobs"]) == 7` with `assert len(fields["cron_jobs"]) == 8`.
+and in `test_worker_startup_logs_identity_and_registry` replace `assert len(fields["cron_jobs"]) == 8` with `assert len(fields["cron_jobs"]) == 9` (leave `len(fields["functions"]) == 14` alone: R4 adds a cron, not an arq function).
 
 - [ ] **Step 5: Run the tests**
 
@@ -2224,6 +2249,24 @@ async def test_a_second_release_changes_nothing_and_says_why(client: AsyncClient
     detail = second.json()["detail"]
     assert detail["code"] == "not_live" and detail["status"] == "cancelled"
     assert len(_FakeCalendar.deleted) == 1  # Google was asked once
+
+
+async def test_release_with_an_open_alterar_dados_draft_leaves_nothing_dangling(  # noqa: F811
+    client: AsyncClient, db, acting
+):
+    """TASK-032 R6 interplay: the patient has an edit draft open on this appointment.
+
+    The release wins (the clinic decided); afterwards the appointment is cancelled,
+    Google was asked once, and the R6 apply path must refuse the draft instead of
+    editing a cancelled appointment. Seed the draft the way
+    `tests/test_appointment_edit_*.py` does (`Conversation.flow_state = EDIT_BOOKING`,
+    `flow_edit_draft` with this appointment's id) and assert: 200 on the release,
+    status cancelled, no new reminder rows, and the refusal from the edit apply
+    (`test_worker_refuses_past_and_cancelled_appointments_without_success`'s helper).
+    If the draft is left in place, that is acceptable only because the apply refuses
+    it and `state_expiry` clears it by time; note the choice in the CHECKPOINT.
+    """
+    raise NotImplementedError("write it from the R6 edit-flow fixtures named above")
 
 
 async def test_two_concurrent_releases_have_exactly_one_winner(  # noqa: F811
