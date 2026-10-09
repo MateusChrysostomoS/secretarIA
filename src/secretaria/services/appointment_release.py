@@ -28,8 +28,15 @@ from secretaria.core.logging import get_logger
 from secretaria.models import Appointment, MessageSender, Patient, Tenant
 from secretaria.services import cancellation_notice
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE, BrainMessageSender
-from secretaria.services.staff_patient_message import (
+from secretaria.services.staff_patient_message import (  # noqa: F401 - NOTICE_* re-exported
     EMAIL_SENT,
+    NOTICE_FAILED,
+    NOTICE_NO_CHANNEL,
+    NOTICE_PORTAL_CHAT,
+    NOTICE_PORTAL_CHAT_EMAIL,
+    NOTICE_QUEUE_UNAVAILABLE,
+    NOTICE_WHATSAPP_OUTSIDE_WINDOW,
+    NOTICE_WHATSAPP_QUEUED,
     conversation_id_for,
     nudge_portal_patient,
 )
@@ -41,13 +48,6 @@ logger = get_logger(__name__)
 RELEASE_JUSTIFICATION = "a consulta não foi confirmada a tempo e o horário foi liberado."
 PORTAL_REBOOK_LINE = "Para marcar um novo horário, é só me escrever por aqui."
 
-NOTICE_WHATSAPP_QUEUED = "whatsapp_queued"
-NOTICE_WHATSAPP_OUTSIDE_WINDOW = "whatsapp_outside_window"
-NOTICE_PORTAL_CHAT = "portal_chat"
-NOTICE_PORTAL_CHAT_EMAIL = "portal_chat_email"
-NOTICE_NO_CHANNEL = "no_channel"
-NOTICE_QUEUE_UNAVAILABLE = "queue_unavailable"
-NOTICE_FAILED = "notice_failed"
 
 
 async def notify_released_patient(

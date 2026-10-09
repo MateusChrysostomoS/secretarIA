@@ -67,7 +67,7 @@ async def test_get_config_exposes_the_flag_off_by_default(client: AsyncClient):
 
 async def test_the_configuration_save_r5_uses_turns_it_on_and_echoes_it(
     client: AsyncClient,
-    db,
+    db,  # noqa: F811
     clinic,  # noqa: F811
 ):
     response = await client.put(
