@@ -616,6 +616,11 @@ async def release_appointment(
        requests race (a double click, two staff); the loser answers 409 and
        neither touches the money nor tells the patient twice.
     4. In the SAME transaction: the deposit outcome and the reminder rows.
+
+    Deliberate races: a patient confirmation that commits during the Google delete
+    does not stop the release (the event is already gone); a Pix charge paid during
+    the Google delete skips the acknowledgement (the outcome is still reported in
+    `deposit_outcome`).
     """
     appt = await _get_appointment(session, tenant, appointment_id)
     if appt.patient_id is None:
@@ -694,10 +699,20 @@ async def release_appointment(
         .execution_options(synchronize_session=False)
     )
     if claimed.rowcount != 1:
+        appt_id, tenant_id = appt.id, tenant.id  # ids first: rollback expires the ORM rows
         await session.rollback()
+        current_status = await session.scalar(
+            select(Appointment.status).where(
+                Appointment.id == appt_id, Appointment.tenant_id == tenant_id
+            )
+        )
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            _detail("not_live", "Esta consulta já foi cancelada ou encerrada."),
+            _detail(
+                "not_live",
+                "Esta consulta já foi cancelada ou encerrada.",
+                status=current_status.value if current_status is not None else None,
+            ),
         )
     await session.refresh(appt)
     log_status_transition(

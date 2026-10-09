@@ -25,7 +25,7 @@ Never logs a phone number, an e-mail address or the message text.
 
 from dataclasses import dataclass
 from datetime import datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -183,8 +183,20 @@ async def send_staff_message(
         sender = BrainMessageSender(
             conversation_id=conversation_id, session=session, author=MessageSender.HUMAN
         )
-        response = await sender.send_text_message(to=patient.external_id or "", body=text)
-        await session.commit()
+        tenant_id, appointment_id = tenant.id, appointment.id  # rollback expires ORM rows
+        try:
+            response = await sender.send_text_message(to=patient.external_id or "", body=text)
+            await session.commit()
+        except Exception as exc:
+            await session.rollback()
+            logger.error(
+                "staff_message_failed",
+                tenant_id=str(tenant_id),
+                appointment_id=str(appointment_id),
+                delivery=DELIVERY_PORTAL_CHAT,
+                error_type=type(exc).__name__,
+            )
+            raise DeliveryFailedError("the Portal message could not be recorded") from exc
         nudge = await nudge_portal_patient(tenant, patient)
         logger.info(
             "staff_message_sent",
@@ -249,7 +261,10 @@ async def send_staff_message(
                 tenant_id=str(tenant.id),
                 feature="reminders",
                 amount=1,
-                event_id=f"staffmsg:{message_id or appointment.id}:{_wam_id(response) or 'x'}",
+                event_id=(
+                    f"staffmsg:{message_id or appointment.id}:"
+                    f"{_wam_id(response) or uuid4().hex}"
+                ),
             )
         except Exception as exc:
             logger.warning("usage_emit_failed", error_type=type(exc).__name__)

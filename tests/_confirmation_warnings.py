@@ -25,6 +25,7 @@ async def add_warnable_row(
     warned_at: datetime | None = None,
     appointment_start_at: datetime | None = None,
     tenant_id: UUID | None = None,
+    invalidated_at: datetime | None = None,
 ) -> UUID:
     due = NOW - timedelta(hours=3)
     async with db() as session:
@@ -44,6 +45,7 @@ async def add_warnable_row(
             warn_due_at=NOW - timedelta(minutes=1) if warn_due_at is _DEFAULT else warn_due_at,
             warned_at=warned_at,
             warn_kind=warn_kind,
+            invalidated_at=invalidated_at,
         )
         session.add(row)
         await session.commit()

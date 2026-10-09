@@ -190,6 +190,23 @@ async def test_a_refusal_by_the_channel_is_a_502_and_records_nothing(
     assert await outbound_messages(db, world.conversation.id) == []
 
 
+async def test_a_failing_portal_write_is_a_502_and_records_nothing(
+    client: AsyncClient, db, acting, monkeypatch
+):  # noqa: F811
+    world = await _world(db, acting, channel=CHANNEL_BRAIN_MESSAGE)
+
+    async def _boom(self, **kwargs):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(spm.BrainMessageSender, "send_text_message", _boom)
+
+    response = await _message(client, world.appointment.id)
+
+    assert response.status_code == 502
+    assert response.json()["detail"]["code"] == "delivery_failed"
+    assert await outbound_messages(db, world.conversation.id) == []
+
+
 @pytest.mark.parametrize("text", ["", "   ", "x" * 1001])
 async def test_blank_or_huge_text_is_rejected(client: AsyncClient, db, acting, text):  # noqa: F811
     world = await _world(db, acting, last_inbound_at=_recent(1))

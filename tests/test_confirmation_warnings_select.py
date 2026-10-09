@@ -5,7 +5,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import update
 
-from secretaria.models import Appointment, AppointmentStatus
+from secretaria.models import Appointment, AppointmentReminder, AppointmentStatus
 from secretaria.workers import confirmation_warnings as cw
 from tests._confirmation_warnings import add_warnable_row
 from tests._reminder_fixtures import db  # noqa: F401
@@ -65,6 +65,27 @@ async def test_the_deadline_must_have_passed_and_exist(db):  # noqa: F811
     await add_warnable_row(db, world, kind="hour", warn_due_at=None, warn_kind=None)
 
     assert await _candidates(db) == []
+
+
+async def test_an_invalidated_row_is_neither_selected_nor_claimable(db):  # noqa: F811
+    world = await seed_world(db)
+    stale = await add_warnable_row(db, world, invalidated_at=NOW - timedelta(hours=1))
+    assert await _candidates(db) == []
+
+    live = await add_warnable_row(db, world, kind="morning")
+    [candidate] = await _candidates(db)
+    assert candidate.reminder_id == live
+    async with db() as session:
+        await session.execute(
+            update(AppointmentReminder)
+            .where(AppointmentReminder.id == live)
+            .values(invalidated_at=NOW)
+        )
+        await session.commit()
+
+    assert await _claim(db, candidate) is False
+    assert (await get_reminder(db, live)).warned_at is None
+    assert (await get_reminder(db, stale)).warned_at is None
 
 
 async def test_the_chat_opening_row_is_never_warned_about(db):  # noqa: F811

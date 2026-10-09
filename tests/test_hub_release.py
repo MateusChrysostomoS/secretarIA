@@ -124,6 +124,19 @@ class _TransitionSpy:
         self.calls.append(kwargs)
 
 
+def _spy_cancel_hook(monkeypatch) -> list:
+    """Wrap the real `on_appointment_cancelled`, recording each appointment id."""
+    calls: list = []
+    real = deposit_lifecycle.on_appointment_cancelled
+
+    async def _wrapped(session, *, tenant, appointment, **kwargs):
+        calls.append(appointment.id)
+        return await real(session, tenant=tenant, appointment=appointment, **kwargs)
+
+    monkeypatch.setattr(hub_calendar.deposit_lifecycle, "on_appointment_cancelled", _wrapped)
+    return calls
+
+
 async def _setup(db, acting, **kwargs):
     kwargs.setdefault("last_inbound_at", NOW)
     world = await seed_world(db, **kwargs)
@@ -139,10 +152,12 @@ async def test_release_frees_the_slot_cancels_the_row_and_the_pending_reminders(
     await add_reminder(db, world, kind="day", status="pending")
     spy = _TransitionSpy()
     monkeypatch.setattr(hub_calendar, "log_status_transition", spy)
+    hook_calls = _spy_cancel_hook(monkeypatch)
 
     response = await _release(client, world.appointment.id)
 
     assert response.status_code == 200, response.text
+    assert hook_calls == [world.appointment.id]  # the money hook ran exactly once
     body = response.json()
     assert body["status"] == "cancelled" and body["id"] == str(world.appointment.id)
     assert _FakeCalendar.deleted == [("tenant", world.appointment.google_event_id)]
@@ -153,13 +168,17 @@ async def test_release_frees_the_slot_cancels_the_row_and_the_pending_reminders(
     assert transition["new_status"] == AppointmentStatus.CANCELLED
 
 
-async def test_a_second_release_changes_nothing_and_says_why(client: AsyncClient, db, acting):
+async def test_a_second_release_changes_nothing_and_says_why(
+    client: AsyncClient, db, acting, monkeypatch
+):
     world = await _setup(db, acting)
+    hook_calls = _spy_cancel_hook(monkeypatch)
 
     first = await _release(client, world.appointment.id)
     second = await _release(client, world.appointment.id)
 
     assert first.status_code == 200 and second.status_code == 409
+    assert hook_calls == [world.appointment.id]  # once in total
     detail = second.json()["detail"]
     assert detail["code"] == "not_live" and detail["status"] == "cancelled"
     assert len(_FakeCalendar.deleted) == 1  # Google was asked once
@@ -237,6 +256,7 @@ async def test_two_concurrent_releases_have_exactly_one_winner(
     response = await _release(client, world.appointment.id)
 
     assert response.status_code == 409 and response.json()["detail"]["code"] == "not_live"
+    assert response.json()["detail"]["status"] == "cancelled"  # R5 contract: always present
     assert calls == []  # the loser neither touches the money nor notifies
 
 

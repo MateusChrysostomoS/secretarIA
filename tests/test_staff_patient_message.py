@@ -150,6 +150,33 @@ async def test_a_portal_patient_gets_the_chat_message_and_an_email_nudge_without
     assert FakeWhatsAppClient.all_sent() == []
 
 
+async def test_a_failing_portal_write_is_a_typed_failure(db, mail, monkeypatch):  # noqa: F811
+    world = await seed_world(db, channel=CHANNEL_BRAIN_MESSAGE, email="paciente@x.com")
+
+    async def _boom(self, **kwargs):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(spm.BrainMessageSender, "send_text_message", _boom)
+
+    with pytest.raises(spm.DeliveryFailedError) as err:
+        await _send(db, world)
+
+    assert err.value.code == "delivery_failed"
+    assert await outbound_messages(db, world.conversation.id) == []
+    assert mail == []  # no nudge for a message that was never written
+
+
+async def test_a_usage_event_id_without_a_meta_id_never_repeats(db, usage, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(spm, "_wam_id", lambda response: None)
+    world = await seed_world(db, last_inbound_at=NOW - timedelta(hours=30))
+    await _send(db, world, allow_paid=True)
+    await _send(db, world, allow_paid=True)
+
+    ids = [e["event_id"] for e in usage]
+    assert len(ids) == 2 and ids[0] != ids[1]
+    assert not any(i.endswith(":x") for i in ids)
+
+
 async def test_a_portal_patient_without_email_still_gets_the_chat_message(db, mail):  # noqa: F811
     world = await seed_world(db, channel=CHANNEL_BRAIN_MESSAGE, email=None)
 
