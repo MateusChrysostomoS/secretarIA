@@ -246,4 +246,13 @@ class Tenant(Base):
     # TASK-032 (spec 4.5): lead time, in minutes before the appointment, of the
     # clinic-configured ("custom") reminder. NULL = the clinic has no extra one.
     reminder_extra_lead_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # TASK-032 R7 (spec 2026-10-09 §2): the clinic's standing yes ("não perguntar
+    # novamente") to BILLED WhatsApp notices outside Meta's 24 h window. With it, every
+    # clinic action that notifies the patient sends the paid template without asking;
+    # without it, each action asks (`notify_outside_window`). Editable in the hub
+    # configuration (schemas/config.py).
+    paid_notices_auto_approved: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false"), default=False
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

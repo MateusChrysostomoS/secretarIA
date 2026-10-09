@@ -205,6 +205,14 @@ class Appointment(Base):
     last_confirmed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+    # TASK-032 R7: when the post-consult message was delivered because the clinic marked
+    # "Compareceu" (services/clinic_action_notice.py::notify_attended). Claimed before the
+    # send and cleared when it could not be delivered - one message per appointment, and
+    # the next-open follow-up skips an appointment that already got it.
+    post_consult_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
