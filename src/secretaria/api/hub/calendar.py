@@ -3,6 +3,7 @@
 GET   /tenants/me/calendar/events                      - agenda read model.
 POST  /tenants/me/calendar/appointments                - create consultation.
 POST  /tenants/me/calendar/appointments/{id}/cancel    - cancel + notify patient.
+POST  /tenants/me/calendar/appointments/{id}/release    - free an unconfirmed slot.
 POST  /tenants/me/calendar/appointments/{id}/reschedule - reschedule + notify.
 POST  /tenants/me/calendar/blocks                      - block slot (no notification).
 PATCH /tenants/me/calendar/appointments/{id}/status    - mark attended / no-show / etc.
@@ -12,7 +13,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import Row, select
+from sqlalchemy import Row, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.api.hub.deps import get_current_tenant
@@ -27,11 +28,14 @@ from secretaria.models import (
     Professional,
     Tenant,
 )
+from secretaria.models.appointment import LIVE_APPOINTMENT_STATUSES
 from secretaria.models.patient import Patient
 from secretaria.schemas.calendar import (
     AppointmentCancel,
     AppointmentCreate,
     AppointmentRead,
+    AppointmentRelease,
+    AppointmentReleaseRead,
     AppointmentReschedule,
     AppointmentStatusUpdate,
     BlockCreate,
@@ -42,12 +46,16 @@ from secretaria.schemas.calendar import (
     CancelPreviewRead,
 )
 from secretaria.services import cancellation_notice, reminder_hooks, reminder_schedule
-from secretaria.services.appointment_status import SOURCE_HUB, log_status_transition
+from secretaria.services.appointment_status import (
+    CANCEL_REASON_UNCONFIRMED,
+    SOURCE_HUB,
+    log_status_transition,
+)
 from secretaria.services.calendar import CalendarService
 from secretaria.services.insurance_catalog import AppointmentPlan, load_appointment_plans
 from secretaria.services.patient_context import as_utc
 from secretaria.services.payments import deposit_lifecycle
-from secretaria.services.tenant_config import load_tenant_config
+from secretaria.services.tenant_config import load_tenant_config, resolve_professional_calendar
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/tenants/me/calendar", tags=["hub-calendar"])
@@ -136,6 +144,51 @@ async def _professional_name(
             Professional.tenant_id == tenant.id,
         )
     )
+
+
+def _detail(code: str, message: str, **extra) -> dict:
+    """A machine-readable error body: the front switches on `code`, shows `message`."""
+    return {"code": code, "message": message, **extra}
+
+
+async def _owning_calendar(session: AsyncSession, tenant: Tenant, appt: Appointment):
+    """The Google calendar that owns `appt`'s event.
+
+    A booking made with a professional lives on THAT professional's calendar;
+    `cancel_event` treats a 404 as "already gone" (success), so deleting on the
+    wrong calendar would silently no-op while the slot stays occupied. When the
+    owner cannot be resolved this refuses (409) instead of guessing the tenant
+    calendar - same "don't guess, degrade" rule as
+    workers/shared/actions.py::_calendar_for_appointment.
+    """
+    if appt.professional_id is None:
+        return await _get_calendar(session, tenant)
+    professional = await session.scalar(
+        select(Professional).where(
+            Professional.id == appt.professional_id, Professional.tenant_id == tenant.id
+        )
+    )
+    unresolved = HTTPException(
+        status.HTTP_409_CONFLICT,
+        _detail(
+            "calendar_unresolved",
+            "Não foi possível identificar a agenda do profissional desta consulta.",
+        ),
+    )
+    if professional is None:
+        raise unresolved
+    try:
+        config = await load_tenant_config(session, tenant)
+        return await resolve_professional_calendar(
+            session, tenant, professional, tenant_config=config
+        )
+    except Exception as exc:
+        logger.warning(
+            "release_owning_calendar_failed",
+            appointment_id=str(appt.id),
+            error_type=type(exc).__name__,
+        )
+        raise unresolved from exc
 
 
 # ---------------------------------------------------------------------------
@@ -524,6 +577,123 @@ async def cancel_appointment(
     )
     deposit_status = await _deposit_status_value(session, appt.id)
     return _appointment_read(appt, deposit_status=deposit_status, deposit_outcome=deposit_outcome)
+
+
+# ---------------------------------------------------------------------------
+# POST /appointments/{id}/release — free the slot of an unconfirmed appointment
+# ---------------------------------------------------------------------------
+
+
+@router.post("/appointments/{appointment_id}/release", response_model=AppointmentReleaseRead)
+async def release_appointment(
+    appointment_id: str,
+    body: AppointmentRelease,
+    request: Request,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> AppointmentReleaseRead:
+    """The clinic frees the slot of an appointment the patient never confirmed.
+
+    Order matters and every step is deliberate:
+
+    1. Guards (404 foreign/malformed, 422 block, 409 not live, 409 confirmed).
+    2. Delete the Google event on the OWNING calendar. FAIL CLOSED: if Google
+       refuses, answer 502 and change nothing - marking the row cancelled while
+       the event still blocks the slot would be the silent half-release this
+       endpoint exists to avoid. The delete is idempotent (404/410 = success), so
+       a retry after a partial failure is safe.
+    3. A guarded `UPDATE ... WHERE status IN live` has exactly one winner when two
+       requests race (a double click, two staff); the loser answers 409 and
+       neither touches the money nor tells the patient twice.
+    4. In the SAME transaction: the deposit outcome and the reminder rows.
+    """
+    appt = await _get_appointment(session, tenant, appointment_id)
+    if appt.patient_id is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            _detail("not_a_patient_appointment", "Este horário não pertence a um paciente."),
+        )
+    if appt.status not in LIVE_APPOINTMENT_STATUSES:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            _detail(
+                "not_live",
+                "Esta consulta já foi cancelada ou encerrada.",
+                status=appt.status.value,
+            ),
+        )
+    if appt.confirmation_count >= 1 and not body.release_confirmed:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            _detail(
+                "already_confirmed",
+                "O paciente já confirmou esta consulta.",
+                confirmation_count=appt.confirmation_count,
+            ),
+        )
+
+    if appt.google_event_id:
+        calendar = await _owning_calendar(session, tenant, appt)
+        try:
+            await calendar.cancel_event(appt.google_event_id)
+        except Exception as exc:
+            logger.error(
+                "calendar_release_delete_failed",
+                appointment_id=str(appt.id),
+                error_type=type(exc).__name__,
+            )
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                _detail(
+                    "calendar_unavailable",
+                    "Não foi possível apagar o evento no Google Agenda. "
+                    "Nada foi alterado; tente de novo em instantes.",
+                ),
+            ) from exc
+
+    previous_status = appt.status
+    now = datetime.now(UTC)
+    claimed = await session.execute(
+        update(Appointment)
+        .where(
+            Appointment.id == appt.id,
+            Appointment.tenant_id == tenant.id,
+            Appointment.status.in_(LIVE_APPOINTMENT_STATUSES),
+        )
+        .values(status=AppointmentStatus.CANCELLED, updated_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    if claimed.rowcount != 1:
+        await session.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            _detail("not_live", "Esta consulta já foi cancelada ou encerrada."),
+        )
+    await session.refresh(appt)
+    log_status_transition(
+        appointment_id=appt.id,
+        tenant_id=tenant.id,
+        old_status=previous_status,
+        new_status=AppointmentStatus.CANCELLED,
+        source=SOURCE_HUB,
+        idempotency_key=f"release:{appt.id}",
+        reason=CANCEL_REASON_UNCONFIRMED,
+    )
+    await reminder_schedule.cancel_reminders(session, appt.id, reason="released")
+    deposit_outcome = await deposit_lifecycle.on_appointment_cancelled(
+        session, tenant=tenant, appointment=appt, waba_token=None
+    )
+    await session.commit()
+    await session.refresh(appt)
+
+    logger.info(
+        "calendar_appointment_released",
+        appointment_id=str(appt.id),
+        deposit_outcome=deposit_outcome,
+    )
+    deposit_status = await _deposit_status_value(session, appt.id)
+    read = _appointment_read(appt, deposit_status=deposit_status, deposit_outcome=deposit_outcome)
+    return AppointmentReleaseRead(**read.model_dump())
 
 
 # ---------------------------------------------------------------------------

@@ -269,3 +269,32 @@ class CalendarHealthRead(BaseModel):
 
     clinic: CalendarCredentialStatusWire
     professionals: list[ProfessionalCalendarHealthRead]
+
+
+class AppointmentRelease(BaseModel):
+    """POST /appointments/{id}/release (TASK-032 R4, spec 4.4).
+
+    Freeing the slot of an unconfirmed appointment. Every flag defaults to the
+    cautious side, so a client that does not know a flag can never trigger the
+    risky behavior by accident.
+    """
+
+    # The clinic has read the retention text for a PAID Pix deposit and agrees.
+    acknowledge_retention: bool = False
+    # The patient confirmed in the meantime; release anyway (the clinic's call).
+    release_confirmed: bool = False
+    # Authorises the BILLED template notice when the patient is outside Meta's
+    # 24 h window (same meaning as AppointmentCancel.notify_outside_window).
+    notify_outside_window: bool = False
+    # Optional reason quoted in the patient notice; blank = the standard sentence.
+    justification: str | None = Field(default=None, max_length=1000)
+
+
+class AppointmentReleaseRead(AppointmentRead):
+    """The released appointment, plus what happened to the patient notice.
+
+    `patient_notice` is one of: whatsapp_queued, whatsapp_outside_window,
+    portal_chat, portal_chat_email, no_channel, queue_unavailable, notice_failed.
+    """
+
+    patient_notice: str = "not_attempted"
