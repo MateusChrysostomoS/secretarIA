@@ -1,8 +1,8 @@
 # CHECKPOINT — Lembretes R4: avisos, liberar horário e mensagem (TASK-032)
 
-**Estado:** implementado e validado localmente conforme o plano `docs/superpowers/plans/2026-10-03-lembretes-r4-avisos-e-liberar.md`. **Commitado localmente** na branch `task/TASK-043-lembretes-r4-avisos` (worktree `C:\TECH\BRAIN-worktrees\TASK-043\secretarIA`, commits `f516ec3` (plano) .. `2755689`, sobre a `main` `4545933`). **Não** mesclado, **não** pushado, **não** deployado. Sem migração. Interruptor `reminders_v2_enabled` continua desligado em todas as clínicas.
+**Estado:** implementado e validado localmente conforme o plano `docs/superpowers/plans/2026-10-03-lembretes-r4-avisos-e-liberar.md`. **Commitado localmente** na branch `task/TASK-043-lembretes-r4-avisos` (worktree `C:\TECH\BRAIN-worktrees\TASK-043\secretarIA`, commits `f516ec3` (plano) .. `04de046` (correções da revisão final) + o commit deste checkpoint, sobre a `main` `4545933`). **Não** mesclado, **não** pushado, **não** deployado. Sem migração. Interruptor `reminders_v2_enabled` continua desligado em todas as clínicas.
 
-Validação: baseline da suíte completa antes do R4 = 4530 passed, 68 skipped. Validação focada desta tarefa (arquivos do R4 + regressões listadas no plano): 109 + 139 + 101 = 349 passed; ruff limpo nos arquivos tocados. A suíte completa é rodada pelo controlador na integração.
+Validação: baseline da suíte completa antes do R4 = 4530 passed, 68 skipped. Validação focada desta tarefa (arquivos do R4 + regressões listadas no plano): 109 + 139 + 101 = 349 passed; ruff limpo nos arquivos tocados. **Suíte completa (rodada após as correções da revisão final): `4643 passed, 68 skipped, 21 warnings in 511.63s (0:08:31)`** (baseline 4530 passed, 68 skipped; 0 failed).
 
 ## O que entrou onde
 
@@ -28,6 +28,9 @@ Validação: baseline da suíte completa antes do R4 = 4530 passed, 68 skipped. 
 - Consulta já confirmada exige `release_confirmed=true` (409 `already_confirmed`).
 - Mensagem a paciente de WhatsApp fora das 24 h só com `notify_outside_window=true` (modelo `REMINDER_TEMPLATE_NAME`, uma variável, cobrado, evento de uso `reminders`); sem isso, 409 com o link `wa.me`. Paciente do Portal: mensagem no chat + e-mail genérico (nunca com o texto) se houver e-mail.
 - As duas ações da equipe valem com o interruptor desligado (são decisões manuais da clínica); o interruptor só governa o que o sistema faz sozinho.
+- Confirmação do paciente que commita durante a exclusão no Google **não** impede o release (deliberado: o evento já foi apagado). Sinal Pix pago durante a exclusão no Google pula o reconhecimento de retenção; o desfecho continua informado em `deposit_outcome`.
+- Mensagem de WhatsApp a paciente sem conversa é enviada (e cobrada, se fora da janela) mas **não** fica registrada no histórico.
+- Falha ao gravar a mensagem do Portal (envio ou commit) vira `DeliveryFailedError` (502 `delivery_failed`), com rollback e log só de ids e classe do erro. O 409 `not_live` do perdedor da corrida do release traz sempre `status`.
 - Mandar mensagem **não** assume a conversa (não liga o atendimento humano).
 - Depois de liberar, um rascunho aberto do R6 ("Alterar Dados") permanece na conversa; aplicá-lo é recusado e a consulta continua cancelada e sem edição. O rascunho some por tempo (expiração de estado), não pelo release.
 - O log de transição agora carrega `reason`; o teste de taxonomia (`test_transition_log_is_sanitized`) foi atualizado para o novo campo.
@@ -54,6 +57,5 @@ Validação: baseline da suíte completa antes do R4 = 4530 passed, 68 skipped. 
 - `POST /cancel` do hub ainda apaga no calendário do tenant, não no do profissional (mesma lacuna; `_owning_calendar` já existe e pode ser reaproveitado).
 - O 422 "Google Calendar não conectado" continua com `detail` em texto simples (não objeto com código): o front precisa tratá-lo.
 - A reivindicação do aviso à clínica não repete todas as guardas de seleção dentro do UPDATE; uma confirmação que commite durante a espera do lock da reivindicação pode deixar passar um aviso indevido (Postgres READ COMMITTED).
-- Falha de envio ao Portal no endpoint de mensagem aparece como 500, não como 502 `delivery_failed`.
 - A prévia do destino do sinal Pix pode diferir do resultado real se a fronteira da janela de estorno passar entre o 409 e o novo POST com reconhecimento; o 200 informa o que de fato aconteceu.
 - Deploy (quando autorizado): ver o plano (seção "Deploy e liberação"). **API (`secretaria_api`) e worker (`secretaria-worker`) juntos** — o cron novo vive no worker; conferir `cron:process_confirmation_warnings` no log de registro do worker. Operador: `DOCTOR_AGENDA_URL`, SMTP e `contact_email` por clínica. Nada foi enviado, pushado ou publicado.
