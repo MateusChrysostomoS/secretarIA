@@ -32,7 +32,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
-from secretaria.core.whatsapp_limits import truncate_plain
+from secretaria.core.whatsapp_limits import (
+    MAX_INTERACTIVE_BODY_CHARS,
+    MAX_TEXT_MESSAGE_CHARS,
+    truncate_plain,
+)
 from secretaria.models import (
     Appointment,
     Conversation,
@@ -81,6 +85,7 @@ DELIVERED_NOTICES = frozenset(
 # A template parameter is one line and Meta caps the whole body at 1024 characters
 # including the template's own words (same budget as reminder_text.SINGLE_LINE_MAX_CHARS).
 TEMPLATE_LINE_MAX_CHARS = 900
+LONG_NOTICE_CARD = "Confira os detalhes da consulta na mensagem acima. Você está ciente?"
 
 _PORTAL_LINK_FALLBACK = "Acesse o portal da clínica e abra a sua conversa."
 
@@ -389,7 +394,12 @@ async def _clinic_notice_portal(
     to = patient.external_id or ""
     try:
         if buttons:
-            response = await sender.send_buttons(to, body, buttons)
+            card_body = body
+            if len(body) > MAX_INTERACTIVE_BODY_CHARS:
+                # Portal details have no Meta limit; its shared card builder does.
+                await sender.send_text_message(to=to, body=body)
+                card_body = LONG_NOTICE_CARD
+            response = await sender.send_buttons(to, card_body, buttons)
         else:
             response = await sender.send_text_message(to=to, body=body)
         await session.commit()
@@ -437,15 +447,31 @@ async def _clinic_notice_whatsapp(
         )
 
     waba_token = await get_waba_token(session, tenant_id)
+    details: list[tuple[str, str | None]] = []
     try:
         client = WhatsAppClient.for_tenant(tenant, waba_token)
-        if inside and buttons:
+        if inside and buttons and len(body) > MAX_INTERACTIVE_BODY_CHARS:
+            for offset in range(0, len(body), MAX_TEXT_MESSAGE_CHARS):
+                chunk = body[offset : offset + MAX_TEXT_MESSAGE_CHARS]
+                sent_detail = await client.send_text_message(to=to, body=chunk)
+                details.append((chunk, _wam_id(sent_detail)))
+            response = await client.send_buttons(to, LONG_NOTICE_CARD, buttons)
+            history = interactive_history_body(LONG_NOTICE_CARD, [label for _, label in buttons])
+            interactive = interactive_buttons_record(LONG_NOTICE_CARD, buttons)
+        elif inside and buttons:
             response = await client.send_buttons(to, body, buttons)
             history = interactive_history_body(body, [label for _, label in buttons])
             interactive = interactive_buttons_record(body, buttons)
         elif inside:
-            response = await client.send_text_message(to=to, body=body)
-            history, interactive = body, None
+            chunks = [
+                body[offset : offset + MAX_TEXT_MESSAGE_CHARS]
+                for offset in range(0, len(body), MAX_TEXT_MESSAGE_CHARS)
+            ] or [""]
+            for chunk in chunks[:-1]:
+                sent_detail = await client.send_text_message(to=to, body=chunk)
+                details.append((chunk, _wam_id(sent_detail)))
+            response = await client.send_text_message(to=to, body=chunks[-1])
+            history, interactive = chunks[-1], None
         else:
             line = truncate_plain(_one_line(body), TEMPLATE_LINE_MAX_CHARS)
             response = await client.send_template(
@@ -469,6 +495,14 @@ async def _clinic_notice_whatsapp(
     try:
         conversation_id = await conversation_id_for(session, tenant_id, appointment, patient)
         if conversation_id is not None:
+            for detail, detail_wam_id in details:
+                session.add(Message(
+                    conversation_id=conversation_id,
+                    direction=MessageDirection.OUTBOUND,
+                    sender=MessageSender.HUMAN,
+                    wam_id=detail_wam_id,
+                    body=detail,
+                ))
             message = Message(
                 conversation_id=conversation_id,
                 direction=MessageDirection.OUTBOUND,

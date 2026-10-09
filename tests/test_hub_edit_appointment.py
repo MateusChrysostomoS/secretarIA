@@ -265,3 +265,55 @@ async def test_a_stale_alterar_dados_draft_cannot_overwrite_the_clinics_edit(
     row = await reload_appointment(db, world.appointment.id)
     assert row.insurance != "Amil"
     assert row.start_at.replace(tzinfo=None) == new.replace(tzinfo=None)
+
+
+async def test_long_edit_text_keeps_every_change_and_the_current_footer(db, acting):
+    from secretaria.models import Appointment, Tenant
+    from secretaria.services.clinic_action_notice import edit_text
+    from secretaria.services.reminder_text import load_reminder_content
+    from secretaria.services.staff_appointment_edit import FieldChange
+
+    world = await _world(db, acting)
+    changes = [
+        FieldChange("Paciente", "A" * 120, "B" * 120),
+        FieldChange("Convênio", "C" * 120, "D" * 120),
+        FieldChange("Médico", "E" * 255, "F" * 255),
+    ]
+    async with db() as session:
+        content = await load_reminder_content(
+            session,
+            await session.get(Tenant, world.tenant.id),
+            await session.get(Appointment, world.appointment.id),
+        )
+    text = edit_text(changes, content)
+    for change in changes:
+        assert f"{change.before} → {change.after}" in text
+    assert text.endswith("com a equipe da Clínica Olhar.") and "Agora:" in text
+
+
+async def test_long_multi_field_portal_edit_preserves_complete_detail_and_current_footer(
+    client, db, acting
+):
+    from tests._r7_support import add_professional, set_appointment
+
+    world = await _world(
+        db, acting, channel=CHANNEL_BRAIN_MESSAGE, wa_id=None, professional_name="Ana " * 63
+    )
+    new_doctor = "Bruno " * 42
+    doctor_id = await add_professional(db, world.tenant.id, new_doctor)
+    await set_appointment(db, world.appointment.id, insurance="A" * 120, attendee_name="C" * 120)
+    response = await _post(
+        client,
+        world.appointment.id,
+        insurance="B" * 120,
+        attendee_name="D" * 120,
+        professional_id=str(doctor_id),
+    )
+    assert response.status_code == 200
+    rows = await outbound_messages(db, world.conversation.id)
+    detail = next(row.body for row in rows if row.interactive is None)
+    assert "A" * 120 + " → " + "B" * 120 in detail
+    assert "C" * 120 + " → " + "D" * 120 in detail
+    assert "Ana " * 62 in detail and new_doctor.strip() in detail
+    assert "Agora:" in detail and detail.endswith(new_doctor.strip() + ".")
+    assert len([row for row in rows if row.interactive is not None]) == 1

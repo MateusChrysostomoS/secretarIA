@@ -26,7 +26,6 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.logging import get_logger
-from secretaria.core.whatsapp_limits import MAX_INTERACTIVE_BODY_CHARS, truncate_plain
 from secretaria.models import Appointment, Patient, Professional, Tenant
 from secretaria.models.appointment_reminder import (
     REMINDER_CHANNEL_CHAT,
@@ -305,7 +304,7 @@ def edit_text(changes: Sequence[FieldChange], content: ReminderContent) -> str:
         "",
         EDIT_NOW.format(day=f"{local:%d/%m/%Y}", time=f"{local:%H:%M}", doctor=_doctor(content)),
     ]
-    return truncate_plain("\n".join(lines), MAX_INTERACTIVE_BODY_CHARS)
+    return "\n".join(lines)
 
 
 async def notify_staff_edit(

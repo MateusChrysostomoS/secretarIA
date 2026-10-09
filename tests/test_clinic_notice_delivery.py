@@ -228,3 +228,60 @@ async def test_the_patient_number_wins_over_the_appointment_contact_phone(db, us
     await _notice(db, world)
 
     assert FakeWhatsAppClient.all_sent()[0][1] == WA_ID
+
+
+@pytest.mark.parametrize("portal", [True, False])
+async def test_long_notice_preserves_all_details_and_uses_a_short_button_card(
+    db, mail, usage, portal  # noqa: F811
+):  # noqa: F811
+    full = "Detalhes: " + "campo antigo → campo novo; " * 180 + "\nAgora: 20/10/2026 às 12:00."
+    world = await seed_world(
+        db,
+        channel=CHANNEL_BRAIN_MESSAGE if portal else "whatsapp",
+        wa_id=None if portal else WA_ID,
+        last_inbound_at=NOW - timedelta(hours=1),
+    )
+    async with db() as session:
+        result = await spm.send_clinic_notice(
+            session,
+            await session.get(Tenant, world.tenant.id),
+            await session.get(Appointment, world.appointment.id),
+            await session.get(Patient, world.patient.id),
+            body=full,
+            buttons=BUTTONS,
+            allow_paid=False,
+            usage_key="long",
+            now=NOW,
+        )
+    assert result.delivered
+    messages = await outbound_messages(db, world.conversation.id)
+    details = [message.body for message in messages if message.interactive is None]
+    assert "".join(details) == full
+    card = [message for message in messages if message.interactive is not None][0]
+    assert [item["id"] for item in card.interactive["options"]] == [item[0] for item in BUTTONS]
+    assert len(card.interactive["body"]) <= 1024
+    if not portal:
+        assert all(len(item[2]) <= 4096 for item in FakeWhatsAppClient.all_sent())
+
+
+async def test_failure_of_long_notice_card_is_reported_truthfully(db, monkeypatch):  # noqa: F811
+    world = await seed_world(db, last_inbound_at=NOW - timedelta(hours=1))
+
+    async def refuses_card(*args, **kwargs):
+        raise RuntimeError("card refused")
+
+    monkeypatch.setattr(FakeWhatsAppClient, "send_buttons", refuses_card)
+    async with db() as session:
+        result = await spm.send_clinic_notice(
+            session,
+            await session.get(Tenant, world.tenant.id),
+            await session.get(Appointment, world.appointment.id),
+            await session.get(Patient, world.patient.id),
+            body="complete detail " * 100,
+            buttons=BUTTONS,
+            allow_paid=False,
+            usage_key="long",
+            now=NOW,
+        )
+    assert result.code == "notice_failed"
+    assert all(item[0] == "text" for item in FakeWhatsAppClient.all_sent())
