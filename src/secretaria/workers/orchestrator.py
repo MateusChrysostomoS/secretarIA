@@ -1,5 +1,7 @@
 """orchestrator - split out of workers/tasks.py (TASK-023)."""
 
+import json
+import re
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -7,8 +9,10 @@ from secretaria.ai.formatter import (
     parse,
 )
 from secretaria.ai.graph import (
+    APPOINTMENT_EDIT_SENTINEL_PREFIX,
     BOOKING_DRAFT_SENTINEL_PREFIX,
     CALENDAR_UNAVAILABLE_SENTINEL,
+    FALLBACK_REPLY,
     HUMAN_HANDOFF_OFFER_SENTINEL,
     HUMAN_HANDOFF_SENTINEL_PREFIX,
     MANAGE_APPOINTMENT_SENTINEL_PREFIX,
@@ -30,6 +34,7 @@ from secretaria.models import (
 from secretaria.plugins.base import InboundContext
 from secretaria.plugins.registry import agent_tools_for, run_on_inbound
 from secretaria.services.appointment_edit import EditContext
+from secretaria.services.appointment_edit_flow import apply_ai_edit
 from secretaria.services.booking_scope import (
     booking_topology,
 )
@@ -244,6 +249,7 @@ async def _send_turn_fallback(reply: _ReplyContext, redis, *, cause: str) -> Non
             conversation_id=str(reply.conversation_id),
         )
 
+
 async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     """Answer one inbound turn - and guarantee the patient is never left in silence.
 
@@ -292,6 +298,7 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
         channel=reply.channel,
     )
     await _send_turn_fallback(reply, redis, cause=cause)
+
 
 async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
     """Generate a reply, split it into bubbles, send each, and record them."""
@@ -1102,34 +1109,46 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
         has_state=conversation_state_text is not None,
     )
 
-    reply_text = await run_agent(
-        reply.inbound_body,
-        context={"conversation_id": str(reply.conversation_id)},
-        tenant_config=tenant_config,
-        # The deterministic-flow hand-back tools ride along with the plugin
-        # ones, gated on the flow existing at all (and, for
-        # start_guided_booking, on the topology) - see _flow_handback_tools.
-        extra_tools=_flow_handback_tools(tenant, turn_topology, agent_tools_for(summary)),
-        redis=redis,
-        selected_professional=selected_professional,
-        # The tenant's REAL shape decides which tools the agent is given at
-        # all (ai/graph.py::base_tools_for): a multi-professional clinic never
-        # receives the tenant-level calendar tools, and a single-professional
-        # one lets the base booking tool resolve its owner. `professional_rows`
-        # is None only when the roster load itself failed (already logged) -
-        # booking_topology maps that to "unknown", which keeps today's tool
-        # set rather than silently disarming a working clinic.
-        booking_topology=turn_topology,
-        include_post_consult_knowledge=_should_inject_post_consult_knowledge(
-            tenant_config.post_consult_knowledge if tenant_config is not None else None,
-            opening_state,
-            flow_state,
-            delegated_to_llm,
-        ),
-        appointment_context=appointment_context_text,
-        conversation_state=conversation_state_text,
-        toolset_v2=_ai_toolset_v2(tenant),
-    )
+    editing = flow_snapshot is not None and flow_snapshot[0].flow_state == FlowState.EDIT_BOOKING
+    try:
+        reply_text = await run_agent(
+            reply.inbound_body,
+            context={"conversation_id": str(reply.conversation_id)},
+            tenant_config=tenant_config,
+            # The deterministic-flow hand-back tools ride along with the plugin
+            # ones, gated on the flow existing at all (and, for
+            # start_guided_booking, on the topology) - see _flow_handback_tools.
+            extra_tools=_flow_handback_tools(tenant, turn_topology, agent_tools_for(summary)),
+            redis=redis,
+            selected_professional=selected_professional,
+            # The tenant's REAL shape decides which tools the agent is given at
+            # all (ai/graph.py::base_tools_for): a multi-professional clinic never
+            # receives the tenant-level calendar tools, and a single-professional
+            # one lets the base booking tool resolve its owner. `professional_rows`
+            # is None only when the roster load itself failed (already logged) -
+            # booking_topology maps that to "unknown", which keeps today's tool
+            # set rather than silently disarming a working clinic.
+            booking_topology=turn_topology,
+            include_post_consult_knowledge=_should_inject_post_consult_knowledge(
+                tenant_config.post_consult_knowledge if tenant_config is not None else None,
+                opening_state,
+                flow_state,
+                delegated_to_llm,
+            ),
+            appointment_context=appointment_context_text,
+            conversation_state=conversation_state_text,
+            toolset_v2=_ai_toolset_v2(tenant),
+            editing=editing,
+        )
+    except Exception as exc:
+        if not editing:
+            raise
+        logger.warning(
+            "edit_ai_entrypoint_failed",
+            error_type=type(exc).__name__,
+            conversation_id=str(reply.conversation_id),
+        )
+        reply_text = FALLBACK_REPLY
 
     # The model may not announce an action no tool performed. Applied HERE -
     # after run_agent and before every send path below, so there is exactly
@@ -1143,6 +1162,79 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
     # ai/graph.py::HANDBACK_INTRO_PREFIX): split them off first so every sentinel
     # below matches exactly as before.
     handback_intro, reply_text = split_handback_intro(reply_text)
+    if (
+        editing
+        and reply_text != HUMAN_HANDOFF_OFFER_SENTINEL
+        and not reply_text.startswith(HUMAN_HANDOFF_SENTINEL_PREFIX)
+    ):
+        # Defense in depth: even an old/forged handback cannot escape an active edit.
+        # Re-read after the AI: a different appointment/draft opened meanwhile owns
+        # the turn now. Never apply this proposal over a newer draft.
+        conv_snapshot, tenant_snapshot = flow_snapshot
+        proposal = None
+        if reply_text.startswith(APPOINTMENT_EDIT_SENTINEL_PREFIX):
+            try:
+                proposal = json.loads(reply_text[len(APPOINTMENT_EDIT_SENTINEL_PREFIX) :])
+            except (ValueError, TypeError):
+                pass
+        async with async_session_factory() as session:
+            fresh = await session.get(Conversation, reply.conversation_id)
+            if fresh is None or fresh.flow_state != FlowState.EDIT_BOOKING:
+                logger.info(
+                    "edit_ai_stale_turn_ignored", conversation_id=str(reply.conversation_id)
+                )
+                return
+            if (
+                fresh.flow_edit_draft != conv_snapshot.flow_edit_draft
+                or fresh.flow_step != conv_snapshot.flow_step
+            ):
+                proposal = None
+                conv_snapshot = SimpleNamespace(
+                    **{key: getattr(fresh, key) for key in vars(flow_snapshot[0])}
+                )
+                upcoming_appointments = await load_upcoming_appointments(
+                    session, tenant.id, fresh.patient_id
+                )
+                edit_context = await build_edit_context(
+                    session,
+                    tenant,
+                    tenant_config,
+                    fresh,
+                    professional_rows,
+                    upcoming_appointments,
+                )
+        result = await apply_ai_edit(
+            conv_snapshot,
+            tenant_snapshot,
+            proposal,
+            upcoming_appointments or [],
+            flow_professionals,
+            edit_context,
+        )
+        # Information answers may precede the unchanged stage. Failure, cancellation
+        # advice, protocol strings and arbitrary handback intros never reach the patient.
+        prose = reply_text if proposal is None else ""
+        if (
+            prose
+            and not prose.startswith("__")
+            and prose != FALLBACK_REPLY
+            and not re.search(r"cancel|desmarc|agendar outra", prose, re.IGNORECASE)
+        ):
+            result.bubbles = [
+                *parse(
+                    guard_reply(
+                        prose,
+                        proven_actions=frozenset(),
+                        conversation_id=str(reply.conversation_id),
+                    )
+                ),
+                *result.bubbles,
+            ]
+        await _apply_flow_result(
+            reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+        )
+        return
+
     if not _is_agent_sentinel(reply_text):
         reply_text = guard_reply(
             reply_text,

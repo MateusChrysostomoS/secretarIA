@@ -140,6 +140,8 @@ neither" do `README.md`.
 
 ## Documentação
 
+`docs/CHECKPOINT_edicao_ia_nao_perde_rascunho.md` — TASK-041: IA altera o rascunho sem sair da edição; 4527 testes passaram, sem novas falhas de lint; prova real no Portal BLOCKED, sem publicação.
+
 `docs/CHECKPOINT_primeira_mensagem_lembrete.md` — 2026-10-08: primeira mensagem com consulta reutiliza exatamente o cartão/ações de lembrete no Portal e WhatsApp; 4427 testes passaram; privacidade e concorrência verificadas; sem deploy.
 
 `docs/CHECKPOINT_email_alteracao_consulta.md` — complemento R6: e-mail fixo ao médico atual após alteração confirmada, mudanças e dados completos, sem LLM; commitado, candidato validado com 4411 testes; merge/push autorizados, sem deploy.

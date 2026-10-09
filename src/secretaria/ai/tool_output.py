@@ -97,6 +97,7 @@ V2_TOOL_OUTPUTS: Mapping[str, OutputAllowlist] = {
         )
     ),
     "iniciar_pre_consulta": OutputAllowlist(frozenset({"error"}), text=True),
+    "propose_appointment_edit": _ERROR_ONLY,
     "create_event": _ERROR_ONLY,
     "cancel_event": _ERROR_ONLY,
     "set_booking_draft": _ERROR_ONLY,
