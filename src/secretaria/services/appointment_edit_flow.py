@@ -783,6 +783,23 @@ async def edit_step(
             fields.update({key: draft.original[key] for key in ("start_at", "end_at")})
         return _menu_result(draft.with_changes(**fields).with_stage(), ctx)
 
+    # An offered menu entry remains a valid change of intention inside ANY picker.
+    if step != fr.STEP_EDIT_MENU:
+        if match(body, ae.LABEL_EDIT_DATE) and not ctx.reschedule_blocked:
+            return await _begin_date(conversation, tenant, draft, professionals, ctx)
+        if match(body, ae.LABEL_EDIT_TIME) and not ctx.reschedule_blocked:
+            return await _slots_for(conversation, tenant, draft, draft.start, professionals, ctx)
+        if match(body, ae.LABEL_EDIT_SERVICE) and not ctx.paid_deposit:
+            return _service_list(draft, tenant, professionals, ctx)
+        if match(body, ae.LABEL_EDIT_DOCTOR) and not ctx.paid_deposit:
+            return await _doctor_list(draft, tenant, appt, professionals, ctx)
+        if match(body, ae.LABEL_EDIT_MORE):
+            return _more_result(draft, ctx)
+        if match(body, ae.LABEL_EDIT_INSURANCE) and not ctx.paid_deposit:
+            return _insurance_list(draft, tenant, professionals)
+        if match(body, ae.LABEL_EDIT_PATIENT):
+            return _attendee_question_result(draft)
+
     if step == fr.STEP_EDIT_MENU:
         if match(body, ae.LABEL_EDIT_DATE) and not ctx.reschedule_blocked:
             return await _begin_date(conversation, tenant, draft, professionals, ctx)
@@ -837,3 +854,243 @@ async def edit_step(
         return _attendee_step(conversation, tenant, body, draft, professionals)
 
     return fr._preserve(conversation, "delegate_llm")
+
+
+async def redisplay_edit(conversation, tenant, appointments, professionals, ctx):
+    """Redraw this stage without changing either draft snapshot (including staged values)."""
+    draft = ae.EditDraft.from_json(getattr(conversation, "flow_edit_draft", None))
+    if draft is None:
+        return fr._preserve(conversation, "reply")
+    ctx = ctx or ae.EditContext()
+    appt = fr._find_appt_by_id(appointments, draft.appointment_id) or {}
+    step = conversation.flow_step
+    if step == fr.STEP_EDIT_MENU:
+        result = _menu_result(draft, ctx)
+    elif step == fr.STEP_EDIT_MORE:
+        result = _more_result(draft, ctx)
+    elif step == fr.STEP_EDIT_SERVICE:
+        result = _service_list(
+            draft, tenant, professionals, ctx, after_doctor=bool(draft.stage.get("after_doctor"))
+        )
+    elif step == fr.STEP_EDIT_DOCTOR:
+        result = await _doctor_list(draft, tenant, appt, professionals, ctx)
+    elif step in (fr.STEP_EDIT_INSURANCE, fr.STEP_EDIT_INSURANCE_OTHER):
+        result = (
+            _insurance_list(draft, tenant, professionals)
+            if step == fr.STEP_EDIT_INSURANCE
+            else _result(draft, [TextBubble(body=fr.INSURANCE_PROMPT_OTHER)], step)
+        )
+    elif step == fr.STEP_EDIT_CONFIRM:
+        result = _confirm_result(draft, tenant, professionals)
+    elif step == fr.STEP_EDIT_TIME_TOO:
+        result = _result(
+            draft,
+            [
+                fr.MenuBubble(
+                    body=ae.EDIT_TIME_TOO_BODY, labels=[ae.LABEL_TIME_TOO_YES, ae.LABEL_TIME_TOO_NO]
+                )
+            ],
+            step,
+        )
+    elif step == fr.STEP_EDIT_SLOT:
+        day = datetime.fromisoformat(
+            conversation.flow_selected_day or draft.start.date().isoformat()
+        )
+        result = await _slots_for(conversation, tenant, draft, day, professionals, ctx)
+    elif step in fr._EDIT_DAY_STEPS:
+        result = await fr.enter_day_picker(
+            _carrier(conversation, draft),
+            tenant,
+            ctx.calendar_for(draft.current["professional_id"]),
+            duration_minutes=draft.duration_minutes,
+            branch=fr.EDIT_DAY_BRANCH,
+            anchor=draft.start,
+            professionals=professionals,
+        )
+    elif step == fr.STEP_EDIT_ATT_AUTH and draft.stage.get("pending_attendee"):
+        result = _result(
+            draft,
+            [
+                ButtonBubble(
+                    body=authorization_body(draft.stage["pending_attendee"]),
+                    confirm_label=LABEL_ATTENDEE_AUTH_CONFIRM,
+                    cancel_label=LABEL_ATTENDEE_AUTH_BACK,
+                )
+            ],
+            step,
+            flow_attendee_name=draft.stage["pending_attendee"],
+        )
+    elif step == fr.STEP_EDIT_ATT_NAME:
+        result = _result(draft, [TextBubble(body=ATTENDEE_NAME_REQUEST)], step)
+    else:
+        result = _attendee_question_result(draft)
+    # Pickers may delegate when an agenda is down. The failed AI must still answer
+    # within the same edit, never invoke itself again or return a general menu.
+    if result.action != "reply":
+        result = _result(draft, [TextBubble(body=ae.EDIT_TIME_BUSY)], step)
+    result.flow_edit_draft = draft.to_json()
+    result.flow_step = step
+    result.flow_selected_day = getattr(conversation, "flow_selected_day", None)
+    result.flow_selected_slot = getattr(conversation, "flow_selected_slot", None)
+    return result
+
+
+async def apply_ai_edit(conversation, tenant, proposal, appointments, professionals, ctx):
+    """Validate an AI proposal and land it in the same edit; NEVER apply/confirm it."""
+
+    async def unchanged():
+        return await redisplay_edit(conversation, tenant, appointments, professionals, ctx)
+
+    draft = ae.EditDraft.from_json(getattr(conversation, "flow_edit_draft", None))
+    appt = fr._find_appt_by_id(appointments, fr._managing_appt_id_str(conversation))
+    if draft is None or ctx is None or appt is None or str(appt.get("id")) != draft.appointment_id:
+        return await unchanged()
+    if ae.EditDraft.from_appointment(appt, _tz(tenant)).original != draft.original:
+        return await unchanged()
+    if draft.start.replace(tzinfo=_tz(tenant)) <= datetime.now(_tz(tenant)):
+        return await unchanged()
+    if not isinstance(proposal, dict):
+        return await unchanged()
+    allowed = {
+        "open_field",
+        "professional",
+        "service",
+        "day",
+        "time",
+        "insurance",
+        "attendee",
+        "keep",
+        "finish",
+        "abandon",
+    }
+    if set(proposal) - allowed:
+        return await unchanged()
+    for key in allowed - {"keep", "finish", "abandon"}:
+        if proposal.get(key) is not None and not isinstance(proposal[key], str):
+            return await unchanged()
+    if any(not isinstance(proposal.get(k, False), bool) for k in ("finish", "abandon")):
+        return await unchanged()
+    keep = proposal.get("keep") or []
+    if not isinstance(keep, list) or any(
+        not isinstance(k, str)
+        or k not in {"day", "time", "service", "doctor", "insurance", "patient"}
+        for k in keep
+    ):
+        return await unchanged()
+    keep_keys = {
+        "day": "day",
+        "time": "time",
+        "service": "service",
+        "doctor": "professional",
+        "insurance": "insurance",
+        "patient": "attendee",
+    }
+    if any(proposal.get(keep_keys[field]) for field in keep):
+        return await unchanged()
+    if ctx.paid_deposit and any(proposal.get(k) for k in ("professional", "service", "insurance")):
+        return await unchanged()
+    if ctx.reschedule_blocked and any(proposal.get(k) for k in ("day", "time")):
+        return await unchanged()
+    new = draft
+    doctor = _doctor(professionals, draft)
+    if proposal.get("professional"):
+        matches = [
+            p
+            for p in professionals or []
+            if fr._match_professional([p], proposal["professional"]) is not None
+        ]
+        doctor = matches[0] if len(matches) == 1 else None
+        if doctor is None:
+            return await unchanged()
+        new = new.with_changes(professional_id=str(doctor.id))
+    if proposal.get("service"):
+        service = fr._match_service(_services_of(tenant, doctor), proposal["service"])
+        if service is None:
+            return await unchanged()
+        new = new.with_changes(service=str(service["name"]))
+    service = fr._match_service(_services_of(tenant, doctor), new.current["service"])
+    if service is not None and (proposal.get("professional") or proposal.get("service")):
+        new = new.with_changes(
+            end_at=_iso(new.start + timedelta(minutes=fr._service_duration(service, tenant)))
+        )
+    if proposal.get("insurance"):
+        insurance = fr._match_insurance_plan(tenant, proposal["insurance"])
+        if insurance is None and fr._says_no_insurance(proposal["insurance"]):
+            insurance = fr.LABEL_INSURANCE_PARTICULAR
+        if insurance is None:
+            return await unchanged()
+        new = new.with_changes(insurance=insurance)
+    if proposal.get("day") or proposal.get("time"):
+        try:
+            day = (
+                datetime.strptime(proposal["day"], "%Y-%m-%d").date()
+                if proposal.get("day")
+                else new.start.date()
+            )
+            hour = (
+                datetime.strptime(proposal["time"], "%H:%M").time()
+                if proposal.get("time")
+                else new.start.time()
+            )
+            start = datetime.combine(day, hour)
+        except ValueError:
+            return await unchanged()
+        end = start + timedelta(minutes=new.duration_minutes)
+        if start.replace(tzinfo=_tz(tenant)) <= datetime.now(_tz(tenant)):
+            return await unchanged()
+        if not await _slot_free(
+            ctx.calendar_for(new.current["professional_id"]),
+            start,
+            end,
+            _ignore_event(new, appt, ctx),
+            new.current["professional_id"],
+        ):
+            # Keep the prior slot until a replacement is actually available and chosen.
+            return await _reslot_picker(conversation, tenant, new, professionals, ctx)
+        new = new.with_changes(start_at=_iso(start), end_at=_iso(end))
+    if proposal.get("attendee") not in (None, "self", "other"):
+        return await unchanged()
+    if proposal.get("attendee") == "self":
+        new = new.with_changes(attendee_name=None)
+    if proposal.get("attendee") == "other":
+        return _result(new, [TextBubble(body=ATTENDEE_NAME_REQUEST)], fr.STEP_EDIT_ATT_NAME)
+    if proposal.get("abandon") and not new.changed():
+        return _leave(tenant, professionals, TextBubble(body=ae.EDIT_KEPT))
+    fields = {
+        "date": ae.LABEL_EDIT_DATE,
+        "time": ae.LABEL_EDIT_TIME,
+        "service": ae.LABEL_EDIT_SERVICE,
+        "doctor": ae.LABEL_EDIT_DOCTOR,
+        "insurance": ae.LABEL_EDIT_INSURANCE,
+        "patient": ae.LABEL_EDIT_PATIENT,
+        "more": ae.LABEL_EDIT_MORE,
+    }
+    opened = proposal.get("open_field")
+    if opened:
+        if (
+            opened not in fields
+            or (ctx.paid_deposit and opened in {"service", "doctor", "insurance"})
+            or (ctx.reschedule_blocked and opened in {"date", "time"})
+        ):
+            return await unchanged()
+        from types import SimpleNamespace
+
+        carrier = SimpleNamespace(
+            **{
+                **vars(conversation),
+                "flow_edit_draft": new.to_json(),
+                "flow_step": fr.STEP_EDIT_MORE
+                if opened in {"insurance", "patient"}
+                else fr.STEP_EDIT_MENU,
+            }
+        )
+        return await edit_step(carrier, tenant, fields[opened], appointments, professionals, ctx)
+    if service is None:
+        return _service_list(new, tenant, professionals, ctx, after_doctor=True)
+    if new.changed() or keep or proposal.get("finish") or proposal.get("abandon"):
+        if "médico" in new.changed() or "serviço" in new.changed():
+            return await _after_slot_affecting_change(
+                conversation, tenant, new, appt, professionals, ctx
+            )
+        return _confirm_result(new, tenant, professionals)
+    return await unchanged()

@@ -41,6 +41,7 @@ from secretaria.ai.tools import (
     AI_TOOLSET_V2_STAGING,
     AI_TOOLSET_V2_WITHHELD,
     BLIND_STAGING_VARIANT,
+    AppointmentEditRequested,
     BookingDraftRequested,
     GuidedBookingRequested,
     HumanHandoffOfferRequested,
@@ -52,6 +53,7 @@ from secretaria.ai.tools import (
     _booking_topology_ctx,
     _calendar_ctx,
     _conversation_id_ctx,
+    _editing_ctx,
     _redis_ctx,
     _tenant_config_ctx,
     _tenant_id_ctx,
@@ -62,6 +64,7 @@ from secretaria.ai.tools import (
     iniciar_pre_consulta,
     list_free_slots,
     list_patient_appointments,
+    propose_appointment_edit,
     show_main_menu,
 )
 from secretaria.ai.trace import diagnose, summarize_turn
@@ -130,6 +133,7 @@ START_GUIDED_BOOKING_SENTINEL_PREFIX = "__START_GUIDED_BOOKING__:"
 # patient's or a third party's name: "w" is only "self"/"other".
 HUMAN_HANDOFF_SENTINEL_PREFIX = "__HUMAN_HANDOFF__:"
 BOOKING_DRAFT_SENTINEL_PREFIX = "__BOOKING_DRAFT__:"
+APPOINTMENT_EDIT_SENTINEL_PREFIX = "__APPOINTMENT_EDIT__:"
 # Returned when the agent called offer_human_handoff (TASK-038): the worker sends the
 # fixed "quer que eu chame nosso atendente humano?" card with ✅ Sim / ❌ Não
 # (workers/shared/sentinels.py::_handle_offer_human_handoff); the tap decides.
@@ -303,7 +307,9 @@ def _kept_on_v2(tool: Any) -> bool:
     return True
 
 
-def effective_tools(topology: str, extra_tools: Sequence = (), *, toolset_v2: bool = False) -> list:
+def effective_tools(
+    topology: str, extra_tools: Sequence = (), *, toolset_v2: bool = False, editing: bool = False
+) -> list:
     """THE tool list of one turn: base set + the tenant's extra tools.
 
     One assembly for `build_agent` and for the `agent_capabilities_resolved` log, so what
@@ -311,6 +317,25 @@ def effective_tools(topology: str, extra_tools: Sequence = (), *, toolset_v2: bo
     busy reader, no legacy writer; the blind create/cancel pass). With it off this is
     exactly `[*base_tools_for(topology), *extra_tools]`, as it always was.
     """
+    if editing:
+        # Allowlist, not a name blacklist: new plugin writers cannot silently escape an edit.
+        allowed = {
+            "get_service_info",
+            "get_availability",
+            "list_professionals",
+            "list_units",
+            "list_free_slots",
+            "list_free_slots_for_professional",
+            "request_human_handoff",
+            "offer_human_handoff",
+        }
+        candidates = [*base_tools_for(topology, toolset_v2=toolset_v2), *extra_tools]
+        kept = [
+            t
+            for t in candidates
+            if getattr(t, "name", "") in allowed and (not toolset_v2 or _kept_on_v2(t))
+        ]
+        return [*kept, propose_appointment_edit]
     if not toolset_v2:
         return [*base_tools_for(topology), *extra_tools]
     kept = [t for t in extra_tools if _kept_on_v2(t)]
@@ -336,6 +361,7 @@ def _turn_tool_names() -> frozenset[str]:
         _booking_topology_ctx.get(),
         _extra_tools_ctx.get(),
         toolset_v2=_ai_toolset_v2_ctx.get(),
+        editing=_editing_ctx.get(),
     )
     return frozenset(getattr(t, "name", str(t)) for t in tools)
 
@@ -347,9 +373,27 @@ def _turn_system_prompt(config: TenantRuntimeConfig) -> str:
     worker hands to `run_agent(toolset_v2=...)` - and never frozen into a cached agent.
     With the switch off this is `secretary_system_prompt(config)`, byte for byte.
     """
-    if not _ai_toolset_v2_ctx.get():
-        return secretary_system_prompt(config)
-    return secretary_system_prompt_v2(config, tool_names=_turn_tool_names())
+    prompt = (
+        secretary_system_prompt_v2(config, tool_names=_turn_tool_names())
+        if _ai_toolset_v2_ctx.get()
+        else secretary_system_prompt(config)
+    )
+    if _editing_ctx.get():
+        prompt += """
+EDIÇÃO DE CONSULTA EM ANDAMENTO — estas regras prevalecem sobre agendar/remarcar.
+Você ajuda a alterar UMA consulta já marcada, permanecendo na edição. O estado
+mascarado contém current: esse é o valor que vale no rascunho; não o descarte.
+Tudo que o paciente não mencionou fica como está em current, inclusive convênio.
+Use propose_appointment_edit para interpretar texto e trocar de assunto/campo.
+'Mesmo dia', 'mesmo horário', 'não quero mudar o convênio' preservam esses campos.
+'Por hoje é só' com mudanças pendentes mostra o cartão final (finish); nunca confirma.
+Só abandono explícito sem mudanças pendentes encerra a edição (abandon).
+Nunca ofereça cancelar a consulta para mudar médico ou serviço; nunca cancele,
+remarque ou inicie outro agendamento. Nenhum valor é apagado ao abrir uma lista.
+Um médico ocupado exige horários DAQUELE médico, sem perder o horário atual.
+Nunca afirme que salvou: somente Confirmar no cartão final aplica as mudanças.
+"""
+    return prompt
 
 
 def _prompt_with_today(state: dict) -> list[BaseMessage]:
@@ -401,6 +445,7 @@ def build_agent(
     topology: str = BOOKING_TOPOLOGY_UNKNOWN,
     *,
     toolset_v2: bool = False,
+    editing: bool = False,
 ) -> Any:
     """Compile (or fetch from cache) the ReAct agent for THIS turn's capabilities.
 
@@ -411,8 +456,10 @@ def build_agent(
     both can never share a graph: a multi-professional tenant's key simply has
     no `create_event` in it.
     """
-    tools = effective_tools(topology, extra_tools, toolset_v2=toolset_v2)
+    tools = effective_tools(topology, extra_tools, toolset_v2=toolset_v2, editing=editing)
     key = frozenset(_tool_cache_key(t) for t in tools)
+    if editing:
+        key = key | {"#editing"}
     if toolset_v2:
         # TASK-030 P4: a v2 agent's tools are wrapped differently (below), so it never
         # shares a cache entry with a v1 agent of the same names (a multi clinic, no extras).
@@ -474,6 +521,7 @@ async def invoke_agent(messages: list[BaseMessage]) -> str:
         _extra_tools_ctx.get(),
         _booking_topology_ctx.get(),
         toolset_v2=_ai_toolset_v2_ctx.get(),
+        editing=_editing_ctx.get(),
     )
     result = await agent.ainvoke({"messages": messages})
     # The input history comes back first; everything after it is what THIS turn
@@ -659,6 +707,7 @@ async def run_agent(
     booking_topology: str = BOOKING_TOPOLOGY_UNKNOWN,
     conversation_state: str | None = None,
     toolset_v2: bool = False,
+    editing: bool = False,
 ) -> str:
     """arq-side entry point: build history + run agent + return reply text.
 
@@ -733,6 +782,7 @@ async def run_agent(
     tok_redis = _redis_ctx.set(redis)
     tok_topology = _booking_topology_ctx.set(booking_topology)
     tok_toolset_v2 = _ai_toolset_v2_ctx.set(toolset_v2)
+    tok_editing = _editing_ctx.set(editing)
     # Seeded from this conversation's stored map, so a phone tokenized last
     # week keeps its token today. Installed in a ContextVar because the tool
     # wrapper (ai/pii.py) runs deep inside the ReAct loop, in a context
@@ -743,7 +793,9 @@ async def run_agent(
 
     capabilities = [
         getattr(t, "name", str(t))
-        for t in effective_tools(booking_topology, extra_tools, toolset_v2=toolset_v2)
+        for t in effective_tools(
+            booking_topology, extra_tools, toolset_v2=toolset_v2, editing=editing
+        )
     ]
     logger.info(
         "agent_capabilities_resolved",
@@ -877,6 +929,9 @@ async def run_agent(
         return with_handback_intro(
             f"{MANAGE_APPOINTMENT_SENTINEL_PREFIX}{request.to_payload()}", exc.intro
         )
+    except AppointmentEditRequested as exc:
+        logger.info("ai_run_agent_propose_appointment_edit", conversation_id=str(conversation_id))
+        return APPOINTMENT_EDIT_SENTINEL_PREFIX + json.dumps(exc.proposal, ensure_ascii=False)
     except BookingDraftRequested as exc:
         draft = exc.draft
         logger.info(
@@ -923,6 +978,7 @@ async def run_agent(
         _redis_ctx.reset(tok_redis)
         _booking_topology_ctx.reset(tok_topology)
         _ai_toolset_v2_ctx.reset(tok_toolset_v2)
+        _editing_ctx.reset(tok_editing)
         _pseudonymizer_ctx.reset(tok_pii)
         # In `finally`, not on the happy path: the map has already grown by the
         # time any of the sentinel exceptions above fires, and re-minting those

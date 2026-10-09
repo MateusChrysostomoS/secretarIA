@@ -103,6 +103,8 @@ _booking_topology_ctx: ContextVar[str] = ContextVar(
 # `_blocked_by_toolset_v2`, the second lock inside each of those tools. Lives here, like the
 # vars above, so a plugin tool module can read it without importing graph.py. The default
 # (False) keeps every tool exactly as it was.
+_editing_ctx: ContextVar[bool] = ContextVar("_editing", default=False)
+
 _ai_toolset_v2_ctx: ContextVar[bool] = ContextVar("_ai_toolset_v2", default=False)
 
 # Note on calendar outages: a tool that hits CalendarUnavailableError simply
@@ -1833,3 +1835,53 @@ async def offer_human_handoff(message: str = "") -> dict:
             se não houver nada a dizer.
     """
     raise HumanHandoffOfferRequested(intro=handback_message(message))
+
+
+class AppointmentEditRequested(Exception):
+    """A proposal for the active edit, never an authorization to persist it."""
+
+    def __init__(self, proposal: dict) -> None:
+        super().__init__("appointment edit proposal")
+        self.proposal = proposal
+
+
+@tool
+async def propose_appointment_edit(
+    open_field: str | None = None,
+    professional: str | None = None,
+    service: str | None = None,
+    day: str | None = None,
+    time: str | None = None,
+    insurance: str | None = None,
+    attendee: str | None = None,
+    keep: list[str] | None = None,
+    finish: bool = False,
+    abandon: bool = False,
+) -> dict:
+    """Propose changes ONLY to the existing appointment's active editing draft.
+
+    Unmentioned fields keep their current value. open_field opens doctor/service/date/
+    time/insurance/patient/more without changing anything. professional/service/insurance
+    must name an actual catalog option. day is YYYY-MM-DD, time HH:MM. keep names fields
+    the patient wants unchanged (same day/time/insurance); never reset them to original.
+    attendee is self or other; other opens the existing name and authorization flow,
+    never pass a patient's name here. finish shows the final change confirmation card;
+    it NEVER confirms or writes. abandon only for an explicit request to stop editing;
+    with pending changes it still shows confirmation. Never cancel an appointment.
+    """
+    if not _editing_ctx.get():
+        return {"error": "Não há edição de consulta em andamento."}
+    raise AppointmentEditRequested(
+        {
+            "open_field": open_field,
+            "professional": professional,
+            "service": service,
+            "day": day,
+            "time": time,
+            "insurance": insurance,
+            "attendee": attendee,
+            "keep": keep,
+            "finish": finish,
+            "abandon": abandon,
+        }
+    )

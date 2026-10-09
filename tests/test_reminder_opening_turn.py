@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from secretaria.models import AppointmentStatus, FlowState, Patient
+from secretaria.services import appointment_edit as ae
 from secretaria.services.attendee import ATTENDEE_QUESTION_BODY
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.flow_router import LABEL_BOOK, menu_label
@@ -222,7 +223,8 @@ async def test_legacy_outro_keeps_the_edit_draft_while_free_text_goes_to_the_ai(
 
     row = await get_conversation(db, world)
     assert row.flow_state == FlowState.EDIT_BOOKING and row.flow_edit_draft is not None
-    assert sent()[-1][2] == AGENT_REPLY
+    assert sent()[-2][2] == AGENT_REPLY
+    assert sent()[-1][2] == ae.EDIT_MENU_BODY
 
 
 async def test_the_ais_short_answer_is_not_lost_when_the_menu_is_suppressed(
