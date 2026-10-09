@@ -53,6 +53,7 @@ from secretaria.schemas.calendar import (
 from secretaria.services import (
     appointment_release,
     cancellation_notice,
+    clinic_action_notice,
     reminder_hooks,
     reminder_schedule,
     staff_patient_message,
@@ -126,6 +127,15 @@ def _notice_link(code: str | None, patient: Patient | None, appt: Appointment) -
         return None
     number = (patient.wa_id if patient is not None else None) or appt.phone
     return cancellation_notice.whatsapp_deep_link(number)
+
+
+async def _patient_of(session: AsyncSession, tenant: Tenant, appt: Appointment) -> Patient | None:
+    """The appointment's patient, tenant-scoped (a foreign id resolves to nobody)."""
+    if appt.patient_id is None:
+        return None
+    return await session.scalar(
+        select(Patient).where(Patient.id == appt.patient_id, Patient.tenant_id == tenant.id)
+    )
 
 
 async def _get_appointment(
@@ -1001,6 +1011,18 @@ async def update_appointment_status(
     await session.commit()
     await session.refresh(appt)
     notice: staff_patient_message.NoticeResult | None = None
+    allow_paid = staff_patient_message.paid_notice_authorised(tenant, body.notify_outside_window)
+    if body.status == AppointmentStatus.CONFIRMED:
+        # Spec §2: "Seu médico confirmou ..." + Confirmar / Cancelar / Alterar Dados.
+        notice = await clinic_action_notice.notify_staff_confirmation(
+            session,
+            tenant,
+            appt,
+            await _patient_of(session, tenant, appt),
+            allow_paid=allow_paid,
+            now=now,
+        )
+        await session.refresh(appt)
 
     logger.info(
         "calendar_appointment_status_updated",
