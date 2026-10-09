@@ -66,7 +66,10 @@ from secretaria.services.greeting_template import (  # noqa: E402
     LGPD_CONSENT_MESSAGE,
     render_greeting,
 )
-from secretaria.services.patient_name import NAME_REQUEST_MESSAGE  # noqa: E402
+from secretaria.services.patient_name import (  # noqa: E402
+    NAME_CHANGE_BUTTON_LABEL,
+    NAME_REQUEST_MESSAGE,
+)
 from secretaria.workers import tasks  # noqa: E402
 
 PHONE_NUMBER_ID = "1234567890"
@@ -391,7 +394,11 @@ async def test_first_contact_puts_exactly_two_messages_on_the_wire(db, wire) -> 
 
     assert len(wire.sends) == 3, wire.sends
     kind, body, buttons = wire.sends[2]
-    assert (kind, body, buttons) == ("buttons", LGPD_CONSENT_MESSAGE, [CONSENT_BUTTON_LABEL])
+    assert (kind, body, buttons) == (
+        "buttons",
+        LGPD_CONSENT_MESSAGE,
+        [CONSENT_BUTTON_LABEL, NAME_CHANGE_BUTTON_LABEL],
+    )
 
 
 async def test_the_menu_buttons_only_appear_after_the_tap(db, wire) -> None:
@@ -406,8 +413,8 @@ async def test_the_menu_buttons_only_appear_after_the_tap(db, wire) -> None:
     labels = [buttons for _kind, _body, buttons in wire.sends if buttons]
     # Two consent prompts (the notice and the re-prompt), then the menu.
     assert labels == [
-        [CONSENT_BUTTON_LABEL],
-        [CONSENT_BUTTON_LABEL],
+        [CONSENT_BUTTON_LABEL, NAME_CHANGE_BUTTON_LABEL],
+        [CONSENT_BUTTON_LABEL, NAME_CHANGE_BUTTON_LABEL],
         [decorate(EMOJI_SCHEDULE, LABEL_BOOK), LABEL_OTHER],
     ]
     assert wire.sends[-1][1] == CONSENT_ACCEPTED_MESSAGE

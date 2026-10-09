@@ -41,6 +41,8 @@ from secretaria.services.patient_name import (
     parse_patient_name,
 )
 from secretaria.services.pending_identity import (
+    IDENTITY_CHANGE_EMAIL_ACTION,
+    identity_action_or_none,
     parse_code,
 )
 from secretaria.services.reminder_opening import (
@@ -80,6 +82,7 @@ from secretaria.workers.shared.state_expiry import (
 )
 from secretaria.workers.shared.text import (
     _is_consent_acceptance,
+    _is_name_change_request,
     extract_patient_name,
     is_menu_command,
 )
@@ -341,6 +344,28 @@ async def _route_inbound_turn(
             )
 
     if conversation.flow_state == FlowState.AWAITING_NAME:
+        # "📩 Mudar e-mail" on the Portal's name question: the visitor typed the
+        # wrong address. Checked before the answer is read as a name; only the
+        # id this module offered counts (revalidated upstream), never the label.
+        if (
+            policy.has_inline_identity
+            and identity_action_or_none(interactive_reply_id) == IDENTITY_CHANGE_EMAIL_ACTION
+        ):
+            conversation.flow_state = FlowState.AWAITING_EMAIL
+            conversation.flow_step = None
+            logger.info(
+                "patient_name_email_change_tapped",
+                conversation_id=str(conversation.id),
+                tenant_id=str(tenant.id),
+            )
+            return _ReplyContext(
+                channel=channel,
+                conversation_id=conversation.id,
+                tenant_id=tenant.id,
+                patient_ref=patient_ref,
+                inbound_body=body or "",
+                identity_action=IDENTITY_CHANGE_EMAIL_ACTION,
+            )
         # The time-based floor first, as everywhere else: a patient who went
         # silent on the question an hour ago is not answering it now.
         if _expire_stale_pending_identity_state(conversation, tenant, last_activity_at):
@@ -407,6 +432,32 @@ async def _route_inbound_turn(
             patient_ref=patient_ref,
             inbound_body=body or "",
             name_captured=True,
+        )
+
+    # "✏️ Mudar nome" on the LGPD notice (BOTH channels): ask the name again.
+    # Before the identity gate and the consent gate, so the tap is never read as
+    # a consent reminder. Offered only while consent is owed; a stale tap after
+    # consent is honoured only from a resting state, so it never cuts a
+    # booking in progress.
+    if _is_name_change_request(body, interactive_reply_id) and (
+        patient.lgpd_accepted_at is None
+        or conversation.flow_state in (FlowState.IDLE, FlowState.MENU)
+    ):
+        conversation.flow_step = None
+        conversation.reactivation_origin = None
+        logger.info(
+            "patient_name_change_tapped",
+            conversation_id=str(conversation.id),
+            tenant_id=str(tenant.id),
+            channel=channel,
+        )
+        return _ReplyContext(
+            channel=channel,
+            conversation_id=conversation.id,
+            tenant_id=tenant.id,
+            patient_ref=patient_ref,
+            inbound_body=body or "",
+            name_change_requested=True,
         )
 
     # --- Brain-Message inline identity gate --------------------

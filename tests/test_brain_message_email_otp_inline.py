@@ -147,7 +147,11 @@ def _code_notice_row(email_masked: str | None = EMAIL_MASKED) -> str:
 # not the bare constant, is what the patient's console renders, and asserting
 # on it is the stronger statement. WhatsApp assertions still use the raw
 # constant: there the row is a history copy and the SEND is the delivery.
+EMAIL_CHANGE_OPTION = "\n(opções: 📩 Mudar e-mail)"
 LGPD_ROW = interactive_history_body(LGPD_CONSENT_MESSAGE, [CONSENT_BUTTON_LABEL])
+LGPD_NAME_ROW = interactive_history_body(
+    LGPD_CONSENT_MESSAGE, [CONSENT_BUTTON_LABEL, "✏️ Mudar nome"]
+)
 
 
 @pytest_asyncio.fixture
@@ -471,14 +475,14 @@ async def test_first_contact_asks_the_email_between_the_greeting_and_the_lgpd(db
     assert calls.claimed == [EMAIL], "the address must reach brain-api before consent"
     # A NEW address (brain-api said no account) earns the name question, and
     # the LGPD notice waits for its answer (services/patient_name.py).
-    assert sent[2] == NAME_REQUEST_AFTER_EMAIL_MESSAGE
+    assert sent[2] == NAME_REQUEST_AFTER_EMAIL_MESSAGE + EMAIL_CHANGE_OPTION
     assert LGPD_ROW not in sent
     assert await _flow_state(db, tenant) == FlowState.AWAITING_NAME
 
     await _bm_turn(tenant, NAME)
 
     sent = await _outbound(db, tenant)
-    assert sent[3] == LGPD_ROW
+    assert sent[3] == LGPD_NAME_ROW
     assert await _flow_state(db, tenant) == FlowState.IDLE
     assert (await _patient(db, tenant)).name == NAME
 
@@ -534,7 +538,8 @@ async def test_an_unreadable_answer_reasks_and_does_not_advance(db, calls) -> No
     # a dead end.
     await _bm_turn(tenant, EMAIL)
     assert calls.claimed == [EMAIL]
-    assert (await _outbound(db, tenant))[3] == NAME_REQUEST_AFTER_EMAIL_MESSAGE
+    name_question = NAME_REQUEST_AFTER_EMAIL_MESSAGE + EMAIL_CHANGE_OPTION
+    assert (await _outbound(db, tenant))[3] == name_question
 
 
 async def test_a_brain_api_outage_on_the_claim_does_not_advance_to_consent(

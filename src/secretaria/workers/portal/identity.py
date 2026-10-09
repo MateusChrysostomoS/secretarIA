@@ -42,6 +42,7 @@ from secretaria.workers.shared.context import (
 from secretaria.workers.shared.dispatch import (
     _send_buttons_reply,
     _send_consent_notice,
+    _send_name_question,
     _send_plain_reply,
 )
 from secretaria.workers.shared.opening import (
@@ -148,12 +149,14 @@ async def _continue_after_email_claim(
         return
 
     await _write_flow_state(reply.conversation_id, FlowState.AWAITING_NAME)
-    await _send_plain_reply(
+    # With "📩 Mudar e-mail": the address was typed a message ago and may be wrong.
+    await _send_name_question(
         reply,
         tenant=tenant,
         waba_token=waba_token,
         body=NAME_REQUEST_AFTER_EMAIL_MESSAGE,
         event="patient_name_requested",
+        offer_email_change=True,
     )
 
 async def _account_code_dead_end(

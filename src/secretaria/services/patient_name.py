@@ -57,6 +57,14 @@ NAME_REQUEST_MESSAGE = (
     "✍️ É só digitar aqui."
 )
 
+# The button that rides on the LGPD notice (BOTH channels) so a patient who typed
+# the wrong name can redo the question before consenting. The id is semantic;
+# the label is what a plain tap comes back as (`workers/shared/text.py::
+# _is_name_change_request` accepts either). 20-character reply-button cap:
+# "✏️ Mudar nome" is 13 code points.
+NAME_CHANGE_ACTION = "name_change"
+NAME_CHANGE_BUTTON_LABEL = "✏️ Mudar nome"
+
 # Portal: the same question, one message later — it answers the e-mail the
 # visitor just typed. Nothing else on this channel acknowledges the address
 # (the claim is silent), so the first line does, without echoing it back: a

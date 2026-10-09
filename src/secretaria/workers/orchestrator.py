@@ -143,6 +143,7 @@ from secretaria.workers.shared.dispatch import (
     _send_buttons_reply,
     _send_consent_notice,
     _send_greeting,
+    _send_name_question,
     _send_plain_reply,
 )
 from secretaria.workers.shared.flow_runner import (
@@ -599,12 +600,14 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             )
             return
         await _write_flow_state(reply.conversation_id, FlowState.AWAITING_NAME)
-        await _send_plain_reply(
+        await _send_name_question(
             reply,
             tenant=tenant,
             waba_token=waba_token,
             body=NAME_REQUEST_MESSAGE,
             event="patient_name_reactivated",
+            offer_email_change=policy_for(reply.channel).has_inline_identity
+            and patient_owes_consent,
         )
         return
 
@@ -718,12 +721,30 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
 
     # --- The name question's two answers (both channels) -----------------
     if reply.name_invalid:
-        await _send_plain_reply(
+        await _send_name_question(
             reply,
             tenant=tenant,
             waba_token=waba_token,
             body=NAME_INVALID_MESSAGE,
             event="patient_name_reprompt_sent",
+            offer_email_change=policy_for(reply.channel).has_inline_identity
+            and patient_owes_consent,
+        )
+        return
+
+    if reply.name_change_requested:
+        # "✏️ Mudar nome" on the LGPD notice: the question again, from the top.
+        # The state is written here, past the entitlement gate, like every other
+        # entry into AWAITING_NAME.
+        await _write_flow_state(reply.conversation_id, FlowState.AWAITING_NAME)
+        await _send_name_question(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            body=NAME_REQUEST_MESSAGE,
+            event="patient_name_change_requested",
+            offer_email_change=policy_for(reply.channel).has_inline_identity
+            and patient_owes_consent,
         )
         return
 
@@ -753,8 +774,14 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             )
             return
         # Consent is next, on every channel — the same notice, with the same
-        # button, that followed the greeting before this step existed.
-        await _send_consent_notice(reply, tenant=tenant, waba_token=waba_token)
+        # button, that followed the greeting before this step existed. A name
+        # was just registered, so the notice also offers to change it.
+        await _send_consent_notice(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            change_name=bool((patient_name or "").strip()),
+        )
         return
 
     if reply.pending_email_claim is not None:
@@ -878,7 +905,11 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
         ):
             return
         await _send_consent_notice(
-            reply, tenant=tenant, waba_token=waba_token, body=CONSENT_REMINDER_MESSAGE
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            body=CONSENT_REMINDER_MESSAGE,
+            change_name=bool((patient_name or "").strip()),
         )
         return
 

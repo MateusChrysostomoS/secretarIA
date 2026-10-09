@@ -74,6 +74,8 @@ from secretaria.services.greeting_template import (  # noqa: E402
 )
 from secretaria.services.patient_name import (  # noqa: E402
     NAME_ANSWER_LLM_PLACEHOLDER,
+    NAME_CHANGE_ACTION,
+    NAME_CHANGE_BUTTON_LABEL,
     NAME_INVALID_MESSAGE,
     NAME_PAUSED_MESSAGE,
     NAME_REQUEST_AFTER_EMAIL_MESSAGE,
@@ -86,6 +88,7 @@ from secretaria.services.pending_identity import (  # noqa: E402
     EMAIL_REQUEST_MESSAGE,
     EXISTING_ACCOUNT_CODE_BUTTONS,
     EXISTING_ACCOUNT_SENTENCE,
+    IDENTITY_CHANGE_EMAIL_ACTION,
     ClaimOutcome,
     ClaimResult,
     IdentityState,
@@ -105,6 +108,9 @@ EMAIL_MASKED = "m***a@exemplo.com"
 # Meta's `contact.profile.name` — the value the owner does NOT trust.
 PROFILE_NAME = "Mari 🌸"
 LGPD_ROW = interactive_history_body(LGPD_CONSENT_MESSAGE, [CONSENT_BUTTON_LABEL])
+NAME_LGPD_BUTTONS = [CONSENT_BUTTON_LABEL, NAME_CHANGE_BUTTON_LABEL]
+LGPD_NAME_ROW = interactive_history_body(LGPD_CONSENT_MESSAGE, NAME_LGPD_BUTTONS)
+EMAIL_CHANGE_OPTION = "\n(opções: 📩 Mudar e-mail)"
 
 
 # --------------------------------------------------------------------------
@@ -264,10 +270,14 @@ async def _wa_turn(tenant: Tenant, body: str, *, profile_name: str | None = PROF
     return reply
 
 
-async def _bm_turn(tenant: Tenant, body: str):
+async def _bm_turn(tenant: Tenant, body: str, *, reply_id: str | None = None):
     """One Brain-Message inbound, decided AND delivered (the row IS delivery)."""
     reply = await tasks._persist_brain_message_inbound(
-        tenant_id=tenant.id, external_id=EXTERNAL_ID, text=body, patient_name=None
+        tenant_id=tenant.id,
+        external_id=EXTERNAL_ID,
+        text=body,
+        patient_name=None,
+        interactive_reply_id=reply_id,
     )
     if reply is not None:
         await tasks._send_bot_reply(reply, redis=None)
@@ -403,7 +413,7 @@ async def test_portal_a_custom_menu_label_as_the_name_answer_is_reasked(db, call
 
     await _bm_turn(tenant, "lentes esclerais")
 
-    assert (await _outbound(db, tenant))[-1] == NAME_INVALID_MESSAGE
+    assert (await _outbound(db, tenant))[-1] == NAME_INVALID_MESSAGE + EMAIL_CHANGE_OPTION
     assert (await _patient(db, tenant, CHANNEL_BRAIN_MESSAGE)).name is None
     assert calls.reported == []
 
@@ -488,7 +498,7 @@ async def test_whatsapp_first_contact_asks_the_name_even_with_a_profile_name(db,
     await _wa_turn(tenant, "maria  da silva")
 
     assert (await _patient(db, tenant, CHANNEL_WHATSAPP)).name == "Maria da Silva"
-    assert _WireClient.sends[2] == ("buttons", LGPD_CONSENT_MESSAGE, [CONSENT_BUTTON_LABEL])
+    assert _WireClient.sends[2] == ("buttons", LGPD_CONSENT_MESSAGE, NAME_LGPD_BUTTONS)
     assert (await _conversation(db, tenant)).flow_state == FlowState.IDLE
 
     # A later profile name never overwrites the typed one.
@@ -516,7 +526,7 @@ async def test_whatsapp_an_unreadable_answer_reasks_once_then_moves_on(db) -> No
 
     await _wa_turn(tenant, "12345")
 
-    assert _WireClient.sends[-1] == ("buttons", LGPD_CONSENT_MESSAGE, [CONSENT_BUTTON_LABEL])
+    assert _WireClient.sends[-1] == ("buttons", LGPD_CONSENT_MESSAGE, NAME_LGPD_BUTTONS)
     conversation = await _conversation(db, tenant)
     assert (conversation.flow_state, conversation.flow_step) == (FlowState.IDLE, None)
     # No name typed: the profile name stays as the only thing we have.
@@ -597,7 +607,7 @@ async def test_a_free_answer_to_the_name_offer_never_loops(db) -> None:
     await _wa_turn(tenant, "Ana Souza")
 
     assert (await _patient(db, tenant, CHANNEL_WHATSAPP)).name == "Ana Souza"
-    assert _WireClient.sends[-1] == ("buttons", LGPD_CONSENT_MESSAGE, [CONSENT_BUTTON_LABEL])
+    assert _WireClient.sends[-1] == ("buttons", LGPD_CONSENT_MESSAGE, NAME_LGPD_BUTTONS)
     assert (await _conversation(db, tenant)).reactivation_origin is None
 
 
@@ -612,7 +622,7 @@ async def test_a_non_name_answer_to_the_name_offer_meets_consent(db) -> None:
     assert _WireClient.sends[-1] == (
         "buttons",
         CONSENT_REMINDER_MESSAGE,
-        [CONSENT_BUTTON_LABEL],
+        NAME_LGPD_BUTTONS,
     )
     conversation = await _conversation(db, tenant)
     assert (conversation.flow_state, conversation.reactivation_origin) == (FlowState.IDLE, None)
@@ -651,7 +661,7 @@ async def test_whatsapp_declining_to_resume_pauses_and_then_meets_consent(db) ->
     assert _WireClient.sends[-1] == (
         "buttons",
         CONSENT_REMINDER_MESSAGE,
-        [CONSENT_BUTTON_LABEL],
+        NAME_LGPD_BUTTONS,
     )
 
 
@@ -669,7 +679,7 @@ async def test_portal_new_email_asks_the_name_before_the_lgpd(db, calls) -> None
 
     sent = await _outbound(db, tenant)
     assert sent[1] == EMAIL_REQUEST_MESSAGE
-    assert sent[2] == NAME_REQUEST_AFTER_EMAIL_MESSAGE
+    assert sent[2] == NAME_REQUEST_AFTER_EMAIL_MESSAGE + EMAIL_CHANGE_OPTION
     assert LGPD_ROW not in sent
     assert calls.code_requests == [], "a new address must not be mailed a code here"
     assert (await _conversation(db, tenant)).flow_state == FlowState.AWAITING_NAME
@@ -677,7 +687,7 @@ async def test_portal_new_email_asks_the_name_before_the_lgpd(db, calls) -> None
     await _bm_turn(tenant, "Beatriz Lima")
 
     sent = await _outbound(db, tenant)
-    assert sent[3] == LGPD_ROW
+    assert sent[3] == LGPD_NAME_ROW
     # Portal: the typed name also goes to brain-api, for this account's next clinic.
     assert calls.reported == [(EXTERNAL_ID, "Beatriz Lima")]
     assert (await _patient(db, tenant, CHANNEL_BRAIN_MESSAGE)).name == "Beatriz Lima"
@@ -833,7 +843,7 @@ async def test_portal_silence_expires_the_name_wait(db) -> None:
 
     await _bm_turn(tenant, "sim")
 
-    assert (await _outbound(db, tenant))[-1] == NAME_REQUEST_MESSAGE
+    assert (await _outbound(db, tenant))[-1] == NAME_REQUEST_MESSAGE + EMAIL_CHANGE_OPTION
     assert (await _conversation(db, tenant)).flow_state == FlowState.AWAITING_NAME
 
 
@@ -967,3 +977,54 @@ async def test_portal_two_unparsed_answers_leave_no_raw_name_for_the_llm(db, mon
     )
     # "Beatriz", not "Maria": the re-ask copy itself says "Maria Silva".
     assert "beatriz" not in history.casefold(), history
+
+
+async def test_whatsapp_change_name_button_asks_again_and_overwrites(db) -> None:
+    """"✏️ Mudar nome" on the LGPD notice: no e-mail button, the new answer wins."""
+    tenant = await _seed_tenant(db)
+    await _wa_turn(tenant, "oi")
+    await _wa_turn(tenant, "Ana Souza")
+    assert _WireClient.sends[-1] == ("buttons", LGPD_CONSENT_MESSAGE, NAME_LGPD_BUTTONS)
+
+    await _wa_turn(tenant, NAME_CHANGE_BUTTON_LABEL)
+
+    # WhatsApp has no e-mail step: the question goes out button-free.
+    assert _WireClient.sends[-1] == ("text", NAME_REQUEST_MESSAGE, None)
+    assert (await _conversation(db, tenant)).flow_state == FlowState.AWAITING_NAME
+
+    await _wa_turn(tenant, "Maria Souza")
+
+    assert (await _patient(db, tenant, CHANNEL_WHATSAPP)).name == "Maria Souza"
+    assert _WireClient.sends[-1] == ("buttons", LGPD_CONSENT_MESSAGE, NAME_LGPD_BUTTONS)
+    assert (await _conversation(db, tenant)).flow_state == FlowState.IDLE
+
+
+async def test_portal_change_name_button_asks_again_with_the_email_button(db) -> None:
+    tenant = await _seed_tenant(db)
+    await _bm_turn(tenant, "oi")
+    await _bm_turn(tenant, EMAIL)
+    await _bm_turn(tenant, "Ana Souza")
+    assert (await _outbound(db, tenant))[3] == LGPD_NAME_ROW
+
+    await _bm_turn(tenant, NAME_CHANGE_BUTTON_LABEL, reply_id=NAME_CHANGE_ACTION)
+
+    sent = await _outbound(db, tenant)
+    assert sent[-1] == NAME_REQUEST_MESSAGE + EMAIL_CHANGE_OPTION
+    assert (await _conversation(db, tenant)).flow_state == FlowState.AWAITING_NAME
+
+
+async def test_portal_change_email_button_on_the_name_question_goes_back_to_the_email(db) -> None:
+    tenant = await _seed_tenant(db)
+    await _bm_turn(tenant, "oi")
+    await _bm_turn(tenant, EMAIL)
+    assert (await _conversation(db, tenant)).flow_state == FlowState.AWAITING_NAME
+
+    await _bm_turn(tenant, "📩 Mudar e-mail", reply_id=IDENTITY_CHANGE_EMAIL_ACTION)
+
+    sent = await _outbound(db, tenant)
+    assert sent[-1] == EMAIL_REQUEST_MESSAGE
+    assert (await _conversation(db, tenant)).flow_state == FlowState.AWAITING_EMAIL
+    # And the corrected address is verified again, landing on the name question.
+    await _bm_turn(tenant, "outro@example.com")
+    name_question = NAME_REQUEST_AFTER_EMAIL_MESSAGE + EMAIL_CHANGE_OPTION
+    assert (await _outbound(db, tenant))[-1] == name_question

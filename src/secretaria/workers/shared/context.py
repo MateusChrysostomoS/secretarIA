@@ -144,6 +144,10 @@ class _ReplyContext:
     name_captured: bool = False
     # The answer did not look like a name; the re-ask is the whole turn.
     name_invalid: bool = False
+    # The patient tapped "Mudar nome" on the LGPD notice: the name question is
+    # asked again (`_persist_inbound_message` -> `_send_bot_reply`), the state
+    # is written there, past the entitlement gate.
+    name_change_requested: bool = False
     # --- TASK-032 R3: the reminder that opens a returning patient's chat -----
     # The appointment the card is about (services/reminder_opening.py). The
     # card goes out first (`workers/shared/reminder_opening.py`), then the

@@ -9,6 +9,10 @@ from secretaria.core.whatsapp_limits import (
 from secretaria.services.greeting_template import (
     CONSENT_BUTTON_LABEL,
 )
+from secretaria.services.patient_name import (
+    NAME_CHANGE_ACTION,
+    NAME_CHANGE_BUTTON_LABEL,
+)
 
 # Patient-facing fallbacks for non-conversational outcomes. Hardcoded for the
 # MVP; candidates for per-tenant configuration later.
@@ -109,6 +113,21 @@ def _is_consent_acceptance(body: str | None) -> bool:
     if not body:
         return False
     return strip_decoration(body).casefold() == strip_decoration(CONSENT_BUTTON_LABEL).casefold()
+
+def _is_name_change_request(body: str | None, reply_id: str | None = None) -> bool:
+    """True for a tap on (or a typed match of) the LGPD notice's "Mudar nome" button.
+
+    The id is checked first (the Portal hands back the id it was offered; WhatsApp
+    hands back both), then the label through `strip_decoration`, exactly as
+    `_is_consent_acceptance` does for "Concordo".
+    """
+    if reply_id == NAME_CHANGE_ACTION:
+        return True
+    if not body:
+        return False
+    return (
+        strip_decoration(body).casefold() == strip_decoration(NAME_CHANGE_BUTTON_LABEL).casefold()
+    )
 
 # The DESTRUCTIVE reset. Deliberately long, literal and self-describing: it is
 # the one command nobody types by accident, so reaching it is unambiguously a

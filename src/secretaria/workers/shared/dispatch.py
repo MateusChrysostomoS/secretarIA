@@ -24,6 +24,14 @@ from secretaria.services.greeting_template import (
     CONSENT_BUTTON_LABEL,
     LGPD_CONSENT_MESSAGE,
 )
+from secretaria.services.patient_name import (
+    NAME_CHANGE_ACTION,
+    NAME_CHANGE_BUTTON_LABEL,
+)
+from secretaria.services.pending_identity import (
+    CODE_NOTICE_BUTTONS,
+    IDENTITY_CHANGE_EMAIL_ACTION,
+)
 from secretaria.services.turn_safety_net import take_held_intro
 from secretaria.services.whatsapp import (
     interactive_buttons_record,
@@ -239,8 +247,13 @@ async def _send_consent_notice(
     tenant: Tenant,
     waba_token: str | None = None,
     body: str = LGPD_CONSENT_MESSAGE,
+    change_name: bool = False,
 ) -> None:
     """Send an LGPD terms message carrying the `✅ Concordo` button.
+
+    `change_name` adds the `✏️ Mudar nome` button beside it, for a patient whose
+    name is already registered (both channels): a typo in the name is fixable
+    before consenting.
 
     Two callers, one shape: the notice that follows the first-contact greeting
     (`body` defaults to it), and the re-prompt for a subject who answered
@@ -272,6 +285,8 @@ async def _send_consent_notice(
     # `_is_consent_acceptance` matches on, since `extract_inbound_body` hands
     # back a plain button's title. One list for the send AND its record.
     buttons = [("consent|accept", CONSENT_BUTTON_LABEL)]
+    if change_name:
+        buttons.append((NAME_CHANGE_ACTION, NAME_CHANGE_BUTTON_LABEL))
     try:
         result = await client.send_buttons(
             to=reply.patient_ref,
@@ -337,6 +352,38 @@ async def _send_plain_reply(
         await _record_outbound(reply.conversation_id, body, result)
     logger.info(event, conversation_id=str(reply.conversation_id))
     return True
+
+
+async def _send_name_question(
+    reply: _ReplyContext,
+    *,
+    tenant: Tenant,
+    waba_token: str | None,
+    body: str,
+    event: str,
+    offer_email_change: bool = False,
+) -> bool:
+    """Send the name question; on the Portal it can carry `📩 Mudar e-mail`.
+
+    `offer_email_change` is only ever True for a visitor who typed an address in
+    this chat (Portal, before consent): the tap reuses the code card's
+    `identity_change_email` id, so it lands on the same handler that already asks
+    for the address again. WhatsApp has no e-mail step and always gets plain text.
+    """
+    if not offer_email_change:
+        return await _send_plain_reply(
+            reply, tenant=tenant, waba_token=waba_token, body=body, event=event
+        )
+    return await _send_buttons_reply(
+        reply,
+        tenant=tenant,
+        waba_token=waba_token,
+        body=body,
+        buttons=[
+            button for button in CODE_NOTICE_BUTTONS if button[0] == IDENTITY_CHANGE_EMAIL_ACTION
+        ],
+        event=event,
+    )
 
 
 async def _send_buttons_reply(
