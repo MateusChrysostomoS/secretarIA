@@ -21,10 +21,11 @@ never raise. Logs carry ids and codes only.
 
 from datetime import datetime
 
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.logging import get_logger
-from secretaria.models import Appointment, Patient, Tenant
+from secretaria.models import Appointment, Patient, Professional, Tenant
 from secretaria.models.appointment_reminder import (
     REMINDER_CHANNEL_CHAT,
     REMINDER_CHANNEL_WHATSAPP,
@@ -198,3 +199,84 @@ async def notify_staff_confirmation(
         now=now,
         once_per_start=True,
     )
+
+
+# --- "Compareceu" -> the post-consult message (spec §2) -----------------------------
+
+POST_CONSULT_DEFAULT = (
+    "Como foi a sua consulta{doctor}? Conte pra gente como você está se sentindo. "
+    "Se precisar de algo, é só responder por aqui."
+)
+
+
+def post_consult_text(tenant: Tenant, doctor_name: str | None) -> str:
+    """The clinic's own `post_consult_message`, verbatim; else the default question."""
+    own = (tenant.post_consult_message or "").strip()
+    if own:
+        return own
+    doctor = _one_line(doctor_name)
+    return POST_CONSULT_DEFAULT.format(doctor=f" com {doctor}" if doctor else "")
+
+
+async def notify_attended(
+    session: AsyncSession,
+    tenant: Tenant,
+    appointment: Appointment,
+    patient: Patient | None,
+    *,
+    allow_paid: bool,
+    now: datetime,
+) -> NoticeResult | None:
+    """The post-consult message right after "Compareceu", once per appointment.
+
+    `post_consult_notified_at` is claimed with a conditional UPDATE (two clicks, two
+    staff: one winner) and committed BEFORE the send; it is cleared again when the
+    message did not reach the patient, so the next-open follow-up
+    (services/patient_context.py::find_post_consult_followup) still asks later. None =
+    already sent for this appointment.
+    """
+    tenant_id, appointment_id = tenant.id, appointment.id
+    claimed = await session.execute(
+        update(Appointment)
+        .where(
+            Appointment.id == appointment_id,
+            Appointment.tenant_id == tenant_id,
+            Appointment.post_consult_notified_at.is_(None),
+        )
+        .values(post_consult_notified_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    if claimed.rowcount != 1:
+        logger.info("post_consult_notice_skipped", appointment_id=str(appointment_id))
+        return None
+    await session.commit()
+    doctor = None
+    if appointment.professional_id is not None:
+        doctor = await session.scalar(
+            select(Professional.name).where(
+                Professional.id == appointment.professional_id,
+                Professional.tenant_id == tenant_id,
+            )
+        )
+    result = await send_clinic_notice(
+        session,
+        tenant,
+        appointment,
+        patient,
+        body=post_consult_text(tenant, doctor),
+        allow_paid=allow_paid,
+        usage_key=f"postconsult:{appointment_id}",
+        now=now,
+    )
+    if not result.delivered:
+        await session.execute(
+            update(Appointment)
+            .where(Appointment.id == appointment_id, Appointment.tenant_id == tenant_id)
+            .values(post_consult_notified_at=None)
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
+    logger.info(
+        "post_consult_notice", appointment_id=str(appointment_id), patient_notice=result.code
+    )
+    return result

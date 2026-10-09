@@ -1023,6 +1023,17 @@ async def update_appointment_status(
             now=now,
         )
         await session.refresh(appt)
+    elif body.status == AppointmentStatus.ATTENDED:
+        # Spec §2: the post-consult message now, once per appointment.
+        notice = await clinic_action_notice.notify_attended(
+            session,
+            tenant,
+            appt,
+            await _patient_of(session, tenant, appt),
+            allow_paid=allow_paid,
+            now=now,
+        )
+        await session.refresh(appt)
 
     logger.info(
         "calendar_appointment_status_updated",

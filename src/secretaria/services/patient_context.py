@@ -258,6 +258,10 @@ async def find_post_consult_followup(
     )
     if appointment is None:
         return None
+    if appointment.post_consult_notified_at is not None:
+        # TASK-032 R7: the clinic's "Compareceu" already delivered the post-consult
+        # message for this appointment - asking again on the next open would repeat it.
+        return None
     ended_at = as_utc(appointment.end_at or appointment.start_at)
     if ended_at > now:
         return None  # still in progress
