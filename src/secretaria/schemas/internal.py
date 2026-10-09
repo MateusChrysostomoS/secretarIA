@@ -253,3 +253,18 @@ class BrainMessageVisitMerge(BaseModel):
     tenant_id: UUID
     visit_external_id: str = Field(min_length=1, max_length=64)
     into_external_id: str = Field(min_length=1, max_length=64)
+
+
+class BrainMessageVisitDiscard(BaseModel):
+    """brain-api's retention job (TASK-042): drop a visit that only opened the link."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: UUID
+    external_id: str = Field(min_length=1, max_length=64)
+
+
+class BrainMessageVisitDiscardOut(BaseModel):
+    """`discarded` (deleted now) or `absent` (nothing here, e.g. a retry). Both mean "done"."""
+
+    status: Literal["discarded", "absent"]

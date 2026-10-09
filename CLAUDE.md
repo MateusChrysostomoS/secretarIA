@@ -545,3 +545,5 @@ TASK-034: Portal visit discard on account promotion; local validation and deploy
 `docs/CHECKPOINT_ia_captura_datas.md` — TASK-030: correção aprovada de captura completa no caminho atual, datas explícitas/relativas no fuso da clínica e escolha segura de médico; validação conjunta com TASK-037/avaliações reais, publicação autorizada e deploy pelo dono pendente; ler antes de P4/P5 e novo reteste.
 
 `docs/TESTES_REAIS_p4_posdeploy_2026-10-07.md` — TASK-030: código P4 comprovado em API/worker, Portal cartões/desistência PASS; ai_draft_v2=false, disponibilidade natural/remarcação textual ainda limitadas; P5 antes de ativar, WhatsApp real pendente.
+
+TASK-042: descarte de visita vazia (`POST /internal/brain-message/visits/discard`) e espera de código de conta conhecida que não cai mais no LGPD: `docs/CHECKPOINT_retencao_visitas_portal.md`. Local, não deployado.

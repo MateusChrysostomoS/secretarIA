@@ -696,6 +696,21 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
         )
         return
 
+    if reply.existing_account_code_reprompt:
+        # TASK-042: a known address's code wait, before consent, got something that is
+        # not a code. The same two-button card again ("Reenviar código" / "Mudar
+        # e-mail"), the wait untouched; its exit is the clock. No mask: this turn asked
+        # brain-api for no new code, so the card says "o seu e-mail".
+        await _send_code_notice(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            email_masked=None,
+            event="existing_account_code_reprompt_sent",
+            pre_consent=True,
+        )
+        return
+
     if reply.pending_code_reprompt is not None:
         # The card again, saying the reservation is still standing. No mask:
         # brain-api hands one back only on a fresh `request_code`, and this
