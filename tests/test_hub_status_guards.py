@@ -44,9 +44,11 @@ def test_a_cancelled_appointment_never_comes_back(target):
     assert err.value.code == "not_live"
 
 
-def test_attended_and_no_show_correct_each_other_and_repeat_as_a_no_op():
-    assert staff_transition(S.ATTENDED, S.NO_SHOW, start_at=PAST, now=NOW) is True
-    assert staff_transition(S.NO_SHOW, S.ATTENDED, start_at=PAST, now=NOW) is True
+def test_closed_outcomes_cannot_correct_each_other_and_repeat_as_a_no_op():
+    with pytest.raises(StaffTransitionRefused, match="not_live"):
+        staff_transition(S.ATTENDED, S.NO_SHOW, start_at=PAST, now=NOW)
+    with pytest.raises(StaffTransitionRefused, match="not_live"):
+        staff_transition(S.NO_SHOW, S.ATTENDED, start_at=PAST, now=NOW)
     assert staff_transition(S.ATTENDED, S.ATTENDED, start_at=PAST, now=NOW) is False
     assert staff_transition(S.NO_SHOW, S.NO_SHOW, start_at=PAST, now=NOW) is False
     with pytest.raises(StaffTransitionRefused):
@@ -120,7 +122,7 @@ async def test_attended_twice_is_a_quiet_no_op(client: AsyncClient, db, acting, 
     assert response.json()["patient_notice"] is None and logged == []
 
 
-async def test_attended_can_be_corrected_to_no_show_after_the_start(
+async def test_attended_cannot_be_corrected_to_no_show_after_the_start(
     client: AsyncClient, db, acting
 ):
     world = await setup_world(db, acting, start_at=datetime.now(UTC) - timedelta(hours=1))
@@ -128,7 +130,9 @@ async def test_attended_can_be_corrected_to_no_show_after_the_start(
 
     response = await patch_status(client, world.appointment.id, "no_show")
 
-    assert response.status_code == 200 and response.json()["status"] == "no_show"
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "not_live"
+    assert (await reload_appointment(db, world.appointment.id)).status == S.ATTENDED
 
 
 async def test_the_action_response_carries_the_notice_keys(client: AsyncClient, db, acting):
@@ -138,3 +142,25 @@ async def test_the_action_response_carries_the_notice_keys(client: AsyncClient, 
 
     assert body["patient_notice"] is None and body["whatsapp_link"] is None
     assert body["status"] == "scheduled"
+
+
+@pytest.mark.parametrize(("current", "target"), [(S.ATTENDED, "no_show"), (S.NO_SHOW, "attended")])
+async def test_closed_cross_status_change_has_no_side_effects(
+    client, db, acting, monkeypatch, current, target
+):
+    from tests._r7_support import sent
+
+    world = await setup_world(
+        db, acting, status=current, start_at=datetime.now(UTC) - timedelta(hours=1)
+    )
+    calls = []
+
+    async def forbidden(*args, **kwargs):
+        calls.append(1)
+
+    monkeypatch.setattr(hub_calendar.deposit_lifecycle, "on_no_show", forbidden)
+    response = await patch_status(client, world.appointment.id, target)
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "not_live"
+    assert (await reload_appointment(db, world.appointment.id)).status == current
+    assert calls == [] and sent() == []

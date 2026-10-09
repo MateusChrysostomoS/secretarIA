@@ -937,7 +937,7 @@ async def update_appointment_status(
     R7 guards (spec 2026-10-09 §1/§3, rule in services/appointment_status.py::
     staff_transition): `no_show` before the start is 409 `no_show_before_start`; a
     live target, `attended` or `no_show` on a cancelled booking is 409 `not_live` (it
-    used to resurrect); attended <-> no_show is a correction; repeating attended or
+    used to resurrect); closed outcomes cannot change; repeating attended or
     no_show changes nothing. `cancelled` keeps its old, unguarded behaviour.
     """
     appt = await _get_appointment(session, tenant, appointment_id)

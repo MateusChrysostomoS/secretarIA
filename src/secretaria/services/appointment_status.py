@@ -87,12 +87,8 @@ class StaffTransitionRefused(ValueError):
         self.message = message
 
 
-# After the start the agenda offers both "Compareceu" and "Faltou", so a mis-click must
-# be correctable; nothing else ever leaves a terminal status through this endpoint.
-STAFF_STATUS_CORRECTIONS: dict[AppointmentStatus, tuple[AppointmentStatus, ...]] = {
-    AppointmentStatus.ATTENDED: (AppointmentStatus.NO_SHOW,),
-    AppointmentStatus.NO_SHOW: (AppointmentStatus.ATTENDED,),
-}
+# Closed outcomes are immutable through PATCH (binding spec 2026-10-09 §1/§3).
+STAFF_TERMINAL_NOOPS = (AppointmentStatus.ATTENDED, AppointmentStatus.NO_SHOW)
 
 
 def staff_transition(
@@ -106,17 +102,17 @@ def staff_transition(
 
     * `cancelled` keeps its pre-R7, unguarded behaviour (and its money hook).
     * Any other target needs a LIVE appointment - a cancelled booking never comes back
-      (it used to: PATCH confirmed "resurrected" it) - except the attended <-> no_show
-      correction.
+      (it used to: PATCH confirmed "resurrected" it). Closed outcome corrections
+      also require a separate explicitly authorized operation.
     * `no_show` before the start is refused: "Faltou" does not exist before the time.
 
     Raises `StaffTransitionRefused` with code `not_live` or `no_show_before_start`.
     """
     if target == AppointmentStatus.CANCELLED:
         return True
-    if target in STAFF_STATUS_CORRECTIONS and current == target:
+    if target in STAFF_TERMINAL_NOOPS and current == target:
         return False
-    if not (is_live_status(current) or current in STAFF_STATUS_CORRECTIONS.get(target, ())):
+    if not is_live_status(current):
         raise StaffTransitionRefused("not_live", "Esta consulta já foi cancelada ou encerrada.")
     if target == AppointmentStatus.NO_SHOW and start_at is not None:
         start = start_at if start_at.tzinfo is not None else start_at.replace(tzinfo=UTC)
