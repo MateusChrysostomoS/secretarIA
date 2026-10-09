@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Literal
+from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from secretaria.models.appointment import AppointmentStatus
 
@@ -193,6 +194,43 @@ class AppointmentReschedule(BaseModel):
     new_start: datetime
     new_end: datetime
     custom_message: str | None = Field(default=None, max_length=4000)
+
+
+_EDITABLE = ("start_at", "service", "professional_id", "insurance", "attendee_name", "phone")
+_NOT_CLEARABLE = ("start_at", "service", "professional_id")
+
+
+class AppointmentEdit(BaseModel):
+    """POST /appointments/{id}/edit - "Editar/Remarcar" (TASK-032 R7, spec 2026-10-09 §1/§3).
+
+    Every field is optional; at least one of the six editable ones must be SENT. A sent
+    null / "" clears `insurance`, `attendee_name` and `phone`; the other three cannot be
+    cleared. `phone` is the appointment's contact phone, never the patient's identity.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    start_at: AwareDatetime | None = None
+    service: str | None = Field(default=None, min_length=1, max_length=120)
+    professional_id: UUID | None = None
+    insurance: str | None = Field(default=None, max_length=120)
+    attendee_name: str | None = Field(default=None, max_length=120)
+    phone: str | None = Field(default=None, max_length=32)
+    # Same meaning as AppointmentCancel.notify_outside_window (OR-ed with the clinic's
+    # `paid_notices_auto_approved`).
+    notify_outside_window: bool = False
+    # True = book over a busy slot or outside the hours (an "encaixe").
+    allow_overlap: bool = False
+
+    @model_validator(mode="after")
+    def _something_to_change(self) -> AppointmentEdit:
+        sent = self.model_fields_set
+        if not sent.intersection(_EDITABLE):
+            raise ValueError("send at least one field to change")
+        for name in _NOT_CLEARABLE:
+            if name in sent and getattr(self, name) is None:
+                raise ValueError(f"{name} cannot be null")
+        return self
 
 
 class AppointmentStatusUpdate(BaseModel):

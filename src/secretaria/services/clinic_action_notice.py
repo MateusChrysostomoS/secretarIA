@@ -19,17 +19,20 @@ These functions commit (the card's row must exist before the patient can tap it)
 never raise. Logs carry ids and codes only.
 """
 
+from collections.abc import Sequence
 from datetime import datetime
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.logging import get_logger
+from secretaria.core.whatsapp_limits import MAX_INTERACTIVE_BODY_CHARS, truncate_plain
 from secretaria.models import Appointment, Patient, Professional, Tenant
 from secretaria.models.appointment_reminder import (
     REMINDER_CHANNEL_CHAT,
     REMINDER_CHANNEL_WHATSAPP,
     REMINDER_KIND_STAFF_CONFIRM,
+    REMINDER_KIND_STAFF_EDIT,
 )
 from secretaria.services import reminder_hooks, reminder_schedule
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
@@ -40,7 +43,12 @@ from secretaria.services.reminder_text import (
     local_start,
     reminder_buttons,
 )
-from secretaria.services.staff_patient_message import NoticeResult, send_clinic_notice
+from secretaria.services.staff_appointment_edit import FieldChange
+from secretaria.services.staff_patient_message import (
+    NOTICE_FAILED,
+    NoticeResult,
+    send_clinic_notice,
+)
 
 logger = get_logger(__name__)
 
@@ -280,3 +288,48 @@ async def notify_attended(
         "post_consult_notice", appointment_id=str(appointment_id), patient_notice=result.code
     )
     return result
+
+
+# --- "Editar/Remarcar" -> what changed + the same three buttons (spec §2) -----------
+
+EDIT_TITLE = "A clínica alterou {subject}:"
+EDIT_NOW = "Agora: {day} às {time} com {doctor}."
+
+
+def edit_text(changes: Sequence[FieldChange], content: ReminderContent) -> str:
+    """Before -> after of each field the clinic changed, then the appointment as it is now."""
+    local = local_start(content)
+    lines = [EDIT_TITLE.format(subject=_subject(content))]
+    lines += [f"• {change.label}: {change.before} → {change.after}" for change in changes]
+    lines += [
+        "",
+        EDIT_NOW.format(day=f"{local:%d/%m/%Y}", time=f"{local:%H:%M}", doctor=_doctor(content)),
+    ]
+    return truncate_plain("\n".join(lines), MAX_INTERACTIVE_BODY_CHARS)
+
+
+async def notify_staff_edit(
+    session: AsyncSession,
+    tenant: Tenant,
+    appointment: Appointment,
+    patient: Patient | None,
+    *,
+    changes: Sequence[FieldChange],
+    allow_paid: bool,
+    now: datetime,
+) -> NoticeResult:
+    """Every edit is told; the card row of this start is re-used across edits."""
+    content = await load_reminder_content(session, tenant, appointment)
+    result = await _card_notice(
+        session,
+        tenant,
+        appointment,
+        patient,
+        kind=REMINDER_KIND_STAFF_EDIT,
+        body=edit_text(changes, content),
+        allow_paid=allow_paid,
+        now=now,
+        once_per_start=False,
+    )
+    # once_per_start=False never skips; the fallback only keeps the return type honest.
+    return result if result is not None else NoticeResult(NOTICE_FAILED)

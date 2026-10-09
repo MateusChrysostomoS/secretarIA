@@ -6,6 +6,7 @@ POST  /tenants/me/calendar/appointments/{id}/cancel    - cancel + notify patient
 POST  /tenants/me/calendar/appointments/{id}/release    - free an unconfirmed slot.
 POST  /tenants/me/calendar/appointments/{id}/message    - write to the patient (any channel).
 POST  /tenants/me/calendar/appointments/{id}/reschedule - reschedule + notify.
+POST  /tenants/me/calendar/appointments/{id}/edit       - Editar/Remarcar + notify (R7).
 POST  /tenants/me/calendar/blocks                      - block slot (no notification).
 PATCH /tenants/me/calendar/appointments/{id}/status    - mark attended / no-show / etc.
 """
@@ -36,6 +37,7 @@ from secretaria.schemas.calendar import (
     AppointmentActionRead,
     AppointmentCancel,
     AppointmentCreate,
+    AppointmentEdit,
     AppointmentRead,
     AppointmentRelease,
     AppointmentReleaseRead,
@@ -56,6 +58,7 @@ from secretaria.services import (
     clinic_action_notice,
     reminder_hooks,
     reminder_schedule,
+    staff_appointment_edit,
     staff_patient_message,
 )
 from secretaria.services.appointment_status import (
@@ -70,6 +73,10 @@ from secretaria.services.insurance_catalog import AppointmentPlan, load_appointm
 from secretaria.services.patient_context import as_utc
 from secretaria.services.payments import deposit_lifecycle
 from secretaria.services.tenant_config import load_tenant_config, resolve_professional_calendar
+from secretaria.workers.shared.appointment_edit_apply import AppliedEdit
+from secretaria.workers.shared.appointment_edit_notification import (
+    enqueue_professional_edit_notification,
+)
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/tenants/me/calendar", tags=["hub-calendar"])
@@ -182,21 +189,22 @@ def _detail(code: str, message: str, **extra) -> dict:
     return {"code": code, "message": message, **extra}
 
 
-async def _owning_calendar(session: AsyncSession, tenant: Tenant, appt: Appointment):
-    """The Google calendar that owns `appt`'s event.
+async def _calendar_for_professional(
+    session: AsyncSession, tenant: Tenant, professional_id: UUID | None
+):
+    """The Google calendar of `professional_id` (the clinic's own when None).
 
     A booking made with a professional lives on THAT professional's calendar;
-    `cancel_event` treats a 404 as "already gone" (success), so deleting on the
-    wrong calendar would silently no-op while the slot stays occupied. When the
-    owner cannot be resolved this refuses (409) instead of guessing the tenant
-    calendar - same "don't guess, degrade" rule as
-    workers/shared/actions.py::_calendar_for_appointment.
+    `cancel_event` treats a 404 as "already gone" (success), so writing to the wrong
+    calendar would silently no-op while the slot stays occupied. When the professional
+    cannot be resolved this refuses (409) instead of guessing the tenant calendar -
+    same "don't guess, degrade" rule as workers/shared/actions.py::_calendar_for_appointment.
     """
-    if appt.professional_id is None:
+    if professional_id is None:
         return await _get_calendar(session, tenant)
     professional = await session.scalar(
         select(Professional).where(
-            Professional.id == appt.professional_id, Professional.tenant_id == tenant.id
+            Professional.id == professional_id, Professional.tenant_id == tenant.id
         )
     )
     unresolved = HTTPException(
@@ -215,12 +223,16 @@ async def _owning_calendar(session: AsyncSession, tenant: Tenant, appt: Appointm
         )
     except Exception as exc:
         logger.warning(
-            "release_owning_calendar_failed",
-            appointment_id=str(appt.id),
+            "hub_professional_calendar_failed",
+            professional_id=str(professional_id),
             error_type=type(exc).__name__,
         )
         raise unresolved from exc
 
+
+async def _owning_calendar(session: AsyncSession, tenant: Tenant, appt: Appointment):
+    """The Google calendar that owns `appt`'s event (see `_calendar_for_professional`)."""
+    return await _calendar_for_professional(session, tenant, appt.professional_id)
 
 # ---------------------------------------------------------------------------
 # GET /events — agenda read model
@@ -863,6 +875,96 @@ async def message_patient(
 # ---------------------------------------------------------------------------
 # POST /appointments/{id}/reschedule — move event + optionally notify
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# POST /appointments/{id}/edit — Editar/Remarcar (TASK-032 R7)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/appointments/{appointment_id}/edit", response_model=AppointmentActionRead)
+async def edit_appointment(
+    appointment_id: str,
+    body: AppointmentEdit,
+    request: Request,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> AppointmentActionRead:
+    """The clinic changes date/time, service, doctor, convênio, who it is for or the
+    contact phone in one action, and the patient is told (spec 2026-10-09 §1/§2/§3).
+
+    The edit itself (validation, Google fail-closed, the row, the doctor e-mail outbox)
+    is services/staff_appointment_edit.py; here: the reminders follow a new time (R2,
+    same rule as /reschedule), the doctor e-mail is enqueued (the outbox cron recovers
+    a lost enqueue) and the patient gets "A clínica alterou ..." with the three buttons.
+    """
+    appt = await _get_appointment(session, tenant, appointment_id)
+    staff_request = staff_appointment_edit.StaffEditRequest(
+        fields=frozenset(body.model_fields_set.intersection(staff_appointment_edit.EDITABLE_FIELDS)),
+        start_at=body.start_at,
+        service=body.service,
+        professional_id=body.professional_id,
+        insurance=body.insurance,
+        attendee_name=body.attendee_name,
+        phone=body.phone,
+        allow_overlap=body.allow_overlap,
+    )
+
+    async def _calendar(professional_id):
+        return await _calendar_for_professional(session, tenant, professional_id)
+
+    try:
+        outcome = await staff_appointment_edit.apply_staff_edit(
+            session, tenant, appt, staff_request, calendar_for=_calendar
+        )
+    except staff_appointment_edit.StaffEditError as exc:
+        raise HTTPException(exc.status_code, _detail(exc.code, exc.message, **exc.extra)) from None
+
+    await session.refresh(appt)
+    if outcome.time_changed and (
+        reminder_hooks.enabled_for(tenant) or (appt.confirmation_count or 0) > 0
+    ):
+        await reminder_hooks.after_appointment_rescheduled(appt.id)
+        await session.refresh(appt)
+    if outcome.notice_id is not None:
+        await enqueue_professional_edit_notification(
+            getattr(request.app.state, "arq_pool", None),
+            tenant.id,
+            AppliedEdit(
+                appointment_id=appt.id,
+                moved=outcome.time_changed,
+                old_event_id=None,
+                old_professional_id=None,
+                notice_id=outcome.notice_id,
+                notice_version=outcome.notice_version,
+                changed_fields=outcome.changed_fields,
+            ),
+        )
+    patient = await _patient_of(session, tenant, appt)
+    notice = await clinic_action_notice.notify_staff_edit(
+        session,
+        tenant,
+        appt,
+        patient,
+        changes=outcome.changes,
+        allow_paid=staff_patient_message.paid_notice_authorised(
+            tenant, body.notify_outside_window
+        ),
+        now=datetime.now(UTC),
+    )
+    await session.refresh(appt)
+    logger.info(
+        "calendar_appointment_edited",
+        appointment_id=str(appt.id),
+        changed=len(outcome.changes),
+        patient_notice=notice.code,
+    )
+    deposit_status = await _deposit_status_value(session, appt.id)
+    return AppointmentActionRead(
+        **_appointment_read(appt, deposit_status=deposit_status).model_dump(),
+        patient_notice=notice.code,
+        whatsapp_link=notice.whatsapp_link,
+    )
 
 
 @router.post("/appointments/{appointment_id}/reschedule", response_model=AppointmentRead)
