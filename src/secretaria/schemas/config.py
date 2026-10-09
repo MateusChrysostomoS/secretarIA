@@ -205,6 +205,10 @@ class TenantConfigUpdate(BaseModel):
     pix_retention_policy: Literal["total", "partial"] | None = None
     pix_partial_refund_percent: int | None = Field(default=None, ge=1, le=100)
     pix_reschedule_limit: int | None = Field(default=None, ge=0)
+    # TASK-032 R7 (spec 2026-10-09 §2/§3): "não perguntar novamente" - the clinic's
+    # standing yes to BILLED WhatsApp notices outside the 24 h window. Absent = left
+    # untouched; an explicit null is refused below (the column is NOT NULL).
+    paid_notices_auto_approved: bool | None = None
     is_active: bool | None = None
 
     @field_validator("initial_flows")
@@ -277,6 +281,14 @@ class TenantConfigUpdate(BaseModel):
         return value
 
 
+    @field_validator("paid_notices_auto_approved")
+    @classmethod
+    def _paid_flag_is_true_or_false(cls, value: bool | None) -> bool:
+        if value is None:
+            raise ValueError("paid_notices_auto_approved must be true or false")
+        return value
+
+
 class TenantConfigRead(BaseModel):
     """GET/PUT response. Never includes secrets — only a `calendar_connected` flag.
 
@@ -333,3 +345,6 @@ class TenantConfigRead(BaseModel):
     # can never flip it; it only ever changes via
     # POST /internal/tenants/{id}/asaas-connection.
     asaas_connected: bool
+    # TASK-032 R7: the clinic's standing authorisation for billed notices (see
+    # TenantConfigUpdate). Defaulted so an older reader building this model never 500s.
+    paid_notices_auto_approved: bool = False

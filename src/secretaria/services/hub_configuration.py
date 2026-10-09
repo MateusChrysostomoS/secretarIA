@@ -137,6 +137,7 @@ TENANT_SCALAR_FIELDS: tuple[str, ...] = (
     "pix_retention_policy",
     "pix_partial_refund_percent",
     "pix_reschedule_limit",
+    "paid_notices_auto_approved",
 )
 
 PROFESSIONAL_CONFIG_FIELDS: tuple[str, ...] = (
@@ -381,6 +382,7 @@ async def tenant_read_model(session: AsyncSession, tenant: Tenant) -> TenantConf
         pix_partial_refund_percent=tenant.pix_partial_refund_percent,
         pix_reschedule_limit=tenant.pix_reschedule_limit,
         asaas_connected=asaas_connected,
+        paid_notices_auto_approved=bool(tenant.paid_notices_auto_approved),
     )
 
 
