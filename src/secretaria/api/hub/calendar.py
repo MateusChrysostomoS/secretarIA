@@ -30,6 +30,7 @@ from secretaria.models import (
 )
 from secretaria.models.appointment import LIVE_APPOINTMENT_STATUSES
 from secretaria.models.patient import Patient
+from secretaria.models.pix_deposit import PixDepositStatus
 from secretaria.schemas.calendar import (
     AppointmentCancel,
     AppointmentCreate,
@@ -629,6 +630,26 @@ async def release_appointment(
                 "already_confirmed",
                 "O paciente já confirmou esta consulta.",
                 confirmation_count=appt.confirmation_count,
+            ),
+        )
+
+    # Money first, Google second: a release whose deposit was PAID moves money
+    # (retained / partially or fully refunded), so the clinic must have read the
+    # consequence. Raised before anything is touched.
+    deposit = await deposit_lifecycle.get_deposit_for_appointment(session, appt.id)
+    if (
+        deposit is not None
+        and deposit.status is PixDepositStatus.PAID
+        and not body.acknowledge_retention
+    ):
+        outcome = deposit_lifecycle.preview_cancellation_outcome(tenant, deposit, appt)
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            _detail(
+                "retention_ack_required",
+                deposit_lifecycle.release_warning_text(outcome, tenant, deposit),
+                deposit_outcome=outcome,
+                amount_cents=deposit.amount_cents,
             ),
         )
 

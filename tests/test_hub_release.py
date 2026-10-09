@@ -1,6 +1,7 @@
 # ruff: noqa: F811
 """POST /appointments/{id}/release — guards, Google, status, reminders (TASK-032 R4, spec 4.4)."""
 
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -11,13 +12,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from secretaria.api.hub import calendar as hub_calendar
 from secretaria.api.hub.deps import get_current_tenant
 from secretaria.core.database import get_session
-from secretaria.models import Appointment, AppointmentReminder, AppointmentStatus, FlowState, Tenant
+from secretaria.models import (
+    Appointment,
+    AppointmentReminder,
+    AppointmentStatus,
+    FlowState,
+    PixDeposit,
+    PixDepositStatus,
+    Tenant,
+)
 from secretaria.services.flow_router import STEP_EDIT_MENU
+from secretaria.services.payments import deposit_lifecycle
 from secretaria.services.tenant_config import set_google_refresh_token
 from tests._edit_flow_support import draft_for
 from tests._reminder_fixtures import db  # noqa: F401
 from tests._reminders_r3 import set_conversation, wire
-from tests._reminders_v2 import NOW, add_reminder, seed_world
+from tests._reminders_v2 import NOW, add_reminder, seed_paid_deposit, seed_world
 from tests.test_appointment_edit_apply import _apply, _edit
 
 CALENDAR = "/tenants/me/calendar"
@@ -391,3 +401,124 @@ async def test_the_response_keeps_the_appointment_read_shape(client: AsyncClient
     ):
         assert key in body
     assert body["deposit_outcome"] is None and body["confirmation_count"] == 0
+
+
+# ------------------------------------------------------------------- Pix deposit
+
+
+async def _deposit_status(db, appointment_id):
+    async with db() as session:
+        deposit = await session.scalar(
+            select(PixDeposit).where(PixDeposit.appointment_id == appointment_id)
+        )
+        return deposit.status
+
+
+async def _policy(db, tenant_id, policy: str) -> None:
+    async with db() as session:
+        tenant = await session.get(Tenant, tenant_id)
+        tenant.pix_retention_policy = policy
+        await session.commit()
+
+
+async def _paid_world(db, acting, *, hours_ahead: float, policy: str = "total", **kwargs):
+    world = await _setup(
+        db, acting, start_at=datetime.now(UTC) + timedelta(hours=hours_ahead), **kwargs
+    )
+    await _policy(db, world.tenant.id, policy)
+    await seed_paid_deposit(db, world)
+    return world
+
+
+@pytest.fixture
+def refund_ok(monkeypatch: pytest.MonkeyPatch):
+    async def _refund(session, tenant, deposit, *, value_cents, full, now):
+        deposit.status = (
+            PixDepositStatus.CANCELLED_REFUNDED if full else PixDepositStatus.CANCELLED_RETAINED
+        )
+        return "refunded" if full else "partial_refund"
+
+    monkeypatch.setattr(deposit_lifecycle, "_refund", _refund)
+
+
+async def test_a_paid_deposit_inside_the_retention_window_needs_the_acknowledgement(
+    client: AsyncClient, db, acting
+):
+    world = await _paid_world(db, acting, hours_ahead=2)
+
+    response = await _release(client, world.appointment.id)
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "retention_ack_required"
+    assert detail["deposit_outcome"] == "retained" and detail["amount_cents"] == 10000
+    assert "100,00" in detail["message"] and "fica com o sinal" in detail["message"]
+    assert (await _appointment(db, world.appointment.id)).status == AppointmentStatus.SCHEDULED
+    assert _FakeCalendar.deleted == []  # Google was not touched
+    assert await _deposit_status(db, world.appointment.id) == PixDepositStatus.PAID
+
+
+async def test_with_the_acknowledgement_the_clinic_keeps_the_deposit(
+    client: AsyncClient, db, acting
+):
+    world = await _paid_world(db, acting, hours_ahead=2)
+
+    response = await _release(client, world.appointment.id, acknowledge_retention=True)
+
+    assert response.status_code == 200
+    assert response.json()["deposit_outcome"] == "retained"
+    assert await _deposit_status(db, world.appointment.id) == PixDepositStatus.CANCELLED_RETAINED
+    assert len(_FakeCalendar.deleted) == 1
+
+
+async def test_a_partial_policy_is_announced_as_such(client: AsyncClient, db, acting):
+    world = await _paid_world(db, acting, hours_ahead=2, policy="partial")
+
+    detail = (await _release(client, world.appointment.id)).json()["detail"]
+
+    assert detail["deposit_outcome"] == "partial_refund"
+    assert "50,00" in detail["message"]
+
+
+async def test_even_a_full_refund_asks_first_and_then_refunds(
+    client: AsyncClient, db, acting, refund_ok
+):
+    world = await _paid_world(db, acting, hours_ahead=96)
+
+    refused = await _release(client, world.appointment.id)
+    accepted = await _release(client, world.appointment.id, acknowledge_retention=True)
+
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["deposit_outcome"] == "refunded"
+    assert "por inteiro" in refused.json()["detail"]["message"]
+    assert accepted.status_code == 200 and accepted.json()["deposit_outcome"] == "refunded"
+
+
+async def test_an_unpaid_charge_needs_no_acknowledgement(client: AsyncClient, db, acting):
+    world = await _setup(db, acting)
+    async with db() as session:
+        session.add(
+            PixDeposit(
+                id=uuid4(),
+                tenant_id=world.tenant.id,
+                appointment_id=world.appointment.id,
+                patient_id=world.patient.id,
+                asaas_payment_id=None,
+                amount_cents=10000,
+                percent_applied=30,
+                status=PixDepositStatus.AWAITING,
+            )
+        )
+        await session.commit()
+
+    response = await _release(client, world.appointment.id)
+
+    assert response.status_code == 200 and response.json()["deposit_outcome"] == "voided"
+
+
+async def test_the_flag_is_harmless_without_a_deposit(client: AsyncClient, db, acting):
+    world = await _setup(db, acting)
+
+    response = await _release(client, world.appointment.id, acknowledge_retention=True)
+
+    assert response.status_code == 200 and response.json()["deposit_outcome"] is None
