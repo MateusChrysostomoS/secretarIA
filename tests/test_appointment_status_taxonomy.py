@@ -161,6 +161,7 @@ def test_transition_log_is_sanitized(monkeypatch: pytest.MonkeyPatch) -> None:
         "new_status",
         "source",
         "idempotency_key",
+        "reason",
         "still_live",
     }
 

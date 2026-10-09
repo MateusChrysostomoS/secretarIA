@@ -148,6 +148,8 @@ neither" do `README.md`.
 
 `docs/CHECKPOINT_lembretes_r6.md` — TASK-032 R6: Confirmar / Cancelar / Alterar Dados e edição por rascunho; entrega commitada, candidata validada com 4411 testes; merge/push autorizados, sem deploy; migração aditiva `b1c4e7a2d9f3`. Revisão e verificações antes da liberação no checkpoint.
 
+`docs/CHECKPOINT_lembretes_r4.md` — TASK-032 R4 (branch TASK-043): cron de aviso à clínica (`process_confirmation_warnings`), `POST .../release` (liberar horário, falha fechado no Google, aviso ao paciente, confirmação de retenção do sinal Pix) e `POST .../message`; commitado local, sem merge/push/deploy, sem migração; deploy API + worker juntos.
+
 `docs/CHECKPOINT_ia_prompt_v2.md` - TASK-030 P5 adaptado ao atendimento atual: prompt por turno, fatos/preparo/datas/oferta humana preservados; 4266 testes verdes na integracao; modelo real e jornada continua testados; commitado, merge/push autorizados, sem deploy/ativacao; fingerprint esperado d301f7e027b3, piloto v2 pendente.
 
 `docs/TESTES_REAIS_captura_datas_2026-10-07.md` — captura real até o cartão PASS: mensagem original pergunta só horário; amanhã/quinta da próxima semana vão direto ao cartão; consulta existente preservada, sem confirmação nova. Versão/paridade e limites da prova registrados.

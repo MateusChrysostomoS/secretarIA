@@ -187,6 +187,82 @@ async def send_cancellation_escalation_alert(
         )
 
 
+_WARNING_SUBJECT = {
+    "unconfirmed": "[SecretarIA] Consulta sem confirmação — {clinic_name}",
+    "delivery_failed": "[SecretarIA] Lembrete não entregue — {clinic_name}",
+}
+
+
+async def send_confirmation_warning_alert(
+    to_email: str,
+    *,
+    clinic_name: str,
+    warn_kind: str,
+    patient_label: str,
+    professional_name: str,
+    service_name: str,
+    when_text: str,
+    reminder_label: str,
+    agenda_link: str | None,
+) -> bool:
+    """Email the clinic that a reminded patient has not confirmed (TASK-032 R4).
+
+    Two variants, chosen by `warn_kind` (the constants of
+    models/appointment_reminder.py): `unconfirmed` - the reminder went out and
+    nobody answered by the deadline; `delivery_failed` - the reminder itself
+    could not be delivered, so the patient may not even know. Both tell the
+    clinic what it can do in the agenda: write to the patient, mark the
+    appointment confirmed, or free the slot.
+
+    No clinical detail on purpose (no requirements, insurance or anamnese):
+    name, doctor, service, date/time, which reminder, a link. The name and the
+    link are PII and go in the BODY only, never into a log line - the same rule
+    `send_cancellation_escalation_alert` follows for its `wa.me` link.
+
+    Returns True only when the message was handed to SMTP, so the caller can log
+    an alarm without a second attempt; False when `SMTP_HOST` is empty or the
+    send raised. NEVER raises: like the alerts above, it is the end of the line.
+    """
+    settings = get_settings()
+    if not settings.SMTP_HOST:
+        return False
+
+    subject = _WARNING_SUBJECT.get(warn_kind, _WARNING_SUBJECT["unconfirmed"]).format(
+        clinic_name=clinic_name
+    )
+    if warn_kind == "delivery_failed":
+        headline = (
+            f"Não foi possível entregar o {reminder_label} da consulta de {patient_label} "
+            f"com {professional_name} ({service_name}) marcada para {when_text}. "
+            f"O paciente pode nem ter visto o aviso."
+        )
+    else:
+        headline = (
+            f"{patient_label} ainda não confirmou a consulta com {professional_name} "
+            f"({service_name}) marcada para {when_text}.\n\n"
+            f"O {reminder_label} já foi enviado e não houve resposta."
+        )
+    link_block = f"Abrir na agenda:\n{agenda_link}\n\n" if agenda_link else ""
+    body = (
+        f"Olá,\n\n"
+        f"{headline}\n\n"
+        f"{link_block}"
+        f"Na agenda você pode enviar uma mensagem ao paciente, marcar a consulta como "
+        f"confirmada ou liberar o horário.\n\n"
+        f"— Equipe SecretarIA"
+    )
+
+    try:
+        await asyncio.to_thread(_send_sync, to_email, subject, body)
+    except Exception as exc:
+        logger.warning(
+            "confirmation_warning_email_failed", error_type=type(exc).__name__, clinic=clinic_name
+        )
+        return False
+    logger.info("confirmation_warning_email_sent", clinic=clinic_name, warn_kind=warn_kind)
+    return True
+
+
 # WHAT each gap code means, in the doctor's own words. Two fixed strings, not a
 # message assembled at the call site, so the email cannot drift from the two
 # values `FlowRouterResult.professional_config_gap` is allowed to carry.
@@ -388,6 +464,19 @@ _TEMPLATES: dict[str, EmailTemplate] = {
             "{reminder_text}\n\n"
             "Para confirmar, cancelar ou falar com a {clinic_name}, abra a sua conversa:\n"
             "{link_line}\n"
+            "— {clinic_name}"
+        ),
+    ),
+    # TASK-032 R4: a Portal patient got a message typed by the clinic. The text
+    # itself is NEVER put in the e-mail (it may carry clinical content): the mail
+    # only says there is something to read and links to the conversation.
+    "clinic_message_patient": EmailTemplate(
+        subject="Nova mensagem de {clinic_name}",
+        body=(
+            "Olá!\n\n"
+            "Você recebeu uma nova mensagem da {clinic_name}.\n\n"
+            "Para ler e responder, abra a sua conversa:\n"
+            "{link_line}\n\n"
             "— {clinic_name}"
         ),
     ),
