@@ -1,5 +1,6 @@
 """Doctor hub — calendar platform endpoints (authenticated).
 
+GET   /tenants/me/calendar/viewer                      - who is looking (role scope).
 GET   /tenants/me/calendar/events                      - agenda read model.
 POST  /tenants/me/calendar/appointments                - create consultation.
 POST  /tenants/me/calendar/appointments/{id}/cancel    - cancel + notify patient.
@@ -18,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import Row, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from secretaria.api.hub.deps import get_current_tenant
+from secretaria.api.hub.deps import get_agenda_viewer, get_current_tenant
 from secretaria.config import get_settings
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
@@ -34,6 +35,7 @@ from secretaria.models.appointment import LIVE_APPOINTMENT_STATUSES
 from secretaria.models.patient import Patient
 from secretaria.models.pix_deposit import PixDepositStatus
 from secretaria.schemas.calendar import (
+    AgendaViewerRead,
     AppointmentActionRead,
     AppointmentCancel,
     AppointmentCreate,
@@ -61,6 +63,7 @@ from secretaria.services import (
     staff_appointment_edit,
     staff_patient_message,
 )
+from secretaria.services.agenda_visibility import AgendaViewer
 from secretaria.services.appointment_status import (
     CANCEL_REASON_UNCONFIRMED,
     SOURCE_HUB,
@@ -284,6 +287,34 @@ def _current_reminders(row: Row, reminders: list[AppointmentReminder]) -> list[A
         current_start = as_utc(row.start_at)
         reminders = [r for r in reminders if as_utc(r.appointment_start_at) == current_start]
     return sorted(reminders, key=lambda r: as_utc(r.due_at))
+
+
+# ---------------------------------------------------------------------------
+# GET /viewer — who is looking (TASK-044 R7)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/viewer", response_model=AgendaViewerRead)
+async def agenda_viewer(
+    tenant: Tenant = Depends(get_current_tenant),
+    viewer: AgendaViewer = Depends(get_agenda_viewer),
+    session: AsyncSession = Depends(get_session),
+) -> AgendaViewerRead:
+    """Whose appointments this session sees, and whether to offer "Só os meus"."""
+    name = None
+    if viewer.professional_id is not None:
+        name = await session.scalar(
+            select(Professional.name).where(
+                Professional.id == viewer.professional_id,
+                Professional.tenant_id == tenant.id,
+            )
+        )
+    return AgendaViewerRead(
+        agenda_scope=viewer.scope,
+        professional_id=str(viewer.professional_id) if viewer.professional_id else None,
+        professional_name=name,
+        can_filter_own=viewer.can_filter_own,
+    )
 
 
 @router.get("/events", response_model=list[CalendarEventRead])

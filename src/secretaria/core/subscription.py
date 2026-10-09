@@ -11,7 +11,9 @@ locally.
 Contract (brain-api, already implemented, do not change): POST
 {BRAIN_API_BASE_URL}/internal/secretaria/hub-token/verify, header
 X-Internal-Api-Key: <INTERNAL_API_KEY>, body {"token": "<token>"}. 200 response:
-{"active": bool, "tenant_id": "<uuid>" | null}. "active" is the LIVE answer —
+{"active": bool, "tenant_id": "<uuid>" | null, "professional_id": "<uuid>" | null,
+"agenda_scope": "clinic" | "own"} (TASK-044; older replies may omit the new keys).
+"active" is the LIVE answer —
 token validity AND entitlement, in one call.
 
 Everything here FAILS CLOSED: any ambiguity (unconfigured settings, network
@@ -49,6 +51,13 @@ logger = get_logger(__name__)
 _cache: dict[str, tuple[float, "SubscriptionClaim"]] = {}
 _CACHE_MAX_SIZE = 512
 
+# TASK-044 R7 (spec 2026-10-09 §5.A): brain-api's answer to "whose appointments may this
+# hub session see". Any other value reads as None ("not said") - the fail-closed rule for
+# that case lives in services/agenda_visibility.py::viewer_from_claim.
+AGENDA_SCOPE_CLINIC = "clinic"
+AGENDA_SCOPE_OWN = "own"
+_AGENDA_SCOPES = frozenset({AGENDA_SCOPE_CLINIC, AGENDA_SCOPE_OWN})
+
 
 @dataclass(frozen=True)
 class SubscriptionClaim:
@@ -62,6 +71,11 @@ class SubscriptionClaim:
 
     tenant_id: UUID | None
     active: bool
+    # TASK-044 R7: the acting user's secretarIA professional (brain-api `users.professional_id`)
+    # and brain-api's agenda scope ("clinic" | "own" | None = not said). Defaulted so an
+    # older brain-api answer still builds a claim.
+    professional_id: UUID | None = None
+    agenda_scope: str | None = None
 
 
 def _cache_key(token: str) -> str:
@@ -87,6 +101,16 @@ def _cache_put(key: str, claim: "SubscriptionClaim", ttl_seconds: int) -> None:
         # cleverly. A brief cache-cold spell is cheap; unbounded memory is not.
         _cache.clear()
     _cache[key] = (time.monotonic() + ttl_seconds, claim)
+
+
+def _optional_uuid(raw: object) -> UUID | None:
+    """A UUID from the answer, or None for anything absent or malformed (never raises)."""
+    if not raw or not isinstance(raw, str):
+        return None
+    try:
+        return UUID(raw)
+    except ValueError:
+        return None
 
 
 async def verify_subscription_token(token: str) -> SubscriptionClaim | None:
@@ -152,6 +176,17 @@ async def verify_subscription_token(token: str) -> SubscriptionClaim | None:
         logger.warning("subscription_verify_failed", reason="bad_tenant_id")
         return None
 
-    claim = SubscriptionClaim(tenant_id=tenant_id, active=True)
+    raw_scope = body.get("agenda_scope")
+    agenda_scope = (
+        raw_scope if isinstance(raw_scope, str) and raw_scope in _AGENDA_SCOPES else None
+    )
+    if raw_scope is not None and agenda_scope is None:
+        logger.warning("subscription_verify_unknown_agenda_scope")
+    claim = SubscriptionClaim(
+        tenant_id=tenant_id,
+        active=True,
+        professional_id=_optional_uuid(body.get("professional_id")),
+        agenda_scope=agenda_scope,
+    )
     _cache_put(key, claim, settings.SUBSCRIPTION_CACHE_TTL_SECONDS)
     return claim

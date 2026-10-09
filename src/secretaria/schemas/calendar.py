@@ -67,6 +67,20 @@ class CalendarReminderRead(BaseModel):
     warn_kind: str | None = None
 
 
+class AgendaViewerRead(BaseModel):
+    """GET /calendar/viewer - who is looking at the agenda (TASK-044 R7, spec §5.A).
+
+    `agenda_scope` "clinic" sees every doctor; "own" only `professional_id`'s
+    appointments (none when it is null). `can_filter_own` = clinic-wide AND a
+    professional: the front shows "Todos / Só os meus" only then.
+    """
+
+    agenda_scope: Literal["clinic", "own"]
+    professional_id: str | None = None
+    professional_name: str | None = None
+    can_filter_own: bool = False
+
+
 class CalendarEventRead(BaseModel):
     """A Google Calendar event as returned by the agenda view.
 

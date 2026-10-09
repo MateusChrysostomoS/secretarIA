@@ -236,3 +236,65 @@ def test_tenant_id_type() -> None:
     tenant_id = uuid4()
     claim = SubscriptionClaim(tenant_id=tenant_id, active=True)
     assert isinstance(claim.tenant_id, UUID)
+
+
+# --- TASK-044 R7: who is looking at the agenda (brain-api's agenda_scope) ----------
+
+
+async def test_r7_the_claim_carries_the_professional_and_the_agenda_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_id, professional_id = uuid4(), uuid4()
+    _install_fake_client(
+        monkeypatch,
+        body={
+            "active": True,
+            "tenant_id": str(tenant_id),
+            "professional_id": str(professional_id),
+            "agenda_scope": "own",
+        },
+    )
+
+    claim = await subscription.verify_subscription_token("doctor-token")
+
+    assert claim == SubscriptionClaim(
+        tenant_id=tenant_id, active=True, professional_id=professional_id, agenda_scope="own"
+    )
+
+
+async def test_r7_an_older_brain_api_without_the_new_keys_still_authenticates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_id = uuid4()
+    _install_fake_client(monkeypatch, body={"active": True, "tenant_id": str(tenant_id)})
+
+    claim = await subscription.verify_subscription_token("old-token")
+
+    assert claim == SubscriptionClaim(tenant_id=tenant_id, active=True)
+    assert claim.agenda_scope is None and claim.professional_id is None
+
+
+@pytest.mark.parametrize("raw", ["everyone", "", "CLINIC", 7, ["clinic"], {"x": 1}])
+async def test_r7_an_unknown_scope_reads_as_not_said(
+    monkeypatch: pytest.MonkeyPatch, raw: object
+) -> None:
+    _install_fake_client(
+        monkeypatch, body={"active": True, "tenant_id": str(uuid4()), "agenda_scope": raw}
+    )
+
+    claim = await subscription.verify_subscription_token(f"token-{raw!r}")
+
+    assert claim is not None and claim.agenda_scope is None
+
+
+@pytest.mark.parametrize("raw", ["nope", 12, ["x"], ""])
+async def test_r7_a_malformed_professional_id_reads_as_absent(
+    monkeypatch: pytest.MonkeyPatch, raw: object
+) -> None:
+    _install_fake_client(
+        monkeypatch, body={"active": True, "tenant_id": str(uuid4()), "professional_id": raw}
+    )
+
+    claim = await subscription.verify_subscription_token(f"token-{raw!r}")
+
+    assert claim is not None and claim.professional_id is None
