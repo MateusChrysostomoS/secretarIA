@@ -46,7 +46,12 @@ from secretaria.schemas.calendar import (
     CalendarReminderRead,
     CancelPreviewRead,
 )
-from secretaria.services import cancellation_notice, reminder_hooks, reminder_schedule
+from secretaria.services import (
+    appointment_release,
+    cancellation_notice,
+    reminder_hooks,
+    reminder_schedule,
+)
 from secretaria.services.appointment_status import (
     CANCEL_REASON_UNCONFIRMED,
     SOURCE_HUB,
@@ -701,20 +706,45 @@ async def release_appointment(
         reason=CANCEL_REASON_UNCONFIRMED,
     )
     await reminder_schedule.cancel_reminders(session, appt.id, reason="released")
+    professional_name = await _professional_name(session, tenant, appt)
     deposit_outcome = await deposit_lifecycle.on_appointment_cancelled(
         session, tenant=tenant, appointment=appt, waba_token=None
     )
+    deposit_notice: str | None = None
+    if deposit_outcome is not None:
+        resolved = await deposit_lifecycle.get_deposit_for_appointment(session, appt.id)
+        if resolved is not None:
+            deposit_notice = deposit_lifecycle.cancellation_notice(
+                deposit_outcome, tenant, resolved
+            )
+    patient = await session.scalar(
+        select(Patient).where(Patient.id == appt.patient_id, Patient.tenant_id == tenant.id)
+    )
     await session.commit()
+
+    # After the commit: the release stands whatever happens to the notice.
+    patient_notice = await appointment_release.notify_released_patient(
+        session,
+        tenant,
+        appt,
+        patient,
+        professional_name=professional_name,
+        justification=body.justification,
+        deposit_notice=deposit_notice,
+        allow_paid=body.notify_outside_window,
+        arq_pool=getattr(request.app.state, "arq_pool", None),
+    )
     await session.refresh(appt)
 
     logger.info(
         "calendar_appointment_released",
         appointment_id=str(appt.id),
         deposit_outcome=deposit_outcome,
+        patient_notice=patient_notice,
     )
     deposit_status = await _deposit_status_value(session, appt.id)
     read = _appointment_read(appt, deposit_status=deposit_status, deposit_outcome=deposit_outcome)
-    return AppointmentReleaseRead(**read.model_dump())
+    return AppointmentReleaseRead(**read.model_dump(), patient_notice=patient_notice)
 
 
 # ---------------------------------------------------------------------------

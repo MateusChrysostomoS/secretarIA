@@ -21,13 +21,23 @@ from secretaria.models import (
     PixDepositStatus,
     Tenant,
 )
+from secretaria.services import appointment_release, staff_patient_message as spm
+from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
+from secretaria.services.email import EmailOutcome
 from secretaria.services.flow_router import STEP_EDIT_MENU
 from secretaria.services.payments import deposit_lifecycle
 from secretaria.services.tenant_config import set_google_refresh_token
 from tests._edit_flow_support import draft_for
 from tests._reminder_fixtures import db  # noqa: F401
 from tests._reminders_r3 import set_conversation, wire
-from tests._reminders_v2 import NOW, add_reminder, seed_paid_deposit, seed_world
+from tests._reminders_v2 import (
+    NOW,
+    FakeWhatsAppClient,
+    add_reminder,
+    outbound_messages,
+    seed_paid_deposit,
+    seed_world,
+)
 from tests.test_appointment_edit_apply import _apply, _edit
 
 CALENDAR = "/tenants/me/calendar"
@@ -522,3 +532,214 @@ async def test_the_flag_is_harmless_without_a_deposit(client: AsyncClient, db, a
     response = await _release(client, world.appointment.id, acknowledge_retention=True)
 
     assert response.status_code == 200 and response.json()["deposit_outcome"] is None
+
+
+# ------------------------------------------------------------- patient notice
+
+
+class _FakeArqPool:
+    def __init__(self, fail: bool = False) -> None:
+        self.calls: list[tuple] = []
+        self.fail = fail
+
+    async def enqueue_job(self, name: str, *args) -> None:
+        if self.fail:
+            raise RuntimeError("redis down")
+        self.calls.append((name, *args))
+
+
+def _install_pool(pool) -> None:
+    from secretaria.main import app
+
+    app.state.arq_pool = pool
+
+
+def _recent(hours: float):
+    return datetime.now(UTC) - timedelta(hours=hours)
+
+
+@pytest.fixture
+def portal_mail(monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
+    sent: list[tuple] = []
+
+    async def _send(to, template, variables):
+        sent.append((to, template, variables))
+        return EmailOutcome.SENT
+
+    monkeypatch.setattr(spm, "send_transactional_email_result", _send)
+    monkeypatch.setattr(spm, "portal_conversation_link", lambda tenant_id: "https://portal/x")
+    return sent
+
+
+async def test_a_whatsapp_patient_is_told_through_the_existing_notice_job(  # noqa: F811
+    client: AsyncClient, db, acting, monkeypatch
+):
+    async def _resolve(session, tenant, professional, *, tenant_config=None, **_):
+        return _FakeCalendar("professional")
+
+    monkeypatch.setattr(hub_calendar, "resolve_professional_calendar", _resolve)
+    pool = _FakeArqPool()
+    _install_pool(pool)
+    world = await _setup(db, acting, last_inbound_at=_recent(1), professional_name="Dra. Ana")
+
+    response = await _release(client, world.appointment.id)
+
+    assert response.json()["patient_notice"] == "whatsapp_queued"
+    assert pool.calls == [
+        (
+            "send_cancellation_notice",
+            str(world.tenant.id),
+            str(world.appointment.id),
+            "Dra. Ana",
+            appointment_release.RELEASE_JUSTIFICATION,
+            None,
+            False,
+        )
+    ]
+
+
+async def test_the_clinics_own_reason_replaces_the_standard_sentence(
+    client: AsyncClient, db, acting
+):
+    pool = _FakeArqPool()
+    _install_pool(pool)
+    world = await _setup(db, acting, last_inbound_at=_recent(1))
+
+    await _release(client, world.appointment.id, justification="  Remarcamos a agenda  ")
+
+    assert pool.calls[0][4] == "Remarcamos a agenda"
+
+
+async def test_outside_the_window_nothing_billed_is_sent_without_authorisation(  # noqa: F811
+    client: AsyncClient, db, acting
+):
+    pool = _FakeArqPool()
+    _install_pool(pool)
+    world = await _setup(db, acting, last_inbound_at=_recent(30))
+
+    response = await _release(client, world.appointment.id)
+
+    assert response.status_code == 200
+    assert response.json()["patient_notice"] == "whatsapp_outside_window"
+    assert pool.calls == []  # the release stands; the front offers the free wa.me link
+
+
+async def test_outside_the_window_with_authorisation_the_job_is_told_it_may_bill(  # noqa: F811
+    client: AsyncClient, db, acting
+):
+    pool = _FakeArqPool()
+    _install_pool(pool)
+    world = await _setup(db, acting, last_inbound_at=_recent(30))
+
+    response = await _release(client, world.appointment.id, notify_outside_window=True)
+
+    assert response.json()["patient_notice"] == "whatsapp_queued"
+    assert pool.calls[0][-1] is True
+
+
+async def test_a_release_survives_a_dead_queue(client: AsyncClient, db, acting):  # noqa: F811
+    world = await _setup(db, acting, last_inbound_at=_recent(1))
+
+    no_pool = await _release(client, world.appointment.id)
+    assert no_pool.status_code == 200
+    assert no_pool.json()["patient_notice"] == "queue_unavailable"
+
+    other = await _setup(
+        db,
+        acting,
+        last_inbound_at=_recent(1),
+        phone_number_id="pnid-2",
+        wa_id="5511900000002",
+    )
+    _install_pool(_FakeArqPool(fail=True))
+    broken = await _release(client, other.appointment.id)
+    assert broken.status_code == 200 and broken.json()["patient_notice"] == "queue_unavailable"
+    assert (await _appointment(db, other.appointment.id)).status == AppointmentStatus.CANCELLED
+
+
+async def test_the_notice_is_queued_once_even_if_the_slot_is_released_twice(  # noqa: F811
+    client: AsyncClient, db, acting
+):
+    pool = _FakeArqPool()
+    _install_pool(pool)
+    world = await _setup(db, acting, last_inbound_at=_recent(1))
+
+    await _release(client, world.appointment.id)
+    await _release(client, world.appointment.id)
+
+    assert len(pool.calls) == 1
+
+
+async def test_the_deposit_sentence_rides_along_in_the_notice(client: AsyncClient, db, acting):  # noqa: F811
+    pool = _FakeArqPool()
+    _install_pool(pool)
+    world = await _paid_world(db, acting, hours_ahead=2, last_inbound_at=_recent(1))
+
+    await _release(client, world.appointment.id, acknowledge_retention=True)
+
+    assert "retido" in pool.calls[0][5]
+
+
+async def test_a_portal_patient_gets_a_chat_message_and_an_email_nudge(  # noqa: F811
+    client: AsyncClient, db, acting, portal_mail
+):
+    pool = _FakeArqPool()
+    _install_pool(pool)
+    FakeWhatsAppClient.reset()
+    world = await _setup(db, acting, channel=CHANNEL_BRAIN_MESSAGE, email="paciente@x.com")
+
+    response = await _release(client, world.appointment.id)
+
+    assert response.json()["patient_notice"] == "portal_chat_email"
+    [row] = await outbound_messages(db, world.conversation.id)
+    assert "desmarcou a sua consulta" in row.body
+    assert appointment_release.RELEASE_JUSTIFICATION in row.body
+    assert appointment_release.PORTAL_REBOOK_LINE in row.body
+    assert portal_mail[0][1] == "clinic_message_patient"
+    assert pool.calls == [] and FakeWhatsAppClient.all_sent() == []  # never WhatsApp
+
+
+async def test_a_portal_patient_without_email_is_still_told_in_the_chat(  # noqa: F811
+    client: AsyncClient, db, acting, portal_mail
+):
+    world = await _setup(db, acting, channel=CHANNEL_BRAIN_MESSAGE, email=None)
+
+    response = await _release(client, world.appointment.id)
+
+    assert response.status_code == 200 and response.json()["patient_notice"] == "portal_chat"
+    assert portal_mail == []
+    assert len(await outbound_messages(db, world.conversation.id)) == 1
+
+
+async def test_a_failing_chat_write_does_not_undo_the_release(  # noqa: F811
+    client: AsyncClient, db, acting, portal_mail, monkeypatch
+):
+    class _Boom:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        async def send_text_message(self, to, body):
+            raise RuntimeError("write failed")
+
+    monkeypatch.setattr(appointment_release, "BrainMessageSender", _Boom)
+    world = await _setup(db, acting, channel=CHANNEL_BRAIN_MESSAGE, email="paciente@x.com")
+
+    response = await _release(client, world.appointment.id)
+
+    assert response.status_code == 200 and response.json()["patient_notice"] == "notice_failed"
+    assert (await _appointment(db, world.appointment.id)).status == AppointmentStatus.CANCELLED
+
+
+async def test_an_unreachable_patient_is_reported_not_an_error(
+    client: AsyncClient, db, acting, portal_mail
+):
+    world = await _setup(db, acting, channel=CHANNEL_BRAIN_MESSAGE)
+    async with db() as session:
+        appointment = await session.get(Appointment, world.appointment.id)
+        appointment.conversation_id = None
+        await session.delete(await session.get(type(world.conversation), world.conversation.id))
+        await session.commit()
+
+    response = await _release(client, world.appointment.id)
+
+    assert response.status_code == 200 and response.json()["patient_notice"] == "no_channel"
