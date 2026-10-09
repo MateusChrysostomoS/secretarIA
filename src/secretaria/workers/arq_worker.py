@@ -20,6 +20,7 @@ from secretaria.plugins import booking_notifications  # noqa: F401
 from secretaria.plugins.post_booking import run_post_booking_hooks
 from secretaria.plugins.professional_notification import retry_professional_notification
 from secretaria.plugins.reminders import send_appointment_reminders
+from secretaria.workers.confirmation_warnings import process_confirmation_warnings
 from secretaria.workers.deploy_parity import check_deploy_parity_cron
 from secretaria.workers.onboarding_cron import (
     run_onboarding_nudges,
@@ -176,6 +177,10 @@ class WorkerSettings:
         cron(process_appointment_reminders, minute=set(range(60))),
         cron(dispatch_pending_professional_edits, minute=set(range(60))),
         cron(reconcile_appointment_reminders, minute={4, 14, 24, 34, 44, 54}),
+        # TASK-032 R4: warn the clinic about reminded-but-unconfirmed appointments
+        # (sets `warned_at`, which turns the agenda red, and e-mails the alert
+        # address). Every minute; the atomic claim makes an overlapping tick harmless.
+        cron(process_confirmation_warnings, minute=set(range(60))),
         cron(run_onboarding_nudges, minute={10}),
         cron(run_patient_usage_metering, hour={3}, minute={30}),
         cron(check_deploy_parity_cron, minute={7}),
