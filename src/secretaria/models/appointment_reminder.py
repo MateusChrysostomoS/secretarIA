@@ -36,12 +36,24 @@ REMINDER_KIND_CUSTOM = "custom"  # clinic-configured lead time
 REMINDER_KIND_DAY = "day"  # 24 h before
 REMINDER_KIND_HOUR = "hour"  # 1 h before
 REMINDER_KIND_CHAT = "chat"  # the opening message of the chat (born already sent)
+# TASK-032 R7: the cards the CLINIC's actions put in front of the patient - "Seu médico
+# confirmou ..." and "A clínica alterou ...". Born already sent, never warned about; they
+# exist so the Confirmar / Cancelar / Alterar Dados taps resolve to a row exactly like a
+# reminder's (workers/shared/reminder_actions.py).
+REMINDER_KIND_STAFF_CONFIRM = "staff_confirm"
+REMINDER_KIND_STAFF_EDIT = "staff_edit"
 REMINDER_KINDS: tuple[str, ...] = (
     REMINDER_KIND_CUSTOM,
     REMINDER_KIND_DAY,
     REMINDER_KIND_HOUR,
     REMINDER_KIND_CHAT,
+    REMINDER_KIND_STAFF_CONFIRM,
+    REMINDER_KIND_STAFF_EDIT,
 )
+REMINDER_KINDS_STAFF: tuple[str, ...] = (REMINDER_KIND_STAFF_CONFIRM, REMINDER_KIND_STAFF_EDIT)
+# Kinds that are shown, never planned: the cron engine, the reconcile backfill and the
+# clinic warnings ignore them.
+REMINDER_KINDS_UNPLANNED: tuple[str, ...] = (REMINDER_KIND_CHAT, *REMINDER_KINDS_STAFF)
 
 REMINDER_STATUS_PENDING = "pending"
 REMINDER_STATUS_SENDING = "sending"

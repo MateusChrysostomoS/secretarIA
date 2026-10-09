@@ -35,7 +35,7 @@ from secretaria.models import (
 )
 from secretaria.models.appointment import LIVE_APPOINTMENT_STATUSES
 from secretaria.models.appointment_reminder import (
-    REMINDER_KIND_CHAT,
+    REMINDER_KINDS_UNPLANNED,
     REMINDER_STATUS_FAILED,
     REMINDER_STATUS_SENT,
     REMINDER_WARN_DELIVERY_FAILED,
@@ -100,7 +100,8 @@ async def due_candidates(
             # corrupt data; never let it reach a clinic's inbox.
             AppointmentReminder.tenant_id == Appointment.tenant_id,
             AppointmentReminder.status.in_(_WARNABLE_ROW_STATUSES),
-            AppointmentReminder.kind != REMINDER_KIND_CHAT,
+            # R3's opening card and R7's clinic cards are never warned about.
+            AppointmentReminder.kind.not_in(REMINDER_KINDS_UNPLANNED),
             AppointmentReminder.warn_kind.in_(_WARN_KINDS),
             AppointmentReminder.warn_due_at.is_not(None),
             AppointmentReminder.warn_due_at <= now,

@@ -27,9 +27,11 @@ from secretaria.models.appointment_reminder import (
     REMINDER_KIND_CUSTOM,
     REMINDER_KIND_DAY,
     REMINDER_KIND_HOUR,
+    REMINDER_KINDS_STAFF,
     REMINDER_STATUS_CANCELLED,
     REMINDER_STATUS_PENDING,
     REMINDER_STATUS_SENDING,
+    REMINDER_STATUS_SENT,
     AppointmentReminder,
 )
 from secretaria.services.appointment_status import (
@@ -394,3 +396,93 @@ def display_state(appointment, reminders: Iterable) -> str:
             continue
         return DISPLAY_ATTENTION
     return DISPLAY_UNCONFIRMED
+
+
+# --- TASK-032 R7: the rows behind the clinic's confirm / edit cards -----------------
+
+
+def _check_staff_kind(kind: str) -> None:
+    if kind not in REMINDER_KINDS_STAFF:
+        raise ValueError(f"not a staff notice kind: {kind!r}")
+
+
+async def current_staff_notice_row(
+    session: AsyncSession, appointment: Appointment, *, kind: str
+) -> AppointmentReminder | None:
+    """The active `kind` row of the appointment's CURRENT start, or None."""
+    _check_staff_kind(kind)
+    if appointment.start_at is None:
+        return None
+    start = _as_utc(appointment.start_at)
+    rows = await session.scalars(
+        select(AppointmentReminder).where(
+            AppointmentReminder.tenant_id == appointment.tenant_id,
+            AppointmentReminder.appointment_id == appointment.id,
+            AppointmentReminder.kind == kind,
+            AppointmentReminder.invalidated_at.is_(None),
+        )
+    )
+    return next((row for row in rows if _as_utc(row.appointment_start_at) == start), None)
+
+
+async def ensure_staff_notice_row(
+    session: AsyncSession,
+    appointment: Appointment,
+    *,
+    kind: str,
+    channel: str,
+    with_prompt: bool,
+    now: datetime,
+) -> tuple[AppointmentReminder, bool]:
+    """The staff card row of the current start: re-shown (False) or created (True).
+
+    Born `sent` with NO clinic warning (`warn_due_at` NULL) - the R4 cron must never
+    warn about a card the clinic itself sent. A re-shown row keeps its `answer`, so
+    tapping Confirmar on the same card twice still counts once (R1 dedupes on the
+    row). One active row per (appointment, kind, start) - R1's unique index. Flushes;
+    the caller commits.
+    """
+    if appointment.start_at is None:
+        raise ValueError("an appointment without a start has no card")
+    row = await current_staff_notice_row(session, appointment, kind=kind)
+    if row is not None:
+        row.sent_at = now
+        row.with_prompt = with_prompt
+        await session.flush()
+        return row, False
+    row = AppointmentReminder(
+        tenant_id=appointment.tenant_id,
+        appointment_id=appointment.id,
+        patient_id=appointment.patient_id,
+        kind=kind,
+        appointment_start_at=appointment.start_at,
+        due_at=now,
+        status=REMINDER_STATUS_SENT,
+        channel=channel,
+        with_prompt=with_prompt,
+        sent_at=now,
+        warn_due_at=None,
+    )
+    session.add(row)
+    await session.flush()
+    logger.info(
+        "staff_notice_row_created",
+        appointment_id=str(appointment.id),
+        kind=kind,
+    )
+    return row, True
+
+
+async def retire_staff_notice_row(
+    session: AsyncSession, reminder_id: UUID, *, tenant_id: UUID
+) -> None:
+    """Retire a staff row whose card never reached the patient (a retry gets a fresh one)."""
+    await session.execute(
+        update(AppointmentReminder)
+        .where(
+            AppointmentReminder.id == reminder_id,
+            AppointmentReminder.tenant_id == tenant_id,
+        )
+        .values(invalidated_at=datetime.now(UTC))
+        .execution_options(synchronize_session=False)
+    )
