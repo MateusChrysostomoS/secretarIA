@@ -199,7 +199,10 @@ class AppointmentStatusUpdate(BaseModel):
     """PATCH /appointments/{id}/status."""
 
     status: AppointmentStatus
-
+    # TASK-032 R7: authorises the BILLED template for the notice that `confirmed` and
+    # `attended` send to a WhatsApp patient outside the 24 h window (OR-ed with the
+    # clinic's `paid_notices_auto_approved`). Ignored for every other status.
+    notify_outside_window: bool = False
 
 class AppointmentRead(BaseModel):
     """Appointment response."""
@@ -288,6 +291,19 @@ class AppointmentRelease(BaseModel):
     notify_outside_window: bool = False
     # Optional reason quoted in the patient notice; blank = the standard sentence.
     justification: str | None = Field(default=None, max_length=1000)
+
+
+class AppointmentActionRead(AppointmentRead):
+    """An appointment after a clinic action that may tell the patient (TASK-032 R7).
+
+    `patient_notice` is null when no notice was due, else one of: whatsapp_queued,
+    whatsapp_sent, whatsapp_outside_window, portal_chat, portal_chat_email,
+    no_channel, queue_unavailable, notice_failed. `whatsapp_link` is the free
+    `wa.me` link, only with whatsapp_outside_window.
+    """
+
+    patient_notice: str | None = None
+    whatsapp_link: str | None = None
 
 
 class AppointmentReleaseRead(AppointmentRead):

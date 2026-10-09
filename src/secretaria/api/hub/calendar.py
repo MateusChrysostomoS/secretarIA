@@ -33,6 +33,7 @@ from secretaria.models.appointment import LIVE_APPOINTMENT_STATUSES
 from secretaria.models.patient import Patient
 from secretaria.models.pix_deposit import PixDepositStatus
 from secretaria.schemas.calendar import (
+    AppointmentActionRead,
     AppointmentCancel,
     AppointmentCreate,
     AppointmentRead,
@@ -59,7 +60,9 @@ from secretaria.services import (
 from secretaria.services.appointment_status import (
     CANCEL_REASON_UNCONFIRMED,
     SOURCE_HUB,
+    StaffTransitionRefused,
     log_status_transition,
+    staff_transition,
 )
 from secretaria.services.calendar import CalendarService
 from secretaria.services.insurance_catalog import AppointmentPlan, load_appointment_plans
@@ -922,44 +925,42 @@ async def reschedule_appointment(
 # ---------------------------------------------------------------------------
 
 
-@router.patch("/appointments/{appointment_id}/status", response_model=AppointmentRead)
+@router.patch("/appointments/{appointment_id}/status", response_model=AppointmentActionRead)
 async def update_appointment_status(
     appointment_id: str,
     body: AppointmentStatusUpdate,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_session),
-) -> AppointmentRead:
+) -> AppointmentActionRead:
+    """Mark scheduled / confirmed / attended / no-show / cancelled (TASK-032 R1 + R7).
+
+    R7 guards (spec 2026-10-09 §1/§3, rule in services/appointment_status.py::
+    staff_transition): `no_show` before the start is 409 `no_show_before_start`; a
+    live target, `attended` or `no_show` on a cancelled booking is 409 `not_live` (it
+    used to resurrect); attended <-> no_show is a correction; repeating attended or
+    no_show changes nothing. `cancelled` keeps its old, unguarded behaviour.
+    """
     appt = await _get_appointment(session, tenant, appointment_id)
-    previous_status = appt.status
-    appt.status = body.status
-    appt.updated_at = datetime.now(UTC)
-    log_status_transition(
-        appointment_id=appt.id,
-        tenant_id=tenant.id,
-        old_status=previous_status,
-        new_status=body.status,
-        source=SOURCE_HUB,
-        idempotency_key=f"status:{appt.id}:{body.status.value}",
-    )
-
-    # Money hooks (PROMPT S3 section 4): PATCH doesn't touch Google Calendar
-    # today (unchanged) — but a CANCELLED/NO_SHOW status transition is still
-    # a real money event for a Pix deposit, exactly like the dedicated
-    # POST /cancel endpoint or a no-show marked from any other surface.
-    deposit_outcome: str | None = None
-    if body.status == AppointmentStatus.CANCELLED:
-        deposit_outcome = await deposit_lifecycle.on_appointment_cancelled(
-            session, tenant=tenant, appointment=appt, waba_token=None
-        )
-    elif body.status == AppointmentStatus.NO_SHOW:
-        deposit_outcome = await deposit_lifecycle.on_no_show(
-            session, tenant=tenant, appointment=appt
-        )
-
-    # TASK-032: the reminder schedule follows the status. The status above is
-    # still assigned exactly as before (no new transition validation).
     now = datetime.now(UTC)
+    try:
+        applies = staff_transition(appt.status, body.status, start_at=appt.start_at, now=now)
+    except StaffTransitionRefused as exc:
+        extra: dict = {"status": appt.status.value}
+        if exc.code == "no_show_before_start" and appt.start_at is not None:
+            extra["start_at"] = as_utc(appt.start_at).isoformat()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, _detail(exc.code, exc.message, **extra)
+        ) from None
+    if not applies:
+        deposit_status = await _deposit_status_value(session, appt.id)
+        return AppointmentActionRead(
+            **_appointment_read(appt, deposit_status=deposit_status).model_dump()
+        )
+
+    deposit_outcome: str | None = None
     if body.status == AppointmentStatus.CONFIRMED:
+        # One staff confirmation (counts only from 0, R1) and the CONFIRMED status,
+        # logged with source `hub` by register_confirmation itself.
         await reminder_schedule.register_confirmation(
             session,
             appointment=appt,
@@ -967,20 +968,51 @@ async def update_appointment_status(
             source=reminder_schedule.CONFIRMATION_SOURCE_STAFF,
             now=now,
         )
-    elif body.status == AppointmentStatus.SCHEDULED:
-        reminder_schedule.reset_confirmation(appt)
-    elif body.status in TERMINAL_APPOINTMENT_STATUSES:
-        await reminder_schedule.cancel_reminders(
-            session, appt.id, reason=f"status_{body.status.value}"
+    else:
+        previous_status = appt.status
+        appt.status = body.status
+        appt.updated_at = now
+        log_status_transition(
+            appointment_id=appt.id,
+            tenant_id=tenant.id,
+            old_status=previous_status,
+            new_status=body.status,
+            source=SOURCE_HUB,
+            idempotency_key=f"status:{appt.id}:{body.status.value}",
         )
+        # Money hooks (PROMPT S3 section 4): a CANCELLED/NO_SHOW transition is a real
+        # money event for a Pix deposit, exactly like POST /cancel.
+        if body.status == AppointmentStatus.CANCELLED:
+            deposit_outcome = await deposit_lifecycle.on_appointment_cancelled(
+                session, tenant=tenant, appointment=appt, waba_token=None
+            )
+        elif body.status == AppointmentStatus.NO_SHOW:
+            deposit_outcome = await deposit_lifecycle.on_no_show(
+                session, tenant=tenant, appointment=appt
+            )
+        # TASK-032: the reminder schedule follows the status.
+        if body.status == AppointmentStatus.SCHEDULED:
+            reminder_schedule.reset_confirmation(appt)
+        elif body.status in TERMINAL_APPOINTMENT_STATUSES:
+            await reminder_schedule.cancel_reminders(
+                session, appt.id, reason=f"status_{body.status.value}"
+            )
 
     await session.commit()
     await session.refresh(appt)
+    notice: staff_patient_message.NoticeResult | None = None
+
     logger.info(
         "calendar_appointment_status_updated",
         appointment_id=str(appt.id),
         status=body.status.value,
         deposit_outcome=deposit_outcome,
+        patient_notice=notice.code if notice is not None else None,
     )
     deposit_status = await _deposit_status_value(session, appt.id)
-    return _appointment_read(appt, deposit_status=deposit_status, deposit_outcome=deposit_outcome)
+    read = _appointment_read(appt, deposit_status=deposit_status, deposit_outcome=deposit_outcome)
+    return AppointmentActionRead(
+        **read.model_dump(),
+        patient_notice=notice.code if notice is not None else None,
+        whatsapp_link=notice.whatsapp_link if notice is not None else None,
+    )
