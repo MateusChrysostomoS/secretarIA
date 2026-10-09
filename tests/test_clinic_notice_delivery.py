@@ -180,7 +180,7 @@ async def test_no_patient_or_a_foreign_patient_is_no_channel(db):  # noqa: F811
 
 async def test_portal_writes_the_card_in_the_chat_and_nudges_by_email(db, mail):  # noqa: F811
     world = await seed_world(
-        db,  # noqa: F811 channel=CHANNEL_BRAIN_MESSAGE, wa_id=None, email="maria@exemplo.com"
+        db, channel=CHANNEL_BRAIN_MESSAGE, wa_id=None, email="maria@exemplo.com"
     )
 
     result = await _notice(db, world, buttons=BUTTONS)

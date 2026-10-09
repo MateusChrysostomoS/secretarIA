@@ -295,9 +295,12 @@ class AppointmentReleaseRead(AppointmentRead):
 
     `patient_notice` is one of: whatsapp_queued, whatsapp_outside_window,
     portal_chat, portal_chat_email, no_channel, queue_unavailable, notice_failed.
+    `whatsapp_link` (TASK-032 R7) is the free `wa.me` link, only with
+    whatsapp_outside_window.
     """
 
     patient_notice: str = "not_attempted"
+    whatsapp_link: str | None = None
 
 
 class StaffMessageRequest(BaseModel):

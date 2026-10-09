@@ -117,6 +117,14 @@ async def _get_calendar(session: AsyncSession, tenant: Tenant) -> CalendarServic
     return CalendarService.from_tenant_config(config)
 
 
+def _notice_link(code: str | None, patient: Patient | None, appt: Appointment) -> str | None:
+    """The free `wa.me` link, only when the 24 h window is why the patient was not told."""
+    if code != staff_patient_message.NOTICE_WHATSAPP_OUTSIDE_WINDOW:
+        return None
+    number = (patient.wa_id if patient is not None else None) or appt.phone
+    return cancellation_notice.whatsapp_deep_link(number)
+
+
 async def _get_appointment(
     session: AsyncSession, tenant: Tenant, appointment_id: str
 ) -> Appointment:
@@ -750,7 +758,9 @@ async def release_appointment(
         professional_name=professional_name,
         justification=body.justification,
         deposit_notice=deposit_notice,
-        allow_paid=body.notify_outside_window,
+        allow_paid=staff_patient_message.paid_notice_authorised(
+            tenant, body.notify_outside_window
+        ),
         arq_pool=getattr(request.app.state, "arq_pool", None),
     )
     await session.refresh(appt)
@@ -763,7 +773,11 @@ async def release_appointment(
     )
     deposit_status = await _deposit_status_value(session, appt.id)
     read = _appointment_read(appt, deposit_status=deposit_status, deposit_outcome=deposit_outcome)
-    return AppointmentReleaseRead(**read.model_dump(), patient_notice=patient_notice)
+    return AppointmentReleaseRead(
+        **read.model_dump(),
+        patient_notice=patient_notice,
+        whatsapp_link=_notice_link(patient_notice, patient, appt),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -794,7 +808,14 @@ async def message_patient(
         )
     try:
         result = await staff_patient_message.send_staff_message(
-            session, tenant, appt, patient, body.text, allow_paid=body.notify_outside_window
+            session,
+            tenant,
+            appt,
+            patient,
+            body.text,
+            allow_paid=staff_patient_message.paid_notice_authorised(
+                tenant, body.notify_outside_window
+            ),
         )
     except staff_patient_message.OutsideWindowError as exc:
         settings = get_settings()
