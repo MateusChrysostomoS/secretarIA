@@ -4,6 +4,7 @@ GET   /tenants/me/calendar/events                      - agenda read model.
 POST  /tenants/me/calendar/appointments                - create consultation.
 POST  /tenants/me/calendar/appointments/{id}/cancel    - cancel + notify patient.
 POST  /tenants/me/calendar/appointments/{id}/release    - free an unconfirmed slot.
+POST  /tenants/me/calendar/appointments/{id}/message    - write to the patient (any channel).
 POST  /tenants/me/calendar/appointments/{id}/reschedule - reschedule + notify.
 POST  /tenants/me/calendar/blocks                      - block slot (no notification).
 PATCH /tenants/me/calendar/appointments/{id}/status    - mark attended / no-show / etc.
@@ -45,12 +46,15 @@ from secretaria.schemas.calendar import (
     CalendarInsurancePlanRead,
     CalendarReminderRead,
     CancelPreviewRead,
+    StaffMessageRead,
+    StaffMessageRequest,
 )
 from secretaria.services import (
     appointment_release,
     cancellation_notice,
     reminder_hooks,
     reminder_schedule,
+    staff_patient_message,
 )
 from secretaria.services.appointment_status import (
     CANCEL_REASON_UNCONFIRMED,
@@ -745,6 +749,66 @@ async def release_appointment(
     deposit_status = await _deposit_status_value(session, appt.id)
     read = _appointment_read(appt, deposit_status=deposit_status, deposit_outcome=deposit_outcome)
     return AppointmentReleaseRead(**read.model_dump(), patient_notice=patient_notice)
+
+
+# ---------------------------------------------------------------------------
+# POST /appointments/{id}/message — write to the patient on THEIR channel
+# ---------------------------------------------------------------------------
+
+
+@router.post("/appointments/{appointment_id}/message", response_model=StaffMessageRead)
+async def message_patient(
+    appointment_id: str,
+    body: StaffMessageRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> StaffMessageRead:
+    """Free text from the clinic to the appointment's patient (spec 4.4).
+
+    WhatsApp patient: free text inside Meta's 24 h window; outside it only the
+    billed template and only with `notify_outside_window` (else 409 with the free
+    `wa.me` alternative). Portal patient: a chat message plus a generic e-mail
+    nudge when the patient has an address. All the channel logic lives in
+    services/staff_patient_message.py; this route only maps its errors to HTTP.
+    """
+    appt = await _get_appointment(session, tenant, appointment_id)
+    patient = None
+    if appt.patient_id is not None:
+        patient = await session.scalar(
+            select(Patient).where(Patient.id == appt.patient_id, Patient.tenant_id == tenant.id)
+        )
+    try:
+        result = await staff_patient_message.send_staff_message(
+            session, tenant, appt, patient, body.text, allow_paid=body.notify_outside_window
+        )
+    except staff_patient_message.OutsideWindowError as exc:
+        settings = get_settings()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            _detail(
+                exc.code,
+                "O paciente não escreveu nas últimas 24 horas: só é possível enviar um "
+                "modelo aprovado (cobrado) ou escrever pelo seu próprio WhatsApp.",
+                template_cost_brl=settings.CANCEL_TEMPLATE_COST_BRL,
+                cost_is_estimate=settings.CANCEL_TEMPLATE_COST_IS_ESTIMATE,
+                whatsapp_link=exc.whatsapp_link,
+            ),
+        ) from None
+    except staff_patient_message.NoChannelError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            _detail(exc.code, "Não há como falar com este paciente por aqui."),
+        ) from None
+    except staff_patient_message.DeliveryFailedError as exc:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            _detail(exc.code, "Não foi possível entregar a mensagem. Tente de novo."),
+        ) from None
+    return StaffMessageRead(
+        delivery=result.delivery,
+        email_nudge=result.email_nudge,
+        message_id=str(result.message_id) if result.message_id else None,
+    )
 
 
 # ---------------------------------------------------------------------------

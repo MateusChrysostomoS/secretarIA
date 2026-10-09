@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from secretaria.models.appointment import AppointmentStatus
 
@@ -298,3 +298,32 @@ class AppointmentReleaseRead(AppointmentRead):
     """
 
     patient_notice: str = "not_attempted"
+
+
+class StaffMessageRequest(BaseModel):
+    """POST /appointments/{id}/message (TASK-032 R4, spec 4.4)."""
+
+    text: str = Field(min_length=1, max_length=1000)
+    # Authorises the BILLED template when a WhatsApp patient is outside Meta's
+    # 24 h window (same meaning as AppointmentCancel.notify_outside_window).
+    notify_outside_window: bool = False
+
+    @field_validator("text")
+    @classmethod
+    def _trimmed_and_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("text must not be blank")
+        return value
+
+
+class StaffMessageRead(BaseModel):
+    """What happened to the staff message.
+
+    `delivery`: whatsapp_text | whatsapp_template | portal_chat.
+    `email_nudge`: only for portal_chat - sent | no_email | not_sent.
+    """
+
+    delivery: str
+    email_nudge: str | None = None
+    message_id: str | None = None
