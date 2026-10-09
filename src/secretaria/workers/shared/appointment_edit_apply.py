@@ -10,7 +10,6 @@ logged and never undoes the edit the patient just confirmed.
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
@@ -18,17 +17,19 @@ from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import (
     Appointment,
-    AppointmentStatus,
     Patient,
     PixDeposit,
     Tenant,
     is_live_status,
 )
 from secretaria.services import reminder_hooks
-from secretaria.services.appointment_edit import EditDraft, appointment_email_version
-from secretaria.services.appointment_status import SOURCE_FLOW, log_status_transition
+from secretaria.services.appointment_edit import appointment_email_version
+from secretaria.services.appointment_edit_write import (
+    row_draft as _row_draft,
+    write_appointment_edit,
+)
+from secretaria.services.appointment_status import SOURCE_FLOW
 from secretaria.services.calendar import build_event_description
-from secretaria.services.insurance_catalog import resolve_booking_plan_ids
 from secretaria.services.patient_context import as_utc
 from secretaria.services.payments import deposit_lifecycle
 from secretaria.services.professional_edit_outbox import record_professional_edit
@@ -51,21 +52,6 @@ class AppliedEdit:
     notice_id: str | None = None
     notice_version: str | None = None
     changed_fields: tuple[str, ...] = ()
-
-
-def _row_draft(appointment, timezone) -> EditDraft:
-    return EditDraft.from_appointment(
-        {
-            "id": str(appointment.id),
-            "appointment_type": appointment.appointment_type,
-            "professional_id": appointment.professional_id,
-            "start_at": appointment.start_at,
-            "end_at": appointment.end_at,
-            "insurance": appointment.insurance,
-            "attendee_name": appointment.attendee_name,
-        },
-        ZoneInfo(timezone or "America/Sao_Paulo"),
-    )
 
 
 async def apply_appointment_edit(
@@ -129,36 +115,18 @@ async def apply_appointment_edit(
         )
         if not allowed:
             return None
-    previous = appointment.status
-    plan_id, professional_plan_id = await resolve_booking_plan_ids(
-        session, tenant_id, edit["insurance"], edit["professional_id"]
+    fields = await write_appointment_edit(
+        session,
+        appointment,
+        tenant_id=tenant_id,
+        timezone=current_tenant.timezone,
+        edit=edit,
+        source=SOURCE_FLOW,
+        idempotency_key=f"edit:{appointment.id}:{edit['start_at'].isoformat()}",
     )
-    appointment.appointment_type = edit["appointment_type"] or appointment.appointment_type
-    appointment.professional_id = edit["professional_id"]
-    appointment.insurance = edit["insurance"]
-    appointment.insurance_plan_id = plan_id
-    appointment.insurance_professional_plan_id = professional_plan_id
-    appointment.attendee_name = edit["attendee_name"]
-    appointment.google_event_id = edit["google_event_id"]
-    if edit.get("calendar_changed", edit["doctor_changed"]):
-        appointment.google_event_link = edit.get("google_event_link")
-    appointment.end_at = as_utc(edit["end_at"]).astimezone(UTC)
-    if edit["time_changed"]:
-        appointment.start_at = as_utc(edit["start_at"]).astimezone(UTC)
-        appointment.status = AppointmentStatus.RESCHEDULED
-        log_status_transition(
-            appointment_id=appointment.id,
-            tenant_id=tenant_id,
-            old_status=previous,
-            new_status=AppointmentStatus.RESCHEDULED,
-            source=SOURCE_FLOW,
-            idempotency_key=f"edit:{appointment.id}:{edit['start_at'].isoformat()}",
-        )
     moved = bool(edit["time_changed"]) and (
         reminder_hooks.enabled_for(tenant) or (appointment.confirmation_count or 0) > 0
     )
-    after = _row_draft(appointment, current_tenant.timezone)
-    fields = EditDraft(str(appointment.id), after.current, before.current).changed()
     notice = await record_professional_edit(session, appointment, fields)
     return AppliedEdit(
         appointment_id=appointment.id,
