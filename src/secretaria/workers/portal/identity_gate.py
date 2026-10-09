@@ -175,7 +175,33 @@ async def run_identity_gate(
         #            is an offer, the appointment is already committed, and
         #            a patient with a different question must not have to
         #            answer this one first.
+        pre_consent = patient.lgpd_accepted_at is None
+        # The shape of what was not recognised, never its text (TASK-042): enough to tell
+        # a stray tap from a typo'd code from a sentence if the 2026-10-09 incident returns.
+        logger.info(
+            "conversation_pending_code_unrecognized",
+            conversation_id=str(conversation.id),
+            tenant_id=str(tenant.id),
+            kind="interactive" if interactive_reply_id else ("text" if body else "empty"),
+            length=len(body or ""),
+            pre_consent=pre_consent,
+        )
         held = await live_hold_in(session, conversation.id)
+        if held is None and pre_consent:
+            # The KNOWN-address wait (`_continue_after_email_claim`): asked before
+            # consent, so there is no appointment and no hold behind it. Dropping it here
+            # used to send a returning patient into the NEW-visitor LGPD notice, one stray
+            # message away from their account. The card is repeated instead and the
+            # wait's exit is the clock (`_expire_stale_pending_identity_state` above) or
+            # the card's "Mudar e-mail". The post-booking OFFER below is unchanged.
+            return _ReplyContext(
+                channel=channel,
+                conversation_id=conversation.id,
+                tenant_id=tenant.id,
+                patient_ref=patient_ref,
+                inbound_body=body or "",
+                existing_account_code_reprompt=True,
+            )
         if held is not None:
             logger.info(
                 "conversation_pending_code_reprompted",

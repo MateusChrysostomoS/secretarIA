@@ -70,6 +70,8 @@ from secretaria.schemas.internal import (
     BrainMessageOpen,
     BrainMessageReadMark,
     BrainMessageTyping,
+    BrainMessageVisitDiscard,
+    BrainMessageVisitDiscardOut,
     BrainMessageVisitMerge,
     InternalAppointment,
     InternalAppointmentList,
@@ -80,6 +82,7 @@ from secretaria.schemas.internal import (
 from secretaria.services import media_storage, message_status
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.typing_indicator import mark_typing, typing_by as typing_by_for
+from secretaria.services.visit_merge import discard_empty_visit
 
 logger = get_logger(__name__)
 
@@ -1086,3 +1089,37 @@ async def merge_brain_message_visit_route(
     )
     logger.info("brain_message_visit_merge_queued", tenant_id=str(payload.tenant_id))
     return BrainMessageAck(status="queued")
+
+
+@router.post(
+    "/brain-message/visits/discard",
+    response_model=BrainMessageVisitDiscardOut,
+    summary="Retention: discard a Portal visit that only opened the link (internal)",
+    description=(
+        "brain-api's retention job (TASK-042) calls this for a visit older than 24 h with no "
+        "e-mail and no verification, BEFORE deleting its own rows. Synchronous: 200 means "
+        "this side is clean (`discarded` now, or `absent` already) and brain-api may delete "
+        "its side. 409 `visit_not_empty` means the patient wrote, booked or holds a slot: "
+        "nothing is deleted and brain-api must keep the visit. Idempotent. Requires the "
+        "X-Internal-Api-Key header."
+    ),
+    responses={
+        **_INTERNAL_RESPONSES,
+        409: {"description": "The visit has a patient message, an appointment or a live hold."},
+    },
+)
+async def discard_brain_message_visit_route(
+    payload: BrainMessageVisitDiscard,
+    session: AsyncSession = Depends(get_session),
+) -> BrainMessageVisitDiscardOut:
+    result = await discard_empty_visit(session, payload.tenant_id, payload.external_id)
+    if result.status == "not_empty":
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="visit_not_empty")
+    await session.commit()
+    logger.info(
+        "brain_message_visit_retention_discard",
+        tenant_id=str(payload.tenant_id),
+        status=result.status,
+    )
+    return BrainMessageVisitDiscardOut(status=result.status)

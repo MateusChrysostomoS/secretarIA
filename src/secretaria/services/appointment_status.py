@@ -32,6 +32,11 @@ SOURCE_BUTTON = "button"
 SOURCE_HUB = "hub"
 SOURCE_SYSTEM = "system"
 
+# WHY a hub cancellation happened, for the log only (there is no reason column).
+# `unconfirmed`: the clinic freed the slot because the patient never confirmed
+# (api/hub/calendar.py::release_appointment, TASK-032 R4).
+CANCEL_REASON_UNCONFIRMED = "unconfirmed"
+
 
 def log_status_transition(
     *,
@@ -41,6 +46,7 @@ def log_status_transition(
     new_status: AppointmentStatus,
     source: str,
     idempotency_key: str | None = None,
+    reason: str | None = None,
 ) -> None:
     """Record one appointment status transition, sanitized.
 
@@ -49,6 +55,7 @@ def log_status_transition(
     appointment id for a confirm/cancel). It is a correlation aid, not a
     guarantee — the actual replay protection is the `processed_events` ledger
     and the fact that every write here is idempotent by construction.
+    `reason` is an optional closed-vocabulary code (see CANCEL_REASON_*), never free text.
 
     `still_live` is emitted so a status a reader does not recognise (a member
     added later, say) shows up as a countable anomaly rather than as a booking
@@ -62,5 +69,6 @@ def log_status_transition(
         new_status=new_status.value,
         source=source,
         idempotency_key=idempotency_key,
+        reason=reason,
         still_live=is_live_status(new_status),
     )

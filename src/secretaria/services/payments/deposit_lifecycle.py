@@ -844,3 +844,57 @@ async def apply_asaas_event(
         )
 
     return outcome
+
+
+def preview_cancellation_outcome(
+    tenant: Tenant,
+    deposit: PixDeposit | None,
+    appointment: Appointment,
+    *,
+    now: datetime | None = None,
+) -> str | None:
+    """What `on_appointment_cancelled` WOULD return for this deposit, with no I/O.
+
+    Mirrors that function's branching one-to-one (same window arithmetic, same
+    retention policy) so the hub can show the clinic the money consequence BEFORE
+    a slot is released (TASK-032 R4). It cannot predict "refund_failed": that is
+    the PSP's answer. Keep the two in step - `tests/test_deposit_release_preview.py`
+    runs both on the same data and compares.
+    """
+    if deposit is None or deposit.status not in (PixDepositStatus.AWAITING, PixDepositStatus.PAID):
+        return None
+    if deposit.status is PixDepositStatus.AWAITING:
+        return "voided"
+    now = now or datetime.now(UTC)
+    start_at = appointment.start_at
+    hours_until = None if start_at is None else (_as_utc(start_at) - now).total_seconds() / 3600
+    if hours_until is None or hours_until > tenant.pix_refund_window_hours:
+        return "refunded"
+    if tenant.pix_retention_policy == "partial":
+        return "partial_refund"
+    return "retained"
+
+
+def release_warning_text(outcome: str | None, tenant: Tenant, deposit: PixDeposit) -> str:
+    """The pt-BR warning the CLINIC reads before freeing a paid slot (not the patient notice).
+
+    `cancellation_notice` above is the patient-facing sentence; this one is
+    addressed to the clinic and always names the amount, because releasing a
+    slot whose deposit was paid is the one release that moves money.
+    """
+    paid = f"O paciente já pagou o sinal ({format_brl(deposit.amount_cents)})."
+    if outcome == "retained":
+        return (
+            f"{paid} Como faltam menos de {tenant.pix_refund_window_hours}h para a consulta, "
+            "ao liberar o horário a clínica fica com o sinal."
+        )
+    if outcome == "partial_refund":
+        refunded = round(deposit.amount_cents * tenant.pix_partial_refund_percent / 100)
+        return (
+            f"{paid} Como faltam menos de {tenant.pix_refund_window_hours}h para a consulta, "
+            f"{format_brl(refunded)} serão estornados ao paciente e o restante fica retido "
+            "pela clínica."
+        )
+    if outcome == "refunded":
+        return f"{paid} Ao liberar o horário, o valor será estornado por inteiro ao paciente."
+    return f"{paid} Confira a política de estorno do sinal antes de liberar o horário."

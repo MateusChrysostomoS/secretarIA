@@ -750,6 +750,62 @@ async def test_portal_known_email_skips_the_name_and_asks_the_code(db, calls) ->
     assert (await _conversation(db, tenant)).flow_state == FlowState.MENU
 
 
+async def test_portal_known_email_non_code_message_repeats_the_card_not_the_lgpd(
+    db, calls, monkeypatch
+) -> None:
+    """TASK-042 (j): a stray message in the known-address code wait keeps the wait.
+
+    Before: anything that was not six digits dropped AWAITING_EMAIL_CODE and the
+    returning patient fell into the NEW-visitor LGPD notice (incident 2026-10-09). Now
+    the two-button card goes out again, the state stays, and the right code still
+    verifies afterwards. The log carries the message's shape, never its text.
+    """
+    from secretaria.workers.portal import identity_gate
+
+    logged: list[tuple[str, dict]] = []
+
+    class _Spy:
+        def info(self, event, **fields):
+            logged.append((event, fields))
+
+    # Recorded directly: structlog caches loggers on first use, so captured output depends
+    # on test order (same reason as test_brain_message_attachments::_recording_loggers).
+    monkeypatch.setattr(identity_gate, "logger", _Spy())
+    calls.claim_result = ClaimResult(
+        ClaimOutcome.CLAIMED, account_exists=True, email_masked=EMAIL_MASKED
+    )
+    tenant = await _seed_tenant(db)
+    await _bm_turn(tenant, "oi")
+    await _bm_turn(tenant, EMAIL)
+    before = len(await _outbound(db, tenant))
+
+    await _bm_turn(tenant, "não chegou nada ainda")
+
+    new = (await _outbound(db, tenant))[before:]
+    assert new == [
+        interactive_history_body(
+            existing_account_code_body(None),
+            [title for _, title in EXISTING_ACCOUNT_CODE_BUTTONS],
+        )
+    ]
+    assert LGPD_ROW not in new
+    assert calls.code_requests == [EXTERNAL_ID], "repeating the card mails no new code"
+    assert (await _conversation(db, tenant)).flow_state == FlowState.AWAITING_EMAIL_CODE
+    assert (await _patient(db, tenant, CHANNEL_BRAIN_MESSAGE)).lgpd_accepted_at is None
+    unrecognized = [
+        fields for event, fields in logged if event == "conversation_pending_code_unrecognized"
+    ]
+    assert unrecognized and unrecognized[0]["kind"] == "text"
+    assert unrecognized[0]["length"] == len("não chegou nada ainda")
+    assert "chegou" not in repr(logged), "the unrecognised text reached the log"
+
+    calls.probe_states = [IdentityState.VERIFIED]
+    await _bm_turn(tenant, "123456")
+
+    assert calls.verified == ["123456"]
+    assert CODE_ACCEPTED_MESSAGE in await _outbound(db, tenant)
+
+
 async def test_portal_known_email_whose_account_has_no_name_is_asked_it_after_the_code(
     db, calls
 ) -> None:

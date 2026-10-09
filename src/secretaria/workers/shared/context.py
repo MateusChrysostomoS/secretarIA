@@ -111,6 +111,11 @@ class _ReplyContext:
     # instead and its Voltar button stays the explicit way out. Carries
     # the live hold so the re-ask can name the window and the minutes left.
     pending_code_reprompt: HeldSlot | None = None
+    # TASK-042: the KNOWN-address code wait (before consent, no booking) got a message
+    # that is not a code. The two-button card goes out again and the wait stays; the
+    # only exit is `pending_identity_ttl_minutes`. Before this, the message dropped the
+    # wait and the visitor fell into the new-visitor LGPD notice.
+    existing_account_code_reprompt: bool = False
     # A syntactically valid address the visitor just typed, already normalized.
     # `_send_bot_reply` claims it against brain-api and then sends the LGPD
     # notice — in that order, so a patient never consents before we have
