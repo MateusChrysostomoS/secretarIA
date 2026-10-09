@@ -119,7 +119,7 @@ async def _notify_portal(
     appointment: Appointment,
     patient: Patient,
     professional_name: str | None,
-    reason: str,
+    reason: str | None,
     deposit_notice: str | None,
 ) -> str:
     appointment_id = appointment.id  # before a rollback can expire the row
@@ -147,3 +147,74 @@ async def _notify_portal(
         return NOTICE_FAILED
     nudge = await nudge_portal_patient(tenant, patient)
     return NOTICE_PORTAL_CHAT_EMAIL if nudge == EMAIL_SENT else NOTICE_PORTAL_CHAT
+
+
+async def notify_cancelled_patient(
+    session: AsyncSession,
+    tenant: Tenant,
+    appointment: Appointment,
+    patient: Patient | None,
+    *,
+    professional_name: str | None,
+    justification: str | None,
+    deposit_notice: str | None,
+    allow_paid: bool,
+    arq_pool,
+    now: datetime | None = None,
+) -> str:
+    """The patient notice of POST /cancel (TASK-032 R7 §2). Never raises.
+
+    * Portal patient: the cancellation text in the chat + the generic e-mail nudge (new:
+      until R7 a Portal patient learned nothing).
+    * Everyone else: TODAY's enqueue, unchanged - same job, same arguments, same
+      `appointment.phone` condition. The job still decides the 24 h window itself; this
+      only REPORTS what it will do (`whatsapp_queued` inside the window or with
+      `allow_paid`, `whatsapp_outside_window` otherwise).
+    """
+    appointment_id = appointment.id
+    try:
+        own = patient is not None and patient.tenant_id == tenant.id
+        if own and patient.channel == CHANNEL_BRAIN_MESSAGE:
+            return await _notify_portal(
+                session,
+                tenant,
+                appointment,
+                patient,
+                professional_name,
+                justification,
+                deposit_notice,
+            )
+        if not appointment.phone:
+            return NOTICE_NO_CHANNEL
+        inside = False
+        if own:
+            last_inbound = await cancellation_notice.last_inbound_at(session, tenant.id, patient.id)
+            inside = cancellation_notice.is_inside_window(last_inbound, now=now)
+        if arq_pool is None:
+            logger.warning("cancel_notice_not_queued", reason="no_queue")
+            return NOTICE_QUEUE_UNAVAILABLE
+        try:
+            await arq_pool.enqueue_job(
+                "send_cancellation_notice",
+                str(tenant.id),
+                str(appointment_id),
+                professional_name,
+                justification,
+                deposit_notice,
+                allow_paid,
+            )
+        except Exception as exc:
+            logger.error(
+                "cancel_notice_enqueue_failed",
+                appointment_id=str(appointment_id),
+                error_type=type(exc).__name__,
+            )
+            return NOTICE_QUEUE_UNAVAILABLE
+        return NOTICE_WHATSAPP_QUEUED if inside or allow_paid else NOTICE_WHATSAPP_OUTSIDE_WINDOW
+    except Exception as exc:
+        logger.error(
+            "cancel_notice_failed",
+            appointment_id=str(appointment_id),
+            error_type=type(exc).__name__,
+        )
+        return NOTICE_FAILED

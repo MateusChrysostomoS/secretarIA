@@ -539,14 +539,14 @@ async def cancel_preview(
     )
 
 
-@router.post("/appointments/{appointment_id}/cancel", response_model=AppointmentRead)
+@router.post("/appointments/{appointment_id}/cancel", response_model=AppointmentActionRead)
 async def cancel_appointment(
     appointment_id: str,
     body: AppointmentCancel,
     request: Request,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_session),
-) -> AppointmentRead:
+) -> AppointmentActionRead:
     if not body.confirm:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "confirm must be true")
 
@@ -592,35 +592,38 @@ async def cancel_appointment(
     if reminder_hooks.enabled_for(tenant):
         await reminder_hooks.after_appointment_closed(appt.id, reason="cancelled")
 
-    # Notify the patient. UNCONDITIONAL now — this used to fire only when the
-    # doctor typed something, so a blank box meant the patient found out by
-    # turning up to a consultation that no longer existed. The body is composed
-    # server-side (services/cancellation_notice.py); the doctor's text is a
-    # justification quoted inside it, not the message.
-    #
-    # The honest deposit notice, when there is one, rides along rather than
-    # arriving as a second message.
-    if appt.phone:
-        arq_pool = getattr(request.app.state, "arq_pool", None)
-        if arq_pool:
-            await arq_pool.enqueue_job(
-                "send_cancellation_notice",
-                str(tenant.id),
-                str(appt.id),
-                professional_name,
-                body.justification,
-                notice,
-                body.notify_outside_window,
-            )
+    # Notify the patient (unconditional since the cancellation-notice round; R7 adds
+    # the Portal). The WhatsApp side is today's job, byte for byte; the deposit notice
+    # rides along; the doctor's justification is quoted, not the whole message.
+    patient = await _patient_of(session, tenant, appt)
+    patient_notice = await appointment_release.notify_cancelled_patient(
+        session,
+        tenant,
+        appt,
+        patient,
+        professional_name=professional_name,
+        justification=body.justification,
+        deposit_notice=notice,
+        allow_paid=staff_patient_message.paid_notice_authorised(
+            tenant, body.notify_outside_window
+        ),
+        arq_pool=getattr(request.app.state, "arq_pool", None),
+    )
+    await session.refresh(appt)
 
     logger.info(
         "calendar_appointment_cancelled",
         appointment_id=str(appt.id),
         deposit_outcome=deposit_outcome,
+        patient_notice=patient_notice,
     )
     deposit_status = await _deposit_status_value(session, appt.id)
-    return _appointment_read(appt, deposit_status=deposit_status, deposit_outcome=deposit_outcome)
-
+    read = _appointment_read(appt, deposit_status=deposit_status, deposit_outcome=deposit_outcome)
+    return AppointmentActionRead(
+        **read.model_dump(),
+        patient_notice=patient_notice,
+        whatsapp_link=_notice_link(patient_notice, patient, appt),
+    )
 
 # ---------------------------------------------------------------------------
 # POST /appointments/{id}/release — free the slot of an unconfirmed appointment
