@@ -209,6 +209,14 @@ class TenantConfigUpdate(BaseModel):
     # standing yes to BILLED WhatsApp notices outside the 24 h window. Absent = left
     # untouched; an explicit null is refused below (the column is NOT NULL).
     paid_notices_auto_approved: bool | None = None
+    # TASK-044 R7 (spec 2026-10-09 §5.B): the clinic's extra ("custom") reminder, in
+    # minutes before the appointment. More than the 1-day reminder (> 1440; 1500 keeps
+    # them at least an hour apart) and at most 14 days. Absent = untouched; explicit
+    # null = no extra reminder. A change replans the still-pending extra reminders
+    # (services/reminder_schedule.py::replan_custom_reminders). `reminders_v2_enabled`
+    # is deliberately NOT accepted here: the owner turns reminders on per clinic
+    # (spec 4.5) - a PUT that sends it is ignored like any unknown key.
+    reminder_extra_lead_minutes: int | None = Field(default=None, ge=1500, le=20160)
     is_active: bool | None = None
 
     @field_validator("initial_flows")
@@ -348,3 +356,7 @@ class TenantConfigRead(BaseModel):
     # TASK-032 R7: the clinic's standing authorisation for billed notices (see
     # TenantConfigUpdate). Defaulted so an older reader building this model never 500s.
     paid_notices_auto_approved: bool = False
+    # TASK-044 R7: the reminder switch (READ-ONLY here) and the extra reminder's lead
+    # (None = no extra reminder). Defaulted so an older reader never 500s.
+    reminders_v2_enabled: bool = False
+    reminder_extra_lead_minutes: int | None = None

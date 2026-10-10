@@ -13,14 +13,22 @@ LGPD: logs carry ids, kinds and counts only.
 """
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import inspect, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.logging import get_logger
-from secretaria.models import Appointment, AppointmentStatus, Tenant, is_live_status
+from secretaria.models import (
+    LIVE_APPOINTMENT_STATUSES,
+    Appointment,
+    AppointmentStatus,
+    Tenant,
+    is_live_status,
+)
 from secretaria.models.appointment_reminder import (
     REMINDER_ANSWER_CONFIRM,
     REMINDER_CHANNEL_WHATSAPP,
@@ -486,3 +494,159 @@ async def retire_staff_notice_row(
         .values(invalidated_at=datetime.now(UTC))
         .execution_options(synchronize_session=False)
     )
+
+
+# --- TASK-044 R7 (spec 2026-10-09 §5.B): the clinic changed its extra-reminder lead ----
+
+_PLANNED_KINDS = (REMINDER_KIND_CUSTOM, REMINDER_KIND_DAY, REMINDER_KIND_HOUR)
+
+
+@dataclass(frozen=True)
+class CustomReplan:
+    """What `replan_custom_reminders` did (counts only - logged, never shown)."""
+
+    moved: int = 0
+    cancelled: int = 0
+    created: int = 0
+
+
+async def _move_pending_custom(
+    session: AsyncSession, reminder_id: UUID, tenant_id: UUID, due: datetime
+) -> int:
+    """Re-arm one still-pending row at `due`; 0 when the engine claimed it meanwhile."""
+    result = await session.execute(
+        update(AppointmentReminder)
+        .where(
+            AppointmentReminder.id == reminder_id,
+            AppointmentReminder.tenant_id == tenant_id,
+            AppointmentReminder.status == REMINDER_STATUS_PENDING,
+            AppointmentReminder.invalidated_at.is_(None),
+        )
+        .values(
+            due_at=due,
+            warn_due_at=due + _WARN_AFTER[REMINDER_KIND_CUSTOM],
+            warned_at=None,
+            warn_kind=None,
+        )
+        .execution_options(synchronize_session="fetch")
+    )
+    return result.rowcount or 0
+
+
+async def _retire_pending_custom(
+    session: AsyncSession, reminder_id: UUID, tenant_id: UUID, now_utc: datetime
+) -> int:
+    """Cancel + invalidate one still-pending row; 0 when the engine claimed it meanwhile."""
+    result = await session.execute(
+        update(AppointmentReminder)
+        .where(
+            AppointmentReminder.id == reminder_id,
+            AppointmentReminder.tenant_id == tenant_id,
+            AppointmentReminder.status == REMINDER_STATUS_PENDING,
+            AppointmentReminder.invalidated_at.is_(None),
+        )
+        .values(status=REMINDER_STATUS_CANCELLED, warn_due_at=None, invalidated_at=now_utc)
+        .execution_options(synchronize_session="fetch")
+    )
+    return result.rowcount or 0
+
+
+async def replan_custom_reminders(
+    session: AsyncSession, tenant: Tenant, *, now: datetime
+) -> CustomReplan:
+    """Put the clinic's NEW `reminder_extra_lead_minutes` on the reminders already planned.
+
+    Call AFTER `tenant.reminder_extra_lead_minutes` holds the new value, inside the
+    configuration save's transaction (flushes, never commits). For every live future
+    appointment of the clinic that has a patient:
+
+    * its `pending` `custom` row of the CURRENT start is re-armed in place at the new
+      due time, or cancelled + invalidated when the lead was switched off or the new
+      due time is not in the future (never sent late - same rule as schedule_reminders);
+    * a row that already left (`sending`/`sent`/`failed`/`skipped`) stays as history;
+    * with a lead and no `custom` row, one is created - only when the appointment
+      already has a planned `day`/`hour` row. An appointment with no plan at all is
+      left to reminder_hooks.reconcile_missing_reminders, which plans every kind with
+      the new lead (creating only `custom` there would make the cron skip it and lose
+      its day/hour reminders).
+
+    A clinic with the switch off has nothing planned and is left alone. Appointments
+    are locked before their reminders (R1's rule); conditional UPDATEs never move a row
+    the engine claimed meanwhile; a row a concurrent booking hook created first wins.
+    """
+    if not tenant.reminders_v2_enabled:
+        return CustomReplan()
+    now_utc = _as_utc(now)
+    lead = tenant.reminder_extra_lead_minutes
+    lead_delta = timedelta(minutes=lead) if lead is not None and lead > 0 else None
+
+    appointments = list(
+        await session.scalars(
+            select(Appointment)
+            .where(
+                Appointment.tenant_id == tenant.id,
+                Appointment.status.in_(LIVE_APPOINTMENT_STATUSES),
+                Appointment.patient_id.is_not(None),
+                Appointment.start_at > now_utc,
+            )
+            .with_for_update()
+        )
+    )
+    if not appointments:
+        return CustomReplan()
+    rows_by_appointment: dict[UUID, list[AppointmentReminder]] = {}
+    for row in await session.scalars(
+        select(AppointmentReminder).where(
+            AppointmentReminder.tenant_id == tenant.id,
+            AppointmentReminder.appointment_id.in_([a.id for a in appointments]),
+            AppointmentReminder.kind.in_(_PLANNED_KINDS),
+            AppointmentReminder.invalidated_at.is_(None),
+        )
+    ):
+        rows_by_appointment.setdefault(row.appointment_id, []).append(row)
+
+    moved = cancelled = created = 0
+    for appointment in appointments:
+        start = _as_utc(appointment.start_at)
+        current = [
+            row
+            for row in rows_by_appointment.get(appointment.id, [])
+            if _as_utc(row.appointment_start_at) == start
+        ]
+        custom = next((row for row in current if row.kind == REMINDER_KIND_CUSTOM), None)
+        due = start - lead_delta if lead_delta is not None else None
+        if due is None or due <= now_utc:
+            if custom is not None and custom.status == REMINDER_STATUS_PENDING:
+                cancelled += await _retire_pending_custom(session, custom.id, tenant.id, now_utc)
+            continue
+        if custom is not None:
+            if custom.status == REMINDER_STATUS_PENDING and _as_utc(custom.due_at) != due:
+                moved += await _move_pending_custom(session, custom.id, tenant.id, due)
+            continue
+        if not current:
+            continue  # never planned: the reconcile cron plans every kind with the new lead
+        row = AppointmentReminder(
+            tenant_id=tenant.id,
+            appointment_id=appointment.id,
+            patient_id=appointment.patient_id,
+            kind=REMINDER_KIND_CUSTOM,
+            appointment_start_at=start,
+            channel=REMINDER_CHANNEL_WHATSAPP,
+        )
+        _arm(row, due=due, with_prompt=appointment.confirmation_count < MAX_CONFIRMATIONS)
+        try:
+            async with session.begin_nested():
+                session.add(row)
+                await session.flush()
+        except IntegrityError:
+            continue  # a concurrent booking hook planned it first
+        created += 1
+
+    logger.info(
+        "custom_reminders_replanned",
+        tenant_id=str(tenant.id),
+        moved=moved,
+        cancelled=cancelled,
+        created=created,
+    )
+    return CustomReplan(moved=moved, cancelled=cancelled, created=created)

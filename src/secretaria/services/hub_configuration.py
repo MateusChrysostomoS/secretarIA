@@ -32,6 +32,7 @@ layering rule in CLAUDE.md. The routers map those errors to status codes.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,7 +41,7 @@ from secretaria.models import Tenant
 from secretaria.models.professional import Professional
 from secretaria.schemas.config import TenantConfigRead
 from secretaria.schemas.professional import ProfessionalListItem
-from secretaria.services import tenant_config as cfg
+from secretaria.services import reminder_schedule, tenant_config as cfg
 from secretaria.services.greeting_template import (
     clinic_description_budget,
     greeting_preview_template,
@@ -138,6 +139,7 @@ TENANT_SCALAR_FIELDS: tuple[str, ...] = (
     "pix_partial_refund_percent",
     "pix_reschedule_limit",
     "paid_notices_auto_approved",
+    "reminder_extra_lead_minutes",
 )
 
 PROFESSIONAL_CONFIG_FIELDS: tuple[str, ...] = (
@@ -265,6 +267,7 @@ async def apply_tenant_config(session: AsyncSession, tenant: Tenant, data: dict)
     so nothing reaches the database. See check_tenant_activation for why the
     gate cannot run any earlier.
     """
+    previous_lead = tenant.reminder_extra_lead_minutes
     for field_name in TENANT_SCALAR_FIELDS:
         if field_name in data:
             setattr(tenant, field_name, data[field_name])
@@ -289,6 +292,14 @@ async def apply_tenant_config(session: AsyncSession, tenant: Tenant, data: dict)
         tenant.is_active = True
     elif "is_active" in data:
         tenant.is_active = False
+
+    # TASK-044 R7 (spec §5.B): a NEW extra-reminder lead moves the reminders already
+    # planned, in this same transaction - a rolled-back save rolls the replan back too.
+    if (
+        "reminder_extra_lead_minutes" in data
+        and tenant.reminder_extra_lead_minutes != previous_lead
+    ):
+        await reminder_schedule.replan_custom_reminders(session, tenant, now=datetime.now(UTC))
 
 
 def apply_professional_config(professional: Professional, data: dict) -> None:
@@ -383,6 +394,8 @@ async def tenant_read_model(session: AsyncSession, tenant: Tenant) -> TenantConf
         pix_reschedule_limit=tenant.pix_reschedule_limit,
         asaas_connected=asaas_connected,
         paid_notices_auto_approved=bool(tenant.paid_notices_auto_approved),
+        reminders_v2_enabled=bool(tenant.reminders_v2_enabled),
+        reminder_extra_lead_minutes=tenant.reminder_extra_lead_minutes,
     )
 
 
