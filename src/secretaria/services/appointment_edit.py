@@ -17,6 +17,7 @@ from hashlib import sha256
 from typing import Any
 
 from secretaria.core.whatsapp_limits import MAX_INTERACTIVE_BODY_CHARS
+from secretaria.services.appointment_calendar_origin import calendar_professional_id
 
 
 def appointment_email_version(appointment) -> str:
@@ -142,6 +143,8 @@ class EditDraft:
             "insurance": appt.get("insurance") or None,
             "attendee_name": appt.get("attendee_name") or None,
         }
+        if appt.get("google_calendar_source") is not None:
+            values["google_calendar_source"] = appt["google_calendar_source"]
         return cls(appointment_id=str(appt["id"]), current=dict(values), original=dict(values))
 
     def to_json(self) -> dict:
@@ -196,6 +199,16 @@ class EditDraft:
         if cur["attendee_name"] != org["attendee_name"]:
             out.append("paciente")
         return out
+
+    @property
+    def original_calendar_professional_id(self) -> str | None:
+        return calendar_professional_id(self.original)
+
+    @property
+    def calendar_professional_id(self) -> str | None:
+        if self.current["professional_id"] != self.original["professional_id"]:
+            return self.current["professional_id"]
+        return self.original_calendar_professional_id
 
     @property
     def start(self) -> datetime:

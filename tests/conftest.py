@@ -58,3 +58,20 @@ async def client() -> AsyncIterator[AsyncClient]:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
         yield ac
+
+
+@pytest.fixture(autouse=True)
+def _clinic_wide_agenda_viewer():
+    """TASK-044 R7: who is looking at the hub agenda comes from brain-api's token
+    introspection (api/hub/deps.py::get_agenda_viewer). Tests that override
+    `get_current_tenant` never present a token, so by default they see the whole
+    clinic - exactly the pre-R7 behaviour. Scoping tests call
+    tests/_agenda_viewer.py::view_as; tests of the dependency call it directly.
+    """
+    from secretaria.api.hub.deps import get_agenda_viewer
+    from secretaria.main import app
+    from secretaria.services.agenda_visibility import CLINIC_WIDE
+
+    app.dependency_overrides[get_agenda_viewer] = lambda: CLINIC_WIDE
+    yield
+    app.dependency_overrides.pop(get_agenda_viewer, None)

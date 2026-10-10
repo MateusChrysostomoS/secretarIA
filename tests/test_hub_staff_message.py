@@ -227,3 +227,19 @@ async def test_malformed_ids_are_a_404(client: AsyncClient, db, acting):  # noqa
     await _world(db, acting)
 
     assert (await _message(client, "nope")).status_code == 404
+
+
+async def test_r7_the_clinics_standing_yes_sends_the_template_without_asking(  # noqa: F811
+    client: AsyncClient, db, acting
+):
+    world = await _world(db, acting, last_inbound_at=_recent(30))
+    async with db() as session:
+        tenant = await session.get(Tenant, world.tenant.id)
+        tenant.paid_notices_auto_approved = True
+        await session.commit()
+
+    response = await _message(client, world.appointment.id)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["delivery"] == "whatsapp_template"
+    assert FakeWhatsAppClient.all_sent()[0][0] == "template"

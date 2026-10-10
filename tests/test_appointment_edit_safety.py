@@ -8,10 +8,13 @@ import pytest
 from sqlalchemy import update
 
 from secretaria.models import Appointment, AppointmentStatus, FlowState, Patient, PixDeposit
-from secretaria.services import appointment_edit as ae, flow_router as fr
+from secretaria.services import (
+    appointment_edit as ae,
+    appointment_edit_write as writer,
+    flow_router as fr,
+)
 from secretaria.services.appointment_edit_flow import edit_step
 from secretaria.workers import tasks
-from secretaria.workers.shared import appointment_edit_apply as apply_module
 from tests._edit_flow_support import (
     DOCTOR_A,
     DOCTOR_B,
@@ -89,7 +92,7 @@ async def test_database_failure_compensates_calendar_and_keeps_the_draft(
     )
     assert result.appointment_edit is not None
     monkeypatch.setattr(
-        apply_module,
+        writer,
         "resolve_booking_plan_ids",
         AsyncMock(side_effect=RuntimeError("db failed")),
     )

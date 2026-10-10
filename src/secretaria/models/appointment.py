@@ -82,6 +82,14 @@ TERMINAL_APPOINTMENT_STATUSES: tuple[AppointmentStatus, ...] = (
     AppointmentStatus.NO_SHOW,
 )
 
+# A doctor's patient for the console's "Meus pacientes" filter (TASK-046 R8, spec
+# 2026-10-09 §5.D): the booking is happening, happened, or was this patient's slot and
+# they missed it. CANCELLED never happened and does not make anyone "his" patient.
+DOCTOR_PATIENT_STATUSES: tuple[AppointmentStatus, ...] = LIVE_APPOINTMENT_STATUSES + (
+    AppointmentStatus.ATTENDED,
+    AppointmentStatus.NO_SHOW,
+)
+
 
 def is_live_status(status: AppointmentStatus | None) -> bool:
     """True when the booking is still going to happen (see the taxonomy above)."""
@@ -116,6 +124,9 @@ class Appointment(Base):
         ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True
     )
     google_event_id: Mapped[str] = mapped_column(String(255), index=True)
+    # Physical event owner, independent of visibility's professional_id. NULL
+    # preserves legacy inference; hub creation writes clinic explicitly (R7).
+    google_calendar_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # htmlLink returned by Google Calendar on insert — handy for the doctor hub
     # and for confirmation messages without re-fetching the event.
     google_event_link: Mapped[str | None] = mapped_column(String(1024), nullable=True)
@@ -203,6 +214,14 @@ class Appointment(Base):
         DateTime(timezone=True), nullable=True
     )
     last_confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # TASK-032 R7: when the post-consult message was delivered because the clinic marked
+    # "Compareceu" (services/clinic_action_notice.py::notify_attended). Claimed before the
+    # send and cleared when it could not be delivered - one message per appointment, and
+    # the next-open follow-up skips an appointment that already got it.
+    post_consult_notified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

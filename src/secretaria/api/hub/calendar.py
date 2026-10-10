@@ -1,11 +1,13 @@
 """Doctor hub — calendar platform endpoints (authenticated).
 
+GET   /tenants/me/calendar/viewer                      - who is looking (role scope).
 GET   /tenants/me/calendar/events                      - agenda read model.
 POST  /tenants/me/calendar/appointments                - create consultation.
 POST  /tenants/me/calendar/appointments/{id}/cancel    - cancel + notify patient.
 POST  /tenants/me/calendar/appointments/{id}/release    - free an unconfirmed slot.
 POST  /tenants/me/calendar/appointments/{id}/message    - write to the patient (any channel).
 POST  /tenants/me/calendar/appointments/{id}/reschedule - reschedule + notify.
+POST  /tenants/me/calendar/appointments/{id}/edit       - Editar/Remarcar + notify (R7).
 POST  /tenants/me/calendar/blocks                      - block slot (no notification).
 PATCH /tenants/me/calendar/appointments/{id}/status    - mark attended / no-show / etc.
 """
@@ -14,10 +16,10 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import Row, select, update
+from sqlalchemy import Row, and_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from secretaria.api.hub.deps import get_current_tenant
+from secretaria.api.hub.deps import get_agenda_viewer, get_current_tenant
 from secretaria.config import get_settings
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
@@ -33,8 +35,11 @@ from secretaria.models.appointment import LIVE_APPOINTMENT_STATUSES
 from secretaria.models.patient import Patient
 from secretaria.models.pix_deposit import PixDepositStatus
 from secretaria.schemas.calendar import (
+    AgendaViewerRead,
+    AppointmentActionRead,
     AppointmentCancel,
     AppointmentCreate,
+    AppointmentEdit,
     AppointmentRead,
     AppointmentRelease,
     AppointmentReleaseRead,
@@ -52,20 +57,33 @@ from secretaria.schemas.calendar import (
 from secretaria.services import (
     appointment_release,
     cancellation_notice,
+    clinic_action_notice,
     reminder_hooks,
     reminder_schedule,
+    staff_appointment_edit,
     staff_patient_message,
+)
+from secretaria.services.agenda_visibility import AgendaViewer
+from secretaria.services.appointment_calendar_origin import (
+    CalendarOriginUnresolved,
+    calendar_professional_id,
 )
 from secretaria.services.appointment_status import (
     CANCEL_REASON_UNCONFIRMED,
     SOURCE_HUB,
+    StaffTransitionRefused,
     log_status_transition,
+    staff_transition,
 )
 from secretaria.services.calendar import CalendarService
 from secretaria.services.insurance_catalog import AppointmentPlan, load_appointment_plans
 from secretaria.services.patient_context import as_utc
 from secretaria.services.payments import deposit_lifecycle
 from secretaria.services.tenant_config import load_tenant_config, resolve_professional_calendar
+from secretaria.workers.shared.appointment_edit_apply import AppliedEdit
+from secretaria.workers.shared.appointment_edit_notification import (
+    enqueue_professional_edit_notification,
+)
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/tenants/me/calendar", tags=["hub-calendar"])
@@ -117,10 +135,34 @@ async def _get_calendar(session: AsyncSession, tenant: Tenant) -> CalendarServic
     return CalendarService.from_tenant_config(config)
 
 
+def _notice_link(code: str | None, patient: Patient | None, appt: Appointment) -> str | None:
+    """The free `wa.me` link, only when the 24 h window is why the patient was not told."""
+    if code != staff_patient_message.NOTICE_WHATSAPP_OUTSIDE_WINDOW:
+        return None
+    number = (patient.wa_id if patient is not None else None) or appt.phone
+    return cancellation_notice.whatsapp_deep_link(number)
+
+
+async def _patient_of(session: AsyncSession, tenant: Tenant, appt: Appointment) -> Patient | None:
+    """The appointment's patient, tenant-scoped (a foreign id resolves to nobody)."""
+    if appt.patient_id is None:
+        return None
+    return await session.scalar(
+        select(Patient).where(Patient.id == appt.patient_id, Patient.tenant_id == tenant.id)
+    )
+
+
 async def _get_appointment(
-    session: AsyncSession, tenant: Tenant, appointment_id: str
+    session: AsyncSession, tenant: Tenant, appointment_id: str, viewer: AgendaViewer
 ) -> Appointment:
-    """Load an appointment by id, scoped to the tenant. Raises 404 if not found."""
+    """Load an appointment by id, scoped to the tenant AND to what `viewer` may see.
+
+    404 for a malformed id, another clinic's appointment and - TASK-044 R7 (spec
+    2026-10-09 §5.A) - an appointment a viewer restricted to his own agenda does not
+    see (another doctor's, or one without a doctor): the SAME body in every case, so a
+    restricted doctor cannot even learn that the id exists. Every route that takes an
+    appointment id goes through here BEFORE touching Google, the queue or the patient.
+    """
     try:
         appt_uuid = UUID(appointment_id)
     except ValueError:
@@ -131,7 +173,7 @@ async def _get_appointment(
             Appointment.tenant_id == tenant.id,
         )
     )
-    if appt is None:
+    if appt is None or not viewer.sees(appt.professional_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Appointment not found")
     return appt
 
@@ -161,21 +203,66 @@ def _detail(code: str, message: str, **extra) -> dict:
     return {"code": code, "message": message, **extra}
 
 
-async def _owning_calendar(session: AsyncSession, tenant: Tenant, appt: Appointment):
-    """The Google calendar that owns `appt`'s event.
+# TASK-044 R7 (spec 2026-10-09 §5.A + owner's decision 2026-10-09): a viewer
+# restricted to his own agenda creates and keeps appointments only on it.
+_PROFESSIONAL_NOT_ALLOWED = (
+    "professional_not_allowed",
+    "Você só pode manter a consulta na sua própria agenda. Peça à recepção para trocar o médico.",
+)
+_CREATE_ON_OTHER_AGENDA = (
+    "professional_not_allowed",
+    "Você só pode marcar consultas e bloqueios na sua própria agenda.",
+)
+_NO_OWN_AGENDA = ("no_own_agenda", "Seu usuário não está ligado a um profissional da clínica.")
+_UNKNOWN_PROFESSIONAL = ("unknown_professional", "Este profissional não pertence a esta clínica.")
+
+
+async def _creation_professional(
+    session: AsyncSession, tenant: Tenant, viewer: AgendaViewer, requested: UUID | None
+) -> UUID | None:
+    """The doctor a hub-created consultation/block belongs to. Runs BEFORE Google.
+
+    Restricted viewer: nothing sent or his own id -> his own (the row is in his own
+    view at once); another id -> 403 professional_not_allowed; no professional of
+    his own -> 422 no_own_agenda (he has no agenda to write on). Clinic-wide viewer:
+    None stays None (today's doctor-less booking); an id must be an ACTIVE
+    professional of THIS clinic, else 422 unknown_professional.
+    """
+    if viewer.restricted:
+        if viewer.professional_id is None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, _detail(*_NO_OWN_AGENDA))
+        if requested is not None and requested != viewer.professional_id:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, _detail(*_CREATE_ON_OTHER_AGENDA))
+        return viewer.professional_id
+    if requested is None:
+        return None
+    professional = await session.scalar(
+        select(Professional).where(
+            Professional.id == requested,
+            Professional.tenant_id == tenant.id,
+        )
+    )
+    if professional is None or not professional.is_active:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, _detail(*_UNKNOWN_PROFESSIONAL))
+    return professional.id
+
+
+async def _calendar_for_professional(
+    session: AsyncSession, tenant: Tenant, professional_id: UUID | None
+):
+    """The Google calendar of `professional_id` (the clinic's own when None).
 
     A booking made with a professional lives on THAT professional's calendar;
-    `cancel_event` treats a 404 as "already gone" (success), so deleting on the
-    wrong calendar would silently no-op while the slot stays occupied. When the
-    owner cannot be resolved this refuses (409) instead of guessing the tenant
-    calendar - same "don't guess, degrade" rule as
-    workers/shared/actions.py::_calendar_for_appointment.
+    `cancel_event` treats a 404 as "already gone" (success), so writing to the wrong
+    calendar would silently no-op while the slot stays occupied. When the professional
+    cannot be resolved this refuses (409) instead of guessing the tenant calendar -
+    same "don't guess, degrade" rule as workers/shared/actions.py::_calendar_for_appointment.
     """
-    if appt.professional_id is None:
+    if professional_id is None:
         return await _get_calendar(session, tenant)
     professional = await session.scalar(
         select(Professional).where(
-            Professional.id == appt.professional_id, Professional.tenant_id == tenant.id
+            Professional.id == professional_id, Professional.tenant_id == tenant.id
         )
     )
     unresolved = HTTPException(
@@ -194,12 +281,24 @@ async def _owning_calendar(session: AsyncSession, tenant: Tenant, appt: Appointm
         )
     except Exception as exc:
         logger.warning(
-            "release_owning_calendar_failed",
-            appointment_id=str(appt.id),
+            "hub_professional_calendar_failed",
+            professional_id=str(professional_id),
             error_type=type(exc).__name__,
         )
         raise unresolved from exc
 
+
+async def _owning_calendar(session: AsyncSession, tenant: Tenant, appt: Appointment):
+    """The Google calendar that owns `appt`'s event (see `_calendar_for_professional`)."""
+    try:
+        owner_id = calendar_professional_id(appt)
+    except CalendarOriginUnresolved:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            _detail("calendar_unresolved",
+                    "Não foi possível identificar a agenda do profissional desta consulta."),
+        ) from None
+    return await _calendar_for_professional(session, tenant, owner_id)
 
 # ---------------------------------------------------------------------------
 # GET /events — agenda read model
@@ -253,13 +352,59 @@ def _current_reminders(row: Row, reminders: list[AppointmentReminder]) -> list[A
     return sorted(reminders, key=lambda r: as_utc(r.due_at))
 
 
+# ---------------------------------------------------------------------------
+# GET /viewer — who is looking (TASK-044 R7)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/viewer", response_model=AgendaViewerRead)
+async def agenda_viewer(
+    tenant: Tenant = Depends(get_current_tenant),
+    viewer: AgendaViewer = Depends(get_agenda_viewer),
+    session: AsyncSession = Depends(get_session),
+) -> AgendaViewerRead:
+    """Whose appointments this session sees, and whether to offer "Só os meus"."""
+    name = None
+    if viewer.professional_id is not None:
+        name = await session.scalar(
+            select(Professional.name).where(
+                Professional.id == viewer.professional_id,
+                Professional.tenant_id == tenant.id,
+            )
+        )
+    return AgendaViewerRead(
+        agenda_scope=viewer.scope,
+        professional_id=str(viewer.professional_id) if viewer.professional_id else None,
+        professional_name=name,
+        can_filter_own=viewer.can_filter_own,
+    )
+
+
 @router.get("/events", response_model=list[CalendarEventRead])
 async def list_events(
     start: datetime,
     end: datetime,
+    mine: bool = False,
     tenant: Tenant = Depends(get_current_tenant),
+    viewer: AgendaViewer = Depends(get_agenda_viewer),
     session: AsyncSession = Depends(get_session),
 ) -> list[CalendarEventRead]:
+    """The agenda. TASK-044 R7 (spec 2026-10-09 §5.A/§5.C):
+
+    * a viewer restricted to his own agenda gets ONLY events whose local appointment is
+      his - never a Google-only event (its title can carry another patient's name), an
+      appointment without a doctor or another doctor's; `mine` cannot widen that;
+    * a clinic-wide viewer who is also a professional narrows with `mine=true`
+      ("Só os meus"); a clinic-wide viewer without one asking for it is 422;
+    * every event with a local appointment carries the Editar/Remarcar pre-fill.
+    The Google read itself is unchanged (the clinic's calendar, as before).
+    """
+    if mine and not viewer.restricted and viewer.professional_id is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            _detail("no_own_agenda", "Seu usuário não está ligado a um profissional da clínica."),
+        )
+    own_only = viewer.restricted or mine
     cal = await _get_calendar(session, tenant)
     events = await cal.check_availability(start, end)
 
@@ -276,12 +421,12 @@ async def list_events(
     # what stops a google_event_id from another clinic's calendar (a shared or
     # mis-configured Google account) resolving to that clinic's appointment
     # and handing this doctor a working cancel button for someone else's
-    # patient.
+    # patient. The patient join is tenant-scoped for the same reason.
     google_ids = [e["id"] for e in events if e.get("id")]
     booked: dict[str, Row] = {}
     if google_ids:
-        # The convênio columns ride along on the SAME single query: the plan
-        # ids are only needed to resolve names, never sent to the client.
+        # The convênio columns and the TASK-044 pre-fill ride along on the SAME
+        # single query: the plan ids are only needed to resolve names, never sent.
         rows = await session.execute(
             select(
                 Appointment.google_event_id,
@@ -292,12 +437,46 @@ async def list_events(
                 Appointment.status,
                 Appointment.confirmation_count,
                 Appointment.start_at,
-            ).where(
+                Appointment.professional_id,
+                Appointment.appointment_type,
+                Appointment.attendee_name,
+                Appointment.phone,
+                Patient.channel.label("patient_channel"),
+            )
+            .outerjoin(
+                Patient,
+                and_(Patient.id == Appointment.patient_id, Patient.tenant_id == tenant.id),
+            )
+            .where(
                 Appointment.tenant_id == tenant.id,
                 Appointment.google_event_id.in_(google_ids),
             )
         )
         booked = {row.google_event_id: row for row in rows.all()}
+
+    if own_only:
+        # TASK-044 R7: before anything else is loaded - nothing of another doctor's
+        # appointment (plan, deposit, reminders, patient) is even read for this page.
+        focus = viewer.professional_id
+        booked = {
+            gid: row
+            for gid, row in booked.items()
+            if focus is not None and row.professional_id == focus
+        }
+        events = [e for e in events if e.get("id") in booked]
+
+    # At most ONE tenant-scoped query for the page's doctor names; a professional id
+    # of another clinic on a row never resolves (shown as no doctor).
+    owner_ids = {row.professional_id for row in booked.values() if row.professional_id}
+    professional_names: dict[UUID, str] = {}
+    if owner_ids:
+        named = await session.execute(
+            select(Professional.id, Professional.name).where(
+                Professional.tenant_id == tenant.id,
+                Professional.id.in_(owner_ids),
+            )
+        )
+        professional_names = {pid: name for pid, name in named.all()}
 
     # At most ONE query per plan table for the whole page, both tenant-scoped
     # (services/insurance_catalog.py::load_appointment_plans) - a plan id from
@@ -343,6 +522,7 @@ async def list_events(
             else None
         )
         state = reminder_schedule.display_state(row, current) if row is not None else None
+        owner_name = professional_names.get(row.professional_id) if row is not None else None
         reads.append(
             CalendarEventRead(
                 id=e["id"],
@@ -360,6 +540,12 @@ async def list_events(
                 if state is not None
                 else None,
                 reminders=[_reminder_read(r) for r in current] if current is not None else None,
+                professional_id=str(row.professional_id) if owner_name is not None else None,
+                professional_name=owner_name,
+                service=row.appointment_type if row is not None else None,
+                attendee_name=row.attendee_name if row is not None else None,
+                phone=row.phone if row is not None else None,
+                patient_channel=row.patient_channel if row is not None else None,
             )
         )
     return reads
@@ -374,8 +560,11 @@ async def list_events(
 async def create_appointment(
     body: AppointmentCreate,
     tenant: Tenant = Depends(get_current_tenant),
+    viewer: AgendaViewer = Depends(get_agenda_viewer),
     session: AsyncSession = Depends(get_session),
 ) -> AppointmentRead:
+    # Spec §5.A / owner 2026-10-09: decided before Google is touched.
+    professional_id = await _creation_professional(session, tenant, viewer, body.professional_id)
     cal = await _get_calendar(session, tenant)
     event = await cal.create_event(
         start=body.start,
@@ -405,6 +594,8 @@ async def create_appointment(
 
     appt = Appointment(
         tenant_id=tenant.id,
+        professional_id=professional_id,
+        google_calendar_source="clinic",
         patient_id=patient_uuid,
         google_event_id=google_event_id,
         google_event_link=event.get("htmlLink"),
@@ -437,8 +628,11 @@ async def create_appointment(
 async def create_block(
     body: BlockCreate,
     tenant: Tenant = Depends(get_current_tenant),
+    viewer: AgendaViewer = Depends(get_agenda_viewer),
     session: AsyncSession = Depends(get_session),
 ) -> AppointmentRead:
+    # Spec §5.A / owner 2026-10-09: decided before Google is touched.
+    professional_id = await _creation_professional(session, tenant, viewer, body.professional_id)
     cal = await _get_calendar(session, tenant)
     event = await cal.create_event(
         start=body.start,
@@ -448,6 +642,8 @@ async def create_block(
     )
     appt = Appointment(
         tenant_id=tenant.id,
+        professional_id=professional_id,
+        google_calendar_source="clinic",
         patient_id=None,
         google_event_id=event.get("id", ""),
         google_event_link=event.get("htmlLink"),
@@ -476,6 +672,7 @@ async def create_block(
 async def cancel_preview(
     appointment_id: str,
     tenant: Tenant = Depends(get_current_tenant),
+    viewer: AgendaViewer = Depends(get_agenda_viewer),
     session: AsyncSession = Depends(get_session),
 ) -> CancelPreviewRead:
     """What cancelling this appointment would cost, before anything happens.
@@ -488,7 +685,7 @@ async def cancel_preview(
     of being charged silently, or worse, being told "avisado" when nothing
     could be sent.
     """
-    appt = await _get_appointment(session, tenant, appointment_id)
+    appt = await _get_appointment(session, tenant, appointment_id, viewer)
     settings = get_settings()
 
     last_inbound = None
@@ -506,18 +703,19 @@ async def cancel_preview(
     )
 
 
-@router.post("/appointments/{appointment_id}/cancel", response_model=AppointmentRead)
+@router.post("/appointments/{appointment_id}/cancel", response_model=AppointmentActionRead)
 async def cancel_appointment(
     appointment_id: str,
     body: AppointmentCancel,
     request: Request,
     tenant: Tenant = Depends(get_current_tenant),
+    viewer: AgendaViewer = Depends(get_agenda_viewer),
     session: AsyncSession = Depends(get_session),
-) -> AppointmentRead:
+) -> AppointmentActionRead:
     if not body.confirm:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "confirm must be true")
 
-    appt = await _get_appointment(session, tenant, appointment_id)
+    appt = await _get_appointment(session, tenant, appointment_id, viewer)
     if appt.status == AppointmentStatus.CANCELLED:
         raise HTTPException(status.HTTP_409_CONFLICT, "Appointment already cancelled")
 
@@ -559,35 +757,38 @@ async def cancel_appointment(
     if reminder_hooks.enabled_for(tenant):
         await reminder_hooks.after_appointment_closed(appt.id, reason="cancelled")
 
-    # Notify the patient. UNCONDITIONAL now — this used to fire only when the
-    # doctor typed something, so a blank box meant the patient found out by
-    # turning up to a consultation that no longer existed. The body is composed
-    # server-side (services/cancellation_notice.py); the doctor's text is a
-    # justification quoted inside it, not the message.
-    #
-    # The honest deposit notice, when there is one, rides along rather than
-    # arriving as a second message.
-    if appt.phone:
-        arq_pool = getattr(request.app.state, "arq_pool", None)
-        if arq_pool:
-            await arq_pool.enqueue_job(
-                "send_cancellation_notice",
-                str(tenant.id),
-                str(appt.id),
-                professional_name,
-                body.justification,
-                notice,
-                body.notify_outside_window,
-            )
+    # Notify the patient (unconditional since the cancellation-notice round; R7 adds
+    # the Portal). The WhatsApp side is today's job, byte for byte; the deposit notice
+    # rides along; the doctor's justification is quoted, not the whole message.
+    patient = await _patient_of(session, tenant, appt)
+    patient_notice = await appointment_release.notify_cancelled_patient(
+        session,
+        tenant,
+        appt,
+        patient,
+        professional_name=professional_name,
+        justification=body.justification,
+        deposit_notice=notice,
+        allow_paid=staff_patient_message.paid_notice_authorised(
+            tenant, body.notify_outside_window
+        ),
+        arq_pool=getattr(request.app.state, "arq_pool", None),
+    )
+    await session.refresh(appt)
 
     logger.info(
         "calendar_appointment_cancelled",
         appointment_id=str(appt.id),
         deposit_outcome=deposit_outcome,
+        patient_notice=patient_notice,
     )
     deposit_status = await _deposit_status_value(session, appt.id)
-    return _appointment_read(appt, deposit_status=deposit_status, deposit_outcome=deposit_outcome)
-
+    read = _appointment_read(appt, deposit_status=deposit_status, deposit_outcome=deposit_outcome)
+    return AppointmentActionRead(
+        **read.model_dump(),
+        patient_notice=patient_notice,
+        whatsapp_link=_notice_link(patient_notice, patient, appt),
+    )
 
 # ---------------------------------------------------------------------------
 # POST /appointments/{id}/release — free the slot of an unconfirmed appointment
@@ -600,6 +801,7 @@ async def release_appointment(
     body: AppointmentRelease,
     request: Request,
     tenant: Tenant = Depends(get_current_tenant),
+    viewer: AgendaViewer = Depends(get_agenda_viewer),
     session: AsyncSession = Depends(get_session),
 ) -> AppointmentReleaseRead:
     """The clinic frees the slot of an appointment the patient never confirmed.
@@ -622,7 +824,7 @@ async def release_appointment(
     the Google delete skips the acknowledgement (the outcome is still reported in
     `deposit_outcome`).
     """
-    appt = await _get_appointment(session, tenant, appointment_id)
+    appt = await _get_appointment(session, tenant, appointment_id, viewer)
     if appt.patient_id is None:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -750,7 +952,9 @@ async def release_appointment(
         professional_name=professional_name,
         justification=body.justification,
         deposit_notice=deposit_notice,
-        allow_paid=body.notify_outside_window,
+        allow_paid=staff_patient_message.paid_notice_authorised(
+            tenant, body.notify_outside_window
+        ),
         arq_pool=getattr(request.app.state, "arq_pool", None),
     )
     await session.refresh(appt)
@@ -763,7 +967,11 @@ async def release_appointment(
     )
     deposit_status = await _deposit_status_value(session, appt.id)
     read = _appointment_read(appt, deposit_status=deposit_status, deposit_outcome=deposit_outcome)
-    return AppointmentReleaseRead(**read.model_dump(), patient_notice=patient_notice)
+    return AppointmentReleaseRead(
+        **read.model_dump(),
+        patient_notice=patient_notice,
+        whatsapp_link=_notice_link(patient_notice, patient, appt),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -776,6 +984,7 @@ async def message_patient(
     appointment_id: str,
     body: StaffMessageRequest,
     tenant: Tenant = Depends(get_current_tenant),
+    viewer: AgendaViewer = Depends(get_agenda_viewer),
     session: AsyncSession = Depends(get_session),
 ) -> StaffMessageRead:
     """Free text from the clinic to the appointment's patient (spec 4.4).
@@ -786,7 +995,7 @@ async def message_patient(
     nudge when the patient has an address. All the channel logic lives in
     services/staff_patient_message.py; this route only maps its errors to HTTP.
     """
-    appt = await _get_appointment(session, tenant, appointment_id)
+    appt = await _get_appointment(session, tenant, appointment_id, viewer)
     patient = None
     if appt.patient_id is not None:
         patient = await session.scalar(
@@ -794,7 +1003,14 @@ async def message_patient(
         )
     try:
         result = await staff_patient_message.send_staff_message(
-            session, tenant, appt, patient, body.text, allow_paid=body.notify_outside_window
+            session,
+            tenant,
+            appt,
+            patient,
+            body.text,
+            allow_paid=staff_patient_message.paid_notice_authorised(
+                tenant, body.notify_outside_window
+            ),
         )
     except staff_patient_message.OutsideWindowError as exc:
         settings = get_settings()
@@ -831,15 +1047,114 @@ async def message_patient(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# POST /appointments/{id}/edit — Editar/Remarcar (TASK-032 R7)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/appointments/{appointment_id}/edit", response_model=AppointmentActionRead)
+async def edit_appointment(
+    appointment_id: str,
+    body: AppointmentEdit,
+    request: Request,
+    tenant: Tenant = Depends(get_current_tenant),
+    viewer: AgendaViewer = Depends(get_agenda_viewer),
+    session: AsyncSession = Depends(get_session),
+) -> AppointmentActionRead:
+    """The clinic changes date/time, service, doctor, convênio, who it is for or the
+    contact phone in one action, and the patient is told (spec 2026-10-09 §1/§2/§3).
+
+    The edit itself (validation, Google fail-closed, the row, the doctor e-mail outbox)
+    is services/staff_appointment_edit.py; here: the reminders follow a new time (R2,
+    same rule as /reschedule), the doctor e-mail is enqueued (the outbox cron recovers
+    a lost enqueue) and the patient gets "A clínica alterou ..." with the three buttons.
+    """
+    appt = await _get_appointment(session, tenant, appointment_id, viewer)
+    if (
+        viewer.restricted
+        and "professional_id" in body.model_fields_set
+        and body.professional_id != viewer.professional_id
+    ):
+        # Spec §5.A: a doctor who sees only his own agenda never writes on a colleague's.
+        raise HTTPException(status.HTTP_403_FORBIDDEN, _detail(*_PROFESSIONAL_NOT_ALLOWED))
+    staff_request = staff_appointment_edit.StaffEditRequest(
+        fields=frozenset(body.model_fields_set.intersection(staff_appointment_edit.EDITABLE_FIELDS)),
+        start_at=body.start_at,
+        service=body.service,
+        professional_id=body.professional_id,
+        insurance=body.insurance,
+        attendee_name=body.attendee_name,
+        phone=body.phone,
+        allow_overlap=body.allow_overlap,
+    )
+
+    async def _calendar(professional_id):
+        return await _calendar_for_professional(session, tenant, professional_id)
+
+    try:
+        outcome = await staff_appointment_edit.apply_staff_edit(
+            session, tenant, appt, staff_request, calendar_for=_calendar
+        )
+    except staff_appointment_edit.StaffEditError as exc:
+        raise HTTPException(exc.status_code, _detail(exc.code, exc.message, **exc.extra)) from None
+
+    await session.refresh(appt)
+    if outcome.time_changed and (
+        reminder_hooks.enabled_for(tenant) or (appt.confirmation_count or 0) > 0
+    ):
+        await reminder_hooks.after_appointment_rescheduled(appt.id)
+        await session.refresh(appt)
+    if outcome.notice_id is not None:
+        await enqueue_professional_edit_notification(
+            getattr(request.app.state, "arq_pool", None),
+            tenant.id,
+            AppliedEdit(
+                appointment_id=appt.id,
+                moved=outcome.time_changed,
+                old_event_id=None,
+                old_professional_id=None,
+                notice_id=outcome.notice_id,
+                notice_version=outcome.notice_version,
+                changed_fields=outcome.changed_fields,
+            ),
+        )
+    patient = await _patient_of(session, tenant, appt)
+    notice = await clinic_action_notice.notify_staff_edit(
+        session,
+        tenant,
+        appt,
+        patient,
+        changes=outcome.changes,
+        allow_paid=staff_patient_message.paid_notice_authorised(
+            tenant, body.notify_outside_window
+        ),
+        now=datetime.now(UTC),
+    )
+    await session.refresh(appt)
+    logger.info(
+        "calendar_appointment_edited",
+        appointment_id=str(appt.id),
+        changed=len(outcome.changes),
+        patient_notice=notice.code,
+    )
+    deposit_status = await _deposit_status_value(session, appt.id)
+    return AppointmentActionRead(
+        **_appointment_read(appt, deposit_status=deposit_status).model_dump(),
+        patient_notice=notice.code,
+        whatsapp_link=notice.whatsapp_link,
+    )
+
+
 @router.post("/appointments/{appointment_id}/reschedule", response_model=AppointmentRead)
 async def reschedule_appointment(
     appointment_id: str,
     body: AppointmentReschedule,
     request: Request,
     tenant: Tenant = Depends(get_current_tenant),
+    viewer: AgendaViewer = Depends(get_agenda_viewer),
     session: AsyncSession = Depends(get_session),
 ) -> AppointmentRead:
-    appt = await _get_appointment(session, tenant, appointment_id)
+    appt = await _get_appointment(session, tenant, appointment_id, viewer)
     if appt.status == AppointmentStatus.CANCELLED:
         raise HTTPException(status.HTTP_409_CONFLICT, "Cannot reschedule a cancelled appointment")
 
@@ -901,44 +1216,54 @@ async def reschedule_appointment(
 # ---------------------------------------------------------------------------
 
 
-@router.patch("/appointments/{appointment_id}/status", response_model=AppointmentRead)
+@router.patch("/appointments/{appointment_id}/status", response_model=AppointmentActionRead)
 async def update_appointment_status(
     appointment_id: str,
     body: AppointmentStatusUpdate,
     tenant: Tenant = Depends(get_current_tenant),
+    viewer: AgendaViewer = Depends(get_agenda_viewer),
     session: AsyncSession = Depends(get_session),
-) -> AppointmentRead:
-    appt = await _get_appointment(session, tenant, appointment_id)
-    previous_status = appt.status
-    appt.status = body.status
-    appt.updated_at = datetime.now(UTC)
-    log_status_transition(
-        appointment_id=appt.id,
-        tenant_id=tenant.id,
-        old_status=previous_status,
-        new_status=body.status,
-        source=SOURCE_HUB,
-        idempotency_key=f"status:{appt.id}:{body.status.value}",
-    )
+) -> AppointmentActionRead:
+    """Mark scheduled / confirmed / attended / no-show / cancelled (TASK-032 R1 + R7).
 
-    # Money hooks (PROMPT S3 section 4): PATCH doesn't touch Google Calendar
-    # today (unchanged) — but a CANCELLED/NO_SHOW status transition is still
-    # a real money event for a Pix deposit, exactly like the dedicated
-    # POST /cancel endpoint or a no-show marked from any other surface.
-    deposit_outcome: str | None = None
-    if body.status == AppointmentStatus.CANCELLED:
-        deposit_outcome = await deposit_lifecycle.on_appointment_cancelled(
-            session, tenant=tenant, appointment=appt, waba_token=None
+    R7 guards (spec 2026-10-09 §1/§3, rule in services/appointment_status.py::
+    staff_transition): `no_show` before the start is 409 `no_show_before_start`; a
+    live target, `attended` or `no_show` on a cancelled booking is 409 `not_live` (it
+    used to resurrect); closed outcomes cannot change; repeating attended or
+    no_show changes nothing. `cancelled` keeps its old, unguarded behaviour.
+    """
+    appt = await _get_appointment(session, tenant, appointment_id, viewer)
+    # Reload and hold the authoritative row before checking or assigning status.
+    # no_autoflush prevents a stale pending ORM assignment preceding the lock.
+    with session.no_autoflush:
+        appt = await session.scalar(
+            select(Appointment)
+            .where(Appointment.id == appt.id, Appointment.tenant_id == tenant.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
-    elif body.status == AppointmentStatus.NO_SHOW:
-        deposit_outcome = await deposit_lifecycle.on_no_show(
-            session, tenant=tenant, appointment=appt
-        )
-
-    # TASK-032: the reminder schedule follows the status. The status above is
-    # still assigned exactly as before (no new transition validation).
+    if appt is None or not viewer.sees(appt.professional_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Appointment not found")
     now = datetime.now(UTC)
+    try:
+        applies = staff_transition(appt.status, body.status, start_at=appt.start_at, now=now)
+    except StaffTransitionRefused as exc:
+        extra: dict = {"status": appt.status.value}
+        if exc.code == "no_show_before_start" and appt.start_at is not None:
+            extra["start_at"] = as_utc(appt.start_at).isoformat()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, _detail(exc.code, exc.message, **extra)
+        ) from None
+    if not applies:
+        deposit_status = await _deposit_status_value(session, appt.id)
+        return AppointmentActionRead(
+            **_appointment_read(appt, deposit_status=deposit_status).model_dump()
+        )
+
+    deposit_outcome: str | None = None
     if body.status == AppointmentStatus.CONFIRMED:
+        # One staff confirmation (counts only from 0, R1) and the CONFIRMED status,
+        # logged with source `hub` by register_confirmation itself.
         await reminder_schedule.register_confirmation(
             session,
             appointment=appt,
@@ -946,20 +1271,80 @@ async def update_appointment_status(
             source=reminder_schedule.CONFIRMATION_SOURCE_STAFF,
             now=now,
         )
-    elif body.status == AppointmentStatus.SCHEDULED:
-        reminder_schedule.reset_confirmation(appt)
-    elif body.status in TERMINAL_APPOINTMENT_STATUSES:
-        await reminder_schedule.cancel_reminders(
-            session, appt.id, reason=f"status_{body.status.value}"
+        if appt.status not in LIVE_APPOINTMENT_STATUSES:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                _detail("not_live", "Esta consulta já foi cancelada ou encerrada.",
+                        status=appt.status.value),
+            )
+    else:
+        previous_status = appt.status
+        appt.status = body.status
+        appt.updated_at = now
+        log_status_transition(
+            appointment_id=appt.id,
+            tenant_id=tenant.id,
+            old_status=previous_status,
+            new_status=body.status,
+            source=SOURCE_HUB,
+            idempotency_key=f"status:{appt.id}:{body.status.value}",
         )
+        # Money hooks (PROMPT S3 section 4): a CANCELLED/NO_SHOW transition is a real
+        # money event for a Pix deposit, exactly like POST /cancel.
+        if body.status == AppointmentStatus.CANCELLED:
+            deposit_outcome = await deposit_lifecycle.on_appointment_cancelled(
+                session, tenant=tenant, appointment=appt, waba_token=None
+            )
+        elif body.status == AppointmentStatus.NO_SHOW:
+            deposit_outcome = await deposit_lifecycle.on_no_show(
+                session, tenant=tenant, appointment=appt
+            )
+        # TASK-032: the reminder schedule follows the status.
+        if body.status == AppointmentStatus.SCHEDULED:
+            reminder_schedule.reset_confirmation(appt)
+        elif body.status in TERMINAL_APPOINTMENT_STATUSES:
+            await reminder_schedule.cancel_reminders(
+                session, appt.id, reason=f"status_{body.status.value}"
+            )
 
     await session.commit()
     await session.refresh(appt)
+    notice: staff_patient_message.NoticeResult | None = None
+    allow_paid = staff_patient_message.paid_notice_authorised(tenant, body.notify_outside_window)
+    if body.status == AppointmentStatus.CONFIRMED:
+        # Spec §2: "Seu médico confirmou ..." + Confirmar / Cancelar / Alterar Dados.
+        notice = await clinic_action_notice.notify_staff_confirmation(
+            session,
+            tenant,
+            appt,
+            await _patient_of(session, tenant, appt),
+            allow_paid=allow_paid,
+            now=now,
+        )
+        await session.refresh(appt)
+    elif body.status == AppointmentStatus.ATTENDED:
+        # Spec §2: the post-consult message now, once per appointment.
+        notice = await clinic_action_notice.notify_attended(
+            session,
+            tenant,
+            appt,
+            await _patient_of(session, tenant, appt),
+            allow_paid=allow_paid,
+            now=now,
+        )
+        await session.refresh(appt)
+
     logger.info(
         "calendar_appointment_status_updated",
         appointment_id=str(appt.id),
         status=body.status.value,
         deposit_outcome=deposit_outcome,
+        patient_notice=notice.code if notice is not None else None,
     )
     deposit_status = await _deposit_status_value(session, appt.id)
-    return _appointment_read(appt, deposit_status=deposit_status, deposit_outcome=deposit_outcome)
+    read = _appointment_read(appt, deposit_status=deposit_status, deposit_outcome=deposit_outcome)
+    return AppointmentActionRead(
+        **read.model_dump(),
+        patient_notice=notice.code if notice is not None else None,
+        whatsapp_link=notice.whatsapp_link if notice is not None else None,
+    )

@@ -80,7 +80,15 @@ LEGACY_EVENT_KEYS = {"id", "summary", "start", "end", "appointment_id"}
 # ---------------------------------------------------------------------------
 
 
-NEW_EVENT_KEYS = {"status", "confirmation_count", "display_state", "attention", "reminders"}
+NEW_EVENT_KEYS = {"status", "confirmation_count", "display_state", "attention", "reminders"} | {
+    # TASK-044 R7 (spec §5.C): what Editar/Remarcar pre-fills
+    "professional_id",
+    "professional_name",
+    "service",
+    "attendee_name",
+    "phone",
+    "patient_channel",
+}
 
 
 def test_a_legacy_event_gains_three_null_fields_and_loses_nothing():
