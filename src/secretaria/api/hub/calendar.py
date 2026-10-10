@@ -1219,6 +1219,17 @@ async def update_appointment_status(
     no_show changes nothing. `cancelled` keeps its old, unguarded behaviour.
     """
     appt = await _get_appointment(session, tenant, appointment_id, viewer)
+    # Reload and hold the authoritative row before checking or assigning status.
+    # no_autoflush prevents a stale pending ORM assignment preceding the lock.
+    with session.no_autoflush:
+        appt = await session.scalar(
+            select(Appointment)
+            .where(Appointment.id == appt.id, Appointment.tenant_id == tenant.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    if appt is None or not viewer.sees(appt.professional_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Appointment not found")
     now = datetime.now(UTC)
     try:
         applies = staff_transition(appt.status, body.status, start_at=appt.start_at, now=now)
@@ -1246,6 +1257,12 @@ async def update_appointment_status(
             source=reminder_schedule.CONFIRMATION_SOURCE_STAFF,
             now=now,
         )
+        if appt.status not in LIVE_APPOINTMENT_STATUSES:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                _detail("not_live", "Esta consulta já foi cancelada ou encerrada.",
+                        status=appt.status.value),
+            )
     else:
         previous_status = appt.status
         appt.status = body.status

@@ -471,8 +471,17 @@ async def ensure_staff_notice_row(
         sent_at=now,
         warn_due_at=None,
     )
-    session.add(row)
-    await session.flush()
+    try:
+        # The unique active-row index is the backstop when a competing insert
+        # arrives after our lookup (and on SQLite, where FOR UPDATE is ignored).
+        async with session.begin_nested():
+            session.add(row)
+            await session.flush()
+    except IntegrityError:
+        winner = await current_staff_notice_row(session, appointment, kind=kind)
+        if winner is None:
+            raise
+        return winner, False
     logger.info(
         "staff_notice_row_created",
         appointment_id=str(appointment.id),

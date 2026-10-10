@@ -26,7 +26,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.logging import get_logger
-from secretaria.models import Appointment, Patient, Professional, Tenant
+from secretaria.models import Appointment, Patient, Professional, Tenant, is_live_status
 from secretaria.models.appointment_reminder import (
     REMINDER_CHANNEL_CHAT,
     REMINDER_CHANNEL_WHATSAPP,
@@ -81,7 +81,8 @@ def confirm_text(content: ReminderContent) -> str:
 def buttons_allowed(tenant: Tenant, appointment: Appointment, now: datetime) -> bool:
     """Only buttons a tap can honour (the R6 handler refuses every other case)."""
     return (
-        reminder_hooks.enabled_for(tenant)
+        is_live_status(appointment.status)
+        and reminder_hooks.enabled_for(tenant)
         and (appointment.confirmation_count or 0) < reminder_schedule.MAX_CONFIRMATIONS
         and appointment.start_at is not None
         and as_utc(appointment.start_at) > now
@@ -107,6 +108,7 @@ async def _card_notice(
     allow_paid: bool,
     now: datetime,
     once_per_start: bool,
+    expected_start: datetime | None = None,
 ) -> NoticeResult | None:
     """Row first (committed, so a tap can resolve it), then the card.
 
@@ -114,7 +116,15 @@ async def _card_notice(
     row - the patient already has that card. A card that did not reach the patient
     retires the row it just created, so a later retry starts clean.
     """
+    appointment = await reminder_schedule._lock_appointment(session, appointment)
     tenant_id, appointment_id = tenant.id, appointment.id
+    if once_per_start and (
+        not is_live_status(appointment.status)
+        or appointment.start_at is None
+        or as_utc(appointment.start_at) <= now
+        or (expected_start is not None and as_utc(appointment.start_at) != expected_start)
+    ):
+        return None
     usage_key = f"{kind}:{appointment_id}"
     if (
         patient is None
@@ -152,6 +162,8 @@ async def _card_notice(
         with_prompt=with_prompt,
         now=now,
     )
+    if once_per_start and not created:
+        return None
     row_id = row.id
     await session.commit()
     result = await send_clinic_notice(
@@ -192,8 +204,14 @@ async def notify_staff_confirmation(
     None when nothing was due: the appointment already started (the buttons would be
     refused) or the patient already has this time's confirm card.
     """
-    if appointment.start_at is None or as_utc(appointment.start_at) <= now:
+    appointment = await reminder_schedule._lock_appointment(session, appointment)
+    if (
+        not is_live_status(appointment.status)
+        or appointment.start_at is None
+        or as_utc(appointment.start_at) <= now
+    ):
         return None
+    expected_start = as_utc(appointment.start_at)
     content = await load_reminder_content(session, tenant, appointment)
     return await _card_notice(
         session,
@@ -205,6 +223,7 @@ async def notify_staff_confirmation(
         allow_paid=allow_paid,
         now=now,
         once_per_start=True,
+        expected_start=expected_start,
     )
 
 
