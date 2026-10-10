@@ -158,6 +158,10 @@ class AppointmentCreate(BaseModel):
     phone: str | None = Field(default=None, max_length=32)
     # Patient DB id (optional — the hub may not know it).
     patient_id: str | None = None
+    # TASK-044 R7 (owner 2026-10-09): whose agenda the new row belongs to. A viewer
+    # restricted to his own agenda may omit it (= his own) or send his own; a
+    # clinic-wide viewer may name any active professional of the clinic or none.
+    professional_id: UUID | None = None
 
 
 class BlockCreate(BaseModel):
@@ -167,6 +171,10 @@ class BlockCreate(BaseModel):
     end: datetime
     summary: str = Field(default="Bloqueado", min_length=1, max_length=500)
     description: str = ""
+    # TASK-044 R7 (owner 2026-10-09): whose agenda the new row belongs to. A viewer
+    # restricted to his own agenda may omit it (= his own) or send his own; a
+    # clinic-wide viewer may name any active professional of the clinic or none.
+    professional_id: UUID | None = None
 
 
 class AppointmentCancel(BaseModel):
