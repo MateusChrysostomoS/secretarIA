@@ -5,6 +5,8 @@ Plano: `docs/superpowers/plans/2026-10-09-lembretes-r7-avisos-acoes-clinica.md`.
 
 ## Estado
 
+- Passe final I1–I3: código `fcf9c86146e42c2fd54febd5756e38a6f3548a16`; **4913 passed, 68 skipped, 28 warnings in 229.32s (0:03:49)**, lint limpo. Estado local; adjudicação de integração é do coordenador.
+
 - Branch `task/TASK-044-lembretes-r7-avisos` (worktree `C:\TECH\BRAIN-worktrees\TASK-044\secretarIA`), commits locais: 
 
 ```text
@@ -61,7 +63,7 @@ Fora das 24 h, até a Meta aprovar modelos com botões, confirmar/alterar vão p
 
 ## Deploy (quando o dono autorizar)
 
-1. `alembic upgrade head` (imagem nova; adiciona as duas colunas, aditivo).
+1. `alembic upgrade head` (imagem nova; adiciona as três colunas, aditivo).
 2. brain-api com `agenda_scope` (`brain-api/docs/superpowers/plans/2026-10-09-hub-token-papel-profissional.md`). Sem ele, a regra de rollout vale: quem está ligado a um médico vê só o próprio (gestor-médico sem seletor) — é o sintoma de ordem trocada.
 3. `secretaria_api` **e** `secretaria-worker` juntos (`GET /build` → `deploy_parity=match`): o worker lê o reconcile novo, o filtro dos avisos à clínica, o follow-up da pós-consulta e o gravador do "Alterar Dados".
 4. Front (R5 atualizado) depois da API.
@@ -105,8 +107,31 @@ Fora das 24 h, até a Meta aprovar modelos com botões, confirmar/alterar vão p
 - Task10 RED missing module→GREEN22 plan tests; additional concurrent-field RED4→GREEN26. Ruling: compare all editable row fields under lock, restore committed winner details on Google compensation — plan only compared event/start and could lose simultaneous service/insurance/attendee/contact edits; cost: extra read on failed writes, Google remains best-effort compensation. Coordinator explicitly confirmed409 behavior.
 - Task12 RED6 missing patient_notice failures→GREEN94 passed; existing cancel enqueue assertions preserved. Producer7f3331d additive contract committed,66focused tests; final docs/review pending. Ruling: proceed consumer13 tests against committed producer contract while its independent final validation finishes — coordinator authorized, no integration/deploy; cost: producer review may later require consumer adjustment.
 - Task11 fidelity Ruling: full channel-neutral edit body never truncated; channel sender emits complete detail text then concise unchanged-ID card when >1024, free WhatsApp text chunks≤4096, Portal detail unlimited — binding all-field/current-footer requirement overrides plan global cap; cost: extra message(s), partial WhatsApp detail may have left if card subsequently fails; failure code truthful and paid900 wire cap unchanged. RED3 failures→GREEN59 passed, long Portal multi-field route included; commit 43643a23f0cf8e8ed5c184999d5a2ae618d2661d
-- Task13 RED module missing→GREEN146 passed; current linked professional checked tenant-scope; no producer writes. Ruling: existing positive introspection cache TTL retained per plan — whole auth seam remains consistent and bounded; cost if wrong: current mutable role changes apply after configured TTL, final review to weigh spec current-role requirement.
+- Task13 RED module missing→GREEN146 passed; current linked professional checked tenant-scope; no producer writes. Ruling: existing positive introspection cache TTL retained per plan — whole auth seam remains consistent and bounded; cost if wrong: current mutable role changes apply after configured TTL, final review retained the bounded cache; coordinator adjudication follows below.
 
 ## Revisão final
 
-Revisão independente em andamento. O primeiro modelo atingiu seu limite antes de concluir; a revisão foi retomada com um modelo disponível, sem repetir a implementação. Nenhuma conclusão de integração será tirada antes do relatório final.
+Revisão independente concluída em `C:/TECH/BRAIN/tasks/TASK-044/REVIEW_R7.md`: três achados Important (I1–I3). Corrigidos no passe único abaixo, com regressões RED→GREEN; adjudicação final é do coordenador, sem repetir a revisão.
+
+
+## Passe único das correções finais (I1–I3)
+
+Base do passe: `edd56f3`. Código final: `fcf9c86146e42c2fd54febd5756e38a6f3548a16`.
+
+```text
+fcf9c86 fix(calendar): refuse explicit origin without a proven event owner (TASK-044)
+46f79a5 fix(calendar): preserve physical Google origin independently of doctor visibility (TASK-044)
+3370214 fix(reminders): atomically claim confirmation and guard current status (TASK-044)
+```
+
+Suíte completa após todas as correções: **4913 passed, 68 skipped, 28 warnings in 229.32s (0:03:49)**. `uvx ruff check .`: zero achados (`fix-pass-ruff.json = []`).
+A rodada anterior de 4892 passed/68 skipped continua sendo evidência da versão anterior. Uma primeira tentativa de validação deste passe foi interrompida em 26%, sem falhas, quando o coordenador pediu a cobertura adicional de origem profissional sem dono; a única rodada COMPLETA do passe é a registrada acima.
+
+- I1: a decisão de criar/reutilizar cartão é feita sob lock da consulta. Conflito real no índice único é recuperado em savepoint; `created=False` não envia um segundo aviso de confirmação. Duas sessões independentes reproduziram ambos os interleavings: RED2→GREEN.
+- I2: PATCH recarrega e bloqueia a consulta antes de validar, atribuir ou aplicar efeito financeiro; o viewer atual é rechecado após o lock. Fechamento concorrente e remarcação para o futuro são recusados sem aviso/dinheiro. O cartão revalida estado vivo e uma versão de horário, médico, atendido e identidade antes de usar seu corpo. RED5 + RED1 (troca de médico após montar texto)→GREEN.
+- I3: **terceira coluna aditiva** `appointments.google_calendar_source`, nullable (`clinic`/`professional`, NULL=regra legada). Ela foi acrescentada à revisão R7 `d8e3a5c1f7b2`, que permanece NÃO aplicada em banco real. Criar consulta/bloqueio pelo hub continua gravando evento na agenda da clínica e registra origem `clinic`; visibilidade continua pelo médico. Editar/liberar, ações do paciente e R6 usam a origem física. Troca efetiva de calendário muda a origem no gravador compartilhado; trocar só o médico numa mesma agenda conserva a origem. Metadado interno e opcional no snapshot/rascunho: rascunhos antigos continuam válidos e os schemas públicos do R5 não ganharam campos.
+- Eventos reais por agenda no double comprovam criar→editar→liberar, mover médico apagando o evento original da clínica, edição/movimento R6 de consulta criada pelo hub, bloco e fallback NULL. Origem explicitamente profissional sem médico (FK removida) ou origem não-NULL desconhecida recusa com `calendar_unresolved`/worker sem agenda, preservando evento e estado. RED4 + RED4→GREEN.
+- Rollback perde também os metadados de origem: código antigo volta à inferência pelo médico. A distinção entre evento da clínica e agenda própria some. Ordem permanece **DDL das TRÊS colunas → brain-api → API+worker → front**; nenhuma etapa operacional foi executada.
+- Pré-requisito brain-api verificado por leitura em `2450502`: checkpoint `docs/CHECKPOINT_hub_token_agenda_scope.md`, produtor `7f3331d`/`cf0833f`, suíte 1391 passed/3 skipped/39 warnings (baseline1355),66 testes focados e revisão READY informados na sessão produtora. Não houve integração, escrita no produtor nem deploy.
+- Minor M1 adiado: cópias originais do plano e spec continuam deliberadamente untracked; não foram modificadas nem incluídas nos commits do passe. Os três arquivos duráveis gerados de Graphify permanecem locais/uncommitted, sem caches ou snapshots no commit.
+- Relatório do passe: `C:/TECH/BRAIN/tasks/TASK-044/results/r7-fix-pass.md`. Os demais recortes "Declined to judge" do revisor ficam preservados como planejado; decisões finais e custos são do coordenador. Não foi feito novo passe de revisão.
