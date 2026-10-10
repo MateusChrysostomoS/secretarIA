@@ -72,7 +72,8 @@ async def test_far_appointment_gets_custom_day_and_hour_with_warn_deadlines(db, 
 async def test_no_custom_row_when_the_clinic_did_not_configure_one(db, tenant):  # noqa: F811
     async with db() as session:
         t = await session.get(Tenant, tenant.id)
-        t.reminder_extra_lead_minutes = None
+        t.reminder_extra_days_before = None
+        t.reminder_extra_send_time = None
         await session.commit()
     appt = await make_appointment(db, tenant, start_at=NOW + timedelta(days=6))
 

@@ -21,6 +21,7 @@ from sqlalchemy import inspect, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from secretaria.core.extra_reminder import custom_due_at
 from secretaria.core.logging import get_logger
 from secretaria.models import (
     LIVE_APPOINTMENT_STATUSES,
@@ -115,13 +116,18 @@ async def _lock_appointment(session: AsyncSession, appointment: Appointment) -> 
     return current
 
 
-def _planned_kinds(tenant: Tenant) -> list[tuple[str, timedelta]]:
-    plan: list[tuple[str, timedelta]] = []
-    extra = tenant.reminder_extra_lead_minutes
-    if extra is not None and extra > 0:
-        plan.append((REMINDER_KIND_CUSTOM, timedelta(minutes=extra)))
-    plan.append((REMINDER_KIND_DAY, _DAY_LEAD))
-    plan.append((REMINDER_KIND_HOUR, _HOUR_LEAD))
+def _planned_dues(tenant: Tenant, start: datetime) -> list[tuple[str, datetime]]:
+    """(kind, due) of the reminders an appointment starting at `start` gets, in send order.
+
+    The extra ("custom") one is the clinic's "N dias antes, às HH:MM" on its local calendar
+    (core/extra_reminder.py, spec 2026-10-09 §6.2); day/hour are fixed leads.
+    """
+    plan: list[tuple[str, datetime]] = []
+    custom = custom_due_at(tenant, start)
+    if custom is not None:
+        plan.append((REMINDER_KIND_CUSTOM, custom))
+    plan.append((REMINDER_KIND_DAY, start - _DAY_LEAD))
+    plan.append((REMINDER_KIND_HOUR, start - _HOUR_LEAD))
     return plan
 
 
@@ -184,8 +190,7 @@ async def schedule_reminders(
     }
 
     created: list[AppointmentReminder] = []
-    for kind, lead in _planned_kinds(tenant):
-        due = start - lead
+    for kind, due in _planned_dues(tenant, start):
         if due <= now_utc:
             continue
         row = existing.get(kind)
@@ -505,7 +510,7 @@ async def retire_staff_notice_row(
     )
 
 
-# --- TASK-044 R7 (spec 2026-10-09 §5.B): the clinic changed its extra-reminder lead ----
+# --- TASK-044 R7 (spec 2026-10-09 §5.B): the clinic changed its extra-reminder setting ----
 
 _PLANNED_KINDS = (REMINDER_KIND_CUSTOM, REMINDER_KIND_DAY, REMINDER_KIND_HOUR)
 
@@ -563,17 +568,19 @@ async def _retire_pending_custom(
 async def replan_custom_reminders(
     session: AsyncSession, tenant: Tenant, *, now: datetime
 ) -> CustomReplan:
-    """Put the clinic's NEW `reminder_extra_lead_minutes` on the reminders already planned.
+    """Put the clinic's CURRENT extra-reminder setting on the reminders already planned.
 
-    Call AFTER `tenant.reminder_extra_lead_minutes` holds the new value, inside the
-    configuration save's transaction (flushes, never commits). For every live future
-    appointment of the clinic that has a patient:
+    Call AFTER the tenant holds the new `reminder_extra_days_before` /
+    `reminder_extra_send_time` / `timezone` (TASK-048 R9, spec §6.2), inside the
+    configuration save's transaction (flushes, never commits). The due time is
+    core/extra_reminder.py::custom_due_at of each appointment's CURRENT start. For every
+    live future appointment of the clinic that has a patient:
 
     * its `pending` `custom` row of the CURRENT start is re-armed in place at the new
-      due time, or cancelled + invalidated when the lead was switched off or the new
+      due time, or cancelled + invalidated when the setting was switched off or the new
       due time is not in the future (never sent late - same rule as schedule_reminders);
     * a row that already left (`sending`/`sent`/`failed`/`skipped`) stays as history;
-    * with a lead and no `custom` row, one is created - only when the appointment
+    * with the setting on and no `custom` row, one is created - only when the appointment
       already has a planned `day`/`hour` row. An appointment with no plan at all is
       left to reminder_hooks.reconcile_missing_reminders, which plans every kind with
       the new lead (creating only `custom` there would make the cron skip it and lose
@@ -586,8 +593,6 @@ async def replan_custom_reminders(
     if not tenant.reminders_v2_enabled:
         return CustomReplan()
     now_utc = _as_utc(now)
-    lead = tenant.reminder_extra_lead_minutes
-    lead_delta = timedelta(minutes=lead) if lead is not None and lead > 0 else None
 
     appointments = list(
         await session.scalars(
@@ -623,7 +628,7 @@ async def replan_custom_reminders(
             if _as_utc(row.appointment_start_at) == start
         ]
         custom = next((row for row in current if row.kind == REMINDER_KIND_CUSTOM), None)
-        due = start - lead_delta if lead_delta is not None else None
+        due = custom_due_at(tenant, start)
         if due is None or due <= now_utc:
             if custom is not None and custom.status == REMINDER_STATUS_PENDING:
                 cancelled += await _retire_pending_custom(session, custom.id, tenant.id, now_utc)
@@ -633,7 +638,7 @@ async def replan_custom_reminders(
                 moved += await _move_pending_custom(session, custom.id, tenant.id, due)
             continue
         if not current:
-            continue  # never planned: the reconcile cron plans every kind with the new lead
+            continue  # never planned: the reconcile cron plans every kind with the new setting
         row = AppointmentReminder(
             tenant_id=tenant.id,
             appointment_id=appointment.id,
