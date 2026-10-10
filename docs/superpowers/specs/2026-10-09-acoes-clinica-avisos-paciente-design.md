@@ -95,6 +95,9 @@ secretarIA (API e worker juntos) → front. Nada é deployado pelos planos.
 
 ### B. Lembrete extra configurável pela clínica
 
+> **2026-10-10:** o "minutos antes" abaixo foi substituído por "N dias antes, às HH:MM" — ver §6.2. A regra
+> de reprogramação continua valendo.
+
 - A configuração da clínica passa a mostrar se os lembretes estão ligados (só leitura — quem liga é o dono
   da plataforma) e o **lembrete extra**: quantos minutos antes da consulta, de 1500 (mais que o lembrete de
   1 dia) a 20160 (14 dias); vazio = sem lembrete extra.
@@ -125,8 +128,9 @@ R5 continuam sem mexer no console.
   esse médico marcada, confirmada, remarcada, em que o paciente compareceu ou em que faltou. **Consulta
   cancelada não conta** — ela não aconteceu nem vai acontecer. Bloqueio de horário não é paciente. Quem só
   conversou e nunca marcou nada fica fora do filtro (continua em "Todas").
-- Conversas do PreCheck (questionário) não têm consulta ligada: com "Meus pacientes" ligado elas saem da
-  lista; desligado, aparecem como hoje.
+- ~~Conversas do PreCheck (questionário) não têm consulta ligada: com "Meus pacientes" ligado elas saem da
+  lista; desligado, aparecem como hoje.~~ **Substituído pela §6.1 (2026-10-10):** conversas do PreCheck
+  nunca aparecem no console.
 
 ### E. Agenda — quem vê a clínica toda escolhe o médico ao criar (decisão do dono, 2026-10-09)
 
@@ -140,3 +144,59 @@ R5 continuam sem mexer no console.
 - O médico restrito continua travado nele mesmo (já construído no R5); para ele a lista nem aparece.
 - O servidor continua sendo a autoridade (R7): médico de outra clínica, inativo ou inexistente é recusado;
   médico restrito pedindo outro médico é recusado.
+
+## 6. Decisões de 2026-10-10
+
+Decisões do dono em 2026-10-10. Autoridade do **R9**
+(`plans/2026-10-10-lembretes-r9-sem-precheck-e-lembrete-dia-hora.md`). Ordem de deploy: migração da
+secretarIA → secretarIA (API e worker juntos) → front. Nada é deployado pelo plano.
+
+### 6.1 Conversas do PreCheck nunca aparecem no console
+
+- **O PreCheck aparece só para o paciente** (no portal dele, como hoje). O console de conversas da clínica
+  (Brain-Message, módulo de atendimento) **não lista, não conta, não busca e não abre** conversas do
+  PreCheck (questionário), para ninguém da clínica: médico, gestor ou recepção.
+- Um link antigo ou colado para uma conversa do PreCheck responde "conversa não encontrada", igual a
+  uma conversa que não existe.
+- O filtro "Meus pacientes" (§5.D) deixa de precisar da exceção do PreCheck: as conversas do PreCheck já
+  não estão na lista. O último ponto da §5.D ("Conversas do PreCheck … aparecem como hoje") está
+  **substituído** por esta seção.
+- A mudança é só no console. O PreCheck, o WhatsApp do PreCheck em produção, o portal do paciente e os
+  endpoints do brain-api/PreCheck não mudam (regra do dono: o WhatsApp do PreCheck em produção é
+  intocável). A lista vinha de uma chamada do próprio console ao PreCheck; o console deixa de fazê-la.
+- Fora do escopo (continuam como estão): o módulo **Anamneses** (resultados do questionário, não são
+  conversas) e o selo "Status do PreCheck" no painel de contexto de uma conversa da secretarIA.
+
+### 6.2 Lembrete extra: "N dias antes, às HH:MM", no fuso da clínica
+
+Substitui o "X minutos antes" da §5.B (1500..20160 minutos).
+
+- A clínica escolhe **quantos dias antes** (de **2 a 14**) e **a que horas** (das **06:00 às 22:00**, de 15
+  em 15 minutos), no fuso horário da clínica. Desligado = sem lembrete extra (dia e hora vazios juntos).
+- Por que 2 a 14: "1 dia antes" já é o lembrete fixo de 1 dia; repetir no mesmo dia seria ruído. Por que
+  06:00 às 22:00: é o lembrete que a clínica escolhe a hora, e mensagem de madrugada acorda o paciente.
+- Quando sai: no **dia da consulta (no fuso da clínica) menos N dias, na hora escolhida**, convertido para o
+  horário universal com regras de horário de verão (o relógio local manda, não uma conta de minutos).
+- Nunca sai atrasado: se esse momento já passou quando o lembrete é planejado (consulta marcada em cima
+  da hora) ou reprogramado, ele não é criado / é cancelado — mesma regra de hoje.
+- Nunca fica colado no lembrete de 1 dia: se faltar menos de 25 horas entre ele e a consulta, ele não sai
+  (o mesmo piso de 1 hora antes do lembrete de 1 dia que a §5.B garantia). Com 2..14 dias e 06:00..22:00 isso
+  não acontece na prática (o mínimo é 25 h, numa virada de horário de verão); fica como proteção.
+- O aviso à clínica de "lembrete antecipado sem confirmação" continua 2 horas depois do envio, como hoje.
+- Mudar dias, horário **ou o fuso da clínica** reprograma os lembretes extras ainda não enviados das
+  consultas futuras (mesmas regras da §5.B: os enviados ficam como histórico; os que cairiam no passado são
+  cancelados; consultas sem nenhum lembrete planejado ficam com a rotina que já as planeja).
+- Valores já gravados em minutos viram dias arredondando para cima (no mínimo 2, no máximo 14), às 09:00
+  — o lembrete continua saindo no mesmo dia ou um pouco antes. Os lembretes já planejados mantêm o horário
+  até a próxima vez que a clínica salvar essa configuração.
+- Durante a troca (API e tela publicadas em momentos diferentes) a API continua aceitando o valor em
+  minutos da tela antiga e o traduz pela mesma regra.
+
+### 6.3 Confirmações do dono (2026-10-10, depois do plano escrito)
+
+- Lembrete extra: **2 a 14 dias antes, das 06:00 às 22:00** (de 15 em 15 minutos) — confirmado.
+- Os **resultados do PreCheck** continuam visíveis para a clínica (módulo Anamneses e o selo "Status do
+  PreCheck"); só as **conversas** saem do console.
+- O valor antigo em minutos (`reminder_extra_lead_minutes`) pode ser **removido numa migração futura**,
+  depois que tudo estiver rodando o R9 (fora do R9; fica como pendência).
+- O R9 é **só plano** por ora: não executar sem novo pedido do dono.
