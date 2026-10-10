@@ -1,6 +1,6 @@
 # SecretarIA
 
-TASK-048 R9: lembrete extra por dia e horario, no fuso da clinica. Local, sem deploy: [checkpoint](docs/CHECKPOINT_lembretes_r9.md).
+TASK-048 R9: lembrete extra por dia e horario, no fuso da clinica. Integrado à main para publicação autorizada, sem deploy: [checkpoint](docs/CHECKPOINT_lembretes_r9.md).
 
 Plano preparado (2026-10-08): [avisos ao médico, entrada por lembrete e QA R6](../z_prompts/PROMPT_CORRECAO_EMAIL_MEDICO_ENTRADA_LEMBRETE_R6.md), com [especificação](docs/superpowers/specs/2026-10-08-email-medico-entrada-lembrete-r6-design.md). Decisão do dono: mostrar os três botões ao abrir o link preservando o rascunho. Apenas planejamento; correção/QA completa ainda não executadas.
 

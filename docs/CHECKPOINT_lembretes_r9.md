@@ -6,7 +6,7 @@ Plano: `docs/superpowers/plans/2026-10-10-lembretes-r9-sem-precheck-e-lembrete-d
 ## Estado
 
 - Branch `task/TASK-048-lembrete-dia-hora-api` (base: 75c81baf). Commits: b950a30 (A1), a608f90 (A2), 80706f5 (A3), ad4d8e9 + dca93c7 (A4); este checkpoint registra A5.
-- **Local e commitado; não mesclado, não pushado, não deployado. Migração não aplicada em banco real.**
+- **Integrado à `main` em 2026-10-10 para publicação Git autorizada pelo dono. Não deployado.** Migração não aplicada em banco real.
 - Suíte: 4999 passed / 68 skipped / 0 failed; ruff limpo; head Alembic `a4c7e2f9b1d3`.
 
 ## O que entrou onde
@@ -54,3 +54,9 @@ Su?te completa: 4999 passed, 68 skipped, 31 warnings em 287.66 s. Nenhuma falha 
 ## Revisao final
 
 Revisao independente encontrou uma lacuna no exemplo do plano: um par migrado igual ao salvo nao reprogramava linhas R7 ainda pendentes. Corrigido em `services/reminder_schedule.py::pending_custom_reminders_need_replan` e `services/hub_configuration.py::apply_tenant_config`: ao salvar explicitamente o lembrete, divergencias pendentes sao reconciliadas pelo escritor com locks ja existente. Linhas ja alinhadas continuam sem reprogramacao, e historico enviado permanece. Duas regressoes HTTP/banco (par novo igual / eco legado) falharam antes e passaram depois; 42 testes focados e suite completa 4999 passed / 68 skipped / 0 failed. Custo: uma consulta de leitura em salvamentos explicitos inalterados, com a funcionalidade ligada.
+
+## Integração autorizada (2026-10-10)
+
+O dono autorizou os merges e pushes dos dois repositórios. `main` integrada por fast-forward, sem conflitos; o código integrado é idêntico ao HEAD da tarefa revisada. Validação repetida nesse mesmo commit: 4999 passed, 68 skipped, 31 warnings em 263.66 s; ruff limpo; head Alembic `a4c7e2f9b1d3`.
+
+Deploy e migração real continuam sem autorização. A ordem operacional permanece: migração, API e worker juntos, depois front.
