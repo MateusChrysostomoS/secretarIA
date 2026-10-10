@@ -82,6 +82,14 @@ TERMINAL_APPOINTMENT_STATUSES: tuple[AppointmentStatus, ...] = (
     AppointmentStatus.NO_SHOW,
 )
 
+# A doctor's patient for the console's "Meus pacientes" filter (TASK-046 R8, spec
+# 2026-10-09 §5.D): the booking is happening, happened, or was this patient's slot and
+# they missed it. CANCELLED never happened and does not make anyone "his" patient.
+DOCTOR_PATIENT_STATUSES: tuple[AppointmentStatus, ...] = LIVE_APPOINTMENT_STATUSES + (
+    AppointmentStatus.ATTENDED,
+    AppointmentStatus.NO_SHOW,
+)
+
 
 def is_live_status(status: AppointmentStatus | None) -> bool:
     """True when the booking is still going to happen (see the taxonomy above)."""
