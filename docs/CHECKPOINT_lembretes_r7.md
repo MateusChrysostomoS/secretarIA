@@ -135,3 +135,33 @@ A rodada anterior de 4892 passed/68 skipped continua sendo evidência da versão
 - Pré-requisito brain-api verificado por leitura em `2450502`: checkpoint `docs/CHECKPOINT_hub_token_agenda_scope.md`, produtor `7f3331d`/`cf0833f`, suíte 1391 passed/3 skipped/39 warnings (baseline1355),66 testes focados e revisão READY informados na sessão produtora. Não houve integração, escrita no produtor nem deploy.
 - Minor M1 adiado: cópias originais do plano e spec continuam deliberadamente untracked; não foram modificadas nem incluídas nos commits do passe. Os três arquivos duráveis gerados de Graphify permanecem locais/uncommitted, sem caches ou snapshots no commit.
 - Relatório do passe: `C:/TECH/BRAIN/tasks/TASK-044/results/r7-fix-pass.md`. Os demais recortes "Declined to judge" do revisor ficam preservados como planejado; decisões finais e custos são do coordenador. Não foi feito novo passe de revisão.
+
+
+## Adjudicação final do coordenador
+
+**READY_WITH_DEFERRED_M1.** I1–I3 foram corrigidos e verificados por reproduções RED→GREEN e suíte final de 4913 passed/68 skipped/0 failed. O relatório independente original avaliou edd56f3; o coordenador examinou o delta final e as provas. Nenhuma segunda revisão foi solicitada. Branch e worktree permanecem locais, sem integração ou publicação.
+
+Todos os recortes considerados pelo revisor foram decididos explicitamente, com os seguintes custos:
+
+| Ordem | Decisão | Motivo | Custo/limite aceito |
+|---|---|---|---|
+| 1 | Manter cache positivo de até 60 s | Contrato e cache de autenticação existentes, explicitamente preservados pelo plano; produtor lê o cadastro atual | Uma alteração de papel pode levar o TTL configurado para valer no consumidor |
+| 2 | Manter limite de 900 caracteres somente no modelo pago | Fallback de uma variável autorizado; novo modelo/custo não faz parte desta execução | Aviso pago excepcionalmente longo pode perder o final; Portal e mensagens gratuitas mantêm os detalhes |
+| 3 | Manter `notice_failed` para envio parcial de detalhes antes de falha do cartão | Vocabulário de resposta não tem entrega parcial; não ocultar a falha nem criar novo contrato | Nova tentativa pode repetir detalhes; partes já enviadas podem não constar do histórico persistido após rollback |
+| 4 | Manter repetição de Compareceu como no-op, sem retry automático do aviso pelo PATCH | Escolha explícita do plano, preview antes da ação e recuperação pelo follow-up | Aviso não entregue exige mensagem manual ou abertura posterior do paciente; se R5 oferecer retry pelo PATCH, esse contrato precisará mudar |
+| 5 | Manter recusa de replay de edição/cancelamento já aplicado | Operações existentes retornam nothing_changed/already-cancelled; não criar nova ação de reenvio | Não há reenvio automático desses avisos; o operador usa mensagem/link disponível |
+| 6 | Manter envio síncrono com claim antes do envio | Arquitetura autorizada; recuperação com lease/outbox seria trabalho novo | Uma queda do processo nessa janela pode impedir o aviso; não prometer entrega exatamente uma vez |
+| 7 | Não ampliar compensação cross-calendar além da correção de origem I3 | Não foi demonstrada corrupção do evento vencedor; o evento antigo pode já ter sido removido | A compensação pode falhar e deixar necessidade de limpeza manual quando outra operação também falhou |
+| 8 | Manter limpeza do evento antigo como best-effort | Comportamento do R6 preservado; nova fila de reconciliação fora do plano | Falha de limpeza pode deixar evento duplicado até intervenção |
+| 9 | Manter leitura do hub somente na agenda Google da clínica | Decisão vinculante do dono | Consultas em agendas Google próprias continuam fora da lista do hub |
+| 10 | Não refatorar todos os eventos/caminhos Google legados de cancelamento e remarcação | Escopo e compatibilidade explícitos; I3 corrige os eventos novos e seus leitores pertinentes | Limitações anteriores para eventos em agendas próprias permanecem |
+| 11 | Manter console/conversas e listas do brain-api fora do R7 | Spec §5.D exige plano separado | Médicos continuam com visão ampla nesses canais até a tarefa específica |
+| 12 | Não redesenhar criação legada com referência de paciente nesta execução | Comportamento anterior; novos leitores e avisos verificam tenant | A criação legada ainda pode produzir uma associação inadequada; nenhuma nova consulta/aviso pode revelar dados de outra clínica |
+| 13 | Manter parsing compatível de UUID profissional malformado como ausente | Produtor interno conhecido emite UUID válido e scope explícito; próprio scope own sem profissional vê nada | Uma resposta interna malformada sem scope pode acionar fallback legado; não representa fluxo normal do produtor atual |
+| 14 | Não inventar revogação de acesso por profissional inativo | Política de usuário/identidade não definida por este plano | Inativar agenda não é equivalente a revogar a conta; acesso deve ser removido pela autoridade de identidade |
+| 15 | Manter coerção de representações integrais para lead | Valor fracionário/range inválido é recusado; representação integral conserva a mesma janela | String ou número integral pode ser aceito no boundary, sem alterar o prazo configurado |
+| 16 | Manter exceção legada de PATCH cancelled | Decisão explícita de compatibilidade no plano/ruling; correções attended/no_show continuam recusadas | Cancelamento ainda pode alterar um resultado encerrado pelo caminho legado |
+
+**Rollback não é automaticamente simétrico:** o código antigo não lê a origem física das consultas novas criadas na agenda da clínica com médico vinculado, mesmo antes de remover a coluna. Validar essas consultas antes de qualquer reversão; não presumir que código antigo ou downgrade recuperam a agenda correta. Nenhuma reversão ou migração foi executada.
+
+M1 permanece adiado: fontes de plano/spec fora do snapshot Git, preservadas localmente. Antes de compartilhar/integrar, incluir essas fontes ou fixar a referência durável. Os snapshots duráveis de Graphify foram atualizados localmente e não commitados; caches/artefatos temporários não entraram nos commits.
