@@ -1,9 +1,10 @@
-"""R7: clinic actions on the agenda notify the patient - two additive columns.
+"""R7: clinic actions on the agenda notify the patient - three additive columns.
 
 TASK-032 R7 (docs/superpowers/specs/2026-10-09-acoes-clinica-avisos-paciente-design.md):
 
     ADD tenants.paid_notices_auto_approved     BOOLEAN NOT NULL DEFAULT false
     ADD appointments.post_consult_notified_at  TIMESTAMPTZ NULL
+    ADD appointments.google_calendar_source  VARCHAR(16) NULL (legacy inference)
 
 `paid_notices_auto_approved` is the clinic's standing "não perguntar novamente" for
 billed WhatsApp notices outside the 24 h window (spec §2). `post_consult_notified_at`
@@ -11,7 +12,7 @@ marks that the post-consult message of THIS appointment was delivered after the
 clinic marked "Compareceu", so it is never sent twice and the next-open follow-up
 (services/patient_context.py::find_post_consult_followup) does not repeat it.
 
-Both are metadata-only on Postgres 11+ (constant default / nullable). DEPLOY ORDER -
+These are metadata-only on Postgres 11+ (constant default / nullable). DEPLOY ORDER -
 the database moves FIRST (the ORM names every mapped column on every read):
 
     1. `alembic upgrade head` from the NEW image (one-off), both services still old;
@@ -52,7 +53,13 @@ def upgrade() -> None:
         sa.Column("post_consult_notified_at", sa.DateTime(timezone=True), nullable=True),
     )
 
+    op.add_column(
+        "appointments",
+        sa.Column("google_calendar_source", sa.String(length=16), nullable=True),
+    )
+
 
 def downgrade() -> None:
+    op.drop_column("appointments", "google_calendar_source")
     op.drop_column("appointments", "post_consult_notified_at")
     op.drop_column("tenants", "paid_notices_auto_approved")

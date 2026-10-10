@@ -31,6 +31,7 @@ def row_draft(appointment, timezone: str | None) -> EditDraft:
             "id": str(appointment.id),
             "appointment_type": appointment.appointment_type,
             "professional_id": appointment.professional_id,
+            "google_calendar_source": appointment.google_calendar_source,
             "start_at": appointment.start_at,
             "end_at": appointment.end_at,
             "insurance": appointment.insurance,
@@ -69,6 +70,9 @@ async def write_appointment_edit(
     appointment.google_event_id = edit["google_event_id"]
     if edit.get("calendar_changed", edit["doctor_changed"]):
         appointment.google_event_link = edit.get("google_event_link")
+        appointment.google_calendar_source = (
+            "professional" if edit["professional_id"] is not None else "clinic"
+        )
     appointment.end_at = as_utc(edit["end_at"]).astimezone(UTC)
     if edit["time_changed"]:
         appointment.start_at = as_utc(edit["start_at"]).astimezone(UTC)

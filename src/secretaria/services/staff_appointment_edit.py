@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.logging import get_logger
 from secretaria.models import Appointment, Patient, Professional, Tenant, is_live_status
+from secretaria.services.appointment_calendar_origin import calendar_professional_id
 from secretaria.services.appointment_edit import appointment_email_version
 from secretaria.services.appointment_edit_write import write_appointment_edit
 from secretaria.services.appointment_status import SOURCE_HUB
@@ -146,6 +147,7 @@ class _Before:
     insurance: str | None
     attendee_name: str | None
     event_id: str
+    google_calendar_source: str | None
 
 
 @dataclass(frozen=True)
@@ -343,7 +345,7 @@ async def _move_event(
     calendar_for: CalendarFor,
     patient_name: str | None,
 ) -> _Moved:
-    old_calendar = await calendar_for(before.professional_id)
+    old_calendar = await calendar_for(calendar_professional_id(before))
     doctor_moved = target.professional_id != before.professional_id
     new_calendar = await calendar_for(target.professional_id) if doctor_moved else old_calendar
     calendar_changed = (
@@ -469,6 +471,7 @@ async def apply_staff_edit(
         insurance=appointment.insurance,
         attendee_name=appointment.attendee_name,
         event_id=(appointment.google_event_id or "").strip(),
+        google_calendar_source=appointment.google_calendar_source,
     )
     names = await _names(session, tenant_id, {before.professional_id, target.professional_id})
     changes = _changes(_clinic_tz(tenant), before, target, names, appointment.phone)
@@ -510,6 +513,7 @@ async def apply_staff_edit(
             or as_utc(locked.end_at or locked.start_at) != before.end_at
             or locked.appointment_type != before.service
             or locked.professional_id != before.professional_id
+            or locked.google_calendar_source != before.google_calendar_source
             or locked.insurance != before.insurance
             or locked.attendee_name != before.attendee_name
             or locked.phone != phone_before
@@ -567,6 +571,7 @@ async def apply_staff_edit(
                 insurance=committed.insurance,
                 attendee_name=committed.attendee_name,
                 event_id=(committed.google_event_id or "").strip(),
+                google_calendar_source=committed.google_calendar_source,
             )
         await _undo_move(appointment_id, moved, restore, patient_name)
         raise

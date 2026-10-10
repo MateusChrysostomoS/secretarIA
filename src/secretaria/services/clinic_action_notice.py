@@ -89,6 +89,16 @@ def buttons_allowed(tenant: Tenant, appointment: Appointment, now: datetime) -> 
     )
 
 
+def _confirmation_version(appointment: Appointment) -> tuple:
+    """Fields represented by the card body and the patient's recipient identity."""
+    return (
+        as_utc(appointment.start_at) if appointment.start_at is not None else None,
+        appointment.professional_id,
+        appointment.attendee_name,
+        appointment.patient_id,
+    )
+
+
 def _row_channel(patient: Patient) -> str:
     return (
         REMINDER_CHANNEL_CHAT
@@ -108,7 +118,7 @@ async def _card_notice(
     allow_paid: bool,
     now: datetime,
     once_per_start: bool,
-    expected_start: datetime | None = None,
+    expected_version: tuple | None = None,
 ) -> NoticeResult | None:
     """Row first (committed, so a tap can resolve it), then the card.
 
@@ -122,7 +132,7 @@ async def _card_notice(
         not is_live_status(appointment.status)
         or appointment.start_at is None
         or as_utc(appointment.start_at) <= now
-        or (expected_start is not None and as_utc(appointment.start_at) != expected_start)
+        or (expected_version is not None and _confirmation_version(appointment) != expected_version)
     ):
         return None
     usage_key = f"{kind}:{appointment_id}"
@@ -211,7 +221,7 @@ async def notify_staff_confirmation(
         or as_utc(appointment.start_at) <= now
     ):
         return None
-    expected_start = as_utc(appointment.start_at)
+    expected_version = _confirmation_version(appointment)
     content = await load_reminder_content(session, tenant, appointment)
     return await _card_notice(
         session,
@@ -223,7 +233,7 @@ async def notify_staff_confirmation(
         allow_paid=allow_paid,
         now=now,
         once_per_start=True,
-        expected_start=expected_start,
+        expected_version=expected_version,
     )
 
 

@@ -107,6 +107,8 @@ async def load_upcoming_appointments(
             # the manage flow act on the owning calendar instead of a stale
             # booking-flow selection (workers/tasks.py::_manage_owner_calendar_target).
             "professional_id": str(appt.professional_id) if appt.professional_id else None,
+            **({"google_calendar_source": appt.google_calendar_source}
+               if appt.google_calendar_source is not None else {}),
         }
         for appt in rows
     ]

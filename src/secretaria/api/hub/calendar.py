@@ -64,6 +64,7 @@ from secretaria.services import (
     staff_patient_message,
 )
 from secretaria.services.agenda_visibility import AgendaViewer
+from secretaria.services.appointment_calendar_origin import calendar_professional_id
 from secretaria.services.appointment_status import (
     CANCEL_REASON_UNCONFIRMED,
     SOURCE_HUB,
@@ -286,7 +287,7 @@ async def _calendar_for_professional(
 
 async def _owning_calendar(session: AsyncSession, tenant: Tenant, appt: Appointment):
     """The Google calendar that owns `appt`'s event (see `_calendar_for_professional`)."""
-    return await _calendar_for_professional(session, tenant, appt.professional_id)
+    return await _calendar_for_professional(session, tenant, calendar_professional_id(appt))
 
 # ---------------------------------------------------------------------------
 # GET /events — agenda read model
@@ -583,6 +584,7 @@ async def create_appointment(
     appt = Appointment(
         tenant_id=tenant.id,
         professional_id=professional_id,
+        google_calendar_source="clinic",
         patient_id=patient_uuid,
         google_event_id=google_event_id,
         google_event_link=event.get("htmlLink"),
@@ -630,6 +632,7 @@ async def create_block(
     appt = Appointment(
         tenant_id=tenant.id,
         professional_id=professional_id,
+        google_calendar_source="clinic",
         patient_id=None,
         google_event_id=event.get("id", ""),
         google_event_link=event.get("htmlLink"),

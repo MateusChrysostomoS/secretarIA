@@ -191,3 +191,32 @@ async def test_i2_confirmation_body_cannot_bind_to_a_new_start_after_content_loa
     monkeypatch.setattr(notices, "load_reminder_content", content_before_move)
     assert await _confirm_notice(db, world) is None
     assert sent() == [] and await staff_rows(db, world.appointment.id, "staff_confirm") == []
+
+
+async def test_i2_confirmation_body_cannot_bind_to_a_new_doctor_after_content_load(
+    db, acting, monkeypatch
+):
+    from sqlalchemy import update
+
+    from tests._r7_support import add_professional
+
+    world = await setup_world(
+        db, acting, status=AppointmentStatus.CONFIRMED, professional_name="Dra. Ana"
+    )
+    new_doctor = await add_professional(db, world.tenant.id, "Dr. Beto")
+    original = notices.load_reminder_content
+
+    async def content_before_move(*args, **kwargs):
+        content = await original(*args, **kwargs)
+        async with db() as winner:
+            await winner.execute(
+                update(Appointment)
+                .where(Appointment.id == world.appointment.id)
+                .values(professional_id=new_doctor)
+            )
+            await winner.commit()
+        return content
+
+    monkeypatch.setattr(notices, "load_reminder_content", content_before_move)
+    assert await _confirm_notice(db, world) is None
+    assert sent() == [] and await staff_rows(db, world.appointment.id, "staff_confirm") == []

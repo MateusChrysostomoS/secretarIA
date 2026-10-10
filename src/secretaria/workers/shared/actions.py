@@ -20,6 +20,7 @@ from secretaria.models import (
     is_live_status,
 )
 from secretaria.services import reminder_hooks
+from secretaria.services.appointment_calendar_origin import calendar_professional_id
 from secretaria.services.appointment_edit import EditContext, EditDraft
 from secretaria.services.appointment_edit_flow import enter_edit_menu
 from secretaria.services.appointment_status import (
@@ -108,8 +109,13 @@ async def _calendar_for_appointment(
     calendar could silently no-op while the event still lives on the
     professional's own agenda.
     """
-    if appointment.professional_id is not None:
-        professional = await session.get(Professional, appointment.professional_id)
+    owner_id = calendar_professional_id(appointment)
+    if owner_id is not None:
+        professional = await session.scalar(
+            select(Professional).where(
+                Professional.id == owner_id, Professional.tenant_id == tenant.id
+            )
+        )
         if professional is None:
             return None
         try:

@@ -52,6 +52,7 @@ class AppliedEdit:
     notice_id: str | None = None
     notice_version: str | None = None
     changed_fields: tuple[str, ...] = ()
+    old_google_calendar_source: str | None = None
 
 
 async def apply_appointment_edit(
@@ -135,6 +136,7 @@ async def apply_appointment_edit(
         if edit.get("calendar_changed", edit["doctor_changed"])
         else None,
         old_professional_id=edit.get("old_professional_id"),
+        old_google_calendar_source=edit.get("old_google_calendar_source"),
         notice_id=str(notice.id) if notice else None,
         notice_version=appointment_email_version(appointment) if fields else None,
         changed_fields=tuple(fields),
@@ -196,7 +198,8 @@ async def _finish_edit(tenant, applied: AppliedEdit) -> None:
         async with async_session_factory() as session:
             rows = await list_active_professionals(session, tenant.id)
             target = _appointment_calendar_target(
-                {"professional_id": applied.old_professional_id}, rows
+                {"professional_id": applied.old_professional_id,
+                 "google_calendar_source": applied.old_google_calendar_source}, rows
             )
             calendar = await _appointment_calendar(session, tenant, target)
         if calendar is None:

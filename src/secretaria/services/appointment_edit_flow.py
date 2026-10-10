@@ -146,9 +146,8 @@ async def _slot_free(
 
 def _ignore_event(draft: ae.EditDraft, appt: dict, ctx: ae.EditContext) -> str | None:
     """Exclude our event only when it lives on the calendar being checked."""
-    same = draft.current["professional_id"] == draft.original["professional_id"]
-    same = same or ctx.same_calendar(
-        draft.current["professional_id"], draft.original["professional_id"]
+    same = ctx.same_calendar(
+        draft.calendar_professional_id, draft.original_calendar_professional_id
     )
     return str(appt.get("google_event_id") or "") or None if same else None
 
@@ -225,7 +224,7 @@ async def _begin_date(conversation, tenant, draft, professionals, ctx) -> fr.Flo
     return await fr.enter_day_picker(
         _carrier(conversation, draft),
         tenant,
-        ctx.calendar_for(draft.current["professional_id"]),
+        ctx.calendar_for(draft.calendar_professional_id),
         duration_minutes=draft.duration_minutes,
         branch=fr.EDIT_DAY_BRANCH,
         anchor=draft.start,
@@ -240,7 +239,7 @@ async def _slots_for(
     return await fr._enter_slot_picker(
         _carrier(conversation, draft),
         tenant,
-        ctx.calendar_for(draft.current["professional_id"]),
+        ctx.calendar_for(draft.calendar_professional_id),
         datetime.combine(day.date(), time.min),
         duration_minutes=draft.duration_minutes,
         branch=fr.EDIT_DAY_BRANCH,
@@ -257,7 +256,7 @@ async def _after_slot_affecting_change(
     NEW doctor/service, behind a one-line explanation (spec P1) - never a confirmation
     for a slot that does not exist.
     """
-    calendar = ctx.calendar_for(draft.current["professional_id"])
+    calendar = ctx.calendar_for(draft.calendar_professional_id)
     free = await _slot_free(
         calendar,
         draft.start,
@@ -276,7 +275,7 @@ async def _reslot_picker(conversation, tenant, draft, professionals, ctx) -> fr.
     picker = await fr.enter_day_picker(
         _carrier(conversation, reslot),
         tenant,
-        ctx.calendar_for(reslot.current["professional_id"]),
+        ctx.calendar_for(reslot.calendar_professional_id),
         duration_minutes=reslot.duration_minutes,
         branch=fr.EDIT_DAY_BRANCH,
         anchor=reslot.start,
@@ -288,7 +287,7 @@ async def _reslot_picker(conversation, tenant, draft, professionals, ctx) -> fr.
 
 
 async def _day_step(conversation, tenant, body, draft, appt, professionals, ctx):
-    calendar = ctx.calendar_for(draft.current["professional_id"])
+    calendar = ctx.calendar_for(draft.calendar_professional_id)
     if draft.stage.get("mode") == "date":
         target, _page = fr._day_from_body(body)
         if target is None and calendar is not None:
@@ -328,7 +327,7 @@ async def _time_too_step(conversation, tenant, body, draft, appt, professionals,
     if fr._label_match(body, ae.LABEL_TIME_TOO_NO):
         start = datetime.combine(day.date(), draft.start.time())
         end = start + timedelta(minutes=draft.duration_minutes)
-        calendar = ctx.calendar_for(draft.current["professional_id"])
+        calendar = ctx.calendar_for(draft.calendar_professional_id)
         if await _slot_free(
             calendar,
             start,
@@ -349,7 +348,7 @@ async def _slot_step(conversation, tenant, body, draft, appt, professionals, ctx
     control = await fr._handle_slot_controls(
         conversation,
         tenant,
-        ctx.calendar_for(draft.current["professional_id"]),
+        ctx.calendar_for(draft.calendar_professional_id),
         body,
         duration_minutes=draft.duration_minutes,
         branch=fr.EDIT_DAY_BRANCH,
@@ -445,11 +444,15 @@ async def _doctor_list(draft, tenant, appt, professionals, ctx) -> fr.FlowRouter
     for professional in (professionals or [])[: fr.MAX_CATALOG_OPTION_ROWS]:
         pid = str(professional.id)
         own_event = str(appt.get("google_event_id") or "") or None
-        same = pid == draft.original["professional_id"] or ctx.same_calendar(
-            pid, draft.original["professional_id"]
+        calendar_pid = (
+            draft.original_calendar_professional_id
+            if pid == draft.original["professional_id"] else pid
         )
+        same = ctx.same_calendar(calendar_pid, draft.original_calendar_professional_id)
         ignore = own_event if same else None
-        free = await _availability(ctx.calendar_for(pid), draft.start, draft.end, ignore, pid)
+        free = await _availability(
+            ctx.calendar_for(calendar_pid), draft.start, draft.end, ignore, pid
+        )
         parts: list[str] = []
         if free is not None:
             parts.append(
@@ -643,11 +646,11 @@ async def _apply_confirm(
     if service is None:
         return _service_list(draft, tenant, professionals, ctx, after_doctor=True)
     event_id = str(appt.get("google_event_id") or "")
-    new_cal = ctx.calendar_for(draft.current["professional_id"])
+    new_cal = ctx.calendar_for(draft.calendar_professional_id)
     doctor_changed = "médico" in changed
     calendar_changed = doctor_changed and not ctx.same_calendar(
-        draft.current["professional_id"],
-        draft.original["professional_id"],
+        draft.calendar_professional_id,
+        draft.original_calendar_professional_id,
     )
     time_changed = "data" in changed or "horário" in changed
     if not event_id:
@@ -701,6 +704,7 @@ async def _apply_confirm(
         "appointment_type": draft.current["service"],
         "professional_id": _uuid(draft.current["professional_id"]),
         "old_professional_id": _uuid(draft.original["professional_id"]),
+        "old_google_calendar_source": draft.original.get("google_calendar_source"),
         "insurance": draft.current["insurance"],
         "attendee_name": draft.current["attendee_name"],
         "start_at": start,
@@ -901,7 +905,7 @@ async def redisplay_edit(conversation, tenant, appointments, professionals, ctx)
         result = await fr.enter_day_picker(
             _carrier(conversation, draft),
             tenant,
-            ctx.calendar_for(draft.current["professional_id"]),
+            ctx.calendar_for(draft.calendar_professional_id),
             duration_minutes=draft.duration_minutes,
             branch=fr.EDIT_DAY_BRANCH,
             anchor=draft.start,
@@ -1039,7 +1043,7 @@ async def apply_ai_edit(conversation, tenant, proposal, appointments, profession
         if start.replace(tzinfo=_tz(tenant)) <= datetime.now(_tz(tenant)):
             return await unchanged()
         if not await _slot_free(
-            ctx.calendar_for(new.current["professional_id"]),
+            ctx.calendar_for(new.calendar_professional_id),
             start,
             end,
             _ignore_event(new, appt, ctx),

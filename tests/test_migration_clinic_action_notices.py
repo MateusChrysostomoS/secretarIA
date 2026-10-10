@@ -48,6 +48,11 @@ def test_upgrade_adds_both_columns_with_safe_values_and_downgrade_removes_them(t
             appointments = {c["name"]: c for c in sa.inspect(conn).get_columns("appointments")}
             assert tenants["paid_notices_auto_approved"]["nullable"] is False
             assert appointments["post_consult_notified_at"]["nullable"] is True
+            assert appointments["google_calendar_source"]["nullable"] is True
+            source = conn.execute(
+                sa.text("SELECT google_calendar_source FROM appointments")
+            ).scalar()
+            assert source is None
             flag = conn.execute(sa.text("SELECT paid_notices_auto_approved FROM tenants")).scalar()
             assert flag in (0, False)
             marker = conn.execute(
@@ -55,6 +60,9 @@ def test_upgrade_adds_both_columns_with_safe_values_and_downgrade_removes_them(t
             ).scalar()
             assert marker is None
             migration.downgrade()
+            assert "google_calendar_source" not in {
+                c["name"] for c in sa.inspect(conn).get_columns("appointments")
+            }
             assert "paid_notices_auto_approved" not in {
                 c["name"] for c in sa.inspect(conn).get_columns("tenants")
             }
@@ -67,6 +75,7 @@ def test_upgrade_adds_both_columns_with_safe_values_and_downgrade_removes_them(t
 async def test_the_models_map_the_columns_with_their_defaults(db):  # noqa: F811
     assert Tenant.__table__.c.paid_notices_auto_approved.nullable is False
     assert Appointment.__table__.c.post_consult_notified_at.nullable is True
+    assert Appointment.__table__.c.google_calendar_source.nullable is True
     async with db() as session:
         tenant = Tenant(id=uuid4(), clinic_name="Clínica", phone_number_id=None)
         session.add(tenant)

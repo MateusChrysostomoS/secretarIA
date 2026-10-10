@@ -26,6 +26,7 @@ from secretaria.models import (
     Professional,
     Tenant,
 )
+from secretaria.services.appointment_calendar_origin import calendar_professional_id
 from secretaria.services.booking_scope import (
     BOOKING_TOPOLOGY_MULTI,
 )
@@ -319,7 +320,7 @@ def _appointment_calendar_target(
     """
     if appt is None:
         return None
-    professional_id = appt.get("professional_id")
+    professional_id = calendar_professional_id(appt)
     if not professional_id:
         return "tenant"
     return next((p for p in (professional_rows or []) if str(p.id) == str(professional_id)), None)
