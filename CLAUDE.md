@@ -1,5 +1,7 @@
 # SecretarIA
 
+TASK-048 R9: lembrete extra por dia e horario, no fuso da clinica. Local, sem deploy: [checkpoint](docs/CHECKPOINT_lembretes_r9.md).
+
 Plano preparado (2026-10-08): [avisos ao médico, entrada por lembrete e QA R6](../z_prompts/PROMPT_CORRECAO_EMAIL_MEDICO_ENTRADA_LEMBRETE_R6.md), com [especificação](docs/superpowers/specs/2026-10-08-email-medico-entrada-lembrete-r6-design.md). Decisão do dono: mostrar os três botões ao abrir o link preservando o rascunho. Apenas planejamento; correção/QA completa ainda não executadas.
 
 Prompt pendente (2026-10-09): [visitas vazias somem em 24 h, e-mail digitado nunca é apagado, conta só com código](../z_prompts/PROMPT_PORTAL_VISITA_RETENCAO_E_CONTA_SO_COM_CODIGO.md) — **NÃO EXECUTADO.** O incidente "código não leva à conta (cai no LGPD)" de 2026-10-09 (`conversation_pending_code_abandoned`, nenhuma chamada de verificação ao brain-api) voltou a funcionar após deploy em andamento; o prompt [PROMPT_PORTAL_CODIGO_NAO_RECONHECIDO_URGENTE.md](../z_prompts/PROMPT_PORTAL_CODIGO_NAO_RECONHECIDO_URGENTE.md) só deve rodar se reaparecer, ou apenas no passo 6 (não derrubar a espera de código de conta conhecida para o LGPD).

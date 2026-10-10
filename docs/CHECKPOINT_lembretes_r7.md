@@ -46,6 +46,7 @@ c982fc8 feat(reminders): one channel-aware sender for clinic-action notices (TAS
 - Quem vê a agenda (spec §5.A): `core/subscription.py::SubscriptionClaim` (`professional_id`, `agenda_scope` da introspecção do brain-api), `services/agenda_visibility.py` (`AgendaViewer`, `viewer_from_claim` — regra de rollout que fecha por segurança), `api/hub/deps.py::get_agenda_viewer`, `GET /calendar/viewer`; `api/hub/calendar.py::list_events` (filtro + `mine`), `_get_appointment(..., viewer)` em todas as rotas por id; `_creation_professional` em `POST /appointments` e `POST /blocks` (médico restrito cria só na própria agenda: sem médico = ele, outro médico = 403 `professional_not_allowed`, sem médico próprio = 422 `no_own_agenda`; recepção pode nomear um médico ativo da clínica) e `professional_not_allowed` no Editar/Remarcar.
 - Dados do Editar na agenda (spec §5.C): `schemas/calendar.py::CalendarEventRead` (`professional_id`, `professional_name`, `service`, `attendee_name`, `phone`, `patient_channel`).
 - Lembrete extra (spec §5.B): `schemas/config.py` (`reminders_v2_enabled` só leitura, `reminder_extra_lead_minutes` 1500..20160), `services/hub_configuration.py::apply_tenant_config` → `services/reminder_schedule.py::replan_custom_reminders`.
+  - **Substituído no R9 (2026-10-10):** o lembrete extra passou a ser "N dias antes, às HH:MM" — ver `docs/CHECKPOINT_lembretes_r9.md`.
 
 ## Contrato para o R5
 
