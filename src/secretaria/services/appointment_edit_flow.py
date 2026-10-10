@@ -30,6 +30,7 @@ from secretaria.core.whatsapp_limits import (
 )
 from secretaria.models import FlowState
 from secretaria.services import appointment_edit as ae, flow_router as fr, reminder_hooks
+from secretaria.services.appointment_calendar_origin import CalendarOriginUnresolved
 from secretaria.services.attendee import (
     ATTENDEE_NAME_INVALID,
     ATTENDEE_NAME_REQUEST,
@@ -646,7 +647,10 @@ async def _apply_confirm(
     if service is None:
         return _service_list(draft, tenant, professionals, ctx, after_doctor=True)
     event_id = str(appt.get("google_event_id") or "")
-    new_cal = ctx.calendar_for(draft.calendar_professional_id)
+    try:
+        new_cal = ctx.calendar_for(draft.calendar_professional_id)
+    except CalendarOriginUnresolved:
+        return _unavailable(draft)
     doctor_changed = "médico" in changed
     calendar_changed = doctor_changed and not ctx.same_calendar(
         draft.calendar_professional_id,
@@ -752,6 +756,10 @@ async def edit_step(
     appt = fr._find_appt_by_id(appointments, fr._managing_appt_id_str(conversation))
     if draft is None or appt is None or ctx is None or str(appt.get("id")) != draft.appointment_id:
         return _leave(tenant, professionals, TextBubble(body=ae.EDIT_STALE))
+    try:
+        _ = draft.original_calendar_professional_id
+    except CalendarOriginUnresolved:
+        return _unavailable(draft)
     latest = ae.EditDraft.from_appointment(appt, _tz(tenant))
     if latest.original != draft.original or latest.start.replace(
         tzinfo=_tz(tenant)

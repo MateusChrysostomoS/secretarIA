@@ -38,7 +38,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.logging import get_logger
 from secretaria.models import Appointment, Patient, Professional, Tenant, is_live_status
-from secretaria.services.appointment_calendar_origin import calendar_professional_id
+from secretaria.services.appointment_calendar_origin import (
+    CalendarOriginUnresolved,
+    calendar_professional_id,
+)
 from secretaria.services.appointment_edit import appointment_email_version
 from secretaria.services.appointment_edit_write import write_appointment_edit
 from secretaria.services.appointment_status import SOURCE_HUB
@@ -345,7 +348,14 @@ async def _move_event(
     calendar_for: CalendarFor,
     patient_name: str | None,
 ) -> _Moved:
-    old_calendar = await calendar_for(calendar_professional_id(before))
+    try:
+        old_owner_id = calendar_professional_id(before)
+    except CalendarOriginUnresolved:
+        raise StaffEditError(
+            409, "calendar_unresolved",
+            "Não foi possível identificar a agenda do profissional desta consulta.",
+        ) from None
+    old_calendar = await calendar_for(old_owner_id)
     doctor_moved = target.professional_id != before.professional_id
     new_calendar = await calendar_for(target.professional_id) if doctor_moved else old_calendar
     calendar_changed = (

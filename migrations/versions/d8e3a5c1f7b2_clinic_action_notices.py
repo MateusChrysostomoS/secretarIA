@@ -19,8 +19,9 @@ the database moves FIRST (the ORM names every mapped column on every read):
     2. deploy `secretaria_api` AND `secretaria-worker` together (`GET /build` parity).
 
 Rollback: the OLD code on both services first, then `alembic downgrade`. Data lost:
-the clinic's auto-approval choice and the post-consult markers (the follow-up then
-behaves exactly as before R7).
+the clinic's auto-approval choice, the post-consult markers and explicit event
+origin. OLD code infers the calendar from the doctor again after rollback; hub
+appointments lose the clinic-origin distinction. The follow-up behaves as before R7.
 
 Revision ID: d8e3a5c1f7b2
 Revises: c2d5f8a1e4b6

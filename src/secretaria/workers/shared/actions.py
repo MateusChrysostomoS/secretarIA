@@ -20,7 +20,10 @@ from secretaria.models import (
     is_live_status,
 )
 from secretaria.services import reminder_hooks
-from secretaria.services.appointment_calendar_origin import calendar_professional_id
+from secretaria.services.appointment_calendar_origin import (
+    CalendarOriginUnresolved,
+    calendar_professional_id,
+)
 from secretaria.services.appointment_edit import EditContext, EditDraft
 from secretaria.services.appointment_edit_flow import enter_edit_menu
 from secretaria.services.appointment_status import (
@@ -109,7 +112,10 @@ async def _calendar_for_appointment(
     calendar could silently no-op while the event still lives on the
     professional's own agenda.
     """
-    owner_id = calendar_professional_id(appointment)
+    try:
+        owner_id = calendar_professional_id(appointment)
+    except CalendarOriginUnresolved:
+        return None
     if owner_id is not None:
         professional = await session.scalar(
             select(Professional).where(

@@ -65,6 +65,7 @@ def calendars(r7, monkeypatch):
 
     monkeypatch.setattr(hub, "resolve_professional_calendar", resolve)
     from secretaria.workers.shared import actions, appointment_edit_apply, llm_context
+
     monkeypatch.setattr(actions, "_calendar_for_appointment", real_action_calendar)
     monkeypatch.setattr(llm_context, "_appointment_calendar", real_worker_calendar)
     monkeypatch.setattr(appointment_edit_apply, "_appointment_calendar", real_worker_calendar)
@@ -280,3 +281,42 @@ async def test_i3_source_is_internal_not_editable_by_hub(client, db, acting):
     )
     assert result.status_code == 422
     assert (await reload_appointment(db, row.id)).google_calendar_source == "clinic"
+
+
+@pytest.mark.parametrize("source", ["professional", "unexpected"])
+async def test_i3_explicit_unresolved_origin_never_deletes_clinic_event(client, db, acting, source):
+    from tests._r7_support import set_appointment
+
+    world, row = await _created(client, db, acting)
+    await set_appointment(db, row.id, google_calendar_source=source, professional_id=None)
+    edited = await client.post(f"{CALENDAR}/appointments/{row.id}/edit", json={"insurance": "Amil"})
+    assert edited.status_code == 409 and edited.json()["detail"]["code"] == "calendar_unresolved"
+    released = await client.post(f"{CALENDAR}/appointments/{row.id}/release", json={})
+    assert (
+        released.status_code == 409 and released.json()["detail"]["code"] == "calendar_unresolved"
+    )
+    assert row.google_event_id in OwnedCalendar.get("tenant").events
+    assert (await reload_appointment(db, row.id)).status.value == "scheduled"
+
+
+@pytest.mark.parametrize("source", ["professional", "unexpected"])
+async def test_i3_worker_refuses_explicit_unresolved_calendar_origin(db, acting, source):
+    from secretaria.workers.shared import actions, llm_context
+    from tests._r7_support import set_appointment
+
+    world = await setup_world(db, acting)
+    await set_appointment(
+        db, world.appointment.id, google_calendar_source=source, professional_id=None
+    )
+    row = await reload_appointment(db, world.appointment.id)
+    assert (
+        llm_context._appointment_calendar_target(
+            {"professional_id": None, "google_calendar_source": source}, []
+        )
+        is None
+    )
+    async with db() as session:
+        assert (
+            await actions._calendar_for_appointment(session, world.tenant, SimpleNamespace(), row)
+            is None
+        )

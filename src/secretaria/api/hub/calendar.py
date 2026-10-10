@@ -64,7 +64,10 @@ from secretaria.services import (
     staff_patient_message,
 )
 from secretaria.services.agenda_visibility import AgendaViewer
-from secretaria.services.appointment_calendar_origin import calendar_professional_id
+from secretaria.services.appointment_calendar_origin import (
+    CalendarOriginUnresolved,
+    calendar_professional_id,
+)
 from secretaria.services.appointment_status import (
     CANCEL_REASON_UNCONFIRMED,
     SOURCE_HUB,
@@ -287,7 +290,15 @@ async def _calendar_for_professional(
 
 async def _owning_calendar(session: AsyncSession, tenant: Tenant, appt: Appointment):
     """The Google calendar that owns `appt`'s event (see `_calendar_for_professional`)."""
-    return await _calendar_for_professional(session, tenant, calendar_professional_id(appt))
+    try:
+        owner_id = calendar_professional_id(appt)
+    except CalendarOriginUnresolved:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            _detail("calendar_unresolved",
+                    "Não foi possível identificar a agenda do profissional desta consulta."),
+        ) from None
+    return await _calendar_for_professional(session, tenant, owner_id)
 
 # ---------------------------------------------------------------------------
 # GET /events — agenda read model

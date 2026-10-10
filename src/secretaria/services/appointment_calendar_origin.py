@@ -4,6 +4,10 @@ CALENDAR_SOURCE_CLINIC = "clinic"
 CALENDAR_SOURCE_PROFESSIONAL = "professional"
 
 
+class CalendarOriginUnresolved(ValueError):
+    """Explicit provenance cannot identify a calendar; never guess the clinic."""
+
+
 def calendar_professional_id(appointment):
     """None means the clinic calendar; NULL source preserves legacy doctor inference.
 
@@ -16,4 +20,8 @@ def calendar_professional_id(appointment):
     else:
         source = getattr(appointment, "google_calendar_source", None)
         professional_id = appointment.professional_id
-    return None if source == CALENDAR_SOURCE_CLINIC else professional_id
+    if source == CALENDAR_SOURCE_CLINIC:
+        return None
+    if source is not None and (source != CALENDAR_SOURCE_PROFESSIONAL or professional_id is None):
+        raise CalendarOriginUnresolved("calendar_unresolved")
+    return professional_id
