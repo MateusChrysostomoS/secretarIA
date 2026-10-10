@@ -1,11 +1,11 @@
 ﻿{
     "metadata_schema":  "brain.graphify-metadata/v1",
-    "repository":  "secretarIA-r6-integracao",
-    "repository_path":  "C:\\TECH\\BRAIN-worktrees\\TASK-032\\secretarIA-r6-integracao",
-    "branch":  "task/TASK-032-first-message",
-    "commit":  "b9d5cd14726d073fc9aa6041e1b9745190615a11",
-    "generated_at":  "2026-10-08T11:33:02.4095846Z",
+    "repository":  "secretarIA",
+    "repository_path":  "C:\\TECH\\BRAIN-worktrees\\TASK-048\\secretarIA",
+    "branch":  "task/TASK-048-lembrete-dia-hora-api",
+    "commit":  "e41ca176d9b40f2a7e16e0f3d4c22498f80ea367",
+    "generated_at":  "2026-10-10T14:42:42.9878943Z",
     "graphify_version":  "0.9.5",
     "graph_schema":  "networkx-node-link (unversioned upstream)",
-    "graph_sha256":  "e34eadab86895e5faf1f3b841e0e2b15626b5738394fbe2e8a285b011814224c"
+    "graph_sha256":  "df6cee6d29577a3127fa50b289c96d725317999dff015381afd8812185f2ec67"
 }
