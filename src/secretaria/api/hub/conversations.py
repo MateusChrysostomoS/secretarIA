@@ -45,6 +45,7 @@ picks a `services/channel_sender.py::ChannelSender` by `Patient.channel` — the
 single place in this router that knows more than one channel exists.
 """
 
+import inspect
 from datetime import datetime
 from uuid import UUID
 
@@ -268,6 +269,7 @@ _NO_OWN_AGENDA = {
 
 @router.get("", response_model=list[ConversationRead])
 async def list_conversations(
+    request: Request,
     mine: bool = Query(
         default=False,
         description=(
@@ -277,15 +279,28 @@ async def list_conversations(
         ),
     ),
     tenant: Tenant = Depends(get_current_tenant),
-    viewer: AgendaViewer = Depends(get_agenda_viewer),
     session: AsyncSession = Depends(get_session),
 ) -> list[ConversationRead]:
     # Spec 2026-10-09 §5.D (owner, replacing the earlier role table): everyone at the
     # clinic sees every conversation. The viewer is read ONLY to answer `mine`; it never
     # narrows the default list, not even for a doctor restricted to his own agenda.
-    own = viewer.professional_id
-    if mine and own is None:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, _NO_OWN_AGENDA)
+    own = None
+    if mine:
+        # Resolved only here, so the default list keeps its pre-R8 auth path (no second
+        # token check, no new 401). Honours a test override of get_agenda_viewer.
+        override = request.app.dependency_overrides.get(get_agenda_viewer)
+        if override is not None:
+            resolved = override()
+            viewer: AgendaViewer = await resolved if inspect.isawaitable(resolved) else resolved
+        else:
+            viewer = await get_agenda_viewer(
+                authorization=request.headers.get("authorization"),
+                tenant=tenant,
+                session=session,
+            )
+        own = viewer.professional_id
+        if own is None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, _NO_OWN_AGENDA)
     # One query: join Conversation -> Patient, LEFT OUTER join a grouped
     # subquery for the most recent message per conversation (regardless of
     # who sent it). No pagination — deliberately minimal for the dashboard.
@@ -303,7 +318,7 @@ async def list_conversations(
         # stays portable across the sqlite test DB and the real Postgres DB.
         .order_by(last_msg_sub.c.last_message_at.desc().nulls_last())
     )
-    if mine and own is not None:
+    if own is not None:
         stmt = stmt.where(is_patient_of(own))
     rows = (await session.execute(stmt)).all()
     return [

@@ -281,3 +281,24 @@ async def test_mine_never_lists_another_clinics_conversation(
 
     assert response.status_code == 200
     assert response.json() == []
+
+
+async def test_default_list_never_resolves_the_viewer(client: AsyncClient, db, tenant) -> None:
+    """Without `mine` the viewer is not read at all: a failing resolver cannot 401 the list."""
+    from fastapi import HTTPException
+
+    from secretaria.api.hub.deps import get_agenda_viewer
+    from secretaria.main import app
+
+    async def _boom():
+        raise HTTPException(401, "Invalid or inactive subscription token")
+
+    conv = await _conversation(db, tenant, "Qualquer", minutes_ago=1)
+    app.dependency_overrides[get_agenda_viewer] = _boom
+
+    default = await client.get(ENDPOINT)
+    mine = await client.get(ENDPOINT, params={"mine": "true"})
+
+    assert default.status_code == 200
+    assert _ids(default) == [str(conv.id)]
+    assert mine.status_code == 401
