@@ -258,8 +258,15 @@ async def test_changing_the_time_zone_replans_in_the_same_save(
 
 
 async def test_saves_that_change_nothing_do_not_replan(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    db,  # noqa: F811
+    tenant,  # noqa: F811
 ):
+    start = (datetime.now(UTC) + timedelta(days=10)).replace(
+        hour=15, minute=0, second=0, microsecond=0
+    )
+    await _planned_custom_due(db, tenant, start)
     calls: list[int] = []
 
     async def _spy(*args, **kwargs):
@@ -292,3 +299,45 @@ async def test_the_new_pair_ignores_even_an_invalid_legacy_key(client: AsyncClie
     )
     assert response.status_code == 200
     assert response.json()["tenant"]["reminder_extra_lead_minutes"] == 5760
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"reminder_extra_days_before": 5, "reminder_extra_send_time": "09:00"},
+        {"reminder_extra_lead_minutes": 7200},
+    ],
+)
+async def test_saving_migrated_settings_moves_pending_legacy_due_even_when_the_pair_is_unchanged(
+    client: AsyncClient,
+    db,  # noqa: F811
+    tenant,  # noqa: F811
+    patch,
+):
+    start = (datetime.now(UTC) + timedelta(days=10)).replace(
+        hour=20, minute=30, second=0, microsecond=0
+    )
+    appointment, _ = await _planned_custom_due(db, tenant, start)
+    legacy_due = start - timedelta(days=5)  # 17:30 local, as R7 planned it.
+    async with db() as session:
+        row = await session.scalar(
+            select(AppointmentReminder).where(
+                AppointmentReminder.appointment_id == appointment.id,
+                AppointmentReminder.kind == "custom",
+            )
+        )
+        row.due_at = legacy_due
+        row.warn_due_at = legacy_due + timedelta(hours=2)
+        reminder_id = row.id
+        await session.commit()
+
+    response = await client.put(CONFIGURATION, json={"tenant": patch})
+
+    assert response.status_code == 200
+    expected_due = start.replace(hour=12, minute=0) - timedelta(days=5)  # 09:00 local.
+    async with db() as session:
+        row = await session.get(AppointmentReminder, reminder_id)
+        assert reminder_schedule._as_utc(row.due_at) == expected_due
+        assert reminder_schedule._as_utc(row.warn_due_at) == expected_due + timedelta(hours=2)
+        assert row.status == "pending"
+    assert await _stored(db, tenant.id) == (True, 5, "09:00", 7200)

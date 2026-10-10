@@ -524,6 +524,40 @@ class CustomReplan:
     created: int = 0
 
 
+async def pending_custom_reminders_need_replan(
+    session: AsyncSession, tenant: Tenant, *, now: datetime
+) -> bool:
+    """Whether pending rows retained by the R9 migration disagree with today's rule.
+
+    A settings save must reconcile them even when the migrated settings are unchanged.
+    This is only a read: the existing replan writer locks and rechecks each row before
+    moving it, so a concurrent sender or reschedule still wins safely.
+    """
+    if not tenant.reminders_v2_enabled:
+        return False
+    now_utc = _as_utc(now)
+    rows = await session.execute(
+        select(AppointmentReminder.due_at, Appointment.start_at)
+        .join(Appointment, Appointment.id == AppointmentReminder.appointment_id)
+        .where(
+            AppointmentReminder.tenant_id == tenant.id,
+            Appointment.tenant_id == tenant.id,
+            AppointmentReminder.kind == REMINDER_KIND_CUSTOM,
+            AppointmentReminder.status == REMINDER_STATUS_PENDING,
+            AppointmentReminder.invalidated_at.is_(None),
+            AppointmentReminder.appointment_start_at == Appointment.start_at,
+            Appointment.status.in_(LIVE_APPOINTMENT_STATUSES),
+            Appointment.patient_id.is_not(None),
+            Appointment.start_at > now_utc,
+        )
+    )
+    for stored_due, start in rows:
+        due = custom_due_at(tenant, _as_utc(start))
+        if due is None or due <= now_utc or _as_utc(stored_due) != due:
+            return True
+    return False
+
+
 async def _move_pending_custom(
     session: AsyncSession, reminder_id: UUID, tenant_id: UUID, due: datetime
 ) -> int:

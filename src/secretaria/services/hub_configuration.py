@@ -328,8 +328,16 @@ async def apply_tenant_config(session: AsyncSession, tenant: Tenant, data: dict)
     # TASK-044 R7 (§5.B) / TASK-048 R9 (§6.2): a NEW day, hour or time zone moves the extra
     # reminders already planned, in this same transaction - a rolled-back save rolls the
     # replan back too.
-    if _extra_reminder_state(tenant) != previous_extra:
-        await reminder_schedule.replan_custom_reminders(session, tenant, now=datetime.now(UTC))
+    now = datetime.now(UTC)
+    extra_changed = _extra_reminder_state(tenant) != previous_extra
+    extra_supplied = "reminder_extra_days_before" in data or "reminder_extra_lead_minutes" in data
+    # The migration keeps pending R7 due times. The next explicit reminder save
+    # reconciles those rows even if the displayed day/hour pair did not change.
+    if extra_changed or (
+        extra_supplied
+        and await reminder_schedule.pending_custom_reminders_need_replan(session, tenant, now=now)
+    ):
+        await reminder_schedule.replan_custom_reminders(session, tenant, now=now)
 
 
 def apply_professional_config(professional: Professional, data: dict) -> None:

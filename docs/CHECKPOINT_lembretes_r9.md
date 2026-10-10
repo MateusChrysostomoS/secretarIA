@@ -7,7 +7,7 @@ Plano: `docs/superpowers/plans/2026-10-10-lembretes-r9-sem-precheck-e-lembrete-d
 
 - Branch `task/TASK-048-lembrete-dia-hora-api` (base: 75c81baf). Commits: b950a30 (A1), a608f90 (A2), 80706f5 (A3), ad4d8e9 + dca93c7 (A4); este checkpoint registra A5.
 - **Local e commitado; não mesclado, não pushado, não deployado. Migração não aplicada em banco real.**
-- Suíte: 4997 passed / 68 skipped / 0 failed; ruff limpo; head Alembic `a4c7e2f9b1d3`.
+- Suíte: 4999 passed / 68 skipped / 0 failed; ruff limpo; head Alembic `a4c7e2f9b1d3`.
 
 ## O que entrou onde
 
@@ -45,8 +45,12 @@ espelhada; a hora escolhida se perde).
 
 ## Validacao e ajustes de execucao
 
-Su?te completa: 4997 passed, 68 skipped, 31 warnings em 693.57 s. Nenhuma falha nova ou baseline. `uvx ruff check src tests`: limpo; formatacao dos Python alterados: limpa; `python -m alembic heads`: a4c7e2f9b1d3. Migra??o testada em SQLite descartavel (upgrade/conversao/downgrade), nao em banco real.
+Su?te completa: 4999 passed, 68 skipped, 31 warnings em 287.66 s. Nenhuma falha nova ou baseline. `uvx ruff check src tests`: limpo; formatacao dos Python alterados: limpa; `python -m alembic heads`: a4c7e2f9b1d3. Migra??o testada em SQLite descartavel (upgrade/conversao/downgrade), nao em banco real.
 
 - O novo par ignora o legado antes da validacao, inclusive legado invalido: regressao adicional de D11, 3 casos RED -> GREEN.
 - As colunas antigas e novas seguem compativeis enquanto a tela antiga existir.
 - Graphify atualizado via AST, diagnostico sem duplicatas nem endpoints ausentes (um self-loop incidental permitido pela politica).
+
+## Revisao final
+
+Revisao independente encontrou uma lacuna no exemplo do plano: um par migrado igual ao salvo nao reprogramava linhas R7 ainda pendentes. Corrigido em `services/reminder_schedule.py::pending_custom_reminders_need_replan` e `services/hub_configuration.py::apply_tenant_config`: ao salvar explicitamente o lembrete, divergencias pendentes sao reconciliadas pelo escritor com locks ja existente. Linhas ja alinhadas continuam sem reprogramacao, e historico enviado permanece. Duas regressoes HTTP/banco (par novo igual / eco legado) falharam antes e passaram depois; 42 testes focados e suite completa 4999 passed / 68 skipped / 0 failed. Custo: uma consulta de leitura em salvamentos explicitos inalterados, com a funcionalidade ligada.
