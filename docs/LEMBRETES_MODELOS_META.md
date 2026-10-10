@@ -65,3 +65,15 @@ linha e cortadas em 400 caracteres; os rótulos dos botões têm no máximo 20 c
 Enquanto `REMINDER_V2_TEMPLATE_APPROVED=false`: dentro da janela de 24 h o paciente recebe a
 mensagem com os 3 botões normalmente; fora dela recebe o modelo simples (sem botões) e responde
 pela conversa — a mensagem de abertura do chat (plano R3) mostra os botões quando ele escrever.
+
+
+## R7 — avisos das ações da clínica (2026-10-09) — PROPOSTA, não submetida
+
+Hoje (sem modelo aprovado) o aviso fora das 24 h vai pelo modelo de uma variável `REMINDER_TEMPLATE_NAME`, só texto. Para os botões funcionarem fora das 24 h seriam necessários dois modelos UTILITY (pt_BR), cada um com três respostas rápidas na ordem **Confirmar / Cancelar / Alterar Dados** (o payload é posicional: `remconfirm|<id>`, `remcancel|<id>`, `remedit|<id>`, o mesmo do lembrete):
+
+| Nome proposto | Corpo | Variáveis |
+|---|---|---|
+| `clinica_confirmou_v1` | `Seu médico confirmou {{1}} de {{2}} às {{3}} com {{4}}. Você está ciente?` | 1 = "sua consulta" / "a consulta de <nome>", 2 = dd/mm/aaaa, 3 = HH:MM, 4 = médico |
+| `clinica_alterou_v1` | `A clínica alterou {{1}}: {{2}}. Agora: {{3}} às {{4}} com {{5}}.` | 1 = como acima, 2 = mudanças numa linha ("Data: 16/10 → 17/10; Horário: 14:00 → 15:30"), 3–5 = como acima |
+
+Pós-consulta e cancelamento não precisam de modelo novo (texto sem botões e `CANCEL_TEMPLATE_NAME`, respectivamente). Depois de aprovados, o código precisa de um ajuste pequeno em `services/staff_patient_message.py::_clinic_notice_whatsapp` (nome do modelo + variáveis + `button_payloads`, atrás de uma flag `*_APPROVED`, como o `REMINDER_V2_TEMPLATE_APPROVED`).
