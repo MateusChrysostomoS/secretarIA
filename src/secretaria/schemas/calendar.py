@@ -131,6 +131,20 @@ class CalendarEventRead(BaseModel):
     display_state: str | None = None
     attention: bool | None = None
     reminders: list[CalendarReminderRead] | None = None
+    # TASK-044 R7 (spec 2026-10-09 §5.C): what the "Editar/Remarcar" form pre-fills, so
+    # the front stops guessing. All None for an event with no local Appointment.
+    # `professional_id`/`professional_name` only when the owner is a professional of
+    # THIS clinic; `service` is the stored service name; `phone` is the appointment's
+    # CONTACT phone (never the patient's identity); `patient_channel` is the patient's
+    # own channel - "whatsapp" | "brain_message" - or None without a patient record (a
+    # block or a phone-only booking). A viewer restricted to his own agenda never
+    # receives another doctor's event at all (api/hub/calendar.py::list_events).
+    professional_id: str | None = None
+    professional_name: str | None = None
+    service: str | None = None
+    attendee_name: str | None = None
+    phone: str | None = None
+    patient_channel: str | None = None
 
 
 class AppointmentCreate(BaseModel):

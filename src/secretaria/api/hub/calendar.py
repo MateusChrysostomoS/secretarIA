@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import Row, select, update
+from sqlalchemy import Row, and_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.api.hub.deps import get_agenda_viewer, get_current_tenant
@@ -321,9 +321,27 @@ async def agenda_viewer(
 async def list_events(
     start: datetime,
     end: datetime,
+    mine: bool = False,
     tenant: Tenant = Depends(get_current_tenant),
+    viewer: AgendaViewer = Depends(get_agenda_viewer),
     session: AsyncSession = Depends(get_session),
 ) -> list[CalendarEventRead]:
+    """The agenda. TASK-044 R7 (spec 2026-10-09 §5.A/§5.C):
+
+    * a viewer restricted to his own agenda gets ONLY events whose local appointment is
+      his - never a Google-only event (its title can carry another patient's name), an
+      appointment without a doctor or another doctor's; `mine` cannot widen that;
+    * a clinic-wide viewer who is also a professional narrows with `mine=true`
+      ("Só os meus"); a clinic-wide viewer without one asking for it is 422;
+    * every event with a local appointment carries the Editar/Remarcar pre-fill.
+    The Google read itself is unchanged (the clinic's calendar, as before).
+    """
+    if mine and not viewer.restricted and viewer.professional_id is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            _detail("no_own_agenda", "Seu usuário não está ligado a um profissional da clínica."),
+        )
+    own_only = viewer.restricted or mine
     cal = await _get_calendar(session, tenant)
     events = await cal.check_availability(start, end)
 
@@ -340,12 +358,12 @@ async def list_events(
     # what stops a google_event_id from another clinic's calendar (a shared or
     # mis-configured Google account) resolving to that clinic's appointment
     # and handing this doctor a working cancel button for someone else's
-    # patient.
+    # patient. The patient join is tenant-scoped for the same reason.
     google_ids = [e["id"] for e in events if e.get("id")]
     booked: dict[str, Row] = {}
     if google_ids:
-        # The convênio columns ride along on the SAME single query: the plan
-        # ids are only needed to resolve names, never sent to the client.
+        # The convênio columns and the TASK-044 pre-fill ride along on the SAME
+        # single query: the plan ids are only needed to resolve names, never sent.
         rows = await session.execute(
             select(
                 Appointment.google_event_id,
@@ -356,12 +374,46 @@ async def list_events(
                 Appointment.status,
                 Appointment.confirmation_count,
                 Appointment.start_at,
-            ).where(
+                Appointment.professional_id,
+                Appointment.appointment_type,
+                Appointment.attendee_name,
+                Appointment.phone,
+                Patient.channel.label("patient_channel"),
+            )
+            .outerjoin(
+                Patient,
+                and_(Patient.id == Appointment.patient_id, Patient.tenant_id == tenant.id),
+            )
+            .where(
                 Appointment.tenant_id == tenant.id,
                 Appointment.google_event_id.in_(google_ids),
             )
         )
         booked = {row.google_event_id: row for row in rows.all()}
+
+    if own_only:
+        # TASK-044 R7: before anything else is loaded - nothing of another doctor's
+        # appointment (plan, deposit, reminders, patient) is even read for this page.
+        focus = viewer.professional_id
+        booked = {
+            gid: row
+            for gid, row in booked.items()
+            if focus is not None and row.professional_id == focus
+        }
+        events = [e for e in events if e.get("id") in booked]
+
+    # At most ONE tenant-scoped query for the page's doctor names; a professional id
+    # of another clinic on a row never resolves (shown as no doctor).
+    owner_ids = {row.professional_id for row in booked.values() if row.professional_id}
+    professional_names: dict[UUID, str] = {}
+    if owner_ids:
+        named = await session.execute(
+            select(Professional.id, Professional.name).where(
+                Professional.tenant_id == tenant.id,
+                Professional.id.in_(owner_ids),
+            )
+        )
+        professional_names = {pid: name for pid, name in named.all()}
 
     # At most ONE query per plan table for the whole page, both tenant-scoped
     # (services/insurance_catalog.py::load_appointment_plans) - a plan id from
@@ -407,6 +459,7 @@ async def list_events(
             else None
         )
         state = reminder_schedule.display_state(row, current) if row is not None else None
+        owner_name = professional_names.get(row.professional_id) if row is not None else None
         reads.append(
             CalendarEventRead(
                 id=e["id"],
@@ -424,6 +477,12 @@ async def list_events(
                 if state is not None
                 else None,
                 reminders=[_reminder_read(r) for r in current] if current is not None else None,
+                professional_id=str(row.professional_id) if owner_name is not None else None,
+                professional_name=owner_name,
+                service=row.appointment_type if row is not None else None,
+                attendee_name=row.attendee_name if row is not None else None,
+                phone=row.phone if row is not None else None,
+                patient_channel=row.patient_channel if row is not None else None,
             )
         )
     return reads

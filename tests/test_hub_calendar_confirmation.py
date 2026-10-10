@@ -27,7 +27,15 @@ from tests._reminder_fixtures import (  # noqa: F401
 CALENDAR = "/tenants/me/calendar"
 LEGACY_EVENT_KEYS = {"id", "summary", "start", "end", "appointment_id"}
 INSURANCE_KEYS = {"insurance", "insurance_plan", "deposit"}
-NEW_KEYS = {"status", "confirmation_count", "display_state", "attention", "reminders"}
+NEW_KEYS = {"status", "confirmation_count", "display_state", "attention", "reminders"} | {
+    # TASK-044 R7 (spec §5.C): what Editar/Remarcar pre-fills
+    "professional_id",
+    "professional_name",
+    "service",
+    "attendee_name",
+    "phone",
+    "patient_channel",
+}
 
 
 class _FakeCalendarService:
