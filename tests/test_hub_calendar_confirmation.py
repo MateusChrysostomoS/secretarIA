@@ -27,7 +27,15 @@ from tests._reminder_fixtures import (  # noqa: F401
 CALENDAR = "/tenants/me/calendar"
 LEGACY_EVENT_KEYS = {"id", "summary", "start", "end", "appointment_id"}
 INSURANCE_KEYS = {"insurance", "insurance_plan", "deposit"}
-NEW_KEYS = {"status", "confirmation_count", "display_state", "attention", "reminders"}
+NEW_KEYS = {"status", "confirmation_count", "display_state", "attention", "reminders"} | {
+    # TASK-044 R7 (spec §5.C): what Editar/Remarcar pre-fills
+    "professional_id",
+    "professional_name",
+    "service",
+    "attendee_name",
+    "phone",
+    "patient_channel",
+}
 
 
 class _FakeCalendarService:
@@ -306,7 +314,7 @@ async def test_patch_back_to_scheduled_zeroes_the_counter(client: AsyncClient, d
     assert a.first_confirmed_at is None and a.last_confirmed_at is None
 
 
-@pytest.mark.parametrize("terminal", ["cancelled", "attended", "no_show"])
+@pytest.mark.parametrize("terminal", ["cancelled", "attended"])
 async def test_patch_to_a_terminal_status_cancels_the_pending_reminders(
     client: AsyncClient, db, tenant, terminal
 ):  # noqa: F811
@@ -320,18 +328,17 @@ async def test_patch_to_a_terminal_status_cancels_the_pending_reminders(
     assert await _statuses(db, appt.id) == {"cancelled"}
 
 
-async def test_patch_keeps_accepting_the_transitions_it_always_accepted(
-    client: AsyncClient, db, tenant
-):  # noqa: F811
-    """No validation was added: a cancelled booking can still be PATCHed to any
-    status, exactly as before (this plan only adds counter side effects)."""
+async def test_patch_no_longer_resurrects_a_cancelled_booking(client: AsyncClient, db, tenant):  # noqa: F811
+    """R7 (spec 2026-10-09 §3): confirmed/attended on a cancelled booking is 409 not_live."""
     await _connect(db, tenant)
     appt = await _booked(db, tenant, status=AppointmentStatus.CANCELLED)
 
-    assert (await _patch(client, appt.id, "attended")).status_code == 200
-    again = await _patch(client, appt.id, "confirmed")
-    assert again.status_code == 200 and again.json()["status"] == "confirmed"
+    attended = await _patch(client, appt.id, "attended")
+    confirmed = await _patch(client, appt.id, "confirmed")
 
+    assert attended.status_code == confirmed.status_code == 409
+    assert confirmed.json()["detail"]["code"] == "not_live"
+    assert (await _reload(db, appt.id)).status == AppointmentStatus.CANCELLED
 
 async def test_patch_on_another_clinics_appointment_is_404_and_changes_nothing(
     client: AsyncClient, db, tenant, other_tenant
@@ -369,7 +376,7 @@ async def test_existing_appointment_read_keys_are_unchanged(client: AsyncClient,
         "deposit_status",
         "deposit_outcome",
     }
-    assert set(body) == legacy | {"confirmation_count"}
+    assert set(body) == legacy | {"confirmation_count", "patient_notice", "whatsapp_link"}
 
 
 async def test_same_start_reschedule_only_exposes_fresh_generation(client: AsyncClient, db, tenant):
@@ -389,3 +396,18 @@ async def test_same_start_reschedule_only_exposes_fresh_generation(client: Async
     assert len(body["reminders"]) == 3
     assert {r["status"] for r in body["reminders"]} == {"pending"}
     assert all(r["warned_at"] is None for r in body["reminders"])
+
+
+async def test_patch_no_show_after_the_start_cancels_the_pending_reminders(
+    client: AsyncClient, db, tenant
+):  # noqa: F811
+    """R7: no_show is only accepted after the start (spec 2026-10-09 §1)."""
+    await _connect(db, tenant)
+    appt = await _booked(db, tenant)
+    await _set(db, appt.id, start_at=datetime.now(UTC) - timedelta(minutes=5))
+    assert await _statuses(db, appt.id) == {"pending"}
+
+    response = await _patch(client, appt.id, "no_show")
+
+    assert response.status_code == 200
+    assert await _statuses(db, appt.id) == {"cancelled"}

@@ -12,7 +12,10 @@ from tests._reminder_fixtures import NOW, db, make_appointment, tenant  # noqa: 
 
 
 def test_string_constants_are_the_spec_vocabulary():
-    assert ar.REMINDER_KINDS == ("custom", "day", "hour", "chat")
+    assert ar.REMINDER_KINDS == ("custom", "day", "hour", "chat", "staff_confirm", "staff_edit")
+    assert ar.REMINDER_KINDS_STAFF == ("staff_confirm", "staff_edit")
+    assert ar.REMINDER_KINDS_UNPLANNED == ("chat", "staff_confirm", "staff_edit")
+    assert all(len(kind) <= 16 for kind in ar.REMINDER_KINDS)  # kind is VARCHAR(16)
     assert ar.REMINDER_STATUSES == (
         "pending",
         "sending",

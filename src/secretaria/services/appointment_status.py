@@ -19,6 +19,7 @@ phone, name, the appointment type, or any clinical detail — see
 `core/logging.py`'s redactor for the backstop.
 """
 
+from datetime import UTC, datetime
 from uuid import UUID
 
 from secretaria.core.logging import get_logger
@@ -72,3 +73,52 @@ def log_status_transition(
         reason=reason,
         still_live=is_live_status(new_status),
     )
+
+
+# --- TASK-032 R7: what a staff PATCH /status may do ----------------------------------
+
+
+class StaffTransitionRefused(ValueError):
+    """The PATCH would contradict the appointment's state (spec 2026-10-09 §1/§3)."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(code)
+        self.code = code
+        self.message = message
+
+
+# Closed outcomes are immutable through PATCH (binding spec 2026-10-09 §1/§3).
+STAFF_TERMINAL_NOOPS = (AppointmentStatus.ATTENDED, AppointmentStatus.NO_SHOW)
+
+
+def staff_transition(
+    current: AppointmentStatus,
+    target: AppointmentStatus,
+    *,
+    start_at: datetime | None,
+    now: datetime,
+) -> bool:
+    """True = apply `target`; False = a repeated attended/no_show (a no-op). Pure.
+
+    * `cancelled` keeps its pre-R7, unguarded behaviour (and its money hook).
+    * Any other target needs a LIVE appointment - a cancelled booking never comes back
+      (it used to: PATCH confirmed "resurrected" it). Closed outcome corrections
+      also require a separate explicitly authorized operation.
+    * `no_show` before the start is refused: "Faltou" does not exist before the time.
+
+    Raises `StaffTransitionRefused` with code `not_live` or `no_show_before_start`.
+    """
+    if target == AppointmentStatus.CANCELLED:
+        return True
+    if target in STAFF_TERMINAL_NOOPS and current == target:
+        return False
+    if not is_live_status(current):
+        raise StaffTransitionRefused("not_live", "Esta consulta já foi cancelada ou encerrada.")
+    if target == AppointmentStatus.NO_SHOW and start_at is not None:
+        start = start_at if start_at.tzinfo is not None else start_at.replace(tzinfo=UTC)
+        if start > now:
+            raise StaffTransitionRefused(
+                "no_show_before_start",
+                "Só é possível marcar falta depois do horário da consulta.",
+            )
+    return True

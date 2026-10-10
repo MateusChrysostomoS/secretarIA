@@ -107,6 +107,8 @@ async def load_upcoming_appointments(
             # the manage flow act on the owning calendar instead of a stale
             # booking-flow selection (workers/tasks.py::_manage_owner_calendar_target).
             "professional_id": str(appt.professional_id) if appt.professional_id else None,
+            **({"google_calendar_source": appt.google_calendar_source}
+               if appt.google_calendar_source is not None else {}),
         }
         for appt in rows
     ]
@@ -257,6 +259,10 @@ async def find_post_consult_followup(
         .limit(1)
     )
     if appointment is None:
+        return None
+    if appointment.post_consult_notified_at is not None:
+        # TASK-032 R7: the clinic's "Compareceu" already delivered the post-consult
+        # message for this appointment - asking again on the next open would repeat it.
         return None
     ended_at = as_utc(appointment.end_at or appointment.start_at)
     if ended_at > now:

@@ -763,3 +763,40 @@ async def test_an_unreachable_patient_is_reported_not_an_error(
     response = await _release(client, world.appointment.id)
 
     assert response.status_code == 200 and response.json()["patient_notice"] == "no_channel"
+
+
+# --- TASK-032 R7: the clinic's standing authorisation and the wa.me link ------------
+
+
+async def _approve_paid_notices(db, tenant_id) -> None:
+    async with db() as session:
+        tenant = await session.get(Tenant, tenant_id)
+        tenant.paid_notices_auto_approved = True
+        await session.commit()
+
+
+async def test_r7_with_the_clinics_standing_yes_the_release_notice_may_bill(  # noqa: F811
+    client: AsyncClient, db, acting
+):
+    pool = _FakeArqPool()
+    _install_pool(pool)
+    world = await _setup(db, acting, last_inbound_at=_recent(30))
+    await _approve_paid_notices(db, world.tenant.id)
+
+    response = await _release(client, world.appointment.id)  # no notify_outside_window
+
+    assert response.json()["patient_notice"] == "whatsapp_queued"
+    assert response.json()["whatsapp_link"] is None
+    assert pool.calls[0][-1] is True
+
+
+async def test_r7_outside_the_window_the_release_answers_the_free_link(  # noqa: F811
+    client: AsyncClient, db, acting
+):
+    _install_pool(_FakeArqPool())
+    world = await _setup(db, acting, last_inbound_at=_recent(30))
+
+    body = (await _release(client, world.appointment.id)).json()
+
+    assert body["patient_notice"] == "whatsapp_outside_window"
+    assert body["whatsapp_link"] == "https://wa.me/5511988887777"

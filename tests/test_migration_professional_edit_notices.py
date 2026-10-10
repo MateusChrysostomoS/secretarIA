@@ -22,7 +22,9 @@ def test_upgrade_defaults_unique_revision_and_downgrade():
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)
     scripts = ScriptDirectory.from_config(Config(str(ROOT / "alembic.ini")))
-    assert scripts.get_heads() == [migration.revision]
+    heads = scripts.get_heads()
+    assert len(heads) == 1
+    assert migration.revision in {r.revision for r in scripts.walk_revisions(head=heads[0])}
     assert migration.down_revision == "b1c4e7a2d9f3"
     engine = sa.create_engine("sqlite://")
     with engine.begin() as conn:
