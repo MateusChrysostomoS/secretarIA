@@ -37,6 +37,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from secretaria.core import extra_reminder
 from secretaria.models import Tenant
 from secretaria.models.professional import Professional
 from secretaria.schemas.config import TenantConfigRead
@@ -139,7 +140,6 @@ TENANT_SCALAR_FIELDS: tuple[str, ...] = (
     "pix_partial_refund_percent",
     "pix_reschedule_limit",
     "paid_notices_auto_approved",
-    "reminder_extra_lead_minutes",
 )
 
 PROFESSIONAL_CONFIG_FIELDS: tuple[str, ...] = (
@@ -254,6 +254,37 @@ async def check_tenant_activation(session: AsyncSession, tenant: Tenant, data: d
 # ---------------------------------------------------------------------------
 
 
+def _extra_reminder_state(tenant: Tenant) -> tuple[int | None, str | None, str | None]:
+    """What the extra reminders' due times depend on (a change replans them)."""
+    return (
+        tenant.reminder_extra_days_before,
+        tenant.reminder_extra_send_time,
+        tenant.timezone,
+    )
+
+
+def _apply_extra_reminder(tenant: Tenant, data: dict) -> None:
+    """The clinic's extra reminder (TASK-048 R9, spec §6.2) from a validated patch.
+
+    The pair wins; without it, a legacy `reminder_extra_lead_minutes` from a screen older
+    than R9 is translated (whole days rounded up, the stored hour kept). The legacy
+    column is mirrored as days x 1440 so a code rollback plans the same day.
+    """
+    if "reminder_extra_days_before" in data:
+        days = data["reminder_extra_days_before"]
+        send_time = data.get("reminder_extra_send_time") if days is not None else None
+    elif "reminder_extra_lead_minutes" in data:
+        days, send_time = extra_reminder.from_legacy_lead(
+            data["reminder_extra_lead_minutes"],
+            current_send_time=tenant.reminder_extra_send_time,
+        )
+    else:
+        return
+    tenant.reminder_extra_days_before = days
+    tenant.reminder_extra_send_time = send_time
+    tenant.reminder_extra_lead_minutes = extra_reminder.legacy_lead_minutes(days)
+
+
 async def apply_tenant_config(session: AsyncSession, tenant: Tenant, data: dict) -> None:
     """Apply a validated TenantConfigUpdate dump onto `tenant`. No commit.
 
@@ -267,10 +298,11 @@ async def apply_tenant_config(session: AsyncSession, tenant: Tenant, data: dict)
     so nothing reaches the database. See check_tenant_activation for why the
     gate cannot run any earlier.
     """
-    previous_lead = tenant.reminder_extra_lead_minutes
+    previous_extra = _extra_reminder_state(tenant)
     for field_name in TENANT_SCALAR_FIELDS:
         if field_name in data:
             setattr(tenant, field_name, data[field_name])
+    _apply_extra_reminder(tenant, data)
 
     # Budget check for the greeting's clinic slot. Runs on the PATCHED tenant
     # so a PUT that changes `clinic_name` and `clinic_description` together is
@@ -293,12 +325,10 @@ async def apply_tenant_config(session: AsyncSession, tenant: Tenant, data: dict)
     elif "is_active" in data:
         tenant.is_active = False
 
-    # TASK-044 R7 (spec §5.B): a NEW extra-reminder lead moves the reminders already
-    # planned, in this same transaction - a rolled-back save rolls the replan back too.
-    if (
-        "reminder_extra_lead_minutes" in data
-        and tenant.reminder_extra_lead_minutes != previous_lead
-    ):
+    # TASK-044 R7 (§5.B) / TASK-048 R9 (§6.2): a NEW day, hour or time zone moves the extra
+    # reminders already planned, in this same transaction - a rolled-back save rolls the
+    # replan back too.
+    if _extra_reminder_state(tenant) != previous_extra:
         await reminder_schedule.replan_custom_reminders(session, tenant, now=datetime.now(UTC))
 
 
@@ -396,6 +426,8 @@ async def tenant_read_model(session: AsyncSession, tenant: Tenant) -> TenantConf
         paid_notices_auto_approved=bool(tenant.paid_notices_auto_approved),
         reminders_v2_enabled=bool(tenant.reminders_v2_enabled),
         reminder_extra_lead_minutes=tenant.reminder_extra_lead_minutes,
+        reminder_extra_days_before=tenant.reminder_extra_days_before,
+        reminder_extra_send_time=tenant.reminder_extra_send_time,
     )
 
 
