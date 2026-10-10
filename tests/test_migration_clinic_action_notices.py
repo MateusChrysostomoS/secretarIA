@@ -26,11 +26,12 @@ def _migration():
     return module
 
 
-def test_the_migration_is_the_single_head_on_top_of_the_edit_outbox():
+def test_the_migration_sits_on_top_of_the_edit_outbox():
+    # The head itself is pinned by the newest migration's test (R9: a4c7e2f9b1d3).
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "migrations"))
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == [REVISION]
+    assert scripts.get_revision(REVISION) is not None
     assert _migration().down_revision == DOWN_REVISION
 
 

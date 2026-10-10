@@ -1,4 +1,4 @@
-"""The clinic's extra reminder: "N dias antes, às HH:MM" in its time zone (TASK-048 R9, spec §6.2)."""
+"""Local calendar and time rule for the extra reminder (TASK-048 R9)."""
 
 from datetime import UTC, datetime, time, timedelta
 from types import SimpleNamespace

@@ -246,6 +246,13 @@ class Tenant(Base):
     # TASK-032 (spec 4.5): lead time, in minutes before the appointment, of the
     # clinic-configured ("custom") reminder. NULL = the clinic has no extra one.
     reminder_extra_lead_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # TASK-048 R9 (spec 2026-10-09 §6.2): the extra reminder as "N days before, at HH:MM"
+    # in `timezone` (core/extra_reminder.py). Both NULL = no extra reminder. The column
+    # above (`reminder_extra_lead_minutes`) is the LEGACY form: R9 no longer reads it and
+    # mirrors days x 1440 into it on every save, so a code rollback plans the same day.
+    # Drop it in a later migration once API and worker both run R9 ("narrow after").
+    reminder_extra_days_before: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reminder_extra_send_time: Mapped[str | None] = mapped_column(String(5), nullable=True)
 
     # TASK-032 R7 (spec 2026-10-09 §2): the clinic's standing yes ("não perguntar
     # novamente") to BILLED WhatsApp notices outside Meta's 24 h window. With it, every

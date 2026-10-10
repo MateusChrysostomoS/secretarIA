@@ -45,14 +45,16 @@ async def db():
     await engine.dispose()
 
 
-async def _make_tenant(db, name: str, *, enabled: bool, extra_lead: int | None) -> Tenant:
+async def _make_tenant(db, name: str, *, enabled: bool, extra_days: int | None) -> Tenant:
     async with db() as session:
         t = Tenant(
             id=uuid4(),
             clinic_name=name,
             phone_number_id=None,
             reminders_v2_enabled=enabled,
-            reminder_extra_lead_minutes=extra_lead,
+            reminder_extra_days_before=extra_days,
+            reminder_extra_send_time="09:00" if extra_days else None,
+            reminder_extra_lead_minutes=extra_days * 1440 if extra_days else None,
         )
         session.add(t)
         await session.commit()
@@ -62,13 +64,17 @@ async def _make_tenant(db, name: str, *, enabled: bool, extra_lead: int | None) 
 
 @pytest_asyncio.fixture
 async def tenant(db) -> Tenant:
-    """Clinic with the feature ON and a 5-day extra reminder (7200 min)."""
-    return await _make_tenant(db, "Clinic", enabled=True, extra_lead=7200)
+    """Clinic with the feature ON and an extra reminder 5 days before at 09:00 (São Paulo).
+
+    NOW is 12:00 UTC = 09:00 in São Paulo, so for an appointment at NOW + k days the extra
+    reminder is exactly start - 5 days (the R1 assertions written in minutes still hold).
+    """
+    return await _make_tenant(db, "Clinic", enabled=True, extra_days=5)
 
 
 @pytest_asyncio.fixture
 async def other_tenant(db) -> Tenant:
-    return await _make_tenant(db, "Other clinic", enabled=True, extra_lead=7200)
+    return await _make_tenant(db, "Other clinic", enabled=True, extra_days=5)
 
 
 async def make_patient(db, tenant: Tenant) -> Patient:
