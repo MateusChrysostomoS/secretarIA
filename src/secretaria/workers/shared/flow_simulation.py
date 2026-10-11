@@ -126,6 +126,23 @@ _NOTES = {
 }
 
 
+# The four steps where the router asks the LLM to pick (ai/scoped_help.py). The simulation
+# never runs them: a `state` naming one of these would otherwise make a real, paid model call.
+_HELP_STEPS = frozenset(
+    {"professional_help", "professional_help_final", "service_help", "service_help_final"}
+)
+_HELP_NOTE = (
+    "Neste ponto a IA ajudaria o paciente a escolher. A simulação não a executa; use Recomeçar."
+)
+
+
+def note_for(action: str | None, flow_step: str | None) -> str | None:
+    """The on-screen explanation for a turn, or None when the turn is fully simulated."""
+    if flow_step in _HELP_STEPS:
+        return _HELP_NOTE
+    return _NOTES.get(action or "")
+
+
 async def simulate_turn(
     *,
     tenant: Any,
@@ -144,6 +161,9 @@ async def simulate_turn(
     else:
         inbound = text or ""
 
+    if current.get("flow_step") in _HELP_STEPS:
+        return SimulationTurn(bubbles=[], state=current, finished=False, note=_HELP_NOTE)
+
     conversation = _conversation(current)
     selected = current.get("flow_selected_professional_id")
     result = await route(
@@ -158,7 +178,7 @@ async def simulate_turn(
     )
     bubbles = [_render(b) for b in result.bubbles]
     finished = result.appointment is not None
-    note = _NOTES.get(result.action)
+    note = note_for(result.action, result.flow_step)
     if finished:
         note = "Consulta simulada: nada foi agendado de verdade."
     return SimulationTurn(bubbles=bubbles, state=_state_from(result), finished=finished, note=note)

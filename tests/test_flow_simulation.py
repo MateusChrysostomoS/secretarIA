@@ -148,3 +148,31 @@ async def test_free_text_that_would_reach_the_llm_is_reported_not_run() -> None:
     first = await _turn(tenant, calendars, state=initial_state(), text="olá")
     second = await _turn(tenant, calendars, state=first.state, text="qual o endereço de vocês?")
     assert second.note and "IA livre" in second.note
+
+
+@pytest.mark.parametrize(
+    "step", ["professional_help", "professional_help_final", "service_help", "service_help_final"]
+)
+async def test_the_scoped_help_steps_never_reach_the_llm(monkeypatch, step) -> None:
+    # A hostile or stale `state` can name a help step; route() would call ChatOpenAI there.
+    async def _boom(*args, **kwargs):
+        raise AssertionError("the simulation must never call the LLM")
+
+    monkeypatch.setattr("secretaria.services.flow_router.run_professional_help", _boom)
+    monkeypatch.setattr("secretaria.services.flow_router.run_service_help", _boom)
+    tenant = _tenant()
+    state = {**initial_state(), "flow_state": "service_catalog", "flow_step": step}
+    turn = await _turn(tenant, _Calendars(tenant), state=state, text="x")
+    assert turn.note and "IA" in turn.note
+    assert turn.state["flow_step"] == step and not turn.finished
+
+
+async def test_entering_the_help_step_explains_that_the_ai_is_not_run() -> None:
+    from secretaria.services.flow_router import _enter_service_help
+
+    convo = SimpleNamespace(flow_selected_professional_id=None, flow_selected_insurance=None)
+    result = _enter_service_help(convo)
+    from secretaria.workers.shared.flow_simulation import note_for
+
+    note = note_for(result.action, result.flow_step)
+    assert note and "IA" in note
