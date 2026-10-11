@@ -32,6 +32,7 @@ from secretaria.api.hub import (
     oauth,
     professionals,
     services,
+    simulation,
     units,
 )
 from secretaria.config import get_settings
@@ -119,6 +120,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_insurance.router, tags=["admin"])
     # Doctor hub: tenant config + Google Calendar OAuth onboarding + calendar actions.
     app.include_router(config.router)
+    app.include_router(simulation.router)
     app.include_router(context_completeness.router)
     app.include_router(oauth.router)
     app.include_router(calendar.router)
