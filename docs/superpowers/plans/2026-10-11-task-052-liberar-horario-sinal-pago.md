@@ -4,9 +4,9 @@
 
 **Goal:** Quando a clínica libera uma consulta com sinal Pix já pago, o paciente escolhe **Manter horário** (um PEDIDO à clínica, que aceita ou recusa em 24 h), **Remarcar** (a qualquer momento; leva o sinal se a clínica ainda não marcou devolvido) ou **Cancelar** (avisa a clínica na hora com o passo a passo do Asaas); o silêncio avisa a clínica em B e vira "Cancelado por falta de resposta" em T + 24 h; quando a clínica marca devolvido o paciente responde Recebido / Não recebido — e a TASK-052 expõe tudo isso, com o escopo de agenda de cada papel, para a aba da TASK-054. O sistema nunca devolve dinheiro (D15).
 
-**Architecture:** Duas tabelas aditivas — `deposit_release_offers` (uma por consulta liberada com sinal; eixos `decision` e `refund_status`; cada transição um `UPDATE ... WHERE` guardado) e `deposit_release_emails` (um envio por linha, reivindicado antes de enviar). Regras em `services/` (`release_deadlines`, `release_offer`, `release_keep`, `release_offer_dispatch`, `brain_staff`); toques por `workers/shared/actions.py::_handle_action_button` via `workers/shared/release_offer_actions.py`; B, E, K e envios na varredura de pagamentos; transferência na transação que cria a consulta nova; quatro rotas novas no hub com o escopo da agenda.
+**Architecture:** Duas tabelas aditivas — `deposit_release_offers` (uma por consulta liberada com sinal; eixos `decision` e `refund_status`; cada transição um `UPDATE ... WHERE` guardado) e `deposit_release_emails` (um envio por linha, reivindicado antes de enviar). Regras em `services/` (`release_deadlines`, `release_offer`, `release_keep`, `release_offer_dispatch`); toques por `workers/shared/actions.py::_handle_action_button` via `workers/shared/release_offer_actions.py`; B, E, K e envios na varredura de pagamentos; transferência na transação que cria a consulta nova; quatro rotas novas no hub com o escopo da agenda.
 
-**Tech Stack:** Python 3.12, FastAPI, SQLAlchemy async, Alembic, arq, httpx (brain-api), pytest (`asyncio_mode = "auto"`, SQLite em memória; Postgres real opcional por `PAYMENTS_TEST_PG_URL`), ruff, SMTP. Front: Next.js/TypeScript/vitest (só um texto).
+**Tech Stack:** Python 3.12, FastAPI, SQLAlchemy async, Alembic, arq, pytest (`asyncio_mode = "auto"`, SQLite em memória; Postgres real opcional por `PAYMENTS_TEST_PG_URL`), ruff, SMTP. Front: Next.js/TypeScript/vitest (só um texto).
 
 **Spec:** `docs/superpowers/specs/2026-10-11-liberar-horario-com-sinal-pago-design.md` (3ª revisão do dono, 2026-10-12; este worktree). Regras-mãe: D15, `docs/CHECKPOINT_task050_main_into_out_of_mvp.md`, `tests/test_workers_layering.py`, skill `frozen-contract-migration`.
 
@@ -14,7 +14,7 @@
 
 - **Worktree:** `C:\TECH\BRAIN-worktrees\TASK-052\secretarIA`, branch `task/TASK-052-liberar-sinal-pago`, base `task/TASK-050-secretaria` @ `3650e10` (+ só commits de documentos). Integra em `feature/out-of-mvp` (NUNCA `main`) depois da TASK-050.
 - **Este plano NÃO foi aplicado numa cópia descartável.** Âncoras conferidas lendo o código de `3650e10`; os blocos são o conteúdo pretendido. Se um trecho não aplicar, aplique pela âncora (nome de função/constante), nunca pelo número de linha, e registre no `TASK.md`. Veja cada teste falhar ANTES de implementar.
-- **Dependência externa:** `GET /internal/tenants/{id}/staff-roles` do brain-api (o dono está construindo). Sem ele, o fechamento usado é o do médico (fallback testado).
+- **Pendente de dependência (decisão do dono, 2026-10-12):** a leitura do papel de secretária no brain-api fica para a **Task 16**, que só começa quando a tela de integrantes do dono existir. Até lá o prazo B usa o horário de fechamento do **médico da consulta** (sem médico: o da clínica). As Tasks 0–15 não dependem da 16.
 - **NÃO PROVADO:** WhatsApp real (modelos não aprovados), SMTP real, cartão no Portal real, produção, o endpoint de papéis do brain-api. A tela da aba é da TASK-054.
 - **Produção:** NÃO AUTORIZADA. Sem push, deploy, migração em banco real, `.env`, Easypanel.
 
@@ -31,7 +31,7 @@
 | 5 | Portal: ids aceitos como ação | família dos lembretes | + os 5 `rel*` (só de cartão recente) |
 | 6 | `payment_attention_items.reason` / `resolve_item` | — | + `released_refund_due`; resolver o item atualiza a oferta |
 | 7 | Hub NOVO (TASK-054) | — | `GET /tenants/me/release-offers`, `POST .../{id}/refunded`, `POST .../{id}/keep/accept`, `POST .../{id}/keep/refuse` — todos os papéis, escopo da agenda |
-| 8 | brain-api (DEPENDÊNCIA) | — | `GET /internal/tenants/{id}/staff-roles` → `{"roles": [...]}` (secretarIA só lê; fallback = médico) |
+| 8 | brain-api (PENDENTE — Task 16) | — | leitura futura de `GET /internal/tenants/{id}/staff-roles` → `{"roles": [...]}`; hoje nada é chamado e B usa o horário do médico |
 | 9 | Banco | cabeça `e2b7c4a9d1f5` | + `b6d2e8f4a1c3` (só tabelas novas) |
 | 10 | `config.py` | — | `RELEASE_OFFER_TEMPLATE_NAME`, `REFUND_CHECK_TEMPLATE_NAME` (PENDÊNCIA META) |
 | 11 | Avisos | — | 7 tipos à clínica (e-mail com link do console); ao paciente: mensagens na conversa; e-mail só no Portal |
@@ -40,7 +40,7 @@
 ## Global Constraints
 
 - **Dinheiro (D15):** o sistema NUNCA estorna nem chama o provedor; "devolver" = UM item `released_refund_due` por sinal + avisos à clínica, que estorna no Asaas.
-- **Instantes:** T; S; F = fechamento − 30 min no dia de T (clínica se o brain-api diz que há secretária; senão o do médico; sem médico, a clínica); B = `min(T + 6 h, F)` se F > T, senão T + 6 h; E = T + 24 h; K = toque em Manter + 24 h. Nada sai antes de T.
+- **Instantes:** T; S; F = fechamento − 30 min no dia de T (por enquanto o horário do MÉDICO da consulta; sem médico, o da clínica — a regra "clínica com secretária usa o horário da clínica" é a Task 16, pendente); B = `min(T + 6 h, F)` se F > T, senão T + 6 h; E = T + 24 h; K = toque em Manter + 24 h. Nada sai antes de T.
 - **Manter** só pede: T..S (também depois de B), devolução não marcada; abre `keep_requested` até K; pausa B/E e descarta os avisos de devolução que vencerem; aceite (só com horário livre) recria e desfaz a devolução; recusa ou K → devolução devida, aviso novo + lembrete.
 - **Remarcar** a qualquer momento enquanto a oferta não está encerrada (`kept`, `rebooked`, `no_answer_cancelled`, `not_offered` encerram): leva o sinal se a devolução não foi marcada; ao confirmar, desfaz a devolução e manda `clinic_rebooked_deposit`.
 - **Cancelar** sempre avisa a clínica na hora (exceto devolução já marcada). **E** sem decisão final → `no_answer_cancelled` (terminal, não reabre).
@@ -67,7 +67,7 @@
 
 ## File Structure
 
-**Criar (secretarIA):** `src/secretaria/models/deposit_release_offer.py`; `migrations/versions/b6d2e8f4a1c3_deposit_release_offers.py`; `src/secretaria/services/{release_deadlines,release_offer,release_keep,release_offer_dispatch,brain_staff}.py`; `src/secretaria/workers/shared/release_offer_actions.py`; `src/secretaria/api/hub/release_offers.py`; `src/secretaria/schemas/release_offers.py`; testes `tests/release_offer_support.py`, `tests/test_deposit_release_offer_migration.py`, `tests/test_release_deadlines.py`, `tests/test_release_offer.py`, `tests/test_release_keep.py`, `tests/test_release_offer_dispatch.py`, `tests/test_brain_staff.py`, `tests/test_release_offer_buttons.py`, `tests/test_release_offer_carry_over.py`, `tests/test_release_offers_hub.py`, `tests/test_release_offer_postgres.py`; `docs/CHECKPOINT_task052_liberar_sinal_pago.md`.
+**Criar (secretarIA):** `src/secretaria/models/deposit_release_offer.py`; `migrations/versions/b6d2e8f4a1c3_deposit_release_offers.py`; `src/secretaria/services/{release_deadlines,release_offer,release_keep,release_offer_dispatch}.py`; `src/secretaria/workers/shared/release_offer_actions.py`; `src/secretaria/api/hub/release_offers.py`; `src/secretaria/schemas/release_offers.py`; testes `tests/release_offer_support.py`, `tests/test_deposit_release_offer_migration.py`, `tests/test_release_deadlines.py`, `tests/test_release_offer.py`, `tests/test_release_keep.py`, `tests/test_release_offer_dispatch.py`, `tests/test_release_offer_buttons.py`, `tests/test_release_offer_carry_over.py`, `tests/test_release_offers_hub.py`, `tests/test_release_offer_postgres.py`; `docs/CHECKPOINT_task052_liberar_sinal_pago.md`.
 
 **Modificar (secretarIA):** `src/secretaria/models/{__init__,payment_attention_item}.py`; `src/secretaria/config.py`; `src/secretaria/main.py`; `src/secretaria/services/email.py`; `src/secretaria/services/payments/attention_view.py`; `src/secretaria/api/hub/calendar.py`; `src/secretaria/services/appointment_release.py`; `src/secretaria/workers/whatsapp/notifications.py`; `src/secretaria/schemas/webhook.py`; `src/secretaria/workers/portal/{inbound,open}.py`; `src/secretaria/workers/shared/actions.py`; `src/secretaria/services/{flow_router,availability,booking_hold}.py`; `src/secretaria/workers/shared/{flow_runner,booking_hold}.py`; `src/secretaria/workers/payments_cron.py`; testes `tests/{test_deposit_before_migration,test_payment_attention,test_hub_release,test_cancellation_notice,test_availability,test_before_booking_flow,test_payment_cron_jobs}.py`; `docs/LEMBRETES_MODELOS_META.md`; `CLAUDE.md` (1 linha).
 
@@ -75,7 +75,9 @@
 
 **Fora dos repositórios:** `C:\TECH\BRAIN\tasks\TASK-052\TASK.md`.
 
-**Nunca modificar:** `.env`, `Dockerfile`, `workers/tasks.py` (fachada), `workers/arq_worker.py`, brain-api (a dependência é do dono), PreCheck.
+**Task 16 (pendente, não executar agora):** `src/secretaria/services/brain_staff.py`, `tests/test_brain_staff.py`, uma linha em `api/hub/calendar.py::release_appointment`.
+
+**Nunca modificar:** `.env`, `Dockerfile`, `workers/tasks.py` (fachada), `workers/arq_worker.py`, brain-api, PreCheck.
 
 ---
 
@@ -127,7 +129,7 @@ Expected: 0 failed (medido no plano anterior sobre `3650e10`: **6103 passed, 79 
 - Test: `tests/test_deposit_release_offer_migration.py` (novo)
 
 **Interfaces:**
-- Produces: `DepositReleaseOffer` (colunas `id, tenant_id, deposit_id, released_appointment_id (UNIQUE), patient_id, conversation_id, deposit_paid, decision, refund_status, refund_source, released_at, slot_start_at, decide_by_at, expires_at, paid_notice_allowed, first_contact_at, refund_due_at, refund_marked_at, patient_answered_at, last_reminder_at, after_start_card_at, keep_requested_at, keep_deadline_at, keep_outcome, keep_resolved_at, keep_resolved_by, new_appointment_id, closed_at, created_at`); `DepositReleaseEmail` (`id, tenant_id, offer_id, kind, seq, due_at, attempts, claimed_at, outcome, created_at`; UNIQUE `(offer_id, kind, seq)`). Nenhuma coluna em tabela existente ("tem secretária" vem do brain-api, Task 6).
+- Produces: `DepositReleaseOffer` (colunas `id, tenant_id, deposit_id, released_appointment_id (UNIQUE), patient_id, conversation_id, deposit_paid, decision, refund_status, refund_source, released_at, slot_start_at, decide_by_at, expires_at, paid_notice_allowed, first_contact_at, refund_due_at, refund_marked_at, patient_answered_at, last_reminder_at, after_start_card_at, keep_requested_at, keep_deadline_at, keep_outcome, keep_resolved_at, keep_resolved_by, new_appointment_id, closed_at, created_at`); `DepositReleaseEmail` (`id, tenant_id, offer_id, kind, seq, due_at, attempts, claimed_at, outcome, created_at`; UNIQUE `(offer_id, kind, seq)`). Nenhuma coluna em tabela existente ("tem secretária" virá do brain-api na Task 16, pendente; hoje B usa o horário do médico).
 - Constantes (em `models/deposit_release_offer.py`): decisões `DECISION_NONE="none"`, `DECISION_RESCHEDULING="rescheduling"`, `DECISION_KEEP_REQUESTED="keep_requested"`, `DECISION_KEPT="kept"`, `DECISION_KEEP_DECLINED="keep_declined"`, `DECISION_REBOOKED="rebooked"`, `DECISION_CANCELLED="cancelled"`, `DECISION_NO_ANSWER="no_answer_cancelled"`, `DECISION_NOT_OFFERED="not_offered"`; grupos `SILENT_DECISIONS=(none, rescheduling)` (B e E valem), `KEEP_FROM=(none, rescheduling)`, `RESCHEDULE_FROM=(none, rescheduling, cancelled, keep_requested, keep_declined)`, `CANCEL_FROM=(none, rescheduling, keep_requested, keep_declined)`; `KEEP_OUTCOME_ACCEPTED="accepted"`, `KEEP_OUTCOME_REFUSED="refused"`, `KEEP_OUTCOME_TIMEOUT="timeout"`; `REFUND_SOURCE_KEEP_REFUSED="keep_refused"`, `REFUND_SOURCE_KEEP_TIMEOUT="keep_timeout"`; `REFUND_CARRYABLE=(not_due, due)`; devolução `REFUND_NOT_DUE="not_due"`, `REFUND_DUE="due"`, `REFUND_MARKED="marked"`, `REFUND_RECEIVED="received"`, `REFUND_NOT_RECEIVED="not_received"`, `REFUND_CLINIC_DECIDED="clinic_decided"`, `REFUND_ANSWERABLE=(marked, not_received)`; `REFUND_SOURCE_PATIENT="patient"`, `REFUND_SOURCE_TIMEOUT="timeout"`; envios `EMAIL_REFUND_CANCEL="clinic_refund_cancel"`, `EMAIL_REFUND_NOANSWER="clinic_refund_noanswer"`, `EMAIL_REFUND_DAY="clinic_refund_day"`, `EMAIL_REFUND_REMINDER="clinic_refund_reminder"`, `EMAIL_KEEP_REQUEST="clinic_keep_request"`, `EMAIL_KEEP_DECLINED="clinic_keep_declined"`, `EMAIL_REBOOKED_DEPOSIT="clinic_rebooked_deposit"`, `EMAIL_PATIENT_KEEP_ACCEPTED="patient_keep_accepted"`, `EMAIL_PATIENT_KEEP_DECLINED="patient_keep_declined"`, `EMAIL_PATIENT_CHECK="patient_check"`, `REFUND_NOTICE_KINDS` (os 5 avisos de devolução); resultados `OUTCOME_SENDING="sending"`, `OUTCOME_SENT="sent"`, `OUTCOME_SKIPPED="skipped"`, `OUTCOME_NO_CONTACT="skipped_no_contact"`, `OUTCOME_GIVEN_UP="given_up"`. Revisão `b6d2e8f4a1c3` (desce de `e2b7c4a9d1f5`).
 
 - [ ] **Step 1: Escrever o teste que falha**
@@ -767,8 +769,8 @@ T = the release instant. B (`decide_by`) = min(T + 6 h, F), F = 30 minutes befor
 local day: the patient who has not answered by B makes the clinic return the deposit. E
 (`expires_at`) = T + 24 h: an offer still undecided then is "cancelled for lack of answer".
 
-`business_hours` is chosen by the CALLER (services/release_offer.py): the clinic's hours when it
-has a secretary, else the hours of the consultation's doctor. Shape `{"monday": [{"start":
+`business_hours` is chosen by the CALLER (services/release_offer.py): the hours of the
+consultation's doctor (the clinic's when there is no doctor; "clinic with a secretary" = Task 16). Shape `{"monday": [{"start":
 "08:00", "end": "12:00"}, ...]}` (schemas/config.py); closing = the latest `end` of T's weekday,
 in `Tenant.timezone`. There is no holiday calendar in the product.
 
@@ -1224,16 +1226,16 @@ async def test_opening_is_idempotent_and_sets_the_instants(db):
     assert await _sweep(db, E + timedelta(days=3)) == 0  # nothing ever fires on it
 
 
-async def test_the_closing_is_the_clinics_with_a_secretary_else_the_doctors(db):
-    # The doctor closes at 18:00 (F = T + 3 h 30); the clinic at 22:00 (B = T + 6 h).
-    _a, doctors = await _offer(db, professional_hours=CLOSES_AT_SIX, has_secretary=False)
-    _b, unknown = await _offer(db, professional_hours=CLOSES_AT_SIX, has_secretary=None)
-    _c, clinics = await _offer(db, professional_hours=CLOSES_AT_SIX, has_secretary=True)
-    _d, no_doctor = await _offer(db, business_hours=CLOSES_AT_SIX)
+async def test_the_closing_is_the_consultation_doctors(db):
+    # Owner 2026-10-12: B uses the DOCTOR's closing for now (the "clinic with a secretary" rule is
+    # Task 16, pending). The doctor closes at 18:00 (F = T + 3 h 30); the clinic at 22:00 (T + 6 h).
+    _a, doctors = await _offer(db, professional_hours=CLOSES_AT_SIX)
+    _b, no_doctor = await _offer(db, business_hours=CLOSES_AT_SIX)
     assert utc(doctors.decide_by_at) == T + timedelta(hours=3, minutes=30)
-    assert utc(unknown.decide_by_at) == T + timedelta(hours=3, minutes=30)  # brain-api silent
+    assert utc(no_doctor.decide_by_at) == T + timedelta(hours=3, minutes=30)  # no doctor: clinic's
+    # The hook Task 16 will fill: True switches to the clinic's hours (22:00 -> B = T + 6 h).
+    _c, clinics = await _offer(db, professional_hours=CLOSES_AT_SIX, has_secretary=True)
     assert utc(clinics.decide_by_at) == B
-    assert utc(no_doctor.decide_by_at) == T + timedelta(hours=3, minutes=30)
 
 
 async def test_a_deposit_of_another_clinic_never_gets_an_offer(db):
@@ -1664,8 +1666,8 @@ Instants: T release, S consultation start, B = min(T + 6 h, closing - 30 min), E
 K = the "Manter" tap + 24 h. The platform never returns money (decision D15).
 
 * `open_offer` (hub release): ONE `DepositReleaseOffer` per released appointment with a deposit;
-  closing = the clinic's when it has a secretary (brain-api roles, services/brain_staff.py), else
-  the doctor's.
+  closing = the consultation doctor's (no doctor: the clinic's). `has_secretary=True` switches to
+  the clinic's hours - a hook for Task 16 (pending); nobody passes it yet.
 * "Manter horário" (`request_keep`, T..S, also after B) asks the CLINIC: `keep_requested` for 24 h
   (K). The clinic accepts (services/release_keep.py -> `claim_keep`) or refuses
   (`decline_keep`); no decision by K is a refusal. B and E do not apply while it is open and the
@@ -2017,7 +2019,7 @@ def patient_decision(offer: DepositReleaseOffer) -> str:
 async def _closing_hours(
     session: AsyncSession, tenant: Tenant, appointment: Appointment, has_secretary: bool | None
 ):
-    """The clinic's hours when it has a secretary; otherwise the consultation's doctor's."""
+    """The consultation doctor's hours (no doctor: the clinic's); `has_secretary=True` = clinic's."""
     if has_secretary or appointment.professional_id is None:
         return tenant.business_hours
     professional = await session.get(Professional, appointment.professional_id)
@@ -2039,8 +2041,8 @@ async def open_offer(
     """Record the release of an appointment with a deposit of THIS clinic; idempotent.
 
     PAID: an open offer with T, S, B and E. Anything else: `not_offered` (list only). None when the
-    deposit or the appointment is not this clinic's. `has_secretary` comes from brain-api
-    (services/brain_staff.py); None = unknown = the doctor's closing time. Does not commit.
+    deposit or the appointment is not this clinic's. `has_secretary` is a hook for Task 16
+    (pending: brain-api roles); today nobody passes it, so B uses the doctor's closing. No commit.
     """
     if (
         deposit.tenant_id != tenant.id
@@ -4411,16 +4413,14 @@ git commit -m "feat(payments): released-slot notices - keep request, refund step
 
 ---
 
-### Task 6: Liberar abre a oferta (hub, com o fechamento lido do brain-api) e o Portal recebe o cartão
+### Task 6: Liberar abre a oferta (hub) e o Portal recebe o cartão com os botões
 
 **Files:**
-- Create: `src/secretaria/services/brain_staff.py`, `tests/test_brain_staff.py`
 - Modify: `src/secretaria/api/hub/calendar.py` (`release_appointment`), `src/secretaria/services/appointment_release.py` (`notify_released_patient`, `_notify_portal`)
-- Test: `tests/test_hub_release.py`, `tests/test_brain_staff.py`
+- Test: `tests/test_hub_release.py`
 
 **Interfaces:**
-- Consumes: Task 3 (`open_offer(..., has_secretary=)`, `offer_body`, `offer_buttons`, `keep_allowed`, `warning_text`, `DEPOSIT_OUTCOME_OFFERED`); o padrão de cliente de `services/brain_professionals.py` (`BRAIN_API_BASE_URL`, `INTERNAL_API_KEY`, `X-Internal-Api-Key`, `BRAIN_API_TIMEOUT_SECONDS`).
-- Produces (novo): `services/brain_staff.py::fetch_has_secretary(tenant_id) -> bool | None` — `GET {BRAIN_API_BASE_URL}/internal/tenants/{tenant_id}/staff-roles` → `{"roles": [str, ...]}`; `True`/`False` pela presença de `"secretary"`; `None` em qualquer ambiguidade (sem configuração, rede, ≠ 200 — inclusive 404 enquanto o brain-api não tiver o endpoint —, JSON ou formato inválidos). **Dependência externa:** o endpoint é do brain-api (o dono está construindo a adição de integrantes por papel); até existir, `None` = horário do médico.
+- Consumes: Task 3 (`open_offer`, `offer_body`, `offer_buttons`, `keep_allowed`, `warning_text`, `DEPOSIT_OUTCOME_OFFERED`). `open_offer` é chamado SEM `has_secretary` (fica `None` = horário de fechamento do MÉDICO da consulta) até a Task 16 (pendente de dependência).
 - Produces: 409 `retention_ack_required` com `deposit_outcome = "choice_offered"`; 200 com `deposit_outcome = "choice_offered"` e UMA oferta aberta; sinal NÃO pago: o fluxo de hoje (`on_appointment_cancelled`) + registro `not_offered`; `notify_released_patient(..., offer_buttons: list[tuple[str, str]] | None = None)`; o enfileiramento do job NÃO muda (7 argumentos; o 6º é o corpo inteiro da oferta). Paciente de WhatsApp: nenhum e-mail.
 
 - [ ] **Step 1: Escrever os testes**
@@ -4582,105 +4582,6 @@ async def test_a_whatsapp_patient_gets_no_email_at_the_release(
 
 > `hours_ahead=-1` libera uma consulta que começou há 1 h; se `_setup` recusar consultas no passado, use a menor antecedência que ele aceita e confira que o texto continua sem "Manter horário" mudando `start_at` direto no banco antes de liberar.
 
-`tests/test_brain_staff.py`:
-
-```python
-"""services/brain_staff.py - does the clinic have a secretary? (TASK-052, owner 2026-10-12).
-
-brain-api owns identity and roles; secretarIA asks, per release, and never stores a copy. Any
-ambiguity is `None` (the caller then uses the doctor's closing time).
-"""
-
-import httpx
-import pytest
-
-from secretaria.config import get_settings
-from secretaria.services import brain_staff
-
-TENANT = "11111111-1111-1111-1111-111111111111"
-
-
-@pytest.fixture
-def configured(monkeypatch):
-    monkeypatch.setattr(get_settings(), "BRAIN_API_BASE_URL", "https://brain.exemplo", raising=False)
-    monkeypatch.setattr(get_settings(), "INTERNAL_API_KEY", "k", raising=False)
-
-
-def _answer(monkeypatch, handler):
-    real = httpx.AsyncClient
-
-    def _client(*args, **kwargs):
-        kwargs["transport"] = httpx.MockTransport(handler)
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(brain_staff.httpx, "AsyncClient", _client)
-
-
-async def test_a_secretary_among_the_roles_is_true_and_none_is_false(monkeypatch, configured):
-    seen = []
-
-    def handler(request):
-        seen.append((request.url.path, request.headers.get("X-Internal-Api-Key")))
-        return httpx.Response(200, json={"roles": ["manager", "doctor", "secretary"]})
-
-    _answer(monkeypatch, handler)
-    assert await brain_staff.fetch_has_secretary(TENANT) is True
-    assert seen == [(f"/internal/tenants/{TENANT}/staff-roles", "k")]
-
-    _answer(monkeypatch, lambda request: httpx.Response(200, json={"roles": ["doctor"]}))
-    assert await brain_staff.fetch_has_secretary(TENANT) is False
-
-
-@pytest.mark.parametrize(
-    "response",
-    [
-        httpx.Response(404, json={"detail": "Not Found"}),  # brain-api without the endpoint yet
-        httpx.Response(500),
-        httpx.Response(200, text="not json"),
-        httpx.Response(200, json={"items": []}),
-    ],
-)
-async def test_every_ambiguity_is_unknown(monkeypatch, configured, response):
-    _answer(monkeypatch, lambda request: response)
-    assert await brain_staff.fetch_has_secretary(TENANT) is None
-
-
-async def test_unconfigured_or_unreachable_is_unknown(monkeypatch):
-    monkeypatch.setattr(get_settings(), "BRAIN_API_BASE_URL", "", raising=False)
-    assert await brain_staff.fetch_has_secretary(TENANT) is None
-
-    monkeypatch.setattr(get_settings(), "BRAIN_API_BASE_URL", "https://brain.exemplo", raising=False)
-    monkeypatch.setattr(get_settings(), "INTERNAL_API_KEY", "k", raising=False)
-
-    def boom(request):
-        raise httpx.ConnectError("down")
-
-    _answer(monkeypatch, boom)
-    assert await brain_staff.fetch_has_secretary(TENANT) is None
-```
-
-Em `tests/test_hub_release.py`, acrescente também:
-
-```python
-async def test_the_b_deadline_uses_the_clinic_closing_when_brain_api_says_secretary(
-    client: AsyncClient, db, acting, monkeypatch
-):
-    from secretaria.services import brain_staff
-
-    asked: list = []
-
-    async def _has_secretary(tenant_id):
-        asked.append(tenant_id)
-        return True
-
-    monkeypatch.setattr(brain_staff, "fetch_has_secretary", _has_secretary)
-    world = await _paid_world(db, acting, hours_ahead=30)
-
-    await _release(client, world.appointment.id, acknowledge_retention=True)
-
-    assert asked == [world.tenant.id]
-```
-
 - [ ] **Step 2: Rodar e ver falhar**
 
 Run: `$env:BOT_ALLOWLIST_WA_IDS = ""; uv run python -m pytest tests/test_hub_release.py -q -p no:cacheprovider`
@@ -4688,79 +4589,9 @@ Expected: FAIL nos casos novos (`deposit_outcome` ainda da política; nenhuma of
 
 - [ ] **Step 3: Implementar**
 
-`src/secretaria/services/brain_staff.py`:
-
-```python
-"""secretarIA -> brain-api: does this clinic have a SECRETARY? (TASK-052, owner 2026-10-12).
-
-brain-api is the single writer of identity and roles (`users.role`: manager | doctor | secretary,
-brain-api models/user.py `ROLE_SECRETARY`). A role reaches secretarIA only in the hub token of the
-person ACTING (core/hub_roles.py) - that says who clicks, not who the clinic has - so this module
-ASKS, per release, and never stores a copy (same rule as services/brain_professionals.py).
-
-Contract (brain-api, api/internal.py - being built by the owner together with "add members by
-role" in the Contexto/professionals screen):
-  - GET {BRAIN_API_BASE_URL}/internal/tenants/{tenant_id}/staff-roles
-    -> 200 {"roles": ["manager", "doctor", "secretary", ...]}  (the distinct roles of the
-       clinic's ACTIVE members)
-
-Returns True/False, or None on ANY ambiguity (unconfigured, network, non-200 - including the 404
-of a brain-api that does not have the endpoint yet -, bad JSON/shape). None means "unknown" and
-the caller (services/release_offer.py) uses the DOCTOR's closing time. Never logs PII.
-"""
-
-from uuid import UUID
-
-import httpx
-
-from secretaria.config import get_settings
-from secretaria.core.logging import get_logger
-
-logger = get_logger(__name__)
-
-ROLE_SECRETARY = "secretary"
-
-
-async def fetch_has_secretary(tenant_id: UUID) -> bool | None:
-    settings = get_settings()
-    if not settings.BRAIN_API_BASE_URL or not settings.INTERNAL_API_KEY:
-        return None
-    try:
-        async with httpx.AsyncClient(
-            base_url=settings.BRAIN_API_BASE_URL,
-            headers={"X-Internal-Api-Key": settings.INTERNAL_API_KEY},
-            timeout=settings.BRAIN_API_TIMEOUT_SECONDS,
-        ) as client:
-            response = await client.get(f"/internal/tenants/{tenant_id}/staff-roles")
-    except httpx.HTTPError as exc:
-        logger.warning(
-            "staff_roles_fetch_failed", reason="network_error", error_type=type(exc).__name__,
-            tenant_id=str(tenant_id),
-        )  # fmt: skip
-        return None
-    if response.status_code != 200:
-        logger.info(
-            "staff_roles_fetch_failed",
-            reason="non_200_status",
-            status_code=response.status_code,
-            tenant_id=str(tenant_id),
-        )
-        return None
-    try:
-        body = response.json()
-    except ValueError:
-        logger.warning("staff_roles_fetch_failed", reason="invalid_json", tenant_id=str(tenant_id))
-        return None
-    roles = body.get("roles") if isinstance(body, dict) else None
-    if not isinstance(roles, list):
-        logger.warning("staff_roles_fetch_failed", reason="bad_shape", tenant_id=str(tenant_id))
-        return None
-    return ROLE_SECRETARY in roles
-```
-
 Em `src/secretaria/api/hub/calendar.py`:
 
-1. No bloco `from secretaria.services import (...)`, adicione `brain_staff,` (em ordem alfabética) e `release_offer,` (depois de `clinic_action_notice,`).
+1. No bloco `from secretaria.services import (...)`, adicione `release_offer,` (depois de `clinic_action_notice,`).
 
 2. Substitua o bloco que começa em `# Money first, Google second: a release whose deposit was PAID moves money` e termina no `raise HTTPException(...)` do `retention_ack_required` por:
 
@@ -4804,9 +4635,8 @@ Em `src/secretaria/api/hub/calendar.py`:
             deposit=paid,
             now=now,
             paid_notice_allowed=allow_paid,
-            # Closing time: the clinic's with a secretary, else the doctor's (brain-api roles;
-            # None while brain-api cannot say - services/brain_staff.py).
-            has_secretary=await brain_staff.fetch_has_secretary(tenant.id),
+            # Closing time = the consultation doctor's for now (owner 2026-10-12); the clinic's
+            # when it has a secretary comes with Task 16 (pending the brain-api roles screen).
         )
         deposit_outcome = release_offer.DEPOSIT_OUTCOME_OFFERED
         keep = offer is not None and release_offer.keep_allowed(offer, now)
@@ -4931,14 +4761,14 @@ async def _notify_portal(
 
 - [ ] **Step 4: Rodar e ver passar**
 
-Run: `$env:BOT_ALLOWLIST_WA_IDS = ""; uv run python -m pytest tests/test_brain_staff.py tests/test_hub_release.py tests/test_deposit_release_preview.py tests/test_hub_cancel_portal_notice.py tests/test_hub_calendar_money.py -q -p no:cacheprovider ; uv run ruff check src/secretaria/services/brain_staff.py src/secretaria/api/hub/calendar.py src/secretaria/services/appointment_release.py tests/test_brain_staff.py tests/test_hub_release.py`
+Run: `$env:BOT_ALLOWLIST_WA_IDS = ""; uv run python -m pytest tests/test_hub_release.py tests/test_deposit_release_preview.py tests/test_hub_cancel_portal_notice.py tests/test_hub_calendar_money.py -q -p no:cacheprovider ; uv run ruff check src/secretaria/api/hub/calendar.py src/secretaria/services/appointment_release.py tests/test_hub_release.py`
 Expected: PASS, ruff limpo.
 
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add src/secretaria/services/brain_staff.py src/secretaria/api/hub/calendar.py src/secretaria/services/appointment_release.py tests/test_brain_staff.py tests/test_hub_release.py
-git commit -m "feat(calendar): releasing a paid slot opens the patient's offer; closing time from brain-api roles (TASK-052)" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>" -m "Claude-Session: https://claude.ai/code/session_01J2kYPbf3cmf5WwjFSAq5zG"
+git add src/secretaria/api/hub/calendar.py src/secretaria/services/appointment_release.py tests/test_hub_release.py
+git commit -m "feat(calendar): releasing a paid slot opens the patient's offer instead of retaining (TASK-052)" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>" -m "Claude-Session: https://claude.ai/code/session_01J2kYPbf3cmf5WwjFSAq5zG"
 ```
 
 ---
@@ -7646,7 +7476,7 @@ git commit -m "fix(agenda): the paid-release warning describes keep/reschedule/c
 
 - [ ] **Step 1: Suíte inteira e lint de tudo o que foi tocado**
 
-Run: `$env:BOT_ALLOWLIST_WA_IDS = ""; uv run python -m pytest -q -p no:cacheprovider ; uv run ruff check src/secretaria/models/deposit_release_offer.py src/secretaria/models/__init__.py src/secretaria/models/payment_attention_item.py migrations/versions/b6d2e8f4a1c3_deposit_release_offers.py src/secretaria/config.py src/secretaria/main.py src/secretaria/services/email.py src/secretaria/services/release_deadlines.py src/secretaria/services/release_offer.py src/secretaria/services/release_keep.py src/secretaria/services/release_offer_dispatch.py src/secretaria/services/brain_staff.py src/secretaria/services/payments/attention_view.py src/secretaria/api/hub/calendar.py src/secretaria/api/hub/release_offers.py src/secretaria/schemas/release_offers.py src/secretaria/services/appointment_release.py src/secretaria/workers/whatsapp/notifications.py src/secretaria/services/availability.py src/secretaria/services/flow_router.py src/secretaria/workers/shared/release_offer_actions.py src/secretaria/workers/shared/actions.py src/secretaria/schemas/webhook.py src/secretaria/workers/portal/inbound.py src/secretaria/workers/portal/open.py src/secretaria/workers/shared/flow_runner.py src/secretaria/workers/shared/booking_hold.py src/secretaria/services/booking_hold.py src/secretaria/workers/payments_cron.py tests/release_offer_support.py tests/test_deposit_release_offer_migration.py tests/test_release_deadlines.py tests/test_release_offer.py tests/test_release_keep.py tests/test_release_offer_dispatch.py tests/test_brain_staff.py tests/test_release_offer_buttons.py tests/test_release_offer_carry_over.py tests/test_release_offers_hub.py tests/test_release_offer_postgres.py tests/test_deposit_before_migration.py tests/test_payment_attention.py tests/test_hub_release.py tests/test_cancellation_notice.py tests/test_availability.py tests/test_before_booking_flow.py tests/test_payment_cron_jobs.py`
+Run: `$env:BOT_ALLOWLIST_WA_IDS = ""; uv run python -m pytest -q -p no:cacheprovider ; uv run ruff check src/secretaria/models/deposit_release_offer.py src/secretaria/models/__init__.py src/secretaria/models/payment_attention_item.py migrations/versions/b6d2e8f4a1c3_deposit_release_offers.py src/secretaria/config.py src/secretaria/main.py src/secretaria/services/email.py src/secretaria/services/release_deadlines.py src/secretaria/services/release_offer.py src/secretaria/services/release_keep.py src/secretaria/services/release_offer_dispatch.py src/secretaria/services/payments/attention_view.py src/secretaria/api/hub/calendar.py src/secretaria/api/hub/release_offers.py src/secretaria/schemas/release_offers.py src/secretaria/services/appointment_release.py src/secretaria/workers/whatsapp/notifications.py src/secretaria/services/availability.py src/secretaria/services/flow_router.py src/secretaria/workers/shared/release_offer_actions.py src/secretaria/workers/shared/actions.py src/secretaria/schemas/webhook.py src/secretaria/workers/portal/inbound.py src/secretaria/workers/portal/open.py src/secretaria/workers/shared/flow_runner.py src/secretaria/workers/shared/booking_hold.py src/secretaria/services/booking_hold.py src/secretaria/workers/payments_cron.py tests/release_offer_support.py tests/test_deposit_release_offer_migration.py tests/test_release_deadlines.py tests/test_release_offer.py tests/test_release_keep.py tests/test_release_offer_dispatch.py tests/test_release_offer_buttons.py tests/test_release_offer_carry_over.py tests/test_release_offers_hub.py tests/test_release_offer_postgres.py tests/test_deposit_before_migration.py tests/test_payment_attention.py tests/test_hub_release.py tests/test_cancellation_notice.py tests/test_availability.py tests/test_before_booking_flow.py tests/test_payment_cron_jobs.py`
 Expected: linha de base da Task 0 + os testes novos, **0 failed**; ruff limpo. Falha que também falha na linha de base é pré-existente (registre); qualquer outra é regressão (corrija antes de seguir).
 
 - [ ] **Step 2: Documentar os dois modelos pendentes na Meta**
@@ -7694,7 +7524,7 @@ que aceita (a consulta volta, se o horário estiver livre) ou recusa em até 24 
 Remarcar a qualquer momento leva o sinal se a clínica ainda não marcou devolvido (e a clínica recebe "REMARCADA levando
 o sinal"); senão cobra de novo. Cancelar avisa a clínica NA HORA com o passo a passo do estorno no Asaas. Sem resposta:
 aviso em B = min(T + 6 h, fechamento − 30 min; fechamento da clínica se o brain-api diz que há secretária, senão o do
-médico); em T + 24 h "Cancelado por falta de resposta" e "prazo vencido, devolva agora". A clínica (qualquer papel, no
+médico — por enquanto sempre o do médico, Task 16 pendente); em T + 24 h "Cancelado por falta de resposta" e "prazo vencido, devolva agora". A clínica (qualquer papel, no
 escopo da agenda) marca "devolvido" e o paciente responde Recebido / Não recebido. Portal: cartão + e-mail com link;
 WhatsApp: só mensagem. O sistema nunca estorna (D15).
 
@@ -7705,7 +7535,7 @@ WhatsApp: só mensagem. O sistema nunca estorna (D15).
 | Prazos | `services/release_deadlines.py` |
 | Regras e textos | `services/release_offer.py` |
 | Aceitar "Manter" | `services/release_keep.py` |
-| Papéis (brain-api) | `services/brain_staff.py` (depende de `GET /internal/tenants/{id}/staff-roles`) |
+| Papéis (brain-api) | PENDENTE (Task 16): B usa o horário do médico até a tela de integrantes existir |
 | Envios | `services/release_offer_dispatch.py`, `services/email.py`, `config.py` |
 | Liberar / Portal | `api/hub/calendar.py::release_appointment`, `services/appointment_release.py` |
 | Aba (TASK-054) | `api/hub/release_offers.py` (lista, devolvido, aceitar/recusar Manter; escopo da agenda), `schemas/release_offers.py`; gancho em `services/payments/attention_view.py::resolve_item` |
@@ -7731,7 +7561,7 @@ Migração `b6d2e8f4a1c3` → API → worker LOGO depois → Brain-Message-Front
 Na seção "## Documentação" do `CLAUDE.md` do secretarIA, como primeiro parágrafo:
 
 ```markdown
-`docs/CHECKPOINT_task052_liberar_sinal_pago.md` — TASK-052: liberar horário com sinal pago dá ao paciente Manter (pedido; a clínica aceita/recusa em 24 h) / Remarcar (a qualquer momento; leva o sinal se não marcado devolvido) / Cancelar (avisa a clínica na hora com o passo a passo do Asaas); sem resposta, aviso em B e "cancelado por falta de resposta" em T+24h; contrato da aba da TASK-054 (todos os papéis, escopo da agenda); depende de `staff-roles` do brain-api (fallback: horário do médico); modelos Meta PENDENTES; integra em `feature/out-of-mvp`; **construído, NÃO deployado**.
+`docs/CHECKPOINT_task052_liberar_sinal_pago.md` — TASK-052: liberar horário com sinal pago dá ao paciente Manter (pedido; a clínica aceita/recusa em 24 h) / Remarcar (a qualquer momento; leva o sinal se não marcado devolvido) / Cancelar (avisa a clínica na hora com o passo a passo do Asaas); sem resposta, aviso em B e "cancelado por falta de resposta" em T+24h; contrato da aba da TASK-054 (todos os papéis, escopo da agenda); B usa o horário do médico (papel de secretária pendente, Task 16); modelos Meta PENDENTES; integra em `feature/out-of-mvp`; **construído, NÃO deployado**.
 ```
 
 - [ ] **Step 5: Atualizar o `TASK.md`**
@@ -7749,6 +7579,39 @@ Merge em `feature/out-of-mvp` (depois da TASK-050) é do Integrator; push e depl
 
 ---
 
+---
+
+### Task 16 (PENDENTE DE DEPENDÊNCIA — não executar agora): "clínica com secretária" usa o horário da clínica
+
+**Estado:** bloqueada pela tela de integrantes do dono (Contexto/aba de profissionais: gestores adicionam membros com
+papel gestor+médico, gestor, médico ou secretária, no brain-api). Decisão do dono (2026-10-12): até lá o prazo B usa o
+horário de fechamento do MÉDICO da consulta. Nenhuma outra task depende desta; ela não entra no merge da TASK-052 enquanto
+estiver pendente.
+
+**Files (quando desbloquear):**
+- Create: `src/secretaria/services/brain_staff.py`, `tests/test_brain_staff.py`
+- Modify: `src/secretaria/api/hub/calendar.py` (`release_appointment`: passar `has_secretary=` a `release_offer.open_offer`), `tests/test_hub_release.py` (1 teste)
+
+**Interface esperada (a confirmar com o brain-api quando a tela existir):**
+- brain-api: `GET {BRAIN_API_BASE_URL}/internal/tenants/{tenant_id}/staff-roles`, cabeçalho `X-Internal-Api-Key`, resposta
+  `200 {"roles": ["manager", "doctor", "secretary", ...]}` (papéis distintos dos membros ATIVOS). Papéis vêm de
+  brain-api `models/user.py` (`ROLE_SECRETARY = "secretary"`). O papel no token do hub (`core/hub_roles.py`) NÃO serve:
+  diz quem age, não quem a clínica tem.
+- secretarIA: `services/brain_staff.py::fetch_has_secretary(tenant_id: UUID) -> bool | None` — mesmo cliente de
+  `services/brain_professionals.py` (`BRAIN_API_BASE_URL`, `INTERNAL_API_KEY`, `BRAIN_API_TIMEOUT_SECONDS`); `True`/`False`
+  pela presença de `"secretary"`; `None` em qualquer ambiguidade (sem configuração, rede, ≠ 200 incluindo 404, JSON ou
+  formato inválidos). Nunca guarda cópia; nunca loga PII.
+- Uso: em `release_appointment`, `has_secretary=await brain_staff.fetch_has_secretary(tenant.id)` na chamada de
+  `open_offer` (o parâmetro já existe desde a Task 3; `None` = horário do médico, o comportamento atual).
+
+**Testes a escrever então:** `True` com `"secretary"` nos papéis; `False` sem; `None` para 404/500/JSON inválido/formato
+inválido/sem configuração/erro de rede; no hub, B = fechamento da clínica quando `True` (o teste de serviço
+`test_the_closing_is_the_clinics_with_a_secretary_else_the_doctors` da Task 3 já cobre `open_offer`).
+
+Nenhum passo de código aqui até o dono liberar.
+
+---
+
 ## Self-review
 
 **1. Cobertura da spec → tasks.**
@@ -7758,7 +7621,7 @@ Merge em `feature/out-of-mvp` (depois da TASK-050) é do Integrator; push e depl
 | §1 Intenção e critérios 1–6 | 1 → Tasks 3, 6, 7; 2 → Tasks 3, 4, 9, 11; 3 → Tasks 3, 5, 9; 4 → Tasks 3, 5, 10; 5 → Tasks 3, 5, 12; 6 → Tasks 2, 3, 5, 9, 11, 13 |
 | §2 / §3 | Tasks 1–14 / não tocados (sem estorno, sem tela, sem endpoint do brain-api, sem aprovação Meta) |
 | §5.1 Oferta e transições | Tasks 1, 3, 4 |
-| §5.2 Prazos e "tem secretária" (brain-api + fallback) | Tasks 2, 3, 6 |
+| §5.2 Prazos (horário do médico agora; "tem secretária" pendente) | Tasks 2, 3, 6; Task 16 (pendente) |
 | §5.3 Mensagem em T, canais | Tasks 3, 6, 7 |
 | §5.4 Manter por opção da clínica (pausa, aceitar, recusar, K, Portal depois de S) | Tasks 3, 4, 5, 9, 11, 12 |
 | §5.5 Remarcar a qualquer momento; nova cobrança se marcado; e-mail "REMARCADA" | Tasks 3, 5, 9, 10 |
@@ -7776,6 +7639,6 @@ Merge em `feature/out-of-mvp` (depois da TASK-050) é do Integrator; push e depl
 
 **2. Varredura de placeholders.** Nenhum "TBD"/"TODO"/"similar à Task N". Os `«»` do CHECKPOINT são medições; `<porta>` é a de um Postgres descartável. O plano NÃO foi aplicado numa cópia descartável (dito no topo); as notas de "se o texto diferir" (Task 6) dizem o que ajustar.
 
-**3. Consistência de nomes.** `rel*` iguais em `release_offer.py`, `webhook.py`, `inbound.py`, hub, job e testes; decisões/devolução/kinds vêm todos de `models/deposit_release_offer.py`; `keep_allowed` (hub, job), `request_keep`/`claim_keep`/`decline_keep`/`accept_keep` (serviço, hub, toques, varredura), `choose_reschedule` → `RESCHEDULE_*` (toques), `still_relevant` (despacho), `patient_decision` (aba) e `fetch_has_secretary` (hub release) com as mesmas assinaturas em todas as tasks.
+**3. Consistência de nomes.** `rel*` iguais em `release_offer.py`, `webhook.py`, `inbound.py`, hub, job e testes; decisões/devolução/kinds vêm todos de `models/deposit_release_offer.py`; `keep_allowed` (hub, job), `request_keep`/`claim_keep`/`decline_keep`/`accept_keep` (serviço, hub, toques, varredura), `choose_reschedule` → `RESCHEDULE_*` (toques), `still_relevant` (despacho), `patient_decision` (aba) com as mesmas assinaturas em todas as tasks; `open_offer(..., has_secretary=None)` já aceita o parâmetro que a Task 16 vai preencher.
 
 **4. Review Focus.** Os 5 itens têm teste nomeado na task dona.

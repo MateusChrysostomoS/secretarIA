@@ -3,13 +3,14 @@
 **Data:** 2026-10-11; refeito em 2026-10-12 (3ª revisão do dono, mesmo dia) · **Estado:** para revisão ·
 **Integração:** `feature/out-of-mvp` (NUNCA `main`) · **Base:** `task/TASK-050-secretaria` @ `3650e10` (worktree
 `C:\TECH\BRAIN-worktrees\TASK-052\secretarIA`, branch `task/TASK-052-liberar-sinal-pago`) · **Risco:** ALTO (dinheiro,
-agenda, migração, avisos programados, dependência do brain-api, dois serviços com deploy separado) · **Produção:** NÃO
+agenda, migração, avisos programados, dois serviços com deploy separado) · **Produção:** NÃO
 AUTORIZADA.
 
 > **Histórico.** 2026-10-11 "Receber agora / Remarcar" → substituído. 2026-10-12 (1ª) e‑mails A/B/C → substituído.
 > 2026-10-12 (2ª) Manter recriava a consulta sozinho, Remarcar com sinal só até B → substituído. **2026-10-12 (3ª, este
 > documento):** Manter é POR OPÇÃO DA CLÍNICA (o toque avisa a clínica e abre uma negociação de 24 h do toque; a clínica
-> aceita ou recusa na aba); "tem secretária" vem dos papéis do brain-api (sem campo manual); TODOS os papéis marcam
+> aceita ou recusa na aba); fechamento = horário do MÉDICO da consulta (a regra "tem secretária" pelos papéis do
+> brain-api ficou PENDENTE até a tela de integrantes do dono — decisão de 2026-10-12, Task 16 do plano); TODOS os papéis marcam
 > "devolvido", no escopo de agenda de cada um; modelo Meta de 3 botões reaproveitado; Remarcar a qualquer momento
 > (transfere o sinal se a clínica ainda não marcou devolvido; senão cobra de novo) com e-mail próprio à clínica. Seguem
 > valendo: Cancelar avisa a clínica NA HORA com o passo a passo do Asaas; B; T + 24 h "Cancelado por falta de resposta";
@@ -47,7 +48,8 @@ Instantes: **T** liberação; **S** início da consulta liberada; **F** fechamen
 8. **Marcar devolvido**, **aceitar/recusar manter** e a **lista**: TODOS os papéis (secretária, gestor, médico), cada um
    no escopo que já tem na agenda — secretária e gestor veem a clínica toda (gestor que também é médico tem "só as
    minhas"); médico comum só as suas; um médico não age sobre a oferta de outro.
-9. **Fechamento (F)**: clínica com secretária → horário da clínica; sem → horário do médico da consulta.
+9. **Fechamento (F)**: por enquanto, horário do médico da consulta (sem médico: o da clínica). "Clínica com secretária →
+   horário da clínica" fica PENDENTE de dependência (tela de integrantes do dono no brain-api; §5.2, §11).
 10. **Texto do reembolso ao paciente**: sem banco; valor + "a conta de onde saiu o Pix". Feriados: ficam para depois.
 
 **Sucesso** =
@@ -63,15 +65,15 @@ Instantes: **T** liberação; **S** início da consulta liberada; **F** fechamen
 
 ## 2. Escopo
 
-secretarIA: tabelas novas aditivas; prazos; leitura de "tem secretária" no brain-api; abertura na liberação; mensagens
+secretarIA: tabelas novas aditivas; prazos (horário do médico); abertura na liberação; mensagens
 com botões; toques; negociação de Manter e as ações da clínica; transferência/cobrança no Remarcar; B, E, K e envios na
 varredura de pagamentos; endpoints da aba; cartão depois de S no Portal; aviso de horários segurados. Brain-Message-
 Frontend: só o texto do aviso de liberar.
 
 ## 3. Fora de escopo
 
-O sistema estornar ou consultar o Asaas (D15). A tela/aba (TASK-054). O endpoint do brain-api que diz os papéis da
-clínica (em construção pelo dono — §4, §11). Aprovação Meta. Feriados. Cancelamento de consulta viva (como hoje). IA
+O sistema estornar ou consultar o Asaas (D15). A tela/aba (TASK-054). A leitura de "tem secretária" (endpoint do
+brain-api + cliente no secretarIA) — PENDENTE de dependência, tarefa isolada no fim do plano (§5.2, §11). Aprovação Meta. Feriados. Cancelamento de consulta viva (como hoje). IA
 transferir o sinal. Pix pago depois da liberação (`paid_then_cancelled`).
 
 ## 4. O que o código mostra hoje (base `3650e10`)
@@ -81,7 +83,7 @@ transferir o sinal. Pix pago depois da liberação (`paid_then_cancelled`).
 | Liberar trata como cancelamento DO PACIENTE (pode reter) | `api/hub/calendar.py::release_appointment` | Com sinal pago abre a oferta |
 | Liberar apaga o evento e cancela a linha; id de evento apagado não volta | `release_appointment`, `services/calendar.py::create_event` | "Aceitar manter" cria consulta e evento novos (id determinístico) |
 | Horário livre: eventos do Google, reservas, consultas | `check_availability`, `booking_hold.live_hold_overlaps` | "Aceitar manter" checa os três |
-| Papéis: `manager`, `doctor`, `secretary` existem no brain-api (`models/user.py::ROLE_SECRETARY`) e chegam ao secretarIA só no token de QUEM chama (`core/hub_roles.py`) | brain-api `api/internal.py` não tem leitura de "papéis da clínica" (`professional-emails` exclui secretárias) | Leitura nova `GET /internal/tenants/{id}/staff-roles` (dependência do dono); até existir, `None` = horário do médico |
+| Papéis: `manager`, `doctor`, `secretary` existem no brain-api (`models/user.py::ROLE_SECRETARY`) e chegam ao secretarIA só no token de QUEM chama (`core/hub_roles.py`) | brain-api `api/internal.py` não tem leitura de "papéis da clínica" (`professional-emails` exclui secretárias) | PENDENTE: leitura futura `GET /internal/tenants/{id}/staff-roles` quando a tela de integrantes existir; até lá, nada é chamado e F usa o horário do médico |
 | Escopo de agenda: `agenda_scope` no token (brain-api `services/hub_scope.py`: secretária e gestor = clínica; médico = os seus) → `AgendaViewer` | `api/hub/deps.py::get_agenda_viewer`, `services/agenda_visibility.py`, `api/hub/calendar.py::list_events` (`mine`, `no_own_agenda`) | A lista e as ações da aba usam a MESMA regra |
 | Aviso ao paciente: job `send_cancellation_notice` (WhatsApp) ou mensagem + e-mail com link (Portal) | `services/appointment_release.py`, `services/staff_patient_message.py::nudge_portal_patient` | Botões novos entram aqui |
 | Link do console: `?conversationId=` | Brain-Message-Frontend `lib/portal-routes.ts::conversationHref` | `{BRAIN_MESSAGE_PORTAL_URL}/chat/?conversationId=<id>` |
@@ -122,16 +124,17 @@ pedir para manter o horário (a clínica decide), remarcar usando o mesmo sinal 
 responder até o prazo, a clínica receberá avisos para devolver o sinal por inteiro pelo painel do provedor de pagamento."
 `deposit_outcome = choice_offered`.
 
-### 5.2 Prazos e "tem secretária"
+### 5.2 Prazos (horário do médico; "tem secretária" pendente)
 
-- `has_secretary` = o brain-api diz que a clínica tem membro ativo com papel `secretary`
-  (`services/brain_staff.py::fetch_has_secretary` → `GET {BRAIN_API_BASE_URL}/internal/tenants/{id}/staff-roles` →
-  `{"roles": ["manager", "doctor", "secretary", ...]}`, mesmo cliente/chave de `services/brain_professionals.py`).
-  **Dependência:** esse endpoint é parte do que o dono está construindo (adição de integrantes por papel). **Fallback:**
-  sem resposta, 404, erro ou formato inválido → `None` → horário do médico. O papel do token de quem libera NÃO é usado
-  (diz quem age, não quem a clínica tem). Nenhum campo manual.
-- F = maior `end` do dia de T no horário escolhido (clínica se `has_secretary`, senão o efetivo do médico — que herda da
-  clínica quando o médico não tem horário; consulta sem médico → clínica), no fuso da clínica, − 30 min.
+- **Agora (decisão do dono, 2026-10-12):** F usa o horário de fechamento do **médico da consulta** (o efetivo, que
+  herda da clínica quando o médico não tem horário; consulta sem médico → clínica). Nada é perguntado ao brain-api.
+- **Pendente de dependência:** "clínica com secretária → horário da clínica". Espera a tela de integrantes do dono
+  (brain-api). Interface esperada: `services/brain_staff.py::fetch_has_secretary(tenant_id) -> bool | None` lendo
+  `GET {BRAIN_API_BASE_URL}/internal/tenants/{id}/staff-roles` → `{"roles": ["manager", "doctor", "secretary", ...]}`
+  (mesmo cliente/chave de `services/brain_professionals.py`); qualquer falha → `None` → horário do médico. O papel do
+  token de quem libera NÃO serve (diz quem age, não quem a clínica tem). Nenhum campo manual. `open_offer` já aceita
+  `has_secretary` (hoje sempre `None`); ligar é a Task 16 do plano, que não bloqueia as demais.
+- F = maior `end` do dia de T nesse horário, no fuso da clínica, − 30 min.
 - B = `min(T + 6 h, F)` se F > T; senão T + 6 h (clínica fechada em T: dia sem expediente, sem horário, ou T depois de
   F — o paciente mantém tempo para decidir; nada antes de T). E = T + 24 h. K = toque em Manter + 24 h.
 - **Premissas visíveis:** oferta sem decisão final fica aberta até E e vira `no_answer_cancelled`; "contato" = toque em
@@ -304,15 +307,16 @@ comitada antes de enviar; revalidada (§5.8/§5.9); sem contato → `skipped_no_
 
 ## 8. Testes
 
-No plano: um teste nomeado por linha das §6/§7, prazos (clínica × médico; brain-api fora = médico), textos, canais
+No plano: um teste nomeado por linha das §6/§7, prazos (horário do médico; sem médico = clínica), textos, canais
 (WhatsApp sem e-mail), contrato da aba (escopo, idempotência) e o texto do front.
 
 ## 9. Dependências e deploy
 
 Base `task/TASK-050-secretaria` @ `3650e10`; integra em `feature/out-of-mvp`. Dependências: TASK-054 (tela) consome
-§5.10; brain-api `GET /internal/tenants/{id}/staff-roles` (o dono, em paralelo) — sem ele, F usa o horário do médico.
-Deploy (NÃO autorizado): migração `b6d2e8f4a1c3` → API → worker LOGO depois → front. `BRAIN_MESSAGE_PORTAL_URL` e
-`BRAIN_API_BASE_URL`/`INTERNAL_API_KEY` já configurados.
+§5.10. PENDENTE (não bloqueia): papéis da clínica no brain-api (tela de integrantes do dono) → Task 16; até lá F usa o
+horário do médico.
+Deploy (NÃO autorizado): migração `b6d2e8f4a1c3` → API → worker LOGO depois → front. `BRAIN_MESSAGE_PORTAL_URL` já
+configurado.
 
 ## 10. Decisões tomadas (padrão)
 
@@ -323,7 +327,7 @@ Deploy (NÃO autorizado): migração `b6d2e8f4a1c3` → API → worker LOGO depo
 - Aceitar recria (linha e evento novos), conta como confirmação e fecha o item de devolução como "remarcado".
 - Remarcar a qualquer momento enquanto a oferta não está encerrada; transfere se a devolução não foi marcada.
 - Cancelar depois de devolução marcada não gera aviso. Item resolvido de outro jeito → `clinic_decided`.
-- Clínica fechada em T → B = T + 6 h. `has_secretary` desconhecido → horário do médico.
+- Clínica fechada em T → B = T + 6 h. Fechamento = horário do médico (secretária: pendente).
 - Clínica sem `contact_email` → `skipped_no_contact`, não reenviado.
 - Avisos à clínica por e-mail com link para o console.
 - Liberação com sinal não pago fica só registrada (`not_offered`).
@@ -334,11 +338,11 @@ Deploy (NÃO autorizado): migração `b6d2e8f4a1c3` → API → worker LOGO depo
 
 1. Remarcar com sinal transferido quando a clínica já estornou no Asaas mas não marcou: aceitar o risco (adotado: o
    e-mail "não há reembolso a fazer" pede conferência) ou bloquear a transferência depois do aviso de devolução?
-2. Contrato do brain-api para "papéis da clínica": confirmar `GET /internal/tenants/{id}/staff-roles` →
-   `{"roles": [...]}` (ou dizer qual será) para o dono implementar no mesmo movimento da tela de integrantes.
+2. ADIADA (dono, 2026-10-12): "tem secretária" e o contrato `GET /internal/tenants/{id}/staff-roles` →
+   `{"roles": [...]}` ficam para quando a tela de integrantes existir (Task 16, pendente de dependência).
 3. Feriados: depois.
 
 ## 12. Não provado / bloqueios
 
-Nada impede planejar. NÃO PROVADO: WhatsApp real (modelos não aprovados), SMTP real, Portal real, produção, o endpoint
-de papéis do brain-api (ainda não existe).
+Nada impede planejar. NÃO PROVADO: WhatsApp real (modelos não aprovados), SMTP real, Portal real, produção. Pendente
+de dependência: a regra "tem secretária" (Task 16).
