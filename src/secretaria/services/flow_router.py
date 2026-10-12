@@ -75,6 +75,7 @@ from secretaria.services.attendee import (
 )
 from secretaria.services.availability import (
     available_day_starts,
+    held_slots,
     slot_scan_limit,
     without_holds,
 )
@@ -468,6 +469,33 @@ DAY_ESCAPE_HINT = 'Se preferir falar com a gente, toque em "Outro".'
 # The day the patient picked filled up between the two taps (someone else
 # booked it). Deterministic answer: the same picker, refreshed.
 DAY_NO_LONGER_FREE_PREFIX = "Esse dia não tem mais horário livre."
+# TASK-052 (owner decision 2026-10-11): a day whose free times are held by other patients'
+# unfinished bookings (an unpaid Pix, or an e-mail code still pending) is offered, and picking it
+# says which times are held - never by whom - and that they may free up.
+HELD_SLOTS_NOTICE = (
+    "Os horários {times} deste dia estão reservados para outro paciente, aguardando a "
+    "confirmação ou o pagamento do sinal. Se o prazo terminar sem pagamento, eles voltam a "
+    "ficar livres."
+)
+ALL_HELD_NOTICE = (
+    "Todos os horários livres deste dia ({times}) estão reservados para outro paciente, "
+    "aguardando a confirmação ou o pagamento do sinal. Se o prazo terminar sem pagamento, eles "
+    "voltam a ficar livres: tente de novo mais tarde ou escolha outro dia."
+)
+HELD_TIMES_SHOWN = 8
+
+
+def held_times_text(labels: list[str]) -> str:
+    """"08:00", "08:00 e 08:30", "08:00, 08:30 e 09:00", "... e mais 3" - times only."""
+    shown = labels[:HELD_TIMES_SHOWN]
+    rest = len(labels) - len(shown)
+    if rest > 0:
+        return f"{', '.join(shown)} e mais {rest}"
+    if len(shown) <= 1:
+        return "".join(shown)
+    return f"{', '.join(shown[:-1])} e {shown[-1]}"
+
+
 NO_AVAILABLE_DAYS_MESSAGE = (
     "Não encontrei horários livres nos próximos dias. "
     "Escolha uma opção abaixo e a gente te ajuda."
@@ -3384,12 +3412,9 @@ async def enter_day_picker(
     step = step or branch.day_step
     if calendar is None:
         return _calendar_unavailable(conversation, branch, step)
-    # feature/out-of-mvp (TASK-017, ported by TASK-050): a Pix keeps a slot HELD for 30-120
-    # minutes, so a day whose every free slot is held must not be offered - the patient would
-    # tap it and land straight back here. With no holds this renders exactly as on main
-    # (services/availability.py's module note); with holds only the days they touch are
-    # re-read slot by slot.
-    reserved = await _hold_windows(_hold_owner(conversation, professionals))
+    # TASK-052 (owner decision 2026-10-11): a day whose free slots are held by another
+    # conversation (an unpaid Pix keeps one for 30-120 minutes) IS offered, as on main; the
+    # slot step hides the held times and says which they are (`_enter_slot_picker`).
     try:
         start = datetime.now(calendar.tzinfo)
         if anchor is not None:
@@ -3400,7 +3425,6 @@ async def enter_day_picker(
             start=start,
             window_days=DAY_PICKER_WINDOW_DAYS,
             duration_minutes=duration_minutes,
-            holds=reserved,
         )
         if anchor is not None:
             # The days NEAREST the current one come first (ties: the earlier day), so
@@ -3502,8 +3526,10 @@ async def _enter_slot_picker(
     # both branches (first booking and reschedule) - a reservation half the
     # surfaces ignore is not a reservation. The patient's own hold is excluded
     # upstream, so their own choice stays visible to them.
+    held: list[dict] = []
     if reserved:
         before = len(slots)
+        held = held_slots(slots, reserved, duration_minutes=duration_minutes, tz=calendar.tzinfo)
         slots = without_holds(
             slots, reserved, duration_minutes=duration_minutes, tz=calendar.tzinfo
         )
@@ -3515,6 +3541,32 @@ async def _enter_slot_picker(
             )
         # Reserve the final two rows for the day and service navigation controls.
         slots = slots[:SLOT_PICKER_MAX_SLOTS]
+
+    held_labels = [str(s.get("label") or "") for s in held if s.get("label")]
+    if not slots and held_labels:
+        # TASK-052: every free time of the day is held by someone else. The day stays offered
+        # (it may free up), so going back to the day list would loop: say why, offer the day
+        # list and the back control, nothing to tap on this day.
+        controls: list[tuple[str, str]] = [(f"{ROW_DAY_AGAIN_PREFIX}{page}", LABEL_ANOTHER_DAY)]
+        if back_target:
+            controls.append((f"{ROW_DAY_BACK_PREFIX}{back_target}", _day_back_label(back_target)))
+        return FlowRouterResult(
+            action="reply",
+            bubbles=[
+                SlotsBubble(
+                    body=ALL_HELD_NOTICE.format(times=held_times_text(held_labels))[
+                        :MAX_LIST_BODY_CHARS
+                    ],
+                    rows=controls[:MAX_LIST_ROWS],
+                    button_label="Ver opções",
+                    section_title="Opções",
+                )
+            ],
+            flow_state=branch.flow_state,
+            flow_step=branch.slot_step,
+            flow_selected_day=target.date().isoformat(),
+            **_day_branch_fields(conversation, branch),
+        )
 
     if not slots:
         return await enter_day_picker(
@@ -3541,7 +3593,12 @@ async def _enter_slot_picker(
         action="reply",
         bubbles=[
             SlotsBubble(
-                body=f"{branch.slot_body_prefix} {target.strftime('%d/%m')}:",
+                body=(
+                    f"{HELD_SLOTS_NOTICE.format(times=held_times_text(held_labels))}\n\n"
+                    if held_labels
+                    else ""
+                )
+                + f"{branch.slot_body_prefix} {target.strftime('%d/%m')}:",
                 rows=rows[:MAX_LIST_ROWS],
                 button_label="Ver horários",
                 section_title="Horários livres",
