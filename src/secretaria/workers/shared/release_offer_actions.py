@@ -9,7 +9,7 @@ patient's first contact.
 * "Manter horário" only ASKS the clinic (`request_keep`): the clinic accepts or refuses in the
   TASK-054 list. After S it answers "O horário da consulta já passou" with Remarcar / Cancelar
   (a NEW WhatsApp message; the Portal also shows that card when the patient opens the
-  conversation after S - `offer_card_after_start`).
+  conversation after S - `workers/portal/release_card.py::offer_card_after_start`).
 * "Remarcar" at any time while the offer is open: carries the deposit, or charges again when the
   clinic already marked it refunded. After E ("cancelada por falta de resposta") nothing reopens.
 * "Cancelar" always tells the clinic at once (unless it already marked the refund).
@@ -24,22 +24,18 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select, update
-
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
-from secretaria.models import Appointment, Conversation, Patient, PixDeposit, Tenant
+from secretaria.models import Appointment, Conversation, PixDeposit, Tenant
 from secretaria.models.deposit_release_offer import (
     DECISION_CANCELLED,
     DECISION_KEPT,
     DECISION_NO_ANSWER,
     DECISION_NOT_OFFERED,
-    KEEP_FROM,
     KEEP_OUTCOME_TIMEOUT,
     DepositReleaseOffer,
 )
 from secretaria.services import release_offer as ro, release_offer_dispatch
-from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE, BrainMessageSender
 from secretaria.services.payments.money import format_brl
 from secretaria.services.tenant_config import get_waba_token
 from secretaria.workers.shared.context import _ReplyContext
@@ -221,58 +217,3 @@ async def _on_not_received(session, offer, now) -> _Answer:
     if outcome == "closed":
         return _Answer(text=ro.CHECK_CLOSED_TEXT)
     return _Answer(text=ro.CHECK_TOO_EARLY_TEXT)
-
-
-async def offer_card_after_start(
-    tenant_id: UUID, external_id: str, *, now: datetime | None = None
-) -> bool:
-    """Portal entry after S with the offer still unanswered: ONE card with Remarcar / Cancelar."""
-    now = now or datetime.now(UTC)
-    async with async_session_factory() as session:
-        patient = await session.scalar(
-            select(Patient).where(
-                Patient.tenant_id == tenant_id,
-                Patient.channel == CHANNEL_BRAIN_MESSAGE,
-                Patient.external_id == external_id,
-            )
-        )
-        if patient is None:
-            return False
-        offer = await session.scalar(
-            select(DepositReleaseOffer)
-            .where(
-                DepositReleaseOffer.tenant_id == tenant_id,
-                DepositReleaseOffer.patient_id == patient.id,
-                DepositReleaseOffer.deposit_paid.is_(True),
-                DepositReleaseOffer.decision.in_(KEEP_FROM),
-                DepositReleaseOffer.slot_start_at <= now,
-                DepositReleaseOffer.expires_at > now,
-                DepositReleaseOffer.after_start_card_at.is_(None),
-            )
-            .order_by(DepositReleaseOffer.released_at.desc())
-            .limit(1)
-        )
-        if offer is None or offer.conversation_id is None:
-            return False
-        conversation_id, released_id = offer.conversation_id, offer.released_appointment_id
-        claimed = await session.execute(
-            update(DepositReleaseOffer)
-            .where(
-                DepositReleaseOffer.id == offer.id,
-                DepositReleaseOffer.after_start_card_at.is_(None),
-            )
-            .values(after_start_card_at=now)
-            .execution_options(synchronize_session=False)
-        )
-        await session.commit()
-        if claimed.rowcount != 1:
-            return False
-        sender = BrainMessageSender(conversation_id=conversation_id, session=session)
-        await sender.send_buttons(
-            to=external_id,
-            body=ro.AFTER_START_TEXT,
-            buttons=ro.keep_fallback_buttons(released_id),
-        )
-        await session.commit()
-    logger.info("deposit_release_offer_after_start_card", tenant_id=str(tenant_id))
-    return True

@@ -29,7 +29,7 @@ from secretaria.services.flow_router import STEP_DECLINE_REASON
 from secretaria.workers import tasks
 from secretaria.workers.orchestrator import _send_bot_reply
 from secretaria.workers.portal.inbound import _persist_brain_message_inbound
-from secretaria.workers.shared.release_offer_actions import offer_card_after_start
+from secretaria.workers.portal.release_card import offer_card_after_start
 from tests._reminder_fixtures import db  # noqa: F401
 from tests._reminders_r3 import consent, sent, wire
 from tests._reminders_v2 import outbound_messages, seed_paid_deposit, seed_world

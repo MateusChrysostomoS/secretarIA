@@ -34,6 +34,7 @@ from secretaria.services.reminder_text import REMINDER_TERMINAL_TEXT
 from secretaria.workers.orchestrator import (
     _send_bot_reply,
 )
+from secretaria.workers.portal.release_card import offer_card_after_start
 from secretaria.workers.shared.context import (
     _ReplyContext,
 )
@@ -51,7 +52,6 @@ from secretaria.workers.shared.jobs import (
 from secretaria.workers.shared.opening import (
     _send_context_opening,
 )
-from secretaria.workers.shared.release_offer_actions import offer_card_after_start
 from secretaria.workers.shared.text import (
     _as_utc,
 )
