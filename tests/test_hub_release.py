@@ -25,8 +25,11 @@ from secretaria.services import appointment_release, staff_patient_message as sp
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.email import EmailOutcome
 from secretaria.services.flow_router import STEP_EDIT_MENU
-from secretaria.services.payments import deposit_lifecycle
-from secretaria.services.tenant_config import set_google_refresh_token
+from secretaria.services.payments import accounts, asaas_provider, deposit_lifecycle
+from secretaria.services.tenant_config import (
+    set_google_refresh_token,
+    set_payment_account_secrets,
+)
 from tests._edit_flow_support import draft_for
 from tests._reminder_fixtures import db  # noqa: F401
 from tests._reminders_r3 import set_conversation, wire
@@ -38,6 +41,7 @@ from tests._reminders_v2 import (
     seed_paid_deposit,
     seed_world,
 )
+from tests.payments_support import FakeAsaasClient
 from tests.test_appointment_edit_apply import _apply, _edit
 
 CALENDAR = "/tenants/me/calendar"
@@ -537,9 +541,45 @@ async def test_an_unpaid_charge_needs_no_acknowledgement(client: AsyncClient, db
     response = await _release(client, world.appointment.id)
 
     # No provider account to ask in this seed: the void fails safe (TASK-017) and the charge
-    # stays for the reconciliation job. Either way no acknowledgement was needed.
+    # stays for the reconciliation job. No acknowledgement was needed.
     assert response.status_code == 200
-    assert response.json()["deposit_outcome"] in ("voided", "payment_in_flight")
+    assert response.json()["deposit_outcome"] == "payment_in_flight"
+
+
+async def test_an_unpaid_charge_the_provider_can_void_is_voided(
+    client: AsyncClient, db, acting, monkeypatch: pytest.MonkeyPatch
+):
+    world = await _setup(db, acting)
+    fake = FakeAsaasClient(payment={"status": "PENDING", "value": 100.0, "externalReference": "r"})
+    monkeypatch.setattr(asaas_provider, "client_for", lambda api_key: fake)
+    async with db() as session:
+        row = await accounts.get_or_create_account_row(
+            session, tenant_id=world.tenant.id, provider="asaas"
+        )
+        set_payment_account_secrets(row, api_key="key", webhook_token="tok")
+        row.status = "connected"
+        session.add(
+            PixDeposit(
+                id=uuid4(),
+                tenant_id=world.tenant.id,
+                appointment_id=world.appointment.id,
+                patient_id=world.patient.id,
+                amount_cents=10000,
+                percent_applied=30,
+                status=PixDepositStatus.AWAITING,
+                provider="asaas",
+                provider_charge_id="pay_1",
+                asaas_payment_id="pay_1",
+                external_reference="r",
+            )
+        )
+        await session.commit()
+
+    response = await _release(client, world.appointment.id)
+
+    assert response.status_code == 200
+    assert response.json()["deposit_outcome"] == "voided"
+    assert await _deposit_status(db, world.appointment.id) == PixDepositStatus.EXPIRED
 
 
 async def test_the_flag_is_harmless_without_a_deposit(client: AsyncClient, db, acting):

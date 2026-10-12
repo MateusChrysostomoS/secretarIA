@@ -29,6 +29,7 @@ from secretaria.models import (
     BookingHold,
     Conversation,
     Patient,
+    Professional,
     Tenant,
 )
 from secretaria.plugins import multi_professional as mp, multi_unit as mu
@@ -445,6 +446,37 @@ async def test_editing_next_to_a_held_slot_still_works(client: AsyncClient, db, 
     )
     assert response.status_code == 200, response.text
     assert HubCalendar.updated == [HOLD_END]
+
+
+async def test_editing_only_the_doctor_onto_a_held_slot_is_409(client: AsyncClient, db, hub_world):
+    """Same window, different doctor: the hold of that doctor's slot still counts (D4)."""
+    async with db() as session:
+        doctor = Professional(id=uuid4(), tenant_id=hub_world.tenant_id, name="Dra. Ana")
+        session.add(doctor)
+        await session.commit()
+    await _hold_for_another_conversation(db, hub_world, professional_id=doctor.id)
+    appointment_id, _ = await _a_booked_appointment(db, hub_world, start=HOLD_START)
+    response = await client.post(
+        f"/tenants/me/calendar/appointments/{appointment_id}/edit",
+        json={"professional_id": str(doctor.id)},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "slot_held_awaiting_payment"
+    assert HubCalendar.updated == []
+
+
+async def test_an_edit_that_keeps_window_and_doctor_never_asks_the_hold_gate(
+    client: AsyncClient, db, hub_world
+):
+    """The appointment sits on a slot someone else holds (no gate ran when it was made); a
+    change that moves neither time nor doctor must not be refused because of it."""
+    await _hold_for_another_conversation(db, hub_world)
+    appointment_id, _ = await _a_booked_appointment(db, hub_world, start=HOLD_START)
+    response = await client.post(
+        f"/tenants/me/calendar/appointments/{appointment_id}/edit",
+        json={"attendee_name": "Maria"},
+    )
+    assert response.status_code == 200, response.text
 
 
 async def test_a_hold_of_another_clinic_never_blocks_this_one(client: AsyncClient, db, hub_world):

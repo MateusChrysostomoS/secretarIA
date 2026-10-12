@@ -84,7 +84,7 @@ async def test_an_unpaid_charge_is_voided(db):  # noqa: F811
     # with no provider account to ask (this seed has none), fails safe to "payment_in_flight":
     # an unpaid charge is never released while the provider may still have the money.
     assert predicted == "voided"
-    assert actual in ("voided", "payment_in_flight")
+    assert actual == "payment_in_flight"
 
 
 async def test_no_deposit_and_an_already_resolved_one_have_no_outcome(db):  # noqa: F811

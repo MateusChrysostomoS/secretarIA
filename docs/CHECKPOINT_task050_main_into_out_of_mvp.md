@@ -84,3 +84,16 @@ passaram a usar `tests/_patching.py::workers_ns`.
 
 Nada foi testado em produção ou com o Asaas real; o fluxo completo Pix + Portal + lembretes da
 main não foi exercitado de ponta a ponta fora dos testes.
+
+## 5. Pré-condições e decisões conscientes (fecha m-4 e m-5 da revisão)
+
+- **Migração reencadeada (m-5).** `c8a5d3f1b7e2.down_revision` passou de `d4f8a2c6e913` para
+  `a4c7e2f9b1d3`. Isso só é seguro porque a linha do Pix (`e2b7c4a9d1f5`, antes do merge) nunca foi
+  aplicada em banco algum (nem prod, nem staging, nem dev compartilhado). Um banco que já tivesse
+  `e2b7c4a9d1f5` se acharia "na cabeça" sem as 8 migrações da `main`. **Antes de qualquer deploy
+  desta linha, confirmar que nenhum banco tem `e2b7c4a9d1f5` na tabela `alembic_version`.**
+- **Papel no token x escopo ao vivo (m-4).** `role`/`is_owner`/`is_manager` vêm do token do hub
+  (TASK-020); `agenda_scope` é lido ao vivo (decisão do dono, 2026-10-09). Um gestor rebaixado
+  mantém os poderes de gestor (chave Pix, ajustes de pagamento) até o token expirar. É o desenho
+  da TASK-020, não regressão do merge; fica registrado como decisão consciente e documentado em
+  `brain-api/CONTRACTS.md` §12.2. Alinhar com o `agenda_scope` é tarefa futura.
