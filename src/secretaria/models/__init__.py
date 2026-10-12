@@ -18,6 +18,7 @@ from secretaria.models.clinic_payment_account import ClinicPaymentAccount
 from secretaria.models.consent_event import ConsentEvent
 from secretaria.models.conversation import Conversation, FlowState, HandoverState
 from secretaria.models.conversation_pii_token_map import ConversationPiiTokenMap
+from secretaria.models.deposit_release_offer import DepositReleaseEmail, DepositReleaseOffer
 from secretaria.models.insurance import (
     INSURANCE_MECHANISMS,
     INSURANCE_MODES,
@@ -56,6 +57,8 @@ __all__ = [
     "ClinicPaymentAccount",
     "is_live_status",
     "ConsentEvent",
+    "DepositReleaseEmail",
+    "DepositReleaseOffer",
     "Conversation",
     "ConversationPiiTokenMap",
     "FlowState",
