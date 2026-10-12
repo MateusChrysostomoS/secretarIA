@@ -44,6 +44,7 @@ from secretaria.services.patient_context import (
     load_upcoming_appointments,
 )
 from secretaria.services.payments import deposit_lifecycle
+from secretaria.services.release_offer import RELEASE_OFFER_ACTIONS
 from secretaria.services.reminder_text import REMINDER_ROW_ACTIONS
 from secretaria.services.service_catalog import (
     load_service_catalog,
@@ -73,6 +74,7 @@ from secretaria.workers.shared.llm_context import (
     _appointment_calendar,
     _appointment_calendar_target,
 )
+from secretaria.workers.shared.release_offer_actions import handle_release_offer_tap
 from secretaria.workers.shared.reminder_actions import (
     CONTINUE_CANCEL_AND_ASK_WHY,
     CONTINUE_EDIT,
@@ -232,6 +234,16 @@ async def _handle_action_button(
             return
         action, appointment_id = continuation
         appt_uuid = UUID(appointment_id)
+
+    # TASK-052: a slot the clinic released with a PAID deposit. Most taps are answered there;
+    # "Remarcar" comes back as "rebooksame" with the line above the day list, "Cancelar" as
+    # "rebookno" (the "why" list follows), both on the released appointment.
+    offer_prefix: str | None = None
+    if action in RELEASE_OFFER_ACTIONS:
+        offer_tap = await handle_release_offer_tap(reply, action, appt_uuid)
+        if offer_tap is None:
+            return
+        action, offer_prefix = offer_tap
 
     # Set only on the "enter the reschedule sub-flow" path (apptresched,
     # under the limit) - handled AFTER this session closes, mirroring
@@ -431,7 +443,7 @@ async def _handle_action_button(
             same = action == "rebooksame"
             service_name = appointment.appointment_type
             candidates: list = []
-            prefix = None
+            prefix = offer_prefix
             if same:
                 target_id = appointment.professional_id
             else:

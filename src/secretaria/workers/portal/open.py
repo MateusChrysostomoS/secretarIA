@@ -51,6 +51,7 @@ from secretaria.workers.shared.jobs import (
 from secretaria.workers.shared.opening import (
     _send_context_opening,
 )
+from secretaria.workers.shared.release_offer_actions import offer_card_after_start
 from secretaria.workers.shared.text import (
     _as_utc,
 )
@@ -504,6 +505,10 @@ async def process_brain_message_enter(
     the claim back when nothing reached the patient.
     """
     tenant_uuid = UUID(tenant_id)
+    # TASK-052: after the released consultation's start, opening the conversation shows only
+    # "Remarcar" / "Cancelar" (once per offer); nothing else is said on this entry.
+    if await offer_card_after_start(tenant_uuid, external_id):
+        return
     context = (
         ConversationEntryContext.model_validate(entry_context)
         if entry_context is not None

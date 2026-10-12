@@ -5166,6 +5166,8 @@ async def enter_rebooking(
             duration_minutes=duration,
             branch=BOOKING_DAY_BRANCH,
             professionals=professionals,
+            # TASK-052: "Remarcar" on a released PAID slot says what happens to the deposit.
+            prefix=prefix,
         )
         # enter_day_picker knows nothing about who or what is being booked, and
         # these fields are written unconditionally by the caller — so a result
