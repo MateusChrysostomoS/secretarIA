@@ -70,6 +70,7 @@ def test_every_reason_of_the_spec_is_known():
         "reference_mismatch",
         "promotion_failed",
         "refunded_externally",
+        "released_refund_due",
     }
 
 
