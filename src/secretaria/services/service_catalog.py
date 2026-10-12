@@ -135,6 +135,35 @@ def service_by_name(services: Sequence[Service] | None, name: str | None) -> Ser
     return by_name.get(normalize(name))
 
 
+def find_by_name(items: Sequence[Any], name: str | None) -> Any | None:
+    """The first of `items` (anything with a `.name`) whose name IS `name`, by `normalize`.
+
+    Case, accents and inner spacing do not matter — the same identity rule the
+    catalog itself enforces. A blank `name` matches nothing.
+    """
+    key = normalize(name)
+    if not key:
+        return None
+    return next((item for item in items if normalize(item.name) == key), None)
+
+
+def missing_from(items: Sequence[Any], listed: Sequence[Any]) -> list[Any]:
+    """The `items` whose name is not among `listed`'s, by `normalize`; order kept.
+
+    A repeat inside `items` itself is dropped too, so the result never names one
+    service twice. Used to merge two views of the catalog without duplicating a
+    service that both of them know (ai/tools.py, ai/prompts.py).
+    """
+    seen = {normalize(item.name) for item in listed}
+    out: list[Any] = []
+    for item in items:
+        key = normalize(item.name)
+        if key not in seen:
+            seen.add(key)
+            out.append(item)
+    return out
+
+
 def resolve_entries(
     entries: Sequence[dict] | None, services: Sequence[Service] | None
 ) -> list[dict]:

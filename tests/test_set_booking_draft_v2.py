@@ -1,0 +1,210 @@
+"""set_booking_draft v2: six fields, formats only, never a name (TASK-030 P2)."""
+
+import os
+
+os.environ.setdefault("APP_ENV", "test")
+os.environ.setdefault("META_APP_SECRET", "test-app-secret")
+os.environ.setdefault("META_VERIFY_TOKEN", "test-verify-token")
+os.environ.setdefault("META_ACCESS_TOKEN", "test-access-token")
+os.environ.setdefault("META_PHONE_NUMBER_ID", "1234567890")
+os.environ.setdefault("ENCRYPTION_KEY", "gBSpATEZoI21UX0_59nHvxdUDJ4drCttg2RAEaPJc1w=")
+os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
+
+import datetime as dt  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+from uuid import uuid4  # noqa: E402
+
+import pytest  # noqa: E402
+
+from secretaria.ai import tools as ai_tools  # noqa: E402
+from secretaria.ai.tools import (  # noqa: E402
+    BookingDraftRequested,
+    set_booking_draft,
+    set_booking_draft_v2,
+)
+from secretaria.plugins import multi_professional as mp  # noqa: E402
+from secretaria.services import booking_dates  # noqa: E402
+from secretaria.services.booking_draft import BookingDraft  # noqa: E402
+from secretaria.services.booking_scope import BOOKING_TOPOLOGY_SOLE  # noqa: E402
+from secretaria.workers.shared.llm_context import _flow_handback_tools  # noqa: E402
+
+ANA = SimpleNamespace(id=uuid4(), name="Dra. Ana")
+BETO = SimpleNamespace(id=uuid4(), name="Dr. Beto")
+
+
+class _Log:
+    def __init__(self):
+        self.events: list[tuple[str, dict]] = []
+
+    def __getattr__(self, level):
+        def _log(event, **fields):
+            self.events.append((event, fields))
+
+        return _log
+
+
+class _PinnedClock(dt.datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return dt.datetime(2026, 10, 7, 14, 13, tzinfo=dt.UTC)  # Wed 07/10, 11:13 BRT
+
+
+@pytest.fixture
+def clinic(monkeypatch):
+    roster = [ANA, BETO]
+
+    async def _pros(_tenant_id):
+        return list(roster)
+
+    monkeypatch.setattr(mp, "_active_professionals", _pros)
+    # The tool refuses a time of TODAY that already passed (TASK-038); pin the clinic
+    # clock so the fixed dates in these tests never become "today" on the real calendar.
+    monkeypatch.setattr(booking_dates, "datetime", _PinnedClock)
+    log = _Log()
+    monkeypatch.setattr(ai_tools, "logger", log)
+    token = ai_tools._tenant_id_ctx.set(uuid4())
+    yield roster, log
+    ai_tools._tenant_id_ctx.reset(token)
+
+
+def test_the_v2_tool_is_named_set_booking_draft_with_its_string_args():
+    assert set_booking_draft_v2.name == "set_booking_draft"
+    assert set(set_booking_draft_v2.args) == {
+        "service",
+        "professional",
+        "insurance",
+        "for_whom",
+        "day",
+        "time",
+        "message",  # TASK-038: the agent's words for the patient, sent before the card
+    }
+
+
+async def test_v2_carries_every_field_raw_for_the_resolver(clinic):
+    with pytest.raises(BookingDraftRequested) as exc:
+        await set_booking_draft_v2.ainvoke(
+            {
+                "service": " limpeza ",
+                "professional": "dra. ana",
+                "insurance": "Unimed",
+                "for_whom": "me",
+                "day": "2026-10-08",
+                "time": "10:00",
+            }
+        )
+    assert exc.value.draft == BookingDraft(
+        service="limpeza",  # the resolver canonicalizes against the FRESH catalog
+        professional_id=ANA.id,
+        insurance="Unimed",
+        attendee="self",
+        day=dt.date(2026, 10, 8),
+        time=dt.time(10, 0),
+    )
+
+
+async def test_v2_other_is_other_and_empty_is_unknown(clinic):
+    with pytest.raises(BookingDraftRequested) as exc:
+        await set_booking_draft_v2.ainvoke({"for_whom": "other"})
+    assert exc.value.draft.attendee == "other"
+    with pytest.raises(BookingDraftRequested) as exc:
+        await set_booking_draft_v2.ainvoke({})
+    assert exc.value.draft == BookingDraft()
+
+
+async def test_v2_for_whom_is_never_a_name(clinic):
+    out = await set_booking_draft_v2.ainvoke({"for_whom": "Maria Silva"})
+    assert "error" in out
+    assert "Maria" not in out["error"]
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [("day", "08/10/2026"), ("day", "2026-13-01"), ("time", "10h"), ("time", "25:00")],
+)
+async def test_v2_a_bad_format_is_a_recoverable_error(clinic, field, value):
+    out = await set_booking_draft_v2.ainvoke({"service": "Limpeza", field: value})
+    assert "error" in out
+
+
+@pytest.mark.parametrize(
+    "name, reason",
+    [("Dr. Fantasma", "unknown_professional"), ("Dra. Ana", "ambiguous_professional")],
+)
+async def test_v2_an_unresolvable_doctor_is_dropped_not_an_error(clinic, name, reason):
+    roster, log = clinic
+    if reason == "ambiguous_professional":
+        roster.append(SimpleNamespace(id=uuid4(), name="Dra. Ana"))
+    with pytest.raises(BookingDraftRequested) as exc:
+        await set_booking_draft_v2.ainvoke({"professional": name, "service": "Limpeza"})
+    assert exc.value.draft.professional_id is None
+    assert exc.value.draft.service == "Limpeza"
+    dropped = [f for e, f in log.events if e == "booking_draft_tool_item_dropped"]
+    assert dropped == [{"field": "professional", "reason": reason}]
+
+
+async def test_v2_without_a_clinic_is_an_error():
+    token = ai_tools._tenant_id_ctx.set(None)
+    try:
+        out = await set_booking_draft_v2.ainvoke({"service": "Limpeza"})
+    finally:
+        ai_tools._tenant_id_ctx.reset(token)
+    assert "error" in out
+
+
+def test_the_clinic_switch_picks_the_draft_tool():
+    off = _flow_handback_tools(SimpleNamespace(initial_flows={}), BOOKING_TOPOLOGY_SOLE, [])
+    on = _flow_handback_tools(
+        SimpleNamespace(initial_flows={"ai_draft_v2": True}), BOOKING_TOPOLOGY_SOLE, []
+    )
+    assert set_booking_draft in off and set_booking_draft_v2 not in off
+    assert set_booking_draft_v2 in on and set_booking_draft not in on
+    # TASK-030 P4: the v2 set also carries the agenda read and the two blind staging tools.
+    assert sorted(t.name for t in on) == sorted(
+        [*(t.name for t in off), "get_availability", "create_event", "cancel_event"]
+    )
+
+
+
+async def test_v2_refuses_a_time_of_today_that_already_passed(clinic):
+    """Owner, 2026-10-07: "quarta às 10" said on a Wednesday at 11h is next Wednesday -
+    the model is told to correct itself instead of opening today's past hour."""
+    out = await set_booking_draft_v2.ainvoke(
+        {"service": "limpeza", "for_whom": "me", "day": "2026-10-07", "time": "10:00"}
+    )
+    assert "já passou" in out["error"]
+    assert "semana que vem" in out["error"]
+
+    with pytest.raises(BookingDraftRequested) as later_today:
+        await set_booking_draft_v2.ainvoke(
+            {"service": "limpeza", "for_whom": "me", "day": "2026-10-07", "time": "15:00"}
+        )
+    assert later_today.value.draft.day == dt.date(2026, 10, 7)
+
+
+# --------------------------------------------------------------------------
+# TASK-030 P5: the final model-facing wording of the v2 tool
+# --------------------------------------------------------------------------
+
+
+def test_the_v2_description_teaches_what_the_prompt_relies_on():
+    text = set_booking_draft_v2.description
+    for phrase in (
+        "Chamar esta ferramenta NÃO marca nada",
+        "nunca diga que algo foi marcado, reservado ou confirmado",
+        "ESTADO DA CONVERSA",
+        '"other" se é para outra',
+        "NUNCA escreva um nome",
+        "lista PRÓXIMOS DIAS",
+    ):
+        assert phrase in text
+    # Name and arguments are a contract with the prompt and the sentinel: unchanged.
+    assert set_booking_draft_v2.name == "set_booking_draft"
+    assert set(set_booking_draft_v2.args) == {
+        "service",
+        "professional",
+        "insurance",
+        "for_whom",
+        "day",
+        "time",
+        "message",
+    }

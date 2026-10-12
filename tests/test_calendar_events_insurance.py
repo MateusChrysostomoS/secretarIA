@@ -80,16 +80,30 @@ LEGACY_EVENT_KEYS = {"id", "summary", "start", "end", "appointment_id"}
 # ---------------------------------------------------------------------------
 
 
+NEW_EVENT_KEYS = {"status", "confirmation_count", "display_state", "attention", "reminders"} | {
+    # TASK-044 R7 (spec §5.C): what Editar/Remarcar pre-fills
+    "professional_id",
+    "professional_name",
+    "service",
+    "attendee_name",
+    "phone",
+    "patient_channel",
+}
+
+
 def test_a_legacy_event_gains_three_null_fields_and_loses_nothing():
     event = CalendarEventRead(id="g1", summary="Consulta", start="s", end="e")
 
     dumped = event.model_dump()
 
-    assert set(dumped) == LEGACY_EVENT_KEYS | {"insurance", "insurance_plan", "deposit"}
+    assert set(dumped) == (
+        LEGACY_EVENT_KEYS | {"insurance", "insurance_plan", "deposit"} | NEW_EVENT_KEYS
+    )
     assert dumped["insurance"] is None
     assert dumped["insurance_plan"] is None
     assert dumped["deposit"] is None
     assert dumped["appointment_id"] is None
+    assert dumped["status"] is None and dumped["reminders"] is None
 
 
 def test_the_plan_wire_carries_exactly_three_keys():
@@ -784,7 +798,8 @@ async def test_a_paid_deposit_says_nothing_about_the_appointment_and_leaks_no_pa
 
     body = resp.json()[0]
     assert set(body["deposit"]) == {"status", "amount_cents", "needs_attention"}
-    assert "status" not in {k for k in body if k != "deposit"}
+    assert body["status"] == "scheduled"
+    assert body["confirmation_count"] == 0
     assert "NAO-VAZAR" not in resp.text
     assert "pay_" not in resp.text
 
@@ -827,7 +842,9 @@ async def test_the_event_wire_only_grew_by_three_optional_keys(client: AsyncClie
 
     body = (await _events(client)).json()[0]
 
-    assert set(body) == LEGACY_EVENT_KEYS | {"insurance", "insurance_plan", "deposit"}
+    assert set(body) == (
+        LEGACY_EVENT_KEYS | {"insurance", "insurance_plan", "deposit"} | NEW_EVENT_KEYS
+    )
     assert body["id"] == "evt-1"
     assert body["summary"] == "Consulta"
     assert body["appointment_id"] == str(appt.id)

@@ -12,6 +12,7 @@ from secretaria.models.appointment import (
     AppointmentStatus,
     is_live_status,
 )
+from secretaria.models.appointment_reminder import AppointmentReminder
 from secretaria.models.booking_hold import BookingHold
 from secretaria.models.clinic_payment_account import ClinicPaymentAccount
 from secretaria.models.consent_event import ConsentEvent
@@ -35,6 +36,7 @@ from secretaria.models.processed_asaas_event import ProcessedAsaasEvent
 from secretaria.models.processed_event import ProcessedEvent
 from secretaria.models.professional import Professional
 from secretaria.models.professional_credentials import ProfessionalCredentials
+from secretaria.models.professional_edit_notice import ProfessionalEditNotice
 from secretaria.models.rebooking_decline import RebookingDecline
 from secretaria.models.service import Service
 from secretaria.models.tenant import Tenant
@@ -49,6 +51,7 @@ __all__ = [
     "AnalyticsEvent",
     "Appointment",
     "AppointmentStatus",
+    "AppointmentReminder",
     "BookingHold",
     "ClinicPaymentAccount",
     "is_live_status",
@@ -71,6 +74,7 @@ __all__ = [
     "ProcessedAsaasEvent",
     "ProcessedEvent",
     "Professional",
+    "ProfessionalEditNotice",
     "RebookingDecline",
     "ProfessionalCredentials",
     "ProfessionalInsurancePlan",

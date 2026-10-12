@@ -508,3 +508,30 @@ async def test_legacy_professional_put_still_404s_across_tenants(
         json={"specialty": "invadido"},
     )
     assert response.status_code == 404
+
+
+async def test_a_professional_service_price_is_persisted_and_echoed_back(
+    client, db, tenant, professional
+) -> None:
+    """The price is the professional's own number on a catalog service. A save that carries
+    it must commit it and return it, so a reload shows what was typed."""
+    entry = {
+        "name": "Consulta",
+        "duration_min": 30,
+        "is_active": True,
+        "sort_order": 0,
+        "price": "R$ 500,00",
+    }
+    response = await client.put(
+        CONFIGURATION,
+        json={
+            "tenant": {},
+            "professional_id": str(professional.id),
+            "professional": {"appointment_types": [entry]},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["professional"]["appointment_types"][0]["price"] == "R$ 500,00"
+    _, stored = await _reload(db, tenant.id, professional.id)
+    assert stored.appointment_types[0]["price"] == "R$ 500,00"

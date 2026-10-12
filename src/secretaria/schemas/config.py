@@ -7,16 +7,18 @@ services/tenant_config.py instead.
 """
 
 from datetime import time
-from typing import Literal
+from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from secretaria.core.extra_reminder import EXTRA_DAYS_MAX, EXTRA_DAYS_MIN, is_valid_send_time
 from secretaria.core.whatsapp_limits import (
     MAX_BUTTON_LABEL_CHARS,
     MAX_BUTTONS_PER_MESSAGE as MAX_GREETING_BUTTONS,
     MAX_INTERACTIVE_BODY_CHARS,
 )
+from secretaria.schemas.clinic_facts import ClinicFacts
 
 # Convention: lowercase English weekday names, Monday-first.
 WEEKDAYS: tuple[str, ...] = (
@@ -184,6 +186,7 @@ class TenantConfigUpdate(BaseModel):
     # Clinic physical address. NULL/omitted = leave untouched (or "not
     # collected yet" on first save).
     address: TenantAddress | None = None
+    clinic_facts: ClinicFacts | None = None
     # TASK-008: `insurances` (free-text convênio names) is GONE from this
     # payload on purpose - it used to pass through `sync_legacy_insurances`,
     # which could silently re-derive the clinic's `tenant_insurance_plans` set
@@ -209,6 +212,25 @@ class TenantConfigUpdate(BaseModel):
     payment_provider: Literal["asaas", "mercadopago"] | None = None
     deposit_timing: Literal["before", "after"] | None = None
     deposit_hold_ttl_minutes: int | None = Field(default=None, ge=30, le=120)
+    # TASK-032 R7 (spec 2026-10-09 §2/§3): "não perguntar novamente" - the clinic's
+    # standing yes to BILLED WhatsApp notices outside the 24 h window. Absent = left
+    # untouched; an explicit null is refused below (the column is NOT NULL).
+    paid_notices_auto_approved: bool | None = None
+    # TASK-048 R9 (spec 2026-10-09 §6.2): the clinic's extra ("custom") reminder as
+    # "N dias antes, às HH:MM" in its time zone. The two keys travel TOGETHER: both null =
+    # no extra reminder, both set = on (validated below). Absent = untouched. A change
+    # (or a `timezone` change) replans the still-pending extra reminders
+    # (services/reminder_schedule.py::replan_custom_reminders). `reminders_v2_enabled`
+    # is deliberately NOT accepted here: the owner turns reminders on per clinic
+    # (spec 4.5) - a PUT that sends it is ignored like any unknown key.
+    reminder_extra_days_before: int | None = Field(
+        default=None, ge=EXTRA_DAYS_MIN, le=EXTRA_DAYS_MAX
+    )
+    reminder_extra_send_time: str | None = None
+    # LEGACY (TASK-044 R7): minutes before, still accepted from a screen older than R9
+    # and translated by services/hub_configuration.py (core/extra_reminder.py::
+    # from_legacy_lead). Ignored when the pair above is in the same body.
+    reminder_extra_lead_minutes: int | None = Field(default=None, ge=1500, le=20160)
     is_active: bool | None = None
 
     @field_validator("initial_flows")
@@ -280,6 +302,46 @@ class TenantConfigUpdate(BaseModel):
             raise ValueError(f"unknown IANA timezone {value!r}") from exc
         return value
 
+    @model_validator(mode="before")
+    @classmethod
+    def _new_extra_pair_supersedes_legacy(cls, value: Any) -> Any:
+        # The new pair wins before validation of an obsolete, ignored legacy key.
+        if isinstance(value, dict) and "reminder_extra_days_before" in value:
+            return {k: v for k, v in value.items() if k != "reminder_extra_lead_minutes"}
+        return value
+
+    @field_validator("reminder_extra_send_time")
+    @classmethod
+    def _send_time_on_the_grid(cls, value: str | None) -> str | None:
+        if value is not None and not is_valid_send_time(value):
+            raise ValueError(
+                "reminder_extra_send_time must be HH:MM between 06:00 and 22:00, in 15-minute steps"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _extra_reminder_pair_travels_together(self) -> "TenantConfigUpdate":
+        sent = {"reminder_extra_days_before", "reminder_extra_send_time"} & self.model_fields_set
+        if not sent:
+            return self
+        if len(sent) == 1:
+            raise ValueError(
+                "reminder_extra_days_before and reminder_extra_send_time travel together"
+            )
+        if (self.reminder_extra_days_before is None) != (self.reminder_extra_send_time is None):
+            raise ValueError(
+                "reminder_extra_days_before and reminder_extra_send_time are both null (off) "
+                "or both set"
+            )
+        return self
+
+    @field_validator("paid_notices_auto_approved")
+    @classmethod
+    def _paid_flag_is_true_or_false(cls, value: bool | None) -> bool:
+        if value is None:
+            raise ValueError("paid_notices_auto_approved must be true or false")
+        return value
+
 
 class TenantConfigRead(BaseModel):
     """GET/PUT response. Never includes secrets — only a `calendar_connected` flag.
@@ -317,7 +379,10 @@ class TenantConfigRead(BaseModel):
     business_hours: dict
     appointment_types: list
     initial_flows: dict
-    address: dict | None
+    # Whatever is stored, in any shape: the AI reads these as free text, so a value that is
+    # not an object must not turn the whole configuration read into a 500.
+    address: Any = None
+    clinic_facts: Any = None
     collect_insurance: bool
     is_active: bool
     # True when a Google Calendar refresh token is stored for this tenant.
@@ -338,3 +403,15 @@ class TenantConfigRead(BaseModel):
     # can never flip it; it only ever changes via
     # POST /internal/tenants/{id}/asaas-connection.
     asaas_connected: bool
+    # TASK-032 R7: the clinic's standing authorisation for billed notices (see
+    # TenantConfigUpdate). Defaulted so an older reader building this model never 500s.
+    paid_notices_auto_approved: bool = False
+    # TASK-044 R7: the reminder switch (READ-ONLY here) and the extra reminder's lead
+    # (None = no extra reminder). Defaulted so an older reader never 500s.
+    reminders_v2_enabled: bool = False
+    reminder_extra_lead_minutes: int | None = None
+    # TASK-048 R9: the extra reminder as "N days before, at HH:MM" (both None = off).
+    # `reminder_extra_lead_minutes` above is now the LEGACY mirror (days x 1440) kept for
+    # a screen older than R9; remove it together with the legacy column.
+    reminder_extra_days_before: int | None = None
+    reminder_extra_send_time: str | None = None

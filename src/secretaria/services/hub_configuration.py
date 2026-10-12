@@ -32,15 +32,17 @@ layering rule in CLAUDE.md. The routers map those errors to status codes.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from secretaria.core import extra_reminder
 from secretaria.models import Tenant
 from secretaria.models.professional import Professional
 from secretaria.schemas.config import TenantConfigRead
 from secretaria.schemas.professional import ProfessionalListItem
-from secretaria.services import tenant_config as cfg
+from secretaria.services import reminder_schedule, tenant_config as cfg
 from secretaria.services.greeting_template import (
     clinic_description_budget,
     greeting_preview_template,
@@ -134,6 +136,7 @@ TENANT_SCALAR_FIELDS: tuple[str, ...] = (
     "appointment_types",
     "initial_flows",
     "address",
+    "clinic_facts",
     "collect_insurance",
     "pix_deposit_enabled",
     "pix_deposit_percent",
@@ -144,6 +147,7 @@ TENANT_SCALAR_FIELDS: tuple[str, ...] = (
     "payment_provider",
     "deposit_timing",
     "deposit_hold_ttl_minutes",
+    "paid_notices_auto_approved",
 )
 
 PROFESSIONAL_CONFIG_FIELDS: tuple[str, ...] = (
@@ -270,6 +274,37 @@ async def check_tenant_activation(session: AsyncSession, tenant: Tenant, data: d
 # ---------------------------------------------------------------------------
 
 
+def _extra_reminder_state(tenant: Tenant) -> tuple[int | None, str | None, str | None]:
+    """What the extra reminders' due times depend on (a change replans them)."""
+    return (
+        tenant.reminder_extra_days_before,
+        tenant.reminder_extra_send_time,
+        tenant.timezone,
+    )
+
+
+def _apply_extra_reminder(tenant: Tenant, data: dict) -> None:
+    """The clinic's extra reminder (TASK-048 R9, spec §6.2) from a validated patch.
+
+    The pair wins; without it, a legacy `reminder_extra_lead_minutes` from a screen older
+    than R9 is translated (whole days rounded up, the stored hour kept). The legacy
+    column is mirrored as days x 1440 so a code rollback plans the same day.
+    """
+    if "reminder_extra_days_before" in data:
+        days = data["reminder_extra_days_before"]
+        send_time = data.get("reminder_extra_send_time") if days is not None else None
+    elif "reminder_extra_lead_minutes" in data:
+        days, send_time = extra_reminder.from_legacy_lead(
+            data["reminder_extra_lead_minutes"],
+            current_send_time=tenant.reminder_extra_send_time,
+        )
+    else:
+        return
+    tenant.reminder_extra_days_before = days
+    tenant.reminder_extra_send_time = send_time
+    tenant.reminder_extra_lead_minutes = extra_reminder.legacy_lead_minutes(days)
+
+
 async def apply_tenant_config(session: AsyncSession, tenant: Tenant, data: dict) -> None:
     """Apply a validated TenantConfigUpdate dump onto `tenant`. No commit.
 
@@ -283,9 +318,11 @@ async def apply_tenant_config(session: AsyncSession, tenant: Tenant, data: dict)
     so nothing reaches the database. See check_tenant_activation for why the
     gate cannot run any earlier.
     """
+    previous_extra = _extra_reminder_state(tenant)
     for field_name in TENANT_SCALAR_FIELDS:
         if field_name in data:
             setattr(tenant, field_name, data[field_name])
+    _apply_extra_reminder(tenant, data)
 
     # Budget check for the greeting's clinic slot. Runs on the PATCHED tenant
     # so a PUT that changes `clinic_name` and `clinic_description` together is
@@ -307,6 +344,20 @@ async def apply_tenant_config(session: AsyncSession, tenant: Tenant, data: dict)
         tenant.is_active = True
     elif "is_active" in data:
         tenant.is_active = False
+
+    # TASK-044 R7 (§5.B) / TASK-048 R9 (§6.2): a NEW day, hour or time zone moves the extra
+    # reminders already planned, in this same transaction - a rolled-back save rolls the
+    # replan back too.
+    now = datetime.now(UTC)
+    extra_changed = _extra_reminder_state(tenant) != previous_extra
+    extra_supplied = "reminder_extra_days_before" in data or "reminder_extra_lead_minutes" in data
+    # The migration keeps pending R7 due times. The next explicit reminder save
+    # reconciles those rows even if the displayed day/hour pair did not change.
+    if extra_changed or (
+        extra_supplied
+        and await reminder_schedule.pending_custom_reminders_need_replan(session, tenant, now=now)
+    ):
+        await reminder_schedule.replan_custom_reminders(session, tenant, now=now)
 
 
 def apply_professional_config(professional: Professional, data: dict) -> None:
@@ -389,6 +440,7 @@ async def tenant_read_model(session: AsyncSession, tenant: Tenant) -> TenantConf
         appointment_types=tenant.appointment_types or [],
         initial_flows=tenant.initial_flows or {},
         address=tenant.address,
+        clinic_facts=tenant.clinic_facts,
         collect_insurance=tenant.collect_insurance,
         is_active=tenant.is_active,
         calendar_connected=connected,
@@ -402,6 +454,11 @@ async def tenant_read_model(session: AsyncSession, tenant: Tenant) -> TenantConf
         deposit_timing=tenant.deposit_timing,
         deposit_hold_ttl_minutes=tenant.deposit_hold_ttl_minutes,
         asaas_connected=asaas_connected,
+        paid_notices_auto_approved=bool(tenant.paid_notices_auto_approved),
+        reminders_v2_enabled=bool(tenant.reminders_v2_enabled),
+        reminder_extra_lead_minutes=tenant.reminder_extra_lead_minutes,
+        reminder_extra_days_before=tenant.reminder_extra_days_before,
+        reminder_extra_send_time=tenant.reminder_extra_send_time,
     )
 
 

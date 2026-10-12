@@ -287,3 +287,6 @@ mesmo parágrafo sem um repositório novo onde aplicá-la.
 **O gatilho para valer a pena:** um TERCEIRO serviço adotar `pseudonymize-core` num
 caminho com ferramentas (o candidato é o `Brain-Message-Backend`). Aí o padrão terá três
 instâncias e a skill se paga.
+
+
+> TASK-030 P4: na v2 a pseudonimização é a SEGUNDA parede, não a defesa principal — as ferramentas v2 não leem dado de terceiro e só devolvem chaves declaradas (`ai/tool_output.py`), porque o guarda não mascara nome de terceiro desconhecido; prova com iscas em `tests/test_ai_v2_blindness.py` (ver `docs/CHECKPOINT_ia_get_availability.md`).

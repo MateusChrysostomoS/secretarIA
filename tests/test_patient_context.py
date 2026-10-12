@@ -9,8 +9,9 @@ in place of the Postgres-backed `async_session_factory` on both
 `core.database` and `workers.tasks`. All resolver calls pass an explicit
 tz-aware `now=` so nothing depends on wall-clock.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -86,7 +87,7 @@ async def db():
 @pytest.fixture(autouse=True)
 def _patch_session_factory(monkeypatch: pytest.MonkeyPatch, db):
     monkeypatch.setattr(core_database, "async_session_factory", db)
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     yield
 
 
@@ -726,7 +727,7 @@ async def test_opening_router_only_on_opening_message(db, monkeypatch: pytest.Mo
         calls.append((tenant_id, patient_id))
         return None
 
-    monkeypatch.setattr(tasks, "resolve_patient_opening_state", _fake_resolve)
+    monkeypatch.setattr(workers_ns, "resolve_patient_opening_state", _fake_resolve)
 
     reply1 = await tasks._persist_inbound_message(
         phone_number_id=tenant.phone_number_id,

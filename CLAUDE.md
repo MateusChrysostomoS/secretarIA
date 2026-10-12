@@ -1,5 +1,15 @@
 # SecretarIA
 
+Branch `feature/out-of-mvp` (Pix): TASK-050 trouxe a `main` e portou o Pix para os workers divididos; ver [checkpoint](docs/CHECKPOINT_task050_main_into_out_of_mvp.md).
+TASK-027 simulador do Agendar (`POST /tenants/me/simulation/turn`, sem efeitos colaterais): branch local `task/TASK-027-flow-simulation`, sem deploy: [checkpoint](docs/CHECKPOINT_flow_simulation.md).
+TASK-048 R9: lembrete extra por dia e horario, no fuso da clinica. Integrado à main para publicação autorizada, sem deploy: [checkpoint](docs/CHECKPOINT_lembretes_r9.md).
+
+Plano preparado (2026-10-08): [avisos ao médico, entrada por lembrete e QA R6](../z_prompts/PROMPT_CORRECAO_EMAIL_MEDICO_ENTRADA_LEMBRETE_R6.md), com [especificação](docs/superpowers/specs/2026-10-08-email-medico-entrada-lembrete-r6-design.md). Decisão do dono: mostrar os três botões ao abrir o link preservando o rascunho. Apenas planejamento; correção/QA completa ainda não executadas.
+
+Prompt pendente (2026-10-09): [visitas vazias somem em 24 h, e-mail digitado nunca é apagado, conta só com código](../z_prompts/PROMPT_PORTAL_VISITA_RETENCAO_E_CONTA_SO_COM_CODIGO.md) — **NÃO EXECUTADO.** O incidente "código não leva à conta (cai no LGPD)" de 2026-10-09 (`conversation_pending_code_abandoned`, nenhuma chamada de verificação ao brain-api) voltou a funcionar após deploy em andamento; o prompt [PROMPT_PORTAL_CODIGO_NAO_RECONHECIDO_URGENTE.md](../z_prompts/PROMPT_PORTAL_CODIGO_NAO_RECONHECIDO_URGENTE.md) só deve rodar se reaparecer, ou apenas no passo 6 (não derrubar a espera de código de conta conhecida para o LGPD).
+
+Prompt pendente (2026-10-08): [IA dentro de "Alterar Dados" não pode sair da edição nem perder a consulta atual](../z_prompts/PROMPT_EDICAO_ALTERAR_DADOS_IA_NAO_PERDE_RASCUNHO.md) — texto livre na edição vai à IA, que hoje só tem ferramentas da remarcação antiga e descarta o rascunho. Decisões do dono fechadas no prompt. **NÃO EXECUTADO.**
+
 ## Product vision
 
 SecretarIA is a **multi-tenant SaaS** that drops a conversational appointment-booking secretary into any service business's existing WhatsApp number, via the WhatsApp **Cloud API Coexistence** model (bot and human agent share the same line, the bot stays quiet when the human picks up). Initial target market is clinics, but the product is service-agnostic — clients self-schedule with the business through their own WhatsApp.
@@ -23,6 +33,7 @@ Shipped product configures each tenant with at minimum:
 - **Language**: conversation language (pt-BR default, en, es, ...)
 - **Google Calendar**: encrypted `refresh_token` + `calendar_id` (per tenant, obtained via a hosted OAuth onboarding flow, not the dev `scripts/gcal_auth.py`)
 - **WhatsApp Coexistence**: `phone_number_id` + `access_token` (already on `tenants`)
+- **Clinic facts** (TASK-025): `clinic_facts` (JSON, nullable: parking, how to arrive, payment methods, cancellation policy, documents, accessibility, FAQ, notes) — quoted by the LLM in the "SOBRE A CLÍNICA" prompt block; the address stays in `address`
 
 All of the above now lives on `Tenant` (and, for the professional-level fields — specialty/about/context message/business hours/services/Calendar credential — on `Professional`, one or more rows per tenant). The schema migration, onboarding flow, and encryption at rest are DONE; see `docs/CHECKPOINT_onboarding_multiprofessional.md` for the per-professional layer and `docs/CHECKPOINT_plugins.md` for the encryption-at-rest / multi-tenant round that came before it.
 
@@ -56,7 +67,10 @@ The request flows in one direction — keep it that way:
 `api/` (HTTP) → `workers/` (orchestration) → `services/` + `ai/` (business logic) → `models/` (ORM) → `core/` (infra).
 
 - **`api/`** — thin HTTP layer only: parse/validate input, call a service, shape the response. No business logic, no DB transactions beyond trivial reads. Each module exposes one `APIRouter` registered in `main.py`.
-- **`workers/`** — async orchestration (arq jobs). `tasks.py` decides *which brain* answers; it does not contain calendar/whatsapp logic itself — it calls `services/`.
+- **`workers/`** — async orchestration (arq jobs). Desde a TASK-023 é um pacote: `shared/` (neutro de canal),
+  `whatsapp/`, `portal/`, e os dois módulos de composição `turn_router.py` / `orchestrator.py` (únicos que conhecem
+  os dois canais). `tasks.py` é só uma fachada de reexports (`arq_worker.py` e os testes ainda importam dele).
+  Regras de camada em `tests/test_workers_layering.py`. Não contém lógica de calendário/whatsapp — chama `services/`.
 - **`services/`** — business logic, reusable by both brains (flow router AND the LLM agent). Calendar/availability logic lives ONLY in `services/calendar.py`.
 - **`ai/`** — everything LLM-specific (the agent, prompts, tools, formatter). No business-specific clinic facts here (see the Eye Company rule above).
 - **`core/`** — framework-agnostic infra (db engine, crypto, security, logging). Must not import from `api/`, `services/`, or `ai/`.
@@ -71,22 +85,23 @@ Current `api/` domains (for reference when it grows):
 
 When you restructure, do it as a dedicated change (move files + fix imports in `main.py` + fix `tests/`), then run `graphify update .` — never bundle a structural move with a behavioural change.
 
-### Onde vive o código do Portal (Brain-Message)
+### Onde vive o código do Portal e do WhatsApp (workers)
 
-O dono perguntou (2026-09-20, TASK-004) se cada peça do Portal não deveria virar uma pasta
-`portal/` própria, como o PreCheck tem. A decisão foi **não mover nada** — e esta seção existe
-para que uma sessão futura não reabra a proposta sem saber que ela já foi avaliada e recusada.
-As três peças, e o motivo de cada uma:
+Até a TASK-023 (2026-10-01) tudo vivia em `workers/tasks.py` e a decisão registrada era *não* criar `portal/`
+(TASK-004, 2026-09-20). O dono reverteu isso. Estrutura atual — fonte de verdade: `docs/CHECKPOINT_workers_split.md`:
 
-| Peça | Natureza | Por que fica onde está |
+| Pasta | O que é | Pode importar |
 |---|---|---|
-| `services/channel_sender.py::BrainMessageSender` | exclusiva do Portal, **dentro de arquivo compartilhado** | o que está acima dela no arquivo (o Protocol `ChannelSender`, `MediaChannelSender` e os helpers `interactive_history_body` / `sender_persists_outbound` / `sender_sends_media`) é dos DOIS canais, porque `WhatsAppClient` satisfaz o mesmo Protocol estruturalmente. Tirar só o sender parte o seam em duas metades incompletas. |
-| `plugins/precheck_handoff.py::_post_booking` | **ramo por canal dentro de uma função só** | `portal = ctx.patient.channel == CHANNEL_BRAIN_MESSAGE` decide tudo depois dele; é o padrão `channel-aware-dispatch` (um ponto de decisão, nunca os dois ramos disparando). Separar exigiria duplicar a função. |
-| `plugins/pending_identity.py` | **100% do Portal** (guarda `ctx.patient.channel != CHANNEL_BRAIN_MESSAGE` no topo) | é 1 arquivo só. A regra de granularidade logo acima promove um domínio a subpacote com ~3+ arquivos; uma pasta para 1 arquivo furaria a própria regra do repo. |
+| `workers/shared/` | neutro de canal (saudação, envio, bolhas, handover, fluxo, ações, jobs) | só `shared/` |
+| `workers/whatsapp/` | webhook, rate limit, áudio, coexistência, remove-context, avisos de cancelamento | `shared/` (+ composição em `inbound`/`audio`) — nunca `portal/` |
+| `workers/portal/` | entrada brain-message, `open`, identidade/OTP/nome, anexos | `shared/` (+ composição em `inbound`/`open`) — nunca `whatsapp/` |
+| `workers/turn_router.py`, `workers/orchestrator.py` | composição: chamam o bloco de identidade do Portal e conhecem os dois canais (`orchestrator` usa `portal/attachments` e `portal/identity`) | tudo |
 
-Do lado do PreCheck a pasta **existe** e não segue este padrão: `app/services/brain_message/`
-(`store.py` / `agent_client.py` / `conductor.py`) é do Portal de ponta a ponta — nenhum nó do n8n
-a chama. Ou seja, o pedido do dono já está atendido lá; não renomeie nem recrie.
+Desde a TASK-024 o código neutro não compara o canal: lê `workers/shared/channel_policy.py` (`policy_for(channel)`; uma tabela, uma linha por canal).
+`tests/test_channel_branches.py` impede o retrocesso. Os únicos lugares que ainda decidem por canal são intencionais: `shared/sender.py::_reply_sender`
+(o ponto único que escolhe o remetente), `plugins/precheck_handoff.py::_post_booking`, `plugins/booking_notifications.py`, `plugins/pending_identity.py`
+e as rotas por canal de `api/`. Para mudar o comportamento de um canal, mude o campo da política (e o teste que o fixa).
+`services/channel_sender.py` e `flow_router.py` não se moveram: o primeiro tem o Protocol dos dois canais, o segundo é 100% neutro.
 
 ### General
 - Pure decision functions over side-effects: prefer the `flow_router.route()` pattern — return a result object, let the caller persist/send. Easier to test without network/DB.
@@ -135,6 +150,46 @@ neither" do `README.md`.
 
 ## Documentação
 
+`docs/CHECKPOINT_lembretes_r7.md` — TASK-044 R7: ações da clínica na agenda avisam o paciente (confirmar com botões, compareceu → pós-consulta, Editar/Remarcar, cancelar no Portal, autorização permanente de aviso pago), quem vê a agenda por papel (brain-api `agenda_scope`, aplicado no servidor), lembrete extra na configuração e dados do Editar na agenda; migração aditiva `d8e3a5c1f7b2`; local, não mesclado/pushado/deployado; deploy: migração → brain-api → API+worker → front; contrato do R5 no plano.
+
+`docs/CHECKPOINT_conversas_meus_pacientes.md` — TASK-046 R8: `GET /tenants/me/conversations?mine=true` ("Meus pacientes", filtro e não permissão; cancelada não conta); local, não deployado; API antes do front.
+`docs/CHECKPOINT_edicao_ia_nao_perde_rascunho.md` — TASK-041: IA altera o rascunho sem sair da edição; 4527 testes passaram, sem novas falhas de lint; prova real no Portal BLOCKED, sem publicação.
+
+`docs/CHECKPOINT_primeira_mensagem_lembrete.md` — 2026-10-08: primeira mensagem com consulta reutiliza exatamente o cartão/ações de lembrete no Portal e WhatsApp; 4427 testes passaram; privacidade e concorrência verificadas; sem deploy.
+
+`docs/CHECKPOINT_email_alteracao_consulta.md` — complemento R6: e-mail fixo ao médico atual após alteração confirmada, mudanças e dados completos, sem LLM; commitado, candidato validado com 4411 testes; merge/push autorizados, sem deploy.
+
+`docs/CHECKPOINT_lembretes_r6.md` — TASK-032 R6: Confirmar / Cancelar / Alterar Dados e edição por rascunho; entrega commitada, candidata validada com 4411 testes; merge/push autorizados, sem deploy; migração aditiva `b1c4e7a2d9f3`. Revisão e verificações antes da liberação no checkpoint.
+
+`docs/CHECKPOINT_lembretes_r4.md` — TASK-032 R4 (branch TASK-043): cron de aviso à clínica (`process_confirmation_warnings`), `POST .../release` (liberar horário, falha fechado no Google, aviso ao paciente, confirmação de retenção do sinal Pix) e `POST .../message`; commitado local, sem merge/push/deploy, sem migração; deploy API + worker juntos.
+
+`docs/CHECKPOINT_ia_prompt_v2.md` - TASK-030 P5 adaptado ao atendimento atual: prompt por turno, fatos/preparo/datas/oferta humana preservados; 4266 testes verdes na integracao; modelo real e jornada continua testados; commitado, merge/push autorizados, sem deploy/ativacao; fingerprint esperado d301f7e027b3, piloto v2 pendente.
+
+`docs/TESTES_REAIS_captura_datas_2026-10-07.md` — captura real até o cartão PASS: mensagem original pergunta só horário; amanhã/quinta da próxima semana vão direto ao cartão; consulta existente preservada, sem confirmação nova. Versão/paridade e limites da prova registrados.
+
+`docs/CHECKPOINT_ia_get_availability.md` — TASK-030 P4: horários livres, criar/cancelar cegos, proteção de dono e filtro de saída; reutilizado por WhatsApp e Portal, commitado e compat?vel com TASK-038, publica??o autorizada, sem deploy; P5 antes de ativar.
+
+`docs/CHECKPOINT_ia_atende_como_pessoa.md` — TASK-038: texto livre no convênio/dia vai à IA na mesma etapa ("ter" em frase não é terça), a fala da IA sai junto do cartão ao devolver aos botões (envelope `__INTRO__:`, segurada até o cartão), "Não sei" humano, bloco "COMO ATENDER" no prompt e oferta de atendente com Sim/Não (`offer_human_handoff`, cartão fixo); deploy API+worker juntos.
+
+`docs/CHECKPOINT_outro_pergunta_fixa.md` — TASK-037: "Outro" do menu responde a pergunta fixa "O que te traz à clínica?" sem a IA (a IA começa na resposta); 12 testes reais dos outros pontos de entrada da IA e as recomendações.
+
+`docs/TESTES_REAIS_p3_posdeploy_2026-10-06.md` — P3 `01f2af7` comprovado em API/worker; cartões/desistências e consulta preservada PASS, linguagem natural/v2 ainda não aprovadas; ler os limites antes de P4/P5 e novo reteste.
+
+`docs/CHECKPOINT_ia_confirmacao_expressa.md` — TASK-030 P3 commitado: confirmação expressa, retomada e gerenciamento v2; revisão corrigida, validação conjunta com lembretes R2, publicação autorizada e deploy pelo dono pendente; ler antes de P4/P5.
+- Lembretes/confirmação (TASK-032 R1): `docs/CHECKPOINT_lembretes_r1.md`.
+
+`docs/CHECKPOINT_ia_p2a_rascunho_resolvedor.md` — TASK-030 P2a A1–A6 commitado e integrado em main; deploy/migração informados pelo dono, paridade comprovada. Smoke até resumo em `docs/TESTES_REAIS_ia_p2a_2026-10-06.md`. Teste posterior pela LLM criou e manteve uma consulta em 16/10/2026 às 14:40: memória/correção PASS, transferência de data/hora incompleta (P2b/P3 pendentes) e cartão de gerenciamento exibe UTC 17:40; prova em `docs/TESTES_REAIS_llm_agendamento_2026-10-06.md`. Ler antes de P2b/P3 para preservar as correções.
+
+`docs/CHECKPOINT_workers_split.md` — TASK-023: divisão de `workers/tasks.py` (mapa nome → módulo, camadas, como provar).
+
+`docs/CHECKPOINT_mvp_portal.md` — TASK-021: contexto/rascunho da LLM, handoff e notificações; não deployado; validação e pendências registradas.
+
+`docs/CHECKPOINT_portal_mensagens_recentes.md` — TASK-028: a API da conversa do Portal devolve as mensagens MAIS RECENTES (`has_more`, `before`); commitado, não deployado; prova ao vivo pendente; o Portal ainda precisa de um ajuste de rolagem no front ("Dependência do front").
+
+`docs/CHECKPOINT_lembretes_r2.md` — TASK-032 R2: motor de lembretes (3 lembretes com botões, Portal por e-mail), atrás de `reminders_v2_enabled`; commitado, não deployado; modelo da Meta em `docs/LEMBRETES_MODELOS_META.md`.
+
+`docs/CHECKPOINT_clinic_context.md` — TASK-025: endereço e fatos da clínica (`clinic_facts`) no prompt da LLM, tool `get_service_info` e completude do contexto; mesclado em main e deployado em 2026-10-05; correção das orientações por serviço em clínicas com 2+ profissionais registrada no checkpoint.
+
 `docs/` é a fonte de verdade deste repo (exemplo do padrão: `docs/CHECKPOINT_plugins.md`). Regra
 geral de quando/como atualizar (CHECKPOINT, âncoras estáveis) em `AI_WORKFLOW.md` — aqui só o que
 diverge, se houver.
@@ -158,7 +213,7 @@ Gerados por uma sessão de auditoria (2026-08-21) a partir de uma lista de bugs 
 §8: `models/message.py:107` não tem `none_as_null=True` (ao contrário de `attachment`, linha 118),
 então `interactive=None` numa bolha de texto grava a string `'null'`, não SQL NULL. Consequência:
 `workers/tasks.py::_validated_brain_message_reply_id` (linha 6493, filtro na linha 6527,
-`BRAIN_MESSAGE_TAP_WINDOW=10` na linha 6474) conta as 10 últimas mensagens de qualquer tipo, não
+`BRAIN_MESSAGE_TAP_WINDOW=10` na linha 6474; números de linha anteriores à TASK-023, a função agora está em `workers/portal/inbound.py`) conta as 10 últimas mensagens de qualquer tipo, não
 os 10 últimos cartões interactive — um cartão seguido de 10+ bolhas de texto teria o toque
 recusado. Confirmado ainda pendente em 2026-09-19. **NÃO EXECUTADO.**
 
@@ -487,6 +542,8 @@ Gerados 2026-08-30 a partir de um pedido de UX conversacional (emoji dinâmico n
 
 ## graphify
 
+Limpeza administrativa de pacientes (TASK-029): ver `docs/CHECKPOINT_tenant_patient_cleanup.md`; integrado à main local, não publicado em produção.
+
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
 
 Rules:
@@ -494,3 +551,14 @@ Rules:
 - If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
 - Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+
+
+docs/CHECKPOINT_digitando_backend.md — TASK-033: indicador universal no backend Portal/console; local, sem deploy; validação e provas pendentes registradas.
+
+TASK-034: Portal visit discard on account promotion; local validation and deployment order: `docs/CHECKPOINT_portal_visita_fundida.md`. Not deployed.
+
+`docs/CHECKPOINT_ia_captura_datas.md` — TASK-030: correção aprovada de captura completa no caminho atual, datas explícitas/relativas no fuso da clínica e escolha segura de médico; validação conjunta com TASK-037/avaliações reais, publicação autorizada e deploy pelo dono pendente; ler antes de P4/P5 e novo reteste.
+
+`docs/TESTES_REAIS_p4_posdeploy_2026-10-07.md` — TASK-030: código P4 comprovado em API/worker, Portal cartões/desistência PASS; ai_draft_v2=false, disponibilidade natural/remarcação textual ainda limitadas; P5 antes de ativar, WhatsApp real pendente.
+
+TASK-042: descarte de visita vazia (`POST /internal/brain-message/visits/discard`) e espera de código de conta conhecida que não cai mais no LGPD: `docs/CHECKPOINT_retencao_visitas_portal.md`. Local, não deployado.

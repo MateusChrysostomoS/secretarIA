@@ -1,10 +1,11 @@
 """Shared pytest fixtures and deterministic test environment."""
-
 import os
 from collections.abc import AsyncIterator
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+
+from tests._patching import workers_ns
 
 # Configure a deterministic environment BEFORE any `secretaria` import, so that
 # Settings() picks these values up. Real env vars take precedence over `.env`.
@@ -23,6 +24,24 @@ os.environ.setdefault(
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 
 
+@pytest.fixture(autouse=True)
+def _no_turn_apology(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the "patient never unanswered" net out of tests that fake the sender.
+
+    The net counts messages that really leave (`WhatsAppClient._post` /
+    `BrainMessageSender._record`). Most older tests replace the client with a
+    fake that never reaches those two points, so their perfectly good turns look
+    silent and would gain a second, unexpected apology. Tests of the net itself
+    (tests/test_turn_safety_net.py) call the real function they captured at
+    import time and exercise it explicitly.
+    """
+
+    async def _noop(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(workers_ns, "_send_turn_fallback", _noop)
+
+
 @pytest.fixture
 async def client() -> AsyncIterator[AsyncClient]:
     """An httpx AsyncClient bound to the FastAPI app via ASGITransport.
@@ -39,3 +58,20 @@ async def client() -> AsyncIterator[AsyncClient]:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
         yield ac
+
+
+@pytest.fixture(autouse=True)
+def _clinic_wide_agenda_viewer():
+    """TASK-044 R7: who is looking at the hub agenda comes from brain-api's token
+    introspection (api/hub/deps.py::get_agenda_viewer). Tests that override
+    `get_current_tenant` never present a token, so by default they see the whole
+    clinic - exactly the pre-R7 behaviour. Scoping tests call
+    tests/_agenda_viewer.py::view_as; tests of the dependency call it directly.
+    """
+    from secretaria.api.hub.deps import get_agenda_viewer
+    from secretaria.main import app
+    from secretaria.services.agenda_visibility import CLINIC_WIDE
+
+    app.dependency_overrides[get_agenda_viewer] = lambda: CLINIC_WIDE
+    yield
+    app.dependency_overrides.pop(get_agenda_viewer, None)

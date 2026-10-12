@@ -47,7 +47,14 @@ from secretaria.config import get_settings
 from secretaria.core import attachments
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
-from secretaria.models import Appointment, Conversation, Message, MessageDirection, Patient
+from secretaria.models import (
+    Appointment,
+    Conversation,
+    HandoverState,
+    Message,
+    MessageDirection,
+    Patient,
+)
 from secretaria.models.message import status_of
 from secretaria.schemas.conversation import (
     MessagesReadResult,
@@ -62,13 +69,20 @@ from secretaria.schemas.internal import (
     BrainMessageMessageList,
     BrainMessageOpen,
     BrainMessageReadMark,
+    BrainMessageTyping,
+    BrainMessageVisitDiscard,
+    BrainMessageVisitDiscardOut,
+    BrainMessageVisitMerge,
     InternalAppointment,
     InternalAppointmentList,
     InternalPatient,
     InternalPatientList,
+    TypingAck,
 )
 from secretaria.services import media_storage, message_status
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
+from secretaria.services.typing_indicator import mark_typing, typing_by as typing_by_for
+from secretaria.services.visit_merge import discard_empty_visit
 
 logger = get_logger(__name__)
 
@@ -594,8 +608,33 @@ async def brain_message_open(
     Fail-closed on a missing queue with 503, like `/inbound`: answering 202
     with nothing enqueued would promise a greeting that never comes.
     """
-    if await _brain_message_conversation_started(session, payload.tenant_id, payload.external_id):
+    if payload.entry_context is not None or await _brain_message_conversation_started(
+        session,
+        payload.tenant_id,
+        payload.external_id,
+    ):
         response.status_code = status.HTTP_200_OK
+        # A patient ENTERING a conversation that already has history (owner,
+        # 2026-10-05): the worker decides whether the context-aware opening is
+        # due (`workers/portal/open.py::_brain_message_entry_decision`) - it
+        # stays silent mid-flow, mid-onboarding and right after the last
+        # message. Best effort on purpose: the answer is still `exists`, and a
+        # Redis hiccup here costs one opening, never the patient's visit.
+        await session.close()
+        try:
+            kwargs = (
+                {"entry_context": payload.entry_context.model_dump(mode="json")}
+                if payload.entry_context is not None
+                else {}
+            )
+            await _arq_pool_or_503(request).enqueue_job(
+                "process_brain_message_enter",
+                str(payload.tenant_id),
+                payload.external_id,
+                **kwargs,
+            )
+        except Exception as exc:
+            logger.warning("brain_message_enter_enqueue_failed", error_type=type(exc).__name__)
         logger.info(
             "brain_message_open_exists",
             tenant_id=str(payload.tenant_id),
@@ -641,14 +680,19 @@ async def brain_message_open(
     summary="Messages of one Brain-Message patient (internal)",
     description=(
         "Returns the message history of ONE patient on the Brain-Message channel, "
-        "scoped to tenant_id + external_id. `since` returns only messages CHANGED "
+        "scoped to tenant_id + external_id. Without `since` it returns the NEWEST `limit` "
+        "messages, oldest first, and `has_more` says whether older ones exist; `before` "
+        "(a `created_at` cursor, e.g. the oldest one already shown) pages further back. "
+        "`since` returns only messages CHANGED "
         "(`updated_at`: created, or their delivery status moved) strictly after that "
         "instant, ordered by `updated_at` - a message already fetched comes back when it "
-        "is read; upsert by `id`. Requires the X-Internal-Api-Key header."
+        "is read; upsert by `id`; `has_more` is always false there, and `since` cannot be "
+        "combined with `before`. Requires the X-Internal-Api-Key header."
     ),
     responses=_INTERNAL_RESPONSES,
 )
 async def list_brain_message_messages(
+    request: Request,
     external_id: Annotated[str, Path(description="The patient's id on the Brain-Message channel.")],
     tenant_id: Annotated[UUID, Query(description="Tenant UUID — REQUIRED; the outer scope.")],
     since: Annotated[
@@ -660,7 +704,27 @@ async def list_brain_message_messages(
             )
         ),
     ] = None,
-    limit: Annotated[int, Query(ge=1, le=_MAX_PAGE)] = _DEFAULT_PAGE,
+    before: Annotated[
+        datetime | None,
+        Query(
+            description=(
+                "Page backwards: only messages created strictly before this instant. "
+                "Only valid without `since`."
+            )
+        ),
+    ] = None,
+    limit: Annotated[
+        int,
+        Query(
+            ge=1,
+            le=_MAX_PAGE,
+            description=(
+                "Page size. A page never ends INSIDE a group of rows with an equal cursor "
+                "timestamp (written together by one transaction), so it may exceed `limit` "
+                "by that group: `created_at` groups without `since`, `updated_at` with it."
+            ),
+        ),
+    ] = _DEFAULT_PAGE,
     session: AsyncSession = Depends(get_session),
 ) -> BrainMessageMessageList:
     """One patient's messages. Both scopes are REQUIRED and both are enforced.
@@ -682,6 +746,11 @@ async def list_brain_message_messages(
     an ordinary state, not an error, and answering 404 would also confirm to a
     caller which external_ids do not exist.
     """
+    if since is not None and before is not None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="`since` and `before` cannot be combined.",
+        )
     patient = await session.scalar(
         select(Patient).where(
             Patient.tenant_id == tenant_id,
@@ -693,53 +762,107 @@ async def list_brain_message_messages(
         logger.info("brain_message_messages_unknown_patient", tenant_id=str(tenant_id))
         return BrainMessageMessageList(data=[])
 
-    conversation_id = await session.scalar(
-        select(Conversation.id).where(
-            Conversation.tenant_id == tenant_id,
-            Conversation.patient_id == patient.id,
+    found = (
+        await session.execute(
+            select(Conversation.id, Conversation.handover_state).where(
+                Conversation.tenant_id == tenant_id,
+                Conversation.patient_id == patient.id,
+            )
         )
-    )
-    if conversation_id is None:
+    ).one_or_none()
+    if found is None:
         return BrainMessageMessageList(data=[])
+    conversation_id, handover_state = found
 
     stmt = select(Message).where(Message.conversation_id == conversation_id)
+    has_more = False
     if since is None:
-        # The first load: the transcript, oldest first. `id` breaks ties between rows
-        # written in the same tick.
-        stmt = stmt.order_by(Message.created_at, Message.id)
+        # The first load and every Portal poll: the NEWEST `limit` rows, returned oldest
+        # first. Ordering ascending with a LIMIT used to hand back the oldest page and
+        # freeze any conversation past `limit` messages (LACUNAS_PORTAL L1). `limit + 1`
+        # rows are read only to learn whether older ones exist.
+        if before is not None:
+            stmt = stmt.where(Message.created_at < before)
+        newest_first = list(
+            (
+                await session.execute(
+                    stmt.order_by(Message.created_at.desc(), Message.id.desc()).limit(limit + 1)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        has_more = len(newest_first) > limit
+        page = newest_first[:limit]
+        if has_more and newest_first[limit].created_at == page[-1].created_at:
+            # The caller's next `before` is the oldest `created_at` it received, strict `<`:
+            # the rest of a group of equal `created_at` cut by `limit` (one transaction
+            # stamps its rows with the same now()) would never be served again. So the page
+            # is completed with the rest of that group, as the `since` page below does (it
+            # may exceed `limit` by that group), and `has_more` is asked again: the group
+            # may have been the oldest one.
+            # Column-to-column, not the loaded value re-bound (same reason as below).
+            seen = {row.id for row in page}
+            group_created_at = (
+                select(Message.created_at).where(Message.id == page[-1].id).scalar_subquery()
+            )
+            group_rest = await session.scalars(
+                select(Message)
+                .where(
+                    Message.conversation_id == conversation_id,
+                    Message.created_at == group_created_at,
+                )
+                .order_by(Message.id.desc())
+            )
+            page.extend(row for row in group_rest.all() if row.id not in seen)
+            has_more = (
+                await session.scalar(
+                    select(Message.id)
+                    .where(
+                        Message.conversation_id == conversation_id,
+                        Message.created_at < group_created_at,
+                    )
+                    .limit(1)
+                )
+                is not None
+            )
+        rows = list(reversed(page))
     else:
         # The poll: everything that CHANGED since the cursor - new rows and rows whose
         # status moved (`updated_at`, bumped by every write). `created_at` here would
         # never return a message again once fetched, so its ticks would freeze at
         # whatever they were on the first fetch. Ordered by the cursor column.
         stmt = stmt.where(Message.updated_at > since).order_by(Message.updated_at, Message.id)
-    rows = list((await session.execute(stmt.limit(limit))).scalars().all())
-    if since is not None and len(rows) == limit:
-        # A page never ends INSIDE a group of equal `updated_at`: one read mark stamps
-        # every row it touches with the same now(), and the caller's next cursor is the
-        # last `updated_at` it received - with a strict `>`, the rest of a group cut by
-        # `limit` would never be served again. So the page is completed with the rest
-        # of the last row's group (it may exceed `limit` by that group).
-        # Column-to-column, not the loaded value re-bound: a datetime round-trip need not
-        # compare equal to what the database stored.
-        seen = {row.id for row in rows}
-        last_updated_at = (
-            select(Message.updated_at).where(Message.id == rows[-1].id).scalar_subquery()
-        )
-        tail = await session.scalars(
-            select(Message)
-            .where(
-                Message.conversation_id == conversation_id,
-                Message.updated_at == last_updated_at,
+        rows = list((await session.execute(stmt.limit(limit))).scalars().all())
+        if len(rows) == limit:
+            # A page never ends INSIDE a group of equal `updated_at`: one read mark stamps
+            # every row it touches with the same now(), and the caller's next cursor is the
+            # last `updated_at` it received - with a strict `>`, the rest of a group cut by
+            # `limit` would never be served again. So the page is completed with the rest
+            # of the last row's group (it may exceed `limit` by that group).
+            # Column-to-column, not the loaded value re-bound: a datetime round-trip need not
+            # compare equal to what the database stored.
+            seen = {row.id for row in rows}
+            last_updated_at = (
+                select(Message.updated_at).where(Message.id == rows[-1].id).scalar_subquery()
             )
-            .order_by(Message.id)
-        )
-        rows.extend(row for row in tail.all() if row.id not in seen)
+            tail = await session.scalars(
+                select(Message)
+                .where(
+                    Message.conversation_id == conversation_id,
+                    Message.updated_at == last_updated_at,
+                )
+                .order_by(Message.id)
+            )
+            rows.extend(row for row in tail.all() if row.id not in seen)
     logger.info(
         "brain_message_messages_listed",
         tenant_id=str(tenant_id),
         conversation_id=str(conversation_id),
         count=len(rows),
+    )
+    typer = await typing_by_for(
+        getattr(request.app.state, "arq_pool", None), conversation_id, viewer="patient"
     )
     return BrainMessageMessageList(
         data=[
@@ -758,7 +881,11 @@ async def list_brain_message_messages(
                 updated_at=row.updated_at,
             )
             for row in rows
-        ]
+        ],
+        has_more=has_more,
+        typing=typer is not None,
+        typing_by=typer,
+        accepts_typing=handover_state == HandoverState.HUMAN_ACTIVE,
     )
 
 
@@ -891,3 +1018,108 @@ async def get_brain_message_media(
     if record is None:
         logger.info("brain_message_media_not_found", tenant_id=str(tenant_id))
     return await stream_attachment(record)
+
+
+@router.post(
+    "/brain-message/typing",
+    response_model=TypingAck,
+    summary="The patient is typing - recorded only while a human conducts (internal)",
+    description=(
+        "A heartbeat from the patient's client. Recorded ONLY when a human conducts the "
+        "conversation (the clinic's console is the only reader); with the automation "
+        "conducting nothing is written and `applied` is false. Unknown patient: `applied: "
+        "false`, never 404. Requires the X-Internal-Api-Key header."
+    ),
+    responses=_INTERNAL_RESPONSES,
+)
+async def patient_typing(
+    payload: BrainMessageTyping,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> TypingAck:
+    found = (
+        await session.execute(
+            select(Conversation.id, Conversation.handover_state)
+            .join(Patient, Patient.id == Conversation.patient_id)
+            .where(
+                Conversation.tenant_id == payload.tenant_id,
+                Patient.tenant_id == payload.tenant_id,
+                Patient.channel == CHANNEL_BRAIN_MESSAGE,
+                Patient.external_id == payload.external_id,
+            )
+        )
+    ).one_or_none()
+    if found is None:
+        return TypingAck(applied=False)
+    conversation_id, handover_state = found
+    if handover_state != HandoverState.HUMAN_ACTIVE:
+        return TypingAck(applied=False)
+    await mark_typing(getattr(request.app.state, "arq_pool", None), conversation_id, "patient")
+    return TypingAck(applied=True)
+
+
+@router.post(
+    "/brain-message/visits/merge",
+    response_model=BrainMessageAck,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="A Portal visit was merged into an existing account (internal)",
+    description=(
+        "brain-api calls this after a visit's code proved an address that already had an "
+        "identity at the clinic. The visit's own conversation is discarded and the account's "
+        "conversation gets the menu (or, if the account never had one, the normal opening). "
+        "Idempotent; returns 202 immediately, the work runs in the worker. Requires the "
+        "X-Internal-Api-Key header."
+    ),
+    responses={**_INTERNAL_RESPONSES, 422: {"description": "Visit and account are the same."}},
+)
+async def merge_brain_message_visit_route(
+    payload: BrainMessageVisitMerge, request: Request
+) -> BrainMessageAck:
+    if payload.visit_external_id == payload.into_external_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="A visit cannot be merged into itself.",
+        )
+    pool = _arq_pool_or_503(request)
+    await pool.enqueue_job(
+        "merge_brain_message_visit",
+        str(payload.tenant_id),
+        payload.visit_external_id,
+        payload.into_external_id,
+    )
+    logger.info("brain_message_visit_merge_queued", tenant_id=str(payload.tenant_id))
+    return BrainMessageAck(status="queued")
+
+
+@router.post(
+    "/brain-message/visits/discard",
+    response_model=BrainMessageVisitDiscardOut,
+    summary="Retention: discard a Portal visit that only opened the link (internal)",
+    description=(
+        "brain-api's retention job (TASK-042) calls this for a visit older than 24 h with no "
+        "e-mail and no verification, BEFORE deleting its own rows. Synchronous: 200 means "
+        "this side is clean (`discarded` now, or `absent` already) and brain-api may delete "
+        "its side. 409 `visit_not_empty` means the patient wrote, booked or holds a slot: "
+        "nothing is deleted and brain-api must keep the visit. Idempotent. Requires the "
+        "X-Internal-Api-Key header."
+    ),
+    responses={
+        **_INTERNAL_RESPONSES,
+        409: {"description": "The visit has a patient message, an appointment or a live hold."},
+    },
+)
+async def discard_brain_message_visit_route(
+    payload: BrainMessageVisitDiscard,
+    session: AsyncSession = Depends(get_session),
+) -> BrainMessageVisitDiscardOut:
+    result = await discard_empty_visit(session, payload.tenant_id, payload.external_id)
+    if result.status == "not_empty":
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="visit_not_empty")
+    await session.commit()
+    logger.info(
+        "brain_message_visit_retention_discard",
+        tenant_id=str(payload.tenant_id),
+        status=result.status,
+    )
+    return BrainMessageVisitDiscardOut(status=result.status)

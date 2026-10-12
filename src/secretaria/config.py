@@ -156,6 +156,15 @@ class Settings(BaseSettings):
     # the doctor sets status via the hub PATCH), so weeks-old rows stuck in
     # SCHEDULED must never influence the greeting.
     POST_CONSULT_WINDOW_HOURS: int = 48
+    # Portal opening (workers/shared/opening.py): how far back a past consult
+    # still earns the "como foi a sua consulta?" question on the patient's FIRST
+    # appearance after it. Wider than the window above on purpose: that one
+    # bounds an LLM hint, this one a single question that is asked once.
+    POST_CONSULT_FOLLOWUP_DAYS: int = 30
+    # Portal entry into a conversation that already has history: nothing is
+    # sent while the last message is younger than this (a refresh mid-chat, or
+    # the opening that the login itself just sent).
+    PORTAL_ENTRY_QUIET_MINUTES: int = 30
 
     # --- Onboarding / multi-professional (cross-service contract v1) ---
     # workers/tasks.py:_resolve_tenant's MVP single-tenant scaffold (fall back
@@ -232,6 +241,21 @@ class Settings(BaseSettings):
     # content="" (the model "ran out" before producing visible text). 2500 is
     # a safe floor for gpt-5-mini conversational turns with tool calls.
     OPENAI_MAX_TOKENS: int = 2500
+    # Wall-clock budget for ONE whole agent turn (every LLM call + tool call +
+    # the transient retry). The per-call HTTP timeout is 60s with 5 SDK
+    # retries, so without this a stuck turn could outlive arq's 300s job
+    # timeout, which cancels the job and leaves the patient with no answer.
+    LLM_TURN_TIMEOUT_SECONDS: int = 120
+    # Opt-in: log the exact (pseudonymized) conversation the model received and
+    # its reply, plus the rendered system prompt. Off by default - these are
+    # patient words. Turn on in production only while debugging, then turn off.
+    LLM_TRACE_CONTENT: bool = False
+    # Safety net for "the patient never goes unanswered": when a turn ends with
+    # no outbound message, ONE fixed apology (no LLM) is sent, at most
+    # TURN_FALLBACK_MAX_PER_WINDOW times per conversation per window, so a
+    # looping or abusive sender cannot turn the net into an amplifier.
+    TURN_FALLBACK_MAX_PER_WINDOW: int = 3
+    TURN_FALLBACK_WINDOW_SECONDS: int = 600
 
     # --- Audio transcription (transcription-core) ---
     # STT model, NEVER the chat model: the transcription endpoint rejects chat
@@ -388,6 +412,26 @@ class Settings(BaseSettings):
     # itself needs external Meta approval before it can actually be used;
     # this setting only names it ahead of time.
     REMINDER_DEPOSIT_TEMPLATE_NAME: str = "appointment_reminder_deposit"
+
+    # --- Reminder engine v2 (TASK-032 R2, workers/reminder_engine.py) ---
+    # Approved Meta utility template with 6 body parameters and 3 quick-reply
+    # buttons (Confirmar / Cancelar / Outro). The exact texts to submit are in
+    # docs/LEMBRETES_MODELOS_META.md. Templates are approved per WABA.
+    REMINDER_V2_TEMPLATE_NAME: str = "lembrete_consulta_v2"
+    # False until Meta has approved REMINDER_V2_TEMPLATE_NAME on the WABAs in
+    # use. While False, a reminder that must go OUTSIDE the 24h window is sent
+    # with the plain REMINDER_TEMPLATE_NAME (one variable, no buttons) and the
+    # patient answers through the chat. When True and Meta still refuses the
+    # template on some WABA, the engine falls back to the plain template too.
+    REMINDER_V2_TEMPLATE_APPROVED: bool = False
+    # Rows claimed per one-minute tick, so one tick never outlives the next.
+    REMINDER_V2_BATCH_SIZE: int = 200
+    # Base URL of the Brain-Message patient portal - the SAME value brain-api
+    # has under this name. The Portal reminder e-mail links to
+    # {BRAIN_MESSAGE_PORTAL_URL}/clinicas/?convite=<tenant_id>, the invite shape
+    # brain-api's core/invite_codes.py::parse_invite accepts. Empty = the
+    # e-mail carries no link (it tells the patient to open the portal).
+    BRAIN_MESSAGE_PORTAL_URL: str = ""
 
     # --- Brain-Message attachments (docs/CHECKPOINT_brain_message_anexos_secretaria.md) ---
     # secretarIA's OWN Cloudflare R2 bucket for the files patients and clinic staff

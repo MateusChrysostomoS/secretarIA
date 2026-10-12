@@ -16,9 +16,11 @@ from secretaria.core.build_info import (
 )
 from secretaria.core.database import engine
 from secretaria.core.logging import get_logger, setup_logging
+from secretaria.plugins import booking_notifications  # noqa: F401
 from secretaria.plugins.post_booking import run_post_booking_hooks
 from secretaria.plugins.professional_notification import retry_professional_notification
 from secretaria.plugins.reminders import send_appointment_reminders
+from secretaria.workers.confirmation_warnings import process_confirmation_warnings
 from secretaria.workers.deploy_parity import check_deploy_parity_cron
 from secretaria.workers.onboarding_cron import (
     run_onboarding_nudges,
@@ -43,8 +45,18 @@ from secretaria.workers.payments_tasks import (
     process_asaas_event,
     process_payment_event,
 )
+from secretaria.workers.reminder_engine import (
+    process_appointment_reminders,
+    reconcile_appointment_reminders,
+)
+from secretaria.workers.shared.appointment_edit_notification import (
+    dispatch_pending_professional_edits,
+    send_professional_edit_notification,
+)
 from secretaria.workers.tasks import (
     check_handover_timeouts,
+    merge_brain_message_visit,
+    process_brain_message_enter,
     process_brain_message_inbound,
     process_brain_message_open,
     process_message_statuses,
@@ -124,6 +136,11 @@ class WorkerSettings:
         # automation greets first, with no inbound message behind it. Enqueued
         # by POST /internal/brain-message/open. See workers/tasks.py.
         process_brain_message_open,
+        # A known patient entered a conversation that already has history: the
+        # context-aware opening, when it is due. Enqueued by the same route.
+        process_brain_message_enter,
+        # A Portal visit superseded by an existing account.
+        merge_brain_message_visit,
         # The one deferred second look at WhatsApp delivery receipts that overtook
         # their message's row; enqueued only from process_webhook_event.
         process_message_statuses,
@@ -142,6 +159,7 @@ class WorkerSettings:
         # cannot retry a single hook: registry.run_post_booking contains hook
         # exceptions by contract. See plugins/professional_notification.py.
         retry_professional_notification,
+        send_professional_edit_notification,
         # Onboarding transactional email (contract v1 §4 endpoint 6), enqueued
         # by POST /internal/notifications/email. See workers/tasks.py and
         # services/email.py.
@@ -167,20 +185,35 @@ class WorkerSettings:
     # (daily at 03:30 UTC) — contract v1 §11. See workers/onboarding_cron.py.
     # check_deploy_parity_cron (hourly at :07) re-announces this worker's build
     # identity and WARNs when the API is running different code — FIX_01 §5.2.
-    # The minute is offset from every other cron above so the parity check
-    # never shares a tick with real work.
+    # process_appointment_reminders (TASK-032 R2 engine) runs every minute and
+    # reconcile_appointment_reminders at minutes 4,14,...,54. The parity check's
+    # minute (:07) is offset from every other cron except the every-minute
+    # engine, so it shares a tick only with that cheap cron, never with the
+    # other real work.
     cron_jobs = [
         cron(check_handover_timeouts, minute={0, 15, 30, 45}),
         cron(
             send_appointment_reminders,
             minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
         ),
+        # TASK-032 R2: the reminder engine for clinics with reminders_v2_enabled
+        # (the cron above skips them). Every minute - the atomic claim makes an
+        # overlapping tick harmless. The reconcile plans rows a crash or a fresh
+        # switch-ON left missing (the backfill), offset from every other minute.
+        cron(process_appointment_reminders, minute=set(range(60))),
+        cron(dispatch_pending_professional_edits, minute=set(range(60))),
+        cron(reconcile_appointment_reminders, minute={4, 14, 24, 34, 44, 54}),
+        # TASK-032 R4: warn the clinic about reminded-but-unconfirmed appointments
+        # (sets `warned_at`, which turns the agenda red, and e-mails the alert
+        # address). Every minute; the atomic claim makes an overlapping tick harmless.
+        cron(process_confirmation_warnings, minute=set(range(60))),
         cron(run_onboarding_nudges, minute={10}),
         cron(run_patient_usage_metering, hour={3}, minute={30}),
         cron(check_deploy_parity_cron, minute={7}),
         # Payment provider core (services/payments/jobs.py): void expired `before` charges,
         # reconcile paid-but-unheard charges, re-enqueue stuck events/fulfillments, and the
-        # daily key recheck + payload pruning. Minutes are disjoint from every cron above.
+        # daily key recheck + payload pruning. Minutes are disjoint from every non-every-minute
+        # cron above.
         cron(run_payment_expiry, minute=EXPIRY_MINUTES),
         cron(run_payment_reconciliation, minute=RECONCILE_MINUTES),
         cron(run_payment_sweeps, minute=SWEEP_MINUTES),

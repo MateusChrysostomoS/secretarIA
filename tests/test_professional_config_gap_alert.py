@@ -29,8 +29,9 @@ so all three of its outcomes are exercised: a dict WITH this doctor, a dict
 WITHOUT them (no linked user — silent), and `None` (brain-api could not say —
 warned, and the clinic is still told).
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -291,7 +292,7 @@ async def db():
 
 @pytest.fixture(autouse=True)
 def _wire_db(monkeypatch: pytest.MonkeyPatch, db):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     yield
 
 
@@ -333,7 +334,7 @@ def lookup(monkeypatch: pytest.MonkeyPatch) -> _Lookup:
         return state.answer
 
     state = _Lookup()
-    monkeypatch.setattr(tasks, "fetch_professional_emails", _fetch)
+    monkeypatch.setattr(workers_ns, "fetch_professional_emails", _fetch)
     return state
 
 
@@ -371,7 +372,7 @@ def sent(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
             }
         )
 
-    monkeypatch.setattr(tasks, "send_professional_config_incomplete_alert", _fake_send)
+    monkeypatch.setattr(workers_ns, "send_professional_config_incomplete_alert", _fake_send)
     return calls
 
 
@@ -384,7 +385,7 @@ def _no_whatsapp(monkeypatch: pytest.MonkeyPatch) -> list:
         captured.extend(bubbles)
         return len(bubbles)
 
-    monkeypatch.setattr(tasks, "_dispatch_bubbles", _fake_dispatch)
+    monkeypatch.setattr(workers_ns, "_dispatch_bubbles", _fake_dispatch)
     return captured
 
 
@@ -409,7 +410,7 @@ class _LogRecorder:
 @pytest.fixture
 def log(monkeypatch: pytest.MonkeyPatch) -> _LogRecorder:
     recorder = _LogRecorder()
-    monkeypatch.setattr(tasks, "logger", recorder)
+    monkeypatch.setattr(workers_ns, "logger", recorder)
     return recorder
 
 

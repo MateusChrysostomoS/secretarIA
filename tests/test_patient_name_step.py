@@ -17,10 +17,11 @@ not by reading the code.
 Fixtures follow tests/test_brain_message_email_otp_inline.py (in-memory SQLite
 on a StaticPool, rows read back as the delivery on Brain-Message).
 """
-
 import json
 import os
 import re
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -73,6 +74,8 @@ from secretaria.services.greeting_template import (  # noqa: E402
 )
 from secretaria.services.patient_name import (  # noqa: E402
     NAME_ANSWER_LLM_PLACEHOLDER,
+    NAME_CHANGE_ACTION,
+    NAME_CHANGE_BUTTON_LABEL,
     NAME_INVALID_MESSAGE,
     NAME_PAUSED_MESSAGE,
     NAME_REQUEST_AFTER_EMAIL_MESSAGE,
@@ -85,6 +88,7 @@ from secretaria.services.pending_identity import (  # noqa: E402
     EMAIL_REQUEST_MESSAGE,
     EXISTING_ACCOUNT_CODE_BUTTONS,
     EXISTING_ACCOUNT_SENTENCE,
+    IDENTITY_CHANGE_EMAIL_ACTION,
     ClaimOutcome,
     ClaimResult,
     IdentityState,
@@ -104,6 +108,9 @@ EMAIL_MASKED = "m***a@exemplo.com"
 # Meta's `contact.profile.name` — the value the owner does NOT trust.
 PROFILE_NAME = "Mari 🌸"
 LGPD_ROW = interactive_history_body(LGPD_CONSENT_MESSAGE, [CONSENT_BUTTON_LABEL])
+NAME_LGPD_BUTTONS = [CONSENT_BUTTON_LABEL, NAME_CHANGE_BUTTON_LABEL]
+LGPD_NAME_ROW = interactive_history_body(LGPD_CONSENT_MESSAGE, NAME_LGPD_BUTTONS)
+EMAIL_CHANGE_OPTION = "\n(opções: 📩 Mudar e-mail)"
 
 
 # --------------------------------------------------------------------------
@@ -169,12 +176,12 @@ class _WireClient:
 
 @pytest.fixture(autouse=True)
 def _wire(monkeypatch: pytest.MonkeyPatch, db, calls):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     monkeypatch.setattr(graph, "async_session_factory", db)
     monkeypatch.setattr(pii_store, "async_session_factory", db)
-    monkeypatch.setattr(tasks, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
+    monkeypatch.setattr(workers_ns, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
     _WireClient.sends = []
-    monkeypatch.setattr(tasks, "WhatsAppClient", _WireClient)
+    monkeypatch.setattr(workers_ns, "WhatsAppClient", _WireClient)
 
     async def _fake_resolve(session, tenant_id, patient_id, **kwargs):
         return None
@@ -194,9 +201,9 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db, calls):
             limits={},
         )
 
-    monkeypatch.setattr(tasks, "resolve_patient_opening_state", _fake_resolve)
-    monkeypatch.setattr(tasks, "get_waba_token", _fake_token)
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_entitlements)
+    monkeypatch.setattr(workers_ns, "resolve_patient_opening_state", _fake_resolve)
+    monkeypatch.setattr(workers_ns, "get_waba_token", _fake_token)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_entitlements)
 
     async def _probe(tenant_id, external_id):
         calls.probed.append(external_id)
@@ -222,11 +229,11 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db, calls):
         calls.reported.append((external_id, name))
         return True
 
-    monkeypatch.setattr(tasks, "report_name", _report)
-    monkeypatch.setattr(tasks, "probe_identity", _probe)
-    monkeypatch.setattr(tasks, "claim_email", _claim)
-    monkeypatch.setattr(tasks, "verify_code", _verify)
-    monkeypatch.setattr(tasks, "request_code", _request)
+    monkeypatch.setattr(workers_ns, "report_name", _report)
+    monkeypatch.setattr(workers_ns, "probe_identity", _probe)
+    monkeypatch.setattr(workers_ns, "claim_email", _claim)
+    monkeypatch.setattr(workers_ns, "verify_code", _verify)
+    monkeypatch.setattr(workers_ns, "request_code", _request)
     yield
 
 
@@ -263,10 +270,14 @@ async def _wa_turn(tenant: Tenant, body: str, *, profile_name: str | None = PROF
     return reply
 
 
-async def _bm_turn(tenant: Tenant, body: str):
+async def _bm_turn(tenant: Tenant, body: str, *, reply_id: str | None = None):
     """One Brain-Message inbound, decided AND delivered (the row IS delivery)."""
     reply = await tasks._persist_brain_message_inbound(
-        tenant_id=tenant.id, external_id=EXTERNAL_ID, text=body, patient_name=None
+        tenant_id=tenant.id,
+        external_id=EXTERNAL_ID,
+        text=body,
+        patient_name=None,
+        interactive_reply_id=reply_id,
     )
     if reply is not None:
         await tasks._send_bot_reply(reply, redis=None)
@@ -402,7 +413,7 @@ async def test_portal_a_custom_menu_label_as_the_name_answer_is_reasked(db, call
 
     await _bm_turn(tenant, "lentes esclerais")
 
-    assert (await _outbound(db, tenant))[-1] == NAME_INVALID_MESSAGE
+    assert (await _outbound(db, tenant))[-1] == NAME_INVALID_MESSAGE + EMAIL_CHANGE_OPTION
     assert (await _patient(db, tenant, CHANNEL_BRAIN_MESSAGE)).name is None
     assert calls.reported == []
 
@@ -487,7 +498,7 @@ async def test_whatsapp_first_contact_asks_the_name_even_with_a_profile_name(db,
     await _wa_turn(tenant, "maria  da silva")
 
     assert (await _patient(db, tenant, CHANNEL_WHATSAPP)).name == "Maria da Silva"
-    assert _WireClient.sends[2] == ("buttons", LGPD_CONSENT_MESSAGE, [CONSENT_BUTTON_LABEL])
+    assert _WireClient.sends[2] == ("buttons", LGPD_CONSENT_MESSAGE, NAME_LGPD_BUTTONS)
     assert (await _conversation(db, tenant)).flow_state == FlowState.IDLE
 
     # A later profile name never overwrites the typed one.
@@ -515,7 +526,7 @@ async def test_whatsapp_an_unreadable_answer_reasks_once_then_moves_on(db) -> No
 
     await _wa_turn(tenant, "12345")
 
-    assert _WireClient.sends[-1] == ("buttons", LGPD_CONSENT_MESSAGE, [CONSENT_BUTTON_LABEL])
+    assert _WireClient.sends[-1] == ("buttons", LGPD_CONSENT_MESSAGE, NAME_LGPD_BUTTONS)
     conversation = await _conversation(db, tenant)
     assert (conversation.flow_state, conversation.flow_step) == (FlowState.IDLE, None)
     # No name typed: the profile name stays as the only thing we have.
@@ -596,7 +607,7 @@ async def test_a_free_answer_to_the_name_offer_never_loops(db) -> None:
     await _wa_turn(tenant, "Ana Souza")
 
     assert (await _patient(db, tenant, CHANNEL_WHATSAPP)).name == "Ana Souza"
-    assert _WireClient.sends[-1] == ("buttons", LGPD_CONSENT_MESSAGE, [CONSENT_BUTTON_LABEL])
+    assert _WireClient.sends[-1] == ("buttons", LGPD_CONSENT_MESSAGE, NAME_LGPD_BUTTONS)
     assert (await _conversation(db, tenant)).reactivation_origin is None
 
 
@@ -611,7 +622,7 @@ async def test_a_non_name_answer_to_the_name_offer_meets_consent(db) -> None:
     assert _WireClient.sends[-1] == (
         "buttons",
         CONSENT_REMINDER_MESSAGE,
-        [CONSENT_BUTTON_LABEL],
+        NAME_LGPD_BUTTONS,
     )
     conversation = await _conversation(db, tenant)
     assert (conversation.flow_state, conversation.reactivation_origin) == (FlowState.IDLE, None)
@@ -625,7 +636,7 @@ async def test_a_first_contact_that_sends_nothing_does_not_arm_the_name_wait(
     async def _lapsed(tenant_id, redis):
         return None
 
-    monkeypatch.setattr(tasks, "get_entitlements", _lapsed)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _lapsed)
     tenant = await _seed_tenant(db)
 
     await _wa_turn(tenant, "oi")
@@ -650,7 +661,7 @@ async def test_whatsapp_declining_to_resume_pauses_and_then_meets_consent(db) ->
     assert _WireClient.sends[-1] == (
         "buttons",
         CONSENT_REMINDER_MESSAGE,
-        [CONSENT_BUTTON_LABEL],
+        NAME_LGPD_BUTTONS,
     )
 
 
@@ -668,7 +679,7 @@ async def test_portal_new_email_asks_the_name_before_the_lgpd(db, calls) -> None
 
     sent = await _outbound(db, tenant)
     assert sent[1] == EMAIL_REQUEST_MESSAGE
-    assert sent[2] == NAME_REQUEST_AFTER_EMAIL_MESSAGE
+    assert sent[2] == NAME_REQUEST_AFTER_EMAIL_MESSAGE + EMAIL_CHANGE_OPTION
     assert LGPD_ROW not in sent
     assert calls.code_requests == [], "a new address must not be mailed a code here"
     assert (await _conversation(db, tenant)).flow_state == FlowState.AWAITING_NAME
@@ -676,7 +687,7 @@ async def test_portal_new_email_asks_the_name_before_the_lgpd(db, calls) -> None
     await _bm_turn(tenant, "Beatriz Lima")
 
     sent = await _outbound(db, tenant)
-    assert sent[3] == LGPD_ROW
+    assert sent[3] == LGPD_NAME_ROW
     # Portal: the typed name also goes to brain-api, for this account's next clinic.
     assert calls.reported == [(EXTERNAL_ID, "Beatriz Lima")]
     assert (await _patient(db, tenant, CHANNEL_BRAIN_MESSAGE)).name == "Beatriz Lima"
@@ -739,6 +750,62 @@ async def test_portal_known_email_skips_the_name_and_asks_the_code(db, calls) ->
     assert (await _conversation(db, tenant)).flow_state == FlowState.MENU
 
 
+async def test_portal_known_email_non_code_message_repeats_the_card_not_the_lgpd(
+    db, calls, monkeypatch
+) -> None:
+    """TASK-042 (j): a stray message in the known-address code wait keeps the wait.
+
+    Before: anything that was not six digits dropped AWAITING_EMAIL_CODE and the
+    returning patient fell into the NEW-visitor LGPD notice (incident 2026-10-09). Now
+    the two-button card goes out again, the state stays, and the right code still
+    verifies afterwards. The log carries the message's shape, never its text.
+    """
+    from secretaria.workers.portal import identity_gate
+
+    logged: list[tuple[str, dict]] = []
+
+    class _Spy:
+        def info(self, event, **fields):
+            logged.append((event, fields))
+
+    # Recorded directly: structlog caches loggers on first use, so captured output depends
+    # on test order (same reason as test_brain_message_attachments::_recording_loggers).
+    monkeypatch.setattr(identity_gate, "logger", _Spy())
+    calls.claim_result = ClaimResult(
+        ClaimOutcome.CLAIMED, account_exists=True, email_masked=EMAIL_MASKED
+    )
+    tenant = await _seed_tenant(db)
+    await _bm_turn(tenant, "oi")
+    await _bm_turn(tenant, EMAIL)
+    before = len(await _outbound(db, tenant))
+
+    await _bm_turn(tenant, "não chegou nada ainda")
+
+    new = (await _outbound(db, tenant))[before:]
+    assert new == [
+        interactive_history_body(
+            existing_account_code_body(None),
+            [title for _, title in EXISTING_ACCOUNT_CODE_BUTTONS],
+        )
+    ]
+    assert LGPD_ROW not in new
+    assert calls.code_requests == [EXTERNAL_ID], "repeating the card mails no new code"
+    assert (await _conversation(db, tenant)).flow_state == FlowState.AWAITING_EMAIL_CODE
+    assert (await _patient(db, tenant, CHANNEL_BRAIN_MESSAGE)).lgpd_accepted_at is None
+    unrecognized = [
+        fields for event, fields in logged if event == "conversation_pending_code_unrecognized"
+    ]
+    assert unrecognized and unrecognized[0]["kind"] == "text"
+    assert unrecognized[0]["length"] == len("não chegou nada ainda")
+    assert "chegou" not in repr(logged), "the unrecognised text reached the log"
+
+    calls.probe_states = [IdentityState.VERIFIED]
+    await _bm_turn(tenant, "123456")
+
+    assert calls.verified == ["123456"]
+    assert CODE_ACCEPTED_MESSAGE in await _outbound(db, tenant)
+
+
 async def test_portal_known_email_whose_account_has_no_name_is_asked_it_after_the_code(
     db, calls
 ) -> None:
@@ -779,7 +846,7 @@ async def test_portal_known_email_whose_code_cannot_be_checked_continues_to_cons
         calls.verified.append(code)
         return VerifyResult(VerifyOutcome.UNAVAILABLE)
 
-    monkeypatch.setattr(tasks, "verify_code", _down)
+    monkeypatch.setattr(workers_ns, "verify_code", _down)
     tenant = await _seed_tenant(db)
     await _bm_turn(tenant, "oi")
     await _bm_turn(tenant, EMAIL)
@@ -832,7 +899,7 @@ async def test_portal_silence_expires_the_name_wait(db) -> None:
 
     await _bm_turn(tenant, "sim")
 
-    assert (await _outbound(db, tenant))[-1] == NAME_REQUEST_MESSAGE
+    assert (await _outbound(db, tenant))[-1] == NAME_REQUEST_MESSAGE + EMAIL_CHANGE_OPTION
     assert (await _conversation(db, tenant)).flow_state == FlowState.AWAITING_NAME
 
 
@@ -966,3 +1033,54 @@ async def test_portal_two_unparsed_answers_leave_no_raw_name_for_the_llm(db, mon
     )
     # "Beatriz", not "Maria": the re-ask copy itself says "Maria Silva".
     assert "beatriz" not in history.casefold(), history
+
+
+async def test_whatsapp_change_name_button_asks_again_and_overwrites(db) -> None:
+    """"✏️ Mudar nome" on the LGPD notice: no e-mail button, the new answer wins."""
+    tenant = await _seed_tenant(db)
+    await _wa_turn(tenant, "oi")
+    await _wa_turn(tenant, "Ana Souza")
+    assert _WireClient.sends[-1] == ("buttons", LGPD_CONSENT_MESSAGE, NAME_LGPD_BUTTONS)
+
+    await _wa_turn(tenant, NAME_CHANGE_BUTTON_LABEL)
+
+    # WhatsApp has no e-mail step: the question goes out button-free.
+    assert _WireClient.sends[-1] == ("text", NAME_REQUEST_MESSAGE, None)
+    assert (await _conversation(db, tenant)).flow_state == FlowState.AWAITING_NAME
+
+    await _wa_turn(tenant, "Maria Souza")
+
+    assert (await _patient(db, tenant, CHANNEL_WHATSAPP)).name == "Maria Souza"
+    assert _WireClient.sends[-1] == ("buttons", LGPD_CONSENT_MESSAGE, NAME_LGPD_BUTTONS)
+    assert (await _conversation(db, tenant)).flow_state == FlowState.IDLE
+
+
+async def test_portal_change_name_button_asks_again_with_the_email_button(db) -> None:
+    tenant = await _seed_tenant(db)
+    await _bm_turn(tenant, "oi")
+    await _bm_turn(tenant, EMAIL)
+    await _bm_turn(tenant, "Ana Souza")
+    assert (await _outbound(db, tenant))[3] == LGPD_NAME_ROW
+
+    await _bm_turn(tenant, NAME_CHANGE_BUTTON_LABEL, reply_id=NAME_CHANGE_ACTION)
+
+    sent = await _outbound(db, tenant)
+    assert sent[-1] == NAME_REQUEST_MESSAGE + EMAIL_CHANGE_OPTION
+    assert (await _conversation(db, tenant)).flow_state == FlowState.AWAITING_NAME
+
+
+async def test_portal_change_email_button_on_the_name_question_goes_back_to_the_email(db) -> None:
+    tenant = await _seed_tenant(db)
+    await _bm_turn(tenant, "oi")
+    await _bm_turn(tenant, EMAIL)
+    assert (await _conversation(db, tenant)).flow_state == FlowState.AWAITING_NAME
+
+    await _bm_turn(tenant, "📩 Mudar e-mail", reply_id=IDENTITY_CHANGE_EMAIL_ACTION)
+
+    sent = await _outbound(db, tenant)
+    assert sent[-1] == EMAIL_REQUEST_MESSAGE
+    assert (await _conversation(db, tenant)).flow_state == FlowState.AWAITING_EMAIL
+    # And the corrected address is verified again, landing on the name question.
+    await _bm_turn(tenant, "outro@example.com")
+    name_question = NAME_REQUEST_AFTER_EMAIL_MESSAGE + EMAIL_CHANGE_OPTION
+    assert (await _outbound(db, tenant))[-1] == name_question

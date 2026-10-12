@@ -229,3 +229,4 @@ wiring, prompt section formatting.
 - PROMPT 4 integration points are marked with `PROMPT 4 hook` comments.
 - Per-tenant configurable per-state greeting copy remains a possible
   follow-up (all copy lives as constants in `workers/tasks.py`).
+- TASK-032 R3: com o interruptor de lembretes ligado, a consulta futura abre a conversa depois de 6 h de silêncio (docs/CHECKPOINT_lembretes_r3.md); a saudação HAS_UPCOMING de primeiro contato continua como estava.

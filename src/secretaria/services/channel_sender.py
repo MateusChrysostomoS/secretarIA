@@ -81,6 +81,7 @@ from secretaria.core.attachments import (
 from secretaria.core.logging import get_logger
 from secretaria.models import Conversation, Message, MessageDirection, MessageSender
 from secretaria.services import media_storage
+from secretaria.services.turn_safety_net import note_send
 from secretaria.services.whatsapp import interactive_buttons_record, interactive_list_record
 
 logger = get_logger(__name__)
@@ -231,6 +232,10 @@ class BrainMessageSender:
     senders never send files and leave it unset.
     """
 
+    # The Portal draws as many buttons as the card carries (owner, 2026-10-07: "é o nosso
+    # portal"), so a wide menu stays buttons here and becomes a list only on WhatsApp.
+    MAX_BUTTONS = 8
+
     persists_outbound = True
 
     def __init__(
@@ -300,6 +305,10 @@ class BrainMessageSender:
             conversation_id=str(self._conversation_id),
             author=self._author.value,
         )
+        # Counted for the turn's safety net (services/turn_safety_net.py): on
+        # this channel the row IS the delivery. A caller-owned session may still
+        # roll back, but then the caller's own turn is failing loudly anyway.
+        note_send()
         return {RECORDED_MESSAGE_ID: str(message_id)}
 
     async def _write(self, session: AsyncSession, message: Message) -> None:
@@ -352,7 +361,7 @@ class BrainMessageSender:
         # exactly the ids a WhatsApp patient could.
         return await self._record(
             interactive_history_body(body, [label for _, label in buttons]),
-            interactive=interactive_buttons_record(body, buttons),
+            interactive=interactive_buttons_record(body, buttons, max_buttons=self.MAX_BUTTONS),
         )
 
     async def send_list(

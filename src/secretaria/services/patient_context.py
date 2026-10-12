@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
-from secretaria.models import LIVE_APPOINTMENT_STATUSES, Appointment, AppointmentStatus
+from secretaria.models import LIVE_APPOINTMENT_STATUSES, Appointment, AppointmentStatus, Message
 
 logger = get_logger(__name__)
 
@@ -99,12 +99,16 @@ async def load_upcoming_appointments(
             "id": str(appt.id),
             "google_event_id": appt.google_event_id,
             "appointment_type": appt.appointment_type,
+            "insurance": appt.insurance,
+            "attendee_name": appt.attendee_name,
             "start_at": appt.start_at,
             "end_at": appt.end_at,
             # Which professional owns this booking (None = tenant-level) - lets
             # the manage flow act on the owning calendar instead of a stale
             # booking-flow selection (workers/tasks.py::_manage_owner_calendar_target).
             "professional_id": str(appt.professional_id) if appt.professional_id else None,
+            **({"google_calendar_source": appt.google_calendar_source}
+               if appt.google_calendar_source is not None else {}),
         }
         for appt in rows
     ]
@@ -215,3 +219,69 @@ async def resolve_patient_opening_state(
         recent_past_count=len(context.recent_past_appointments),
     )
     return context
+
+
+# A consult that did not happen earns no "como foi?" question.
+_FOLLOWUP_EXCLUDED = (AppointmentStatus.CANCELLED, AppointmentStatus.NO_SHOW)
+
+
+async def find_post_consult_followup(
+    session: AsyncSession,
+    tenant_id: UUID,
+    patient_id: UUID,
+    conversation_id: UUID,
+    *,
+    now: datetime | None = None,
+) -> dict | None:
+    """The consult to ask "como foi?" about, on the patient's first appearance after it.
+
+    The most recent appointment that already ENDED (end, or start when the end
+    is unknown) within `POST_CONSULT_FOLLOWUP_DAYS`, cancelled and no-show
+    excluded — and only when this conversation has carried NO message since it
+    ended. That last condition is what makes it "the first appearance after
+    the consult" without storing a flag (the module's hard rule): the question
+    itself is a message, so once it went out the next entry reads as a normal
+    one. A past row still SCHEDULED/CONFIRMED counts: nothing auto-marks a
+    consult as attended, and asking how it went is safe either way.
+    """
+    now = now or datetime.now(UTC)
+    window = timedelta(days=get_settings().POST_CONSULT_FOLLOWUP_DAYS)
+    appointment = await session.scalar(
+        select(Appointment)
+        .where(
+            Appointment.patient_id == patient_id,
+            Appointment.tenant_id == tenant_id,
+            Appointment.status.not_in(_FOLLOWUP_EXCLUDED),
+            Appointment.start_at < now,
+            Appointment.start_at >= now - window,
+        )
+        .order_by(Appointment.start_at.desc())
+        .limit(1)
+    )
+    if appointment is None:
+        return None
+    if appointment.post_consult_notified_at is not None:
+        # TASK-032 R7: the clinic's "Compareceu" already delivered the post-consult
+        # message for this appointment - asking again on the next open would repeat it.
+        return None
+    ended_at = as_utc(appointment.end_at or appointment.start_at)
+    if ended_at > now:
+        return None  # still in progress
+    spoken_since = await session.scalar(
+        select(Message.id)
+        .where(Message.conversation_id == conversation_id, Message.created_at >= ended_at)
+        .limit(1)
+    )
+    if spoken_since is not None:
+        return None
+    return {
+        "id": str(appointment.id),
+        "appointment_type": appointment.appointment_type,
+        "start_at": appointment.start_at,
+        "end_at": appointment.end_at,
+        "status": appointment.status,
+        "attendee_name": appointment.attendee_name,
+        "professional_id": (
+            str(appointment.professional_id) if appointment.professional_id else None
+        ),
+    }

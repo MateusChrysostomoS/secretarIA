@@ -42,6 +42,7 @@ from secretaria.services.payments import (
 )
 from secretaria.services.payments.provider import ChargeState, PaymentStatus, ProviderError
 from secretaria.workers import tasks
+from tests._patching import workers_ns
 from tests.before_support import SLOT_END, SLOT_START, make_world, new_charge, recorded_logs
 from tests.payments_support import FakeProvider, FakeRedis, make_sessionmaker
 
@@ -132,9 +133,9 @@ class Env:
 @pytest_asyncio.fixture
 async def db(monkeypatch):
     engine, maker = await make_sessionmaker()
-    for module in (tasks, notify, pix_deposit):
+    for module in (workers_ns, notify, pix_deposit):
         monkeypatch.setattr(module, "async_session_factory", maker)
-    monkeypatch.setattr(tasks, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
+    monkeypatch.setattr(workers_ns, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
     monkeypatch.setattr(deposit_lifecycle, "WhatsAppClient", FakeWhatsApp)
     FakeWhatsApp.log, FakeWhatsApp.fail_on = [], None
     yield maker
@@ -145,7 +146,7 @@ async def db(monkeypatch):
 def env(monkeypatch, kind) -> Env:
     e = Env(kind)
     monkeypatch.setitem(registry._PROVIDERS, PROVIDER[kind], e.provider)
-    monkeypatch.setattr(tasks, "_reply_sender", lambda reply, tenant, token: e.sender)
+    monkeypatch.setattr(workers_ns, "_reply_sender", lambda reply, tenant, token: e.sender)
     return e
 
 

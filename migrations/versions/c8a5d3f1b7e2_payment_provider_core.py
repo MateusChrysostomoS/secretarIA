@@ -32,7 +32,8 @@ API + worker BOTH on the new code (deploy_parity=match) -> nothing else for F1. 
 refuses to run while any `pix_deposits.appointment_id` is NULL (it would lose money rows).
 
 Revision ID: c8a5d3f1b7e2
-Revises: d4f8a2c6e913
+Revises: a4c7e2f9b1d3 (re-parented by TASK-050 from d4f8a2c6e913 when main was merged into
+feature/out-of-mvp; content unchanged)
 Create Date: 2026-09-29
 """
 
@@ -43,7 +44,7 @@ import sqlalchemy as sa
 from alembic import context, op
 
 revision: str = "c8a5d3f1b7e2"
-down_revision: str | None = "d4f8a2c6e913"
+down_revision: str | None = "a4c7e2f9b1d3"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

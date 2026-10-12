@@ -16,7 +16,7 @@ edited per clinic.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from secretaria.core.whatsapp_limits import (
@@ -24,6 +24,8 @@ from secretaria.core.whatsapp_limits import (
     MAX_LIST_ROW_TITLE_CHARS,
     decorated_text_budget,
 )
+from secretaria.services.booking_dates import date_context
+from secretaria.services.service_catalog import missing_from
 
 if TYPE_CHECKING:
     from secretaria.services.tenant_config import TenantRuntimeConfig
@@ -65,8 +67,34 @@ def _format_appointment_types(types: list, default_duration: int) -> str:
         dur = t.duration_min
         price = f" - {t.price}" if getattr(t, "price", None) else ""
         desc = f" — {t.description}" if t.description else ""
-        lines.append(f"- {t.name} ({dur} min){price}{desc}")
+        guide = (
+            " (há orientações: use get_service_info)"
+            if getattr(t, "requirements", None) or getattr(t, "long_description", None)
+            else ""
+        )
+        lines.append(f"- {t.name} ({dur} min){price}{desc}{guide}")
     return "\n".join(lines)
+
+
+def _format_service_guides(config: TenantRuntimeConfig) -> str:
+    """The "Serviços com orientações" line, or "" when there is nothing to add.
+
+    `_format_appointment_types` flags a service that has orientations, but it only sees
+    `config.appointment_types`: with 2+ active professionals that is the tenant's list, and a
+    service that exists only in the clinic's catalog is not on it. `config.service_guides`
+    (clinic-wide, from the catalog) carries those; this names the ones the list above does not
+    already flag, so the model knows to call get_service_info instead of saying there is no
+    orientation. A service already on the list gets its marker there and is never repeated, so
+    a clinic with one professional, or whose list is complete, renders exactly as before.
+    """
+    guides = missing_from(
+        getattr(config, "service_guides", None) or [], config.appointment_types
+    )
+    if not guides:
+        return ""
+    return "\n- Serviços com orientações (use get_service_info): " + ", ".join(
+        guide.name for guide in guides
+    )
 
 
 def _format_safety_rules() -> str:
@@ -113,7 +141,48 @@ def _format_safety_rules() -> str:
         "criada, e-mail ou identidade confirmados, pagamento recebido, "
         "consulta marcada, cancelada ou remarcada. Se você não tem uma "
         "ferramenta para aquilo, diga que não consegue confirmar por aqui "
-        "e oriente o passo que funciona — nunca invente a confirmação."
+        "e oriente o passo que funciona — nunca invente a confirmação.\n"
+        "6) Para um sintoma ou necessidade comum, acolha brevemente e ajude a "
+        "avançar para uma consulta de avaliação. NÃO faça perguntas clínicas "
+        "(há quanto tempo, um ou dois olhos, intensidade, sintomas associados), "
+        "nem tente diagnosticar ou fazer triagem. Pergunte apenas o que falta "
+        "para o agendamento. Não minimize: não afirme que é seguro esperar, "
+        "que não é urgente ou que não é grave. Sinais explícitos de urgência "
+        "continuam exigindo a orientação IMEDIATA da regra 2, antes de qualquer "
+        "agendamento; não os trate como simples pedido de consulta."
+    )
+
+
+def _format_service_priorities() -> str:
+    """The unconditional "COMO ATENDER" block: the order the agent serves the patient in.
+
+    Owner, 2026-10-07 (TASK-038): live tests showed the agent answering a question by
+    re-opening the same list in silence, offering to "check times" it could not check,
+    and the human hand-off being the only thing spelled out as a rule. This states the
+    whole order - serve like a person first, booking second, a human last - for every
+    clinic, like `_format_safety_rules` (product behaviour, not a clinic fact).
+    """
+    return (
+        "\n\n================ COMO ATENDER (ordem de prioridade) ================\n"
+        "1) PRIMEIRO, atenda o que o paciente pediu, como uma secretária de verdade: "
+        "responda a pergunta com os dados da clínica, acolha o que ele contou e "
+        "explique o próximo passo. Nunca ignore uma pergunta só para mostrar botões "
+        "de novo.\n"
+        "2) DEPOIS, quando fizer sentido, leve ao agendamento pelos botões. Ao devolver "
+        "o paciente aos botões (show_main_menu, set_booking_draft, start_guided_booking, "
+        "select_professional_and_continue, manage_existing_appointment), preencha SEMPRE "
+        "o campo `message` com 1-2 frases para ele: responda o que ele perguntou ou "
+        "contou, sem anunciar qual lista vem a seguir (o fluxo decide e mostra logo "
+        "abaixo). Se nenhuma opção da clínica corresponde exatamente ao que ele "
+        "descreveu, diga isso com franqueza nessa mensagem.\n"
+        "3) POR ÚLTIMO, uma pessoa da equipe. Se o paciente pedir explicitamente uma "
+        "pessoa, ou o assunto exigir avaliação humana, use request_human_handoff. Se você "
+        "não tem a informação ou não consegue fazer o que ele pediu (depois de tentar de "
+        "verdade), use offer_human_handoff: o sistema pergunta a ele, com botões, se quer "
+        "um atendente. Nunca prometa \"vou confirmar com a equipe\" sem essa ferramenta.\n"
+        "- Não ofereça o que você não pode fazer neste turno (ex.: \"posso verificar os "
+        "horários de quinta\" quando dia e horário são escolhidos nos botões): diga em "
+        "qual lista ele escolhe."
     )
 
 
@@ -210,15 +279,163 @@ def _format_appointment_context(config: TenantRuntimeConfig) -> str:
     )
 
 
-def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
+def _format_conversation_state(config: TenantRuntimeConfig) -> str:
+    """Render the "ESTADO DA CONVERSA" block, or "" when this turn has none."""
+    if not config.conversation_state:
+        return ""
+    return (
+        "\n\n================ ESTADO DA CONVERSA (carregado agora) ================\n"
+        "Confie nestes dados, não no que a conversa tenha dito antes:\n"
+        f"{config.conversation_state}\n\n"
+        "COMO USAR:\n"
+        "- Estas regras prevalecem sobre o fluxo de chat descrito abaixo, inclusive "
+        "sobre a regra de primeira mensagem sem ferramentas. Este é um fluxo guiado. "
+        "NÃO consulte agenda, ofereça horários, peça confirmação em [CONFIRM] ou "
+        "crie consultas pelo chat: devolva o agendamento aos botões.\n"
+        "- Primeiro ENTENDA o que o paciente disse: responda dúvidas sobre a clínica, "
+        "ou acolha brevemente um sintoma/necessidade e encaminhe para avaliação. "
+        "Use apenas fatos do catálogo, sem inferir diagnóstico ou inventar serviço.\n"
+        "- Se ele estava numa etapa com botões ou lista (veja \"Onde o paciente "
+        "estava\") e só fez uma pergunta, responda a pergunta e termine convidando a "
+        "escolher na mesma lista que já está na conversa (ex.: \"Quando quiser, é só "
+        "escolher o dia na lista acima.\"). Não reabra o agendamento nesse caso.\n"
+        "- Se ele só tocou no botão e ainda não disse nada útil, pergunte de forma "
+        "aberta, em UMA frase e sem menu: \"O que te traz à clínica?\".\n"
+        "- Compare o que o paciente descreveu com as especialidades e os serviços "
+        "acima. Se NENHUM médico ou serviço da clínica corresponde (ex.: problema de "
+        "visão e nenhum oftalmologista na clínica), diga isso com franqueza, cite o que "
+        "a clínica oferece e pergunte se ele quer agendar mesmo assim. Não apresente as "
+        "opções como indicadas e não devolva aos botões antes da resposta dele.\n"
+        "- Se já dá para saber o serviço e/ou o médico, chame set_booking_draft com o "
+        "que você sabe: ele pula as etapas já respondidas e abre a próxima que falta. "
+        "Não repita perguntas cujas respostas estão acima.\n"
+        "- CAPTURE TODOS os campos já informados antes de devolver ao fluxo: serviço, "
+        "médico, convênio, for_whom, day e time. Não perca dia e atendido ao chamar a ferramenta. "
+        "'Para mim', 'para mim mesmo' e equivalentes viram for_whom=\"me\"; outra pessoa "
+        "vira \"other\", sem nome no argumento. 'Não tenho convênio', 'sem convênio' e "
+        "pagamento particular viram insurance=\"Particular\". Não suponha esses campos se "
+        "não foram respondidos.\n"
+        "- Converta a data explícita ou relativa pelo calendário operacional em day "
+        "(AAAA-MM-DD). Preserve a última correção do paciente e as escolhas compatíveis "
+        "do ESTADO DA CONVERSA. Se faltar horário, deixe time vazio: o fluxo pergunta "
+        "somente o que falta. Ao receber apenas HH:MM, envie time com o dia já escolhido. "
+        "Nunca peça de novo quem será atendido ou o dia quando já foram informados.\n"
+        "- Com este ESTADO DA CONVERSA, use set_booking_draft também quando o paciente "
+        "nomeia um médico: use o nome completo do catálogo se a escolha for inequívoca. "
+        "Não use select_professional_and_continue para descartar os demais dados. "
+        "A ferramenta só prepara o fluxo/cartão; ela não confirma uma consulta.\n"
+        "- Se há sintoma ou necessidade de avaliação, mas o catálogo não permite "
+        "identificar serviço/médico com segurança, chame neste turno "
+        "set_booking_draft(service=\"\", professional=\"\", insurance=\"\"). "
+        "Isso reabre a escolha guiada; não é uma consulta marcada. Se apenas um "
+        "campo é conhecido, preencha só esse campo (nome exato do catálogo ou "
+        "convênio explicitamente informado), deixando os demais vazios. "
+        "Preserve escolhas compatíveis já registradas; não associe um serviço "
+        "a um médico que não o oferece. Não faça perguntas clínicas para tentar "
+        "resolver essa incerteza. Use o campo `message` para explicar ao paciente, "
+        "em 1-2 frases, por que está mostrando essas opções - e, se nenhuma "
+        "corresponde ao que ele descreveu, diga isso com franqueza.\n"
+        "- Se você não tem a informação ou não consegue fazer o que ele pediu, use "
+        "offer_human_handoff (pergunta, com botões, se ele quer um atendente).\n"
+        "- Chamar a equipe humana (request_human_handoff) é ÚLTIMO RECURSO: só quando o "
+        "paciente pede explicitamente uma pessoa, quando o assunto exige avaliação "
+        "humana, ou depois de você tentar ajudar de verdade. Nunca por dúvida comum."
+    )
+
+
+# TASK-025. The block is bounded: whatever the clinic typed, it costs at most this many
+# characters of prompt. Items are rendered in priority order and the first one that does not
+# fit ends the list, so a full block drops the FAQ and the free notes, never the address.
+CLINIC_FACTS_BUDGET = 1800
+_CLINIC_FACTS_HEADING = "\n\n================ SOBRE A CLÍNICA ================\n"
+_CLINIC_FACTS_FOOTER = (
+    "\nSe a informação pedida não estiver acima nem vier de get_service_info, "
+    "não invente: diga que não tem essa informação e chame offer_human_handoff."
+)
+
+
+def _address_line(address: dict | None) -> str | None:
+    if not address:
+        return None
+    street = [address.get(key) for key in ("line", "complement", "neighborhood")]
+    city_state = " - ".join(
+        str(part).strip()
+        for part in (address.get("city"), address.get("state"))
+        if part and str(part).strip()
+    )
+    postal = address.get("postal_code")
+    parts = [str(p).strip() for p in [*street, city_state, postal] if p and str(p).strip()]
+    return ", ".join(parts) or None
+
+
+def _texts(value: object) -> list[str]:
+    """The usable strings of a stored list; anything else (not a list, non-strings) is dropped."""
+    if not isinstance(value, list):
+        return []
+    return [s.strip() for s in value if isinstance(s, str) and s.strip()]
+
+
+def _clinic_fact_lines(config: TenantRuntimeConfig) -> list[str]:
+    # Both columns are JSON, so a row written outside the schema can hold any shape. A bad
+    # shape is ignored (valid parts still render): it must never break the turn.
+    facts = config.clinic_facts if isinstance(config.clinic_facts, dict) else {}
+    lines: list[str] = []
+    address = _address_line(config.address if isinstance(config.address, dict) else None)
+    if address:
+        lines.append(f"- Endereço: {address}")
+    for key, label in (("how_to_arrive", "Como chegar"), ("parking", "Estacionamento")):
+        if facts.get(key):
+            lines.append(f"- {label}: {facts[key]}")
+    payment_methods = _texts(facts.get("payment_methods"))
+    if payment_methods:
+        lines.append("- Formas de pagamento: " + ", ".join(payment_methods))
+    if facts.get("cancellation_policy"):
+        lines.append(f"- Cancelamento e remarcação: {facts['cancellation_policy']}")
+    documents = _texts(facts.get("documents_to_bring"))
+    if documents:
+        lines.append("- Documentos a levar: " + ", ".join(documents))
+    if facts.get("accessibility"):
+        lines.append(f"- Acessibilidade: {facts['accessibility']}")
+    faq = facts.get("faq")
+    for item in faq if isinstance(faq, list) else []:
+        if (
+            isinstance(item, dict)
+            and isinstance(item.get("question"), str)
+            and isinstance(item.get("answer"), str)
+        ):
+            lines.append(f"- Pergunta frequente — {item['question']} Resposta: {item['answer']}")
+    if facts.get("notes"):
+        lines.append(f"- Observações: {facts['notes']}")
+    return lines
+
+
+def _format_clinic_facts(config: TenantRuntimeConfig) -> str:
+    """The "SOBRE A CLÍNICA" block, or "" when the clinic told us nothing (prompt unchanged)."""
+    lines = _clinic_fact_lines(config)
+    if not lines:
+        return ""
+    used = len(_CLINIC_FACTS_HEADING) + len(_CLINIC_FACTS_FOOTER)
+    kept: list[str] = []
+    for line in lines:
+        if used + len(line) + 1 > CLINIC_FACTS_BUDGET:
+            if not kept:  # a single item bigger than the whole budget: cut it, do not drop it
+                room = CLINIC_FACTS_BUDGET - used - 2
+                kept.append(line[: max(room, 0)].rstrip() + "…")
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return _CLINIC_FACTS_HEADING + "\n".join(kept) + _CLINIC_FACTS_FOOTER
+
+
+def secretary_system_prompt(config: TenantRuntimeConfig, *, now: datetime | None = None) -> str:
     """Render the full system prompt for a specific tenant."""
-    today = date.today().isoformat()
     tz = config.timezone
     clinic = config.clinic_name
     hours_text = _format_business_hours(config.business_hours)
     types_text = _format_appointment_types(
         config.appointment_types, config.appointment_duration_min
     )
+    service_guides_line = _format_service_guides(config)
     # What a [SLOTS] label may actually contain. ai/formatter.py::_parse_slot_rows
     # prepends the calendar emoji itself, so the model writes against a budget
     # three characters smaller than the raw row cap - the calendar emoji carries
@@ -227,19 +444,22 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
     # MAX_LIST_ROW_TITLE_CHARS if that cap ever moves.
     slot_label_chars = decorated_text_budget(EMOJI_SCHEDULE, MAX_LIST_ROW_TITLE_CHARS)
     safety_section = _format_safety_rules()
+    priorities_section = _format_service_priorities()
     professional_section = _format_professional_context(config)
+    clinic_facts_section = _format_clinic_facts(config)
     post_consult_section = _format_post_consult_knowledge(config)
     appointment_context_section = _format_appointment_context(config)
+    conversation_state_section = _format_conversation_state(config)
 
     return (
         f"Você é a secretária virtual da {clinic}. Sua função é acolher pacientes "
         f"no WhatsApp e agendar, remarcar ou cancelar consultas no Google Calendar da clínica."
-        f"{safety_section}{professional_section}{post_consult_section}"
-        f"{appointment_context_section}\n\n"
+        f"{safety_section}{priorities_section}{professional_section}{clinic_facts_section}{post_consult_section}"
+        f"{appointment_context_section}{conversation_state_section}\n\n"
         "CONTEXTO OPERACIONAL:\n"
-        f"- Hoje é {today} (timezone {tz}).\n"
+        f"{date_context(tz, now=now)}"
         f"- Horário de atendimento:\n{hours_text}\n"
-        f"- Tipos de consulta disponíveis:\n{types_text}\n\n"
+        f"- Tipos de consulta disponíveis:\n{types_text}{service_guides_line}\n\n"
         "================ COMO ESCREVER NO WHATSAPP ================\n"
         "Cada resposta sua é entregue como uma sequência de balões curtos no "
         "WhatsApp do paciente. Para deixar a conversa leve e legível:\n\n"
@@ -299,6 +519,9 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
         "\"<rótulo> (<iso>)\", então você sabe exatamente qual slot foi "
         "escolhido sem precisar perguntar de novo.\n\n"
         "================ FLUXO DE CONVERSA ================\n\n"
+        "As etapas de agenda pelo chat abaixo valem apenas quando NÃO houver "
+        "um bloco de estado do fluxo guiado e as ferramentas citadas estiverem "
+        "disponíveis neste turno.\n\n"
         "1) PRIMEIRA MENSAGEM do paciente (qualquer saudação ou pedido "
         "inicial sem contexto prévio):\n"
         f"   - Responda com um acolhimento curto que apresenta a {clinic}.\n"
@@ -370,7 +593,9 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
         "para o paciente seguir pelos botões do menu — não conduza "
         "remarcação/cancelamento de consulta já existente pelo chat.\n"
         "- Quando o paciente descrever um sintoma, uma necessidade ou "
-        "perguntar qual profissional deve procurar, chame list_professionals "
+        "perguntar qual profissional deve procurar, com um bloco de estado do fluxo "
+        "use set_booking_draft conforme as regras acima. Sem esse estado, "
+        "se estiver disponível, chame list_professionals "
         "e raciocine sobre a especialidade e a descrição de cada um. "
         "Recomende de 1 a 3 profissionais, com um motivo curto para cada.\n"
         "- Quando o paciente confirmar um profissional, chame "
@@ -400,5 +625,6 @@ def secretary_system_prompt(config: TenantRuntimeConfig) -> str:
         "invente um serviço que não esteja na lista.\n"
         "- NUNCA invente horários sem chamar check_availability ou "
         "list_free_slots.\n"
-        "- Se o paciente sair do assunto consulta, redirecione com educação."
+        "- Se o paciente sair do assunto da clínica, responda com educação e traga a "
+        "conversa de volta ao que a clínica pode ajudar."
     )

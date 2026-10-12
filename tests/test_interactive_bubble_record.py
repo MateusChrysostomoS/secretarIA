@@ -17,8 +17,9 @@ pin the two halves apart:
 - the hub endpoint serves the card and the tap id, and a malformed blob costs
   one message its controls, never the whole thread.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -128,8 +129,8 @@ class _RecordingClient:
 @pytest.fixture
 def whatsapp(monkeypatch: pytest.MonkeyPatch, db) -> _RecordingClient:
     client = _RecordingClient()
-    monkeypatch.setattr(tasks, "async_session_factory", db)
-    monkeypatch.setattr(tasks, "_tenant_client", lambda tenant, waba_token: client)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "_tenant_client", lambda tenant, waba_token: client)
     return client
 
 

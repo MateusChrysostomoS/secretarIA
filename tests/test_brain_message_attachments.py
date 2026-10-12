@@ -18,8 +18,9 @@ Pins §6 of z_prompts/PROMPT_BRAIN_MESSAGE_ANEXOS_SECRETARIA_2_SECRETARIA.md:
 Storage is `FakeStorage`, patched over services/media_storage.py; that module itself is
 exercised against a stubbed boto3 client and httpx's MockTransport. No real bucket.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -173,8 +174,8 @@ class _FakeArqPool:
 
 @pytest.fixture(autouse=True)
 def _wire(monkeypatch: pytest.MonkeyPatch, db):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
-    monkeypatch.setattr(tasks, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
 
     async def _fake_resolve(session, tenant_id, patient_id, **kwargs):
         return None
@@ -194,10 +195,10 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db):
             limits={},
         )
 
-    monkeypatch.setattr(tasks, "resolve_patient_opening_state", _fake_resolve)
-    monkeypatch.setattr(tasks, "get_waba_token", _fake_token)
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_entitlements)
-    monkeypatch.setattr(tasks, "WhatsAppClient", _ExplodingWhatsAppClient)
+    monkeypatch.setattr(workers_ns, "resolve_patient_opening_state", _fake_resolve)
+    monkeypatch.setattr(workers_ns, "get_waba_token", _fake_token)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_entitlements)
+    monkeypatch.setattr(workers_ns, "WhatsAppClient", _ExplodingWhatsAppClient)
 
 
 @pytest_asyncio.fixture
@@ -1091,7 +1092,7 @@ async def test_a_file_the_worker_cannot_record_is_reported_with_its_key(
     db, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     events: list[dict] = []
-    monkeypatch.setattr(tasks, "logger", _RecordingLogger(events))
+    monkeypatch.setattr(workers_ns, "logger", _RecordingLogger(events))
     tenant = await _seed_tenant(db)
     _, conversation = await _seed_patient(db, tenant)
 
@@ -1162,3 +1163,47 @@ async def test_a_failed_staff_commit_removes_the_uploaded_file(
     assert api.storage.objects == {}
     assert len(api.storage.deleted) == 1
     assert await _rows(db, conversation.id) == []
+
+
+async def test_staff_file_notifies_only_on_first_human_transition(api, db, monkeypatch):
+    from secretaria.services import handoff_notification as hn
+    from secretaria.services.email import EmailOutcome
+    tenant = await _seed_tenant(db)
+    tenant.contact_email = "clinic@example.com"
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.contact_email = tenant.contact_email
+        await session.commit()
+    api.acting["tenant"] = tenant
+    _, conv = await _seed_patient(db, tenant)
+    sent = []
+    async def send(to, template, variables):
+        async with db() as session:
+            row = await session.get(Conversation, conv.id)
+            assert row.handover_state == HandoverState.HUMAN_ACTIVE
+        sent.append(template)
+        return EmailOutcome.SENT
+    monkeypatch.setattr(hn, "async_session_factory", db)
+    monkeypatch.setattr(hn, "send_transactional_email_result", send)
+    for _ in range(2):
+        response = await _staff_send(api, conv.id,
+            files={"file": ("private.pdf", _pdf(), "application/pdf")})
+        assert response.status_code == 200
+    assert sent == ["human_handoff_alert"]
+
+
+async def test_staff_attachment_clears_typing_after_success(api, db, monkeypatch):
+    from secretaria.main import app
+    from secretaria.services import typing_indicator as ti
+    from tests.test_typing_indicator import _Redis
+    tenant = await _seed_tenant(db)
+    api.acting["tenant"] = tenant
+    patient, conversation = await _seed_patient(db, tenant)
+    pool = _Redis()
+    monkeypatch.setattr(app.state, "arq_pool", pool)
+    await ti.mark_typing(pool, conversation.id, "staff")
+    response = await _staff_send(
+        api, conversation.id, files={"file": ("test.pdf", _pdf(), "application/pdf")}
+    )
+    assert response.status_code == 200
+    assert await ti.typing_by(pool, conversation.id, viewer="patient") is None

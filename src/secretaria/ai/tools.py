@@ -10,6 +10,7 @@ table is created/updated so the platform has a record independent of Google
 Calendar. This is wrapped so a DB hiccup never fails the calendar operation.
 """
 
+import re
 from collections.abc import Sequence
 from contextvars import ContextVar
 from dataclasses import replace
@@ -19,9 +20,12 @@ from urllib.parse import quote
 from uuid import UUID
 
 from langchain_core.tools import tool
+from pseudonymize_core import has_unresolved_tokens
 
 from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
+from secretaria.services.booking_dates import resolve_booking_day, time_has_passed_today
+from secretaria.services.booking_draft import BookingDraft
 from secretaria.services.booking_scope import (
     BOOKING_TOPOLOGY_MULTI,
     BOOKING_TOPOLOGY_SOLE,
@@ -29,8 +33,14 @@ from secretaria.services.booking_scope import (
     canonical_service_name,
     service_names,
 )
-from secretaria.services.calendar import CalendarService, build_patient_calendar_link
+from secretaria.services.calendar import (
+    CalendarService,
+    build_event_description,
+    build_patient_calendar_link,
+)
+from secretaria.services.manage_request import ManageRequest, parse_appointment_ref
 from secretaria.services.precheck import HandoffOutcome, request_precheck_handoff
+from secretaria.services.service_catalog import find_by_name, missing_from
 
 if TYPE_CHECKING:
     from secretaria.services.tenant_config import TenantRuntimeConfig
@@ -85,6 +95,18 @@ _booking_topology_ctx: ContextVar[str] = ContextVar(
     "_booking_topology", default=BOOKING_TOPOLOGY_UNKNOWN
 )
 
+# True when THIS turn runs on the AI toolset v2 (TASK-030 P4, per-clinic switch
+# `flow_router.ai_draft_v2_enabled`): the agent was built without the tools that read busy
+# intervals and without the legacy agenda writers (`AI_TOOLSET_V2_WITHHELD`,
+# `AI_TOOLSET_V2_STAGING`); it has `get_availability` and the blind `create_event` /
+# `cancel_event` of ai/staging_tools.py instead. Set by graph.run_agent; read by
+# `_blocked_by_toolset_v2`, the second lock inside each of those tools. Lives here, like the
+# vars above, so a plugin tool module can read it without importing graph.py. The default
+# (False) keeps every tool exactly as it was.
+_editing_ctx: ContextVar[bool] = ContextVar("_editing", default=False)
+
+_ai_toolset_v2_ctx: ContextVar[bool] = ContextVar("_ai_toolset_v2", default=False)
+
 # Note on calendar outages: a tool that hits CalendarUnavailableError simply
 # lets it propagate. LangGraph's ToolNode re-raises it out of the agent's
 # ainvoke (it is not a ToolInvocationError), and graph.run_agent catches it by
@@ -92,6 +114,28 @@ _booking_topology_ctx: ContextVar[str] = ContextVar(
 # a ContextVar flag for this: LangGraph runs each node in a COPIED context
 # (contextvars.copy_context()), so a flag set inside the tool would be invisible
 # to run_agent.
+
+
+# TASK-038 (owner, 2026-10-07): a hand-back used to drop whatever the agent meant to
+# say, so the patient only saw the same list again, as if unheard. Every hand-back
+# tool now takes the agent's own short words (`message`); the exception carries them
+# as `intro`, graph.run_agent puts them in front of the sentinel
+# (`HANDBACK_INTRO_PREFIX`) and the worker sends them BEFORE the flow's card.
+HANDBACK_MESSAGE_MAX = 600
+
+
+def handback_message(message: str | None) -> str | None:
+    """The patient-facing words a hand-back tool was given, trimmed and capped (or None).
+
+    The tool boundary already re-hydrated them (ai/pii.py); a token the map could not
+    resolve (the model invented or mangled one) would be printed to the patient as
+    "[PACIENTE_...]", so such words are dropped - the card alone still answers.
+    """
+    text = (message or "").strip()[:HANDBACK_MESSAGE_MAX].rstrip()
+    if text and has_unresolved_tokens(text):
+        logger.warning("handback_message_unresolved_tokens", message_len=len(text))
+        return None
+    return text or None
 
 
 class ShowMainMenuRequested(Exception):
@@ -111,6 +155,10 @@ class ShowMainMenuRequested(Exception):
     `/dangerously-remove-context` and is unreachable from this tool.
     """
 
+    def __init__(self, *, intro: str | None = None) -> None:
+        super().__init__("show main menu")
+        self.intro = intro
+
 
 class ManageAppointmentRequested(Exception):
     """Raised by `manage_existing_appointment`: the patient wants to reschedule
@@ -124,9 +172,30 @@ class ManageAppointmentRequested(Exception):
     The LLM itself NEVER performs the reschedule/cancel — it only requests it.
     """
 
-    def __init__(self, action: str) -> None:
+    def __init__(
+        self,
+        action: str,
+        *,
+        appointment: datetime | None = None,
+        day: date | None = None,
+        time: Any = None,
+        intro: str | None = None,
+    ) -> None:
         super().__init__(f"manage appointment: {action}")
         self.action = action
+        self.intro = intro
+        # TASK-030 P3 (v2 tool only): WHICH appointment, by its clinic-local start, and for
+        # a reschedule the new day and time. Formats only - the worker validates the rest.
+        self.appointment = appointment
+        self.day = day
+        self.time = time
+
+    @property
+    def request(self) -> ManageRequest:
+        """What graph.run_agent serializes (services/manage_request.py)."""
+        return ManageRequest(
+            action=self.action, appointment=self.appointment, day=self.day, time=self.time
+        )
 
 
 class GuidedBookingRequested(Exception):
@@ -146,9 +215,55 @@ class GuidedBookingRequested(Exception):
     prove one against, which the flow handles exactly as it does elsewhere.
     """
 
-    def __init__(self, appointment_type: str | None) -> None:
+    def __init__(self, appointment_type: str | None, *, intro: str | None = None) -> None:
         super().__init__("start guided booking")
         self.appointment_type = appointment_type
+        self.intro = intro
+
+
+class BookingDraftRequested(Exception):
+    """Raised by `set_booking_draft` (v1 and v2): the agent resolved what the patient wants.
+
+    Same exception->sentinel mechanism as `GuidedBookingRequested`. graph.run_agent
+    serializes `draft` (services/booking_draft.py) after BOOKING_DRAFT_SENTINEL_PREFIX;
+    workers/shared/sentinels.py::_handle_set_booking_draft lands it. The LLM never writes
+    `flow_selected_*` itself, and never a third party's name: `attendee` is only
+    "self"/"other" (TASK-030 P2).
+    """
+
+    def __init__(
+        self,
+        appointment_type: str | None,
+        professional_id: UUID | None,
+        insurance: str | None,
+        *,
+        attendee: str | None = None,
+        day: date | None = None,
+        time: Any = None,
+        professional_unresolved: bool = False,
+        intro: str | None = None,
+    ) -> None:
+        super().__init__("set booking draft")
+        self.intro = intro
+        self.appointment_type = appointment_type
+        self.professional_id = professional_id
+        self.insurance = insurance
+        self.attendee = attendee
+        self.day = day
+        self.time = time
+        self.professional_unresolved = professional_unresolved
+
+    @property
+    def draft(self) -> BookingDraft:
+        return BookingDraft(
+            service=self.appointment_type,
+            professional_id=self.professional_id,
+            insurance=self.insurance,
+            attendee=self.attendee,  # type: ignore[arg-type]
+            day=self.day,
+            time=self.time,
+            professional_unresolved=self.professional_unresolved,
+        )
 
 
 class SelectProfessionalRequested(Exception):
@@ -160,10 +275,13 @@ class SelectProfessionalRequested(Exception):
     greeting + services (flow_router._enter_professional_services).
     """
 
-    def __init__(self, professional_id: UUID, professional_name: str) -> None:
+    def __init__(
+        self, professional_id: UUID, professional_name: str, *, intro: str | None = None
+    ) -> None:
         super().__init__(f"select professional {professional_name}")
         self.professional_id = professional_id
         self.professional_name = professional_name
+        self.intro = intro
 
 
 def _get_calendar() -> CalendarService:
@@ -340,6 +458,60 @@ def _naive_safe(value: datetime, like: datetime) -> datetime:
     if like.tzinfo is None and value.tzinfo is not None:
         return value.replace(tzinfo=None)
     return value
+# The AI toolset v2 (TASK-030 P4, owner's decision of 2026-10-03): the AI never reads a busy
+# interval, an event or another patient's data, and nothing it types reaches the agenda. Both
+# lists are withheld in ai/graph.py::effective_tools (lock one) and refused again inside each
+# tool by `_blocked_by_toolset_v2` (lock two):
+#   - AI_TOOLSET_V2_WITHHELD: no v2 variant at all - the busy/raw-slot readers
+#     (`list_free_slots_for_professional` has no holds subtracted, so it would offer a slot
+#     another patient is confirming) and the two plugin writers (the professional is a field
+#     of the blind `create_event`; a unit is not part of the draft at all).
+#   - AI_TOOLSET_V2_STAGING: the NAMES stay, the implementation changes - on v2 they are the
+#     blind tools of ai/staging_tools.py (metadata cache_variant BLIND_STAGING_VARIANT), which
+#     only stage the patient's confirmation card. The legacy implementations below, which
+#     write to the agenda, never run on a v2 turn.
+AI_TOOLSET_V2_WITHHELD = (
+    "check_availability",
+    "list_free_slots",
+    "list_free_slots_for_professional",
+    "create_event_for_professional",
+    "create_event_at_unit",
+)
+AI_TOOLSET_V2_STAGING = ("create_event", "cancel_event")
+
+# P5: the draft carries service and professional; keep these only for v1.
+AI_TOOLSET_V2_RETIRED = ("start_guided_booking", "select_professional_and_continue")
+
+BLIND_STAGING_VARIANT = "blind_v2"
+
+TOOL_BLOCK_TOOLSET_V2 = "toolset_v2"
+
+_TOOLSET_V2_ERROR = (
+    "Esta ferramenta não está disponível para você nesta clínica. Para ver horários livres "
+    "use get_availability; para marcar, use create_event ou set_booking_draft; para "
+    "cancelar, use cancel_event; para remarcar, use manage_existing_appointment. Todas só "
+    "preparam o cartão: quem confirma é o paciente."
+)
+
+
+def _blocked_by_toolset_v2(tool_name: str) -> dict | None:
+    """Second lock of the v2 toolset. None = allowed (the switch is off for this turn).
+
+    Same two-lock shape as `_blocked_tenant_level`: graph.build_agent already leaves these
+    tools out of a v2 turn's tool set; this catches the paths a tool set cannot - a stale
+    cached graph, a hand-rolled invocation, a future caller - and returns BEFORE any Google
+    call or DB write.
+    """
+    if not _ai_toolset_v2_ctx.get():
+        return None
+    tenant_id = _tenant_id_ctx.get()
+    logger.warning(
+        "agent_tool_blocked",
+        tool=tool_name,
+        reason=TOOL_BLOCK_TOOLSET_V2,
+        tenant_id=str(tenant_id) if tenant_id else None,
+    )
+    return {"error": _TOOLSET_V2_ERROR}
 
 
 def _sole_professional_id() -> UUID | None:
@@ -364,6 +536,18 @@ def _effective_service_catalog() -> list:
     """
     config = _tenant_config_ctx.get()
     return list(getattr(config, "appointment_types", None) or [])
+
+
+def _service_guides() -> list:
+    """The clinic-wide service orientations of THIS turn's tenant (read-only info).
+
+    Unlike `_effective_service_catalog` this is NOT what a booking is validated against: it
+    holds every active catalog service that has orientations AND that somebody offers,
+    including ones only reachable through a professional's own list (a 2+ professional clinic's
+    effective catalog is the tenant's). Empty for dev scripts with no config in context.
+    """
+    config = _tenant_config_ctx.get()
+    return list(getattr(config, "service_guides", None) or [])
 
 
 def _canonical_appointment_type(
@@ -415,8 +599,12 @@ def _canonical_appointment_type(
         logger.info("agent_tool_blocked", tool=tool_name, reason=TOOL_BLOCK_UNKNOWN_SERVICE)
         return None, {
             "error": (
-                f"Serviço '{text}' não existe nesta clínica. Serviços "
-                f"disponíveis: {', '.join(names)}."
+                (
+                    "Serviço não encontrado nesta clínica. Serviços "
+                    if _ai_toolset_v2_ctx.get()
+                    else f"Serviço '{text}' não existe nesta clínica. Serviços "
+                )
+                + f"disponíveis: {', '.join(names)}."
             )
         }
     return canonical, None
@@ -435,6 +623,18 @@ def _match_by_name(items: Sequence[Any], name: str) -> Any | None:
         if item.name.strip().casefold() == target:
             return item
     return None
+
+
+def _lookup_service(items: Sequence[Any], name: str) -> Any | None:
+    """A service of `items` by the name the patient or the LLM used.
+
+    `_match_by_name` first — the exact, case-insensitive rule `get_service_info` has always
+    used, so anything it matched still resolves to the very same entry — then the catalog's own
+    identity rule (`service_catalog.find_by_name`), which also ignores accents and inner
+    spacing, so "ressonancia magnetica" finds "Ressonância Magnética".
+    """
+    found = _match_by_name(items, name)
+    return found if found is not None else find_by_name(items, name)
 
 
 def _event_window(
@@ -506,9 +706,11 @@ async def _persist_appointment(
     # Imported lazily to keep this module importable without a DB/ORM in the
     # dev terminal, and to avoid an import cycle through models -> services.
     from secretaria.core.database import async_session_factory
-    from secretaria.models import Appointment, AppointmentStatus, Conversation, Patient
+    from secretaria.models import Appointment, AppointmentStatus, Conversation, Patient, Tenant
+    from secretaria.services import reminder_hooks
 
     appointment: Any | None = None
+    plan_reminders = False
     try:
         async with async_session_factory() as session:
             async with session.begin():
@@ -536,15 +738,27 @@ async def _persist_appointment(
                     status=AppointmentStatus.SCHEDULED,
                     professional_id=professional_id,
                     unit_id=unit_id,
-                    attendee_name=attendee_name,
+                    attendee_name=attendee_name or None,
                 )
                 session.add(appointment)
+                # TASK-032 R2: read the clinic's reminder switch in this same
+                # transaction; the hook itself runs after the commit, below.
+                plan_reminders = reminder_hooks.enabled_for(await session.get(Tenant, tenant_id))
                 # The attendee belonged to THIS booking: consumed here, so the
                 # patient's next chat booking ("agora uma pra mim") is theirs.
-                if attendee_name and conversation_id is not None:
+                # Also consumes the "pra mim" marker (""), not only a third party's
+                # name, so the next chat booking is asked pra-quem again.
+                if conversation_id is not None:
                     booked_conversation = await session.get(Conversation, conversation_id)
                     if booked_conversation is not None:
                         booked_conversation.flow_attendee_name = None
+                        # TASK-032 R3: "Marcar outra" replaces the original only
+                        # through the flow's confirmation card, which warns about
+                        # it. A booking the agent made by itself showed no such
+                        # warning, so it never cancels anything; the marker of an
+                        # unfinished "Marcar outra" ends here.
+                        booked_conversation.flow_replaces_appointment_id = None
+                        booked_conversation.flow_edit_draft = None
         logger.info("tool_appointment_persisted", event_id=event.get("id"))
     except Exception as exc:
         # The calendar event already exists; a missing DB row is recoverable
@@ -581,6 +795,8 @@ async def _persist_appointment(
         await enqueue_post_booking_hooks(
             _redis_ctx.get(), tenant_id, appointment.id, source="agent"
         )
+        if plan_reminders:
+            await reminder_hooks.after_appointment_booked(appointment.id)
 
 
 async def _mark_appointment_cancelled(event_id: str) -> str | None:
@@ -606,9 +822,11 @@ async def _mark_appointment_cancelled(event_id: str) -> str | None:
 
     from secretaria.core.database import async_session_factory
     from secretaria.models import Appointment, AppointmentStatus, Tenant
+    from secretaria.services import reminder_hooks
     from secretaria.services.payments import deposit_lifecycle
 
     notice: str | None = None
+    closed_id = None
     try:
         async with async_session_factory() as session:
             async with session.begin():
@@ -628,6 +846,8 @@ async def _mark_appointment_cancelled(event_id: str) -> str | None:
                 )
                 if appointment is not None:
                     tenant = await session.get(Tenant, tenant_id)
+                    if tenant is not None and reminder_hooks.enabled_for(tenant):
+                        closed_id = appointment.id
                     if tenant is not None:
                         outcome = await deposit_lifecycle.on_appointment_cancelled(
                             session, tenant=tenant, appointment=appointment
@@ -640,6 +860,8 @@ async def _mark_appointment_cancelled(event_id: str) -> str | None:
                                 notice = deposit_lifecycle.cancellation_notice(
                                     outcome, tenant, deposit
                                 )
+        if closed_id is not None:
+            await reminder_hooks.after_appointment_closed(closed_id, reason="cancelled")
         logger.info("tool_appointment_cancelled", event_id=event_id, rows=result.rowcount)
     except Exception as exc:
         logger.warning("tool_appointment_cancel_persist_failed", error=str(exc), event_id=event_id)
@@ -736,6 +958,9 @@ async def check_availability(start: str, end: str) -> dict:
         start: Início da janela em ISO 8601 (ex: 2026-05-27T14:00:00).
         end: Fim da janela em ISO 8601.
     """
+    blocked = _blocked_by_toolset_v2("check_availability")
+    if blocked is not None:
+        return blocked
     blocked = _blocked_tenant_level("check_availability")
     if blocked is not None:
         return blocked
@@ -768,6 +993,9 @@ async def list_free_slots(day: str, max_slots: int = 6) -> dict:
         day: Dia no formato YYYY-MM-DD (ex: 2026-05-29).
         max_slots: Quantidade máxima de slots a retornar (default 6, máx 10).
     """
+    blocked = _blocked_by_toolset_v2("list_free_slots")
+    if blocked is not None:
+        return blocked
     blocked = _blocked_tenant_level("list_free_slots")
     if blocked is not None:
         return blocked
@@ -804,6 +1032,23 @@ async def _conversation_attendee_name() -> str | None:
         return None
 
 
+async def _conversation_insurance() -> str | None:
+    """Read the current conversation's selected insurance, best effort."""
+    conversation_id = _conversation_id_ctx.get()
+    if conversation_id is None or _tenant_id_ctx.get() is None:
+        return None
+    from secretaria.core.database import async_session_factory
+    from secretaria.models import Conversation
+
+    try:
+        async with async_session_factory() as session:
+            conversation = await session.get(Conversation, conversation_id)
+            return conversation.flow_selected_insurance if conversation is not None else None
+    except Exception as exc:
+        logger.warning("tool_insurance_lookup_failed", error_type=type(exc).__name__)
+        return None
+
+
 @tool
 async def create_event(
     start: str,
@@ -831,6 +1076,9 @@ async def create_event(
             com o nome do paciente. Se a clínica tiver só um serviço, pode
             deixar em branco.
     """
+    blocked = _blocked_by_toolset_v2("create_event")
+    if blocked is not None:
+        return blocked
     blocked = _blocked_tenant_level("create_event")
     if blocked is not None:
         return blocked
@@ -853,6 +1101,13 @@ async def create_event(
     attendee_name = await _conversation_attendee_name()
     if attendee_name:
         summary = f"{canonical_type or 'Consulta'} - {attendee_name}"
+    insurance = await _conversation_insurance()
+    auto_description = build_event_description(
+        service=canonical_type, insurance=insurance, attendee_name=attendee_name
+    )
+    description = (
+        f"{auto_description}\n\n{description}".strip() if description else auto_description
+    )
     event = await cal.create_event(
         start=fallback_start,
         end=fallback_end,
@@ -889,18 +1144,46 @@ async def create_event(
     }
 
 
+# TASK-030 P4: `cancel_event` acts only on an event of THIS conversation's patient in THIS
+# turn's tenant. Before, any Google event id the model passed was deleted - a third party's
+# consultation included. Reason code for `agent_tool_blocked`; never the id itself.
+TOOL_BLOCK_NOT_PATIENTS_EVENT = "not_patients_event"
+
+_NOT_PATIENTS_EVENT_ERROR = (
+    "Essa consulta não está entre as consultas deste paciente, então não posso cancelá-la. "
+    'Para cancelar uma consulta dele, chame manage_existing_appointment com action "cancel": '
+    "o fluxo mostra as consultas dele e pede a confirmação."
+)
+
+
 @tool
 async def cancel_event(event_id: str) -> dict:
     """Cancela (deleta) um evento existente pelo seu id. Se o resultado trouxer
     um campo "note", repasse essa frase ao paciente literalmente — é a
     informação honesta sobre reembolso/retenção do sinal (Pix), quando houver.
+    Só cancela uma consulta DESTE paciente; qualquer outro id é recusado.
 
     Args:
         event_id: ID do evento no Google Calendar.
     """
+    blocked = _blocked_by_toolset_v2("cancel_event")
+    if blocked is not None:
+        return blocked
     blocked = _blocked_tenant_level("cancel_event")
     if blocked is not None:
         return blocked
+    # Ownership BEFORE any Google call or DB write: the same proof `check_availability`
+    # uses for `do_paciente` (an `Appointment` of this patient in this tenant carries the
+    # id). Fails closed: no tenant, no conversation, no patient or a DB error -> refused.
+    if event_id not in await _own_google_event_ids([event_id]):
+        tenant_id = _tenant_id_ctx.get()
+        logger.warning(
+            "agent_tool_blocked",
+            tool="cancel_event",
+            reason=TOOL_BLOCK_NOT_PATIENTS_EVENT,
+            tenant_id=str(tenant_id) if tenant_id else None,
+        )
+        return {"error": _NOT_PATIENTS_EVENT_ERROR}
     await _get_calendar().cancel_event(event_id)
     notice = await _mark_appointment_cancelled(event_id)
     result: dict = {"status": "cancelled"}
@@ -912,16 +1195,22 @@ async def cancel_event(event_id: str) -> dict:
 
 
 @tool
-async def show_main_menu() -> str:
+async def show_main_menu(message: str = "") -> str:
     """Volta a conversa para o menu inicial de botões da clínica. Use quando o
     paciente quiser recomeçar, "voltar ao início", trocar de profissional ou
     ver as opções de novo. Não apaga nada da conversa — apenas reabre o menu.
+
+    Args:
+        message: UMA ou duas frases curtas para o paciente, enviadas ANTES dos botões:
+            responda o que ele perguntou ou contou, sem anunciar qual lista vem a
+            seguir (o fluxo decide e mostra logo abaixo). Deixe vazio só se não
+            houver nada a dizer.
     """
-    raise ShowMainMenuRequested()
+    raise ShowMainMenuRequested(intro=handback_message(message))
 
 
 @tool
-async def manage_existing_appointment(action: str) -> dict:
+async def manage_existing_appointment(action: str, message: str = "") -> dict:
     """Aciona o fluxo de remarcação/cancelamento de uma consulta JÁ MARCADA
     deste paciente. Chame SEMPRE que o paciente quiser remarcar ou cancelar
     uma consulta existente — NUNCA remarque ou cancele você mesma pelo chat
@@ -932,12 +1221,16 @@ async def manage_existing_appointment(action: str) -> dict:
     Args:
         action: "reschedule" (ou "remarcar") para remarcar, "cancel" (ou
             "cancelar") para cancelar.
+        message: UMA ou duas frases curtas para o paciente, enviadas ANTES dos botões:
+            responda o que ele perguntou ou contou, sem anunciar qual lista vem a
+            seguir (o fluxo decide e mostra logo abaixo). Deixe vazio só se não
+            houver nada a dizer.
     """
     normalized = (action or "").strip().casefold()
     if normalized in {"reschedule", "remarcar"}:
-        raise ManageAppointmentRequested("reschedule")
+        raise ManageAppointmentRequested("reschedule", intro=handback_message(message))
     if normalized in {"cancel", "cancelar"}:
-        raise ManageAppointmentRequested("cancel")
+        raise ManageAppointmentRequested("cancel", intro=handback_message(message))
     return {
         "error": (
             f"Ação '{action}' não reconhecida. Use 'reschedule' para remarcar "
@@ -947,7 +1240,7 @@ async def manage_existing_appointment(action: str) -> dict:
 
 
 @tool
-async def start_guided_booking(appointment_type: str) -> dict:
+async def start_guided_booking(appointment_type: str, message: str = "") -> dict:
     """Entrega o agendamento ao fluxo guiado de botões, abrindo direto a lista
     de dias disponíveis (ou a pergunta de convênio, quando a clínica pede).
     A partir daí o fluxo de botões conduz dia, horário e confirmação — você
@@ -966,6 +1259,10 @@ async def start_guided_booking(appointment_type: str) -> dict:
             (um dos "Tipos de consulta disponíveis" do seu contexto, ex:
             'Primeira Consulta'). Não invente, não traduza e não misture com
             o nome do paciente.
+        message: UMA ou duas frases curtas para o paciente, enviadas ANTES dos botões:
+            responda o que ele perguntou ou contou, sem anunciar qual lista vem a
+            seguir (o fluxo decide e mostra logo abaixo). Deixe vazio só se não
+            houver nada a dizer.
     """
     blocked = _blocked_tenant_level("start_guided_booking")
     if blocked is not None:
@@ -981,7 +1278,7 @@ async def start_guided_booking(appointment_type: str) -> dict:
     )
     if error is not None:
         return error
-    raise GuidedBookingRequested(canonical_type)
+    raise GuidedBookingRequested(canonical_type, intro=handback_message(message))
 
 
 _PATIENT_UNRESOLVED_TEXT = (
@@ -1132,3 +1429,545 @@ async def iniciar_pre_consulta() -> str:
     if result.outcome is HandoffOutcome.CONFLICT:
         return _PRECHECK_CONFLICT_TEXT
     return _PRECHECK_TEMPORARY_FAILURE_TEXT
+
+
+@tool
+async def set_booking_draft(
+    service: str = "", professional: str = "", insurance: str = "",
+    for_whom: str = "", day: str = "", time: str = "", message: str = "",
+) -> dict:
+    """Registra o que o paciente já disse (serviço, profissional, convênio) e entrega
+    o agendamento ao fluxo guiado, que PULA as etapas já respondidas e abre a próxima
+    que falta. Se o paciente quer uma avaliação/consulta, mas não escolheu um serviço
+    ou médico, chame com ambos vazios: o fluxo mostra as escolhas administrativas.
+    Nunca deduza um procedimento a partir de sintomas.
+
+    Args:
+        service: Nome EXATO de um serviço escolhido pelo paciente (ou vazio).
+        professional: Nome do profissional, quando o paciente já escolheu um (ou vazio).
+        insurance: Convênio que o paciente citou, se citou (ou vazio).
+            Sem convênio / particular / não tenho convênio: use "Particular".
+        for_whom: "me" se disse que é para si; "other" se é para outra pessoa;
+            vazio se não informou. Nunca envie nome de paciente aqui.
+        day: Dia explicitamente informado, AAAA-MM-DD, ou expressão como 07/10,
+            amanhã, quinta da semana que vem. Use a data e o calendário da clínica
+            no prompt. Não invente nem perca a data já escolhida.
+        time: HH:MM, apenas quando informado. Ao receber só o horário, envie
+            também o day já escolhido no ESTADO DA CONVERSA.
+        message: UMA ou duas frases curtas para o paciente, enviadas ANTES dos botões:
+            responda o que ele perguntou ou contou, sem anunciar qual lista vem a
+            seguir (o fluxo decide e mostra logo abaixo); se nenhuma opção da
+            clínica corresponde exatamente ao que ele descreveu, diga isso.
+            Deixe vazio só se não houver nada a dizer.
+    """
+    # Existing three-field calls retain their old validation/landing. Only an
+    # explicit date/attendee preference opts into the complete capture request.
+    if any((value or "").strip() for value in (for_whom, day, time)):
+        normalized_day = (day or "").strip()
+        if normalized_day:
+            config = _tenant_config_ctx.get()
+            timezone = config.timezone if config is not None else get_settings().CLINIC_TIMEZONE
+            try:
+                normalized_day = resolve_booking_day(
+                    normalized_day, timezone=timezone, at=(time or "").strip() or None
+                ).isoformat()
+            except ValueError:
+                logger.info("agent_tool_blocked", tool="set_booking_draft", reason="bad_day")
+                return {"error": "Não consegui identificar a data. Peça o dia e mês sem adivinhar."}
+        return await set_booking_draft_v2.coroutine(
+            service=service, professional=professional, insurance=insurance,
+            for_whom=for_whom, day=normalized_day, time=time, message=message,
+        )
+    tenant_id = _tenant_id_ctx.get()
+    if tenant_id is None:
+        return {"error": "Nenhuma clínica configurada para esta conversa."}
+    service = (service or "").strip()
+    professional = (professional or "").strip()
+    insurance = (insurance or "").strip()
+
+    intro = handback_message(message)
+    if not service and not professional:
+        raise BookingDraftRequested(None, None, insurance or None, intro=intro)
+
+    professional_id: UUID | None = None
+    catalog = _effective_service_catalog()
+    if _booking_topology_ctx.get() == BOOKING_TOPOLOGY_MULTI:
+        # Lazy: plugins import this module, so the reverse import must not be top-level.
+        from secretaria.plugins.multi_professional import (
+            _active_professionals,
+            _professional_services,
+            _unknown_professional_error,
+        )
+
+        professionals = await _active_professionals(tenant_id)
+        chosen = None
+        if professional:
+            matches = [
+                p for p in professionals
+                if p.name.strip().casefold() == professional.casefold()
+            ]
+            if len(matches) > 1:
+                return {
+                    "error": "Mais de um profissional tem esse nome. Peça uma escolha inequívoca."
+                }
+            chosen = _match_by_name(professionals, professional)
+            if chosen is None:
+                return _unknown_professional_error(professional, professionals)
+        elif service:
+            offering = []
+            for candidate in professionals:
+                offered = await _professional_services(tenant_id, candidate)
+                if canonical_service_name(offered, service) is not None:
+                    offering.append(candidate)
+            if not offering:
+                return {"error": f"Nenhum profissional da clínica oferece '{service}'."}
+            if len(offering) > 1:
+                names = ", ".join(p.name for p in offering)
+                return {
+                    "error": (
+                        f"Mais de um profissional atende '{service}': {names}. "
+                        "Pergunte com quem o paciente prefere e chame de novo."
+                    )
+                }
+            chosen = offering[0]
+        else:
+            return {"error": "Informe ao menos o serviço ou o profissional."}
+        professional_id = chosen.id
+        catalog = await _professional_services(tenant_id, chosen)
+    elif not service:
+        return {"error": "Informe o serviço (nome exato de um dos serviços da clínica)."}
+
+    canonical_type: str | None = None
+    if service:
+        canonical_type, error = _canonical_appointment_type(service, "set_booking_draft", catalog)
+        if error is not None:
+            return error
+    raise BookingDraftRequested(canonical_type, professional_id, insurance or None, intro=intro)
+
+
+# --- set_booking_draft v2 (TASK-030 P2) ----------------------------------------------------
+# Same model-facing NAME as the v1 tool above; the clinic's switch picks one
+# (`flow_router.ai_draft_v2_enabled`, workers/shared/llm_context.py::_flow_handback_tools).
+# It checks FORMATS only. Whether a service, convênio or doctor exists is the worker-side
+# resolver's call (services/booking_draft.py), which drops just the invalid item and asks
+# from that step - so "not in the catalog" is never an error the model would answer in text.
+TOOL_BLOCK_BAD_FOR_WHOM = "bad_for_whom"
+TOOL_BLOCK_BAD_DAY = "bad_day"
+TOOL_BLOCK_BAD_TIME = "bad_time"
+_FOR_WHOM_VALUES: dict[str, str | None] = {"": None, "me": "self", "other": "other"}
+_FOR_WHOM_ERROR = (
+    'for_whom aceita só "me" (a consulta é para o próprio paciente), "other" (é para outra '
+    "pessoa) ou vazio (ele não disse). Nunca escreva um nome nesse campo."
+)
+_DAY_FORMAT_ERROR = "day precisa estar no formato AAAA-MM-DD (ex.: 2026-10-08), no fuso da clínica."
+_TIME_FORMAT_ERROR = "time precisa estar no formato HH:MM (ex.: 10:00)."
+TOOL_BLOCK_PAST_TIME = "past_time"
+# Owner, 2026-10-07: "quarta às 10" said on a Wednesday at 11h is next Wednesday.
+_PAST_TIME_ERROR = (
+    "Esse horário de hoje já passou. Se o paciente disse um dia da semana igual ao de "
+    "hoje (ex.: 'quarta' numa quarta), use o mesmo dia da semana que vem; se ele disse "
+    "'hoje', avise que esse horário já passou e pergunte outro."
+)
+_ISO_DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_HHMM_RE = re.compile(r"\d{2}:\d{2}")
+_DRAFT_TEXT_MAX = 120
+
+
+async def _draft_professional_id(tenant_id: UUID, name: str) -> UUID | None:
+    """The ACTIVE professional with exactly this name, or None (counted, never an error)."""
+    if not name:
+        return None
+    # Lazy: plugins import this module, so the reverse import must not be top-level.
+    from secretaria.plugins.multi_professional import _active_professionals
+
+    roster = await _active_professionals(tenant_id)
+    matches = [p for p in roster if p.name.strip().casefold() == name.casefold()]
+    if not matches:
+        # The patient may say only a first name. A subset of complete name tokens
+        # is safe only when it identifies exactly one ACTIVE professional.
+        def tokens(value: str) -> set[str]:
+            return set(re.findall(r"[^\W\d_]+", value.casefold())) - {"dr", "dra"}
+
+        requested = tokens(name)
+        if requested:
+            matches = [p for p in roster if requested <= tokens(p.name)]
+    if len(matches) == 1:
+        return matches[0].id
+    logger.info(
+        "booking_draft_tool_item_dropped",
+        field="professional",
+        reason="ambiguous_professional" if matches else "unknown_professional",
+    )
+    return None
+
+
+@tool("set_booking_draft")
+async def set_booking_draft_v2(
+    service: str = "",
+    professional: str = "",
+    insurance: str = "",
+    for_whom: str = "",
+    day: str = "",
+    time: str = "",
+    message: str = "",
+) -> dict:
+    """Entrega o agendamento ao fluxo guiado com TUDO o que o paciente já disse nesta
+    conversa e o que o ESTADO DA CONVERSA já mostra. O fluxo confere cada item com os dados
+    reais da clínica, pergunta só o que falta e, com tudo válido, mostra os detalhes e o
+    cartão com o botão Confirmar. Chamar esta ferramenta NÃO marca nada: quem confirma é o
+    paciente, tocando no botão - nunca diga que algo foi marcado, reservado ou confirmado.
+    Preencha só o que o paciente disse e deixe o resto vazio; não repita uma pergunta que
+    ele já respondeu. Nunca deduza um serviço a partir de sintomas e nunca invente dia ou
+    horário.
+
+    Args:
+        service: Nome EXATO de um serviço da clínica escolhido pelo paciente (ou vazio).
+        professional: Nome do profissional que o paciente escolheu (ou vazio).
+        insurance: Convênio que o paciente citou (ou vazio). Se o estado diz que o convênio
+            já foi informado, deixe vazio: ele já está guardado.
+        for_whom: "me" se a consulta é para o próprio paciente; "other" se é para outra
+            pessoa (mãe, filho, cônjuge...); vazio se ele não disse. NUNCA escreva um nome
+            aqui nem peça o nome: o fluxo pede o nome e a autorização.
+        day: Dia pedido, AAAA-MM-DD, no fuso da clínica - converta "amanhã", "quinta" pela
+            lista PRÓXIMOS DIAS do prompt (ou vazio).
+        time: Horário pedido, HH:MM em 24 horas (ou vazio). Sem `day`, é ignorado.
+        message: UMA ou duas frases curtas para o paciente, enviadas ANTES dos botões:
+            responda o que ele perguntou ou contou, sem anunciar qual lista vem a
+            seguir (o fluxo decide e mostra logo abaixo); se nenhuma opção da
+            clínica corresponde exatamente ao que ele descreveu, diga isso.
+            Deixe vazio só se não houver nada a dizer.
+    """
+    tenant_id = _tenant_id_ctx.get()
+    if tenant_id is None:
+        return {"error": "Nenhuma clínica configurada para esta conversa."}
+    who = (for_whom or "").strip().casefold()
+    if who not in _FOR_WHOM_VALUES:
+        # The value itself is never logged nor echoed: it may be a third party's name.
+        logger.info("agent_tool_blocked", tool="set_booking_draft", reason=TOOL_BLOCK_BAD_FOR_WHOM)
+        return {"error": _FOR_WHOM_ERROR}
+    day_text = (day or "").strip()
+    parsed_day: date | None = None
+    if day_text:
+        try:
+            if not _ISO_DAY_RE.fullmatch(day_text):
+                raise ValueError(day_text)
+            parsed_day = date.fromisoformat(day_text)
+        except ValueError:
+            logger.info("agent_tool_blocked", tool="set_booking_draft", reason=TOOL_BLOCK_BAD_DAY)
+            return {"error": _DAY_FORMAT_ERROR}
+    time_text = (time or "").strip()
+    parsed_time = None
+    if time_text:
+        try:
+            if not _HHMM_RE.fullmatch(time_text):
+                raise ValueError(time_text)
+            parsed_time = datetime.strptime(time_text, "%H:%M").time()
+        except ValueError:
+            logger.info("agent_tool_blocked", tool="set_booking_draft", reason=TOOL_BLOCK_BAD_TIME)
+            return {"error": _TIME_FORMAT_ERROR}
+    if parsed_day is not None and parsed_time is not None:
+        config = _tenant_config_ctx.get()
+        clinic_tz = config.timezone if config is not None else get_settings().CLINIC_TIMEZONE
+        if time_has_passed_today(parsed_day, parsed_time, timezone=clinic_tz):
+            logger.info(
+                "agent_tool_blocked", tool="set_booking_draft", reason=TOOL_BLOCK_PAST_TIME
+            )
+            return {"error": _PAST_TIME_ERROR}
+    professional_id = await _draft_professional_id(tenant_id, (professional or "").strip())
+    raise BookingDraftRequested(
+        (service or "").strip()[:_DRAFT_TEXT_MAX] or None,
+        professional_id,
+        (insurance or "").strip()[:_DRAFT_TEXT_MAX] or None,
+        attendee=_FOR_WHOM_VALUES[who],
+        day=parsed_day,
+        time=parsed_time,
+        professional_unresolved=bool((professional or "").strip()) and professional_id is None,
+        intro=handback_message(message),
+    )
+
+
+# Read by ai/graph.py::_tool_cache_key: the v1 and v2 tools share the name
+# "set_booking_draft" and must never share a compiled agent.
+set_booking_draft_v2.metadata = {"cache_variant": "draft_v2"}
+
+
+# --- manage_existing_appointment v2 (TASK-030 P3) ---------------------------------------------
+# Same model-facing NAME as the v1 tool above; the clinic's switch picks one
+# (`flow_router.ai_draft_v2_enabled`, workers/shared/llm_context.py::_flow_handback_tools).
+# Formats only, like set_booking_draft v2: whether the appointment is THIS patient's and
+# whether the new time is free is the worker's call (services/manage_request.py), which
+# never goes further than the confirmation card the buttons show.
+TOOL_BLOCK_BAD_ACTION = "bad_action"
+TOOL_BLOCK_BAD_APPOINTMENT = "bad_appointment"
+_MANAGE_ACTIONS: dict[str, str] = {
+    "reschedule": "reschedule",
+    "remarcar": "reschedule",
+    "cancel": "cancel",
+    "cancelar": "cancel",
+}
+_MANAGE_ACTION_ERROR = (
+    "Ação não reconhecida. Use 'reschedule' para remarcar ou 'cancel' para cancelar."
+)
+_APPOINTMENT_REF_ERROR = (
+    'appointment precisa ser a referência da consulta que aparece em "consultas marcadas" '
+    "(ref AAAA-MM-DD HH:MM), ou vazio."
+)
+
+
+def _tool_day(text: str) -> date | None:
+    """`day` as the hand-back tools accept it (AAAA-MM-DD); None when empty, else ValueError."""
+    value = (text or "").strip()
+    if not value:
+        return None
+    if not _ISO_DAY_RE.fullmatch(value):
+        raise ValueError("day must be YYYY-MM-DD")
+    return date.fromisoformat(value)
+
+
+def _tool_time(text: str) -> Any:
+    """`time` as the hand-back tools accept it (HH:MM); None when empty, else ValueError."""
+    value = (text or "").strip()
+    if not value:
+        return None
+    if not _HHMM_RE.fullmatch(value):
+        raise ValueError("time must be HH:MM")
+    return datetime.strptime(value, "%H:%M").time()
+
+
+@tool("manage_existing_appointment")
+async def manage_existing_appointment_v2(
+    action: str, appointment: str = "", day: str = "", time: str = "", message: str = ""
+) -> dict:
+    """Leva o paciente ao fluxo de remarcar ou cancelar uma consulta JÁ MARCADA dele. O
+    fluxo confere tudo e para no cartão de confirmação: quem confirma é o paciente, tocando
+    no botão. NUNCA remarque nem cancele você mesma pelo chat.
+
+    Args:
+        action: "reschedule" (ou "remarcar") ou "cancel" (ou "cancelar").
+        appointment: QUAL consulta, pela referência "(ref AAAA-MM-DD HH:MM)" mostrada em
+            "consultas marcadas". Vazio se o paciente não disse qual.
+        day: Só para remarcar: o novo dia, AAAA-MM-DD, no fuso da clínica (ou vazio).
+        time: Só para remarcar: o novo horário, HH:MM (ou vazio). Sem `day`, é ignorado.
+        message: UMA ou duas frases curtas para o paciente, enviadas ANTES dos botões:
+            responda o que ele perguntou ou contou, sem anunciar qual lista vem a
+            seguir (o fluxo decide e mostra logo abaixo). Deixe vazio só se não
+            houver nada a dizer.
+    """
+    canonical = _MANAGE_ACTIONS.get((action or "").strip().casefold())
+    if canonical is None:
+        # The value is never echoed nor logged: it may carry the patient's own words.
+        logger.info(
+            "agent_tool_blocked", tool="manage_existing_appointment", reason=TOOL_BLOCK_BAD_ACTION
+        )
+        return {"error": _MANAGE_ACTION_ERROR}
+    reference_text = (appointment or "").strip()
+    try:
+        reference = parse_appointment_ref(reference_text) if reference_text else None
+    except ValueError:
+        logger.info(
+            "agent_tool_blocked",
+            tool="manage_existing_appointment",
+            reason=TOOL_BLOCK_BAD_APPOINTMENT,
+        )
+        return {"error": _APPOINTMENT_REF_ERROR}
+    new_day = new_time = None
+    if canonical == "reschedule":
+        try:
+            new_day = _tool_day(day)
+        except ValueError:
+            logger.info(
+                "agent_tool_blocked", tool="manage_existing_appointment", reason=TOOL_BLOCK_BAD_DAY
+            )
+            return {"error": _DAY_FORMAT_ERROR}
+        try:
+            new_time = _tool_time(time)
+        except ValueError:
+            logger.info(
+                "agent_tool_blocked", tool="manage_existing_appointment", reason=TOOL_BLOCK_BAD_TIME
+            )
+            return {"error": _TIME_FORMAT_ERROR}
+    raise ManageAppointmentRequested(
+        canonical,
+        appointment=reference,
+        day=new_day,
+        time=new_time,
+        intro=handback_message(message),
+    )
+
+
+# Read by ai/graph.py::_tool_cache_key: the v1 and v2 tools share the name
+# "manage_existing_appointment" and must never share a compiled agent.
+manage_existing_appointment_v2.metadata = {"cache_variant": "manage_v2"}
+
+
+HANDOFF_REASONS = ("patient_requested_human", "clinical_sensitive", "could_not_help")
+
+
+class HumanHandoffRequested(Exception):
+    """Raised by `request_human_handoff`: the agent asks for a person.
+
+    Same exception->sentinel mechanism as the other hand-backs. Carries only a
+    reason CODE (an enum) — never patient text — so nothing sensitive can ride
+    into the operational e-mail that follows.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"human handoff: {reason}")
+        self.reason = reason
+
+
+class HumanHandoffOfferRequested(Exception):
+    """Raised by `offer_human_handoff` (and by `request_human_handoff` for "could_not_help").
+
+    Owner, 2026-10-07 (TASK-038): when the agent lacks what it needs to answer, it does
+    not hand the patient to a person behind their back - the flow ASKS, with the fixed
+    card `services/flow_router.py::HUMAN_OFFER_BODY` and ✅ Sim / ❌ Não. Same
+    exception->sentinel path as the other hand-backs; `intro` is the agent's one-line
+    "what I don't have", sent in front of the card.
+    """
+
+    def __init__(self, *, intro: str | None = None) -> None:
+        super().__init__("offer human handoff")
+        self.intro = intro
+
+
+@tool
+async def get_service_info(service_name: str) -> dict:
+    """Consulta as orientações de UM serviço da clínica: o que o paciente precisa saber antes
+    (jejum, exames, documentos, preparo), a descrição completa, a duração e o preço.
+
+    Use quando o paciente perguntar o que precisa fazer ou levar para um serviço, quanto dura
+    ou o que inclui. Ferramenta SOMENTE-LEITURA: não agenda nada. Se duracao_min ou preco vierem
+    vazios, não invente: diga que não tem essa informação e chame offer_human_handoff.
+
+    Args:
+        service_name: Nome do serviço como aparece na lista de serviços da clínica.
+    """
+    asked = service_name or ""
+    catalog = _effective_service_catalog()
+    # Two sources, because the effective catalog only lists what THIS turn books from (the
+    # tenant's list, or the one professional's), while the orientations are clinic-wide.
+    match = _lookup_service(catalog, asked)
+    if match is not None:
+        return {
+            "servico": match.name,
+            "duracao_min": match.duration_min,
+            "preco": match.price,
+            "descricao": match.description,
+            "descricao_completa": getattr(match, "long_description", None),
+            "orientacoes": list(getattr(match, "requirements", None) or []),
+        }
+    guides = _service_guides()
+    guide = _lookup_service(guides, asked)
+    if guide is None:
+        listed = [t.name for t in catalog] + [g.name for g in missing_from(guides, catalog)]
+        return {
+            "error": (
+                (
+                    "Serviço não encontrado nesta clínica. "
+                    if _ai_toolset_v2_ctx.get()
+                    else f"Serviço '{asked.strip()}' não existe nesta clínica. "
+                )
+                + f"Serviços disponíveis: {', '.join(listed) or 'nenhum'}."
+            )
+        }
+    # Known to the clinic but not in this turn's catalog: duration and price vary per
+    # professional, so they are not guessed here.
+    return {
+        "servico": guide.name,
+        "duracao_min": None,
+        "preco": None,
+        "descricao": guide.description,
+        "descricao_completa": guide.long_description,
+        "orientacoes": list(guide.requirements or []),
+    }
+
+
+@tool
+async def request_human_handoff(reason: str) -> dict:
+    """ÚLTIMO RECURSO: passa a conversa DIRETO para uma pessoa da equipe. Use SOMENTE
+    quando o paciente pediu explicitamente para falar com uma pessoa, ou quando o assunto
+    exige avaliação humana. Se você apenas não tem a informação ou não consegue fazer o
+    que ele pediu, use offer_human_handoff (pergunta ao paciente antes). NUNCA por uma
+    dúvida comum sobre a clínica, serviços, horários ou convênios.
+
+    Args:
+        reason: Exatamente um de: "patient_requested_human" (o paciente pediu uma
+            pessoa), "clinical_sensitive" (assunto que exige avaliação humana).
+    """
+    normalized = (reason or "").strip()
+    if normalized not in HANDOFF_REASONS:
+        return {"error": f"Motivo inválido. Use um de: {', '.join(HANDOFF_REASONS)}."}
+    if normalized == "could_not_help":
+        # TASK-038: "I could not help" never transfers behind the patient's back -
+        # the flow asks first (offer_human_handoff's card).
+        raise HumanHandoffOfferRequested()
+    raise HumanHandoffRequested(normalized)
+
+
+@tool
+async def offer_human_handoff(message: str = "") -> dict:
+    """Use quando você NÃO tem a informação ou NÃO consegue fazer o que o paciente pediu
+    (ex.: um preço ou dado que não está no seu contexto, um pedido fora do que você
+    resolve por aqui). O sistema mostra ao paciente a pergunta padrão "Não sou capaz de
+    atender essa sua necessidade por aqui. Quer que eu chame nosso atendente humano?"
+    com os botões Sim/Não; se ele tocar Sim, a equipe assume a conversa. NUNCA diga
+    "vou confirmar com a equipe" ou "vou verificar" sem chamar esta ferramenta. Antes,
+    tente de verdade com o que você sabe.
+
+    Args:
+        message: UMA frase curta dizendo o que você não tem ou não consegue (ex.: "Não
+            tenho o valor dessa cirurgia aqui."), enviada antes da pergunta. Deixe vazio
+            se não houver nada a dizer.
+    """
+    raise HumanHandoffOfferRequested(intro=handback_message(message))
+
+
+class AppointmentEditRequested(Exception):
+    """A proposal for the active edit, never an authorization to persist it."""
+
+    def __init__(self, proposal: dict) -> None:
+        super().__init__("appointment edit proposal")
+        self.proposal = proposal
+
+
+@tool
+async def propose_appointment_edit(
+    open_field: str | None = None,
+    professional: str | None = None,
+    service: str | None = None,
+    day: str | None = None,
+    time: str | None = None,
+    insurance: str | None = None,
+    attendee: str | None = None,
+    keep: list[str] | None = None,
+    finish: bool = False,
+    abandon: bool = False,
+) -> dict:
+    """Propose changes ONLY to the existing appointment's active editing draft.
+
+    Unmentioned fields keep their current value. open_field opens doctor/service/date/
+    time/insurance/patient/more without changing anything. professional/service/insurance
+    must name an actual catalog option. day is YYYY-MM-DD, time HH:MM. keep names fields
+    the patient wants unchanged (same day/time/insurance); never reset them to original.
+    attendee is self or other; other opens the existing name and authorization flow,
+    never pass a patient's name here. finish shows the final change confirmation card;
+    it NEVER confirms or writes. abandon only for an explicit request to stop editing;
+    with pending changes it still shows confirmation. Never cancel an appointment.
+    """
+    if not _editing_ctx.get():
+        return {"error": "Não há edição de consulta em andamento."}
+    raise AppointmentEditRequested(
+        {
+            "open_field": open_field,
+            "professional": professional,
+            "service": service,
+            "day": day,
+            "time": time,
+            "insurance": insurance,
+            "attendee": attendee,
+            "keep": keep,
+            "finish": finish,
+            "abandon": abandon,
+        }
+    )

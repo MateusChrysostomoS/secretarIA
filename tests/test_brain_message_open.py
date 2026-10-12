@@ -23,8 +23,9 @@ What this file defends, in order:
 Fixtures follow tests/test_brain_message_pipeline.py (in-memory SQLite on a
 StaticPool, the real ASGI app, a recording queue).
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -63,7 +64,7 @@ from secretaria.services.channel_sender import (  # noqa: E402
     CHANNEL_WHATSAPP,
 )
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
-from secretaria.services.flow_router import menu_buttons_for, menu_label  # noqa: E402
+from secretaria.services.flow_router import main_menu_buttons, menu_label  # noqa: E402
 from secretaria.services.greeting_template import (  # noqa: E402
     CONSENT_REMINDER_MESSAGE,
     LGPD_CONSENT_MESSAGE,
@@ -125,9 +126,9 @@ def state() -> _State:
 
 @pytest.fixture(autouse=True)
 def _wire(monkeypatch: pytest.MonkeyPatch, db, state):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
-    monkeypatch.setattr(tasks, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
-    monkeypatch.setattr(tasks, "WhatsAppClient", _ExplodingWhatsAppClient)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
+    monkeypatch.setattr(workers_ns, "WhatsAppClient", _ExplodingWhatsAppClient)
 
     async def _fake_resolve(session, tenant_id, patient_id, **kwargs):
         return None
@@ -153,10 +154,10 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db, state):
         state.probed.append(external_id)
         return state.answer
 
-    monkeypatch.setattr(tasks, "resolve_patient_opening_state", _fake_resolve)
-    monkeypatch.setattr(tasks, "get_waba_token", _fake_token)
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_entitlements)
-    monkeypatch.setattr(tasks, "probe_identity", _probe)
+    monkeypatch.setattr(workers_ns, "resolve_patient_opening_state", _fake_resolve)
+    monkeypatch.setattr(workers_ns, "get_waba_token", _fake_token)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_entitlements)
+    monkeypatch.setattr(workers_ns, "probe_identity", _probe)
     yield
 
 
@@ -264,10 +265,13 @@ async def test_a_visitor_who_has_not_written_gets_a_queued_greeting(api, db) -> 
 
 
 async def test_a_conversation_that_already_started_is_never_greeted_again(api, db) -> None:
-    """200 `exists`, and NOTHING is queued — the contract's second answer.
+    """200 `exists`, and no GREETING is queued — the contract's second answer.
 
     The patient wrote first; an unsolicited greeting on top of a live thread
-    would read as the clinic forgetting the conversation it is in.
+    would read as the clinic forgetting the conversation it is in. Since
+    TASK-035 the ENTRY job is queued instead: it decides whether the
+    context-aware opening is due (and is silent on a live thread like this
+    one — see tests/test_portal_context_opening.py).
     """
     client, pool = api
     tenant = await _seed_tenant(db)
@@ -284,7 +288,7 @@ async def test_a_conversation_that_already_started_is_never_greeted_again(api, d
 
     assert response.status_code == 200, response.text
     assert response.json() == {"status": "exists"}
-    assert pool.jobs == []
+    assert pool.jobs == [("process_brain_message_enter", (str(tenant.id), EXTERNAL_ID), {})]
 
 
 async def test_the_route_is_behind_the_same_key_as_every_other_internal_route(api, db) -> None:
@@ -483,9 +487,9 @@ class _NoIdentityWrites:
             self.calls.append("verify_code")
             raise AssertionError("a verified account was asked for a code")
 
-        monkeypatch.setattr(tasks, "claim_email", _claim)
-        monkeypatch.setattr(tasks, "request_code", _request)
-        monkeypatch.setattr(tasks, "verify_code", _verify)
+        monkeypatch.setattr(workers_ns, "claim_email", _claim)
+        monkeypatch.setattr(workers_ns, "request_code", _request)
+        monkeypatch.setattr(workers_ns, "verify_code", _verify)
 
 
 @pytest.fixture
@@ -497,7 +501,7 @@ def reported(monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
         calls.append((tenant_id, external_id, name))
         return True
 
-    monkeypatch.setattr(tasks, "report_name", _report)
+    monkeypatch.setattr(workers_ns, "report_name", _report)
     return calls
 
 
@@ -532,7 +536,7 @@ async def _say(tenant: Tenant, text: str) -> None:
 
 def _menu_body(tenant: Tenant) -> str:
     """The menu bubble as a Brain-Message transcript stores it (flattened card)."""
-    labels = menu_buttons_for(tenant, False)
+    labels = main_menu_buttons()
     return f"{menu_label(tenant)}\n(opções: {', '.join(labels)})"
 
 
@@ -654,7 +658,7 @@ async def test_a_name_brain_api_did_not_take_does_not_hold_the_patient(
     async def _refused(tenant_id, external_id, name):
         return False
 
-    monkeypatch.setattr(tasks, "report_name", _refused)
+    monkeypatch.setattr(workers_ns, "report_name", _refused)
     await _open(tenant, name=None)
 
     await _say(tenant, "Ana Souza")
@@ -726,7 +730,7 @@ async def test_a_known_accounts_first_tap_on_the_menu_is_served_not_gated(
     await _open(tenant, name="Maria Silva")
     opened = await _bodies(db, tenant, MessageDirection.OUTBOUND)
 
-    await _say(tenant, menu_buttons_for(tenant, False)[0])
+    await _say(tenant, main_menu_buttons()[0])
 
     after = (await _bodies(db, tenant, MessageDirection.OUTBOUND))[len(opened) :]
     assert after, "the tap went unanswered"

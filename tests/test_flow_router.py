@@ -25,7 +25,7 @@ from secretaria.services.flow_router import (  # noqa: E402
     LABEL_MANAGE_APPOINTMENT,
     LABEL_OTHER,
     LABEL_RESCHEDULE,
-    SCOPED_HELP_ESCALATE_MESSAGE,
+    OTHER_OPENER,
     SERVICE_HELP_OPENER,
     STEP_AWAITING_ATTENDEE_CHOICE,
     STEP_AWAITING_CONFIRMATION,
@@ -179,8 +179,8 @@ async def test_flows_run_even_when_never_configured():
         res = await route(_conversation(), tenant, None, "oi")
         assert res.action == "reply", initial_flows
         assert res.flow_state == FlowState.MENU, initial_flows
-        # No configured buttons on these rows -> the router's own defaults.
-        assert res.bubbles[0].labels == ["Serviços e Custo", "Remarcar/Cancelar", "Outro"]
+        # TASK-035: the drawn menu is always [Agendar, Outro].
+        assert res.bubbles[0].labels == ["🗓️ Agendar", "Outro"]
 
 
 async def test_idle_unmatched_shows_menu():
@@ -188,7 +188,7 @@ async def test_idle_unmatched_shows_menu():
     assert res.action == "reply"
     assert res.flow_state == FlowState.MENU
     assert isinstance(res.bubbles[0], MenuBubble)
-    assert res.bubbles[0].labels == ["Serviços e Custo", "Horários", "Outro"]
+    assert res.bubbles[0].labels == ["🗓️ Agendar", "Outro"]
 
 
 async def test_menu_select_services_lists_catalog():
@@ -212,10 +212,21 @@ async def test_menu_select_hours_one_shot():
     assert "Segunda" in res.bubbles[0].body
 
 
-async def test_menu_outro_delegates_llm():
+async def test_menu_outro_asks_fixed_opener_then_parks_in_llm():
+    """ "Outro" never reaches the model: the fixed question goes out and the
+    conversation waits in LLM mode, so the model runs on the ANSWER."""
     res = await route(_conversation(flow_state=FlowState.MENU), _tenant(), None, "Outro")
-    assert res.action == "delegate_llm"
+    assert res.action == "reply"
+    assert [b.body for b in res.bubbles] == [OTHER_OPENER]
+    assert OTHER_OPENER == "O que te traz à clínica?"
     assert res.flow_state == FlowState.LLM
+    assert res.flow_step is None
+
+    answer = await route(
+        _conversation(flow_state=res.flow_state), _tenant(), None, "minha vista está embaçada"
+    )
+    assert answer.action == "delegate_llm"
+    assert answer.flow_state == FlowState.LLM
 
 
 async def test_menu_freetext_delegates_llm():
@@ -936,15 +947,26 @@ async def test_route_idle_cancel_label_enters_directly():
     assert res.flow_managing_appointment_id == UUID(_APPT_A1_ID)
 
 
-async def test_route_idle_outro_label_delegates_llm_even_off_menu():
-    """"Outro" from the greeting trio reaches the LLM even when the tenant's
-    configured single-doctor menu buttons don't include it — the index-based
-    menu mapping only knows the configured labels, so the explicit match must
-    win first (same place-it-anywhere semantics as the manage label)."""
+async def test_route_idle_outro_label_opens_free_chat_even_off_menu():
+    """ "Outro" from the greeting trio opens the free conversation even when the
+    tenant's configured single-doctor menu buttons don't include it — the
+    index-based menu mapping only knows the configured labels, so the explicit
+    match must win first (same place-it-anywhere semantics as the manage label)."""
     tenant = _tenant()
     tenant.initial_flows["buttons"] = ["Agendar", "Horários", "Falar com a equipe"]
     res = await route(_conversation(flow_state=FlowState.IDLE), tenant, None, LABEL_OTHER)
-    assert res.action == "delegate_llm"
+    assert res.action == "reply"
+    assert [b.body for b in res.bubbles] == [OTHER_OPENER]
+    assert res.flow_state == FlowState.LLM
+
+
+async def test_menu_third_configured_button_asks_fixed_opener():
+    """The configured 3rd slot is the same escape: fixed question, no model call."""
+    tenant = _tenant()
+    tenant.initial_flows["buttons"] = ["Serviços e Custo", "Horários", "Falar com a equipe"]
+    res = await route(_conversation(flow_state=FlowState.MENU), tenant, None, "Falar com a equipe")
+    assert res.action == "reply"
+    assert [b.body for b in res.bubbles] == [OTHER_OPENER]
     assert res.flow_state == FlowState.LLM
 
 
@@ -1113,9 +1135,9 @@ async def test_service_help_pick_hands_back_to_service_detail(monkeypatch):
     assert captured["final_round"] is False
 
 
-async def test_service_help_pick_outside_catalog_escalates(monkeypatch):
+async def test_service_help_pick_outside_catalog_delegates(monkeypatch):
     """A pick that doesn't resolve against the real catalog is never offered
-    back to the patient - bounded escalation instead."""
+    back to the patient - delegate to the general agent instead."""
 
     async def _fake_help(**kwargs):
         return ScopedHelpOutcome(kind="pick", choice="Serviço Inventado")
@@ -1123,9 +1145,8 @@ async def test_service_help_pick_outside_catalog_escalates(monkeypatch):
     monkeypatch.setattr(flow_router, "run_service_help", _fake_help)
     conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_SERVICE_HELP)
     res = await route(conv, _tenant(), None, "qualquer coisa")
-    assert res.action == "handover"
-    assert res.flow_state == FlowState.IDLE
-    assert res.bubbles[0].body == SCOPED_HELP_ESCALATE_MESSAGE
+    assert res.action == "delegate_llm"
+    assert res.flow_state == FlowState.LLM
 
 
 async def test_service_help_clarify_asks_once_then_final_step(monkeypatch):
@@ -1140,9 +1161,9 @@ async def test_service_help_clarify_asks_once_then_final_step(monkeypatch):
     assert res.bubbles[0].body == "É a sua primeira vez na clínica?"
 
 
-async def test_service_help_clarify_on_final_round_escalates(monkeypatch):
+async def test_service_help_clarify_on_final_round_delegates(monkeypatch):
     """The 1-2 exchange bound lives in the router: even if the node asks for
-    another clarification on the final step, the flow escalates."""
+    another clarification on the final step, the flow delegates to the LLM."""
     captured = {}
 
     async def _fake_help(**kwargs):
@@ -1153,19 +1174,18 @@ async def test_service_help_clarify_on_final_round_escalates(monkeypatch):
     conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_SERVICE_HELP_FINAL)
     res = await route(conv, _tenant(), None, "continuo sem saber")
     assert captured["final_round"] is True
-    assert res.action == "handover"
-    assert res.bubbles[0].body == SCOPED_HELP_ESCALATE_MESSAGE
+    assert res.action == "delegate_llm"
 
 
-async def test_service_help_escalate_hands_over(monkeypatch):
+async def test_service_help_escalate_delegates_to_llm(monkeypatch):
     async def _fake_help(**kwargs):
         return ScopedHelpOutcome(kind="escalate")
 
     monkeypatch.setattr(flow_router, "run_service_help", _fake_help)
     conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_SERVICE_HELP)
     res = await route(conv, _tenant(), None, "quero falar de outra coisa")
-    assert res.action == "handover"
-    assert res.flow_state == FlowState.IDLE
+    assert res.action == "delegate_llm"
+    assert res.flow_state == FlowState.LLM
     assert res.flow_step is None
 
 

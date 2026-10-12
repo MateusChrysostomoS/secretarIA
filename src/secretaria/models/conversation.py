@@ -4,7 +4,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, String, UniqueConstraint, func
+from sqlalchemy import JSON, DateTime, Enum as SAEnum, ForeignKey, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from secretaria.core.database import Base
@@ -65,6 +65,9 @@ class FlowState(enum.StrEnum):
                       a first contact. Brain-Message: right after an e-mail
                       that belongs to no account. Always before LGPD.
 
+    EDIT_BOOKING    - patient is editing an existing appointment through a draft
+                      (services/appointment_edit_flow.py).
+
     The two e-mail states are the ONLY ones a WhatsApp conversation can never
     enter (`workers/tasks.py` gates both on `channel`); AWAITING_NAME is
     channel-neutral on purpose. All three are pre-/post-consent identity waits
@@ -93,6 +96,10 @@ class FlowState(enum.StrEnum):
     AWAITING_DEPOSIT = "AWAITING_DEPOSIT"
     # Same reasoning, same absence of a migration: 19 characters in the VARCHAR(32).
     AWAITING_PAYER_DATA = "AWAITING_PAYER_DATA"
+    # TASK-032 R6 ("Alterar Dados" on a reminder): the patient is changing date, time,
+    # service, doctor, convênio or patient of ONE existing appointment through a draft
+    # (`flow_edit_draft`). Same reasoning, same absence of a migration: 12 characters.
+    EDIT_BOOKING = "EDIT_BOOKING"
 
 
 def _handover_values(enum_cls: type[enum.Enum]) -> list[str]:
@@ -175,6 +182,30 @@ class Conversation(Base):
     # above. PII: registered as the ATENDIDO identifier by
     # `services/pii_pseudonymization.py::load_pseudonymizer`.
     flow_attendee_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # The AI's booking draft parked while the patient answers "Essa consulta é pra você?"
+    # (TASK-030 P2, services/booking_draft.py): {"t", "p", "i", "w", "d", "h", "saved_at"},
+    # never a third party's name ("w" is only self/other). NULL whenever no draft waits.
+    # Written unconditionally by `_apply_flow_result` like every flow field, and carried
+    # only on the attendee steps (`flow_router._carry_draft`).
+    flow_draft: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # TASK-032 R3 ("Marcar outra consulta", spec §4.3): the live appointment the
+    # booking in progress REPLACES. The original is cancelled only in the same
+    # transaction that writes the new appointment
+    # (services/appointment_replacement.py). Written unconditionally by
+    # `_apply_flow_result` like every flow field and carried only while the
+    # conversation stays in the booking (`flow_router._carry_replacement`).
+    # SET NULL so deleting the appointment never breaks the conversation row.
+    flow_replaces_appointment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("appointments.id", ondelete="SET NULL"), nullable=True
+    )
+    # TASK-032 R6: the "Alterar Dados" draft - {"appointment_id", "current", "original",
+    # "stage"} (services/appointment_edit.py::EditDraft.to_json). The real appointment is
+    # never touched until the final Confirmar. Written unconditionally by
+    # `_apply_flow_result` like every flow field and carried only while the conversation
+    # stays in `EDIT_BOOKING` (`flow_router._carry_edit_draft`). Third-party names appear
+    # only inside `current["attendee_name"]` / `original["attendee_name"]` (same PII rule as
+    # `flow_attendee_name`).
+    flow_edit_draft: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # Set while a returning patient is mid-"quer continuar?" prompt: holds the
     # FlowState value to resume to AND marks that the next inbound is the Sim/Não
     # answer. NULL whenever no reactivation prompt is pending.

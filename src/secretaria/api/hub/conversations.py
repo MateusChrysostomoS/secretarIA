@@ -3,7 +3,12 @@
 GET  /tenants/me/conversations                     - list every conversation
                                                        for the authenticated
                                                        tenant, newest activity
-                                                       first.
+                                                       first. `?mine=true`
+                                                       ("Meus pacientes",
+                                                       TASK-046) narrows it to
+                                                       the viewer's own
+                                                       patients - a filter,
+                                                       never a permission.
 POST /tenants/me/conversations/{id}/handover        - flip a conversation
                                                        between BOT_ACTIVE and
                                                        HUMAN_ACTIVE.
@@ -21,6 +26,9 @@ POST /tenants/me/conversations/{id}/messages/read   - staff has seen the
                                                        thread up to a cursor
                                                        (Brain-Message only).
 
+GET  /tenants/me/conversations/{id}/typing          - read automation/patient typing.
+POST /tenants/me/conversations/{id}/typing          - staff heartbeat (Portal only).
+
 The state flip itself is never reimplemented here — it goes through
 `services/handover.py::HandoverManager`, which also stamps
 `last_human_message_at` when a human takes over (that timestamp starts the
@@ -37,11 +45,12 @@ picks a `services/channel_sender.py::ChannelSender` by `Patient.channel` — the
 single place in this router that knows more than one channel exists.
 """
 
+import inspect
 from datetime import datetime
 from uuid import UUID
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -53,7 +62,7 @@ from secretaria.api.attachment_http import (
     refusal,
     stream_attachment,
 )
-from secretaria.api.hub.deps import get_current_tenant
+from secretaria.api.hub.deps import get_agenda_viewer, get_current_tenant
 from secretaria.core import attachments
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
@@ -70,10 +79,13 @@ from secretaria.schemas.conversation import (
     MessageSendForm,
     MessagesReadMark,
     MessagesReadResult,
+    TypingBeat,
+    TypingRead,
     attachment_read_or_none,
     interactive_read_or_none,
 )
 from secretaria.services import media_storage, message_status
+from secretaria.services.agenda_visibility import AgendaViewer
 from secretaria.services.channel_sender import (
     CHANNEL_BRAIN_MESSAGE,
     RECORDED_MESSAGE_ID,
@@ -82,8 +94,11 @@ from secretaria.services.channel_sender import (
     sender_persists_outbound,
     sender_sends_media,
 )
+from secretaria.services.doctor_patients import is_patient_of
+from secretaria.services.handoff_notification import activate_human_handoff, notify_human_handoff
 from secretaria.services.handover import HandoverManager
 from secretaria.services.tenant_config import get_waba_token
+from secretaria.services.typing_indicator import clear_typing, mark_typing, typing_by
 from secretaria.services.whatsapp import TenantWhatsAppCredentialMissing, WhatsAppClient
 
 logger = get_logger(__name__)
@@ -217,9 +232,7 @@ async def _staff_sender(
             conversation_id=conversation.id,
             session=session,
             author=MessageSender.HUMAN,
-            media_key_prefix=media_storage.object_key_prefix(
-                conversation.tenant_id, patient.id
-            ),
+            media_key_prefix=media_storage.object_key_prefix(conversation.tenant_id, patient.id),
         )
         return sender, patient.external_id
 
@@ -227,11 +240,67 @@ async def _staff_sender(
     return WhatsAppClient.for_tenant(tenant, waba_token), patient.wa_id
 
 
+async def _notify_takeover(tenant, conversation, occurrence_id) -> None:
+    """Notify only after a newly committed human transition."""
+    if occurrence_id is not None:
+        try:
+            await notify_human_handoff(
+                tenant=tenant,
+                conversation_id=conversation.id,
+                professional_id=conversation.flow_selected_professional_id,
+                reason="could_not_help",
+                occurrence_id=occurrence_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "human_handoff_notification_undelivered",
+                alarm="human_handoff_notification_undelivered",
+                conversation_id=str(conversation.id),
+                error_type=type(exc).__name__,
+            )
+
+
+# Same code and sentence as GET /calendar/events?mine=true (api/hub/calendar.py).
+_NO_OWN_AGENDA = {
+    "code": "no_own_agenda",
+    "message": "Seu usuário não está ligado a um profissional da clínica.",
+}
+
+
 @router.get("", response_model=list[ConversationRead])
 async def list_conversations(
+    request: Request,
+    mine: bool = Query(
+        default=False,
+        description=(
+            '"Meus pacientes": only conversations whose patient has or had an appointment '
+            "with the viewer's own professional (any status but cancelled). A filter, never "
+            "a permission: without it every viewer gets the whole clinic."
+        ),
+    ),
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_session),
 ) -> list[ConversationRead]:
+    # Spec 2026-10-09 §5.D (owner, replacing the earlier role table): everyone at the
+    # clinic sees every conversation. The viewer is read ONLY to answer `mine`; it never
+    # narrows the default list, not even for a doctor restricted to his own agenda.
+    own = None
+    if mine:
+        # Resolved only here, so the default list keeps its pre-R8 auth path (no second
+        # token check, no new 401). Honours a test override of get_agenda_viewer.
+        override = request.app.dependency_overrides.get(get_agenda_viewer)
+        if override is not None:
+            resolved = override()
+            viewer: AgendaViewer = await resolved if inspect.isawaitable(resolved) else resolved
+        else:
+            viewer = await get_agenda_viewer(
+                authorization=request.headers.get("authorization"),
+                tenant=tenant,
+                session=session,
+            )
+        own = viewer.professional_id
+        if own is None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, _NO_OWN_AGENDA)
     # One query: join Conversation -> Patient, LEFT OUTER join a grouped
     # subquery for the most recent message per conversation (regardless of
     # who sent it). No pagination — deliberately minimal for the dashboard.
@@ -249,6 +318,8 @@ async def list_conversations(
         # stays portable across the sqlite test DB and the real Postgres DB.
         .order_by(last_msg_sub.c.last_message_at.desc().nulls_last())
     )
+    if own is not None:
+        stmt = stmt.where(is_patient_of(own))
     rows = (await session.execute(stmt)).all()
     return [
         _read_model(conversation, patient, last_message_at)
@@ -268,12 +339,16 @@ async def update_handover(
     conversation = await _get_conversation(session, tenant, conversation_id)
 
     manager = HandoverManager(session)
+    occurrence_id = None
     if body.state == HandoverState.HUMAN_ACTIVE:
-        await manager.set_human_active(conversation)
+        occurrence_id = await activate_human_handoff(
+            session, conversation, manager=HandoverManager(session)
+        )
     else:
         await manager.set_bot_active(conversation)
     await session.commit()
     await session.refresh(conversation)
+    await _notify_takeover(tenant, conversation, occurrence_id)
 
     patient = await session.get(Patient, conversation.patient_id)
     last_message_at = await _last_message_at(session, conversation.id)
@@ -302,6 +377,43 @@ async def list_messages(
         )
     ).all()
     return [_message_read_model(message) for message in rows]
+
+
+@router.get("/{conversation_id}/typing", response_model=TypingRead)
+async def get_typing(
+    conversation_id: str,
+    request: Request,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> TypingRead:
+    """A cheap poll beside the transcript (which is a bare list, with no room for a flag)."""
+    conversation = await _get_conversation(session, tenant, conversation_id)
+    patient = await session.get(Patient, conversation.patient_id)
+    if patient is None or patient.channel != CHANNEL_BRAIN_MESSAGE:
+        return TypingRead(typing=False, by=None)
+    pool = getattr(request.app.state, "arq_pool", None)
+    by = await typing_by(pool, conversation.id, viewer="staff")
+    return TypingRead(typing=by is not None, by=by)
+
+
+@router.post("/{conversation_id}/typing", response_model=TypingBeat)
+async def staff_typing(
+    conversation_id: str,
+    request: Request,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> TypingBeat:
+    """A heartbeat while a person types in the console: the Portal patient sees "digitando".
+
+    Only a Brain-Message patient has a screen to show it on; a WhatsApp conversation answers
+    `applied: false` and nothing is written.
+    """
+    conversation = await _get_conversation(session, tenant, conversation_id)
+    patient = await session.get(Patient, conversation.patient_id)
+    if patient is None or patient.channel != CHANNEL_BRAIN_MESSAGE:
+        return TypingBeat(applied=False)
+    await mark_typing(getattr(request.app.state, "arq_pool", None), conversation.id, "staff")
+    return TypingBeat(applied=True)
 
 
 @router.post("/{conversation_id}/messages/read", response_model=MessagesReadResult)
@@ -419,8 +531,12 @@ async def send_message(
         session.add(message)
     # A human send always takes the conversation over, whichever channel carried
     # it and whether it came from the WhatsApp app or from here.
-    await HandoverManager(session).set_human_active(conversation)
+    occurrence_id = await activate_human_handoff(
+        session, conversation, manager=HandoverManager(session)
+    )
     await session.commit()
+    await clear_typing(getattr(request.app.state, "arq_pool", None), conversation.id, "staff")
+    await _notify_takeover(tenant, conversation, occurrence_id)
     await session.refresh(message)
 
     logger.info(
@@ -457,9 +573,7 @@ async def _send_attachment(
             checked = await checked_upload(upload)
             sender, to = await _staff_sender(session, tenant, conversation, patient)
             if not sender_sends_media(sender):  # Brain-Message only, checked above
-                raise attachments.AttachmentRefused(
-                    attachments.ATTACHMENT_UNSUPPORTED_FOR_CHANNEL
-                )
+                raise attachments.AttachmentRefused(attachments.ATTACHMENT_UNSUPPORTED_FOR_CHANNEL)
             send_response = await sender.send_media(
                 to, file=upload.file, attachment=checked, caption=fields.body
             )
@@ -476,7 +590,9 @@ async def _send_attachment(
     stored_key = message.attachment["r2_object_key"]
     try:
         # A human send always takes the conversation over - a file as much as a text.
-        await HandoverManager(session).set_human_active(conversation)
+        occurrence_id = await activate_human_handoff(
+            session, conversation, manager=HandoverManager(session)
+        )
         await session.commit()
     except Exception:
         # The row rolls back with the session; the bytes would stay behind with nothing
@@ -486,6 +602,8 @@ async def _send_attachment(
         # 404 - rarer, and louder, than a silent orphan.
         await media_storage.delete_object(stored_key)
         raise
+    await clear_typing(getattr(request.app.state, "arq_pool", None), conversation.id, "staff")
+    await _notify_takeover(tenant, conversation, occurrence_id)
     await session.refresh(message)
     logger.info(
         "hub_conversation_message_sent",

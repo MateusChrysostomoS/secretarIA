@@ -55,7 +55,12 @@ _TENANT_LEVEL_CALENDAR_TOOLS = {
     "create_event",
     "cancel_event",
 }
-_SCOPE_FREE_TOOLS = {"iniciar_pre_consulta", "list_patient_appointments", "show_main_menu"}
+_SCOPE_FREE_TOOLS = {
+    "get_service_info",
+    "iniciar_pre_consulta",
+    "list_patient_appointments",
+    "show_main_menu",
+}
 
 _ALL_ADDONS_OFF = {
     "reactivation_pack": False,

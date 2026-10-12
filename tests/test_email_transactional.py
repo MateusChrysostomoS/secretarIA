@@ -5,8 +5,9 @@ Follows the exact monkeypatch style test_tasks_helpers.py already uses for
 the legacy calendar-alert path: patch `secretaria.services.email.get_settings`
 and `asyncio.to_thread` so no real network/SMTP call is ever made.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -279,7 +280,7 @@ async def test_arq_task_delegates_to_service_with_correct_argument_order(
         calls.append((to, template, variables))
         return True
 
-    monkeypatch.setattr(tasks, "send_transactional_email_message", _fake)
+    monkeypatch.setattr(workers_ns, "send_transactional_email_message", _fake)
 
     await tasks.send_transactional_email(
         {}, "connection_success", "doctor@example.com", {"clinic_name": "Clínica"}
@@ -292,7 +293,7 @@ async def test_arq_task_never_raises_when_service_returns_false(monkeypatch: pyt
     async def _fake(*, to, template, variables):
         return False
 
-    monkeypatch.setattr(tasks, "send_transactional_email_message", _fake)
+    monkeypatch.setattr(workers_ns, "send_transactional_email_message", _fake)
     # Must not raise.
     await tasks.send_transactional_email({}, "connection_success", "doctor@example.com", {})
 

@@ -22,6 +22,7 @@ from secretaria.services.payments import booking_charge, deposit_gate, deposit_l
 from secretaria.services.payments.provider import ChargeState, PaymentStatus
 from secretaria.services.pending_identity import RequestCodeOutcome, RequestCodeResult
 from secretaria.workers import tasks
+from tests._patching import workers_ns
 from tests.before_support import entitlement_summary, make_world, new_charge
 from tests.payments_support import FakeProvider, FakeRedis, make_sessionmaker
 
@@ -32,7 +33,7 @@ SLOT_ISO = "2030-03-04T10:00"
 @pytest_asyncio.fixture
 async def db(monkeypatch):
     engine, maker = await make_sessionmaker()
-    for module in (tasks, holds, booking_charge):
+    for module in (workers_ns, holds, booking_charge):
         monkeypatch.setattr(module, "async_session_factory", maker)
     yield maker
     await engine.dispose()
@@ -179,7 +180,7 @@ async def test_the_persistence_seam_parks_the_conversation_and_sends_the_pix_in_
     async with db() as session:
         world = await make_world(session)
     sender = Sender()
-    monkeypatch.setattr(tasks, "_reply_sender", lambda reply, tenant, token: sender)
+    monkeypatch.setattr(workers_ns, "_reply_sender", lambda reply, tenant, token: sender)
     result = await _confirm(world, env)
 
     handled = await tasks._apply_flow_result(
@@ -233,7 +234,7 @@ async def test_a_pix_that_cannot_be_delivered_voids_the_charge_frees_the_slot_an
     async with db() as session:
         world = await make_world(session, contact_email="clinic@example.com")
     sender = Sender(fail_on=1)  # every send fails
-    monkeypatch.setattr(tasks, "_reply_sender", lambda reply, tenant, token: sender)
+    monkeypatch.setattr(workers_ns, "_reply_sender", lambda reply, tenant, token: sender)
     result = await _confirm(world, env)
 
     await tasks._apply_flow_result(
@@ -271,7 +272,7 @@ async def test_one_failed_send_is_retried_once_and_the_rest_still_goes_out(db, e
         return await original(to, body)
 
     sender.send_text_message = flaky
-    monkeypatch.setattr(tasks, "_reply_sender", lambda reply, tenant, token: sender)
+    monkeypatch.setattr(workers_ns, "_reply_sender", lambda reply, tenant, token: sender)
     result = await _confirm(world, env)
     await tasks._apply_flow_result(
         _reply(world), result, world.patient.wa_id, tenant=world.tenant, waba_token="wt"
@@ -327,10 +328,23 @@ async def test_the_day_picker_treats_held_windows_as_busy_time(db, env):
         end_at=start + timedelta(minutes=30),
     )
 
+    held_local = start.astimezone(TZ)
+    held_day = held_local.replace(hour=0, minute=0, second=0, microsecond=0)
+
     class Recording(Calendar):
+        # Google says the held day is free, and its ONLY free slot is the held one.
         async def list_available_days(self, start_day, days, slot_minutes=None, **kwargs):
             self.day_kwargs.append(kwargs)
-            return []
+            return [held_day]
+
+        async def list_free_slots(self, day, slot_minutes=None, max_slots=None, **kwargs):
+            return [
+                {
+                    "start": held_local.isoformat(),
+                    "end": (held_local + timedelta(minutes=30)).isoformat(),
+                    "label": held_local.strftime("%H:%M"),
+                }
+            ]
 
     calendar = Recording()
     gate = holds.BookingGate(
@@ -342,10 +356,12 @@ async def test_the_day_picker_treats_held_windows_as_busy_time(db, env):
     )
     token = fr._ACTIVE_GATE.set(gate)
     try:
-        await fr.enter_day_picker(
+        result = await fr.enter_day_picker(
             _snapshot(world.conversation), world.tenant, calendar, duration_minutes=30
         )
     finally:
         fr._ACTIVE_GATE.reset(token)
-    (kwargs,) = calendar.day_kwargs
-    assert [(s, e) for s, e in kwargs["extra_busy"]] == [(start, start + timedelta(minutes=30))]
+    # Ported onto main's availability module (TASK-050): the fully held day is not offered.
+    assert len(calendar.day_kwargs) == 1
+    assert result.flow_state == FlowState.MENU
+    assert result.bubbles[0].body == fr.NO_AVAILABLE_DAYS_MESSAGE

@@ -7,8 +7,9 @@ conversation/patient/appointment resolution. `async_session_factory` is
 imported lazily inside the tool (same seam as `_resolve_patient_phone`), so
 the SOURCE module attribute (`core.database`) is what must be patched.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -46,7 +47,6 @@ from secretaria.models import (  # noqa: E402
     Tenant,
 )
 from secretaria.services.tenant_config import TenantRuntimeConfig  # noqa: E402
-from secretaria.workers import tasks  # noqa: E402
 
 SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 
@@ -72,7 +72,7 @@ def _patch_session_factory(monkeypatch: pytest.MonkeyPatch, db):
     # identical note). workers.tasks is patched too for parity with the rest
     # of the suite, even though this file never exercises it directly.
     monkeypatch.setattr(core_database, "async_session_factory", db)
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     yield
 
 

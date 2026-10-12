@@ -12,8 +12,9 @@ quoted inside it.
 Fixture shape mirrors test_hub_calendar_money.py (fake Calendar, fake arq pool,
 in-memory SQLite) so no Google or Redis call is ever attempted.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -497,13 +498,13 @@ class _FakeWhatsApp:
 def wa(db, monkeypatch: pytest.MonkeyPatch) -> _FakeWhatsApp:
     client = _FakeWhatsApp()
     _FakeWhatsApp.current = client
-    monkeypatch.setattr(tasks, "WhatsAppClient", _FakeWhatsApp)
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "WhatsAppClient", _FakeWhatsApp)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
 
     async def _token(session, tenant_id):
         return "fake-waba-token"
 
-    monkeypatch.setattr(tasks, "get_waba_token", _token)
+    monkeypatch.setattr(workers_ns, "get_waba_token", _token)
     return client
 
 
@@ -515,7 +516,7 @@ def metered(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
         recorded.append({"feature": feature, "event_id": event_id, "amount": amount})
         return True
 
-    monkeypatch.setattr(tasks, "emit_usage_event", _emit)
+    monkeypatch.setattr(workers_ns, "emit_usage_event", _emit)
     return recorded
 
 
@@ -692,7 +693,7 @@ async def test_metering_can_never_trigger_a_second_billed_send(db, tenant, wa, m
     async def _boom(**kwargs):
         raise RuntimeError("meter down")
 
-    monkeypatch.setattr(tasks, "emit_usage_event", _boom)
+    monkeypatch.setattr(workers_ns, "emit_usage_event", _boom)
 
     await _run(appt, allow_paid=True)  # must not raise Retry
 
@@ -716,7 +717,7 @@ async def test_the_retry_gives_up_and_tells_the_clinic(db, tenant, wa, metered, 
     async def _alert(to_email, clinic_name, whatsapp_link):
         alerts.append({"to": to_email, "clinic": clinic_name, "link": whatsapp_link})
 
-    monkeypatch.setattr(tasks, "send_cancellation_escalation_alert", _alert)
+    monkeypatch.setattr(workers_ns, "send_cancellation_escalation_alert", _alert)
 
     wa.explode = True
     # Last permitted attempt: no budget left, so it must NOT raise.

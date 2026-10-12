@@ -37,7 +37,6 @@ from secretaria.services.flow_router import (  # noqa: E402
     LABEL_MANAGE_APPOINTMENT,
     LABEL_RESCHEDULE,
     PROFESSIONAL_HELP_OPENER,
-    SCOPED_HELP_ESCALATE_MESSAGE,
     STEP_AWAITING_ATTENDEE_CHOICE,
     STEP_AWAITING_CONFIRMATION,
     STEP_AWAITING_DAY,
@@ -205,7 +204,8 @@ async def test_multi_menu_replaces_buttons():
     assert res.action == "reply"
     assert res.flow_state == FlowState.MENU
     assert isinstance(res.bubbles[0], MenuBubble)
-    assert res.bubbles[0].labels == [BTN_CHOOSE_PROFESSIONAL, BTN_CHOOSE_SERVICE, "Outro"]
+    # TASK-035: drawn as [Agendar, Outro]; the trio stays reachable by typing.
+    assert res.bubbles[0].labels == ["🗓️ Agendar", "Outro"]
     # Labels must survive WhatsApp's 20-char button-title cap untruncated.
     assert all(len(label) <= 20 for label in res.bubbles[0].labels)
 
@@ -213,7 +213,7 @@ async def test_multi_menu_replaces_buttons():
 async def test_single_professional_keeps_configured_menu():
     profs = _professionals()[:1]
     res = await route(_conversation(), _tenant(), None, "oi", professionals=profs)
-    assert res.bubbles[0].labels == ["Serviços e Custo", "Horários", "Outro"]
+    assert res.bubbles[0].labels == ["🗓️ Agendar", "Outro"]
 
 
 def test_menu_buttons_for_helper():
@@ -237,7 +237,7 @@ async def test_multi_menu_freetext_delegates_llm():
     assert res.flow_state == FlowState.LLM
 
 
-async def test_multi_menu_outro_delegates_llm():
+async def test_multi_menu_outro_asks_fixed_opener():
     res = await route(
         _conversation(flow_state=FlowState.MENU),
         _tenant(),
@@ -245,7 +245,8 @@ async def test_multi_menu_outro_delegates_llm():
         "Outro",
         professionals=_professionals(),
     )
-    assert res.action == "delegate_llm"
+    assert res.action == "reply"
+    assert [b.body for b in res.bubbles] == [flow_router.OTHER_OPENER]
     assert res.flow_state == FlowState.LLM
 
 
@@ -745,7 +746,7 @@ async def test_retry_menu_shows_multi_menu():
     )
     res = await route(conv, _tenant(), _FakeCalendar(), "Menu principal", professionals=profs)
     assert res.flow_state == FlowState.MENU
-    assert res.bubbles[0].labels == [BTN_CHOOSE_PROFESSIONAL, BTN_CHOOSE_SERVICE, "Outro"]
+    assert res.bubbles[0].labels == ["🗓️ Agendar", "Outro"]
 
 
 # --------------------------------------------------------------------------
@@ -907,21 +908,20 @@ async def test_professional_help_pick_hands_back_to_doctor_greeting_and_services
     assert captured["final_round"] is False
 
 
-async def test_professional_help_pick_outside_roster_escalates(monkeypatch):
+async def test_professional_help_pick_outside_roster_delegates(monkeypatch):
     async def _fake_help(**kwargs):
         return ScopedHelpOutcome(kind="pick", choice="Dr. Inventado")
 
     monkeypatch.setattr(flow_router, "run_professional_help", _fake_help)
     conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_PROFESSIONAL_HELP)
     res = await route(conv, _tenant(), None, "sei lá", professionals=_professionals())
-    assert res.action == "handover"
-    assert res.flow_state == FlowState.IDLE
-    assert res.bubbles[0].body == SCOPED_HELP_ESCALATE_MESSAGE
+    assert res.action == "delegate_llm"
+    assert res.flow_state == FlowState.LLM
 
 
-async def test_professional_help_clarify_then_final_then_escalates(monkeypatch):
+async def test_professional_help_clarify_then_final_then_delegates(monkeypatch):
     """Round 1 clarify goes out and arms the FINAL step; a clarify on the
-    final step escalates - the bound is the router's, not the model's."""
+    final step delegates to the LLM - the bound is the router's, not the model's."""
     outcomes = iter(
         [
             ScopedHelpOutcome(kind="clarify", question="É dor no peito ou nas costas?"),
@@ -947,8 +947,8 @@ async def test_professional_help_clarify_then_final_then_escalates(monkeypatch):
         flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_PROFESSIONAL_HELP_FINAL
     )
     res2 = await route(conv2, _tenant(), None, "não sei dizer", professionals=profs)
-    assert res2.action == "handover"
-    assert res2.bubbles[0].body == SCOPED_HELP_ESCALATE_MESSAGE
+    assert res2.action == "delegate_llm"
+    assert res2.flow_state == FlowState.LLM
     assert seen_final_rounds == [False, True]
 
 
@@ -987,3 +987,44 @@ async def test_service_help_scoped_to_selected_professional(monkeypatch):
     assert res.flow_selected_type == "Consulta Cardio"
     # The professional selection survives the hand-back.
     assert res.flow_selected_professional_id == profs[0].id
+
+
+
+async def _agendar_tap(count):
+    profs = _professionals()[:count]
+    return await route(
+        _conversation(flow_state=FlowState.MENU), _tenant(), None, "🗓️ Agendar", professionals=profs
+    )
+
+
+async def test_main_menu_agendar_tap_opens_pra_quem_on_single_doctor():
+    """TASK-035: the drawn "🗓️ Agendar" starts the usual flow ("Essa consulta é pra você?")."""
+    from secretaria.services.attendee import ATTENDEE_QUESTION_BODY
+
+    res = await _agendar_tap(1)
+    assert res.action == "reply"
+    assert res.bubbles[0].body == ATTENDEE_QUESTION_BODY
+
+
+async def test_main_menu_agendar_tap_opens_pra_quem_on_multi_doctor():
+    """Matched before the multi-doctor trio dispatch, so it works there too."""
+    from secretaria.services.attendee import ATTENDEE_QUESTION_BODY
+
+    res = await _agendar_tap(2)
+    assert res.action == "reply"
+    assert res.bubbles[0].body == ATTENDEE_QUESTION_BODY
+
+
+async def test_old_trio_label_still_routes_when_typed():
+    """No longer drawn, but a typed (or older on-screen) "Escolher médico" still books."""
+    from secretaria.services.attendee import ATTENDEE_QUESTION_BODY
+
+    res = await route(
+        _conversation(flow_state=FlowState.MENU),
+        _tenant(),
+        None,
+        BTN_CHOOSE_PROFESSIONAL,
+        professionals=_professionals(),
+    )
+    assert res.action == "reply"
+    assert res.bubbles[0].body == ATTENDEE_QUESTION_BODY

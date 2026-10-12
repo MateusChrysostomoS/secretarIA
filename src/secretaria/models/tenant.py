@@ -228,6 +228,10 @@ class Tenant(Base):
     # Accepted health-insurance plan names, e.g. ["Unimed", "Amil"]. NULL/empty
     # = the clinic does not take insurance, or hasn't configured the list yet.
     insurances: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Bounded facts the LLM may quote (parking, how to arrive, payment methods, cancellation
+    # policy, documents, FAQ). Shape: schemas/clinic_facts.py::ClinicFacts. NULL = never
+    # filled in. The ADDRESS is not duplicated here: it stays in `address`. (TASK-025)
+    clinic_facts: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # Whether the bot should ask patients for their insurance during booking.
     collect_insurance: Mapped[bool] = mapped_column(
         Boolean, server_default=text("false"), default=False
@@ -246,4 +250,30 @@ class Tenant(Base):
     # services/tenant_config.py::insurance_mode_configured.
     insurance_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
+    # TASK-032 (spec 4.5): master switch of the reminder schedule / confirmation
+    # state. Default OFF for every clinic; turn it on per clinic after the test
+    # clinic proves it. While False nothing is scheduled and nothing is sent by
+    # the new engine.
+    reminders_v2_enabled: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false"), default=False
+    )
+    # TASK-032 (spec 4.5): lead time, in minutes before the appointment, of the
+    # clinic-configured ("custom") reminder. NULL = the clinic has no extra one.
+    reminder_extra_lead_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # TASK-048 R9 (spec 2026-10-09 §6.2): the extra reminder as "N days before, at HH:MM"
+    # in `timezone` (core/extra_reminder.py). Both NULL = no extra reminder. The column
+    # above (`reminder_extra_lead_minutes`) is the LEGACY form: R9 no longer reads it and
+    # mirrors days x 1440 into it on every save, so a code rollback plans the same day.
+    # Drop it in a later migration once API and worker both run R9 ("narrow after").
+    reminder_extra_days_before: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reminder_extra_send_time: Mapped[str | None] = mapped_column(String(5), nullable=True)
+
+    # TASK-032 R7 (spec 2026-10-09 §2): the clinic's standing yes ("não perguntar
+    # novamente") to BILLED WhatsApp notices outside Meta's 24 h window. With it, every
+    # clinic action that notifies the patient sends the paid template without asking;
+    # without it, each action asks (`notify_outside_window`). Editable in the hub
+    # configuration (schemas/config.py).
+    paid_notices_auto_approved: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false"), default=False
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

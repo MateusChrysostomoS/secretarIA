@@ -17,8 +17,9 @@ StaticPool monkeypatched over `workers.tasks.async_session_factory`, then the
 actual call site is invoked. A model-only test would pass straight through a
 broken call site.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -76,13 +77,13 @@ async def db():
 
 @pytest.fixture(autouse=True)
 def _wire_db(monkeypatch: pytest.MonkeyPatch, db):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
-    monkeypatch.setattr(tasks, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
 
     async def _fake_resolve(session, tenant_id, patient_id, **kwargs):
         return None
 
-    monkeypatch.setattr(tasks, "resolve_patient_opening_state", _fake_resolve)
+    monkeypatch.setattr(workers_ns, "resolve_patient_opening_state", _fake_resolve)
     yield
 
 

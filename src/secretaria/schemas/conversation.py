@@ -138,7 +138,7 @@ class MessageRead(BaseModel):
 
 
 class MessagesReadMark(BaseModel):
-    """"I have seen this conversation up to here" - exactly ONE of the two cursors.
+    """ "I have seen this conversation up to here" - exactly ONE of the two cursors.
 
     `up_to_message_id`: the last message the reader saw (resolved to its `created_at`
     inside the same conversation). `up_to`: an instant, which must carry its offset -
@@ -184,3 +184,14 @@ class MessageSendForm(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     body: str | None = Field(default=None, min_length=1)
+
+
+class TypingRead(BaseModel):
+    """Who the clinic's console should see typing right now."""
+
+    typing: bool
+    by: Literal["automation", "patient"] | None = None
+
+
+class TypingBeat(BaseModel):
+    applied: bool

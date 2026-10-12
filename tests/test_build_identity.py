@@ -360,12 +360,15 @@ def test_worker_registry_is_complete() -> None:
         "process_webhook_event",
         "process_brain_message_inbound",
         "process_brain_message_open",
+        "process_brain_message_enter",
+        "merge_brain_message_visit",
         "process_message_statuses",
         "send_cancellation_notice",
         "send_patient_notification",
         "transcribe_audio_message",
         "run_post_booking_hooks",
         "retry_professional_notification",
+        "send_professional_edit_notification",
         "send_transactional_email",
         "process_asaas_event",
         "process_payment_event",
@@ -375,6 +378,10 @@ def test_worker_registry_is_complete() -> None:
     assert arq_worker.registered_cron_names() == [
         "cron:check_handover_timeouts",
         "cron:send_appointment_reminders",
+        "cron:process_appointment_reminders",
+        "cron:dispatch_pending_professional_edits",
+        "cron:reconcile_appointment_reminders",
+        "cron:process_confirmation_warnings",
         "cron:run_onboarding_nudges",
         "cron:run_patient_usage_metering",
         "cron:check_deploy_parity_cron",
@@ -399,8 +406,8 @@ async def test_worker_startup_logs_identity_and_registry(
         event, fields = recorder.records[0]
         assert event == "worker_started"
         assert {"build_sha", "built_at", "alembic_head", "source_fingerprint"} <= set(fields)
-        assert len(fields["functions"]) == 14
-        assert len(fields["cron_jobs"]) == 10
+        assert len(fields["functions"]) == 17
+        assert len(fields["cron_jobs"]) == 14
 
         rendered = json.dumps(fields, default=str)
         for secret in configured_secrets():

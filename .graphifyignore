@@ -1,0 +1,2 @@
+# Exclude local superpowers session copies and temporary scripts from the code graph.
+.superpowers/

@@ -38,6 +38,27 @@ rule-6 treatment the patient's own name gets.
 The copy never echoes PART of the name: the authorization sentence interpolates
 the whole stored value, which is exactly what the identifier masks.
 
+## Three states in one nullable column
+
+`Conversation.flow_attendee_name` is a tri-state, because "é pra mim" must be
+REMEMBERED: the LLM hand-back (`workers/tasks.py::_handle_booking_draft`) re-enters
+the booking from free chat, and a patient who already answered pra-quem would be
+asked "Essa consulta é pra você?" again (found 2026-10-01: "Sim, é pra mim" ->
+convênio -> "Não sei" -> scoped help -> LLM -> the question came back).
+
+    None          not asked yet (or the booking ended / the state expired)
+    ATTENDEE_SELF answered "Sim, é pra mim" ("" - falsy on purpose)
+    "Maria Silva" answered "outra pessoa" and confirmed the authorization
+
+`ATTENDEE_SELF` is the empty string so that every existing `if attendee_name:`
+guard (event title, "Paciente:" line, appointment dict, PII masking) keeps
+treating it as "the patient themself"; only the places that ask "was pra-quem
+answered?" read `is not None`. Rows that PERSIST a name (BookingHold,
+Appointment) must go through `real_attendee_name` so "" never reaches them.
+No migration: the column already exists and is already carried by every flow
+result (`_carry_attendee`, `_preserve`, `_delegate_llm_keeping_draft`, the
+hand-backs), which is exactly why a marker here survives the LLM detour.
+
 ## Scope (MVP)
 
 Only the NAME of the attendee. No phone, CPF or birth date: no screen has a
@@ -90,6 +111,14 @@ CONSENT_LEGAL_BASIS_THIRD_PARTY_BOOKING = (
 
 # What the LLM reads in place of any answer to the attendee-name question.
 ATTENDEE_NAME_LLM_PLACEHOLDER = "[resposta à pergunta do nome do atendido — omitida]"
+
+
+ATTENDEE_SELF = ""
+
+
+def real_attendee_name(value: str | None) -> str | None:
+    """The third party's name, or None for "pra mim" / not asked (never "")."""
+    return value or None
 
 
 def authorization_body(name: str) -> str:

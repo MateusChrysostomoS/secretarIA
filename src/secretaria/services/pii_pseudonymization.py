@@ -90,6 +90,7 @@ async def load_pseudonymizer(conversation_id: UUID) -> Pseudonymizer:
     tokens: dict[str, str] = {}
     patient_name: str | None = None
     patient_phone: str | None = None
+    patient_email: str | None = None
     attendee_names: list[str] = []
     try:
         async with async_session_factory() as session:
@@ -102,6 +103,7 @@ async def load_pseudonymizer(conversation_id: UUID) -> Pseudonymizer:
                 if patient is not None:
                     patient_name = patient.name
                     patient_phone = patient.wa_id
+                    patient_email = patient.email
             attendee_names = await _attendee_names(session, conversation)
     except Exception as exc:
         # Degrade to a fresh map rather than dropping the turn - see the
@@ -128,6 +130,9 @@ async def load_pseudonymizer(conversation_id: UUID) -> Pseudonymizer:
     # catch most spellings of it anyway; registering it pins ONE token to the
     # canonical form the DB holds instead of minting a new one per spelling.
     p.add_identifier("TELEFONE", patient_phone)
+    # Pin the canonical booking contact across spellings and turns; free-text
+    # addresses still have the shared pattern rule as a safety net.
+    p.add_identifier("EMAIL", patient_email)
     # The name of a third party the patient booked for ("Essa consulta é pra
     # você?" -> "Pra outra pessoa", services/attendee.py). It lives in three
     # columns none of which is Patient.name, so it is registered here, next to
@@ -166,10 +171,22 @@ async def _attendee_names(session, conversation: Conversation | None) -> list[st
     if conversation is None:
         return []
     names = {conversation.flow_attendee_name}
+    edit = getattr(conversation, "flow_edit_draft", None)
+    if isinstance(edit, dict):
+        for key in ("current", "original"):
+            part = edit.get(key)
+            if isinstance(part, dict) and isinstance(part.get("attendee_name"), str):
+                names.add(part["attendee_name"])
     for model in (Appointment, BookingHold):
+        scope = model.conversation_id == conversation.id
+        if model is Appointment and conversation.patient_id is not None:
+            # A staff-origin booking may never have named a conversation. Its
+            # attendee still appears in this patient's opening/reminder history.
+            scope = model.patient_id == conversation.patient_id
         rows = await session.scalars(
             select(model.attendee_name).where(
-                model.conversation_id == conversation.id,
+                model.tenant_id == conversation.tenant_id,
+                scope,
                 model.attendee_name.is_not(None),
             )
         )

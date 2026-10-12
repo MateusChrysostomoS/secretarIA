@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from secretaria.api import (
     health,
     internal,
+    internal_patient_cleanup,
     internal_privacy,
     internal_provisioning,
     webhook,
@@ -26,6 +27,7 @@ from secretaria.api.hub import (
     analytics,
     calendar,
     config,
+    context_completeness,
     conversations,
     insurance,
     oauth,
@@ -34,6 +36,7 @@ from secretaria.api.hub import (
     payment_settings,
     professionals,
     services,
+    simulation,
     units,
 )
 from secretaria.config import get_settings
@@ -114,6 +117,7 @@ def create_app() -> FastAPI:
     app.include_router(internal.router)
     # LGPD privacy endpoints (export/erase), same X-Internal-Api-Key gate.
     app.include_router(internal_privacy.router)
+    app.include_router(internal_patient_cleanup.router)
     # Onboarding/provisioning endpoints (contract v1 §4), same X-Internal-Api-Key gate.
     app.include_router(internal_provisioning.router)
     app.include_router(panel.router, tags=["admin"])
@@ -123,6 +127,8 @@ def create_app() -> FastAPI:
     app.include_router(admin_insurance.router, tags=["admin"])
     # Doctor hub: tenant config + Google Calendar OAuth onboarding + calendar actions.
     app.include_router(config.router)
+    app.include_router(simulation.router)
+    app.include_router(context_completeness.router)
     app.include_router(oauth.router)
     app.include_router(calendar.router)
     # The clinic's canonical service catalog — the ONE place a service's name

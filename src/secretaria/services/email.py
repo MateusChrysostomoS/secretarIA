@@ -254,6 +254,82 @@ async def send_cancellation_escalation_alert(
         )
 
 
+_WARNING_SUBJECT = {
+    "unconfirmed": "[SecretarIA] Consulta sem confirmação — {clinic_name}",
+    "delivery_failed": "[SecretarIA] Lembrete não entregue — {clinic_name}",
+}
+
+
+async def send_confirmation_warning_alert(
+    to_email: str,
+    *,
+    clinic_name: str,
+    warn_kind: str,
+    patient_label: str,
+    professional_name: str,
+    service_name: str,
+    when_text: str,
+    reminder_label: str,
+    agenda_link: str | None,
+) -> bool:
+    """Email the clinic that a reminded patient has not confirmed (TASK-032 R4).
+
+    Two variants, chosen by `warn_kind` (the constants of
+    models/appointment_reminder.py): `unconfirmed` - the reminder went out and
+    nobody answered by the deadline; `delivery_failed` - the reminder itself
+    could not be delivered, so the patient may not even know. Both tell the
+    clinic what it can do in the agenda: write to the patient, mark the
+    appointment confirmed, or free the slot.
+
+    No clinical detail on purpose (no requirements, insurance or anamnese):
+    name, doctor, service, date/time, which reminder, a link. The name and the
+    link are PII and go in the BODY only, never into a log line - the same rule
+    `send_cancellation_escalation_alert` follows for its `wa.me` link.
+
+    Returns True only when the message was handed to SMTP, so the caller can log
+    an alarm without a second attempt; False when `SMTP_HOST` is empty or the
+    send raised. NEVER raises: like the alerts above, it is the end of the line.
+    """
+    settings = get_settings()
+    if not settings.SMTP_HOST:
+        return False
+
+    subject = _WARNING_SUBJECT.get(warn_kind, _WARNING_SUBJECT["unconfirmed"]).format(
+        clinic_name=clinic_name
+    )
+    if warn_kind == "delivery_failed":
+        headline = (
+            f"Não foi possível entregar o {reminder_label} da consulta de {patient_label} "
+            f"com {professional_name} ({service_name}) marcada para {when_text}. "
+            f"O paciente pode nem ter visto o aviso."
+        )
+    else:
+        headline = (
+            f"{patient_label} ainda não confirmou a consulta com {professional_name} "
+            f"({service_name}) marcada para {when_text}.\n\n"
+            f"O {reminder_label} já foi enviado e não houve resposta."
+        )
+    link_block = f"Abrir na agenda:\n{agenda_link}\n\n" if agenda_link else ""
+    body = (
+        f"Olá,\n\n"
+        f"{headline}\n\n"
+        f"{link_block}"
+        f"Na agenda você pode enviar uma mensagem ao paciente, marcar a consulta como "
+        f"confirmada ou liberar o horário.\n\n"
+        f"— Equipe SecretarIA"
+    )
+
+    try:
+        await asyncio.to_thread(_send_sync, to_email, subject, body)
+    except Exception as exc:
+        logger.warning(
+            "confirmation_warning_email_failed", error_type=type(exc).__name__, clinic=clinic_name
+        )
+        return False
+    logger.info("confirmation_warning_email_sent", clinic=clinic_name, warn_kind=warn_kind)
+    return True
+
+
 # WHAT each gap code means, in the doctor's own words. Two fixed strings, not a
 # message assembled at the call site, so the email cannot drift from the two
 # values `FlowRouterResult.professional_config_gap` is allowed to carry.
@@ -391,6 +467,86 @@ class _SafeDict(dict):
 # lasts), `blocker_reason` (nudge templates only), `days` and `restart_url`
 # (test_window_expired only), `code` (patient_access_otp only).
 _TEMPLATES: dict[str, EmailTemplate] = {
+    # Confirmed R6 edits: static copy, populated from committed data only; no LLM.
+    "appointment_changed_professional": EmailTemplate(
+        subject="Consulta alterada — {when}",
+        body=(
+            "Olá, {professional_name}!\n\n"
+            "A consulta de {attendee_name} mudou para:\n{changes}\n\n"
+            "Dados atualizados da consulta:\n"
+            "Clínica: {clinic_name}\n"
+            "Médico: {professional_name}\n"
+            "Paciente: {attendee_name}\n"
+            "Agendado por: {patient_name}\n"
+            "Serviço: {service}\n"
+            "Convênio: {insurance}\n"
+            "Data: {date}\n"
+            "Horário: {time}\n"
+            "Término: {end_time}\n"
+            "{unit_line}\n"
+            "{agenda_line}{calendar_line}"
+            "— Equipe SecretarIA"
+        ),
+    ),
+    # Patient-facing confirmation (Portal). Carries what the patient needs to show
+    # up, plus the public add-to-calendar link; `*_line` fields arrive pre-rendered
+    # (empty when there is nothing to say) because EmailTemplate has no branching.
+    "appointment_booked_patient": EmailTemplate(
+        subject="Consulta confirmada — {when}",
+        body=(
+            "Olá!\n\n"
+            "Sua consulta na {clinic_name} está confirmada:\n\n"
+            "Serviço: {service}\n"
+            "Quando: {when}\n"
+            "{insurance_line}"
+            "\n"
+            "{calendar_line}"
+            "Você também recebe um convite do Google Agenda, com lembrete.\n\n"
+            "— {clinic_name}"
+        ),
+    ),
+    # Clinic-side record of a booking, identified without patient PII.
+    "appointment_booked_clinic": EmailTemplate(
+        subject="Nova consulta marcada — {when}",
+        body=(
+            "Olá!\n\n"
+            "Uma consulta foi marcada na {clinic_name}:\n\n"
+            "Agendamento: {appointment_id}\n"
+            "Serviço: {service}\n"
+            "Quando: {when}\n"
+            "{insurance_line}"
+            "\n"
+            "— Equipe SecretarIA"
+        ),
+    ),
+    # TASK-032 R2: a Portal patient's appointment reminder (workers/reminder_engine.py).
+    # `reminder_text` is services/reminder_text.py::build_reminder_body - the very
+    # words the chat shows; `link_line` arrives pre-rendered (the clinic invite
+    # link, or a sentence when BRAIN_MESSAGE_PORTAL_URL is unset). Nothing beyond
+    # what the patient already received when booking.
+    "appointment_reminder_patient": EmailTemplate(
+        subject="Lembrete de consulta — {when}",
+        body=(
+            "Olá!\n\n"
+            "{reminder_text}\n\n"
+            "Para confirmar, cancelar ou falar com a {clinic_name}, abra a sua conversa:\n"
+            "{link_line}\n"
+            "— {clinic_name}"
+        ),
+    ),
+    # TASK-032 R4: a Portal patient got a message typed by the clinic. The text
+    # itself is NEVER put in the e-mail (it may carry clinical content): the mail
+    # only says there is something to read and links to the conversation.
+    "clinic_message_patient": EmailTemplate(
+        subject="Nova mensagem de {clinic_name}",
+        body=(
+            "Olá!\n\n"
+            "Você recebeu uma nova mensagem da {clinic_name}.\n\n"
+            "Para ler e responder, abra a sua conversa:\n"
+            "{link_line}\n\n"
+            "— {clinic_name}"
+        ),
+    ),
     "professional_invite": EmailTemplate(
         subject="Você foi convidado(a) para a equipe da {clinic_name} no SecretarIA",
         body=(
@@ -594,6 +750,23 @@ _TEMPLATES: dict[str, EmailTemplate] = {
             "— Equipe SecretarIA"
         ),
     ),
+    # Operational alert: a conversation was handed to a person. Carries NO
+    # patient content — only the reason the agent gave (an enum rendered as a
+    # sentence). The secretary opens the console to read the chat, same stance
+    # as `appointment_booked_professional`.
+    "human_handoff_alert": EmailTemplate(
+        subject="Conversa aguardando atendimento humano",
+        body=(
+            "Olá!\n\n"
+            "Uma conversa na SecretarIA foi passada para atendimento humano.\n\n"
+            "Cl\u00ednica: {tenant_id}\n"
+            "Conversa: {conversation_id}\n"
+            "Motivo: {reason}\n\n"
+            "Abra o console de atendimento para responder ao paciente.\n\n"
+            "— Equipe SecretarIA"
+        ),
+    ),
+
 }
 
 
@@ -664,13 +837,17 @@ async def send_transactional_email_result(to: str, template: str, variables: dic
         subject = tpl.subject.format_map(safe_vars)
         body = tpl.body.format_map(safe_vars)
     except Exception as exc:
-        logger.warning("transactional_email_render_failed", template=template, error=str(exc))
+        logger.warning(
+            "transactional_email_render_failed", template=template, error_type=type(exc).__name__
+        )
         return EmailOutcome.RENDER_FAILED
 
     try:
         await asyncio.to_thread(_send_transactional_sync, to, subject, body)
     except Exception as exc:
-        logger.warning("transactional_email_send_failed", template=template, error=str(exc))
+        logger.warning(
+            "transactional_email_send_failed", template=template, error_type=type(exc).__name__
+        )
         return EmailOutcome.SEND_FAILED
 
     logger.info("transactional_email_sent", template=template)

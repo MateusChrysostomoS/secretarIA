@@ -27,6 +27,7 @@ cache hit).
 """
 
 from collections.abc import Callable
+from dataclasses import replace
 
 from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy import select
@@ -36,7 +37,8 @@ from secretaria.core.database import get_session
 from secretaria.core.hub_roles import is_clinic_clinician, is_clinic_manager
 from secretaria.core.logging import get_logger
 from secretaria.core.subscription import SubscriptionClaim, verify_subscription_token
-from secretaria.models import Tenant
+from secretaria.models import Professional, Tenant
+from secretaria.services.agenda_visibility import AgendaViewer, viewer_from_claim
 
 logger = get_logger(__name__)
 
@@ -159,3 +161,33 @@ async def require_clinic_clinician(
     claim = await get_hub_claim(authorization)
     ensure_clinic_clinician(claim)
     return await _tenant_for_claim(session, claim)
+
+
+async def get_agenda_viewer(
+    authorization: str | None = Header(default=None),
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> AgendaViewer:
+    """Who is looking at the agenda (TASK-044 R7, spec 2026-10-09 §5.A).
+
+    Re-reads the introspection `get_current_tenant` just did: a positive answer is cached
+    in-process (core/subscription.py), so this is no second brain-api call within
+    SUBSCRIPTION_CACHE_TTL_SECONDS. Fails closed: no live claim for THIS clinic is 401.
+    The linked professional must be a Professional row of this clinic - any other id is
+    dropped, and an "own" viewer without a professional then reaches no appointment.
+    """
+    token = _bearer_token(authorization)
+    claim = await verify_subscription_token(token) if token else None
+    if claim is None or not claim.active or claim.tenant_id != tenant.id:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or inactive subscription token")
+    viewer = viewer_from_claim(claim.agenda_scope, claim.professional_id)
+    if viewer.professional_id is not None:
+        owned = await session.scalar(
+            select(Professional.id).where(
+                Professional.id == viewer.professional_id,
+                Professional.tenant_id == tenant.id,
+            )
+        )
+        if owned is None:
+            viewer = replace(viewer, professional_id=None)
+    return viewer

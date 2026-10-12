@@ -1036,3 +1036,67 @@ def before_late_reopened_text() -> str:
     """Said BEFORE the confirmation bubble when the payment came after the Pix window but the
     slot was still free, so the reservation was reopened."""
     return "Recebemos o seu pagamento e o horário ainda estava livre, então reabri a sua reserva."
+
+
+def preview_cancellation_outcome(
+    tenant: Tenant,
+    deposit: PixDeposit | None,
+    appointment: Appointment,
+    *,
+    now: datetime | None = None,
+    cancelled_by: str = CANCELLED_BY_PATIENT,
+) -> str | None:
+    """What `on_appointment_cancelled` WOULD return for this deposit, with no I/O.
+
+    Mirrors that function's branching one-to-one (same window arithmetic, same
+    retention policy, same `cancelled_by` rule) so the hub can show the clinic the money
+    consequence BEFORE a slot is released (TASK-032 R4). Since decision D15 (TASK-017) the
+    platform NEVER refunds: "refund_due" / "partial_refund_due" mean the clinic returns the
+    money itself, in the provider's panel. It cannot predict "payment_in_flight" (the
+    provider's answer) nor an already-handled cancellation. Keep the two in step -
+    `tests/test_deposit_release_preview.py` runs both on the same data and compares.
+    """
+    if deposit is None or deposit.status not in (PixDepositStatus.AWAITING, PixDepositStatus.PAID):
+        return None
+    if deposit.status is PixDepositStatus.AWAITING:
+        return "voided"
+    if cancelled_by == CANCELLED_BY_CLINIC:
+        return "refund_due"
+    now = now or datetime.now(UTC)
+    start_at = appointment.start_at
+    hours_until = None if start_at is None else (_as_utc(start_at) - now).total_seconds() / 3600
+    if hours_until is None or hours_until > tenant.pix_refund_window_hours:
+        return "refund_due"
+    if tenant.pix_retention_policy == "partial":
+        return "partial_refund_due"
+    return "retained"
+
+
+def release_warning_text(outcome: str | None, tenant: Tenant, deposit: PixDeposit) -> str:
+    """The pt-BR warning the CLINIC reads before freeing a paid slot (not the patient notice).
+
+    `cancellation_notice` above is the patient-facing sentence; this one is
+    addressed to the clinic and always names the amount, because releasing a
+    slot whose deposit was paid is the one release that moves money. Like every money line
+    since decision D15 it never says the platform refunds: the CLINIC returns what is due,
+    in the payment provider's own panel (an attention item is opened with the amount).
+    """
+    paid = f"O paciente já pagou o sinal ({format_brl(deposit.amount_cents)})."
+    if outcome == "retained":
+        return (
+            f"{paid} Como faltam menos de {tenant.pix_refund_window_hours}h para a consulta, "
+            "ao liberar o horário a clínica fica com o sinal."
+        )
+    if outcome == "partial_refund_due":
+        refunded = round(deposit.amount_cents * tenant.pix_partial_refund_percent / 100)
+        return (
+            f"{paid} Como faltam menos de {tenant.pix_refund_window_hours}h para a consulta, "
+            f"ao liberar o horário a clínica deve devolver {format_brl(refunded)} ao paciente "
+            "pelo painel do provedor de pagamento; o restante fica retido pela clínica."
+        )
+    if outcome == "refund_due":
+        return (
+            f"{paid} Ao liberar o horário, a clínica deve devolver o valor por inteiro ao "
+            "paciente pelo painel do provedor de pagamento."
+        )
+    return f"{paid} Confira a política de devolução do sinal antes de liberar o horário."

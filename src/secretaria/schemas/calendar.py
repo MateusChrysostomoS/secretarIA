@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Literal
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from secretaria.models.appointment import AppointmentStatus
 
@@ -64,6 +65,40 @@ class CalendarDepositRead(BaseModel):
     needs_attention: bool = False
 
 
+class CalendarReminderRead(BaseModel):
+    """One reminder of the appointment's CURRENT start, as the agenda shows it.
+
+    Datetimes are always aware UTC on the wire (skill naive-timestamp-
+    serialization). `kind`/`status`/`answer`/`warn_kind` are plain strings (the
+    constants of models/appointment_reminder.py) so a value added later never
+    breaks an older client. No message text, no phone, no error text: the only
+    failure detail is a code kept server-side.
+    """
+
+    kind: str
+    status: str
+    due_at: datetime
+    sent_at: datetime | None = None
+    answered_at: datetime | None = None
+    answer: str | None = None
+    warned_at: datetime | None = None
+    warn_kind: str | None = None
+
+
+class AgendaViewerRead(BaseModel):
+    """GET /calendar/viewer - who is looking at the agenda (TASK-044 R7, spec §5.A).
+
+    `agenda_scope` "clinic" sees every doctor; "own" only `professional_id`'s
+    appointments (none when it is null). `can_filter_own` = clinic-wide AND a
+    professional: the front shows "Todos / Só os meus" only then.
+    """
+
+    agenda_scope: Literal["clinic", "own"]
+    professional_id: str | None = None
+    professional_name: str | None = None
+    can_filter_own: bool = False
+
+
 class CalendarEventRead(BaseModel):
     """A Google Calendar event as returned by the agenda view.
 
@@ -101,6 +136,33 @@ class CalendarEventRead(BaseModel):
     # asks for a deposit), a clinic/plan without deposit, or a charge that could
     # not be created. The backend does not tell those apart and neither does the UI.
     deposit: CalendarDepositRead | None = None
+    # TASK-032 (spec 4.4). Additive; all None for an event with no local
+    # Appointment (a block, or something typed into Google). `status` is the
+    # appointment status VALUE; `display_state` is one of "unconfirmed",
+    # "confirmed", "confirmed_twice", "attention" (terminal appointments are
+    # always "unconfirmed" - colour them by `status`); `attention` is
+    # `display_state == "attention"`; `reminders` lists only the rows of the
+    # appointment's current start, ordered by due time. A consumer must ignore
+    # any key it does not know.
+    status: AppointmentStatus | None = None
+    confirmation_count: int | None = None
+    display_state: str | None = None
+    attention: bool | None = None
+    reminders: list[CalendarReminderRead] | None = None
+    # TASK-044 R7 (spec 2026-10-09 §5.C): what the "Editar/Remarcar" form pre-fills, so
+    # the front stops guessing. All None for an event with no local Appointment.
+    # `professional_id`/`professional_name` only when the owner is a professional of
+    # THIS clinic; `service` is the stored service name; `phone` is the appointment's
+    # CONTACT phone (never the patient's identity); `patient_channel` is the patient's
+    # own channel - "whatsapp" | "brain_message" - or None without a patient record (a
+    # block or a phone-only booking). A viewer restricted to his own agenda never
+    # receives another doctor's event at all (api/hub/calendar.py::list_events).
+    professional_id: str | None = None
+    professional_name: str | None = None
+    service: str | None = None
+    attendee_name: str | None = None
+    phone: str | None = None
+    patient_channel: str | None = None
 
 
 class AppointmentCreate(BaseModel):
@@ -114,6 +176,10 @@ class AppointmentCreate(BaseModel):
     phone: str | None = Field(default=None, max_length=32)
     # Patient DB id (optional — the hub may not know it).
     patient_id: str | None = None
+    # TASK-044 R7 (owner 2026-10-09): whose agenda the new row belongs to. A viewer
+    # restricted to his own agenda may omit it (= his own) or send his own; a
+    # clinic-wide viewer may name any active professional of the clinic or none.
+    professional_id: UUID | None = None
 
 
 class BlockCreate(BaseModel):
@@ -123,6 +189,10 @@ class BlockCreate(BaseModel):
     end: datetime
     summary: str = Field(default="Bloqueado", min_length=1, max_length=500)
     description: str = ""
+    # TASK-044 R7 (owner 2026-10-09): whose agenda the new row belongs to. A viewer
+    # restricted to his own agenda may omit it (= his own) or send his own; a
+    # clinic-wide viewer may name any active professional of the clinic or none.
+    professional_id: UUID | None = None
 
 
 class AppointmentCancel(BaseModel):
@@ -180,11 +250,51 @@ class AppointmentReschedule(BaseModel):
     custom_message: str | None = Field(default=None, max_length=4000)
 
 
+_EDITABLE = ("start_at", "service", "professional_id", "insurance", "attendee_name", "phone")
+_NOT_CLEARABLE = ("start_at", "service", "professional_id")
+
+
+class AppointmentEdit(BaseModel):
+    """POST /appointments/{id}/edit - "Editar/Remarcar" (TASK-032 R7, spec 2026-10-09 §1/§3).
+
+    Every field is optional; at least one of the six editable ones must be SENT. A sent
+    null / "" clears `insurance`, `attendee_name` and `phone`; the other three cannot be
+    cleared. `phone` is the appointment's contact phone, never the patient's identity.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    start_at: AwareDatetime | None = None
+    service: str | None = Field(default=None, min_length=1, max_length=120)
+    professional_id: UUID | None = None
+    insurance: str | None = Field(default=None, max_length=120)
+    attendee_name: str | None = Field(default=None, max_length=120)
+    phone: str | None = Field(default=None, max_length=32)
+    # Same meaning as AppointmentCancel.notify_outside_window (OR-ed with the clinic's
+    # `paid_notices_auto_approved`).
+    notify_outside_window: bool = False
+    # True = book over a busy slot or outside the hours (an "encaixe").
+    allow_overlap: bool = False
+
+    @model_validator(mode="after")
+    def _something_to_change(self) -> AppointmentEdit:
+        sent = self.model_fields_set
+        if not sent.intersection(_EDITABLE):
+            raise ValueError("send at least one field to change")
+        for name in _NOT_CLEARABLE:
+            if name in sent and getattr(self, name) is None:
+                raise ValueError(f"{name} cannot be null")
+        return self
+
+
 class AppointmentStatusUpdate(BaseModel):
     """PATCH /appointments/{id}/status."""
 
     status: AppointmentStatus
-
+    # TASK-032 R7: authorises the BILLED template for the notice that `confirmed` and
+    # `attended` send to a WhatsApp patient outside the 24 h window (OR-ed with the
+    # clinic's `paid_notices_auto_approved`). Ignored for every other status.
+    notify_outside_window: bool = False
 
 class AppointmentRead(BaseModel):
     """Appointment response."""
@@ -200,6 +310,9 @@ class AppointmentRead(BaseModel):
     end_at: datetime | None = None
     phone: str | None
     status: AppointmentStatus
+    # TASK-032: how many distinct confirmations (0..2) the booking has. Additive;
+    # 0 for every row from before the counter existed.
+    confirmation_count: int = 0
     created_at: datetime
     updated_at: datetime
     # The PixDeposit status VALUE for this appointment (e.g. "confirmado_pago"),
@@ -253,3 +366,77 @@ class CalendarHealthRead(BaseModel):
 
     clinic: CalendarCredentialStatusWire
     professionals: list[ProfessionalCalendarHealthRead]
+
+
+class AppointmentRelease(BaseModel):
+    """POST /appointments/{id}/release (TASK-032 R4, spec 4.4).
+
+    Freeing the slot of an unconfirmed appointment. Every flag defaults to the
+    cautious side, so a client that does not know a flag can never trigger the
+    risky behavior by accident.
+    """
+
+    # The clinic has read the retention text for a PAID Pix deposit and agrees.
+    acknowledge_retention: bool = False
+    # The patient confirmed in the meantime; release anyway (the clinic's call).
+    release_confirmed: bool = False
+    # Authorises the BILLED template notice when the patient is outside Meta's
+    # 24 h window (same meaning as AppointmentCancel.notify_outside_window).
+    notify_outside_window: bool = False
+    # Optional reason quoted in the patient notice; blank = the standard sentence.
+    justification: str | None = Field(default=None, max_length=1000)
+
+
+class AppointmentActionRead(AppointmentRead):
+    """An appointment after a clinic action that may tell the patient (TASK-032 R7).
+
+    `patient_notice` is null when no notice was due, else one of: whatsapp_queued,
+    whatsapp_sent, whatsapp_outside_window, portal_chat, portal_chat_email,
+    no_channel, queue_unavailable, notice_failed. `whatsapp_link` is the free
+    `wa.me` link, only with whatsapp_outside_window.
+    """
+
+    patient_notice: str | None = None
+    whatsapp_link: str | None = None
+
+
+class AppointmentReleaseRead(AppointmentRead):
+    """The released appointment, plus what happened to the patient notice.
+
+    `patient_notice` is one of: whatsapp_queued, whatsapp_outside_window,
+    portal_chat, portal_chat_email, no_channel, queue_unavailable, notice_failed.
+    `whatsapp_link` (TASK-032 R7) is the free `wa.me` link, only with
+    whatsapp_outside_window.
+    """
+
+    patient_notice: str = "not_attempted"
+    whatsapp_link: str | None = None
+
+
+class StaffMessageRequest(BaseModel):
+    """POST /appointments/{id}/message (TASK-032 R4, spec 4.4)."""
+
+    text: str = Field(min_length=1, max_length=1000)
+    # Authorises the BILLED template when a WhatsApp patient is outside Meta's
+    # 24 h window (same meaning as AppointmentCancel.notify_outside_window).
+    notify_outside_window: bool = False
+
+    @field_validator("text")
+    @classmethod
+    def _trimmed_and_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("text must not be blank")
+        return value
+
+
+class StaffMessageRead(BaseModel):
+    """What happened to the staff message.
+
+    `delivery`: whatsapp_text | whatsapp_template | portal_chat.
+    `email_nudge`: only for portal_chat - sent | no_email | not_sent.
+    """
+
+    delivery: str
+    email_nudge: str | None = None
+    message_id: str | None = None

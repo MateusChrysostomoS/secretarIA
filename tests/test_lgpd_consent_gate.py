@@ -24,8 +24,9 @@ DB tests mirror the in-memory-sqlite pattern from test_bot_allowlist.py /
 test_menu_command.py: a real aiosqlite engine on StaticPool, monkeypatched in
 place of `workers.tasks.async_session_factory`.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -65,7 +66,10 @@ from secretaria.services.greeting_template import (  # noqa: E402
     LGPD_CONSENT_MESSAGE,
     render_greeting,
 )
-from secretaria.services.patient_name import NAME_REQUEST_MESSAGE  # noqa: E402
+from secretaria.services.patient_name import (  # noqa: E402
+    NAME_CHANGE_BUTTON_LABEL,
+    NAME_REQUEST_MESSAGE,
+)
 from secretaria.workers import tasks  # noqa: E402
 
 PHONE_NUMBER_ID = "1234567890"
@@ -88,15 +92,15 @@ async def db():
 
 @pytest.fixture(autouse=True)
 def _wire_db(monkeypatch: pytest.MonkeyPatch, db):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
-    monkeypatch.setattr(tasks, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
 
     # The opening-state resolver does its own indexed reads; stubbed out so
     # these tests exercise the gate and nothing else.
     async def _fake_resolve(session, tenant_id, patient_id, **kwargs):
         return None
 
-    monkeypatch.setattr(tasks, "resolve_patient_opening_state", _fake_resolve)
+    monkeypatch.setattr(workers_ns, "resolve_patient_opening_state", _fake_resolve)
     yield
 
 
@@ -345,7 +349,7 @@ class _WireClient:
 @pytest.fixture
 def wire(monkeypatch: pytest.MonkeyPatch):
     _WireClient.sends = []
-    monkeypatch.setattr(tasks, "WhatsAppClient", _WireClient)
+    monkeypatch.setattr(workers_ns, "WhatsAppClient", _WireClient)
 
     async def _fake_token(session, tenant_id):
         return "decrypted-waba-token"
@@ -362,8 +366,8 @@ def wire(monkeypatch: pytest.MonkeyPatch):
             limits={},
         )
 
-    monkeypatch.setattr(tasks, "get_waba_token", _fake_token)
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_entitlements)
+    monkeypatch.setattr(workers_ns, "get_waba_token", _fake_token)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_entitlements)
     return _WireClient
 
 
@@ -390,7 +394,11 @@ async def test_first_contact_puts_exactly_two_messages_on_the_wire(db, wire) -> 
 
     assert len(wire.sends) == 3, wire.sends
     kind, body, buttons = wire.sends[2]
-    assert (kind, body, buttons) == ("buttons", LGPD_CONSENT_MESSAGE, [CONSENT_BUTTON_LABEL])
+    assert (kind, body, buttons) == (
+        "buttons",
+        LGPD_CONSENT_MESSAGE,
+        [CONSENT_BUTTON_LABEL, NAME_CHANGE_BUTTON_LABEL],
+    )
 
 
 async def test_the_menu_buttons_only_appear_after_the_tap(db, wire) -> None:
@@ -405,8 +413,8 @@ async def test_the_menu_buttons_only_appear_after_the_tap(db, wire) -> None:
     labels = [buttons for _kind, _body, buttons in wire.sends if buttons]
     # Two consent prompts (the notice and the re-prompt), then the menu.
     assert labels == [
-        [CONSENT_BUTTON_LABEL],
-        [CONSENT_BUTTON_LABEL],
+        [CONSENT_BUTTON_LABEL, NAME_CHANGE_BUTTON_LABEL],
+        [CONSENT_BUTTON_LABEL, NAME_CHANGE_BUTTON_LABEL],
         [decorate(EMOJI_SCHEDULE, LABEL_BOOK), LABEL_OTHER],
     ]
     assert wire.sends[-1][1] == CONSENT_ACCEPTED_MESSAGE

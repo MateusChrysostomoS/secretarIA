@@ -13,6 +13,7 @@ Every list is wrapped as `{"data": [...]}` (the agreed internal envelope).
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -126,6 +127,14 @@ class BrainMessageInboundForm(BrainMessageInbound):
     dedupe_id: None = None
 
 
+class ConversationEntryContext(BaseModel):
+    """Untrusted presentation intent; never a patient/tenant authorization."""
+
+    model_config = ConfigDict(extra="forbid")
+    source: Literal["navigation", "clinic_link", "reminder_link"] = "navigation"
+    reminder_id: UUID | None = None
+
+
 class BrainMessageOpen(BaseModel):
     """`POST /internal/brain-message/open` — start the conversation, unasked.
 
@@ -150,6 +159,7 @@ class BrainMessageOpen(BaseModel):
     # ever used to fill a patient row that has no name yet — never to overwrite
     # one, and never required.
     patient_name: str | None = Field(default=None, max_length=255)
+    entry_context: ConversationEntryContext | None = None
 
 
 class BrainMessageAck(BaseModel):
@@ -214,3 +224,47 @@ class BrainMessageMessageList(BaseModel):
     """`GET /internal/brain-message/conversations/{external_id}/messages` response."""
 
     data: list[BrainMessageMessage]
+    # True when older messages exist beyond this page (only meaningful without `since`).
+    # Additive and defaulted: callers that never read it keep working.
+    has_more: bool = False
+    typing: bool = False
+    typing_by: Literal["automation", "staff"] | None = None
+    accepts_typing: bool = False
+
+
+class BrainMessageTyping(BaseModel):
+    """The PATIENT is typing (a heartbeat). Scope is the session's; nothing else is accepted."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: UUID
+    external_id: str = Field(min_length=1, max_length=64)
+
+
+class TypingAck(BaseModel):
+    applied: bool
+
+
+class BrainMessageVisitMerge(BaseModel):
+    """brain-api merged a Portal visit into an existing account: drop the visit's chat."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: UUID
+    visit_external_id: str = Field(min_length=1, max_length=64)
+    into_external_id: str = Field(min_length=1, max_length=64)
+
+
+class BrainMessageVisitDiscard(BaseModel):
+    """brain-api's retention job (TASK-042): drop a visit that only opened the link."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: UUID
+    external_id: str = Field(min_length=1, max_length=64)
+
+
+class BrainMessageVisitDiscardOut(BaseModel):
+    """`discarded` (deleted now) or `absent` (nothing here, e.g. a retry). Both mean "done"."""
+
+    status: Literal["discarded", "absent"]

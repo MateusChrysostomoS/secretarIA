@@ -41,7 +41,7 @@ from secretaria.models import (
 )
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-PREVIOUS_HEAD = "d4f8a2c6e913"
+PREVIOUS_HEAD = "a4c7e2f9b1d3"  # re-parented onto main's head (TASK-050)
 REVISION = "c8a5d3f1b7e2"
 NEW_TABLES = (
     "clinic_payment_accounts",

@@ -15,12 +15,13 @@ in-memory DB), monkeypatched in place of the Postgres-backed
 env-var setup block below matches test_hub_professionals.py /
 test_handover_echoes.py.
 """
-
 import hashlib
 import hmac
 import json
 import os
 from uuid import uuid4
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -258,7 +259,7 @@ async def db():
 
 @pytest.fixture(autouse=True)
 def _wire_db(monkeypatch: pytest.MonkeyPatch, db):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     monkeypatch.setattr(webhook_api, "async_session_factory", db)
     yield
 
@@ -394,8 +395,8 @@ async def test_handle_patient_messages_skips_audio_but_text_still_flows(
         persist_calls.append(kwargs)
         return None
 
-    monkeypatch.setattr(tasks, "_is_rate_limited", _fake_is_rate_limited)
-    monkeypatch.setattr(tasks, "_persist_inbound_message", _fake_persist_inbound_message)
+    monkeypatch.setattr(workers_ns, "_is_rate_limited", _fake_is_rate_limited)
+    monkeypatch.setattr(workers_ns, "_persist_inbound_message", _fake_persist_inbound_message)
 
     value = WebhookValue.model_validate(
         {
@@ -447,8 +448,8 @@ async def test_handle_patient_messages_audio_without_media_id_falls_through(
         persist_calls.append(kwargs)
         return None
 
-    monkeypatch.setattr(tasks, "_is_rate_limited", _fake_is_rate_limited)
-    monkeypatch.setattr(tasks, "_persist_inbound_message", _fake_persist_inbound_message)
+    monkeypatch.setattr(workers_ns, "_is_rate_limited", _fake_is_rate_limited)
+    monkeypatch.setattr(workers_ns, "_persist_inbound_message", _fake_persist_inbound_message)
 
     value = WebhookValue.model_validate(
         {
@@ -510,7 +511,7 @@ def _spy_send_bot_reply(monkeypatch: pytest.MonkeyPatch) -> list:
     async def _fake(reply, redis=None):
         calls.append(reply)
 
-    monkeypatch.setattr(tasks, "_send_bot_reply", _fake)
+    monkeypatch.setattr(workers_ns, "_send_bot_reply", _fake)
     return calls
 
 
@@ -520,7 +521,7 @@ def _spy_send_simple_text(monkeypatch: pytest.MonkeyPatch) -> list:
     async def _fake(to, body, client=None):
         calls.append((to, body, client))
 
-    monkeypatch.setattr(tasks, "_send_simple_text", _fake)
+    monkeypatch.setattr(workers_ns, "_send_simple_text", _fake)
     return calls
 
 
@@ -547,7 +548,7 @@ async def test_happy_path_transcribes_and_persists_like_text(
             char_count=31,
         )
 
-    monkeypatch.setattr(tasks, "transcribe_whatsapp_media", _fake_transcribe)
+    monkeypatch.setattr(workers_ns, "transcribe_whatsapp_media", _fake_transcribe)
     send_bot_calls = _spy_send_bot_reply(monkeypatch)
 
     await tasks.transcribe_audio_message(
@@ -591,7 +592,7 @@ async def test_low_confidence_sends_clarification_no_message_persisted(
             text="", provider_used="openai", is_low_confidence=True, char_count=0
         )
 
-    monkeypatch.setattr(tasks, "transcribe_whatsapp_media", _fake_transcribe)
+    monkeypatch.setattr(workers_ns, "transcribe_whatsapp_media", _fake_transcribe)
     simple_calls = _spy_send_simple_text(monkeypatch)
     send_bot_calls = _spy_send_bot_reply(monkeypatch)
 
@@ -633,7 +634,7 @@ async def test_idempotency_pre_processed_event_skips_transcription(
         transcribe_calls.append((args, kwargs))
         raise AssertionError("transcribe_whatsapp_media must not be called for a duplicate")
 
-    monkeypatch.setattr(tasks, "transcribe_whatsapp_media", _fake_transcribe)
+    monkeypatch.setattr(workers_ns, "transcribe_whatsapp_media", _fake_transcribe)
     simple_calls = _spy_send_simple_text(monkeypatch)
     send_bot_calls = _spy_send_bot_reply(monkeypatch)
 
@@ -659,7 +660,7 @@ async def test_media_too_large_sends_clarification_and_marks_processed(
     async def _fake_transcribe(media_id, access_token, *, api_version, config, http_client):
         raise MediaTooLarge("audio is 20000000 bytes, exceeds max_bytes=16777216")
 
-    monkeypatch.setattr(tasks, "transcribe_whatsapp_media", _fake_transcribe)
+    monkeypatch.setattr(workers_ns, "transcribe_whatsapp_media", _fake_transcribe)
     simple_calls = _spy_send_simple_text(monkeypatch)
     send_bot_calls = _spy_send_bot_reply(monkeypatch)
 
@@ -693,7 +694,7 @@ async def test_transient_media_fetch_error_propagates_and_stays_unprocessed(
     async def _fake_transcribe(media_id, access_token, *, api_version, config, http_client):
         raise MediaFetchError("WhatsApp media metadata fetch failed (status 503)")
 
-    monkeypatch.setattr(tasks, "transcribe_whatsapp_media", _fake_transcribe)
+    monkeypatch.setattr(workers_ns, "transcribe_whatsapp_media", _fake_transcribe)
     simple_calls = _spy_send_simple_text(monkeypatch)
     send_bot_calls = _spy_send_bot_reply(monkeypatch)
 
@@ -731,7 +732,7 @@ async def test_uses_the_tenant_token_not_the_global_env(
             text="quero marcar", provider_used="openai", char_count=12, is_low_confidence=False
         )
 
-    monkeypatch.setattr(tasks, "transcribe_whatsapp_media", _fake_transcribe)
+    monkeypatch.setattr(workers_ns, "transcribe_whatsapp_media", _fake_transcribe)
     _spy_send_bot_reply(monkeypatch)
 
     await tasks.transcribe_audio_message(
@@ -762,7 +763,7 @@ async def test_missing_tenant_token_skips_transcription(
     async def _explode(*args, **kwargs):
         raise AssertionError("STT was attempted without the tenant's own token")
 
-    monkeypatch.setattr(tasks, "transcribe_whatsapp_media", _explode)
+    monkeypatch.setattr(workers_ns, "transcribe_whatsapp_media", _explode)
     simple_calls = _spy_send_simple_text(monkeypatch)
     send_bot_calls = _spy_send_bot_reply(monkeypatch)
 

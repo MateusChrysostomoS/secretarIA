@@ -80,6 +80,7 @@ def test_build_agent_base_tools_unchanged():
         "list_free_slots",
         "create_event",
         "cancel_event",
+        "get_service_info",
         "iniciar_pre_consulta",
         "list_patient_appointments",
         "show_main_menu",
@@ -128,3 +129,26 @@ async def test_run_agent_caches_distinct_agents_per_extra_tools_set(
     await graph.run_agent("oi", context=ctx, extra_tools=(_fake_tool_a,))
     assert len(graph._AGENTS) == 2
     assert len(build_calls) == 2
+
+
+def test_two_draft_tools_never_share_a_compiled_agent(_clean_agent_cache_and_fakes):
+    """v1 and v2 share the model-facing NAME `set_booking_draft` (TASK-030 P2); keyed by
+    name alone, the first compiled would serve every clinic."""
+    from secretaria.ai.tools import set_booking_draft, set_booking_draft_v2
+
+    v1 = graph.build_agent(extra_tools=[set_booking_draft])
+    v2 = graph.build_agent(extra_tools=[set_booking_draft_v2])
+    assert v1 is not v2
+    assert graph.build_agent(extra_tools=[set_booking_draft_v2]) is v2
+    assert len(_clean_agent_cache_and_fakes) == 2
+
+
+def test_two_manage_tools_never_share_a_compiled_agent(_clean_agent_cache_and_fakes):
+    """v1 and v2 share the model-facing NAME `manage_existing_appointment` (TASK-030 P3)."""
+    from secretaria.ai.tools import manage_existing_appointment, manage_existing_appointment_v2
+
+    v1 = graph.build_agent(extra_tools=[manage_existing_appointment])
+    v2 = graph.build_agent(extra_tools=[manage_existing_appointment_v2])
+    assert v1 is not v2
+    assert graph.build_agent(extra_tools=[manage_existing_appointment_v2]) is v2
+    assert len(_clean_agent_cache_and_fakes) == 2

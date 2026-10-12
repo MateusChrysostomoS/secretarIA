@@ -24,8 +24,9 @@ Layout:
 Fixtures follow tests/test_brain_message_pipeline.py (in-memory SQLite on a
 StaticPool; a WhatsApp client that fails the test if anything builds it).
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -52,7 +53,6 @@ from secretaria.ai import graph, scoped_help  # noqa: E402
 from secretaria.config import Settings  # noqa: E402
 from secretaria.core.database import Base  # noqa: E402
 from secretaria.core.whatsapp_limits import (  # noqa: E402
-    MAX_BUTTONS_PER_MESSAGE,
     MAX_INTERACTIVE_REPLY_ID_CHARS,
     MAX_LIST_ROWS,
 )
@@ -74,7 +74,6 @@ from secretaria.services.channel_sender import (  # noqa: E402
 )
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
 from secretaria.services.whatsapp import (  # noqa: E402
-    interactive_buttons_record,
     interactive_list_record,
 )
 from secretaria.workers import tasks  # noqa: E402
@@ -122,11 +121,11 @@ _agent_calls: list[str] = []
 
 @pytest.fixture(autouse=True)
 def _wire(monkeypatch: pytest.MonkeyPatch, db):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     monkeypatch.setattr(graph, "async_session_factory", db)
     monkeypatch.setattr(scoped_help, "async_session_factory", db)
-    monkeypatch.setattr(tasks, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
-    monkeypatch.setattr(tasks, "WhatsAppClient", _ExplodingWhatsAppClient)
+    monkeypatch.setattr(workers_ns, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
+    monkeypatch.setattr(workers_ns, "WhatsAppClient", _ExplodingWhatsAppClient)
     _agent_calls.clear()
 
     async def _no_opening_state(session, tenant_id, patient_id, **kwargs):
@@ -151,10 +150,10 @@ def _wire(monkeypatch: pytest.MonkeyPatch, db):
         _agent_calls.append(message)
         return "resposta da LLM"
 
-    monkeypatch.setattr(tasks, "resolve_patient_opening_state", _no_opening_state)
-    monkeypatch.setattr(tasks, "get_waba_token", _fake_token)
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_entitlements)
-    monkeypatch.setattr(tasks, "run_agent", _agent)
+    monkeypatch.setattr(workers_ns, "resolve_patient_opening_state", _no_opening_state)
+    monkeypatch.setattr(workers_ns, "get_waba_token", _fake_token)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_entitlements)
+    monkeypatch.setattr(workers_ns, "run_agent", _agent)
     yield
 
 
@@ -230,7 +229,7 @@ def _stop_at_the_reply_seam(monkeypatch: pytest.MonkeyPatch) -> list:
     async def _capture(reply, redis=None):
         replies.append(reply)
 
-    monkeypatch.setattr(tasks, "_send_bot_reply", _capture)
+    monkeypatch.setattr(workers_ns, "_send_bot_reply", _capture)
     return replies
 
 
@@ -246,19 +245,23 @@ async def _turn(tenant: Tenant, text: str, reply_id: str | None) -> None:
 # --------------------------------------------------------------------------
 
 
-async def test_send_buttons_records_the_card_whatsapp_would(db) -> None:
-    """Same builder, same caps: a fourth button is dropped here as on WhatsApp,
-    and the history body is the flattened line it always was."""
+async def test_send_buttons_records_all_five_portal_options(db) -> None:
+    """A wide Portal card keeps every option and its flattened history."""
     _, _, conversation = await _seed(db)
     sender = BrainMessageSender(conversation_id=conversation.id, session_factory=db)
-    buttons = [(f"menu|{i}", f"Opção {i}") for i in range(MAX_BUTTONS_PER_MESSAGE + 1)]
+    buttons = [(f"menu|{i}", f"Opção {i}") for i in range(5)]
 
     await sender.send_buttons(to=EXTERNAL_ID, body="Como posso ajudar?", buttons=buttons)
 
     [row] = await _rows(db, conversation.id)
-    assert row.interactive == interactive_buttons_record("Como posso ajudar?", buttons)
+    assert row.interactive["body"] == "Como posso ajudar?"
     assert row.interactive["kind"] == "buttons"
-    assert [o["id"] for o in row.interactive["options"]] == ["menu|0", "menu|1", "menu|2"]
+    assert [o["id"] for o in row.interactive["options"]] == [
+        "menu|0", "menu|1", "menu|2", "menu|3", "menu|4"
+    ]
+    assert [o["title"] for o in row.interactive["options"]] == [
+        "Opção 0", "Opção 1", "Opção 2", "Opção 3", "Opção 4"
+    ]
     assert row.body == interactive_history_body("Como posso ajudar?", [b[1] for b in buttons])
     assert row.direction == MessageDirection.OUTBOUND and row.sender == MessageSender.BOT
 

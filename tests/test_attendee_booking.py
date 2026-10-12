@@ -17,8 +17,9 @@ symptom, closed one proof at a time:
 3. The PII proof: the third party's name reaches OpenAI only as an ATENDIDO
    token - through the real history load and the real pseudonymizer.
 """
-
 import os
+
+from tests._patching import workers_ns
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("META_APP_SECRET", "test-app-secret")
@@ -55,6 +56,7 @@ from secretaria.models import (  # noqa: E402
     FlowState,
     Message,
     Patient,
+    Professional,
     Tenant,
 )
 from secretaria.plugins import professional_notification, reminders  # noqa: E402
@@ -64,6 +66,7 @@ from secretaria.services.attendee import (  # noqa: E402
     ATTENDEE_NAME_LLM_PLACEHOLDER,
     ATTENDEE_NAME_REQUEST,
     ATTENDEE_QUESTION_BODY,
+    ATTENDEE_SELF,
     CONSENT_KIND_THIRD_PARTY_BOOKING,
     LABEL_ATTENDEE_AUTH_BACK,
     LABEL_ATTENDEE_AUTH_CONFIRM,
@@ -71,9 +74,11 @@ from secretaria.services.attendee import (  # noqa: E402
     LABEL_ATTENDEE_SELF,
     authorization_body,
 )
+from secretaria.services.booking_draft import BookingDraft, draft_record  # noqa: E402
 from secretaria.services.channel_sender import CHANNEL_WHATSAPP  # noqa: E402
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
+    ATTENDEE_NEXT_BOOK,
     LABEL_BOOK,
     LABEL_BOOK_SERVICE,
     LABEL_CONFIRM,
@@ -155,6 +160,32 @@ async def _drive(taps: list[str], cal: _FakeCalendar, results=None) -> list[Flow
     return results
 
 
+@pytest.mark.parametrize("other", [False, True])
+async def test_answered_insurance_survives_attendee_steps_and_resume(other):
+    from secretaria.services.flow_router import enter_booking, resume_bubbles
+
+    tenant = _tenant()
+    tenant.collect_insurance = True
+    tenant.insurances = ["Unimed"]
+    result = enter_booking(tenant)
+    # The empty booking-draft handback validates this plan before this entry.
+    result.flow_selected_insurance = "Unimed"
+    taps = (
+        [LABEL_ATTENDEE_OTHER, "Maria da Silva", LABEL_ATTENDEE_AUTH_BACK,
+         LABEL_ATTENDEE_OTHER, "123", "Maria da Silva", LABEL_ATTENDEE_AUTH_CONFIRM]
+        if other else [LABEL_ATTENDEE_SELF]
+    )
+    for tap in taps:
+        conv = _snapshot(result)
+        resumed = await resume_bubbles(conv, tenant, None)
+        assert resumed.flow_selected_insurance == "Unimed"
+        result = await route(_snapshot(resumed), tenant, None, tap)
+        assert result.flow_selected_insurance == "Unimed"
+    assert result.flow_step == STEP_AWAITING_SERVICE
+    assert result.flow_attendee_name == ("Maria da Silva" if other else ATTENDEE_SELF)
+    assert result.attendee_authorized is other
+
+
 def _row_tap(result: FlowRouterResult) -> str:
     """What tapping the first row of the result's list echoes back."""
     bubble = next(b for b in result.bubbles if isinstance(b, SlotsBubble))
@@ -212,7 +243,10 @@ async def test_self_path_books_exactly_what_it_booked_before() -> None:
     assert cal.created[0][2] == "Primeira Consulta - João Conta"
     assert "Paciente:" not in final.bubbles[0].body
     assert not any(r.attendee_authorized for r in results)
-    assert all(r.flow_attendee_name is None for r in results)
+    # Nobody is NAMED on the self path (the "" marker is falsy), and the marker is
+    # gone once the booking ends: the next booking is asked pra-quem again.
+    assert not any(r.flow_attendee_name for r in results)
+    assert final.flow_attendee_name is None
 
 
 async def test_other_path_name_sentence_confirm_and_back() -> None:
@@ -344,12 +378,12 @@ class _WireClient:
 
 @pytest.fixture
 def wired(monkeypatch: pytest.MonkeyPatch, db):
-    monkeypatch.setattr(tasks, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
     monkeypatch.setattr(graph, "async_session_factory", db)
     monkeypatch.setattr(pii_store, "async_session_factory", db)
-    monkeypatch.setattr(tasks, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
+    monkeypatch.setattr(workers_ns, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
     _WireClient.sends = []
-    monkeypatch.setattr(tasks, "WhatsAppClient", _WireClient)
+    monkeypatch.setattr(workers_ns, "WhatsAppClient", _WireClient)
 
     async def _fake_resolve(session, tenant_id, patient_id, **kwargs):
         return None
@@ -369,9 +403,9 @@ def wired(monkeypatch: pytest.MonkeyPatch, db):
             limits={},
         )
 
-    monkeypatch.setattr(tasks, "resolve_patient_opening_state", _fake_resolve)
-    monkeypatch.setattr(tasks, "get_waba_token", _fake_token)
-    monkeypatch.setattr(tasks, "get_entitlements", _fake_entitlements)
+    monkeypatch.setattr(workers_ns, "resolve_patient_opening_state", _fake_resolve)
+    monkeypatch.setattr(workers_ns, "get_waba_token", _fake_token)
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_entitlements)
     return db
 
 
@@ -478,7 +512,7 @@ async def test_worker_self_path_writes_no_consent_row(wired) -> None:
     await _wa_turn(tenant, LABEL_ATTENDEE_SELF)
     conversation = await _conversation(db, tenant)
     assert conversation.flow_step == STEP_AWAITING_SERVICE
-    assert conversation.flow_attendee_name is None
+    assert conversation.flow_attendee_name == ATTENDEE_SELF  # answered, not "not asked"
     assert await _consents(db, tenant) == 0
 
 
@@ -735,19 +769,26 @@ async def test_chat_booking_consumes_the_attendee(wired, monkeypatch) -> None:
 
 
 async def test_llm_choose_doctor_hand_back_keeps_the_attendee(wired, monkeypatch) -> None:
-    """Finding 3: `select_professional_and_continue` bypasses route()."""
     db = wired
     tenant = await _seed_tenant(db)
     await _onboard(tenant)
+    async with db() as session:
+        async with session.begin():
+            doctor = Professional(
+                tenant_id=tenant.id,
+                name="Dra. Ana",
+                specialty="Cardiologia",
+                is_active=True,
+                appointment_types=[
+                    {"name": "Primeira Consulta", "duration_min": 40, "is_active": True}
+                ],
+            )
+            session.add(doctor)
     conversation = await _conversation(db, tenant)
-    professional = SimpleNamespace(
-        id=uuid4(),
-        name="Dra. Ana",
-        specialty="Cardiologia",
-        about=None,
-        appointment_types=[{"name": "Primeira Consulta", "duration_min": 40, "is_active": True}],
-        business_hours=None,
-    )
+    async with db() as session:
+        async with session.begin():
+            row = await session.get(Conversation, conversation.id)
+            row.flow_attendee_name = "Maria da Silva"
     reply = tasks._ReplyContext(
         channel=CHANNEL_WHATSAPP,
         conversation_id=conversation.id,
@@ -755,19 +796,129 @@ async def test_llm_choose_doctor_hand_back_keeps_the_attendee(wired, monkeypatch
         inbound_body="quero a Dra. Ana",
         tenant_id=tenant.id,
     )
-    snapshot = (SimpleNamespace(flow_attendee_name="Maria da Silva"), _tenant())
+    # The turn-start snapshot is stale on purpose: the ROW is what counts now.
+    snapshot = (SimpleNamespace(flow_attendee_name=None), _tenant())
     await tasks._handle_select_professional(
         reply,
-        f"{tasks.SELECT_PROFESSIONAL_SENTINEL_PREFIX}{professional.id}",
+        f"{tasks.SELECT_PROFESSIONAL_SENTINEL_PREFIX}{doctor.id}",
         tenant,
         snapshot,
-        [professional],
+        [doctor],
         WA_ID,
         waba_token="t",
     )
     conversation = await _conversation(db, tenant)
     assert conversation.flow_state == FlowState.SERVICE_CATALOG
     assert conversation.flow_attendee_name == "Maria da Silva"
+
+
+async def test_pra_mim_answer_survives_the_llm_detour(wired) -> None:
+    """2026-10-01: "Sim, é pra mim" -> LLM detour -> hand-back asked pra-quem AGAIN.
+
+    The "Não sei" scoped help ends in `_delegate_llm_keeping_draft`, which drops
+    the step: NULL attendee then read as "never asked". The answer must live in
+    the attendee column itself, so it rides every carry site through the LLM.
+    """
+    from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
+    from secretaria.services.flow_router import _delegate_llm_keeping_draft
+
+    db = wired
+    tenant = await _seed_tenant(db)
+    await _onboard(tenant)
+    await _wa_turn(tenant, LABEL_BOOK)
+    await _wa_turn(tenant, LABEL_ATTENDEE_SELF)
+    conversation = await _conversation(db, tenant)
+    assert conversation.flow_attendee_name == ATTENDEE_SELF
+
+    # The router's own detour (what scoped help returns on an unresolved pick).
+    detour = _delegate_llm_keeping_draft(conversation)
+    assert detour.flow_attendee_name == ATTENDEE_SELF
+    async with db() as session:
+        async with session.begin():
+            row = await session.get(Conversation, conversation.id)
+            row.flow_state = detour.flow_state
+            row.flow_step = detour.flow_step
+            row.flow_selected_type = detour.flow_selected_type
+            row.flow_attendee_name = detour.flow_attendee_name
+
+    _WireClient.sends = []
+    reply = tasks._ReplyContext(
+        channel=CHANNEL_WHATSAPP,
+        conversation_id=conversation.id,
+        patient_ref=WA_ID,
+        inbound_body="Tenho incômodo ao olhar para telas. Quero marcar uma avaliação.",
+        tenant_id=tenant.id,
+    )
+    await tasks._handle_set_booking_draft(
+        reply, BOOKING_DRAFT_SENTINEL_PREFIX + "{}", tenant, None, [], WA_ID, waba_token="t"
+    )
+
+    assert not any(ATTENDEE_QUESTION_BODY in (body or "") for _kind, body, _x in _WireClient.sends)
+    conversation = await _conversation(db, tenant)
+    assert conversation.flow_state == FlowState.SERVICE_CATALOG
+    assert conversation.flow_step == STEP_AWAITING_SERVICE
+    assert conversation.flow_attendee_name == ATTENDEE_SELF
+
+
+async def test_hand_back_still_asks_pra_quem_when_it_was_never_answered(wired) -> None:
+    """The control: a booking started from free chat (no answer yet) IS asked."""
+    from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
+
+    db = wired
+    tenant = await _seed_tenant(db)
+    await _onboard(tenant)
+    conversation = await _conversation(db, tenant)
+    reply = tasks._ReplyContext(
+        channel=CHANNEL_WHATSAPP,
+        conversation_id=conversation.id,
+        patient_ref=WA_ID,
+        inbound_body="quero marcar uma consulta",
+        tenant_id=tenant.id,
+    )
+    await tasks._handle_set_booking_draft(
+        reply, BOOKING_DRAFT_SENTINEL_PREFIX + "{}", tenant, None, [], WA_ID, waba_token="t"
+    )
+    conversation = await _conversation(db, tenant)
+    assert conversation.flow_step == STEP_AWAITING_ATTENDEE_CHOICE
+
+
+async def test_chat_booking_consumes_the_pra_mim_marker_and_stores_no_empty_name(
+    wired, monkeypatch
+) -> None:
+    """The marker ("") is consumed by a chat booking and never lands on the row."""
+    from secretaria.ai import tools
+    from secretaria.core import database
+
+    db = wired
+    monkeypatch.setattr(database, "async_session_factory", db)
+    tenant = await _seed_tenant(db)
+    await _onboard(tenant)
+    conversation = await _conversation(db, tenant)
+    async with db() as session:
+        async with session.begin():
+            row = await session.get(Conversation, conversation.id)
+            row.flow_attendee_name = ATTENDEE_SELF
+    tenant_token = tools._tenant_id_ctx.set(tenant.id)
+    conv_token = tools._conversation_id_ctx.set(conversation.id)
+    try:
+        start = datetime(2026, 6, 15, 11, 0, tzinfo=UTC)
+        await tools._persist_appointment(
+            {"id": "evt-self"},
+            start,
+            start + timedelta(minutes=40),
+            "Primeira Consulta",
+            attendee_name=await tools._conversation_attendee_name(),
+        )
+    finally:
+        tools._conversation_id_ctx.reset(conv_token)
+        tools._tenant_id_ctx.reset(tenant_token)
+    async with db() as session:
+        appt = await session.scalar(
+            select(Appointment).where(Appointment.google_event_id == "evt-self")
+        )
+        conv = await session.get(Conversation, conversation.id)
+    assert appt.attendee_name is None
+    assert conv.flow_attendee_name is None
 
 
 async def test_stale_booking_with_an_attendee_expires(wired) -> None:
@@ -792,3 +943,120 @@ async def test_stale_booking_with_an_attendee_expires(wired) -> None:
     conversation = await _conversation(db, tenant)
     assert conversation.flow_attendee_name is None
     assert conversation.flow_step != "awaiting_service_confirm"
+
+
+# --------------------------------------------------------------------------
+# 5. TASK-030 P2: the AI draft parked on the conversation (flow_draft)
+# --------------------------------------------------------------------------
+
+
+async def _park_with_draft(db, tenant, *, step, attendee=None):
+    conversation = await _conversation(db, tenant)
+    async with db() as session:
+        async with session.begin():
+            row = await session.get(Conversation, conversation.id)
+            row.flow_state = FlowState.SERVICE_CATALOG
+            row.flow_step = step
+            row.flow_selected_type = ATTENDEE_NEXT_BOOK
+            row.flow_attendee_name = attendee
+            row.flow_draft = draft_record(
+                BookingDraft(service="Primeira Consulta"), saved_at=datetime.now(UTC)
+            )
+    return conversation
+
+
+async def test_worker_apply_writes_and_clears_the_draft(wired) -> None:
+    db = wired
+    tenant = await _seed_tenant(db)
+    await _onboard(tenant)
+    conversation = await _conversation(db, tenant)
+    reply = tasks._ReplyContext(
+        channel=CHANNEL_WHATSAPP,
+        conversation_id=conversation.id,
+        patient_ref=WA_ID,
+        inbound_body="x",
+        tenant_id=tenant.id,
+    )
+    record = draft_record(BookingDraft(service="Primeira Consulta"), saved_at=datetime.now(UTC))
+    parked = FlowRouterResult(
+        action="reply",
+        bubbles=[TextBubble(body="ok")],
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=STEP_AWAITING_ATTENDEE_CHOICE,
+        flow_draft=record,
+    )
+    await tasks._apply_flow_result(reply, parked, WA_ID, redis=None, tenant=tenant, waba_token="t")
+    assert (await _conversation(db, tenant)).flow_draft == record
+
+    moved_on = FlowRouterResult(
+        action="reply",
+        bubbles=[TextBubble(body="ok")],
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=STEP_AWAITING_SERVICE,
+    )
+    await tasks._apply_flow_result(
+        reply, moved_on, WA_ID, redis=None, tenant=tenant, waba_token="t"
+    )
+    assert (await _conversation(db, tenant)).flow_draft is None
+
+
+async def test_worker_snapshot_carries_the_draft_into_the_name_step(wired) -> None:
+    db = wired
+    tenant = await _seed_tenant(db)
+    await _onboard(tenant)
+    await _park_with_draft(db, tenant, step=STEP_AWAITING_ATTENDEE_CHOICE)
+
+    await _wa_turn(tenant, LABEL_ATTENDEE_OTHER)
+
+    conversation = await _conversation(db, tenant)
+    assert conversation.flow_step == STEP_AWAITING_ATTENDEE_NAME
+    assert conversation.flow_draft["t"] == "Primeira Consulta"
+
+
+async def test_worker_attendee_floor_drops_the_draft(wired) -> None:
+    db = wired
+    tenant = await _seed_tenant(db)
+    await _onboard(tenant)
+    conversation = await _park_with_draft(
+        db, tenant, step=STEP_AWAITING_ATTENDEE_AUTH, attendee="Maria da Silva"
+    )
+    async with db() as session:
+        async with session.begin():
+            await session.execute(
+                update(Message)
+                .where(Message.conversation_id == conversation.id)
+                .values(created_at=datetime.now(UTC) - timedelta(days=3))
+            )
+    # Only the inbound leg: the in-place expiry is what is under test, not the reply.
+    await tasks._persist_inbound_message(
+        phone_number_id=tenant.phone_number_id,
+        wa_id=WA_ID,
+        patient_name="Perfil",
+        wam_id=f"wamid.in.{next(_wam_seq)}",
+        body="Maria bom dia",
+    )
+    conversation = await _conversation(db, tenant)
+    assert conversation.flow_draft is None
+    assert conversation.flow_attendee_name is None
+
+
+async def test_worker_no_to_quer_continuar_drops_the_draft(wired) -> None:
+    db = wired
+    tenant = await _seed_tenant(db)
+    await _onboard(tenant)
+    conversation = await _park_with_draft(db, tenant, step=STEP_AWAITING_ATTENDEE_CHOICE)
+    async with db() as session:
+        async with session.begin():
+            row = await session.get(Conversation, conversation.id)
+            row.reactivation_origin = FlowState.SERVICE_CATALOG.value
+
+    await tasks._persist_inbound_message(
+        phone_number_id=tenant.phone_number_id,
+        wa_id=WA_ID,
+        patient_name="Perfil",
+        wam_id=f"wamid.in.{next(_wam_seq)}",
+        body="Não",
+    )
+    conversation = await _conversation(db, tenant)
+    assert conversation.reactivation_origin is None
+    assert conversation.flow_draft is None

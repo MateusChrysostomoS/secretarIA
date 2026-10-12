@@ -31,6 +31,42 @@ from secretaria.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+# What the clinic's own calendar shows the owner: a popup a day and an hour
+# before, and an e-mail a day before. The PATIENT is not the owner of this
+# calendar — they get the Google invite (Task 7) and their own reminder defaults.
+DEFAULT_EVENT_REMINDERS: list[dict] = [
+    {"method": "popup", "minutes": 24 * 60},
+    {"method": "popup", "minutes": 60},
+    {"method": "email", "minutes": 24 * 60},
+]
+
+_CHANNEL_LABELS = {"brain_message": "Portal", "whatsapp": "WhatsApp"}
+
+
+def build_event_description(
+    *,
+    service: str | None,
+    insurance: str | None,
+    channel: str | None = None,
+    attendee_name: str | None = None,
+) -> str:
+    """The event's description: what a doctor needs to recognise the booking.
+
+    The convênio is ALWAYS stated (or "não informado"): the clinic asked for it to
+    be explicit in the event. No phone, no e-mail, no clinical text — the summary
+    already carries the name, and this lands on a calendar other people may see.
+    """
+    lines: list[str] = []
+    if service:
+        lines.append(f"Serviço: {service}")
+    lines.append(f"Convênio: {insurance}" if insurance else "Convênio: não informado")
+    if attendee_name:
+        lines.append(f"Consulta para: {attendee_name}")
+    label = _CHANNEL_LABELS.get(channel or "")
+    if label:
+        lines.append(f"Agendado pelo: {label}")
+    return "\n".join(lines)
+
 SCOPES = [
     "https://www.googleapis.com/auth/calendar.events",
     # Covers calendars.insert AND full CRUD on events in calendars the app
@@ -277,6 +313,20 @@ class CalendarService:
         self._business_hours: dict = {}
         self._default_slot_minutes: int = 30
 
+    def references_same_calendar(self, other: object) -> bool:
+        """Identify the physical agenda without exporting credentials.
+
+        Named calendar ids are global. The alias 'primary' refers to the connected
+        account, so matching aliases alone must never merge two doctors' calendars.
+        """
+        if not isinstance(other, CalendarService) or self._calendar_id != other._calendar_id:
+            return False
+        if self._calendar_id != "primary":
+            return True
+        own = self._refresh_token_override or self._settings.GOOGLE_REFRESH_TOKEN
+        theirs = other._refresh_token_override or other._settings.GOOGLE_REFRESH_TOKEN
+        return bool(own and own == theirs)
+
     @classmethod
     def from_tenant_config(cls, config: "TenantRuntimeConfig") -> "CalendarService":
         """Build a CalendarService using per-tenant credentials.
@@ -385,6 +435,16 @@ class CalendarService:
     def tzinfo(self) -> ZoneInfo:
         """The clinic-local timezone this service interprets naive times in."""
         return self._tz
+
+    @property
+    def default_slot_minutes(self) -> int:
+        """The slot length this agenda walks when no service is named.
+
+        The tenant's default, or - for a professional's agenda - the first active service's
+        duration (`for_professional`). The AI availability tool reads it when the model names
+        no service (ai/availability_tool.py).
+        """
+        return self._default_slot_minutes
 
     def _ensure_tz(self, dt: datetime) -> datetime:
         return dt if dt.tzinfo else dt.replace(tzinfo=self._tz)
@@ -638,6 +698,7 @@ class CalendarService:
         end: datetime,
         summary: str,
         description: str = "",
+        reminders: list[dict] | None = None,
         *,
         event_id: str | None = None,
     ) -> dict:
@@ -655,6 +716,10 @@ class CalendarService:
         body = {
             "summary": summary,
             "description": description,
+            "reminders": {
+                "useDefault": False,
+                "overrides": DEFAULT_EVENT_REMINDERS if reminders is None else reminders,
+            },
             "start": {"dateTime": start_dt.isoformat(), "timeZone": tz_name},
             "end": {"dateTime": end_dt.isoformat(), "timeZone": tz_name},
         }
@@ -692,7 +757,7 @@ class CalendarService:
                 raise CalendarUnavailableError("Google Calendar unreachable") from exc
 
         event = await asyncio.to_thread(_insert)
-        logger.info("calendar_event_created", event_id=event.get("id"), summary=summary)
+        logger.info("calendar_event_created", event_id=event.get("id"))
         return event
 
     async def update_event(
@@ -702,13 +767,35 @@ class CalendarService:
         end: datetime,
     ) -> dict:
         """Move an existing event to a new [start, end) window. Returns the updated event."""
-        start_dt = self._ensure_tz(start)
-        end_dt = self._ensure_tz(end)
+        return await self._patch_event(event_id, self._window_body(start, end))
+
+    async def update_event_details(
+        self,
+        event_id: str,
+        start: datetime,
+        end: datetime,
+        summary: str,
+        description: str = "",
+    ) -> dict:
+        """Move an event AND rewrite its title and description (TASK-032 R6, "Alterar Dados").
+
+        The same single patch `update_event` does, plus the two fields that carry the
+        service, the convênio and the attendee - so editing any of them leaves the doctor's
+        agenda telling the truth.
+        """
+        body = self._window_body(start, end)
+        body["summary"] = summary
+        body["description"] = description
+        return await self._patch_event(event_id, body)
+
+    def _window_body(self, start: datetime, end: datetime) -> dict:
         tz_name = str(self._tz)
-        body = {
-            "start": {"dateTime": start_dt.isoformat(), "timeZone": tz_name},
-            "end": {"dateTime": end_dt.isoformat(), "timeZone": tz_name},
+        return {
+            "start": {"dateTime": self._ensure_tz(start).isoformat(), "timeZone": tz_name},
+            "end": {"dateTime": self._ensure_tz(end).isoformat(), "timeZone": tz_name},
         }
+
+    async def _patch_event(self, event_id: str, body: dict) -> dict:
         calendar_id = self._calendar_id
 
         def _patch() -> dict:
@@ -730,6 +817,69 @@ class CalendarService:
         event = await asyncio.to_thread(_patch)
         logger.info("calendar_event_updated", event_id=event_id)
         return event
+
+    async def is_slot_free(
+        self, start: datetime, end: datetime, *, ignore_event_id: str | None = None
+    ) -> bool:
+        """Whether [start, end) is bookable: in the future, inside the hours, nothing overlapping.
+
+        Unlike `list_free_slots` this does NOT require `start` to sit on the service-length
+        grid: an existing appointment keeps its time when only its doctor or service changes,
+        and that time may be off the new grid. `ignore_event_id` names the event being
+        edited, so an appointment never "conflicts" with itself. Raises
+        `CalendarUnavailableError` like the other reads.
+        """
+        start_dt, end_dt = self._ensure_tz(start), self._ensure_tz(end)
+        if start_dt <= datetime.now(self._tz):
+            return False
+        windows = self._windows_for_day(start_dt, 8, 18)
+        if not any(
+            window_start <= start_dt and end_dt <= window_end
+            for window_start, window_end in windows
+        ):
+            return False
+        events = await self.check_availability(start_dt, end_dt)
+        busy = self._busy_ranges([ev for ev in events if ev.get("id") != ignore_event_id])
+        return not any(busy_start < end_dt and busy_end > start_dt for busy_start, busy_end in busy)
+
+    async def add_attendee(self, event_id: str, email: str) -> dict:
+        """Invite `email` to an existing event; Google notifies them. Idempotent.
+
+        Reads the current attendee list first (a PATCH replaces the list, so
+        sending only the new one would drop anyone already invited) and does
+        nothing when the address is already there.
+        """
+        calendar_id = self._calendar_id
+
+        def _patch() -> dict:
+            try:
+                client = self._client()
+                current = (
+                    client.events().get(calendarId=calendar_id, eventId=event_id).execute()
+                )
+                attendees = list(current.get("attendees") or [])
+                if any((a.get("email") or "").lower() == email.lower() for a in attendees):
+                    return current
+                attendees.append({"email": email})
+                return (
+                    client.events()
+                    .patch(
+                        calendarId=calendar_id,
+                        eventId=event_id,
+                        body={"attendees": attendees},
+                        sendUpdates="all",
+                    )
+                    .execute()
+                )
+            except HttpError as exc:
+                logger.error("calendar_add_attendee_http_error", error_type=type(exc).__name__)
+                _raise_if_unavailable(exc)
+                raise
+            except _NETWORK_ERRORS as exc:
+                logger.error("calendar_add_attendee_network_error", error_type=type(exc).__name__)
+                raise CalendarUnavailableError("Google Calendar unreachable") from exc
+
+        return await asyncio.to_thread(_patch)
 
     async def cancel_event(self, event_id: str) -> None:
         """Delete an event by id. 404/410 are treated as success (idempotent)."""

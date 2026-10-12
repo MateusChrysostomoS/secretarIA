@@ -37,6 +37,11 @@ Deposit-aware variant: an appointment with a PAID Pix deposit
 see `_send_deposit_aware_reminder`. The buttons carry `"<action>|<id>"`
 ids/payloads, decoded on reply by workers/tasks.py's
 `extract_action_button`/`_handle_action_button` (schemas/webhook.py).
+
+TASK-032 R2: clinics with `Tenant.reminders_v2_enabled` are skipped here and
+reminded by workers/reminder_engine.py instead (three reminders, buttons,
+retries, Portal by e-mail). Patients without a WhatsApp number (Portal) are
+skipped too - this job never reached them. Everything else is unchanged.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -323,6 +328,13 @@ async def _process_lead_window(
                     Appointment.start_at.is_not(None),
                     Appointment.start_at > window_start,
                     Appointment.start_at <= window_end,
+                    # TASK-032 R2: a clinic on the new engine
+                    # (workers/reminder_engine.py) is reminded there, never twice.
+                    Tenant.reminders_v2_enabled.is_not(True),
+                    # A Portal patient has no WhatsApp number: this job cannot
+                    # reach them, and claiming the ledger first made every sweep
+                    # fail on the same row again.
+                    Patient.wa_id.is_not(None),
                 )
             )
         ).all()

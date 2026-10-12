@@ -30,6 +30,7 @@ from secretaria.services.payments import booking_charge, deposit_gate, deposit_l
 from secretaria.services.payments.deposit_gate import DepositQuote
 from secretaria.services.payments.provider import ChargeState, PaymentStatus, ProviderError
 from secretaria.workers import tasks
+from tests._patching import workers_ns
 from tests.before_support import (
     SLOT_END,
     SLOT_START,
@@ -49,9 +50,9 @@ QUOTE = DepositQuote(
 @pytest_asyncio.fixture
 async def db(monkeypatch):
     engine, maker = await make_sessionmaker()
-    for module in (tasks, holds, booking_charge):
+    for module in (workers_ns, holds, booking_charge):
         monkeypatch.setattr(module, "async_session_factory", maker)
-    monkeypatch.setattr(tasks, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
+    monkeypatch.setattr(workers_ns, "get_settings", lambda: Settings(BOT_ALLOWLIST_WA_IDS=""))
     yield maker
     await engine.dispose()
 
@@ -93,7 +94,7 @@ def env(monkeypatch) -> Env:
     monkeypatch.setattr(deposit_gate, "get_entitlements", entitlements)
     monkeypatch.setattr(email, "send_payment_alert", send_email)
     monkeypatch.setitem(registry._PROVIDERS, "asaas", e.provider)
-    monkeypatch.setattr(tasks, "_reply_sender", lambda reply, tenant, token: e.sender)
+    monkeypatch.setattr(workers_ns, "_reply_sender", lambda reply, tenant, token: e.sender)
     return e
 
 
