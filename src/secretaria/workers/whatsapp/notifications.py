@@ -13,7 +13,8 @@ from secretaria.models import (
     Patient,
     Tenant,
 )
-from secretaria.services import cancellation_notice
+from secretaria.models.deposit_release_offer import SILENT_DECISIONS
+from secretaria.services import cancellation_notice, release_offer
 from secretaria.services.email import (
     send_cancellation_escalation_alert,
 )
@@ -137,6 +138,14 @@ async def send_cancellation_notice(
                 )
         to = to or appointment.phone
         waba_token = await get_waba_token(session, tenant.id)
+        # TASK-052: a slot the clinic released with a PAID deposit carries the patient's choice and
+        # `extra_notice` IS the whole text. Read here, by the job, so the API's queued arguments
+        # never changed (old worker = old card).
+        offer = await release_offer.find_offer(
+            session, tenant_id=tenant.id, released_appointment_id=appointment.id
+        )
+        offer_decision = offer.decision if offer is not None and offer.deposit_paid else None
+        offer_keep = offer is not None and release_offer.keep_allowed(offer)
 
     if not to:
         logger.info(
@@ -157,6 +166,12 @@ async def send_cancellation_notice(
         )
         return
 
+    if offer_decision is not None and offer_decision not in SILENT_DECISIONS:
+        logger.info(
+            "cancellation_notice_skipped", reason="offer_answered", appointment_id=appointment_id
+        )
+        return
+
     if not await _claim_event(key):
         logger.info(
             "cancellation_notice_skipped", reason="already_sent", appointment_id=appointment_id
@@ -170,7 +185,21 @@ async def send_cancellation_notice(
     client = WhatsAppClient.for_tenant(tenant, waba_token)
     settings = get_settings()
     try:
-        if inside:
+        if offer_decision is not None and extra_notice:
+            choices = release_offer.offer_buttons(appointment_id, keep=offer_keep)
+            if inside:
+                await client.send_buttons(to=to, body=extra_notice, buttons=choices)
+            else:
+                # PENDÊNCIA META: RELEASE_OFFER_TEMPLATE_NAME is not approved yet (config.py);
+                # until it is, this send fails and is retried/escalated like any other.
+                await client.send_template(
+                    to=to,
+                    template=settings.RELEASE_OFFER_TEMPLATE_NAME,
+                    lang=cancellation_notice.meta_language_code(tenant.language),
+                    variables=[release_offer.template_text(extra_notice)],
+                    button_payloads=[button_id for button_id, _label in choices],
+                )
+        elif inside:
             await client.send_buttons(
                 to=to,
                 body=cancellation_notice.join_blocks(
