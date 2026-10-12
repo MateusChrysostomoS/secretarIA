@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Quando a clínica libera uma consulta com sinal Pix já pago, o paciente escolhe **Manter horário** (um PEDIDO à clínica, que aceita ou recusa em 24 h), **Remarcar** (a qualquer momento; leva o sinal se a clínica ainda não marcou devolvido) ou **Cancelar** (avisa a clínica na hora com o passo a passo do Asaas); o silêncio avisa a clínica em B e vira "Cancelado por falta de resposta" em T + 24 h; quando a clínica marca devolvido o paciente responde Recebido / Não recebido — e a TASK-052 expõe tudo isso, com o escopo de agenda de cada papel, para a aba da TASK-054. O sistema nunca devolve dinheiro (D15).
+**Goal:** Quando a clínica libera uma consulta com sinal Pix já pago, o paciente escolhe **Manter horário** (um PEDIDO à clínica, que aceita ou recusa em 24 h), **Remarcar** (a qualquer momento; ao CONFIRMAR, lê a cobrança no Asaas: paga e sem estorno → leva o sinal; estornada/em estorno, clínica já marcou devolvido ou Asaas sem resposta → sinal novo) ou **Cancelar** (avisa a clínica na hora com o passo a passo do Asaas); o silêncio avisa a clínica em B e vira "Cancelado por falta de resposta" em T + 24 h; quando a clínica marca devolvido o paciente responde Recebido / Não recebido — e a TASK-052 expõe tudo isso, com o escopo de agenda de cada papel, para a aba da TASK-054. O sistema nunca devolve dinheiro (D15).
 
-**Architecture:** Duas tabelas aditivas — `deposit_release_offers` (uma por consulta liberada com sinal; eixos `decision` e `refund_status`; cada transição um `UPDATE ... WHERE` guardado) e `deposit_release_emails` (um envio por linha, reivindicado antes de enviar). Regras em `services/` (`release_deadlines`, `release_offer`, `release_keep`, `release_offer_dispatch`); toques por `workers/shared/actions.py::_handle_action_button` via `workers/shared/release_offer_actions.py`; B, E, K e envios na varredura de pagamentos; transferência na transação que cria a consulta nova; quatro rotas novas no hub com o escopo da agenda.
+**Architecture:** Duas tabelas aditivas — `deposit_release_offers` (uma por consulta liberada com sinal; eixos `decision` e `refund_status`; cada transição um `UPDATE ... WHERE` guardado) e `deposit_release_emails` (um envio por linha, reivindicado antes de enviar). Regras em `services/` (`release_deadlines`, `release_offer`, `release_keep`, `release_offer_dispatch`); toques por `workers/shared/actions.py::_handle_action_button` via `workers/shared/release_offer_actions.py`; B, E, K e envios na varredura de pagamentos; checagem de leitura no Asaas na confirmação do Remarcar (`release_carry_check`, fora de transação, com teto de espera) e transferência na transação que cria a consulta nova; quatro rotas novas no hub com o escopo da agenda.
 
 **Tech Stack:** Python 3.12, FastAPI, SQLAlchemy async, Alembic, arq, pytest (`asyncio_mode = "auto"`, SQLite em memória; Postgres real opcional por `PAYMENTS_TEST_PG_URL`), ruff, SMTP. Front: Next.js/TypeScript/vitest (só um texto).
 
@@ -32,17 +32,19 @@
 | 6 | `payment_attention_items.reason` / `resolve_item` | — | + `released_refund_due`; resolver o item atualiza a oferta |
 | 7 | Hub NOVO (TASK-054) | — | `GET /tenants/me/release-offers`, `POST .../{id}/refunded`, `POST .../{id}/keep/accept`, `POST .../{id}/keep/refuse` — todos os papéis, escopo da agenda |
 | 8 | brain-api (PENDENTE — Task 16) | — | leitura futura de `GET /internal/tenants/{id}/staff-roles` → `{"roles": [...]}`; hoje nada é chamado e B usa o horário do médico |
-| 9 | Banco | cabeça `e2b7c4a9d1f5` | + `b6d2e8f4a1c3` (só tabelas novas) |
+| 9 | Banco | cabeça `e2b7c4a9d1f5` | + `b6d2e8f4a1c3` (só tabelas novas; a oferta guarda `carry_check`, `carry_checked_at`, `deposit_reused_at`) |
+| 9a | `ChargeState` (`services/payments/provider.py`) | `status`, valor, referência, datas | + `refunds` (`absent`/`none`/`some`/`unreadable`, aditivo) lido por `AsaasProvider.get_charge` |
+| 9b | Hub `POST .../{id}/refunded` e `ReleaseOfferOut` | — | + 409 `deposit_reused`; + `deposit_reused`, `carry_check`, `state_note` ("Sinal reaproveitado — não devolver") |
 | 10 | `config.py` | — | `RELEASE_OFFER_TEMPLATE_NAME`, `REFUND_CHECK_TEMPLATE_NAME` (PENDÊNCIA META) |
-| 11 | Avisos | — | 7 tipos à clínica (e-mail com link do console); ao paciente: mensagens na conversa; e-mail só no Portal |
+| 11 | Avisos | — | 8 tipos à clínica (e-mail com link do console; o 8º é `clinic_carry_refused` "DEVOLVA o sinal anterior"); ao paciente: mensagens na conversa; e-mail só no Portal |
 | 12 | Brain-Message-Frontend `lib/agenda/release.ts` | "pode fazer a clínica reter o valor pago" | manter (a clínica decide) / remarcar / cancelar; avisos para devolver |
 
 ## Global Constraints
 
-- **Dinheiro (D15):** o sistema NUNCA estorna nem chama o provedor; "devolver" = UM item `released_refund_due` por sinal + avisos à clínica, que estorna no Asaas.
+- **Dinheiro (D15):** o sistema NUNCA estorna; "devolver" = UM item `released_refund_due` por sinal + avisos à clínica, que estorna no Asaas. A ÚNICA chamada ao provedor é a LEITURA da cobrança na confirmação do Remarcar (`get_charge`, chave da própria clínica).
 - **Instantes:** T; S; F = fechamento − 30 min no dia de T (por enquanto o horário do MÉDICO da consulta; sem médico, o da clínica — a regra "clínica com secretária usa o horário da clínica" é a Task 16, pendente); B = `min(T + 6 h, F)` se F > T, senão T + 6 h; E = T + 24 h; K = toque em Manter + 24 h. Nada sai antes de T.
 - **Manter** só pede: T..S (também depois de B), devolução não marcada; abre `keep_requested` até K; pausa B/E e descarta os avisos de devolução que vencerem; aceite (só com horário livre) recria e desfaz a devolução; recusa ou K → devolução devida, aviso novo + lembrete.
-- **Remarcar** a qualquer momento enquanto a oferta não está encerrada (`kept`, `rebooked`, `no_answer_cancelled`, `not_offered` encerram): leva o sinal se a devolução não foi marcada; ao confirmar, desfaz a devolução e manda `clinic_rebooked_deposit`.
+- **Remarcar** a qualquer momento enquanto a oferta não está encerrada (`kept`, `rebooked`, `no_answer_cancelled`, `not_offered` encerram). Devolução já marcada → sinal novo, sem consultar o Asaas. Senão, ao CONFIRMAR, lê a cobrança no Asaas (fora de transação, ≤ `CHECK_TIMEOUT_SECONDS`, gravado UMA vez): paga e sem estorno → leva o sinal, desfaz a devolução, descarta os avisos, TRAVA "marcar devolvido" (409 `deposit_reused`) e manda `clinic_rebooked_deposit`; estornada/em estorno → sinal novo; erro/timeout/resposta inesperada → **FAIL-SAFE = sinal novo** (o paciente pode pagar duas vezes; o sinal antigo vira devolução devida + `clinic_carry_refused`). Risco residual aceito: segundos entre a leitura e um estorno da clínica.
 - **Cancelar** sempre avisa a clínica na hora (exceto devolução já marcada). **E** sem decisão final → `no_answer_cancelled` (terminal, não reabre).
 - **Lembrete de E**: não sai só com devolução `received`/`clinic_decided` ou decisão `keep_requested`/`kept`/`rebooked`.
 - **Escopo:** todos os papéis; lista e ações com `get_agenda_viewer` + `mine` (regra de `api/hub/calendar.py::list_events`); fora do escopo = 404.
@@ -61,15 +63,16 @@
 2. **Um aviso sai duas vezes** (retry, duas instâncias, cliques/marcações repetidos). → Task 5: `test_each_scheduled_email_goes_out_once_even_dispatched_twice`; Task 9: `test_manter_twice_tells_the_clinic_once`; Task 11: `test_marking_refunded_is_idempotent_and_asks_the_patient_once`; Task 13: `test_concurrent_dispatchers_send_one_email`.
 3. **Aviso de devolução enquanto a clínica decide "Manter", ou lembrete de E errado.** → Task 5: `test_manter_tells_the_clinic_with_the_link_and_pauses_the_refund_notices`, `test_the_day_reminder_skips_only_when_marked_and_received`, `test_the_day_reminder_still_goes_when_marked_but_unanswered`.
 4. **Alguém age fora do seu escopo** (médico na oferta de outro; outra clínica). → Task 11: `test_scope_follows_the_agenda`, `test_another_clinics_offer_is_a_404_and_a_bad_body_is_never_echoed`; Task 9: `test_another_patients_tap_is_an_unknown_appointment_and_changes_nothing`.
+5a. **Sinal reaproveitado que já tinha sido devolvido, ou Asaas sem resposta tratado como "pago".** → Task 10: `test_asaas_says_refunded_charges_a_new_pix` (estornada / em estorno / estorno listado), `test_the_asaas_client_maps_refund_states_and_the_refund_list`, `test_the_clinic_marked_refunded_without_asaas_refunding_charges_again`, `test_asaas_down_or_unreadable_charges_again_and_the_old_deposit_is_owed` (8 casos), `test_two_confirm_clicks_reuse_the_deposit_once`, `test_marking_refunded_after_the_reuse_is_refused`, `test_the_asaas_check_uses_only_this_clinics_key_and_charge`, `test_a_deposit_of_another_clinic_is_never_read_with_this_clinics_key`; Task 11: `test_marking_a_reused_deposit_is_409_and_the_list_says_do_not_refund`.
 5. **A oferta reabre depois de T + 24 h, ou "aceitar manter" põe o paciente num horário ocupado.** → Task 9: `test_any_tap_after_e_is_answered_and_reopens_nothing`; Task 4: `test_a_consultation_the_clinic_booked_there_means_taken`, `test_another_conversations_hold_means_taken`.
 
 ---
 
 ## File Structure
 
-**Criar (secretarIA):** `src/secretaria/models/deposit_release_offer.py`; `migrations/versions/b6d2e8f4a1c3_deposit_release_offers.py`; `src/secretaria/services/{release_deadlines,release_offer,release_keep,release_offer_dispatch}.py`; `src/secretaria/workers/shared/release_offer_actions.py`; `src/secretaria/api/hub/release_offers.py`; `src/secretaria/schemas/release_offers.py`; testes `tests/release_offer_support.py`, `tests/test_deposit_release_offer_migration.py`, `tests/test_release_deadlines.py`, `tests/test_release_offer.py`, `tests/test_release_keep.py`, `tests/test_release_offer_dispatch.py`, `tests/test_release_offer_buttons.py`, `tests/test_release_offer_carry_over.py`, `tests/test_release_offers_hub.py`, `tests/test_release_offer_postgres.py`; `docs/CHECKPOINT_task052_liberar_sinal_pago.md`.
+**Criar (secretarIA):** `src/secretaria/models/deposit_release_offer.py`; `migrations/versions/b6d2e8f4a1c3_deposit_release_offers.py`; `src/secretaria/services/{release_deadlines,release_offer,release_keep,release_offer_dispatch,release_carry_check}.py`; `src/secretaria/workers/shared/release_offer_actions.py`; `src/secretaria/api/hub/release_offers.py`; `src/secretaria/schemas/release_offers.py`; testes `tests/release_offer_support.py`, `tests/test_deposit_release_offer_migration.py`, `tests/test_release_deadlines.py`, `tests/test_release_offer.py`, `tests/test_release_keep.py`, `tests/test_release_offer_dispatch.py`, `tests/test_release_offer_buttons.py`, `tests/test_release_offer_carry_over.py`, `tests/test_release_carry_check.py`, `tests/test_release_offers_hub.py`, `tests/test_release_offer_postgres.py`; `docs/CHECKPOINT_task052_liberar_sinal_pago.md`.
 
-**Modificar (secretarIA):** `src/secretaria/models/{__init__,payment_attention_item}.py`; `src/secretaria/config.py`; `src/secretaria/main.py`; `src/secretaria/services/email.py`; `src/secretaria/services/payments/attention_view.py`; `src/secretaria/api/hub/calendar.py`; `src/secretaria/services/appointment_release.py`; `src/secretaria/workers/whatsapp/notifications.py`; `src/secretaria/schemas/webhook.py`; `src/secretaria/workers/portal/{inbound,open}.py`; `src/secretaria/workers/shared/actions.py`; `src/secretaria/services/{flow_router,availability,booking_hold}.py`; `src/secretaria/workers/shared/{flow_runner,booking_hold}.py`; `src/secretaria/workers/payments_cron.py`; testes `tests/{test_deposit_before_migration,test_payment_attention,test_hub_release,test_cancellation_notice,test_availability,test_before_booking_flow,test_payment_cron_jobs}.py`; `docs/LEMBRETES_MODELOS_META.md`; `CLAUDE.md` (1 linha).
+**Modificar (secretarIA):** `src/secretaria/models/{__init__,payment_attention_item}.py`; `src/secretaria/config.py`; `src/secretaria/main.py`; `src/secretaria/services/email.py`; `src/secretaria/services/payments/attention_view.py`; `src/secretaria/services/payments/{provider,asaas_provider}.py` (`ChargeState.refunds`); `src/secretaria/api/hub/calendar.py`; `src/secretaria/services/appointment_release.py`; `src/secretaria/workers/whatsapp/notifications.py`; `src/secretaria/schemas/webhook.py`; `src/secretaria/workers/portal/{inbound,open}.py`; `src/secretaria/workers/shared/actions.py`; `src/secretaria/services/{flow_router,availability,booking_hold}.py`; `src/secretaria/workers/shared/{flow_runner,booking_hold}.py`; `src/secretaria/workers/payments_cron.py`; testes `tests/{test_deposit_before_migration,test_payment_attention,test_hub_release,test_cancellation_notice,test_availability,test_before_booking_flow,test_payment_cron_jobs}.py`; `docs/LEMBRETES_MODELOS_META.md`; `CLAUDE.md` (1 linha).
 
 **Brain-Message-Frontend (Task 14):** `lib/agenda/release.ts`, `lib/agenda/__tests__/release.test.ts`.
 
@@ -129,8 +132,8 @@ Expected: 0 failed (medido no plano anterior sobre `3650e10`: **6103 passed, 79 
 - Test: `tests/test_deposit_release_offer_migration.py` (novo)
 
 **Interfaces:**
-- Produces: `DepositReleaseOffer` (colunas `id, tenant_id, deposit_id, released_appointment_id (UNIQUE), patient_id, conversation_id, deposit_paid, decision, refund_status, refund_source, released_at, slot_start_at, decide_by_at, expires_at, paid_notice_allowed, first_contact_at, refund_due_at, refund_marked_at, patient_answered_at, last_reminder_at, after_start_card_at, keep_requested_at, keep_deadline_at, keep_outcome, keep_resolved_at, keep_resolved_by, new_appointment_id, closed_at, created_at`); `DepositReleaseEmail` (`id, tenant_id, offer_id, kind, seq, due_at, attempts, claimed_at, outcome, created_at`; UNIQUE `(offer_id, kind, seq)`). Nenhuma coluna em tabela existente ("tem secretária" virá do brain-api na Task 16, pendente; hoje B usa o horário do médico).
-- Constantes (em `models/deposit_release_offer.py`): decisões `DECISION_NONE="none"`, `DECISION_RESCHEDULING="rescheduling"`, `DECISION_KEEP_REQUESTED="keep_requested"`, `DECISION_KEPT="kept"`, `DECISION_KEEP_DECLINED="keep_declined"`, `DECISION_REBOOKED="rebooked"`, `DECISION_CANCELLED="cancelled"`, `DECISION_NO_ANSWER="no_answer_cancelled"`, `DECISION_NOT_OFFERED="not_offered"`; grupos `SILENT_DECISIONS=(none, rescheduling)` (B e E valem), `KEEP_FROM=(none, rescheduling)`, `RESCHEDULE_FROM=(none, rescheduling, cancelled, keep_requested, keep_declined)`, `CANCEL_FROM=(none, rescheduling, keep_requested, keep_declined)`; `KEEP_OUTCOME_ACCEPTED="accepted"`, `KEEP_OUTCOME_REFUSED="refused"`, `KEEP_OUTCOME_TIMEOUT="timeout"`; `REFUND_SOURCE_KEEP_REFUSED="keep_refused"`, `REFUND_SOURCE_KEEP_TIMEOUT="keep_timeout"`; `REFUND_CARRYABLE=(not_due, due)`; devolução `REFUND_NOT_DUE="not_due"`, `REFUND_DUE="due"`, `REFUND_MARKED="marked"`, `REFUND_RECEIVED="received"`, `REFUND_NOT_RECEIVED="not_received"`, `REFUND_CLINIC_DECIDED="clinic_decided"`, `REFUND_ANSWERABLE=(marked, not_received)`; `REFUND_SOURCE_PATIENT="patient"`, `REFUND_SOURCE_TIMEOUT="timeout"`; envios `EMAIL_REFUND_CANCEL="clinic_refund_cancel"`, `EMAIL_REFUND_NOANSWER="clinic_refund_noanswer"`, `EMAIL_REFUND_DAY="clinic_refund_day"`, `EMAIL_REFUND_REMINDER="clinic_refund_reminder"`, `EMAIL_KEEP_REQUEST="clinic_keep_request"`, `EMAIL_KEEP_DECLINED="clinic_keep_declined"`, `EMAIL_REBOOKED_DEPOSIT="clinic_rebooked_deposit"`, `EMAIL_PATIENT_KEEP_ACCEPTED="patient_keep_accepted"`, `EMAIL_PATIENT_KEEP_DECLINED="patient_keep_declined"`, `EMAIL_PATIENT_CHECK="patient_check"`, `REFUND_NOTICE_KINDS` (os 5 avisos de devolução); resultados `OUTCOME_SENDING="sending"`, `OUTCOME_SENT="sent"`, `OUTCOME_SKIPPED="skipped"`, `OUTCOME_NO_CONTACT="skipped_no_contact"`, `OUTCOME_GIVEN_UP="given_up"`. Revisão `b6d2e8f4a1c3` (desce de `e2b7c4a9d1f5`).
+- Produces: `DepositReleaseOffer` (colunas `id, tenant_id, deposit_id, released_appointment_id (UNIQUE), patient_id, conversation_id, deposit_paid, decision, refund_status, refund_source, released_at, slot_start_at, decide_by_at, expires_at, paid_notice_allowed, first_contact_at, refund_due_at, refund_marked_at, patient_answered_at, last_reminder_at, after_start_card_at, keep_requested_at, keep_deadline_at, keep_outcome, keep_resolved_at, keep_resolved_by, new_appointment_id, closed_at, carry_check, carry_checked_at, deposit_reused_at, created_at`); `DepositReleaseEmail` (`id, tenant_id, offer_id, kind, seq, due_at, attempts, claimed_at, outcome, created_at`; UNIQUE `(offer_id, kind, seq)`). Nenhuma coluna em tabela existente ("tem secretária" virá do brain-api na Task 16, pendente; hoje B usa o horário do médico).
+- Constantes (em `models/deposit_release_offer.py`): decisões `DECISION_NONE="none"`, `DECISION_RESCHEDULING="rescheduling"`, `DECISION_KEEP_REQUESTED="keep_requested"`, `DECISION_KEPT="kept"`, `DECISION_KEEP_DECLINED="keep_declined"`, `DECISION_REBOOKED="rebooked"`, `DECISION_CANCELLED="cancelled"`, `DECISION_NO_ANSWER="no_answer_cancelled"`, `DECISION_NOT_OFFERED="not_offered"`; grupos `SILENT_DECISIONS=(none, rescheduling)` (B e E valem), `KEEP_FROM=(none, rescheduling)`, `RESCHEDULE_FROM=(none, rescheduling, cancelled, keep_requested, keep_declined)`, `CANCEL_FROM=(none, rescheduling, keep_requested, keep_declined)`; `KEEP_OUTCOME_ACCEPTED="accepted"`, `KEEP_OUTCOME_REFUSED="refused"`, `KEEP_OUTCOME_TIMEOUT="timeout"`; `REFUND_SOURCE_KEEP_REFUSED="keep_refused"`, `REFUND_SOURCE_KEEP_TIMEOUT="keep_timeout"`, `REFUND_SOURCE_CARRY_REFUNDED="carry_refunded"`, `REFUND_SOURCE_CARRY_UNKNOWN="carry_unknown"`; checagem do Remarcar (dono 2026-10-12) `CARRY_CHECK_REUSABLE="reusable"`, `CARRY_CHECK_REFUNDED="refunded"`, `CARRY_CHECK_UNKNOWN="unknown"`, `CARRY_CHECKS`; `REFUND_CARRYABLE=(not_due, due)`; devolução `REFUND_NOT_DUE="not_due"`, `REFUND_DUE="due"`, `REFUND_MARKED="marked"`, `REFUND_RECEIVED="received"`, `REFUND_NOT_RECEIVED="not_received"`, `REFUND_CLINIC_DECIDED="clinic_decided"`, `REFUND_ANSWERABLE=(marked, not_received)`; `REFUND_SOURCE_PATIENT="patient"`, `REFUND_SOURCE_TIMEOUT="timeout"`; envios `EMAIL_REFUND_CANCEL="clinic_refund_cancel"`, `EMAIL_REFUND_NOANSWER="clinic_refund_noanswer"`, `EMAIL_REFUND_DAY="clinic_refund_day"`, `EMAIL_REFUND_REMINDER="clinic_refund_reminder"`, `EMAIL_KEEP_REQUEST="clinic_keep_request"`, `EMAIL_KEEP_DECLINED="clinic_keep_declined"`, `EMAIL_REBOOKED_DEPOSIT="clinic_rebooked_deposit"`, `EMAIL_CARRY_REFUSED="clinic_carry_refused"`, `EMAIL_PATIENT_KEEP_ACCEPTED="patient_keep_accepted"`, `EMAIL_PATIENT_KEEP_DECLINED="patient_keep_declined"`, `EMAIL_PATIENT_CHECK="patient_check"`, `REFUND_NOTICE_KINDS` (os 5 avisos de devolução); resultados `OUTCOME_SENDING="sending"`, `OUTCOME_SENT="sent"`, `OUTCOME_SKIPPED="skipped"`, `OUTCOME_NO_CONTACT="skipped_no_contact"`, `OUTCOME_GIVEN_UP="given_up"`. Revisão `b6d2e8f4a1c3` (desce de `e2b7c4a9d1f5`).
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -214,7 +217,7 @@ def test_the_models_declare_what_the_migration_creates():
         "first_contact_at", "refund_due_at", "refund_marked_at", "patient_answered_at",
         "last_reminder_at", "after_start_card_at", "keep_requested_at", "keep_deadline_at",
         "keep_outcome", "keep_resolved_at", "keep_resolved_by", "new_appointment_id", "closed_at",
-        "created_at",
+        "carry_check", "carry_checked_at", "deposit_reused_at", "created_at",
     }  # fmt: skip
     fk = {fk.parent.name: fk.ondelete for fk in offers.foreign_keys}
     assert fk["tenant_id"] == "CASCADE" and fk["released_appointment_id"] == "CASCADE"
@@ -339,6 +342,16 @@ REFUND_SOURCE_PATIENT = "patient"
 REFUND_SOURCE_TIMEOUT = "timeout"
 REFUND_SOURCE_KEEP_REFUSED = "keep_refused"
 REFUND_SOURCE_KEEP_TIMEOUT = "keep_timeout"
+# The provider check at the "Remarcar" confirmation said "do not reuse" (owner 2026-10-12).
+REFUND_SOURCE_CARRY_REFUNDED = "carry_refunded"  # Asaas: refunded / refund requested / in progress
+REFUND_SOURCE_CARRY_UNKNOWN = "carry_unknown"  # Asaas unreachable / error / unreadable: fail-safe
+
+# `DepositReleaseOffer.carry_check`: what the payment provider said when the patient confirmed the
+# booking of a "Remarcar" (recorded once; the first answer stands).
+CARRY_CHECK_REUSABLE = "reusable"  # paid, no refund: the new booking carries the deposit
+CARRY_CHECK_REFUNDED = "refunded"  # refunded or being refunded: a NEW Pix is charged
+CARRY_CHECK_UNKNOWN = "unknown"  # could not tell: FAIL-SAFE = a NEW Pix (patient may pay twice)
+CARRY_CHECKS = (CARRY_CHECK_REUSABLE, CARRY_CHECK_REFUNDED, CARRY_CHECK_UNKNOWN)
 
 # `DepositReleaseEmail.kind` (<= 24 characters).
 EMAIL_REFUND_CANCEL = "clinic_refund_cancel"  # at the "Cancelar" tap, always right away
@@ -348,6 +361,7 @@ EMAIL_REFUND_REMINDER = "clinic_refund_reminder"  # "Não recebido" (seq 1, 2, .
 EMAIL_KEEP_REQUEST = "clinic_keep_request"  # "Manter horário" tapped: the clinic decides
 EMAIL_KEEP_DECLINED = "clinic_keep_declined"  # refused / no decision in 24 h: refund due
 EMAIL_REBOOKED_DEPOSIT = "clinic_rebooked_deposit"  # "REMARCADA levando o sinal"
+EMAIL_CARRY_REFUSED = "clinic_carry_refused"  # new Pix charged at the Remarcar: refund the old one
 EMAIL_PATIENT_KEEP_ACCEPTED = "patient_keep_accepted"
 EMAIL_PATIENT_KEEP_DECLINED = "patient_keep_declined"
 EMAIL_PATIENT_CHECK = "patient_check"  # "Recebido / Não recebido", when the clinic marks refunded
@@ -435,6 +449,16 @@ class DepositReleaseOffer(Base):
         ForeignKey("appointments.id", ondelete="SET NULL"), nullable=True
     )
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # TASK-052 (owner 2026-10-12): the provider check made when the patient confirmed the
+    # booking of a "Remarcar" (CARRY_CHECK_*), and the instant the paid deposit was reused - from
+    # then on "marcar devolvido" is refused (409 `deposit_reused`).
+    carry_check: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    carry_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    deposit_reused_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -562,6 +586,9 @@ def upgrade() -> None:
             nullable=True,
         ),
         _ts("closed_at"),
+        sa.Column("carry_check", sa.String(16), nullable=True),
+        _ts("carry_checked_at"),
+        _ts("deposit_reused_at"),
         sa.Column(
             "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
         ),
@@ -869,9 +896,9 @@ git commit -m "feat(payments): decision deadlines of a released paid slot from t
 - Produces (`secretaria.services.release_offer`):
   - ações `ACTION_KEEP="relkeep"`, `ACTION_RESCHEDULE="relresched"`, `ACTION_CANCEL="relcancel"`, `ACTION_RECEIVED="relgot"`, `ACTION_NOT_RECEIVED="relmiss"`, `OFFER_ACTIONS`, `RELEASE_OFFER_ACTIONS`; `LABEL_*`; `DEPOSIT_OUTCOME_OFFERED="choice_offered"`; `REASON_CARRIED_OVER="carried_over"`; `REMINDER_INTERVAL`, `KEEP_WINDOW` (24 h); `REFUNDED_ACTION="refunded_in_provider_panel"`;
   - resultados: `KEEP_REQUESTED_NOW`, `KEEP_ALREADY_REQUESTED`, `KEEP_AFTER_START`, `KEEP_AFTER_REFUND`, `KEEP_DECLINED_BEFORE`, `KEEP_CLOSED`; `CANCEL_NOTIFIED`, `CANCEL_AFTER_REFUND`, `CANCEL_CLOSED`; `RESCHEDULE_CARRYING`, `RESCHEDULE_NEW_CHARGE`, `RESCHEDULE_NO_ANSWER`, `RESCHEDULE_CLOSED`;
-  - textos (spec §5.3–§5.9): `OFFER_HEAD`, `OFFER_HEAD_CONFIRMED`, `CLINIC_NOTE_PREFIX`, `OFFER_DETAIL`, `OFFER_DETAIL_NO_KEEP`, `KEEP_REQUESTED_TEXT` (`{when}`), `KEEP_ALREADY_REQUESTED_TEXT`, `AFTER_START_TEXT`, `KEEP_AFTER_REFUND_TEXT`, `KEEP_DECLINED_TAP_TEXT`, `KEEP_ACCEPTED_TEXT` (`{when}`), `KEEP_DECLINED_TEXT` (`{when}`), `KEEP_UNAVAILABLE_TEXT`, `TAP_ALREADY_KEPT_TEXT` (`{when}`), `TAP_ALREADY_REBOOKED_TEXT`, `TAP_KEEP_AFTER_CANCEL_TEXT`, `CANCEL_DONE_TEXT` (`{amount}`), `CANCEL_AFTER_MARKED_TEXT`, `TAP_REFUND_ALREADY_TEXT`, `TAP_CANCEL_AFTER_KEEP_TEXT`, `OFFER_CLOSED_NO_ANSWER_TEXT`, `RESCHEDULE_PREFIX`, `RESCHEDULE_NEW_CHARGE_PREFIX`, `CARRIED_OVER_NOTE`, `CHECK_TEXT` (`{amount}`), `RECEIVED_TEXT`, `NOT_RECEIVED_TEXT`, `NOT_RECEIVED_RECENT_TEXT`, `CHECK_TOO_EARLY_TEXT`, `CHECK_CLOSED_TEXT`, `NOT_FOUND_TEXT`;
+  - textos (spec §5.3–§5.9): `OFFER_HEAD`, `OFFER_HEAD_CONFIRMED`, `CLINIC_NOTE_PREFIX`, `OFFER_DETAIL`, `OFFER_DETAIL_NO_KEEP`, `KEEP_REQUESTED_TEXT` (`{when}`), `KEEP_ALREADY_REQUESTED_TEXT`, `AFTER_START_TEXT`, `KEEP_AFTER_REFUND_TEXT`, `KEEP_DECLINED_TAP_TEXT`, `KEEP_ACCEPTED_TEXT` (`{when}`), `KEEP_DECLINED_TEXT` (`{when}`), `KEEP_UNAVAILABLE_TEXT`, `TAP_ALREADY_KEPT_TEXT` (`{when}`), `TAP_ALREADY_REBOOKED_TEXT`, `TAP_KEEP_AFTER_CANCEL_TEXT`, `CANCEL_DONE_TEXT` (`{amount}`), `CANCEL_AFTER_MARKED_TEXT`, `TAP_REFUND_ALREADY_TEXT`, `TAP_CANCEL_AFTER_KEEP_TEXT`, `OFFER_CLOSED_NO_ANSWER_TEXT`, `RESCHEDULE_PREFIX`, `RESCHEDULE_NEW_CHARGE_PREFIX`, `CARRIED_OVER_NOTE`, `CARRY_REFUSED_NOTE`, `DEPOSIT_REUSED_LABEL`, `CARRY_REFUSED_LABEL`, `CHECK_TEXT` (`{amount}`), `RECEIVED_TEXT`, `NOT_RECEIVED_TEXT`, `NOT_RECEIVED_RECENT_TEXT`, `CHECK_TOO_EARLY_TEXT`, `CHECK_CLOSED_TEXT`, `NOT_FOUND_TEXT`;
   - `offer_buttons(id, *, keep=True)`, `keep_fallback_buttons(id)`, `check_buttons(id)`; `when_text`, `slot_text`; `offer_body(*, deposit, decide_by_at, timezone, justification, confirmed, keep=True)`; `template_text`; `warning_text`; `console_conversation_link`; `keep_allowed(offer, now=None) -> bool`; `patient_decision(offer) -> str`;
-  - `async open_offer(session, *, tenant, appointment, deposit, now=None, paid_notice_allowed=False, has_secretary=None)`; `async find_offer(...)`; `async record_contact(session, *, offer_id, now)`; `async request_keep(session, *, offer, now=None) -> str`; `async claim_keep(session, *, offer, new_appointment, resolved_by, now=None) -> bool`; `async decline_keep(session, *, offer, outcome, resolved_by=None, now=None) -> bool`; `async choose_cancel(...) -> str`; `async choose_reschedule(session, *, offer, conversation_id, now=None) -> str`; `async settle_if_expired(...)` (B); `async close_if_no_answer(...)` (E); `async expire_offers(session, *, now=None, limit=50) -> int` (B, E e K; comita); `async carry_over_pending(...)`; `async claim_carry_over(...) -> PixDeposit | None`; `async record_received(...)`; `async request_reminder(...)`; `async on_refund_recorded(session, *, tenant_id, item, now)`; `async mark_refunded(session, *, tenant_id, offer_id, note, resolved_by_name, now=None) -> str` (`marked`/`already`/`not_due`/`keep_pending`/`not_found`; comita); `async skip_kinds(session, offer_id, kinds, now)`.
+  - `async open_offer(session, *, tenant, appointment, deposit, now=None, paid_notice_allowed=False, has_secretary=None)`; `async find_offer(...)`; `async record_contact(session, *, offer_id, now)`; `async request_keep(session, *, offer, now=None) -> str`; `async claim_keep(session, *, offer, new_appointment, resolved_by, now=None) -> bool`; `async decline_keep(session, *, offer, outcome, resolved_by=None, now=None) -> bool`; `async choose_cancel(...) -> str`; `async choose_reschedule(session, *, offer, conversation_id, now=None) -> str`; `async settle_if_expired(...)` (B); `async close_if_no_answer(...)` (E); `async expire_offers(session, *, now=None, limit=50) -> int` (B, E e K; comita); `async carrying_offer(session, *, tenant_id, conversation_id) -> DepositReleaseOffer | None`; `async carry_over_pending(...)`; `async record_carry_check(session, *, tenant_id, offer_id, outcome, now=None) -> str | None` (grava UMA vez o que o provedor disse na confirmação; recusado = sinal novo + devolução devida + `clinic_carry_refused`); `async claim_carry_over(...) -> PixDeposit | None` (só com `carry_check == "reusable"`; grava `deposit_reused_at`); `async record_received(...)`; `async request_reminder(...)`; `async on_refund_recorded(session, *, tenant_id, item, now)`; `async mark_refunded(session, *, tenant_id, offer_id, note, resolved_by_name, now=None) -> str` (`marked`/`already`/`not_due`/`keep_pending`/`deposit_reused`/`not_found`; comita); `async skip_kinds(session, offer_id, kinds, now)`.
   - Nada comita, exceto `expire_offers` e `mark_refunded`.
 
 - [ ] **Step 1: Escrever os testes que falham**
@@ -1144,8 +1171,20 @@ async def _mark(db, released, offer_id, at=None):
         )
 
 
-async def _carry(db, released, at, *, days=4):
+async def _carry(db, released, at, *, days=4, check=True):
     async with db() as session:
+        if check:  # the provider said "paid, no refund" when the patient confirmed (Task 10)
+            offer_id = await session.scalar(
+                select(DepositReleaseOffer.id)
+                .where(DepositReleaseOffer.conversation_id == released.conversation.id)
+                .order_by(DepositReleaseOffer.released_at.desc())
+                .limit(1)
+            )
+            if offer_id is not None:
+                await ro.record_carry_check(
+                    session, tenant_id=released.tenant_id, offer_id=offer_id,
+                    outcome="reusable", now=at,
+                )  # fmt: skip
         fresh = await new_appointment(session, released, start=RELEASED_START + timedelta(days=days))
         carried = await ro.claim_carry_over(
             session,
@@ -1514,6 +1553,54 @@ async def test_another_clinic_carries_nothing(db):
     assert (await _deposit(db, released.deposit.id)).appointment_id == released.appointment.id
 
 
+async def test_a_refused_carry_check_stops_the_carry_and_makes_the_old_deposit_due(db):
+    # Owner 2026-10-12: the provider said refunded (or could not be read) when the patient
+    # confirmed - the booking charges a NEW Pix and the old deposit is a refund the clinic owes.
+    released, offer = await _offer(db)
+    await _call(db, ro.choose_reschedule, offer.id, T + timedelta(hours=1),
+                conversation_id=released.conversation.id)  # fmt: skip
+    async with db() as session:
+        first = await ro.record_carry_check(
+            session, tenant_id=released.tenant_id, offer_id=offer.id,
+            outcome="unknown", now=T + timedelta(hours=2),
+        )  # fmt: skip
+        again = await ro.record_carry_check(
+            session, tenant_id=released.tenant_id, offer_id=offer.id,
+            outcome="reusable", now=T + timedelta(hours=2, minutes=1),
+        )  # fmt: skip
+        await session.commit()
+    assert (first, again) == ("unknown", "unknown")  # recorded ONCE: the first answer stands
+    async with db() as session:
+        assert not await ro.carry_over_pending(
+            session, tenant_id=released.tenant_id, conversation_id=released.conversation.id
+        )
+    _fresh, carried = await _carry(db, released, T + timedelta(hours=3), check=False)
+    assert carried is None
+    row = await _row(db, offer.id)
+    assert (row.decision, row.refund_status, row.refund_source) == (
+        "rebooked", "due", "carry_unknown",
+    )  # fmt: skip
+    assert row.deposit_reused_at is None and row.new_appointment_id is None
+    assert (await _deposit(db, released.deposit.id)).appointment_id == released.appointment.id
+    (item,) = await _items(db)
+    assert item.status == "open"
+    assert "clinic_carry_refused" in await _kinds(db, offer.id, pending_only=True)
+
+
+async def test_marking_refunded_after_the_deposit_was_reused_is_refused(db):
+    released, offer = await _offer(db)
+    await _call(db, ro.choose_cancel, offer.id, T + timedelta(hours=1))  # refund due, notices on
+    await _call(db, ro.choose_reschedule, offer.id, T + timedelta(hours=2),
+                conversation_id=released.conversation.id)  # fmt: skip
+    _fresh, carried = await _carry(db, released, T + timedelta(hours=3))
+    assert carried is not None
+    assert await _mark(db, released, offer.id, at=T + timedelta(hours=4)) == "deposit_reused"
+    row = await _row(db, offer.id)
+    assert utc(row.deposit_reused_at) == T + timedelta(hours=3) and row.refund_status == "not_due"
+    assert "patient_check" not in await _kinds(db, offer.id)
+    assert "clinic_refund_cancel" not in await _kinds(db, offer.id, pending_only=True)
+
+
 async def test_a_tap_that_loses_to_the_sweep_opens_no_second_item(db):
     _released, offer = await _offer(db)
     async with db() as session:
@@ -1705,6 +1792,10 @@ from secretaria.models import (
 )
 from secretaria.models.deposit_release_offer import (
     CANCEL_FROM,
+    CARRY_CHECK_REFUNDED,
+    CARRY_CHECK_REUSABLE,
+    CARRY_CHECK_UNKNOWN,
+    CARRY_CHECKS,
     DECISION_CANCELLED,
     DECISION_KEEP_DECLINED,
     DECISION_KEEP_REQUESTED,
@@ -1714,6 +1805,7 @@ from secretaria.models.deposit_release_offer import (
     DECISION_NOT_OFFERED,
     DECISION_REBOOKED,
     DECISION_RESCHEDULING,
+    EMAIL_CARRY_REFUSED,
     EMAIL_KEEP_DECLINED,
     EMAIL_KEEP_REQUEST,
     EMAIL_PATIENT_CHECK,
@@ -1738,6 +1830,8 @@ from secretaria.models.deposit_release_offer import (
     REFUND_NOT_RECEIVED,
     REFUND_NOTICE_KINDS,
     REFUND_RECEIVED,
+    REFUND_SOURCE_CARRY_REFUNDED,
+    REFUND_SOURCE_CARRY_UNKNOWN,
     REFUND_SOURCE_KEEP_REFUSED,
     REFUND_SOURCE_KEEP_TIMEOUT,
     REFUND_SOURCE_PATIENT,
@@ -1871,12 +1965,23 @@ OFFER_CLOSED_NO_ANSWER_TEXT = (
     "resposta. A clínica foi avisada para devolver o seu sinal. Para marcar uma nova consulta, é "
     "só me escrever."
 )
-RESCHEDULE_PREFIX = "Ótimo! O sinal que você já pagou vale para a nova consulta."
+RESCHEDULE_PREFIX = (
+    "Ótimo! Escolha o novo horário. Ao confirmar, conferimos se o sinal que você já pagou pode "
+    "valer para a nova consulta."
+)
 RESCHEDULE_NEW_CHARGE_PREFIX = (
     "A clínica já informou que devolveu o seu sinal, então a nova consulta segue as regras de "
     "sinal da clínica."
 )
 CARRIED_OVER_NOTE = "O sinal que você já pagou vale para esta consulta. Não há nova cobrança."
+# Owner 2026-10-12: the provider check said "do not reuse" (or could not tell) - a new Pix.
+CARRY_REFUSED_NOTE = (
+    "Não foi possível reaproveitar o sinal anterior, então esta consulta terá um sinal novo. "
+    "Se o sinal anterior ainda não voltou para você, a clínica vai devolvê-lo."
+)
+# What the TASK-054 list shows next to the offer (`state_note`).
+DEPOSIT_REUSED_LABEL = "Sinal reaproveitado — não devolver"
+CARRY_REFUSED_LABEL = "Sinal novo cobrado na remarcação — devolva o sinal anterior"
 CHECK_TEXT = (
     "A clínica informou que devolveu o seu sinal de {amount}. Confira a sua conta (a devolução "
     "vai para a conta de onde saiu o Pix) e nos conte:"
@@ -2523,14 +2628,25 @@ def _carrying(tenant_id: UUID, conversation_id: UUID) -> tuple:
     )
 
 
+async def carrying_offer(
+    session: AsyncSession, *, tenant_id: UUID, conversation_id: UUID
+) -> DepositReleaseOffer | None:
+    """This conversation's open "Remarcar" (THIS clinic) whose paid deposit may be carried."""
+    return await session.scalar(
+        select(DepositReleaseOffer)
+        .where(*_carrying(tenant_id, conversation_id))
+        .order_by(DepositReleaseOffer.released_at.desc())
+        .limit(1)
+    )
+
+
 async def carry_over_pending(
     session: AsyncSession, *, tenant_id: UUID, conversation_id: UUID, now: datetime | None = None
 ) -> bool:
-    """Whether this conversation's next booking carries a paid deposit (no new charge)."""
-    found = await session.scalar(
-        select(DepositReleaseOffer.id).where(*_carrying(tenant_id, conversation_id))
-    )
-    return found is not None
+    """Whether this conversation has a "Remarcar" that may carry a paid deposit. Only the
+    provider check (`record_carry_check` = REUSABLE, Task 10) lets `claim_carry_over` carry it."""
+    offer = await carrying_offer(session, tenant_id=tenant_id, conversation_id=conversation_id)
+    return offer is not None and offer.carry_check in (None, CARRY_CHECK_REUSABLE)
 
 
 async def claim_carry_over(
@@ -2542,23 +2658,24 @@ async def claim_carry_over(
     now: datetime | None = None,
 ) -> PixDeposit | None:
     """Inside the booking's transaction: move the paid deposit to `new_appointment`, close the
-    offer as `rebooked`, undo a due refund (item closed, notices dropped) and tell the clinic
-    "REMARCADA levando o sinal". None when nothing is carried. Does not commit."""
+    offer as `rebooked`, undo a due refund (item closed, notices dropped), lock "marcar devolvido"
+    (`deposit_reused_at`) and tell the clinic "REMARCADA levando o sinal". ONLY when the provider
+    check recorded at the confirmation said REUSABLE (owner 2026-10-12). None when nothing is
+    carried. Does not commit."""
     if new_appointment.tenant_id != tenant_id:
         return None
     now = _now(now)
-    offer = await session.scalar(
-        select(DepositReleaseOffer)
-        .where(*_carrying(tenant_id, conversation_id))
-        .order_by(DepositReleaseOffer.released_at.desc())
-        .limit(1)
-    )
-    if offer is None:
+    offer = await carrying_offer(session, tenant_id=tenant_id, conversation_id=conversation_id)
+    if offer is None or offer.carry_check != CARRY_CHECK_REUSABLE:
         return None
     previous_refund = offer.refund_status
     claimed = await session.execute(
         update(DepositReleaseOffer)
-        .where(DepositReleaseOffer.id == offer.id, *_carrying(tenant_id, conversation_id))
+        .where(
+            DepositReleaseOffer.id == offer.id,
+            DepositReleaseOffer.carry_check == CARRY_CHECK_REUSABLE,
+            *_carrying(tenant_id, conversation_id),
+        )
         .values(
             decision=DECISION_REBOOKED,
             closed_at=now,
@@ -2574,11 +2691,89 @@ async def claim_carry_over(
         await _undo(session, offer.id, DECISION_RESCHEDULING, previous_refund)
         logger.warning("deposit_release_offer_carry_lost_deposit", offer_id=str(offer.id))
         return None
+    # The money is in use again: from now on "marcar devolvido" answers 409 `deposit_reused`.
+    await session.execute(
+        update(DepositReleaseOffer)
+        .where(DepositReleaseOffer.id == offer.id)
+        .values(deposit_reused_at=now)
+        .execution_options(synchronize_session=False)
+    )
     await _close_refund_item(session, offer, now, CARRIED_RESOLUTION_NOTE)
     await skip_kinds(session, offer.id, REFUND_NOTICE_KINDS, now)
     await _schedule(session, offer, EMAIL_REBOOKED_DEPOSIT, now)
     logger.info("deposit_release_offer_rebooked", tenant_id=str(tenant_id), offer_id=str(offer.id))
     return await session.get(PixDeposit, offer.deposit_id, populate_existing=True)
+
+
+async def record_carry_check(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    offer_id: UUID,
+    outcome: str,
+    now: datetime | None = None,
+) -> str | None:
+    """Store what the payment provider said when the patient confirmed the booking of a
+    "Remarcar" on THIS clinic's paid deposit (owner 2026-10-12). Recorded ONCE: the first answer
+    stands and is returned again (two confirm clicks never get two different answers).
+
+    REUSABLE: the booking may carry the deposit (`claim_carry_over`). REFUNDED / UNKNOWN
+    (fail-safe; anything unexpected counts as UNKNOWN): no carry - the booking charges a NEW Pix;
+    the offer closes as rebooked-with-a-new-charge, the old deposit becomes a refund the clinic
+    owes (item opened) and the clinic gets `clinic_carry_refused` at once (the patient may have
+    paid twice). None when this clinic has no such open "Remarcar". Does not commit.
+    """
+    if outcome not in CARRY_CHECKS:
+        outcome = CARRY_CHECK_UNKNOWN
+    now = _now(now)
+    offer = await session.scalar(
+        select(DepositReleaseOffer).where(
+            DepositReleaseOffer.id == offer_id, DepositReleaseOffer.tenant_id == tenant_id
+        )
+    )
+    if offer is None:
+        return None
+    if offer.carry_check is not None or offer.conversation_id is None:
+        return offer.carry_check
+    values: dict = {"carry_check": outcome, "carry_checked_at": now}
+    if outcome != CARRY_CHECK_REUSABLE:
+        values.update(
+            decision=DECISION_REBOOKED,
+            closed_at=now,
+            patient_answered_at=func.coalesce(DepositReleaseOffer.patient_answered_at, now),
+        )
+    wrote = await session.execute(
+        update(DepositReleaseOffer)
+        .where(
+            DepositReleaseOffer.id == offer.id,
+            DepositReleaseOffer.carry_check.is_(None),
+            *_carrying(tenant_id, offer.conversation_id),
+        )
+        .values(**values)
+        .execution_options(synchronize_session=False)
+    )
+    current = await _reload(session, offer.id)
+    if wrote.rowcount != 1:
+        return current.carry_check
+    if outcome != CARRY_CHECK_REUSABLE:
+        source = (
+            REFUND_SOURCE_CARRY_REFUNDED
+            if outcome == CARRY_CHECK_REFUNDED
+            else REFUND_SOURCE_CARRY_UNKNOWN
+        )
+        await _make_due(session, current, now=now, source=source)  # no-op when already due
+        await _schedule(session, current, EMAIL_CARRY_REFUSED, now)
+        logger.warning(
+            "deposit_release_offer_carry_refused",
+            tenant_id=str(tenant_id),
+            offer_id=str(offer.id),
+            check=outcome,
+        )
+    else:
+        logger.info(
+            "deposit_release_offer_carry_verified", tenant_id=str(tenant_id), offer_id=str(offer.id)
+        )
+    return outcome
 
 
 # --- B, E, K -----------------------------------------------------------------------------------
@@ -2810,7 +3005,8 @@ async def mark_refunded(
     """The clinic says it refunded in the Asaas panel (TASK-054 list). Idempotent.
 
     `marked` / `already` (marked or answered before: nothing re-sent) / `not_due` / `keep_pending`
-    (decide "Manter" first) / `not_found` (no such offer in THIS clinic). Goes through
+    (decide "Manter" first) / `deposit_reused` (a "Remarcar" reused the deposit: never refund it)
+    / `not_found` (no such offer in THIS clinic). Goes through
     `attention_view.resolve_item`, so the deposit is recorded as refunded exactly as in the
     payments screen. Commits.
     """
@@ -2824,6 +3020,8 @@ async def mark_refunded(
     )
     if offer is None:
         return "not_found"
+    if offer.deposit_reused_at is not None:
+        return "deposit_reused"  # owner 2026-10-12: the money is in use again
     if offer.refund_status in (REFUND_MARKED, REFUND_RECEIVED, REFUND_NOT_RECEIVED):
         return "already"
     if offer.decision == DECISION_KEEP_REQUESTED:
@@ -2873,7 +3071,7 @@ async def mark_refunded(
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `$env:BOT_ALLOWLIST_WA_IDS = ""; uv run python -m pytest tests/test_release_offer.py tests/test_payment_attention.py tests/test_payment_attention_hub.py -q -p no:cacheprovider ; uv run ruff check src/secretaria/services/release_offer.py src/secretaria/models/payment_attention_item.py src/secretaria/services/payments/attention_view.py tests/release_offer_support.py tests/test_release_offer.py tests/test_payment_attention.py`
-Expected: PASS (`test_release_offer.py`: 27), ruff limpo.
+Expected: PASS (`test_release_offer.py`: 29), ruff limpo.
 
 - [ ] **Step 5: Commit**
 
@@ -3607,6 +3805,10 @@ async def test_a_confirmed_remarcar_sends_the_rebooked_email_and_cancels_refund_
     await _call(db, ro.choose_reschedule, offer.id, T + timedelta(hours=2),
                 conversation_id=released.conversation.id)  # fmt: skip
     async with db() as session:
+        await ro.record_carry_check(  # the provider said "paid, no refund" at the confirmation
+            session, tenant_id=released.tenant_id, offer_id=offer.id, outcome="reusable",
+            now=T + timedelta(hours=3),
+        )  # fmt: skip
         fresh = await new_appointment(session, released, start=RELEASED_START + timedelta(days=4))
         await ro.claim_carry_over(
             session,
@@ -3928,8 +4130,9 @@ def release_rebooked_clinic_email(
     body = (
         f"Olá,\n\nO paciente da consulta de {old_slot_text}, cujo horário a clínica liberou, "
         f"remarcou para {new_slot_text}. O sinal de {amount_text} já pago foi transferido para a "
-        "nova consulta: não há reembolso a fazer. Se a clínica já tinha estornado esse sinal no "
-        "Asaas e ainda não marcou como devolvido, confira com o paciente."
+        "nova consulta: não há reembolso a fazer. NÃO devolva este sinal: ele está em uso. No "
+        "momento da remarcação conferimos no Asaas que a cobrança estava paga e sem estorno; se a "
+        "clínica estornou depois disso, fale com o paciente."
         f"{_release_link_line(conversation_link)}\n\n— Equipe SecretarIA"
     )
     return subject, body
@@ -6024,27 +6227,396 @@ git commit -m "feat(flow): keep request, reschedule any time, cancel and refund-
 
 ---
 
-### Task 10: A nova consulta do "Remarcar" leva o sinal pago (fluxo, promoção do Portal e portão do "antes")
+### Task 10: Confirmar o "Remarcar" consulta o Asaas e só então a nova consulta leva o sinal pago (fluxo, promoção do Portal e portão do "antes")
+
+> **Decisão do dono (2026-10-12, resolve a pergunta 1):** no momento em que o paciente CONFIRMA a remarcação, o sistema
+> LÊ a cobrança paga original no Asaas (chave da clínica; leitura apenas, nunca estorna — D15). Estornada / em estorno,
+> ou a clínica já marcou "devolvido" → sinal NOVO. Paga e sem estorno → transfere o sinal, sem cobrança nova. Asaas fora
+> do ar / erro / timeout / resposta ilegível → **FAIL-SAFE FINANCEIRO = cobrar de novo**: pode cobrar duas vezes o
+> paciente (o primeiro sinal continua pago) e a clínica fica com um sinal a devolver — vira devolução devida com aviso
+> claro. A remarcação nunca espera o Asaas além de `CHECK_TIMEOUT_SECONDS`. Risco residual ACEITO: segundos entre a
+> consulta ao Asaas e um estorno feito pela clínica nesse intervalo. Os campos do Asaas são lidos pelo cliente que já
+> existe (`AsaasClient.get_payment` → `AsaasProvider.get_charge`: `status` `REFUNDED`/`REFUND_REQUESTED`/
+> `REFUND_IN_PROGRESS` → `PaymentStatus.REFUNDED`); a lista `refunds` da cobrança é lida se vier — **NÃO PROVADO** até o
+> sandbox (formato real da cobrança com estorno parcial); qualquer formato inesperado conta como "não sei" = cobrar de novo.
 
 **Files:**
-- Modify: `src/secretaria/workers/shared/flow_runner.py` (`_apply_flow_result`), `src/secretaria/workers/shared/booking_hold.py` (`_promote_booking_hold`), `src/secretaria/services/booking_hold.py` (`BookingGate._deposit_quote`)
-- Test: `tests/test_release_offer_carry_over.py` (novo)
+- Create: `src/secretaria/services/release_carry_check.py`
+- Modify: `src/secretaria/services/payments/provider.py` (`ChargeState.refunds`, aditivo), `src/secretaria/services/payments/asaas_provider.py` (`get_charge` lê `refunds`), `src/secretaria/services/email.py` (aviso `clinic_carry_refused`), `src/secretaria/services/release_offer_dispatch.py` (envio do aviso), `src/secretaria/workers/shared/flow_runner.py` (`_apply_flow_result`), `src/secretaria/workers/shared/booking_hold.py` (`_promote_booking_hold`), `src/secretaria/services/booking_hold.py` (`BookingGate._deposit_quote`)
+- Test: `tests/test_release_carry_check.py` (novo), `tests/test_release_offer_carry_over.py` (novo)
 
 **Interfaces:**
-- Consumes: Task 3 (`claim_carry_over`, `carry_over_pending`, `CARRIED_OVER_NOTE`, `REASON_CARRIED_OVER`, `expire_offers`, `mark_refunded`), `deposit_gate.DepositQuote`.
-- Produces: a consulta criada numa conversa com oferta em `rescheduling` e devolução ainda NÃO marcada (antes OU depois de B) recebe o sinal PAGO na mesma transação; a devolução devida é desfeita (item fechado como "remarcado", avisos de devolução descartados) e a clínica recebe `clinic_rebooked_deposit`; a última bolha (ou a confirmação do Portal) ganha `CARRIED_OVER_NOTE`; o portão do "antes" responde `DepositQuote("no_deposit", "carried_over")`. Com a devolução marcada, nada é transferido (nova cobrança).
+- Consumes: Task 1 (`CARRY_CHECK_*`, `EMAIL_CARRY_REFUSED`, colunas `carry_check`/`deposit_reused_at`), Task 3 (`carrying_offer`, `record_carry_check`, `claim_carry_over`, `CARRIED_OVER_NOTE`, `CARRY_REFUSED_NOTE`, `REASON_CARRIED_OVER`, `expire_offers`, `mark_refunded`, `slot_text`, `console_conversation_link`), Task 5 (`still_relevant`, `_send_clinic`, `_send_release_mail`, `_release_link_line`), `deposit_gate.DepositQuote`, `registry.find_provider`, `tenant_config.get_payment_account`.
+- Produces:
+  - `release_carry_check.CHECK_TIMEOUT_SECONDS = 4.0`; `verdict_from(state: ChargeState) -> str`; `async ensure_checked(conversation_id: UUID | None, *, now=None) -> str | None` (abre as próprias sessões; NUNCA levanta; `None` = não há "Remarcar" com sinal a transferir nesta conversa; senão o veredito gravado UMA vez: `reusable` / `refunded` / `unknown`).
+  - `ChargeState.refunds: str = "absent"` (`absent` / `none` / `some` / `unreadable`).
+  - `email.release_carry_refused_clinic_email(...)`, `email.send_release_carry_refused_clinic_email(...)`.
+  - A consulta criada numa conversa com oferta em `rescheduling`, devolução não marcada e veredito `reusable` recebe o sinal PAGO na mesma transação (item fechado como "remarcado", avisos de devolução descartados, `deposit_reused_at` gravado — "marcar devolvido" passa a dar 409 `deposit_reused`), a clínica recebe `clinic_rebooked_deposit` e a última bolha (ou a confirmação do Portal) ganha `CARRIED_OVER_NOTE`; o portão do "antes" responde `DepositQuote("no_deposit", "carried_over")`. Veredito `refunded`/`unknown`: nada é transferido, a consulta segue as regras de sinal (Pix NOVO), a última bolha ganha `CARRY_REFUSED_NOTE` e a clínica recebe `clinic_carry_refused` ("DEVOLVA o sinal anterior"). Devolução já marcada: sinal novo SEM consultar o Asaas.
 
-- [ ] **Step 1: Escrever o teste que falha**
+- [ ] **Step 1: Escrever os testes que falham**
+
+`tests/test_release_carry_check.py`:
+
+```python
+"""The provider check at the "Remarcar" confirmation (TASK-052, owner 2026-10-12).
+
+Read only - the platform never refunds (D15). Paid and not refunded: the deposit is reused.
+Refunded / being refunded, or the clinic already marked it refunded: a NEW Pix. The provider
+unreachable, slow, failing or answering something unexpected: FAIL-SAFE = a NEW Pix, the old
+deposit becomes a refund the clinic owes ("clinic_carry_refused"). One clinic's key never reads
+another clinic's charge.
+"""
+
+import asyncio
+from datetime import timedelta
+from uuid import uuid4
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import select
+
+from secretaria.models.deposit_release_offer import DepositReleaseOffer
+from secretaria.services import email, release_carry_check as rcc, release_offer as ro
+from secretaria.services import release_offer_dispatch
+from secretaria.services.payments import asaas_provider, registry
+from secretaria.services.payments.provider import (
+    ChargeState,
+    PaymentAccount,
+    PaymentStatus,
+    ProviderError,
+)
+from tests.payments_support import FakeProvider, make_sessionmaker
+from tests.release_offer_support import RELEASED_START, T, emails, make_released, new_appointment
+
+PAID = ChargeState(status=PaymentStatus.PAID, paid_amount_cents=10000)
+
+
+@pytest_asyncio.fixture
+async def db():
+    engine, maker = await make_sessionmaker()
+    yield maker
+    await engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _wire(monkeypatch, db):
+    monkeypatch.setattr(rcc, "async_session_factory", db)
+
+    async def _account(session, tenant_id, provider):  # a placeholder, never a real key
+        return PaymentAccount(tenant_id=tenant_id, provider=provider, api_key=f"key-{tenant_id}")
+
+    monkeypatch.setattr(rcc, "_account", _account)
+
+
+def _provider(monkeypatch, **kw) -> FakeProvider:
+    fake = FakeProvider(**kw)
+    monkeypatch.setitem(registry._PROVIDERS, "asaas", fake)
+    return fake
+
+
+async def _rescheduling(db, *, at=T):
+    async with db() as session:
+        released = await make_released(session)
+        offer = await ro.open_offer(
+            session,
+            tenant=released.tenant,
+            appointment=released.appointment,
+            deposit=released.deposit,
+            now=at,
+        )
+        await ro.choose_reschedule(
+            session, offer=offer, conversation_id=released.conversation.id, now=at
+        )
+        await session.commit()
+    return released, offer
+
+
+async def _row(db, offer_id) -> DepositReleaseOffer:
+    async with db() as session:
+        return await session.get(DepositReleaseOffer, offer_id)
+
+
+async def _book(db, released, *, days=4):
+    async with db() as session:
+        fresh = await new_appointment(session, released, start=RELEASED_START + timedelta(days=days))
+        carried = await ro.claim_carry_over(
+            session,
+            tenant_id=released.tenant_id,
+            conversation_id=released.conversation.id,
+            new_appointment=fresh,
+        )
+        await session.commit()
+    return carried
+
+
+async def _kinds(db, offer_id) -> list[str]:
+    async with db() as session:
+        return [e.kind for e in await emails(session, offer_id)]
+
+
+async def test_asaas_says_paid_reuses_the_deposit(db, monkeypatch):
+    provider = _provider(monkeypatch, state=PAID)
+    released, offer = await _rescheduling(db)
+
+    assert await rcc.ensure_checked(released.conversation.id) == "reusable"
+    carried = await _book(db, released)
+
+    assert carried is not None and provider.called("get_charge") == 1
+    row = await _row(db, offer.id)
+    assert (row.decision, row.carry_check) == ("rebooked", "reusable")
+    assert row.deposit_reused_at is not None
+    assert "clinic_rebooked_deposit" in await _kinds(db, offer.id)
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        ChargeState(status=PaymentStatus.REFUNDED),  # REFUNDED / REFUND_REQUESTED / IN_PROGRESS
+        ChargeState(status=PaymentStatus.PAID, refunds="some"),  # a (partial) refund listed
+    ],
+    ids=["asaas_says_refunded_or_in_progress", "asaas_lists_a_refund"],
+)
+async def test_asaas_says_refunded_charges_a_new_pix(db, monkeypatch, state):
+    _provider(monkeypatch, state=state)
+    released, offer = await _rescheduling(db)
+
+    assert await rcc.ensure_checked(released.conversation.id) == "refunded"
+
+    assert await _book(db, released) is None  # nothing carried: the booking charges a new Pix
+    row = await _row(db, offer.id)
+    assert (row.decision, row.refund_status, row.refund_source) == (
+        "rebooked", "due", "carry_refunded",
+    )  # fmt: skip
+    assert row.deposit_reused_at is None
+    assert "clinic_carry_refused" in await _kinds(db, offer.id)
+
+
+def test_the_asaas_client_maps_refund_states_and_the_refund_list(monkeypatch):
+    answers = {
+        "p1": {"id": "p1", "status": "REFUNDED"},
+        "p2": {"id": "p2", "status": "REFUND_REQUESTED"},
+        "p3": {"id": "p3", "status": "REFUND_IN_PROGRESS"},
+        "p4": {"id": "p4", "status": "RECEIVED", "refunds": [{"status": "DONE"}]},
+        "p5": {"id": "p5", "status": "RECEIVED", "refunds": []},
+        "p6": {"id": "p6", "status": "RECEIVED"},
+        "p7": {"id": "p7", "status": "RECEIVED", "refunds": "?"},
+    }
+
+    class _Client:
+        async def get_payment(self, payment_id):
+            return answers[payment_id]
+
+    monkeypatch.setattr(asaas_provider, "client_for", lambda key: _Client())
+    account = PaymentAccount(tenant_id=uuid4(), provider="asaas", api_key="placeholder")
+
+    async def state(pid):
+        return await asaas_provider.AsaasProvider().get_charge(account, pid)
+
+    got = {pid: asyncio.run(state(pid)) for pid in answers}
+    assert {pid: rcc.verdict_from(s) for pid, s in got.items()} == {
+        "p1": "refunded", "p2": "refunded", "p3": "refunded", "p4": "refunded",
+        "p5": "reusable", "p6": "reusable", "p7": "unknown",
+    }  # fmt: skip
+
+
+async def test_the_clinic_marked_refunded_without_asaas_refunding_charges_again(db, monkeypatch):
+    provider = _provider(monkeypatch, state=PAID)  # Asaas still says PAID
+    async with db() as session:
+        released = await make_released(session)
+        offer = await ro.open_offer(
+            session, tenant=released.tenant, appointment=released.appointment,
+            deposit=released.deposit, now=T,
+        )  # fmt: skip
+        await session.commit()
+    async with db() as session:
+        row = await session.get(DepositReleaseOffer, offer.id)
+        await ro.choose_cancel(session, offer=row, now=T + timedelta(hours=1))
+        await session.commit()
+    async with db() as session:
+        assert (
+            await ro.mark_refunded(
+                session, tenant_id=released.tenant_id, offer_id=offer.id,
+                note="Estornado no painel do Asaas", resolved_by_name="Ana",
+                now=T + timedelta(hours=2),
+            )
+            == "marked"
+        )  # fmt: skip
+    async with db() as session:
+        row = await session.get(DepositReleaseOffer, offer.id)
+        outcome = await ro.choose_reschedule(
+            session, offer=row, conversation_id=released.conversation.id, now=T + timedelta(hours=3)
+        )
+        await session.commit()
+
+    assert outcome == ro.RESCHEDULE_NEW_CHARGE
+    assert await rcc.ensure_checked(released.conversation.id) is None  # nothing to carry
+    assert provider.called("get_charge") == 0  # the clinic's word is enough: no provider call
+    assert await _book(db, released) is None
+
+
+@pytest.mark.parametrize(
+    "setup",
+    ["provider_error", "network_error", "timeout", "unexpected_status", "unreadable_refunds",
+     "unexpected_answer", "no_account", "no_charge_id"],
+)  # fmt: skip
+async def test_asaas_down_or_unreadable_charges_again_and_the_old_deposit_is_owed(
+    db, monkeypatch, setup
+):
+    kw = {"state": PAID}
+    if setup == "provider_error":
+        kw = {"get_error": ProviderError("get_charge_failed", status_code=500, retryable=True)}
+    elif setup == "network_error":
+        kw = {"get_error": OSError("connection reset")}
+    elif setup == "unexpected_status":
+        kw = {"state": ChargeState(status=PaymentStatus.OTHER)}
+    elif setup == "unreadable_refunds":
+        kw = {"state": ChargeState(status=PaymentStatus.PAID, refunds="unreadable")}
+    provider = _provider(monkeypatch, **kw)
+    if setup == "timeout":
+        monkeypatch.setattr(rcc, "CHECK_TIMEOUT_SECONDS", 0.05)
+
+        async def _slow(account, charge_id):
+            await asyncio.sleep(1)
+            return PAID
+
+        monkeypatch.setattr(provider, "get_charge", _slow)
+    if setup == "no_account":
+
+        async def _none(session, tenant_id, provider_name):
+            return None
+
+        monkeypatch.setattr(rcc, "_account", _none)
+    released, offer = await _rescheduling(db)
+    if setup == "no_charge_id":
+        async with db() as session:
+            deposit = await session.get(type(released.deposit), released.deposit.id)
+            deposit.provider_charge_id = None
+            deposit.asaas_payment_id = None
+            await session.commit()
+    if setup == "unexpected_answer":  # not a ChargeState at all
+        monkeypatch.setattr(provider, "state", {released.deposit.provider_charge_id: {"x": 1}})
+
+    assert await rcc.ensure_checked(released.conversation.id) == "unknown"
+
+    assert await _book(db, released) is None  # FAIL-SAFE: never reuse a deposit we cannot verify
+    row = await _row(db, offer.id)
+    assert (row.decision, row.refund_status, row.refund_source) == (
+        "rebooked", "due", "carry_unknown",
+    )  # fmt: skip
+    assert await _kinds(db, offer.id) == ["clinic_carry_refused"]
+
+
+async def test_two_confirm_clicks_reuse_the_deposit_once(db, monkeypatch):
+    provider = _provider(monkeypatch, state=PAID)
+    released, offer = await _rescheduling(db)
+
+    first = await rcc.ensure_checked(released.conversation.id)
+    provider.state = ChargeState(status=PaymentStatus.REFUNDED)  # the 2nd click's answer never wins
+    second = await rcc.ensure_checked(released.conversation.id)
+    carried = [await _book(db, released, days=4), await _book(db, released, days=5)]
+
+    assert (first, second) == ("reusable", "reusable") and provider.called("get_charge") == 1
+    # ONE booking carries (guarded UPDATE); the truly concurrent version runs on Postgres in Task 13.
+    assert sum(1 for c in carried if c is not None) == 1
+    row = await _row(db, offer.id)
+    assert (row.decision, row.carry_check) == ("rebooked", "reusable")
+    assert (await _kinds(db, offer.id)).count("clinic_rebooked_deposit") == 1
+
+
+async def test_marking_refunded_after_the_reuse_is_refused(db, monkeypatch):
+    _provider(monkeypatch, state=PAID)
+    released, offer = await _rescheduling(db)
+    await rcc.ensure_checked(released.conversation.id)
+    assert await _book(db, released) is not None
+
+    async with db() as session:
+        outcome = await ro.mark_refunded(
+            session, tenant_id=released.tenant_id, offer_id=offer.id, note="Estornado",
+            resolved_by_name="Ana",
+        )  # fmt: skip
+
+    assert outcome == "deposit_reused"  # the hub answers 409 `deposit_reused` (Task 11)
+    assert (await _row(db, offer.id)).refund_status == "not_due"
+
+
+async def test_the_asaas_check_uses_only_this_clinics_key_and_charge(db, monkeypatch):
+    released_a, offer_a = await _rescheduling(db)
+    released_b, _offer_b = await _rescheduling(db)
+    provider = _provider(
+        monkeypatch,
+        state={
+            released_a.deposit.provider_charge_id: PAID,
+            released_b.deposit.provider_charge_id: ChargeState(status=PaymentStatus.REFUNDED),
+        },
+    )
+    keys: list = []
+
+    async def _account(session, tenant_id, provider_name):
+        keys.append(tenant_id)
+        return PaymentAccount(tenant_id=tenant_id, provider=provider_name, api_key=f"key-{tenant_id}")
+
+    monkeypatch.setattr(rcc, "_account", _account)
+
+    assert await rcc.ensure_checked(released_a.conversation.id) == "reusable"
+
+    assert keys == [released_a.tenant_id] and provider.tenants_seen == [released_a.tenant_id]
+    assert provider.calls == [("get_charge", released_a.deposit.provider_charge_id)]
+    async with db() as session:  # clinic B's offer was never touched
+        others = list(
+            await session.scalars(
+                select(DepositReleaseOffer).where(DepositReleaseOffer.id != offer_a.id)
+            )
+        )
+    assert [o.carry_check for o in others] == [None]
+
+
+async def test_a_deposit_of_another_clinic_is_never_read_with_this_clinics_key(db, monkeypatch):
+    provider = _provider(monkeypatch, state=PAID)
+    released, offer = await _rescheduling(db)
+    other_tenant = (await _rescheduling(db))[0].tenant_id
+    async with db() as session:  # a corrupted row: the deposit now belongs to another clinic
+        deposit = await session.get(type(released.deposit), released.deposit.id)
+        deposit.tenant_id = other_tenant
+        await session.commit()
+
+    assert await rcc.ensure_checked(released.conversation.id) == "unknown"
+    assert provider.called("get_charge") == 0
+
+
+def test_the_carry_refused_email_says_refund_the_old_deposit_and_why():
+    subject, unknown = email.release_carry_refused_clinic_email(
+        clinic_name="Clínica X", check="unknown", amount_text="R$ 60,00",
+        slot_text="08/03 às 10:00", conversation_link="https://portal.example/c/1",
+    )  # fmt: skip
+    _subject, refunded = email.release_carry_refused_clinic_email(
+        clinic_name="Clínica X", check="refunded", amount_text="R$ 60,00",
+        slot_text="08/03 às 10:00", conversation_link=None,
+    )  # fmt: skip
+
+    assert "DEVOLVA o sinal anterior" in subject and "R$ 60,00" in subject
+    assert "pode ter pago duas vezes" in unknown and "Estornar" in unknown
+    assert "já foi estornado" in refunded and "marque como devolvido" in refunded
+    for body in (unknown, refunded):
+        assert "banco" not in body.lower()
+
+
+def test_the_carry_refused_notice_is_relevant_until_the_clinic_marks_it():
+    offer = DepositReleaseOffer(deposit_paid=True, decision="rebooked", refund_status="due")
+    assert release_offer_dispatch.still_relevant("clinic_carry_refused", offer)
+    offer.refund_status = "marked"
+    assert not release_offer_dispatch.still_relevant("clinic_carry_refused", offer)
+```
 
 `tests/test_release_offer_carry_over.py`:
 
 ```python
 """The booking that ends a "Remarcar" carries the released slot's PAID deposit (TASK-052).
 
-The deposit moves to the new appointment in the booking's own transaction, without a new charge
-and without touching `reschedule_count`; the `before` gate asks for no Pix while the offer is in
-`rescheduling` and the refund is not marked - before OR after B; once the clinic marked the
-refund, the booking stands on its own (new charge).
+The confirmation asks the payment provider first (owner 2026-10-12): paid and not refunded ->
+the deposit moves to the new appointment in the booking's own transaction, without a new charge
+and without touching `reschedule_count`; the `before` gate asks for no Pix. Refunded / unknown ->
+the booking stands on its own (new charge) and says so. The clinic already marked the refund ->
+new charge, no provider call.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -6063,10 +6635,11 @@ from secretaria.models import (
     PixDepositStatus,
 )
 from secretaria.models.deposit_release_offer import DepositReleaseEmail, DepositReleaseOffer
-from secretaria.services import booking_hold as holds, release_offer
+from secretaria.services import booking_hold as holds, release_carry_check, release_offer
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.flow_router import FlowRouterResult
 from secretaria.services.payments import deposit_gate, registry
+from secretaria.services.payments.provider import ChargeState, PaymentAccount, PaymentStatus
 from secretaria.workers import tasks
 from tests._reminder_fixtures import db  # noqa: F401
 from tests._reminders_r3 import sent, wire
@@ -6075,12 +6648,26 @@ from tests.before_support import entitlement_summary
 from tests.payments_support import FakeProvider
 
 CONFIRMED = "Pronto! Seu agendamento está confirmado."
+PAID = ChargeState(status=PaymentStatus.PAID, paid_amount_cents=10000)
+
+
+@pytest.fixture
+def provider(monkeypatch) -> FakeProvider:
+    fake = FakeProvider(state=PAID)
+    monkeypatch.setitem(registry._PROVIDERS, "asaas", fake)
+    return fake
 
 
 @pytest.fixture(autouse=True)
-def _wire(monkeypatch, db):  # noqa: F811
+def _wire(monkeypatch, db, provider):  # noqa: F811
     wire(monkeypatch, db)
     monkeypatch.setattr(holds, "async_session_factory", db)
+    monkeypatch.setattr(release_carry_check, "async_session_factory", db)
+
+    async def _account(session, tenant_id, provider_name):  # a placeholder, never a real key
+        return PaymentAccount(tenant_id=tenant_id, provider=provider_name, api_key="placeholder")
+
+    monkeypatch.setattr(release_carry_check, "_account", _account)
 
 
 def _future(days: int) -> datetime:
@@ -6140,7 +6727,7 @@ async def _state(db):  # noqa: F811
     return new, deposit, offer, items
 
 
-async def test_the_new_booking_carries_the_paid_deposit_and_says_so(db):  # noqa: F811
+async def test_the_new_booking_carries_the_paid_deposit_and_says_so(db, provider):  # noqa: F811
     world = await _rescheduling(db)
 
     await _confirm(world, _booking(_future(6)))
@@ -6150,19 +6737,35 @@ async def test_the_new_booking_carries_the_paid_deposit_and_says_so(db):  # noqa
     assert deposit.appointment_id == new.id and deposit.status is PixDepositStatus.PAID
     assert deposit.reschedule_count == 0  # the clinic freed the slot: not the patient's reschedule
     assert (offer.decision, offer.new_appointment_id) == ("rebooked", new.id)
+    assert offer.deposit_reused_at is not None and provider.called("get_charge") == 1
     assert items == []
     [text] = [item[2] for item in sent() if item[0] == "text"]
     assert text == f"{CONFIRMED}\n\n{release_offer.CARRIED_OVER_NOTE}"
 
 
-async def test_without_the_remarcar_tap_nothing_is_carried(db):  # noqa: F811
+async def test_when_asaas_cannot_confirm_the_booking_says_a_new_deposit_is_due(db, provider):  # noqa: F811
+    provider.get_error = OSError("asaas down")
+    world = await _rescheduling(db)
+
+    await _confirm(world, _booking(_future(6)))
+
+    new, deposit, offer, items = await _state(db)
+    assert new is not None and deposit.appointment_id == world.appointment.id  # not carried
+    assert (offer.decision, offer.carry_check, offer.refund_status) == ("rebooked", "unknown", "due")
+    (item,) = items
+    assert item.status == "open"  # the clinic owes the old deposit back
+    [text] = [item[2] for item in sent() if item[0] == "text"]
+    assert text == f"{CONFIRMED}\n\n{release_offer.CARRY_REFUSED_NOTE}"
+
+
+async def test_without_the_remarcar_tap_nothing_is_carried(db, provider):  # noqa: F811
     world = await _rescheduling(db, tap=False)
 
     await _confirm(world, _booking(_future(6)))
 
     new, deposit, offer, _items = await _state(db)
     assert new is not None and deposit.appointment_id == world.appointment.id
-    assert offer.decision == "none"
+    assert offer.decision == "none" and provider.called("get_charge") == 0
     assert [item[2] for item in sent() if item[0] == "text"] == [CONFIRMED]
 
 
@@ -6188,7 +6791,7 @@ async def test_a_booking_after_b_still_carries_and_undoes_the_refund(db):  # noq
     assert pending == ["clinic_rebooked_deposit"]  # "REMARCADA levando o sinal", nothing else
 
 
-async def test_a_booking_after_the_clinic_marked_refunded_charges_again(db):  # noqa: F811
+async def test_a_booking_after_the_clinic_marked_refunded_charges_again(db, provider):  # noqa: F811
     world = await _rescheduling(db)
     async with db() as session:
         await release_offer.expire_offers(session, now=datetime.now(UTC) + timedelta(hours=7))
@@ -6210,12 +6813,11 @@ async def test_a_booking_after_the_clinic_marked_refunded_charges_again(db):  # 
     new, deposit, offer, _items = await _state(db)
     assert new is not None and deposit.appointment_id == world.appointment.id
     assert deposit.status is PixDepositStatus.CANCELLED_REFUNDED
-    assert offer.refund_status == "marked"
+    assert offer.refund_status == "marked" and provider.called("get_charge") == 0
     assert [item[2] for item in sent() if item[0] == "text"] == [CONFIRMED]
 
 
-async def test_the_before_gate_asks_no_new_pix_while_the_deposit_is_carried(db, monkeypatch):  # noqa: F811
-    world = await _rescheduling(db)
+async def _on_before(db, world, monkeypatch):  # noqa: F811
     async with db() as session:
         tenant = await session.get(type(world.tenant), world.tenant.id)
         tenant.pix_deposit_enabled = True
@@ -6229,8 +6831,6 @@ async def test_the_before_gate_asks_no_new_pix_while_the_deposit_is_carried(db, 
         return entitlement_summary()
 
     monkeypatch.setattr(deposit_gate, "get_entitlements", _entitled)
-    provider = FakeProvider()
-    monkeypatch.setitem(registry._PROVIDERS, "asaas", provider)
     gate = holds.BookingGate(
         tenant_id=world.tenant.id,
         conversation_id=world.conversation.id,
@@ -6238,8 +6838,7 @@ async def test_the_before_gate_asks_no_new_pix_while_the_deposit_is_carried(db, 
         external_id="",
         armed=False,
     )
-
-    decision = await gate.decide(
+    return await gate.decide(
         start_at=_future(6),
         end_at=_future(6) + timedelta(minutes=30),
         professional_id=None,
@@ -6247,8 +6846,30 @@ async def test_the_before_gate_asks_no_new_pix_while_the_deposit_is_carried(db, 
         insurance=None,
     )
 
+
+async def test_the_before_gate_asks_no_new_pix_while_the_deposit_is_carried(
+    db, monkeypatch, provider  # noqa: F811
+):
+    world = await _rescheduling(db)
+
+    decision = await _on_before(db, world, monkeypatch)
+
     assert decision.outcome == "commit"
-    assert provider.called("create_pix_charge") == 0
+    assert provider.called("get_charge") == 1 and provider.called("create_pix_charge") == 0
+
+
+async def test_the_before_gate_charges_a_new_pix_when_asaas_says_refunded(
+    db, monkeypatch, provider  # noqa: F811
+):
+    provider.state = ChargeState(status=PaymentStatus.REFUNDED)
+    world = await _rescheduling(db)
+
+    decision = await _on_before(db, world, monkeypatch)
+
+    assert decision.outcome != "commit"  # the normal `before` path: a NEW Pix is asked for
+    async with db() as session:
+        offer = await session.scalar(select(DepositReleaseOffer))
+    assert (offer.carry_check, offer.refund_status) == ("refunded", "due")
 
 
 async def test_the_portal_booking_born_at_the_code_carries_it_too(db):  # noqa: F811
@@ -6300,21 +6921,275 @@ async def test_the_portal_booking_born_at_the_code_carries_it_too(db):  # noqa: 
     assert born.id != world.appointment.id and born.start_at is not None
 ```
 
+(`seed_paid_deposit` grava só `asaas_payment_id`; `ensure_checked` usa `provider_charge_id or asaas_payment_id`, então o `FakeProvider` recebe esse id.)
+
 - [ ] **Step 2: Rodar e ver falhar**
 
-Run: `$env:BOT_ALLOWLIST_WA_IDS = ""; uv run python -m pytest tests/test_release_offer_carry_over.py -q -p no:cacheprovider`
-Expected: FAIL (o sinal continua na consulta liberada; o portão do "antes" responde `blocked`/`no_credential`).
+Run: `$env:BOT_ALLOWLIST_WA_IDS = ""; uv run python -m pytest tests/test_release_carry_check.py tests/test_release_offer_carry_over.py -q -p no:cacheprovider`
+Expected: FAIL (`ImportError: cannot import name 'release_carry_check'`; `ChargeState` sem `refunds`).
 
 - [ ] **Step 3: Implementar**
 
-(Diffs do plano anterior, verificados sobre `3650e10`; o estado da oferta (`decision`, `refund_status`) fica todo dentro de `claim_carry_over`.)
+`src/secretaria/services/payments/provider.py` (aditivo; nenhum chamador existente muda):
+
+```diff
+ @dataclass(frozen=True)
+ class ChargeState:
+     status: PaymentStatus
+     paid_amount_cents: int | None = None
+     external_reference: str | None = None
+     paid_at: datetime | None = None
+     expires_at: datetime | None = None
++    # TASK-052: the charge's refund entries when the provider lists them - "absent" (not
++    # reported), "none" (empty list), "some" (at least one) or "unreadable" (unexpected shape).
++    refunds: str = "absent"
+```
+
+`src/secretaria/services/payments/asaas_provider.py`:
+
+```diff
+@@ (depois de `_charge_status`)
++def _refunds(payment: Mapping) -> str:
++    """The refund entries Asaas lists on the payment, if any (TASK-052). The exact shape is NOT
++    PROVEN until the sandbox: anything unexpected is "unreadable", which never reuses a deposit."""
++    if payment.get("refunds") is None:
++        return "absent"
++    refunds = payment.get("refunds")
++    if not isinstance(refunds, list):
++        return "unreadable"
++    return "some" if refunds else "none"
++
++
+@@ (AsaasProvider.get_charge)
+         return ChargeState(
+             status=_charge_status(payment),
+             paid_amount_cents=_cents(payment.get("value")),
+             external_reference=payment.get("externalReference") or None,
+             paid_at=_parse_dt(payment.get("paymentDate") or payment.get("confirmedDate")),
++            refunds=_refunds(payment),
+         )
+```
+
+`src/secretaria/services/release_carry_check.py`:
+
+```python
+"""Before a "Remarcar" booking reuses a released slot's PAID deposit, read the charge at the
+payment provider (TASK-052, owner decision 2026-10-12). READ ONLY - the platform never refunds
+(D15).
+
+* The clinic already marked the refund      -> there is no carrying offer: new Pix, no call.
+* Provider: paid and no refund listed       -> REUSABLE: the booking carries the deposit.
+* Provider: refunded / refund requested / in progress, or any refund listed -> REFUNDED: new Pix.
+* Anything else - no account, no charge id, a deposit of another clinic, timeout, network or HTTP
+  error, an unexpected status or shape      -> UNKNOWN = FAIL-SAFE: new Pix. The patient may pay
+  twice (the first deposit stays paid); the old deposit becomes a refund the clinic owes, with the
+  "clinic_carry_refused" notice.
+
+The answer is stored ONCE on the offer (`release_offer.record_carry_check`): two confirm clicks
+get the same answer and only one booking carries (`claim_carry_over` is a guarded UPDATE). No
+transaction is open while the provider is asked, and a booking never waits more than
+CHECK_TIMEOUT_SECONDS for it. Residual risk ACCEPTED by the owner: a refund made in the Asaas
+panel in the seconds between this read and the booking. Logs carry ids and the outcome only.
+"""
+
+import asyncio
+from datetime import datetime
+from uuid import UUID
+
+from sqlalchemy import select
+
+from secretaria.core.logging import get_logger
+from secretaria.core.database import async_session_factory
+from secretaria.models import Conversation, PixDeposit
+from secretaria.models.deposit_release_offer import (
+    CARRY_CHECK_REFUNDED,
+    CARRY_CHECK_REUSABLE,
+    CARRY_CHECK_UNKNOWN,
+)
+from secretaria.services import release_offer
+from secretaria.services import tenant_config as cfg
+from secretaria.services.payments import registry
+from secretaria.services.payments.provider import ChargeState, PaymentStatus
+
+logger = get_logger(__name__)
+
+CHECK_TIMEOUT_SECONDS = 4.0
+
+
+def verdict_from(state: ChargeState) -> str:
+    """The provider's answer -> REUSABLE / REFUNDED / UNKNOWN (pure)."""
+    if state.status is PaymentStatus.REFUNDED or state.refunds == "some":
+        return CARRY_CHECK_REFUNDED
+    if state.status is PaymentStatus.PAID and state.refunds in ("absent", "none"):
+        return CARRY_CHECK_REUSABLE
+    return CARRY_CHECK_UNKNOWN
+
+
+async def _account(session, tenant_id: UUID, provider: str):
+    """Seam: THIS clinic's decrypted account (the single decrypt point)."""
+    return await cfg.get_payment_account(session, tenant_id, provider)
+
+
+async def ensure_checked(conversation_id: UUID | None, *, now: datetime | None = None) -> str | None:
+    """The stored provider answer for this conversation's "Remarcar", asking the provider the
+    first time. None when there is nothing to carry. Never raises: an internal failure is logged
+    and answers None - nothing is carried (the booking charges as usual) and B/E still make the
+    old deposit due."""
+    if conversation_id is None:
+        return None
+    try:
+        return await _ensure_checked(conversation_id, now)
+    except Exception as exc:  # noqa: BLE001 - a booking never fails because of this check
+        logger.error("release_carry_check_failed", error_type=type(exc).__name__)
+        return None
+
+
+async def _ensure_checked(conversation_id: UUID, now: datetime | None) -> str | None:
+    async with async_session_factory() as session:
+        tenant_id = await session.scalar(
+            select(Conversation.tenant_id).where(Conversation.id == conversation_id)
+        )
+        if tenant_id is None:
+            return None
+        offer = await release_offer.carrying_offer(
+            session, tenant_id=tenant_id, conversation_id=conversation_id
+        )
+        if offer is None:
+            return None
+        if offer.carry_check is not None:
+            return offer.carry_check
+        offer_id = offer.id
+        deposit = await session.scalar(
+            select(PixDeposit).where(
+                PixDeposit.id == offer.deposit_id, PixDeposit.tenant_id == tenant_id
+            )
+        )
+        provider_name = deposit.provider if deposit is not None else None
+        charge_id = (
+            (deposit.provider_charge_id or deposit.asaas_payment_id) if deposit is not None else None
+        )
+        account = await _account(session, tenant_id, provider_name) if provider_name else None
+    # The session is closed: no transaction (and no row lock) waits on the provider.
+    outcome = await _ask_provider(tenant_id, provider_name, account, charge_id)
+    async with async_session_factory() as session:
+        stored = await release_offer.record_carry_check(
+            session, tenant_id=tenant_id, offer_id=offer_id, outcome=outcome, now=now
+        )
+        await session.commit()
+    return stored
+
+
+async def _ask_provider(tenant_id: UUID, provider_name, account, charge_id) -> str:
+    provider = registry.find_provider(provider_name) if provider_name else None
+    if provider is None or account is None or not charge_id or account.tenant_id != tenant_id:
+        logger.warning("release_carry_check_unverifiable", tenant_id=str(tenant_id))
+        return CARRY_CHECK_UNKNOWN
+    try:
+        state = await asyncio.wait_for(
+            provider.get_charge(account, charge_id), timeout=CHECK_TIMEOUT_SECONDS
+        )
+    except Exception as exc:  # noqa: BLE001 - timeout, network, HTTP, parsing: FAIL-SAFE
+        logger.warning(
+            "release_carry_check_provider_failed",
+            tenant_id=str(tenant_id),
+            error_type=type(exc).__name__,
+        )
+        return CARRY_CHECK_UNKNOWN
+    if not isinstance(state, ChargeState):
+        logger.warning("release_carry_check_unexpected_answer", tenant_id=str(tenant_id))
+        return CARRY_CHECK_UNKNOWN
+    outcome = verdict_from(state)
+    logger.info("release_carry_check", tenant_id=str(tenant_id), outcome=outcome)
+    return outcome
+```
+
+`src/secretaria/services/email.py` (junto dos textos da Task 5):
+
+```python
+def release_carry_refused_clinic_email(
+    *,
+    clinic_name: str,
+    check: str,
+    amount_text: str,
+    slot_text: str,
+    conversation_link: str | None,
+) -> tuple[str, str]:
+    """The patient's "Remarcar" charged a NEW Pix because the old deposit could not be reused
+    (owner 2026-10-12). The clinic must refund the old one - never names a bank."""
+    subject = (
+        f"[SecretarIA] DEVOLVA o sinal anterior ({amount_text}) — paciente remarcou com sinal "
+        f"novo — {clinic_name}"
+    )
+    if check == "refunded":
+        why = (
+            "O Asaas mostra que o sinal anterior já foi estornado (ou está em estorno). Por isso a "
+            "nova consulta pediu um sinal novo."
+        )
+        todo = "Confira o estorno no Asaas e marque como devolvido na aba de consultas liberadas."
+    else:
+        why = (
+            "Não conseguimos confirmar com o Asaas se o sinal anterior foi devolvido. Por "
+            "segurança, a nova consulta pediu um sinal novo: o paciente pode ter pago duas vezes."
+        )
+        todo = (
+            "Devolva o sinal anterior no Asaas (Cobranças > a cobrança paga > Estornar) e marque "
+            "como devolvido na aba de consultas liberadas."
+        )
+    body = (
+        f"Olá,\n\nO paciente da consulta de {slot_text}, cujo horário a clínica liberou, remarcou. "
+        f"{why}\n\n{todo} Valor do sinal anterior: {amount_text}."
+        f"{_release_link_line(conversation_link)}\n\n— Equipe SecretarIA"
+    )
+    return subject, body
+
+
+async def send_release_carry_refused_clinic_email(to_email: str, **fields) -> bool:
+    subject, body = release_carry_refused_clinic_email(**fields)
+    return await _send_release_mail(to_email, subject, body, "release_carry_refused_email")
+```
+
+`src/secretaria/services/release_offer_dispatch.py`:
+
+```diff
+@@ (imports de deposit_release_offer)
+     DECISION_REBOOKED,
++    EMAIL_CARRY_REFUSED,
+     EMAIL_KEEP_DECLINED,
+@@ (still_relevant: dentro de `rules`)
+         EMAIL_REBOOKED_DEPOSIT: decision == DECISION_REBOOKED,
++        # Owner 2026-10-12: a new Pix was charged at the Remarcar; relevant until marked.
++        EMAIL_CARRY_REFUSED: refund == REFUND_DUE,
+@@ (_send_clinic: antes de `if kind == EMAIL_REBOOKED_DEPOSIT:`)
++    if kind == EMAIL_CARRY_REFUSED:
++        return await email.send_release_carry_refused_clinic_email(
++            to,
++            clinic_name=tenant.clinic_name,
++            check=offer.carry_check or "unknown",
++            amount_text=amount,
++            slot_text=slot,
++            conversation_link=link,
++        )
+```
+
+(Confira que `EMAIL_CARRY_REFUSED` cai no ramo da CLÍNICA no despacho da Task 5 — o ramo é escolhido pelo prefixo `clinic_` ou por um conjunto de tipos; se for conjunto, inclua o tipo novo nele.)
+
+Fiação (sobre `3650e10`; o estado da oferta fica todo em `record_carry_check`/`claim_carry_over`):
 
 ```diff
 --- a/src/secretaria/workers/shared/flow_runner.py
 +++ b/src/secretaria/workers/shared/flow_runner.py
 @@ (imports)
++from secretaria.models.deposit_release_offer import CARRY_CHECK_REFUNDED, CARRY_CHECK_UNKNOWN
+ (... imports existentes de secretaria.models / secretaria.plugins ...)
 -from secretaria.services import reminder_hooks
-+from secretaria.services import release_offer, reminder_hooks
++from secretaria.services import release_carry_check, release_offer, reminder_hooks
+@@ (_apply_flow_result: logo antes de `# Persist the new flow state (+ any booked appointment) in one short txn.`)
++    # TASK-052 (owner 2026-10-12): a booking that may reuse a released slot's PAID deposit asks
++    # the payment provider FIRST - outside the transaction, bounded wait, failure = new charge.
++    carry_check = None
++    if result.appointment is not None:
++        carry_check = await release_carry_check.ensure_checked(reply.conversation_id)
++
 @@ (_apply_flow_result: junto das variáveis iniciais, depois de `cancellation_note: str | None = None`)
      cancellation_note: str | None = None
 +    # TASK-052: the line that says a released slot's paid deposit now covers this booking.
@@ -6323,7 +7198,7 @@ Expected: FAIL (o sinal continua na consulta liberada; o portão do "antes" resp
                          session.add(booked_appointment)
 +                        # TASK-052: "Remarcar" on a slot the clinic released with a PAID deposit -
 +                        # the deposit moves to THIS booking in this transaction (no new charge)
-+                        # unless the clinic already marked it refunded.
++                        # only when the provider check said REUSABLE.
 +                        await session.flush()
 +                        if await release_offer.claim_carry_over(
 +                            session,
@@ -6337,21 +7212,28 @@ Expected: FAIL (o sinal continua na consulta liberada; o portão do "antes" resp
                  result.bubbles[-1].body = f"{result.bubbles[-1].body}\n\n{cancellation_note}"
 +            if carried_note and persisted:
 +                result.bubbles[-1].body = f"{result.bubbles[-1].body}\n\n{carried_note}"
++            elif carry_check in (CARRY_CHECK_REFUNDED, CARRY_CHECK_UNKNOWN) and persisted:
++                note = release_offer.CARRY_REFUSED_NOTE
++                result.bubbles[-1].body = f"{result.bubbles[-1].body}\n\n{note}"
 ```
 
 ```diff
 --- a/src/secretaria/workers/shared/booking_hold.py
 +++ b/src/secretaria/workers/shared/booking_hold.py
 @@ (imports)
++from secretaria.models.deposit_release_offer import CARRY_CHECK_REFUNDED, CARRY_CHECK_UNKNOWN
+ (... imports existentes de secretaria.models / secretaria.plugins ...)
 -from secretaria.services import reminder_hooks
-+from secretaria.services import release_offer, reminder_hooks
++from secretaria.services import release_carry_check, release_offer, reminder_hooks
 @@ (_promote_booking_hold: depois de `replaced: ReplacedAppointment | None = None`)
      replaced: ReplacedAppointment | None = None
 +    carried = None  # TASK-052: the paid deposit this booking carried over, if any
++    # TASK-052: ask the provider BEFORE the transaction (bounded wait; failure = new charge).
++    carry_check = await release_carry_check.ensure_checked(reply.conversation_id)
 @@ (_promote_booking_hold: logo depois de `session.add(appointment)` dentro de `async with session.begin():`)
                  session.add(appointment)
 +                # TASK-052: a released PAID slot's deposit moves to this booking, in this
-+                # transaction (the Portal booking is born here, after the code).
++                # transaction (the Portal booking is born here, after the code), when REUSABLE.
 +                await session.flush()
 +                carried = await release_offer.claim_carry_over(
 +                    session,
@@ -6364,39 +7246,47 @@ Expected: FAIL (o sinal continua na consulta liberada; o portão do "antes" resp
          confirmation = f"{confirmation}\n\n{_replaced_notice(tenant, replaced)}"
 +    if carried is not None:
 +        confirmation = f"{confirmation}\n\n{release_offer.CARRIED_OVER_NOTE}"
++    elif carry_check in (CARRY_CHECK_REFUNDED, CARRY_CHECK_UNKNOWN):
++        confirmation = f"{confirmation}\n\n{release_offer.CARRY_REFUSED_NOTE}"
      return confirmation
 ```
 
 ```diff
 --- a/src/secretaria/services/booking_hold.py
 +++ b/src/secretaria/services/booking_hold.py
+@@ (BookingGate._deposit_quote: no início, antes de `on_before = False`)
+         from secretaria.services.payments import deposit_gate
++        # TASK-052 (owner 2026-10-12): the confirmation of a "Remarcar" asks the payment provider
++        # whether the released slot's PAID deposit may be reused - before any session is open.
++        from secretaria.models.deposit_release_offer import CARRY_CHECK_REUSABLE
++        from secretaria.services import release_carry_check, release_offer
++
++        carry_check = await release_carry_check.ensure_checked(self._conversation_id)
+ 
+         on_before = False
 @@ (BookingGate._deposit_quote: logo depois de `self._patient_id = patient_id`, antes de `return await deposit_gate.quote_deposit(`)
                  self._patient_id = patient_id
-+                # TASK-052: "Remarcar" on a slot the clinic released with a PAID deposit - the
-+                # next booking of this conversation carries that deposit (no new charge).
-+                from secretaria.services import release_offer
-+
-+                if self._conversation_id is not None and await release_offer.carry_over_pending(
-+                    session, tenant_id=tenant.id, conversation_id=self._conversation_id
-+                ):
++                # Reusable: the next booking of this conversation carries that deposit (no Pix).
++                # Refunded / unknown: the normal quote below asks for a NEW Pix.
++                if carry_check == CARRY_CHECK_REUSABLE:
 +                    return deposit_gate.DepositQuote(
 +                        "no_deposit", release_offer.REASON_CARRIED_OVER
 +                    )
                  return await deposit_gate.quote_deposit(
 ```
 
-(O import é local de propósito: `services/release_offer.py` não deve entrar no grafo de import de `services/booking_hold.py` na carga do módulo.)
+(Os imports são locais de propósito: `services/release_offer.py` e `services/release_carry_check.py` não devem entrar no grafo de import de `services/booking_hold.py` na carga do módulo. No `flow_runner.py`/`workers/shared/booking_hold.py` o import é de topo, como os demais serviços; `tests/test_workers_layering.py` confirma que a camada continua válida.)
 
 - [ ] **Step 4: Rodar e ver passar**
 
-Run: `$env:BOT_ALLOWLIST_WA_IDS = ""; uv run python -m pytest tests/test_release_offer_carry_over.py tests/test_appointment_replacement_wiring.py tests/test_booking_gate_deposit.py tests/test_booking_code_gate.py tests/test_before_booking_flow.py tests/test_deposit_after_mode.py tests/test_workers_layering.py -q -p no:cacheprovider ; uv run ruff check src/secretaria/workers/shared/flow_runner.py src/secretaria/workers/shared/booking_hold.py src/secretaria/services/booking_hold.py tests/test_release_offer_carry_over.py`
-Expected: PASS (6 novos), ruff limpo.
+Run: `$env:BOT_ALLOWLIST_WA_IDS = ""; uv run python -m pytest tests/test_release_carry_check.py tests/test_release_offer_carry_over.py tests/test_release_offer.py tests/test_release_offer_dispatch.py tests/test_appointment_replacement_wiring.py tests/test_booking_gate_deposit.py tests/test_booking_code_gate.py tests/test_before_booking_flow.py tests/test_deposit_after_mode.py tests/test_deposit_wait.py tests/test_workers_layering.py -q -p no:cacheprovider ; uv run ruff check src/secretaria/services/release_carry_check.py src/secretaria/services/payments/provider.py src/secretaria/services/payments/asaas_provider.py src/secretaria/services/email.py src/secretaria/services/release_offer_dispatch.py src/secretaria/workers/shared/flow_runner.py src/secretaria/workers/shared/booking_hold.py src/secretaria/services/booking_hold.py tests/test_release_carry_check.py tests/test_release_offer_carry_over.py`
+Expected: PASS (`test_release_carry_check.py`: 19 com os parametrizados; `test_release_offer_carry_over.py`: 9), ruff limpo; as suítes existentes de pagamento sem falha nova (o campo `refunds` é aditivo).
 
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add src/secretaria/workers/shared/flow_runner.py src/secretaria/workers/shared/booking_hold.py src/secretaria/services/booking_hold.py tests/test_release_offer_carry_over.py
-git commit -m "feat(payments): the booking that ends a Remarcar carries the released slot's paid deposit, no new charge (TASK-052)" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>" -m "Claude-Session: https://claude.ai/code/session_01J2kYPbf3cmf5WwjFSAq5zG"
+git add src/secretaria/services/release_carry_check.py src/secretaria/services/payments/provider.py src/secretaria/services/payments/asaas_provider.py src/secretaria/services/email.py src/secretaria/services/release_offer_dispatch.py src/secretaria/workers/shared/flow_runner.py src/secretaria/workers/shared/booking_hold.py src/secretaria/services/booking_hold.py tests/test_release_carry_check.py tests/test_release_offer_carry_over.py
+git commit -m "feat(payments): a Remarcar reuses the released paid deposit only after Asaas says paid and not refunded; otherwise a new Pix (TASK-052)" -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>" -m "Claude-Session: https://claude.ai/code/session_01J2kYPbf3cmf5WwjFSAq5zG"
 ```
 
 ---
@@ -6412,10 +7302,10 @@ git commit -m "feat(payments): the booking that ends a Remarcar carries the rele
 - Consumes: Task 3 (`patient_decision`, `mark_refunded`, `decline_keep`, constantes), Task 4 (`accept_keep`, `ACCEPT_*`), Task 5 (`dispatch_due`); `reminder_hooks.after_appointment_booked`; `get_current_tenant`, `get_agenda_viewer` (`api/hub/deps.py`) e `AgendaViewer` (`services/agenda_visibility.py`) — a MESMA regra de escopo de `api/hub/calendar.py::list_events` (`mine`, `no_own_agenda`); `attention_view.check_resolution_input`, `ResolveRefused`.
 - Produces (spec §5.10). Todas as rotas: qualquer papel da clínica (secretária, gestor, médico), filtradas pela clínica do token e pelo escopo de agenda — quem só vê os seus nunca vê nem age sobre a oferta de outro médico (404); `mine=true` sem profissional → 422 `no_own_agenda`.
   - `GET /tenants/me/release-offers?pending_only=false&mine=false&limit=100` → `{"items": [ReleaseOfferOut]}` (mais novos primeiro).
-  - `POST /tenants/me/release-offers/{id}/refunded` `{"resolved_by_name", "note"?}` → 200 / 409 `refund_not_due` | `keep_pending` / 404 / 422.
+  - `POST /tenants/me/release-offers/{id}/refunded` `{"resolved_by_name", "note"?}` → 200 / 409 `refund_not_due` | `keep_pending` | `deposit_reused` (Remarcar reaproveitou o sinal — não devolver) / 404 / 422.
   - `POST /tenants/me/release-offers/{id}/keep/accept` `{"resolved_by_name"}` → 200 / 409 `not_requested` | `slot_taken` | `slot_past` | `refund_already_marked` / 503 `calendar_unavailable` / 404 / 422.
   - `POST /tenants/me/release-offers/{id}/keep/refuse` `{"resolved_by_name"}` → 200 (agora ou antes) / 409 `not_requested` / 404 / 422.
-  - `ReleaseOfferOut`: `id, released_appointment_id, new_appointment_id, conversation_id, patient_display_name, professional_id, service_label, slot_start, slot_end, amount_cents, deposit_paid_at_release, deposit_status, refund_status, refund_source, decision, patient_decision, keep_deadline_at, released_at, decide_by_at, expires_at, first_contact_at, refund_due_at, refund_marked_at, patient_answered_at, can_mark_refunded, can_decide_keep`.
+  - `ReleaseOfferOut`: `id, released_appointment_id, new_appointment_id, conversation_id, patient_display_name, professional_id, service_label, slot_start, slot_end, amount_cents, deposit_paid_at_release, deposit_status, refund_status, refund_source, decision, patient_decision, keep_deadline_at, released_at, decide_by_at, expires_at, first_contact_at, refund_due_at, refund_marked_at, patient_answered_at, can_mark_refunded, can_decide_keep, deposit_reused, carry_check, state_note`.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -6640,6 +7530,35 @@ async def test_marking_is_refused_before_the_refund_is_due_or_while_keep_is_pend
     assert response.status_code == 409  # keep_pending, or refund_not_due while nothing is due
 
 
+async def test_marking_a_reused_deposit_is_409_and_the_list_says_do_not_refund(
+    client: AsyncClient, db
+):
+    from tests.release_offer_support import RELEASED_START, new_appointment
+
+    released, offer = await _opened(db)
+    await _do(db, ro.choose_reschedule, offer.id, T + timedelta(hours=1),
+              conversation_id=released.conversation.id)  # fmt: skip
+    async with db() as session:
+        await ro.record_carry_check(
+            session, tenant_id=released.tenant_id, offer_id=offer.id, outcome="reusable",
+            now=T + timedelta(hours=2),
+        )  # fmt: skip
+        fresh = await new_appointment(session, released, start=RELEASED_START + timedelta(days=4))
+        assert await ro.claim_carry_over(
+            session, tenant_id=released.tenant_id, conversation_id=released.conversation.id,
+            new_appointment=fresh, now=T + timedelta(hours=2),
+        )  # fmt: skip
+        await session.commit()
+    _wire(db, released.tenant_id)
+
+    response = await client.post(f"{OFFERS}/{offer.id}/refunded", json=BODY)
+
+    assert (response.status_code, response.json()) == (409, {"detail": {"code": "deposit_reused"}})
+    (item,) = (await client.get(OFFERS)).json()["items"]
+    assert (item["deposit_reused"], item["can_mark_refunded"]) == (True, False)
+    assert (item["carry_check"], item["state_note"]) == ("reusable", ro.DEPOSIT_REUSED_LABEL)
+
+
 async def test_accepting_keep_recreates_the_consultation_and_twice_is_the_same(
     client: AsyncClient, db
 ):
@@ -6740,6 +7659,12 @@ class ReleaseOfferOut(BaseModel):
     patient_answered_at: datetime | None
     can_mark_refunded: bool
     can_decide_keep: bool
+    # Owner 2026-10-12: a "Remarcar" reused the paid deposit - never refund it (409 on marking).
+    deposit_reused: bool
+    carry_check: str | None  # reusable | refunded | unknown (provider check at the confirmation)
+    # "Sinal reaproveitado — não devolver" / "Sinal novo cobrado na remarcação — devolva o sinal
+    # anterior" / None
+    state_note: str | None
 
 
 class ReleaseOfferListOut(BaseModel):
@@ -6877,8 +7802,16 @@ def _out(row) -> ReleaseOfferOut:
         patient_answered_at=offer.patient_answered_at,
         can_mark_refunded=offer.deposit_paid
         and offer.refund_status == REFUND_DUE
-        and offer.decision != DECISION_KEEP_REQUESTED,
+        and offer.decision != DECISION_KEEP_REQUESTED
+        and offer.deposit_reused_at is None,
         can_decide_keep=offer.decision == DECISION_KEEP_REQUESTED,
+        deposit_reused=offer.deposit_reused_at is not None,
+        carry_check=offer.carry_check,
+        state_note=release_offer.DEPOSIT_REUSED_LABEL
+        if offer.deposit_reused_at is not None
+        else release_offer.CARRY_REFUSED_LABEL
+        if offer.carry_check in ("refunded", "unknown")
+        else None,
     )
 
 
@@ -6966,8 +7899,9 @@ async def mark_offer_refunded(
     outcome = await release_offer.mark_refunded(
         session, tenant_id=tenant.id, offer_id=offer_uuid, note=note, resolved_by_name=name
     )
-    if outcome in ("not_due", "keep_pending"):
-        return _detail("refund_not_due" if outcome == "not_due" else "keep_pending", 409)
+    if outcome in ("not_due", "keep_pending", "deposit_reused"):
+        code = {"not_due": "refund_not_due"}.get(outcome, outcome)
+        return _detail(code, 409)
     if outcome == "not_found":
         return _detail("not_found", 404)
     if outcome == "marked":
@@ -7038,7 +7972,7 @@ Em `src/secretaria/main.py`: no bloco de imports dos routers do hub (o que tem `
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `$env:BOT_ALLOWLIST_WA_IDS = ""; uv run python -m pytest tests/test_release_offers_hub.py tests/test_payment_attention_hub.py tests/test_payment_attention_roles.py tests/test_agenda_viewer.py tests/test_hub_conversations_my_patients.py -q -p no:cacheprovider ; uv run ruff check src/secretaria/schemas/release_offers.py src/secretaria/api/hub/release_offers.py src/secretaria/main.py tests/test_release_offers_hub.py`
-Expected: PASS (8), ruff limpo. (`test_agenda_viewer.py` e `test_hub_conversations_my_patients.py` provam que o escopo da agenda não mudou.)
+Expected: PASS (9), ruff limpo. (`test_agenda_viewer.py` e `test_hub_conversations_my_patients.py` provam que o escopo da agenda não mudou.)
 
 - [ ] **Step 5: Commit**
 
@@ -7317,6 +8251,11 @@ async def test_bookings_racing_the_sweep_carry_exactly_once_and_leave_no_refund_
         assert await release_offer.choose_reschedule(
             session, offer=row, conversation_id=released.conversation.id
         )
+        # The provider said "paid, no refund" at the confirmation (Task 10): every racing booking
+        # (two confirm clicks, the Portal code and the flow) may try to carry - ONE wins.
+        await release_offer.record_carry_check(
+            session, tenant_id=released.tenant_id, offer_id=offer.id, outcome="reusable"
+        )
         await session.commit()
 
     async def book(day: int):
@@ -7450,7 +8389,7 @@ e, em `RELEASE_COPY`, troque `ackBody` e `ackLabel` por:
 
 ```ts
   ackBody:
-    "Ao liberar o horário, o paciente poderá pedir para manter o horário (a clínica decide), remarcar usando o mesmo sinal, sem nova cobrança, ou cancelar. Se ele cancelar ou não responder até o prazo, a clínica recebe avisos para devolver o sinal por inteiro pelo painel do provedor de pagamento.",
+    "Ao liberar o horário, o paciente poderá pedir para manter o horário (a clínica decide), remarcar usando o mesmo sinal (se o Asaas confirmar que ele não foi devolvido; senão é cobrado um sinal novo), ou cancelar. Se ele cancelar ou não responder até o prazo, a clínica recebe avisos para devolver o sinal por inteiro pelo painel do provedor de pagamento.",
   ackLabel: "Entendo que o sinal pago pode ter de ser devolvido",
 ```
 
@@ -7476,7 +8415,7 @@ git commit -m "fix(agenda): the paid-release warning describes keep/reschedule/c
 
 - [ ] **Step 1: Suíte inteira e lint de tudo o que foi tocado**
 
-Run: `$env:BOT_ALLOWLIST_WA_IDS = ""; uv run python -m pytest -q -p no:cacheprovider ; uv run ruff check src/secretaria/models/deposit_release_offer.py src/secretaria/models/__init__.py src/secretaria/models/payment_attention_item.py migrations/versions/b6d2e8f4a1c3_deposit_release_offers.py src/secretaria/config.py src/secretaria/main.py src/secretaria/services/email.py src/secretaria/services/release_deadlines.py src/secretaria/services/release_offer.py src/secretaria/services/release_keep.py src/secretaria/services/release_offer_dispatch.py src/secretaria/services/payments/attention_view.py src/secretaria/api/hub/calendar.py src/secretaria/api/hub/release_offers.py src/secretaria/schemas/release_offers.py src/secretaria/services/appointment_release.py src/secretaria/workers/whatsapp/notifications.py src/secretaria/services/availability.py src/secretaria/services/flow_router.py src/secretaria/workers/shared/release_offer_actions.py src/secretaria/workers/shared/actions.py src/secretaria/schemas/webhook.py src/secretaria/workers/portal/inbound.py src/secretaria/workers/portal/open.py src/secretaria/workers/shared/flow_runner.py src/secretaria/workers/shared/booking_hold.py src/secretaria/services/booking_hold.py src/secretaria/workers/payments_cron.py tests/release_offer_support.py tests/test_deposit_release_offer_migration.py tests/test_release_deadlines.py tests/test_release_offer.py tests/test_release_keep.py tests/test_release_offer_dispatch.py tests/test_release_offer_buttons.py tests/test_release_offer_carry_over.py tests/test_release_offers_hub.py tests/test_release_offer_postgres.py tests/test_deposit_before_migration.py tests/test_payment_attention.py tests/test_hub_release.py tests/test_cancellation_notice.py tests/test_availability.py tests/test_before_booking_flow.py tests/test_payment_cron_jobs.py`
+Run: `$env:BOT_ALLOWLIST_WA_IDS = ""; uv run python -m pytest -q -p no:cacheprovider ; uv run ruff check src/secretaria/models/deposit_release_offer.py src/secretaria/models/__init__.py src/secretaria/models/payment_attention_item.py migrations/versions/b6d2e8f4a1c3_deposit_release_offers.py src/secretaria/config.py src/secretaria/main.py src/secretaria/services/email.py src/secretaria/services/release_deadlines.py src/secretaria/services/release_offer.py src/secretaria/services/release_keep.py src/secretaria/services/release_offer_dispatch.py src/secretaria/services/release_carry_check.py src/secretaria/services/payments/provider.py src/secretaria/services/payments/asaas_provider.py src/secretaria/services/payments/attention_view.py src/secretaria/api/hub/calendar.py src/secretaria/api/hub/release_offers.py src/secretaria/schemas/release_offers.py src/secretaria/services/appointment_release.py src/secretaria/workers/whatsapp/notifications.py src/secretaria/services/availability.py src/secretaria/services/flow_router.py src/secretaria/workers/shared/release_offer_actions.py src/secretaria/workers/shared/actions.py src/secretaria/schemas/webhook.py src/secretaria/workers/portal/inbound.py src/secretaria/workers/portal/open.py src/secretaria/workers/shared/flow_runner.py src/secretaria/workers/shared/booking_hold.py src/secretaria/services/booking_hold.py src/secretaria/workers/payments_cron.py tests/release_offer_support.py tests/test_deposit_release_offer_migration.py tests/test_release_deadlines.py tests/test_release_offer.py tests/test_release_keep.py tests/test_release_offer_dispatch.py tests/test_release_offer_buttons.py tests/test_release_offer_carry_over.py tests/test_release_carry_check.py tests/test_release_offers_hub.py tests/test_release_offer_postgres.py tests/test_deposit_before_migration.py tests/test_payment_attention.py tests/test_hub_release.py tests/test_cancellation_notice.py tests/test_availability.py tests/test_before_booking_flow.py tests/test_payment_cron_jobs.py`
 Expected: linha de base da Task 0 + os testes novos, **0 failed**; ruff limpo. Falha que também falha na linha de base é pré-existente (registre); qualquer outra é regressão (corrija antes de seguir).
 
 - [ ] **Step 2: Documentar os dois modelos pendentes na Meta**
@@ -7521,8 +8460,10 @@ Spec: `docs/superpowers/specs/2026-10-11-liberar-horario-com-sinal-pago-design.m
 ## 1. O que é
 Liberar uma consulta com sinal PAGO abre uma oferta. Manter horário (até o início da consulta) é um PEDIDO à clínica,
 que aceita (a consulta volta, se o horário estiver livre) ou recusa em até 24 h do toque; sem decisão = recusa.
-Remarcar a qualquer momento leva o sinal se a clínica ainda não marcou devolvido (e a clínica recebe "REMARCADA levando
-o sinal"); senão cobra de novo. Cancelar avisa a clínica NA HORA com o passo a passo do estorno no Asaas. Sem resposta:
+Remarcar a qualquer momento: ao CONFIRMAR, o sistema LÊ a cobrança no Asaas (nunca estorna). Paga e sem estorno → leva o
+sinal (a clínica recebe "REMARCADA levando o sinal" e "marcar devolvido" fica travado); estornada/em estorno ou já marcada
+devolvida → sinal novo; Asaas sem resposta/erro → sinal novo por segurança (o paciente pode pagar duas vezes; a clínica
+recebe "DEVOLVA o sinal anterior"). Cancelar avisa a clínica NA HORA com o passo a passo do estorno no Asaas. Sem resposta:
 aviso em B = min(T + 6 h, fechamento − 30 min; fechamento da clínica se o brain-api diz que há secretária, senão o do
 médico — por enquanto sempre o do médico, Task 16 pendente); em T + 24 h "Cancelado por falta de resposta" e "prazo vencido, devolva agora". A clínica (qualquer papel, no
 escopo da agenda) marca "devolvido" e o paciente responde Recebido / Não recebido. Portal: cartão + e-mail com link;
@@ -7531,7 +8472,7 @@ WhatsApp: só mensagem. O sistema nunca estorna (D15).
 ## 2. Onde está cada coisa
 | Camada | Arquivo |
 |---|---|
-| Tabelas + migração + `tenants.has_secretary` | `models/deposit_release_offer.py`, `models/tenant.py`, `migrations/versions/b6d2e8f4a1c3_deposit_release_offers.py` |
+| Tabelas + migração | `models/deposit_release_offer.py`, `migrations/versions/b6d2e8f4a1c3_deposit_release_offers.py` |
 | Prazos | `services/release_deadlines.py` |
 | Regras e textos | `services/release_offer.py` |
 | Aceitar "Manter" | `services/release_keep.py` |
@@ -7541,7 +8482,7 @@ WhatsApp: só mensagem. O sistema nunca estorna (D15).
 | Aba (TASK-054) | `api/hub/release_offers.py` (lista, devolvido, aceitar/recusar Manter; escopo da agenda), `schemas/release_offers.py`; gancho em `services/payments/attention_view.py::resolve_item` |
 | WhatsApp | `workers/whatsapp/notifications.py::send_cancellation_notice` |
 | Toques | `workers/shared/release_offer_actions.py`, `workers/shared/actions.py`, `schemas/webhook.py`, `workers/portal/inbound.py`, `workers/portal/open.py` |
-| Transferência | `workers/shared/flow_runner.py`, `workers/shared/booking_hold.py`, `services/booking_hold.py` |
+| Transferência | `services/release_carry_check.py` (leitura no Asaas na confirmação; fail-safe = sinal novo), `services/payments/asaas_provider.py::get_charge` (`refunds`), `workers/shared/flow_runner.py`, `workers/shared/booking_hold.py`, `services/booking_hold.py` |
 | B, T + 24 h, K, envios | `workers/payments_cron.py::run_payment_sweeps` |
 | Dias segurados | `services/flow_router.py::_enter_slot_picker`, `services/availability.py::held_slots` |
 
@@ -7550,7 +8491,7 @@ Decisões padrão: spec §10. Perguntas ao dono: spec §11. Modelos Meta: `docs/
 
 ## 4. Validação
 Suíte «N» passed / «S» skipped / «X» xfailed / 0 failed (linha de base «B»); ruff limpo; Postgres real: «PROVADO / NÃO PROVADO».
-**NÃO PROVADO:** WhatsApp real (modelos não aprovados), SMTP real, cartão no Portal real, produção.
+**NÃO PROVADO:** WhatsApp real (modelos não aprovados), SMTP real, cartão no Portal real, produção, a leitura da cobrança no Asaas real (status de estorno e lista `refunds`; só o sandbox prova o formato — qualquer formato inesperado cobra de novo).
 
 ## 5. Deploy (NÃO autorizado)
 Migração `b6d2e8f4a1c3` → API → worker LOGO depois → Brain-Message-Frontend. `BRAIN_MESSAGE_PORTAL_URL` na API e no worker.
@@ -7561,7 +8502,7 @@ Migração `b6d2e8f4a1c3` → API → worker LOGO depois → Brain-Message-Front
 Na seção "## Documentação" do `CLAUDE.md` do secretarIA, como primeiro parágrafo:
 
 ```markdown
-`docs/CHECKPOINT_task052_liberar_sinal_pago.md` — TASK-052: liberar horário com sinal pago dá ao paciente Manter (pedido; a clínica aceita/recusa em 24 h) / Remarcar (a qualquer momento; leva o sinal se não marcado devolvido) / Cancelar (avisa a clínica na hora com o passo a passo do Asaas); sem resposta, aviso em B e "cancelado por falta de resposta" em T+24h; contrato da aba da TASK-054 (todos os papéis, escopo da agenda); B usa o horário do médico (papel de secretária pendente, Task 16); modelos Meta PENDENTES; integra em `feature/out-of-mvp`; **construído, NÃO deployado**.
+`docs/CHECKPOINT_task052_liberar_sinal_pago.md` — TASK-052: liberar horário com sinal pago dá ao paciente Manter (pedido; a clínica aceita/recusa em 24 h) / Remarcar (a qualquer momento; leva o sinal só se o Asaas confirmar paga e sem estorno na hora; senão sinal novo — fail-safe) / Cancelar (avisa a clínica na hora com o passo a passo do Asaas); sem resposta, aviso em B e "cancelado por falta de resposta" em T+24h; contrato da aba da TASK-054 (todos os papéis, escopo da agenda); B usa o horário do médico (papel de secretária pendente, Task 16); modelos Meta PENDENTES; integra em `feature/out-of-mvp`; **construído, NÃO deployado**.
 ```
 
 - [ ] **Step 5: Atualizar o `TASK.md`**
@@ -7624,7 +8565,7 @@ Nenhum passo de código aqui até o dono liberar.
 | §5.2 Prazos (horário do médico agora; "tem secretária" pendente) | Tasks 2, 3, 6; Task 16 (pendente) |
 | §5.3 Mensagem em T, canais | Tasks 3, 6, 7 |
 | §5.4 Manter por opção da clínica (pausa, aceitar, recusar, K, Portal depois de S) | Tasks 3, 4, 5, 9, 11, 12 |
-| §5.5 Remarcar a qualquer momento; nova cobrança se marcado; e-mail "REMARCADA" | Tasks 3, 5, 9, 10 |
+| §5.5 Remarcar a qualquer momento; leitura no Asaas na confirmação; fail-safe = sinal novo; trava de "devolvido"; e-mails "REMARCADA" / "DEVOLVA o sinal anterior" | Tasks 1, 3, 5, 9, 10, 11, 13 |
 | §5.6 Cancelar | Tasks 3, 5, 9 |
 | §5.7 B, E, K | Tasks 3, 9, 12 |
 | §5.8 Avisos à clínica | Task 5 |

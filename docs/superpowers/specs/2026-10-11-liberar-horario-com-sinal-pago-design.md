@@ -12,7 +12,10 @@ AUTORIZADA.
 > aceita ou recusa na aba); fechamento = horário do MÉDICO da consulta (a regra "tem secretária" pelos papéis do
 > brain-api ficou PENDENTE até a tela de integrantes do dono — decisão de 2026-10-12, Task 16 do plano); TODOS os papéis marcam
 > "devolvido", no escopo de agenda de cada um; modelo Meta de 3 botões reaproveitado; Remarcar a qualquer momento
-> (transfere o sinal se a clínica ainda não marcou devolvido; senão cobra de novo) com e-mail próprio à clínica. Seguem
+> (transfere o sinal se a clínica ainda não marcou devolvido; senão cobra de novo) com e-mail próprio à clínica.
+> **Ajuste do dono (2026-10-12, resolve a §11-1):** ao CONFIRMAR o Remarcar o sistema LÊ a cobrança no Asaas; só
+> transfere se ela está paga e sem estorno; estornada/em estorno ou Asaas sem resposta → sinal novo (fail-safe
+> financeiro); com sinal reaproveitado, "marcar devolvido" fica travado (§5.5). Seguem
 > valendo: Cancelar avisa a clínica NA HORA com o passo a passo do Asaas; B; T + 24 h "Cancelado por falta de resposta";
 > lembrete de T + 24 h; Recebido / Não recebido quando a clínica marca devolvido; WhatsApp sem e-mail; texto sem banco;
 > D15; idempotência; tabela nova aditiva; corridas em Postgres; dias segurados; texto da agenda.
@@ -33,9 +36,11 @@ Instantes: **T** liberação; **S** início da consulta liberada; **F** fechamen
    mensagem; Portal: ao abrir a conversa o cartão mostra só esses dois).
 3. **Remarcar** a qualquer momento enquanto a oferta não foi encerrada (antes ou depois de B e de S; depois de
    Cancelar; depois da recusa da clínica). Se a clínica JÁ marcou o sinal como devolvido → a nova consulta cobra de novo
-   (novo Pix); senão → o sinal pago é transferido sem nova cobrança e, quando a nova consulta é CONFIRMADA, a clínica
+   (novo Pix); senão, quando o paciente CONFIRMA a nova consulta, o sistema consulta o Asaas (§5.5): paga e sem estorno →
+   o sinal pago é transferido sem nova cobrança e a clínica
    recebe um e-mail próprio ("nova consulta marcada — REMARCADA levando o sinal, não há reembolso a fazer") e os avisos
-   de devolução pendentes da oferta são cancelados. **Oferta "Cancelada por falta de resposta" (E) continua encerrada:
+   de devolução pendentes da oferta são cancelados ("marcar devolvido" fica travado); estornada / em estorno / Asaas sem
+   resposta → sinal novo e a clínica é avisada para devolver o anterior. **Oferta "Cancelada por falta de resposta" (E) continua encerrada:
    Remarcar depois disso não reabre e não transfere** (resposta clara; o paciente marca uma consulta nova normal).
 4. **Cancelar**: pergunta de motivo de sempre + aviso de devolução à clínica NA HORA, sempre, com o passo a passo do
    Asaas (estornar a própria cobrança, sem digitar chave; saldo insuficiente logo após receber; guardar comprovante).
@@ -58,8 +63,9 @@ Instantes: **T** liberação; **S** início da consulta liberada; **F** fechamen
 2. Manter avisa a clínica UMA vez e abre a negociação; aceitar recria a consulta (se livre) e avisa o paciente; recusar
    ou K vencido torna a devolução devida, avisa a clínica e o paciente (Remarcar / Cancelar).
 3. Cancelar: UM item `released_refund_due`, aviso à clínica na hora, uma vez.
-4. Remarcar: transfere ou cobra conforme "devolvido"; com transferência, e-mail "REMARCADA levando o sinal" e avisos de
-   devolução cancelados.
+4. Remarcar: transfere só se a clínica não marcou "devolvido" E o Asaas, consultado na confirmação, diz paga e sem
+   estorno; com transferência, e-mail "REMARCADA levando o sinal", avisos de devolução cancelados e "devolvido" travado
+   (409); Asaas estornado/em estorno/sem resposta → sinal novo + "DEVOLVA o sinal anterior" à clínica.
 5. Silêncio: aviso em B; "Cancelado por falta de resposta" em E; lembrete de E conforme a regra.
 6. Nenhum aviso duas vezes; nada antes de T; nada entre clínicas nem fora do escopo de agenda de quem age.
 
@@ -72,7 +78,7 @@ Frontend: só o texto do aviso de liberar.
 
 ## 3. Fora de escopo
 
-O sistema estornar ou consultar o Asaas (D15). A tela/aba (TASK-054). A leitura de "tem secretária" (endpoint do
+O sistema estornar (D15) ou consultar o Asaas fora da confirmação do Remarcar (a única leitura, §5.5). A tela/aba (TASK-054). A leitura de "tem secretária" (endpoint do
 brain-api + cliente no secretarIA) — PENDENTE de dependência, tarefa isolada no fim do plano (§5.2, §11). Aprovação Meta. Feriados. Cancelamento de consulta viva (como hoje). IA
 transferir o sinal. Pix pago depois da liberação (`paid_then_cancelled`).
 
@@ -102,7 +108,9 @@ transferir o sinal. Pix pago depois da liberação (`paid_then_cancelled`).
 |---|---|
 | `decision` (paciente/negociação) | `none`, `rescheduling`, `keep_requested`, `kept`, `keep_declined`, `rebooked`, `cancelled`, `no_answer_cancelled`, `not_offered` |
 | `refund_status` (dinheiro) | `not_due` → `due` → `marked` → `received` / `not_received`; `due` → `clinic_decided` |
-| `refund_source` | `patient` (Cancelar), `timeout` (B/E), `keep_refused`, `keep_timeout` |
+| `refund_source` | `patient` (Cancelar), `timeout` (B/E), `keep_refused`, `keep_timeout`, `carry_refunded` / `carry_unknown` (checagem do Remarcar recusou) |
+| `carry_check` | `reusable` / `refunded` / `unknown` — o que o Asaas disse na confirmação do Remarcar (gravado UMA vez; + `carry_checked_at`) |
+| `deposit_reused_at` | instante em que um Remarcar reaproveitou o sinal; a partir daí "marcar devolvido" → 409 `deposit_reused` |
 | `keep_outcome` | `accepted`, `refused`, `timeout` (+ `keep_requested_at`, `keep_deadline_at` = K, `keep_resolved_at`, `keep_resolved_by`) |
 | instantes | `released_at` T, `slot_start_at` S, `decide_by_at` B, `expires_at` E, `first_contact_at`, `refund_due_at`, `refund_marked_at`, `patient_answered_at`, `last_reminder_at`, `after_start_card_at` |
 
@@ -182,13 +190,36 @@ reaproveitado em toda mensagem fora da janela desta tarefa, exceto a conferênci
 ### 5.5 Remarcar
 
 Sempre que a oferta não está encerrada (`kept`, `rebooked`, `no_answer_cancelled`, `not_offered` encerram). Entra no
-"Outro horário" (mesmo médico/serviço; dia, depois horário). Devolução não marcada → "Ótimo! O sinal que você já pagou
-vale para a nova consulta." e o portão do "antes" não pede Pix; ao confirmar (`flow_runner._apply_flow_result` ou
-promoção do Portal) a consulta nova leva o sinal na mesma transação: `rebooked`, devolução `not_due`, item fechado como
-"remarcado", avisos de devolução descartados e `clinic_rebooked_deposit` à clínica. Devolução marcada → "A clínica já
-informou que devolveu o seu sinal, então a nova consulta segue as regras de sinal da clínica." (novo Pix). Depois de E
-sem resposta: "O prazo de 24 horas para responder terminou e a consulta foi cancelada por falta de resposta. ... Para
-marcar uma nova consulta, é só me escrever." (não reabre).
+"Outro horário" (mesmo médico/serviço; dia, depois horário). Devolução não marcada → "Ótimo! Escolha o novo horário. Ao
+confirmar, conferimos se o sinal que você já pagou pode valer para a nova consulta." Devolução marcada → "A clínica já
+informou que devolveu o seu sinal, então a nova consulta segue as regras de sinal da clínica." (novo Pix, SEM consultar
+o Asaas). Depois de E sem resposta: "O prazo de 24 horas para responder terminou e a consulta foi cancelada por falta de
+resposta. ... Para marcar uma nova consulta, é só me escrever." (não reabre).
+
+**Proteção da transferência (decisão do dono, 2026-10-12).** No momento em que o paciente CONFIRMA a nova consulta
+(portão do "antes" ao escolher o horário; `flow_runner._apply_flow_result` ou promoção do Portal no "depois"), o sistema
+LÊ a cobrança paga original no Asaas com a chave da própria clínica (`services/release_carry_check.py` →
+`AsaasProvider.get_charge` → `GET /payments/{id}`; leitura apenas, nunca estorna — D15), FORA de transação e com espera
+máxima de poucos segundos; o resultado fica gravado UMA vez na oferta (`carry_check`):
+
+| O Asaas diz | Resultado |
+|---|---|
+| paga (`RECEIVED`/`CONFIRMED`) e nenhum estorno listado | `reusable`: a consulta nova leva o sinal na mesma transação — `rebooked`, devolução `not_due`, item fechado como "remarcado", avisos de devolução pendentes descartados, `deposit_reused_at` gravado ("marcar devolvido" → 409 `deposit_reused`; a aba mostra "Sinal reaproveitado — não devolver") e `clinic_rebooked_deposit` destacado à clínica ("REMARCADA levando o sinal"); o paciente lê "O sinal que você já pagou vale para esta consulta. Não há nova cobrança." |
+| `REFUNDED` / `REFUND_REQUESTED` / `REFUND_IN_PROGRESS`, ou algum estorno listado (inclui parcial) | `refunded`: nada transferido; sinal NOVO pelas regras da clínica |
+| fora do ar, timeout, erro HTTP/rede, status inesperado, formato ilegível, sem conta/sem id de cobrança, sinal de outra clínica | `unknown` = **FAIL-SAFE FINANCEIRO: cobrar de novo**. A remarcação não espera o Asaas |
+
+Em `refunded`/`unknown`: a oferta fecha como remarcada com sinal novo (`rebooked`, sem `new_appointment_id`), o sinal
+antigo vira devolução devida (`carry_refunded`/`carry_unknown`; item aberto) e a clínica recebe NA HORA
+`clinic_carry_refused` ("DEVOLVA o sinal anterior" — em `unknown`: "não conseguimos confirmar com o Asaas; o paciente
+pode ter pago duas vezes", com o passo a passo do estorno); o paciente lê "Não foi possível reaproveitar o sinal
+anterior, então esta consulta terá um sinal novo. Se o sinal anterior ainda não voltou para você, a clínica vai
+devolvê-lo." **Consequência aceita:** no `unknown` o paciente pode pagar duas vezes (o primeiro sinal continua pago) e a
+clínica fica com um sinal extra a devolver. **Risco residual aceito pelo dono:** segundos entre a leitura no Asaas e um
+estorno feito pela clínica nesse intervalo. Dois cliques de confirmar recebem a MESMA resposta (gravada uma vez) e só
+uma consulta leva o sinal (`UPDATE` guardado). Campos do Asaas: o cliente existente já traduz `status`; a lista
+`refunds` da cobrança é lida se vier — formato NÃO PROVADO até o sandbox (formato inesperado = `unknown`). Os textos da
+oferta ao paciente (e o modelo Meta) continuam dizendo "usando o mesmo sinal, sem nova cobrança" — vale no caso normal;
+quando a checagem recusa, a nota acima explica na hora.
 
 ### 5.6 Cancelar
 
@@ -210,7 +241,8 @@ E: `none`/`rescheduling` → `no_answer_cancelled` (e devida, se ainda não). K:
 |---|---|---|
 | `clinic_keep_request` | toque Manter | `keep_requested` |
 | `clinic_keep_declined` | recusa / K | `keep_declined` e devolução `due` (passo a passo do Asaas) |
-| `clinic_rebooked_deposit` | Remarcar confirmado com sinal transferido | `rebooked` ("REMARCADA levando o sinal: não há reembolso a fazer") |
+| `clinic_rebooked_deposit` | Remarcar confirmado com sinal transferido | `rebooked` ("REMARCADA levando o sinal: não há reembolso a fazer; NÃO devolva, o sinal está em uso; conferido no Asaas na remarcação") |
+| `clinic_carry_refused` | checagem do Remarcar = `refunded`/`unknown` | devolução `due` ("DEVOLVA o sinal anterior"; motivo; em `unknown`, "o paciente pode ter pago duas vezes") |
 | `clinic_refund_cancel` | toque Cancelar | `cancelled` e `due` |
 | `clinic_refund_noanswer` | B | `due` e decisão `none`/`rescheduling`/`no_answer_cancelled` |
 | `clinic_refund_day` (seq 0 em E; seq 1 após recusa/K) | E / +24 h | devolução `due`/`marked`/`not_received` e decisão fora de `keep_requested`/`kept`/`rebooked`; com `no_answer_cancelled`: "prazo vencido, devolva agora" |
@@ -240,9 +272,12 @@ seus não age sobre outro (404); `mine=true` sem profissional → 422 `no_own_ag
   `refund_status`, `refund_source`, `decision`, `patient_decision` (`no_answer` | `keep_requested` | `kept` |
   `keep_declined` | `rescheduled` | `cancelled` | `cancelled_no_answer` | `received` | `not_received` | `not_offered`),
   `keep_deadline_at`, `released_at`, `decide_by_at`, `expires_at`, `first_contact_at`, `refund_due_at`,
-  `refund_marked_at`, `patient_answered_at`, `can_mark_refunded`, `can_decide_keep`.
+  `refund_marked_at`, `patient_answered_at`, `can_mark_refunded`, `can_decide_keep`, `deposit_reused` (bool),
+  `carry_check` (`reusable` | `refunded` | `unknown` | null), `state_note` ("Sinal reaproveitado — não devolver" |
+  "Sinal novo cobrado na remarcação — devolva o sinal anterior" | null).
 - `POST /tenants/me/release-offers/{id}/refunded` `{"resolved_by_name", "note"?}` → 200 (marcado agora ou antes);
-  409 `refund_not_due` | `keep_pending`; 404; 422 (nota nunca ecoada).
+  409 `refund_not_due` | `keep_pending` | `deposit_reused` (um Remarcar reaproveitou o sinal: não devolver); 404; 422
+  (nota nunca ecoada).
 - `POST /tenants/me/release-offers/{id}/keep/accept` `{"resolved_by_name"}` → 200 (aceito agora ou antes); 409
   `not_requested` | `slot_taken` | `slot_past` | `refund_already_marked`; 503 `calendar_unavailable`; 404.
 - `POST /tenants/me/release-offers/{id}/keep/refuse` `{"resolved_by_name"}` → 200 (recusado agora ou antes); 409
@@ -281,7 +316,11 @@ comitada antes de enviar; revalidada (§5.8/§5.9); sem contato → `skipped_no_
 | Clínica não decide até K | idem, `keep_timeout` |
 | Manter e depois Remarcar | pedido encerrado; aceitar depois = 409 `not_requested` |
 | Remarcar antes/depois de B, depois de S, depois de Cancelar, depois da recusa (não marcada) | sinal transferido; ao confirmar `clinic_rebooked_deposit`; avisos de devolução cancelados; item fechado |
-| Remarcar com devolução marcada | nova cobrança (prefixo próprio) |
+| Remarcar com devolução marcada (Asaas ainda diz paga) | nova cobrança (prefixo próprio), sem consultar o Asaas |
+| Remarcar confirmado; Asaas diz paga e sem estorno | sinal transferido; "devolvido" travado (409 `deposit_reused`) |
+| Remarcar confirmado; Asaas diz estornada / em estorno / estorno listado | sinal novo; devolução devida; `clinic_carry_refused` |
+| Remarcar confirmado; Asaas fora do ar / timeout / erro / resposta inesperada | sinal novo (fail-safe); devolução devida; `clinic_carry_refused` ("pode ter pago duas vezes") |
+| Marcar devolvido depois do sinal reaproveitado | 409 `deposit_reused`; nada muda |
 | Remarcar sem concluir até B / até E | aviso em B / `no_answer_cancelled` em E |
 | Remarcar depois de E sem resposta | encerrada; não reabre |
 | Cancelar antes/depois de S, depois de B, depois da recusa | aviso na hora; 1 item |
@@ -301,7 +340,10 @@ comitada antes de enviar; revalidada (§5.8/§5.9); sem contato → `skipped_no_
 | Aceitar × Remarcar/Cancelar do paciente | um `UPDATE` vence; perdendo, o evento criado é apagado |
 | Aceitar × K | idem |
 | Remarcar confirmado × marcação de devolvido | um `UPDATE` vence (transfere com devolução `due` OU marca devolvido) — provado em Postgres real |
-| Clínica estornou no Asaas mas não marcou, e o paciente remarcou | o sistema transfere (regra do dono) e manda "não há reembolso a fazer"; a clínica precisa conferir (§11-1) |
+| Clínica estornou no Asaas mas não marcou, e o paciente remarcou | a leitura do Asaas na confirmação vê o estorno → sinal novo (§5.5) |
+| Clínica estorna no Asaas nos segundos entre a leitura e a consulta nova | transfere; risco residual ACEITO pelo dono |
+| Dois cliques de confirmar | mesma resposta (gravada uma vez), um só `UPDATE` transfere — provado em Postgres real |
+| Consulta ao Asaas de uma clínica | só a chave e a cobrança da própria clínica (sinal de outra clínica = `unknown`, nenhuma chamada) |
 | Duas instâncias enviando | reivindicação |
 | API nova + worker velho | worker LOGO depois da API |
 
@@ -325,7 +367,8 @@ configurado.
 - Durante a negociação os avisos de devolução ficam pausados (descartados) e B/E não se aplicam; ao recusar/K, aviso novo
   na hora + lembrete em 24 h.
 - Aceitar recria (linha e evento novos), conta como confirmação e fecha o item de devolução como "remarcado".
-- Remarcar a qualquer momento enquanto a oferta não está encerrada; transfere se a devolução não foi marcada.
+- Remarcar a qualquer momento enquanto a oferta não está encerrada; transfere só se a devolução não foi marcada E o
+  Asaas, lido na confirmação, diz paga e sem estorno; qualquer dúvida = sinal novo (fail-safe financeiro).
 - Cancelar depois de devolução marcada não gera aviso. Item resolvido de outro jeito → `clinic_decided`.
 - Clínica fechada em T → B = T + 6 h. Fechamento = horário do médico (secretária: pendente).
 - Clínica sem `contact_email` → `skipped_no_contact`, não reenviado.
@@ -336,13 +379,13 @@ configurado.
 
 ## 11. Perguntas em aberto
 
-1. Remarcar com sinal transferido quando a clínica já estornou no Asaas mas não marcou: aceitar o risco (adotado: o
-   e-mail "não há reembolso a fazer" pede conferência) ou bloquear a transferência depois do aviso de devolução?
+1. RESOLVIDA (dono, 2026-10-12): ler o Asaas na confirmação do Remarcar; fail-safe = cobrar de novo (§5.5).
 2. ADIADA (dono, 2026-10-12): "tem secretária" e o contrato `GET /internal/tenants/{id}/staff-roles` →
    `{"roles": [...]}` ficam para quando a tela de integrantes existir (Task 16, pendente de dependência).
 3. Feriados: depois.
 
 ## 12. Não provado / bloqueios
 
-Nada impede planejar. NÃO PROVADO: WhatsApp real (modelos não aprovados), SMTP real, Portal real, produção. Pendente
+Nada impede planejar. NÃO PROVADO: WhatsApp real (modelos não aprovados), SMTP real, Portal real, produção, a leitura
+real da cobrança no Asaas (status de estorno e lista `refunds`, só o sandbox prova). Pendente
 de dependência: a regra "tem secretária" (Task 16).
