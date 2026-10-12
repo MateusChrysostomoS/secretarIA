@@ -492,6 +492,16 @@ _TEMPLATES: dict[str, EmailTemplate] = {
             "— Equipe SecretarIA"
         ),
     ),
+    "staff_temporary_password": EmailTemplate(
+        subject="Bem-vindo(a) à equipe da {clinic_name} — Brain",
+        body=(
+            "Olá, {name}!\n\nBem-vindo(a) à equipe da {clinic_name}.\n\n"
+            "Seu e-mail de acesso: {email}\nSua senha temporária: {temporary_password}\n\n"
+            "Acesse o portal: {login_url}\n\n"
+            "No primeiro acesso, você deverá criar sua senha pessoal antes de usar o portal. "
+            "A senha temporária expira em 72 horas. Não compartilhe sua senha.\n\n— Equipe Brain"
+        ),
+    ),
     "password_reset": EmailTemplate(
         subject="Redefinição de senha — SecretarIA",
         body=(
@@ -699,7 +709,6 @@ _TEMPLATES: dict[str, EmailTemplate] = {
             "— Equipe SecretarIA"
         ),
     ),
-
 }
 
 

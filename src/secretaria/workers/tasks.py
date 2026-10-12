@@ -412,6 +412,7 @@ from secretaria.workers.shared.jobs import (
     _release_event,
     check_handover_timeouts,
     send_transactional_email,
+    send_staff_welcome_email,
 )
 from secretaria.workers.shared.llm_context import (
     _appointment_calendar,

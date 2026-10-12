@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.logging import get_logger
 from secretaria.models import Professional, Tenant
+from secretaria.services.professional_capacity import require_professional_capacity
 from secretaria.services.tenant_config import (
     ProfessionalCompletenessItem,
     can_activate_professional_aware,
@@ -180,6 +181,7 @@ async def create_or_attach_professional(
     name: str,
     specialty: str | None,
     about: str | None,
+    interactive: bool = False,
 ) -> tuple[Professional, bool] | None:
     """Case-insensitive attach-by-name, else create (contract endpoint 4).
 
@@ -201,6 +203,8 @@ async def create_or_attach_professional(
     if existing is not None:
         return existing, False
 
+    if interactive:
+        await require_professional_capacity(session, tenant)
     professional = Professional(tenant_id=tenant_id, name=name, specialty=specialty, about=about)
     session.add(professional)
     await session.flush()

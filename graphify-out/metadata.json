@@ -1,11 +1,11 @@
 ﻿{
     "metadata_schema":  "brain.graphify-metadata/v1",
     "repository":  "secretarIA",
-    "repository_path":  "C:\\TECH\\BRAIN-worktrees\\TASK-048\\secretarIA",
-    "branch":  "task/TASK-048-lembrete-dia-hora-api",
-    "commit":  "cab2110ba3f8d1dfb4f153a24004cb452ec61f58",
-    "generated_at":  "2026-10-10T23:17:42.2122807Z",
+    "repository_path":  "C:\\TECH\\BRAIN-worktrees\\TASK-054\\secretarIA",
+    "branch":  "task/TASK-054-secretaria",
+    "commit":  "d37aa119ec302348dc29e9ad6dda15382b743517",
+    "generated_at":  "2026-10-12T18:34:45.9414511Z",
     "graphify_version":  "0.9.5",
     "graph_schema":  "networkx-node-link (unversioned upstream)",
-    "graph_sha256":  "1f886334de3d48d7b1236b85859ee2aa6482f4f05934e68adc1fb4e6f51f38f0"
+    "graph_sha256":  "a8ce62fee6a659fa42e3a188a9986ea0575cc4ad60933e33bd667666c452557e"
 }

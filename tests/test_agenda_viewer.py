@@ -5,7 +5,7 @@
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from httpx import AsyncClient
 
 from secretaria.api.hub import deps as hub_deps
@@ -52,7 +52,8 @@ def test_what_each_viewer_sees():
 
 
 def _verify_as(monkeypatch, claim) -> None:
-    async def _fake(token: str):
+
+    async def _fake(token: str, *, fresh: bool = False):
         return claim
 
     monkeypatch.setattr(hub_deps, "verify_subscription_token", _fake)
@@ -70,7 +71,10 @@ async def test_the_dependency_reads_brain_apis_answer(db, acting, monkeypatch):
 
     async with db() as session:
         viewer = await hub_deps.get_agenda_viewer(
-            authorization="Bearer t", tenant=world.tenant, session=session
+            request=Request({"type": "http", "headers": []}),
+            authorization="Bearer t",
+            tenant=world.tenant,
+            session=session,
         )
 
     assert viewer == AgendaViewer("own", ana)
@@ -93,7 +97,10 @@ async def test_a_professional_of_another_clinic_is_dropped_never_trusted(db, act
 
     async with db() as session:
         viewer = await hub_deps.get_agenda_viewer(
-            authorization="Bearer t", tenant=world.tenant, session=session
+            request=Request({"type": "http", "headers": []}),
+            authorization="Bearer t",
+            tenant=world.tenant,
+            session=session,
         )
 
     assert viewer == AgendaViewer("clinic", None)  # no toggle, never the other clinic's doctor
@@ -108,7 +115,10 @@ async def test_an_older_brain_api_restricts_a_doctors_token(db, acting, monkeypa
 
     async with db() as session:
         viewer = await hub_deps.get_agenda_viewer(
-            authorization="Bearer t", tenant=world.tenant, session=session
+            request=Request({"type": "http", "headers": []}),
+            authorization="Bearer t",
+            tenant=world.tenant,
+            session=session,
         )
 
     assert viewer == AgendaViewer("own", ana)
@@ -128,6 +138,7 @@ async def test_no_live_session_for_this_clinic_is_401(db, acting, monkeypatch, c
     async with db() as session:
         with pytest.raises(HTTPException) as err:
             await hub_deps.get_agenda_viewer(
+                request=Request({"type": "http", "headers": []}),
                 authorization=None if case == "no_token" else "Bearer t",
                 tenant=world.tenant,
                 session=session,

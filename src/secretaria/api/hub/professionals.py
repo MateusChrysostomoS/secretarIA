@@ -83,7 +83,11 @@ from secretaria.services.calendar import (
     GoogleScopeInsufficientError,
     GoogleTokenRevokedError,
 )
-from secretaria.services.entitlements_client import get_entitlements, is_entitled
+from secretaria.services.entitlements_client import get_entitlements
+from secretaria.services.professional_capacity import (
+    ProfessionalCapacityError,
+    require_professional_capacity,
+)
 from secretaria.services.tenant_config import (
     ClinicCalendarNotConnectedError,
     ensure_professional_secondary_calendar,
@@ -164,19 +168,10 @@ async def _require_entitled_within_limit(session: AsyncSession, tenant: Tenant) 
     Fetches entitlements fresh (redis=None — this path is not hot). None
     (fetch failure) fails CLOSED: 503, never treated as "allowed".
     """
-    summary = await get_entitlements(tenant.id, redis=None)
-    if summary is None:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE, "Could not verify entitlements right now"
-        )
-    if not is_entitled(summary, ADDON_KEY):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "multi_professional_not_entitled")
-
-    limit = summary.limits.get(LIMIT_KEY)
-    if limit is not None:
-        active_count = await _count_active(session, tenant.id)
-        if active_count >= limit:
-            raise HTTPException(status.HTTP_409_CONFLICT, "professional_limit_reached")
+    try:
+        await require_professional_capacity(session, tenant, get_entitlements)
+    except ProfessionalCapacityError as exc:
+        raise HTTPException(exc.status, exc.code) from None
 
 
 @router.get("", response_model=list[ProfessionalListItem])

@@ -912,7 +912,6 @@ def _allow_multi_professional(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         professionals_api, "get_entitlements", _entitled_fake(addons={"multi_professional": True})
     )
-    monkeypatch.setattr(professionals_api, "is_entitled", lambda summary, key: True)
 
 
 async def test_creating_a_professional_in_shared_account_mode_creates_their_calendar(

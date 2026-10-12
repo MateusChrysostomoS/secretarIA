@@ -370,6 +370,7 @@ def test_worker_registry_is_complete() -> None:
         "retry_professional_notification",
         "send_professional_edit_notification",
         "send_transactional_email",
+        "send_staff_welcome_email",
         "process_asaas_event",
     ]
     assert arq_worker.registered_cron_names() == [
@@ -398,7 +399,7 @@ async def test_worker_startup_logs_identity_and_registry(
         event, fields = recorder.records[0]
         assert event == "worker_started"
         assert {"build_sha", "built_at", "alembic_head", "source_fingerprint"} <= set(fields)
-        assert len(fields["functions"]) == 14
+        assert len(fields["functions"]) == 15
         assert len(fields["cron_jobs"]) == 9
 
         rendered = json.dumps(fields, default=str)

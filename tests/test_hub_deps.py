@@ -18,7 +18,7 @@ os.environ.setdefault("META_ACCESS_TOKEN", "test-access-token")
 os.environ.setdefault("META_PHONE_NUMBER_ID", "1234567890")
 
 import pytest  # noqa: E402
-from fastapi import HTTPException  # noqa: E402
+from fastapi import HTTPException, Request  # noqa: E402
 
 from secretaria.api.hub import deps as hub_deps  # noqa: E402
 from secretaria.core.subscription import SubscriptionClaim  # noqa: E402
@@ -55,29 +55,43 @@ class _FakeSession:
 
 async def test_missing_bearer_token_is_401() -> None:
     with pytest.raises(HTTPException) as exc_info:
-        await hub_deps.get_current_tenant(authorization=None, session=_FakeSession({}))
+        await hub_deps.get_current_tenant(
+            request=Request({"type": "http", "headers": []}),
+            authorization=None,
+            session=_FakeSession({}),
+        )
     assert exc_info.value.status_code == 401
 
 
 async def test_verification_failure_is_401(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fake_verify(token: str) -> SubscriptionClaim | None:
+
+    async def _fake_verify(token: str, *, fresh: bool = False) -> SubscriptionClaim | None:
         return None
 
     monkeypatch.setattr(hub_deps, "verify_subscription_token", _fake_verify)
 
     with pytest.raises(HTTPException) as exc_info:
-        await hub_deps.get_current_tenant(authorization="Bearer whatever", session=_FakeSession({}))
+        await hub_deps.get_current_tenant(
+            request=Request({"type": "http", "headers": []}),
+            authorization="Bearer whatever",
+            session=_FakeSession({}),
+        )
     assert exc_info.value.status_code == 401
 
 
 async def test_inactive_claim_is_401(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fake_verify(token: str) -> SubscriptionClaim | None:
+
+    async def _fake_verify(token: str, *, fresh: bool = False) -> SubscriptionClaim | None:
         return SubscriptionClaim(tenant_id=uuid4(), active=False)
 
     monkeypatch.setattr(hub_deps, "verify_subscription_token", _fake_verify)
 
     with pytest.raises(HTTPException) as exc_info:
-        await hub_deps.get_current_tenant(authorization="Bearer whatever", session=_FakeSession({}))
+        await hub_deps.get_current_tenant(
+            request=Request({"type": "http", "headers": []}),
+            authorization="Bearer whatever",
+            session=_FakeSession({}),
+        )
     assert exc_info.value.status_code == 401
 
 
@@ -86,13 +100,14 @@ async def test_active_claim_resolves_the_claimed_tenant(
 ) -> None:
     tenant = _make_tenant()
 
-    async def _fake_verify(token: str) -> SubscriptionClaim | None:
+    async def _fake_verify(token: str, *, fresh: bool = False) -> SubscriptionClaim | None:
         assert token == "the-token"
         return SubscriptionClaim(tenant_id=tenant.id, active=True)
 
     monkeypatch.setattr(hub_deps, "verify_subscription_token", _fake_verify)
 
     result = await hub_deps.get_current_tenant(
+        request=Request({"type": "http", "headers": []}),
         authorization="Bearer the-token",
         session=_FakeSession({tenant.id: tenant}),
     )
@@ -102,11 +117,16 @@ async def test_active_claim_resolves_the_claimed_tenant(
 async def test_active_claim_with_unknown_tenant_is_404(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def _fake_verify(token: str) -> SubscriptionClaim | None:
+
+    async def _fake_verify(token: str, *, fresh: bool = False) -> SubscriptionClaim | None:
         return SubscriptionClaim(tenant_id=uuid4(), active=True)
 
     monkeypatch.setattr(hub_deps, "verify_subscription_token", _fake_verify)
 
     with pytest.raises(HTTPException) as exc_info:
-        await hub_deps.get_current_tenant(authorization="Bearer whatever", session=_FakeSession({}))
+        await hub_deps.get_current_tenant(
+            request=Request({"type": "http", "headers": []}),
+            authorization="Bearer whatever",
+            session=_FakeSession({}),
+        )
     assert exc_info.value.status_code == 404

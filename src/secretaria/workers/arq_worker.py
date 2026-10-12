@@ -46,6 +46,7 @@ from secretaria.workers.tasks import (
     send_cancellation_notice,
     send_patient_notification,
     send_transactional_email,
+    send_staff_welcome_email,
     transcribe_audio_message,
 )
 
@@ -146,6 +147,7 @@ class WorkerSettings:
         # by POST /internal/notifications/email. See workers/tasks.py and
         # services/email.py.
         send_transactional_email,
+        send_staff_welcome_email,
         # Pix deposit (sinal) webhook processing, enqueued by
         # POST /webhooks/asaas. See workers/payments_tasks.py and
         # services/payments/deposit_lifecycle.py.

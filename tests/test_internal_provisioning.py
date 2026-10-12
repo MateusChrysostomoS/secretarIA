@@ -41,6 +41,70 @@ GOOD_KEY = "test-internal-key"
 HEADERS = {"X-Internal-Api-Key": GOOD_KEY}
 
 
+async def test_interactive_professional_creation_cannot_bypass_capacity(client, db, monkeypatch):
+    from fastapi import HTTPException
+    from secretaria.services import provisioning
+
+    async def denied(*args, **kwargs):
+        raise HTTPException(403, "multi_professional_not_entitled")
+
+    monkeypatch.setattr(provisioning, "require_professional_capacity", denied, raising=False)
+    tenant = await _seed_tenant(db)
+    response = await client.post(
+        f"/internal/tenants/{tenant.id}/professionals",
+        headers=HEADERS,
+        json={"name": "New Doctor", "interactive": True},
+    )
+    assert response.status_code == 403
+
+
+async def test_staff_welcome_queue_never_contains_plain_credentials(client, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+    from secretaria.main import app
+
+    pool = _FakeArqPool()
+    monkeypatch.setattr(app.state, "arq_pool", pool, raising=False)
+    response = await client.post(
+        "/internal/notifications/email",
+        headers=HEADERS,
+        json={
+            "to": "staff@example.com",
+            "template": "staff_temporary_password",
+            "variables": {
+                "name": "Staff",
+                "clinic_name": "Test Clinic",
+                "temporary_password": "TemporaryTest7",
+                "login_url": "https://portal.example.com/",
+                "tenant_id": str(uuid4()),
+                "user_id": str(uuid4()),
+                "credential_version": 0,
+                "expires_at": (datetime.now(UTC) + timedelta(hours=72)).isoformat(),
+            },
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {"queued": True}
+    name, args, kwargs = pool.calls[0]
+    assert name == "send_staff_welcome_email"
+    assert args == ()
+    assert "payload_encrypted" in kwargs
+    assert "TemporaryTest7" not in repr(args)
+    assert "staff@example.com" not in repr(args)
+    assert "TemporaryTest7" not in repr(kwargs)
+    assert "staff@example.com" not in repr(kwargs)
+
+
+async def test_internal_roster_includes_inactive_without_changing_completeness(client, db):
+    tenant = await _seed_tenant(db)
+    own = await _seed_professional(db, tenant, is_active=False)
+    other_tenant = await _seed_tenant(db)
+    await _seed_professional(db, other_tenant)
+    response = await client.get(f"/internal/tenants/{tenant.id}/professionals", headers=HEADERS)
+    assert response.status_code == 200
+    assert [row["id"] for row in response.json()] == [str(own.id)]
+    assert response.json()[0]["is_active"] is False
+
+
 class _FakeArqPool:
     """Records every enqueue_job call; installed on app.state.arq_pool."""
 

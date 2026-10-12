@@ -1,5 +1,7 @@
 # SecretarIA
 
+TASK-054: inativos, capacidade interativa e boas-vindas cifradas no ARQ; local, sem publicação: [checkpoint](docs/CHECKPOINT_equipe_primeiro_acesso.md).
+
 TASK-027 simulador do Agendar (`POST /tenants/me/simulation/turn`, sem efeitos colaterais): branch local `task/TASK-027-flow-simulation`, sem deploy: [checkpoint](docs/CHECKPOINT_flow_simulation.md).
 TASK-048 R9: lembrete extra por dia e horario, no fuso da clinica. Integrado à main para publicação autorizada, sem deploy: [checkpoint](docs/CHECKPOINT_lembretes_r9.md).
 
