@@ -62,8 +62,15 @@ async def notify_released_patient(
     allow_paid: bool,
     arq_pool,
     now: datetime | None = None,
+    offer_buttons: list[tuple[str, str]] | None = None,
 ) -> str:
-    """Tell the patient; returns one `NOTICE_*` code. Never raises."""
+    """Tell the patient; returns one `NOTICE_*` code. Never raises.
+
+    `offer_buttons` (TASK-052): the choice of a PAID slot. Portal: the card carries the buttons
+    and its body is `deposit_notice` (the whole offer text), plus the usual e-mail with the
+    conversation link. WhatsApp: the job reads the open offer itself (same queued arguments);
+    no e-mail is ever sent to a WhatsApp patient (owner decision 2026-10-12).
+    """
     # Read once, up front: a rollback inside the Portal path expires the ORM rows,
     # and the error logging below must not trigger a lazy load.
     appointment_id = appointment.id
@@ -73,7 +80,14 @@ async def notify_released_patient(
             return NOTICE_NO_CHANNEL
         if patient.channel == CHANNEL_BRAIN_MESSAGE:
             return await _notify_portal(
-                session, tenant, appointment, patient, professional_name, reason, deposit_notice
+                session,
+                tenant,
+                appointment,
+                patient,
+                professional_name,
+                reason,
+                deposit_notice,
+                offer_buttons=offer_buttons,
             )
 
         to = patient.wa_id or appointment.phone
@@ -121,21 +135,30 @@ async def _notify_portal(
     professional_name: str | None,
     reason: str | None,
     deposit_notice: str | None,
+    *,
+    offer_buttons: list[tuple[str, str]] | None = None,
 ) -> str:
     appointment_id = appointment.id  # before a rollback can expire the row
     conversation_id = await conversation_id_for(session, tenant.id, appointment, patient)
     if conversation_id is None:
         return NOTICE_NO_CHANNEL
-    text = cancellation_notice.join_blocks(
-        cancellation_notice.build_cancellation_text(professional_name, reason),
-        deposit_notice,
-        PORTAL_REBOOK_LINE,
-    )
     try:
         sender = BrainMessageSender(
             conversation_id=conversation_id, session=session, author=MessageSender.HUMAN
         )
-        await sender.send_text_message(to=patient.external_id or "", body=text)
+        if offer_buttons and deposit_notice:
+            # TASK-052: the buttons ARE the way forward; the card is recorded with its options,
+            # which is what lets the Portal accept the tap (workers/portal/inbound.py).
+            await sender.send_buttons(
+                to=patient.external_id or "", body=deposit_notice, buttons=offer_buttons
+            )
+        else:
+            text = cancellation_notice.join_blocks(
+                cancellation_notice.build_cancellation_text(professional_name, reason),
+                deposit_notice,
+                PORTAL_REBOOK_LINE,
+            )
+            await sender.send_text_message(to=patient.external_id or "", body=text)
         await session.commit()
     except Exception as exc:
         await session.rollback()
