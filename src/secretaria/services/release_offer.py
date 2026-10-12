@@ -111,6 +111,11 @@ logger = get_logger(__name__)
 DEFAULT_TIMEZONE = "America/Sao_Paulo"
 REMINDER_INTERVAL = timedelta(hours=24)
 KEEP_WINDOW = timedelta(hours=24)
+# A provider answer "paid, not refunded" is good for the minutes a booking takes to complete (two
+# confirm clicks, the Portal's code window). After that it is asked again: the clinic may have
+# refunded in the meantime (review of TASK-052). Until then it also holds the sweeps and the
+# "marcar devolvido" off the deposit a booking is about to carry.
+CARRY_CHECK_MAX_AGE = timedelta(minutes=15)
 REFUNDED_ACTION = "refunded_in_provider_panel"
 CARRIED_RESOLUTION_NOTE = "Remarcada pelo paciente levando o sinal (TASK-052)."
 KEPT_RESOLUTION_NOTE = "Horário mantido pela clínica com o mesmo sinal (TASK-052)."
@@ -196,6 +201,11 @@ KEEP_DECLINED_TEXT = (
 KEEP_UNAVAILABLE_TEXT = "Não consegui confirmar o horário agora. Tente de novo em instantes."
 TAP_ALREADY_KEPT_TEXT = "Sua consulta já está mantida para {when}."
 TAP_ALREADY_REBOOKED_TEXT = "O sinal que você já pagou está valendo para a sua consulta."
+# The provider check refused to reuse the deposit: the old one goes back, a new one was asked.
+TAP_REBOOKED_NEW_CHARGE_TEXT = (
+    "O sinal anterior não pôde ser usado nesta remarcação e a clínica foi avisada para devolvê-lo. "
+    "Se quiser marcar uma consulta, é só pedir por aqui."
+)
 TAP_KEEP_AFTER_CANCEL_TEXT = (
     "Você já pediu o cancelamento desta consulta. Para marcar de novo, toque em Remarcar."
 )
@@ -521,8 +531,10 @@ async def _open_refund_item(session: AsyncSession, offer: DepositReleaseOffer) -
         session,
         tenant_id=offer.tenant_id,
         reason=REASON_RELEASED_REFUND_DUE,
+        # The offer id leads the reference: a deposit released a second time (after a keep or a
+        # carry closed the first item) is a NEW refund and must not hit the first item's key.
         dedupe_key=attention.attention_dedupe_key(
-            deposit.provider, charge_ref, REASON_RELEASED_REFUND_DUE
+            deposit.provider, f"{offer.id}:{charge_ref}", REASON_RELEASED_REFUND_DUE
         ),
         deposit=deposit,
         suggested_refund_cents=deposit.amount_cents,
@@ -850,6 +862,15 @@ async def choose_reschedule(
         return RESCHEDULE_CLOSED
     if current.refund_status not in REFUND_CARRYABLE:
         return RESCHEDULE_NEW_CHARGE
+    values: dict = {
+        "decision": DECISION_RESCHEDULING,
+        "conversation_id": conversation_id,
+        "first_contact_at": func.coalesce(DepositReleaseOffer.first_contact_at, now),
+    }
+    if now >= _as_utc(current.expires_at):
+        # Tapped AFTER E: it is the patient's answer, so the 24 h sweep must not close it as "no
+        # answer" (the guard compares `patient_answered_at` with `expires_at`).
+        values["patient_answered_at"] = now
     await session.execute(
         update(DepositReleaseOffer)
         .where(
@@ -857,11 +878,7 @@ async def choose_reschedule(
             DepositReleaseOffer.decision.in_(RESCHEDULE_FROM),
             DepositReleaseOffer.refund_status.in_(REFUND_CARRYABLE),
         )
-        .values(
-            decision=DECISION_RESCHEDULING,
-            conversation_id=conversation_id,
-            first_contact_at=func.coalesce(DepositReleaseOffer.first_contact_at, now),
-        )
+        .values(**values)
         .execution_options(synchronize_session=False)
     )
     after = await _reload(session, offer.id)
@@ -1028,6 +1045,61 @@ async def record_carry_check(
     return outcome
 
 
+def _carry_not_holding(now: datetime) -> tuple:
+    """SQL guard: NO fresh REUSABLE provider answer is pending on the offer (a booking is about to
+    carry the deposit, so B and E must not close it under the booking)."""
+    cutoff = now - CARRY_CHECK_MAX_AGE
+    return (
+        or_(
+            DepositReleaseOffer.carry_check.is_(None),
+            DepositReleaseOffer.carry_check != CARRY_CHECK_REUSABLE,
+            DepositReleaseOffer.carry_checked_at <= cutoff,
+        ),
+    )
+
+
+def _not_answered_since_e() -> tuple:
+    """SQL guard for E: a patient answer given AFTER E (a late "Remarcar") is not silence."""
+    return (
+        or_(
+            DepositReleaseOffer.patient_answered_at.is_(None),
+            DepositReleaseOffer.patient_answered_at <= DepositReleaseOffer.expires_at,
+        ),
+    )
+
+
+def carry_check_is_fresh(offer: DepositReleaseOffer, now: datetime) -> bool:
+    """Whether the offer holds a REUSABLE provider answer read within `CARRY_CHECK_MAX_AGE`."""
+    return (
+        offer.carry_check == CARRY_CHECK_REUSABLE
+        and offer.carry_checked_at is not None
+        and _as_utc(offer.carry_checked_at) > now - CARRY_CHECK_MAX_AGE
+    )
+
+
+async def reset_stale_carry_check(
+    session: AsyncSession, *, tenant_id: UUID, offer_id: UUID, now: datetime | None = None
+) -> bool:
+    """Forget a REUSABLE answer older than `CARRY_CHECK_MAX_AGE` (the booking it was read for never
+    completed) so the next confirmation asks the provider again. Never touches a deposit already
+    reused. Does not commit."""
+    now = _now(now)
+    cleared = await session.execute(
+        update(DepositReleaseOffer)
+        .where(
+            DepositReleaseOffer.id == offer_id,
+            DepositReleaseOffer.tenant_id == tenant_id,
+            DepositReleaseOffer.decision == DECISION_RESCHEDULING,
+            DepositReleaseOffer.carry_check == CARRY_CHECK_REUSABLE,
+            DepositReleaseOffer.carry_checked_at <= now - CARRY_CHECK_MAX_AGE,
+            DepositReleaseOffer.deposit_reused_at.is_(None),
+        )
+        .values(carry_check=None, carry_checked_at=None)
+        .execution_options(synchronize_session=False)
+    )
+    return cleared.rowcount == 1
+
+
 # --- B, E, K -----------------------------------------------------------------------------------
 
 
@@ -1045,6 +1117,7 @@ async def settle_if_expired(
             DepositReleaseOffer.decision.in_(SILENT_DECISIONS),
             DepositReleaseOffer.deposit_paid.is_(True),
             DepositReleaseOffer.decide_by_at <= now,
+            *_carry_not_holding(now),
         ),
     )
 
@@ -1063,6 +1136,8 @@ async def close_if_no_answer(
             DepositReleaseOffer.decision.in_(SILENT_DECISIONS),
             DepositReleaseOffer.deposit_paid.is_(True),
             DepositReleaseOffer.expires_at <= now,
+            *_carry_not_holding(now),
+            *_not_answered_since_e(),
         )
         .values(decision=DECISION_NO_ANSWER, closed_at=now)
         .execution_options(synchronize_session=False)
@@ -1089,7 +1164,13 @@ async def expire_offers(
             DepositReleaseOffer.refund_status == REFUND_NOT_DUE,
             DepositReleaseOffer.decide_by_at <= now,
         ),
-        select(DepositReleaseOffer.id).where(paid, silent, DepositReleaseOffer.expires_at <= now),
+        select(DepositReleaseOffer.id).where(
+            paid,
+            silent,
+            DepositReleaseOffer.expires_at <= now,
+            *_carry_not_holding(now),
+            *_not_answered_since_e(),
+        ),
         select(DepositReleaseOffer.id).where(
             paid,
             DepositReleaseOffer.decision == DECISION_KEEP_REQUESTED,
@@ -1274,6 +1355,8 @@ async def mark_refunded(
         return "not_found"
     if offer.deposit_reused_at is not None:
         return "deposit_reused"  # owner 2026-10-12: the money is in use again
+    if offer.decision == DECISION_RESCHEDULING and carry_check_is_fresh(offer, now):
+        return "deposit_reused"  # a booking is about to carry it (the provider just said "paid")
     if offer.refund_status in (REFUND_MARKED, REFUND_RECEIVED, REFUND_NOT_RECEIVED):
         return "already"
     if offer.decision == DECISION_KEEP_REQUESTED:

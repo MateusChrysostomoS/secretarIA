@@ -27,12 +27,14 @@ from secretaria.core.logging import get_logger
 from secretaria.models import Appointment, AppointmentStatus, Patient, Tenant
 from secretaria.models.appointment import LIVE_APPOINTMENT_STATUSES
 from secretaria.models.deposit_release_offer import (
+    CARRY_CHECK_REUSABLE,
     DECISION_KEEP_REQUESTED,
     DECISION_KEPT,
     REFUND_CARRYABLE,
+    REFUND_DUE,
     DepositReleaseOffer,
 )
-from secretaria.services import booking_hold, booking_promotion, release_offer
+from secretaria.services import booking_hold, booking_promotion, release_carry_check, release_offer
 
 logger = get_logger(__name__)
 
@@ -43,6 +45,9 @@ ACCEPT_PAST = "slot_past"
 ACCEPT_UNAVAILABLE = "calendar_unavailable"
 ACCEPT_NOT_REQUESTED = "not_requested"
 ACCEPT_REFUNDED = "refund_already_marked"
+# The refund had already fallen due and Asaas did not confirm the deposit is still paid and not
+# refunded (refunded, unreachable or unreadable): nothing is re-created (review of TASK-052).
+ACCEPT_DEPOSIT_NOT_REUSABLE = "deposit_not_reusable"
 
 
 @dataclass(frozen=True)
@@ -106,6 +111,11 @@ async def accept_keep(
         return await _kept(session, offer_id)
     if offer.refund_status not in REFUND_CARRYABLE:
         return KeepResult(ACCEPT_REFUNDED)
+    if offer.refund_status == REFUND_DUE and (
+        await release_carry_check.check_offer_deposit(session, offer) != CARRY_CHECK_REUSABLE
+    ):
+        # The clinic was told to refund this deposit; another staff member may have done it.
+        return KeepResult(ACCEPT_DEPOSIT_NOT_REUSABLE)
     released = await session.get(Appointment, offer.released_appointment_id)
     if released is None or released.tenant_id != tenant.id or released.start_at is None:
         return KeepResult(ACCEPT_NOT_REQUESTED)

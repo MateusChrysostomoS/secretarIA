@@ -28,6 +28,8 @@ from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import Appointment, Conversation, PixDeposit, Tenant
 from secretaria.models.deposit_release_offer import (
+    CARRY_CHECK_REFUNDED,
+    CARRY_CHECK_UNKNOWN,
     DECISION_CANCELLED,
     DECISION_KEPT,
     DECISION_NO_ANSWER,
@@ -131,6 +133,9 @@ def _closed_answer(offer: DepositReleaseOffer, action: str) -> _Answer:
     """Kept / rebooked / cancelled-for-no-answer: what each button says."""
     if offer.decision == DECISION_NO_ANSWER:
         return _Answer(text=ro.OFFER_CLOSED_NO_ANSWER_TEXT)
+    if offer.carry_check in (CARRY_CHECK_REFUNDED, CARRY_CHECK_UNKNOWN):
+        # The provider check refused to reuse the deposit: it is NOT valid for any consultation.
+        return _Answer(text=ro.TAP_REBOOKED_NEW_CHARGE_TEXT)
     if action == ro.ACTION_CANCEL:
         return _Answer(text=ro.TAP_CANCEL_AFTER_KEEP_TEXT)
     return _Answer(text=ro.TAP_ALREADY_REBOOKED_TEXT)

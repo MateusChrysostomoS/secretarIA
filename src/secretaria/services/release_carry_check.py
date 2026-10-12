@@ -18,7 +18,7 @@ panel in the seconds between this read and the booking. Logs carry ids and the o
 """
 
 import asyncio
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -82,6 +82,18 @@ async def _ensure_checked(conversation_id: UUID, now: datetime | None) -> str | 
         )
         if offer is None:
             return None
+        if offer.carry_check == CARRY_CHECK_REUSABLE and offer.carry_checked_at is not None:
+            moment = now or datetime.now(UTC)
+            checked = offer.carry_checked_at
+            checked = checked.replace(tzinfo=UTC) if checked.tzinfo is None else checked
+            if checked <= moment - release_offer.CARRY_CHECK_MAX_AGE:
+                # Review of TASK-052: the booking this answer was read for never completed and
+                # the clinic may have refunded since. Ask the provider again.
+                await release_offer.reset_stale_carry_check(
+                    session, tenant_id=tenant_id, offer_id=offer.id, now=moment
+                )
+                await session.commit()
+                await session.refresh(offer)
         if offer.carry_check is not None:
             return offer.carry_check
         offer_id = offer.id
@@ -105,6 +117,32 @@ async def _ensure_checked(conversation_id: UUID, now: datetime | None) -> str | 
         )
         await session.commit()
     return stored
+
+
+async def check_offer_deposit(session, offer) -> str:
+    """Read-only provider check of an offer's deposit, for the clinic's acceptance of "Manter"
+    after the refund already fell due (review of TASK-052): REUSABLE only when Asaas says the
+    deposit is still paid and not refunded; anything else - refunded, unreachable, unexpected - is
+    not reusable. Never raises and never refunds."""
+    try:
+        deposit = await session.scalar(
+            select(PixDeposit).where(
+                PixDeposit.id == offer.deposit_id, PixDeposit.tenant_id == offer.tenant_id
+            )
+        )
+        provider_name = deposit.provider if deposit is not None else None
+        charge_id = (
+            (deposit.provider_charge_id or deposit.asaas_payment_id)
+            if deposit is not None
+            else None
+        )
+        account = (
+            await _account(session, offer.tenant_id, provider_name) if provider_name else None
+        )
+        return await _ask_provider(offer.tenant_id, provider_name, account, charge_id)
+    except Exception as exc:  # noqa: BLE001 - FAIL-SAFE: not reusable
+        logger.error("release_offer_deposit_check_failed", error_type=type(exc).__name__)
+        return CARRY_CHECK_UNKNOWN
 
 
 async def _ask_provider(tenant_id: UUID, provider_name, account, charge_id) -> str:
