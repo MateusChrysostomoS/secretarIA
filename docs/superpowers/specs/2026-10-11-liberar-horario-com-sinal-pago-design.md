@@ -185,7 +185,7 @@ acontece sem resposta). Nenhum cron novo, nenhuma mudança na contagem de crons.
 ## 8. Dependências e deploy
 
 - Base: `task/TASK-050-secretaria` @ `3650e10`. Integra em `feature/out-of-mvp` (nunca `main`), depois da TASK-050.
-- Independente da TASK-051 (não tocam os mesmos arquivos de backend; no front, a TASK-051 não toca `lib/agenda/release.ts`).
+- Independente da TASK-053 (não tocam os mesmos arquivos de backend; no front, a TASK-051 não toca `lib/agenda/release.ts`).
 - Deploy (NÃO autorizado; skill frozen-contract-migration): migração `b6d2e8f4a1c3` (aditiva) → API → worker logo em seguida
   (a API abre ofertas; o worker manda os botões, trata toques, transfere o sinal e fecha as vencidas) → front por último.
 
