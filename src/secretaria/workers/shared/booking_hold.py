@@ -25,8 +25,9 @@ from secretaria.models import (
     Patient,
     Tenant,
 )
+from secretaria.models.deposit_release_offer import CARRY_CHECK_REFUNDED, CARRY_CHECK_UNKNOWN
 from secretaria.plugins.post_booking import enqueue_post_booking_hooks
-from secretaria.services import reminder_hooks
+from secretaria.services import release_carry_check, release_offer, reminder_hooks
 from secretaria.services.appointment_replacement import (
     ReplacedAppointment,
     cancel_replaced_appointment,
@@ -292,6 +293,9 @@ async def _promote_booking_hold(
     )
     # TASK-032 R3: the appointment a "Marcar outra" booking replaced, if any.
     replaced: ReplacedAppointment | None = None
+    carried = None  # TASK-052: the paid deposit this booking carried over, if any
+    # TASK-052: ask the provider BEFORE the transaction (bounded wait; failure = new charge).
+    carry_check = await release_carry_check.ensure_checked(reply.conversation_id)
     try:
         async with async_session_factory() as session:
             async with session.begin():
@@ -302,6 +306,15 @@ async def _promote_booking_hold(
                     session, tenant.id, held.insurance, held.professional_id
                 )
                 session.add(appointment)
+                # TASK-052: a released PAID slot's deposit moves to this booking, in this
+                # transaction (the Portal booking is born here, after the code), when REUSABLE.
+                await session.flush()
+                carried = await release_offer.claim_carry_over(
+                    session,
+                    tenant_id=tenant.id,
+                    conversation_id=reply.conversation_id,
+                    new_appointment=appointment,
+                )
                 # The Portal booking is confirmed HERE (the code gate), so the
                 # original goes in this same transaction (spec §4.3).
                 conversation = await session.get(Conversation, reply.conversation_id)
@@ -366,6 +379,10 @@ async def _promote_booking_hold(
     )
     if replaced is not None:
         confirmation = f"{confirmation}\n\n{_replaced_notice(tenant, replaced)}"
+    if carried is not None:
+        confirmation = f"{confirmation}\n\n{release_offer.CARRIED_OVER_NOTE}"
+    elif carry_check in (CARRY_CHECK_REFUNDED, CARRY_CHECK_UNKNOWN):
+        confirmation = f"{confirmation}\n\n{release_offer.CARRY_REFUSED_NOTE}"
     return confirmation
 
 async def _release_hold(hold_id) -> None:

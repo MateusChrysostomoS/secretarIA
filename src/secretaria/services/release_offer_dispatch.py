@@ -26,6 +26,7 @@ from secretaria.models.deposit_release_offer import (
     DECISION_KEPT,
     DECISION_NO_ANSWER,
     DECISION_REBOOKED,
+    EMAIL_CARRY_REFUSED,
     EMAIL_KEEP_DECLINED,
     EMAIL_KEEP_REQUEST,
     EMAIL_PATIENT_CHECK,
@@ -84,6 +85,8 @@ def still_relevant(kind: str, offer: DepositReleaseOffer) -> bool:
         EMAIL_PATIENT_KEEP_DECLINED: decision == DECISION_KEEP_DECLINED,
         EMAIL_KEEP_DECLINED: decision == DECISION_KEEP_DECLINED and refund == REFUND_DUE,
         EMAIL_REBOOKED_DEPOSIT: decision == DECISION_REBOOKED,
+        # Owner 2026-10-12: a new Pix was charged at the Remarcar; relevant until marked.
+        EMAIL_CARRY_REFUSED: refund == REFUND_DUE,
         EMAIL_PATIENT_CHECK: refund == REFUND_MARKED,
         EMAIL_REFUND_CANCEL: decision == DECISION_CANCELLED and refund == REFUND_DUE,
         EMAIL_REFUND_NOANSWER: refund == REFUND_DUE
@@ -240,6 +243,15 @@ async def _send_clinic(
             clinic_name=tenant.clinic_name,
             slot_text=slot,
             decide_by_text=release_offer.when_text(offer.keep_deadline_at, tz),
+            conversation_link=link,
+        )
+    if kind == EMAIL_CARRY_REFUSED:
+        return await email.send_release_carry_refused_clinic_email(
+            to,
+            clinic_name=tenant.clinic_name,
+            check=offer.carry_check or "unknown",
+            amount_text=amount,
+            slot_text=slot,
             conversation_link=link,
         )
     if kind == EMAIL_REBOOKED_DEPOSIT:

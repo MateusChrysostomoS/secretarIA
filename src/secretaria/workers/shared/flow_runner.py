@@ -15,8 +15,9 @@ from secretaria.models import (
     RebookingDecline,
     Tenant,
 )
+from secretaria.models.deposit_release_offer import CARRY_CHECK_REFUNDED, CARRY_CHECK_UNKNOWN
 from secretaria.plugins.post_booking import enqueue_post_booking_hooks
-from secretaria.services import reminder_hooks
+from secretaria.services import release_carry_check, release_offer, reminder_hooks
 from secretaria.services.appointment_edit import EditDraft
 from secretaria.services.appointment_replacement import (
     ReplacedAppointment,
@@ -219,10 +220,18 @@ async def _apply_flow_result(
             if isinstance(name, str) and name:
                 await remember_attendee_name(reply.conversation_id, name)
 
+    # TASK-052 (owner 2026-10-12): a booking that may reuse a released slot's PAID deposit asks
+    # the payment provider FIRST - outside the transaction, bounded wait, failure = new charge.
+    carry_check = None
+    if result.appointment is not None:
+        carry_check = await release_carry_check.ensure_checked(reply.conversation_id)
+
     # Persist the new flow state (+ any booked appointment) in one short txn.
     persisted = True
     booked_appointment: Appointment | None = None
     cancellation_note: str | None = None
+    # TASK-052: the line that says a released slot's paid deposit now covers this booking.
+    carried_note: str | None = None
     # TASK-032 R3: the appointment a "Marcar outra" booking replaced, if any.
     replaced: ReplacedAppointment | None = None
     applied_edit: AppliedEdit | None = None
@@ -317,6 +326,17 @@ async def _apply_flow_result(
                             **result.appointment,
                         )
                         session.add(booked_appointment)
+                        # TASK-052: "Remarcar" on a slot the clinic released with a PAID deposit -
+                        # the deposit moves to THIS booking in this transaction (no new charge)
+                        # only when the provider check said REUSABLE.
+                        await session.flush()
+                        if await release_offer.claim_carry_over(
+                            session,
+                            tenant_id=conv.tenant_id,
+                            conversation_id=conv.id,
+                            new_appointment=booked_appointment,
+                        ):
+                            carried_note = release_offer.CARRIED_OVER_NOTE
                         # TASK-032 R3 ("Marcar outra consulta"): the original is
                         # cancelled HERE - same transaction as the new row, and
                         # only now that the new booking is confirmed. A failed
@@ -614,6 +634,11 @@ async def _apply_flow_result(
         if result.bubbles:
             if cancellation_note:
                 result.bubbles[-1].body = f"{result.bubbles[-1].body}\n\n{cancellation_note}"
+            if carried_note and persisted:
+                result.bubbles[-1].body = f"{result.bubbles[-1].body}\n\n{carried_note}"
+            elif carry_check in (CARRY_CHECK_REFUNDED, CARRY_CHECK_UNKNOWN) and persisted:
+                note = release_offer.CARRY_REFUSED_NOTE
+                result.bubbles[-1].body = f"{result.bubbles[-1].body}\n\n{note}"
             if replaced is not None and persisted and tenant is not None:
                 notice = _replaced_notice(tenant, replaced)
                 result.bubbles[-1].body = f"{result.bubbles[-1].body}\n\n{notice}"

@@ -105,6 +105,9 @@ class ChargeState:
     external_reference: str | None = None
     paid_at: datetime | None = None
     expires_at: datetime | None = None
+    # TASK-052: the charge's refund entries when the provider lists them - "absent" (not
+    # reported), "none" (empty list), "some" (at least one) or "unreadable" (unexpected shape).
+    refunds: str = "absent"
 
 
 @dataclass(frozen=True)

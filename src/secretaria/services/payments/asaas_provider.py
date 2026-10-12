@@ -99,6 +99,17 @@ def _charge_status(payment: Mapping) -> PaymentStatus:
     return _PAYMENT_STATUS.get(str(payment.get("status") or ""), PaymentStatus.OTHER)
 
 
+def _refunds(payment: Mapping) -> str:
+    """The refund entries Asaas lists on the payment, if any (TASK-052). The exact shape is NOT
+    PROVEN until the sandbox: anything unexpected is "unreadable", which never reuses a deposit."""
+    if payment.get("refunds") is None:
+        return "absent"
+    refunds = payment.get("refunds")
+    if not isinstance(refunds, list):
+        return "unreadable"
+    return "some" if refunds else "none"
+
+
 class AsaasProvider:
     name = "asaas"
 
@@ -221,6 +232,7 @@ class AsaasProvider:
             paid_amount_cents=_cents(payment.get("value")),
             external_reference=payment.get("externalReference") or None,
             paid_at=_parse_dt(payment.get("paymentDate") or payment.get("confirmedDate")),
+            refunds=_refunds(payment),
         )
 
     async def delete_customer(self, account: PaymentAccount, provider_customer_id: str) -> None:

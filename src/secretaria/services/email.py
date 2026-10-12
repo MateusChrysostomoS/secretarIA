@@ -1040,3 +1040,45 @@ async def send_release_rebooked_clinic_email(to_email: str, **fields) -> bool:
 async def send_refund_check_patient_email(to_email: str, **fields) -> bool:
     subject, body = refund_check_patient_email(**fields)
     return await _send_release_mail(to_email, subject, body, "refund_check_patient_email")
+
+
+def release_carry_refused_clinic_email(
+    *,
+    clinic_name: str,
+    check: str,
+    amount_text: str,
+    slot_text: str,
+    conversation_link: str | None,
+) -> tuple[str, str]:
+    """The patient's "Remarcar" charged a NEW Pix because the old deposit could not be reused
+    (owner 2026-10-12). The clinic must refund the old one - never names a bank."""
+    subject = (
+        f"[SecretarIA] DEVOLVA o sinal anterior ({amount_text}) — paciente remarcou com sinal "
+        f"novo — {clinic_name}"
+    )
+    if check == "refunded":
+        why = (
+            "O Asaas mostra que o sinal anterior já foi estornado (ou está em estorno). Por isso a "
+            "nova consulta pediu um sinal novo."
+        )
+        todo = "Confira o estorno no Asaas e marque como devolvido na aba de consultas liberadas."
+    else:
+        why = (
+            "Não conseguimos confirmar com o Asaas se o sinal anterior foi devolvido. Por "
+            "segurança, a nova consulta pediu um sinal novo: o paciente pode ter pago duas vezes."
+        )
+        todo = (
+            "Devolva o sinal anterior no Asaas (Cobranças > a cobrança paga > Estornar) e marque "
+            "como devolvido na aba de consultas liberadas."
+        )
+    body = (
+        f"Olá,\n\nO paciente da consulta de {slot_text}, cujo horário a clínica liberou, remarcou. "
+        f"{why}\n\n{todo} Valor do sinal anterior: {amount_text}."
+        f"{_release_link_line(conversation_link)}\n\n— Equipe SecretarIA"
+    )
+    return subject, body
+
+
+async def send_release_carry_refused_clinic_email(to_email: str, **fields) -> bool:
+    subject, body = release_carry_refused_clinic_email(**fields)
+    return await _send_release_mail(to_email, subject, body, "release_carry_refused_email")
