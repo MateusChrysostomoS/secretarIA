@@ -426,6 +426,17 @@ class Settings(BaseSettings):
     REMINDER_V2_TEMPLATE_APPROVED: bool = False
     # Rows claimed per one-minute tick, so one tick never outlives the next.
     REMINDER_V2_BATCH_SIZE: int = 200
+
+    # --- Released PAID slot (TASK-052) ---------------------------------- PENDÊNCIA META ---
+    # Utility templates NOT YET APPROVED by Meta. Owner decision 2026-10-12: the code uses them as
+    # if approved; once Meta approves them on each WABA, put the approved names here. Texts to
+    # submit: docs/LEMBRETES_MODELOS_META.md, section "TASK-052". While unapproved, a send
+    # outside the 24 h window fails and is logged; the clinic's notices still go.
+    # 1 body parameter + 3 quick replies (Manter horário / Remarcar / Cancelar); reused for every
+    # out-of-window message of the offer (owner: "reaproveite o modelo de 3 botões").
+    RELEASE_OFFER_TEMPLATE_NAME: str = "liberacao_sinal_pago_v1"
+    # 1 body parameter + 2 quick replies (Recebido / Não recebido).
+    REFUND_CHECK_TEMPLATE_NAME: str = "devolucao_sinal_conferir_v1"
     # Base URL of the Brain-Message patient portal - the SAME value brain-api
     # has under this name. The Portal reminder e-mail links to
     # {BRAIN_MESSAGE_PORTAL_URL}/clinicas/?convite=<tenant_id>, the invite shape
