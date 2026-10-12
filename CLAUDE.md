@@ -150,6 +150,8 @@ neither" do `README.md`.
 
 ## Documentação
 
+`docs/CHECKPOINT_task052_liberar_sinal_pago.md` — TASK-052: liberar horário com sinal pago dá ao paciente Manter (pedido; a clínica aceita/recusa em 24 h) / Remarcar (a qualquer momento; leva o sinal só se o Asaas confirmar paga e sem estorno na hora; senão sinal novo — fail-safe) / Cancelar (avisa a clínica na hora com o passo a passo do Asaas); sem resposta, aviso em B e "cancelado por falta de resposta" em T+24h; contrato da aba da TASK-054 (todos os papéis, escopo da agenda); B usa o horário do médico (papel de secretária pendente, Task 16); modelos Meta PENDENTES; integra em `feature/out-of-mvp`; **construído, NÃO deployado**.
+
 `docs/CHECKPOINT_lembretes_r7.md` — TASK-044 R7: ações da clínica na agenda avisam o paciente (confirmar com botões, compareceu → pós-consulta, Editar/Remarcar, cancelar no Portal, autorização permanente de aviso pago), quem vê a agenda por papel (brain-api `agenda_scope`, aplicado no servidor), lembrete extra na configuração e dados do Editar na agenda; migração aditiva `d8e3a5c1f7b2`; local, não mesclado/pushado/deployado; deploy: migração → brain-api → API+worker → front; contrato do R5 no plano.
 
 `docs/CHECKPOINT_conversas_meus_pacientes.md` — TASK-046 R8: `GET /tenants/me/conversations?mine=true` ("Meus pacientes", filtro e não permissão; cancelada não conta); local, não deployado; API antes do front.
