@@ -2,8 +2,9 @@
 
 On a clinic on `before` timing a consultation is created only by a paid deposit. Four other doors
 exist and each is closed here: the LLM's creation tools (refuse, send the agent to the buttons),
-the LLM's availability tools (held slots are busy), the hub's manual booking and reschedule (409,
-decision D4) and, for completeness, what stays open on purpose (a doctor's block, a clinic that
+the LLM's availability tools (held slots are busy), the hub's manual booking, reschedule and
+Editar/Remarcar `/edit` (409, decision D4 - a new hub door that moves a time belongs here too)
+and, for completeness, what stays open on purpose (a doctor's block, a clinic that
 is on `after`, a cancelled add-on).
 """
 
@@ -286,6 +287,17 @@ class HubCalendar:
         HubCalendar.updated.append(start)
         return {"id": event_id}
 
+    # POST /edit (TASK-032 R7) asks Google whether the slot is free, then patches the event.
+    async def is_slot_free(self, start, end, ignore_event_id=None):
+        return True
+
+    async def update_event_details(self, event_id, start, end, summary, description=""):
+        HubCalendar.updated.append(start)
+        return {"id": event_id}
+
+    def references_same_calendar(self, other):
+        return True
+
 
 @pytest_asyncio.fixture
 async def hub_world(db, monkeypatch):
@@ -385,6 +397,54 @@ async def test_rescheduling_onto_a_held_slot_is_409(client: AsyncClient, db, hub
     )
     assert response.status_code == 409
     assert HubCalendar.updated == []
+
+
+async def _a_booked_appointment(db, world, *, start=HOLD_START + timedelta(days=1)):
+    async with db() as session:
+        appointment = Appointment(
+            tenant_id=world.tenant_id,
+            patient_id=world.patient.id,
+            google_event_id="evt-old",
+            appointment_type="Consulta",
+            start_at=start,
+            end_at=start + timedelta(minutes=30),
+            status=AppointmentStatus.SCHEDULED,
+        )
+        session.add(appointment)
+        await session.commit()
+        return appointment.id, appointment.start_at
+
+
+@pytest.mark.parametrize("allow_overlap", [False, True])
+async def test_editing_onto_a_held_slot_is_409_even_as_an_encaixe(
+    client: AsyncClient, db, hub_world, allow_overlap
+):
+    """The clinic's Editar/Remarcar (POST /edit, TASK-032 R7) is a door too (D4): neither a
+    plain move nor an encaixe may take the slot another patient is paying for."""
+    await _hold_for_another_conversation(db, hub_world)
+    appointment_id, start_before = await _a_booked_appointment(db, hub_world)
+    response = await client.post(
+        f"/tenants/me/calendar/appointments/{appointment_id}/edit",
+        json={"start_at": HOLD_START.isoformat(), "allow_overlap": allow_overlap},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "slot_held_awaiting_payment"
+    assert HubCalendar.updated == []  # Google never touched
+    async with db() as session:
+        row = await session.get(Appointment, appointment_id)
+        # nor the row (SQLite hands the timestamp back naive)
+        assert row.start_at.replace(tzinfo=None) == start_before.replace(tzinfo=None)
+
+
+async def test_editing_next_to_a_held_slot_still_works(client: AsyncClient, db, hub_world):
+    await _hold_for_another_conversation(db, hub_world)
+    appointment_id, _ = await _a_booked_appointment(db, hub_world)
+    response = await client.post(
+        f"/tenants/me/calendar/appointments/{appointment_id}/edit",
+        json={"start_at": HOLD_END.isoformat()},  # adjacent: half-open windows do not overlap
+    )
+    assert response.status_code == 200, response.text
+    assert HubCalendar.updated == [HOLD_END]
 
 
 async def test_a_hold_of_another_clinic_never_blocks_this_one(client: AsyncClient, db, hub_world):

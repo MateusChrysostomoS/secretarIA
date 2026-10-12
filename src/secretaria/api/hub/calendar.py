@@ -936,9 +936,10 @@ async def release_appointment(
             ),
         )
 
-    # Money first, Google second: a release whose deposit was PAID moves money
-    # (retained / partially or fully refunded), so the clinic must have read the
-    # consequence. Raised before anything is touched.
+    # Money first, Google second: a release whose deposit was PAID has a money
+    # consequence (retained, or due back in full/in part - returned by the clinic
+    # in the provider's panel, never automatically, decision D15), so the clinic
+    # must have read it. Raised before anything is touched.
     deposit = await deposit_lifecycle.get_deposit_for_appointment(session, appt.id)
     if (
         deposit is not None
@@ -1178,9 +1179,15 @@ async def edit_appointment(
     async def _calendar(professional_id):
         return await _calendar_for_professional(session, tenant, professional_id)
 
+    async def _slot_guard(start, end, professional_id):
+        # D4: the same gate as create and /reschedule (tests/test_before_bypass_paths.py).
+        await _refuse_if_slot_is_held(
+            session, tenant, start, end, professional_id=professional_id or "any"
+        )
+
     try:
         outcome = await staff_appointment_edit.apply_staff_edit(
-            session, tenant, appt, staff_request, calendar_for=_calendar
+            session, tenant, appt, staff_request, calendar_for=_calendar, slot_guard=_slot_guard
         )
     except staff_appointment_edit.StaffEditError as exc:
         raise HTTPException(exc.status_code, _detail(exc.code, exc.message, **exc.extra)) from None

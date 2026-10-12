@@ -1025,15 +1025,9 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
         if handled:
             return
 
-    # `/menu` & aliases: the non-destructive menu return (PROMPT_FIX_18).
-    # Reached only here, so it has already cleared the exact same gates as any
-    # other turn - allowlist and handover (in `_persist_inbound_message`),
-    # entitlement, and the addon inbound hooks just above. It reuses
-    # `_handle_show_main_menu`, the very seam the agent's `show_main_menu` tool
-    # goes through, so both surfaces produce the identical effective menu and
-    # the identical flow-state write. Placed BEFORE the reactivation/flow
-    # blocks so the command is never re-interpreted as input to whatever step
-    # the patient was on.
+    # The Pix turns (TASK-017): the waiting card's taps and the ends of the
+    # payer-data question belong to the wait, never to the router or the LLM.
+    # End to end in tests/test_pix_turn_dispatch_e2e.py.
     if reply.deposit_wait_action is not None:
         await _handle_deposit_wait(
             reply, tenant=tenant, waba_token=waba_token, redis=redis, patient_wa=patient_wa
@@ -1052,6 +1046,16 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
         # label); the rest of this function, the flow router, does the booking. Drop the value from
         # the context now that it is stored.
         reply = dataclass_replace(reply, payer_data_answer=None)
+
+    # `/menu` & aliases: the non-destructive menu return (PROMPT_FIX_18).
+    # Reached only here, so it has already cleared the exact same gates as any
+    # other turn - allowlist and handover (in `_persist_inbound_message`),
+    # entitlement, and the addon inbound hooks just above. It reuses
+    # `_handle_show_main_menu`, the very seam the agent's `show_main_menu` tool
+    # goes through, so both surfaces produce the identical effective menu and
+    # the identical flow-state write. Placed BEFORE the reactivation/flow
+    # blocks so the command is never re-interpreted as input to whatever step
+    # the patient was on.
     if reply.menu_requested:
         await _handle_show_main_menu(
             reply,

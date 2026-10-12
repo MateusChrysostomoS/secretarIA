@@ -54,6 +54,32 @@ passaram a usar `tests/_patching.py::workers_ns`.
   (migração + concorrência): 22 passed.
 - `ruff check` nos arquivos alterados: limpo.
 
+## 3a. Correções da revisão (`tasks/TASK-050/REVIEW.md`, I-1 e I-2)
+
+- **I-1 — `/edit` respeita o horário de quem está pagando o sinal (D4).** A porta
+  `POST /appointments/{id}/edit` (R7, vinda da main) não consultava as reservas. Agora
+  `services/staff_appointment_edit.py::apply_staff_edit` recebe `slot_guard` e o chama antes do
+  Google sempre que horário ou médico mudam; a rota do hub passa a MESMA checagem de criar e
+  `/reschedule` (`api/hub/calendar.py::_refuse_if_slot_is_held`) → 409
+  `slot_held_awaiting_payment`. Decisão tomada: o **encaixe (`allow_overlap`) NÃO passa por cima**
+  de uma reserva com Pix (encaixe sobrepõe consulta marcada, nunca horário sendo pago) — confirmar
+  com o dono. Testes em `tests/test_before_bypass_paths.py` (a lista de portas): mover para o
+  horário reservado é 409 com e sem encaixe, sem tocar Google nem a linha; mover para o horário
+  vizinho funciona.
+- **I-2 — os encaixes do Pix no orquestrador agora têm teste de ponta a ponta.**
+  `tests/test_pix_turn_dispatch_e2e.py` passa pelo caminho real (`_persist_inbound_message` →
+  `_send_bot_reply_inner`): os três toques do cartão de espera, CPF inválido e opt-out, e o CPF
+  válido que completa o "Confirmar" (o Redis do turno chega ao portão e o provedor recebe o CPF).
+  Prova de mordida (cada encaixe desligado na cópia de trabalho, depois restaurado): despacho de
+  `deposit_wait_action` → 3 falham; despacho de `payer_data_action` → 2 falham; guarda da resposta
+  (`payer_data_answer`) → 1 falha; `_turn_booking_gate(redis=None)` → 1 falha. Restaurado: 6 verdes.
+- Comentários: `/menu` voltou para cima do bloco dele em `orchestrator.py` (o merge o deixou sobre
+  o despacho do Pix); docstrings de `deposit_lifecycle` e `release_appointment` não falam mais em
+  estorno automático nem em `_asaas_client_for`.
+- Os Minor m-1, m-3, m-4, m-5 da revisão continuam abertos.
+- Suíte completa depois das correções: **6112 passed, 79 skipped, 1 xfailed, 0 failed**
+  (6103 + 9 testes novos).
+
 ## 4. Não provado
 
 Nada foi testado em produção ou com o Asaas real; o fluxo completo Pix + Portal + lembretes da

@@ -11,7 +11,8 @@ phone. In order:
    moves to another agenda - create it there. If Google refuses, nothing in the database
    changed (502). The slot must be free and inside the hours unless the clinic says
    `allow_overlap` (an "encaixe"). A contact-phone-only change never calls Google (the
-   event carries no phone).
+   event carries no phone). Before Google, a new window or doctor goes through the hub's
+   `slot_guard` (the Pix booking-hold gate, D4) - an encaixe does not bypass it.
 3. The row, locked, through the SAME writer the patient's "Alterar Dados" uses
    (services/appointment_edit_write.py), plus the contact phone; the doctor e-mail goes
    to R6's outbox only when date, time or doctor changed. A row that stopped being live -
@@ -84,6 +85,9 @@ DEFAULT_SERVICE = "Consulta"
 _NOT_DIGIT = re.compile(r"\D")
 
 CalendarFor = Callable[[UUID | None], Awaitable[Any]]
+# (start, end, professional_id) -> raises when a live booking hold (a patient paying the Pix
+# deposit) owns that window: decision D4, the SAME check the hub's create and /reschedule run.
+SlotGuard = Callable[[datetime, datetime, UUID | None], Awaitable[None]]
 
 
 class StaffEditError(Exception):
@@ -456,9 +460,14 @@ async def apply_staff_edit(
     request: StaffEditRequest,
     *,
     calendar_for: CalendarFor,
+    slot_guard: SlotGuard | None = None,
     now: datetime | None = None,
 ) -> StaffEditOutcome:
-    """Validate, move Google, write the row; commits. See the module docstring."""
+    """Validate, move Google, write the row; commits. See the module docstring.
+
+    `slot_guard` runs before Google whenever the window or the doctor changes - even on an
+    `allow_overlap` encaixe: an encaixe may overlap a booked consultation, never a slot
+    another patient is paying for (D4)."""
     now = now or datetime.now(UTC)
     appointment_id, tenant_id = appointment.id, tenant.id
     if appointment.patient_id is None and not appointment.phone:
@@ -495,6 +504,12 @@ async def apply_staff_edit(
             )
         )
     time_changed = target.start_at != before.start_at
+    window_or_doctor_changed = (target.start_at, target.end_at) != (
+        before.start_at,
+        before.end_at,
+    ) or target.professional_id != before.professional_id
+    if slot_guard is not None and window_or_doctor_changed:
+        await slot_guard(target.start_at, target.end_at, target.professional_id)
     phone_before = appointment.phone
     needs_google = bool(before.event_id) and any(c.label != LABEL_PHONE for c in changes)
     moved = (

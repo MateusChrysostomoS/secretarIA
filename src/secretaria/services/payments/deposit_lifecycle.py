@@ -11,9 +11,11 @@ functions commit — callers own the transaction, exactly like every other
 single deliberate exception of `apply_asaas_event`'s own claim+mutate step
 (see its docstring for why).
 
-`_asaas_client_for` is the ONE construction seam for `AsaasClient` — tests
-monkeypatch it to install a fake recording client, so nothing here ever hits
-a real network in a test run.
+No money ever leaves through this module: a PAID deposit is never refunded
+by the system (decision D15) - when the policy says it is due back, the
+outcome is `refund_due` / `partial_refund_due` and the clinic returns it in
+the provider's own panel. Provider calls (voiding an unpaid charge) go
+through `services/payments/registry.py`, which tests replace with a fake.
 """
 
 import hmac
