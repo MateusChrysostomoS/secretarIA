@@ -428,14 +428,14 @@ def downgrade() -> None:
 ```diff
 --- a/src/secretaria/models/__init__.py
 +++ b/src/secretaria/models/__init__.py
-@@ -16,6 +16,7 @@
- from secretaria.models.booking_hold import BookingHold
- from secretaria.models.clinic_payment_account import ClinicPaymentAccount
+@@ -18,6 +18,7 @@
  from secretaria.models.consent_event import ConsentEvent
-+from secretaria.models.deposit_release_offer import DepositReleaseOffer
  from secretaria.models.conversation import Conversation, FlowState, HandoverState
  from secretaria.models.conversation_pii_token_map import ConversationPiiTokenMap
++from secretaria.models.deposit_release_offer import DepositReleaseOffer
  from secretaria.models.insurance import (
+     INSURANCE_MECHANISMS,
+     INSURANCE_MODES,
 @@ -56,6 +57,7 @@
      "ClinicPaymentAccount",
      "is_live_status",
