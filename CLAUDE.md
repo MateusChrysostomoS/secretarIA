@@ -151,6 +151,8 @@ neither" do `README.md`.
 
 ## Documentação
 
+`docs/CHECKPOINT_subagendas_convite.md` — TASK-054: criação de subagenda no convite, vínculo próprio e reativação em conta compartilhada da clínica; integração à main local autorizada, sem deploy; estado em `BRAIN/tasks/TASK-054/CALENDAR_IMPLEMENTATION.md`.
+
 `docs/CHECKPOINT_lembretes_r7.md` — TASK-044 R7: ações da clínica na agenda avisam o paciente (confirmar com botões, compareceu → pós-consulta, Editar/Remarcar, cancelar no Portal, autorização permanente de aviso pago), quem vê a agenda por papel (brain-api `agenda_scope`, aplicado no servidor), lembrete extra na configuração e dados do Editar na agenda; migração aditiva `d8e3a5c1f7b2`; local, não mesclado/pushado/deployado; deploy: migração → brain-api → API+worker → front; contrato do R5 no plano.
 
 `docs/CHECKPOINT_conversas_meus_pacientes.md` — TASK-046 R8: `GET /tenants/me/conversations?mine=true` ("Meus pacientes", filtro e não permissão; cancelada não conta); local, não deployado; API antes do front.

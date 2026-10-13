@@ -84,6 +84,7 @@ from secretaria.services.calendar import (
     GoogleTokenRevokedError,
 )
 from secretaria.services.entitlements_client import get_entitlements
+from secretaria.services.professional_calendar_setup import prepare_shared_professional_calendar
 from secretaria.services.professional_capacity import (
     ProfessionalCapacityError,
     require_professional_capacity,
@@ -207,55 +208,8 @@ async def create_professional(
         "hub_professional_created", tenant_id=str(tenant.id), professional_id=str(professional.id)
     )
 
-    await _ensure_calendar_for_new_professional(session, tenant, professional)
+    await prepare_shared_professional_calendar(session, tenant, professional)
     return _read_model(professional)
-
-
-async def _ensure_calendar_for_new_professional(
-    session: AsyncSession, tenant: Tenant, professional: Professional
-) -> None:
-    """In shared_account mode, a professional joining gets their agenda too.
-
-    BEST EFFORT, and after the professional is already committed. A clinic in
-    `shared_account` mode has said "every doctor lives inside our one Google
-    account"; a doctor added afterwards belongs there as well, and making the
-    clinic notice a missing calendar later is exactly the gap the bulk endpoint
-    exists to close.
-
-    Never allowed to fail the creation itself: the professional is a real row
-    that must exist regardless of Google's mood, and the retry paths (the bulk
-    endpoint, the per-row button) are both idempotent. So every failure here is
-    logged and swallowed — including "the clinic has no Google account", which
-    for a tenant mid-onboarding is the normal case, not an error.
-    """
-    if tenant.google_calendar_mode != "shared_account" or not professional.is_active:
-        return
-    # Ids are read BEFORE the try: `session.rollback()` expires every instance,
-    # so reading them inside the handler would issue lazy database IO from an
-    # exception path — the same trap api/hub/config.py documents.
-    tenant_id, professional_id = str(tenant.id), str(professional.id)
-    try:
-        result = await ensure_professional_secondary_calendar(session, tenant, professional)
-        await session.commit()
-    except Exception as exc:
-        await session.rollback()
-        logger.info(
-            "hub_professional_autocalendar_skipped",
-            tenant_id=tenant_id,
-            professional_id=professional_id,
-            code=type(exc).__name__,
-        )
-        # The caller still has to serialize this row, and the rollback just
-        # expired it. Reload it here rather than leaving a landmine one
-        # attribute access away.
-        await session.refresh(professional)
-        return
-    logger.info(
-        "hub_professional_autocalendar_created",
-        tenant_id=tenant_id,
-        professional_id=professional_id,
-        created=result.created,
-    )
 
 
 @router.patch("/{professional_id}", response_model=ProfessionalRead)
@@ -284,6 +238,8 @@ async def update_professional(
     logger.info(
         "hub_professional_updated", tenant_id=str(tenant.id), professional_id=str(professional.id)
     )
+    if data.get("is_active") is True:
+        await prepare_shared_professional_calendar(session, tenant, professional)
     return _read_model(professional)
 
 

@@ -23,10 +23,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.api.internal import require_internal_api_key
+from secretaria.core.crypto import EncryptionError
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
 from secretaria.models import Professional, Tenant
-from secretaria.schemas.professional import ProfessionalListItem
 from secretaria.schemas.internal_provisioning import (
     ActivateOut,
     AsaasConnectionIn,
@@ -42,12 +42,13 @@ from secretaria.schemas.internal_provisioning import (
     WhatsappConnectionIn,
     WhatsappConnectionOut,
 )
+from secretaria.schemas.professional import ProfessionalListItem
 from secretaria.services import provisioning
-from secretaria.services.hub_configuration import professional_list_item
 from secretaria.services.email import is_known_template
-from secretaria.services.staff_welcome import seal_staff_welcome
+from secretaria.services.hub_configuration import professional_list_item
+from secretaria.services.professional_calendar_setup import prepare_shared_professional_calendar
 from secretaria.services.professional_capacity import ProfessionalCapacityError
-from secretaria.core.crypto import EncryptionError
+from secretaria.services.staff_welcome import seal_staff_welcome
 
 logger = get_logger(__name__)
 
@@ -218,7 +219,9 @@ async def config_status(
     summary="Create-or-attach a professional by name (internal)",
     description=(
         "Case-insensitive match on an existing ACTIVE professional of this tenant -> "
-        "returns it (created=false, no mutation). Otherwise creates a new one."
+        "returns it (created=false). Otherwise creates a new one. After registration, "
+        "shared-account clinics prepare a missing secondary calendar without overwriting "
+        "existing professional settings."
     ),
     responses=_NOT_FOUND_RESPONSES,
 )
@@ -242,6 +245,8 @@ async def attach_professional(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown tenant")
     professional, created = result
     await session.commit()
+    tenant = await session.get(Tenant, professional.tenant_id)
+    await prepare_shared_professional_calendar(session, tenant, professional)
     return ProfessionalAttachOut(professional_id=professional.id, created=created)
 
 

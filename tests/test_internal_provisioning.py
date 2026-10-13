@@ -43,6 +43,7 @@ HEADERS = {"X-Internal-Api-Key": GOOD_KEY}
 
 async def test_interactive_professional_creation_cannot_bypass_capacity(client, db, monkeypatch):
     from fastapi import HTTPException
+
     from secretaria.services import provisioning
 
     async def denied(*args, **kwargs):
@@ -60,6 +61,7 @@ async def test_interactive_professional_creation_cannot_bypass_capacity(client, 
 
 async def test_staff_welcome_queue_never_contains_plain_credentials(client, monkeypatch):
     from datetime import UTC, datetime, timedelta
+
     from secretaria.main import app
 
     pool = _FakeArqPool()
@@ -506,6 +508,138 @@ async def test_attach_professional_does_not_match_inactive(client: AsyncClient, 
     )
     assert response.status_code == 200
     assert response.json()["created"] is True  # a NEW (active) row, inactive one not matched
+
+
+@pytest.mark.parametrize("existing", [False, True])
+async def test_invite_or_self_binding_prepares_shared_calendar(client, db, monkeypatch, existing):
+    """Both consumers use this internal endpoint; an existing unprepared row is repaired."""
+    from secretaria.services import provisioning, tenant_config
+
+    tenant = await _seed_tenant(db, google_calendar_mode="shared_account")
+    other = await _seed_tenant(db, google_calendar_mode="shared_account")
+    untouched = await _seed_professional(db, other, name="Dr. New")
+    if existing:
+        await _seed_professional(db, tenant, name="Dr. New")
+    async with db() as session:
+        await set_google_refresh_token(session, tenant.id, "clinic-test-token")
+        await session.commit()
+
+    class GoogleCalendar:
+        async def create_secondary_calendar(self, summary):
+            return {"id": "doctor-test@group.calendar.google.com"}
+
+    async def capacity_allowed(*args):
+        pass
+
+    monkeypatch.setattr(provisioning, "require_professional_capacity", capacity_allowed)
+    monkeypatch.setattr(
+        tenant_config.CalendarService, "from_tenant_config", lambda config: GoogleCalendar()
+    )
+    response = await client.post(
+        f"/internal/tenants/{tenant.id}/professionals",
+        headers=HEADERS,
+        json={"name": "Dr. New", "interactive": True},
+    )
+    assert response.status_code == 200
+    assert response.json()["created"] is not existing
+    async with db() as session:
+        professional = await session.get(Professional, UUID(response.json()["professional_id"]))
+        assert professional.google_calendar_id == "doctor-test@group.calendar.google.com"
+        assert (await session.get(Professional, untouched.id)).google_calendar_id is None
+
+    # A repeated attach must preserve the linked calendar without writing to Google again.
+    unexpected_calls = []
+
+    def unexpected_google(config):
+        unexpected_calls.append(config)
+        raise AssertionError("An existing linked calendar must be reused")
+
+    monkeypatch.setattr(tenant_config.CalendarService, "from_tenant_config", unexpected_google)
+    again = await client.post(
+        f"/internal/tenants/{tenant.id}/professionals",
+        headers=HEADERS,
+        json={"name": "Dr. New", "interactive": True},
+    )
+    assert again.status_code == 200
+    assert unexpected_calls == []
+    assert again.json()["professional_id"] == response.json()["professional_id"]
+    async with db() as session:
+        professional = await session.get(Professional, UUID(again.json()["professional_id"]))
+        assert professional.google_calendar_id == "doctor-test@group.calendar.google.com"
+
+
+@pytest.mark.parametrize("mode,connected", [("shared_account", False), ("per_professional", True)])
+async def test_internal_attach_without_shared_connection_preserves_registration(
+    client, db, monkeypatch, mode, connected
+):
+    from secretaria.services import tenant_config
+
+    tenant = await _seed_tenant(db, google_calendar_mode=mode)
+    if connected:
+        async with db() as session:
+            await set_google_refresh_token(session, tenant.id, "clinic-test-token")
+            await session.commit()
+
+    unexpected_calls = []
+
+    def unexpected_google(config):
+        unexpected_calls.append(config)
+        raise AssertionError("No remote calendar should be created")
+
+    monkeypatch.setattr(tenant_config.CalendarService, "from_tenant_config", unexpected_google)
+    response = await client.post(
+        f"/internal/tenants/{tenant.id}/professionals",
+        headers=HEADERS,
+        json={"name": "Dr. New"},
+    )
+    assert response.status_code == 200
+    assert unexpected_calls == []
+    async with db() as session:
+        professional = await session.get(Professional, UUID(response.json()["professional_id"]))
+        assert professional.name == "Dr. New"
+        assert professional.google_calendar_id is None
+
+
+async def test_internal_attach_recovers_calendar_after_google_failure(client, db, monkeypatch):
+    from secretaria.services import tenant_config
+    from secretaria.services.calendar import CalendarUnavailableError
+
+    tenant = await _seed_tenant(db, google_calendar_mode="shared_account")
+    async with db() as session:
+        await set_google_refresh_token(session, tenant.id, "clinic-test-token")
+        await session.commit()
+
+    class GoogleCalendar:
+        unavailable = True
+
+        async def create_secondary_calendar(self, summary):
+            if self.unavailable:
+                raise CalendarUnavailableError("test outage")
+            return {"id": "recovered@group.calendar.google.com"}
+
+    google = GoogleCalendar()
+    monkeypatch.setattr(tenant_config.CalendarService, "from_tenant_config", lambda config: google)
+    response = await client.post(
+        f"/internal/tenants/{tenant.id}/professionals",
+        headers=HEADERS,
+        json={"name": "Dr. New"},
+    )
+    assert response.status_code == 200
+    async with db() as session:
+        professional = await session.get(Professional, UUID(response.json()["professional_id"]))
+        assert professional.google_calendar_id is None
+
+    google.unavailable = False
+    retry = await client.post(
+        f"/internal/tenants/{tenant.id}/professionals",
+        headers=HEADERS,
+        json={"name": "Dr. New"},
+    )
+    assert retry.status_code == 200
+    assert retry.json()["professional_id"] == response.json()["professional_id"]
+    async with db() as session:
+        professional = await session.get(Professional, UUID(retry.json()["professional_id"]))
+        assert professional.google_calendar_id == "recovered@group.calendar.google.com"
 
 
 # --------------------------------------------------------------------------
