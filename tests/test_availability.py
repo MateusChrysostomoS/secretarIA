@@ -206,6 +206,30 @@ async def test_a_held_slot_is_hidden_from_the_slot_picker(monkeypatch):
     assert [f["hidden"] for e, f in log.events if e == "flow_slots_hidden_by_hold"] == [1]
 
 
+async def test_a_partly_held_day_lists_the_free_times_under_the_held_ones():
+    """TASK-052: the held times are named above the list (times only), the rest is tappable."""
+    res = await fr.route(
+        _at_day_step(),
+        _tenant(),
+        _FakeCalendar(slots=_SLOTS),
+        _DAY_TAP,
+        gate=_Gate({None: [_HELD_0800]}),
+    )
+    (bubble,) = res.bubbles
+    assert bubble.body == (
+        fr.HELD_SLOTS_NOTICE.format(times="08:00") + "\n\nHorários livres em 05/10:"
+    )
+    assert [row[0] for row in bubble.rows][:1] == ["slot|2026-10-05T08:40"]
+
+
+def test_held_times_are_listed_plainly_and_capped():
+    assert fr.held_times_text(["08:00"]) == "08:00"
+    assert fr.held_times_text(["08:00", "08:30"]) == "08:00 e 08:30"
+    assert fr.held_times_text(["08:00", "08:30", "09:00"]) == "08:00, 08:30 e 09:00"
+    many = [f"{h:02d}:00" for h in range(8, 19)]
+    assert fr.held_times_text(many).endswith("e mais 3")
+
+
 async def test_a_sole_professionals_hold_is_looked_up_by_their_id():
     """Holds are PLACED with the sole professional as owner (`resolve_booking_owner_id`);
     the picker used to look them up under None and never saw them."""

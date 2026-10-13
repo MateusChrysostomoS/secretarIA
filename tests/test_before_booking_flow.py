@@ -303,7 +303,9 @@ async def test_a_clinic_on_after_still_books_with_the_event_and_the_confirmation
     assert "está confirmado" in result.bubbles[0].body
 
 
-async def test_the_day_picker_treats_held_windows_as_busy_time(db, env):
+async def test_a_fully_held_day_is_offered_and_says_which_times_are_held(db, env):
+    """TASK-052 (owner decision 2026-10-11) reverts the TASK-050 port that hid it: the day is
+    offered (an unpaid Pix may expire), and picking it lists the held TIMES - never who."""
     from secretaria.models import Patient
 
     async with db() as session:
@@ -359,9 +361,22 @@ async def test_the_day_picker_treats_held_windows_as_busy_time(db, env):
         result = await fr.enter_day_picker(
             _snapshot(world.conversation), world.tenant, calendar, duration_minutes=30
         )
+        slot_step = await fr._enter_slot_picker(
+            _snapshot(world.conversation),
+            world.tenant,
+            calendar,
+            held_day,
+            duration_minutes=30,
+        )
     finally:
         fr._ACTIVE_GATE.reset(token)
-    # Ported onto main's availability module (TASK-050): the fully held day is not offered.
     assert len(calendar.day_kwargs) == 1
-    assert result.flow_state == FlowState.MENU
-    assert result.bubbles[0].body == fr.NO_AVAILABLE_DAYS_MESSAGE
+    assert result.flow_state != FlowState.MENU
+    day_rows = [row[0] for row in result.bubbles[0].rows]
+    assert f"day|{held_day.date().isoformat()}|0" in day_rows
+    (bubble,) = slot_step.bubbles
+    label = held_local.strftime("%H:%M")
+    assert bubble.body.startswith(f"Todos os horários livres deste dia ({label})")
+    assert "pagamento do sinal" in bubble.body and "voltam a ficar livres" in bubble.body
+    assert "5511888888888" not in bubble.body  # times only, never the other patient
+    assert [row[0] for row in bubble.rows] == ["dayagain|0"]  # nothing held is tappable

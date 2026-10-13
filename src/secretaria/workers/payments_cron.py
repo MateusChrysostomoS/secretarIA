@@ -15,7 +15,11 @@ from secretaria.core.logging import get_logger
 # Imported for their side effects: `asaas_connection` registers the daily Asaas key recheck
 # into `jobs.DAILY_STEPS`; `deposit_wait` registers the `before` expiry hook that frees the
 # hold and tells the patient into `jobs.EXPIRY_HOOKS`.
-from secretaria.services import deposit_wait  # noqa: F401
+from secretaria.services import (
+    deposit_wait,  # noqa: F401
+    release_offer,
+    release_offer_dispatch,
+)
 from secretaria.services.payments import (
     asaas_connection,  # noqa: F401
     attention_alerts,
@@ -63,8 +67,24 @@ async def run_payment_sweeps(ctx: dict) -> None:
             session, now=now, enqueue=enqueue_for(ctx)
         )
         notices = await jobs.recover_paid_notices(session, now=now)
-    if events or fulfillments or notices:
-        logger.info("payment_sweep_tick", events=events, fulfillments=fulfillments, notices=notices)
+    # TASK-052: a slot the clinic released with a PAID deposit - B (refund due when nobody
+    # answered), E (24 h: "cancelado por falta de resposta"), K (no clinic decision on a
+    # "Manter" request in 24 h = refused), then whatever is due (the clinic's
+    # notices, the patient's refund check). Own sessions: a failure here never touches the sweeps
+    # above.
+    async with async_session_factory() as session:
+        offers = await release_offer.expire_offers(session, now=now)
+    async with async_session_factory() as session:
+        sends = (await release_offer_dispatch.dispatch_due(session, now=now)).sent
+    if events or fulfillments or notices or offers or sends:
+        logger.info(
+            "payment_sweep_tick",
+            events=events,
+            fulfillments=fulfillments,
+            notices=notices,
+            release_offers=offers,
+            release_sends=sends,
+        )
 
 
 async def run_attention_alerts(ctx: dict) -> None:

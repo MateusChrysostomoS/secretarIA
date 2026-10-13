@@ -29,6 +29,7 @@ from secretaria.models.payment_attention_item import (
     REASON_PAID_THEN_CANCELLED,
     REASON_PROMOTION_FAILED,
     REASON_REFUND_DUE_POLICY,
+    REASON_RELEASED_REFUND_DUE,
     RESOLUTION_ACTIONS,
     PaymentAttentionItem,
 )
@@ -59,6 +60,7 @@ REASON_TEXT = {
     "reference_mismatch": "Pagamento com referência diferente da esperada.",
     "promotion_failed": "Pago, mas não conseguimos confirmar a consulta.",
     "refunded_externally": "O provedor informa que este pagamento foi estornado.",
+    "released_refund_due": "Horário liberado pela clínica: devolver o sinal ao paciente.",
 }
 
 # Resolving with "refunded in the provider's panel" closes the money story of the deposit only
@@ -69,6 +71,7 @@ _REFUND_RECORDING_REASONS = frozenset(
         REASON_PAID_THEN_CANCELLED,
         REASON_REFUND_DUE_POLICY,
         REASON_PROMOTION_FAILED,
+        REASON_RELEASED_REFUND_DUE,
     }
 )
 
@@ -271,6 +274,12 @@ async def resolve_item(
     item = await session.get(PaymentAttentionItem, item_id)
     await session.refresh(item)
     await _close_deposit_story(session, tenant_id, item, action)
+    # TASK-052: a released PAID slot's refund item. "Refunded in the provider's panel" asks the
+    # patient "Recebido / Não recebido"; any other decision ends the clinic's notices. Lazy
+    # import: services/release_offer.py imports this package.
+    from secretaria.services import release_offer
+
+    await release_offer.on_refund_recorded(session, tenant_id=tenant_id, item=item, now=now)
     await session.commit()
     return "resolved"
 

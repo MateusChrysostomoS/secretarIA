@@ -30,7 +30,7 @@ import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
 from arq import Retry  # noqa: E402
 from httpx import AsyncClient  # noqa: E402
-from sqlalchemy import event  # noqa: E402
+from sqlalchemy import event, select  # noqa: E402
 from sqlalchemy.ext.asyncio import (  # noqa: E402
     AsyncSession,
     async_sessionmaker,
@@ -40,6 +40,7 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from secretaria.api.hub import calendar as hub_calendar  # noqa: E402
 from secretaria.api.hub.deps import get_current_tenant  # noqa: E402
+from secretaria.config import get_settings  # noqa: E402
 from secretaria.core.database import Base, get_session  # noqa: E402
 from secretaria.models import (  # noqa: E402
     Appointment,
@@ -49,10 +50,16 @@ from secretaria.models import (  # noqa: E402
     MessageDirection,
     MessageSender,
     Patient,
+    PixDeposit,
+    PixDepositStatus,
     Professional,
     Tenant,
 )
-from secretaria.services import cancellation_notice as notice  # noqa: E402
+from secretaria.models.deposit_release_offer import DepositReleaseOffer  # noqa: E402
+from secretaria.services import (  # noqa: E402
+    cancellation_notice as notice,
+    release_offer,
+)
 from secretaria.services.tenant_config import set_google_refresh_token  # noqa: E402
 from secretaria.workers import tasks  # noqa: E402
 
@@ -792,6 +799,81 @@ async def test_the_deposit_notice_rides_along_rather_than_arriving_separately(
 
     assert len(wa.buttons) == 1
     assert "retido pela clínica" in wa.buttons[0]["body"]
+
+
+async def _open_paid_offer(db, appt) -> None:
+    async with db() as session:
+        row = await session.get(Appointment, appt.id)
+        row.status = AppointmentStatus.CANCELLED
+        deposit = PixDeposit(
+            id=uuid4(),
+            tenant_id=row.tenant_id,
+            appointment_id=row.id,
+            patient_id=row.patient_id,
+            asaas_payment_id=f"pay_{uuid4().hex[:8]}",
+            amount_cents=6000,
+            percent_applied=30,
+            status=PixDepositStatus.PAID,
+        )
+        session.add(deposit)
+        await session.flush()
+        tenant_row = await session.get(Tenant, row.tenant_id)
+        await release_offer.open_offer(session, tenant=tenant_row, appointment=row, deposit=deposit)
+        await session.commit()
+
+
+def _offer_text() -> str:
+    return release_offer.offer_body(
+        deposit=PixDeposit(amount_cents=6000),
+        decide_by_at=datetime.now(UTC) + timedelta(hours=6),
+        timezone="America/Sao_Paulo",
+        justification=None,
+        confirmed=False,
+    )
+
+
+async def test_a_released_paid_slot_carries_the_choices_and_the_body_as_is(
+    db, tenant, wa, metered
+):
+    """TASK-052: same job, same arguments; the open offer decides the card."""
+    appt = await _seed(db, tenant, last_inbound=datetime.now(UTC) - timedelta(hours=2))
+    await _open_paid_offer(db, appt)
+    body = _offer_text()
+
+    await _run(appt, justification="x" * 1500, extra=body)
+
+    [sent] = wa.buttons
+    ids = [bid for bid, _ in sent["buttons"]]
+    assert ids[-2:] == [f"relresched|{appt.id}", f"relcancel|{appt.id}"]
+    assert sent["body"] == body and len(sent["body"]) <= 1024
+
+
+async def test_outside_the_window_the_offer_goes_as_the_pending_meta_template(
+    db, tenant, wa, metered
+):
+    appt = await _seed(db, tenant, last_inbound=datetime.now(UTC) - timedelta(hours=30))
+    await _open_paid_offer(db, appt)
+    body = _offer_text()
+
+    await _run(appt, extra=body, allow_paid=True)
+
+    [sent] = wa.templates
+    assert sent["template"] == get_settings().RELEASE_OFFER_TEMPLATE_NAME
+    assert sent["variables"] == [release_offer.template_text(body)]
+    assert sent["button_payloads"][-1] == f"relcancel|{appt.id}"
+
+
+async def test_an_offer_already_answered_sends_nothing(db, tenant, wa, metered):
+    appt = await _seed(db, tenant, last_inbound=datetime.now(UTC) - timedelta(hours=2))
+    await _open_paid_offer(db, appt)
+    async with db() as session:
+        offer = await session.scalar(select(DepositReleaseOffer))
+        offer.decision = "kept"
+        await session.commit()
+
+    await _run(appt, extra=_offer_text())
+
+    assert wa.buttons == [] and wa.templates == []
 
 
 async def test_an_appointment_from_another_tenant_is_never_notified(db, tenant, wa, metered):

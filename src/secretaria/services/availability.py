@@ -13,9 +13,11 @@ extracted, so there is one definition of "free":
 Nothing here returns an event - only instants. That is the contract the AI tool relies
 on: no title, attendee or event id ever leaves the calendar layer through this module.
 
-The day picker passes no holds, on purpose: it has always listed every day with free
-Google time and let the slot step hide the held slots, and it must keep rendering byte
-for byte (tests/test_availability.py). The AI readers pass the holds.
+The day picker passes no holds, on purpose: it lists every day with free Google time and
+lets the slot step hide the held slots AND say which times are held (`held_slots`), so a
+patient can see that a day may free up when an unpaid Pix expires (TASK-052, owner decision
+2026-10-11, reverting the TASK-050 port that hid fully held days). The AI readers pass the
+holds.
 """
 
 from __future__ import annotations
@@ -74,6 +76,21 @@ def without_holds(
         ):
             kept.append(slot)
     return kept
+
+
+def held_slots(
+    slots: Sequence[dict],
+    holds: Sequence[Window],
+    *,
+    duration_minutes: int,
+    tz: tzinfo | None,
+) -> list[dict]:
+    """The complement of `without_holds`: the slots another conversation is holding."""
+    if not holds:
+        return []
+    free = without_holds(slots, holds, duration_minutes=duration_minutes, tz=tz)
+    kept = {id(slot) for slot in free}
+    return [slot for slot in slots if id(slot) not in kept]
 
 
 async def free_slots_for_day(

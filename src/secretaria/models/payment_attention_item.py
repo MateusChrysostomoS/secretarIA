@@ -35,6 +35,9 @@ REASON_ORPHAN_PAYMENT = "orphan_payment"
 REASON_REFERENCE_MISMATCH = "reference_mismatch"
 REASON_PROMOTION_FAILED = "promotion_failed"
 REASON_REFUNDED_EXTERNALLY = "refunded_externally"
+# TASK-052: the clinic released a PAID slot and the refund fell due (cancelled, no answer by B or
+# in 24 h, or the clinic refused "Manter") - the clinic returns the deposit in the provider's panel.
+REASON_RELEASED_REFUND_DUE = "released_refund_due"
 
 ATTENTION_REASONS = frozenset(
     {
@@ -48,6 +51,7 @@ ATTENTION_REASONS = frozenset(
         REASON_REFERENCE_MISMATCH,
         REASON_PROMOTION_FAILED,
         REASON_REFUNDED_EXTERNALLY,
+        REASON_RELEASED_REFUND_DUE,
     }
 )
 

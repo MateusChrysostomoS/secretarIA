@@ -704,6 +704,15 @@ _ACTION_BUTTON_PREFIXES: tuple[str, ...] = (
     "remgiveup|",
     "remgiveupyes|",
     "remkeep|",
+    # TASK-052: the choice on a slot the clinic released with a PAID deposit, and the patient's
+    # refund check. The trailing id is the RELEASED appointment's; workers/shared/
+    # release_offer_actions.py honours it only for the patient of the offer, in the tapping
+    # conversation's clinic.
+    "relkeep|",
+    "relresched|",
+    "relcancel|",
+    "relgot|",
+    "relmiss|",
 )
 
 

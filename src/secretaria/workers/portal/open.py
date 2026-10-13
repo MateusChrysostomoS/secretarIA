@@ -34,6 +34,7 @@ from secretaria.services.reminder_text import REMINDER_TERMINAL_TEXT
 from secretaria.workers.orchestrator import (
     _send_bot_reply,
 )
+from secretaria.workers.portal.release_card import offer_card_after_start
 from secretaria.workers.shared.context import (
     _ReplyContext,
 )
@@ -504,6 +505,10 @@ async def process_brain_message_enter(
     the claim back when nothing reached the patient.
     """
     tenant_uuid = UUID(tenant_id)
+    # TASK-052: after the released consultation's start, opening the conversation shows only
+    # "Remarcar" / "Cancelar" (once per offer); nothing else is said on this entry.
+    if await offer_card_after_start(tenant_uuid, external_id):
+        return
     context = (
         ConversationEntryContext.model_validate(entry_context)
         if entry_context is not None

@@ -528,6 +528,84 @@ def test_the_four_jobs_are_registered_on_the_worker():
         assert name in names
 
 
+async def test_the_sweep_cron_runs_b_and_the_24h_cancellation_and_sends_once(db, monkeypatch):
+    """TASK-052: B, E ("cancelado por falta de resposta") and the notices ride the sweep."""
+    from secretaria.config import get_settings
+    from secretaria.models import PaymentAttentionItem
+    from secretaria.models.deposit_release_offer import DepositReleaseEmail, DepositReleaseOffer
+    from secretaria.services import email, release_offer
+    from tests.release_offer_support import make_released
+
+    monkeypatch.setattr(payments_cron, "async_session_factory", db)
+    mailbox: list[str] = []
+    monkeypatch.setattr(email, "_send_sync", lambda to, subject, body: mailbox.append(subject))
+    monkeypatch.setattr(get_settings(), "SMTP_HOST", "smtp.exemplo", raising=False)
+    async with db() as session:
+        released = await make_released(session, business_hours={})
+        offer = await release_offer.open_offer(
+            session,
+            tenant=released.tenant,
+            appointment=released.appointment,
+            deposit=released.deposit,
+            now=datetime.now(UTC) - timedelta(hours=25),  # B and E both passed, nobody answered
+        )
+        await session.commit()
+
+    await payments_cron.run_payment_sweeps({"redis": FakeRedis()})
+    await payments_cron.run_payment_sweeps({"redis": FakeRedis()})
+
+    async with db() as session:
+        closed = await session.get(DepositReleaseOffer, offer.id)
+        items = list(await session.scalars(select(PaymentAttentionItem)))
+        sends = {
+            row.kind: row.outcome for row in await session.scalars(select(DepositReleaseEmail))
+        }
+    assert (closed.decision, closed.refund_status) == ("no_answer_cancelled", "due")
+    assert [item.reason for item in items] == ["released_refund_due"]
+    assert sends == {"clinic_refund_noanswer": "sent", "clinic_refund_day": "sent"}
+    assert len(mailbox) == 2 and any("Prazo vencido" in subject for subject in mailbox)
+
+
+async def test_the_sweep_cron_closes_a_keep_request_the_clinic_never_decided(db, monkeypatch):
+    """TASK-052: no clinic decision 24 h after the "Manter" tap = refused; the clinic is told."""
+    from secretaria.config import get_settings
+    from secretaria.models.deposit_release_offer import DepositReleaseEmail, DepositReleaseOffer
+    from secretaria.services import email, release_offer
+    from tests.release_offer_support import make_released
+
+    monkeypatch.setattr(payments_cron, "async_session_factory", db)
+    mailbox: list[str] = []
+    monkeypatch.setattr(email, "_send_sync", lambda to, subject, body: mailbox.append(subject))
+    monkeypatch.setattr(get_settings(), "SMTP_HOST", "smtp.exemplo", raising=False)
+    now = datetime.now(UTC)
+    async with db() as session:
+        released = await make_released(session, business_hours={}, start=now + timedelta(days=3))
+        offer = await release_offer.open_offer(
+            session,
+            tenant=released.tenant,
+            appointment=released.appointment,
+            deposit=released.deposit,
+            now=now - timedelta(hours=26),
+        )
+        await release_offer.request_keep(session, offer=offer, now=now - timedelta(hours=25))
+        await session.commit()
+
+    await payments_cron.run_payment_sweeps({"redis": FakeRedis()})
+
+    async with db() as session:
+        row = await session.get(DepositReleaseOffer, offer.id)
+        sends = {
+            (e.kind, e.seq): e.outcome for e in await session.scalars(select(DepositReleaseEmail))
+        }
+    assert (row.decision, row.keep_outcome, row.refund_status) == (
+        "keep_declined",
+        "timeout",
+        "due",
+    )
+    assert sends[("clinic_keep_declined", 0)] == "sent"
+    assert any("não foi mantido" in subject for subject in mailbox)
+
+
 async def test_the_expiry_cron_wrapper_runs_the_job_with_its_own_session(db, monkeypatch):
     monkeypatch.setattr(payments_cron, "async_session_factory", db)
     fake = _provider(monkeypatch, state=OPEN)

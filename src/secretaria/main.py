@@ -35,6 +35,7 @@ from secretaria.api.hub import (
     payment_attention,
     payment_settings,
     professionals,
+    release_offers,
     services,
     simulation,
     units,
@@ -143,6 +144,7 @@ def create_app() -> FastAPI:
     # cancelling the Pix add-on must never lock a clinic out of disconnecting its key.
     app.include_router(payment_accounts.router)
     app.include_router(payment_attention.router)
+    app.include_router(release_offers.router)
     app.include_router(payment_settings.router)
     # Addon CRUD: multi_professional / multi_unit (entitlement + limit gated
     # in the routers themselves; see api/hub/professionals.py, api/hub/units.py).

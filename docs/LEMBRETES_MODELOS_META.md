@@ -77,3 +77,23 @@ Hoje (sem modelo aprovado) o aviso fora das 24 h vai pelo modelo de uma variáve
 | `clinica_alterou_v1` | `A clínica alterou {{1}}: {{2}}. Agora: {{3}} às {{4}} com {{5}}.` | 1 = como acima, 2 = mudanças numa linha ("Data: 16/10 → 17/10; Horário: 14:00 → 15:30"), 3–5 = como acima |
 
 Pós-consulta e cancelamento não precisam de modelo novo (texto sem botões e `CANCEL_TEMPLATE_NAME`, respectivamente). Depois de aprovados, o código precisa de um ajuste pequeno em `services/staff_patient_message.py::_clinic_notice_whatsapp` (nome do modelo + variáveis + `button_payloads`, atrás de uma flag `*_APPROVED`, como o `REMINDER_V2_TEMPLATE_APPROVED`).
+
+## TASK-052 — horário liberado com sinal pago (PENDÊNCIA META, 2026-10-12)
+
+Decisão do dono: o código já usa os dois modelos como se aprovados (`config.py`
+`RELEASE_OFFER_TEMPLATE_NAME`, `REFUND_CHECK_TEMPLATE_NAME`). Enquanto a Meta não aprovar, o envio
+fora da janela de 24 h falha e fica registrado; os avisos à clínica seguem. Categoria: Utilidade.
+Idioma: pt_BR. Um parâmetro no corpo, sem quebras de linha.
+
+### `liberacao_sinal_pago_v1`
+
+Corpo: `{{1}}`. Botões de resposta rápida: "Manter horário", "Remarcar", "Cancelar". Decisão do dono
+(2026-10-12): este modelo é reaproveitado em toda mensagem da oferta fora da janela (liberação, resposta
+da clínica ao "Manter"), inclusive depois do início da consulta — "Manter horário" tocado depois do
+início responde com uma mensagem nova só com "Remarcar" e "Cancelar".
+Exemplo de `{{1}}`: "Devido à sua não confirmação da ida à consulta, a clínica liberou o seu horário para que você decida o que fazer. Você já pagou o sinal desta consulta (R$ 60,00). Toque em *Manter horário* para ficar com o mesmo horário, em *Remarcar* para escolher outro dia e horário usando o mesmo sinal, sem nova cobrança, ou em *Cancelar* para cancelar a consulta e receber o sinal de volta. Se você não responder até 20:00 de 05/03, a clínica será avisada para devolver o seu sinal."
+
+### `devolucao_sinal_conferir_v1`
+
+Corpo: `{{1}}`. Botões de resposta rápida: "Recebido", "Não recebido".
+Exemplo de `{{1}}`: "A clínica informou que devolveu o seu sinal de R$ 60,00. Confira a sua conta (a devolução vai para a conta de onde saiu o Pix) e nos conte:"

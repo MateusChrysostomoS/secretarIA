@@ -678,7 +678,13 @@ class BookingGate:
         an outage must not stop an `after` clinic's agenda), FAIL-CLOSED afterwards: once a
         deposit may be due, a failure to decide is a `blocked`, never a free booking.
         """
+        # TASK-052 (owner 2026-10-12): the confirmation of a "Remarcar" asks the payment provider
+        # whether the released slot's PAID deposit may be reused - before any session is open.
+        from secretaria.models.deposit_release_offer import CARRY_CHECK_REUSABLE
+        from secretaria.services import release_carry_check, release_offer
         from secretaria.services.payments import deposit_gate
+
+        carry_check = await release_carry_check.ensure_checked(self._conversation_id)
 
         on_before = False
         try:
@@ -696,6 +702,12 @@ class BookingGate:
                         )
                     )
                 self._patient_id = patient_id
+                # Reusable: the next booking of this conversation carries that deposit (no Pix).
+                # Refunded / unknown: the normal quote below asks for a NEW Pix.
+                if carry_check == CARRY_CHECK_REUSABLE:
+                    return deposit_gate.DepositQuote(
+                        "no_deposit", release_offer.REASON_CARRIED_OVER
+                    )
                 return await deposit_gate.quote_deposit(
                     session,
                     tenant,

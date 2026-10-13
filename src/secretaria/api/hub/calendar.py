@@ -61,6 +61,7 @@ from secretaria.services import (
     booking_hold,
     cancellation_notice,
     clinic_action_notice,
+    release_offer,
     reminder_hooks,
     reminder_schedule,
     staff_appointment_edit,
@@ -936,23 +937,22 @@ async def release_appointment(
             ),
         )
 
-    # Money first, Google second: a release whose deposit was PAID has a money
-    # consequence (retained, or due back in full/in part - returned by the clinic
-    # in the provider's panel, never automatically, decision D15), so the clinic
-    # must have read it. Raised before anything is touched.
+    # Money first, Google second: a release whose deposit was PAID hands the patient a choice
+    # (TASK-052: "Manter horário" / "Remarcar" / "Cancelar"; cancelling or silence makes the
+    # clinic return it), so the clinic must have read the consequence. Raised before anything
+    # is touched.
     deposit = await deposit_lifecycle.get_deposit_for_appointment(session, appt.id)
     if (
         deposit is not None
         and deposit.status is PixDepositStatus.PAID
         and not body.acknowledge_retention
     ):
-        outcome = deposit_lifecycle.preview_cancellation_outcome(tenant, deposit, appt)
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             _detail(
                 "retention_ack_required",
-                deposit_lifecycle.release_warning_text(outcome, tenant, deposit),
-                deposit_outcome=outcome,
+                release_offer.warning_text(deposit),
+                deposit_outcome=release_offer.DEPOSIT_OUTCOME_OFFERED,
                 amount_cents=deposit.amount_cents,
             ),
         )
@@ -1016,16 +1016,49 @@ async def release_appointment(
     )
     await reminder_schedule.cancel_reminders(session, appt.id, reason="released")
     professional_name = await _professional_name(session, tenant, appt)
-    deposit_outcome = await deposit_lifecycle.on_appointment_cancelled(
-        session, tenant=tenant, appointment=appt, waba_token=None
-    )
+    allow_paid = staff_patient_message.paid_notice_authorised(tenant, body.notify_outside_window)
     deposit_notice: str | None = None
-    if deposit_outcome is not None:
-        resolved = await deposit_lifecycle.get_deposit_for_appointment(session, appt.id)
-        if resolved is not None:
-            deposit_notice = deposit_lifecycle.cancellation_notice(
-                deposit_outcome, tenant, resolved
-            )
+    offer_buttons: list[tuple[str, str]] | None = None
+    paid = await deposit_lifecycle.get_deposit_for_appointment(session, appt.id)
+    if paid is not None and paid.status is PixDepositStatus.PAID:
+        # TASK-052: the clinic freed a PAID slot. Nothing is decided about the money and the
+        # platform never refunds (D15): ONE offer, answered by the patient or by the deadlines
+        # (services/release_offer.py). No attention item yet.
+        offer = await release_offer.open_offer(
+            session,
+            tenant=tenant,
+            appointment=appt,
+            deposit=paid,
+            now=now,
+            paid_notice_allowed=allow_paid,
+            # Closing time = the consultation doctor's for now (owner 2026-10-12); the clinic's
+            # when it has a secretary comes with Task 16 (pending the brain-api roles screen).
+        )
+        deposit_outcome = release_offer.DEPOSIT_OUTCOME_OFFERED
+        keep = offer is not None and release_offer.keep_allowed(offer, now)
+        deposit_notice = release_offer.offer_body(
+            deposit=paid,
+            decide_by_at=offer.decide_by_at if offer is not None else now,
+            timezone=tenant.timezone,
+            justification=body.justification,
+            confirmed=appt.confirmation_count >= 1,
+            keep=keep,
+        )
+        offer_buttons = release_offer.offer_buttons(appt.id, keep=keep)
+    else:
+        deposit_outcome = await deposit_lifecycle.on_appointment_cancelled(
+            session, tenant=tenant, appointment=appt, waba_token=None
+        )
+        if deposit_outcome is not None:
+            resolved = await deposit_lifecycle.get_deposit_for_appointment(session, appt.id)
+            if resolved is not None:
+                deposit_notice = deposit_lifecycle.cancellation_notice(
+                    deposit_outcome, tenant, resolved
+                )
+                # TASK-052: an unpaid deposit's release is recorded for the clinic's list only.
+                await release_offer.open_offer(
+                    session, tenant=tenant, appointment=appt, deposit=resolved, now=now
+                )
     patient = await session.scalar(
         select(Patient).where(Patient.id == appt.patient_id, Patient.tenant_id == tenant.id)
     )
@@ -1040,10 +1073,9 @@ async def release_appointment(
         professional_name=professional_name,
         justification=body.justification,
         deposit_notice=deposit_notice,
-        allow_paid=staff_patient_message.paid_notice_authorised(
-            tenant, body.notify_outside_window
-        ),
+        allow_paid=allow_paid,
         arq_pool=getattr(request.app.state, "arq_pool", None),
+        offer_buttons=offer_buttons,
     )
     await session.refresh(appt)
 

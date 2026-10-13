@@ -869,3 +869,216 @@ async def send_transactional_email_message(to: str, template: str, variables: di
     """
     outcome = await send_transactional_email_result(to, template, variables)
     return outcome is EmailOutcome.SENT
+# --- TASK-052: a slot the clinic released with a PAID deposit ----------------------------------
+# Builders are pure; senders are SMTP-only, never raise, and return True only when the server
+# accepted the message (services/release_offer_dispatch.py gives a claim back otherwise). Bodies
+# carry the amount, the slot and links - never the patient's name, phone or e-mail; logs carry
+# only the event name. The platform never refunds (D15): the steps tell the CLINIC how to.
+
+
+def asaas_refund_steps(*, amount_text: str, paid_text: str) -> str:
+    paid = f", paga em {paid_text}" if paid_text else ""
+    return (
+        "Como devolver pelo Asaas:\n"
+        f"1. No painel do Asaas, abra Cobranças e encontre a cobrança Pix deste sinal "
+        f"({amount_text}{paid}).\n"
+        "2. Abra a cobrança e escolha estornar o valor total. Não é preciso digitar chave Pix: o "
+        "estorno devolve o dinheiro para a mesma conta de onde o paciente pagou.\n"
+        "3. Atenção: o estorno usa o saldo da sua conta no Asaas. Logo depois do pagamento o "
+        "valor pode ainda não estar disponível (saldo insuficiente); nesse caso, aguarde a "
+        "liberação e tente de novo.\n"
+        "4. Guarde o comprovante do estorno.\n"
+        "5. Marque a devolução como feita na aba de consultas liberadas. O paciente será "
+        "perguntado se recebeu."
+    )
+
+
+def _release_link_line(link: str | None) -> str:
+    return f"\n\nConversa com o paciente: {link}" if link else ""
+
+
+def release_refund_clinic_email(
+    *,
+    clinic_name: str,
+    kind: str,
+    no_answer_closed: bool,
+    amount_text: str,
+    paid_text: str,
+    slot_text: str,
+    deadline_text: str,
+    conversation_link: str | None,
+) -> tuple[str, str]:
+    """(subject, body) of the clinic's refund notices."""
+    pending = f"[SecretarIA] Devolver sinal de {amount_text} — {clinic_name}"
+    if kind == "clinic_refund_cancel":
+        subject = pending
+        lead = (
+            f"O paciente da consulta de {slot_text}, cujo horário a clínica liberou, cancelou a "
+            f"consulta. O sinal de {amount_text} precisa ser devolvido."
+        )
+    elif kind == "clinic_refund_noanswer":
+        subject = pending
+        lead = (
+            f"O paciente da consulta de {slot_text}, cujo horário a clínica liberou, não respondeu "
+            f"até {deadline_text}. O sinal de {amount_text} precisa ser devolvido."
+        )
+    elif kind == "clinic_keep_declined":
+        subject = (
+            f"[SecretarIA] Horário não foi mantido: devolver sinal de {amount_text} — {clinic_name}"
+        )
+        lead = (
+            f"O pedido do paciente para manter o horário de {slot_text} foi recusado ou ficou sem "
+            f"decisão da clínica em 24 horas. O sinal de {amount_text} precisa ser devolvido, a "
+            "menos que o paciente remarque."
+        )
+    elif kind == "clinic_refund_day" and no_answer_closed:
+        subject = f"[SecretarIA] Prazo vencido: devolva o sinal de {amount_text} — {clinic_name}"
+        lead = (
+            f"Prazo vencido: 24 horas depois da liberação do horário da consulta de {slot_text}, "
+            "o paciente não respondeu e a consulta foi cancelada por falta de resposta. "
+            f"Devolva agora o sinal de {amount_text}."
+        )
+    elif kind == "clinic_refund_day":
+        subject = f"[SecretarIA] Lembrete: devolução de sinal pendente — {clinic_name}"
+        lead = (
+            f"Lembrete da consulta de {slot_text}: confira se o sinal de {amount_text} foi "
+            "devolvido e se a devolução foi marcada como feita."
+        )
+    else:  # clinic_refund_reminder
+        subject = f"[SecretarIA] Paciente não recebeu a devolução do sinal — {clinic_name}"
+        lead = (
+            f"O paciente da consulta de {slot_text} informou que ainda não recebeu a devolução do "
+            f"sinal de {amount_text}. Confira o estorno no painel do Asaas."
+        )
+    body = (
+        f"Olá,\n\n{lead}\n\n{asaas_refund_steps(amount_text=amount_text, paid_text=paid_text)}"
+        f"{_release_link_line(conversation_link)}\n\n— Equipe SecretarIA"
+    )
+    return subject, body
+
+
+def release_keep_request_clinic_email(
+    *, clinic_name: str, slot_text: str, decide_by_text: str, conversation_link: str | None
+) -> tuple[str, str]:
+    subject = f"[SecretarIA] Paciente quer manter o horário de {slot_text} — {clinic_name}"
+    body = (
+        f"Olá,\n\nO paciente da consulta de {slot_text}, cujo horário a clínica liberou, pediu "
+        "para manter o mesmo horário. A decisão é da clínica: na aba de consultas liberadas, "
+        "aceite (a consulta volta para a agenda com o sinal já pago, se o horário estiver livre) "
+        f"ou recuse (o sinal deverá ser devolvido). Decida até {decide_by_text}; sem decisão, o "
+        "pedido é tratado como recusado."
+        f"{_release_link_line(conversation_link)}\n\n— Equipe SecretarIA"
+    )
+    return subject, body
+
+
+def release_rebooked_clinic_email(
+    *,
+    clinic_name: str,
+    amount_text: str,
+    old_slot_text: str,
+    new_slot_text: str,
+    conversation_link: str | None,
+) -> tuple[str, str]:
+    subject = f"[SecretarIA] Nova consulta marcada — REMARCADA levando o sinal — {clinic_name}"
+    body = (
+        f"Olá,\n\nO paciente da consulta de {old_slot_text}, cujo horário a clínica liberou, "
+        f"remarcou para {new_slot_text}. O sinal de {amount_text} já pago foi transferido para a "
+        "nova consulta: não há reembolso a fazer. NÃO devolva este sinal: ele está em uso. No "
+        "momento da remarcação conferimos no Asaas que a cobrança estava paga e sem estorno; se a "
+        "clínica estornou depois disso, fale com o paciente."
+        f"{_release_link_line(conversation_link)}\n\n— Equipe SecretarIA"
+    )
+    return subject, body
+
+
+def refund_check_patient_email(
+    *, clinic_name: str, amount_text: str, conversation_link: str | None
+) -> tuple[str, str]:
+    """To a PORTAL patient only (a WhatsApp patient is asked on WhatsApp)."""
+    subject = f"{clinic_name}: confira a devolução do seu sinal"
+    where = (
+        f"Abra a conversa e toque em Recebido ou Não recebido: {conversation_link}"
+        if conversation_link
+        else "Abra a conversa com a clínica e toque em Recebido ou Não recebido."
+    )
+    body = (
+        f"Olá,\n\nA clínica {clinic_name} informou que devolveu o seu sinal de {amount_text}. "
+        "Confira a sua conta: a devolução vai para a conta de onde saiu o Pix."
+        f"\n\n{where}\n\n— {clinic_name}"
+    )
+    return subject, body
+
+
+async def _send_release_mail(to_email: str, subject: str, body: str, event: str) -> bool:
+    if not get_settings().SMTP_HOST:
+        return False
+    try:
+        await asyncio.to_thread(_send_sync, to_email, subject, body)
+    except Exception as exc:
+        logger.warning(f"{event}_failed", error_type=type(exc).__name__)
+        return False
+    logger.info(f"{event}_sent")
+    return True
+
+
+async def send_release_refund_clinic_email(to_email: str, **fields) -> bool:
+    subject, body = release_refund_clinic_email(**fields)
+    return await _send_release_mail(to_email, subject, body, "release_refund_clinic_email")
+
+
+async def send_release_keep_request_clinic_email(to_email: str, **fields) -> bool:
+    subject, body = release_keep_request_clinic_email(**fields)
+    return await _send_release_mail(to_email, subject, body, "release_keep_request_email")
+
+
+async def send_release_rebooked_clinic_email(to_email: str, **fields) -> bool:
+    subject, body = release_rebooked_clinic_email(**fields)
+    return await _send_release_mail(to_email, subject, body, "release_rebooked_clinic_email")
+
+
+async def send_refund_check_patient_email(to_email: str, **fields) -> bool:
+    subject, body = refund_check_patient_email(**fields)
+    return await _send_release_mail(to_email, subject, body, "refund_check_patient_email")
+
+
+def release_carry_refused_clinic_email(
+    *,
+    clinic_name: str,
+    check: str,
+    amount_text: str,
+    slot_text: str,
+    conversation_link: str | None,
+) -> tuple[str, str]:
+    """The patient's "Remarcar" charged a NEW Pix because the old deposit could not be reused
+    (owner 2026-10-12). The clinic must refund the old one - never names a bank."""
+    subject = (
+        f"[SecretarIA] DEVOLVA o sinal anterior ({amount_text}) — paciente remarcou com sinal "
+        f"novo — {clinic_name}"
+    )
+    if check == "refunded":
+        why = (
+            "O Asaas mostra que o sinal anterior já foi estornado (ou está em estorno). Por isso a "
+            "nova consulta pediu um sinal novo."
+        )
+        todo = "Confira o estorno no Asaas e marque como devolvido na aba de consultas liberadas."
+    else:
+        why = (
+            "Não conseguimos confirmar com o Asaas se o sinal anterior foi devolvido. Por "
+            "segurança, a nova consulta pediu um sinal novo: o paciente pode ter pago duas vezes."
+        )
+        todo = (
+            "Devolva o sinal anterior no Asaas (Cobranças > a cobrança paga > Estornar) e marque "
+            "como devolvido na aba de consultas liberadas."
+        )
+    body = (
+        f"Olá,\n\nO paciente da consulta de {slot_text}, cujo horário a clínica liberou, remarcou. "
+        f"{why}\n\n{todo} Valor do sinal anterior: {amount_text}."
+        f"{_release_link_line(conversation_link)}\n\n— Equipe SecretarIA"
+    )
+    return subject, body
+
+
+async def send_release_carry_refused_clinic_email(to_email: str, **fields) -> bool:
+    subject, body = release_carry_refused_clinic_email(**fields)
+    return await _send_release_mail(to_email, subject, body, "release_carry_refused_email")

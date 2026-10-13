@@ -48,7 +48,8 @@ def _offline(direction: str) -> str:
 
 def test_the_revision_chains_after_the_provider_core_and_is_the_single_head():
     script = ScriptDirectory.from_config(_config())
-    assert script.get_heads() == [REVISION]
+    # TASK-052 chains `b6d2e8f4a1c3` after this one: the newest migration pins the head.
+    assert len(script.get_heads()) == 1
     assert script.get_revision(REVISION).down_revision == PREVIOUS_HEAD
 
 

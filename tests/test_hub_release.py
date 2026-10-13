@@ -16,12 +16,14 @@ from secretaria.models import (
     Appointment,
     AppointmentReminder,
     AppointmentStatus,
+    DepositReleaseOffer,
     FlowState,
+    PaymentAttentionItem,
     PixDeposit,
     PixDepositStatus,
     Tenant,
 )
-from secretaria.services import appointment_release, staff_patient_message as spm
+from secretaria.services import appointment_release, release_offer, staff_patient_message as spm
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.email import EmailOutcome
 from secretaria.services.flow_router import STEP_EDIT_MENU
@@ -42,6 +44,7 @@ from tests._reminders_v2 import (
     seed_world,
 )
 from tests.payments_support import FakeAsaasClient
+from tests.release_offer_support import utc
 from tests.test_appointment_edit_apply import _apply, _edit
 
 CALENDAR = "/tenants/me/calendar"
@@ -464,61 +467,62 @@ async def _paid_world(db, acting, *, hours_ahead: float, policy: str = "total", 
     return world
 
 
-async def test_a_paid_deposit_inside_the_retention_window_needs_the_acknowledgement(
-    client: AsyncClient, db, acting
+async def _offers(db) -> list[DepositReleaseOffer]:
+    async with db() as session:
+        return list(await session.scalars(select(DepositReleaseOffer)))
+
+
+async def _attention_items(db) -> list[PaymentAttentionItem]:
+    async with db() as session:
+        return list(await session.scalars(select(PaymentAttentionItem)))
+
+
+@pytest.mark.parametrize(("hours_ahead", "policy"), [(2, "total"), (2, "partial"), (96, "total")])
+async def test_a_paid_deposit_needs_the_acknowledgement_and_the_patient_gets_the_choice(
+    client: AsyncClient, db, acting, hours_ahead, policy
 ):
-    world = await _paid_world(db, acting, hours_ahead=2)
+    """TASK-052: a clinic release never retains a paid deposit, whatever the cancellation policy."""
+    world = await _paid_world(db, acting, hours_ahead=hours_ahead, policy=policy)
 
     response = await _release(client, world.appointment.id)
 
     assert response.status_code == 409
     detail = response.json()["detail"]
     assert detail["code"] == "retention_ack_required"
-    assert detail["deposit_outcome"] == "retained" and detail["amount_cents"] == 10000
-    assert "100,00" in detail["message"] and "fica com o sinal" in detail["message"]
+    assert detail["deposit_outcome"] == "choice_offered" and detail["amount_cents"] == 10000
+    for words in ("100,00", "manter o horário", "remarcar", "avisos", "por inteiro"):
+        assert words in detail["message"]
+    assert "retid" not in detail["message"]
     assert (await _appointment(db, world.appointment.id)).status == AppointmentStatus.SCHEDULED
-    assert _FakeCalendar.deleted == []  # Google was not touched
-    assert await _deposit_status(db, world.appointment.id) == PixDepositStatus.PAID
+    assert _FakeCalendar.deleted == []
+    assert await _offers(db) == []
 
 
-async def test_with_the_acknowledgement_the_clinic_keeps_the_deposit(
+async def test_with_the_acknowledgement_the_offer_opens_and_nothing_is_decided_yet(
     client: AsyncClient, db, acting
 ):
-    world = await _paid_world(db, acting, hours_ahead=2)
+    world = await _paid_world(db, acting, hours_ahead=30)
 
     response = await _release(client, world.appointment.id, acknowledge_retention=True)
 
     assert response.status_code == 200
-    assert response.json()["deposit_outcome"] == "retained"
-    assert await _deposit_status(db, world.appointment.id) == PixDepositStatus.CANCELLED_RETAINED
+    assert response.json()["deposit_outcome"] == "choice_offered"
+    assert await _deposit_status(db, world.appointment.id) == PixDepositStatus.PAID  # D15
+    assert await _attention_items(db) == []
+    [offer] = await _offers(db)
+    assert (offer.decision, offer.refund_status, offer.deposit_paid) == ("none", "not_due", True)
+    assert offer.released_appointment_id == world.appointment.id
+    assert offer.tenant_id == world.tenant.id and offer.conversation_id == world.conversation.id
+    released_at = utc(offer.released_at)
+    # This clinic configured no business hours: B = T + 6 h (spec §5.2).
+    assert utc(offer.decide_by_at) == released_at + timedelta(hours=6)
+    assert utc(offer.expires_at) == released_at + timedelta(hours=24)
+    assert utc(offer.slot_start_at) == utc(world.start_at)
     assert len(_FakeCalendar.deleted) == 1
 
-
-async def test_a_partial_policy_is_announced_as_such(client: AsyncClient, db, acting):
-    world = await _paid_world(db, acting, hours_ahead=2, policy="partial")
-
-    detail = (await _release(client, world.appointment.id)).json()["detail"]
-
-    # Decision D15 (TASK-017, ported by TASK-050): the platform never refunds; the clinic does.
-    assert detail["deposit_outcome"] == "partial_refund_due"
-    assert "50,00" in detail["message"] and "painel" in detail["message"]
-
-
-async def test_even_a_full_refund_asks_first_and_then_leaves_it_to_the_clinic(
-    client: AsyncClient, db, acting
-):
-    world = await _paid_world(db, acting, hours_ahead=96)
-
-    refused = await _release(client, world.appointment.id)
-    accepted = await _release(client, world.appointment.id, acknowledge_retention=True)
-
-    assert refused.status_code == 409
-    assert refused.json()["detail"]["deposit_outcome"] == "refund_due"
-    assert "por inteiro" in refused.json()["detail"]["message"]
-    assert accepted.status_code == 200 and accepted.json()["deposit_outcome"] == "refund_due"
-    # Nothing was refunded by the platform (D15): the deposit stays PAID and the clinic gets an
-    # attention item with the amount to return in the provider's panel.
-    assert await _deposit_status(db, world.appointment.id) == PixDepositStatus.PAID
+    again = await _release(client, world.appointment.id, acknowledge_retention=True)
+    assert again.status_code == 409 and again.json()["detail"]["code"] == "not_live"
+    assert len(await _offers(db)) == 1
 
 
 async def test_an_unpaid_charge_needs_no_acknowledgement(client: AsyncClient, db, acting):
@@ -544,6 +548,10 @@ async def test_an_unpaid_charge_needs_no_acknowledgement(client: AsyncClient, db
     # stays for the reconciliation job. No acknowledgement was needed.
     assert response.status_code == 200
     assert response.json()["deposit_outcome"] == "payment_in_flight"
+
+    # TASK-052: the release is recorded for the clinic's list, without buttons or deadlines.
+    [offer] = await _offers(db)
+    assert (offer.deposit_paid, offer.decision) == (False, "not_offered")
 
 
 async def test_an_unpaid_charge_the_provider_can_void_is_voided(
@@ -726,14 +734,77 @@ async def test_the_notice_is_queued_once_even_if_the_slot_is_released_twice(  # 
     assert len(pool.calls) == 1
 
 
-async def test_the_deposit_sentence_rides_along_in_the_notice(client: AsyncClient, db, acting):  # noqa: F811
+async def test_the_offer_rides_in_the_same_job_arguments(client: AsyncClient, db, acting):
     pool = _FakeArqPool()
     _install_pool(pool)
-    world = await _paid_world(db, acting, hours_ahead=2, last_inbound_at=_recent(1))
+    world = await _paid_world(db, acting, hours_ahead=30, last_inbound_at=_recent(1))
+
+    await _release(
+        client, world.appointment.id, acknowledge_retention=True, justification="Agenda cheia"
+    )
+
+    (call,) = pool.calls
+    assert call[0] == "send_cancellation_notice" and len(call) == 7  # an older worker still works
+    body = call[5]
+    assert body.startswith(release_offer.OFFER_HEAD)
+    assert "Recado da clínica: Agenda cheia" in body and "*Manter horário*" in body
+    assert "retido" not in body
+
+
+async def test_a_portal_patient_with_a_paid_deposit_gets_the_three_buttons_and_the_email_link(
+    client: AsyncClient, db, acting, portal_mail
+):
+    world = await _paid_world(
+        db, acting, hours_ahead=30, channel=CHANNEL_BRAIN_MESSAGE, email="paciente@x.com"
+    )
+
+    response = await _release(client, world.appointment.id, acknowledge_retention=True)
+
+    assert response.json()["patient_notice"] == "portal_chat_email"
+    assert portal_mail  # the existing "a clínica escreveu" e-mail, with the conversation link
+    [row] = await outbound_messages(db, world.conversation.id)
+    assert row.body.startswith(release_offer.OFFER_HEAD)
+    assert appointment_release.PORTAL_REBOOK_LINE not in row.body
+    assert [o["id"] for o in row.interactive["options"]] == [
+        f"relkeep|{world.appointment.id}",
+        f"relresched|{world.appointment.id}",
+        f"relcancel|{world.appointment.id}",
+    ]
+
+
+async def test_a_released_slot_that_already_started_offers_no_manter(
+    client: AsyncClient, db, acting, portal_mail
+):
+    world = await _paid_world(
+        db, acting, hours_ahead=-1, channel=CHANNEL_BRAIN_MESSAGE, email="paciente@x.com"
+    )
 
     await _release(client, world.appointment.id, acknowledge_retention=True)
 
-    assert "retido" in pool.calls[0][5]
+    [row] = await outbound_messages(db, world.conversation.id)
+    assert [o["title"] for o in row.interactive["options"]] == ["Remarcar", "Cancelar"]
+    assert "Manter horário" not in row.body
+
+
+async def test_a_whatsapp_patient_gets_no_email_at_the_release(
+    client: AsyncClient, db, acting, monkeypatch
+):
+    from secretaria.config import get_settings
+    from secretaria.services import email as email_module
+
+    sent: list[tuple] = []
+    monkeypatch.setattr(
+        email_module, "_send_sync", lambda to, subject, body: sent.append((to, subject))
+    )
+    monkeypatch.setattr(get_settings(), "SMTP_HOST", "smtp.exemplo", raising=False)
+    world = await _paid_world(
+        db, acting, hours_ahead=30, last_inbound_at=_recent(30), email="maria@x.com"
+    )
+
+    response = await _release(client, world.appointment.id, acknowledge_retention=True)
+
+    assert response.json()["patient_notice"] == "whatsapp_outside_window"
+    assert sent == []  # owner decision 2026-10-12: WhatsApp gets messages, never e-mails
 
 
 async def test_a_portal_patient_gets_a_chat_message_and_an_email_nudge(  # noqa: F811
