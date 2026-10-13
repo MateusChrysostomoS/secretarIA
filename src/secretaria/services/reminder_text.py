@@ -335,13 +335,13 @@ def give_up_confirm_buttons(reminder_id) -> list[tuple[str, str]]:
 def portal_conversation_link(tenant_id, reminder_id=None) -> str | None:
     """Where the reminder e-mail sends a Portal patient: the clinic's invite link.
 
-    `{BRAIN_MESSAGE_PORTAL_URL}/clinicas/?convite=<tenant uuid>` is a shape
+    `{BRAIN_MESSAGE_PUBLIC_URL}/clinicas/?convite=<tenant uuid>` is a shape
     brain-api already accepts (core/invite_codes.py::parse_invite reads a bare
     clinic UUID; tenant ids are shared across the mesh), so no brain-api call
     and no new contract. A patient with a live session lands in the
     conversation; one without signs in first. None while the URL is unset.
     """
-    base = (get_settings().BRAIN_MESSAGE_PORTAL_URL or "").strip().rstrip("/")
+    base = (get_settings().BRAIN_MESSAGE_PUBLIC_URL or "").strip().rstrip("/")
     if not base:
         return None
     link = f"{base}/clinicas/?convite={tenant_id}"

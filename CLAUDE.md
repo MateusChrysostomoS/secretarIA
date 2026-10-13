@@ -1,5 +1,7 @@
 # SecretarIA
 
+TASK-055: agenda, retorno Google e convites usam `BRAIN_MESSAGE_PUBLIC_URL` na API e no worker; [guia](docs/CHECKPOINT_urls_publicas.md). Commit e push para origin/main autorizados; sem deploy manual.
+
 TASK-054: inativos, capacidade interativa e boas-vindas cifradas no ARQ; local, sem publicação: [checkpoint](docs/CHECKPOINT_equipe_primeiro_acesso.md).
 
 TASK-027 simulador do Agendar (`POST /tenants/me/simulation/turn`, sem efeitos colaterais): branch local `task/TASK-027-flow-simulation`, sem deploy: [checkpoint](docs/CHECKPOINT_flow_simulation.md).

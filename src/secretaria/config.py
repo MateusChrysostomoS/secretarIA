@@ -294,13 +294,11 @@ class Settings(BaseSettings):
     OAUTH_STATE_SECRET: str = ""
     # Max age (seconds) of a `state` token between /start and /callback.
     OAUTH_STATE_MAX_AGE: int = 600
-    # Where to send the doctor's browser after the OAuth callback completes:
-    # the secretarIA-frontend app's own /calendar/connected page (NOT
-    # brain-frontend — that copy of the page was a pre-domain-split leftover
-    # and is no longer the intended target). In production this must be an
-    # absolute URL on the secretarIA-frontend origin, e.g.
-    # https://<secretaria-frontend-domain>/calendar/connected.
-    PORTAL_POST_OAUTH_REDIRECT: str = "http://localhost:3000/calendar/connected"
+    # Google connection results return to the unified portal's Context screen.
+    @property
+    def PORTAL_POST_OAUTH_REDIRECT(self) -> str:
+        base = self.BRAIN_MESSAGE_PUBLIC_URL.strip().rstrip("/")
+        return f"{base}/contexto" if base else ""
 
     # --- SMTP (operational alerts to tenants) ---
     # When SMTP_HOST is empty, email alerts are silently skipped (fail-open).
@@ -333,20 +331,11 @@ class Settings(BaseSettings):
     EMAIL_ENABLED: bool = False
     EMAIL_FROM_ADDRESS: str = ""
     EMAIL_FROM_NAME: str = "SecretarIA"
-    # FULL URL of the doctor-facing agenda screen, linked from the
-    # "nova consulta marcada" email (plugins/professional_notification.py).
-    #
-    # A full URL rather than a base plus a path hardcoded here, because the
-    # path is NOT the same on the two frontends this platform ships:
-    # brain-frontend serves it at /secretaria/agenda, the newer
-    # secretarIA-frontend at /agenda. Composing `{base}/secretaria/agenda`
-    # would silently produce a 404 link for every clinic on the second one.
-    # Whoever configures a deployment knows which frontend it serves; this
-    # setting just records the answer.
-    #
-    # Empty (the default) omits the link line from the email entirely — a mail
-    # with no link is fine, a mail with a broken link is not.
-    DOCTOR_AGENDA_URL: str = ""
+    # Staff notifications use the unified portal's fixed /agenda route.
+    @property
+    def DOCTOR_AGENDA_URL(self) -> str:
+        base = self.BRAIN_MESSAGE_PUBLIC_URL.strip().rstrip("/")
+        return f"{base}/agenda" if base else ""
 
     # --- Reminders plugin (CORE capability, billed per-send via the reminders
     # Stripe meter outside the 24h window — see plugins/reminders.py) ---
@@ -409,12 +398,12 @@ class Settings(BaseSettings):
     REMINDER_V2_TEMPLATE_APPROVED: bool = False
     # Rows claimed per one-minute tick, so one tick never outlives the next.
     REMINDER_V2_BATCH_SIZE: int = 200
-    # Base URL of the Brain-Message patient portal - the SAME value brain-api
-    # has under this name. The Portal reminder e-mail links to
-    # {BRAIN_MESSAGE_PORTAL_URL}/clinicas/?convite=<tenant_id>, the invite shape
+    # Public origin of the unified portal - the SAME value brain-api has.
+    # Portal reminder e-mail links to
+    # {BRAIN_MESSAGE_PUBLIC_URL}/clinicas/?convite=<tenant_id>, the invite shape
     # brain-api's core/invite_codes.py::parse_invite accepts. Empty = the
     # e-mail carries no link (it tells the patient to open the portal).
-    BRAIN_MESSAGE_PORTAL_URL: str = ""
+    BRAIN_MESSAGE_PUBLIC_URL: str = ""
 
     # --- Brain-Message attachments (docs/CHECKPOINT_brain_message_anexos_secretaria.md) ---
     # secretarIA's OWN Cloudflare R2 bucket for the files patients and clinic staff

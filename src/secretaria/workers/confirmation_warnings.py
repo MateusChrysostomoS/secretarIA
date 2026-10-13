@@ -224,8 +224,7 @@ def _agenda_link(appointment_id, day: str | None = None) -> str | None:
     `data` makes R5's agenda open the week that contains the appointment (the
     screen only selects an appointment inside the range it loaded).
 
-    `DOCTOR_AGENDA_URL` is a full URL on purpose (the two frontends serve the
-    agenda at different paths); a mail with no link is fine, a broken one is not.
+    The agenda route is derived from `BRAIN_MESSAGE_PUBLIC_URL`.
     """
     base = (get_settings().DOCTOR_AGENDA_URL or "").strip()
     if not base:

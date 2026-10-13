@@ -12,7 +12,7 @@ def test_r2_settings_defaults():
     assert settings.REMINDER_V2_TEMPLATE_NAME == "lembrete_consulta_v2"
     assert settings.REMINDER_V2_TEMPLATE_APPROVED is False
     assert settings.REMINDER_V2_BATCH_SIZE == 200
-    assert settings.BRAIN_MESSAGE_PORTAL_URL == ""
+    assert settings.BRAIN_MESSAGE_PUBLIC_URL == ""
 
 
 async def test_seed_world_builds_a_v2_clinic_with_a_planned_row(db):  # noqa: F811

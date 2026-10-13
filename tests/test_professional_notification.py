@@ -244,7 +244,7 @@ def _patch_lookup(monkeypatch: pytest.MonkeyPatch, emails: dict[str, str] | None
 def _patch_agenda_url(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
     from secretaria.config import get_settings
 
-    monkeypatch.setattr(get_settings(), "DOCTOR_AGENDA_URL", url, raising=False)
+    monkeypatch.setattr(get_settings(), "BRAIN_MESSAGE_PUBLIC_URL", url, raising=False)
 
 
 async def _make_rows(
@@ -358,7 +358,7 @@ async def test_emails_the_owning_professional_from_both_booking_paths(
     hook — the deterministic router and the LLM tools alike."""
     tenant, patient, appointment, professional = await _make_rows(db)
     _patch_lookup(monkeypatch, {str(professional.id): DOCTOR_EMAIL})
-    _patch_agenda_url(monkeypatch, "https://app.example/secretaria/agenda")
+    _patch_agenda_url(monkeypatch, "https://app.example")
 
     await notif._post_booking(_ctx(tenant, patient, appointment, source=source))
 
@@ -370,7 +370,7 @@ async def test_emails_the_owning_professional_from_both_booking_paths(
     assert "Dra. Ana" in body
     assert "Maria Silva" in body
     assert "Primeira consulta" in body
-    assert "https://app.example/secretaria/agenda" in body
+    assert "https://app.example/agenda" in body
 
 
 async def test_time_is_rendered_in_the_tenants_timezone(db, monkeypatch, mailer):
@@ -464,7 +464,7 @@ async def test_the_two_agenda_links_coexist(db, monkeypatch, mailer):
         db, google_event_link=EVENT_LINK
     )
     _patch_lookup(monkeypatch, {str(professional.id): DOCTOR_EMAIL})
-    _patch_agenda_url(monkeypatch, "https://app.example/agenda")
+    _patch_agenda_url(monkeypatch, "https://app.example")
 
     await notif._post_booking(_ctx(tenant, patient, appointment))
 
