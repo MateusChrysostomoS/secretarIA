@@ -30,13 +30,13 @@ from secretaria.workers.payments_tasks import enqueue_for
 logger = get_logger(__name__)
 
 # Odd minutes that are not multiples of 5 and not :07 -> about every 2 minutes.
-EXPIRY_MINUTES = frozenset(minute for minute in range(1, 60, 2) if minute % 5 and minute != 7)
+EXPIRY_MINUTES = {minute for minute in range(1, 60, 2) if minute % 5 and minute != 7}
 # About every 10 minutes, on even minutes (never an expiry minute).
-RECONCILE_MINUTES = frozenset({2, 12, 22, 32, 42, 52})
+RECONCILE_MINUTES = {2, 12, 22, 32, 42, 52}
 # Both sweeps, about every 4-6 minutes, on even minutes that no other payment job uses.
-SWEEP_MINUTES = frozenset({4, 8, 14, 18, 24, 28, 34, 38, 44, 48, 54, 58})
+SWEEP_MINUTES = {4, 8, 14, 18, 24, 28, 34, 38, 44, 48, 54, 58}
 # Every ~10 minutes, on the even minutes no other cron uses: the e-mail of a paid cancellation.
-ATTENTION_ALERT_MINUTES = frozenset({6, 16, 26, 36, 46, 56})
+ATTENTION_ALERT_MINUTES = {6, 16, 26, 36, 46, 56}
 DAILY_HOUR = 4
 DAILY_MINUTE = 17
 
