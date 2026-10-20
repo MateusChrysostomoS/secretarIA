@@ -37,6 +37,7 @@ from secretaria.schemas.admin import (
 )
 from secretaria.services import admin as admin_service
 from secretaria.services.calendar import CalendarService, CalendarUnavailableError
+from secretaria.services.calendar_sync import push_future_local_events
 from secretaria.services.tenant_config import TenantRuntimeConfig, load_tenant_config
 
 logger = get_logger(__name__)
@@ -279,6 +280,29 @@ async def tenant_calendar_health(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown tenant.")
     config = await load_tenant_config(session, tenant)
     return await _probe_config(config, tenant.google_calendar_id)
+
+
+@router.post(
+    "/{tenant_id}/calendar/sync-local",
+    dependencies=[Depends(require_admin)],
+    summary="Push a tenant's future secretarIA-agenda events to its Google Calendar",
+    description=(
+        "Runs the connect-time sync (services/calendar_sync.py) now, inline: every "
+        "future event booked on the secretarIA's own agenda whose agenda a Google "
+        "credential covers is created on Google and the appointments repointed. "
+        "Idempotent - safe to repeat. The OAuth callback enqueues the same work on its "
+        "own; this route is the manual retry. Requires the X-Admin-Token header."
+    ),
+    responses={**_ADMIN_RESPONSES, 404: {"description": "No tenant with that id."}},
+)
+async def tenant_calendar_sync_local(
+    tenant_id: Annotated[UUID, Path(description="Tenant UUID.")],
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    if await session.get(Tenant, tenant_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown tenant.")
+    summary = await push_future_local_events(tenant_id)
+    return summary.as_dict()
 
 
 @router.delete(
