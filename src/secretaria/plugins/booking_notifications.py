@@ -32,6 +32,7 @@ from secretaria.services.brain_patients import fetch_patient_email_result
 from secretaria.services.calendar import CalendarService, build_patient_calendar_link
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.email import EmailOutcome, send_transactional_email_result
+from secretaria.services.flow_router import LABEL_INSURANCE_PARTICULAR
 from secretaria.services.insurance_catalog import load_appointment_plans
 from secretaria.services.tenant_config import load_tenant_config, resolve_professional_calendar
 
@@ -87,6 +88,10 @@ async def _insurance_line(tenant, appointment) -> str:
                 return f"Convênio: {plan.name}\n"
         except Exception as exc:
             logger.warning("booking_notification_plan_lookup_failed", error_type=type(exc).__name__)
+    # "Particular" is the flow's own button label, not patient text: name it (live test,
+    # 2026-10-19 - a private booking read "Convênio informado; consulte o agendamento").
+    if insurance.casefold() == LABEL_INSURANCE_PARTICULAR.casefold():
+        return f"Convênio: {LABEL_INSURANCE_PARTICULAR}\n"
     # Legacy catalog strings and unmatched patient answers are untrusted text.
     return "Convênio informado; consulte o agendamento.\n" if insurance else ""
 

@@ -44,6 +44,7 @@ from secretaria.ai.prompts import (
     _format_service_guides,
     date_context,
 )
+from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 
 if TYPE_CHECKING:
     from secretaria.services.tenant_config import TenantRuntimeConfig
@@ -354,6 +355,20 @@ def _format_clinic_facts_v2(config: TenantRuntimeConfig) -> str:
     return block.removesuffix(_CLINIC_FACTS_FOOTER)
 
 
+# The fixed text never names a channel, so a Portal patient who asked "isso aqui é o
+# WhatsApp da clínica?" got a confident "Sim" (live test, 2026-10-19). On the Portal the
+# prompt says where the conversation is; WhatsApp keeps the historical, channel-free text.
+_PORTAL_CHANNEL_NOTE = (
+    "\n\nCANAL: esta conversa acontece no chat da clínica, aberto no navegador pelo link "
+    "ou QR code que a clínica divulga. NÃO é o WhatsApp: se o paciente perguntar, diga que "
+    "é o chat da clínica e nunca que é o WhatsApp."
+)
+
+
+def _format_channel_v2(config: TenantRuntimeConfig) -> str:
+    return _PORTAL_CHANNEL_NOTE if config.channel == CHANNEL_BRAIN_MESSAGE else ""
+
+
 def secretary_system_prompt_v2(config: TenantRuntimeConfig, *, tool_names: Iterable[str]) -> str:
     """Render the v2 system prompt for one turn of `config`'s clinic.
 
@@ -369,6 +384,7 @@ def secretary_system_prompt_v2(config: TenantRuntimeConfig, *, tool_names: Itera
         "consultas. Quem marca, remarca e cancela é o FLUXO GUIADO da clínica (mensagens "
         "e botões automáticos): você entende o que o paciente quer e entrega ao fluxo o "
         "pedido com tudo o que ele já disse; quem confirma é o paciente, tocando no botão."
+        f"{_format_channel_v2(config)}"
         f"{_format_safety_rules()}"
         f"{_format_rules_v2()}"
         f"{_format_tools_v2(names)}"

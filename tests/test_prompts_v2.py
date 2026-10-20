@@ -446,3 +446,20 @@ def test_real_model_failures_are_addressed_in_tool_instructions():
 def test_missing_required_tools_fail_before_misleading_instructions_are_rendered():
     with pytest.raises(ValueError, match="required"):
         secretary_system_prompt_v2(_config(), tool_names={"get_availability"})
+
+
+# --------------------------------------------------------------------------
+# The channel (live test, 2026-10-19: "isso aqui é o WhatsApp?" -> "Sim")
+# --------------------------------------------------------------------------
+
+
+def test_a_portal_v2_prompt_says_the_conversation_is_not_whatsapp():
+    prompt = secretary_system_prompt_v2(_config(channel="brain_message"), tool_names=V2_FULL)
+    assert "CANAL: esta conversa acontece no chat da clínica" in prompt
+    assert "nunca que é o WhatsApp" in prompt
+
+
+def test_the_whatsapp_v2_prompt_is_unchanged_by_the_channel_note():
+    default = secretary_system_prompt_v2(_config(), tool_names=V2_FULL)
+    assert secretary_system_prompt_v2(_config(channel="whatsapp"), tool_names=V2_FULL) == default
+    assert "CANAL:" not in default

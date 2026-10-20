@@ -563,3 +563,15 @@ async def test_another_clinics_doctor_is_never_named(world):
     await bn._post_booking(ctx)
     variables = next(v for _, t, v in sent if t == bn.CLINIC_TEMPLATE)
     assert variables["professional_line"] == ""
+
+
+async def test_a_private_booking_is_named_particular_in_the_emails():
+    """Live 2026-10-19: "Particular" read "Convênio informado; consulte o agendamento"."""
+    appointment = SimpleNamespace(
+        insurance="Particular", insurance_plan_id=None, insurance_professional_plan_id=None
+    )
+    line = await bn._insurance_line(SimpleNamespace(id=uuid4()), appointment)
+    assert line.strip() == "Convênio: Particular"
+    appointment.insurance = "unimed sei la"
+    line = await bn._insurance_line(SimpleNamespace(id=uuid4()), appointment)
+    assert line.strip() == "Convênio informado; consulte o agendamento."
