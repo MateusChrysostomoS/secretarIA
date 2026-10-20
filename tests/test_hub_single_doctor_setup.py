@@ -376,3 +376,95 @@ async def test_offer_duration_is_validated(client: AsyncClient, db, tenant, doct
     )
     assert response.status_code == 422
     assert await _service_count(db, tenant.id) == 0
+
+
+# --------------------------------------------------------------------------
+# 3. The checklist asks what the booking flow asks
+# --------------------------------------------------------------------------
+
+
+def _status(payload: dict) -> dict[str, dict]:
+    return {item["key"]: item for item in payload["items"]}
+
+
+async def test_checklist_of_a_new_one_doctor_clinic(client: AsyncClient, tenant, doctor) -> None:
+    items = _status((await client.get(COMPLETENESS)).json())
+    assert items["professional"]["status"] == "done"
+    assert items["hours"]["status"] == "missing"
+    assert items["services"]["status"] == "missing"
+    assert items["services"]["hint"] == "Cadastre os serviços que os pacientes podem agendar."
+    # Booking first: who, when, what.
+    keys = [item["key"] for item in (await client.get(COMPLETENESS)).json()["items"]]
+    assert keys[:3] == ["professional", "hours", "services"]
+
+
+async def test_a_catalog_row_nobody_offers_is_not_a_bookable_service(
+    client: AsyncClient, tenant, doctor
+) -> None:
+    await client.post(SERVICES, json={"name": "Consulta"})
+
+    services = _status((await client.get(COMPLETENESS)).json())["services"]
+    assert services["status"] == "missing"
+    assert services["hint"] == (
+        "Nenhum serviço está marcado para Dr. Lucas: marque ao menos um, com a duração."
+    )
+
+
+async def test_checklist_turns_green_once_configured_through_the_console(
+    client: AsyncClient, tenant, doctor
+) -> None:
+    await client.put(
+        CONFIGURATION,
+        json={
+            "tenant": {"business_hours": CLINIC_WEEK},
+            "professional_id": str(doctor.id),
+            "professional": {"business_hours": None},
+        },
+    )
+    await client.post(
+        SERVICES,
+        json={"name": "Consulta", "offer": {"professional_id": str(doctor.id), "duration_min": 30}},
+    )
+
+    items = _status((await client.get(COMPLETENESS)).json())
+    assert items["professional"]["status"] == "done"
+    assert items["hours"]["status"] == "done"
+    assert items["services"]["status"] == "done"
+
+
+async def test_a_doctor_with_an_empty_own_week_keeps_hours_missing(
+    client: AsyncClient, db, tenant
+) -> None:
+    """Clinic hours alone are not enough: the doctor's own (empty) week wins."""
+    await _add_professional(db, tenant.id, business_hours={})
+    await client.put(CONFIGURATION, json={"tenant": {"business_hours": CLINIC_WEEK}})
+
+    hours = _status((await client.get(COMPLETENESS)).json())["hours"]
+    assert hours["status"] == "missing"
+    assert hours["hint"] == "Sem horário de atendimento: Dr. Lucas."
+
+
+async def test_a_clinic_with_nobody_attending_says_so(client: AsyncClient, tenant) -> None:
+    item = _status((await client.get(COMPLETENESS)).json())["professional"]
+    assert item["status"] == "missing"
+    assert item["section"] == "professionals"
+
+
+def test_multi_doctor_hints_name_who_is_missing() -> None:
+    tenant = SimpleNamespace(business_hours=CLINIC_WEEK, appointment_types=None, clinic_facts=None)
+    offered = [{"name": "Consulta", "duration_min": 30, "is_active": True}]
+    ana = SimpleNamespace(name="Dra. Ana", business_hours=None, appointment_types=offered)
+    bruno = SimpleNamespace(name="Dr. Bruno", business_hours={}, appointment_types=[])
+
+    items = {i.key: i for i in compute_completeness(tenant, [], [ana, bruno]).items}
+
+    assert items["hours"].hint == "Sem horário de atendimento: Dr. Bruno."
+    assert items["services"].status == "missing"
+    assert items["services"].hint == "Cadastre os serviços que os pacientes podem agendar."
+
+
+def test_without_a_roster_the_checklist_reads_as_before() -> None:
+    tenant = SimpleNamespace(business_hours=CLINIC_WEEK, clinic_facts=None)
+    keys = [i.key for i in compute_completeness(tenant, []).items]
+    assert "professional" not in keys
+    assert keys[:2] == ["hours", "services"]
