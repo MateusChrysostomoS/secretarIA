@@ -17,6 +17,7 @@ from secretaria.core.build_info import (
 from secretaria.core.database import engine
 from secretaria.core.logging import get_logger, setup_logging
 from secretaria.plugins import booking_notifications  # noqa: F401
+from secretaria.plugins.appointment_change_notifications import notify_appointment_change
 from secretaria.plugins.post_booking import run_post_booking_hooks
 from secretaria.plugins.professional_notification import retry_professional_notification
 from secretaria.plugins.reminders import send_appointment_reminders
@@ -143,6 +144,10 @@ class WorkerSettings:
         # exceptions by contract. See plugins/professional_notification.py.
         retry_professional_notification,
         send_professional_edit_notification,
+        # The clinic / doctor / Portal patient mails after the PATIENT cancelled or
+        # moved (A7). Enqueued after the commit of every patient path; never from
+        # the hub. See plugins/appointment_change_notifications.py.
+        notify_appointment_change,
         # Onboarding transactional email (contract v1 §4 endpoint 6), enqueued
         # by POST /internal/notifications/email. See workers/tasks.py and
         # services/email.py.

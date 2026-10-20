@@ -795,15 +795,24 @@ async def _mark_appointment_cancelled(event_id: str) -> str | None:
     from sqlalchemy import select, update
 
     from secretaria.core.database import async_session_factory
-    from secretaria.models import Appointment, AppointmentStatus, Tenant
+    from secretaria.models import Appointment, AppointmentStatus, Tenant, is_live_status
     from secretaria.services import reminder_hooks
     from secretaria.services.payments import deposit_lifecycle
 
     notice: str | None = None
     closed_id = None
+    # A7: set only when THIS call took a live row to CANCELLED - the mail below
+    # announces a change, never a repeat of one.
+    cancelled_id = None
     try:
         async with async_session_factory() as session:
             async with session.begin():
+                previous_status = await session.scalar(
+                    select(Appointment.status).where(
+                        Appointment.google_event_id == event_id,
+                        Appointment.tenant_id == tenant_id,
+                    )
+                )
                 result = await session.execute(
                     update(Appointment)
                     .where(
@@ -819,6 +828,8 @@ async def _mark_appointment_cancelled(event_id: str) -> str | None:
                     )
                 )
                 if appointment is not None:
+                    if is_live_status(previous_status):
+                        cancelled_id = appointment.id
                     tenant = await session.get(Tenant, tenant_id)
                     if tenant is not None and reminder_hooks.enabled_for(tenant):
                         closed_id = appointment.id
@@ -839,6 +850,20 @@ async def _mark_appointment_cancelled(event_id: str) -> str | None:
         logger.info("tool_appointment_cancelled", event_id=event_id, rows=result.rowcount)
     except Exception as exc:
         logger.warning("tool_appointment_cancel_persist_failed", error=str(exc), event_id=event_id)
+        return notice
+
+    # Committed: tell the clinic, the doctor and the Portal patient, off the hot path
+    # - the same fire-and-forget shape as `_persist_appointment`'s post_booking
+    # enqueue, imported lazily for the same reason.
+    if cancelled_id is not None:
+        from secretaria.plugins.appointment_change_notifications import (
+            CHANGE_CANCELLED,
+            enqueue_appointment_change_notification,
+        )
+
+        await enqueue_appointment_change_notification(
+            _redis_ctx.get(), tenant_id, cancelled_id, CHANGE_CANCELLED
+        )
     return notice
 
 

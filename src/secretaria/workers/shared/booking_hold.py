@@ -408,7 +408,7 @@ async def _promote_booking_hold(
         await reminder_hooks.after_appointment_booked(appointment.id)
 
     if replaced is not None:
-        await _finish_replacement(tenant, replaced)
+        await _finish_replacement(tenant, replaced, redis=redis)
 
     tz = _tenant_tzinfo(tenant)
     local_start = held.start_at.astimezone(tz)

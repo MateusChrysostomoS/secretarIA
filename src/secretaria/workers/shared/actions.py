@@ -19,6 +19,10 @@ from secretaria.models import (
     Tenant,
     is_live_status,
 )
+from secretaria.plugins.appointment_change_notifications import (
+    CHANGE_CANCELLED,
+    enqueue_appointment_change_notification,
+)
 from secretaria.services import reminder_hooks
 from secretaria.services.appointment_calendar_origin import (
     CalendarOriginUnresolved,
@@ -196,6 +200,19 @@ async def _execute_appointment_cancel(
     return text
 
 
+async def _announce_button_cancel(redis, tenant: Tenant, appointment_id, was_live: bool) -> None:
+    """A7: mail the clinic, the doctor and the Portal patient about a button cancel.
+
+    Called right after the commit, and only when the tap really took a LIVE booking
+    to CANCELLED - a second tap on a stale reminder announces nothing. See
+    plugins/appointment_change_notifications.py.
+    """
+    if was_live:
+        await enqueue_appointment_change_notification(
+            redis, tenant.id, appointment_id, CHANGE_CANCELLED
+        )
+
+
 async def _handle_action_button(
     reply: _ReplyContext, action: str, appointment_id: str, redis=None
 ) -> None:
@@ -314,23 +331,27 @@ async def _handle_action_button(
                     ],
                 )
                 return
+            was_live = is_live_status(appointment.status)
             text = await _execute_appointment_cancel(
                 session, tenant, tenant_config, appointment, waba_token
             )
             await session.commit()
             if reminder_hooks.enabled_for(tenant):
                 await reminder_hooks.after_appointment_closed(appointment.id, reason="cancelled")
+            await _announce_button_cancel(redis, tenant, appointment.id, was_live)
             await client.send_text_message(to=reply.patient_ref, body=text)
             return
 
         if action == "apptcancelyes":
             tenant_config = await load_tenant_config(session, tenant)
+            was_live = is_live_status(appointment.status)
             text = await _execute_appointment_cancel(
                 session, tenant, tenant_config, appointment, waba_token
             )
             await session.commit()
             if reminder_hooks.enabled_for(tenant):
                 await reminder_hooks.after_appointment_closed(appointment.id, reason="cancelled")
+            await _announce_button_cancel(redis, tenant, appointment.id, was_live)
             await client.send_text_message(to=reply.patient_ref, body=text)
             return
 
@@ -340,12 +361,14 @@ async def _handle_action_button(
             # exactly like "apptcancelyes" - Calendar delete, status, Pix
             # outcome - then ask why (FEAT_34 §8 list), like "rebookno".
             tenant_config = await load_tenant_config(session, tenant)
+            was_live = is_live_status(appointment.status)
             text = await _execute_appointment_cancel(
                 session, tenant, tenant_config, appointment, waba_token
             )
             await session.commit()
             if reminder_hooks.enabled_for(tenant):
                 await reminder_hooks.after_appointment_closed(appointment.id, reason="cancelled")
+            await _announce_button_cancel(redis, tenant, appointment.id, was_live)
             await client.send_text_message(to=reply.patient_ref, body=text)
             decline_handoff = (tenant, waba_token, appointment.id)
 

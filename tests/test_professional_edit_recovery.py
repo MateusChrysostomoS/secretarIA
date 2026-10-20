@@ -109,7 +109,9 @@ async def test_a_b_a_suppresses_obsolete_occurrence_even_when_content_returns(
         )
     await _deliver(first, redis)
     assert not sender.calls
-    await _deliver(redis.jobs[-1], redis)
+    # The last EDIT job: a move also queues the clinic/patient mail (A7) after it.
+    edits = [job for job in redis.jobs if job[0] == notice.JOB_NAME]
+    await _deliver(edits[-1], redis)
     assert len(sender.calls) == 1
 
 
