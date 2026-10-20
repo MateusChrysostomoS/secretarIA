@@ -468,3 +468,144 @@ def test_without_a_roster_the_checklist_reads_as_before() -> None:
     keys = [i.key for i in compute_completeness(tenant, []).items]
     assert "professional" not in keys
     assert keys[:2] == ["hours", "services"]
+
+
+# --------------------------------------------------------------------------
+# 4. A patient can book: days and slots come from what the console saved
+# --------------------------------------------------------------------------
+
+
+class _FakeEvents:
+    """An empty Google agenda: every window the clinic opens is free."""
+
+    def list(self, **_kwargs):
+        class _Request:
+            def execute(self):
+                return {"items": []}
+
+        return _Request()
+
+
+class _FakeGoogle:
+    def events(self):
+        return _FakeEvents()
+
+
+def _conversation(**kw):
+    base = dict(
+        id=uuid4(),
+        flow_state=FlowState.IDLE,
+        flow_step=None,
+        flow_selected_type=None,
+        flow_selected_day=None,
+        flow_selected_slot=None,
+        flow_managing_appointment_id=None,
+        flow_selected_professional_id=None,
+        patient_id=None,
+    )
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+async def _configure_like_the_console(client: AsyncClient, doctor_id) -> None:
+    saved = await client.put(
+        CONFIGURATION,
+        json={
+            "tenant": {"business_hours": CLINIC_WEEK, "appointment_duration_min": 30},
+            "professional_id": str(doctor_id),
+            "professional": {"business_hours": None, "specialty": "Clínica Geral"},
+        },
+    )
+    assert saved.status_code == 200
+    created = await client.post(
+        SERVICES,
+        json={
+            "name": "Consulta",
+            "offer": {"professional_id": str(doctor_id), "duration_min": 30, "price": "R$ 200"},
+        },
+    )
+    assert created.status_code == 201
+
+
+async def _router_inputs(db, tenant_id, monkeypatch):
+    """What the worker hands the router for this clinic (workers/shared/greeting.py)."""
+    async with db() as session:
+        tenant = await session.get(Tenant, tenant_id)
+        services = await load_service_catalog(session, tenant.id)
+        rows = list(
+            await session.scalars(
+                select(Professional).where(
+                    Professional.tenant_id == tenant.id, Professional.is_active.is_(True)
+                )
+            )
+        )
+        config = await load_tenant_config(session, tenant)
+        snapshot = _flow_tenant_snapshot(tenant, rows, services)
+        professionals = _flow_professionals(rows, services)
+    calendar = CalendarService.from_tenant_config(config)
+    monkeypatch.setattr(calendar, "_service", _FakeGoogle())
+    return snapshot, professionals, calendar, config
+
+
+@pytest.mark.parametrize("own_week", [None, {"monday": [], "tuesday": []}])
+async def test_a_patient_is_offered_the_service_and_only_the_open_days(
+    client: AsyncClient, db, tenant, monkeypatch, own_week
+) -> None:
+    """End to end on stored data: menu -> service list -> day picker.
+
+    `own_week` covers both a fresh doctor and the test clinic's broken stored
+    week (`{"monday": [], "tuesday": []}`), which the one-schedule save repairs.
+    """
+    doctor = await _add_professional(db, tenant.id, business_hours=own_week)
+    await _configure_like_the_console(client, doctor.id)
+    snapshot, professionals, calendar, config = await _router_inputs(db, tenant.id, monkeypatch)
+
+    # The runtime config resolves through the only doctor: the clinic's week and
+    # the service just created.
+    assert config.business_hours == CLINIC_WEEK
+    assert [t.name for t in config.appointment_types] == ["Consulta"]
+
+    # "Agendar" -> "é pra mim?" -> the service list, which names the service.
+    first = await route(
+        _conversation(), snapshot, calendar, LABEL_BOOK, professionals=professionals
+    )
+    assert first.flow_state == FlowState.SERVICE_CATALOG
+    listed = await route(
+        _conversation(flow_state=first.flow_state, flow_step=first.flow_step),
+        snapshot,
+        calendar,
+        LABEL_ATTENDEE_SELF,
+        professionals=professionals,
+    )
+    rendered = repr(listed.bubbles)
+    assert "Consulta" in rendered
+    assert "não há serviços disponíveis" not in rendered
+
+    # Confirming the service opens the day picker with real days: Mondays only.
+    days = await route(
+        _conversation(
+            flow_state=FlowState.SERVICE_CATALOG,
+            flow_step=STEP_AWAITING_SERVICE_CONFIRM,
+            flow_selected_type="Consulta",
+        ),
+        snapshot,
+        calendar,
+        "Sim",
+        professionals=professionals,
+    )
+    assert days.flow_step == STEP_AWAITING_DAY
+    [bubble] = [b for b in days.bubbles if isinstance(b, SlotsBubble)]
+    offered = [row for row in bubble.rows if row[0].startswith("day|")]
+    assert offered, "the day picker offered no day"
+    for row_id, *_ in offered:
+        day = datetime.fromisoformat(row_id.split("|")[1])
+        assert day.weekday() == 0, f"{row_id} is not a Monday"
+
+    # And a Monday has free slots inside the clinic's windows, 30 minutes each.
+    monday = datetime.now(_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    monday += timedelta(days=(7 - monday.weekday()) % 7 or 7)
+    slots = await calendar.list_free_slots(monday, slot_minutes=30, max_slots=50)
+    assert slots
+    starts = {s["start"][11:16] for s in slots}
+    assert "08:00" in starts and "14:00" in starts
+    assert "12:00" not in starts and "13:00" not in starts
