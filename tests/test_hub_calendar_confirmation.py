@@ -37,6 +37,8 @@ NEW_KEYS = {"status", "confirmation_count", "display_state", "attention", "remin
     "patient_channel",
     # The booking account's name, so the agenda names the patient without the title.
     "patient_name",
+    # Native agenda (2026-10-20): which agenda holds the event, "google" | "local".
+    "calendar_backend",
 }
 
 

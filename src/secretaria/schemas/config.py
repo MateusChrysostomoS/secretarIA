@@ -381,6 +381,12 @@ class TenantConfigRead(BaseModel):
     is_active: bool
     # True when a Google Calendar refresh token is stored for this tenant.
     calendar_connected: bool
+    # Native agenda (2026-10-20): where the CLINIC's own agenda lives - "google" while a
+    # clinic token is stored (a revoked one included: it fails loudly, it never falls
+    # back), else "local", the secretarIA's own agenda (services/local_calendar.py).
+    # Read-only/derived, like `calendar_connected`. A per_professional doctor with his
+    # own Google account is Google-backed either way (`calendar_source` on his row).
+    calendar_backend: Literal["google", "local"] = "local"
     # --- Pix deposit (sinal) policy — services/payments/deposit_lifecycle.py ---
     pix_deposit_enabled: bool
     pix_deposit_percent: int

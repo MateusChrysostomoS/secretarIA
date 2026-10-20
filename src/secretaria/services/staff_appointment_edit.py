@@ -367,7 +367,7 @@ async def _move_event(
     unavailable = StaffEditError(
         502,
         "calendar_unavailable",
-        "Não foi possível alterar o evento no Google Agenda. Nada foi alterado; "
+        "Não foi possível alterar o evento na agenda. Nada foi alterado; "
         "tente de novo em instantes.",
     )
     if (window_changed or calendar_changed) and not request.allow_overlap:

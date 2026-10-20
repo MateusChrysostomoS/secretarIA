@@ -672,18 +672,18 @@ async def _notify_paid(session: AsyncSession, tenant: Tenant, deposit: PixDeposi
 
 
 async def _notify_expired(session: AsyncSession, tenant: Tenant, appointment: Appointment) -> None:
-    # Best-effort Google Calendar event delete, reusing the same per-tenant
+    # Best-effort Calendar event delete, reusing the same per-tenant
     # calendar construction the patient-cancel path uses
-    # (api/hub/calendar.py::_get_calendar + CalendarService.cancel_event) —
-    # skipped entirely (not an error) when the tenant has no Calendar
-    # connected at all.
+    # (api/hub/calendar.py::_get_calendar + CalendarService.cancel_event). A
+    # clinic without Google books on the secretarIA's own agenda
+    # (services/local_calendar.py), so the event is freed there too: skipping it
+    # used to be harmless only while every agenda was Google's.
     if appointment.google_event_id:
         try:
             config = await load_tenant_config(session, tenant)
-            if config.google_refresh_token:
-                await CalendarService.from_tenant_config(config).cancel_event(
-                    appointment.google_event_id
-                )
+            await CalendarService.from_tenant_config(config).cancel_event(
+                appointment.google_event_id
+            )
         except Exception as exc:
             logger.warning(
                 "pix_deposit_expired_calendar_delete_failed",

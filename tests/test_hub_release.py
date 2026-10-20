@@ -286,14 +286,16 @@ async def test_a_google_failure_changes_nothing_and_is_retryable(
     assert retry.status_code == 200
 
 
-async def test_the_clinic_without_google_connected_cannot_release(client: AsyncClient, db, acting):
+async def test_the_clinic_without_google_releases_too(client: AsyncClient, db, acting):
+    """Native agenda (2026-10-20): no Google is no longer a 422 - the clinic's agenda is
+    the secretarIA's own (end to end in tests/test_hub_calendar_local.py)."""
     world = await seed_world(db)
     acting["tenant_id"] = world.tenant.id  # no _connect
 
     response = await _release(client, world.appointment.id)
 
-    assert response.status_code == 422
-    assert (await _appointment(db, world.appointment.id)).status == AppointmentStatus.SCHEDULED
+    assert response.status_code == 200, response.text
+    assert (await _appointment(db, world.appointment.id)).status == AppointmentStatus.CANCELLED
 
 
 async def test_another_clinics_staff_gets_a_404_and_nothing_happens(

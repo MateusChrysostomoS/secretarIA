@@ -29,7 +29,11 @@ from secretaria.plugins.base import PluginSpec, PostBookingContext
 from secretaria.plugins.professional_notification import _as_utc, _local_when
 from secretaria.plugins.registry import register
 from secretaria.services.brain_patients import fetch_patient_email_result
-from secretaria.services.calendar import CalendarService, build_patient_calendar_link
+from secretaria.services.calendar import (
+    CalendarService,
+    build_patient_calendar_link,
+    is_local_event_id,
+)
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.email import EmailOutcome, send_transactional_email_result
 from secretaria.services.flow_router import LABEL_INSURANCE_PARTICULAR
@@ -40,6 +44,17 @@ logger = get_logger(__name__)
 
 PATIENT_TEMPLATE = "appointment_booked_patient"
 CLINIC_TEMPLATE = "appointment_booked_clinic"
+
+# Only true of a booking on Google: the secretarIA's own agenda sends no invite
+# (services/local_calendar.py), so its patient is not promised one.
+GOOGLE_INVITE_LINE = "Você também recebe um convite do Google Agenda, com lembrete.\n\n"
+
+
+def invite_line(appointment) -> str:
+    """The patient e-mail's invite sentence, or "" for a booking on the secretarIA agenda."""
+    if is_local_event_id(getattr(appointment, "google_event_id", None)):
+        return ""
+    return GOOGLE_INVITE_LINE
 
 
 def _key(kind: str, appointment_id: UUID) -> str:
@@ -253,7 +268,11 @@ async def _post_booking(ctx: PostBookingContext) -> None:
             _as_utc(appointment.end_at),
             appointment.appointment_type or "Consulta",
         )
-        patient_vars = {**variables, "calendar_line": f"Adicionar à sua agenda:\n{link}\n\n"}
+        patient_vars = {
+            **variables,
+            "calendar_line": f"Adicionar à sua agenda:\n{link}\n\n",
+            "invite_line": invite_line(appointment),
+        }
         await _send_once("patient", appointment.id, email, PATIENT_TEMPLATE, patient_vars)
     except Exception as exc:
         logger.warning("booking_notification_patient_failed", error_type=type(exc).__name__)

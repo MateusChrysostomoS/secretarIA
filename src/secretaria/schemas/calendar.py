@@ -149,6 +149,11 @@ class CalendarEventRead(BaseModel):
     patient_name: str | None = None
     phone: str | None = None
     patient_channel: str | None = None
+    # Native agenda (2026-10-20): which agenda holds the event - "google" (a connected
+    # Google Calendar) or "local" (the secretarIA's own, services/local_calendar.py).
+    # Every write route acts on both the same way; the console may label it. None only
+    # from an agenda that does not say (never in production).
+    calendar_backend: Literal["google", "local"] | None = None
 
 
 class AppointmentCreate(BaseModel):

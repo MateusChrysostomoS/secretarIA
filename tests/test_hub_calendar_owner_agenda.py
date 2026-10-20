@@ -373,10 +373,15 @@ async def test_without_a_doctor_it_stays_on_the_clinics_agenda(
     assert google.ids("cal-ana") == set() and google.ids("cal-bia") == set()
 
 
-async def test_a_doctors_agenda_is_never_written_while_the_clinic_is_not_connected(
-    client: AsyncClient, db, clinic, google
+async def test_a_doctors_agenda_without_google_is_the_secretarias_never_the_env_token(
+    client: AsyncClient, db, clinic, google, monkeypatch
 ):
-    """Same 422 as before; never a doctor's agenda built on the env fallback token."""
+    """Native agenda (2026-10-20): no more 422. With no credential the doctor's agenda is
+    the secretarIA's own - never a Google agenda built on the env fallback token."""
+    from secretaria.models.calendar_event import CalendarEvent
+    from secretaria.services import local_calendar
+
+    monkeypatch.setattr(local_calendar, "async_session_factory", db)
     await _shared_account_clinic(db, clinic, google, connected=False)
 
     resp = await client.post(
@@ -384,9 +389,11 @@ async def test_a_doctors_agenda_is_never_written_while_the_clinic_is_not_connect
         json={**_window(), "summary": "Consulta", "professional_id": str(clinic.ana.id)},
     )
 
-    assert resp.status_code == 422
-    assert "not connected" in resp.json()["detail"]
+    assert resp.status_code == 201, resp.text
     assert google.calls == []
+    async with db() as session:
+        event = await session.get(CalendarEvent, resp.json()["google_event_id"])
+    assert event is not None and event.professional_id == clinic.ana.id
 
 
 async def test_a_consultation_created_for_a_doctor_is_cancelled_on_her_agenda(

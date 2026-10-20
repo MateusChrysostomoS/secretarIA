@@ -434,7 +434,7 @@ _TEMPLATES: dict[str, EmailTemplate] = {
             "{insurance_line}"
             "\n"
             "{calendar_line}"
-            "Você também recebe um convite do Google Agenda, com lembrete.\n\n"
+            "{invite_line}"
             "— {clinic_name}"
         ),
     ),

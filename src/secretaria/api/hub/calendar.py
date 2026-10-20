@@ -11,6 +11,13 @@ POST  /tenants/me/calendar/appointments/{id}/edit       - Editar/Remarcar + noti
 POST  /tenants/me/calendar/blocks                      - block slot (no notification).
 PATCH /tenants/me/calendar/appointments/{id}/status    - mark attended / no-show / etc.
 
+Native agenda (founder's decision 2026-10-20): a clinic without Google is served by the
+secretarIA's own agenda (services/local_calendar.py) through the very same calendar
+objects, so every route below works unchanged in both modes - the factories choose the
+backend (services/calendar.py::CalendarService.from_tenant_config). Nothing here answers
+"Google not connected" any more; a revoked Google token still fails as it did
+(`GoogleTokenRevokedError`), it never falls back to the local agenda.
+
 Whose Google agenda (owner's decision 2026-10-19, replacing "the hub reads only the
 clinic's agenda" - docs/CHECKPOINT_lembretes_r7.md decision 9): in a clinic with one
 agenda per doctor, everything that has a doctor lives on THAT doctor's agenda - the only
@@ -28,6 +35,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import Row, and_, select, update
@@ -93,6 +101,7 @@ from secretaria.services.appointment_status import (
 )
 from secretaria.services.calendar import CalendarService, is_event_not_found
 from secretaria.services.insurance_catalog import AppointmentPlan, load_appointment_plans
+from secretaria.services.local_calendar import LocalCalendarService, list_unpushed_events
 from secretaria.services.patient_context import as_utc
 from secretaria.services.payments import deposit_lifecycle
 from secretaria.services.tenant_config import (
@@ -146,23 +155,18 @@ async def _deposit_status_value(session: AsyncSession, appointment_id: UUID) -> 
 
 
 async def _clinic_config(session: AsyncSession, tenant: Tenant) -> TenantRuntimeConfig:
-    """The clinic's runtime config. Raises 422 when Calendar is not connected.
+    """The clinic's runtime config, for the clinic's agenda and every doctor's alike.
 
-    THE hub's connection gate, for the clinic's agenda and every doctor's alike: a
-    doctor's agenda resolves its credential through this config (the clinic's token, or
-    the doctor's own), so without it CalendarService would fall back to the env token.
+    It used to be the hub's "Google not connected" gate (422). Since the native agenda a
+    clinic without Google simply gets the secretarIA's own agenda from the same factory
+    (`CalendarService.from_tenant_config`); a doctor's agenda still resolves its
+    credential through this config (the clinic's token, or the doctor's own).
     """
-    config = await load_tenant_config(session, tenant)
-    if not config.google_refresh_token:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            "Google Calendar not connected. Complete OAuth onboarding first.",
-        )
-    return config
+    return await load_tenant_config(session, tenant)
 
 
 async def _get_calendar(session: AsyncSession, tenant: Tenant) -> CalendarService:
-    """Load a per-tenant CalendarService. Raises 422 when Calendar is not connected."""
+    """The clinic's own agenda: Google when connected, the secretarIA's otherwise."""
     return CalendarService.from_tenant_config(await _clinic_config(session, tenant))
 
 
@@ -483,7 +487,7 @@ def _current_reminders(row: Row, reminders: list[AppointmentReminder]) -> list[A
 
 @dataclass(frozen=True)
 class _AgendaSource:
-    """One Google agenda GET /events reads: the clinic's (`required`) or a doctor's."""
+    """One agenda GET /events reads: the clinic's (`required`) or a doctor's."""
 
     calendar: CalendarService
     professional_id: UUID | None = None
@@ -491,7 +495,12 @@ class _AgendaSource:
 
 
 async def _agenda_sources(
-    session: AsyncSession, tenant: Tenant, *, own_only: bool, focus: UUID | None
+    session: AsyncSession,
+    tenant: Tenant,
+    config: TenantRuntimeConfig,
+    *,
+    own_only: bool,
+    focus: UUID | None,
 ) -> list[_AgendaSource]:
     """The clinic's agenda plus the doctors' that can hold this page's events, each ONCE.
 
@@ -501,10 +510,8 @@ async def _agenda_sources(
     misplaced legacy Portal bookings. A doctor resolving to an agenda already listed - no
     calendar of his own in a shared/fallback setup, or the one doctor of a clinic whose
     agenda `load_tenant_config` already resolves through him - is dropped. One doctor's
-    resolution failing is logged and skipped. 422 when the clinic is not connected, as
-    before.
+    resolution failing is logged and skipped. `config` is the clinic's (`_clinic_config`).
     """
-    config = await _clinic_config(session, tenant)
     sources = [_AgendaSource(CalendarService.from_tenant_config(config), required=True)]
     if not own_only:
         professionals = await list_active_professionals(session, tenant.id)
@@ -539,6 +546,35 @@ async def _agenda_sources(
     return sources
 
 
+def _agenda_owners(
+    config: TenantRuntimeConfig,
+    sources: list[_AgendaSource],
+    *,
+    own_only: bool,
+    focus: UUID | None,
+) -> set[UUID | None]:
+    """Owners whose secretarIA-agenda events this page shows although no source reads them.
+
+    In view: the clinic's own agenda (None, and - one active doctor - that doctor, whose
+    agenda the clinic's resolves to), every doctor `_agenda_sources` kept (only `focus`
+    in an own view). Minus the owners a LOCAL source already reads whole. What is left
+    are agendas served by Google now: their pre-connection local events (past ones are
+    never pushed, services/calendar_sync.py) and any future one not pushed yet.
+    """
+    owners: set[UUID | None] = {None, config.professional_id}
+    if own_only:
+        if focus is not None:
+            owners.add(focus)
+    else:
+        owners.update(source.professional_id for source in sources)
+    read_locally = {
+        source.calendar.professional_id
+        for source in sources
+        if isinstance(source.calendar, LocalCalendarService)
+    }
+    return owners - read_locally
+
+
 def _event_start(event: dict) -> datetime:
     """Chronological key across agendas (each one already comes ordered by Google)."""
     try:
@@ -563,6 +599,7 @@ async def _read_agendas(sources: list[_AgendaSource], start: datetime, end: date
     events: list[dict] = []
     seen: set[str] = set()
     for source, result in zip(sources, results, strict=True):
+        backend = getattr(source.calendar, "backend", None)
         if isinstance(result, BaseException):
             if source.required or not isinstance(result, Exception):
                 raise result
@@ -578,10 +615,33 @@ async def _read_agendas(sources: list[_AgendaSource], start: datetime, end: date
                 continue
             if event_id:
                 seen.add(event_id)
-            events.append(event)
+            events.append({**event, "calendar_backend": backend})
     if len(sources) > 1:
         events.sort(key=_event_start)
     return events
+
+
+async def _with_unpushed_local_events(
+    session: AsyncSession,
+    tenant: Tenant,
+    owners: set[UUID | None],
+    events: list[dict],
+    start: datetime,
+    end: datetime,
+) -> list[dict]:
+    """`events` plus the secretarIA-agenda events of `owners` (`_agenda_owners`), each ONCE."""
+    leftovers = await list_unpushed_events(
+        session, tenant.id, owners, start, end, ZoneInfo(tenant.timezone or "America/Sao_Paulo")
+    )
+    seen = {event.get("id") for event in events}
+    extra = [
+        {**event, "calendar_backend": LocalCalendarService.backend}
+        for event in leftovers
+        if event["id"] not in seen
+    ]
+    if not extra:
+        return events
+    return sorted([*events, *extra], key=_event_start)
 
 
 # ---------------------------------------------------------------------------
@@ -641,10 +701,15 @@ async def list_events(
             _detail("no_own_agenda", "Seu usuário não está ligado a um profissional da clínica."),
         )
     own_only = viewer.restricted or mine
+    config = await _clinic_config(session, tenant)
     sources = await _agenda_sources(
-        session, tenant, own_only=own_only, focus=viewer.professional_id
+        session, tenant, config, own_only=own_only, focus=viewer.professional_id
     )
     events = await _read_agendas(sources, start, end)
+    # A clinic that booked on the secretarIA agenda before connecting Google still sees
+    # those bookings (and can act on them: services/calendar.py routes `loc_` ids).
+    owners = _agenda_owners(config, sources, own_only=own_only, focus=viewer.professional_id)
+    events = await _with_unpushed_local_events(session, tenant, owners, events, start, end)
 
     # Attach the LOCAL Appointment.id to every event that has one, so the
     # agenda can call cancel/reschedule (which key on it) instead of only
@@ -786,6 +851,7 @@ async def list_events(
                 patient_name=row.patient_name if row is not None else None,
                 phone=row.phone if row is not None else None,
                 patient_channel=row.patient_channel if row is not None else None,
+                calendar_backend=e.get("calendar_backend"),
             )
         )
     return reads
@@ -979,7 +1045,7 @@ async def cancel_appointment(
                 error_type=type(exc).__name__,
             )
             raise _calendar_unavailable(
-                "Não foi possível apagar o evento no Google Agenda. "
+                "Não foi possível apagar o evento na agenda. "
                 "A consulta não foi cancelada; tente de novo em instantes."
             ) from exc
 
@@ -1143,7 +1209,7 @@ async def release_appointment(
                 error_type=type(exc).__name__,
             )
             raise _calendar_unavailable(
-                "Não foi possível apagar o evento no Google Agenda. "
+                "Não foi possível apagar o evento na agenda. "
                 "Nada foi alterado; tente de novo em instantes."
             ) from exc
 
@@ -1430,7 +1496,7 @@ async def reschedule_appointment(
             error_type=type(exc).__name__,
         )
         raise _calendar_unavailable(
-            "Não foi possível mover o evento no Google Agenda. "
+            "Não foi possível mover o evento na agenda. "
             "Nada foi alterado; tente de novo em instantes."
         ) from exc
     if not moved:
@@ -1438,7 +1504,7 @@ async def reschedule_appointment(
             status.HTTP_409_CONFLICT,
             _detail(
                 "calendar_event_not_found",
-                "O evento desta consulta não está mais no Google Agenda. Nada foi alterado.",
+                "O evento desta consulta não está mais na agenda. Nada foi alterado.",
             ),
         )
 
