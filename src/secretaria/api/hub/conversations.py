@@ -53,12 +53,13 @@ single place in this router that knows more than one channel exists.
 """
 
 import inspect
+from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from sqlalchemy import func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.api.attachment_http import (
@@ -127,16 +128,147 @@ _SEND_FORM_SCHEMA: dict = {
 }
 
 
+# The list row shows one line of the newest message; the rest stays in the thread.
+_PREVIEW_CHARS = 200
+
+
+@dataclass(frozen=True)
+class _ListSignals:
+    """What the console list needs beyond the conversation row (see ConversationRead)."""
+
+    needs_human: bool = False
+    unread_count: int = 0
+    last_message_preview: str | None = None
+    last_message_sender: str | None = None
+
+
 def _read_model(
-    conversation: Conversation, patient: Patient, last_message_at: datetime | None
+    conversation: Conversation,
+    patient: Patient,
+    last_message_at: datetime | None,
+    signals: _ListSignals | None = None,
 ) -> ConversationRead:
+    signals = signals or _ListSignals()
     return ConversationRead(
         id=str(conversation.id),
         patient_wa_id=patient.wa_id,
         patient_name=patient.name,
         handover_state=conversation.handover_state.value,
         last_message_at=last_message_at,
+        needs_human=signals.needs_human,
+        unread_count=signals.unread_count,
+        last_message_preview=signals.last_message_preview,
+        last_message_sender=signals.last_message_sender,
     )
+
+
+def _preview(body: str | None) -> str | None:
+    text = " ".join((body or "").split())
+    return text[:_PREVIEW_CHARS] or None
+
+
+async def _list_signals(
+    session: AsyncSession, tenant: Tenant, only: UUID | None = None
+) -> dict[UUID, _ListSignals]:
+    """Per conversation of `tenant` (or just `only`): who waits, how much, and the preview.
+
+    Three grouped reads for the whole list, never one per row, each joined to
+    `Conversation.tenant_id` - no message of another clinic is ever read:
+
+    * the newest patient and staff instants -> `needs_human` (HUMAN_ACTIVE and the
+      patient spoke after staff last did - a handoff the patient or the automation
+      started leaves staff silent, so it reads as waiting);
+    * the patient's messages after the newest outbound one that staff has not marked
+      read (`read_at`, set by POST .../messages/read - Brain-Message only) -> `unread_count`;
+    * the newest message itself (ties broken by id) -> preview + sender.
+    """
+    scope = [Conversation.tenant_id == tenant.id]
+    if only is not None:
+        scope.append(Conversation.id == only)
+    inbound = Message.direction == MessageDirection.INBOUND
+    outbound = Message.direction == MessageDirection.OUTBOUND
+    staff = Message.sender == MessageSender.HUMAN
+    times = (
+        await session.execute(
+            select(
+                Message.conversation_id,
+                Conversation.handover_state,
+                func.max(case((inbound, Message.created_at))).label("last_inbound"),
+                func.max(case((staff, Message.created_at))).label("last_staff"),
+            )
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .where(*scope)
+            .group_by(Message.conversation_id, Conversation.handover_state)
+        )
+    ).all()
+
+    last_out = (
+        select(
+            Message.conversation_id.label("conversation_id"),
+            func.max(Message.created_at).label("at"),
+        )
+        .join(Conversation, Conversation.id == Message.conversation_id)
+        .where(*scope, outbound)
+        .group_by(Message.conversation_id)
+        .subquery()
+    )
+    unread: dict[UUID, int] = {
+        conversation_id: count
+        for conversation_id, count in (
+            await session.execute(
+                select(Message.conversation_id, func.count())
+                .join(Conversation, Conversation.id == Message.conversation_id)
+                .outerjoin(last_out, last_out.c.conversation_id == Message.conversation_id)
+                .where(
+                    *scope,
+                    inbound,
+                    Message.read_at.is_(None),
+                    or_(last_out.c.at.is_(None), Message.created_at > last_out.c.at),
+                )
+                .group_by(Message.conversation_id)
+            )
+        ).all()
+    }
+
+    ranked = (
+        select(
+            Message.conversation_id.label("conversation_id"),
+            Message.body.label("body"),
+            Message.sender.label("sender"),
+            func.row_number()
+            .over(
+                partition_by=Message.conversation_id,
+                order_by=(Message.created_at.desc(), Message.id.desc()),
+            )
+            .label("rank"),
+        )
+        .join(Conversation, Conversation.id == Message.conversation_id)
+        .where(*scope)
+        .subquery()
+    )
+    newest = {
+        row.conversation_id: row
+        for row in (
+            await session.execute(
+                select(ranked.c.conversation_id, ranked.c.body, ranked.c.sender).where(
+                    ranked.c.rank == 1
+                )
+            )
+        ).all()
+    }
+
+    signals: dict[UUID, _ListSignals] = {}
+    for conversation_id, handover_state, last_inbound, last_staff in times:
+        last = newest.get(conversation_id)
+        signals[conversation_id] = _ListSignals(
+            needs_human=handover_state == HandoverState.HUMAN_ACTIVE
+            and last_inbound is not None
+            and (last_staff is None or last_inbound > last_staff),
+            unread_count=unread.get(conversation_id, 0),
+            last_message_preview=_preview(last.body) if last is not None else None,
+            last_message_sender=MessageSender(last.sender).value if last is not None else None,
+        )
+    return signals
 
 
 async def _get_conversation(
@@ -308,8 +440,9 @@ async def list_conversations(
     if own is not None:
         stmt = stmt.where(is_patient_of(own))
     rows = (await session.execute(stmt)).all()
+    signals = await _list_signals(session, tenant)
     return [
-        _read_model(conversation, patient, last_message_at)
+        _read_model(conversation, patient, last_message_at, signals.get(conversation.id))
         for conversation, patient, last_message_at in rows
     ]
 
@@ -336,13 +469,14 @@ async def update_handover(
 
     patient = await session.get(Patient, conversation.patient_id)
     last_message_at = await _last_message_at(session, conversation.id)
+    signals = await _list_signals(session, tenant, only=conversation.id)
     logger.info(
         "hub_conversation_handover_updated",
         tenant_id=str(tenant.id),
         conversation_id=str(conversation.id),
         state=conversation.handover_state.value,
     )
-    return _read_model(conversation, patient, last_message_at)
+    return _read_model(conversation, patient, last_message_at, signals.get(conversation.id))
 
 
 @router.get("/{conversation_id}/messages", response_model=list[MessageRead])

@@ -186,6 +186,11 @@ async def test_mine_lists_only_the_viewers_patients_newest_first(
         "patient_name",
         "handover_state",
         "last_message_at",
+        # The console list signals: the same row shape as the default list.
+        "needs_human",
+        "unread_count",
+        "last_message_preview",
+        "last_message_sender",
     }
 
 

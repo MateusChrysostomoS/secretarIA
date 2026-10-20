@@ -15,13 +15,29 @@ logger = get_logger(__name__)
 
 
 class ConversationRead(BaseModel):
-    """Response — whitelisted fields only (no message bodies ride along)."""
+    """Response — whitelisted fields only. The one message text that rides along is
+    `last_message_preview`: the newest message's body, cut short, for the list row.
+
+    The console list signals (additive; api/hub/conversations.py::_list_signals):
+
+    * `needs_human` - a person conducts (HUMAN_ACTIVE) and the patient wrote after the
+      clinic's staff last did (or staff never did): the patient is waiting for a person,
+      including right after a handoff the patient or the automation started.
+    * `unread_count` - the patient's messages after the newest reply (staff or
+      secretarIA) that the clinic has not marked read. Only a Brain-Message read is
+      recorded (POST .../messages/read); on WhatsApp it is everything since the reply.
+    * `last_message_sender` - "patient" | "bot" | "human", the author of that preview.
+    """
 
     id: str
     patient_wa_id: str | None
     patient_name: str | None
     handover_state: str
     last_message_at: datetime | None
+    needs_human: bool = False
+    unread_count: int = 0
+    last_message_preview: str | None = None
+    last_message_sender: str | None = None
 
 
 class HandoverUpdate(BaseModel):
