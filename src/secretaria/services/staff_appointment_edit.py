@@ -45,7 +45,13 @@ from secretaria.services.appointment_calendar_origin import (
 from secretaria.services.appointment_edit import appointment_email_version
 from secretaria.services.appointment_edit_write import write_appointment_edit
 from secretaria.services.appointment_status import SOURCE_HUB
-from secretaria.services.calendar import CalendarUnavailableError, build_event_description
+from secretaria.services.calendar import (
+    GOOGLE_RECONNECT_AGENDA_MESSAGE,
+    GOOGLE_RECONNECT_CODE,
+    CalendarUnavailableError,
+    GoogleTokenRevokedError,
+    build_event_description,
+)
 from secretaria.services.patient_context import as_utc
 from secretaria.services.professional_edit_outbox import record_professional_edit
 from secretaria.services.service_catalog import (
@@ -370,6 +376,9 @@ async def _move_event(
         "Não foi possível alterar o evento no Google Agenda. Nada foi alterado; "
         "tente de novo em instantes.",
     )
+    # Google refused the stored grant itself: retrying never helps, reconnecting does
+    # (the hub's other calendar routes answer the same - api/hub/calendar.py).
+    reconnect = StaffEditError(409, GOOGLE_RECONNECT_CODE, GOOGLE_RECONNECT_AGENDA_MESSAGE)
     if (window_changed or calendar_changed) and not request.allow_overlap:
         try:
             free = await new_calendar.is_slot_free(
@@ -377,6 +386,8 @@ async def _move_event(
                 target.end_at,
                 ignore_event_id=None if calendar_changed else before.event_id,
             )
+        except GoogleTokenRevokedError as exc:
+            raise reconnect from exc
         except CalendarUnavailableError as exc:
             raise unavailable from exc
         if not free:
@@ -411,6 +422,9 @@ async def _move_event(
         )
     except StaffEditError:
         raise
+    except GoogleTokenRevokedError as exc:
+        logger.warning("hub_edit_calendar_reconnect_required", appointment_id=str(appointment_id))
+        raise reconnect from exc
     except Exception as exc:
         logger.error(
             "hub_edit_calendar_failed",
