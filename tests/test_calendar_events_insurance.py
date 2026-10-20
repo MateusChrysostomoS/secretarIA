@@ -494,6 +494,11 @@ class _FakeCalendarService:
     def from_tenant_config(cls, config):
         return cls()
 
+    def references_same_calendar(self, other) -> bool:
+        # GET /events also reads each doctor's own agenda (api/hub/calendar.py); this
+        # fake stands for ONE Google agenda, so every resolution is the same one.
+        return True
+
     async def check_availability(self, start, end):
         return _FakeCalendarService.next_events
 
@@ -514,6 +519,11 @@ def _override(db, tenant, monkeypatch: pytest.MonkeyPatch):
     app.dependency_overrides[get_session] = _fake_get_session
     app.dependency_overrides[get_current_tenant] = _fake_get_current_tenant
     monkeypatch.setattr(hub_calendar, "CalendarService", _FakeCalendarService)
+
+    async def _resolve(session, tenant, professional, **_):
+        return _FakeCalendarService()
+
+    monkeypatch.setattr(hub_calendar, "resolve_professional_calendar", _resolve)
     _FakeCalendarService.next_events = []
     yield
     app.dependency_overrides.pop(get_session, None)

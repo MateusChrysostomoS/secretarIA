@@ -1,4 +1,10 @@
-"""Real event ownership regressions for hub-created doctor-owned appointments."""
+"""Real event ownership regressions for hub-created doctor-owned appointments.
+
+Owner's decision 2026-10-19: the hub creates a doctor's consultation/block on THAT
+doctor's agenda (origin "professional"). Rows created before it sit on the clinic's
+agenda with an explicit "clinic" origin and a doctor (`_legacy_hub_row`); everything
+that acts on them must keep finding the clinic's event.
+"""
 
 # ruff: noqa: F811
 
@@ -76,7 +82,7 @@ def calendars(r7, monkeypatch):
     monkeypatch.setattr(llm_context, "resolve_professional_calendar", resolve)
 
 
-async def _created(client, db, acting):
+async def _created(client, db, acting, *, with_doctor: bool = True):
     world = await setup_world(db, acting, professional_name="Dra. Ana")
     await set_tenant(
         db,
@@ -84,6 +90,7 @@ async def _created(client, db, acting):
         appointment_types=[{"name": "Consulta", "is_active": True, "duration_min": 30}],
     )
     start = soon(4)
+    doctor = {"professional_id": str(world.appointment.professional_id)} if with_doctor else {}
     result = await client.post(
         f"{CALENDAR}/appointments",
         json={
@@ -91,7 +98,7 @@ async def _created(client, db, acting):
             "end": (start + timedelta(minutes=30)).isoformat(),
             "summary": "Consulta",
             "patient_id": str(world.patient.id),
-            "professional_id": str(world.appointment.professional_id),
+            **doctor,
         },
     )
     assert result.status_code == 201
@@ -99,8 +106,41 @@ async def _created(client, db, acting):
     return world, row
 
 
-async def test_i3_hub_doctor_creation_edit_and_release_use_clinic_event(client, db, acting):
+async def _legacy_hub_row(client, db, acting):
+    """A doctor's hub row as written before 2026-10-19: clinic agenda, "clinic" origin."""
+    from tests._r7_support import set_appointment
+
+    world, row = await _created(client, db, acting, with_doctor=False)
+    assert row.google_calendar_source == "clinic"
+    await set_appointment(db, row.id, professional_id=world.appointment.professional_id)
+    return world, await reload_appointment(db, row.id)
+
+
+async def test_hub_doctor_creation_edit_and_release_use_the_doctors_own_event(client, db, acting):
     world, row = await _created(client, db, acting)
+    doctor = OwnedCalendar.get(str(world.appointment.professional_id))
+    event_id = row.google_event_id
+    assert row.google_calendar_source == "professional"
+    assert event_id in doctor.events and OwnedCalendar.get("tenant").events == {}
+    edited = await client.post(
+        f"{CALENDAR}/appointments/{row.id}/edit", json={"insurance": "Unimed"}
+    )
+    assert edited.status_code == 200
+    assert "Convênio: Unimed" in doctor.events[event_id][3]
+    released = await client.post(f"{CALENDAR}/appointments/{row.id}/release", json={})
+    assert released.status_code == 200
+    assert doctor.events == {} and OwnedCalendar.get("tenant").events == {}
+
+
+async def test_hub_creation_without_a_doctor_stays_on_the_clinic_agenda(client, db, acting):
+    world, row = await _created(client, db, acting, with_doctor=False)
+    assert row.professional_id is None and row.google_calendar_source == "clinic"
+    assert row.google_event_id in OwnedCalendar.get("tenant").events
+    assert OwnedCalendar.get(str(world.appointment.professional_id)).events == {}
+
+
+async def test_i3_legacy_hub_row_edit_and_release_use_clinic_event(client, db, acting):
+    world, row = await _legacy_hub_row(client, db, acting)
     event_id = row.google_event_id
     assert event_id in OwnedCalendar.get("tenant").events
     edited = await client.post(
@@ -115,7 +155,7 @@ async def test_i3_hub_doctor_creation_edit_and_release_use_clinic_event(client, 
 
 
 async def test_i3_doctor_move_updates_origin_and_removes_original_clinic_event(client, db, acting):
-    world, row = await _created(client, db, acting)
+    world, row = await _legacy_hub_row(client, db, acting)
     doctor = await add_professional(db, world.tenant.id, "Dr. Beto")
     result = await client.post(
         f"{CALENDAR}/appointments/{row.id}/edit",
@@ -132,7 +172,7 @@ async def test_i3_doctor_move_updates_origin_and_removes_original_clinic_event(c
 
 
 async def test_i3_same_physical_calendar_keeps_clinic_origin(client, db, acting):
-    world, row = await _created(client, db, acting)
+    world, row = await _legacy_hub_row(client, db, acting)
     doctor = await add_professional(db, world.tenant.id, "Dr. Beto")
     OwnedCalendar.instances[str(doctor)] = OwnedCalendar.get("tenant")
     result = await client.post(
@@ -147,7 +187,7 @@ async def test_i3_same_physical_calendar_keeps_clinic_origin(client, db, acting)
 
 
 async def test_i3_r6_patient_edit_of_hub_created_row_patches_actual_origin(client, db, acting):
-    world, row = await _created(client, db, acting)
+    world, row = await _legacy_hub_row(client, db, acting)
     async with db() as session:
         row = await session.get(Appointment, row.id)
         row.appointment_type = "Consulta"
@@ -188,7 +228,7 @@ async def test_i3_r6_patient_edit_of_hub_created_row_patches_actual_origin(clien
 
 
 async def test_i3_r6_doctor_move_cleans_up_the_old_clinic_calendar(client, db, acting):
-    world, row = await _created(client, db, acting)
+    world, row = await _legacy_hub_row(client, db, acting)
     new_id = await add_professional(db, world.tenant.id, "Dr. Beto")
     async with db() as session:
         row = await session.get(Appointment, row.id)
@@ -253,8 +293,10 @@ async def test_i3_legacy_null_origin_keeps_professional_inference(db, acting):
     assert calendar is OwnedCalendar.get(str(doctor_id))
 
 
-async def test_i3_hub_blocks_have_explicit_clinic_origin(client, db, acting):
+@pytest.mark.parametrize("with_doctor", [True, False])
+async def test_i3_hub_blocks_have_an_explicit_origin(client, db, acting, with_doctor):
     world = await setup_world(db, acting, professional_name="Dra. Ana")
+    doctor = str(world.appointment.professional_id)
     start = soon(5)
     result = await client.post(
         f"{CALENDAR}/blocks",
@@ -262,19 +304,19 @@ async def test_i3_hub_blocks_have_explicit_clinic_origin(client, db, acting):
             "start": start.isoformat(),
             "end": (start + timedelta(minutes=30)).isoformat(),
             "summary": "Bloqueio",
-            "professional_id": str(world.appointment.professional_id),
+            **({"professional_id": doctor} if with_doctor else {}),
         },
     )
     assert result.status_code == 201
     row = await reload_appointment(db, UUID(result.json()["id"]))
-    assert (
-        row.google_calendar_source == "clinic"
-        and row.google_event_id in OwnedCalendar.get("tenant").events
-    )
+    # A doctor's block on HIS agenda: his patients are never offered that slot.
+    where, origin = (doctor, "professional") if with_doctor else ("tenant", "clinic")
+    assert row.google_calendar_source == origin
+    assert row.google_event_id in OwnedCalendar.get(where).events
 
 
 async def test_i3_source_is_internal_not_editable_by_hub(client, db, acting):
-    world, row = await _created(client, db, acting)
+    world, row = await _legacy_hub_row(client, db, acting)
     result = await client.post(
         f"{CALENDAR}/appointments/{row.id}/edit",
         json={"google_calendar_source": "professional", "insurance": "Amil"},
@@ -287,7 +329,7 @@ async def test_i3_source_is_internal_not_editable_by_hub(client, db, acting):
 async def test_i3_explicit_unresolved_origin_never_deletes_clinic_event(client, db, acting, source):
     from tests._r7_support import set_appointment
 
-    world, row = await _created(client, db, acting)
+    world, row = await _legacy_hub_row(client, db, acting)
     await set_appointment(db, row.id, google_calendar_source=source, professional_id=None)
     edited = await client.post(f"{CALENDAR}/appointments/{row.id}/edit", json={"insurance": "Amil"})
     assert edited.status_code == 409 and edited.json()["detail"]["code"] == "calendar_unresolved"

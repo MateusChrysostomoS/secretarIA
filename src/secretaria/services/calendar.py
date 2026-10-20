@@ -132,6 +132,22 @@ def _raise_if_unavailable(exc: HttpError) -> None:
         raise CalendarUnavailableError(f"Google Calendar returned HTTP {status}") from exc
 
 
+# Google's answer for an event id the calendar ASKED does not hold: 404 when it
+# never lived there, 410 when it was deleted from it.
+_EVENT_GONE_HTTP_STATUSES = frozenset({404, 410})
+
+
+def is_event_not_found(exc: BaseException) -> bool:
+    """Whether `exc` is Google saying "no such event on THIS calendar".
+
+    Not an outage, and not proof the event is gone everywhere: with one agenda per
+    professional the same id may live on another calendar (api/hub/calendar.py's
+    legacy fallback to the clinic's agenda).
+    """
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    return isinstance(exc, HttpError) and status in _EVENT_GONE_HTTP_STATUSES
+
+
 class GoogleTokenRevokedError(CalendarUnavailableError):
     """Google refused the stored refresh token itself (`invalid_grant`).
 
@@ -860,28 +876,36 @@ class CalendarService:
 
         return await asyncio.to_thread(_patch)
 
-    async def cancel_event(self, event_id: str) -> None:
-        """Delete an event by id. 404/410 are treated as success (idempotent)."""
+    async def cancel_event(self, event_id: str) -> bool:
+        """Delete an event by id. 404/410 are treated as success (idempotent).
+
+        Returns True when THIS calendar held the event and deleted it, False when it
+        answered 404/410. Callers that only need the idempotent success ignore the
+        value; the hub's cancel/release need it, because "not on this calendar" is not
+        "gone" once a clinic has one agenda per professional (api/hub/calendar.py).
+        """
         calendar_id = self._calendar_id
 
-        def _delete() -> None:
+        def _delete() -> bool:
             try:
                 self._client().events().delete(
                     calendarId=calendar_id, eventId=event_id
                 ).execute()
             except HttpError as exc:
-                if exc.resp.status in (404, 410):
+                if exc.resp.status in _EVENT_GONE_HTTP_STATUSES:
                     logger.info("calendar_event_already_gone", event_id=event_id)
-                    return
+                    return False
                 logger.error("calendar_delete_http_error", error=str(exc))
                 _raise_if_unavailable(exc)
                 raise
             except _NETWORK_ERRORS as exc:
                 logger.error("calendar_delete_network_error", error=str(exc))
                 raise CalendarUnavailableError("Google Calendar unreachable") from exc
+            return True
 
-        await asyncio.to_thread(_delete)
+        deleted = await asyncio.to_thread(_delete)
         logger.info("calendar_event_cancelled", event_id=event_id)
+        return deleted
 
     async def create_secondary_calendar(self, summary: str) -> dict:
         """Create a NEW secondary Google Calendar via `calendars.insert`.
