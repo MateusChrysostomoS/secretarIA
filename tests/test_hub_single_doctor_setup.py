@@ -52,6 +52,7 @@ from secretaria.core.database import Base, get_session  # noqa: E402
 from secretaria.models import FlowState, Tenant  # noqa: E402
 from secretaria.models.professional import Professional  # noqa: E402
 from secretaria.models.service import Service  # noqa: E402
+from secretaria.services import local_calendar  # noqa: E402
 from secretaria.services.calendar import CalendarService  # noqa: E402
 from secretaria.services.context_completeness import compute_completeness  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
@@ -542,6 +543,9 @@ async def _router_inputs(db, tenant_id, monkeypatch):
         config = await load_tenant_config(session, tenant)
         snapshot = _flow_tenant_snapshot(tenant, rows, services)
         professionals = _flow_professionals(rows, services)
+    # A clinic with no Google credential reads its own agenda (services/local_calendar.py),
+    # which opens its own short sessions: point them at the test database.
+    monkeypatch.setattr(local_calendar, "async_session_factory", db)
     calendar = CalendarService.from_tenant_config(config)
     monkeypatch.setattr(calendar, "_service", _FakeGoogle())
     return snapshot, professionals, calendar, config
