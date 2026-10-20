@@ -36,10 +36,12 @@ from secretaria.services.booking_scope import (
 )
 from secretaria.services.calendar import (
     CalendarService,
+    CalendarSlotTakenError,
     build_event_description,
     build_patient_calendar_link,
 )
 from secretaria.services.flow_router import SLOT_TAKEN_AT_CONFIRM_MESSAGE
+from secretaria.services.local_calendar import create_event_exclusive
 from secretaria.services.manage_request import ManageRequest, parse_appointment_ref
 from secretaria.services.precheck import HandoffOutcome, request_precheck_handoff
 from secretaria.services.service_catalog import find_by_name, missing_from
@@ -639,13 +641,51 @@ async def _hand_back_if_slot_taken(
         tenant_id=_tenant_id_ctx.get(),
     ):
         return
-    raise BookingDraftRequested(
+    raise await _slot_taken_hand_back(cal, start, appointment_type, professional_id)
+
+
+async def _slot_taken_hand_back(
+    cal: CalendarService, start: datetime, appointment_type: str | None, professional_id
+) -> "BookingDraftRequested":
+    """The hand-back both "taken" answers raise: the same service, doctor, convênio, DAY."""
+    return BookingDraftRequested(
         appointment_type,
         professional_id,
         await _conversation_insurance(),
         day=start.astimezone(cal.tzinfo).date(),
         intro=SLOT_TAKEN_AT_CONFIRM_MESSAGE,
     )
+
+
+async def _create_booking_event(
+    cal: CalendarService,
+    start: datetime,
+    end: datetime,
+    *,
+    summary: str,
+    description: str,
+    tool_name: str,
+    appointment_type: str | None,
+    professional_id: UUID | None = None,
+) -> dict:
+    """The v1 booking tools' write: refused atomically when the time was just taken.
+
+    On the secretarIA agenda the write itself re-checks under the agenda's lock
+    (services/local_calendar.py::create_event_exclusive), closing the gap between
+    `_hand_back_if_slot_taken` and the insert; a refusal leaves the model exactly
+    like that re-check does. On Google it is the plain `create_event`, as before.
+    """
+    try:
+        return await create_event_exclusive(
+            cal, start=start, end=end, summary=summary, description=description
+        )
+    except CalendarSlotTakenError:
+        logger.info(
+            "booking_slot_taken_at_write",
+            source=tool_name,
+            conversation_id=str(_conversation_id_ctx.get() or "") or None,
+        )
+        raise await _slot_taken_hand_back(cal, start, appointment_type, professional_id) from None
 
 
 async def _persist_appointment(
@@ -1095,11 +1135,14 @@ async def create_event(
     await _hand_back_if_slot_taken(
         cal, fallback_start, fallback_end, tool_name="create_event", appointment_type=canonical_type
     )
-    event = await cal.create_event(
-        start=fallback_start,
-        end=fallback_end,
+    event = await _create_booking_event(
+        cal,
+        fallback_start,
+        fallback_end,
         summary=summary,
         description=description,
+        tool_name="create_event",
+        appointment_type=canonical_type,
     )
     await _persist_appointment(
         event,

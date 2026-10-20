@@ -36,6 +36,7 @@ from secretaria.ai.tools import (
     _canonical_appointment_type,
     _conversation_attendee_name,
     _conversation_insurance,
+    _create_booking_event,
     _get_calendar,
     _hand_back_if_slot_taken,
     _localize_window,
@@ -168,11 +169,14 @@ async def create_event_at_unit(
         tool_name="create_event_at_unit",
         appointment_type=canonical_type,
     )
-    event = await cal.create_event(
-        start=fallback_start,
-        end=fallback_end,
+    event = await _create_booking_event(
+        cal,
+        fallback_start,
+        fallback_end,
         summary=summary,
         description=description,
+        tool_name="create_event_at_unit",
+        appointment_type=canonical_type,
     )
     await _persist_appointment(
         event,

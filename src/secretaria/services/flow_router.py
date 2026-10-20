@@ -87,11 +87,13 @@ from secretaria.services.booking_scope import (
 )
 from secretaria.services.calendar import (
     CalendarService,
+    CalendarSlotTakenError,
     CalendarUnavailableError,
     build_event_description,
     build_patient_calendar_link,
 )
 from secretaria.services.insurance_catalog import match_plan
+from secretaria.services.local_calendar import create_event_exclusive, update_event_exclusive
 from secretaria.services.patient_context import as_utc
 from secretaria.services.pending_identity import BOOKING_SLOT_TAKEN_MESSAGE
 from secretaria.services.sensitive_claim_guard import unbacked_claim
@@ -4159,12 +4161,28 @@ async def _handle_confirmation(
         # "commit" falls through to exactly the code that was here before.
 
     try:
-        event = await calendar.create_event(
+        # Exclusive on the secretarIA agenda: the re-check above and the write become
+        # one atomic step there (services/local_calendar.py); plain on Google.
+        event = await create_event_exclusive(
+            calendar,
             start=start, end=end, summary=summary,
             description=build_event_description(
                 service=canonical_type or service_type, insurance=insurance,
                 attendee_name=attendee_name,
             ),
+        )
+    except CalendarSlotTakenError:
+        # Somebody else's booking landed between the re-check and the write: the same
+        # answer as a taken re-check.
+        return await _reoffer_taken_slot(
+            conversation,
+            tenant,
+            calendar,
+            start,
+            duration_minutes=duration,
+            branch=BOOKING_DAY_BRANCH,
+            back_target=BACK_TARGET_SERVICE,
+            professionals=professionals,
         )
     except CalendarUnavailableError:
         return FlowRouterResult(
@@ -4776,7 +4794,19 @@ async def _manage_reschedule(
         )
 
     try:
-        await calendar.update_event(event_id, start=start, end=end)
+        await update_event_exclusive(calendar, event_id, start=start, end=end)
+    except CalendarSlotTakenError:
+        # Taken between the re-check and the move (secretarIA agenda only): reoffer.
+        return await _reoffer_taken_slot(
+            conversation,
+            tenant,
+            calendar,
+            start,
+            duration_minutes=duration,
+            branch=MANAGE_DAY_BRANCH,
+            back_target=None,
+            professionals=professionals,
+        )
     except Exception as exc:
         # Any refusal to move the event (an outage, OR Google answering 404
         # because the event is not on this agenda / was deleted by hand) is a

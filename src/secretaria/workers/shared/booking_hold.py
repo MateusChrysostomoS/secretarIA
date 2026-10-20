@@ -46,6 +46,7 @@ from secretaria.services.booking_hold import (
 )
 from secretaria.services.booking_scope import resolve_booking_owner_id
 from secretaria.services.calendar import (
+    CalendarSlotTakenError,
     CalendarUnavailableError,
     build_event_description,
     build_patient_calendar_link,
@@ -60,6 +61,7 @@ from secretaria.services.flow_router import (
 from secretaria.services.insurance_catalog import (
     resolve_booking_plan_ids,
 )
+from secretaria.services.local_calendar import create_event_exclusive
 from secretaria.services.pending_identity import (
     BOOKING_HOLD_EXPIRED_MESSAGE,
     CODE_NOTICE_BUTTONS,
@@ -314,13 +316,20 @@ async def _promote_booking_hold(
     event_name = held.attendee_name or await _patient_display_name(patient_id)
     summary = f"{service_type} - {event_name}" if event_name else service_type
     try:
-        event = await calendar.create_event(
+        # Exclusive on the secretarIA agenda (atomic with its own re-check); plain on
+        # Google, where the re-check above is the whole protection.
+        event = await create_event_exclusive(
+            calendar,
             start=held.start_at, end=held.end_at, summary=summary,
             description=build_event_description(
                 service=service_type, insurance=held.insurance,
                 channel=reply.channel, attendee_name=held.attendee_name,
             ),
         )
+    except CalendarSlotTakenError:
+        # Taken between the re-check and the write: exactly the taken re-check's answer.
+        await _release_hold(held.id)
+        return await _slot_taken_reoffer(reply, tenant, held, calendar)
     except CalendarUnavailableError:
         logger.error(
             "booking_hold_promote_calendar_unavailable",
