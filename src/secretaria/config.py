@@ -2,6 +2,7 @@
 
 import json
 from functools import lru_cache
+from uuid import UUID
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -145,6 +146,37 @@ class Settings(BaseSettings):
             if digits:
                 wa_ids.add(digits)
         return frozenset(wa_ids)
+
+    # --- `/menu3` test-only reset (workers/shared/debug_reset.py) ---
+    # Comma-separated tenant UUIDs where a patient typing `/menu3` wipes their own
+    # conversation and is asked for the LGPD consent again, so the founder can replay
+    # the patient flow as many times as needed. The DEFAULT names the two test
+    # clinics, so the command works in production without any env var; setting this
+    # to "" turns it off everywhere. For every other tenant `/menu3` is an ordinary
+    # message.
+    DEBUG_RESET_TENANT_IDS: str = (
+        "9c4fa6a5-ffdb-4adb-9fe1-9036270f1246,a31bf7b7-3727-48bb-b1eb-342847cd6cd6"
+    )
+
+    @property
+    def debug_reset_tenant_ids(self) -> frozenset[UUID]:
+        """Parse DEBUG_RESET_TENANT_IDS into a set of tenant UUIDs.
+
+        Quotes and blanks are stripped like BOT_ALLOWLIST_WA_IDS above. An entry
+        that is not a UUID is dropped rather than raising: `Settings()` is built
+        once per process and must never fail on a typo in a panel. Unlike the
+        wa_id allowlist, an empty result means "nobody": the command is off.
+        """
+        tenant_ids: set[UUID] = set()
+        for raw in self.DEBUG_RESET_TENANT_IDS.split(","):
+            cleaned = raw.strip().strip("'\"").strip()
+            if not cleaned:
+                continue
+            try:
+                tenant_ids.add(UUID(cleaned))
+            except ValueError:
+                continue
+        return frozenset(tenant_ids)
 
     # --- Context-aware opening greeting (workers/tasks.py + services/patient_context.py) ---
     # Hours ahead of now within which an upcoming appointment counts as "soon"

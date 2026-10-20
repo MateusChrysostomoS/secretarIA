@@ -580,6 +580,22 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
         )
         return
 
+    # `/menu3` (test clinics only, workers/shared/debug_reset.py): the conversation
+    # was wiped in the inbound transaction. Replay the opening a first contact gets -
+    # the frame without buttons, then the LGPD notice with "✅ Concordo" - and nothing
+    # else. No identity probe: it would mirror a verified account's consent and skip
+    # the notice. "✏️ Mudar nome" rides along when a name is stored, as on the notice
+    # that follows the name question.
+    if reply.debug_reset:
+        await _send_greeting(reply, tenant=tenant, waba_token=waba_token)
+        await _send_consent_notice(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            change_name=bool((patient_name or "").strip()),
+        )
+        return
+
     # First-contact/returning greeting: deterministic, verbatim and sent with
     # this tenant's own WhatsApp number/token. This intentionally runs only
     # after entitlement and tenant credentials have been resolved.
