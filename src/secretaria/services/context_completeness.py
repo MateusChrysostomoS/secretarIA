@@ -1,15 +1,30 @@
 """What is still missing in a clinic's context - deterministic, no LLM (TASK-025).
 
-`compute_completeness(tenant, services)` returns the checklist the manager sees next to the
-context form and a 0-100 score. Required items weigh 1, recommended ones 0.5. A required item
-that is not filled is `missing`; a recommended one is `optional`. Pure: it reads attributes
-of the objects it is given and touches no database, so it is trivially testable.
+`compute_completeness(tenant, services, professionals)` returns the checklist the manager sees
+next to the context form and a 0-100 score. Required items weigh 1, recommended ones 0.5. A
+required item that is not filled is `missing`; a recommended one is `optional`. Pure: it reads
+attributes of the objects it is given and touches no database, so it is trivially testable.
+
+`professionals` (the clinic's ACTIVE professionals) is what makes the booking items honest.
+Without it, "hours" read the clinic's own column and "services" counted catalog rows — but a
+patient books against each professional's RESOLVED hours and services, and a catalog row is
+offered by nobody until a professional ticks it. A new one-doctor clinic could be told
+"Pelo menos um serviço: feito" while its patients read "não há serviços disponíveis". With the
+roster the checklist asks the same question the booking flow does
+(services/tenant_config.py::professional_business_hours / professional_appointment_types) and
+gains a "who attends" item. `None` keeps the roster-blind reading for callers without one.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Literal
+
+from secretaria.services.tenant_config import (
+    active_appointment_types,
+    professional_appointment_types,
+    professional_business_hours,
+)
 
 Status = Literal["done", "missing", "optional"]
 
@@ -63,7 +78,108 @@ def _guidance_gap(active_services: list[Any]) -> list[str]:
     return [s.name for s in active_services if not _has_guidance(s)]
 
 
-def compute_completeness(tenant: Any, services: list[Any]) -> Completeness:
+def _names(names: list[str]) -> str:
+    """Up to three names, then "e mais N" — the same shape as the guidance hint."""
+    extra = len(names) - 3
+    return ", ".join(names[:3]) + (f" e mais {extra}" if extra > 0 else "")
+
+
+HOURS_HINT = "Defina os dias e horários em que a clínica atende."
+SERVICES_HINT = "Cadastre os serviços que os pacientes podem agendar."
+PROFESSIONAL_HINT = (
+    'Diga quem atende os pacientes: você mesmo ("Sim, eu também atendo") ou um '
+    "profissional convidado."
+)
+
+# (key, label, weight, done, hint-when-not-done, section)
+_Spec = tuple[str, str, float, bool, str, str]
+
+
+def _booking_items(
+    tenant: Any, services: list[Any], active: list[Any], professionals: list[Any] | None
+) -> list[_Spec]:
+    """The items a patient's booking depends on: who attends, when, and what.
+
+    Roster-aware when `professionals` is given (see the module docstring): every active
+    professional must resolve to at least one window and one active service, because a
+    professional without either is offered to nobody. With `None`, the roster-blind reading.
+    """
+    clinic_hours = _has_hours(getattr(tenant, "business_hours", None))
+    if professionals is None:
+        return [
+            (
+                "hours",
+                "Horários de atendimento",
+                REQUIRED_WEIGHT,
+                clinic_hours,
+                HOURS_HINT,
+                "hours",
+            ),
+            (
+                "services",
+                "Pelo menos um serviço",
+                REQUIRED_WEIGHT,
+                bool(active),
+                SERVICES_HINT,
+                "services",
+            ),
+        ]
+
+    without_hours = [p.name for p in professionals if not professional_business_hours(p, tenant)]
+    hours_hint = (
+        HOURS_HINT if not clinic_hours else f"Sem horário de atendimento: {_names(without_hours)}."
+    )
+
+    if professionals:
+        without_services = [
+            p.name for p in professionals if not professional_appointment_types(p, tenant, services)
+        ]
+        services_done = not without_services
+    else:
+        # Nobody attends: what the flow would offer is the clinic's own legacy list.
+        without_services = []
+        services_done = bool(active_appointment_types(tenant, services))
+    if not active or not without_services:
+        services_hint = SERVICES_HINT
+    elif len(professionals) == 1:
+        services_hint = (
+            f"Nenhum serviço está marcado para {professionals[0].name}: marque ao menos um, "
+            "com a duração."
+        )
+    else:
+        services_hint = f"Sem serviço marcado: {_names(without_services)}."
+
+    return [
+        (
+            "professional",
+            "Profissional que atende",
+            REQUIRED_WEIGHT,
+            bool(professionals),
+            PROFESSIONAL_HINT,
+            "professionals",
+        ),
+        (
+            "hours",
+            "Horários de atendimento",
+            REQUIRED_WEIGHT,
+            clinic_hours and not without_hours,
+            hours_hint,
+            "hours",
+        ),
+        (
+            "services",
+            "Pelo menos um serviço",
+            REQUIRED_WEIGHT,
+            services_done,
+            services_hint,
+            "services",
+        ),
+    ]
+
+
+def compute_completeness(
+    tenant: Any, services: list[Any], professionals: list[Any] | None = None
+) -> Completeness:
     # JSON column: a row written outside the schema can hold any shape; ignore a bad one.
     stored = getattr(tenant, "clinic_facts", None)
     facts = stored if isinstance(stored, dict) else {}
@@ -75,12 +191,11 @@ def compute_completeness(tenant: Any, services: list[Any]) -> Completeness:
     if not active:
         guidance_hint = "Cadastre os serviços primeiro."
     else:
-        extra = len(gap) - 3
-        names = ", ".join(gap[:3]) + (f" e mais {extra}" if extra > 0 else "")
-        guidance_hint = f"Faltam orientações em: {names}."
+        guidance_hint = f"Faltam orientações em: {_names(gap)}."
 
-    # (key, label, weight, done, hint-when-not-done, section)
-    spec: list[tuple[str, str, float, bool, str, str]] = [
+    # What a booking needs comes first: it is what a clinic setting itself up must see first.
+    spec: list[_Spec] = [
+        *_booking_items(tenant, services, active, professionals),
         (
             "address",
             "Endereço da clínica",
@@ -88,22 +203,6 @@ def compute_completeness(tenant: Any, services: list[Any]) -> Completeness:
             _has_address(getattr(tenant, "address", None)),
             "Informe pelo menos a rua e a cidade.",
             "address",
-        ),
-        (
-            "hours",
-            "Horários de atendimento",
-            REQUIRED_WEIGHT,
-            _has_hours(getattr(tenant, "business_hours", None)),
-            "Defina os dias e horários em que a clínica atende.",
-            "hours",
-        ),
-        (
-            "services",
-            "Pelo menos um serviço",
-            REQUIRED_WEIGHT,
-            bool(active),
-            "Cadastre os serviços que os pacientes podem agendar.",
-            "services",
         ),
         (
             "parking_or_arrival",
