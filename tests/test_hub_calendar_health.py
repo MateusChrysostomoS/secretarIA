@@ -117,6 +117,10 @@ class _FakeCalendar:
             raise outcome
         return []
 
+    async def list_events(self, start, end) -> list[dict]:
+        # GET /events reads an agenda whole (CalendarService.list_events).
+        return await self.check_availability(start, end)
+
 
 class _FakeCalendarFactory:
     @staticmethod

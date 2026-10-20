@@ -553,10 +553,11 @@ async def _read_agendas(sources: list[_AgendaSource], start: datetime, end: date
     An id seen on two agendas (one Google event visible from both) is listed from the
     first source, the clinic's. The clinic's agenda failing fails the page exactly as it
     did when it was the only one read (the same exception); a doctor's failing is logged
-    and skipped - one broken credential must not blank the whole clinic's agenda.
+    and skipped - one broken credential must not blank the whole clinic's agenda. Each
+    agenda is read whole (`CalendarService.list_events` pages), not its first 50 events.
     """
     results = await asyncio.gather(
-        *(source.calendar.check_availability(start, end) for source in sources),
+        *(source.calendar.list_events(start, end) for source in sources),
         return_exceptions=True,
     )
     events: list[dict] = []

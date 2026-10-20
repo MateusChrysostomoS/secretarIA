@@ -110,6 +110,15 @@ _UNAVAILABLE_HTTP_STATUSES = frozenset({401, 403, 500, 502, 503, 504})
 DEFAULT_MAX_EVENTS = 50
 DAY_SCAN_MAX_EVENTS = 2500
 
+# The hub agenda (`list_events`, GET /tenants/me/calendar/events) shows a whole
+# month of one agenda, so it pages through events.list instead of trusting one
+# page - the 50 above silently hid every event after the 50th. The cap keeps a
+# runaway calendar from turning one screen into an unbounded read; the page
+# guard stops a misbehaving `nextPageToken` chain.
+HUB_LIST_MAX_EVENTS = 2500
+HUB_LIST_PAGE_SIZE = 250
+_HUB_LIST_MAX_PAGES = 50
+
 
 class CalendarUnavailableError(Exception):
     """Raised when Google Calendar cannot be reached or refused our credentials.
@@ -486,54 +495,88 @@ class CalendarService:
         """
         start_iso = self._ensure_tz(start).isoformat()
         end_iso = self._ensure_tz(end).isoformat()
-        calendar_id = self._calendar_id
 
         def _list() -> list[dict]:
-            try:
-                resp = (
-                    self._client()
-                    .events()
-                    .list(
-                        calendarId=calendar_id,
-                        timeMin=start_iso,
-                        timeMax=end_iso,
-                        singleEvents=True,
-                        orderBy="startTime",
-                        maxResults=max_results,
-                    )
-                    .execute()
-                )
-            except HttpError as exc:
-                logger.error("calendar_events_list_http_error", error=str(exc))
-                _raise_if_unavailable(exc)
-                raise
-            except _NETWORK_ERRORS as exc:
-                logger.error("calendar_events_list_network_error", error=str(exc))
-                raise CalendarUnavailableError("Google Calendar unreachable") from exc
-            out: list[dict] = []
-            for ev in resp.get("items", []):
-                # transparency=="transparent" means the owner marked the event
-                # as "free" - does not block time, do not report as conflict.
-                if ev.get("transparency") == "transparent":
-                    continue
-                # All-day events expose `date` only; skip them so personal
-                # all-day reminders (birthdays etc.) on a primary calendar
-                # don't block clinic-hour scheduling.
-                ev_start = ev.get("start", {}).get("dateTime")
-                ev_end = ev.get("end", {}).get("dateTime")
-                if not (ev_start and ev_end):
-                    continue
-                out.append(
-                    {
-                        "id": ev.get("id"),
-                        "summary": ev.get("summary"),
-                        "start": ev_start,
-                        "end": ev_end,
-                    }
-                )
-            return out
+            return self._events_page(start_iso, end_iso, max_results)[0]
 
         return await asyncio.to_thread(_list)
+
+    async def list_events(
+        self, start: datetime, end: datetime, max_events: int = HUB_LIST_MAX_EVENTS
+    ) -> list[dict]:
+        """Every event overlapping [start, end) - the hub agenda's read.
+
+        Same items and filtering as `check_availability`, but paged through
+        `nextPageToken` until the window is exhausted or `max_events` is reached
+        (logged as `calendar_events_list_truncated`). Slot availability keeps the
+        single page above; only the agenda screen needs the whole window.
+        """
+        start_iso = self._ensure_tz(start).isoformat()
+        end_iso = self._ensure_tz(end).isoformat()
+
+        def _list_all() -> list[dict]:
+            out: list[dict] = []
+            token: str | None = None
+            for _ in range(_HUB_LIST_MAX_PAGES):
+                page_size = min(HUB_LIST_PAGE_SIZE, max_events - len(out))
+                items, token = self._events_page(start_iso, end_iso, page_size, token)
+                out.extend(items)
+                if not token or len(out) >= max_events:
+                    break
+            if token:
+                logger.warning(
+                    "calendar_events_list_truncated", events=len(out), max_events=max_events
+                )
+            return out[:max_events]
+
+        return await asyncio.to_thread(_list_all)
+
+    def _events_page(
+        self, start_iso: str, end_iso: str, max_results: int, page_token: str | None = None
+    ) -> tuple[list[dict], str | None]:
+        """One events.list page (blocking): the timed, busy events and the next page's token."""
+        calendar_id = self._calendar_id
+        params: dict[str, Any] = {
+            "calendarId": calendar_id,
+            "timeMin": start_iso,
+            "timeMax": end_iso,
+            "singleEvents": True,
+            "orderBy": "startTime",
+            "maxResults": max_results,
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        try:
+            resp = self._client().events().list(**params).execute()
+        except HttpError as exc:
+            logger.error("calendar_events_list_http_error", error=str(exc))
+            _raise_if_unavailable(exc)
+            raise
+        except _NETWORK_ERRORS as exc:
+            logger.error("calendar_events_list_network_error", error=str(exc))
+            raise CalendarUnavailableError("Google Calendar unreachable") from exc
+        out: list[dict] = []
+        for ev in resp.get("items", []):
+            # transparency=="transparent" means the owner marked the event
+            # as "free" - does not block time, do not report as conflict.
+            if ev.get("transparency") == "transparent":
+                continue
+            # All-day events expose `date` only; skip them so personal
+            # all-day reminders (birthdays etc.) on a primary calendar
+            # don't block clinic-hour scheduling.
+            ev_start = ev.get("start", {}).get("dateTime")
+            ev_end = ev.get("end", {}).get("dateTime")
+            if not (ev_start and ev_end):
+                continue
+            out.append(
+                {
+                    "id": ev.get("id"),
+                    "summary": ev.get("summary"),
+                    "start": ev_start,
+                    "end": ev_end,
+                }
+            )
+        return out, resp.get("nextPageToken") or None
 
     def _windows_for_day(
         self, day_local: datetime, open_hour: int, close_hour: int

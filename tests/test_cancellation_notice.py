@@ -167,6 +167,10 @@ class _FakeCalendarService:
     async def check_availability(self, start, end):
         return _FakeCalendarService.next_events
 
+    async def list_events(self, start, end):
+        # GET /events reads an agenda whole (CalendarService.list_events).
+        return await self.check_availability(start, end)
+
 
 class _FakeArqPool:
     def __init__(self) -> None:

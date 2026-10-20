@@ -48,6 +48,10 @@ class _FakeCalendarService:
     async def check_availability(self, start, end):
         return list(type(self).events)
 
+    async def list_events(self, start, end):
+        # GET /events reads an agenda whole (CalendarService.list_events).
+        return await self.check_availability(start, end)
+
     async def cancel_event(self, event_id: str) -> None:
         return None
 
