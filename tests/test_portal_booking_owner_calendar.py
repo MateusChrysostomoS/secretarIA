@@ -64,6 +64,7 @@ from secretaria.services.calendar import CalendarService  # noqa: E402
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE  # noqa: E402
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
 from secretaria.services.pending_identity import VerifyOutcome, VerifyResult  # noqa: E402
+from secretaria.services.tenant_config import set_google_refresh_token  # noqa: E402
 from secretaria.workers import tasks  # noqa: E402
 from secretaria.workers.shared.llm_context import _appointment_calendar  # noqa: E402
 from secretaria.workers.shared.text import CALENDAR_UNAVAILABLE_MESSAGE  # noqa: E402
@@ -214,6 +215,8 @@ async def _seed(db):
             flow_state=FlowState.AWAITING_EMAIL_CODE,
         )
         s.add(conv)
+        # A CONNECTED clinic (the env-var token no longer stands in for a tenant's).
+        await set_google_refresh_token(s, tenant.id, "clinic-token")
         await s.commit()
         for row in (tenant, dr_a, dr_b, patient, conv):
             await s.refresh(row)

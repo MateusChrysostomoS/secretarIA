@@ -322,6 +322,7 @@ def _calendar_for_professional(
     google_refresh_token: str | None,
     business_hours: dict | None,
     appointment_duration_min: int | None = None,
+    professional_id: UUID | None = None,
 ) -> CalendarService:
     """Build a CalendarService for ONE professional's own config (contract v1 §10 item C).
 
@@ -343,6 +344,7 @@ def _calendar_for_professional(
         google_refresh_token=google_refresh_token,
         business_hours=business_hours,
         appointment_duration_min=appointment_duration_min,
+        professional_id=professional_id,
     )
 
 

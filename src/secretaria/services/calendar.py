@@ -1,9 +1,15 @@
-"""Google Calendar integration for the clinic.
+"""Google Calendar integration for the clinic - and the agenda-backend selection point.
 
 Fase A (single tenant): credentials come from the environment
 (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_REFRESH_TOKEN, scope
 calendar.events). Multi-tenant (Phase 5): the refresh token moves to an
 encrypted column on `tenants` and `CalendarService` takes a `Tenant` row.
+
+Native agenda (founder's decision 2026-10-20): an agenda no Google credential covers
+is the secretarIA's own (services/local_calendar.py::LocalCalendarService, a subclass
+with this same interface over the `calendar_events` table). `from_tenant_config` -
+which every factory point goes through - is where that choice is made; see its
+docstring. Event ids of that agenda start with `loc_` (`is_local_event_id`).
 
 The googleapiclient library is blocking, so every public method offloads to
 a worker thread with asyncio.to_thread to keep the event loop responsive.
@@ -12,11 +18,13 @@ a worker thread with asyncio.to_thread to keep the event loop responsive.
 import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import quote, urlencode
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
+    from secretaria.services.local_calendar import LocalCalendarService
     from secretaria.services.tenant_config import TenantRuntimeConfig
 
 from google.auth.exceptions import RefreshError, TransportError
@@ -146,13 +154,47 @@ def _raise_if_unavailable(exc: HttpError) -> None:
 _EVENT_GONE_HTTP_STATUSES = frozenset({404, 410})
 
 
+# Ids of events on the secretarIA's own agenda (services/local_calendar.py). Never a
+# valid Google id ("_" is outside Google's base32hex alphabet), so the two can share
+# `appointments.google_event_id` without ever being confused.
+LOCAL_EVENT_ID_PREFIX = "loc_"
+
+
+def is_local_event_id(event_id: object) -> bool:
+    """Whether `event_id` names an event on the secretarIA's own agenda. Pure."""
+    return isinstance(event_id, str) and event_id.startswith(LOCAL_EVENT_ID_PREFIX)
+
+
+class CalendarEventNotFoundError(LookupError):
+    """The secretarIA agenda holds no live event with this id - its 404/410.
+
+    `is_event_not_found` answers True for it, so every caller that already treats a
+    Google 404 as "not on this agenda" treats this one the same way.
+    """
+
+
+class CalendarSlotTakenError(Exception):
+    """An EXCLUSIVE write was refused: something busy already overlaps [start, end).
+
+    Raised only by the secretarIA's own agenda, which can make "create this booking
+    unless the time is taken" one atomic step (services/local_calendar.py). Google
+    cannot, so on a Google agenda the caller's `slot_taken_at_confirm` re-check stays
+    the whole protection, as before. NOT a `CalendarUnavailableError`: nothing is
+    down, somebody else just got the time first - every patient write site answers it
+    with the same "esse horário acabou de ser ocupado" branch as that re-check.
+    """
+
+
 def is_event_not_found(exc: BaseException) -> bool:
     """Whether `exc` is Google saying "no such event on THIS calendar".
 
     Not an outage, and not proof the event is gone everywhere: with one agenda per
     professional the same id may live on another calendar (api/hub/calendar.py's
-    legacy fallback to the clinic's agenda).
+    legacy fallback to the clinic's agenda). The secretarIA agenda's own "not found"
+    (`CalendarEventNotFoundError`) counts too.
     """
+    if isinstance(exc, CalendarEventNotFoundError):
+        return True
     status = getattr(getattr(exc, "resp", None), "status", None)
     return isinstance(exc, HttpError) and status in _EVENT_GONE_HTTP_STATUSES
 
@@ -327,6 +369,10 @@ def build_patient_calendar_link(
 class CalendarService:
     """Async wrapper around the (sync) Google Calendar v3 API."""
 
+    # Which backend answers: "google" here, "local" on LocalCalendarService. Read by the
+    # hub (CalendarEventRead.calendar_backend) and the connect-time sync.
+    backend: ClassVar[str] = "google"
+
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
         self._tz = ZoneInfo(self._settings.CLINIC_TIMEZONE)
@@ -337,6 +383,12 @@ class CalendarService:
         # fixed 08-18 window is used by list_free_slots (dev/Fase A fallback).
         self._business_hours: dict = {}
         self._default_slot_minutes: int = 30
+        # Whose agenda this is, set by `from_tenant_config`: the tenant, and the
+        # professional (None = the clinic's own). Lets a Google agenda still act on an
+        # event the clinic booked on the secretarIA agenda before connecting
+        # (`_local_event_target`). None on the bare env-token service (dev scripts).
+        self._tenant_id: UUID | None = None
+        self._owner_professional_id: UUID | None = None
 
     def references_same_calendar(self, other: object) -> bool:
         """Identify the physical agenda without exporting credentials.
@@ -353,19 +405,50 @@ class CalendarService:
         return bool(own and own == theirs)
 
     @classmethod
-    def from_tenant_config(cls, config: "TenantRuntimeConfig") -> "CalendarService":
-        """Build a CalendarService using per-tenant credentials.
+    def from_tenant_config(
+        cls, config: "TenantRuntimeConfig", *, professional_id: UUID | None = None
+    ) -> "CalendarService":
+        """THE agenda-backend selection point: Google when a credential covers it, else local.
+
+        Every factory point builds through here - the clinic's agenda directly, every
+        professional's through `for_professional` (services/tenant_config.py::
+        resolve_professional_calendar, ai/tools.py::_calendar_for_professional) - so the
+        rule below has exactly one spelling:
+
+          - `config.google_refresh_token` set -> Google Calendar, as before. That token
+            is already the right one: the clinic's for its own agenda and in
+            shared_account mode, the professional's own in per_professional mode
+            (tenant_config.py::_professional_credential). A token Google has revoked or
+            expired is still a token: the agenda stays Google and raises
+            `GoogleTokenRevokedError` on use. Switching it to the local agenda instead
+            would split one clinic's bookings across two agendas and double-book.
+          - no token -> the secretarIA's own agenda (`LocalCalendarService`), keyed by
+            tenant + owner. Never the env-var dev token: that fallback is only reached
+            by a bare `CalendarService()` (dev scripts).
+
+        The owner is `professional_id`, else `config.professional_id` - set by
+        `load_tenant_config` for a clinic with exactly ONE active professional, whose
+        agenda the clinic's then IS (the same resolution Google mode does through his
+        calendar id and credential); None is the clinic's own agenda.
 
         The OAuth app (client_id / client_secret) belongs to the platform and
         is read from settings. Only the refresh_token and calendar_id come from
         the tenant row.
         """
+        owner = professional_id if professional_id is not None else config.professional_id
+        if not config.google_refresh_token:
+            # Imported here: local_calendar subclasses this class.
+            from secretaria.services.local_calendar import LocalCalendarService
+
+            return LocalCalendarService.for_config(config, professional_id=owner)
         instance = cls()
         instance._tz = ZoneInfo(config.timezone)
         instance._calendar_id = config.google_calendar_id
         instance._refresh_token_override = config.google_refresh_token
         instance._business_hours = config.business_hours or {}
         instance._default_slot_minutes = config.appointment_duration_min or 30
+        instance._tenant_id = config.tenant_id
+        instance._owner_professional_id = owner
         return instance
 
     @classmethod
@@ -377,6 +460,7 @@ class CalendarService:
         google_refresh_token: str | None = None,
         business_hours: dict | None = None,
         appointment_duration_min: int | None = None,
+        professional_id: UUID | None = None,
     ) -> "CalendarService":
         """CalendarService for professional X under tenant config Y (contract v1 §10).
 
@@ -404,6 +488,11 @@ class CalendarService:
             legacy config the clinic deliberately emptied, on the
             patient-facing slot path. See the NULL-versus-EMPTY note in
             services/tenant_config.py.
+
+        `professional_id` is WHOSE agenda this is. Google needs no such key (the
+        calendar id and credential already name one), the secretarIA agenda does: it
+        keys each doctor's own agenda by it (`from_tenant_config`). Every caller passes
+        it; None keeps the tenant config's owner.
         """
         resolved = replace(
             tenant_config,
@@ -416,7 +505,7 @@ class CalendarService:
                 appointment_duration_min or tenant_config.appointment_duration_min
             ),
         )
-        return cls.from_tenant_config(resolved)
+        return cls.from_tenant_config(resolved, professional_id=professional_id)
 
     def _build_service(self) -> Any:
         s = self._settings
@@ -745,8 +834,15 @@ class CalendarService:
         summary: str,
         description: str = "",
         reminders: list[dict] | None = None,
+        *,
+        event_id: str | None = None,
     ) -> dict:
-        """Create an event on the clinic's calendar. Returns the inserted event."""
+        """Create an event on the clinic's calendar. Returns the inserted event.
+
+        `event_id` asks Google to use that id (base32hex, 5-1024 chars): the
+        connect-time sync (services/calendar_sync.py) derives it from the local
+        event's, so a retry after a half-finished push gets a 409 instead of a copy.
+        """
         start_dt = self._ensure_tz(start)
         end_dt = self._ensure_tz(end)
         tz_name = str(self._tz)
@@ -760,6 +856,8 @@ class CalendarService:
             "start": {"dateTime": start_dt.isoformat(), "timeZone": tz_name},
             "end": {"dateTime": end_dt.isoformat(), "timeZone": tz_name},
         }
+        if event_id is not None:
+            body["id"] = event_id
         calendar_id = self._calendar_id
 
         def _insert() -> dict:
@@ -789,6 +887,10 @@ class CalendarService:
         end: datetime,
     ) -> dict:
         """Move an existing event to a new [start, end) window. Returns the updated event."""
+        if self._handles_local_ids(event_id):
+            event_id, local = await self._local_event_target(event_id)
+            if local is not None:
+                return await local.update_event(event_id, start, end)
         return await self._patch_event(event_id, self._window_body(start, end))
 
     async def update_event_details(
@@ -805,6 +907,10 @@ class CalendarService:
         service, the convênio and the attendee - so editing any of them leaves the doctor's
         agenda telling the truth.
         """
+        if self._handles_local_ids(event_id):
+            event_id, local = await self._local_event_target(event_id)
+            if local is not None:
+                return await local.update_event_details(event_id, start, end, summary, description)
         body = self._window_body(start, end)
         body["summary"] = summary
         body["description"] = description
@@ -887,6 +993,10 @@ class CalendarService:
         sending only the new one would drop anyone already invited) and does
         nothing when the address is already there.
         """
+        if self._handles_local_ids(event_id):
+            event_id, local = await self._local_event_target(event_id)
+            if local is not None:
+                return await local.add_attendee(event_id, email)
         calendar_id = self._calendar_id
 
         def _patch() -> dict:
@@ -927,6 +1037,10 @@ class CalendarService:
         value; the hub's cancel/release need it, because "not on this calendar" is not
         "gone" once a clinic has one agenda per professional (api/hub/calendar.py).
         """
+        if self._handles_local_ids(event_id):
+            event_id, local = await self._local_event_target(event_id)
+            if local is not None:
+                return await local.cancel_event(event_id)
         calendar_id = self._calendar_id
 
         def _delete() -> bool:
@@ -949,6 +1063,59 @@ class CalendarService:
         deleted = await asyncio.to_thread(_delete)
         logger.info("calendar_event_cancelled", event_id=event_id)
         return deleted
+
+    async def get_event(self, event_id: str) -> dict | None:
+        """The event as Google holds it, or None when THIS calendar has no such id (404/410).
+
+        Read by the connect-time sync to recover a push whose id Google already holds.
+        Raises `CalendarUnavailableError` like the other reads.
+        """
+        if self._handles_local_ids(event_id):
+            event_id, local = await self._local_event_target(event_id)
+            if local is not None:
+                return await local.get_event(event_id)
+        calendar_id = self._calendar_id
+
+        def _get() -> dict | None:
+            try:
+                return (
+                    self._client().events().get(calendarId=calendar_id, eventId=event_id).execute()
+                )
+            except HttpError as exc:
+                if exc.resp.status in _EVENT_GONE_HTTP_STATUSES:
+                    return None
+                logger.error("calendar_get_http_error", error=str(exc))
+                _raise_if_unavailable(exc)
+                raise
+            except _NETWORK_ERRORS as exc:
+                logger.error("calendar_get_network_error", error=str(exc))
+                raise CalendarUnavailableError("Google Calendar unreachable") from exc
+
+        return await asyncio.to_thread(_get)
+
+    def _handles_local_ids(self, event_id: object) -> bool:
+        """Whether `event_id` is a secretarIA-agenda id THIS Google agenda must route."""
+        return self._tenant_id is not None and is_local_event_id(event_id)
+
+    async def _local_event_target(
+        self, event_id: str
+    ) -> tuple[str, "LocalCalendarService | None"]:
+        """Where a `loc_` event lives now that this agenda is Google's.
+
+        A clinic that booked on the secretarIA agenda and then connected Google keeps
+        appointments whose `google_event_id` is a `loc_` id: the past ones (never
+        pushed), and any future one the connect-time sync could not push yet. Google
+        does not know that id - asking it would answer 400 and fail a cancel the
+        clinic is entitled to. So: an event already pushed is acted on through its
+        Google copy (the id is swapped, Google answers); one never pushed is acted on
+        where it is, the secretarIA agenda (the local service is returned).
+        """
+        from secretaria.services.local_calendar import LocalCalendarService, google_copy_id
+
+        copy_id = await google_copy_id(self._tenant_id, event_id)
+        if copy_id:
+            return copy_id, None
+        return event_id, LocalCalendarService.mirroring(self)
 
     async def create_secondary_calendar(self, summary: str) -> dict:
         """Create a NEW secondary Google Calendar via `calendars.insert`.

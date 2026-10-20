@@ -592,6 +592,11 @@ async def resolve_professional_calendar(
         `duration_min`; when nothing resolves, None keeps the tenant default.
       - calendar id: `professional.google_calendar_id`, else the tenant's
         (CalendarService.for_professional's substitution semantics).
+      - owner: `professional.id` - whose agenda this is. Google ignores it (the id
+        and credential above already name the calendar); with NO credential the
+        secretarIA's own agenda is chosen (CalendarService.from_tenant_config) and
+        keys this doctor's agenda by it, so he never shares busy time with the clinic
+        or a colleague the way an id-less doctor shares the clinic's Google calendar.
 
     `tenant_config` is loaded via `load_tenant_config` when not passed —
     callers that already hold one (workers/tasks.py's flow path, the plugin's
@@ -599,7 +604,7 @@ async def resolve_professional_calendar(
 
     `calendar_factory` is the construction seam, called with the resolved
     keyword overrides (google_calendar_id / google_refresh_token /
-    business_hours / appointment_duration_min). None builds directly via
+    business_hours / appointment_duration_min / professional_id). None builds directly via
     `CalendarService.for_professional(tenant_config, ...)` — the plain
     flow-router path, no ContextVar involved. plugins/multi_professional.py
     passes `ai.tools._calendar_for_professional` instead, keeping the LLM
@@ -628,6 +633,7 @@ async def resolve_professional_calendar(
         google_refresh_token=_professional_credential(tenant, own_token, fallback_token),
         business_hours=hours,
         appointment_duration_min=duration,
+        professional_id=professional.id,
     )
     if calendar_factory is not None:
         return calendar_factory(**overrides)

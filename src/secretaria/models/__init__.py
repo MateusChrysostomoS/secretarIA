@@ -14,6 +14,7 @@ from secretaria.models.appointment import (
 )
 from secretaria.models.appointment_reminder import AppointmentReminder
 from secretaria.models.booking_hold import BookingHold
+from secretaria.models.calendar_event import CalendarEvent
 from secretaria.models.consent_event import ConsentEvent
 from secretaria.models.conversation import Conversation, FlowState, HandoverState
 from secretaria.models.conversation_pii_token_map import ConversationPiiTokenMap
@@ -49,6 +50,7 @@ __all__ = [
     "AppointmentStatus",
     "AppointmentReminder",
     "BookingHold",
+    "CalendarEvent",
     "is_live_status",
     "ConsentEvent",
     "Conversation",

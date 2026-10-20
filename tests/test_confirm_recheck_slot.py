@@ -96,6 +96,7 @@ from secretaria.services.pending_identity import (  # noqa: E402
     VerifyOutcome,
     VerifyResult,
 )
+from secretaria.services.tenant_config import set_google_refresh_token  # noqa: E402
 from secretaria.workers import tasks  # noqa: E402
 
 TZ = ZoneInfo("America/Sao_Paulo")
@@ -615,6 +616,8 @@ async def _seed(db):
             flow_state=FlowState.AWAITING_EMAIL_CODE,
         )
         s.add(conv)
+        # A CONNECTED clinic (the env-var token no longer stands in for a tenant's).
+        await set_google_refresh_token(s, tenant.id, "clinic-token")
         await s.commit()
         for row in (tenant, dr_a, patient, conv):
             await s.refresh(row)
