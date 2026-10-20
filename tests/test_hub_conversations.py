@@ -950,48 +950,51 @@ def test_recorded_message_id_never_reads_as_a_wamid() -> None:
 
 
 @pytest.mark.parametrize("mode", ["manual", "text"])
-async def test_hub_takeover_notifies_only_on_actual_transition(
+async def test_a_staff_takeover_sends_no_handoff_alert_but_a_later_handoff_still_does(
     client, db, tenant, monkeypatch, mode
 ):
+    """The "a secretária virtual não conseguiu resolver" mail is a FALSE alarm when the
+    clinic itself takes over ("Assumir" or a reply from the console). A handoff the
+    automation starts afterwards (the patient asked for a person) is still alerted."""
     from secretaria.services import handoff_notification as hn
     from secretaria.services.email import EmailOutcome
+    from secretaria.workers.shared import handover as worker_handover
 
     tenant.contact_email = "clinic@example.com"
     async with db() as session:
         row = await session.get(Tenant, tenant.id)
         row.contact_email = tenant.contact_email
         await session.commit()
-    patient = await _seed_patient(
-        db, tenant, channel="brain_message", wa_id=None, external_id=str(uuid4())
-    )
+    patient = await _seed_patient(db, tenant, channel="brain_message", wa_id=None,
+        external_id=str(uuid4()))
     conv = await _seed_conversation(db, tenant, patient)
     sent = []
-
     async def send(to, template, variables):
-        async with db() as session:
-            row = await session.get(Conversation, conv.id)
-            assert row.handover_state == HandoverState.HUMAN_ACTIVE
-        sent.append((to, template, variables))
+        sent.append((to, template, variables["reason"]))
         return EmailOutcome.SENT
-
     monkeypatch.setattr(hn, "async_session_factory", db)
     monkeypatch.setattr(hn, "send_transactional_email_result", send)
-
+    monkeypatch.setattr(worker_handover, "async_session_factory", db)
     async def takeover():
         if mode == "manual":
-            return await client.post(
-                f"{ENDPOINT}/{conv.id}/handover", json={"state": "HUMAN_ACTIVE"}
-            )
+            return await client.post(f"{ENDPOINT}/{conv.id}/handover",
+                json={"state": "HUMAN_ACTIVE"})
         return await client.post(f"{ENDPOINT}/{conv.id}/messages", json={"body": "staff text"})
 
     assert (await takeover()).status_code == 200
+    assert (await _get_conversation_row(db, conv.id)).handover_state == HandoverState.HUMAN_ACTIVE
     assert (await takeover()).status_code == 200
-    assert len(sent) == 1
-    assert (
-        await client.post(f"{ENDPOINT}/{conv.id}/handover", json={"state": "BOT_ACTIVE"})
-    ).status_code == 200
-    assert (await takeover()).status_code == 200
-    assert len(sent) == 2
+    assert sent == []
+
+    assert (await client.post(f"{ENDPOINT}/{conv.id}/handover",
+        json={"state": "BOT_ACTIVE"})).status_code == 200
+    # The automation hands the patient to a person (workers/shared/handover.py).
+    await worker_handover._set_conversation_human_active(
+        conv.id, reason="patient_requested_human"
+    )
+    assert sent == [
+        ("clinic@example.com", "human_handoff_alert", "O paciente pediu para falar com uma pessoa.")
+    ]
 
 
 @pytest_asyncio.fixture

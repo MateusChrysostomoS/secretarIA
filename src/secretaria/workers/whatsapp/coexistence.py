@@ -19,7 +19,7 @@ from secretaria.schemas.webhook import (
     extract_echo_body,
     history_item_is_final,
 )
-from secretaria.services.handoff_notification import activate_human_handoff, notify_human_handoff
+from secretaria.services.handoff_notification import activate_human_handoff
 from secretaria.services.handover import HandoverManager
 from secretaria.workers.shared.db import (
     _event_already_processed,
@@ -118,14 +118,11 @@ async def _persist_human_echo(
                         body=body,
                     )
                 )
-                occurrence_id = await activate_human_handoff(
+                # The clinic replied from its own app: a takeover by staff, so no
+                # handoff alert ("a secretária virtual não conseguiu resolver") -
+                # that mail is for a handoff the patient or the automation started.
+                await activate_human_handoff(
                     session, conversation, manager=HandoverManager(session)
-                )
-            if occurrence_id is not None:
-                await notify_human_handoff(
-                    tenant=tenant, conversation_id=conversation.id,
-                    professional_id=conversation.flow_selected_professional_id,
-                    reason="could_not_help", occurrence_id=occurrence_id,
                 )
         except IntegrityError:
             logger.info("worker_echo_duplicate_race", wam_id=wam_id)
