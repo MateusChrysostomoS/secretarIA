@@ -581,7 +581,11 @@ async def test_create_returns_the_catalog_row(client: AsyncClient):
         # Who offers it — the hub renders "também oferecido por" from this and
         # warns before a rename that would change it for other doctors too.
         "professional_ids",
+        # The offering professional's row when the request carried `offer`
+        # (test_hub_single_doctor_setup.py); null here, where it did not.
+        "professional",
     }
+    assert body["professional"] is None
     # The internal identity key is never exposed as if it were editable.
     assert "normalized_name" not in body
 

@@ -247,3 +247,132 @@ async def test_an_empty_day_is_dropped_from_a_simulation_draft_too(
 
     draft = TenantConfigUpdate(business_hours={"monday": [], "friday": [AFTERNOON]})
     assert draft.model_dump(exclude_unset=True)["business_hours"] == {"friday": [AFTERNOON]}
+
+
+# --------------------------------------------------------------------------
+# 2. Creating a service can offer it in the same commit
+# --------------------------------------------------------------------------
+
+
+async def test_create_with_offer_makes_the_service_bookable(
+    client: AsyncClient, db, tenant, doctor
+) -> None:
+    response = await client.post(
+        SERVICES,
+        json={
+            "name": "Consulta",
+            "description": "Avaliação",
+            "requirements": ["Jejum de 8 horas"],
+            "offer": {"professional_id": str(doctor.id), "duration_min": 40, "price": " R$ 300 "},
+        },
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["professional_ids"] == [str(doctor.id)]
+    professional = body["professional"]
+    assert professional["id"] == str(doctor.id)
+    assert professional["has_services"] is True
+    assert professional["appointment_types_inherited"] is False
+    [entry] = professional["appointment_types"]
+    assert entry == {
+        "name": "Consulta",
+        "service_id": body["id"],
+        "description": None,
+        "duration_min": 40,
+        "is_active": True,
+        "sort_order": 0,
+        "price": "R$ 300",
+        "long_description": None,
+        # The catalog owns the orientations of a linked entry.
+        "requirements": [],
+    }
+    _t, p = await _reload(db, tenant.id, doctor.id)
+    assert p.appointment_types == [entry]
+
+
+async def test_create_without_offer_is_unchanged(client: AsyncClient, db, tenant, doctor) -> None:
+    response = await client.post(SERVICES, json={"name": "Consulta"})
+
+    assert response.status_code == 201
+    assert response.json()["professional_ids"] == []
+    assert response.json()["professional"] is None
+    _t, p = await _reload(db, tenant.id, doctor.id)
+    assert p.appointment_types is None
+
+
+async def test_offer_keeps_what_an_inheriting_doctor_already_offered(
+    client: AsyncClient, db, tenant
+) -> None:
+    async with db() as session:
+        t = await session.get(Tenant, tenant.id)
+        t.appointment_types = [
+            {"name": "Retorno", "duration_min": 20, "is_active": True, "sort_order": 0}
+        ]
+        await session.commit()
+    inheriting = await _add_professional(db, tenant.id, appointment_types=None)
+
+    response = await client.post(
+        SERVICES,
+        json={
+            "name": "Consulta",
+            "offer": {"professional_id": str(inheriting.id), "duration_min": 30},
+        },
+    )
+
+    assert response.status_code == 201
+    _t, p = await _reload(db, tenant.id, inheriting.id)
+    assert [e["name"] for e in p.appointment_types] == ["Retorno", "Consulta"]
+    assert p.appointment_types[1]["price"] is None
+
+
+@pytest.mark.parametrize("foreign", [False, True])
+async def test_an_unknown_professional_creates_nothing(
+    client: AsyncClient, db, tenant, foreign
+) -> None:
+    target = str(uuid4())
+    if foreign:
+        other = Tenant(id=uuid4(), clinic_name="Outra", phone_number_id=None)
+        async with db() as session:
+            session.add(other)
+            await session.commit()
+        target = str((await _add_professional(db, other.id, name="Dr. Outro")).id)
+
+    response = await client.post(
+        SERVICES,
+        json={"name": "Consulta", "offer": {"professional_id": target, "duration_min": 30}},
+    )
+
+    assert response.status_code == 404
+    assert await _service_count(db, tenant.id) == 0
+
+
+async def test_a_duplicate_name_with_offer_changes_nothing(
+    client: AsyncClient, db, tenant, doctor
+) -> None:
+    await client.post(SERVICES, json={"name": "Consulta"})
+
+    response = await client.post(
+        SERVICES,
+        json={
+            "name": " CONSULTA ",
+            "offer": {"professional_id": str(doctor.id), "duration_min": 30},
+        },
+    )
+
+    assert response.status_code == 409
+    _t, p = await _reload(db, tenant.id, doctor.id)
+    assert p.appointment_types is None
+
+
+@pytest.mark.parametrize("duration", [0, 601])
+async def test_offer_duration_is_validated(client: AsyncClient, db, tenant, doctor, duration):
+    response = await client.post(
+        SERVICES,
+        json={
+            "name": "Consulta",
+            "offer": {"professional_id": str(doctor.id), "duration_min": duration},
+        },
+    )
+    assert response.status_code == 422
+    assert await _service_count(db, tenant.id) == 0

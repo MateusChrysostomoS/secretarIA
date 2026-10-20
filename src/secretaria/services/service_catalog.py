@@ -296,6 +296,62 @@ def offering_map(
     return out
 
 
+def offer_to_professional(
+    professional: Any,
+    tenant: Any,
+    service: Service,
+    *,
+    duration_min: int,
+    price: str | None,
+) -> bool:
+    """Add `service` to what `professional` offers, with their own duration and price.
+
+    The write behind "create a service and offer it" (api/hub/services.py): a
+    catalog row on its own is offered by nobody, so for a clinic with one doctor
+    a freshly created service used to stay unbookable until a second, unrelated
+    "Salvar" — which a clinic setting itself up for the first time had no reason
+    to know about. Mutates only; the caller owns the transaction.
+
+    The entry has exactly the shape a console save writes for a linked service
+    (hub-mapping.ts::toWireAppointmentTypes): the catalog owns the name's
+    spelling and the descriptive copy, the professional owns duration and price.
+
+    A professional who still INHERITS the clinic's legacy list (NULL) gets an own
+    list made of that list plus the new entry, so nothing they offered before is
+    lost on the way — the same NULL-versus-EMPTY rule
+    services/tenant_config.py::professional_appointment_types applies when
+    reading. Returns False, changing nothing, when the professional already has
+    an entry for this service.
+    """
+    current = (
+        professional.appointment_types
+        if professional.appointment_types is not None
+        else getattr(tenant, "appointment_types", None)
+    )
+    entries = [dict(entry) for entry in (current or []) if isinstance(entry, dict)]
+    key = service.normalized_name or normalize(service.name)
+    for entry in entries:
+        if entry_service_id(entry) == service.id or normalize(entry.get("name")) == key:
+            return False
+    entries.append(
+        {
+            "name": service.name,
+            SERVICE_ID_KEY: str(service.id),
+            "description": None,
+            "duration_min": duration_min,
+            "is_active": True,
+            "sort_order": len(entries),
+            "price": price,
+            "long_description": None,
+            "requirements": [],
+        }
+    )
+    # A new list, never an in-place append: the column is plain JSON, and an
+    # in-place mutation is invisible to the ORM's change tracking.
+    professional.appointment_types = entries
+    return True
+
+
 async def load_service_catalog(session: AsyncSession, tenant_id: UUID) -> list[Service]:
     """Every catalog row for one tenant, ordered the way a clinic reads it.
 

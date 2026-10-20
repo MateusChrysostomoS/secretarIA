@@ -14,6 +14,22 @@ from datetime import datetime
 from pydantic import BaseModel, Field, field_validator
 
 from secretaria.schemas.config import clean_requirements
+from secretaria.schemas.professional import ProfessionalListItem
+
+
+class ServiceOffer(BaseModel):
+    """Who offers the service being created, and on what terms.
+
+    Optional on `ServiceCreate`. Sent by the console when the clinic has ONE
+    professional, so creating a service is also offering it: a catalog row on
+    its own is offered by nobody and stays unbookable. Duration and price are
+    the professional's own (they differ between doctors), exactly the two
+    numbers `AppointmentType` carries per professional.
+    """
+
+    professional_id: str = Field(min_length=1, max_length=64)
+    duration_min: int = Field(gt=0, le=600)
+    price: str | None = Field(default=None, max_length=40)
 
 
 class ServiceCreate(BaseModel):
@@ -30,6 +46,10 @@ class ServiceCreate(BaseModel):
     requirements: list[str] = Field(default_factory=list)
     is_active: bool = True
     sort_order: int = 0
+    # Absent = the historical behaviour: the row enters the catalog, offered by
+    # nobody. Present = the same row, offered by that professional in the same
+    # transaction (see ServiceOffer).
+    offer: ServiceOffer | None = None
 
     @field_validator("requirements")
     @classmethod
@@ -84,3 +104,16 @@ class ServiceRead(BaseModel):
     sort_order: int
     created_at: datetime
     professional_ids: list[str] = Field(default_factory=list)
+
+
+class ServiceCreated(ServiceRead):
+    """POST /tenants/me/services response: the row, plus who now offers it.
+
+    `professional` is the offering professional's row exactly as
+    GET /tenants/me/professionals would return it after the commit — null when
+    the request carried no `offer`. Returned so the console can take it as its
+    new baseline instead of re-reading the roster (or, worse, treating the
+    server's own write as an unsaved local edit).
+    """
+
+    professional: ProfessionalListItem | None = None
