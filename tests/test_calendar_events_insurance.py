@@ -88,6 +88,8 @@ NEW_EVENT_KEYS = {"status", "confirmation_count", "display_state", "attention", 
     "attendee_name",
     "phone",
     "patient_channel",
+    # The booking account's name, so the agenda names the patient without the title.
+    "patient_name",
 }
 
 

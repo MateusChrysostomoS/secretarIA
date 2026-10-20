@@ -139,10 +139,14 @@ class CalendarEventRead(BaseModel):
     # own channel - "whatsapp" | "brain_message" - or None without a patient record (a
     # block or a phone-only booking). A viewer restricted to his own agenda never
     # receives another doctor's event at all (api/hub/calendar.py::list_events).
+    # `patient_name` is the booking account's name (`Patient.name`, tenant-scoped join):
+    # with `attendee_name` NULL - "é pra mim" - it is who the consultation is for, so the
+    # agenda never has to recover a name from the Google title.
     professional_id: str | None = None
     professional_name: str | None = None
     service: str | None = None
     attendee_name: str | None = None
+    patient_name: str | None = None
     phone: str | None = None
     patient_channel: str | None = None
 

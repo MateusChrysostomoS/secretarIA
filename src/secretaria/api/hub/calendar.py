@@ -680,6 +680,7 @@ async def list_events(
                 Appointment.attendee_name,
                 Appointment.phone,
                 Patient.channel.label("patient_channel"),
+                Patient.name.label("patient_name"),
             )
             .outerjoin(
                 Patient,
@@ -782,6 +783,7 @@ async def list_events(
                 professional_name=owner_name,
                 service=row.appointment_type if row is not None else None,
                 attendee_name=row.attendee_name if row is not None else None,
+                patient_name=row.patient_name if row is not None else None,
                 phone=row.phone if row is not None else None,
                 patient_channel=row.patient_channel if row is not None else None,
             )
