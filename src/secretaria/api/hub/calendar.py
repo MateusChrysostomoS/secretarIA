@@ -99,7 +99,13 @@ from secretaria.services.appointment_status import (
     log_status_transition,
     staff_transition,
 )
-from secretaria.services.calendar import CalendarService, is_event_not_found
+from secretaria.services.calendar import (
+    GOOGLE_RECONNECT_AGENDA_MESSAGE,
+    GOOGLE_RECONNECT_CODE,
+    CalendarService,
+    GoogleTokenRevokedError,
+    is_event_not_found,
+)
 from secretaria.services.insurance_catalog import AppointmentPlan, load_appointment_plans
 from secretaria.services.local_calendar import LocalCalendarService, list_unpushed_events
 from secretaria.services.patient_context import as_utc
@@ -433,6 +439,22 @@ def _calendar_unavailable(message: str) -> HTTPException:
     return HTTPException(status.HTTP_502_BAD_GATEWAY, _detail("calendar_unavailable", message))
 
 
+def _reconnect_required(action: str) -> HTTPException:
+    """Google refused the stored grant itself (`GoogleTokenRevokedError`): 409, nothing changed.
+
+    Not an outage (`_calendar_unavailable`'s "tente de novo em instantes" would be a lie):
+    expired or revoked, it stays so until someone reconnects the Google account, so the
+    console shows a reconnect state instead of a retry. Same code as api/hub/professionals.py
+    (`google_reconnect_required`), and the same 409 it answers; what used to come out of
+    here was a raw 500 (GET /events, create, block) or that 502.
+    """
+    logger.warning("hub_calendar_reconnect_required", action=action)
+    return HTTPException(
+        status.HTTP_409_CONFLICT,
+        _detail(GOOGLE_RECONNECT_CODE, GOOGLE_RECONNECT_AGENDA_MESSAGE),
+    )
+
+
 # ---------------------------------------------------------------------------
 # GET /events — agenda read model
 # ---------------------------------------------------------------------------
@@ -705,7 +727,12 @@ async def list_events(
     sources = await _agenda_sources(
         session, tenant, config, own_only=own_only, focus=viewer.professional_id
     )
-    events = await _read_agendas(sources, start, end)
+    try:
+        events = await _read_agendas(sources, start, end)
+    except GoogleTokenRevokedError as exc:
+        # Only the clinic's agenda re-raises (`_read_agendas`): a doctor's revoked grant
+        # is skipped like any other failure of a doctor's agenda.
+        raise _reconnect_required("list_events") from exc
     # A clinic that booked on the secretarIA agenda before connecting Google still sees
     # those bookings (and can act on them: services/calendar.py routes `loc_` ids).
     owners = _agenda_owners(config, sources, own_only=own_only, focus=viewer.professional_id)
@@ -875,12 +902,15 @@ async def create_appointment(
     # availability reads - on the clinic's, the slot stayed free for them (double
     # booking). No doctor: the clinic's agenda, as before.
     cal = await _calendar_for_professional(session, tenant, professional_id)
-    event = await cal.create_event(
-        start=body.start,
-        end=body.end,
-        summary=body.summary,
-        description=body.description,
-    )
+    try:
+        event = await cal.create_event(
+            start=body.start,
+            end=body.end,
+            summary=body.summary,
+            description=body.description,
+        )
+    except GoogleTokenRevokedError as exc:
+        raise _reconnect_required("create_appointment") from exc
     google_event_id = event.get("id", "")
 
     patient_uuid: UUID | None = None
@@ -945,12 +975,15 @@ async def create_block(
     # Owner's decision 2026-10-19: a doctor's block sits on HIS agenda, so his patients
     # are never offered the blocked slot (same rule as create_appointment).
     cal = await _calendar_for_professional(session, tenant, professional_id)
-    event = await cal.create_event(
-        start=body.start,
-        end=body.end,
-        summary=body.summary,
-        description=body.description,
-    )
+    try:
+        event = await cal.create_event(
+            start=body.start,
+            end=body.end,
+            summary=body.summary,
+            description=body.description,
+        )
+    except GoogleTokenRevokedError as exc:
+        raise _reconnect_required("create_block") from exc
     appt = Appointment(
         tenant_id=tenant.id,
         professional_id=professional_id,
@@ -1038,6 +1071,8 @@ async def cancel_appointment(
             await _delete_owned_event(session, tenant, appt, "cancel")
         except HTTPException:
             raise
+        except GoogleTokenRevokedError as exc:
+            raise _reconnect_required("cancel") from exc
         except Exception as exc:
             logger.error(
                 "calendar_cancel_delete_failed",
@@ -1202,6 +1237,8 @@ async def release_appointment(
             await _delete_owned_event(session, tenant, appt, "release")
         except HTTPException:
             raise
+        except GoogleTokenRevokedError as exc:
+            raise _reconnect_required("release") from exc
         except Exception as exc:
             logger.error(
                 "calendar_release_delete_failed",
@@ -1489,6 +1526,8 @@ async def reschedule_appointment(
         moved = await _move_owned_event(session, tenant, appt, body.new_start, body.new_end)
     except HTTPException:
         raise
+    except GoogleTokenRevokedError as exc:
+        raise _reconnect_required("reschedule") from exc
     except Exception as exc:
         logger.error(
             "calendar_reschedule_update_failed",

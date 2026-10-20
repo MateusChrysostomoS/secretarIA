@@ -23,6 +23,7 @@ from uuid import UUID, uuid4
 import pytest
 from googleapiclient.errors import HttpError
 from httpx import AsyncClient
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.api.hub.deps import get_current_tenant
@@ -30,7 +31,11 @@ from secretaria.core.database import get_session
 from secretaria.models import Appointment, AppointmentStatus, Patient, Professional, Tenant
 from secretaria.services import appointment_release
 from secretaria.services.agenda_visibility import AgendaViewer
-from secretaria.services.calendar import CalendarService, CalendarUnavailableError
+from secretaria.services.calendar import (
+    CalendarService,
+    CalendarUnavailableError,
+    GoogleTokenRevokedError,
+)
 from secretaria.services.tenant_config import (
     resolve_professional_calendar,
     set_google_refresh_token,
@@ -71,6 +76,8 @@ class _FakeGoogle:
         self.calendars: dict[str, dict[str, dict]] = {}
         self.calls: list[tuple[str, str, str | None]] = []
         self.down: set[str] = set()
+        # Grants Google refuses at the token refresh (`invalid_grant`): expired or revoked.
+        self.revoked: set[str] = set()
         self.barrier: threading.Barrier | None = None
         self._lock = threading.Lock()
 
@@ -169,9 +176,15 @@ class _FakeGoogle:
 @pytest.fixture
 def google(monkeypatch: pytest.MonkeyPatch) -> _FakeGoogle:
     fake = _FakeGoogle()
-    monkeypatch.setattr(
-        CalendarService, "_build_service", lambda self: fake.client(self._refresh_token_override)
-    )
+
+    def _build(self):
+        token = self._refresh_token_override
+        if token in fake.revoked:
+            # What the real _build_service raises when the refresh answers invalid_grant.
+            raise GoogleTokenRevokedError("Google Calendar refresh token rejected")
+        return fake.client(token)
+
+    monkeypatch.setattr(CalendarService, "_build_service", _build)
     return fake
 
 
@@ -728,3 +741,116 @@ async def test_a_restricted_doctor_reads_only_the_clinics_agenda_and_her_own(
     assert resp.status_code == 200
     assert [e["id"] for e in resp.json()] == ["evt-a", "evt-legacy"]
     assert sorted(google.where("list")) == ["cal-ana", "cal-clinic"]
+
+
+# ---------------------------------------------------------------------------
+# A revoked Google grant (production 2026-10-20: GET /events answered 500)
+# ---------------------------------------------------------------------------
+
+RECONNECT = {
+    "code": "google_reconnect_required",
+    "message": "A conexão da clínica com o Google Agenda expirou. Reconecte em Contexto → Google.",
+}
+
+
+async def _appointment_count(db, clinic) -> int:
+    async with db() as session:
+        return await session.scalar(
+            select(func.count())
+            .select_from(Appointment)
+            .where(Appointment.tenant_id == clinic.tenant.id)
+        )
+
+
+async def test_events_with_the_clinics_grant_revoked_ask_to_reconnect_not_500(
+    client: AsyncClient, db, clinic, google
+):
+    await _per_professional_clinic(db, clinic, google)
+    google.put("cal-ana-own", "evt-a", _at(10), _at(10, 30))
+    google.revoked.add("tok-clinic")
+
+    resp = await _events(client)
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == RECONNECT
+
+
+async def test_events_with_a_doctors_grant_revoked_skip_her_agenda_like_any_failure(
+    client: AsyncClient, db, clinic, google
+):
+    await _per_professional_clinic(db, clinic, google)
+    google.put("cal-clinic", "evt-c", _at(9), _at(9, 30))
+    google.put("cal-ana-own", "evt-a", _at(10), _at(10, 30))
+    google.revoked.add("tok-ana")
+
+    resp = await _events(client)
+
+    assert resp.status_code == 200
+    assert [e["id"] for e in resp.json()] == ["evt-c"]
+
+
+@pytest.mark.parametrize("path", ["appointments", "blocks"])
+async def test_create_with_a_revoked_grant_asks_to_reconnect_and_writes_nothing(
+    client: AsyncClient, db, clinic, google, path
+):
+    await _shared_account_clinic(db, clinic, google)
+    google.revoked.add("tok-clinic")
+
+    resp = await client.post(
+        f"{CALENDAR}/{path}",
+        json={**_window(), "summary": "Consulta", "professional_id": str(clinic.ana.id)},
+    )
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == RECONNECT
+    assert await _appointment_count(db, clinic) == 0
+
+
+async def test_cancel_with_a_revoked_grant_asks_to_reconnect_and_changes_nothing(
+    client: AsyncClient, db, clinic, google
+):
+    """Before: the 502 `calendar_unavailable` "tente de novo em instantes" - waiting never helps."""
+    await _shared_account_clinic(db, clinic, google)
+    google.put("cal-ana", "evt-a", _at(10), _at(10, 30))
+    appt = await _appointment(db, clinic, "evt-a", clinic.ana)
+    google.revoked.add("tok-clinic")
+
+    resp = await _cancel(client, appt)
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == RECONNECT
+    assert (await _row(db, appt.id)).status == AppointmentStatus.SCHEDULED
+    assert google.ids("cal-ana") == {"evt-a"}
+
+
+async def test_release_with_a_revoked_grant_asks_to_reconnect_and_changes_nothing(
+    client: AsyncClient, db, clinic, google
+):
+    await _shared_account_clinic(db, clinic, google)
+    google.put("cal-ana", "evt-a", _at(10), _at(10, 30))
+    appt = await _appointment(db, clinic, "evt-a", clinic.ana, patient=True)
+    google.revoked.add("tok-clinic")
+
+    resp = await client.post(f"{CALENDAR}/appointments/{appt.id}/release", json={})
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == RECONNECT
+    assert (await _row(db, appt.id)).status == AppointmentStatus.SCHEDULED
+    assert google.ids("cal-ana") == {"evt-a"}
+
+
+async def test_reschedule_with_a_revoked_grant_asks_to_reconnect_and_changes_nothing(
+    client: AsyncClient, db, clinic, google
+):
+    await _shared_account_clinic(db, clinic, google)
+    google.put("cal-ana", "evt-a", _at(10), _at(10, 30))
+    appt = await _appointment(db, clinic, "evt-a", clinic.ana)
+    google.revoked.add("tok-clinic")
+
+    resp = await _reschedule(client, appt)
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == RECONNECT
+    row = await _row(db, appt.id)
+    assert row.status == AppointmentStatus.SCHEDULED
+    assert row.start_at.replace(tzinfo=UTC) == _when(10)

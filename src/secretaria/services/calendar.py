@@ -218,6 +218,16 @@ class GoogleTokenRevokedError(CalendarUnavailableError):
     """
 
 
+#: What the hub's agenda answers when a calendar action meets `GoogleTokenRevokedError`
+#: (api/hub/calendar.py, services/staff_appointment_edit.py): the same code as
+#: api/hub/professionals.py — the console branches on it and sends the clinic to the
+#: screen where the Google account is reconnected — and the agenda's own sentence.
+GOOGLE_RECONNECT_CODE = "google_reconnect_required"
+GOOGLE_RECONNECT_AGENDA_MESSAGE = (
+    "A conexão da clínica com o Google Agenda expirou. Reconecte em Contexto → Google."
+)
+
+
 def _is_invalid_grant(exc: RefreshError) -> bool:
     """Whether a refresh failure is Google's `invalid_grant`.
 
