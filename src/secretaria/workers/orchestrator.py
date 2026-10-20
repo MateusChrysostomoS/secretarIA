@@ -132,6 +132,7 @@ from secretaria.workers.shared.actions import (
 )
 from secretaria.workers.shared.appointment_edit_support import build_edit_context
 from secretaria.workers.shared.booking_hold import (
+    SlotTakenAtPromotion,
     _hold_minutes_left,
     _hold_when,
     _is_agent_sentinel,
@@ -893,6 +894,28 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                 waba_token=waba_token,
                 redis=redis,
             )
+            if isinstance(promoted, SlotTakenAtPromotion):
+                # The code was good, the held time was filled on the agenda
+                # while it was being typed. Same order of facts: the account
+                # first, on its own; then the "just taken" line and the same
+                # day's times, persisted as the conversation's new step - not
+                # IDLE - so the next tap books like any other.
+                await _send_plain_reply(
+                    reply,
+                    tenant=tenant,
+                    waba_token=waba_token,
+                    body=CODE_ACCEPTED_MESSAGE,
+                    event="pending_code_reply_sent",
+                )
+                await _apply_flow_result(
+                    reply,
+                    promoted.reoffer,
+                    patient_wa,
+                    redis=redis,
+                    tenant=tenant,
+                    waba_token=waba_token,
+                )
+                return
             if promoted is not None:
                 body = CODE_ACCEPTED_MESSAGE + chr(10) + chr(10) + promoted
         elif result is VerifyOutcome.INVALID:

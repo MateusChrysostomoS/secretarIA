@@ -54,6 +54,7 @@ from secretaria.ai.tools import (
     _canonical_appointment_type,
     _conversation_attendee_name,
     _conversation_insurance,
+    _hand_back_if_slot_taken,
     _localize_window,
     _match_by_name,
     _persist_appointment,
@@ -312,6 +313,15 @@ async def create_event_for_professional(
     )
     description = (
         f"{auto_description}\n\n{description}".strip() if description else auto_description
+    )
+    # Asked on THIS professional's agenda: the one the event is written to below.
+    await _hand_back_if_slot_taken(
+        cal,
+        fallback_start,
+        fallback_end,
+        tool_name="create_event_for_professional",
+        appointment_type=canonical_type,
+        professional_id=professional.id,
     )
     event = await cal.create_event(
         start=fallback_start,

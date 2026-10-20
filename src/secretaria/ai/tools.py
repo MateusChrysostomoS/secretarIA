@@ -24,6 +24,7 @@ from pseudonymize_core import has_unresolved_tokens
 
 from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
+from secretaria.services.availability import slot_taken_at_confirm
 from secretaria.services.booking_dates import resolve_booking_day, time_has_passed_today
 from secretaria.services.booking_draft import BookingDraft
 from secretaria.services.booking_scope import (
@@ -38,6 +39,7 @@ from secretaria.services.calendar import (
     build_event_description,
     build_patient_calendar_link,
 )
+from secretaria.services.flow_router import SLOT_TAKEN_AT_CONFIRM_MESSAGE
 from secretaria.services.manage_request import ManageRequest, parse_appointment_ref
 from secretaria.services.precheck import HandoffOutcome, request_precheck_handoff
 from secretaria.services.service_catalog import find_by_name, missing_from
@@ -603,6 +605,47 @@ def _localize_window(start: str, end: str, cal: CalendarService) -> tuple[dateti
     return parsed_start, parsed_end
 
 
+async def _hand_back_if_slot_taken(
+    cal: CalendarService,
+    start: datetime,
+    end: datetime,
+    *,
+    tool_name: str,
+    appointment_type: str | None,
+    professional_id: UUID | None = None,
+) -> None:
+    """Hand the booking back to the flow when [start, end) was taken since it was offered.
+
+    The v1 booking tools write straight to the agenda after the patient's "sim" in text,
+    and the free time the model read may be minutes old. Asked on `cal` - the agenda the
+    event is about to be written to - right before the write
+    (services/availability.py::slot_taken_at_confirm, fail-open). Taken: nothing is
+    created, and the turn leaves the model the way `set_booking_draft` does - a
+    `BookingDraftRequested` for the same service, doctor, convênio and DAY, so the flow
+    opens that day's fresh times (asking pra-quem first when it was never answered)
+    behind one fixed line. The model never words "that time is gone" itself, nor offers
+    a time from its own stale list.
+
+    Shared by the three create_event*-shaped tools, like `_localize_window`.
+    """
+    if not await slot_taken_at_confirm(
+        cal,
+        start,
+        end,
+        source=tool_name,
+        conversation_id=_conversation_id_ctx.get(),
+        tenant_id=_tenant_id_ctx.get(),
+    ):
+        return
+    raise BookingDraftRequested(
+        appointment_type,
+        professional_id,
+        await _conversation_insurance(),
+        day=start.astimezone(cal.tzinfo).date(),
+        intro=SLOT_TAKEN_AT_CONFIRM_MESSAGE,
+    )
+
+
 async def _persist_appointment(
     event: dict,
     fallback_start: datetime,
@@ -1021,6 +1064,9 @@ async def create_event(
     )
     description = (
         f"{auto_description}\n\n{description}".strip() if description else auto_description
+    )
+    await _hand_back_if_slot_taken(
+        cal, fallback_start, fallback_end, tool_name="create_event", appointment_type=canonical_type
     )
     event = await cal.create_event(
         start=fallback_start,

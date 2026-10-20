@@ -801,9 +801,25 @@ class CalendarService:
             for window_start, window_end in windows
         ):
             return False
+        return not await self.has_conflict(start_dt, end_dt, ignore_event_id=ignore_event_id)
+
+    async def has_conflict(
+        self, start: datetime, end: datetime, *, ignore_event_id: str | None = None
+    ) -> bool:
+        """Whether anything on THIS agenda already overlaps [start, end).
+
+        Only the busy half of `is_slot_free`: no business-hours or "already started" test,
+        because the question is asked about a time the slot list ITSELF offered a moment
+        ago - the one thing that can have changed since is somebody else's event. Same read
+        (`check_availability`) and the same busy parsing (`_busy_ranges`) the slot walk
+        uses, so "taken" here means exactly what "not listed" means there.
+        `ignore_event_id` is the patient's own event when it is the one being moved. Raises
+        `CalendarUnavailableError` like the other reads.
+        """
+        start_dt, end_dt = self._ensure_tz(start), self._ensure_tz(end)
         events = await self.check_availability(start_dt, end_dt)
         busy = self._busy_ranges([ev for ev in events if ev.get("id") != ignore_event_id])
-        return not any(busy_start < end_dt and busy_end > start_dt for busy_start, busy_end in busy)
+        return any(busy_start < end_dt and busy_end > start_dt for busy_start, busy_end in busy)
 
     async def add_attendee(self, event_id: str, email: str) -> dict:
         """Invite `email` to an existing event; Google notifies them. Idempotent.

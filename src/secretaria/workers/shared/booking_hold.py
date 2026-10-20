@@ -1,7 +1,9 @@
 """booking_hold - split out of workers/tasks.py (TASK-023)."""
 
 import math
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -34,19 +36,26 @@ from secretaria.services.appointment_replacement import (
 from secretaria.services.appointment_status import (
     SOURCE_FLOW,
 )
+from secretaria.services.attendee import ATTENDEE_SELF
+from secretaria.services.availability import slot_taken_at_confirm
 from secretaria.services.booking_hold import (
     HOLD_TTL_MINUTES,
     HeldSlot,
     latest_hold_in,
     release_in as release_hold_in,
 )
+from secretaria.services.booking_scope import resolve_booking_owner_id
 from secretaria.services.calendar import (
     CalendarUnavailableError,
     build_event_description,
     build_patient_calendar_link,
 )
 from secretaria.services.flow_router import (
+    SLOT_TAKEN_AT_CONFIRM_MESSAGE,
     WHEN_FORMAT,
+    FlowRouterResult,
+    booking_gate_scope,
+    reoffer_taken_booking_slot,
 )
 from secretaria.services.insurance_catalog import (
     resolve_booking_plan_ids,
@@ -64,6 +73,10 @@ from secretaria.workers.shared.context import (
 )
 from secretaria.workers.shared.dispatch import (
     _send_buttons_reply,
+)
+from secretaria.workers.shared.draft_resolution import (
+    _load_draft_context,
+    _turn_booking_gate,
 )
 from secretaria.workers.shared.handover import (
     _set_conversation_human_active,
@@ -155,6 +168,23 @@ def _hold_when(held: HeldSlot, tenant: Tenant | None) -> str:
     """
     return held.start_at.astimezone(_tenant_tzinfo(tenant)).strftime(WHEN_FORMAT)
 
+@dataclass(frozen=True)
+class SlotTakenAtPromotion:
+    """`_promote_booking_hold`'s third answer: the code was good, the slot is gone.
+
+    Not a paragraph like the other two, because the patient's next step is not text: the
+    caller says the account is active, then persists and sends `reoffer` (the "just
+    taken" line plus the same day's fresh times) instead of leaving the conversation IDLE.
+    """
+
+    reoffer: FlowRouterResult
+
+# Said only when the conversation cannot be re-read to rebuild the slot list (it was
+# there a moment ago): the same fact, and the one thing the patient can do about it.
+_SLOT_TAKEN_NO_REOFFER_MESSAGE = (
+    f"{SLOT_TAKEN_AT_CONFIRM_MESSAGE}\n\nDigite *menu* para escolher outro horário."
+)
+
 async def _send_booking_gate_notice(
     reply: _ReplyContext,
     hold: dict,
@@ -195,7 +225,7 @@ async def _promote_booking_hold(
     tenant: Tenant | None,
     waba_token: str | None,
     redis,
-) -> str | None:
+) -> str | SlotTakenAtPromotion | None:
     """Turn this conversation's reservation into a real appointment.
 
     Returns the extra paragraph to append to the code-accepted message, or
@@ -209,6 +239,13 @@ async def _promote_booking_hold(
     dropped. An event created with no row behind it is the orphan of the
     previous wave; a hold dropped before the row exists would free a slot the
     patient just paid for with a code.
+
+    One read comes before the create: a hold only blocks other HOLDS, never the
+    clinic's own Google writes, so the window may have been filled on the
+    doctor's agenda while the code was being typed. `slot_taken_at_confirm`
+    asks the very calendar the event would be written to; taken, nothing is
+    created, the hold is released and a `SlotTakenAtPromotion` carries the
+    re-offer back. A failed read books as before (fail-open).
     """
     if tenant is None:
         return None
@@ -257,6 +294,19 @@ async def _promote_booking_hold(
         )
         await _set_conversation_human_active(reply.conversation_id)
         return _PROMOTE_FAILED_MESSAGE
+
+    if await slot_taken_at_confirm(
+        calendar,
+        held.start_at,
+        held.end_at,
+        source="booking_hold_promotion",
+        conversation_id=reply.conversation_id,
+        tenant_id=tenant.id,
+    ):
+        # Released, unlike the no-calendar case above: there is nothing left to
+        # rescue - the time belongs to somebody else's event now.
+        await _release_hold(held.id)
+        return await _slot_taken_reoffer(reply, tenant, held, calendar)
 
     service_type = held.appointment_type or "Consulta"
     # The attendee's name titles the event on a booking for someone else, as
@@ -388,6 +438,60 @@ async def _release_hold(hold_id) -> None:
                 await release_hold_in(session, hold_id)
     except Exception as exc:
         logger.warning("booking_hold_release_failed", hold_id=str(hold_id), error=str(exc))
+
+async def _slot_taken_reoffer(
+    reply: _ReplyContext, tenant: Tenant, held: HeldSlot, calendar
+) -> SlotTakenAtPromotion | str:
+    """The same day's fresh times, for the doctor, service and convênio the hold carried.
+
+    `_handle_confirmation` cleared the flow fields when it placed the hold (the hold row
+    carries them instead), so the booking is rebuilt here from `held` onto a FRESH
+    conversation snapshot and handed to `flow_router.reoffer_taken_booking_slot`, on the
+    calendar the promotion just read - the owner's. The doctor goes back into
+    `flow_selected_professional_id` only when the clinic's roster would not imply it (the
+    reverse of `resolve_booking_owner_id`), so a single-doctor clinic keeps reading its
+    agenda exactly the way it did before the code. "Pra mim" is the empty marker on the
+    conversation (a hold row stores no ""). A "Marcar outra" marker rides along, so the
+    booking the patient makes next still replaces the original.
+    """
+    ctx = await _load_draft_context(reply, tenant)
+    if ctx is None:
+        return _SLOT_TAKEN_NO_REOFFER_MESSAGE
+    async with async_session_factory() as session:
+        replaces = await session.scalar(
+            select(Conversation.flow_replaces_appointment_id).where(
+                Conversation.id == reply.conversation_id
+            )
+        )
+    implied = resolve_booking_owner_id(ctx.professionals, None)
+    state = SimpleNamespace(
+        **{
+            **vars(ctx.conversation),
+            "flow_selected_type": held.appointment_type,
+            "flow_selected_professional_id": (
+                None if held.professional_id == implied else held.professional_id
+            ),
+            "flow_selected_insurance": held.insurance,
+            "flow_attendee_name": held.attendee_name or ATTENDEE_SELF,
+            "flow_selected_day": None,
+            "flow_selected_slot": None,
+            "flow_draft": None,
+            "flow_replaces_appointment_id": replaces,
+            "flow_edit_draft": None,
+        }
+    )
+    minutes = int((held.end_at - held.start_at).total_seconds() // 60)
+    # Holds of OTHER conversations stay hidden on this list too, as on any slot list.
+    with booking_gate_scope(_turn_booking_gate(reply, tenant)):
+        result = await reoffer_taken_booking_slot(
+            state,
+            ctx.tenant_snapshot,
+            calendar,
+            held.start_at,
+            duration_minutes=minutes,
+            professionals=ctx.professionals,
+        )
+    return SlotTakenAtPromotion(reoffer=result)
 
 async def _patient_display_name(patient_id) -> str | None:
     """The patient's name for the calendar event title, or None."""
