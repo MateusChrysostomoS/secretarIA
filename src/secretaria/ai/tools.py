@@ -22,6 +22,7 @@ from uuid import UUID
 from langchain_core.tools import tool
 from pseudonymize_core import has_unresolved_tokens
 
+from secretaria.ai.formatter import whatsapp_markup
 from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
 from secretaria.services.availability import slot_taken_at_confirm
@@ -135,7 +136,7 @@ def handback_message(message: str | None) -> str | None:
     resolve (the model invented or mangled one) would be printed to the patient as
     "[PACIENTE_...]", so such words are dropped - the card alone still answers.
     """
-    text = (message or "").strip()[:HANDBACK_MESSAGE_MAX].rstrip()
+    text = whatsapp_markup((message or "").strip()[:HANDBACK_MESSAGE_MAX].rstrip())
     if text and has_unresolved_tokens(text):
         logger.warning("handback_message_unresolved_tokens", message_len=len(text))
         return None

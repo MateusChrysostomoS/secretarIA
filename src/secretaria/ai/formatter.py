@@ -161,9 +161,22 @@ def _clean(text: str) -> str:
     WhatsApp shows leading/trailing whitespace literally and collapses 3+
     consecutive newlines into one big gap, so we normalise here.
     """
-    text = text.strip()
+    text = whatsapp_markup(text.strip())
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text
+
+
+_MARKDOWN_BOLD = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", re.DOTALL)
+
+
+def whatsapp_markup(text: str) -> str:
+    """Markdown bold (`**x**`) as WhatsApp bold (`*x*`).
+
+    Both channels bold ONE pair of asterisks; a Markdown pair prints the outer
+    ones (the Portal showed "*23/10*" to a patient, Claude Haiku 5.5, 2026-10-21).
+    Done here so no model has to remember the convention.
+    """
+    return _MARKDOWN_BOLD.sub(r"*\1*", text)
 
 
 def _parse_slot_rows(block: str) -> list[tuple[str, str]]:
