@@ -288,6 +288,11 @@ class Settings(BaseSettings):
     # Thinking depth. A chat turn with short replies does well at "low"; the
     # model's own default is "medium", slower and dearer.
     ANTHROPIC_EFFORT: Literal["low", "medium", "high"] = "low"
+    # "adaptive" (default) or "disabled". Off answers sooner (Artificial Analysis
+    # measured ~6.4s to the first token at low effort on a 10k prompt) but a model
+    # without thinking may write a tool call as visible text - decide on the live
+    # evaluation (tests/llm_eval), never by default.
+    ANTHROPIC_THINKING: Literal["adaptive", "disabled"] = "adaptive"
     # Wall-clock budget for ONE whole agent turn (every LLM call + tool call +
     # the transient retry). The per-call HTTP timeout is 60s with 5 SDK
     # retries, so without this a stuck turn could outlive arq's 300s job

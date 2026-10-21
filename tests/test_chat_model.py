@@ -24,6 +24,7 @@ def _settings(**over):
         ANTHROPIC_SECRETARIA_MODEL="claude-haiku-5-5",
         ANTHROPIC_MAX_TOKENS=4096,
         ANTHROPIC_EFFORT="low",
+        ANTHROPIC_THINKING="adaptive",
     )
     base.update(over)
     return SimpleNamespace(**base)
@@ -56,6 +57,11 @@ def test_anthropic_builds_haiku_with_adaptive_thinking_at_low_effort(use):
     assert model.default_request_timeout == 30
     assert chat_model.active_model_name() == "claude-haiku-5-5"
     assert chat_model.active_max_tokens() == 4096
+
+
+def test_thinking_can_be_switched_off_for_the_latency_comparison(use):
+    use(LLM_PROVIDER="anthropic", ANTHROPIC_THINKING="disabled")
+    assert chat_model.build_chat_model(timeout=30).thinking == {"type": "disabled"}
 
 
 def test_a_provider_without_its_key_fails_loudly(use):

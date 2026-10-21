@@ -68,9 +68,10 @@ def build_chat_model(*, timeout: float) -> BaseChatModel:
             model=s.ANTHROPIC_SECRETARIA_MODEL,
             api_key=s.ANTHROPIC_API_KEY,
             max_tokens=s.ANTHROPIC_MAX_TOKENS,
-            # Adaptive thinking is Haiku 5.5's default; effort sets how deep. Thinking
-            # stays on: with it off a model can write a tool call as visible text.
-            thinking={"type": "adaptive"},
+            # Adaptive thinking is Haiku 5.5's default; effort sets how deep. It stays
+            # on unless ANTHROPIC_THINKING says otherwise: with it off a model can
+            # write a tool call as visible text (accepted at effort high or below).
+            thinking={"type": s.ANTHROPIC_THINKING},
             output_config={"effort": s.ANTHROPIC_EFFORT},
             max_retries=5,
             default_request_timeout=timeout,
