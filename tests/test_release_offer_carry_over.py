@@ -305,7 +305,7 @@ async def test_the_portal_booking_born_at_the_code_carries_it_too(db):  # noqa: 
     )
 
     extra = await tasks._promote_booking_hold(
-        reply, tenant=world.tenant, waba_token=None, professionals=[], redis=None
+        reply, tenant=world.tenant, waba_token=None, redis=None
     )
 
     assert extra.endswith(release_offer.CARRIED_OVER_NOTE)

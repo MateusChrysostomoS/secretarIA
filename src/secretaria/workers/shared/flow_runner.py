@@ -16,6 +16,11 @@ from secretaria.models import (
     Tenant,
 )
 from secretaria.models.deposit_release_offer import CARRY_CHECK_REFUNDED, CARRY_CHECK_UNKNOWN
+from secretaria.plugins.appointment_change_notifications import (
+    CHANGE_CANCELLED,
+    CHANGE_RESCHEDULED,
+    enqueue_appointment_change_notification,
+)
 from secretaria.plugins.post_booking import enqueue_post_booking_hooks
 from secretaria.services import release_carry_check, release_offer, reminder_hooks
 from secretaria.services.appointment_edit import EditDraft
@@ -39,10 +44,15 @@ from secretaria.services.flow_router import (
     STEP_EDIT_ATT_AUTH,
     FlowRouterResult,
     is_generic_menu_result,
+    is_main_menu,
+    main_menu_buttons,
     route,
 )
 from secretaria.services.insurance_catalog import (
     resolve_booking_plan_ids,
+)
+from secretaria.services.patient_context import (
+    has_upcoming_appointment,
 )
 from secretaria.services.payments import deposit_lifecycle
 from secretaria.services.pii_pseudonymization import remember_attendee_name
@@ -240,6 +250,10 @@ async def _apply_flow_result(
     closed_appointment_id = None
     moved_appointment_id = None
     edit_patient_id = None
+    # A7: (change, appointment id, new start, previous start) of what THIS turn
+    # cancelled or moved at the patient's request - mailed to the clinic, the doctor
+    # and the Portal patient only once the transaction committed.
+    patient_changes: list[tuple] = []
     try:
         async with async_session_factory() as session:
             async with session.begin():
@@ -386,6 +400,11 @@ async def _apply_flow_result(
                                 idempotency_key=f"cancel:{result.appointment_cancel_id}",
                             )
                             closed_appointment_id = cancelled_appt.id
+                            # A replayed turn re-cancels nothing: no second mail.
+                            if previous_status != AppointmentStatus.CANCELLED:
+                                patient_changes.append(
+                                    (CHANGE_CANCELLED, cancelled_appt.id, None, None)
+                                )
                         # Money hook: resolve the deposit's outcome for this
                         # cancellation and carry the honest notice through to
                         # the reply dispatched below (PROMPT S3 section 4).
@@ -444,6 +463,8 @@ async def _apply_flow_result(
                             .with_for_update()
                         )
                         previous_status = resched_appt.status if resched_appt is not None else None
+                        # Before the UPDATE below, which refreshes the in-session row.
+                        previous_start = resched_appt.start_at if resched_appt is not None else None
                         before_reschedule = (
                             _row_draft(resched_appt, tenant.timezone)
                             if resched_appt is not None and tenant is not None
@@ -469,6 +490,14 @@ async def _apply_flow_result(
                             )
                         )
                         if resched_appt is not None:
+                            patient_changes.append(
+                                (
+                                    CHANGE_RESCHEDULED,
+                                    resched_appt.id,
+                                    resched["start_at"],
+                                    previous_start,
+                                )
+                            )
                             if before_reschedule is not None:
                                 after_reschedule = _row_draft(resched_appt, tenant.timezone)
                                 fields = EditDraft(
@@ -541,6 +570,16 @@ async def _apply_flow_result(
                             raise ValueError("edit_no_longer_allowed")
                         if applied_edit is not None and applied_edit.moved:
                             moved_appointment_id = applied_edit.appointment_id
+                        if applied_edit.previous_start_at is not None:
+                            # "Alterar Dados" changed the date/time: a move too.
+                            patient_changes.append(
+                                (
+                                    CHANGE_RESCHEDULED,
+                                    applied_edit.appointment_id,
+                                    applied_edit.new_start_at,
+                                    applied_edit.previous_start_at,
+                                )
+                            )
     except Exception as exc:
         persisted = False
         logger.error(
@@ -563,7 +602,7 @@ async def _apply_flow_result(
         _log_booking_scope(booked_appointment, tenant.id, source=SOURCE_FLOW)
         await enqueue_post_booking_hooks(redis, tenant.id, booked_appointment.id, source="flow")
         if replaced is not None:
-            await _finish_replacement(tenant, replaced)
+            await _finish_replacement(tenant, replaced, redis=redis)
         # TASK-032 R2: plan the reminders, in their own transaction AFTER the
         # booking committed - a reminder problem never costs a booking.
         if reminder_hooks.enabled_for(tenant):
@@ -575,6 +614,21 @@ async def _apply_flow_result(
     if persisted and applied_edit is not None and tenant is not None:
         await _finish_edit(tenant, applied_edit)
         await enqueue_professional_edit_notification(redis, tenant.id, applied_edit)
+    # A7: the patient cancelled or moved - tell the clinic, the doctor (a cancel only:
+    # a move already reached them through the edit notice just above) and the Portal
+    # patient. Every manage entry funnels through here: the "Remarcar"/"Cancelar"
+    # taps, the agent's manage hand-back, the reminder preselection, "Alterar Dados".
+    # The hub never does, so a staff action is never announced twice.
+    if persisted and tenant is not None:
+        for change, changed_id, new_start, previous_start in patient_changes:
+            await enqueue_appointment_change_notification(
+                redis,
+                tenant.id,
+                changed_id,
+                change,
+                new_start_at=new_start,
+                previous_start_at=previous_start,
+            )
 
     # A HELD slot, not a booking: the router reserved the window and brain-api
     # mailed a code. Nothing was created on Google Calendar and no appointment
@@ -642,6 +696,43 @@ async def _apply_flow_result(
             if replaced is not None and persisted and tenant is not None:
                 notice = _replaced_notice(tenant, replaced)
                 result.bubbles[-1].body = f"{result.bubbles[-1].body}\n\n{notice}"
+            await _offer_manage_on_main_menu(reply, result.bubbles)
             await _dispatch_bubbles(reply, result.bubbles, tenant=tenant, waba_token=waba_token)
         return True
     return False  # delegate_llm
+
+
+async def _offer_manage_on_main_menu(reply: _ReplyContext, bubbles: list) -> None:
+    """Add "Gerenciar consulta" to the main menu when the patient has something booked.
+
+    HERE, at the one seam every menu passes through - the router's own menus,
+    `/menu`, the reactivation "Não" and the agent's `show_main_menu` hand-back
+    all arrive through `_apply_flow_result` - and AFTER this turn's write
+    committed, so a menu that follows the patient's last cancellation drops
+    the entry and one that follows a booking gains it. Read fresh from the
+    database rather than from the turn's snapshot for exactly that reason.
+
+    Fail-open: on any error the plain menu goes out, which is what every
+    patient saw before (Agendar + Outro; typing "Remarcar" still works).
+    """
+    menus = [bubble for bubble in bubbles if is_main_menu(bubble)]
+    if not menus or reply.conversation_id is None:
+        return
+    try:
+        async with async_session_factory() as session:
+            conversation = await session.get(Conversation, reply.conversation_id)
+            if conversation is None or conversation.patient_id is None:
+                return
+            upcoming = await has_upcoming_appointment(
+                session, conversation.tenant_id, conversation.patient_id
+            )
+    except Exception as exc:
+        logger.warning(
+            "main_menu_upcoming_lookup_failed",
+            error_type=type(exc).__name__,
+            conversation_id=str(reply.conversation_id),
+        )
+        return
+    if upcoming:
+        for menu in menus:
+            menu.labels = main_menu_buttons(has_upcoming=True)

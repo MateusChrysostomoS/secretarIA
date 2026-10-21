@@ -18,6 +18,10 @@ lets the slot step hide the held slots AND say which times are held (`held_slots
 patient can see that a day may free up when an unpaid Pix expires (TASK-052, owner decision
 2026-10-11, reverting the TASK-050 port that hid fully held days). The AI readers pass the
 holds.
+`slot_taken_at_confirm` is the same definition asked one last time, at the moment a
+patient-confirmed booking or move is about to be WRITTEN: a list is a snapshot, and the
+clinic (or another channel, or a person in Google Calendar) can fill the slot between the
+list and the tap.
 """
 
 from __future__ import annotations
@@ -26,10 +30,13 @@ from collections.abc import Sequence
 from datetime import date, datetime, timedelta, tzinfo
 from typing import TYPE_CHECKING
 
+from secretaria.core.logging import get_logger
 from secretaria.services.booking_hold import overlaps
 
 if TYPE_CHECKING:
     from secretaria.services.calendar import CalendarService
+
+logger = get_logger(__name__)
 
 # Compatibility floor for a full-day scan. Shorter services need more positions;
 # `slot_scan_limit` expands this to the configured duration (which can be one minute).
@@ -166,3 +173,52 @@ async def days_with_free_slots(
         holds=holds,
     )
     return [day_start.date() for day_start in starts]
+
+
+async def slot_taken_at_confirm(
+    calendar: CalendarService,
+    start: datetime,
+    end: datetime,
+    *,
+    source: str,
+    ignore_event_id: str | None = None,
+    conversation_id: object = None,
+    tenant_id: object = None,
+) -> bool:
+    """True only when the agenda about to be WRITTEN proves [start, end) is already taken.
+
+    Asked right before every patient-confirmed `create_event` / `update_event` (the
+    guided "Confirmar", the Portal code-gate promotion, the reschedule "Confirmar" and the
+    v1 AI booking tools). `calendar` must be the very object the write goes to - the
+    owning professional's agenda, resolved exactly as the write resolves it - or the
+    answer is about some other doctor's day. `ignore_event_id` is the patient's own event
+    when that event is the one being moved: it never "takes" its own new time.
+
+    FAIL-OPEN: a read that fails (Google outage, a revoked token, anything raised) answers
+    False, so the booking goes ahead exactly as it did before this check existed, and the
+    warning is what says the check did not run. Failing closed would turn a flaky
+    `events.list` into a clinic that cannot take appointments; and the write right after
+    it hits the same Google, so a real outage still ends in the caller's own
+    `calendar_unavailable` path (a person and an alert), as it always did.
+
+    `source` names the confirm path in both log lines; ids only, never the patient.
+    """
+    try:
+        taken = bool(await calendar.has_conflict(start, end, ignore_event_id=ignore_event_id))
+    except Exception as exc:
+        logger.warning(
+            "booking_slot_recheck_failed",
+            source=source,
+            error_type=type(exc).__name__,
+            conversation_id=str(conversation_id) if conversation_id else None,
+            tenant_id=str(tenant_id) if tenant_id else None,
+        )
+        return False
+    if taken:
+        logger.info(
+            "booking_slot_taken_at_confirm",
+            source=source,
+            conversation_id=str(conversation_id) if conversation_id else None,
+            tenant_id=str(tenant_id) if tenant_id else None,
+        )
+    return taken

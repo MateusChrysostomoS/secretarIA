@@ -189,6 +189,37 @@ async def test_text_echo_persists_message_and_flips_handover(db):
     assert conversation.last_human_message_at is not None
 
 
+async def test_a_reply_from_the_clinic_app_sends_no_handoff_alert(db, monkeypatch):
+    """The clinic answering from its own app is staff taking over, not the automation
+    failing: the "a secretária virtual não conseguiu resolver" mail is not sent."""
+    from secretaria.services import handoff_notification as hn
+    from secretaria.services.email import EmailOutcome
+
+    tenant = await _seed_tenant(db)
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.contact_email = "clinic@example.com"
+        await session.commit()
+    sent = []
+
+    async def send(to, template, variables):
+        sent.append(template)
+        return EmailOutcome.SENT
+
+    monkeypatch.setattr(hn, "async_session_factory", db)
+    monkeypatch.setattr(hn, "send_transactional_email_result", send)
+    wa_id = "5521900000009"
+    value = _echo_value(
+        wa_id=wa_id,
+        echoes=[{"id": "wamid.text.9", "to": wa_id, "type": "text", "text": {"body": "oi"}}],
+    )
+
+    await tasks._handle_human_echoes(value)
+
+    assert (await _load_conversation(db, wa_id)).handover_state == HandoverState.HUMAN_ACTIVE
+    assert sent == []
+
+
 async def test_text_echo_marks_mode_resolved_when_null(db):
     """smb_message_echoes is one of the three Coexistence mode-resolution
     signals (contract v1 §10) - a NULL mode_resolved_at flips to non-NULL."""

@@ -14,8 +14,9 @@ memory, and are NEVER returned by an API response or logged.
 partial-activation rule (cross-service contract v1 §4/§10) for tenants with
 one or more `Professional` rows (every tenant has at least one, backfilled by
 migration - see migrations/versions for the revision id). `can_activate`
-itself is UNCHANGED (kept for its existing caller, api/hub/config.py); the
-professional-aware variant is additive.
+is kept for its existing caller (api/hub/config.py); the professional-aware
+variant is additive. Neither requires Google since the native agenda
+(2026-10-20).
 """
 
 import asyncio
@@ -42,6 +43,7 @@ from secretaria.services.calendar import (
     CalendarUnavailableError,
     GoogleTokenRevokedError,
 )
+from secretaria.services.channel_sender import CHANNEL_WHATSAPP
 from secretaria.services.payments.provider import PaymentAccount
 from secretaria.services.service_catalog import load_service_catalog, normalize, resolve_entries
 
@@ -126,6 +128,10 @@ class TenantRuntimeConfig:
     # run_agent's `conversation_state` parameter. NEVER loaded from DB, and
     # NEVER carries patient/attendee names — only the history is pseudonymized.
     conversation_state: str | None = None
+    # Per-turn: the channel this conversation is on (`_ReplyContext.channel`),
+    # threaded in by run_agent's `channel` parameter so the prompt names the
+    # surface the patient is actually on (ai/prompts.py). NEVER loaded from DB.
+    channel: str = CHANNEL_WHATSAPP
     # Clinic-wide orientations of every ACTIVE catalog service that has any AND that somebody
     # offers (the tenant list or an active professional's own), whichever professional it is.
     # `appointment_types` only holds the tenant's list (or the single active professional's),
@@ -283,14 +289,14 @@ def professional_business_hours(professional: Professional, tenant: Tenant) -> d
     return _filter_active_hours(hours)
 
 
-def can_activate(tenant: Tenant, calendar_connected: bool) -> tuple[bool, str | None]:
+def can_activate(tenant: Tenant) -> tuple[bool, str | None]:
     """Whether the tenant may be set `is_active=True`.
 
-    Returns (ok, reason). The bot cannot operate without a Calendar, at least
-    one active appointment type, and at least one availability window.
+    Returns (ok, reason). The bot cannot operate without at least one active
+    appointment type and at least one availability window. A Google Calendar is no
+    longer required (native agenda, founder's decision 2026-10-20): without one the
+    clinic books on the secretarIA's own agenda (services/local_calendar.py).
     """
-    if not calendar_connected:
-        return False, "Google Calendar must be connected before going live."
     if not active_appointment_types(tenant):
         return False, "At least one active appointment type is required."
     if not active_business_hours(tenant):
@@ -704,6 +710,11 @@ async def resolve_professional_calendar(
         `duration_min`; when nothing resolves, None keeps the tenant default.
       - calendar id: `professional.google_calendar_id`, else the tenant's
         (CalendarService.for_professional's substitution semantics).
+      - owner: `professional.id` - whose agenda this is. Google ignores it (the id
+        and credential above already name the calendar); with NO credential the
+        secretarIA's own agenda is chosen (CalendarService.from_tenant_config) and
+        keys this doctor's agenda by it, so he never shares busy time with the clinic
+        or a colleague the way an id-less doctor shares the clinic's Google calendar.
 
     `tenant_config` is loaded via `load_tenant_config` when not passed —
     callers that already hold one (workers/tasks.py's flow path, the plugin's
@@ -711,7 +722,7 @@ async def resolve_professional_calendar(
 
     `calendar_factory` is the construction seam, called with the resolved
     keyword overrides (google_calendar_id / google_refresh_token /
-    business_hours / appointment_duration_min). None builds directly via
+    business_hours / appointment_duration_min / professional_id). None builds directly via
     `CalendarService.for_professional(tenant_config, ...)` — the plain
     flow-router path, no ContextVar involved. plugins/multi_professional.py
     passes `ai.tools._calendar_for_professional` instead, keeping the LLM
@@ -740,6 +751,7 @@ async def resolve_professional_calendar(
         google_refresh_token=_professional_credential(tenant, own_token, fallback_token),
         business_hours=hours,
         appointment_duration_min=duration,
+        professional_id=professional.id,
     )
     if calendar_factory is not None:
         return calendar_factory(**overrides)
@@ -782,8 +794,6 @@ class TenantCompleteness:
 def _professional_missing_reasons(item: ProfessionalCompletenessItem) -> list[str]:
     """Per-professional missing-config reasons, same tone/wording as `can_activate`."""
     reasons: list[str] = []
-    if not item.has_calendar:
-        reasons.append(f"{item.name}: Google Calendar must be connected before going live.")
     if not item.has_services:
         reasons.append(f"{item.name}: at least one active appointment type is required.")
     if not item.has_hours:
@@ -796,6 +806,11 @@ async def _completeness_item(
 ) -> ProfessionalCompletenessItem:
     """Shared computation behind `professional_completeness` (per active row)
     and `professional_completeness_item` (any single row, any is_active state).
+
+    `has_calendar` stays the PRESENCE of a Google credential (the screens read it to
+    offer "Conectar"/"Reconectar"), but it no longer gates `complete`: a professional
+    no Google account covers books on the secretarIA's own agenda (native agenda,
+    2026-10-20, services/calendar.py::CalendarService.from_tenant_config).
     """
     has_hours = bool(professional_business_hours(professional, tenant))
     has_services = bool(professional_appointment_types(professional, tenant))
@@ -809,7 +824,7 @@ async def _completeness_item(
         has_calendar=has_calendar,
         has_hours=has_hours,
         has_services=has_services,
-        complete=has_calendar and has_hours and has_services,
+        complete=has_hours and has_services,
     )
 
 
@@ -871,8 +886,8 @@ async def professional_completeness(session: AsyncSession, tenant: Tenant) -> Te
     active-filtering" semantics as `active_business_hours` /
     `active_appointment_types`, resolved per-professional via
     `professional_business_hours` / `professional_appointment_types` (own
-    JSON when set, else the tenant's legacy columns). `complete` requires all
-    three.
+    JSON when set, else the tenant's legacy columns). `complete` requires hours
+    and services; `has_calendar` is reported, not required (native agenda).
 
     Threshold rule (`settings.PARTIAL_ACTIVATION_THRESHOLD`, default 10):
     `total_active <= threshold` -> EVERY active professional must be complete
@@ -913,8 +928,8 @@ async def professional_completeness(session: AsyncSession, tenant: Tenant) -> Te
         config_complete = complete_count >= 1
         if not config_complete:
             reasons.append(
-                "At least one professional must have a connected Google Calendar, "
-                "an active appointment type, and an availability window."
+                "At least one professional must have an active appointment type "
+                "and an availability window."
             )
 
     # Honest alert, no mutation: an ACTIVE professional that resolves to zero
@@ -954,32 +969,17 @@ async def can_activate_professional_aware(
     """Professional-aware activation gate (contract endpoints 3/5).
 
     Requires `professional_completeness(...).config_complete` (the partial-
-    activation threshold rule) AND a connected Google Calendar, tenant-level
-    OR on any active professional. The calendar half is already implied by
-    `config_complete` in practice (every counted-complete professional's own
-    `has_calendar` already ORs in the tenant-level token), but is checked
-    again explicitly here so this gate never depends on that coupling holding.
+    activation threshold rule). A connected Google Calendar used to be required
+    as well; since the native agenda (founder's decision 2026-10-20) a clinic
+    without one goes live on the secretarIA's own agenda, so it is not.
 
-    Unlike `can_activate` (kept unchanged for its existing caller,
-    api/hub/config.py), this resolves everything itself from the DB - no
-    `calendar_connected` argument - and does NOT check `phone_number_id`
+    Unlike `can_activate` (its existing caller is api/hub/config.py), this
+    resolves everything itself from the DB and does NOT check `phone_number_id`
     (endpoint 5 checks "connected" separately: that is a WhatsApp fact, not a
     config-completeness one).
     """
     completeness = await professional_completeness(session, tenant)
-    tenant_calendar = await has_google_refresh_token(session, tenant.id)
-    any_calendar = tenant_calendar or any(p.has_calendar for p in completeness.professionals)
-
-    reasons = list(completeness.reasons)
-    ok = completeness.config_complete and any_calendar
-    if not any_calendar and completeness.config_complete:
-        # Defensive only: config_complete should already guarantee this via
-        # has_calendar, but never claim activation is possible without one.
-        reasons.append(
-            "Google Calendar must be connected (clinic-level or for at least "
-            "one professional) before going live."
-        )
-    return ok, reasons
+    return completeness.config_complete, list(completeness.reasons)
 
 
 # --------------------------------------------------------------------------

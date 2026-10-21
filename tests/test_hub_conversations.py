@@ -309,6 +309,168 @@ async def test_list_is_empty_for_a_tenant_with_no_conversations(client: AsyncCli
 
 
 # --------------------------------------------------------------------------
+# GET list — the console signals (needs_human, unread_count, preview)
+# --------------------------------------------------------------------------
+
+
+def _staff(**overrides) -> dict:
+    return dict(direction=MessageDirection.OUTBOUND, sender=MessageSender.HUMAN, **overrides)
+
+
+def _bot(**overrides) -> dict:
+    return dict(direction=MessageDirection.OUTBOUND, sender=MessageSender.BOT, **overrides)
+
+
+async def _row(client: AsyncClient, conversation_id) -> dict:
+    body = (await client.get(ENDPOINT)).json()
+    return next(row for row in body if row["id"] == str(conversation_id))
+
+
+async def test_a_handoff_the_automation_started_reads_as_needing_a_person(
+    client: AsyncClient, db, tenant
+) -> None:
+    """The patient asked for a person; secretarIA said so and went quiet (HUMAN_ACTIVE).
+    Nobody at the clinic has written: the row must say the patient is waiting."""
+    now = datetime.now(UTC)
+    patient = await _seed_patient(db, tenant)
+    conv = await _seed_conversation(db, tenant, patient, handover_state=HandoverState.HUMAN_ACTIVE)
+    await _seed_message(db, conv, now - timedelta(minutes=5), body="quero falar com alguém")
+    await _seed_message(db, conv, now - timedelta(minutes=4), **_bot(body="Vou chamar a equipe."))
+
+    row = await _row(client, conv.id)
+
+    assert row["needs_human"] is True
+    assert row["unread_count"] == 0  # secretarIA's message came after it
+    assert row["last_message_preview"] == "Vou chamar a equipe."
+    assert row["last_message_sender"] == "bot"
+
+    # The patient insists: still waiting, now with two messages nobody answered.
+    await _seed_message(db, conv, now - timedelta(minutes=3), body="alô?")
+    await _seed_message(db, conv, now - timedelta(minutes=2), body="tem alguém aí?")
+    row = await _row(client, conv.id)
+    assert (row["needs_human"], row["unread_count"]) == (True, 2)
+    assert row["last_message_preview"] == "tem alguém aí?"
+    assert row["last_message_sender"] == "patient"
+
+    # Staff answers: nobody is waiting any more.
+    await _seed_message(db, conv, now - timedelta(minutes=1), **_staff(body="Oi, sou a Ana."))
+    row = await _row(client, conv.id)
+    assert (row["needs_human"], row["unread_count"]) == (False, 0)
+    assert (row["last_message_preview"], row["last_message_sender"]) == ("Oi, sou a Ana.", "human")
+
+
+async def test_a_patient_writing_after_staff_in_a_human_conversation_needs_a_person(
+    client: AsyncClient, db, tenant
+) -> None:
+    now = datetime.now(UTC)
+    patient = await _seed_patient(db, tenant)
+    conv = await _seed_conversation(db, tenant, patient, handover_state=HandoverState.HUMAN_ACTIVE)
+    await _seed_message(db, conv, now - timedelta(minutes=3), **_staff(body="Pode vir às 10h."))
+    await _seed_message(db, conv, now - timedelta(minutes=1), body="combinado")
+
+    row = await _row(client, conv.id)
+
+    assert (row["needs_human"], row["unread_count"]) == (True, 1)
+
+
+async def test_the_automation_conducting_never_needs_a_person(
+    client: AsyncClient, db, tenant
+) -> None:
+    """BOT_ACTIVE: secretarIA answers. A patient message it has not answered yet still
+    counts as unread, but the row does not claim the patient asked for a person."""
+    now = datetime.now(UTC)
+    patient = await _seed_patient(db, tenant)
+    conv = await _seed_conversation(db, tenant, patient, handover_state=HandoverState.BOT_ACTIVE)
+    await _seed_message(db, conv, now - timedelta(minutes=3), body="oi")
+    await _seed_message(db, conv, now - timedelta(minutes=2), **_bot(body="Olá!"))
+    await _seed_message(db, conv, now - timedelta(minutes=1), body="quero marcar")
+
+    row = await _row(client, conv.id)
+
+    assert (row["needs_human"], row["unread_count"]) == (False, 1)
+    assert row["last_message_sender"] == "patient"
+
+
+async def test_the_preview_is_one_short_line_and_absent_without_messages(
+    client: AsyncClient, db, tenant
+) -> None:
+    now = datetime.now(UTC)
+    long_text = "linha um\n\n  linha   dois " + "x" * 400
+    patient = await _seed_patient(db, tenant)
+    conv = await _seed_conversation(db, tenant, patient)
+    await _seed_message(db, conv, now, body=long_text)
+    empty = await _seed_conversation(
+        db, tenant, await _seed_patient(db, tenant, wa_id="5511000000001")
+    )
+
+    row = await _row(client, conv.id)
+    blank = await _row(client, empty.id)
+
+    assert row["last_message_preview"].startswith("linha um linha dois xxx")
+    assert len(row["last_message_preview"]) == 200
+    assert blank["last_message_preview"] is None and blank["last_message_sender"] is None
+    assert (blank["needs_human"], blank["unread_count"]) == (False, 0)
+
+
+async def test_a_staff_read_clears_the_count_but_not_the_wait(
+    client: AsyncClient, db, tenant
+) -> None:
+    """Brain-Message: the console marking the thread read zeroes the count (the badge);
+    the patient is still waiting for a person until someone answers."""
+    now = datetime.now(UTC)
+    patient = await _seed_patient(db, tenant, channel="brain_message", wa_id=None,
+        external_id=str(uuid4()))
+    conv = await _seed_conversation(db, tenant, patient, handover_state=HandoverState.HUMAN_ACTIVE)
+    first = await _seed_message(db, conv, now - timedelta(minutes=2), body="oi")
+    await _seed_message(db, conv, now - timedelta(minutes=1), body="alguém?")
+    assert (await _row(client, conv.id))["unread_count"] == 2
+
+    response = await client.post(
+        f"{ENDPOINT}/{conv.id}/messages/read", json={"up_to_message_id": str(first.id)}
+    )
+    assert response.json()["applied"] is True
+    row = await _row(client, conv.id)
+    assert (row["needs_human"], row["unread_count"]) == (True, 1)
+
+
+async def test_another_clinics_messages_never_reach_the_signals(
+    client: AsyncClient, db, tenant
+) -> None:
+    now = datetime.now(UTC)
+    other = Tenant(id=uuid4(), clinic_name="Other Clinic", phone_number_id=str(uuid4())[:12])
+    async with db() as session:
+        session.add(other)
+        await session.commit()
+    theirs = await _seed_conversation(
+        db, other, await _seed_patient(db, other, wa_id="5511333333333"),
+        handover_state=HandoverState.HUMAN_ACTIVE,
+    )
+    await _seed_message(db, theirs, now, body="segredo de outra clínica")
+    ours = await _seed_conversation(db, tenant, await _seed_patient(db, tenant))
+
+    body = (await client.get(ENDPOINT)).json()
+
+    assert [row["id"] for row in body] == [str(ours.id)]
+    assert "segredo" not in str(body)
+
+
+async def test_the_handover_answer_carries_the_same_signals(
+    client: AsyncClient, db, tenant
+) -> None:
+    now = datetime.now(UTC)
+    patient = await _seed_patient(db, tenant)
+    conv = await _seed_conversation(db, tenant, patient)
+    await _seed_message(db, conv, now - timedelta(minutes=1), body="preciso de ajuda")
+
+    response = await client.post(f"{ENDPOINT}/{conv.id}/handover", json={"state": "HUMAN_ACTIVE"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["needs_human"], body["unread_count"]) == (True, 1)
+    assert body["last_message_preview"] == "preciso de ajuda"
+
+
+# --------------------------------------------------------------------------
 # POST /handover — success both directions
 # --------------------------------------------------------------------------
 
@@ -950,48 +1112,51 @@ def test_recorded_message_id_never_reads_as_a_wamid() -> None:
 
 
 @pytest.mark.parametrize("mode", ["manual", "text"])
-async def test_hub_takeover_notifies_only_on_actual_transition(
+async def test_a_staff_takeover_sends_no_handoff_alert_but_a_later_handoff_still_does(
     client, db, tenant, monkeypatch, mode
 ):
+    """The "a secretária virtual não conseguiu resolver" mail is a FALSE alarm when the
+    clinic itself takes over ("Assumir" or a reply from the console). A handoff the
+    automation starts afterwards (the patient asked for a person) is still alerted."""
     from secretaria.services import handoff_notification as hn
     from secretaria.services.email import EmailOutcome
+    from secretaria.workers.shared import handover as worker_handover
 
     tenant.contact_email = "clinic@example.com"
     async with db() as session:
         row = await session.get(Tenant, tenant.id)
         row.contact_email = tenant.contact_email
         await session.commit()
-    patient = await _seed_patient(
-        db, tenant, channel="brain_message", wa_id=None, external_id=str(uuid4())
-    )
+    patient = await _seed_patient(db, tenant, channel="brain_message", wa_id=None,
+        external_id=str(uuid4()))
     conv = await _seed_conversation(db, tenant, patient)
     sent = []
-
     async def send(to, template, variables):
-        async with db() as session:
-            row = await session.get(Conversation, conv.id)
-            assert row.handover_state == HandoverState.HUMAN_ACTIVE
-        sent.append((to, template, variables))
+        sent.append((to, template, variables["reason"]))
         return EmailOutcome.SENT
-
     monkeypatch.setattr(hn, "async_session_factory", db)
     monkeypatch.setattr(hn, "send_transactional_email_result", send)
-
+    monkeypatch.setattr(worker_handover, "async_session_factory", db)
     async def takeover():
         if mode == "manual":
-            return await client.post(
-                f"{ENDPOINT}/{conv.id}/handover", json={"state": "HUMAN_ACTIVE"}
-            )
+            return await client.post(f"{ENDPOINT}/{conv.id}/handover",
+                json={"state": "HUMAN_ACTIVE"})
         return await client.post(f"{ENDPOINT}/{conv.id}/messages", json={"body": "staff text"})
 
     assert (await takeover()).status_code == 200
+    assert (await _get_conversation_row(db, conv.id)).handover_state == HandoverState.HUMAN_ACTIVE
     assert (await takeover()).status_code == 200
-    assert len(sent) == 1
-    assert (
-        await client.post(f"{ENDPOINT}/{conv.id}/handover", json={"state": "BOT_ACTIVE"})
-    ).status_code == 200
-    assert (await takeover()).status_code == 200
-    assert len(sent) == 2
+    assert sent == []
+
+    assert (await client.post(f"{ENDPOINT}/{conv.id}/handover",
+        json={"state": "BOT_ACTIVE"})).status_code == 200
+    # The automation hands the patient to a person (workers/shared/handover.py).
+    await worker_handover._set_conversation_human_active(
+        conv.id, reason="patient_requested_human"
+    )
+    assert sent == [
+        ("clinic@example.com", "human_handoff_alert", "O paciente pediu para falar com uma pessoa.")
+    ]
 
 
 @pytest_asyncio.fixture

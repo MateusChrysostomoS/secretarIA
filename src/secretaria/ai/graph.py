@@ -82,6 +82,7 @@ from secretaria.services.booking_scope import (
     BOOKING_TOPOLOGY_UNKNOWN,
 )
 from secretaria.services.calendar import CalendarService, CalendarUnavailableError
+from secretaria.services.channel_sender import CHANNEL_WHATSAPP
 from secretaria.services.patient_name import NAME_ANSWER_LLM_PLACEHOLDER, is_name_question
 from secretaria.services.pii_pseudonymization import (
     _pseudonymizer_ctx,
@@ -708,10 +709,14 @@ async def run_agent(
     conversation_state: str | None = None,
     toolset_v2: bool = False,
     editing: bool = False,
+    channel: str = CHANNEL_WHATSAPP,
 ) -> str:
     """arq-side entry point: build history + run agent + return reply text.
 
     `conversation_state` is turn-scoped, see services/llm_context.py.
+    `channel` is the conversation's channel (`_ReplyContext.channel`), so the
+    prompt names the surface the patient is on (ai/prompts.py); the default
+    keeps every existing caller on the WhatsApp wording.
     `tenant_config` provides per-tenant Calendar credentials and prompt data.
     When None, falls back to the single-tenant env-var scaffold (Fase A / dev).
     `extra_tools` are plugin-contributed LangChain tools for THIS tenant's
@@ -766,6 +771,8 @@ async def run_agent(
         tenant_config = replace(tenant_config, appointment_context=appointment_context)
     if tenant_config is not None and conversation_state is not None:
         tenant_config = replace(tenant_config, conversation_state=conversation_state)
+    if tenant_config is not None and channel != tenant_config.channel:
+        tenant_config = replace(tenant_config, channel=channel)
 
     # Build a per-tenant CalendarService and inject it via ContextVar so the
     # cached process-wide agent uses the right credentials for this call.

@@ -35,6 +35,7 @@ from secretaria.models.deposit_release_offer import (
     DepositReleaseOffer,
 )
 from secretaria.services import booking_hold, booking_promotion, release_carry_check, release_offer
+from secretaria.services.local_calendar import LocalCalendarService, create_event_exclusive
 
 logger = get_logger(__name__)
 
@@ -56,9 +57,10 @@ class KeepResult:
     appointment: Appointment | None = None
 
 
-def keep_event_id(offer_id: UUID) -> str:
+def keep_event_id(offer_id: UUID, *, calendar=None) -> str:
     """Deterministic Google event id: base32hex alphabet (a-v, 0-9), 5..1024 characters."""
-    return f"relkeep{offer_id.hex}"
+    prefix = "loc_" if isinstance(calendar, LocalCalendarService) else ""
+    return f"{prefix}relkeep{offer_id.hex}"
 
 
 def _utc(value: datetime) -> datetime:
@@ -128,7 +130,7 @@ async def accept_keep(
     )
     if calendar is None:
         return KeepResult(ACCEPT_UNAVAILABLE)
-    own_event = keep_event_id(offer_id)
+    own_event = keep_event_id(offer_id, calendar=calendar)
     try:
         events = await calendar.check_availability(start, end)
     except Exception as exc:  # noqa: BLE001 - Google down: nothing changes, the clinic retries
@@ -149,7 +151,8 @@ async def accept_keep(
     display = released.attendee_name or (patient.name if patient is not None else None)
     service = released.appointment_type or "Consulta"
     try:
-        event = await calendar.create_event(
+        event = await create_event_exclusive(
+            calendar,
             start=start,
             end=end,
             summary=f"{service} - {display}" if display else service,

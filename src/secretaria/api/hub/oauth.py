@@ -12,11 +12,15 @@ OPTIONALLY — when present, the callback routes the refresh token to
 `health` is the live half of "connected": every stored-token flag stays true
 for a token Google has since expired or revoked, and only a real call can tell
 the two apart (services/tenant_config.py::calendar_credential_health).
+
+Native agenda (2026-10-20): a clinic that booked on the secretarIA's own agenda before
+connecting gets its future bookings pushed to Google right after a successful callback
+(`_enqueue_local_sync` -> workers/calendar_sync.py), whichever account was connected.
 """
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,6 +62,35 @@ def _portal_redirect(base: str, status_value: str) -> JSONResponse | RedirectRes
         return JSONResponse({"status": status_value})
     separator = "&" if "?" in base else "?"
     return RedirectResponse(url=f"{base}{separator}status={status_value}", status_code=302)
+
+
+async def _enqueue_local_sync(
+    request: Request, tenant_id: UUID, professional_id: UUID | None
+) -> None:
+    """Queue the connect-time push of the secretarIA agenda to Google. Never raises.
+
+    Enqueued on EVERY successful connection: the job finds on its own which agendas the
+    new credential covers and has nothing to do for a clinic that never booked locally.
+    A lost enqueue is logged; POST /admin/tenants/{id}/calendar/sync-local reruns it.
+    """
+    arq_pool = getattr(request.app.state, "arq_pool", None)
+    if arq_pool is None:
+        logger.warning(
+            "calendar_local_sync_not_enqueued", tenant_id=str(tenant_id), reason="no_pool"
+        )
+        return
+    try:
+        await arq_pool.enqueue_job(
+            "sync_local_calendar_to_google",
+            str(tenant_id),
+            str(professional_id) if professional_id else None,
+        )
+    except Exception as exc:  # noqa: BLE001 - the connection itself already succeeded
+        logger.warning(
+            "calendar_local_sync_not_enqueued",
+            tenant_id=str(tenant_id),
+            reason=type(exc).__name__,
+        )
 
 
 @router.get("/tenants/me/calendar/oauth/start")
@@ -113,6 +146,7 @@ async def professional_oauth_start(
 
 @router.get("/oauth/google/callback", response_model=None)
 async def oauth_callback(
+    request: Request,
     code: str | None = Query(default=None),
     state: str | None = Query(default=None),
     error: str | None = Query(default=None),
@@ -185,6 +219,8 @@ async def oauth_callback(
         await cfg.set_google_refresh_token(session, tenant_id, refresh_token)
         logger.info("hub_oauth_calendar_connected", tenant_id=str(tenant_id))
     await session.commit()
+    # After the commit: the job must see the new credential.
+    await _enqueue_local_sync(request, tenant_id, professional_id)
     return _portal_redirect(portal, "success")
 
 

@@ -12,6 +12,11 @@ from secretaria.models import (
     Patient,
     Tenant,
 )
+from secretaria.services.booking_hold import (
+    HeldSlot,
+    appointment_stands_in,
+    live_hold_in,
+)
 from secretaria.services.patient_name import (
     NAME_REQUEST_AFTER_EMAIL_MESSAGE,
     NAME_REQUEST_MESSAGE,
@@ -19,7 +24,6 @@ from secretaria.services.patient_name import (
 from secretaria.services.pending_identity import (
     ACCOUNT_CODE_GIVE_UP_MESSAGE,
     CODE_ACCEPTED_MESSAGE,
-    CODE_GIVE_UP_MESSAGE,
     CODE_NOTICE_BUTTONS,
     EMAIL_REQUEST_MESSAGE,
     EXISTING_ACCOUNT_CODE_BUTTONS,
@@ -30,11 +34,18 @@ from secretaria.services.pending_identity import (
     IdentityState,
     RequestCodeOutcome,
     RequestCodeResult,
+    booking_gate_body,
     cancel_pending_code,
+    code_give_up_message,
     code_notice_body,
     existing_account_code_body,
     probe_identity,
     request_code,
+    unbooked_code_notice_body,
+)
+from secretaria.workers.shared.booking_hold import (
+    _hold_minutes_left,
+    _hold_when,
 )
 from secretaria.workers.shared.context import (
     _ReplyContext,
@@ -83,18 +94,81 @@ async def _send_code_notice(
     follows a booking, through `BrainMessageSender` directly because it has no
     `_ReplyContext` to hand. All three build the body and the buttons from
     `services/pending_identity.py`, so the card cannot drift between them.
+
+    Post-consent, the body follows what the code confirms TODAY (live test,
+    2026-10-05): "já está confirmada" only when an appointment stands, the
+    gate notice while the slot is still held, and the account-only card once
+    the hold ran out — never a booking that does not exist.
     """
+    if pre_consent:
+        body = existing_account_code_body(email_masked)
+    else:
+        stands, held = await _code_wait_booking(reply.conversation_id)
+        if stands:
+            body = code_notice_body(email_masked)
+        elif held is not None:
+            body = booking_gate_body(
+                email_masked, when=_hold_when(held, tenant), hold_minutes=_hold_minutes_left(held)
+            )
+        else:
+            body = unbooked_code_notice_body(email_masked)
     await _send_buttons_reply(
         reply,
         tenant=tenant,
         waba_token=waba_token,
-        body=(
-            existing_account_code_body(email_masked)
-            if pre_consent
-            else code_notice_body(email_masked)
-        ),
+        body=body,
         buttons=list(EXISTING_ACCOUNT_CODE_BUTTONS if pre_consent else CODE_NOTICE_BUTTONS),
         event=event,
+    )
+
+async def _code_wait_booking(conversation_id: UUID | None) -> tuple[bool, HeldSlot | None]:
+    """What a post-consent code wait confirms: (an appointment stands, the live hold).
+
+    Since the gate the usual answer is "nothing booked, a slot held for ten
+    minutes", and after those minutes "nothing at all"; an appointment stands
+    only on the paths that still book before the code (`appointment_stands_in`).
+    Own short session, like `_conversation_patient_has_name`. A read failure
+    answers (False, None): a message must never claim a booking we could not see.
+    """
+    if conversation_id is None:
+        return False, None
+    try:
+        async with async_session_factory() as session:
+            conversation = await session.get(Conversation, conversation_id)
+            if conversation is None or conversation.patient_id is None:
+                return False, None
+            held = await live_hold_in(session, conversation_id)
+            stands = await appointment_stands_in(
+                session,
+                tenant_id=conversation.tenant_id,
+                patient_id=conversation.patient_id,
+                conversation_id=conversation_id,
+            )
+            return stands, held
+    except Exception as exc:
+        logger.warning(
+            "code_wait_booking_read_failed",
+            error_type=type(exc).__name__,
+            conversation_id=str(conversation_id),
+        )
+        return False, None
+
+async def _code_appointment_stands_in(
+    session, conversation: Conversation, patient: Patient, origin: FlowState
+) -> bool:
+    """`_code_wait_booking`'s appointment half, inside the inbound transaction.
+
+    For the "quer continuar?" offer that `_route_inbound_turn` builds when a
+    code wait expires. Only a POST-consent code wait can have a booking behind
+    it; every other origin answers False without a query.
+    """
+    if origin != FlowState.AWAITING_EMAIL_CODE or patient.lgpd_accepted_at is None:
+        return False
+    return await appointment_stands_in(
+        session,
+        tenant_id=conversation.tenant_id,
+        patient_id=patient.id,
+        conversation_id=conversation.id,
     )
 
 async def _continue_after_email_claim(
@@ -257,8 +331,8 @@ async def _handle_identity_card_action(
     (`_route_inbound_turn`); only `identity_resend` waits on brain-api and
     therefore writes its state here.
 
-    Fails the same way the rest of this leg does: a dead end says the
-    appointment stands (`CODE_GIVE_UP_MESSAGE`) and leaves the conversation
+    Fails the same way the rest of this leg does: a dead end says what is true
+    of the booking (`code_give_up_message`) and leaves the conversation
     usable, never parked in a state whose only exit is a code that was never
     mailed.
     """
@@ -349,11 +423,12 @@ async def _handle_identity_card_action(
     # asked for a code that is not coming, so keeping them in a state that
     # only reads six digits would strand them until the silence floor.
     await _write_flow_state(reply.conversation_id, FlowState.IDLE)
+    stands, _held = await _code_wait_booking(reply.conversation_id)
     await _send_plain_reply(
         reply,
         tenant=tenant,
         waba_token=waba_token,
-        body=CODE_GIVE_UP_MESSAGE,
+        body=code_give_up_message(stands),
         event="pending_code_resend_unavailable",
     )
 

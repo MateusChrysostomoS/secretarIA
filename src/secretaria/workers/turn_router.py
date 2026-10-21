@@ -63,6 +63,12 @@ from secretaria.workers.shared.db import (
     _conversation_message_count,
     _get_or_create_conversation,
 )
+from secretaria.workers.shared.debug_reset import (
+    debug_reset_allowed,
+    debug_reset_reply,
+    is_debug_reset_command,
+    reset_conversation_for_debug,
+)
 from secretaria.workers.shared.dispatch import (
     _GREETING_LLM_ESCAPE_SUFFIX,
 )
@@ -119,7 +125,8 @@ async def _route_inbound_turn(
 
     THE ORDER OF THE BRANCHES BELOW IS THE PRODUCT. It was extracted verbatim
     from `_persist_inbound_message`, not rewritten, and every comment explaining
-    why a gate sits where it does came with it. In sequence: inbound recorded ->
+    why a gate sits where it does came with it. In sequence: `/menu3` (test
+    clinics only, before anything is recorded) -> inbound recorded ->
     reminder action button (above handover, because honouring an existing
     booking is not a conversational turn) -> human handover -> a FILE (the fixed
     receipt, Brain-Message only) -> LGPD consent gate
@@ -167,6 +174,36 @@ async def _route_inbound_turn(
     # reader of `stored_body` is the inbound `Message` row.
     stored_body = body
     body = inbound_routing_text(stored_body, interactive_reply_id)
+
+    # `/menu3` (TEST clinics only, workers/shared/debug_reset.py): ABOVE every
+    # branch below - reminder buttons, human handover, files, identity, consent,
+    # /menu, the flow router, the LLM - because its whole job is to throw away the
+    # state those branches read. Typed text only (a file's caption is not a command:
+    # its bytes are already in the bucket and need their row). The inbound itself is
+    # never stored: it is deleted with the rest by never being written.
+    if (
+        attachment is None
+        and is_debug_reset_command(stored_body)
+        and debug_reset_allowed(tenant.id)
+    ):
+        conversation = await _get_or_create_conversation(session, tenant, patient)
+        counts = await reset_conversation_for_debug(
+            session, conversation=conversation, patient=patient
+        )
+        logger.warning(
+            "debug_conversation_reset",
+            tenant_id=str(tenant.id),
+            conversation_id=str(conversation.id),
+            patient_id=str(patient.id),
+            channel=channel,
+            **counts,
+        )
+        return debug_reset_reply(
+            tenant=tenant,
+            conversation_id=conversation.id,
+            patient_ref=patient_ref,
+            channel=channel,
+        )
 
     # Capture a self-introduced name ("meu nome é ...") when we don't
     # have one yet, so future returning greetings can use {{name}}.
@@ -550,6 +587,14 @@ async def _route_inbound_turn(
                 conversation_id=str(conversation.id),
                 tenant_id=str(tenant.id),
             )
+        # The reply below IS the service menu, so an idle conversation is now
+        # AT the menu - exactly as `/menu` and the opening leave it. Left IDLE,
+        # the patient's first free-text request ("quero marcar com o Dr. X")
+        # only re-presented the menu instead of reaching the LLM (live,
+        # 2026-10-05). A conversation that was doing something else is still
+        # left untouched, per the paragraph above.
+        if conversation.flow_state in (None, FlowState.IDLE):
+            conversation.flow_state = FlowState.MENU
         # The FIRST message of the conversation to carry buttons.
         return _ReplyContext(
             channel=channel,
@@ -945,6 +990,7 @@ async def _route_inbound_turn(
             body,
             last_activity_at,
             resumable_origin,
+            channel=channel,
         )
         if offer is not None:
             return offer

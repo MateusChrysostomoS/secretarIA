@@ -478,7 +478,7 @@ async def test_a_payment_phase_hold_is_never_promoted_by_a_code(db, env):
     world, held, tenant, reply = await _code_held_portal(db)
     await tasks._payment_after_code(reply, tenant=tenant, redis=None)
     promoted = await tasks._promote_booking_hold(
-        reply, tenant=tenant, waba_token=None, professionals=[], redis=None
+        reply, tenant=tenant, waba_token=None, redis=None
     )
     assert promoted is None  # only the payment may create the appointment
     from secretaria.models import Appointment

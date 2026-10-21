@@ -21,6 +21,7 @@ from uuid import UUID
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
+from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import Patient, ProcessedEvent, Professional
@@ -28,9 +29,14 @@ from secretaria.plugins.base import PluginSpec, PostBookingContext
 from secretaria.plugins.professional_notification import _as_utc, _local_when
 from secretaria.plugins.registry import register
 from secretaria.services.brain_patients import fetch_patient_email_result
-from secretaria.services.calendar import CalendarService, build_patient_calendar_link
+from secretaria.services.calendar import (
+    CalendarService,
+    build_patient_calendar_link,
+    is_local_event_id,
+)
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.email import EmailOutcome, send_transactional_email_result
+from secretaria.services.flow_router import LABEL_INSURANCE_PARTICULAR
 from secretaria.services.insurance_catalog import load_appointment_plans
 from secretaria.services.tenant_config import load_tenant_config, resolve_professional_calendar
 
@@ -38,6 +44,17 @@ logger = get_logger(__name__)
 
 PATIENT_TEMPLATE = "appointment_booked_patient"
 CLINIC_TEMPLATE = "appointment_booked_clinic"
+
+# Only true of a booking on Google: the secretarIA's own agenda sends no invite
+# (services/local_calendar.py), so its patient is not promised one.
+GOOGLE_INVITE_LINE = "Você também recebe um convite do Google Agenda, com lembrete.\n\n"
+
+
+def invite_line(appointment) -> str:
+    """The patient e-mail's invite sentence, or "" for a booking on the secretarIA agenda."""
+    if is_local_event_id(getattr(appointment, "google_event_id", None)):
+        return ""
+    return GOOGLE_INVITE_LINE
 
 
 def _key(kind: str, appointment_id: UUID) -> str:
@@ -86,17 +103,58 @@ async def _insurance_line(tenant, appointment) -> str:
                 return f"Convênio: {plan.name}\n"
         except Exception as exc:
             logger.warning("booking_notification_plan_lookup_failed", error_type=type(exc).__name__)
+    # "Particular" is the flow's own button label, not patient text: name it (live test,
+    # 2026-10-19 - a private booking read "Convênio informado; consulte o agendamento").
+    if insurance.casefold() == LABEL_INSURANCE_PARTICULAR.casefold():
+        return f"Convênio: {LABEL_INSURANCE_PARTICULAR}\n"
     # Legacy catalog strings and unmatched patient answers are untrusted text.
     return "Convênio informado; consulte o agendamento.\n" if insurance else ""
 
 
-def _variables(tenant, patient, appointment, insurance_line: str) -> dict:
+async def professional_line(tenant, appointment) -> str:
+    """The "Profissional: <name>" line for the appointment's owner, or "" when unknown.
+
+    Tenant-scoped (a mis-set id never names another clinic's doctor) and
+    best-effort: a failed lookup only drops the line.
+    """
+    professional_id = getattr(appointment, "professional_id", None)
+    if professional_id is None:
+        return ""
+    try:
+        async with async_session_factory() as session:
+            name = await session.scalar(
+                select(Professional.name).where(
+                    Professional.id == professional_id,
+                    Professional.tenant_id == tenant.id,
+                )
+            )
+    except Exception as exc:
+        logger.warning(
+            "booking_notification_professional_lookup_failed", error_type=type(exc).__name__
+        )
+        return ""
+    name = (name or "").strip()
+    return f"Profissional: {name}\n" if name else ""
+
+
+def agenda_line() -> str:
+    """The clinic's agenda screen (DOCTOR_AGENDA_URL), or "" when not configured."""
+    url = (get_settings().DOCTOR_AGENDA_URL or "").strip()
+    return f"Ver na agenda:\n{url}\n\n" if url else ""
+
+
+def _variables(
+    tenant, patient, appointment, insurance_line: str, professional: str = ""
+) -> dict:
     return {
         "clinic_name": tenant.clinic_name,
+        # Footer reference only (support) - see the clinic template.
         "appointment_id": str(appointment.id),
         "service": appointment.appointment_type or "Consulta",
         "when": _local_when(appointment.start_at, tenant.timezone),
         "insurance_line": insurance_line,
+        "professional_line": professional,
+        "agenda_line": agenda_line(),
     }
 
 
@@ -171,7 +229,9 @@ async def _send_once(
 async def _post_booking(ctx: PostBookingContext) -> None:
     tenant, patient, appointment = ctx.tenant, ctx.patient, ctx.appointment
     insurance_line = await _insurance_line(tenant, appointment)
-    variables = _variables(tenant, patient, appointment, insurance_line)
+    variables = _variables(
+        tenant, patient, appointment, insurance_line, await professional_line(tenant, appointment)
+    )
 
     clinic_email = (getattr(tenant, "contact_email", None) or "").strip()
     if clinic_email:
@@ -208,7 +268,11 @@ async def _post_booking(ctx: PostBookingContext) -> None:
             _as_utc(appointment.end_at),
             appointment.appointment_type or "Consulta",
         )
-        patient_vars = {**variables, "calendar_line": f"Adicionar à sua agenda:\n{link}\n\n"}
+        patient_vars = {
+            **variables,
+            "calendar_line": f"Adicionar à sua agenda:\n{link}\n\n",
+            "invite_line": invite_line(appointment),
+        }
         await _send_once("patient", appointment.id, email, PATIENT_TEMPLATE, patient_vars)
     except Exception as exc:
         logger.warning("booking_notification_patient_failed", error_type=type(exc).__name__)

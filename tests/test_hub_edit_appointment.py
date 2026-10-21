@@ -9,6 +9,7 @@ import pytest
 from httpx import AsyncClient
 
 from secretaria.models import AppointmentStatus, FlowState
+from secretaria.services.calendar import GoogleTokenRevokedError
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.flow_router import STEP_EDIT_MENU
 from secretaria.workers.shared import reminder_actions as ra
@@ -218,6 +219,31 @@ async def test_business_refusals_carry_their_code(client: AsyncClient, db, actin
 
     assert taken.status_code == 409 and taken.json()["detail"]["code"] == "slot_unavailable"
     assert same.status_code == 422 and same.json()["detail"]["code"] == "nothing_changed"
+    assert sent() == []
+
+
+async def test_a_revoked_google_grant_asks_to_reconnect_and_changes_nothing(
+    client: AsyncClient, db, acting
+):
+    """Google refused the clinic's grant (invalid_grant): 409 `google_reconnect_required`,
+    never the 502 "tente de novo em instantes" - waiting does not bring it back."""
+    world = await _world(db, acting)
+    FakeCalendar.get("tenant").fail = GoogleTokenRevokedError("refresh token rejected")
+
+    response = await _post(
+        client, world.appointment.id, start_at=_iso(world.start_at + timedelta(hours=3))
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "google_reconnect_required",
+        "message": (
+            "A conexão da clínica com o Google Agenda expirou. Reconecte em Contexto → Google."
+        ),
+    }
+    assert (await reload_appointment(db, world.appointment.id)).start_at.replace(
+        tzinfo=None
+    ) == world.start_at.replace(tzinfo=None)
     assert sent() == []
 
 

@@ -40,6 +40,7 @@ from secretaria.models import (
 from secretaria.services import booking_hold
 from secretaria.services.calendar import CalendarService, build_patient_calendar_link
 from secretaria.services.insurance_catalog import resolve_booking_plan_ids
+from secretaria.services.local_calendar import LocalCalendarService, create_event_exclusive
 from secretaria.services.tenant_config import load_tenant_config, resolve_professional_calendar
 
 logger = get_logger(__name__)
@@ -87,9 +88,11 @@ class BookingSnapshot:
         )
 
 
-def event_id_for(deposit_id: UUID) -> str:
+def event_id_for(deposit_id: UUID, *, calendar: CalendarService | None = None) -> str:
     """The deterministic Google event id of a deposit: 32 lowercase hex characters, inside
     Google's base32hex alphabet (a-v, 0-9) and its 5..1024 length rule."""
+    if isinstance(calendar, LocalCalendarService):
+        return f"loc_{deposit_id.hex}"
     return deposit_id.hex
 
 
@@ -108,8 +111,8 @@ async def calendar_for_booking(
             return await resolve_professional_calendar(
                 session, tenant, professional, tenant_config=config
             )
-        if not config or not config.google_refresh_token:
-            return None  # Google Calendar is not connected: there is no agenda to book on
+        if not config:
+            return None
         return CalendarService.from_tenant_config(config)
     except Exception as exc:  # noqa: BLE001
         logger.warning("promotion_calendar_failed", error_type=type(exc).__name__)
@@ -137,7 +140,7 @@ async def slot_conflict(
         # A payment that arrives after the slot began (a Pix that outlived it, or a late payment
         # of a voided charge) must never create a consultation in the past: the clinic decides.
         return "past"
-    own_event = event_id_for(deposit.id)
+    own_event = event_id_for(deposit.id, calendar=calendar)
     events = await calendar.check_availability(snapshot.start_at, snapshot.end_at)
     if any(event.get("id") != own_event for event in events):
         return "calendar"
@@ -181,13 +184,14 @@ async def promote(
     summary = (
         f"{snapshot.appointment_type} - {display}" if display else snapshot.appointment_type
     )
-    event = await calendar.create_event(
+    event = await create_event_exclusive(
+        calendar,
         start=snapshot.start_at,
         end=snapshot.end_at,
         summary=summary,
-        event_id=event_id_for(deposit.id),
+        event_id=event_id_for(deposit.id, calendar=calendar),
     )
-    google_event_id = event.get("id") or event_id_for(deposit.id)
+    google_event_id = event.get("id") or event_id_for(deposit.id, calendar=calendar)
 
     plan_id, professional_plan_id = await resolve_booking_plan_ids(
         session, tenant.id, snapshot.insurance, snapshot.professional_id

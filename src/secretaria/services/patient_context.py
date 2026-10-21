@@ -114,6 +114,29 @@ async def load_upcoming_appointments(
     ]
 
 
+async def has_upcoming_appointment(
+    session: AsyncSession, tenant_id, patient_id, *, now: datetime | None = None
+) -> bool:
+    """Whether the patient has at least one future LIVE appointment.
+
+    The yes/no half of `load_upcoming_appointments` (same statuses, same
+    window), for a caller that only decides what to OFFER - the main menu's
+    manage entry (workers/shared/flow_runner.py::_offer_manage_on_main_menu).
+    """
+    now = now or datetime.now(UTC)
+    found = await session.scalar(
+        select(Appointment.id)
+        .where(
+            Appointment.patient_id == patient_id,
+            Appointment.tenant_id == tenant_id,
+            Appointment.status.in_(UPCOMING_STATUSES),
+            Appointment.start_at >= now,
+        )
+        .limit(1)
+    )
+    return found is not None
+
+
 async def _load_recent_past_appointments(
     session: AsyncSession, tenant_id, patient_id, *, now: datetime, window: timedelta
 ) -> list[dict]:

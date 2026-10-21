@@ -9,11 +9,19 @@ never undoes the booking the patient just confirmed:
     it (its professional's, or the clinic's) - never a guessed agenda; with an
     owner that no longer resolves nothing is deleted and that is logged, the
     same "don't guess, degrade" rule as `actions.py::_calendar_for_appointment`;
-  * the original's pending reminder rows are cancelled through R2's hook.
+  * the original's pending reminder rows are cancelled through R2's hook;
+  * the clinic, the original's doctor and the Portal patient are told it was
+    cancelled (A7, plugins/appointment_change_notifications.py) - the new booking
+    has its own "marcada" mails, and without this the original's doctor never
+    learned the slot was freed.
 """
 
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
+from secretaria.plugins.appointment_change_notifications import (
+    CHANGE_CANCELLED,
+    enqueue_appointment_change_notification,
+)
 from secretaria.services import reminder_hooks
 from secretaria.services.appointment_replacement import REPLACEMENT_REASON, ReplacedAppointment
 from secretaria.services.tenant_config import list_active_professionals
@@ -34,8 +42,9 @@ def _replaced_notice(tenant, replaced: ReplacedAppointment) -> str:
     return f"{text} {replaced.money_note}" if replaced.money_note else text
 
 
-async def _finish_replacement(tenant, replaced: ReplacedAppointment) -> None:
-    """Delete the original's Google event and close its reminder rows. Never raises."""
+async def _finish_replacement(tenant, replaced: ReplacedAppointment, redis=None) -> None:
+    """Delete the original's Google event, close its reminder rows and announce the
+    cancellation. Never raises."""
     if replaced.google_event_id:
         try:
             async with async_session_factory() as session:
@@ -63,3 +72,6 @@ async def _finish_replacement(tenant, replaced: ReplacedAppointment) -> None:
         await reminder_hooks.after_appointment_closed(
             replaced.appointment_id, reason=REPLACEMENT_REASON
         )
+    await enqueue_appointment_change_notification(
+        redis, tenant.id, replaced.appointment_id, CHANGE_CANCELLED
+    )

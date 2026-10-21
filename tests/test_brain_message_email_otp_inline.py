@@ -91,6 +91,7 @@ from secretaria.services.patient_name import (  # noqa: E402
 from secretaria.services.pending_identity import (  # noqa: E402
     CODE_ACCEPTED_MESSAGE,
     CODE_GIVE_UP_MESSAGE,
+    CODE_GIVE_UP_UNCONFIRMED_MESSAGE,
     CODE_INVALID_MESSAGE,
     CODE_NOTICE_BUTTONS,
     CODE_NOTICE_MESSAGE,
@@ -832,10 +833,36 @@ async def test_a_dead_end_says_the_appointment_stands_and_frees_the_conversation
     monkeypatch.setattr(workers_ns, "verify_code", _gone)
     tenant = await _seed_tenant(db)
     await _ready_for_code(db, tenant)
+    # The booking this sentence reassures about. It used to be implied by the
+    # state alone; since the code gate it has to EXIST (live test, 2026-10-05).
+    await _booked(db, tenant, await _patient(db, tenant))
 
     await _bm_turn(tenant, "123456")
 
     assert (await _outbound(db, tenant))[-1] == CODE_GIVE_UP_MESSAGE
+    assert await _flow_state(db, tenant) == FlowState.IDLE
+
+
+async def test_a_dead_end_without_a_booking_never_claims_one(db, monkeypatch) -> None:
+    """Live test, 2026-10-05: the gate's code wait has NO appointment behind it.
+
+    Since `b0c43a9` a Portal slot is only held until the code is verified, so
+    a dead end there must say the slot was not confirmed - never "sua consulta
+    continua marcada" - and point the patient back to choosing one.
+    """
+
+    async def _gone(tenant_id, external_id, code):
+        return VerifyResult(VerifyOutcome.UNAVAILABLE)
+
+    monkeypatch.setattr(workers_ns, "verify_code", _gone)
+    tenant = await _seed_tenant(db)
+    await _ready_for_code(db, tenant)
+
+    await _bm_turn(tenant, "123456")
+
+    last = (await _outbound(db, tenant))[-1]
+    assert last == CODE_GIVE_UP_UNCONFIRMED_MESSAGE
+    assert "continua marcada" not in last
     assert await _flow_state(db, tenant) == FlowState.IDLE
 
 
@@ -945,6 +972,107 @@ async def test_an_abandoned_code_step_can_stop_without_touching_the_booking(db) 
     assert (await _outbound(db, tenant))[-1] == CODE_GIVE_UP_MESSAGE
     async with db() as session:
         assert await session.get(Appointment, appointment.id) is not None
+
+
+async def test_an_abandoned_code_step_without_a_booking_says_it_was_not_confirmed(db) -> None:
+    """The same expiry with nothing booked: the offer and the "Não" tell the truth.
+
+    Live test, 2026-10-05: a Portal patient whose slot was only HELD (the code
+    gate) came back to "Sua consulta continua marcada." - there was none.
+    """
+    tenant = await _seed_tenant(db)
+    await _ready_for_code(db, tenant)
+    await _age_conversation(db, hours=5)
+
+    await _bm_turn(tenant, "voltei")
+
+    offer = (await _outbound(db, tenant))[-1]
+    assert "continua marcada" not in offer
+    assert "não chegou a ser confirmado" in offer
+    assert "última conversa" in offer
+    assert await _flow_state(db, tenant) == FlowState.IDLE
+
+    await _bm_turn(tenant, "Não")
+
+    assert (await _outbound(db, tenant))[-1] == CODE_GIVE_UP_UNCONFIRMED_MESSAGE
+
+
+async def test_resuming_a_code_wait_without_a_booking_does_not_confirm_one(db, calls) -> None:
+    """"Sim" re-sends the code card - without "Sua consulta já está confirmada!".
+
+    The card that follows the honest offer above must not contradict it: with
+    no appointment and no live hold, the code only activates the account.
+    """
+    tenant = await _seed_tenant(db)
+    await _ready_for_code(db, tenant)
+    await _age_conversation(db, hours=5)
+    await _bm_turn(tenant, "voltei")
+
+    await _bm_turn(tenant, "Sim")
+
+    card = (await _outbound(db, tenant))[-1]
+    assert "já está confirmada" not in card
+    assert "ativar a sua conta" in card
+    assert EMAIL_MASKED in card
+    assert await _flow_state(db, tenant) == FlowState.AWAITING_EMAIL_CODE
+
+
+async def _age_conversation(db, hours: int) -> None:
+    """Push every message `hours` into the past: `last_activity_at` is
+    max(Message.created_at), read before the next inbound is written."""
+    async with db() as session:
+        async with session.begin():
+            for message in (await session.scalars(select(Message))).all():
+                message.created_at = datetime.now(UTC) - timedelta(hours=hours)
+
+
+async def test_a_returning_portal_patient_gets_the_resume_offer_on_the_portal(db) -> None:
+    """The generic "quer continuar?" leaves by Brain-Message, not by WhatsApp.
+
+    Live test, 2026-10-05: a Portal patient back after 6h of silence with a
+    resumable state (LLM here) never saw the question - `_reactivation_offer`
+    built its reply on the `_ReplyContext` default channel and `_reply_sender`
+    handed it to the WhatsApp client. The WhatsApp client is replaced by a
+    recorder so the old behaviour fails here instead of reaching Meta.
+    """
+    tenant = await _seed_tenant(db)
+    await _bm_turn(tenant, "oi")
+    await _bm_turn(tenant, EMAIL)
+    await _bm_turn(tenant, NAME)
+    await _bm_turn(tenant, CONSENT_BUTTON_LABEL)
+    async with db() as session:
+        async with session.begin():
+            conversation = await session.scalar(
+                select(Conversation).where(Conversation.tenant_id == tenant.id)
+            )
+            conversation.flow_state = FlowState.LLM
+    await _age_conversation(db, hours=7)
+
+    whatsapp_sends: list[str] = []
+
+    class _WhatsAppRecorder:
+        persists_outbound = False
+
+        async def send_text_message(self, to, body):
+            whatsapp_sends.append(body)
+            return {}
+
+        async def send_buttons(self, to, body, buttons):
+            whatsapp_sends.append(body)
+            return {}
+
+    original = tasks._tenant_client
+    workers_ns._tenant_client = lambda tenant_, waba_token: _WhatsAppRecorder()
+    try:
+        reply = await _bm_turn(tenant, "oi de novo")
+    finally:
+        workers_ns._tenant_client = original
+
+    assert reply is not None and reply.channel == CHANNEL_BRAIN_MESSAGE
+    assert whatsapp_sends == []
+    offer = (await _outbound(db, tenant))[-1]
+    assert "última conversa" in offer
+    assert "✅ Sim" in offer and "❌ Não" in offer
 
 
 # --------------------------------------------------------------------------

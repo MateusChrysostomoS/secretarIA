@@ -116,6 +116,7 @@ class _FakeCalendarService:
         google_refresh_token: str | None = None,
         business_hours: dict | None = None,
         appointment_duration_min: int | None = None,
+        professional_id=None,
     ) -> "_FakeCalendarService":
         return cls(
             calendar_id=google_calendar_id or tenant_config.google_calendar_id,

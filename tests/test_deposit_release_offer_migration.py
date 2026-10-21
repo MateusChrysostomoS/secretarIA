@@ -38,7 +38,9 @@ def _offline(direction: str) -> str:
 
 def test_the_revision_is_the_single_head_right_after_the_before_timing():
     script = ScriptDirectory.from_config(_config())
-    assert script.get_heads() == [REVISION]
+    heads = script.get_heads()
+    assert len(heads) == 1
+    assert REVISION in {r.revision for r in script.walk_revisions(head=heads[0])}
     assert script.get_revision(REVISION).down_revision == PREVIOUS_HEAD
 
 

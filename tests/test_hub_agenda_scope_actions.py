@@ -173,7 +173,10 @@ async def test_a_restricted_doctor_creates_on_his_own_agenda_by_default(
     assert response.status_code == 201, response.text
     row = await _created(db, response.json()["id"])
     assert row.professional_id == ana  # visible in his own "own" view at once
-    assert len(FakeCalendar.get("tenant").created) == 1  # Google unchanged: the clinic calendar
+    # Owner's decision 2026-10-19: on HIS agenda, never the clinic's.
+    assert set(FakeCalendar.instances) == {str(ana)}
+    assert len(FakeCalendar.get(str(ana)).created) == 1
+    assert row.google_calendar_source == "professional"
 
 
 @pytest.mark.parametrize("path", ["appointments", "blocks"])

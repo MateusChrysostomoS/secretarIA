@@ -345,6 +345,14 @@ async def _appointment_calendar(
     """
     if target is None:
         return None
+    if not isinstance(target, Professional) and target != "tenant":
+        # Fail CLOSED on anything else (a roster snapshot, an id, a dict): the
+        # old catch-all fell through to the clinic calendar, which is how a
+        # doctor's bookings silently landed off the doctor's agenda. No
+        # calendar is the honest answer - every caller already treats None
+        # as "unavailable" and hands the conversation to a person.
+        logger.error("worker_appointment_calendar_bad_target", target_type=type(target).__name__)
+        return None
     try:
         tenant_config = await load_tenant_config(session, tenant)
         if isinstance(target, Professional):

@@ -257,7 +257,10 @@ async def test_completeness_single_complete_professional_via_own_calendar(sessio
     assert result.professionals[0].has_calendar is True
 
 
-async def test_completeness_single_professional_missing_calendar_only(session):
+async def test_completeness_single_professional_without_google_is_complete(session):
+    """Native agenda (founder's decision 2026-10-20): Google is optional. No token at
+    all still reports `has_calendar` False (the screens offer "Conectar"), but the
+    professional is complete and the clinic can go live on the secretarIA agenda."""
     tenant = await _make_tenant(session, business_hours=_HOURS, appointment_types=_TYPES)
     await _make_professional(session, tenant)
     await session.commit()
@@ -265,17 +268,18 @@ async def test_completeness_single_professional_missing_calendar_only(session):
 
     result = await professional_completeness(session, tenant)
 
-    assert result.config_complete is False
-    assert result.complete_count == 0
+    assert result.config_complete is True
+    assert result.complete_count == 1
     item = result.professionals[0]
     assert item.has_calendar is False
     assert item.has_hours is True
     assert item.has_services is True
-    assert any("Google Calendar" in r and item.name in r for r in result.reasons)
+    assert item.complete is True
+    assert not any("Google Calendar" in r for r in result.reasons)
 
     ok, reasons = await can_activate_professional_aware(session, tenant)
-    assert ok is False
-    assert reasons
+    assert ok is True
+    assert reasons == []
 
 
 async def test_completeness_single_professional_missing_hours_and_services(session):

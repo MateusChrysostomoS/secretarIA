@@ -53,6 +53,10 @@ class AppliedEdit:
     notice_version: str | None = None
     changed_fields: tuple[str, ...] = ()
     old_google_calendar_source: str | None = None
+    # A7: set only when the start moved - the "Consulta remarcada" mail to the clinic
+    # and the Portal patient (plugins/appointment_change_notifications.py).
+    previous_start_at: datetime | None = None
+    new_start_at: datetime | None = None
 
 
 async def apply_appointment_edit(
@@ -116,6 +120,7 @@ async def apply_appointment_edit(
         )
         if not allowed:
             return None
+    previous_start = appointment.start_at
     fields = await write_appointment_edit(
         session,
         appointment,
@@ -140,6 +145,8 @@ async def apply_appointment_edit(
         notice_id=str(notice.id) if notice else None,
         notice_version=appointment_email_version(appointment) if fields else None,
         changed_fields=tuple(fields),
+        previous_start_at=previous_start if edit["time_changed"] else None,
+        new_start_at=appointment.start_at if edit["time_changed"] else None,
     )
 
 

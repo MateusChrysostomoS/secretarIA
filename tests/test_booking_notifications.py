@@ -510,3 +510,68 @@ async def test_plan_lookup_outage_still_sends_both_emails_without_private_error(
     assert warnings == [
         ("booking_notification_plan_lookup_failed", {"error_type": "RuntimeError"})
     ]
+
+
+async def test_clinic_email_names_the_doctor_and_links_the_agenda(world, monkeypatch):
+    """Live 2026-10-05: "Nova consulta marcada" opened with "Agendamento: <uuid>".
+
+    Now: the doctor by name, the agenda link, and the id only as the footer.
+    """
+    from secretaria.config import get_settings
+    from secretaria.models import Professional, Tenant
+    from secretaria.services.email import _TEMPLATES
+
+    monkeypatch.setattr(
+        get_settings(), "BRAIN_MESSAGE_PUBLIC_URL", "https://hub.example.com", raising=False
+    )
+    sent, _ = world
+    ctx = _ctx()
+    async with bn.async_session_factory() as session:
+        session.add(Tenant(id=ctx.tenant.id, clinic_name="Clínica Teste", phone_number_id="pn-1"))
+        await session.flush()
+        doctor = Professional(tenant_id=ctx.tenant.id, name="Dra. Ana", is_active=True)
+        session.add(doctor)
+        await session.commit()
+        ctx.appointment.professional_id = doctor.id
+    await bn._post_booking(ctx)
+    variables = next(v for _, t, v in sent if t == bn.CLINIC_TEMPLATE)
+    template = _TEMPLATES[bn.CLINIC_TEMPLATE]
+    body = template.body.format_map(variables)
+    assert "Profissional: Dra. Ana\n" in body
+    assert "Ver na agenda:\nhttps://hub.example.com/agenda\n" in body
+    assert "Agendamento:" not in body
+    assert body.rstrip().splitlines()[-1] == f"Ref.: {ctx.appointment.id}"
+    # The patient's confirmation does not grow an internal agenda link.
+    patient_tpl = _TEMPLATES[bn.PATIENT_TEMPLATE]
+    patient_vars = next(v for _, t, v in sent if t == bn.PATIENT_TEMPLATE)
+    assert "hub.example.com" not in patient_tpl.body.format_map(patient_vars)
+
+
+async def test_another_clinics_doctor_is_never_named(world):
+    from secretaria.models import Professional, Tenant
+
+    sent, _ = world
+    ctx = _ctx()
+    other = uuid4()
+    async with bn.async_session_factory() as session:
+        session.add(Tenant(id=other, clinic_name="Outra", phone_number_id="pn-2"))
+        await session.flush()
+        stranger = Professional(tenant_id=other, name="Dr. Alheio", is_active=True)
+        session.add(stranger)
+        await session.commit()
+        ctx.appointment.professional_id = stranger.id
+    await bn._post_booking(ctx)
+    variables = next(v for _, t, v in sent if t == bn.CLINIC_TEMPLATE)
+    assert variables["professional_line"] == ""
+
+
+async def test_a_private_booking_is_named_particular_in_the_emails():
+    """Live 2026-10-19: "Particular" read "Convênio informado; consulte o agendamento"."""
+    appointment = SimpleNamespace(
+        insurance="Particular", insurance_plan_id=None, insurance_professional_plan_id=None
+    )
+    line = await bn._insurance_line(SimpleNamespace(id=uuid4()), appointment)
+    assert line.strip() == "Convênio: Particular"
+    appointment.insurance = "unimed sei la"
+    line = await bn._insurance_line(SimpleNamespace(id=uuid4()), appointment)
+    assert line.strip() == "Convênio informado; consulte o agendamento."

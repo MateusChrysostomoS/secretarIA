@@ -1,7 +1,9 @@
 """Doctor hub — the clinic's CANONICAL service catalog.
 
 GET   /tenants/me/services        - the whole catalog (active and retired).
-POST  /tenants/me/services        - create one canonical service.
+POST  /tenants/me/services        - create one canonical service; with `offer`,
+                                    also offered by that professional, in the
+                                    same transaction.
 PATCH /tenants/me/services/{id}   - rename / edit copy / retire.
 
 This is the ONE place a service's name and descriptive copy are edited. A
@@ -38,11 +40,13 @@ from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
 from secretaria.models import Professional, Tenant
 from secretaria.models.service import Service
-from secretaria.schemas.service import ServiceCreate, ServiceRead, ServiceUpdate
+from secretaria.schemas.service import ServiceCreate, ServiceCreated, ServiceRead, ServiceUpdate
+from secretaria.services import hub_configuration as hubcfg
 from secretaria.services.service_catalog import (
     find_near_duplicates,
     load_service_catalog,
     normalize,
+    offer_to_professional,
     offering_map,
 )
 
@@ -151,7 +155,7 @@ async def list_services(
     return [_read_model(row, offering) for row in catalog]
 
 
-@router.post("", response_model=ServiceRead, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=ServiceCreated, status_code=status.HTTP_201_CREATED)
 async def create_service(
     payload: ServiceCreate,
     force: bool = Query(
@@ -163,10 +167,31 @@ async def create_service(
     ),
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_session),
-) -> ServiceRead:
+) -> ServiceCreated:
+    """Create one catalog row — and, with `offer`, offer it in the same commit.
+
+    The offering professional is resolved (tenant-scoped) BEFORE anything is
+    written, so an unknown or foreign id creates nothing: either the service
+    exists and is offered, or neither happened. That is the whole point of
+    doing it here rather than as a second request from the console, where a
+    failure in between would leave a clinic with one doctor holding a service
+    nobody offers — the exact state that made a new clinic's patients read
+    "não há serviços disponíveis".
+    """
     normalized = normalize(payload.name)
     if not normalized:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="service_name_required")
+
+    professional = None
+    if payload.offer is not None:
+        try:
+            professional = await hubcfg.resolve_professional(
+                session, tenant, payload.offer.professional_id
+            )
+        except hubcfg.ProfessionalNotFound:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, detail="professional_not_found"
+            ) from None
 
     catalog = await load_service_catalog(session, tenant.id)
     for existing in catalog:
@@ -192,19 +217,38 @@ async def create_service(
         sort_order=payload.sort_order,
     )
     session.add(service)
+    if professional is not None and payload.offer is not None:
+        offer_to_professional(
+            professional,
+            tenant,
+            service,
+            duration_min=payload.offer.duration_min,
+            price=(payload.offer.price or "").strip() or None,
+        )
     await session.commit()
     await session.refresh(service)
+    if professional is not None:
+        await session.refresh(professional)
     logger.info(
         "service_catalog_created",
         tenant_id=str(tenant.id),
         service_id=str(service.id),
         forced=force,
+        offered=professional is not None,
     )
     # Not always empty: a clinic whose professionals still carry the unlinked
     # string "Limpeza" has them resolve to this row by normalized name the
     # instant it exists, so the hub can say "these doctors already offer it"
     # without waiting for a backfill.
-    return _read_model(service, await _offering(session, tenant, [*catalog, service]))
+    row = _read_model(service, await _offering(session, tenant, [*catalog, service]))
+    return ServiceCreated(
+        **row.model_dump(),
+        professional=(
+            await hubcfg.professional_list_item(session, professional, tenant)
+            if professional is not None
+            else None
+        ),
+    )
 
 
 @router.patch("/{service_id}", response_model=ServiceRead)

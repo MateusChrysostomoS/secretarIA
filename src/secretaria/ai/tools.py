@@ -24,6 +24,7 @@ from pseudonymize_core import has_unresolved_tokens
 
 from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
+from secretaria.services.availability import slot_taken_at_confirm
 from secretaria.services.booking_dates import resolve_booking_day, time_has_passed_today
 from secretaria.services.booking_draft import BookingDraft
 from secretaria.services.booking_scope import (
@@ -35,9 +36,12 @@ from secretaria.services.booking_scope import (
 )
 from secretaria.services.calendar import (
     CalendarService,
+    CalendarSlotTakenError,
     build_event_description,
     build_patient_calendar_link,
 )
+from secretaria.services.flow_router import SLOT_TAKEN_AT_CONFIRM_MESSAGE
+from secretaria.services.local_calendar import create_event_exclusive
 from secretaria.services.manage_request import ManageRequest, parse_appointment_ref
 from secretaria.services.precheck import HandoffOutcome, request_precheck_handoff
 from secretaria.services.service_catalog import find_by_name, missing_from
@@ -320,6 +324,7 @@ def _calendar_for_professional(
     google_refresh_token: str | None,
     business_hours: dict | None,
     appointment_duration_min: int | None = None,
+    professional_id: UUID | None = None,
 ) -> CalendarService:
     """Build a CalendarService for ONE professional's own config (contract v1 §10 item C).
 
@@ -341,6 +346,7 @@ def _calendar_for_professional(
         google_refresh_token=google_refresh_token,
         business_hours=business_hours,
         appointment_duration_min=appointment_duration_min,
+        professional_id=professional_id,
     )
 
 
@@ -672,6 +678,85 @@ def _localize_window(start: str, end: str, cal: CalendarService) -> tuple[dateti
     return parsed_start, parsed_end
 
 
+async def _hand_back_if_slot_taken(
+    cal: CalendarService,
+    start: datetime,
+    end: datetime,
+    *,
+    tool_name: str,
+    appointment_type: str | None,
+    professional_id: UUID | None = None,
+) -> None:
+    """Hand the booking back to the flow when [start, end) was taken since it was offered.
+
+    The v1 booking tools write straight to the agenda after the patient's "sim" in text,
+    and the free time the model read may be minutes old. Asked on `cal` - the agenda the
+    event is about to be written to - right before the write
+    (services/availability.py::slot_taken_at_confirm, fail-open). Taken: nothing is
+    created, and the turn leaves the model the way `set_booking_draft` does - a
+    `BookingDraftRequested` for the same service, doctor, convênio and DAY, so the flow
+    opens that day's fresh times (asking pra-quem first when it was never answered)
+    behind one fixed line. The model never words "that time is gone" itself, nor offers
+    a time from its own stale list.
+
+    Shared by the three create_event*-shaped tools, like `_localize_window`.
+    """
+    if not await slot_taken_at_confirm(
+        cal,
+        start,
+        end,
+        source=tool_name,
+        conversation_id=_conversation_id_ctx.get(),
+        tenant_id=_tenant_id_ctx.get(),
+    ):
+        return
+    raise await _slot_taken_hand_back(cal, start, appointment_type, professional_id)
+
+
+async def _slot_taken_hand_back(
+    cal: CalendarService, start: datetime, appointment_type: str | None, professional_id
+) -> "BookingDraftRequested":
+    """The hand-back both "taken" answers raise: the same service, doctor, convênio, DAY."""
+    return BookingDraftRequested(
+        appointment_type,
+        professional_id,
+        await _conversation_insurance(),
+        day=start.astimezone(cal.tzinfo).date(),
+        intro=SLOT_TAKEN_AT_CONFIRM_MESSAGE,
+    )
+
+
+async def _create_booking_event(
+    cal: CalendarService,
+    start: datetime,
+    end: datetime,
+    *,
+    summary: str,
+    description: str,
+    tool_name: str,
+    appointment_type: str | None,
+    professional_id: UUID | None = None,
+) -> dict:
+    """The v1 booking tools' write: refused atomically when the time was just taken.
+
+    On the secretarIA agenda the write itself re-checks under the agenda's lock
+    (services/local_calendar.py::create_event_exclusive), closing the gap between
+    `_hand_back_if_slot_taken` and the insert; a refusal leaves the model exactly
+    like that re-check does. On Google it is the plain `create_event`, as before.
+    """
+    try:
+        return await create_event_exclusive(
+            cal, start=start, end=end, summary=summary, description=description
+        )
+    except CalendarSlotTakenError:
+        logger.info(
+            "booking_slot_taken_at_write",
+            source=tool_name,
+            conversation_id=str(_conversation_id_ctx.get() or "") or None,
+        )
+        raise await _slot_taken_hand_back(cal, start, appointment_type, professional_id) from None
+
+
 async def _persist_appointment(
     event: dict,
     fallback_start: datetime,
@@ -821,15 +906,24 @@ async def _mark_appointment_cancelled(event_id: str) -> str | None:
     from sqlalchemy import select, update
 
     from secretaria.core.database import async_session_factory
-    from secretaria.models import Appointment, AppointmentStatus, Tenant
+    from secretaria.models import Appointment, AppointmentStatus, Tenant, is_live_status
     from secretaria.services import reminder_hooks
     from secretaria.services.payments import deposit_lifecycle
 
     notice: str | None = None
     closed_id = None
+    # A7: set only when THIS call took a live row to CANCELLED - the mail below
+    # announces a change, never a repeat of one.
+    cancelled_id = None
     try:
         async with async_session_factory() as session:
             async with session.begin():
+                previous_status = await session.scalar(
+                    select(Appointment.status).where(
+                        Appointment.google_event_id == event_id,
+                        Appointment.tenant_id == tenant_id,
+                    )
+                )
                 result = await session.execute(
                     update(Appointment)
                     .where(
@@ -845,6 +939,8 @@ async def _mark_appointment_cancelled(event_id: str) -> str | None:
                     )
                 )
                 if appointment is not None:
+                    if is_live_status(previous_status):
+                        cancelled_id = appointment.id
                     tenant = await session.get(Tenant, tenant_id)
                     if tenant is not None and reminder_hooks.enabled_for(tenant):
                         closed_id = appointment.id
@@ -865,6 +961,20 @@ async def _mark_appointment_cancelled(event_id: str) -> str | None:
         logger.info("tool_appointment_cancelled", event_id=event_id, rows=result.rowcount)
     except Exception as exc:
         logger.warning("tool_appointment_cancel_persist_failed", error=str(exc), event_id=event_id)
+        return notice
+
+    # Committed: tell the clinic, the doctor and the Portal patient, off the hot path
+    # - the same fire-and-forget shape as `_persist_appointment`'s post_booking
+    # enqueue, imported lazily for the same reason.
+    if cancelled_id is not None:
+        from secretaria.plugins.appointment_change_notifications import (
+            CHANGE_CANCELLED,
+            enqueue_appointment_change_notification,
+        )
+
+        await enqueue_appointment_change_notification(
+            _redis_ctx.get(), tenant_id, cancelled_id, CHANGE_CANCELLED
+        )
     return notice
 
 
@@ -1108,11 +1218,17 @@ async def create_event(
     description = (
         f"{auto_description}\n\n{description}".strip() if description else auto_description
     )
-    event = await cal.create_event(
-        start=fallback_start,
-        end=fallback_end,
+    await _hand_back_if_slot_taken(
+        cal, fallback_start, fallback_end, tool_name="create_event", appointment_type=canonical_type
+    )
+    event = await _create_booking_event(
+        cal,
+        fallback_start,
+        fallback_end,
         summary=summary,
         description=description,
+        tool_name="create_event",
+        appointment_type=canonical_type,
     )
     await _persist_appointment(
         event,

@@ -409,6 +409,10 @@ class Calendar:
     async def check_availability(self, start, end, max_results=50):
         return list(Calendar.events)
 
+    async def list_events(self, start, end):
+        # main now loads the complete agenda rather than the availability page.
+        return list(Calendar.events)
+
 
 async def test_the_agenda_deposit_gains_needs_attention_and_keeps_its_other_keys(
     client: AsyncClient, db, monkeypatch

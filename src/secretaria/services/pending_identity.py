@@ -466,11 +466,53 @@ CODE_INVALID_MESSAGE = (
 # budget spent, the visit gone. One message for all of them, and it says the
 # appointment stands — that is the fact the patient actually needs, and the
 # reason for the dead end is not something they can act on.
+#
+# ONLY when an appointment really stands (`code_give_up_message`). Since the
+# gate (`docs/CHECKPOINT_secretaria_booking_code_gate.md`) a Portal code wait
+# normally has nothing behind it but a ten-minute hold, and this sentence told
+# those patients a booking existed (live test, 2026-10-05).
 CODE_GIVE_UP_MESSAGE = (
     "Não consegui ativar sua conta agora. 😕\n\n"
     "Mas fique tranquilo(a): *sua consulta continua marcada*. A gente resolve "
     "isso da próxima vez que você voltar por aqui."
 )
+
+# The same dead end when NO appointment stands: the slot was only held, and an
+# unverified code means it was never booked. Says so, and gives the way back.
+CODE_GIVE_UP_UNCONFIRMED_MESSAGE = (
+    "Não consegui ativar sua conta agora. 😕\n\n"
+    "Atenção: o horário que você escolheu *não foi confirmado*. Quando quiser, "
+    "é só digitar *menu* para escolher um horário de novo."
+)
+
+
+def code_give_up_message(appointment_stands: bool) -> str:
+    """The code dead end that is true for this patient. Pure."""
+    return CODE_GIVE_UP_MESSAGE if appointment_stands else CODE_GIVE_UP_UNCONFIRMED_MESSAGE
+
+
+# The code card when NOTHING stands behind it and no slot is held any more —
+# a code wait resumed or re-sent after its reservation ran out. Neither
+# `code_notice_body` ("Sua consulta já está confirmada!") nor the gate notice
+# (a live reservation) is true then: the code only activates the account.
+_UNBOOKED_CODE_LINE = "🔐 Para ativar a sua conta, enviei um código de *6 dígitos* para {inbox}."
+
+
+def unbooked_code_notice_body(email_masked: str | None) -> str:
+    """The code card for a post-consent wait with no appointment and no hold. Pure.
+
+    Same degradation as `existing_account_code_body`: the masked inbox when
+    there is a valid one, "o seu e-mail" otherwise, and the webmail link only
+    for a recognised provider.
+    """
+    masked = masked_email_or_none(email_masked)
+    parts = [_UNBOOKED_CODE_LINE.format(inbox=masked or "o seu e-mail")]
+    provider = provider_link(masked)
+    if provider is not None:
+        name, url = provider
+        parts.append(f"Abrir o {name}:\n{url}")
+    parts.append("✍️ Digite o código aqui.")
+    return "\n\n".join(parts)
 
 
 # Deliberately permissive, and deliberately NOT RFC 5322. The address is about

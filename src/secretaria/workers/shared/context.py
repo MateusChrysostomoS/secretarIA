@@ -182,3 +182,8 @@ class _ReplyContext:
     # An explicit first/context opening keeps management available even after
     # two confirmations; register_confirmation still enforces its counter cap.
     reminder_opening_first_contact: bool = False
+    # `/menu3` (workers/shared/debug_reset.py, test clinics only): the conversation
+    # was wiped inside the inbound transaction. The whole turn is the greeting frame
+    # (`greeting_override`) and then the LGPD notice, with NO identity probe, so even
+    # a verified Portal account is shown the consent again.
+    debug_reset: bool = False

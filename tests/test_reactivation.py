@@ -24,6 +24,10 @@ import pytest  # noqa: E402
 from secretaria.ai.formatter import ButtonBubble, SlotsBubble  # noqa: E402
 from secretaria.core.whatsapp_limits import EMOJI_SCHEDULE, decorate  # noqa: E402
 from secretaria.models import FlowState  # noqa: E402
+from secretaria.services.channel_sender import (  # noqa: E402
+    CHANNEL_BRAIN_MESSAGE,
+    CHANNEL_WHATSAPP,
+)
 from secretaria.services.flow_router import (  # noqa: E402
     DEFAULT_CONTINUE_PROMPT,
     DEFAULT_REACTIVATION_GAP_MINUTES,
@@ -357,7 +361,8 @@ def test_offer_none_when_no_prior_activity():
     conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_AWAITING_DAY)
     assert (
         _reactivation_offer(
-            conv, _offer_tenant(), _patient(), "5511999", "oi", None, conv.flow_state
+            conv, _offer_tenant(), _patient(), "5511999", "oi", None, conv.flow_state,
+            channel=CHANNEL_WHATSAPP,
         )
         is None
     )
@@ -368,7 +373,8 @@ def test_offer_none_when_gap_below_threshold():
     recent = datetime.now(UTC) - timedelta(minutes=5)
     assert (
         _reactivation_offer(
-            conv, _offer_tenant(), _patient(), "5511999", "oi", recent, conv.flow_state
+            conv, _offer_tenant(), _patient(), "5511999", "oi", recent, conv.flow_state,
+            channel=CHANNEL_WHATSAPP,
         )
         is None
     )
@@ -379,7 +385,8 @@ def test_offer_arms_gate_and_builds_prompt_for_resumable_state():
     conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_AWAITING_DAY)
     stale = datetime.now(UTC) - timedelta(hours=10)
     offer = _reactivation_offer(
-        conv, _offer_tenant(), _patient("Maria"), "5511999", "oi", stale, conv.flow_state
+        conv, _offer_tenant(), _patient("Maria"), "5511999", "oi", stale, conv.flow_state,
+        channel=CHANNEL_WHATSAPP,
     )
     assert offer is not None
     assert conv.reactivation_origin == FlowState.SERVICE_CATALOG.value  # gate armed
@@ -393,7 +400,8 @@ def test_offer_arms_gate_for_llm_origin():
     conv = _conversation(flow_state=FlowState.LLM)
     stale = datetime.now(UTC) - timedelta(hours=10)
     offer = _reactivation_offer(
-        conv, _offer_tenant(), _patient(), "5511999", "oi", stale, conv.flow_state
+        conv, _offer_tenant(), _patient(), "5511999", "oi", stale, conv.flow_state,
+        channel=CHANNEL_WHATSAPP,
     )
     assert offer is not None
     assert conv.reactivation_origin == FlowState.LLM.value
@@ -403,7 +411,8 @@ def test_offer_idle_sends_plain_greeting_and_menu_without_arming():
     conv = _conversation(flow_state=FlowState.IDLE)
     stale = datetime.now(UTC) - timedelta(hours=10)
     offer = _reactivation_offer(
-        conv, _offer_tenant(), _patient("Ana"), "5511999", "oi", stale, conv.flow_state
+        conv, _offer_tenant(), _patient("Ana"), "5511999", "oi", stale, conv.flow_state,
+        channel=CHANNEL_WHATSAPP,
     )
     assert offer is not None
     assert conv.reactivation_origin is None  # nothing to resume -> gate NOT armed
@@ -414,6 +423,32 @@ def test_offer_idle_sends_plain_greeting_and_menu_without_arming():
     # a dead end), leaving the [Agendar, Outro] pair.
     assert offer.greeting_buttons == [decorate(EMOJI_SCHEDULE, LABEL_BOOK), LABEL_OTHER]
     assert LABEL_MANAGE_APPOINTMENT not in offer.greeting_buttons
+
+
+@pytest.mark.parametrize("origin", [FlowState.LLM, FlowState.IDLE])
+def test_offer_leaves_by_the_channel_the_patient_came_in_on(origin):
+    """A Portal patient's offer goes out on the Portal, never on WhatsApp.
+
+    Live test, 2026-10-05: a Brain-Message patient back after the 6h gap with
+    a resumable state got "quer continuar?" built on the `_ReplyContext`
+    default channel (WhatsApp), so `_reply_sender` picked the WhatsApp client
+    and the patient saw nothing. Both halves of the offer (resume prompt and
+    IDLE re-greeting) carry the caller's channel.
+    """
+    conv = _conversation(flow_state=origin)
+    stale = datetime.now(UTC) - timedelta(hours=10)
+    offer = _reactivation_offer(
+        conv,
+        _offer_tenant(),
+        _patient(),
+        "00000000-0000-4000-8000-000000000001",
+        "oi",
+        stale,
+        origin,
+        channel=CHANNEL_BRAIN_MESSAGE,
+    )
+    assert offer is not None
+    assert offer.channel == CHANNEL_BRAIN_MESSAGE
 
 
 def test_offer_idle_without_any_greeting_returns_none():
@@ -428,7 +463,10 @@ def test_offer_idle_without_any_greeting_returns_none():
     conv = _conversation(flow_state=FlowState.IDLE)
     stale = datetime.now(UTC) - timedelta(hours=10)
     assert (
-        _reactivation_offer(conv, tenant, _patient(), "5511999", "oi", stale, conv.flow_state)
+        _reactivation_offer(
+            conv, tenant, _patient(), "5511999", "oi", stale, conv.flow_state,
+            channel=CHANNEL_WHATSAPP,
+        )
         is None
     )
 
@@ -452,7 +490,8 @@ def test_offer_prompts_a_default_tenant_with_no_reactivation_config():
     conv = _conversation(flow_state=FlowState.LLM)
     stale = datetime.now(UTC) - timedelta(hours=10)
     offer = _reactivation_offer(
-        conv, _bare_tenant(), _patient(), "5511999", "oi", stale, conv.flow_state
+        conv, _bare_tenant(), _patient(), "5511999", "oi", stale, conv.flow_state,
+        channel=CHANNEL_WHATSAPP,
     )
     assert offer is not None
     assert conv.reactivation_origin == FlowState.LLM.value
@@ -471,7 +510,8 @@ def test_offer_reads_the_captured_origin_not_the_live_column():
     conv = _conversation(flow_state=FlowState.IDLE)  # already dropped this turn
     stale = datetime.now(UTC) - timedelta(hours=10)
     offer = _reactivation_offer(
-        conv, _bare_tenant(), _patient(), "5511999", "oi", stale, FlowState.LLM
+        conv, _bare_tenant(), _patient(), "5511999", "oi", stale, FlowState.LLM,
+        channel=CHANNEL_WHATSAPP,
     )
     assert offer is not None
     assert conv.reactivation_origin == FlowState.LLM.value  # armed from the ORIGIN
@@ -484,7 +524,8 @@ def test_idle_regreeting_stays_opt_in_for_a_default_tenant():
     stale = datetime.now(UTC) - timedelta(hours=10)
     assert (
         _reactivation_offer(
-            conv, _bare_tenant(), _patient(), "5511999", "oi", stale, conv.flow_state
+            conv, _bare_tenant(), _patient(), "5511999", "oi", stale, conv.flow_state,
+            channel=CHANNEL_WHATSAPP,
         )
         is None
     )

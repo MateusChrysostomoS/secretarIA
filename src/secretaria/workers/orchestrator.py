@@ -76,7 +76,6 @@ from secretaria.services.patient_name import (
 )
 from secretaria.services.pending_identity import (
     CODE_ACCEPTED_MESSAGE,
-    CODE_GIVE_UP_MESSAGE,
     CODE_INVALID_MESSAGE,
     CODE_NOTICE_BUTTONS,
     EMAIL_CLAIM_RETRY_MESSAGE,
@@ -91,6 +90,7 @@ from secretaria.services.pending_identity import (
     VerifyResult,
     booking_gate_reprompt_body,
     claim_email,
+    code_give_up_message,
     report_name,
     request_code,
     verify_code,
@@ -120,6 +120,7 @@ from secretaria.workers.portal.attachments import (
 )
 from secretaria.workers.portal.identity import (
     _account_code_dead_end,
+    _code_wait_booking,
     _continue_after_email_claim,
     _finish_account_code_before_consent,
     _handle_identity_card_action,
@@ -132,6 +133,7 @@ from secretaria.workers.shared.actions import (
 )
 from secretaria.workers.shared.appointment_edit_support import build_edit_context
 from secretaria.workers.shared.booking_hold import (
+    SlotTakenAtPromotion,
     _hold_minutes_left,
     _hold_when,
     _is_agent_sentinel,
@@ -586,6 +588,22 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
         )
         return
 
+    # `/menu3` (test clinics only, workers/shared/debug_reset.py): the conversation
+    # was wiped in the inbound transaction. Replay the opening a first contact gets -
+    # the frame without buttons, then the LGPD notice with "✅ Concordo" - and nothing
+    # else. No identity probe: it would mirror a verified account's consent and skip
+    # the notice. "✏️ Mudar nome" rides along when a name is stored, as on the notice
+    # that follows the name question.
+    if reply.debug_reset:
+        await _send_greeting(reply, tenant=tenant, waba_token=waba_token)
+        await _send_consent_notice(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            change_name=bool((patient_name or "").strip()),
+        )
+        return
+
     # First-contact/returning greeting: deterministic, verbatim and sent with
     # this tenant's own WhatsApp number/token. This intentionally runs only
     # after entitlement and tenant credentials have been resolved.
@@ -633,12 +651,13 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
         origin = FlowState(reply.reactivation.origin)
         if reply.reactivation.kind == "reset":
             # A code wait BEFORE consent has no consultation to reassure
-            # about: it pauses exactly like the e-mail step it came from.
-            body = (
-                EMAIL_PAUSED_MESSAGE
-                if origin == FlowState.AWAITING_EMAIL or patient_owes_consent
-                else CODE_GIVE_UP_MESSAGE
-            )
+            # about: it pauses exactly like the e-mail step it came from. After
+            # consent, only a booking that really stands is reassured about.
+            if origin == FlowState.AWAITING_EMAIL or patient_owes_consent:
+                body = EMAIL_PAUSED_MESSAGE
+            else:
+                stands, _held = await _code_wait_booking(reply.conversation_id)
+                body = code_give_up_message(stands)
             await _send_plain_reply(
                 reply,
                 tenant=tenant,
@@ -683,11 +702,12 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                 event="pending_code_reactivation_resolved",
             )
             return
+        stands, _held = await _code_wait_booking(reply.conversation_id)
         await _send_plain_reply(
             reply,
             tenant=tenant,
             waba_token=waba_token,
-            body=CODE_GIVE_UP_MESSAGE,
+            body=code_give_up_message(stands),
             event="pending_code_reactivation_resolved",
         )
         return
@@ -912,9 +932,30 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                 reply,
                 tenant=tenant,
                 waba_token=waba_token,
-                professionals=flow_professionals,
                 redis=redis,
             )
+            if isinstance(promoted, SlotTakenAtPromotion):
+                # The code was good, the held time was filled on the agenda
+                # while it was being typed. Same order of facts: the account
+                # first, on its own; then the "just taken" line and the same
+                # day's times, persisted as the conversation's new step - not
+                # IDLE - so the next tap books like any other.
+                await _send_plain_reply(
+                    reply,
+                    tenant=tenant,
+                    waba_token=waba_token,
+                    body=CODE_ACCEPTED_MESSAGE,
+                    event="pending_code_reply_sent",
+                )
+                await _apply_flow_result(
+                    reply,
+                    promoted.reoffer,
+                    patient_wa,
+                    redis=redis,
+                    tenant=tenant,
+                    waba_token=waba_token,
+                )
+                return
             if promoted is not None:
                 body = CODE_ACCEPTED_MESSAGE + chr(10) + chr(10) + promoted
         elif result is VerifyOutcome.INVALID:
@@ -927,8 +968,10 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
         else:
             # NOT_PENDING / NO_EMAIL / UNAVAILABLE: nothing the patient can act
             # on. Leave the state so the conversation is usable again, and say
-            # the appointment stands — the fact they actually need.
-            body, next_state = CODE_GIVE_UP_MESSAGE, FlowState.IDLE
+            # whether a booking stands — the fact they actually need. Behind a
+            # gated hold it does not: the slot was never booked.
+            stands, _held = await _code_wait_booking(reply.conversation_id)
+            body, next_state = code_give_up_message(stands), FlowState.IDLE
         if next_state is not FlowState.AWAITING_EMAIL_CODE:
             await _write_flow_state(reply.conversation_id, next_state)
         await _send_plain_reply(
@@ -1231,6 +1274,9 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             conversation_state=conversation_state_text,
             toolset_v2=_ai_toolset_v2(tenant),
             editing=editing,
+            # The prompt names the surface the patient is on: "chat da clínica"
+            # on the Portal, never "WhatsApp" (live test, 2026-10-05).
+            channel=reply.channel,
         )
     except Exception as exc:
         if not editing:

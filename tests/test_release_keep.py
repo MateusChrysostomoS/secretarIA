@@ -123,6 +123,25 @@ async def test_accepting_a_free_slot_recreates_the_consultation_with_the_same_de
     assert kinds == ["clinic_keep_request", "patient_keep_accepted"]
 
 
+async def test_accept_keep_works_on_the_merged_native_agenda(db, monkeypatch):
+    from secretaria.services.local_calendar import LocalCalendarService
+    from tests._local_agenda import agenda, wire_local_agenda
+
+    released, offer = await _requested(db)
+    local = agenda(released.tenant_id)
+    wire_local_agenda(monkeypatch, db)
+
+    async def local_calendar(_session, _tenant, _professional_id):
+        return local
+
+    monkeypatch.setattr(booking_promotion, "calendar_for_booking", local_calendar)
+    result = await _accept(db, released, offer.id)
+    assert result.outcome == rk.ACCEPT_KEPT
+    assert result.appointment.google_event_id == rk.keep_event_id(offer.id, calendar=local)
+    assert isinstance(local, LocalCalendarService)
+    assert result.appointment.google_event_id.startswith("loc_")
+
+
 async def test_accepting_twice_is_the_same_answer(db, calendar):
     released, offer = await _requested(db)
     first = await _accept(db, released, offer.id)

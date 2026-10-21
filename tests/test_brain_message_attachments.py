@@ -1165,7 +1165,9 @@ async def test_a_failed_staff_commit_removes_the_uploaded_file(
     assert await _rows(db, conversation.id) == []
 
 
-async def test_staff_file_notifies_only_on_first_human_transition(api, db, monkeypatch):
+async def test_a_staff_file_takes_over_without_a_handoff_alert(api, db, monkeypatch):
+    """A file from the console is the clinic taking over itself: no "a secretária
+    virtual não conseguiu resolver" mail (api/hub/conversations.py docstring)."""
     from secretaria.services import handoff_notification as hn
     from secretaria.services.email import EmailOutcome
     tenant = await _seed_tenant(db)
@@ -1189,7 +1191,10 @@ async def test_staff_file_notifies_only_on_first_human_transition(api, db, monke
         response = await _staff_send(api, conv.id,
             files={"file": ("private.pdf", _pdf(), "application/pdf")})
         assert response.status_code == 200
-    assert sent == ["human_handoff_alert"]
+    async with db() as session:
+        row = await session.get(Conversation, conv.id)
+    assert row.handover_state == HandoverState.HUMAN_ACTIVE
+    assert sent == []
 
 
 async def test_staff_attachment_clears_typing_after_success(api, db, monkeypatch):

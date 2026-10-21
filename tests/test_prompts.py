@@ -356,9 +356,10 @@ def test_legacy_prompt_keeps_calendar_path_without_flow_state():
 # P5. P5 writes the v2 prompt in ai/prompts_v2.py and never edits ai/prompts.py; these
 # digests (rendered at 1c1ce2c, the day pinned to 2026-10-08) catch a drift of one character.
 # Changing the v1 prompt on purpose = re-render, update the digest, say so in the commit.
+# Re-rendered 2026-10-20: rule 7 of COMO ESCREVER (buttons are a "mensagem", never a "card").
 _V1_DIGESTS = {
-    "minimal": (13667, "46d0c547f01a8de2d53ecf491353dcbebc5cc3d85223671238c1e018ef36892b"),
-    "full": (19318, "ffb121c4820f1299fad7cea61bab7d78e3379a888eeef4e79ef50f9774824069"),
+    "minimal": (13884, "074a8358a95e3764598c1479691b57084811537e87ea58dfb060db2399a13eca"),
+    "full": (19615, "13ca27cbbc7baed879af8fbac50f898ba87cb90fe983294478874faa25bcae31"),
 }
 
 
@@ -403,3 +404,70 @@ def test_the_v1_digest_catches_a_one_character_drift(monkeypatch):
     monkeypatch.setattr("secretaria.ai.prompts._format_safety_rules", lambda: safety + " ")
     prompt = secretary_system_prompt(_v1_case("minimal"), now=_PINNED_NOW)
     assert _digest(prompt) != _V1_DIGESTS["minimal"]
+
+
+
+# --------------------------------------------------------------------------
+# The prompt names the channel the conversation is on (live test, 2026-10-05)
+# --------------------------------------------------------------------------
+
+
+def test_a_portal_prompt_never_says_whatsapp():
+    """On the Portal the agent introduced itself as a WhatsApp attendant."""
+    prompt = secretary_system_prompt(_config(channel="brain_message"))
+    assert "WhatsApp" not in prompt
+    assert "WHATSAPP" not in prompt
+    assert "acolher pacientes no chat da clínica e agendar" in prompt
+    assert "COMO ESCREVER NO CHAT DA CLÍNICA" in prompt
+    assert "cards interativos no chat da clínica" in prompt
+
+
+def test_the_whatsapp_prompt_is_the_default_wording():
+    """Explicit WhatsApp and the default render the same text (the golden file
+    in tests/golden pins that text byte for byte)."""
+    default = secretary_system_prompt(_config())
+    assert secretary_system_prompt(_config(channel="whatsapp")) == default
+    assert "acolher pacientes no WhatsApp e agendar" in default
+    assert "COMO ESCREVER NO WHATSAPP" in default
+
+
+def test_an_unknown_channel_keeps_the_whatsapp_wording():
+    assert secretary_system_prompt(_config(channel="sms")) == secretary_system_prompt(_config())
+
+
+async def test_run_agent_threads_the_channel_into_the_prompt(monkeypatch: pytest.MonkeyPatch):
+    """The worker passes `reply.channel`; the prompt the model reads follows it."""
+    from secretaria.ai import graph
+
+    seen: dict[str, str] = {}
+
+    async def _no_history(_cid):  # noqa: ANN001
+        return []
+
+    async def _capture(_messages):  # noqa: ANN001
+        seen["prompt"] = graph._prompt_with_today({"messages": []})[0].content
+        return "ok"
+
+    monkeypatch.setattr(graph, "_load_history", _no_history)
+    monkeypatch.setattr(graph, "invoke_agent", _capture)
+
+    await graph.run_agent(
+        "oi",
+        context={"conversation_id": "11111111-2222-3333-4444-555555555555"},
+        tenant_config=_config(),
+        channel="brain_message",
+    )
+
+    assert "acolher pacientes no chat da clínica" in seen["prompt"]
+    assert "WhatsApp" not in seen["prompt"]
+
+
+# The patient's word for the buttons (live test, 2026-10-20: 'toque em "Confirmar"
+# no card acima'): the prompt names them "mensagem", also when nudging back to them.
+def test_the_v1_prompt_calls_the_buttons_a_message_never_a_card():
+    prompt = secretary_system_prompt(
+        _config(conversation_state="- Onde o paciente estava: a confirmação do agendamento")
+    )
+    assert 'diga "mensagem" (ex.: "toque em Confirmar na mensagem acima")' in prompt
+    assert 'nunca "card" nem "cartão"' in prompt
+    assert '"Quando quiser, é só tocar em Confirmar na mensagem acima."' in prompt

@@ -14,6 +14,7 @@ from secretaria.models.appointment import (
 )
 from secretaria.models.appointment_reminder import AppointmentReminder
 from secretaria.models.booking_hold import BookingHold
+from secretaria.models.calendar_event import CalendarEvent
 from secretaria.models.clinic_payment_account import ClinicPaymentAccount
 from secretaria.models.consent_event import ConsentEvent
 from secretaria.models.conversation import Conversation, FlowState, HandoverState
@@ -55,6 +56,7 @@ __all__ = [
     "AppointmentReminder",
     "BookingHold",
     "ClinicPaymentAccount",
+    "CalendarEvent",
     "is_live_status",
     "ConsentEvent",
     "DepositReleaseEmail",

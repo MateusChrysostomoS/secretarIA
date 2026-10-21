@@ -17,9 +17,11 @@ from secretaria.core.build_info import (
 from secretaria.core.database import engine
 from secretaria.core.logging import get_logger, setup_logging
 from secretaria.plugins import booking_notifications  # noqa: F401
+from secretaria.plugins.appointment_change_notifications import notify_appointment_change
 from secretaria.plugins.post_booking import run_post_booking_hooks
 from secretaria.plugins.professional_notification import retry_professional_notification
 from secretaria.plugins.reminders import send_appointment_reminders
+from secretaria.workers.calendar_sync import sync_local_calendar_to_google
 from secretaria.workers.confirmation_warnings import process_confirmation_warnings
 from secretaria.workers.deploy_parity import check_deploy_parity_cron
 from secretaria.workers.onboarding_cron import (
@@ -63,8 +65,8 @@ from secretaria.workers.tasks import (
     process_webhook_event,
     send_cancellation_notice,
     send_patient_notification,
-    send_transactional_email,
     send_staff_welcome_email,
+    send_transactional_email,
     transcribe_audio_message,
 )
 
@@ -161,6 +163,10 @@ class WorkerSettings:
         # exceptions by contract. See plugins/professional_notification.py.
         retry_professional_notification,
         send_professional_edit_notification,
+        # The clinic / doctor / Portal patient mails after the PATIENT cancelled or
+        # moved (A7). Enqueued after the commit of every patient path; never from
+        # the hub. See plugins/appointment_change_notifications.py.
+        notify_appointment_change,
         # Onboarding transactional email (contract v1 §4 endpoint 6), enqueued
         # by POST /internal/notifications/email. See workers/tasks.py and
         # services/email.py.
@@ -178,6 +184,10 @@ class WorkerSettings:
         fulfill_paid_charge_job,
         # LGPD erasure: ask the provider to delete a patient's customer record.
         delete_provider_customer_job,
+        # Native agenda (2026-10-20): push a clinic's future secretarIA-agenda events to
+        # Google once it connects; enqueued by the OAuth callback. See
+        # workers/calendar_sync.py and services/calendar_sync.py.
+        sync_local_calendar_to_google,
     ]
     # Sweep stale human-handover conversations back to the bot every 15 min;
     # sweep upcoming appointments for due lead-window reminders every 5 min

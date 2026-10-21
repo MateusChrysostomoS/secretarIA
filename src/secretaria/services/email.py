@@ -501,22 +501,112 @@ _TEMPLATES: dict[str, EmailTemplate] = {
             "{insurance_line}"
             "\n"
             "{calendar_line}"
-            "Você também recebe um convite do Google Agenda, com lembrete.\n\n"
+            "{invite_line}"
             "— {clinic_name}"
         ),
     ),
     # Clinic-side record of a booking, identified without patient PII.
+    #
+    # Identified the way the clinic thinks about it - which doctor, which
+    # service, when - plus the agenda link (`agenda_line`, DOCTOR_AGENDA_URL).
+    # The appointment id used to head the list ("Agendamento: <uuid>"), which
+    # nobody at a clinic can read; it survives only as the footer reference,
+    # for support. `professional_line`/`agenda_line` arrive pre-rendered
+    # (empty when unknown), the same flat-template rule as the lines below.
     "appointment_booked_clinic": EmailTemplate(
         subject="Nova consulta marcada — {when}",
         body=(
             "Olá!\n\n"
             "Uma consulta foi marcada na {clinic_name}:\n\n"
-            "Agendamento: {appointment_id}\n"
+            "{professional_line}"
             "Serviço: {service}\n"
             "Quando: {when}\n"
             "{insurance_line}"
             "\n"
+            "{agenda_line}"
+            "— Equipe SecretarIA\n\n"
+            "Ref.: {appointment_id}"
+        ),
+    ),
+    # A7: the PATIENT cancelled or moved through the conversation
+    # (plugins/appointment_change_notifications.py) - the counterpart of the
+    # "marcada" mails above, with the same stances: the clinic's mail names the
+    # doctor, not the patient, and keeps the id only as the footer reference; the
+    # doctor's names the patient, as the booking mail does; the patient's carries
+    # no staff link. `when`/`previous_line` are in the clinic's timezone and every
+    # `*_line` arrives pre-rendered (empty when there is nothing to say). There is
+    # no "remarcada" mail for the doctor: a move already sends them
+    # `appointment_changed_professional` above.
+    "appointment_cancelled_clinic": EmailTemplate(
+        subject="Consulta cancelada — {when}",
+        body=(
+            "Olá!\n\n"
+            "Um paciente cancelou uma consulta na {clinic_name}, pela conversa com a "
+            "SecretarIA:\n\n"
+            "{professional_line}"
+            "Serviço: {service}\n"
+            "Quando: {when}\n"
+            "\n"
+            "{agenda_line}"
+            "— Equipe SecretarIA\n\n"
+            "Ref.: {appointment_id}"
+        ),
+    ),
+    "appointment_cancelled_professional": EmailTemplate(
+        subject="Consulta cancelada — {when}",
+        body=(
+            "Olá, {professional_name}!\n\n"
+            "Um paciente cancelou uma consulta com você pela SecretarIA:\n\n"
+            "Paciente: {patient_name}\n"
+            "Serviço: {service}\n"
+            "Quando: {when}\n"
+            "\n"
+            "{agenda_line}"
             "— Equipe SecretarIA"
+        ),
+    ),
+    "appointment_cancelled_patient": EmailTemplate(
+        subject="Consulta cancelada — {when}",
+        body=(
+            "Olá!\n\n"
+            "Sua consulta na {clinic_name} foi cancelada, como você pediu:\n\n"
+            "{professional_line}"
+            "Serviço: {service}\n"
+            "Quando: {when}\n"
+            "\n"
+            "Se quiser marcar um novo horário, é só falar com a gente pela conversa da "
+            "clínica.\n\n"
+            "— {clinic_name}"
+        ),
+    ),
+    "appointment_rescheduled_clinic": EmailTemplate(
+        subject="Consulta remarcada — {when}",
+        body=(
+            "Olá!\n\n"
+            "Um paciente remarcou uma consulta na {clinic_name}, pela conversa com a "
+            "SecretarIA:\n\n"
+            "{professional_line}"
+            "Serviço: {service}\n"
+            "Novo horário: {when}\n"
+            "{previous_line}"
+            "\n"
+            "{agenda_line}"
+            "— Equipe SecretarIA\n\n"
+            "Ref.: {appointment_id}"
+        ),
+    ),
+    "appointment_rescheduled_patient": EmailTemplate(
+        subject="Consulta remarcada — {when}",
+        body=(
+            "Olá!\n\n"
+            "Sua consulta na {clinic_name} foi remarcada:\n\n"
+            "{professional_line}"
+            "Serviço: {service}\n"
+            "Novo horário: {when}\n"
+            "{previous_line}"
+            "\n"
+            "{calendar_line}"
+            "— {clinic_name}"
         ),
     ),
     # TASK-032 R2: a Portal patient's appointment reminder (workers/reminder_engine.py).
@@ -764,16 +854,22 @@ _TEMPLATES: dict[str, EmailTemplate] = {
     # patient content — only the reason the agent gave (an enum rendered as a
     # sentence). The secretary opens the console to read the chat, same stance
     # as `appointment_booked_professional`.
+    #
+    # The clinic by NAME and, when STAFF_CONSOLE_URL is set, a link straight to
+    # the conversation (`console_line`, pre-rendered by
+    # services/handoff_notification.py, which also carries the plain
+    # instruction when there is no link). It used to print the tenant and
+    # conversation UUIDs as if they were information; the conversation id is
+    # now only the footer reference.
     "human_handoff_alert": EmailTemplate(
-        subject="Conversa aguardando atendimento humano",
+        subject="Conversa aguardando atendimento humano — {clinic_name}",
         body=(
             "Olá!\n\n"
-            "Uma conversa na SecretarIA foi passada para atendimento humano.\n\n"
-            "Cl\u00ednica: {tenant_id}\n"
-            "Conversa: {conversation_id}\n"
+            "Uma conversa na {clinic_name} foi passada para atendimento humano.\n\n"
             "Motivo: {reason}\n\n"
-            "Abra o console de atendimento para responder ao paciente.\n\n"
-            "— Equipe SecretarIA"
+            "{console_line}"
+            "— Equipe SecretarIA\n\n"
+            "Ref. da conversa: {conversation_id}"
         ),
     ),
 }

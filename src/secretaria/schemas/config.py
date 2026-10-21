@@ -120,7 +120,18 @@ class AppointmentType(BaseModel):
 
 
 def _validate_business_hours(value: dict[str, list[TimeWindow]]) -> dict[str, list[TimeWindow]]:
-    """Reject unknown weekday keys and overlapping windows within a day."""
+    """Reject unknown weekday keys and overlapping windows within a day.
+
+    A weekday sent with NO window (`"monday": []`) is dropped, not stored. Every
+    reader already treats it exactly like an absent key (closed that day:
+    tenant_config._filter_active_hours, the flow's hours text, the human-backup
+    plugin), so dropping it loses nothing — and storing it was how a console
+    that showed a day "aberto" with no time range persisted a schedule that
+    looked configured and offered nothing (production, 2026-10-20). Normalized
+    rather than refused: the server cannot tell "opened without a range" from
+    "closed", only the screen can, so the screen validates (the console blocks
+    the save and names the day) and the server keeps one canonical shape.
+    """
     for day, windows in value.items():
         if day not in WEEKDAYS:
             raise ValueError(f"unknown weekday {day!r}; expected one of {WEEKDAYS}")
@@ -128,7 +139,7 @@ def _validate_business_hours(value: dict[str, list[TimeWindow]]) -> dict[str, li
         for (_, prev_end), (next_start, _) in zip(ranges, ranges[1:], strict=False):
             if next_start < prev_end:
                 raise ValueError(f"overlapping availability windows on {day!r}")
-    return value
+    return {day: windows for day, windows in value.items() if windows}
 
 
 class TenantAddress(BaseModel):
@@ -387,6 +398,12 @@ class TenantConfigRead(BaseModel):
     is_active: bool
     # True when a Google Calendar refresh token is stored for this tenant.
     calendar_connected: bool
+    # Native agenda (2026-10-20): where the CLINIC's own agenda lives - "google" while a
+    # clinic token is stored (a revoked one included: it fails loudly, it never falls
+    # back), else "local", the secretarIA's own agenda (services/local_calendar.py).
+    # Read-only/derived, like `calendar_connected`. A per_professional doctor with his
+    # own Google account is Google-backed either way (`calendar_source` on his row).
+    calendar_backend: Literal["google", "local"] = "local"
     # --- Pix deposit (sinal) policy — services/payments/deposit_lifecycle.py ---
     pix_deposit_enabled: bool
     pix_deposit_percent: int

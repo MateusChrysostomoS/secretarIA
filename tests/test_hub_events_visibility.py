@@ -28,6 +28,7 @@ PREFILL_KEYS = {
     "professional_name",
     "service",
     "attendee_name",
+    "patient_name",
     "phone",
     "patient_channel",
 }
@@ -125,14 +126,18 @@ async def test_the_clinic_sees_every_event_with_the_edit_prefill(
     assert ana["professional_name"] == "Dra. Ana"
     assert (ana["service"], ana["attendee_name"], ana["phone"]) == ("Consulta", None, None)
     assert ana["patient_channel"] == "whatsapp"
+    # "É pra mim": no attendee, so the account's own name says who it is for.
+    assert ana["patient_name"] == "Maria"
     joao = body["evt-beto"]
     assert (joao["professional_id"], joao["professional_name"]) == (str(beto), "Dr. Beto")
     assert (joao["service"], joao["attendee_name"]) == ("Retorno", "Pedro")
+    assert joao["patient_name"] == "João"
     assert (joao["phone"], joao["insurance"]) == ("5511977770000", "Unimed")
     assert joao["patient_channel"] == "brain_message"
     orphan = body["evt-sem-medico"]
     assert orphan["professional_id"] is None and orphan["professional_name"] is None
     assert orphan["patient_channel"] is None and orphan["phone"] == "5511966660000"
+    assert orphan["patient_name"] is None
     assert all(body["evt-google"][key] is None for key in PREFILL_KEYS)
 
 

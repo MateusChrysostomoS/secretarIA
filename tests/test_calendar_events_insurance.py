@@ -88,6 +88,10 @@ NEW_EVENT_KEYS = {"status", "confirmation_count", "display_state", "attention", 
     "attendee_name",
     "phone",
     "patient_channel",
+    # The booking account's name, so the agenda names the patient without the title.
+    "patient_name",
+    # Native agenda (2026-10-20): which agenda holds the event, "google" | "local".
+    "calendar_backend",
 }
 
 
@@ -495,8 +499,17 @@ class _FakeCalendarService:
     def from_tenant_config(cls, config):
         return cls()
 
+    def references_same_calendar(self, other) -> bool:
+        # GET /events also reads each doctor's own agenda (api/hub/calendar.py); this
+        # fake stands for ONE Google agenda, so every resolution is the same one.
+        return True
+
     async def check_availability(self, start, end):
         return _FakeCalendarService.next_events
+
+    async def list_events(self, start, end):
+        # GET /events reads an agenda whole (CalendarService.list_events).
+        return await self.check_availability(start, end)
 
 
 @pytest.fixture(autouse=True)
@@ -515,6 +528,11 @@ def _override(db, tenant, monkeypatch: pytest.MonkeyPatch):
     app.dependency_overrides[get_session] = _fake_get_session
     app.dependency_overrides[get_current_tenant] = _fake_get_current_tenant
     monkeypatch.setattr(hub_calendar, "CalendarService", _FakeCalendarService)
+
+    async def _resolve(session, tenant, professional, **_):
+        return _FakeCalendarService()
+
+    monkeypatch.setattr(hub_calendar, "resolve_professional_calendar", _resolve)
     _FakeCalendarService.next_events = []
     yield
     app.dependency_overrides.pop(get_session, None)

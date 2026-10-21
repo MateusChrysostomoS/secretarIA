@@ -35,6 +35,10 @@ NEW_KEYS = {"status", "confirmation_count", "display_state", "attention", "remin
     "attendee_name",
     "phone",
     "patient_channel",
+    # The booking account's name, so the agenda names the patient without the title.
+    "patient_name",
+    # Native agenda (2026-10-20): which agenda holds the event, "google" | "local".
+    "calendar_backend",
 }
 
 
@@ -47,6 +51,10 @@ class _FakeCalendarService:
 
     async def check_availability(self, start, end):
         return list(type(self).events)
+
+    async def list_events(self, start, end):
+        # GET /events reads an agenda whole (CalendarService.list_events).
+        return await self.check_availability(start, end)
 
     async def cancel_event(self, event_id: str) -> None:
         return None

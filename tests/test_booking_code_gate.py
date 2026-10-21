@@ -54,6 +54,7 @@ from secretaria.config import Settings  # noqa: E402
 from secretaria.core.database import Base  # noqa: E402
 from secretaria.models import (  # noqa: E402
     Appointment,
+    AppointmentStatus,
     BookingHold,
     Conversation,
     FlowState,
@@ -74,7 +75,9 @@ from secretaria.services.pending_identity import (  # noqa: E402
     BOOKING_GATE_REPROMPT_SENTENCE,
     BOOKING_GATE_SENTENCE,
     BOOKING_HOLD_EXPIRED_MESSAGE,
+    CODE_GIVE_UP_UNCONFIRMED_MESSAGE,
     CODE_NOTICE_BUTTONS,
+    IDENTITY_RESEND_ACTION,
     RequestCodeOutcome,
     RequestCodeResult,
     VerifyOutcome,
@@ -638,7 +641,7 @@ async def test_the_verified_code_is_what_creates_the_appointment(db, calls, monk
     )
 
     extra = await tasks._promote_booking_hold(
-        _reply(conversation), tenant=tenant, waba_token=None, professionals=[], redis=None
+        _reply(conversation), tenant=tenant, waba_token=None, redis=None
     )
 
     # The event and the row exist NOW, and not one moment earlier.
@@ -678,7 +681,7 @@ async def test_an_expired_reservation_is_never_promoted(db, calls, monkeypatch):
     )
 
     extra = await tasks._promote_booking_hold(
-        _reply(conversation), tenant=tenant, waba_token=None, professionals=[], redis=None
+        _reply(conversation), tenant=tenant, waba_token=None, redis=None
     )
 
     assert extra == BOOKING_HOLD_EXPIRED_MESSAGE
@@ -695,7 +698,7 @@ async def test_an_ungated_conversation_is_left_exactly_as_it_was(db, calls):
     _, conversation = await _seed_conversation(db, tenant)
     assert (
         await tasks._promote_booking_hold(
-            _reply(conversation), tenant=tenant, waba_token=None, professionals=[], redis=None
+            _reply(conversation), tenant=tenant, waba_token=None, redis=None
         )
         is None
     )
@@ -888,8 +891,150 @@ async def test_a_promoted_reservation_plans_its_reminders_only_with_the_switch_o
     )
 
     await tasks._promote_booking_hold(
-        _reply(conversation), tenant=tenant, waba_token=None, professionals=[], redis=None
+        _reply(conversation), tenant=tenant, waba_token=None, redis=None
     )
 
     rows = await _appointments(db, tenant)
     assert spy.calls == ([("booked", rows[0].id)] if v2 else [])
+
+
+# --------------------------------------------------------------------------
+# 9. What a code dead end may say: only a booking that EXISTS "continua
+#    marcada" (live test, 2026-10-05)
+# --------------------------------------------------------------------------
+
+HELD_START = datetime(2099, 1, 5, 13, 0, tzinfo=UTC)
+
+
+async def _book(db, tenant, patient, conversation, start, *, status=AppointmentStatus.SCHEDULED):
+    async with db() as session:
+        appointment = Appointment(
+            id=uuid4(),
+            tenant_id=tenant.id,
+            patient_id=patient.id,
+            conversation_id=conversation.id,
+            start_at=start,
+            end_at=start + timedelta(minutes=30),
+            appointment_type="Consulta",
+            google_event_id=f"gcal-{uuid4().hex[:12]}",
+            status=status,
+        )
+        session.add(appointment)
+        await session.commit()
+        return appointment
+
+
+async def _stands(db, tenant, patient, conversation) -> bool:
+    async with db() as session:
+        return await holds.appointment_stands_in(
+            session,
+            tenant_id=tenant.id,
+            patient_id=patient.id,
+            conversation_id=conversation.id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_held_slot_alone_is_not_an_appointment(db):
+    tenant = await _seed_tenant(db)
+    patient, conversation = await _seed_conversation(
+        db, tenant, flow_state=FlowState.AWAITING_EMAIL_CODE
+    )
+    await _place(db, tenant, conversation, HELD_START, patient=patient)
+    assert await _stands(db, tenant, patient, conversation) is False
+
+
+@pytest.mark.asyncio
+async def test_a_booking_committed_before_the_code_stands(db):
+    """The paths that still book first: the gate stood down, or a pre-gate booking."""
+    tenant = await _seed_tenant(db)
+    patient, conversation = await _seed_conversation(
+        db, tenant, flow_state=FlowState.AWAITING_EMAIL_CODE
+    )
+    await _book(db, tenant, patient, conversation, HELD_START)
+    assert await _stands(db, tenant, patient, conversation) is True
+
+
+@pytest.mark.asyncio
+async def test_an_older_booking_does_not_vouch_for_a_newer_held_slot(db):
+    tenant = await _seed_tenant(db)
+    patient, conversation = await _seed_conversation(
+        db, tenant, flow_state=FlowState.AWAITING_EMAIL_CODE
+    )
+    await _book(db, tenant, patient, conversation, HELD_START - timedelta(days=2))
+    await _place(db, tenant, conversation, HELD_START, patient=patient)
+    assert await _stands(db, tenant, patient, conversation) is False
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_booking_does_not_stand(db):
+    tenant = await _seed_tenant(db)
+    patient, conversation = await _seed_conversation(
+        db, tenant, flow_state=FlowState.AWAITING_EMAIL_CODE
+    )
+    await _book(db, tenant, patient, conversation, HELD_START, status=AppointmentStatus.CANCELLED)
+    assert await _stands(db, tenant, patient, conversation) is False
+
+
+@pytest.mark.asyncio
+async def test_a_dead_end_on_a_held_slot_says_it_was_not_confirmed(db, calls, monkeypatch):
+    """brain-api down while the slot is held: nothing was booked, so say so.
+
+    An older, unrelated booking of the same patient must not turn the answer
+    into "sua consulta continua marcada" - the slot they just chose is not it.
+    """
+
+    async def _unavailable(tenant_id, external_id, code):
+        return VerifyResult(VerifyOutcome.UNAVAILABLE)
+
+    monkeypatch.setattr(workers_ns, "verify_code", _unavailable)
+    tenant = await _seed_tenant(db)
+    patient, conversation = await _seed_conversation(
+        db, tenant, flow_state=FlowState.AWAITING_EMAIL_CODE
+    )
+    await _book(db, tenant, patient, conversation, HELD_START - timedelta(days=2))
+    await _place(db, tenant, conversation, HELD_START, patient=patient)
+
+    reply = await tasks._persist_brain_message_inbound(
+        tenant_id=tenant.id, external_id=EXTERNAL_ID, text="123456", patient_name="Maria"
+    )
+    await tasks._send_bot_reply(reply, redis=None)
+
+    last = (await _outbound(db, tenant))[-1]
+    assert last == CODE_GIVE_UP_UNCONFIRMED_MESSAGE
+    assert "continua marcada" not in last
+
+
+@pytest.mark.asyncio
+async def test_resending_the_code_on_a_held_slot_keeps_the_gate_wording(db, calls):
+    """"Reenviar código" while the slot is held re-sends the GATE card.
+
+    The card used to come back as the pre-gate notice, opening with "Sua
+    consulta já está confirmada!" while nothing had been booked.
+    """
+    tenant = await _seed_tenant(db)
+    patient, conversation = await _seed_conversation(
+        db, tenant, flow_state=FlowState.AWAITING_EMAIL_CODE
+    )
+    await _place(db, tenant, conversation, HELD_START, patient=patient)
+    # The card the gate put on screen: its ids are what makes the tap valid.
+    await tasks._send_booking_gate_notice(
+        _reply(conversation),
+        {"email_masked": EMAIL_MASKED, "when": "05/01/2099 às 10:00"},
+        tenant=tenant,
+        waba_token=None,
+    )
+
+    reply = await tasks._persist_brain_message_inbound(
+        tenant_id=tenant.id,
+        external_id=EXTERNAL_ID,
+        text="↩️ Reenviar código",
+        interactive_reply_id=IDENTITY_RESEND_ACTION,
+    )
+    await tasks._send_bot_reply(reply, redis=None)
+
+    card = (await _outbound(db, tenant))[-1]
+    assert calls.code_requests == [EXTERNAL_ID]
+    assert "já está confirmada" not in card
+    assert BOOKING_GATE_SENTENCE in card
+    assert "05/01/2099 às 10:00" in card

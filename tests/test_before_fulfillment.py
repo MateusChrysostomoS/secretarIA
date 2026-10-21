@@ -200,6 +200,30 @@ async def test_running_the_step_again_creates_nothing_and_sends_nothing(db, env)
     assert len(env.calendar.created) == 1 and len(env.notices) == 1 and len(env.hooks) == 1
 
 
+async def test_paid_charge_confirms_once_on_the_merged_native_agenda(db, env, monkeypatch):
+    from secretaria.models import CalendarEvent
+    from tests._local_agenda import agenda, wire_local_agenda
+
+    async with db() as session:
+        world = await make_world(session)
+    wire_local_agenda(monkeypatch, db)
+    env.calendar = agenda(world.tenant_id)
+    deposit_id = await _paid_charge(db, world)
+
+    assert await _fulfill(db, deposit_id) == "promoted"
+    assert await _fulfill(db, deposit_id) == "noop"
+    deposit, appointments, items, holds_left, conversation = await _state(db, deposit_id)
+    assert len(appointments) == 1
+    assert deposit.calendar_event_id == f"loc_{deposit_id.hex}"
+    assert appointments[0].google_event_id == deposit.calendar_event_id
+    assert deposit.fulfillment_status == FULFILLMENT_CONFIRMED
+    assert items == [] and holds_left == []
+    assert conversation.flow_state == FlowState.IDLE
+    assert len(env.notices) == len(env.hooks) == 1
+    async with db() as session:
+        assert len(list(await session.scalars(select(CalendarEvent)))) == 1
+
+
 async def test_a_retry_after_a_failed_notice_finds_the_appointment_and_only_resends(db, env):
     async with db() as session:
         world = await make_world(session)

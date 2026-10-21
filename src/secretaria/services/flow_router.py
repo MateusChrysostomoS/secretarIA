@@ -77,6 +77,7 @@ from secretaria.services.availability import (
     available_day_starts,
     held_slots,
     slot_scan_limit,
+    slot_taken_at_confirm,
     without_holds,
 )
 from secretaria.services.booking_details import price_text
@@ -87,12 +88,14 @@ from secretaria.services.booking_scope import (
 )
 from secretaria.services.calendar import (
     CalendarService,
+    CalendarSlotTakenError,
     CalendarUnavailableError,
     build_event_description,
     build_patient_calendar_link,
 )
 from secretaria.services.insurance_catalog import match_plan
 from secretaria.services.insurance_payment_copy import insurance_payment_description
+from secretaria.services.local_calendar import create_event_exclusive, update_event_exclusive
 from secretaria.services.patient_context import as_utc
 from secretaria.services.payments import payer_data
 from secretaria.services.payments.deposit_lifecycle import BEFORE_BLOCKED_TEXT
@@ -230,7 +233,9 @@ LABEL_NO = decorate(EMOJI_NEGATIVE, "Não")
 # end ("Você não tem nenhuma consulta agendada no momento."), and a patient
 # who DOES have one is already served by the Remarcar/Cancelar pair. It stays
 # a first-class route() entry regardless - the label is still tappable in any
-# older WhatsApp thread, and typing it still works.
+# older WhatsApp thread, and typing it still works. It IS offered on the main
+# menu, but only to a patient with a live future appointment
+# (`main_menu_buttons(has_upcoming=True)`), where it cannot dead-end.
 LABEL_BOOK = "Agendar"
 LABEL_MANAGE_APPOINTMENT = "Gerenciar consulta"
 
@@ -496,6 +501,11 @@ def held_times_text(labels: list[str]) -> str:
     return f"{', '.join(shown[:-1])} e {shown[-1]}"
 
 
+# The exact time the patient CONFIRMED was filled on the agenda between the list
+# and the tap - the clinic, another channel or a person in Google Calendar got
+# there first (`availability.slot_taken_at_confirm`). One short line; the same
+# day's fresh times follow it (`_reoffer_taken_slot`).
+SLOT_TAKEN_AT_CONFIRM_MESSAGE = "Esse horário acabou de ser ocupado 😕"
 NO_AVAILABLE_DAYS_MESSAGE = (
     "Não encontrei horários livres nos próximos dias. "
     "Escolha uma opção abaixo e a gente te ajuda."
@@ -900,7 +910,7 @@ def menu_buttons_for(tenant: Tenant, multi_professional: bool) -> list[str]:
     return menu_buttons(tenant)
 
 
-def main_menu_buttons() -> list[str]:
+def main_menu_buttons(has_upcoming: bool = False) -> list[str]:
     """The buttons RENDERED under the main menu: [🗓️ Agendar, Outro], for every clinic.
 
     Owner, 2026-10-05: the booking flow now starts with "Essa consulta é pra
@@ -911,8 +921,32 @@ def main_menu_buttons() -> list[str]:
     tap on an older card still on screen) routes exactly as before. Both
     labels are matched in `route()` ahead of the multi-doctor and index
     dispatch, so this pair works on single- and multi-doctor clinics alike.
+
+    `has_upcoming`: the patient has a live future appointment, so the menu
+    also offers "Gerenciar consulta" in the middle slot (3 buttons, WhatsApp's
+    cap). Without it the pair above left that patient no visible way to
+    reschedule or cancel from the menu - found live on the Portal on
+    2026-10-05, and the WhatsApp side effect the TASK-035 checkpoint recorded
+    as pending. The label is the one `route()` already dispatches to
+    `_enter_manage` (one appointment: straight to its Remarcar/Cancelar card),
+    so nothing new is routed. The router never knows the answer itself (it
+    does no DB I/O): the worker decides it right before sending, after this
+    turn's own cancel/booking committed - see
+    workers/shared/flow_runner.py::_offer_manage_on_main_menu.
     """
+    if has_upcoming:
+        return [decorate(EMOJI_SCHEDULE, LABEL_BOOK), LABEL_MANAGE_APPOINTMENT, LABEL_OTHER]
     return [decorate(EMOJI_SCHEDULE, LABEL_BOOK), LABEL_OTHER]
+
+
+def is_main_menu(bubble) -> bool:
+    """True for a card that IS the main menu (`main_menu_buttons()` as drawn).
+
+    Matched by its labels because every surface builds it the same way -
+    `_menu_bubbles`, `/menu` and the agent's `show_main_menu` - so the worker
+    can offer the manage entry on all of them at one seam.
+    """
+    return isinstance(bubble, MenuBubble) and list(bubble.labels) == main_menu_buttons()
 
 
 def menu_label(tenant: Tenant) -> str:
@@ -3964,6 +3998,71 @@ async def _relist_stored_day(
     )
 
 
+async def _reoffer_taken_slot(
+    conversation: Conversation,
+    tenant: Tenant,
+    calendar: CalendarService,
+    start: datetime,
+    *,
+    duration_minutes: int,
+    branch: DayBranch,
+    back_target: str | None,
+    professionals: list | None,
+) -> FlowRouterResult:
+    """The confirmed time was just taken on the agenda: say so, then that day's times again.
+
+    The twin of the "Sim, outro horário" retry (`_relist_stored_day`) without its extra
+    tap - there is nothing to ask, the time is simply gone. One short line
+    (`SLOT_TAKEN_AT_CONFIRM_MESSAGE`), then the fresh slot list of the SAME day on the SAME
+    branch, so the service, doctor and convênio (booking) or the appointment being moved
+    (reschedule) ride along through `_day_branch_fields`. A day with nothing left falls
+    back to the day picker inside `_enter_slot_picker`, as it does for any stale day.
+    """
+    local = start.astimezone(calendar.tzinfo) if start.tzinfo else start
+    result = await _enter_slot_picker(
+        conversation,
+        tenant,
+        calendar,
+        local.replace(hour=0, minute=0, second=0, microsecond=0),
+        duration_minutes=duration_minutes,
+        branch=branch,
+        back_target=back_target,
+        professionals=professionals,
+    )
+    if result.action == "reply":
+        result.bubbles = [TextBubble(body=SLOT_TAKEN_AT_CONFIRM_MESSAGE), *result.bubbles]
+    return result
+
+
+async def reoffer_taken_booking_slot(
+    conversation: Any,
+    tenant: Tenant,
+    calendar: CalendarService,
+    start: datetime,
+    *,
+    duration_minutes: int,
+    professionals: list | None = None,
+) -> FlowRouterResult:
+    """`_reoffer_taken_slot` on the booking branch, for an entry that is not `route()`.
+
+    The Portal code-gate promotion (`workers/shared/booking_hold.py::_promote_booking_hold`)
+    finds the held window taken AFTER the code was verified, with no route() turn around
+    it; it hands in a conversation-shaped snapshot rebuilt from the hold and gets back an
+    ordinary result to persist. The carries are applied here, as every public entry does.
+    """
+    result = await _reoffer_taken_slot(
+        conversation,
+        tenant,
+        calendar,
+        start,
+        duration_minutes=duration_minutes,
+        branch=BOOKING_DAY_BRANCH,
+        back_target=BACK_TARGET_SERVICE,
+        professionals=professionals,
+    )
+    return _carry_booking(conversation, result)
+
+
 def _handle_slot(
     conversation: Conversation, body: str, *, professional: Any | None = None
 ) -> FlowRouterResult:
@@ -4017,6 +4116,15 @@ async def _handle_confirmation(
     `calendar.create_event`, so a gated booking never puts an event on a real
     clinic's agenda that a never-typed code would then have to remove. That is
     the orphan the previous wave produced in the opposite order.
+
+    And BEFORE the gate, one more read: the slot list the patient tapped is a
+    snapshot, and nothing reserved the time on Google while they read the card -
+    WhatsApp has no hold at all, and a Portal hold only blocks other holds. So
+    `slot_taken_at_confirm` asks THIS agenda (the one the event is written to
+    below) about exactly [start, end). Taken: nothing is created or held, and
+    the patient gets one line plus the same day's fresh times
+    (`_reoffer_taken_slot`). A failed read books as before (fail-open). The
+    gated path is asked again at promotion, when the event is really written.
     """
     if _norm(body) == _norm(LABEL_CANCEL):
         return FlowRouterResult(
@@ -4067,6 +4175,24 @@ async def _handle_confirmation(
         professionals, _selected_professional_id(conversation)
     )
     insurance = _selected_insurance(conversation)
+
+    if await slot_taken_at_confirm(
+        calendar,
+        start,
+        end,
+        source="flow_confirm",
+        conversation_id=getattr(conversation, "id", None),
+    ):
+        return await _reoffer_taken_slot(
+            conversation,
+            tenant,
+            calendar,
+            start,
+            duration_minutes=duration,
+            branch=BOOKING_DAY_BRANCH,
+            back_target=BACK_TARGET_SERVICE,
+            professionals=professionals,
+        )
 
     if gate is not None and (gate.armed or gate.deposit_capable):
         decision = await gate.decide(
@@ -4183,12 +4309,28 @@ async def _handle_confirmation(
         # "commit" falls through to exactly the code that was here before.
 
     try:
-        event = await calendar.create_event(
+        # Exclusive on the secretarIA agenda: the re-check above and the write become
+        # one atomic step there (services/local_calendar.py); plain on Google.
+        event = await create_event_exclusive(
+            calendar,
             start=start, end=end, summary=summary,
             description=build_event_description(
                 service=canonical_type or service_type, insurance=insurance,
                 attendee_name=attendee_name,
             ),
+        )
+    except CalendarSlotTakenError:
+        # Somebody else's booking landed between the re-check and the write: the same
+        # answer as a taken re-check.
+        return await _reoffer_taken_slot(
+            conversation,
+            tenant,
+            calendar,
+            start,
+            duration_minutes=duration,
+            branch=BOOKING_DAY_BRANCH,
+            back_target=BACK_TARGET_SERVICE,
+            professionals=professionals,
         )
     except CalendarUnavailableError:
         return FlowRouterResult(
@@ -4774,11 +4916,57 @@ async def _manage_reschedule(
     start = datetime.fromisoformat(conversation.flow_selected_slot)
     if start.tzinfo is None:
         start = start.replace(tzinfo=calendar.tzinfo)
-    end = start + timedelta(minutes=_appt_duration_minutes(appt, tenant))
+    duration = _appt_duration_minutes(appt, tenant)
+    end = start + timedelta(minutes=duration)
+
+    # Same last read as the booking "Confirmar" (`_handle_confirmation`), on the
+    # appointment's OWN agenda - the one the patch below goes to. The event
+    # being moved is excluded: it never takes its own new time. Fail-open.
+    if await slot_taken_at_confirm(
+        calendar,
+        start,
+        end,
+        source="flow_reschedule",
+        ignore_event_id=event_id,
+        conversation_id=getattr(conversation, "id", None),
+    ):
+        return await _reoffer_taken_slot(
+            conversation,
+            tenant,
+            calendar,
+            start,
+            duration_minutes=duration,
+            branch=MANAGE_DAY_BRANCH,
+            back_target=None,
+            professionals=professionals,
+        )
 
     try:
-        await calendar.update_event(event_id, start=start, end=end)
-    except CalendarUnavailableError:
+        await update_event_exclusive(calendar, event_id, start=start, end=end)
+    except CalendarSlotTakenError:
+        # Taken between the re-check and the move (secretarIA agenda only): reoffer.
+        return await _reoffer_taken_slot(
+            conversation,
+            tenant,
+            calendar,
+            start,
+            duration_minutes=duration,
+            branch=MANAGE_DAY_BRANCH,
+            back_target=None,
+            professionals=professionals,
+        )
+    except Exception as exc:
+        # Any refusal to move the event (an outage, OR Google answering 404
+        # because the event is not on this agenda / was deleted by hand) is a
+        # job for a person. Letting a raw HttpError escape made the runner
+        # delegate to the LLM, which re-opened the day picker: the patient
+        # looped on "Confirmar" forever and nobody was told.
+        if not isinstance(exc, CalendarUnavailableError):
+            logger.warning(
+                "flow_manage_reschedule_update_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
         return FlowRouterResult(
             action="calendar_unavailable",
             flow_state=FlowState.MANAGE_BOOKING,

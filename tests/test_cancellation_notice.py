@@ -163,11 +163,20 @@ class _FakeCalendarService:
     def from_tenant_config(cls, config):
         return cls()
 
+    def references_same_calendar(self, other) -> bool:
+        # The console also acts on / reads each doctor's own agenda (api/hub/calendar.py);
+        # this fake stands for ONE Google agenda, so every resolution is the same one.
+        return True
+
     async def cancel_event(self, event_id: str) -> None:
         self.cancelled.append(event_id)
 
     async def check_availability(self, start, end):
         return _FakeCalendarService.next_events
+
+    async def list_events(self, start, end):
+        # GET /events reads an agenda whole (CalendarService.list_events).
+        return await self.check_availability(start, end)
 
 
 class _FakeArqPool:
@@ -194,6 +203,11 @@ def _override(db, tenant, monkeypatch: pytest.MonkeyPatch):
     app.dependency_overrides[get_session] = _fake_get_session
     app.dependency_overrides[get_current_tenant] = _fake_get_current_tenant
     monkeypatch.setattr(hub_calendar, "CalendarService", _FakeCalendarService)
+
+    async def _resolve(session, tenant, professional, **_):
+        return _FakeCalendarService()
+
+    monkeypatch.setattr(hub_calendar, "resolve_professional_calendar", _resolve)
     _FakeCalendarService.next_events = []
     app.state.arq_pool = _FakeArqPool()
     yield

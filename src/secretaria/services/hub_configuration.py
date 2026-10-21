@@ -263,8 +263,7 @@ async def check_tenant_activation(session: AsyncSession, tenant: Tenant, data: d
     """
     if data.get("is_active") is not True:
         return
-    connected = await cfg.has_google_refresh_token(session, tenant.id)
-    ok, reason = cfg.can_activate(tenant, connected)
+    ok, reason = cfg.can_activate(tenant)
     if not ok:
         raise ActivationBlocked(reason)
 
@@ -444,6 +443,7 @@ async def tenant_read_model(session: AsyncSession, tenant: Tenant) -> TenantConf
         collect_insurance=tenant.collect_insurance,
         is_active=tenant.is_active,
         calendar_connected=connected,
+        calendar_backend="google" if connected else "local",
         pix_deposit_enabled=tenant.pix_deposit_enabled,
         pix_deposit_percent=tenant.pix_deposit_percent,
         pix_refund_window_hours=tenant.pix_refund_window_hours,

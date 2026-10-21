@@ -72,6 +72,18 @@ Outro" ou o trio "Escolher médico/Escolher serviço/Outro". Os rótulos antigos
 funcionando quando digitados. Consequência: um paciente de WhatsApp com consulta marcada que
 digitar `/menu` não vê mais um botão de remarcar (continua por texto ou por Outro).
 
+**Corrigido em 2026-10-05 (branch `fix/e2e-portal-manage-notify`), nos dois canais.** O mesmo
+buraco apareceu ao vivo no Portal (paciente com consulta confirmada digitou "menu" e recebeu só
+[Agendar, Outro]). Nenhum registro mostra decisão do dono a favor disso (a seção acima diz
+"pendente"). Agora quem tem consulta viva no futuro recebe
+`[🗓️ Agendar, Gerenciar consulta, Outro]` (`main_menu_buttons(has_upcoming=True)`); "Gerenciar
+consulta" já era rota do `route()` para `_enter_manage` (uma consulta → cartão
+Remarcar/Cancelar/Voltar). Decidido no worker, em
+`workers/shared/flow_runner.py::_offer_manage_on_main_menu`, a costura por onde passam o menu do
+`route()`, `/menu`, o "Não" da reativação e o `show_main_menu` da IA, e DEPOIS do commit do turno
+(o menu que fecha o último cancelamento volta a [Agendar, Outro]). Testes:
+`tests/test_main_menu_manage_entry.py`. Exige deploy do worker.
+
 ## Ordem de deploy (nada disto foi executado)
 
 Sem migração. secretarIA **API e worker juntos** (a rota enfileira um job que só o worker novo

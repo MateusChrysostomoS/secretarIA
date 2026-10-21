@@ -58,17 +58,17 @@ def _expire_stale_pending_identity_state(
       * AWAITING_EMAIL parks the visitor BEFORE the LGPD notice. The floor
         clears the active wait and the caller asks whether they want to resume;
         it never silently skips the still-unclaimed address.
-      * AWAITING_EMAIL_CODE parks the visitor AFTER the appointment is already
-        committed. It has a second, immediate exit (any non-6-digit message
+      * AWAITING_EMAIL_CODE parks the visitor AFTER booking - since the code
+        gate usually on a ten-minute hold, not a committed appointment (see
+        `appointment_stands_in`). It has a second, immediate exit (any non-6-digit message
         leaves it — see the gate in `_persist_inbound_message`), so the floor
         here catches the narrower case of a patient who sends nothing at all
         and comes back tomorrow to a prompt about a code that expired an hour
         into the silence.
 
     No consent, appointment or history row is touched; only the transient
-    column moves. The caller owns the visible "quer continuar?" prompt. The
-    appointment made during the visit is NOT affected in any way — it was
-    committed before AWAITING_EMAIL_CODE was ever entered.
+    column moves. The caller owns the visible "quer continuar?" prompt. An
+    appointment made during the visit, when there is one, is NOT affected.
 
     Returns True when the state was expired (the caller logs it).
     """
@@ -95,6 +95,7 @@ def _pending_identity_reactivation_offer(
     *,
     channel: str,
     pre_consent: bool = False,
+    appointment_stands: bool = False,
 ) -> _ReplyContext:
     """Arm the existing Sim/Não gate for an expired e-mail, OTP or name wait.
 
@@ -103,10 +104,17 @@ def _pending_identity_reactivation_offer(
     patient's offer down the wrong channel (`channel-aware-dispatch`). `pre_consent` picks the true
     sentence for a code wait: a code asked BEFORE consent (an e-mail that
     already had an account) has no consultation behind it to reassure about.
+    `appointment_stands` (`workers/portal/identity.py::_code_appointment_stands_in`)
+    does the same AFTER consent: since the code gate the usual post-consent
+    wait sits on a ten-minute hold, not a booking, and "continua marcada" told
+    those patients a consultation existed (live test, 2026-10-05). The default
+    claims nothing.
     """
     conversation.reactivation_origin = origin.value
-    if origin == FlowState.AWAITING_EMAIL_CODE and not pre_consent:
+    if origin == FlowState.AWAITING_EMAIL_CODE and not pre_consent and appointment_stands:
         prefix = "Sua consulta continua marcada."
+    elif origin == FlowState.AWAITING_EMAIL_CODE and not pre_consent:
+        prefix = "O horário que você escolheu não chegou a ser confirmado."
     else:
         prefix = "Seu atendimento ficou pausado antes da etapa de privacidade."
     prompt = reactivation_continue_prompt(tenant)
@@ -128,6 +136,8 @@ def _reactivation_offer(
     body: str | None,
     last_activity_at: datetime | None,
     origin: FlowState,
+    *,
+    channel: str,
 ) -> _ReplyContext | None:
     """Maybe offer a returning patient to resume, after a silence gap.
 
@@ -144,6 +154,12 @@ def _reactivation_offer(
     just-expired LLM conversation look like it had nothing to resume, and the
     patient would be silently rerouted instead of asked. The caller passes it
     explicitly for exactly that reason.
+
+    `channel` is required for the same reason as on
+    `_pending_identity_reactivation_offer`: the offer is a reply, and the
+    `_ReplyContext` default is WhatsApp. A Portal patient back after the gap
+    had their "quer continuar?" handed to the WhatsApp sender and saw nothing
+    (live test, 2026-10-05) - `channel-aware-dispatch`.
     """
     if last_activity_at is None:
         return None
@@ -179,6 +195,7 @@ def _reactivation_offer(
         prompt = reactivation_continue_prompt(tenant)
         body_text = f"{greeting}\n\n{prompt}".strip() if greeting else prompt
         return _ReplyContext(
+            channel=channel,
             conversation_id=conversation.id,
             patient_ref=wa_id,
             inbound_body=body or "",
@@ -195,6 +212,7 @@ def _reactivation_offer(
     if not greeting or not reactivation_enabled(tenant):
         return None
     return _ReplyContext(
+        channel=channel,
         conversation_id=conversation.id,
         patient_ref=wa_id,
         inbound_body=body or "",

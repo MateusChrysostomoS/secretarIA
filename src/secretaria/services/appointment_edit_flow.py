@@ -42,7 +42,15 @@ from secretaria.services.attendee import (
     authorization_body,
     parse_attendee_name,
 )
-from secretaria.services.calendar import CalendarUnavailableError, build_event_description
+from secretaria.services.calendar import (
+    CalendarSlotTakenError,
+    CalendarUnavailableError,
+    build_event_description,
+)
+from secretaria.services.local_calendar import (
+    create_event_exclusive,
+    update_event_details_exclusive,
+)
 from secretaria.services.tenant_config import professional_appointment_types
 
 logger = get_logger(__name__)
@@ -671,7 +679,8 @@ async def _apply_confirm(
         ).total_seconds()
         // 60
     )
-    if time_changed or doctor_changed or draft.duration_minutes != original_minutes:
+    window_changed = time_changed or doctor_changed or draft.duration_minutes != original_minutes
+    if window_changed:
         try:
             free = await new_cal.is_slot_free(
                 start, end, ignore_event_id=_ignore_event(draft, appt, ctx)
@@ -690,13 +699,25 @@ async def _apply_confirm(
         insurance=draft.current["insurance"],
         attendee_name=draft.current["attendee_name"],
     )
+    # When the window moves, exclusive on the secretarIA agenda: the free check above and
+    # the write are one atomic step there (plain on Google). An edit that keeps the window
+    # (convênio, who it is for) is never refused for an overlap the clinic itself made.
     try:
         if calendar_changed:
-            created = await new_cal.create_event(start, end, summary, description)
+            created = await create_event_exclusive(
+                new_cal, start=start, end=end, summary=summary, description=description
+            )
             new_event_id, link = str(created.get("id")), created.get("htmlLink")
+        elif window_changed:
+            await update_event_details_exclusive(
+                new_cal, event_id, start, end, summary, description
+            )
+            new_event_id, link = event_id, None
         else:
             await new_cal.update_event_details(event_id, start, end, summary, description)
             new_event_id, link = event_id, None
+    except CalendarSlotTakenError:
+        return await _reslot_picker(conversation, tenant, draft, professionals, ctx)
     except CalendarUnavailableError:
         return _unavailable(draft)
 
