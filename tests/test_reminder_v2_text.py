@@ -288,7 +288,7 @@ def test_the_meta_sheet_matches_the_code():
 def test_portal_link_is_the_clinic_invite_link(monkeypatch):
     tenant_id = uuid4()
     monkeypatch.setattr(
-        get_settings(), "BRAIN_MESSAGE_PORTAL_URL", "https://portal.exemplo/", raising=False
+        get_settings(), "BRAIN_MESSAGE_PUBLIC_URL", "https://portal.exemplo/", raising=False
     )
     assert (
         rt.portal_conversation_link(tenant_id)
@@ -297,7 +297,7 @@ def test_portal_link_is_the_clinic_invite_link(monkeypatch):
 
 
 def test_portal_link_is_none_while_unconfigured(monkeypatch):
-    monkeypatch.setattr(get_settings(), "BRAIN_MESSAGE_PORTAL_URL", "", raising=False)
+    monkeypatch.setattr(get_settings(), "BRAIN_MESSAGE_PUBLIC_URL", "", raising=False)
     assert rt.portal_conversation_link(uuid4()) is None
 
 

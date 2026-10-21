@@ -908,11 +908,33 @@ async def _shared_account(db, tenant) -> None:
     tenant.google_calendar_mode = "shared_account"
 
 
+@pytest.mark.parametrize("calendar_id", [None, "existing@group.calendar.google.com"])
+async def test_reactivating_self_as_doctor_prepares_shared_calendar(
+    client, db, tenant, monkeypatch, calendar_id
+):
+    """The 'also attends' action reactivates an already linked inactive professional."""
+    await _shared_account(db, tenant)
+    await _connect_clinic(db, tenant)
+    _patch_calendar_service(monkeypatch)
+    _allow_multi_professional(monkeypatch)
+    professional = await _seed_professional(
+        db, tenant, is_active=False, google_calendar_id=calendar_id
+    )
+    response = await client.patch(f"{ENDPOINT}/{professional.id}", json={"is_active": True})
+    assert response.status_code == 200
+    async with db() as session:
+        activated = await session.get(Professional, professional.id)
+        assert activated.is_active is True
+        assert activated.google_calendar_id is not None
+        if calendar_id:
+            assert activated.google_calendar_id == calendar_id
+            assert _FakeSecondaryCalendar.calls == []
+
+
 def _allow_multi_professional(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         professionals_api, "get_entitlements", _entitled_fake(addons={"multi_professional": True})
     )
-    monkeypatch.setattr(professionals_api, "is_entitled", lambda summary, key: True)
 
 
 async def test_creating_a_professional_in_shared_account_mode_creates_their_calendar(

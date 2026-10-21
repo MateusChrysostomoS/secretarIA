@@ -90,6 +90,7 @@ class ProfessionalAttachIn(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     specialty: str | None = Field(default=None, max_length=255)
     about: str | None = None
+    interactive: bool = False
 
 
 class ProfessionalAttachOut(BaseModel):

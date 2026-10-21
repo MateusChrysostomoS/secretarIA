@@ -344,7 +344,7 @@ def warning_text(deposit: PixDeposit) -> str:
 
 def console_conversation_link(conversation_id: UUID | None) -> str | None:
     """The clinic console's thread (Brain-Message-Frontend `conversationHref`), or None."""
-    base = (get_settings().BRAIN_MESSAGE_PORTAL_URL or "").strip().rstrip("/")
+    base = (get_settings().BRAIN_MESSAGE_PUBLIC_URL or "").strip().rstrip("/")
     if not base or conversation_id is None:
         return None
     return f"{base}/chat/?conversationId={conversation_id}"

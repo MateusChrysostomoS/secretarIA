@@ -50,7 +50,7 @@ def mailbox(monkeypatch) -> list[dict]:
     monkeypatch.setattr(email, "_send_sync", _send)
     monkeypatch.setattr(get_settings(), "SMTP_HOST", "smtp.exemplo", raising=False)
     monkeypatch.setattr(
-        get_settings(), "BRAIN_MESSAGE_PORTAL_URL", "https://portal.exemplo", raising=False
+        get_settings(), "BRAIN_MESSAGE_PUBLIC_URL", "https://portal.exemplo", raising=False
     )
     return sent
 

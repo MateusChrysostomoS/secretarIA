@@ -22,14 +22,14 @@ not allowed. Order of refusals: 401 (no/invalid/inactive token) -> 403 (role) ->
 For a route whose ONE handler serves callers of several roles and only some FIELDS are
 manager-only (payment settings in the config PUT), take `claim: SubscriptionClaim =
 Depends(get_hub_claim)` next to `get_current_tenant` and call `ensure_clinic_manager(claim)`
-inside the handler when such a field is present (the second verification is a positive-
-cache hit).
+inside the handler when such a field is present. Hub checks bypass the positive cache
+so revoked staff access is refused immediately, as on main.
 """
 
 from collections.abc import Callable
 from dataclasses import replace
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -84,7 +84,7 @@ async def get_hub_claim(authorization: str | None = Header(default=None)) -> Sub
     if not token:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
 
-    claim = await verify_subscription_token(token)
+    claim = await verify_subscription_token(token, fresh=True)
     if claim is None or not claim.active:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or inactive subscription token")
     return claim
@@ -98,6 +98,7 @@ async def _tenant_for_claim(session: AsyncSession, claim: SubscriptionClaim) -> 
 
 
 async def get_current_tenant(
+    request: Request,
     authorization: str | None = Header(default=None),
     session: AsyncSession = Depends(get_session),
 ) -> Tenant:
@@ -107,7 +108,9 @@ async def get_current_tenant(
     no tenant can be resolved. Role-blind by design (see the module docstring).
     """
     claim = await get_hub_claim(authorization)
-    return await _tenant_for_claim(session, claim)
+    tenant = await _tenant_for_claim(session, claim)
+    request.state.staff_subscription_claim = claim
+    return tenant
 
 
 def _refuse(code: str, message: str, claim: SubscriptionClaim) -> HTTPException:
@@ -164,20 +167,23 @@ async def require_clinic_clinician(
 
 
 async def get_agenda_viewer(
+    request: Request,
     authorization: str | None = Header(default=None),
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_session),
 ) -> AgendaViewer:
     """Who is looking at the agenda (TASK-044 R7, spec 2026-10-09 §5.A).
 
-    Re-reads the introspection `get_current_tenant` just did: a positive answer is cached
-    in-process (core/subscription.py), so this is no second brain-api call within
-    SUBSCRIPTION_CACHE_TTL_SECONDS. Fails closed: no live claim for THIS clinic is 401.
+    Uses the fresh introspection from this request, without a second remote call.
+    No positive cache from another request can prolong revoked access.
+    Fails closed: no live claim for THIS clinic is 401.
     The linked professional must be a Professional row of this clinic - any other id is
     dropped, and an "own" viewer without a professional then reaches no appointment.
     """
-    token = _bearer_token(authorization)
-    claim = await verify_subscription_token(token) if token else None
+    claim = getattr(request.state, "staff_subscription_claim", None)
+    if claim is None:
+        token = _bearer_token(authorization)
+        claim = await verify_subscription_token(token, fresh=True) if token else None
     if claim is None or not claim.active or claim.tenant_id != tenant.id:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or inactive subscription token")
     viewer = viewer_from_claim(claim.agenda_scope, claim.professional_id)

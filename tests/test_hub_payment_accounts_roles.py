@@ -70,7 +70,8 @@ async def world(monkeypatch):
     monkeypatch.setattr(asaas_connection, "run_probe_suite", probes)
     role = {"value": None}
 
-    async def _verify(token):
+    async def _verify(token, *, fresh=False):
+        assert fresh is True  # main requires live staff revocation checks on hub requests.
         return _claim(tenant.id, role["value"])
 
     monkeypatch.setattr(hub_deps, "verify_subscription_token", _verify)

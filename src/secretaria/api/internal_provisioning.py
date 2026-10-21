@@ -19,12 +19,14 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.api.internal import require_internal_api_key
+from secretaria.core.crypto import EncryptionError
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
-from secretaria.models import Tenant
+from secretaria.models import Professional, Tenant
 from secretaria.schemas.internal_provisioning import (
     ActivateOut,
     AsaasConnectionIn,
@@ -40,8 +42,13 @@ from secretaria.schemas.internal_provisioning import (
     WhatsappConnectionIn,
     WhatsappConnectionOut,
 )
+from secretaria.schemas.professional import ProfessionalListItem
 from secretaria.services import provisioning
 from secretaria.services.email import is_known_template
+from secretaria.services.hub_configuration import professional_list_item
+from secretaria.services.professional_calendar_setup import prepare_shared_professional_calendar
+from secretaria.services.professional_capacity import ProfessionalCapacityError
+from secretaria.services.staff_welcome import seal_staff_welcome
 
 logger = get_logger(__name__)
 
@@ -58,6 +65,23 @@ _INTERNAL_RESPONSES = {
     403: {"description": "INTERNAL_API_KEY not configured on the server."},
 }
 _NOT_FOUND_RESPONSES = {**_INTERNAL_RESPONSES, 404: {"description": "Unknown tenant."}}
+
+
+@router.get("/tenants/{tenant_id}/professionals", response_model=list[ProfessionalListItem])
+async def internal_professional_roster(
+    tenant_id: _TENANT_PATH,
+    session: AsyncSession = Depends(get_session),
+) -> list[ProfessionalListItem]:
+    """The complete roster, including inactive linked professionals; internal only."""
+    tenant = await session.get(Tenant, tenant_id)
+    if tenant is None:
+        raise HTTPException(404, "Unknown tenant")
+    rows = await session.scalars(
+        select(Professional)
+        .where(Professional.tenant_id == tenant.id)
+        .order_by(Professional.created_at, Professional.id)
+    )
+    return [await professional_list_item(session, row, tenant) for row in rows]
 
 
 @router.post(
@@ -215,7 +239,9 @@ async def config_status(
     summary="Create-or-attach a professional by name (internal)",
     description=(
         "Case-insensitive match on an existing ACTIVE professional of this tenant -> "
-        "returns it (created=false, no mutation). Otherwise creates a new one."
+        "returns it (created=false). Otherwise creates a new one. After registration, "
+        "shared-account clinics prepare a missing secondary calendar without overwriting "
+        "existing professional settings."
     ),
     responses=_NOT_FOUND_RESPONSES,
 )
@@ -224,17 +250,23 @@ async def attach_professional(
     body: ProfessionalAttachIn,
     session: AsyncSession = Depends(get_session),
 ) -> ProfessionalAttachOut:
-    result = await provisioning.create_or_attach_professional(
-        session,
-        tenant_id=tenant_id,
-        name=body.name,
-        specialty=body.specialty,
-        about=body.about,
-    )
+    try:
+        result = await provisioning.create_or_attach_professional(
+            session,
+            tenant_id=tenant_id,
+            name=body.name,
+            specialty=body.specialty,
+            about=body.about,
+            interactive=body.interactive,
+        )
+    except ProfessionalCapacityError as exc:
+        raise HTTPException(exc.status, exc.code) from None
     if result is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown tenant")
     professional, created = result
     await session.commit()
+    tenant = await session.get(Tenant, professional.tenant_id)
+    await prepare_shared_professional_calendar(session, tenant, professional)
     return ProfessionalAttachOut(professional_id=professional.id, created=created)
 
 
@@ -297,6 +329,21 @@ async def notifications_email(
     if arq_pool is None:
         logger.error("provisioning_email_arq_pool_unavailable", template=body.template)
         return NotificationEmailOut(queued=False)
+    if body.template == "staff_temporary_password":
+        try:
+            sealed, remaining = seal_staff_welcome({**body.variables, "to": body.to})
+            await arq_pool.enqueue_job(
+                "send_staff_welcome_email", payload_encrypted=sealed, _expires=remaining
+            )
+        except EncryptionError:
+            logger.error("staff_welcome_encryption_unavailable")
+            return NotificationEmailOut(queued=False)
+        except ValueError:
+            raise HTTPException(422, "Invalid staff welcome request") from None
+        except Exception:
+            logger.warning("staff_welcome_enqueue_failed")
+            return NotificationEmailOut(queued=False)
+        return NotificationEmailOut(queued=True)
     await arq_pool.enqueue_job("send_transactional_email", body.template, body.to, body.variables)
     logger.info("provisioning_email_enqueued", template=body.template)
     return NotificationEmailOut(queued=True)

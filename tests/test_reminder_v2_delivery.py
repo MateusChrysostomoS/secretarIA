@@ -41,7 +41,7 @@ def mail(monkeypatch):
     monkeypatch.setattr(reminder_delivery, "fetch_patient_email_result", _fetch)
     monkeypatch.setattr(reminder_delivery, "send_transactional_email_result", _send)
     monkeypatch.setattr(
-        get_settings(), "BRAIN_MESSAGE_PORTAL_URL", "https://portal.exemplo", raising=False
+        get_settings(), "BRAIN_MESSAGE_PUBLIC_URL", "https://portal.exemplo", raising=False
     )
     return sent, state
 

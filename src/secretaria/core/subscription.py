@@ -140,7 +140,7 @@ def _optional_uuid(raw: object) -> UUID | None:
         return None
 
 
-async def verify_subscription_token(token: str) -> SubscriptionClaim | None:
+async def verify_subscription_token(token: str, *, fresh: bool = False) -> SubscriptionClaim | None:
     """Validate a bearer token against brain-api and return its claim, or None.
 
     None means "treat as unauthenticated" — covers an empty token, missing
@@ -157,7 +157,7 @@ async def verify_subscription_token(token: str) -> SubscriptionClaim | None:
         return None
 
     key = _cache_key(token)
-    cached = _cache_get(key)
+    cached = None if fresh else _cache_get(key)
     if cached is not None:
         return cached
 

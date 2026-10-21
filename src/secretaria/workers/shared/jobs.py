@@ -20,6 +20,40 @@ from secretaria.services.email import (
 logger = get_logger(__name__)
 
 
+async def send_staff_welcome_email(ctx: dict, payload_encrypted: str) -> None:
+    from secretaria.services.staff_welcome import open_staff_welcome
+    from secretaria.services.brain_team_delivery import staff_delivery_request
+    from secretaria.core.crypto import EncryptionError
+
+    try:
+        envelope = open_staff_welcome(payload_encrypted)
+    except (ValueError, EncryptionError):
+        logger.warning("staff_welcome_envelope_refused")
+        return
+    if not await staff_delivery_request(
+        envelope.tenant_id, envelope.user_id, envelope.credential_version
+    ):
+        return
+    sent = await send_transactional_email_message(
+        to=str(envelope.to),
+        template="staff_temporary_password",
+        variables={
+            "name": envelope.name,
+            "clinic_name": envelope.clinic_name,
+            "email": str(envelope.to),
+            "temporary_password": envelope.temporary_password.get_secret_value(),
+            "login_url": str(envelope.login_url),
+        },
+    )
+    await staff_delivery_request(
+        envelope.tenant_id,
+        envelope.user_id,
+        envelope.credential_version,
+        "sent" if sent else "failed",
+    )
+    logger.info("staff_welcome_processed", user_id=str(envelope.user_id), sent=sent)
+
+
 async def send_transactional_email(ctx: dict, template: str, to: str, variables: dict) -> None:
     """arq job: render + send one onboarding transactional email.
 

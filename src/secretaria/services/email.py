@@ -522,7 +522,7 @@ _TEMPLATES: dict[str, EmailTemplate] = {
     # TASK-032 R2: a Portal patient's appointment reminder (workers/reminder_engine.py).
     # `reminder_text` is services/reminder_text.py::build_reminder_body - the very
     # words the chat shows; `link_line` arrives pre-rendered (the clinic invite
-    # link, or a sentence when BRAIN_MESSAGE_PORTAL_URL is unset). Nothing beyond
+    # link, or a sentence when BRAIN_MESSAGE_PUBLIC_URL is unset). Nothing beyond
     # what the patient already received when booking.
     "appointment_reminder_patient": EmailTemplate(
         subject="Lembrete de consulta — {when}",
@@ -557,6 +557,16 @@ _TEMPLATES: dict[str, EmailTemplate] = {
             "{link}\n\n"
             "Este link é de uso único e expira em 72 horas.\n\n"
             "— Equipe SecretarIA"
+        ),
+    ),
+    "staff_temporary_password": EmailTemplate(
+        subject="Bem-vindo(a) à equipe da {clinic_name} — Brain",
+        body=(
+            "Olá, {name}!\n\nBem-vindo(a) à equipe da {clinic_name}.\n\n"
+            "Seu e-mail de acesso: {email}\nSua senha temporária: {temporary_password}\n\n"
+            "Acesse o portal: {login_url}\n\n"
+            "No primeiro acesso, você deverá criar sua senha pessoal antes de usar o portal. "
+            "A senha temporária expira em 72 horas. Não compartilhe sua senha.\n\n— Equipe Brain"
         ),
     ),
     "password_reset": EmailTemplate(
@@ -722,8 +732,8 @@ _TEMPLATES: dict[str, EmailTemplate] = {
     # phone number, never a price, never anything clinical.
     #
     # TWO agenda links, deliberately, because they open different things:
-    # `agenda_line` is this product's own agenda screen (`DOCTOR_AGENDA_URL`,
-    # whichever frontend the installation serves) and `calendar_line` is the
+    # `agenda_line` is the unified portal's agenda (derived from
+    # `BRAIN_MESSAGE_PUBLIC_URL`) and `calendar_line` is the
     # event itself on the clinic's Google Calendar (`Appointment.
     # google_event_link`, Google's private `htmlLink`). The second is only
     # ever right for someone who OWNS that calendar — which the professional
@@ -766,7 +776,6 @@ _TEMPLATES: dict[str, EmailTemplate] = {
             "— Equipe SecretarIA"
         ),
     ),
-
 }
 
 
