@@ -1488,6 +1488,9 @@ async def set_booking_draft(
             responda o que ele perguntou ou contou, sem anunciar qual lista vem a
             seguir (o fluxo decide e mostra logo abaixo); se nenhuma opção da
             clínica corresponde exatamente ao que ele descreveu, diga isso.
+            Nunca diga que anotou, registrou ou reservou nada, nem que vai
+            verificar a agenda: o fluxo confere e o paciente confirma no botão
+            (ex.: "Perfeito, é só conferir os dados abaixo.").
             Deixe vazio só se não houver nada a dizer.
     """
     # Existing three-field calls retain their old validation/landing. Only an
@@ -1665,6 +1668,9 @@ async def set_booking_draft_v2(
             responda o que ele perguntou ou contou, sem anunciar qual lista vem a
             seguir (o fluxo decide e mostra logo abaixo); se nenhuma opção da
             clínica corresponde exatamente ao que ele descreveu, diga isso.
+            Nunca diga que anotou, registrou ou reservou nada, nem que vai
+            verificar a agenda: o fluxo confere e o paciente confirma no botão
+            (ex.: "Perfeito, é só conferir os dados abaixo.").
             Deixe vazio só se não houver nada a dizer.
     """
     tenant_id = _tenant_id_ctx.get()
