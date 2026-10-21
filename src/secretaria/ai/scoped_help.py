@@ -40,13 +40,12 @@ from typing import Any, Literal
 from uuid import UUID
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from pseudonymize_core import Pseudonymizer
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
+from secretaria.ai.chat_model import PROVIDER_ANTHROPIC, build_chat_model, provider
 from secretaria.ai.pii import scrub_messages
-from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import Message, MessageSender
@@ -115,28 +114,19 @@ _decision_model: Any | None = None
 def _get_decision_model() -> Any:
     """Build (once) the structured-output model both nodes share.
 
-    Same knobs as ai/graph.py's build_agent — model name, token cap, SDK
-    retries — but no tool loop: `with_structured_output` forces a single
-    function call shaped like `_ScopedHelpDecision`.
+    Same provider and knobs as ai/graph.py's build_agent (ai/chat_model.py) but no
+    tool loop: one call shaped like `_ScopedHelpDecision`. OpenAI forces it as a
+    single function call; Claude cannot force a tool while it thinks, so it answers
+    in the schema through structured outputs instead.
     """
     global _decision_model
     if _decision_model is not None:
         return _decision_model
-    s = get_settings()
-    if not s.OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY missing in environment.")
-    model = ChatOpenAI(
-        model=s.OPENAI_SECRETARIA_MODEL,
-        api_key=s.OPENAI_API_KEY,
-        max_completion_tokens=s.OPENAI_MAX_TOKENS,
-        max_retries=5,
-        # Single decision call — half the agent loop's budget is plenty, and a
-        # stuck socket must not pin the arq job for a whole minute.
-        timeout=30,
-    )
-    _decision_model = model.with_structured_output(
-        _ScopedHelpDecision, method="function_calling"
-    )
+    # Single decision call — half the agent loop's budget is plenty, and a
+    # stuck socket must not pin the arq job for a whole minute.
+    model = build_chat_model(timeout=30)
+    method = "json_schema" if provider() == PROVIDER_ANTHROPIC else "function_calling"
+    _decision_model = model.with_structured_output(_ScopedHelpDecision, method=method)
     return _decision_model
 
 

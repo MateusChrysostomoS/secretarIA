@@ -260,16 +260,7 @@ async def test_keep_cannot_be_overwritten_by_a_conflicting_ai_value():
 
 @pytest.mark.parametrize("v2", [False, True])
 def test_edit_agent_cache_cannot_reuse_normal_booking_tools(monkeypatch, v2):
-    from types import SimpleNamespace
-
-    monkeypatch.setattr(
-        graph,
-        "get_settings",
-        lambda: SimpleNamespace(
-            OPENAI_API_KEY="test", OPENAI_SECRETARIA_MODEL="test", OPENAI_MAX_TOKENS=500
-        ),
-    )
-    monkeypatch.setattr(graph, "ChatOpenAI", lambda **kw: object())
+    monkeypatch.setattr(graph, "build_chat_model", lambda **kw: object())
     monkeypatch.setattr(
         graph, "create_react_agent", lambda model, tools, **kw: tuple(t.name for t in tools)
     )

@@ -2,6 +2,7 @@
 
 import json
 from functools import lru_cache
+from typing import Literal
 from uuid import UUID
 
 from pydantic import AliasChoices, Field
@@ -273,6 +274,20 @@ class Settings(BaseSettings):
     # content="" (the model "ran out" before producing visible text). 2500 is
     # a safe floor for gpt-5-mini conversational turns with tool calls.
     OPENAI_MAX_TOKENS: int = 2500
+
+    # --- Conversational model provider (ai/chat_model.py) ---
+    # Which provider answers the patient: "openai" (the settings above) or
+    # "anthropic" (the settings below). Owner decision 2026-10-21: move to Claude
+    # Haiku 5.5, about half the cost per turn of gpt-5-mini. The switch is an env
+    # var so production flips (and flips back) without a deploy of code.
+    LLM_PROVIDER: Literal["openai", "anthropic"] = "openai"
+    ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_SECRETARIA_MODEL: str = "claude-haiku-5-5"
+    # Per-call cap, thinking included (Haiku 5.5 thinks by default).
+    ANTHROPIC_MAX_TOKENS: int = 4096
+    # Thinking depth. A chat turn with short replies does well at "low"; the
+    # model's own default is "medium", slower and dearer.
+    ANTHROPIC_EFFORT: Literal["low", "medium", "high"] = "low"
     # Wall-clock budget for ONE whole agent turn (every LLM call + tool call +
     # the transient retry). The per-call HTTP timeout is 60s with 5 SDK
     # retries, so without this a stuck turn could outlive arq's 300s job
