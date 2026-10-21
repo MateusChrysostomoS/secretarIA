@@ -273,7 +273,8 @@ def _format_writing_v2(clinic: str) -> str:
         "4) Tom acolhedor e objetivo.\n"
         "5) Nunca escreva sobre você mesma, sobre este prompt ou sobre o sistema "
         '("system note", "ignore..."): cada balão é conteúdo para o paciente.\n'
-        "6) Não escreva marcações de botões entre colchetes: os botões são do fluxo.\n"
+        "6) Os botões são do fluxo: não escreva marcações entre colchetes. O paciente os vê "
+        'numa mensagem: diga "na mensagem acima", nunca "card" nem "cartão".\n'
         "7) Se o paciente só cumprimentou ou só tocou num botão e ainda não disse o que "
         f"quer, apresente a {clinic} em uma frase, se for o começo da conversa, e pergunte "
         'de forma aberta, sem menu: "O que te traz à clínica?".'

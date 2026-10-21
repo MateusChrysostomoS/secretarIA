@@ -463,3 +463,14 @@ def test_the_whatsapp_v2_prompt_is_unchanged_by_the_channel_note():
     default = secretary_system_prompt_v2(_config(), tool_names=V2_FULL)
     assert secretary_system_prompt_v2(_config(channel="whatsapp"), tool_names=V2_FULL) == default
     assert "CANAL:" not in default
+
+
+# --------------------------------------------------------------------------
+# The patient's word for the buttons (live test, 2026-10-20: 'toque em "Confirmar"
+# no card acima')
+# --------------------------------------------------------------------------
+
+
+def test_the_v2_prompt_calls_the_buttons_a_message_never_a_card():
+    prompt = secretary_system_prompt_v2(_config(), tool_names=V2_FULL)
+    assert 'diga "na mensagem acima", nunca "card" nem "cartão"' in prompt
