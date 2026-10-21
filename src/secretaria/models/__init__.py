@@ -17,6 +17,7 @@ from secretaria.models.booking_hold import BookingHold
 from secretaria.models.calendar_event import CalendarEvent
 from secretaria.models.clinic_payment_account import ClinicPaymentAccount
 from secretaria.models.consent_event import ConsentEvent
+from secretaria.models.context_source import ContextSource
 from secretaria.models.conversation import Conversation, FlowState, HandoverState
 from secretaria.models.conversation_pii_token_map import ConversationPiiTokenMap
 from secretaria.models.deposit_release_offer import DepositReleaseEmail, DepositReleaseOffer
@@ -59,6 +60,7 @@ __all__ = [
     "CalendarEvent",
     "is_live_status",
     "ConsentEvent",
+    "ContextSource",
     "DepositReleaseEmail",
     "DepositReleaseOffer",
     "Conversation",

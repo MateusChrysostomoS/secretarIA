@@ -55,6 +55,7 @@ from secretaria.workers.shared.appointment_edit_notification import (
     dispatch_pending_professional_edits,
     send_professional_edit_notification,
 )
+from secretaria.workers.shared.context_ingestion import ingest_context_source
 from secretaria.workers.tasks import (
     check_handover_timeouts,
     merge_brain_message_visit,
@@ -188,6 +189,9 @@ class WorkerSettings:
         # Google once it connects; enqueued by the OAuth callback. See
         # workers/calendar_sync.py and services/calendar_sync.py.
         sync_local_calendar_to_google,
+        # Context sources (TASK-026): fetch/read the clinic's material, propose, erase the input.
+        # Enqueued by POST /tenants/me/context-sources[/file]; see workers/shared/context_ingestion.
+        ingest_context_source,
     ]
     # Sweep stale human-handover conversations back to the bot every 15 min;
     # sweep upcoming appointments for due lead-window reminders every 5 min

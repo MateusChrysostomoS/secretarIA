@@ -28,6 +28,7 @@ from secretaria.api.hub import (
     calendar,
     config,
     context_completeness,
+    context_sources,
     conversations,
     insurance,
     oauth,
@@ -130,6 +131,7 @@ def create_app() -> FastAPI:
     app.include_router(config.router)
     app.include_router(simulation.router)
     app.include_router(context_completeness.router)
+    app.include_router(context_sources.router)
     app.include_router(oauth.router)
     app.include_router(calendar.router)
     # The clinic's canonical service catalog — the ONE place a service's name
