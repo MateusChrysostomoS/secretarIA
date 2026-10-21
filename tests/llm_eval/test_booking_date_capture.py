@@ -9,9 +9,9 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from langchain_core.messages import AIMessage, HumanMessage
 
+from secretaria.ai.chat_model import build_chat_model, system_message
 from secretaria.ai.graph import base_tools_for
 from secretaria.ai.prompts import secretary_system_prompt
 from secretaria.config import get_settings
@@ -31,6 +31,14 @@ STATE = (
 )
 
 
+def _require_provider_key() -> None:
+    """The provider LLM_PROVIDER picks (ai/chat_model.py) needs its own key."""
+    s = get_settings()
+    key = s.ANTHROPIC_API_KEY if s.LLM_PROVIDER == "anthropic" else s.OPENAI_API_KEY
+    if not key or key == "test-openai-key":
+        pytest.skip(f"{s.LLM_PROVIDER} API key missing; real-model behavior was not evaluated")
+
+
 @pytest.mark.parametrize("date_phrase, expected", [
     ("07/10", "2026-10-07"),
     ("amanhã", "2026-10-07"),
@@ -38,20 +46,17 @@ STATE = (
 ])
 @pytest.mark.parametrize("run", range(3))
 async def test_real_model_transfers_the_stated_fields(date_phrase, expected, run):
-    settings = get_settings()
-    real_key = bool(settings.OPENAI_API_KEY and settings.OPENAI_API_KEY != "test-openai-key")
-    assert real_key, "real key required"
+    _require_provider_key()
     extras = _flow_handback_tools(
         SimpleNamespace(initial_flows={}), BOOKING_TOPOLOGY_MULTI,
         list(MULTI_PROFESSIONAL_SPEC.agent_tools),
     )
-    model = ChatOpenAI(
-        model=settings.OPENAI_SECRETARIA_MODEL, api_key=settings.OPENAI_API_KEY,
-        max_completion_tokens=settings.OPENAI_MAX_TOKENS,
-    ).bind_tools([*base_tools_for(BOOKING_TOPOLOGY_MULTI), *extras])
+    model = build_chat_model(timeout=60).bind_tools(
+        [*base_tools_for(BOOKING_TOPOLOGY_MULTI), *extras]
+    )
     prompt = secretary_system_prompt(_config(conversation_state=STATE), now=NOW)
     message = await model.ainvoke([
-        SystemMessage(content=prompt),
+        system_message(prompt),
         HumanMessage(content=(
             f"Eu gostaria de marcar uma consulta para o dia {date_phrase}, com o médico Diogo, "
             "com o serviço de cirurgia de catarata, "
@@ -71,9 +76,7 @@ async def test_real_model_transfers_the_stated_fields(date_phrase, expected, run
 
 @pytest.mark.parametrize("run", range(3))
 async def test_real_model_keeps_selected_day_when_answering_only_the_time(run):
-    settings = get_settings()
-    real_key = bool(settings.OPENAI_API_KEY and settings.OPENAI_API_KEY != "test-openai-key")
-    assert real_key, "real key required"
+    _require_provider_key()
     state = (
         "- Onde o paciente estava: a escolha do horário do agendamento\n"
         "- Médico já escolhido: Dr. Diogo Raposo\n"
@@ -86,12 +89,11 @@ async def test_real_model_keeps_selected_day_when_answering_only_the_time(run):
         SimpleNamespace(initial_flows={}), BOOKING_TOPOLOGY_MULTI,
         list(MULTI_PROFESSIONAL_SPEC.agent_tools),
     )
-    model = ChatOpenAI(
-        model=settings.OPENAI_SECRETARIA_MODEL, api_key=settings.OPENAI_API_KEY,
-        max_completion_tokens=settings.OPENAI_MAX_TOKENS,
-    ).bind_tools([*base_tools_for(BOOKING_TOPOLOGY_MULTI), *extras])
+    model = build_chat_model(timeout=60).bind_tools(
+        [*base_tools_for(BOOKING_TOPOLOGY_MULTI), *extras]
+    )
     msg = await model.ainvoke([
-        SystemMessage(content=secretary_system_prompt(_config(conversation_state=state), now=NOW)),
+        system_message(secretary_system_prompt(_config(conversation_state=state), now=NOW)),
         HumanMessage(content="07/10, Cirurgia de Catarata, Diogo, Particular, para mim."),
         AIMessage(content="Horários livres em 07/10: 14:00 e 14:40. Qual você prefere?"),
         HumanMessage(content="14:40"),

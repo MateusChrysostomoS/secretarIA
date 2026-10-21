@@ -3,9 +3,10 @@
     RUN_LLM_EVAL=1 LLM_EVAL_RUNS=5 \\
         uv run python -m pytest tests/llm_eval/test_ai_v2_conversations.py -v
 
-with OPENAI_API_KEY exported in that shell only. Same shape as
+with the provider's key exported in that shell only (OPENAI_API_KEY, or
+LLM_PROVIDER=anthropic with ANTHROPIC_API_KEY - ai/chat_model.py). Same shape as
 test_portal_mvp_conversations.py (which keeps evaluating the v1 prompt): the production
-model (`OPENAI_SECRETARIA_MODEL`, with the production `max_completion_tokens`) reads the
+model (ai/chat_model.py::build_chat_model, with the production token cap) reads the
 production v2 prompt (`secretary_system_prompt_v2`) with the REAL v2 tool schemas bound.
 Nothing is executed - no DB, no Google: when a case needs a tool result, it is a
 hand-written ToolMessage in the shape the tool really returns.
@@ -26,11 +27,11 @@ from dataclasses import replace
 from datetime import date
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_openai import ChatOpenAI
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from secretaria.ai import prompts_v2
 from secretaria.ai.availability_tool import get_availability
+from secretaria.ai.chat_model import build_chat_model, system_message
 from secretaria.ai.prompts_v2 import secretary_system_prompt_v2
 from secretaria.ai.staging_tools import cancel_event_v2, create_event_v2
 from secretaria.ai.tools import (
@@ -66,6 +67,15 @@ from tests.llm_eval.eval_checks import (
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_LLM_EVAL") != "1", reason="set RUN_LLM_EVAL=1 (uses the real model)"
 )
+
+
+def _require_provider_key() -> None:
+    """The provider LLM_PROVIDER picks (ai/chat_model.py) needs its own key."""
+    s = get_settings()
+    key = s.ANTHROPIC_API_KEY if s.LLM_PROVIDER == "anthropic" else s.OPENAI_API_KEY
+    if not key or key == "test-openai-key":
+        pytest.skip(f"{s.LLM_PROVIDER} API key missing; real-model behavior was not evaluated")
+
 
 RUNS = int(os.environ.get("LLM_EVAL_RUNS", "5"))
 if RUNS < 1:
@@ -161,16 +171,10 @@ def _pinned_clinic_day(monkeypatch: pytest.MonkeyPatch):
 
 
 async def _decide(history: list, config: TenantRuntimeConfig) -> AIMessage:
-    s = get_settings()
-    if not s.OPENAI_API_KEY:
-        pytest.skip("OPENAI_API_KEY missing; real-model behavior was not evaluated")
-    model = ChatOpenAI(
-        model=s.OPENAI_SECRETARIA_MODEL,
-        api_key=s.OPENAI_API_KEY,
-        max_completion_tokens=s.OPENAI_MAX_TOKENS,
-    ).bind_tools(V2_TOOLS)
+    _require_provider_key()
+    model = build_chat_model(timeout=60).bind_tools(V2_TOOLS)
     prompt = secretary_system_prompt_v2(config, tool_names=V2_TOOL_NAMES)
-    return await model.ainvoke([SystemMessage(content=prompt), *history])
+    return await model.ainvoke([system_message(prompt), *history])
 
 
 async def _runs(history: list, config: TenantRuntimeConfig | None = None) -> list[AIMessage]:

@@ -1,6 +1,7 @@
 """Bateria opt-in: o modelo REAL escolhe a ferramenta certa dado o estado (MVP Portal).
 
-Não roda em CI: `RUN_LLM_EVAL=1 OPENAI_API_KEY=... uv run python -m pytest tests/llm_eval -v`.
+Não roda em CI: `RUN_LLM_EVAL=1 OPENAI_API_KEY=... uv run python -m pytest tests/llm_eval -v`
+(ou `LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=...`: o provedor de ai/chat_model.py).
 Mede só a primeira decisão (qual ferramenta, com quais argumentos) sobre o prompt de
 produção + o bloco de estado — barato, sem DB nem calendário.
 """
@@ -11,12 +12,12 @@ from uuid import uuid4
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 
+from secretaria.ai.chat_model import build_chat_model, message_text, system_message
 from secretaria.ai.prompts import secretary_system_prompt
 from secretaria.ai.scoped_help import (
+    _get_decision_model,
     _professional_help_prompt,
-    _ScopedHelpDecision,
     _service_help_prompt,
 )
 from secretaria.ai.tools import (
@@ -31,6 +32,15 @@ from secretaria.services.tenant_config import TenantRuntimeConfig
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_LLM_EVAL") != "1", reason="set RUN_LLM_EVAL=1 (uses the real model)"
 )
+
+
+def _require_provider_key() -> None:
+    """The provider LLM_PROVIDER picks (ai/chat_model.py) needs its own key."""
+    s = get_settings()
+    key = s.ANTHROPIC_API_KEY if s.LLM_PROVIDER == "anthropic" else s.OPENAI_API_KEY
+    if not key or key == "test-openai-key":
+        pytest.skip(f"{s.LLM_PROVIDER} API key missing; real-model behavior was not evaluated")
+
 
 STATE = (
     "- Onde o paciente estava: no menu inicial — escreveu livremente\n"
@@ -57,14 +67,12 @@ def _config() -> TenantRuntimeConfig:
 
 
 async def _first_decision(history):
-    s = get_settings()
-    if not s.OPENAI_API_KEY:
-        pytest.skip("OPENAI_API_KEY missing; real-model behavior was not evaluated")
-    model = ChatOpenAI(model=s.OPENAI_SECRETARIA_MODEL, api_key=s.OPENAI_API_KEY).bind_tools(
+    _require_provider_key()
+    model = build_chat_model(timeout=60).bind_tools(
         [set_booking_draft, request_human_handoff, show_main_menu, list_patient_appointments]
     )
     return await model.ainvoke(
-        [SystemMessage(content=secretary_system_prompt(_config())), *history]
+        [system_message(secretary_system_prompt(_config())), *history]
     )
 
 
@@ -101,7 +109,7 @@ async def test_screen_discomfort_after_outro_returns_to_guided_selection():
     args = second.tool_calls[0]["args"]
     assert not args.get("service")
     assert not args.get("professional")
-    assert "?" not in str(second.content)
+    assert "?" not in message_text(second)
 
 
 async def test_mixed_explicit_preferences_after_outro_are_preserved():
@@ -124,15 +132,13 @@ async def test_emergency_after_outro_gets_immediate_safety_guidance():
         HumanMessage(content="Estou com muita falta de ar e dor intensa no peito"),
     ])
     assert "set_booking_draft" not in _tool_names(second)
-    assert "192" in str(second.content) or "pronto-socorro" in str(second.content).lower()
-    assert "?" not in str(second.content)
+    assert "192" in message_text(second) or "pronto-socorro" in message_text(second).lower()
+    assert "?" not in message_text(second)
 
 
 @pytest.mark.parametrize("scope", ["professional", "service"])
 async def test_nao_sei_uses_catalog_then_administrative_choice(scope):
-    s = get_settings()
-    if not s.OPENAI_API_KEY:
-        pytest.skip("OPENAI_API_KEY missing; real-model behavior was not evaluated")
+    _require_provider_key()
     prompts = {
         "professional": lambda final: _professional_help_prompt([
             SimpleNamespace(name="Dra. Ana", specialty="Oftalmologia", about=None),
@@ -143,8 +149,8 @@ async def test_nao_sei_uses_catalog_then_administrative_choice(scope):
             {"name": "Retorno", "description": "Revisão de consulta já realizada"},
         ], final),
     }
-    model = ChatOpenAI(model=s.OPENAI_SECRETARIA_MODEL, api_key=s.OPENAI_API_KEY)
-    decision_model = model.with_structured_output(_ScopedHelpDecision, method="function_calling")
+    # The production decision model (ai/scoped_help.py): same provider, same method.
+    decision_model = _get_decision_model()
     first = await decision_model.ainvoke([
         SystemMessage(content=prompts[scope](False)), HumanMessage(content="Não sei"),
     ])
@@ -168,7 +174,7 @@ async def test_nao_sei_uses_catalog_then_administrative_choice(scope):
 async def test_bare_button_tap_gets_an_open_question_not_a_human():
     msg = await _first_decision([HumanMessage(content="Outro")])
     assert _tool_names(msg) == []
-    assert "traz" in (msg.content or "").lower()
+    assert "traz" in message_text(msg).lower()
 
 
 async def test_explicit_request_for_a_person_hands_off():
@@ -184,4 +190,4 @@ async def test_explicit_request_for_a_person_hands_off():
 async def test_ordinary_clinic_question_is_answered_without_handoff():
     msg = await _first_decision([HumanMessage(content="Qual o horário de funcionamento?")])
     assert "request_human_handoff" not in _tool_names(msg)
-    assert "17" in (msg.content or "") or "08" in (msg.content or "")
+    assert "17" in message_text(msg) or "08" in message_text(msg)
