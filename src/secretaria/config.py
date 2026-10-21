@@ -273,6 +273,11 @@ class Settings(BaseSettings):
     # content="" (the model "ran out" before producing visible text). 2500 is
     # a safe floor for gpt-5-mini conversational turns with tool calls.
     OPENAI_MAX_TOKENS: int = 2500
+    # Context extraction (TASK-026) needs a budget of its own: OPENAI_MAX_TOKENS (2500) also covers
+    # reasoning tokens and would truncate a structured extraction to nothing.
+    OPENAI_CONTEXT_EXTRACTION_MAX_TOKENS: int = 8000
+    CONTEXT_SOURCES_PER_DAY: int = 10  # <= 0 disables the cap (repo convention)
+    CONTEXT_SOURCES_IN_FLIGHT: int = 2
     # Wall-clock budget for ONE whole agent turn (every LLM call + tool call +
     # the transient retry). The per-call HTTP timeout is 60s with 5 SDK
     # retries, so without this a stuck turn could outlive arq's 300s job

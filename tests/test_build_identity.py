@@ -377,6 +377,7 @@ def test_worker_registry_is_complete() -> None:
         "fulfill_paid_charge_job",
         "delete_provider_customer_job",
         "sync_local_calendar_to_google",
+        "ingest_context_source",
     ]
     assert arq_worker.registered_cron_names() == [
         "cron:check_handover_timeouts",
@@ -409,7 +410,7 @@ async def test_worker_startup_logs_identity_and_registry(
         event, fields = recorder.records[0]
         assert event == "worker_started"
         assert {"build_sha", "built_at", "alembic_head", "source_fingerprint"} <= set(fields)
-        assert len(fields["functions"]) == 20
+        assert len(fields["functions"]) == 21
         assert len(fields["cron_jobs"]) == 14
 
         rendered = json.dumps(fields, default=str)
