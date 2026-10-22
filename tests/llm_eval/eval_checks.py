@@ -11,8 +11,11 @@ import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import date
 
+import pytest
 from langchain_core.messages import AIMessage
 
+from secretaria.ai.chat_model import build_chat_model
+from secretaria.config import get_settings
 from secretaria.services.sensitive_claim_guard import unbacked_claim
 
 
@@ -283,3 +286,16 @@ def offered_slots(text: str, windows: Sequence[Mapping[str, str]]) -> list[tuple
             clock = f"{int(match.group(1)):02d}:{match.group(2) or match.group(3) or '00'}"
             offers.append((day, clock))
     return offers
+
+
+def real_chat_model():
+    """The production vendor's chat model (LLM_PROVIDER: OpenAI or Claude), production token cap.
+
+    Skips the test when that vendor's key is not exported in this shell.
+    """
+    try:
+        return build_chat_model(
+            openai_max_tokens=get_settings().OPENAI_MAX_TOKENS, max_retries=2, timeout=120
+        )
+    except RuntimeError as exc:
+        pytest.skip(f"{exc}; real-model behavior was not evaluated")

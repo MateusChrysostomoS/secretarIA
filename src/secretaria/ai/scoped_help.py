@@ -40,11 +40,11 @@ from typing import Any, Literal
 from uuid import UUID
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from pseudonymize_core import Pseudonymizer
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
+from secretaria.ai.chat_model import build_structured_model
 from secretaria.ai.pii import scrub_messages
 from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
@@ -122,20 +122,14 @@ def _get_decision_model() -> Any:
     global _decision_model
     if _decision_model is not None:
         return _decision_model
-    s = get_settings()
-    if not s.OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY missing in environment.")
-    model = ChatOpenAI(
-        model=s.OPENAI_SECRETARIA_MODEL,
-        api_key=s.OPENAI_API_KEY,
-        max_completion_tokens=s.OPENAI_MAX_TOKENS,
+    # OpenAI or Claude, per LLM_PROVIDER (ai/chat_model.py picks the structured-output method).
+    _decision_model = build_structured_model(
+        _ScopedHelpDecision,
+        openai_max_tokens=get_settings().OPENAI_MAX_TOKENS,
         max_retries=5,
         # Single decision call — half the agent loop's budget is plenty, and a
         # stuck socket must not pin the arq job for a whole minute.
         timeout=30,
-    )
-    _decision_model = model.with_structured_output(
-        _ScopedHelpDecision, method="function_calling"
     )
     return _decision_model
 

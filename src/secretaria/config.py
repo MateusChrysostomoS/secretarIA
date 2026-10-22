@@ -276,6 +276,22 @@ class Settings(BaseSettings):
     # Context extraction (TASK-026) needs a budget of its own: OPENAI_MAX_TOKENS (2500) also covers
     # reasoning tokens and would truncate a structured extraction to nothing.
     OPENAI_CONTEXT_EXTRACTION_MAX_TOKENS: int = 8000
+    # --- Chat vendor switch (ai/chat_model.py) ---
+    # "anthropic" (Claude, the default since TASK-069) or "openai" for EVERY chat call: the
+    # conversation agent, the scoped-help decision and the context-source extraction. Audio
+    # transcription stays on OpenAI/Groq either way, so OPENAI_API_KEY is still needed for it.
+    # Set ANTHROPIC_API_KEY on the API AND the worker together: the worker runs the patient
+    # turns. Without it (and with OPENAI_API_KEY set) the chat falls back to OpenAI and logs
+    # `llm_provider_fallback` at ERROR, so a deploy that forgot the key never goes silent.
+    LLM_PROVIDER: str = "anthropic"
+    ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_SECRETARIA_MODEL: str = "claude-haiku-5-5"
+    # Claude's thinking counts against this cap (as gpt-5's reasoning does against
+    # OPENAI_MAX_TOKENS), so it is larger; one cap for every Claude call.
+    ANTHROPIC_MAX_TOKENS: int = 16000
+    # Thinking depth: "low" | "medium" | "high" | "xhigh" | "max"; empty = the model's default
+    # (medium on Claude Haiku 5.5). Lower = faster and cheaper turns.
+    ANTHROPIC_EFFORT: str = ""
     CONTEXT_SOURCES_PER_DAY: int = 10  # <= 0 disables the cap (repo convention)
     CONTEXT_SOURCES_IN_FLIGHT: int = 2
     # Wall-clock budget for ONE whole agent turn (every LLM call + tool call +

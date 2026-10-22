@@ -13,7 +13,6 @@ import asyncio
 import hashlib
 import json
 import re
-import ssl
 import time
 from collections.abc import Sequence
 from contextvars import ContextVar
@@ -21,13 +20,18 @@ from dataclasses import replace
 from typing import Any
 from uuid import UUID
 
-import httpx
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
-from openai import APIConnectionError, APITimeoutError
 from sqlalchemy import select
 
+from secretaria.ai.chat_model import (
+    TRANSIENT_ERRORS,
+    build_chat_model,
+    model_name,
+    reply_text,
+    token_cap,
+    whatsapp_emphasis,
+)
 from secretaria.ai.pii import (
     rehydrate_reply,
     scrub_messages,
@@ -186,20 +190,11 @@ def split_handback_intro(reply: str) -> tuple[str | None, str]:
 # `finally` so it never leaks across turns/tenants.
 _extra_tools_ctx: ContextVar[Sequence] = ContextVar("_extra_tools", default=())
 
-# Errors that a single retry usually recovers from: TLS connection torn down
-# mid-read, OpenAI gateway returning a brief connection refusal, a timeout
-# we want to give one more shot. The openai SDK already retries internally
-# (see build_agent), but a top-level retry salvages the turn when even the
-# SDK retries get exhausted by a sustained blip.
-_TRANSIENT_NETWORK_EXCEPTIONS: tuple[type[BaseException], ...] = (
-    APIConnectionError,
-    APITimeoutError,
-    httpx.ReadError,
-    httpx.ConnectError,
-    httpx.RemoteProtocolError,
-    httpx.ReadTimeout,
-    ssl.SSLEOFError,
-)
+# Errors that a single retry usually recovers from, for either vendor (OpenAI or Claude): TLS
+# connection torn down mid-read, a gateway's brief connection refusal, a timeout we want to give
+# one more shot. The SDKs already retry internally (see build_agent), but a top-level retry
+# salvages the turn when even the SDK retries get exhausted by a sustained blip.
+_TRANSIENT_NETWORK_EXCEPTIONS: tuple[type[BaseException], ...] = TRANSIENT_ERRORS
 
 # Patterns the LLM should NEVER emit to a patient. If any match, the reply is
 # considered a model hallucination of chat-platform meta-text and we replace
@@ -480,19 +475,12 @@ def build_agent(
         tools = list(wrap_tools_with_output_allowlist(tools))
     tools = list(wrap_tools_with_pseudonymizer(tools))
 
-    s = get_settings()
-    if not s.OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY missing in environment.")
-    model = ChatOpenAI(
-        model=s.OPENAI_SECRETARIA_MODEL,
-        api_key=s.OPENAI_API_KEY,
-        # gpt-5 / o-series reasoning models require max_completion_tokens
-        # (not max_tokens). langchain-openai 1.x accepts it as a direct
-        # kwarg even though it isn't a typed field.
-        max_completion_tokens=s.OPENAI_MAX_TOKENS,
+    # OpenAI or Claude, per LLM_PROVIDER (ai/chat_model.py).
+    model = build_chat_model(
+        openai_max_tokens=get_settings().OPENAI_MAX_TOKENS,
         # Default is 2 — bumping to 5 cushions us against SSL_EOF /
         # APIConnectionError flakes that show up under sustained load.
-        # The openai SDK applies exponential backoff between attempts.
+        # Both SDKs apply exponential backoff between attempts.
         max_retries=5,
         # Per-request HTTP timeout. Without an explicit value the SDK falls
         # back to "no timeout", which means a stuck socket can block the
@@ -532,7 +520,9 @@ async def invoke_agent(messages: list[BaseMessage]) -> str:
         elapsed_ms=int((time.monotonic() - started) * 1000),
     )
     last = result["messages"][-1]
-    return (getattr(last, "content", "") or "").strip()
+    # Claude answers in content blocks (thinking + text); only the text reaches the patient,
+    # with Markdown bold turned into WhatsApp bold.
+    return whatsapp_emphasis(reply_text(last))
 
 
 def _log_agent_trace(new_messages: Sequence[BaseMessage], *, elapsed_ms: int) -> None:
@@ -548,8 +538,8 @@ def _log_agent_trace(new_messages: Sequence[BaseMessage], *, elapsed_ms: int) ->
         log(
             "llm_turn_trace",
             conversation_id=str(_conversation_id_ctx.get() or ""),
-            model=get_settings().OPENAI_SECRETARIA_MODEL,
-            max_completion_tokens=get_settings().OPENAI_MAX_TOKENS,
+            model=model_name(),
+            max_completion_tokens=token_cap(get_settings().OPENAI_MAX_TOKENS),
             verdict=verdict,
             elapsed_ms=elapsed_ms,
             **summary,
@@ -596,7 +586,7 @@ async def _invoke_agent_with_retry(
 ) -> str:
     """Top-level safety net: one extra attempt on transient network errors.
 
-    The openai SDK already retries APIConnectionError / APITimeoutError 5x
+    The vendor SDK already retries connection errors / timeouts 5x
     inside a single LLM call. This wrapper covers the remaining failure
     mode: a TLS connection that survives the SDK retries but dies between
     the LLM call and the tool call (or vice-versa) inside the ReAct loop.
@@ -831,7 +821,7 @@ async def run_agent(
         logger.info(
             "llm_turn_started",
             conversation_id=str(conversation_id),
-            model=settings.OPENAI_SECRETARIA_MODEL,
+            model=model_name(),
             history_messages=len(history),
             history_chars=sum(len(str(m.content)) for m in history),
             # Whether the turn-scoped blocks reached the prompt. A turn that

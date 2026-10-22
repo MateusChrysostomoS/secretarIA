@@ -20,10 +20,12 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
-# `finish_reason` values that mean the model did NOT finish a thought. "length"
-# is the dangerous one: the budget (reasoning + visible text) ran out, so the
-# visible text is empty or cut mid-sentence.
-TRUNCATED_FINISH_REASONS = frozenset({"length", "content_filter"})
+from secretaria.ai.chat_model import reply_text
+
+# Stop reasons that mean the model did NOT finish a thought. "length" (OpenAI) / "max_tokens"
+# (Claude) is the dangerous one: the budget (reasoning + visible text) ran out, so the visible
+# text is empty or cut mid-sentence. "refusal" is Claude declining (after any fallback).
+TRUNCATED_FINISH_REASONS = frozenset({"length", "content_filter", "max_tokens", "refusal"})
 
 
 def _reasoning_tokens(message: AIMessage) -> int:
@@ -54,10 +56,12 @@ def summarize_turn(new_messages: Sequence[BaseMessage]) -> dict[str, Any]:
             input_tokens += int(usage.get("input_tokens") or 0)
             output_tokens += int(usage.get("output_tokens") or 0)
             reasoning_tokens += _reasoning_tokens(message)
-            reason = (getattr(message, "response_metadata", None) or {}).get("finish_reason")
+            metadata = getattr(message, "response_metadata", None) or {}
+            # OpenAI says `finish_reason`, Claude `stop_reason`.
+            reason = metadata.get("finish_reason") or metadata.get("stop_reason")
             if reason:
                 finish_reasons.append(str(reason))
-            has_text = bool(str(getattr(message, "content", "") or "").strip())
+            has_text = bool(reply_text(message))
             has_tools = bool(getattr(message, "tool_calls", None))
             if not has_text and not has_tools:
                 empty_model_calls += 1
@@ -82,7 +86,7 @@ def summarize_turn(new_messages: Sequence[BaseMessage]) -> dict[str, Any]:
     last = new_messages[-1] if new_messages else None
     final_text = ""
     if isinstance(last, AIMessage):
-        final_text = str(getattr(last, "content", "") or "").strip()
+        final_text = reply_text(last)
     truncated = any(r in TRUNCATED_FINISH_REASONS for r in finish_reasons)
 
     return {

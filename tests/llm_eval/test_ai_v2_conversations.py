@@ -3,7 +3,8 @@
     RUN_LLM_EVAL=1 LLM_EVAL_RUNS=5 \\
         uv run python -m pytest tests/llm_eval/test_ai_v2_conversations.py -v
 
-with OPENAI_API_KEY exported in that shell only. Same shape as
+with OPENAI_API_KEY exported in that shell only (for Claude: LLM_PROVIDER=anthropic +
+ANTHROPIC_API_KEY). Same shape as
 test_portal_mvp_conversations.py (which keeps evaluating the v1 prompt): the production
 model (`OPENAI_SECRETARIA_MODEL`, with the production `max_completion_tokens`) reads the
 production v2 prompt (`secretary_system_prompt_v2`) with the REAL v2 tool schemas bound.
@@ -27,7 +28,6 @@ from datetime import date
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_openai import ChatOpenAI
 
 from secretaria.ai import prompts_v2
 from secretaria.ai.availability_tool import get_availability
@@ -43,7 +43,6 @@ from secretaria.ai.tools import (
     set_booking_draft_v2,
     show_main_menu,
 )
-from secretaria.config import get_settings
 from secretaria.services.tenant_config import RuntimeAppointmentType, TenantRuntimeConfig
 from tests.llm_eval.eval_checks import (
     admits_missing_information,
@@ -59,6 +58,7 @@ from tests.llm_eval.eval_checks import (
     offered_slots,
     patient_facing_text,
     quotes_a_button_as_an_option,
+    real_chat_model,
     times_outside_windows,
     unbacked_sensitive_claim,
 )
@@ -161,14 +161,7 @@ def _pinned_clinic_day(monkeypatch: pytest.MonkeyPatch):
 
 
 async def _decide(history: list, config: TenantRuntimeConfig) -> AIMessage:
-    s = get_settings()
-    if not s.OPENAI_API_KEY:
-        pytest.skip("OPENAI_API_KEY missing; real-model behavior was not evaluated")
-    model = ChatOpenAI(
-        model=s.OPENAI_SECRETARIA_MODEL,
-        api_key=s.OPENAI_API_KEY,
-        max_completion_tokens=s.OPENAI_MAX_TOKENS,
-    ).bind_tools(V2_TOOLS)
+    model = real_chat_model().bind_tools(V2_TOOLS)
     prompt = secretary_system_prompt_v2(config, tool_names=V2_TOOL_NAMES)
     return await model.ainvoke([SystemMessage(content=prompt), *history])
 

@@ -132,6 +132,55 @@ async def test_patient_name_and_phone_are_masked_before_reaching_the_model(
     assert isinstance(seen[0][0], HumanMessage)
 
 
+async def test_the_request_body_sent_to_claude_is_masked(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TASK-069: Claude is the default vendor; the spy is the Anthropic request body itself.
+
+    Captured at ChatAnthropic's transport call (`_acreate`), after the agent, the prompt and
+    the history were assembled - what would cross the wire to Anthropic.
+    """
+    from langchain_anthropic import ChatAnthropic
+
+    from secretaria.ai import chat_model
+    from secretaria.config import get_settings
+
+    conversation = await _seed(db, body="oi")
+    claude = get_settings().model_copy(
+        update={"LLM_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "sk-ant-test"}
+    )
+    monkeypatch.setattr(chat_model, "get_settings", lambda: claude)
+    monkeypatch.setattr(graph, "_AGENTS", {})
+    sent: list = []
+
+    class _Captured(Exception):
+        pass
+
+    async def _wire(self, payload):  # noqa: ANN001
+        sent.append(payload)
+        raise _Captured  # the turn's own error handling takes it from here
+
+    monkeypatch.setattr(ChatAnthropic, "_acreate", _wire)
+
+    async def _history(_cid):  # noqa: ANN001
+        return [
+            HumanMessage(content=f"Oi, aqui e o {PATIENT_NAME}, meu telefone e {TYPED_PHONE}"),
+            AIMessage(content=f"Perfeito, {PATIENT_NAME}! Qual dia prefere?"),
+            HumanMessage(content="quinta"),
+        ]
+
+    monkeypatch.setattr(graph, "_load_history", _history)
+
+    await graph.run_agent("quinta", context={"conversation_id": str(conversation.id)})
+
+    assert sent, "the Anthropic request was never built"
+    body = repr(sent[0])
+    assert sent[0]["model"] == claude.ANTHROPIC_SECRETARIA_MODEL
+    assert PATIENT_NAME not in body
+    assert "97777-6666" not in body and PATIENT_PHONE not in body
+    assert "[PACIENTE_" in body and "[TELEFONE_" in body
+
+
 async def test_bot_turns_in_the_history_are_masked_too(db, monkeypatch: pytest.MonkeyPatch) -> None:
     """The clinic's own prior replies quote the patient back by name."""
     conversation = await _seed(db, body="oi")

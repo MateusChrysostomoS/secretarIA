@@ -30,6 +30,7 @@ dependencies = [
     "boto3>=1.36",
     "python-multipart>=0.0.20",
     "pypdf>=6.20.0",
+    "langchain-anthropic>=1.0",
 ]
 
 [dependency-groups]
