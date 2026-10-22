@@ -47,19 +47,20 @@ _models: dict[str, object] = {}
 def _structured_model(name: str, schema):
     """A structured-output model, built lazily so importing this module needs no API key."""
     if name not in _models:
-        from langchain_openai import ChatOpenAI
+        from secretaria.ai.chat_model import build_structured_model
 
-        s = get_settings()
-        if not s.OPENAI_API_KEY:
-            raise ExtractionFailed("model_error")
-        llm = ChatOpenAI(
-            model=s.OPENAI_SECRETARIA_MODEL,
-            api_key=s.OPENAI_API_KEY,
-            max_completion_tokens=s.OPENAI_CONTEXT_EXTRACTION_MAX_TOKENS,
-            max_retries=2,
-            timeout=90,
-        )
-        _models[name] = llm.with_structured_output(schema, method="function_calling")
+        try:
+            # OpenAI or Claude, per LLM_PROVIDER; a missing key is a model failure for the job.
+            _models[name] = build_structured_model(
+                schema,
+                openai_max_tokens=get_settings().OPENAI_CONTEXT_EXTRACTION_MAX_TOKENS,
+                max_retries=2,
+                timeout=90,
+                # Too big for Claude's constrained output ("Schema is too complex").
+                native_schema=False,
+            )
+        except RuntimeError as exc:
+            raise ExtractionFailed("model_error") from exc
     return _models[name]
 
 
