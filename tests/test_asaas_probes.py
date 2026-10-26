@@ -37,9 +37,17 @@ class _Sleeps:
         self.waits.append(seconds)
 
 
-async def _run(client, *, qualified=QUALIFIED, **kw) -> Verdict:
+async def _run(client, *, qualified=QUALIFIED, refuse_excess=True, **kw) -> Verdict:
+    # The matrix below is decision D14 (excess refused); TASK-053 put it behind
+    # ASAAS_REFUSE_EXCESS_PERMISSIONS, so these tests ask for it explicitly. The default
+    # (flag OFF) is covered at the end of this file.
     return await probes.run_probe_suite(
-        "secret-key-value", client=client, qualified=qualified, sleep=_Sleeps(), **kw
+        "secret-key-value",
+        client=client,
+        qualified=qualified,
+        refuse_excess=refuse_excess,
+        sleep=_Sleeps(),
+        **kw,
     )
 
 
@@ -281,7 +289,7 @@ async def test_default_module_state_is_fail_closed_until_qualification_is_record
     if probes.MINIMUM_EXCESS_GROUPS <= probes.QUALIFIED_EXCESS_GROUPS:
         pytest.skip("qualification already recorded (Task 22)")
     client = _client()
-    verdict = await probes.run_probe_suite("k", client=client, sleep=_Sleeps())
+    verdict = await probes.run_probe_suite("k", client=client, refuse_excess=True, sleep=_Sleeps())
     assert verdict.code == "probes_not_qualified" and client.calls == []
 
 
@@ -305,7 +313,9 @@ async def test_the_qualification_flag_defaults_to_off_and_the_default_suite_refu
         assert get_settings().ASAAS_PROBES_QUALIFIED is False
         assert probes.effective_qualified_groups() == frozenset()
         client = _client()
-        verdict = await probes.run_probe_suite("k", client=client, sleep=_Sleeps())
+        verdict = await probes.run_probe_suite(
+            "k", client=client, refuse_excess=True, sleep=_Sleeps()
+        )
         assert verdict.code == "probes_not_qualified" and client.calls == []
     finally:
         get_settings.cache_clear()
@@ -319,12 +329,163 @@ async def test_the_flag_on_qualifies_the_four_minimum_groups_without_touching_th
     try:
         assert probes.effective_qualified_groups() == probes.MINIMUM_EXCESS_GROUPS
         assert probes.QUALIFIED_EXCESS_GROUPS == frozenset()  # the flag never edits the record
-        verdict = await probes.run_probe_suite("k", client=_client(), sleep=_Sleeps())
+        verdict = await probes.run_probe_suite(
+            "k", client=_client(), refuse_excess=True, sleep=_Sleeps()
+        )
         assert verdict.kind is VerdictKind.ACCEPTED
 
         granted = await probes.run_probe_suite(
-            "k", client=_client(TRANSFER=GRANTED), sleep=_Sleeps()
+            "k", client=_client(TRANSFER=GRANTED), refuse_excess=True, sleep=_Sleeps()
         )
         assert granted.code == "key_excess_permissions" and granted.excess_groups == ("TRANSFER",)
+    finally:
+        get_settings.cache_clear()
+
+
+# --------------------------------------------------------------------------
+# TASK-053 (spec 2026-10-11 section 7): the excess refusal behind its own flag, OFF by default
+# --------------------------------------------------------------------------
+
+
+def _refusal_flag(monkeypatch, value):
+    from secretaria.config import get_settings
+
+    if value is None:
+        monkeypatch.delenv("ASAAS_REFUSE_EXCESS_PERMISSIONS", raising=False)
+    else:
+        monkeypatch.setenv("ASAAS_REFUSE_EXCESS_PERMISSIONS", value)
+    monkeypatch.delenv("ASAAS_PROBES_QUALIFIED", raising=False)
+    monkeypatch.setattr(probes, "QUALIFIED_EXCESS_GROUPS", frozenset())
+    get_settings.cache_clear()
+    return get_settings
+
+
+async def test_the_excess_refusal_flag_defaults_to_off(monkeypatch):
+    get_settings = _refusal_flag(monkeypatch, None)
+    try:
+        assert get_settings().ASAAS_REFUSE_EXCESS_PERMISSIONS is False
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_flag_off_a_key_with_extra_permissions_is_accepted_and_the_extras_are_reported(
+    monkeypatch,
+):
+    get_settings = _refusal_flag(monkeypatch, None)
+    try:
+        verdict = await probes.run_probe_suite(
+            "k", client=_client(TRANSFER=GRANTED, BILL=GRANTED), sleep=_Sleeps()
+        )
+        assert verdict.kind is VerdictKind.ACCEPTED and verdict.code is None
+        assert verdict.excess_groups == ("BILL", "TRANSFER")
+        assert verdict.capabilities == {"customers": True, "payments": True, "webhooks": True}
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_flag_off_needs_no_qualification_and_probes_only_the_four_minimum_groups(monkeypatch):
+    get_settings = _refusal_flag(monkeypatch, None)
+    try:
+        client = _client()
+        verdict = await probes.run_probe_suite("k", client=client, sleep=_Sleeps())
+        assert verdict.kind is VerdictKind.ACCEPTED and verdict.excess_groups == ()
+        probed = {call[2] for call in client.calls if call[0] == "probe"}
+        assert {_path(g) for g in probes.MINIMUM_EXCESS_GROUPS} <= probed
+        # Never the refund candidate (a POST) nor the unqualified second wave.
+        assert _path("CHARGEBACK") not in probed and _path("PAYMENT_REFUND") not in probed
+        assert all(call[1] == "GET" for call in client.calls if call[0] == "probe")
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_flag_off_still_refuses_a_missing_permission_an_invalid_key_and_an_ip_restriction(
+    monkeypatch,
+):
+    get_settings = _refusal_flag(monkeypatch, None)
+    try:
+        missing = await probes.run_probe_suite("k", client=_client(WEBHOOK=DENIED), sleep=_Sleeps())
+        assert (missing.kind, missing.code, missing.missing_groups) == (
+            VerdictKind.REFUSED,
+            "missing_permission",
+            ("WEBHOOK",),
+        )
+        dead = ProbeResponse(401, None, False, None)
+        dead_key = FakeAsaasClient(probe_map=dict.fromkeys(REQUIRED_PATHS, dead))
+        invalid = await probes.run_probe_suite("k", client=dead_key, sleep=_Sleeps())
+        assert invalid.code == "key_invalid"
+        ip = ProbeResponse(403, "access_denied_ip", False, None)
+        restricted = await probes.run_probe_suite("k", client=_client(PAYMENT=ip), sleep=_Sleeps())
+        assert restricted.code == "key_restricted"
+        # A missing permission together with extras is still just "missing" (no D14 "mixed").
+        both = await probes.run_probe_suite(
+            "k", client=_client(WEBHOOK=DENIED, TRANSFER=GRANTED), sleep=_Sleeps()
+        )
+        assert (both.code, both.missing_groups) == ("missing_permission", ("WEBHOOK",))
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_flag_off_an_unclear_excess_probe_never_blocks_but_an_unclear_required_one_does(
+    monkeypatch,
+):
+    get_settings = _refusal_flag(monkeypatch, None)
+    failing = ProbeResponse(500, None, False, None)
+    try:
+        good = await probes.run_probe_suite(
+            "k",
+            client=_client(TRANSFER=failing, BILL=ProbeResponse(403, None, False, None)),
+            sleep=_Sleeps(),
+        )
+        assert good.kind is VerdictKind.ACCEPTED and good.excess_groups == ()
+        unclear = await probes.run_probe_suite(
+            "k", client=_client(PAYMENT=failing), sleep=_Sleeps()
+        )
+        assert unclear.kind is VerdictKind.INCONCLUSIVE
+        assert unclear.code == "verification_unavailable"
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_flag_off_a_timeout_is_inconclusive_and_nothing_carries_the_key(monkeypatch):
+    import structlog
+
+    get_settings = _refusal_flag(monkeypatch, None)
+    key = "$aact_hmlg_SECRET-should-never-show-0001"
+    try:
+        slow = FakeAsaasClient(
+            probe_map={path: GRANTED for path in REQUIRED_PATHS}, probe_delay=1.0
+        )
+        with structlog.testing.capture_logs() as logs:
+            verdict = await probes.run_probe_suite(
+                key, client=slow, sleep=_Sleeps(), budget_seconds=0.05
+            )
+        assert (verdict.kind, verdict.code) == (
+            VerdictKind.INCONCLUSIVE,
+            "verification_unavailable",
+        )
+        assert "SECRET" not in repr(verdict) and "SECRET" not in repr(logs)
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_flag_on_from_the_setting_restores_the_d14_refusal(monkeypatch):
+    get_settings = _refusal_flag(monkeypatch, "true")
+    monkeypatch.setenv("ASAAS_PROBES_QUALIFIED", "true")
+    get_settings.cache_clear()
+    try:
+        verdict = await probes.run_probe_suite(
+            "k", client=_client(TRANSFER=GRANTED), sleep=_Sleeps()
+        )
+        assert verdict.code == "key_excess_permissions" and verdict.excess_groups == ("TRANSFER",)
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_flag_on_without_qualification_still_refuses_to_decide(monkeypatch):
+    get_settings = _refusal_flag(monkeypatch, "true")
+    try:
+        client = _client()
+        verdict = await probes.run_probe_suite("k", client=client, sleep=_Sleeps())
+        assert verdict.code == "probes_not_qualified" and client.calls == []
     finally:
         get_settings.cache_clear()

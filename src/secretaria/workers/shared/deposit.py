@@ -94,6 +94,27 @@ def _pix_retention_warning_line(tenant: Tenant, deposit) -> str:
         "são reembolsáveis."
     )
 
+def _cancel_warning_line(
+    tenant: Tenant, deposit, appointment: Appointment, now: datetime
+) -> str | None:
+    """The money sentence a patient must read BEFORE cancelling a PAID deposit, or None when
+    cancelling now simply returns it. Three surfaces share it (the flow's cancel-confirm, the
+    reminder button and the reminder give-up) so they always agree with
+    `deposit_lifecycle.on_appointment_cancelled`: every reschedule used -> the clinic keeps the
+    deposit; inside the refund window -> the retention policy line."""
+    if deposit is None or deposit.status != PixDepositStatus.PAID:
+        return None
+    if deposit_lifecycle.at_reschedule_limit(tenant, deposit):
+        return (
+            f"Você já usou as {tenant.pix_reschedule_limit} remarcações permitidas: ao cancelar "
+            "agora, o sinal fica com a clínica, sem devolução."
+        )
+    hours_until = _hours_until_start(appointment, now)
+    if hours_until is not None and hours_until <= tenant.pix_refund_window_hours:
+        return _pix_retention_warning_line(tenant, deposit)
+    return None
+
+
 def _hours_until_start(appointment: Appointment, now: datetime) -> float | None:
     """Hours between `now` and `appointment.start_at`, or None when unknown.
 
@@ -117,7 +138,8 @@ async def _send_reschedule_limit_buttons(
     and use the same apptconfirm|/apptcancel| button ids.
     """
     body = (
-        f"Você já remarcou essa consulta {count}x — o limite com sinal é {limit}. "
+        f"Você já remarcou essa consulta {count}x — o limite com sinal pago é {limit} e não é "
+        "possível remarcar de novo. Se cancelar agora, o sinal fica com a clínica, sem devolução. "
         "Prefere manter o horário ou cancelar?"
     )
     await client.send_buttons(
@@ -190,12 +212,28 @@ async def _apply_deposit_awareness(
             appointment = await session.get(Appointment, appointment_id)
             if appointment is None:
                 return result
-            hours_until = _hours_until_start(appointment, datetime.now(UTC))
-            if hours_until is None or hours_until > tenant.pix_refund_window_hours:
+            warning = _cancel_warning_line(tenant, deposit, appointment, datetime.now(UTC))
+            if warning is None:
                 return result
-            warning = _pix_retention_warning_line(tenant, deposit)
         else:  # any reschedule render: day picker, slot list or the confirmation card
             if not _at_reschedule_limit(deposit, tenant):
+                # Still allowed: the first render (the day picker) tells the patient how many
+                # reschedules are left and what happens after the last one.
+                if (
+                    result.flow_step == STEP_MANAGE_DAY
+                    and deposit is not None
+                    and deposit.status == PixDepositStatus.PAID
+                    and (tenant.pix_reschedule_limit or 0) > 0
+                    and result.bubbles
+                ):
+                    left = tenant.pix_reschedule_limit - (deposit.reschedule_count or 0)
+                    word = "remarcação" if left == 1 else "remarcações"
+                    result.bubbles[0].body = (
+                        f"Atenção: com sinal pago, restam {left} {word} (limite de "
+                        f"{tenant.pix_reschedule_limit}). Depois disso não será possível "
+                        "remarcar e, se você cancelar, o sinal fica com a clínica, sem "
+                        f"devolução.\n\n{result.bubbles[0].body}"
+                    )
                 return result
             limit_count = deposit.reschedule_count
             limit_value = tenant.pix_reschedule_limit

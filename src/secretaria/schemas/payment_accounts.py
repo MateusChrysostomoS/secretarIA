@@ -42,3 +42,7 @@ class AsaasConnectionResultOut(BaseModel):
     status: str
     incomplete_reason: str | None = None
     capabilities: dict[str, bool] = {}
+    # TASK-053: while the excess refusal is OFF, an ACCEPTED key may hold more permissions than
+    # needed; these are information for the screen ("parece ter mais permissoes"), never a block.
+    excess_groups: list[str] = []
+    excess_labels: list[str] = []

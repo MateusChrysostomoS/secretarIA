@@ -32,6 +32,7 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from secretaria.api.hub import professionals as professionals_api  # noqa: E402
 from secretaria.api.hub.deps import get_current_tenant  # noqa: E402
+from secretaria.config import get_settings  # noqa: E402
 from secretaria.core.database import Base, get_session  # noqa: E402
 from secretaria.models import Professional, Tenant  # noqa: E402
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
@@ -70,6 +71,16 @@ def _entitled_fake(**overrides):
         return _summary(**overrides)
 
     return _fake
+
+
+@pytest.fixture(autouse=True)
+def limit_enforced(monkeypatch: pytest.MonkeyPatch):
+    """This module is about the plan gate, so it runs with the gate ON (the product default is OFF
+    until the secretarIA billing is done: PROFESSIONAL_LIMIT_ENFORCED)."""
+    monkeypatch.setenv("PROFESSIONAL_LIMIT_ENFORCED", "true")
+    get_settings.cache_clear()  # the `client` fixture clears it again; either order reads the env
+    yield
+    get_settings.cache_clear()  # never leave the gated settings cached for the next test
 
 
 async def _never_called_fake(tenant_id, redis=None):
@@ -983,3 +994,27 @@ async def test_a_google_failure_never_blocks_creating_the_professional(
         created = next(iter(await session.scalars(select(Professional))))
         assert created.name == "Dr. Novo"
         assert created.google_calendar_id is None
+
+
+# --- the limit is switched off by default (owner's decision, 2026-10-23) ---------------------
+
+
+async def test_without_the_switch_a_professional_is_created_with_no_entitlement_check(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PROFESSIONAL_LIMIT_ENFORCED", "false")
+    get_settings.cache_clear()
+    monkeypatch.setattr(professionals_api, "get_entitlements", _never_called_fake)
+    response = await client.post(ENDPOINT, json={"name": "Dra. Ana"})
+    assert response.status_code == 201
+    assert response.json()["is_active"] is True
+
+
+async def test_without_the_switch_there_is_no_cap_on_how_many_are_active(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PROFESSIONAL_LIMIT_ENFORCED", "false")
+    get_settings.cache_clear()
+    monkeypatch.setattr(professionals_api, "get_entitlements", _never_called_fake)
+    for name in ("Dra. Ana", "Dr. Bruno", "Dra. Carla"):
+        assert (await client.post(ENDPOINT, json={"name": name})).status_code == 201

@@ -2,6 +2,7 @@
 
 Branch `feature/out-of-mvp` (Pix): TASK-050 trouxe a `main` e portou o Pix para os workers divididos; ver [checkpoint](docs/CHECKPOINT_task050_main_into_out_of_mvp.md).
 TASK-067 (sessão 01): fontes da TASK-026 (`/tenants/me/context-sources`, job `ingest_context_source`, merge de migração `f3b9d1c7a5e2`) portadas e mescladas em `feature/out-of-mvp` (local, sem push, sem deploy); migração → API+worker → front: [checkpoint](docs/CHECKPOINT_context_sources.md).
+TASK-067 (sessão 02, LOCAL, não commitada): Parte B da TASK-053 — `ASAAS_REFUSE_EXCESS_PERMISSIONS` (padrão off: excesso só informativo), grupos extras na conexão, `asaas_environment`, prova do "desligar sem conta" e `GET /internal/brain-message/insurance-overview`; contrato congelado da tela: [checkpoint §8](docs/CHECKPOINT_pix_provider_core.md).
 TASK-055: agenda, retorno Google e convites usam `BRAIN_MESSAGE_PUBLIC_URL` na API e no worker; [guia](docs/CHECKPOINT_urls_publicas.md). Commit e push para origin/main autorizados; sem deploy manual.
 
 TASK-054: inativos, capacidade interativa e boas-vindas cifradas no ARQ; local, sem publicação: [checkpoint](docs/CHECKPOINT_equipe_primeiro_acesso.md).

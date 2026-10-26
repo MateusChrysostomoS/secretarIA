@@ -2,6 +2,7 @@
 
 from sqlalchemy import func, select
 
+from secretaria.config import get_settings
 from secretaria.models import Professional, Tenant
 from secretaria.services.entitlements_client import get_entitlements, is_entitled
 
@@ -14,6 +15,9 @@ class ProfessionalCapacityError(Exception):
 
 
 async def require_professional_capacity(session, tenant, fetch_entitlements=None) -> None:
+    # No limit for now (PROFESSIONAL_LIMIT_ENFORCED, config.py): nothing to read, nothing to lock.
+    if not get_settings().PROFESSIONAL_LIMIT_ENFORCED:
+        return
     await session.execute(select(Tenant.id).where(Tenant.id == tenant.id).with_for_update())
     fetch = fetch_entitlements or get_entitlements
     summary = await fetch(tenant.id, redis=None)

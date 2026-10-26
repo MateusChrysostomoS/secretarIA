@@ -203,6 +203,37 @@ async def test_non_2xx_never_leaks_response_body_text(monkeypatch: pytest.Monkey
     assert exc_info.value.code_hint == "invalid_action"
 
 
+async def test_a_missing_document_answer_is_flagged_without_leaking_the_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The real sandbox answer when a customer without cpfCnpj is charged (TASK-067).
+    text = "Para criar esta cobrança é necessário preencher o CPF ou CNPJ do cliente."
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = {"errors": [{"code": "invalid_object", "description": text}]}
+        return httpx.Response(400, json=body)
+
+    _install_transport(monkeypatch, handler)
+    with pytest.raises(AsaasError) as exc_info:
+        await AsaasClient("key").create_pix_payment("cus_1", 6000, "ref", "Sinal", "2026-10-26")
+    assert exc_info.value.document_missing is True
+    assert exc_info.value.code_hint == "invalid_object"
+    assert text not in str(exc_info.value) and text not in repr(exc_info.value)
+
+
+async def test_an_unrelated_400_is_not_flagged_as_a_missing_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def other(request: httpx.Request) -> httpx.Response:
+        body = {"errors": [{"code": "invalid_object", "description": "Valor mínimo é R$ 5,00."}]}
+        return httpx.Response(400, json=body)
+
+    _install_transport(monkeypatch, other)
+    with pytest.raises(AsaasError) as unrelated:
+        await AsaasClient("key").create_pix_payment("cus_1", 100, "ref", "Sinal", "2026-10-26")
+    assert unrelated.value.document_missing is False
+
+
 async def test_non_2xx_with_unparseable_body_still_raises_cleanly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

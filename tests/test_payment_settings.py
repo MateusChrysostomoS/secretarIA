@@ -323,3 +323,34 @@ async def test_another_clinics_charge_never_locks_this_clinics_provider(
         )
         await session.commit()
     assert (await client.get(SETTINGS)).json()["provider_switch_blockers"] == []
+
+
+# --------------------------------------------------------------------------
+# TASK-053: the optional environment block of the "Pagamento do sinal" screen
+# --------------------------------------------------------------------------
+
+
+async def test_the_asaas_environment_follows_the_base_url(client: AsyncClient, db, monkeypatch):
+    from secretaria.config import get_settings
+
+    await _world(db)
+    try:
+        monkeypatch.setenv("ASAAS_BASE_URL", "https://api-sandbox.asaas.com/v3")
+        get_settings.cache_clear()
+        assert (await client.get(SETTINGS)).json()["asaas_environment"] == "sandbox"
+        monkeypatch.setenv("ASAAS_BASE_URL", "https://api.asaas.com/v3")
+        get_settings.cache_clear()
+        assert (await client.get(SETTINGS)).json()["asaas_environment"] == "production"
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_no_egress_ip_is_exposed_or_configurable(client: AsyncClient, db):
+    """Owner decision 2026-10-12: Asaas does not require a fixed IP; the IP list is the clinic's
+    own option. No server setting, no field - the screen carries only a fixed informational note."""
+    from secretaria.config import get_settings
+
+    await _world(db)
+    body = (await client.get(SETTINGS)).json()
+    assert "egress_ip" not in body
+    assert not hasattr(get_settings(), "PAYMENTS_EGRESS_IP")

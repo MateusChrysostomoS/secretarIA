@@ -525,3 +525,80 @@ async def test_a_webhook_token_outside_the_32_to_255_range_is_refused_before_any
         )
     assert (result.outcome, result.code) == ("refused", "invalid_webhook_token")
     assert probes.calls == [] and token not in repr(result)
+
+
+# --------------------------------------------------------------------------
+# TASK-053: extra permissions are INFORMATION while the excess refusal is OFF
+# --------------------------------------------------------------------------
+
+ACCEPTED_WITH_EXTRAS = Verdict(VerdictKind.ACCEPTED, None, (), ("TRANSFER",), dict(CAPS))
+
+
+async def test_an_accepted_key_with_extra_permissions_is_connected_and_keeps_the_groups(db, asaas):
+    async with db() as session:
+        tenant = await _tenant(session)
+        result = await _connect(session, tenant, verdict=ACCEPTED_WITH_EXTRAS)
+        row = await _row(session, tenant)
+    assert (result.outcome, result.status) == ("connected", "connected")
+    assert result.excess_groups == ("TRANSFER",)
+    assert row.status == "connected" and row.excess_groups == ["TRANSFER"]
+    assert row.incomplete_reason is None
+
+
+async def test_an_accepted_key_with_extras_whose_webhook_fails_is_incomplete_with_the_groups(
+    db, asaas
+):
+    async with db() as session:
+        tenant = await _tenant(session)
+        result = await _connect(
+            session, tenant, verdict=ACCEPTED_WITH_EXTRAS, webhook_base_url=None
+        )
+        row = await _row(session, tenant)
+    assert (result.outcome, result.incomplete_reason) == ("incomplete", "webhook_create_failed")
+    assert result.excess_groups == ("TRANSFER",) and row.excess_groups == ["TRANSFER"]
+
+
+async def test_a_recheck_that_finds_extras_while_the_flag_is_off_keeps_the_account_connected(
+    db, asaas, mails
+):
+    tenant = await _connected(db, asaas)
+    outcome, row = await _recheck(db, tenant, ACCEPTED_WITH_EXTRAS)
+    assert outcome == "accepted"
+    assert (row.status, row.excess_groups) == ("connected", ["TRANSFER"])
+    assert mails == []
+    _, cleaned = await _recheck(db, tenant, ACCEPTED)  # the clinic swapped in a restricted key
+    assert cleaned.excess_groups == []
+
+
+# --------------------------------------------------------------------------
+# TASK-067 session 03: the REAL Asaas sandbox answers 400 "O parâmetro email deve ser informado"
+# to POST /webhooks without an `email`; it is the address Asaas writes to when it pauses the queue.
+# --------------------------------------------------------------------------
+
+
+async def test_the_webhook_carries_the_alert_email_asaas_requires(db, asaas, monkeypatch):
+    from secretaria.config import get_settings
+
+    monkeypatch.setenv("ASAAS_WEBHOOK_ALERT_EMAIL", "alertas@example.com")
+    get_settings.cache_clear()
+    try:
+        async with db() as session:
+            tenant = await _tenant(session)
+            await _connect(session, tenant)
+        _, body = next(c for c in asaas.calls if c[0] == "create_webhook")
+        assert body["email"] == "alertas@example.com"
+    finally:
+        monkeypatch.undo()
+        get_settings.cache_clear()
+
+
+async def test_without_an_alert_email_the_field_is_left_out_not_sent_empty(db, asaas, monkeypatch):
+    from secretaria.config import get_settings
+
+    monkeypatch.delenv("ASAAS_WEBHOOK_ALERT_EMAIL", raising=False)
+    get_settings.cache_clear()
+    async with db() as session:
+        tenant = await _tenant(session)
+        await _connect(session, tenant)
+    _, body = next(c for c in asaas.calls if c[0] == "create_webhook")
+    assert "email" not in body

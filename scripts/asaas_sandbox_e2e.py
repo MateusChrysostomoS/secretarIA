@@ -76,6 +76,7 @@ async def main() -> int:
     os.environ["ASAAS_PROBES_QUALIFIED"] = "true"
 
     # Imports AFTER the guards so a refused run never touches a database engine.
+    from fakeredis import FakeAsyncRedis
     from sqlalchemy import select
 
     from secretaria.core.database import async_session_factory, engine
@@ -93,6 +94,7 @@ async def main() -> int:
         deposit_lifecycle,
         event_processor,
         jobs,
+        payer_data,
     )
 
     tag = uuid4().hex[:8]
@@ -118,7 +120,7 @@ async def main() -> int:
             session,
             tenant_id=tenant.id,
             api_key=key_min,
-            webhook_base_url="https://example.invalid",
+            webhook_base_url=os.environ.get("E2E_WEBHOOK_BASE_URL", "https://example.com"),
         )
         await session.commit()
         step(
@@ -151,10 +153,20 @@ async def main() -> int:
             await session.commit()
             return appointment
 
+        # The payer's CPF is asked in the conversation and kept transiently (decision D7): the
+        # real Asaas refuses a charge without it ("preencher o CPF ou CNPJ do cliente").
+        redis = FakeAsyncRedis()
+        conversation_id = uuid4()
+        await payer_data.remember(
+            redis, tenant_id=tenant.id, conversation_id=conversation_id, kind="document",
+            value="24971563792",  # a public sandbox-style test CPF, not a person
+        )
+
         # 1) create + pay + reconcile + process + replay
         first = await _appointment(f"e2e-1-{tag}")
         deposit = await deposit_lifecycle.maybe_create_deposit(
-            session, tenant=tenant, patient=patient, appointment=first, waba_token=None
+            session, tenant=tenant, patient=patient, appointment=first, waba_token=None,
+            redis=redis, conversation_id=conversation_id,
         )
         await session.commit()
         step(
@@ -172,6 +184,16 @@ async def main() -> int:
                 json={"qrCode": {"payload": deposit.pix_copy_paste}, "value": 6.0},
             )
         step("pay_qr_in_sandbox", status=paid.status_code)
+        if paid.status_code != 200 and deposit.asaas_payment_id:
+            # The default key may lack the withdrawal permission that paying a QR needs: the
+            # sandbox's own "confirm payment" (sandbox-only endpoint) produces the same RECEIVED.
+            async with httpx.AsyncClient(timeout=20.0) as http:
+                confirmed = await http.post(
+                    f"{base_url}/sandbox/payment/{deposit.asaas_payment_id}/confirm",
+                    headers={"access_token": key_full},
+                    json={},
+                )
+            step("confirm_payment_in_sandbox", status=confirmed.status_code)
 
         sent: list[tuple[str, str]] = []
 
@@ -199,7 +221,8 @@ async def main() -> int:
         # 2) an unpaid deposit is voided at Asaas when its consultation is cancelled
         second = await _appointment(f"e2e-2-{tag}")
         voided = await deposit_lifecycle.maybe_create_deposit(
-            session, tenant=tenant, patient=patient, appointment=second, waba_token=None
+            session, tenant=tenant, patient=patient, appointment=second, waba_token=None,
+            redis=redis, conversation_id=conversation_id,
         )
         await session.commit()
         outcome = await deposit_lifecycle.on_appointment_cancelled(

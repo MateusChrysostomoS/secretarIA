@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.api.hub.deps import get_current_tenant
+from secretaria.config import get_settings
 from secretaria.core.database import get_session
 from secretaria.models import Tenant
 from secretaria.schemas.payment_settings import (
@@ -31,6 +32,12 @@ router = APIRouter(prefix="/tenants/me/payment-settings", tags=["hub-payment-set
 
 def _blockers(codes: list[str]) -> list[SettingBlockerOut]:
     return [SettingBlockerOut(code=c, message=settings.MESSAGES.get(c, c)) for c in codes]
+
+
+def _asaas_environment() -> str:
+    """Which Asaas the backend talks to, from ASAAS_BASE_URL (the same test the key-format check
+    uses in asaas_connection.validate_key_format)."""
+    return "sandbox" if "sandbox" in get_settings().ASAAS_BASE_URL.lower() else "production"
 
 
 @router.get("", response_model=PaymentSettingsOut)
@@ -54,4 +61,5 @@ async def get_payment_settings(
         provider_switch_blockers=_blockers(
             await settings.provider_switch_blockers(session, tenant.id)
         ),
+        asaas_environment=_asaas_environment(),
     )

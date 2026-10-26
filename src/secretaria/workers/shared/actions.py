@@ -14,7 +14,6 @@ from secretaria.models import (
     AppointmentStatus,
     Conversation,
     FlowState,
-    PixDepositStatus,
     Professional,
     Tenant,
     is_live_status,
@@ -64,8 +63,7 @@ from secretaria.workers.shared.context import (
     _ReplyContext,
 )
 from secretaria.workers.shared.deposit import (
-    _hours_until_start,
-    _pix_retention_warning_line,
+    _cancel_warning_line,
     _send_reschedule_limit_buttons,
 )
 from secretaria.workers.shared.flow_runner import (
@@ -324,15 +322,8 @@ async def _handle_action_button(
         if action == "apptcancel":
             tenant_config = await load_tenant_config(session, tenant)
             deposit = await deposit_lifecycle.get_deposit_for_appointment(session, appointment.id)
-            hours_until = _hours_until_start(appointment, datetime.now(UTC))
-            inside_window = (
-                deposit is not None
-                and deposit.status == PixDepositStatus.PAID
-                and hours_until is not None
-                and hours_until <= tenant.pix_refund_window_hours
-            )
-            if inside_window:
-                warning = _pix_retention_warning_line(tenant, deposit)
+            warning = _cancel_warning_line(tenant, deposit, appointment, datetime.now(UTC))
+            if warning is not None:
                 body = f"{warning} Cancelar mesmo assim ou prefere reagendar?"
                 await client.send_buttons(
                     reply.patient_ref,

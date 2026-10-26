@@ -142,3 +142,111 @@ Não mexi em `workers/tasks.py` (o aviso de cancelamento com a política continu
   `require_clinic_manager`/`require_clinic_clinician` da TASK-020 quando os expuserem.
 - Colunas Asaas antigas (`asaas_payment_id`, `asaas_customer_id`, `tenant_credentials.asaas_*`,
   `processed_asaas_events`) ficam até a fase "narrow" (migração futura, com `source_fingerprint` das duas aplicações).
+
+## 8. TASK-053 Parte B (implementada na TASK-067 sessão 02, 2026-10-21 — LOCAL, não commitada, não publicada)
+
+Plano: `Brain-Message-Frontend` worktree TASK-053, `docs/superpowers/plans/2026-10-11-task-053-pagamento-sinal-conexao-asaas-tela.md`
+(Parte B, com as emendas de 2026-10-12). Sem migração; head Alembic continua `f3b9d1c7a5e2`.
+
+- **B1 — `ASAAS_REFUSE_EXCESS_PERMISSIONS` (padrão `False`)**, separado de `ASAAS_PROBES_QUALIFIED`. Desligada:
+  só os três grupos necessários (Clientes, Cobranças, Webhooks) decidem; os quatro grupos mínimos de excesso são
+  sondados (GETs de leitura; nunca o `POST` candidato de estorno nem a segunda onda) e um concedido volta em
+  `excess_groups`/`excess_labels` como INFORMAÇÃO (`asaas_probes.decide_informational`); sonda de excesso duvidosa ou
+  proibida é ignorada; a qualificação não importa. Ligada: a recusa D14 de antes, exigindo a qualificação (sem ela,
+  `503 probes_not_qualified` sem nenhuma chamada). Corrige a lacuna G1 (antes, TODA chave recebia `probes_not_qualified`).
+  O xfail "RELEASE GATE" (`test_release_gate_the_minimum_probes_are_qualified`) continua: agora ele só gateia LIGAR a recusa.
+- **B2** — `connect_asaas_account` e `recheck_asaas_account` guardam os grupos informativos de uma chave aceita;
+  `_mark_connected` não os zera mais; `AsaasConnectionResultOut` ganhou `excess_groups`/`excess_labels` (aditivo,
+  `extra="ignore"`). Uma chave aceita com extras e webhook falho fica `incomplete` com os grupos.
+- **B3 (só testes, `tests/test_deposit_off_without_account.py`, 30)** — gestor desliga o sinal com conta ausente,
+  revogada, `reauth_required`, `error` ou `incomplete`, nos dois momentos; os demais campos da clínica ficam iguais;
+  desligado, o "antes" agenda sem reservar/cobrar (WhatsApp) ou só pede o código de e-mail (Portal) e o "depois" não
+  cria cobrança; ligado com conta quebrada o "antes" continua recusando. Mutação em `quote_deposit`: 10 falhas / 20 verdes.
+  Nenhum código de produto mudou. Papéis: secretária/médico não-gestor já recebem `403 forbidden_role` ao mandar
+  `pix_deposit_enabled` (`tests/test_payment_settings_roles.py`).
+- **B4** — `GET /payment-settings` ganhou `asaas_environment` (`sandbox`|`production`, de `ASAAS_BASE_URL`). Sem IP de saída.
+- **B5** — `GET /internal/brain-message/insurance-overview?tenant_id=` (`services/patient_insurance_overview.py`,
+  `schemas/internal.py::PatientInsuranceOverviewOut`, `extra="forbid"`): a lista que o fluxo oferece, texto fixo de
+  pagamento, nota própria da clínica num "Outro", sinal `charged|not_charged|varies` espelhando
+  `deposit_lifecycle._insurance_charges_deposit`; nunca id, profissional, nota do catálogo, dado de paciente. Rota do
+  paciente no brain-api: `GET /patient-access/insurance-overview` (B6, `docs/PORTAL_MESSAGING_API.md` do brain-api).
+- Risco latente (não tocado): `deposit_lifecycle._insurance_payment_note` lê `custom_payment_note` sem filtrar
+  `catalog_id IS NULL`; hoje nada grava nota em linha do catálogo.
+- **NÃO provado:** nenhuma chave real do Asaas foi usada; a conexão qualificada com o sandbox/produção continua
+  pendente (`ASAAS_SANDBOX_API_KEY` do dono). Nenhuma cobrança, devolução, envio ou cancelamento real foi feito.
+- Deploy (NÃO autorizado): sem migração; `secretaria_api` e `secretaria-worker` juntos (o recheck diário roda no worker
+  e usa `asaas_probes`/`asaas_connection`) → brain-api (B6) → front.
+
+### 8.1 Contrato congelado para a sessão 03 (tela)
+
+Conexão — `PUT /tenants/me/payment-accounts/asaas/connection`, corpo EXATAMENTE `{"api_key": "<string>"}`. Ordem das
+respostas: papel → limite de tentativas → corpo → formato → sondas → gravação.
+
+```json
+200 {"provider":"asaas","status":"connected","incomplete_reason":null,
+     "capabilities":{"customers":true,"payments":true,"webhooks":true},
+     "excess_groups":["TRANSFER"],"excess_labels":["Transferências"]}
+200 {"provider":"asaas","status":"incomplete","incomplete_reason":"webhook_create_failed",
+     "capabilities":{...},"excess_groups":[],"excess_labels":[]}
+422 {"detail":{"code":"missing_permission","missing_groups":["WEBHOOK"],"excess_groups":[],
+     "missing_labels":["Webhooks"],"excess_labels":[]}}
+422 {"detail":{"code":"key_invalid"|"key_restricted","missing_groups":[],"excess_groups":[],"missing_labels":[],"excess_labels":[]}}
+422 {"detail":{"code":"key_excess_permissions"|"key_permissions_mixed",...}}   (só com ASAAS_REFUSE_EXCESS_PERMISSIONS=true)
+422 {"detail":{"code":"invalid_body"}}
+429 {"detail":{"code":"rate_limited"}}
+503 {"detail":{"code":"verification_unavailable"|"probes_not_qualified"|"rate_limiter_unavailable"}}
+403 {"detail":{"code":"forbidden_role"|"role_claim_missing","message":"..."}}   (a tela usa só o code)
+```
+
+`probes_not_qualified` só aparece com a recusa LIGADA. Nenhuma resposta, recusa ou log carrega a chave (testes:
+`test_flag_off_the_real_probes_connect_a_key_holding_extras`, `test_flag_off_a_timeout_is_inconclusive_and_nothing_carries_the_key`,
+`test_a_malformed_body_is_422_and_the_response_never_echoes_what_was_sent`). `POST …/asaas/retry-webhook`: mesmas formas de 200,
+`422 no_key`. `DELETE …/asaas`: `200` com `"status":"revoked"` | `404 not_connected`.
+
+`GET /tenants/me/payment-accounts` → `[{provider, status, incomplete_reason, capabilities, excess_groups, excess_labels,
+connected_at, last_verified_at, ready_for_before}]`. Estados: `pending|connected|incomplete|error|reauth_required|revoked`;
+motivos: `key_expired_or_disabled|excess_permissions|missing_permission:<grupos>|webhook_create_failed|webhook_readback_failed|legacy_unverified`.
+
+`GET /tenants/me/payment-settings` → `{payment_provider, deposit_timing, deposit_hold_ttl_minutes, ttl_min_minutes,
+ttl_max_minutes, deposit_enabled, deposit_percent, providers:[{provider, available}], before_blockers:[{code,message}],
+provider_switch_blockers:[{code,message}], asaas_environment:"sandbox"|"production"}`.
+
+Configuração — `PUT /tenants/me/configuration` com `{"tenant": {…só os campos alterados…}}`; campos ausentes ficam como
+estão. Desligar de emergência: `{"tenant":{"pix_deposit_enabled":false}}` → `200` com qualquer estado de conta (inclusive
+ilegível para a tela). Recusas: `422 {"detail":{"code","message"}}` com `deposit_disabled|addon_required|
+entitlement_unresolvable|account_not_ready|provider_unavailable|open_deposits`; prazo fora de 30–120 = `422` do Pydantic.
+
+Paciente — `GET /patient-access/insurance-overview` (brain-api) → `200 {"product":"secretaria","payload":{"deposit":
+{"enabled":true,"percent":30},"plans":[{"name":"GEAP","payment_text":"Pagamento: confirme as condições com a clínica.",
+"clinic_note":"Pagamento na recepção.","deposit":"not_charged"},{"name":"Unimed","payment_text":"Varia por plano: …",
+"clinic_note":null,"deposit":"charged"}]},"at":"…"}`; `401` sessão; `403` sem Secretaria no canal; `502/503` genéricos.
+
+Matriz papel × ação (o backend manda; a tela só esconde):
+
+| Ação | gestor (`manager`, ou médico `is_owner`/`is_manager`) | médico | secretária | sem claim de papel |
+|---|---|---|---|---|
+| `GET /payment-accounts` | sim | sim | `403 forbidden_role` | `403 role_claim_missing` |
+| `PUT connection` / `POST retry-webhook` / `DELETE` | sim | `403 forbidden_role` | `403 forbidden_role` | `403 role_claim_missing` |
+| `GET /payment-settings` | sim | sim | sim (sem gate de papel; lacuna G8) | sim |
+| `PUT /configuration` com campo `pix_*`/`payment_*`/`deposit_*` (inclusive desligar) | sim | `403 forbidden_role` | `403 forbidden_role` | `403 role_claim_missing` |
+
+Matriz estado da conta × sinal (decisão D-A 2 + emenda 2026-10-12):
+
+| Conta | Sinal desligado | Sinal ligado |
+|---|---|---|
+| `connected` + verificada | gestor pode ligar/configurar | agenda com sinal (antes/depois) |
+| ausente, `revoked`, `reauth_required`, `error`, `incomplete`, ilegível | agenda normal sem sinal | "antes": agendamento recusado (fail-closed); o único salvamento útil é desligar |
+
+### §8.2 Prova no Asaas sandbox REAL (TASK-067 sessão 03b, 2026-10-22)
+
+- O Asaas real recusa `POST /webhooks` sem `email` (400 "O parâmetro email deve ser informado"). A conexão passa a enviar `email` = `ASAAS_WEBHOOK_ALERT_EMAIL` (vazia = omitido; sem ela o Asaas real deixa a conta `incomplete`/`webhook_create_failed`). **Definir antes de conectar clínicas reais.**
+- O webhook exige URL pública https (`PAYMENTS_WEBHOOK_BASE_URL`); `http://127.0.0.1` e `*.invalid` são recusadas.
+- Provado com chave real de sandbox: conectar (sondas reais, excesso informativo), criar cobrança Pix, confirmar, conciliar, processar, repetir (sem efeito), cancelar (DELETE), desconectar (apaga o aviso no Asaas). Contrato JSON do §8.1 inalterado.
+- NÃO provado: webhook recebido do Asaas real; recusa de excesso (D14) com chave restrita.
+
+### §8.3 CPF e cobrança no Asaas (TASK-067, 2026-10-26 — fato do sandbox)
+
+`POST /customers` aceita cliente SEM `cpfCnpj`; é `POST /payments` que responde 400 `invalid_object` ("é necessário preencher o CPF ou CNPJ do cliente"). O veredito C4
+da F1 ficava incompleto: o provedor só traduzia o 400 do CLIENTE para `payer_document_required`. Agora `AsaasError.document_missing` (booleano) marca o 400 da COBRANÇA e
+`create_pix_charge` o traduz para o mesmo código, que dispara a pergunta do CPF no chat (Portal e WhatsApp, modos `before` e `after`). Com documento já enviado vira `charge_failed`
+(sem laço de perguntas). O cliente criado sem CPF é apagado em melhor esforço.

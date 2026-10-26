@@ -35,9 +35,15 @@ class AsaasError(Exception):
     """A non-2xx response from Asaas. Carries the status code + an optional
     short symbolic code hint — NEVER response body text (ids/status only)."""
 
-    def __init__(self, status_code: int, code_hint: str | None = None) -> None:
+    def __init__(
+        self, status_code: int, code_hint: str | None = None, *, document_missing: bool = False
+    ) -> None:
         self.status_code = status_code
         self.code_hint = code_hint
+        # True only when Asaas said the CUSTOMER lacks a CPF/CNPJ (sandbox fact: POST /customers
+        # accepts one without it, then POST /payments answers 400 invalid_object).
+        # A boolean, never text.
+        self.document_missing = document_missing
         suffix = f" ({code_hint})" if code_hint else ""
         super().__init__(f"Asaas request failed: HTTP {status_code}{suffix}")
 
@@ -60,6 +66,23 @@ def _extract_code_hint(response: httpx.Response) -> str | None:
         return None
     code = first.get("code")
     return code[:64] if isinstance(code, str) else None
+
+
+def _mentions_missing_document(response: httpx.Response) -> bool:
+    """True when an error's free text asks for the customer's CPF/CNPJ. The text is only TESTED
+    here, never stored, logged or raised: the privacy rule above still holds."""
+    try:
+        data = response.json()
+    except ValueError:
+        return False
+    errors = data.get("errors") if isinstance(data, dict) else None
+    if not isinstance(errors, list):
+        return False
+    for item in errors:
+        text = item.get("description") if isinstance(item, dict) else None
+        if isinstance(text, str) and "cpf" in text.lower() and "cnpj" in text.lower():
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -109,7 +132,13 @@ class AsaasClient:
         if response.status_code >= 300:
             code_hint = _extract_code_hint(response)
             logger.error("asaas_http_error", path=path, status_code=response.status_code)
-            raise AsaasError(response.status_code, code_hint)
+            raise AsaasError(
+                response.status_code,
+                code_hint,
+                document_missing=(
+                    response.status_code == 400 and _mentions_missing_document(response)
+                ),
+            )
 
         if not response.content:
             return {}

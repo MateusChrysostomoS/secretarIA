@@ -39,3 +39,6 @@ class PaymentSettingsOut(BaseModel):
     before_blockers: list[SettingBlockerOut]
     # Empty = the provider can be changed now.
     provider_switch_blockers: list[SettingBlockerOut]
+    # TASK-053: which Asaas environment this backend talks to ("sandbox" | "production").
+    # (No egress IP on purpose - owner decision 2026-10-12: Asaas does not require one.)
+    asaas_environment: str | None = None

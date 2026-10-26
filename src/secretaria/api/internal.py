@@ -77,10 +77,12 @@ from secretaria.schemas.internal import (
     InternalAppointmentList,
     InternalPatient,
     InternalPatientList,
+    PatientInsuranceOverviewOut,
     TypingAck,
 )
 from secretaria.services import media_storage, message_status
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
+from secretaria.services.patient_insurance_overview import patient_insurance_overview
 from secretaria.services.typing_indicator import mark_typing, typing_by as typing_by_for
 from secretaria.services.visit_merge import discard_empty_visit
 
@@ -1123,3 +1125,31 @@ async def discard_brain_message_visit_route(
         status=result.status,
     )
     return BrainMessageVisitDiscardOut(status=result.status)
+
+
+@router.get(
+    "/brain-message/insurance-overview",
+    response_model=PatientInsuranceOverviewOut,
+    summary="The clinic's convenios as a patient may see them (internal)",
+    description=(
+        "TASK-053 (owner decision 2026-10-12). brain-api calls this on behalf of a Portal "
+        "patient; `tenant_id` comes from that patient's session. Returns the SAME convenio list "
+        "the booking flow offers, each with the fixed payment text of its list row, the "
+        "clinic's own note on an 'Outro' plan, and whether the Pix deposit applies "
+        "(charged | not_charged | varies). Never ids, doctors, catalog notes or patient data. "
+        "Read-only. Requires the X-Internal-Api-Key header."
+    ),
+    responses={**_INTERNAL_RESPONSES, 404: {"description": "Unknown tenant."}},
+)
+async def brain_message_insurance_overview(
+    tenant_id: Annotated[
+        UUID, Query(description="Tenant UUID - REQUIRED; from the patient's session.")
+    ],
+    session: AsyncSession = Depends(get_session),
+) -> PatientInsuranceOverviewOut:
+    overview = await patient_insurance_overview(session, tenant_id)
+    if overview is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail={"code": "tenant_not_found"}
+        )
+    return PatientInsuranceOverviewOut.model_validate(overview)

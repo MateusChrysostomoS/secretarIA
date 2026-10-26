@@ -21,6 +21,11 @@ qualified, the whole suite refuses to decide - the connection stays closed until
 recorded here, in code review, with its evidence, OR the operator turns on the
 `ASAAS_PROBES_QUALIFIED` setting (off by default) to trust the four minimum probes.
 
+TASK-053 put the whole excess REFUSAL behind `ASAAS_REFUSE_EXCESS_PERMISSIONS` (off by default):
+off, only the three required groups decide, the four minimum excess groups are probed and a
+granted one is returned as INFORMATION (`decide_informational`), and the qualification guards
+above do not apply. On, everything above holds exactly as written.
+
 What this cannot see (declared to the clinic in the guide): the READ vs READ_WRITE level of a
 required group, groups with no safe probe (paying a QR code moves money, so `PIX_DEBIT` has none),
 and whether `split` inside Cobrancas can route money to another wallet (NOT VERIFIED; our code
@@ -217,6 +222,28 @@ def decide(required: dict[str, ProbeKind], excess: dict[str, ProbeKind]) -> Verd
     return Verdict(VerdictKind.ACCEPTED, None, (), (), capabilities)
 
 
+def decide_informational(required: dict[str, ProbeKind], excess: dict[str, ProbeKind]) -> Verdict:
+    """The verdict while the excess refusal is OFF (TASK-053, spec 2026-10-11 section 7).
+
+    Only the REQUIRED groups decide; a granted excess group is REPORTED in `excess_groups`, never
+    refused, and an excess probe that was denied, inconclusive or forbidden is ignored (it is
+    information, not a gate). ACCEPTED still needs every required group clearly granted.
+    """
+    kinds = list(required.values())
+    if ProbeKind.KEY_INVALID in kinds:
+        return Verdict(VerdictKind.REFUSED, CODE_KEY_INVALID)
+    if ProbeKind.FORBIDDEN_OTHER in kinds:
+        return Verdict(VerdictKind.REFUSED, CODE_KEY_RESTRICTED)
+    missing = tuple(sorted(g for g, kind in required.items() if kind is ProbeKind.DENIED))
+    if missing:
+        return Verdict(VerdictKind.REFUSED, CODE_MISSING, missing, ())
+    if not all(kind is ProbeKind.GRANTED for kind in kinds):
+        return Verdict(VerdictKind.INCONCLUSIVE, CODE_UNAVAILABLE)
+    extra = tuple(sorted(g for g, kind in excess.items() if kind is ProbeKind.GRANTED))
+    capabilities = {_CAPABILITY_OF[group]: True for group in required if group in _CAPABILITY_OF}
+    return Verdict(VerdictKind.ACCEPTED, None, (), extra, capabilities)
+
+
 async def _probe_with_retries(
     client, spec: ProbeSpec, sleep: Callable[[float], Awaitable[None]]
 ) -> ProbeKind:
@@ -239,19 +266,32 @@ async def run_probe_suite(
     *,
     client=None,
     qualified: frozenset | None = None,
+    refuse_excess: bool | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     budget_seconds: float = BUDGET_SECONDS,
 ) -> Verdict:
     """Probe the key and decide. Runs at most 4 probes at once inside a ~20 s budget. The key
-    goes only to the client factory; the returned verdict never contains it."""
-    qualified = effective_qualified_groups() if qualified is None else qualified
-    if not MINIMUM_EXCESS_GROUPS <= qualified:
-        unproved = len(MINIMUM_EXCESS_GROUPS - qualified)
-        logger.warning("asaas_key_probe_not_qualified", unproved_groups=unproved)
-        return Verdict(VerdictKind.INCONCLUSIVE, CODE_NOT_QUALIFIED)
+    goes only to the client factory; the returned verdict never contains it.
+
+    `refuse_excess` (default: the `ASAAS_REFUSE_EXCESS_PERMISSIONS` setting) picks the rule:
+    ON = decision D14 (excess refused; the suite refuses to decide unless the four minimum groups
+    are qualified); OFF = `decide_informational` (the four minimum excess groups are probed and
+    reported, never refused; qualification plays no part)."""
+    refuse = (
+        get_settings().ASAAS_REFUSE_EXCESS_PERMISSIONS if refuse_excess is None else refuse_excess
+    )
+    if refuse:
+        qualified = effective_qualified_groups() if qualified is None else qualified
+        if not MINIMUM_EXCESS_GROUPS <= qualified:
+            unproved = len(MINIMUM_EXCESS_GROUPS - qualified)
+            logger.warning("asaas_key_probe_not_qualified", unproved_groups=unproved)
+            return Verdict(VerdictKind.INCONCLUSIVE, CODE_NOT_QUALIFIED)
+        excess_groups = qualified
+    else:
+        excess_groups = MINIMUM_EXCESS_GROUPS  # information only: read-only list GETs
 
     client = client or asaas_provider.client_for(api_key)
-    specs = [*REQUIRED_PROBES, *(p for p in EXCESS_PROBES if p.group in qualified)]
+    specs = [*REQUIRED_PROBES, *(p for p in EXCESS_PROBES if p.group in excess_groups)]
     results: dict[str, ProbeKind] = {}
     gate = asyncio.Semaphore(CONCURRENCY)
 
@@ -267,7 +307,6 @@ async def run_probe_suite(
     for spec in specs:
         results.setdefault(spec.group, ProbeKind.TRANSIENT)  # never finished: not a "denied"
 
-    return decide(
-        {s.group: results[s.group] for s in specs if s.role == "required"},
-        {s.group: results[s.group] for s in specs if s.role == "excess"},
-    )
+    required = {s.group: results[s.group] for s in specs if s.role == "required"}
+    excess = {s.group: results[s.group] for s in specs if s.role == "excess"}
+    return decide(required, excess) if refuse else decide_informational(required, excess)

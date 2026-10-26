@@ -661,6 +661,15 @@ async def on_appointment_cancelled(
         await _ask_the_clinic(REASON_PAID_THEN_CANCELLED, deposit.amount_cents)
         return "refund_due"
 
+    # PAID, cancelled by the patient who already used every allowed reschedule: the deposit stays
+    # with the clinic whatever the refund window says (the patient was told so, see
+    # `reschedule_rules_text`). Nothing is due, so nothing is asked of the clinic.
+    if at_reschedule_limit(tenant, deposit):
+        deposit.status = PixDepositStatus.CANCELLED_RETAINED
+        deposit.refunded_amount_cents = 0
+        deposit.resolved_at = now
+        return "retained"
+
     # PAID, cancelled by the patient: the refund window decides what the policy says is due.
     start_at = appointment.start_at
     if start_at is None:
@@ -706,6 +715,11 @@ def cancellation_notice(outcome: str | None, tenant: Tenant, deposit: PixDeposit
             f"{format_brl(partial)} do sinal; o restante fica retido. Você será avisado."
         )
     if outcome == "retained":
+        if used_every_reschedule(tenant, deposit):
+            return (
+                f"Como você já usou as {tenant.pix_reschedule_limit} remarcações permitidas, "
+                "o sinal fica retido pela clínica."
+            )
         return (
             f"Como o cancelamento ocorreu com menos de {tenant.pix_refund_window_hours}h de "
             "antecedência, o sinal fica retido pela clínica."
@@ -739,6 +753,35 @@ async def on_no_show(
     deposit.refunded_amount_cents = 0
     deposit.resolved_at = now
     return "retained"
+
+
+def at_reschedule_limit(tenant: Tenant, deposit: PixDeposit | None) -> bool:
+    """Whether a PAID deposit has used every reschedule the clinic allows (limit 0 = no allowance
+    configured: it never triggers the retention rule, so a clinic that blocks reschedules does not
+    silently keep every cancelled deposit)."""
+    return (
+        deposit is not None
+        and deposit.status is PixDepositStatus.PAID
+        and used_every_reschedule(tenant, deposit)
+    )
+
+
+def used_every_reschedule(tenant: Tenant, deposit: PixDeposit) -> bool:
+    """Counter only (status-blind): still true after the cancellation moved the deposit on."""
+    limit = tenant.pix_reschedule_limit or 0
+    return limit > 0 and (deposit.reschedule_count or 0) >= limit
+
+
+def reschedule_rules_text(tenant: Tenant) -> str:
+    """The pt-BR rule the patient is told, in plain words, before any reschedule is spent."""
+    limit = tenant.pix_reschedule_limit or 0
+    if limit <= 0:
+        return "Com o sinal pago não é possível remarcar esta consulta."
+    times = "vez" if limit == 1 else "vezes"
+    return (
+        f"Com o sinal pago você pode remarcar no máximo {limit} {times}. Depois disso não será "
+        "possível remarcar, e se você cancelar o sinal fica com a clínica, sem devolução."
+    )
 
 
 async def register_reschedule(
@@ -1064,6 +1107,8 @@ def preview_cancellation_outcome(
         return "voided"
     if cancelled_by == CANCELLED_BY_CLINIC:
         return "refund_due"
+    if at_reschedule_limit(tenant, deposit):
+        return "retained"
     now = now or datetime.now(UTC)
     start_at = appointment.start_at
     hours_until = None if start_at is None else (_as_utc(start_at) - now).total_seconds() / 3600
