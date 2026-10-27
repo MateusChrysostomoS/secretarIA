@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
+from secretaria.core.whatsapp_limits import MAX_INTERACTIVE_BODY_CHARS
 from secretaria.models import (
     Appointment,
     FlowState,
@@ -11,6 +12,8 @@ from secretaria.models import (
     Tenant,
 )
 from secretaria.services.flow_router import (
+    LABEL_CONFIRM,
+    STEP_EDIT_CONFIRM,
     STEP_MANAGE_CANCEL_CONFIRM,
     STEP_MANAGE_CONFIRM,
     STEP_MANAGE_DAY,
@@ -18,8 +21,10 @@ from secretaria.services.flow_router import (
     STEP_MANAGE_DAY_RETRY,
     STEP_MANAGE_SLOT,
     FlowRouterResult,
+    MenuBubble,
 )
-from secretaria.services.payments import deposit_lifecycle
+from secretaria.services.payments import adjustment_queries, deposit_lifecycle, service_change
+from secretaria.services.payments.deposit_lifecycle import _tenant_tz
 from secretaria.services.payments.money import format_brl
 from secretaria.services.whatsapp import (
     WhatsAppClient,
@@ -82,9 +87,14 @@ def _pix_retention_warning_line(tenant: Tenant, deposit) -> str:
     question (`_apply_deposit_awareness`) and the reminder-button `apptcancel`
     warn (`_handle_action_button`) - same wording, different surrounding
     call-to-action text.
+
+    The partial amount is computed on what the clinic HOLDS (sinal + paid service differences,
+    `adjustment_queries.held_cents_hint` - stamped by `get_deposit_for_appointment`), the same
+    figure `on_appointment_cancelled` will ask the clinic to return.
     """
     if tenant.pix_retention_policy == "partial":
-        partial_amount = round(deposit.amount_cents * tenant.pix_partial_refund_percent / 100)
+        held = adjustment_queries.held_cents_hint(deposit)
+        partial_amount = round(held * tenant.pix_partial_refund_percent / 100)
         return (
             f"Cancelamentos com menos de {tenant.pix_refund_window_hours}h têm reembolso "
             f"parcial de {tenant.pix_partial_refund_percent}% ({format_brl(partial_amount)})."
@@ -151,6 +161,62 @@ async def _send_reschedule_limit_buttons(
         ],
     )
 
+async def _with_service_difference(result: FlowRouterResult, tenant: Tenant) -> FlowRouterResult:
+    """The confirmation card of an edit that changes the SERVICE of a consultation whose sinal
+    is PAID gets one more line: the difference of the sinal (to pay by Pix, or above the new
+    value), from the same decision `service_change.request_service_change` takes at Confirmar
+    (browser proof 2026-10-26). Read-only and best-effort: any doubt leaves the card as it was
+    (Confirmar still shows the value with the Pix)."""
+    draft = result.flow_edit_draft if isinstance(result.flow_edit_draft, dict) else {}
+    current, original = draft.get("current") or {}, draft.get("original") or {}
+    new_service = current.get("service")
+    if not new_service or new_service == original.get("service"):
+        return result
+    card = next(
+        (b for b in result.bubbles if isinstance(b, MenuBubble) and LABEL_CONFIRM in b.labels),
+        None,
+    )
+    if card is None:
+        return result
+    appointment_id = result.flow_managing_appointment_id
+    try:
+        async with async_session_factory() as session:
+            deposit = await deposit_lifecycle.get_deposit_for_appointment(session, appointment_id)
+            if deposit is None or deposit.status != PixDepositStatus.PAID:
+                return result
+            appointment = await session.get(Appointment, appointment_id)
+            if appointment is None or appointment.tenant_id != tenant.id:
+                return result
+            start = current.get("start_at")
+            start_at = (
+                datetime.fromisoformat(start).replace(tzinfo=_tenant_tz(tenant))
+                if start
+                else appointment.start_at
+            )
+            decision = await service_change.preview_service_change(
+                session,
+                tenant=tenant,
+                appointment=appointment,
+                deposit=deposit,
+                new_service=str(new_service),
+                professional_id=current.get("professional_id") or appointment.professional_id,
+                start_at=start_at,
+                now=datetime.now(UTC),
+            )
+    except Exception as exc:  # noqa: BLE001 - the card goes out as it was
+        logger.warning(
+            "edit_confirm_difference_failed",
+            appointment_id=str(appointment_id),
+            error_type=type(exc).__name__,
+        )
+        return result
+    line = service_change.confirm_card_line_text(decision.action, decision.diff_cents)
+    body = f"{card.body.rstrip()}\n\n{line}" if line else card.body
+    if line and len(body) <= MAX_INTERACTIVE_BODY_CHARS:
+        card.body = body
+    return result
+
+
 async def _apply_deposit_awareness(
     reply: _ReplyContext,
     result: FlowRouterResult,
@@ -189,7 +255,17 @@ async def _apply_deposit_awareness(
     session/query for these two specific turns. Every other turn (including
     STEP_MANAGE_DAY retries for an UNBLOCKED target — cheap, idempotent,
     re-checked each time rather than tracked) returns `result` unchanged.
+
+    Plus the edit flow's confirmation card (STEP_EDIT_CONFIRM) of a new service on a PAID
+    sinal: `_with_service_difference` adds the difference line before Confirmar.
     """
+    if (
+        result.action == "reply"
+        and tenant is not None
+        and result.flow_managing_appointment_id is not None
+        and result.flow_step == STEP_EDIT_CONFIRM
+    ):
+        return await _with_service_difference(result, tenant)
     if (
         result.action != "reply"
         or tenant is None

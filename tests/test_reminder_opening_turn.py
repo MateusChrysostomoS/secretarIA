@@ -3,8 +3,9 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import update
 
-from secretaria.models import AppointmentStatus, FlowState, Patient
+from secretaria.models import Appointment, AppointmentStatus, FlowState, Patient
 from secretaria.services import appointment_edit as ae
 from secretaria.services.attendee import ATTENDEE_QUESTION_BODY
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
@@ -144,8 +145,16 @@ async def test_two_appointments_open_with_the_nearest_and_the_answer_names_the_o
     )
 
 
-async def test_confirmed_twice_gets_the_normal_menu(db):  # noqa: F811
+async def test_three_card_confirmations_get_the_normal_menu(db):  # noqa: F811
+    # Owner 2026-10-27: the entry card stops at the patient's 3rd confirmation on a card.
     world = await _quiet_world(db, confirmation_count=2)
+    async with db() as session:
+        await session.execute(
+            update(Appointment)
+            .where(Appointment.id == world.appointment.id)
+            .values(card_confirmation_count=3)
+        )
+        await session.commit()
 
     await turn(db, world, "oi")
 
@@ -162,13 +171,14 @@ async def test_a_cancelled_appointment_gets_the_normal_menu(db):  # noqa: F811
     assert [item[2] for item in sent()] == [menu_label(world.tenant)]
 
 
-async def test_the_switch_off_keeps_todays_behaviour(db):  # noqa: F811
+async def test_the_switch_off_still_opens_with_the_card(db):  # noqa: F811
+    # Owner 2026-10-27: the entry card no longer depends on the reminder switch.
     world = await _quiet_world(db, v2=False)
 
     await turn(db, world, "oi")
 
-    assert await chat_rows(db, world.appointment.id) == []
-    assert [item[2] for item in sent()] == [menu_label(world.tenant)]
+    [chat] = await chat_rows(db, world.appointment.id)
+    assert sent()[0] == ("buttons", WA_ID, _card_body(world), reminder_buttons(chat.id))
 
 
 async def test_a_second_message_right_after_the_card_gets_no_second_card(db):  # noqa: F811
@@ -191,7 +201,15 @@ async def test_chat_and_cron_confirmations_share_the_counter(db):  # noqa: F811
     await _tap(world, "remconfirm", chat.id)
     await _tap(world, "remconfirm", chat.id)
 
-    assert (await reload_appointment(db, world.appointment.id)).confirmation_count == 2
+    appointment = await reload_appointment(db, world.appointment.id)
+    assert (appointment.confirmation_count, appointment.card_confirmation_count) == (2, 2)
+    # Two confirmations no longer stop the entry card (owner 2026-10-27): the third does.
+    await age_conversation(db, world, hours=7)
+    await turn(db, world, "oi")
+    assert sent()[-1][2] == _card_body(world)
+    await _tap(world, "remconfirm", chat.id)
+    appointment = await reload_appointment(db, world.appointment.id)
+    assert (appointment.confirmation_count, appointment.card_confirmation_count) == (2, 3)
     await age_conversation(db, world, hours=7)
     await turn(db, world, "oi")
     assert len(await chat_rows(db, world.appointment.id)) == 1

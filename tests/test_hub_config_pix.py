@@ -168,6 +168,8 @@ async def test_put_partial_update_leaves_other_pix_fields_untouched(
         ("pix_partial_refund_percent", 101),
         ("pix_refund_window_hours", -1),
         ("pix_reschedule_limit", -1),
+        ("pix_difference_refund_min_days", -1),
+        ("pix_difference_refund_min_days", 61),
     ],
 )
 async def test_put_rejects_out_of_range_values(
@@ -204,3 +206,29 @@ async def test_put_cannot_flip_asaas_connected(client: AsyncClient) -> None:
     response = await client.put(CONFIG, json={"asaas_connected": True})
     assert response.status_code == 200  # an undeclared field is silently ignored
     assert response.json()["asaas_connected"] is False  # still false — no key was ever set
+
+
+# --------------------------------------------------------------------------
+# pix_difference_refund_min_days - service change with a paid deposit (2026-10-26 spec)
+# --------------------------------------------------------------------------
+
+
+async def test_difference_refund_min_days_defaults_to_two(client: AsyncClient) -> None:
+    response = await client.get(CONFIG)
+    assert response.status_code == 200
+    assert response.json()["pix_difference_refund_min_days"] == 2
+
+
+async def test_manager_saves_and_reads_difference_refund_min_days(client: AsyncClient) -> None:
+    response = await client.put(CONFIG, json={"pix_difference_refund_min_days": 5})
+    assert response.status_code == 200
+    assert response.json()["pix_difference_refund_min_days"] == 5
+    again = await client.get(CONFIG)
+    assert again.json()["pix_difference_refund_min_days"] == 5
+
+
+async def test_difference_refund_min_days_accepts_the_boundaries(client: AsyncClient) -> None:
+    for value in (0, 60):
+        response = await client.put(CONFIG, json={"pix_difference_refund_min_days": value})
+        assert response.status_code == 200
+        assert response.json()["pix_difference_refund_min_days"] == value

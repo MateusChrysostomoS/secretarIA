@@ -214,6 +214,7 @@ class TenantConfigUpdate(BaseModel):
     pix_deposit_enabled: bool | None = None
     pix_deposit_percent: int | None = Field(default=None, ge=1, le=100)
     pix_refund_window_hours: int | None = Field(default=None, ge=0)
+    pix_difference_refund_min_days: int | None = Field(default=None, ge=0, le=60)
     pix_retention_policy: Literal["total", "partial"] | None = None
     pix_partial_refund_percent: int | None = Field(default=None, ge=1, le=100)
     pix_reschedule_limit: int | None = Field(default=None, ge=0)
@@ -415,6 +416,7 @@ class TenantConfigRead(BaseModel):
     payment_provider: str = "asaas"
     deposit_timing: str = "after"
     deposit_hold_ttl_minutes: int = 30
+    pix_difference_refund_min_days: int = 2
     # True when an Asaas API key is stored for this tenant. Read-only/derived
     # (from has_asaas_api_key) — NOT declared on TenantConfigUpdate, so a PUT
     # can never flip it; it only ever changes via

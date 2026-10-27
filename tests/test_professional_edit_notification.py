@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
+import pytest_asyncio
 from arq import Retry
 from sqlalchemy import select, update
 
@@ -14,14 +15,21 @@ from secretaria.models import (
     FlowState,
     ProcessedEvent,
     Professional,
+    Tenant,
 )
+from secretaria.models.deposit_adjustment import STATUS_APPLIED, DepositAdjustment
+from secretaria.models.professional_edit_notice import ProfessionalEditNotice
 from secretaria.services import flow_router as fr
 from secretaria.services.email import EmailOutcome
+from secretaria.services.payments import event_processor, service_change
+from secretaria.services.payments.provider import ChargeState, CreatedCharge, PaymentStatus
 from secretaria.workers import tasks
 from secretaria.workers.shared import appointment_edit_notification as notice
+from tests import test_service_change as sc, test_service_change_webhook as scw
 from tests._reminder_fixtures import db  # noqa: F401
 from tests._reminders_r3 import wire
 from tests._reminders_v2 import WA_ID, reload_appointment, seed_world
+from tests.payments_support import FakeProvider, make_sessionmaker
 from tests.test_appointment_edit_apply import _edit, _reply
 from tests.test_professional_notification import _FakeRedis, _Mailer, _summary
 
@@ -406,3 +414,168 @@ async def test_doctor_change_notifies_new_doctor_with_current_details(db, transp
     await _deliver(redis.jobs[-1], redis)
     assert sender.calls[0]["to"] == MAIL_B
     assert "• Médico: Dra. Beatriz" in sender.bodies[0]
+
+
+# --------------------------------------------------------------------------
+# TASK-067 / Task 9: a service change with a PAID sinal tells the doctor ONCE
+# --------------------------------------------------------------------------
+# The outbox row (ProfessionalEditNotice) is the only thing that can become an e-mail to the
+# doctor: one row = at most one "Consulta alterada". These tests count rows (exact, not ">= 1"),
+# so a second notice from the payment of the difference, a hook, a replay or a sweep fails them.
+
+@pytest.fixture
+def sc_world(monkeypatch):
+    """Scripted provider + no patient hooks + a recording mailer (nothing may leave)."""
+    fake = FakeProvider(state=ChargeState(status=PaymentStatus.PENDING))
+    fake.created_charge = CreatedCharge(provider_charge_id="pay_diff_1", copy_paste="000201pix")
+    monkeypatch.setitem(sc.registry._PROVIDERS, "asaas", fake)
+    monkeypatch.setattr(service_change, "ADJUSTMENT_EXPIRED_HOOKS", [])
+    monkeypatch.setattr(service_change, "ADJUSTMENT_APPLIED_HOOKS", [])
+    mailer = _Mailer()
+    monkeypatch.setattr(notice, "send_transactional_email_result", mailer)
+    return fake, mailer
+
+
+@pytest_asyncio.fixture
+async def sc_db():
+    engine, maker = await make_sessionmaker()
+    yield maker
+    await engine.dispose()
+
+
+async def _doctor_notices(maker) -> list[ProfessionalEditNotice]:
+    async with maker() as session:
+        rows = await session.scalars(
+            select(ProfessionalEditNotice).order_by(ProfessionalEditNotice.revision)
+        )
+        return list(rows.all())
+
+
+async def _pay(maker, tenant, provider, created, *, event_id="evt_diff_1", amount=3000):
+    provider.state = ChargeState(
+        status=PaymentStatus.PAID,
+        paid_amount_cents=amount,
+        external_reference=str(created.adjustment_id),
+        paid_at=sc.NOW + timedelta(minutes=5),
+    )
+    return await scw._process(maker, tenant, event_id=event_id, amount=amount)
+
+
+async def _sweep(maker, delta):
+    async with maker() as session:
+        return await service_change.expire_adjustments(session, now=sc.NOW + delta)
+
+
+async def test_applied_decrease_sends_exactly_one_servico_notice(sc_db, sc_world):
+    _provider, mailer = sc_world
+    async with sc_db() as session:
+        seeded = await sc._seed(session)
+    result = await sc._request(sc_db, seeded, "Retorno", minutes=20)
+    assert result.kind == "asked"
+
+    [only] = await _doctor_notices(sc_db)
+    assert only.changed_fields == ["serviço"] and only.status == "pending"
+    assert result.notice_id == only.id
+    # The patient's answer and the 24 h sweep never add a second notice.
+    await sc._answer(sc_db, seeded, result.adjustment_id, True)
+    await _sweep(sc_db, timedelta(days=2))
+    assert len(await _doctor_notices(sc_db)) == 1
+    assert mailer.calls == []
+
+
+async def test_decrease_kept_by_the_clinic_sends_exactly_one_notice(sc_db, sc_world):
+    async with sc_db() as session:
+        seeded = await sc._seed(session, days_ahead=1, min_days=2)
+    result = await sc._request(sc_db, seeded, "Retorno", minutes=20)
+    assert result.kind == "applied_now"
+    [only] = await _doctor_notices(sc_db)
+    assert only.changed_fields == ["serviço"]
+
+
+async def test_increase_without_pix_sends_exactly_one_notice(sc_db, sc_world):
+    async with sc_db() as session:
+        seeded = await sc._seed(session)
+    result = await sc._request(sc_db, seeded, "Consulta plus")
+    assert result.kind == "applied_now"
+    [only] = await _doctor_notices(sc_db)
+    assert only.changed_fields == ["serviço"]
+
+
+async def test_increase_awaiting_payment_tells_the_doctor_nothing(sc_db, sc_world):
+    _provider, mailer = sc_world
+    async with sc_db() as session:
+        seeded = await sc._seed(session)
+    result = await sc._request(sc_db, seeded, "Avaliação", minutes=60)
+    assert result.kind == "awaiting_payment"
+    assert await _doctor_notices(sc_db) == []
+    assert await _sweep(sc_db, timedelta(hours=1)) == 1  # expires unpaid: still silent
+    assert await _doctor_notices(sc_db) == []
+    assert (await sc._appointment(sc_db, seeded[2].id)).appointment_type == "Consulta"
+    assert mailer.calls == []
+
+
+async def test_paying_the_difference_sends_exactly_one_notice_and_no_extra_email(sc_db, sc_world):
+    provider, mailer = sc_world
+    async with sc_db() as session:
+        seeded = await sc._seed(session)
+    created = await sc._request(sc_db, seeded, "Avaliação", minutes=60)
+    assert await _doctor_notices(sc_db) == []  # waiting for the Pix: silent
+
+    first = await _pay(sc_db, seeded[0], provider, created)
+    again = await _pay(sc_db, seeded[0], provider, created, event_id="evt_diff_confirmed")
+    assert first.outcome == "adjustment_applied"
+    assert again.outcome == "adjustment_already_applied"
+    async with sc_db() as session:
+        tenant = await session.get(Tenant, seeded[0].id)
+        await event_processor.run_post_commit(session, tenant, first)
+        await event_processor.run_post_commit(session, tenant, again)
+
+    [only] = await _doctor_notices(sc_db)  # ONE "Consulta alterada", from the applied change
+    assert only.changed_fields == ["serviço"] and only.status == "pending"
+    assert (await sc._appointment(sc_db, seeded[2].id)).appointment_type == "Avaliação"
+    async with sc_db() as session:
+        adjustment = (await session.scalars(select(DepositAdjustment))).one()
+    assert adjustment.status == STATUS_APPLIED
+    assert mailer.calls == []  # the payment path mails the doctor nothing
+    await _sweep(sc_db, timedelta(hours=2))
+    assert len(await _doctor_notices(sc_db)) == 1
+
+
+async def test_underpaid_difference_sends_the_doctor_nothing(sc_db, sc_world):
+    provider, mailer = sc_world
+    async with sc_db() as session:
+        seeded = await sc._seed(session)
+    created = await sc._request(sc_db, seeded, "Avaliação", minutes=60)
+    refused = await _pay(sc_db, seeded[0], provider, created, amount=1000)
+    assert refused.outcome != "adjustment_applied"
+    assert (await sc._appointment(sc_db, seeded[2].id)).appointment_type == "Consulta"
+    assert await _doctor_notices(sc_db) == []
+    assert mailer.calls == []
+
+
+async def test_difference_paid_after_expiry_sends_the_doctor_nothing(sc_db, sc_world):
+    provider, mailer = sc_world
+    async with sc_db() as session:
+        seeded = await sc._seed(session)
+    created = await sc._request(sc_db, seeded, "Avaliação", minutes=60)
+    await _sweep(sc_db, timedelta(hours=1))  # expired unpaid
+    late = await _pay(sc_db, seeded[0], provider, created)
+    assert late.outcome == "adjustment_paid_late"
+    assert (await sc._appointment(sc_db, seeded[2].id)).appointment_type == "Consulta"
+    assert await _doctor_notices(sc_db) == []
+    assert mailer.calls == []
+
+
+async def test_cancelled_consultation_paid_difference_sends_nothing(sc_db, sc_world):
+    provider, mailer = sc_world
+    async with sc_db() as session:
+        seeded = await sc._seed(session)
+    created = await sc._request(sc_db, seeded, "Avaliação", minutes=60)
+    async with sc_db() as session:
+        row = await session.get(Appointment, seeded[2].id)
+        row.status = AppointmentStatus.CANCELLED
+        await session.commit()
+    result = await _pay(sc_db, seeded[0], provider, created)
+    assert result.outcome == "adjustment_not_applicable"
+    assert await _doctor_notices(sc_db) == []
+    assert mailer.calls == []

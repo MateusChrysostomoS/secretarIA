@@ -50,8 +50,16 @@ from secretaria.services import tenant_config as cfg
 from secretaria.services.booking_scope import canonical_service_name
 from secretaria.services.calendar import CalendarService
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
-from secretaria.services.payments import accounts, attention, notify, payer_data, registry
+from secretaria.services.payments import (
+    accounts,
+    adjustment_queries,
+    attention,
+    notify,
+    payer_data,
+    registry,
+)
 from secretaria.services.payments.money import format_brl, parse_brl_to_cents
+from secretaria.services.payments.pix_message import pix_code_tail
 from secretaria.services.payments.provider import ChargeRequest, PaymentStatus, ProviderError
 from secretaria.services.service_catalog import load_service_catalog, service_by_name
 from secretaria.services.tenant_config import load_tenant_config
@@ -130,10 +138,18 @@ def _log_deposit_skip(tenant: Tenant, appointment: Appointment, reason: str) -> 
 async def get_deposit_for_appointment(
     session: AsyncSession, appointment_id: UUID
 ) -> PixDeposit | None:
-    """S3 convenience: the one deposit row for an appointment, or None."""
-    return await session.scalar(
+    """S3 convenience: the one deposit row for an appointment, or None.
+
+    A PAID deposit comes back stamped with what the clinic holds for it (sinal + paid service
+    differences - differences asked back, `adjustment_queries.held_total_cents`), so every
+    pt-BR text built from this lookup (cancel notices and warnings, release texts) quotes the
+    total, not the bare `amount_cents` (plan 2026-10-26 Task 8)."""
+    deposit = await session.scalar(
         select(PixDeposit).where(PixDeposit.appointment_id == appointment_id)
     )
+    if deposit is not None and deposit.status is PixDepositStatus.PAID:
+        await adjustment_queries.held_total_cents(session, deposit)
+    return deposit
 
 
 @dataclass(frozen=True)
@@ -145,6 +161,11 @@ class AppointmentDepositView:
     amount_cents: int
     # `fulfillment_status == needs_attention`: an attention item is open on this deposit.
     needs_attention: bool = False
+    # PAID only (plan 2026-10-26): what the clinic holds when service differences changed it
+    # (`adjustment_queries.held_total_cents`; None = `amount_cents`), and a difference Pix still
+    # waiting for payment (patient's or clinic's change; None = none).
+    held_cents: int | None = None
+    pending_difference_cents: int | None = None
 
 
 async def load_deposit_views(
@@ -163,25 +184,39 @@ async def load_deposit_views(
     ids = {i for i in appointment_ids if i is not None}
     if not ids:
         return {}
-    rows = await session.execute(
-        select(
-            PixDeposit.appointment_id,
-            PixDeposit.status,
-            PixDeposit.amount_cents,
-            PixDeposit.fulfillment_status,
-        ).where(
-            PixDeposit.tenant_id == tenant_id,
-            PixDeposit.appointment_id.in_(ids),
+    rows = (
+        await session.execute(
+            select(
+                PixDeposit.appointment_id,
+                PixDeposit.status,
+                PixDeposit.amount_cents,
+                PixDeposit.fulfillment_status,
+                PixDeposit.id,
+            ).where(
+                PixDeposit.tenant_id == tenant_id,
+                PixDeposit.appointment_id.in_(ids),
+            )
         )
+    ).all()
+    # At most ONE more query, for the PAID deposits' service-change adjustments (plan 2026-10-26).
+    totals = await adjustment_queries.load_adjustment_totals(
+        session,
+        tenant_id,
+        [row[4] for row in rows if row[1] is PixDepositStatus.PAID],
     )
-    return {
-        appointment_id: AppointmentDepositView(
+    views: dict[UUID, AppointmentDepositView] = {}
+    for appointment_id, status, amount_cents, fulfillment, deposit_id in rows:
+        total = totals.get(deposit_id)
+        views[appointment_id] = AppointmentDepositView(
             status=status,
             amount_cents=amount_cents,
             needs_attention=fulfillment == FULFILLMENT_NEEDS_ATTENTION,
+            held_cents=amount_cents + total.held_delta_cents
+            if total is not None and total.held_delta_cents
+            else None,
+            pending_difference_cents=total.pending_difference_cents if total else None,
         )
-        for appointment_id, status, amount_cents, fulfillment in rows.all()
-    }
+    return views
 
 
 # --------------------------------------------------------------------------
@@ -258,9 +293,6 @@ def _deposit_request_text(
         f"Para confirmar {appt_type} na {tenant.clinic_name}, pedimos um sinal de "
         f"{format_brl(amount_cents)} via Pix."
     ]
-    if copy_paste:
-        lines.append("Pix copia e cola:")
-        lines.append(copy_paste)
     lines.append("Sua reserva fica garantida assim que o pagamento for confirmado.")
     lines.append("O código Pix vence ainda hoje.")
     if payment_note:
@@ -270,6 +302,11 @@ def _deposit_request_text(
         # arrives.
         lines.append("")
         lines.append(f"💳 Sobre o pagamento do convênio:\n{payment_note}")
+    # ONE message: the code is its last lines (fenced - see `pix_message`).
+    tail = pix_code_tail(copy_paste)
+    if tail:
+        lines.append("")
+        lines.extend(tail)
     return "\n".join(lines)
 
 
@@ -626,6 +663,12 @@ async def on_appointment_cancelled(
     calculated `suggested_refund_cents`, and the clinic returns it in the provider's own panel.
     `waba_token` is accepted for signature symmetry and unused: this function sends NO
     message itself. Does NOT commit - caller's transaction.
+
+    Service-change adjustments (plan 2026-10-26 Task 8): an unpaid difference Pix is voided and
+    its adjustment cancelled, an unanswered refund question is closed
+    (`adjustment_queries.settle_open_adjustments`); every amount below is what the clinic HOLDS
+    (`adjustment_queries.held_total_cents`: sinal + paid differences - differences already asked
+    back, which keep their own `service_diff_refund_due` item), never the bare `amount_cents`.
     """
     deposit = await get_deposit_for_appointment(session, appointment.id)
     if deposit is None or deposit.status not in (PixDepositStatus.AWAITING, PixDepositStatus.PAID):
@@ -636,8 +679,14 @@ async def on_appointment_cancelled(
     if deposit.status is PixDepositStatus.AWAITING:
         return await _void_awaiting(session, tenant, deposit, now)
 
+    # Before the dedupe below: settling is idempotent, and a difference Pix must never stay
+    # payable for a consultation that no longer exists.
+    await adjustment_queries.settle_open_adjustments(
+        session, tenant=tenant, deposit=deposit, now=now
+    )
     if await _cancellation_already_handled(session, tenant.id, deposit.id):
         return None
+    held = await adjustment_queries.held_total_cents(session, deposit)
 
     slot = {
         "slot_start": appointment.start_at,
@@ -658,7 +707,7 @@ async def on_appointment_cancelled(
         )
 
     if cancelled_by == CANCELLED_BY_CLINIC:
-        await _ask_the_clinic(REASON_PAID_THEN_CANCELLED, deposit.amount_cents)
+        await _ask_the_clinic(REASON_PAID_THEN_CANCELLED, held)
         return "refund_due"
 
     # PAID, cancelled by the patient who already used every allowed reschedule: the deposit stays
@@ -683,11 +732,11 @@ async def on_appointment_cancelled(
         hours_until = (_as_utc(start_at) - now).total_seconds() / 3600
 
     if hours_until is None or hours_until > tenant.pix_refund_window_hours:
-        await _ask_the_clinic(REASON_REFUND_DUE_POLICY, deposit.amount_cents)
+        await _ask_the_clinic(REASON_REFUND_DUE_POLICY, held)
         return "refund_due"
 
     if tenant.pix_retention_policy == "partial":
-        partial_amount = round(deposit.amount_cents * tenant.pix_partial_refund_percent / 100)
+        partial_amount = round(held * tenant.pix_partial_refund_percent / 100)
         await _ask_the_clinic(REASON_REFUND_DUE_POLICY, partial_amount)
         return "partial_refund_due"
 
@@ -705,11 +754,30 @@ def cancellation_notice(outcome: str | None, tenant: Tenant, deposit: PixDeposit
 
     It never says the money "will be refunded" or that a refund "was requested": the platform
     does not return money - the CLINIC does, manually - so the promise is exactly that.
+    The partial amount is computed on what the clinic holds (`adjustment_queries.held_cents_hint`,
+    stamped by `on_appointment_cancelled` / `get_deposit_for_appointment`). When the
+    cancellation cancelled an unpaid difference Pix of a service change
+    (`adjustment_queries.voided_difference_hint`), one more sentence tells the patient not to pay
+    it - never a promise about money.
     """
+    text = _cancellation_money_line(outcome, tenant, deposit)
+    voided = adjustment_queries.voided_difference_hint(deposit)
+    if text is None or voided <= 0:
+        return text
+    return (
+        f"{text} O Pix da diferença do sinal ({format_brl(voided)}) foi cancelado: "
+        "não pague esse código."
+    )
+
+
+def _cancellation_money_line(
+    outcome: str | None, tenant: Tenant, deposit: PixDeposit
+) -> str | None:
     if outcome == "refund_due":
         return "A clínica fará a devolução do seu sinal; você será avisado."
     if outcome == "partial_refund_due":
-        partial = round(deposit.amount_cents * tenant.pix_partial_refund_percent / 100)
+        held = adjustment_queries.held_cents_hint(deposit)
+        partial = round(held * tenant.pix_partial_refund_percent / 100)
         return (
             f"Como o cancelamento ficou fora do prazo, a clínica fará a devolução de "
             f"{format_brl(partial)} do sinal; o restante fica retido. Você será avisado."
@@ -1015,9 +1083,6 @@ DEPOSIT_WAIT_BUTTONS: tuple[tuple[str, str], ...] = (
 )
 
 
-BEFORE_COPY_PASTE_LABEL = "Segue o Pix copia e cola, na próxima mensagem:"
-
-
 def before_request_text(
     clinic_name: str,
     *,
@@ -1027,8 +1092,10 @@ def before_request_text(
     minutes: int,
     until_text: str,
     payment_note: str | None = None,
+    copy_paste: str | None = None,
 ) -> str:
-    """The first bubble of the Pix request: what it is for, how much, until when."""
+    """The Pix request (ONE message): what it is for, how much, until when and, when given, the
+    copia-e-cola as its last lines (fenced - see `pix_message`)."""
     lines = [
         f"Para reservar {service} em {when_text} na {clinic_name}, pedimos um sinal de "
         f"{format_brl(amount_cents)} via Pix.",
@@ -1037,10 +1104,10 @@ def before_request_text(
     ]
     if payment_note:
         lines.append(f"💳 Sobre o pagamento do convênio:\n{payment_note}")
+    tail = pix_code_tail(copy_paste)
+    if tail:
+        lines.append("\n".join(tail))
     return "\n\n".join(lines)
-
-
-BEFORE_COPY_PASTE_LABEL = "Pix copia e cola:"
 
 
 def before_wait_card_text(until_text: str) -> str:
@@ -1127,15 +1194,18 @@ def release_warning_text(outcome: str | None, tenant: Tenant, deposit: PixDeposi
     slot whose deposit was paid is the one release that moves money. Like every money line
     since decision D15 it never says the platform refunds: the CLINIC returns what is due,
     in the payment provider's own panel (an attention item is opened with the amount).
+    The amount is what the clinic holds (sinal + paid service differences,
+    `adjustment_queries.held_cents_hint`).
     """
-    paid = f"O paciente já pagou o sinal ({format_brl(deposit.amount_cents)})."
+    held = adjustment_queries.held_cents_hint(deposit)
+    paid = f"O paciente já pagou o sinal ({format_brl(held)})."
     if outcome == "retained":
         return (
             f"{paid} Como faltam menos de {tenant.pix_refund_window_hours}h para a consulta, "
             "ao liberar o horário a clínica fica com o sinal."
         )
     if outcome == "partial_refund_due":
-        refunded = round(deposit.amount_cents * tenant.pix_partial_refund_percent / 100)
+        refunded = round(held * tenant.pix_partial_refund_percent / 100)
         return (
             f"{paid} Como faltam menos de {tenant.pix_refund_window_hours}h para a consulta, "
             f"ao liberar o horário a clínica deve devolver {format_brl(refunded)} ao paciente "

@@ -11,6 +11,8 @@ complete confirmation text. The steps live in `appointment_edit_flow.py`.
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, tzinfo
 from hashlib import sha256
@@ -58,21 +60,64 @@ MARK_FREE = "✅"
 MARK_BUSY = "❌"
 
 # --- Texts -------------------------------------------------------------------------------
-EDIT_MENU_BODY = (
+_EDIT_MENU_INTRO = (
     "*Alterar Dados*: mudar o horário, a data, o serviço, o médico ou qualquer outra "
     "coisa dessa sua consulta já marcada.\n\n"
     "O que você quer mudar?\n\n"
-    "• *Mudar data*: escolher outro dia.\n"
-    "• *Mudar horário*: escolher outro horário no mesmo dia.\n"
-    "• *Mudar serviço*: trocar o serviço.\n"
-    "• *Mudar médico*: trocar o médico.\n"
-    "• *Outro*: mudar o convênio ou o paciente."
 )
-EDIT_MORE_BODY = (
-    "Mais opções:\n\n"
-    "• *Mudar convênio*: trocar o convênio da consulta.\n"
-    "• *Mudar paciente*: a consulta passa a ser para outra pessoa (ou volta a ser sua)."
+# One bullet per menu button: the text lists exactly the buttons offered (a hidden button never
+# stays in the text - browser proof 2026-10-26).
+_EDIT_MENU_LINES = {
+    LABEL_EDIT_DATE: "• *Mudar data*: escolher outro dia.",
+    LABEL_EDIT_TIME: "• *Mudar horário*: escolher outro horário no mesmo dia.",
+    LABEL_EDIT_SERVICE: "• *Mudar serviço*: trocar o serviço.",
+    LABEL_EDIT_DOCTOR: "• *Mudar médico*: trocar o médico.",
+    LABEL_EDIT_MORE: "• *Outro*: mudar o convênio ou o paciente.",
+}
+_EDIT_MENU_MORE_NO_INSURANCE = "• *Outro*: mudar o paciente."
+EDIT_MENU_BODY = _EDIT_MENU_INTRO + "\n".join(_EDIT_MENU_LINES.values())
+_EDIT_MORE_INTRO = "Mais opções:\n\n"
+_EDIT_MORE_LINES = {
+    LABEL_EDIT_INSURANCE: "• *Mudar convênio*: trocar o convênio da consulta.",
+    LABEL_EDIT_PATIENT: (
+        "• *Mudar paciente*: a consulta passa a ser para outra pessoa (ou volta a ser sua)."
+    ),
+}
+EDIT_MORE_BODY = _EDIT_MORE_INTRO + "\n".join(_EDIT_MORE_LINES.values())
+
+
+def edit_menu_body(labels: list[str], *, insurance: bool = True) -> str:
+    """The menu text for exactly these buttons; `insurance=False` (paid sinal) drops the
+    convênio from the "Outro" bullet."""
+    lines = [
+        _EDIT_MENU_MORE_NO_INSURANCE
+        if label == LABEL_EDIT_MORE and not insurance
+        else _EDIT_MENU_LINES[label]
+        for label in labels
+        if label in _EDIT_MENU_LINES
+    ]
+    return _EDIT_MENU_INTRO + "\n".join(lines)
+
+
+def edit_more_body(labels: list[str]) -> str:
+    """The second menu's text for exactly these buttons."""
+    return _EDIT_MORE_INTRO + "\n".join(
+        _EDIT_MORE_LINES[label] for label in labels if label in _EDIT_MORE_LINES
+    )
+
+
+# A typed "change the service / the data" (owner, 2026-10-27): a change verb followed by the
+# service or "dados". Date/time alone is a reschedule and stays with the AI.
+_EDIT_REQUEST = re.compile(
+    r"\b(?:mud|troc|troqu|alter|modific|edit)\w*\b.*"
+    r"\b(?:servicos?|procedimentos?|exames?|dados|tipo d[ae] (?:consulta|atendimento))\b"
 )
+
+
+def asks_to_edit_appointment(text: str | None) -> bool:
+    """Whether a typed message asks to change the appointment's service or data."""
+    folded = unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode()
+    return _EDIT_REQUEST.search(folded.casefold()) is not None
 EDIT_TIME_TOO_BODY = "Quer mudar o horário também?"
 EDIT_TIME_BUSY = "Esse horário não está livre nesse dia. Escolha outro:"
 EDIT_RESLOT_NOTICE = (
@@ -82,8 +127,15 @@ EDIT_KEPT = "Tudo bem, mantive sua consulta como estava."
 EDIT_APPLIED = "Pronto! Sua consulta foi atualizada. ✅"
 EDIT_NOTHING_CHANGED = "Você ainda não mudou nada. O que você quer alterar?"
 EDIT_STALE = "Essa consulta não está mais ativa."
+# 2026-10-26: the service may change with a paid sinal - the difference of the sinal is settled
+# (services/payments/service_change.py); the doctor and the convênio still may not.
 EDIT_PIX_NOTICE = (
-    "Como essa consulta tem sinal pago, para mudar serviço, médico ou convênio fale com a clínica."
+    "Como essa consulta tem sinal pago, para mudar médico ou convênio fale com a clínica. "
+    "Se trocar o serviço, acertamos a diferença do sinal."
+)
+EDIT_SERVICE_NO_ROOM = (
+    "Esse serviço não cabe no horário atual da sua consulta e o limite de remarcações já foi "
+    "atingido. Para trocar, fale com a clínica."
 )
 EDIT_LIMIT_NOTICE = (
     "O limite de remarcações dessa consulta foi atingido; "
@@ -228,9 +280,10 @@ class EditContext:
     """What the worker hands the router for an edit turn (the router does no I/O).
 
     `calendars` maps a professional id (str) or "tenant" to that agenda's CalendarService
-    (None when it could not be built). `paid_deposit` hides service/doctor/convênio
-    (the price may differ); `reschedule_blocked` hides date/time (the Pix reschedule
-    limit was reached).
+    (None when it could not be built). `paid_deposit` hides doctor/convênio and makes a
+    service change a money decision taken by the worker at Confirmar (the difference of the
+    sinal, services/payments/service_change.py); `reschedule_blocked` hides date/time (the
+    Pix reschedule limit was reached).
     """
 
     calendars: dict[str, Any] = field(default_factory=dict)

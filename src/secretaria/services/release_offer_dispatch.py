@@ -51,6 +51,7 @@ from secretaria.models.deposit_release_offer import (
 )
 from secretaria.services import cancellation_notice, email, release_offer
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE, BrainMessageSender
+from secretaria.services.payments import adjustment_queries
 from secretaria.services.payments.money import format_brl
 from secretaria.services.reminder_text import portal_conversation_link
 from secretaria.services.tenant_config import get_waba_token
@@ -221,6 +222,14 @@ async def _give_back(session: AsyncSession, email_id: UUID, attempts: int) -> st
     return OUTCOME_GIVEN_UP if tries >= MAX_ATTEMPTS else "retry"
 
 
+async def _held_text(session: AsyncSession, deposit: PixDeposit | None) -> str:
+    """The amount every release message quotes: what the clinic holds for the sinal (sinal +
+    paid service differences - differences already asked back; plan 2026-10-26 Task 8)."""
+    if deposit is None:
+        return ""
+    return format_brl(await adjustment_queries.held_total_cents(session, deposit))
+
+
 async def _send_clinic(
     session: AsyncSession, tenant: Tenant, offer: DepositReleaseOffer, kind: str
 ) -> bool | None:
@@ -230,7 +239,7 @@ async def _send_clinic(
     deposit = await session.get(PixDeposit, offer.deposit_id)
     released = await session.get(Appointment, offer.released_appointment_id)
     tz = tenant.timezone
-    amount = format_brl(deposit.amount_cents) if deposit is not None else ""
+    amount = await _held_text(session, deposit)
     slot = (
         release_offer.slot_text(released.start_at, tz)
         if released is not None and released.start_at is not None
@@ -294,7 +303,7 @@ async def _patient_message(
     """(text, buttons or None, out-of-window template name, amount) of a patient message."""
     released_id = offer.released_appointment_id
     deposit = await session.get(PixDeposit, offer.deposit_id)
-    amount = format_brl(deposit.amount_cents) if deposit is not None else ""
+    amount = await _held_text(session, deposit)
     if kind == EMAIL_PATIENT_CHECK:
         return (
             release_offer.CHECK_TEXT.format(amount=amount),

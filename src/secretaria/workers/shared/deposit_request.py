@@ -43,8 +43,9 @@ async def _send_deposit_request_notice(
     tenant: Tenant,
     waba_token: str | None,
 ) -> bool:
-    """Ask the patient to pay, on this turn's channel: what it is for, the Pix code in a bubble
-    of its own (easy to copy) and the card that keeps the conversation while it is open.
+    """Ask the patient to pay, on this turn's channel: what it is for with the Pix code at the
+    end of the SAME message (fenced: monospace on WhatsApp, a copy box in the
+    Portal) and the card that keeps the conversation while it is open.
 
     Unlike `_send_plain_reply` this REPORTS failure: in `before` timing a Pix nobody received
     must not keep the slot (`_abort_deposit_request`). Each message is retried once; the
@@ -72,9 +73,9 @@ async def _send_deposit_request_notice(
                 minutes=request["minutes"],
                 until_text=until_text,
                 payment_note=request.get("payment_note"),
+                copy_paste=request["copy_paste"],
             ),
         ),
-        ("text", request["copy_paste"]),
         ("buttons", deposit_lifecycle.before_wait_card_text(until_text)),
     ]
     for kind, body in steps:

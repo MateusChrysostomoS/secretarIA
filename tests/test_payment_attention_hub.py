@@ -193,6 +193,15 @@ async def test_the_refund_policy_text_carries_the_suggested_value(client: AsyncC
     )
 
 
+async def test_the_collect_text_carries_the_difference_to_receive(client: AsyncClient, db):
+    """Follow-up B (2026-10-27): the value is the item's own amount (money still to RECEIVE)."""
+    world = await _world(db)
+    await _item(db, world, reason="service_diff_collect_due")
+    (item,) = (await client.get(ITEMS)).json()["items"]
+    assert "cobrar R$ 60,00 do paciente" in item["reason_text"]
+    assert item["suggested_refund_cents"] is None
+
+
 async def test_another_clinics_items_never_appear_and_its_id_is_a_404(client: AsyncClient, db):
     world = await _world(db)
     async with db() as session:
@@ -449,11 +458,16 @@ async def test_the_agenda_deposit_gains_needs_attention_and_keeps_its_other_keys
         params={"start": NOW.isoformat(), "end": (NOW + timedelta(days=1)).isoformat()},
     )
     by_id = {e["id"]: e["deposit"] for e in response.json()}
+    # plan 2026-10-26 added `held_cents` / `pending_difference_cents` (null without a service
+    # change): additive, a consumer that does not know them ignores them.
     assert by_id["evt-flag"] == {
-        "status": "confirmado_pago", "amount_cents": 6000, "needs_attention": True
+        "status": "confirmado_pago", "amount_cents": 6000, "needs_attention": True,
+        "held_cents": None, "pending_difference_cents": None,
     }
     assert by_id["evt-plain"]["needs_attention"] is False
-    assert set(by_id["evt-plain"]) == {"status", "amount_cents", "needs_attention"}
+    assert set(by_id["evt-plain"]) == {
+        "status", "amount_cents", "needs_attention", "held_cents", "pending_difference_cents"
+    }
 
 
 async def _payment_hold(db, world, *, charge_status=PixDepositStatus.AWAITING, phase="payment",

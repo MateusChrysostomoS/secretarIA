@@ -16,7 +16,10 @@ class ReleaseOfferOut(BaseModel):
     service_label: str | None
     slot_start: datetime | None
     slot_end: datetime | None
-    amount_cents: int
+    amount_cents: int  # the original sinal
+    # What the clinic HOLDS for this sinal (TASK-067 session 05): sinal + paid service differences
+    # - differences already asked back (`service_change.held_deposit_cents`). The amount to refund.
+    held_cents: int
     deposit_paid_at_release: bool
     deposit_status: str  # the deposit's CURRENT status (PixDepositStatus value)
     refund_status: str  # not_due | due | marked | received | not_received | clinic_decided

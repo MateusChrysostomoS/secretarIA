@@ -7,11 +7,15 @@ reminder tap that OPENS the edit (`workers/shared/actions.py`).
 """
 
 from typing import Any
+from uuid import UUID
 
 from secretaria.core.logging import get_logger
 from secretaria.models import Appointment, PixDepositStatus, Tenant
 from secretaria.services.appointment_edit import EditContext
+from secretaria.services.appointment_edit_flow import enter_edit_menu
 from secretaria.services.calendar import CalendarService
+from secretaria.services.flow_router import FlowRouterResult
+from secretaria.services.patient_context import load_upcoming_appointments
 from secretaria.services.payments import deposit_lifecycle
 from secretaria.services.tenant_config import resolve_professional_calendar
 
@@ -21,8 +25,10 @@ logger = get_logger(__name__)
 async def edit_guards(session, tenant: Tenant, appointment: Appointment) -> tuple[bool, bool]:
     """(paid_deposit, reschedule_blocked): what the menu must hide for a paid Pix deposit.
 
-    A PAID deposit hides service / doctor / convênio (the price may differ); a deposit
-    whose reschedule counter reached `tenant.pix_reschedule_limit` also hides date / time.
+    A PAID deposit hides doctor / convênio and turns a service change into a money decision
+    at Confirmar (2026-10-26: `service_change.request_service_change` settles the difference);
+    a deposit whose reschedule counter reached `tenant.pix_reschedule_limit` also hides
+    date / time.
     """
     deposit = await deposit_lifecycle.get_deposit_for_appointment(session, appointment.id)
     paid = deposit is not None and deposit.status == PixDepositStatus.PAID
@@ -61,3 +67,20 @@ async def build_edit_context(
         if appointment is not None and appointment.tenant_id == tenant.id:
             paid, blocked = await edit_guards(session, tenant, appointment)
     return EditContext(calendars=calendars, paid_deposit=paid, reschedule_blocked=blocked)
+
+
+async def typed_edit_entry(session, tenant: Tenant, patient_id) -> FlowRouterResult | None:
+    """The "Alterar Dados" menu for a TYPED request to change the service / the data.
+
+    Owner, 2026-10-27: the same menu the reminder card's "Alterar Dados" opens (fresh draft,
+    same Pix guards). Only when the patient has exactly ONE upcoming appointment - the menu
+    does not name it, so two are never guessed between - otherwise None (the AI answers).
+    """
+    upcoming = await load_upcoming_appointments(session, tenant.id, patient_id)
+    if len(upcoming) != 1:
+        return None
+    appointment = await session.get(Appointment, UUID(upcoming[0]["id"]))
+    paid, blocked = await edit_guards(session, tenant, appointment)
+    return enter_edit_menu(
+        tenant, upcoming[0], EditContext(paid_deposit=paid, reschedule_blocked=blocked)
+    )

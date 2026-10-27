@@ -5,9 +5,11 @@ The decision was taken inside the inbound transaction
 `_send_bot_reply_inner`, after the entitlement gate, so an unentitled clinic
 creates no row and sends nothing. Everything is re-checked here because time
 passed since the decision: the appointment must still be this conversation's
-patient's, live and in the future. Automatic quiet returns stop at two
-confirmations; an explicit context/first-contact card keeps management actions
-available while the shared confirmation writer still enforces the cap.
+patient's, live and in the future. Automatic quiet returns stop once the patient
+confirmed on a card 3 times (owner 2026-10-27, `entry_card_retired`); an explicit
+context/first-contact card (its callers apply that rule before choosing it, a
+reminder link does not) keeps management actions available while the shared
+confirmation writer still enforces the agenda's cap.
 
 The card is the SAME text and buttons as a cron reminder (R2's builders), on
 the `chat` row of this appointment version - created now or re-shown. It goes
@@ -25,8 +27,7 @@ from sqlalchemy.exc import IntegrityError
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import Appointment, Conversation, Tenant, is_live_status
-from secretaria.services import reminder_schedule
-from secretaria.services.reminder_opening import ensure_chat_reminder
+from secretaria.services.reminder_opening import ensure_chat_reminder, entry_card_retired
 from secretaria.services.reminder_text import (
     build_reminder_body,
     load_reminder_content,
@@ -60,10 +61,7 @@ async def _prepare_opening(
                 or not is_live_status(appointment.status)
                 or appointment.start_at is None
                 or _as_utc(appointment.start_at) <= now
-                or (
-                    appointment.confirmation_count >= reminder_schedule.MAX_CONFIRMATIONS
-                    and not reply.reminder_opening_first_contact
-                )
+                or (entry_card_retired(appointment) and not reply.reminder_opening_first_contact)
             ):
                 return None
             row = await ensure_chat_reminder(session, appointment, now=now)

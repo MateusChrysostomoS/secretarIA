@@ -224,3 +224,6 @@ estados novos `AWAITING_DEPOSIT`/`AWAITING_PAYER_DATA` quebram código anterior 
 API ANTES do worker e, num rollback, resetar esses dois estados para `IDLE`**; M8 o 422 do Pydantic vem antes do 403 de papel e um `null` explícito em
 `deposit_timing` dá 500; M9 CNPJ alfanumérico; M10 o código Pix só é enviado uma vez; M11 desconectar a conta do provedor com cobrança aberta trava a troca
 de provedor.
+
+## Uma mensagem por Pix (2026-10-27, LOCAL - sem commit/push/deploy)
+O aviso do Pix (sinal inicial `before`/`after`, diferenca da troca de servico pelo paciente e pela clinica) agora e UMA mensagem: texto + codigo copia-e-cola nas ultimas linhas, entre tres crases (`services/payments/pix_message.py::pix_code_tail`). WhatsApp desenha como monospace; o Portal reconhece a cerca e mostra a caixa cinza clicavel (Brain-Message-Frontend `lib/pix-code.ts`). Sem campo novo no contrato: mensagens antigas (sem cerca) seguem iguais. Pontos: `deposit_lifecycle.before_request_text(copy_paste=)` + `_deposit_request_text`, `service_change.difference_pix_text`, `workers/shared/deposit_request.py` (some a 2a bolha), `service_change_actions.service_change_bubbles`, `clinic_action_notice.notify_service_change` (some o envio `:code`). O cartao "aguardando o Pix" (botoes) continua separado. Testes: `tests/test_pix_single_message.py` + os que assumiam duas mensagens.

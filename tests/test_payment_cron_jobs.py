@@ -8,7 +8,13 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
-from secretaria.models import PaymentWebhookEvent, PixDeposit, Tenant
+from secretaria.models import (
+    Appointment,
+    AppointmentStatus,
+    PaymentWebhookEvent,
+    PixDeposit,
+    Tenant,
+)
 from secretaria.models.pix_deposit import (
     FULFILLMENT_NONE,
     FULFILLMENT_PROMOTING,
@@ -172,6 +178,16 @@ async def test_reconciliation_rotates_past_older_pending_charges(db, monkeypatch
     assert "paid-later" in [call[1] for call in fake.calls if call[0] == "get_charge"]
 
 
+async def _appointment(session, tenant, status=AppointmentStatus.SCHEDULED) -> Appointment:
+    appointment = Appointment(
+        id=uuid4(), tenant_id=tenant.id, google_event_id=f"evt-{uuid4().hex[:6]}",
+        appointment_type="Consulta", phone="5511999999999", status=status,
+    )
+    session.add(appointment)
+    await session.flush()
+    return appointment
+
+
 async def test_paid_after_notice_is_recovered_after_event_commit(db, monkeypatch):
     sent = []
 
@@ -185,6 +201,8 @@ async def test_paid_after_notice_is_recovered_after_event_commit(db, monkeypatch
             session, tenant, charge="paid-no-notice", timing="after", status=PixDepositStatus.PAID,
             paid_minutes_ago=5,
         )
+        # `after` timing always has its consultation (the processor sends no notice without one)
+        deposit.appointment_id = (await _appointment(session, tenant)).id
         deposit_id = deposit.id
         await session.commit()
         first = await jobs.recover_paid_notices(session, now=NOW)
@@ -194,6 +212,42 @@ async def test_paid_after_notice_is_recovered_after_event_commit(db, monkeypatch
     assert (first, second) == (1, 0)
     assert sent == [deposit_id]
     assert deposit.paid_notice_sent_at is not None
+
+
+async def test_paid_notice_recovery_never_tells_a_cancelled_or_missing_consultation_it_is_safe(
+    db, monkeypatch
+):
+    """Session 07 (a): a PAID `after` deposit whose consultation was cancelled (paid after the
+    cancel -> PAID_THEN_CANCELLED item, or released by the clinic) or never existed (ORPHAN item)
+    gets no notice from the processor - so `paid_notice_sent_at` stays NULL. The recovery sweep
+    must not then send "Sinal recebido! Sua consulta está garantida" for it."""
+    sent = []
+
+    async def notify(session, tenant, deposit):
+        sent.append(deposit.id)
+
+    monkeypatch.setattr(deposit_lifecycle, "_notify_paid", notify)
+    async with db() as session:
+        tenant = await _tenant(session)
+        ids = {}
+        for label, status in (
+            ("cancelled", AppointmentStatus.CANCELLED),
+            ("attended", AppointmentStatus.ATTENDED),
+            ("missing", None),
+            ("live", AppointmentStatus.CONFIRMED),
+        ):
+            deposit = await _deposit(
+                session, tenant, charge=f"pay-{label}", timing="after",
+                status=PixDepositStatus.PAID, paid_minutes_ago=5,
+            )
+            if status is not None:
+                deposit.appointment_id = (await _appointment(session, tenant, status)).id
+            ids[label] = deposit.id
+        await session.commit()
+        count = await jobs.recover_paid_notices(session, now=NOW)
+
+    assert count == 1
+    assert sent == [ids["live"]]
 
 
 async def test_only_due_before_charges_are_considered(db, monkeypatch):

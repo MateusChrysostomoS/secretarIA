@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import select, update
 
 from secretaria.core import database as core_database
-from secretaria.models import AppointmentReminder, AppointmentStatus, Tenant
+from secretaria.models import Appointment, AppointmentReminder, AppointmentStatus, Tenant
 from secretaria.services import reminder_hooks, reminder_opening as ro
 from tests._reminder_fixtures import db  # noqa: F401
 from tests._reminders_r3 import add_appointment
@@ -47,9 +47,10 @@ async def test_a_quiet_patient_with_a_live_appointment_opens_with_it(db):  # noq
     assert decision == ro.OpeningDecision(ro.OPEN, world.appointment.id)
 
 
-async def test_the_switch_off_opens_nothing(db):  # noqa: F811
+async def test_the_switch_off_still_opens_with_the_card(db):  # noqa: F811
+    # Owner 2026-10-27: the entry card no longer depends on the reminder switch.
     world = await seed_world(db, v2=False)
-    assert (await _decide(db, world)).reason == ro.SKIP_SWITCH_OFF
+    assert await _decide(db, world) == ro.OpeningDecision(ro.OPEN, world.appointment.id)
 
 
 async def test_no_history_or_recent_activity_opens_nothing(db):  # noqa: F811
@@ -82,15 +83,46 @@ async def test_a_past_or_cancelled_appointment_never_opens_the_chat(
     assert (await _decide(db, world)).reason == ro.SKIP_NO_UPCOMING
 
 
-async def test_confirmed_twice_never_asks_again(db):  # noqa: F811
+async def test_confirmed_twice_on_the_agenda_still_opens(db):  # noqa: F811
+    # The agenda's counter (capped at 2) no longer stops the entry card (owner 2026-10-27).
     world = await seed_world(db, confirmation_count=2)
-    assert (await _decide(db, world)).reason == ro.SKIP_CONFIRMED_TWICE
+    assert (await _decide(db, world)).reason == ro.OPEN
 
 
-async def test_a_chat_card_already_confirmed_is_not_shown_again(db):  # noqa: F811
+async def test_three_card_confirmations_never_ask_again(db):  # noqa: F811
+    world = await seed_world(db, confirmation_count=2)
+    async with db() as session:
+        await session.execute(
+            update(Appointment)
+            .where(Appointment.id == world.appointment.id)
+            .values(card_confirmation_count=3)
+        )
+        await session.commit()
+    assert (await _decide(db, world)).reason == ro.SKIP_CONFIRMED_ENOUGH
+
+
+async def test_a_chat_card_already_confirmed_is_shown_again_and_can_be_confirmed_again(
+    db,  # noqa: F811
+):
     world = await seed_world(db)
-    await _row(db, world, status="sent", sent_at=NOW - timedelta(days=1), answer="confirm")
-    assert (await _decide(db, world)).reason == ro.SKIP_CHAT_ALREADY_CONFIRMED
+    rid = await _row(
+        db,
+        world,
+        status="sent",
+        sent_at=NOW - timedelta(days=1),
+        answer="confirm",
+        answered_at=NOW - timedelta(days=1) + timedelta(minutes=2),
+    )
+    assert (await _decide(db, world)).reason == ro.OPEN
+    async with db() as session:
+        appointment = await ro.nearest_live_appointment(
+            session, world.tenant.id, world.patient.id, now=NOW
+        )
+        row = await ro.ensure_chat_reminder(session, appointment, now=NOW)
+        await session.commit()
+    # The answer stays (review I1); the moved `sent_at` opens this showing to one more tap.
+    assert row.id == rid and row.answer == "confirm"
+    assert ro.as_utc(row.sent_at) == NOW > ro.as_utc(row.answered_at)
 
 
 async def test_a_chat_row_shown_inside_the_gap_is_not_shown_again(db):  # noqa: F811

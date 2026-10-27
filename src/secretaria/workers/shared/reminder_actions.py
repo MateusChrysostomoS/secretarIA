@@ -160,7 +160,12 @@ async def handle_reminder_button(
         tenant = await session.get(Tenant, conversation.tenant_id) if conversation else None
         if tenant is None:
             return None
-        if not reminder_hooks.enabled_for(tenant):
+        reminder = await session.get(AppointmentReminder, row_id)
+        # Owner 2026-10-27: the card sent on entering the conversation (`chat` row) works
+        # whatever the clinic's reminder switch; the other rows keep the switch.
+        if not reminder_hooks.enabled_for(tenant) and (
+            reminder is None or reminder.kind != REMINDER_KIND_CHAT
+        ):
             return None
         waba_token = await get_waba_token(session, tenant.id)
         client = _reply_sender(reply, tenant, waba_token)
@@ -168,7 +173,6 @@ async def handle_reminder_button(
             logger.error("reminder_button_no_sender", tenant_id=str(tenant.id))
             return None
 
-        reminder = await session.get(AppointmentReminder, row_id)
         appointment = (
             await session.get(Appointment, reminder.appointment_id)
             if reminder is not None

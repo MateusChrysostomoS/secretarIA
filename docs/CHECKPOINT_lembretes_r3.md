@@ -61,7 +61,7 @@ Só o cartão novo do caminho do Cancelar mudou. O menu antigo de gerenciar cons
    `test_the_nearest_of_two_appointments_opens_the_chat`, `test_two_appointments_open_with_the_nearest_and_the_answer_names_the_other`.
 3. Consulta passada ou cancelada → sem abertura; toque em cartão velho → "não está mais ativa":
    `test_a_past_or_cancelled_appointment_never_opens_the_chat`, `test_a_cancelled_appointment_gets_the_normal_menu`.
-4. Já confirmou 2 vezes → sem pedido: `test_confirmed_twice_never_asks_again`, `test_confirmed_twice_gets_the_normal_menu`.
+4. ~~Já confirmou 2 vezes → sem pedido~~ — desde 2026-10-27 o cartão de entrada só para com 3 confirmações do paciente e independe do interruptor (`CHECKPOINT_primeira_mensagem_lembrete.md`, Seguimento A): `test_three_card_confirmations_never_ask_again`, `test_three_card_confirmations_get_the_normal_menu`.
 5. Pedido claro junto da abertura ("Agendar") → cartão e depois a pergunta: `test_a_clear_request_is_answered_right_after_the_card`,
    `test_a_clear_request_is_not_the_generic_menu`.
 6. Toque no Portal com id de lembrete de outro paciente → descartado, nada contado:

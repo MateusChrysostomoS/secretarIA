@@ -40,7 +40,7 @@ from secretaria.models.deposit_release_offer import (
 from secretaria.schemas.release_offers import ReleaseOfferListOut, ReleaseOfferOut
 from secretaria.services import release_keep, release_offer, release_offer_dispatch, reminder_hooks
 from secretaria.services.agenda_visibility import AgendaViewer
-from secretaria.services.payments import attention_view
+from secretaria.services.payments import adjustment_queries, attention_view
 from secretaria.services.payments.attention_view import NAME_MAX_CHARS, ResolveRefused
 
 logger = get_logger(__name__)
@@ -96,7 +96,20 @@ async def _rows(
     return (await session.execute(query)).all()
 
 
-def _out(row) -> ReleaseOfferOut:
+async def _held(session: AsyncSession, tenant_id: UUID, rows: list) -> dict[UUID, int]:
+    """What the clinic holds per deposit of the page (one query): `amount_cents` + the delta of
+    `adjustment_queries.load_adjustment_totals` (the `held_deposit_cents` formula)."""
+    totals = await adjustment_queries.load_adjustment_totals(
+        session, tenant_id, [row[2].id for row in rows]
+    )
+    held: dict[UUID, int] = {}
+    for _offer, _appointment, deposit, _name in rows:
+        found = totals.get(deposit.id)
+        held[deposit.id] = int(deposit.amount_cents or 0) + (found.held_delta_cents if found else 0)
+    return held
+
+
+def _out(row, held: dict[UUID, int]) -> ReleaseOfferOut:
     offer, appointment, deposit, patient_name = row
     status = deposit.status.value if hasattr(deposit.status, "value") else str(deposit.status)
     return ReleaseOfferOut(
@@ -110,6 +123,7 @@ def _out(row) -> ReleaseOfferOut:
         slot_start=appointment.start_at,
         slot_end=appointment.end_at,
         amount_cents=deposit.amount_cents,
+        held_cents=held.get(deposit.id, int(deposit.amount_cents or 0)),
         deposit_paid_at_release=offer.deposit_paid,
         deposit_status=status,
         refund_status=offer.refund_status,
@@ -170,8 +184,10 @@ async def _visible(session, tenant: Tenant, viewer: AgendaViewer, offer_id: str)
 
 
 async def _answer(session, tenant: Tenant, viewer: AgendaViewer, offer_uuid: UUID) -> JSONResponse:
-    (row,) = await _rows(session, tenant.id, viewer, offer_id=offer_uuid)
-    return JSONResponse(_out(row).model_dump(mode="json"), status_code=200)
+    rows = await _rows(session, tenant.id, viewer, offer_id=offer_uuid)
+    (row,) = rows
+    held = await _held(session, tenant.id, rows)
+    return JSONResponse(_out(row, held).model_dump(mode="json"), status_code=200)
 
 
 async def _dispatch_now(session, offer_uuid: UUID) -> None:
@@ -195,7 +211,8 @@ async def list_release_offers(
     rows = await _rows(
         session, tenant.id, viewer, own_only=mine, pending_only=pending_only, limit=limit
     )
-    return ReleaseOfferListOut(items=[_out(row) for row in rows])
+    held = await _held(session, tenant.id, rows)
+    return ReleaseOfferListOut(items=[_out(row, held) for row in rows])
 
 
 @router.post("/{offer_id}/refunded")

@@ -168,9 +168,10 @@ async def test_i5_busy_new_doctor_keeps_original_time_and_uses_new_calendar():
 @pytest.mark.parametrize(
     "payload,guard",
     [
-        ({"service": "Retorno"}, "paid_deposit"),
         ({"professional": "Dra. Ana Lima"}, "paid_deposit"),
         ({"insurance": "Amil"}, "paid_deposit"),
+        ({"open_field": "doctor"}, "paid_deposit"),
+        ({"open_field": "insurance"}, "paid_deposit"),
         ({"day": "2030-10-16"}, "reschedule_blocked"),
         ({"time": "09:00"}, "reschedule_blocked"),
     ],
@@ -181,6 +182,33 @@ async def test_i6_ai_cannot_bypass_pix(payload, guard):
     assert result.flow_state == FlowState.EDIT_BOOKING
     assert result.flow_edit_draft["current"] == draft.current
     assert result.flow_edit_draft["original"] == draft.original
+
+
+async def test_i6b_with_a_paid_sinal_the_ai_service_only_lands_on_the_confirmation():
+    """The AI may propose a service with a paid sinal, but it only DRAFTS it: the patient still
+    confirms, and the confirmation is what hands the money rule (difference Pix / question) to
+    the worker - the AI never reaches the calendar or the row."""
+    draft = draft_for()
+    calendar = EditCalendar()
+    result = await ai(
+        conversation(draft, fr.STEP_EDIT_MENU),
+        {"service": "Retorno"},
+        context(calendar, paid_deposit=True),
+    )
+    assert result.flow_step == fr.STEP_EDIT_CONFIRM
+    assert result.appointment_edit is None
+    assert result.flow_edit_draft["current"]["service"] == "Retorno"
+    assert calendar.detail_updates == [] and calendar.created == []
+
+
+async def test_i6c_with_a_paid_sinal_the_ai_may_open_the_service_list():
+    draft = draft_for()
+    result = await ai(
+        conversation(draft, fr.STEP_EDIT_MENU),
+        {"open_field": "service"},
+        context(paid_deposit=True),
+    )
+    assert result.flow_step == fr.STEP_EDIT_SERVICE
 
 
 async def test_i7_edit_still_expires_without_optional_clinic_configuration():

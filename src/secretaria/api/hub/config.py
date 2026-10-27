@@ -59,6 +59,7 @@ PAYMENT_WRITE_FIELDS = frozenset(
         "pix_deposit_enabled",
         "pix_deposit_percent",
         "pix_refund_window_hours",
+        "pix_difference_refund_min_days",
         "pix_retention_policy",
         "pix_partial_refund_percent",
         "pix_reschedule_limit",

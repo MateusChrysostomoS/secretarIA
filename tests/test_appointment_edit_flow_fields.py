@@ -94,6 +94,56 @@ async def test_a_longer_service_that_does_not_fit_asks_for_a_new_time():
     assert not any(isinstance(b, fr.MenuBubble) for b in result.bubbles)
 
 
+async def test_with_a_paid_deposit_a_new_service_reaches_the_confirmation():
+    result = await _step(
+        fr.STEP_EDIT_SERVICE, fr._service_row_title("Retorno"), ctx=context(paid_deposit=True)
+    )
+
+    assert result.flow_step == fr.STEP_EDIT_CONFIRM
+    assert _draft_of(result).changed() == ["serviço"]
+
+
+async def test_a_paid_draft_that_only_changes_the_service_is_kept():
+    draft = draft_for().with_changes(service="Retorno", end_at="2030-10-15T15:40")
+
+    result = await _step(
+        fr.STEP_EDIT_CONFIRM, ae.LABEL_EDIT_MORE_DATA, draft=draft, ctx=context(paid_deposit=True)
+    )
+
+    assert result.flow_step == fr.STEP_EDIT_MENU
+    assert _draft_of(result).current["service"] == "Retorno"
+
+
+async def test_a_paid_draft_that_changes_the_doctor_is_still_reverted():
+    draft = draft_for().with_changes(professional_id=str(DOCTOR_B))
+
+    result = await _step(
+        fr.STEP_EDIT_CONFIRM, fr.LABEL_CONFIRM, draft=draft, ctx=context(paid_deposit=True)
+    )
+
+    assert result.flow_step == fr.STEP_EDIT_MENU
+    assert result.appointment_edit is None
+    assert _draft_of(result).changed() == []
+
+
+async def test_at_the_limit_a_longer_service_that_does_not_fit_says_to_call_the_clinic():
+    """Paid sinal + reschedule limit reached: the time cannot move, so a service that does not
+    fit the current window is refused with a line - never a day/time picker it cannot use."""
+    appt = appointment(appointment_type="Retorno", end_at=START_UTC + timedelta(minutes=20))
+
+    result = await _step(
+        fr.STEP_EDIT_SERVICE,
+        fr._service_row_title("Consulta"),
+        appt=appt,
+        ctx=context(EditCalendar(free=False), paid_deposit=True, reschedule_blocked=True),
+    )
+
+    assert result.flow_step == fr.STEP_EDIT_MENU
+    assert result.bubbles[0].body == ae.EDIT_SERVICE_NO_ROOM
+    draft = _draft_of(result)
+    assert draft.current["service"] == "Retorno" and draft.changed() == []
+
+
 # --- Doctor --------------------------------------------------------------------------
 
 

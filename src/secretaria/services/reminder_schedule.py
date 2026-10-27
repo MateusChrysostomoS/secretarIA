@@ -33,6 +33,7 @@ from secretaria.models import (
 from secretaria.models.appointment_reminder import (
     REMINDER_ANSWER_CONFIRM,
     REMINDER_CHANNEL_WHATSAPP,
+    REMINDER_KIND_CHAT,
     REMINDER_KIND_CUSTOM,
     REMINDER_KIND_DAY,
     REMINDER_KIND_HOUR,
@@ -267,8 +268,9 @@ async def cancel_reminders(session: AsyncSession, appointment_id: UUID, *, reaso
 
 
 def reset_confirmation(appointment: Appointment) -> None:
-    """Zero the confirmation counter (a moved booking is unconfirmed again)."""
+    """Zero the confirmation counters (a moved booking is unconfirmed again)."""
     appointment.confirmation_count = 0
+    appointment.card_confirmation_count = 0
     appointment.first_confirmed_at = None
     appointment.last_confirmed_at = None
 
@@ -312,6 +314,11 @@ async def register_confirmation(
       it must not leak whose row it is). A cancelled row or one of an older
       start (the booking moved since) is a stale tap: ignored, count unchanged.
       The same row counts once; a different row counts again until the cap of 2.
+      A patient's counted tap on a row also adds 1 to `card_confirmation_count`
+      (no cap: the entry card stops at 3 - services/reminder_opening.py). The `chat`
+      row shown AGAIN after its confirmation (`sent_at` later than `answered_at`)
+      takes one more tap per showing, which adds to `card_confirmation_count` ONLY:
+      the entry card raises `confirmation_count` at most once per date.
     * With `reminder_id=None` (staff, or a prompt that has no row) it counts only
       when the counter is 0: re-clicking "mark as confirmed" never reaches 2.
     * On the way the status becomes CONFIRMED (a logged transition) unless it
@@ -347,11 +354,32 @@ async def register_confirmation(
                 and _as_utc(reminder.appointment_start_at) != _as_utc(appointment.start_at)
             )
         )
-        if stale or reminder.answer == REMINDER_ANSWER_CONFIRM:
+        if stale:
+            return count
+        if reminder.answer == REMINDER_ANSWER_CONFIRM:
+            if not _entry_card_shown_again(reminder):
+                return count
+            # Review I1 (owner 2026-10-27): a re-shown entry card counts only towards the 3
+            # that retire it, never again towards the agenda's cap (the 1 d / 1 h buttons
+            # and the clinic's confirm card depend on that one).
+            if source != CONFIRMATION_SOURCE_STAFF:
+                appointment.card_confirmation_count = (appointment.card_confirmation_count or 0) + 1
+            reminder.answered_at = now_utc
+            appointment.updated_at = now_utc
+            await session.flush()
+            logger.info(
+                "entry_card_reconfirmed",
+                appointment_id=str(appointment.id),
+                card_confirmation_count=appointment.card_confirmation_count,
+            )
             return count
         reminder.answer = REMINDER_ANSWER_CONFIRM
         reminder.answered_at = now_utc
         counts = True
+        if source != CONFIRMATION_SOURCE_STAFF:
+            # The patient's own tap on a card: uncapped, it only retires the entry card
+            # (services/reminder_opening.py, owner 2026-10-27).
+            appointment.card_confirmation_count = (appointment.card_confirmation_count or 0) + 1
     else:
         counts = count == 0
 
@@ -382,6 +410,16 @@ async def register_confirmation(
         confirmation_count=count,
     )
     return count
+
+
+def _entry_card_shown_again(reminder: AppointmentReminder) -> bool:
+    """A confirmed `chat` row that went out again after that confirmation (one tap per showing)."""
+    return (
+        reminder.kind == REMINDER_KIND_CHAT
+        and reminder.answered_at is not None
+        and reminder.sent_at is not None
+        and _as_utc(reminder.answered_at) < _as_utc(reminder.sent_at)
+    )
 
 
 def display_state(appointment, reminders: Iterable) -> str:

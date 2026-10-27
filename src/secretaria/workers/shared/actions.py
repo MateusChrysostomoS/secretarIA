@@ -47,6 +47,7 @@ from secretaria.services.patient_context import (
     load_upcoming_appointments,
 )
 from secretaria.services.payments import deposit_lifecycle
+from secretaria.services.payments.service_change import REFUND_ACTIONS
 from secretaria.services.release_offer import RELEASE_OFFER_ACTIONS
 from secretaria.services.reminder_text import REMINDER_ROW_ACTIONS
 from secretaria.services.service_catalog import (
@@ -86,6 +87,7 @@ from secretaria.workers.shared.sender import (
     _reply_sender,
     _send_simple_text,
 )
+from secretaria.workers.shared.service_change_actions import handle_service_diff_tap
 from secretaria.workers.shared.text import (
     _as_utc,
 )
@@ -237,6 +239,12 @@ async def _handle_action_button(
         appt_uuid = UUID(appointment_id)
     except ValueError:
         return  # already validated by extract_action_button; defensive only
+
+    # 2026-10-26: "quer a diferença do sinal de volta?" - the id is a DepositAdjustment's, checked
+    # against the conversation's patient by the handler. Answered there, nothing follows.
+    if action in REFUND_ACTIONS:
+        await handle_service_diff_tap(reply, action, appt_uuid)
+        return
 
     # TASK-032 R2/R3: the reminder buttons carry a REMINDER row id, not an
     # appointment id; their handler checks the row against the patient. Some

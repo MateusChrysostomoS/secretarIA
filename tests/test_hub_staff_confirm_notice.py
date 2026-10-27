@@ -88,7 +88,10 @@ async def test_the_patient_confirming_the_card_reaches_two_and_stops_the_prompts
             last_activity_at=datetime.now(UTC) - timedelta(hours=7),
             now=datetime.now(UTC),
         )
-    assert decision.reason == reminder_opening.SKIP_CONFIRMED_TWICE
+    # Owner 2026-10-27: the entry card stops only at 3 patient confirmations on a card; the
+    # staff's own confirmation does not count.
+    assert appointment.card_confirmation_count == 1
+    assert decision.reason == reminder_opening.OPEN
 
 
 async def test_cancelar_and_alterar_dados_follow_the_reminder_paths(

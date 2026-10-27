@@ -61,12 +61,15 @@ from secretaria.schemas.calendar import (
     AgendaViewerRead,
     AppointmentActionRead,
     AppointmentCancel,
+    AppointmentCancelRead,
     AppointmentCreate,
     AppointmentEdit,
+    AppointmentEditRead,
     AppointmentRead,
     AppointmentRelease,
     AppointmentReleaseRead,
     AppointmentReschedule,
+    AppointmentServiceChangeRead,
     AppointmentStatusUpdate,
     AwaitingPaymentRead,
     BlockCreate,
@@ -81,6 +84,7 @@ from secretaria.schemas.calendar import (
 from secretaria.services import (
     appointment_release,
     booking_hold,
+    brain_staff,
     cancellation_notice,
     clinic_action_notice,
     release_offer,
@@ -113,7 +117,7 @@ from secretaria.services.calendar import (
 from secretaria.services.insurance_catalog import AppointmentPlan, load_appointment_plans
 from secretaria.services.local_calendar import LocalCalendarService, list_unpushed_events
 from secretaria.services.patient_context import as_utc
-from secretaria.services.payments import deposit_lifecycle
+from secretaria.services.payments import adjustment_queries, deposit_lifecycle
 from secretaria.services.tenant_config import (
     TenantRuntimeConfig,
     list_active_professionals,
@@ -516,6 +520,8 @@ def _deposit_read(
         status=view.status.value,
         amount_cents=view.amount_cents,
         needs_attention=view.needs_attention,
+        held_cents=view.held_cents,
+        pending_difference_cents=view.pending_difference_cents,
     )
 
 
@@ -1131,7 +1137,7 @@ async def cancel_preview(
     )
 
 
-@router.post("/appointments/{appointment_id}/cancel", response_model=AppointmentActionRead)
+@router.post("/appointments/{appointment_id}/cancel", response_model=AppointmentCancelRead)
 async def cancel_appointment(
     appointment_id: str,
     body: AppointmentCancel,
@@ -1139,7 +1145,7 @@ async def cancel_appointment(
     tenant: Tenant = Depends(get_current_tenant),
     viewer: AgendaViewer = Depends(get_agenda_viewer),
     session: AsyncSession = Depends(get_session),
-) -> AppointmentActionRead:
+) -> AppointmentCancelRead:
     if not body.confirm:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "confirm must be true")
 
@@ -1197,10 +1203,15 @@ async def cancel_appointment(
         cancelled_by=deposit_lifecycle.CANCELLED_BY_CLINIC,
     )
     notice: str | None = None
+    voided_difference_cents: int | None = None
     if deposit_outcome is not None:
         deposit = await deposit_lifecycle.get_deposit_for_appointment(session, appt.id)
         if deposit is not None:
             notice = deposit_lifecycle.cancellation_notice(deposit_outcome, tenant, deposit)
+            # Plan 2026-10-26: an unpaid difference Pix this cancellation cancelled.
+            voided_difference_cents = (
+                adjustment_queries.voided_difference_hint(deposit) or None
+            )
 
     await session.commit()
     await session.refresh(appt)
@@ -1234,10 +1245,11 @@ async def cancel_appointment(
     )
     deposit_status = await _deposit_status_value(session, appt.id)
     read = _appointment_read(appt, deposit_status=deposit_status, deposit_outcome=deposit_outcome)
-    return AppointmentActionRead(
+    return AppointmentCancelRead(
         **read.model_dump(),
         patient_notice=patient_notice,
         whatsapp_link=_notice_link(patient_notice, patient, appt),
+        voided_difference_cents=voided_difference_cents,
     )
 
 # ---------------------------------------------------------------------------
@@ -1317,8 +1329,20 @@ async def release_appointment(
                 release_offer.warning_text(deposit),
                 deposit_outcome=release_offer.DEPOSIT_OUTCOME_OFFERED,
                 amount_cents=deposit.amount_cents,
+                # what the clinic HOLDS (sinal + paid differences), the figure of the message
+                held_cents=adjustment_queries.held_cents_hint(deposit),
             ),
         )
+    # TASK-052 Task 16: whose closing time sets the patient's deadline B - the CLINIC's when it
+    # has a working secretary, else the consultation doctor's; unknown (None) = the doctor's.
+    # Asked live from brain-api (never the role in this hub token: it names who acts, not who
+    # the clinic has), only for a PAID deposit and BEFORE the row is claimed, so no lock is held
+    # during the call. A deposit paid during the Google delete below keeps None (doctor's).
+    has_secretary = (
+        await brain_staff.fetch_has_secretary(tenant.id)
+        if deposit is not None and deposit.status is PixDepositStatus.PAID
+        else None
+    )
 
     if appt.google_event_id:
         try:
@@ -1393,8 +1417,7 @@ async def release_appointment(
             deposit=paid,
             now=now,
             paid_notice_allowed=allow_paid,
-            # Closing time = the consultation doctor's for now (owner 2026-10-12); the clinic's
-            # when it has a secretary comes with Task 16 (pending the brain-api roles screen).
+            has_secretary=has_secretary,
         )
         deposit_outcome = release_offer.DEPOSIT_OUTCOME_OFFERED
         keep = offer is not None and release_offer.keep_allowed(offer, now)
@@ -1534,7 +1557,7 @@ async def message_patient(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/appointments/{appointment_id}/edit", response_model=AppointmentActionRead)
+@router.post("/appointments/{appointment_id}/edit", response_model=AppointmentEditRead)
 async def edit_appointment(
     appointment_id: str,
     body: AppointmentEdit,
@@ -1542,7 +1565,7 @@ async def edit_appointment(
     tenant: Tenant = Depends(get_current_tenant),
     viewer: AgendaViewer = Depends(get_agenda_viewer),
     session: AsyncSession = Depends(get_session),
-) -> AppointmentActionRead:
+) -> AppointmentEditRead:
     """The clinic changes date/time, service, doctor, convênio, who it is for or the
     contact phone in one action, and the patient is told (spec 2026-10-09 §1/§2/§3).
 
@@ -1550,6 +1573,11 @@ async def edit_appointment(
     is services/staff_appointment_edit.py; here: the reminders follow a new time (R2,
     same rule as /reschedule), the doctor e-mail is enqueued (the outbox cron recovers
     a lost enqueue) and the patient gets "A clínica alterou ..." with the three buttons.
+
+    A new service on a PAID sinal (plan 2026-10-26 Task 7) also answers `service_change`
+    and sends the patient either the Pix of the difference (the service changes only when
+    it is paid; nothing about it in "A clínica alterou") or the refund question with its
+    two fixed buttons; a refused change is 409/422/502 `service_change_blocked`.
     """
     appt = await _get_appointment(session, tenant, appointment_id, viewer)
     if (
@@ -1607,29 +1635,51 @@ async def edit_appointment(
             ),
         )
     patient = await _patient_of(session, tenant, appt)
-    notice = await clinic_action_notice.notify_staff_edit(
-        session,
-        tenant,
-        appt,
-        patient,
-        changes=outcome.changes,
-        allow_paid=staff_patient_message.paid_notice_authorised(
-            tenant, body.notify_outside_window
-        ),
-        now=datetime.now(UTC),
-    )
+    allow_paid = staff_patient_message.paid_notice_authorised(tenant, body.notify_outside_window)
+    notice = None
+    if outcome.changes:  # empty only when the one change waits for the difference Pix
+        notice = await clinic_action_notice.notify_staff_edit(
+            session,
+            tenant,
+            appt,
+            patient,
+            changes=outcome.changes,
+            allow_paid=allow_paid,
+            now=datetime.now(UTC),
+        )
+    service_change_read = None
+    if outcome.service_change is not None:
+        # Plan 2026-10-26 Task 7: the Pix of the difference, or "quer a diferença de volta?".
+        money_notice = await clinic_action_notice.notify_service_change(
+            session, tenant, appt, patient, outcome.service_change,
+            allow_paid=allow_paid, now=datetime.now(UTC),
+        )
+        change = outcome.service_change
+        service_change_read = AppointmentServiceChangeRead(
+            status=change.status,
+            diff_cents=change.diff_cents,
+            old_service=change.old_service,
+            new_service=change.new_service,
+            adjustment_id=str(change.adjustment_id) if change.adjustment_id else None,
+            expires_at=change.expires_at,
+            patient_notice=money_notice.code if money_notice is not None else None,
+        )
+        if notice is None:
+            notice = money_notice
     await session.refresh(appt)
     logger.info(
         "calendar_appointment_edited",
         appointment_id=str(appt.id),
         changed=len(outcome.changes),
-        patient_notice=notice.code,
+        patient_notice=notice.code if notice is not None else None,
+        service_change=service_change_read.status if service_change_read else None,
     )
     deposit_status = await _deposit_status_value(session, appt.id)
-    return AppointmentActionRead(
+    return AppointmentEditRead(
         **_appointment_read(appt, deposit_status=deposit_status).model_dump(),
-        patient_notice=notice.code,
-        whatsapp_link=notice.whatsapp_link,
+        patient_notice=notice.code if notice is not None else None,
+        whatsapp_link=notice.whatsapp_link if notice is not None else None,
+        service_change=service_change_read,
     )
 
 

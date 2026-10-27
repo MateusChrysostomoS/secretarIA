@@ -8,6 +8,7 @@ the CLINIC (24 h to decide); "Remarcar" carries the deposit until the clinic say
 from datetime import timedelta
 from uuid import uuid4
 
+import pytest
 import pytest_asyncio
 from sqlalchemy import func, select
 
@@ -187,6 +188,32 @@ def test_the_texts_say_the_clinic_decides_and_never_name_a_bank():
     assert "conta de onde saiu o Pix" in ro.CHECK_TEXT
 
 
+def test_before_the_check_no_text_promises_the_same_sinal_without_a_new_charge():
+    """Session 07: whether the paid sinal is reused is decided only at the confirmation, by the
+    provider check (`release_carry_check`); when it refuses or cannot answer, a NEW sinal is
+    charged by safety. So nothing said BEFORE that check may promise "sem nova cobrança" - only
+    the confirmed-reuse note (`CARRIED_OVER_NOTE`) may."""
+    deposit = PixDeposit(amount_cents=6000)
+    before_check = [
+        ro.offer_body(
+            deposit=deposit,
+            decide_by_at=B,
+            timezone=SP,
+            justification=None,
+            confirmed=False,
+            keep=keep,
+        )
+        for keep in (True, False)
+    ] + [ro.KEEP_DECLINED_TEXT, ro.warning_text(deposit)]
+    for text in before_check:
+        assert "sem nova cobrança" not in text and "mesmo sinal, sem" not in text
+        assert "usando o mesmo sinal" not in text  # a promise the check may not keep
+    for text in before_check[:3]:
+        assert "se o sinal que você já pagou pode valer" in text
+    assert "Não há nova cobrança" in ro.CARRIED_OVER_NOTE  # the confirmed reuse still says it
+    assert "sinal novo" in ro.CARRY_REFUSED_NOTE
+
+
 # --- opening -------------------------------------------------------------------------------------
 
 
@@ -220,15 +247,51 @@ async def test_opening_is_idempotent_and_sets_the_instants(db):
 
 
 async def test_the_closing_is_the_consultation_doctors(db):
-    # Owner 2026-10-12: B uses the DOCTOR's closing for now (the "clinic with a secretary" rule is
-    # Task 16, pending). The doctor closes at 18:00 (F = T + 3 h 30); the clinic at 22:00 (T + 6 h).
+    # Owner 2026-10-12: without a secretary B uses the DOCTOR's closing. The doctor closes at 18:00
+    # (F = T + 3 h 30); the clinic at 22:00 (T + 6 h).
     _a, doctors = await _offer(db, professional_hours=CLOSES_AT_SIX)
     _b, no_doctor = await _offer(db, business_hours=CLOSES_AT_SIX)
     assert utc(doctors.decide_by_at) == T + timedelta(hours=3, minutes=30)
     assert utc(no_doctor.decide_by_at) == T + timedelta(hours=3, minutes=30)  # no doctor: clinic's
-    # The hook Task 16 will fill: True switches to the clinic's hours (22:00 -> B = T + 6 h).
-    _c, clinics = await _offer(db, professional_hours=CLOSES_AT_SIX, has_secretary=True)
-    assert utc(clinics.decide_by_at) == B
+
+
+@pytest.mark.parametrize(
+    ("has_secretary", "expected"),
+    [
+        (True, B),  # the clinic's closing (22:00 -> capped at T + 6 h)
+        (False, T + timedelta(hours=3, minutes=30)),  # the doctor's (18:00 - 30 min)
+        (None, T + timedelta(hours=3, minutes=30)),  # unknown -> the doctor's (approved rule)
+    ],
+)
+async def test_the_closing_is_the_clinics_with_a_secretary_else_the_doctors(
+    db, has_secretary, expected
+):
+    """Task 16 (TASK-067 s06): brain-api's answer, passed through `open_offer`."""
+    _r, offer = await _offer(db, professional_hours=CLOSES_AT_SIX, has_secretary=has_secretary)
+    assert utc(offer.decide_by_at) == expected
+    assert utc(offer.expires_at) == E  # E never depends on whose closing
+
+
+@pytest.mark.parametrize(
+    ("has_secretary", "expected"),
+    [
+        # Manaus (UTC-4): the clinic closes 19:00 local = 23:00 UTC -> F = 22:30 UTC = T + 5 h 30.
+        (True, T + timedelta(hours=5, minutes=30)),
+        # The doctor closes 18:00 local = 22:00 UTC -> F = 21:30 UTC = T + 4 h 30.
+        (False, T + timedelta(hours=4, minutes=30)),
+        (None, T + timedelta(hours=4, minutes=30)),
+    ],
+)
+async def test_the_closing_is_read_in_the_clinics_timezone(db, has_secretary, expected):
+    clinic_closes_at_seven = {"tuesday": [{"start": "08:00", "end": "19:00"}]}
+    _r, offer = await _offer(
+        db,
+        business_hours=clinic_closes_at_seven,
+        professional_hours=CLOSES_AT_SIX,
+        has_secretary=has_secretary,
+        timezone="America/Manaus",
+    )
+    assert utc(offer.decide_by_at) == expected
 
 
 async def test_a_deposit_of_another_clinic_never_gets_an_offer(db):

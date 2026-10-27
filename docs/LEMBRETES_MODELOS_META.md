@@ -91,7 +91,7 @@ Corpo: `{{1}}`. Botões de resposta rápida: "Manter horário", "Remarcar", "Can
 (2026-10-12): este modelo é reaproveitado em toda mensagem da oferta fora da janela (liberação, resposta
 da clínica ao "Manter"), inclusive depois do início da consulta — "Manter horário" tocado depois do
 início responde com uma mensagem nova só com "Remarcar" e "Cancelar".
-Exemplo de `{{1}}`: "Devido à sua não confirmação da ida à consulta, a clínica liberou o seu horário para que você decida o que fazer. Você já pagou o sinal desta consulta (R$ 60,00). Toque em *Manter horário* para ficar com o mesmo horário, em *Remarcar* para escolher outro dia e horário usando o mesmo sinal, sem nova cobrança, ou em *Cancelar* para cancelar a consulta e receber o sinal de volta. Se você não responder até 20:00 de 05/03, a clínica será avisada para devolver o seu sinal."
+Exemplo de `{{1}}`: "Devido à sua não confirmação da ida à consulta, a clínica liberou o seu horário para que você decida o que fazer. Você já pagou o sinal desta consulta (R$ 60,00). Toque em *Manter horário* para ficar com o mesmo horário, em *Remarcar* para escolher outro dia e horário (ao confirmar, conferimos se o sinal que você já pagou pode valer para a nova consulta) ou em *Cancelar* para cancelar a consulta e receber o sinal de volta. Se você não responder até 20:00 de 05/03, a clínica será avisada para devolver o seu sinal."
 
 ### `devolucao_sinal_conferir_v1`
 

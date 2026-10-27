@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.logging import get_logger
 from secretaria.models import (
+    Appointment,
     ConsentEvent,
     FlowState,
     Message,
@@ -19,7 +20,7 @@ from secretaria.models import (
 from secretaria.schemas.webhook import (
     inbound_routing_text,
 )
-from secretaria.services import deposit_wait, reminder_hooks
+from secretaria.services import deposit_wait
 from secretaria.services.flow_router import (
     LABEL_CONFIRM,
     STEP_AWAITING_CONFIRMATION,
@@ -50,8 +51,9 @@ from secretaria.services.pending_identity import (
 )
 from secretaria.services.reminder_opening import (
     OPEN,
-    SKIP_SWITCH_OFF,
+    SKIP_NO_PATIENT,
     decide_reminder_opening,
+    entry_card_retired,
 )
 from secretaria.workers.portal.identity_gate import NO_DECISION, run_identity_gate
 from secretaria.workers.shared.channel_policy import policy_for
@@ -921,22 +923,31 @@ async def _route_inbound_turn(
     # dropped), and INSTEAD of the returning-patient offer below: a patient with
     # a live future appointment who writes after the reactivation gap sees that
     # appointment's reminder card first (spec §4.3). The patient's message is
-    # still answered right after it (`_send_bot_reply_inner`). Returns without a
-    # query when the clinic's switch is off.
+    # still answered right after it (`_send_bot_reply_inner`). Owner 2026-10-27:
+    # whatever the clinic's reminder switch, until the patient confirmed on a
+    # card 3 times (`entry_card_retired`; then the greeting below).
+    entry_appointment = None
     if (
         greeting_override is not None and opening_context is not None
         and opening_context.future_appointments
         and opening_context.state in (
             PatientOpeningState.HAS_UPCOMING_SOON, PatientOpeningState.HAS_UPCOMING,
         )
-        and reminder_hooks.enabled_for(tenant)
+    ):
+        entry_appointment = await session.get(
+            Appointment, UUID(opening_context.future_appointments[0]["id"])
+        )
+    if (
+        entry_appointment is not None
+        and entry_appointment.tenant_id == tenant.id
+        and not entry_card_retired(entry_appointment)
     ):
         # The known patient's first greeting uses the same reminder as a later
         # quiet return. Consent/identity/handover gates have already run above.
         return _ReplyContext(
             channel=channel, conversation_id=conversation.id, tenant_id=tenant.id,
             patient_ref=patient_ref, inbound_body=body or "",
-            reminder_opening_appointment_id=UUID(opening_context.future_appointments[0]["id"]),
+            reminder_opening_appointment_id=entry_appointment.id,
             reminder_opening_first_contact=True,
         )
     if greeting_override is None:
@@ -962,7 +973,7 @@ async def _route_inbound_turn(
                 inbound_body=body or "",
                 reminder_opening_appointment_id=opening.appointment_id,
             )
-        if opening.reason != SKIP_SWITCH_OFF:
+        if opening.reason != SKIP_NO_PATIENT:
             logger.info(
                 "reminder_opening_skipped",
                 reason=opening.reason,

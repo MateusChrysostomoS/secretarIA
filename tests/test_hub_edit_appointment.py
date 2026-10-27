@@ -343,3 +343,327 @@ async def test_long_multi_field_portal_edit_preserves_complete_detail_and_curren
     assert "Ana " * 62 in detail and new_doctor.strip() in detail
     assert "Agora:" in detail and detail.endswith(new_doctor.strip() + ".")
     assert len([row for row in rows if row.interactive is not None]) == 1
+
+
+# --------------------------------------------------------------------------
+# A PAID sinal and a new SERVICE (plan 2026-10-26 Task 7). Sinal: 10000 cents at 30 %.
+# --------------------------------------------------------------------------
+
+PRICED = [
+    {"name": "Consulta", "price": "R$ 200,00", "duration_min": 30, "is_active": True},
+    {"name": "Avaliação", "price": "R$ 500,00", "duration_min": 50, "is_active": True},
+    {"name": "Retorno", "price": "R$ 100,00", "duration_min": 20, "is_active": True},
+    {"name": "Sem preço", "duration_min": 30, "is_active": True},
+]
+
+
+@pytest.fixture
+def provider(monkeypatch):
+    from secretaria.services.payments import registry
+    from secretaria.services.payments.provider import ChargeState, CreatedCharge, PaymentStatus
+    from tests.payments_support import FakeProvider
+
+    fake = FakeProvider(state=ChargeState(status=PaymentStatus.PENDING))
+    fake.created_charge = CreatedCharge(provider_charge_id="pay_diff_1", copy_paste="000201pix")
+    monkeypatch.setitem(registry._PROVIDERS, "asaas", fake)
+    return fake
+
+
+async def _make_paid(db, world) -> None:
+    from secretaria.models import Tenant
+    from secretaria.models.clinic_payment_account import ACCOUNT_CONNECTED
+    from secretaria.services import tenant_config as cfg
+    from secretaria.services.payments import accounts
+    from tests._reminders_v2 import seed_paid_deposit
+
+    await seed_paid_deposit(db, world)
+    async with db() as session:
+        tenant = await session.get(Tenant, world.tenant.id)
+        tenant.appointment_types = PRICED
+        tenant.pix_deposit_enabled = True
+        tenant.pix_deposit_percent = 30
+        tenant.pix_difference_refund_min_days = 2
+        tenant.deposit_hold_ttl_minutes = 30
+        row = await accounts.get_or_create_account_row(
+            session, tenant_id=tenant.id, provider="asaas"
+        )
+        cfg.set_payment_account_secrets(row, api_key="key", webhook_token="token")
+        row.status = ACCOUNT_CONNECTED
+        await session.commit()
+
+
+async def _paid_world(db, acting, **kwargs):
+    world = await _world(db, acting, **kwargs)
+    await _make_paid(db, world)
+    return world
+
+
+async def _adjustments(db):
+    from sqlalchemy import select
+
+    from secretaria.models.deposit_adjustment import DepositAdjustment
+
+    async with db() as session:
+        return list(await session.scalars(select(DepositAdjustment)))
+
+
+async def test_paid_dearer_service_answers_awaiting_payment_and_sends_the_pix(
+    client: AsyncClient, db, acting, provider
+):
+    pool = FakeArqPool()
+    install_pool(pool)
+    world = await _paid_world(db, acting)
+
+    response = await _post(client, world.appointment.id, service="Avaliação")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["appointment_type"] == "Consulta"  # changes only after the payment
+    [adjustment] = await _adjustments(db)
+    change = body["service_change"]
+    assert change == {
+        "status": "awaiting_payment",
+        "diff_cents": 5000,
+        "old_service": "Consulta",
+        "new_service": "Avaliação",
+        "adjustment_id": str(adjustment.id),
+        "expires_at": change["expires_at"],
+        "patient_notice": "whatsapp_sent",
+    }
+    assert change["expires_at"] is not None
+    assert "000201pix" not in response.text  # the Pix code goes to the patient only
+    assert body["patient_notice"] == "whatsapp_sent"
+    texts = [item[2] for item in sent()]
+    assert len(texts) == 1  # ONE message: the explanation and the code together
+    assert "R$ 50,00" in texts[0] and "só muda depois" in texts[0] and "Avaliação" in texts[0]
+    # the clinic asked for it, not the patient: never "Para trocar sua consulta…"
+    assert texts[0].startswith("A clínica quer trocar o serviço da sua consulta para Avaliação.")
+    assert "Para trocar sua consulta" not in texts[0]
+    assert texts[0].rstrip().endswith("```000201pix```")  # the copia-e-cola, fenced, last
+    assert not any(text.startswith("A clínica alterou") for text in texts)
+    assert pool.calls == []  # no doctor e-mail while the difference is unpaid
+    assert FakeCalendar.get("tenant").updated == []
+
+
+async def test_paid_dearer_service_and_a_new_time_tell_the_time_now_and_the_pix(
+    client: AsyncClient, db, acting, provider
+):
+    world = await _paid_world(db, acting)
+    new = world.start_at + timedelta(days=1)
+
+    response = await _post(client, world.appointment.id, service="Avaliação", start_at=_iso(new))
+
+    body = response.json()
+    assert response.status_code == 200 and body["service_change"]["status"] == "awaiting_payment"
+    assert body["appointment_type"] == "Consulta" and body["status"] == "rescheduled"
+    card, pix = sent()
+    assert card[0] == "buttons" and "• Data:" in card[2] and "Serviço" not in card[2]
+    assert "R$ 50,00" in pix[2] and pix[2].rstrip().endswith("```000201pix```")
+
+
+async def test_paid_cheaper_service_applies_and_asks_the_refund_question(
+    client: AsyncClient, db, acting, provider
+):
+    from secretaria.models.deposit_adjustment import STATUS_REFUND_REQUESTED
+    from secretaria.services.payments import service_change
+
+    pool = FakeArqPool()
+    install_pool(pool)
+    world = await _paid_world(db, acting)
+
+    response = await _post(client, world.appointment.id, service="Retorno")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["appointment_type"] == "Retorno"
+    [adjustment] = await _adjustments(db)
+    assert body["service_change"]["status"] == "asked"
+    assert body["service_change"]["diff_cents"] == 7000
+    assert body["service_change"]["adjustment_id"] == str(adjustment.id)
+    assert body["service_change"]["expires_at"] is None
+    card, question = sent()
+    assert card[0] == "buttons" and "• Serviço: Consulta → Retorno" in card[2]
+    assert question == (
+        "buttons",
+        WA_ID,
+        service_change.refund_question_text("Retorno", 7000),
+        service_change.refund_question_buttons(adjustment.id),
+    )
+    assert body["service_change"]["patient_notice"] == "whatsapp_sent"
+    # exactly ONE "Consulta alterada" e-mail to the doctor
+    assert [call[0] for call in pool.calls] == ["send_professional_edit_notification"]
+
+    await tap(world, service_change.ACTION_REFUND_YES, adjustment.id)
+    [answered] = await _adjustments(db)
+    assert answered.status == STATUS_REFUND_REQUESTED
+
+
+async def test_paid_dearer_service_with_the_provider_down_applies_and_tells_the_patient(
+    client: AsyncClient, db, acting, provider
+):
+    """Follow-up B (2026-10-27): no Pix could be created - the clinic's change stands now, the
+    patient reads that the difference is settled with the clinic, the clinic gets ONE item."""
+    from sqlalchemy import select
+
+    from secretaria.models import PaymentAttentionItem
+    from secretaria.services.payments import service_change
+    from secretaria.services.payments.provider import ProviderError
+
+    provider.create_error = ProviderError("down", status_code=503, retryable=True)
+    world = await _paid_world(db, acting)
+
+    response = await _post(client, world.appointment.id, service="Avaliação")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["appointment_type"] == "Avaliação"
+    [adjustment] = await _adjustments(db)
+    assert body["service_change"]["status"] == "applied_now"
+    assert body["service_change"]["diff_cents"] == 5000
+    assert body["service_change"]["adjustment_id"] == str(adjustment.id)
+    assert body["service_change"]["patient_notice"] == "whatsapp_sent"
+    card, money = sent()
+    assert card[0] == "buttons" and "• Serviço: Consulta → Avaliação" in card[2]
+    assert money[2] == service_change.collect_due_text("Avaliação", 5000, source="hub")
+    assert "R$ 50,00" in money[2] and "clínica" in money[2]
+    async with db() as session:
+        [item] = list(await session.scalars(select(PaymentAttentionItem)))
+    assert (item.reason, item.amount_cents) == ("service_diff_collect_due", 5000)
+
+
+async def test_paid_dearer_service_outside_the_window_says_so_and_sends_no_code(
+    client: AsyncClient, db, acting, provider
+):
+    world = await _paid_world(db, acting, last_inbound_at=recent(30))
+
+    response = await _post(client, world.appointment.id, service="Avaliação")
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["service_change"]["status"] == "awaiting_payment"
+    assert body["service_change"]["patient_notice"] == "whatsapp_outside_window"
+    assert body["patient_notice"] == "whatsapp_outside_window"
+    assert body["whatsapp_link"] == f"https://wa.me/{WA_ID}"
+    assert sent() == []
+
+
+async def test_a_portal_patient_gets_the_refund_question_card_in_the_chat(
+    client: AsyncClient, db, acting, provider
+):
+    world = await _paid_world(
+        db, acting, channel=CHANNEL_BRAIN_MESSAGE, wa_id=None, email="m@x.com"
+    )
+
+    response = await _post(client, world.appointment.id, service="Retorno")
+
+    assert response.json()["service_change"]["patient_notice"] in (
+        "portal_chat",
+        "portal_chat_email",
+    )
+    [adjustment] = await _adjustments(db)
+    cards = [
+        row.interactive
+        for row in await outbound_messages(db, world.conversation.id)
+        if row.interactive is not None
+    ]
+    assert len(cards) == 2  # "A clínica alterou" + the refund question
+    assert "diferença de volta" in cards[1]["body"]
+    assert f"svcdiffyes|{adjustment.id}" in str(cards[1])
+    assert sent() == []
+
+
+async def test_paid_service_change_refused_is_422_and_tells_nobody(
+    client: AsyncClient, db, acting, provider
+):
+    world = await _paid_world(db, acting)
+
+    response = await _post(client, world.appointment.id, service="Sem preço")
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert (detail["code"], detail["reason"]) == ("service_change_blocked", "price_unavailable")
+    assert "Nada foi alterado" in detail["message"]
+    assert sent() == [] and await _adjustments(db) == []
+    assert (await reload_appointment(db, world.appointment.id)).appointment_type == "Consulta"
+
+
+async def test_paid_service_change_on_another_clinics_appointment_is_404(
+    client: AsyncClient, db, acting, provider
+):
+    world = await _paid_world(db, acting)
+    foreign = await seed_world(db, phone_number_id="pnid-9", start_at=world.start_at)
+    await _make_paid(db, foreign)
+    acting["tenant_id"] = world.tenant.id
+
+    response = await _post(client, foreign.appointment.id, service="Avaliação")
+
+    assert response.status_code == 404
+    assert provider.calls == [] and await _adjustments(db) == []
+    assert sent() == [] and FakeCalendar.instances == {}
+    assert (await reload_appointment(db, foreign.appointment.id)).appointment_type == "Consulta"
+
+
+async def test_paid_service_change_outside_a_restricted_doctors_scope_is_404(
+    client: AsyncClient, db, acting, provider
+):
+    from secretaria.services.agenda_visibility import AgendaViewer
+    from tests._agenda_viewer import view_as
+    from tests._r7_support import add_professional
+
+    world = await _paid_world(db, acting, professional_name="Dra. Ana")
+    beto = await add_professional(db, world.tenant.id, "Dr. Beto")
+    view_as(AgendaViewer("own", beto))
+
+    hidden = await _post(client, world.appointment.id, service="Avaliação")
+
+    assert hidden.status_code == 404
+    assert provider.calls == [] and await _adjustments(db) == [] and sent() == []
+
+    view_as(AgendaViewer("own", world.appointment.professional_id))  # her own: as before
+    own = await _post(client, world.appointment.id, service="Avaliação")
+    assert own.status_code == 200 and own.json()["service_change"]["status"] == "awaiting_payment"
+
+
+async def test_cancelling_with_a_difference_pix_waiting_says_it_was_cancelled(
+    client: AsyncClient, db, acting, provider
+):
+    """Browser proof 2026-10-26: the clinic's cancel result and the patient's cancel message
+    did not mention the pending difference Pix the cancellation voided."""
+    pool = FakeArqPool()
+    install_pool(pool)
+    from tests._r7_support import set_appointment
+
+    world = await _paid_world(db, acting)
+    await set_appointment(db, world.appointment.id, phone=WA_ID)
+    edited = await _post(client, world.appointment.id, service="Avaliação")
+    assert edited.json()["service_change"]["status"] == "awaiting_payment"
+
+    response = await client.post(
+        f"{CALENDAR}/appointments/{world.appointment.id}/cancel", json={"confirm": True}
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["voided_difference_cents"] == 5000
+    # the patient's cancel notice (WhatsApp: the cancellation job) carries the sentence
+    assert body["patient_notice"] == "whatsapp_queued", pool.calls
+    [job] = [call for call in pool.calls if call[0] == "send_cancellation_notice"]
+    deposit_notice = job[5]
+    assert deposit_notice.endswith(
+        "O Pix da diferença do sinal (R$ 50,00) foi cancelado: não pague esse código."
+    )
+    [adjustment] = await _adjustments(db)
+    assert adjustment.status == "cancelled"
+
+
+async def test_a_plain_cancel_reports_no_voided_difference(
+    client: AsyncClient, db, acting, provider
+):
+    world = await _paid_world(db, acting)
+
+    response = await client.post(
+        f"{CALENDAR}/appointments/{world.appointment.id}/cancel", json={"confirm": True}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["voided_difference_cents"] is None
