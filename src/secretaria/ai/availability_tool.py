@@ -48,6 +48,7 @@ from secretaria.ai.tools import (
     _tenant_id_ctx,
 )
 from secretaria.core.logging import get_logger
+from secretaria.services.availability import booking_notice_floor, booking_notice_hours
 from secretaria.services.availability_windows import (
     CLAMP_BOOKING_WINDOW,
     CLAMP_MAX_DAYS,
@@ -305,8 +306,14 @@ async def _read_availability(
         armed=False,
     )
     holds = await gate.busy_windows(target.owner_id)
+    # The doctor's minimum notice for a new booking: times inside it are not free to book.
+    floor = booking_notice_floor(target.professional, datetime.now(tz))
     scan = await scan_free_windows(
-        calendar, span=span, duration_minutes=target.slot_minutes, holds=holds
+        calendar,
+        span=span,
+        duration_minutes=target.slot_minutes,
+        holds=holds,
+        not_before=floor,
     )
 
     clamped = [*span.clamped, *([CLAMP_MAX_WINDOWS] if scan.truncated else [])]
@@ -320,6 +327,8 @@ async def _read_availability(
     }
     if target.professional is not None:
         result["professional"] = target.professional.name
+    if floor is not None:
+        result["min_booking_notice_hours"] = booking_notice_hours(target.professional)
     if clamped:
         result["clamped"] = clamped
     note = _note(span, scan)

@@ -74,7 +74,10 @@ from secretaria.services.attendee import (
     real_attendee_name,
 )
 from secretaria.services.availability import (
+    at_or_after,
     available_day_starts,
+    booking_notice_floor,
+    booking_notice_hours,
     slot_scan_limit,
     slot_taken_at_confirm,
     without_holds,
@@ -483,6 +486,12 @@ DAY_NO_LONGER_FREE_PREFIX = "Esse dia não tem mais horário livre."
 # there first (`availability.slot_taken_at_confirm`). One short line; the same
 # day's fresh times follow it (`_reoffer_taken_slot`).
 SLOT_TAKEN_AT_CONFIRM_MESSAGE = "Esse horário acabou de ser ocupado 😕"
+
+
+def booking_notice_message(hours: int) -> str:
+    """The line a patient reads when a time is inside the doctor's minimum notice."""
+    unit = "hora" if hours == 1 else "horas"
+    return f"Os agendamentos precisam de pelo menos {hours} {unit} de antecedência."
 NO_AVAILABLE_DAYS_MESSAGE = (
     "Não encontrei horários livres nos próximos dias. "
     "Escolha uma opção abaixo e a gente te ajuda."
@@ -3452,6 +3461,7 @@ async def enter_day_picker(
             start=start,
             window_days=DAY_PICKER_WINDOW_DAYS,
             duration_minutes=duration_minutes,
+            not_before=_booking_floor(conversation, professionals, branch, calendar.tzinfo),
         )
         if anchor is not None:
             # The days NEAREST the current one come first (ties: the earlier day), so
@@ -3538,14 +3548,26 @@ async def _enter_slot_picker(
     if calendar is None:
         return _calendar_unavailable(conversation, branch, branch.day_step)
     reserved = await _hold_windows(_hold_owner(conversation, professionals))
+    floor = _booking_floor(conversation, professionals, branch, calendar.tzinfo)
     try:
         slots = await calendar.list_free_slots(
             day=target,
             slot_minutes=duration_minutes,
-            max_slots=slot_scan_limit(duration_minutes) if reserved else SLOT_PICKER_MAX_SLOTS,
+            max_slots=(
+                slot_scan_limit(duration_minutes)
+                if reserved or floor is not None
+                else SLOT_PICKER_MAX_SLOTS
+            ),
         )
     except CalendarUnavailableError:
         return _calendar_unavailable(conversation, branch, branch.day_step)
+
+    # The doctor's minimum notice: a slot starting too soon is not offered at all. The
+    # whole day was read, so the times after the floor still fill the page.
+    if floor is not None:
+        slots = at_or_after(slots, floor, calendar.tzinfo)
+        if not reserved:
+            slots = slots[:SLOT_PICKER_MAX_SLOTS]
 
     # A slot another conversation is HOLDING is not free, even though Google
     # has never heard of it: between "Confirmar" and a verified code the
@@ -3778,6 +3800,25 @@ def _booking_duration(
     if service is None:
         return tenant.appointment_duration_min or 30
     return _service_duration(service, tenant)
+
+
+def _notice_now(tz) -> datetime:
+    """"Now" for the minimum-notice rule - one seam, so tests can pin the clock."""
+    return datetime.now(tz)
+
+
+def _booking_floor(
+    conversation: Conversation, professionals: list | None, branch: DayBranch, tz
+) -> datetime | None:
+    """The earliest start a NEW booking may have (the doctor's minimum notice), or None.
+
+    Only the first-booking branch has one: rescheduling (MANAGE) and editing an
+    appointment (EDIT) are never limited by it - the clinic's rule is about how late a
+    patient may book, not about moving what is already booked.
+    """
+    if branch is not BOOKING_DAY_BRANCH:
+        return None
+    return booking_notice_floor(_booking_professional(conversation, professionals), _notice_now(tz))
 
 
 def _booking_professional(conversation: Conversation, professionals: list | None) -> Any | None:
@@ -4135,6 +4176,27 @@ async def _handle_confirmation(
         professionals, _selected_professional_id(conversation)
     )
     insurance = _selected_insurance(conversation)
+
+    # The doctor's minimum notice, asked one last time at the write: the list or the AI's
+    # card may be older than the rule's boundary (or the AI may have proposed the time).
+    booking_owner = _booking_professional(conversation, professionals)
+    floor = booking_notice_floor(booking_owner, _notice_now(calendar.tzinfo))
+    if floor is not None and start < floor:
+        logger.info(
+            "flow_booking_inside_notice",
+            conversation_id=str(getattr(conversation, "id", None)),
+            notice_hours=booking_notice_hours(booking_owner),
+        )
+        return await enter_day_picker(
+            conversation,
+            tenant,
+            calendar,
+            duration_minutes=duration,
+            branch=BOOKING_DAY_BRANCH,
+            back_target=BACK_TARGET_SERVICE,
+            prefix=booking_notice_message(booking_notice_hours(booking_owner)),
+            professionals=professionals,
+        )
 
     if await slot_taken_at_confirm(
         calendar,

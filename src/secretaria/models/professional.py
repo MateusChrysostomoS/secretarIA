@@ -23,7 +23,7 @@ services/tenant_config.py for the full table and why the distinction matters.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, String, Text, func, text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from secretaria.core.database import Base
@@ -91,5 +91,13 @@ class Professional(Base):
     insurance_plans_customized: Mapped[bool] = mapped_column(
         Boolean, server_default=text("false"), default=False
     )
+
+    # The doctor's minimum notice for a NEW booking made by a patient through the
+    # secretarIA, in hours. NULL = not configured: the clinic-wide default applies
+    # (BOOKING_NOTICE_DEFAULT_HOURS, 12h). 0 = no limit. With N, no slot starting less
+    # than N hours from now is offered or confirmed (services/availability.py::
+    # booking_notice_floor); cancelling, rescheduling and the clinic's own agenda are
+    # never limited by it.
+    min_booking_notice_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

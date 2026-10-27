@@ -441,6 +441,7 @@ async def _handle_action_button(
                     specialty=p.specialty,
                     about=p.about,
                     context_doctor_message=p.context_doctor_message,
+                    min_booking_notice_hours=p.min_booking_notice_hours,
                     appointment_types=p.appointment_types,
                     # Verbatim, NULL and all: the router reads it through
                     # `professional_business_hours`, whose whole contract is
@@ -526,6 +527,7 @@ async def _handle_action_button(
                     specialty=p.specialty,
                     about=p.about,
                     context_doctor_message=p.context_doctor_message,
+                    min_booking_notice_hours=p.min_booking_notice_hours,
                     appointment_types=p.appointment_types,
                     # Verbatim, NULL and all: the router reads it through
                     # `professional_business_hours`, whose whole contract is

@@ -22,6 +22,10 @@ os.environ.setdefault(
     "postgresql+asyncpg://secretaria:secretaria@localhost:5432/secretaria",
 )
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
+# The 12h default minimum booking notice (production default) would make every older
+# test whose fake agenda offers slots relative to the REAL clock pass or fail by the time
+# of day. The suite runs with no default; tests/test_booking_min_notice.py turns it on.
+os.environ["BOOKING_NOTICE_DEFAULT_HOURS"] = "0"
 
 
 @pytest.fixture(autouse=True)

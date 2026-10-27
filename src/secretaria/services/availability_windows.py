@@ -189,6 +189,7 @@ async def scan_free_windows(
     duration_minutes: int,
     holds: Sequence[Window] = (),
     max_windows: int = MAX_WINDOWS,
+    not_before: datetime | None = None,
 ) -> WindowScan:
     """Free windows on `calendar` over `span`, earliest first, holds subtracted.
 
@@ -205,13 +206,14 @@ async def scan_free_windows(
         window_days=span.days,
         duration_minutes=duration_minutes,
         holds=holds,
+        not_before=not_before,
     )
     scan = WindowScan()
     for day in free_days:
         if not span.first <= day <= span.last:
             continue
         starts = await free_slots_for_day(
-            calendar, day=day, duration_minutes=duration_minutes, holds=holds
+            calendar, day=day, duration_minutes=duration_minutes, holds=holds, not_before=not_before
         )
         for window in slots_to_windows(starts, duration_minutes=duration_minutes):
             if len(scan.windows) >= max_windows:

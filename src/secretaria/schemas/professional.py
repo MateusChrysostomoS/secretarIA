@@ -74,6 +74,11 @@ class ProfessionalConfigUpdate(BaseModel):
     about: str | None = Field(default=None, max_length=4000)
     context_doctor_message: str | None = Field(default=None, max_length=4000)
     google_calendar_id: str | None = Field(default=None, max_length=255)
+    # The doctor's minimum notice, in hours, for a NEW booking a patient makes through
+    # the secretarIA (models/professional.py). Absent = untouched, null = the clinic-wide
+    # default (BOOKING_NOTICE_DEFAULT_HOURS, 12h), 0 = no limit. At most 30 days: past
+    # that no slot of the 20-day picker could ever be offered.
+    min_booking_notice_hours: int | None = Field(default=None, ge=0, le=720)
 
     @field_validator("business_hours")
     @classmethod
@@ -159,6 +164,9 @@ class ProfessionalListItem(BaseModel):
     specialty: str | None
     about: str | None
     context_doctor_message: str | None
+    # None = not configured (the 12h default applies), 0 = no limit. Defaulted so an older
+    # reader building this model never 500s.
+    min_booking_notice_hours: int | None = None
     business_hours: dict
     business_hours_inherited: bool
     appointment_types: list
