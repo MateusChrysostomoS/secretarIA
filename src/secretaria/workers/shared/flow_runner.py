@@ -100,6 +100,7 @@ from secretaria.workers.shared.replacement import (
     _finish_replacement,
     _replaced_notice,
 )
+from secretaria.workers.shared.service_change_actions import service_change_bubbles
 
 logger = get_logger(__name__)
 
@@ -684,6 +685,21 @@ async def _apply_flow_result(
         if result.bubbles:
             await _dispatch_bubbles(reply, result.bubbles, tenant=tenant, waba_token=waba_token)
         return True
+    if (
+        result.action == "reply"
+        and persisted
+        and applied_edit is not None
+        and applied_edit.service_change is not None
+        and result.appointment_edit is not None
+    ):
+        # 2026-10-26: a service change on a paid sinal - the reply follows the money (the Pix
+        # of the difference, the refund question, or why nothing changed).
+        result.bubbles = service_change_bubbles(
+            result.bubbles,
+            applied_edit.service_change,
+            new_service=str(result.appointment_edit.get("appointment_type") or ""),
+            tenant=tenant,
+        )
     if result.action == "reply":
         if result.bubbles:
             if cancellation_note:

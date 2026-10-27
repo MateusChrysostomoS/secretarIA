@@ -61,7 +61,23 @@ REASON_TEXT = {
     "promotion_failed": "Pago, mas não conseguimos confirmar a consulta.",
     "refunded_externally": "O provedor informa que este pagamento foi estornado.",
     "released_refund_due": "Horário liberado pela clínica: devolver o sinal ao paciente.",
+    "service_diff_refund_due": (
+        "O serviço da consulta foi trocado por um mais barato e o paciente pediu a diferença "
+        "do sinal de volta: "
+        "devolver {value}."
+    ),
+    "service_diff_agenda_pending": (
+        "Diferença do sinal paga e serviço trocado, mas a agenda não foi atualizada (o novo "
+        "horário não cabe ou a agenda não respondeu): ajuste o evento na agenda."
+    ),
+    "service_diff_collect_due": (
+        "O serviço da consulta foi trocado por um mais caro, mas o Pix da diferença do sinal "
+        "não pôde ser gerado (o provedor de pagamento estava indisponível). A troca já valeu: "
+        "cobrar {value} do paciente."
+    ),
 }
+# Reasons whose `{value}` is the item's own amount (money still to RECEIVE), not a refund.
+_AMOUNT_VALUE_REASONS = frozenset({"service_diff_collect_due"})
 
 # Resolving with "refunded in the provider's panel" closes the money story of the deposit only
 # for these reasons (the consultation is not booked and the deposit went back in full).
@@ -95,9 +111,12 @@ def money_text(cents: int | None) -> str:
     return f"R$ {reais:,}".replace(",", ".") + f",{rest:02d}"
 
 
-def reason_text(reason: str, suggested_refund_cents: int | None) -> str:
+def reason_text(
+    reason: str, suggested_refund_cents: int | None, amount_cents: int | None = None
+) -> str:
     template = REASON_TEXT.get(reason, "Pagamento que precisa de decisão.")
-    return template.format(value=money_text(suggested_refund_cents))
+    cents = amount_cents if reason in _AMOUNT_VALUE_REASONS else suggested_refund_cents
+    return template.format(value=money_text(cents))
 
 
 def check_resolution_input(action: object, note: object, resolved_by_name: object) -> tuple:

@@ -35,7 +35,6 @@ from secretaria.models import (
     Appointment,
     AppointmentReminder,
     Conversation,
-    PixDepositStatus,
     Tenant,
     is_live_status,
 )
@@ -64,7 +63,7 @@ from secretaria.services.reminder_text import (
 )
 from secretaria.services.tenant_config import get_waba_token
 from secretaria.workers.shared.context import _ReplyContext
-from secretaria.workers.shared.deposit import _hours_until_start, _pix_retention_warning_line
+from secretaria.workers.shared.deposit import _cancel_warning_line
 from secretaria.workers.shared.greeting import _format_appointment_when
 from secretaria.workers.shared.sender import _reply_sender
 from secretaria.workers.shared.text import _as_utc
@@ -93,15 +92,7 @@ async def _retention_warning(session, tenant: Tenant, appointment: Appointment, 
     deposit and a start inside `tenant.pix_refund_window_hours`.
     """
     deposit = await deposit_lifecycle.get_deposit_for_appointment(session, appointment.id)
-    hours_until = _hours_until_start(appointment, now)
-    if (
-        deposit is not None
-        and deposit.status == PixDepositStatus.PAID
-        and hours_until is not None
-        and hours_until <= tenant.pix_refund_window_hours
-    ):
-        return _pix_retention_warning_line(tenant, deposit)
-    return None
+    return _cancel_warning_line(tenant, deposit, appointment, now)
 
 
 async def _also_scheduled(session, tenant: Tenant, appointment: Appointment, now) -> str:
@@ -169,7 +160,12 @@ async def handle_reminder_button(
         tenant = await session.get(Tenant, conversation.tenant_id) if conversation else None
         if tenant is None:
             return None
-        if not reminder_hooks.enabled_for(tenant):
+        reminder = await session.get(AppointmentReminder, row_id)
+        # Owner 2026-10-27: the card sent on entering the conversation (`chat` row) works
+        # whatever the clinic's reminder switch; the other rows keep the switch.
+        if not reminder_hooks.enabled_for(tenant) and (
+            reminder is None or reminder.kind != REMINDER_KIND_CHAT
+        ):
             return None
         waba_token = await get_waba_token(session, tenant.id)
         client = _reply_sender(reply, tenant, waba_token)
@@ -177,7 +173,6 @@ async def handle_reminder_button(
             logger.error("reminder_button_no_sender", tenant_id=str(tenant.id))
             return None
 
-        reminder = await session.get(AppointmentReminder, row_id)
         appointment = (
             await session.get(Appointment, reminder.appointment_id)
             if reminder is not None

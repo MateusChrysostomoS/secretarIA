@@ -21,6 +21,7 @@ from secretaria.models import (
     PaymentAttentionItem,
     PixDeposit,
     PixDepositStatus,
+    Professional,
     Tenant,
 )
 from secretaria.services import appointment_release, release_offer, staff_patient_message as spm
@@ -500,6 +501,42 @@ async def test_a_paid_deposit_needs_the_acknowledgement_and_the_patient_gets_the
     assert await _offers(db) == []
 
 
+async def test_the_acknowledgement_409_quotes_the_total_held_with_paid_differences(
+    client: AsyncClient, db, acting
+):
+    """Session 07 (d): sinal R$ 100 + a PAID service difference of R$ 30 = the clinic holds
+    R$ 130. The 409 body carries it as `held_cents` (additive, like `ReleaseOfferOut`);
+    `amount_cents` stays the original sinal."""
+    from secretaria.models.deposit_adjustment import DepositAdjustment
+
+    world = await _paid_world(db, acting, hours_ahead=30)
+    async with db() as session:
+        deposit = await session.scalar(
+            select(PixDeposit).where(PixDeposit.appointment_id == world.appointment.id)
+        )
+        session.add(
+            DepositAdjustment(
+                tenant_id=world.tenant.id,
+                deposit_id=deposit.id,
+                appointment_id=world.appointment.id,
+                kind="increase",
+                status="applied",
+                old_service="Consulta",
+                new_service="Avaliação",
+                diff_cents=3000,
+                provider_charge_id=f"pay-diff-{uuid4()}",
+            )
+        )
+        await session.commit()
+
+    response = await _release(client, world.appointment.id)
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert (detail["amount_cents"], detail["held_cents"]) == (10000, 13000)
+    assert "130,00" in detail["message"]
+
+
 async def test_with_the_acknowledgement_the_offer_opens_and_nothing_is_decided_yet(
     client: AsyncClient, db, acting
 ):
@@ -909,3 +946,181 @@ async def test_r7_outside_the_window_the_release_answers_the_free_link(  # noqa:
 
     assert body["patient_notice"] == "whatsapp_outside_window"
     assert body["whatsapp_link"] == "https://wa.me/5511988887777"
+
+
+# ----------------------------------- TASK-052 Task 16: whose closing time (TASK-067 s06)
+
+# T: Tuesday 2030-03-05 14:00 in Sao Paulo (17:00 UTC). The clinic closes 22:00 -> F = T + 7 h 30,
+# capped: B = T + 6 h. The doctor closes 18:00 -> F = 17:30 local = T + 3 h 30.
+T16_RELEASE = datetime(2030, 3, 5, 17, 0, tzinfo=UTC)
+T16_CLINIC_B = T16_RELEASE + timedelta(hours=6)
+T16_DOCTOR_B = T16_RELEASE + timedelta(hours=3, minutes=30)
+T16_CLINIC_HOURS = {"tuesday": [{"start": "08:00", "end": "22:00"}]}
+T16_DOCTOR_HOURS = {"tuesday": [{"start": "08:00", "end": "18:00"}]}
+
+
+class _FrozenDatetime(datetime):
+    """`datetime.now()` of the hub module pinned at T16_RELEASE (the release instant T)."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return T16_RELEASE if tz is None else T16_RELEASE.astimezone(tz)
+
+
+def _freeze_release_clock(monkeypatch) -> None:
+    monkeypatch.setattr(hub_calendar, "datetime", _FrozenDatetime)
+
+
+def _stub_staff(monkeypatch, answer) -> list:
+    """Replace the brain-api read with a fixed answer; return the tenant ids it was asked."""
+    asked: list = []
+
+    async def _fetch(tenant_id):
+        asked.append(tenant_id)
+        return answer
+
+    monkeypatch.setattr(hub_calendar.brain_staff, "fetch_has_secretary", _fetch)
+    return asked
+
+
+async def _t16_world(db, acting, monkeypatch, *, deposit: str = "paid"):
+    async def _resolve(session, tenant, professional, *, tenant_config=None, **_):
+        return _FakeCalendar("professional")
+
+    monkeypatch.setattr(hub_calendar, "resolve_professional_calendar", _resolve)
+    world = await _setup(
+        db,
+        acting,
+        start_at=T16_RELEASE + timedelta(days=3),
+        professional_name="Dra. Ana",
+        last_inbound_at=T16_RELEASE - timedelta(hours=1),
+    )
+    async with db() as session:
+        tenant = await session.get(Tenant, world.tenant.id)
+        tenant.business_hours = T16_CLINIC_HOURS
+        appointment = await session.get(Appointment, world.appointment.id)
+        professional = await session.get(Professional, appointment.professional_id)
+        professional.business_hours = T16_DOCTOR_HOURS
+        await session.commit()
+    if deposit == "paid":
+        await seed_paid_deposit(db, world)
+    return world
+
+
+@pytest.mark.parametrize(
+    ("has_secretary", "expected_b"),
+    [(True, T16_CLINIC_B), (False, T16_DOCTOR_B), (None, T16_DOCTOR_B)],
+)
+async def test_t16_the_deadline_follows_brain_apis_answer(
+    client: AsyncClient, db, acting, monkeypatch, has_secretary, expected_b
+):
+    """True -> the clinic's closing; False -> the doctor's; unknown -> the doctor's (owner rule)."""
+    _freeze_release_clock(monkeypatch)
+    asked = _stub_staff(monkeypatch, has_secretary)
+    world = await _t16_world(db, acting, monkeypatch)
+
+    response = await _release(client, world.appointment.id, acknowledge_retention=True)
+
+    assert response.status_code == 200
+    assert asked == [world.tenant.id]  # asked once, for THIS clinic, never cached
+    [offer] = await _offers(db)
+    assert utc(offer.released_at) == T16_RELEASE
+    assert utc(offer.decide_by_at) == expected_b
+    assert utc(offer.expires_at) == T16_RELEASE + timedelta(hours=24)
+
+
+async def test_t16_brain_api_down_still_releases_with_the_doctors_closing(
+    client: AsyncClient, db, acting, monkeypatch
+):
+    """The real client, brain-api answering 503: the release goes through, B = doctor's."""
+    import httpx
+
+    from secretaria.services import brain_staff
+
+    _freeze_release_clock(monkeypatch)
+    settings = brain_staff.get_settings()
+    monkeypatch.setattr(settings, "BRAIN_API_BASE_URL", "https://brain.test", raising=False)
+    monkeypatch.setattr(settings, "INTERNAL_API_KEY", "pair-key", raising=False)
+    seen: list = []
+    real_client = httpx.AsyncClient
+
+    def _factory(*args, **kwargs):
+        def _handler(request):
+            seen.append(request.url.path)
+            return httpx.Response(503, json={"detail": "down"})
+
+        kwargs["transport"] = httpx.MockTransport(_handler)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(brain_staff.httpx, "AsyncClient", _factory)
+    world = await _t16_world(db, acting, monkeypatch)
+
+    response = await _release(client, world.appointment.id, acknowledge_retention=True)
+
+    assert response.status_code == 200
+    assert seen == [f"/internal/tenants/{world.tenant.id}/staff-roles"]
+    [offer] = await _offers(db)
+    assert utc(offer.decide_by_at) == T16_DOCTOR_B
+
+
+async def test_t16_brain_api_is_not_asked_without_a_paid_deposit(
+    client: AsyncClient, db, acting, monkeypatch
+):
+    _freeze_release_clock(monkeypatch)
+    asked = _stub_staff(monkeypatch, True)
+    world = await _t16_world(db, acting, monkeypatch, deposit="none")
+
+    response = await _release(client, world.appointment.id)
+
+    assert response.status_code == 200
+    assert asked == []
+
+
+async def test_t16_brain_api_is_not_asked_before_the_acknowledgement(
+    client: AsyncClient, db, acting, monkeypatch
+):
+    """The 409 `retention_ack_required` touches nothing - not even brain-api."""
+    asked = _stub_staff(monkeypatch, True)
+    world = await _t16_world(db, acting, monkeypatch)
+
+    response = await _release(client, world.appointment.id)
+
+    assert response.status_code == 409
+    assert asked == []
+
+
+@pytest.mark.parametrize(
+    ("has_secretary", "expected_b"), [(True, T16_CLINIC_B), (False, T16_DOCTOR_B)]
+)
+async def test_t16_the_no_answer_notice_falls_at_that_b_once(
+    client: AsyncClient, db, acting, monkeypatch, has_secretary, expected_b
+):
+    """B decides WHEN the clinic is told to refund; repeated releases and sweeps never duplicate."""
+    from secretaria.models.deposit_release_offer import EMAIL_REFUND_DAY, EMAIL_REFUND_NOANSWER
+    from tests.release_offer_support import emails
+
+    _freeze_release_clock(monkeypatch)
+    asked = _stub_staff(monkeypatch, has_secretary)
+    world = await _t16_world(db, acting, monkeypatch)
+
+    first = await _release(client, world.appointment.id, acknowledge_retention=True)
+    assert first.status_code == 200
+    again = await _release(client, world.appointment.id, acknowledge_retention=True)
+    assert again.status_code == 409 and again.json()["detail"]["code"] == "not_live"
+    assert asked == [world.tenant.id]
+    [offer] = await _offers(db)
+
+    async with db() as session:
+        before_b = expected_b - timedelta(seconds=1)
+        assert await release_offer.expire_offers(session, now=before_b) == 0
+        assert await emails(session, offer.id) == []
+    for _ in range(2):
+        async with db() as session:
+            await release_offer.expire_offers(session, now=expected_b)
+    async with db() as session:
+        sent = [(e.kind, e.seq, utc(e.due_at)) for e in await emails(session, offer.id)]
+    assert sent == [
+        (EMAIL_REFUND_NOANSWER, 0, expected_b),
+        (EMAIL_REFUND_DAY, 0, T16_RELEASE + timedelta(hours=24)),
+    ]
+    assert len(await _attention_items(db)) == 1

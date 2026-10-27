@@ -5,7 +5,8 @@ K = the "Manter" tap + 24 h. The platform never returns money (decision D15).
 
 * `open_offer` (hub release): ONE `DepositReleaseOffer` per released appointment with a deposit;
   closing = the consultation doctor's (no doctor: the clinic's). `has_secretary=True` switches to
-  the clinic's hours - a hook for Task 16 (pending); nobody passes it yet.
+  the clinic's hours (Task 16: the hub release asks brain-api, services/brain_staff.py; False or
+  None = unknown keep the doctor's).
 * "Manter horário" (`request_keep`, T..S, also after B) asks the CLINIC: `keep_requested` for 24 h
   (K). The clinic accepts (services/release_keep.py -> `claim_keep`) or refuses
   (`decline_keep`); no decision by K is a refusal. B and E do not apply while it is open and the
@@ -100,7 +101,7 @@ from secretaria.models.payment_attention_item import (
 )
 from secretaria.models.pix_deposit import FULFILLMENT_NEEDS_ATTENTION, FULFILLMENT_RESOLVED
 from secretaria.services import release_deadlines
-from secretaria.services.payments import attention
+from secretaria.services.payments import adjustment_queries, attention
 from secretaria.services.payments.db_utils import insert_ignore
 from secretaria.services.payments.money import format_brl
 from secretaria.services.staff_patient_message import conversation_id_for
@@ -159,17 +160,24 @@ OFFER_HEAD = (
 )
 OFFER_HEAD_CONFIRMED = "A clínica liberou o seu horário para que você decida o que fazer."
 CLINIC_NOTE_PREFIX = "Recado da clínica: "
+# Session 07: reusing the sinal is decided only at the confirmation (`release_carry_check`; a
+# refused/unanswered check charges a NEW sinal by safety), so no text before it promises "sem
+# nova cobrança" - only `CARRIED_OVER_NOTE`, after a confirmed reuse, says it.
+_REBOOK_CHECK = (
+    "(ao confirmar, conferimos se o sinal que você já pagou pode valer para a nova consulta)"
+)
 OFFER_DETAIL = (
     "Você já pagou o sinal desta consulta ({amount}). Toque em *Manter horário* para pedir à "
-    "clínica o mesmo horário, em *Remarcar* para escolher outro dia e horário usando o mesmo "
-    "sinal, sem nova cobrança, ou em *Cancelar* para cancelar a consulta e receber o sinal de "
-    "volta. Se você não responder até {deadline}, a clínica será avisada para devolver o seu sinal."
+    "clínica o mesmo horário, em *Remarcar* para escolher outro dia e horário "
+    + _REBOOK_CHECK
+    + " ou em *Cancelar* para cancelar a consulta e receber o sinal de volta. Se você não "
+    "responder até {deadline}, a clínica será avisada para devolver o seu sinal."
 )
 OFFER_DETAIL_NO_KEEP = (
     "Você já pagou o sinal desta consulta ({amount}). Toque em *Remarcar* para escolher outro dia "
-    "e horário usando o mesmo sinal, sem nova cobrança, ou em *Cancelar* para cancelar a consulta "
-    "e receber o sinal de volta. Se você não responder até {deadline}, a clínica será avisada para "
-    "devolver o seu sinal."
+    "e horário " + _REBOOK_CHECK + " ou em *Cancelar* para cancelar a consulta e receber o sinal "
+    "de volta. Se você não responder até {deadline}, a clínica será avisada para devolver o seu "
+    "sinal."
 )
 KEEP_REQUESTED_TEXT = (
     "Avisamos a clínica que você quer manter o horário de {when}. A clínica vai verificar se o "
@@ -196,7 +204,7 @@ KEEP_ACCEPTED_TEXT = (
 )
 KEEP_DECLINED_TEXT = (
     "A clínica não conseguiu manter o horário de {when}. Você pode remarcar para outro dia e "
-    "horário, usando o mesmo sinal, ou cancelar e receber o sinal de volta."
+    "horário " + _REBOOK_CHECK + " ou cancelar e receber o sinal de volta."
 )
 KEEP_UNAVAILABLE_TEXT = "Não consegui confirmar o horário agora. Tente de novo em instantes."
 TAP_ALREADY_KEPT_TEXT = "Sua consulta já está mantida para {when}."
@@ -317,7 +325,9 @@ def offer_body(
     """The release notice of a PAID slot. Only the clinic's note is cut to fit."""
     head = OFFER_HEAD_CONFIRMED if confirmed else OFFER_HEAD
     detail = (OFFER_DETAIL if keep else OFFER_DETAIL_NO_KEEP).format(
-        amount=format_brl(deposit.amount_cents), deadline=when_text(decide_by_at, timezone)
+        # What the clinic holds (sinal + paid service differences), plan 2026-10-26 Task 8.
+        amount=format_brl(adjustment_queries.held_cents_hint(deposit)),
+        deadline=when_text(decide_by_at, timezone),
     )
     fixed = f"{head}\n\n{detail}"
     note = (justification or "").strip()
@@ -333,12 +343,15 @@ def template_text(text: str) -> str:
 
 
 def warning_text(deposit: PixDeposit) -> str:
-    """What the CLINIC reads before releasing a paid slot (409 `retention_ack_required`)."""
+    """What the CLINIC reads before releasing a paid slot (409 `retention_ack_required`). The
+    amount is what the clinic holds (`adjustment_queries.held_cents_hint`)."""
+    held = adjustment_queries.held_cents_hint(deposit)
     return (
-        f"O paciente já pagou o sinal ({format_brl(deposit.amount_cents)}). Ao liberar o horário, "
-        "ele poderá pedir para manter o horário (a clínica decide), remarcar usando o mesmo sinal "
-        "ou cancelar. Se ele cancelar ou não responder até o prazo, a clínica receberá avisos "
-        "para devolver o sinal por inteiro pelo painel do provedor de pagamento."
+        f"O paciente já pagou o sinal ({format_brl(held)}). Ao liberar o horário, "
+        "ele poderá pedir para manter o horário (a clínica decide), remarcar (o mesmo sinal vale "
+        "se o provedor de pagamento confirmar que segue pago e sem estorno; senão é cobrado um "
+        "sinal novo) ou cancelar. Se ele cancelar ou não responder até o prazo, a clínica "
+        "receberá avisos para devolver o sinal por inteiro pelo painel do provedor de pagamento."
     )
 
 
@@ -407,8 +420,8 @@ async def open_offer(
     """Record the release of an appointment with a deposit of THIS clinic; idempotent.
 
     PAID: an open offer with T, S, B and E. Anything else: `not_offered` (list only). None when the
-    deposit or the appointment is not this clinic's. `has_secretary` is a hook for Task 16
-    (pending: brain-api roles); today nobody passes it, so B uses the doctor's closing. No commit.
+    deposit or the appointment is not this clinic's. `has_secretary` (Task 16, read from brain-api
+    by the caller): True = the clinic's closing; False/None = the doctor's. No commit.
     """
     if (
         deposit.tenant_id != tenant.id
@@ -418,6 +431,13 @@ async def open_offer(
         return None
     now = _now(now)
     paid = deposit.status is PixDepositStatus.PAID
+    if paid:
+        # The slot is freed: a service-change difference Pix still unpaid is voided now (a late
+        # payment is an ORPHAN item). An unanswered refund question stays open - the patient may
+        # still keep the slot - and is closed when the refund falls due (`_open_refund_item`).
+        await adjustment_queries.settle_open_adjustments(
+            session, tenant=tenant, deposit=deposit, now=now, close_questions=False
+        )
     patient = await session.get(Patient, appointment.patient_id) if appointment.patient_id else None
     if patient is not None and patient.tenant_id != tenant.id:
         patient = None
@@ -520,13 +540,24 @@ async def skip_kinds(
     )
 
 
-async def _open_refund_item(session: AsyncSession, offer: DepositReleaseOffer) -> None:
+async def _open_refund_item(
+    session: AsyncSession, offer: DepositReleaseOffer, now: datetime | None = None
+) -> None:
     deposit = await session.get(PixDeposit, offer.deposit_id)
     if deposit is None or deposit.tenant_id != offer.tenant_id:
         logger.error("deposit_release_offer_deposit_missing", offer_id=str(offer.id))
         return
     released = await session.get(Appointment, offer.released_appointment_id)
     charge_ref = deposit.provider_charge_id or deposit.asaas_payment_id or str(deposit.id)
+    # Plan 2026-10-26 Task 8: the refund is what the clinic holds (sinal + paid differences -
+    # differences already asked back, which keep their own item); an unanswered "quer a
+    # diferença de volta?" is closed first so it can never open a second item for this money.
+    tenant = await session.get(Tenant, offer.tenant_id)
+    if tenant is not None:
+        await adjustment_queries.settle_open_adjustments(
+            session, tenant=tenant, deposit=deposit, now=_now(now), void_payments=False
+        )
+    held = await adjustment_queries.held_total_cents(session, deposit)
     await attention.open_attention_item(
         session,
         tenant_id=offer.tenant_id,
@@ -537,7 +568,7 @@ async def _open_refund_item(session: AsyncSession, offer: DepositReleaseOffer) -
             deposit.provider, f"{offer.id}:{charge_ref}", REASON_RELEASED_REFUND_DUE
         ),
         deposit=deposit,
-        suggested_refund_cents=deposit.amount_cents,
+        suggested_refund_cents=held,
         slot_start=released.start_at if released is not None else None,
         slot_end=released.end_at if released is not None else None,
         service_label=released.appointment_type if released is not None else None,
@@ -610,7 +641,7 @@ async def _make_due(
     )
     if moved.rowcount != 1:
         return False
-    await _open_refund_item(session, offer)
+    await _open_refund_item(session, offer, now)
     if source == REFUND_SOURCE_TIMEOUT:
         await _schedule(session, offer, EMAIL_REFUND_NOANSWER, offer.decide_by_at)
         await _schedule(session, offer, EMAIL_REFUND_DAY, offer.expires_at)

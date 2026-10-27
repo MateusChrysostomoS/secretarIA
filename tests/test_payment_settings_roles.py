@@ -35,6 +35,7 @@ PAYMENT_PATCHES = [
     {"pix_retention_policy": "partial"},
     {"pix_partial_refund_percent": 50},
     {"pix_reschedule_limit": 3},
+    {"pix_difference_refund_min_days": 5},
 ]
 
 PIX_POLICY_COLUMNS = (
@@ -44,6 +45,7 @@ PIX_POLICY_COLUMNS = (
     "pix_retention_policy",
     "pix_partial_refund_percent",
     "pix_reschedule_limit",
+    "pix_difference_refund_min_days",
 )
 
 

@@ -282,3 +282,142 @@ def test_every_patient_notice_promises_a_manual_return_never_an_automatic_refund
     assert "clínica" in notices["payment_in_flight"]
     for text in notices.values():
         assert text is None or "estorno" not in text.lower()
+
+
+async def _use_every_reschedule(session, tenant, deposit, *, limit=2):
+    tenant.pix_reschedule_limit = limit
+    deposit.reschedule_count = limit
+    await session.commit()
+
+
+async def test_a_patient_who_used_every_reschedule_loses_the_deposit_even_when_cancelling_early(
+    db, monkeypatch
+):
+    fake = _install(monkeypatch)
+    async with db() as session:
+        tenant, appointment, deposit = await _seed(session, hours_ahead=200, window=24)
+        await _use_every_reschedule(session, tenant, deposit)
+        preview = deposit_lifecycle.preview_cancellation_outcome(tenant, deposit, appointment)
+        outcome = await _cancel(session, tenant, appointment)
+        await session.refresh(deposit)
+
+    assert preview == outcome == "retained"
+    assert deposit.status == PixDepositStatus.CANCELLED_RETAINED
+    assert deposit.refunded_amount_cents == 0
+    assert await _items(db) == [] and fake.calls == []
+    assert "já usou as 2 remarcações" in deposit_lifecycle.cancellation_notice(
+        outcome, tenant, deposit
+    )
+
+
+async def test_the_reschedule_limit_beats_a_partial_refund_policy(db, monkeypatch):
+    _install(monkeypatch)
+    async with db() as session:
+        tenant, appointment, deposit = await _seed(
+            session, hours_ahead=2, window=24, policy="partial"
+        )
+        await _use_every_reschedule(session, tenant, deposit)
+        outcome = await _cancel(session, tenant, appointment)
+        await session.refresh(deposit)
+
+    assert outcome == "retained" and deposit.status == PixDepositStatus.CANCELLED_RETAINED
+    assert await _items(db) == []
+
+
+async def test_a_cancellation_by_the_clinic_is_still_refunded_at_the_reschedule_limit(
+    db, monkeypatch
+):
+    _install(monkeypatch)
+    async with db() as session:
+        tenant, appointment, deposit = await _seed(session, hours_ahead=200)
+        await _use_every_reschedule(session, tenant, deposit)
+        outcome = await _cancel(
+            session, tenant, appointment, cancelled_by=deposit_lifecycle.CANCELLED_BY_CLINIC
+        )
+
+    (item,) = await _items(db)
+    assert outcome == "refund_due" and item.reason == "paid_then_cancelled"
+
+
+async def test_below_the_reschedule_limit_and_with_no_allowance_nothing_changes(db, monkeypatch):
+    _install(monkeypatch)
+    async with db() as session:
+        tenant, appointment, deposit = await _seed(session, hours_ahead=200)
+        deposit.reschedule_count = 1
+        await session.commit()
+        assert not deposit_lifecycle.at_reschedule_limit(tenant, deposit)
+        tenant.pix_reschedule_limit = 0  # no allowance configured: never the retention rule
+        deposit.reschedule_count = 5
+        assert not deposit_lifecycle.at_reschedule_limit(tenant, deposit)
+
+
+# --------------------------------------------------------------------------
+# service-change adjustments (plan 2026-10-26 Task 8; the full journey is in
+# tests/test_service_change_cancel.py): the cancellation figures use what the clinic HOLDS
+# --------------------------------------------------------------------------
+
+
+def _adjustment(tenant, appointment, deposit, *, kind, status, diff, charge_id=None):
+    from secretaria.models.deposit_adjustment import DepositAdjustment
+
+    return DepositAdjustment(
+        id=uuid4(),
+        tenant_id=tenant.id,
+        deposit_id=deposit.id,
+        appointment_id=appointment.id,
+        kind=kind,
+        status=status,
+        old_service="Consulta",
+        new_service="Outro",
+        diff_cents=diff,
+        provider_charge_id=charge_id,
+    )
+
+
+async def test_a_paid_difference_joins_the_refund_and_an_unpaid_one_is_voided(db, monkeypatch):
+    from secretaria.models.deposit_adjustment import (
+        KIND_DECREASE,
+        KIND_INCREASE,
+        STATUS_APPLIED,
+        STATUS_AWAITING_PAYMENT,
+        STATUS_CANCELLED,
+        STATUS_REFUND_REQUESTED,
+    )
+
+    fake = _install(monkeypatch)
+    async with db() as session:
+        tenant, appointment, deposit = await _seed(session, hours_ahead=48, window=24)
+        paid = _adjustment(
+            tenant, appointment, deposit, kind=KIND_INCREASE, status=STATUS_APPLIED, diff=1500,
+            charge_id="pay_diff_paid",
+        )
+        asked_back = _adjustment(
+            tenant, appointment, deposit, kind=KIND_DECREASE, status=STATUS_REFUND_REQUESTED,
+            diff=500,
+        )
+        unpaid = _adjustment(
+            tenant, appointment, deposit, kind=KIND_INCREASE, status=STATUS_AWAITING_PAYMENT,
+            diff=900, charge_id="pay_diff_open",
+        )
+        session.add_all([paid, asked_back, unpaid])
+        await session.commit()
+        outcome = await _cancel(session, tenant, appointment)
+        await session.refresh(unpaid)
+        await session.refresh(paid)
+
+    (item,) = await _items(db)
+    assert outcome == "refund_due"
+    # R$ 60 + R$ 15 paid - R$ 5 already asked back (its own item); the unpaid R$ 9 is not money.
+    assert (item.reason, item.suggested_refund_cents) == ("refund_due_policy", 7000)
+    assert fake.calls == [("get_payment", "pay_diff_open"), ("delete_payment", "pay_diff_open")]
+    assert (unpaid.status, paid.status) == (STATUS_CANCELLED, STATUS_APPLIED)
+
+
+def test_the_rule_the_patient_reads_names_the_limit_and_the_loss():
+    tenant = Tenant(id=uuid4(), clinic_name="C", phone_number_id="x", pix_reschedule_limit=2)
+    text = deposit_lifecycle.reschedule_rules_text(tenant)
+    assert "no máximo 2 vezes" in text
+    assert "não será possível remarcar" in text
+    assert "o sinal fica com a clínica, sem devolução" in text
+    tenant.pix_reschedule_limit = 1
+    assert "no máximo 1 vez." in deposit_lifecycle.reschedule_rules_text(tenant)

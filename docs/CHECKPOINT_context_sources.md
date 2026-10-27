@@ -85,3 +85,28 @@ Se o próprio texto malicioso **contém** uma frase verdadeira que sustenta um v
 ## Deploy e reversão
 
 Ordem: **migração → `secretaria_api` + `secretaria-worker` juntos (há um job novo no arq) → Brain-Message-Frontend**. `uv sync --frozen` no Dockerfile exige o `uv.lock` commitado (já traz `pypdf`). Reverter só as fontes: código antigo nos dois serviços, depois `alembic downgrade d6f0a8c2e4b7` e `alembic downgrade a1c4e7b9d2f3@-1` (provado em Postgres local). **Nunca** `alembic downgrade a1c4e7b9d2f3-1` nem `-1` a partir do head: descem até o ancestral comum e derrubam também as tabelas do Pix e da agenda nativa.
+
+## Catálogo: profissionais, serviços e convênios (TASK-067, 2026-10-23, pedido do dono)
+
+**Revisa a G10 e o "fora de escopo" da TASK-026.** A fonte agora também propõe os profissionais da clínica, os serviços (com duração,
+preço e quem realiza) e os convênios aceitos. A IA continua **sem gravar**: o job só devolve a proposta (`context_sources.proposal`,
+chaves novas `professionals`, `catalog_services`, `insurance`, `notes`; sem migração). Quem aplica é a tela, pelas rotas que já
+existiam (ver o checkpoint do Brain-Message-Frontend).
+
+- Módulo novo `services/context_catalog_proposal.py`: modelos de extração, verificação e montagem. Mesma disciplina da TASK-026: cada
+  item tem citação literal da fonte; número, link e e-mail do valor precisam estar na citação; os **dias** da semana de um médico
+  precisam estar nomeados na citação ("segundas e quartas", "de segunda a sexta", "dias úteis") e a semana passa pela mesma regra de
+  validação do hub. Um item perde só a parte sem lastro (preço, horário, e-mail), não o item inteiro.
+- Convênio: casa **só** com o catálogo global por nome ou alias; "Bradesco" → "Bradesco Saúde" só quando é o único candidato (vira
+  decisão registrada); o que não está no catálogo vira "Outro" com a explicação do próprio texto. Sem modo escolhido na clínica, a proposta
+  traz `default_mode: "shared"` (todos os profissionais aceitam todos); modo `independent` não é tocado.
+- Serviço com dois médicos: mesmo valor e duração para os dois, dito em `notes`. Duração ausente: usa a padrão da clínica, dito em `notes`.
+- `notes`: lista do que a IA **decidiu** (`kind: decision`, vindo da regra ou do campo `assumptions` do modelo) e do que **não conseguiu
+  preencher** (`kind: gap`). A tela mostra isso ao fim da análise.
+- E-mail de médico no texto: só sugestão; nunca guardado nem convidado (o convite de brain-api envia e-mail de verdade).
+- **Limite de profissionais desligado** (decisão do dono): `PROFESSIONAL_LIMIT_ENFORCED=false` (padrão) em `config.py`; o mesmo
+  `require_professional_capacity` serve a tela, o convite e o provisionamento. Para religar o teto do plano e o gate do add-on
+  `multi_professional`, definir `PROFESSIONAL_LIMIT_ENFORCED=true`; o comportamento anterior (403/409) volta inteiro.
+- Testes: `tests/test_context_catalog_proposal.py` (25, usa o texto real colado pelo dono), mais um caso em `test_context_ingestion.py` e
+  dois em `test_hub_professionals.py` (o módulo roda com o limite ligado, exceto os casos "sem limite").
+- **Não provado com modelo real**: a qualidade da extração com o LLM de verdade neste material (a prova usou resposta de modelo escrita à mão).

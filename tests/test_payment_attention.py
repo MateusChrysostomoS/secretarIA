@@ -71,7 +71,11 @@ def test_every_reason_of_the_spec_is_known():
         "promotion_failed",
         "refunded_externally",
         "released_refund_due",
+        "service_diff_refund_due",
+        "service_diff_agenda_pending",
+        "service_diff_collect_due",
     }
+    assert all(len(reason) <= 32 for reason in ATTENTION_REASONS)  # VARCHAR(32)
 
 
 def test_dedupe_key_shape():

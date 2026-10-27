@@ -123,6 +123,39 @@ async def test_accepting_a_free_slot_recreates_the_consultation_with_the_same_de
     assert kinds == ["clinic_keep_request", "patient_keep_accepted"]
 
 
+async def test_no_database_transaction_is_open_while_the_calendar_answers(db, calendar):
+    """Session 07: `accept_keep` read the offer, the released row and the holds, then called the
+    calendar (Google: seconds, can time out) with that read transaction still open - on Postgres
+    an "idle in transaction" connection held through the network call. The transaction is now
+    ended before each calendar call; the claim still happens in ONE transaction afterwards."""
+    released, offer = await _requested(db)
+    seen: list[tuple[str, bool]] = []
+    async with db() as session:
+        original_check, original_create = calendar.check_availability, calendar.create_event
+
+        async def check_availability(start, end, max_results=50):
+            seen.append(("check", session.in_transaction()))
+            return await original_check(start, end, max_results)
+
+        async def create_event(
+            start, end, summary, description="", reminders=None, *, event_id=None
+        ):
+            seen.append(("create", session.in_transaction()))
+            return await original_create(start, end, summary, description, event_id=event_id)
+
+        calendar.check_availability, calendar.create_event = check_availability, create_event
+        live_offer = await session.get(DepositReleaseOffer, offer.id)
+        tenant = await session.get(Tenant, released.tenant_id)
+        result = await rk.accept_keep(
+            session, tenant=tenant, offer=live_offer, resolved_by="Ana", now=NOW
+        )
+
+    assert result.outcome == rk.ACCEPT_KEPT
+    assert seen == [("check", False), ("create", False)]
+    kept, live, deposit, _kinds = await _state(db, offer.id)
+    assert kept.decision == "kept" and deposit.appointment_id == live[0].id
+
+
 async def test_accept_keep_works_on_the_merged_native_agenda(db, monkeypatch):
     from secretaria.services.local_calendar import LocalCalendarService
     from tests._local_agenda import agenda, wire_local_agenda

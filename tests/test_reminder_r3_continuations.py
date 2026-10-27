@@ -80,6 +80,10 @@ async def test_legacy_book_another_with_paid_deposit_hides_price_changes(db, cal
     rid = await add_reminder(db, world, kind="hour")
     await _tap(world, "remnew", rid)
     assert EDIT_PIX_NOTICE in sent()[0][2]
-    labels = [label for _id, label in sent()[0][3]]
-    assert LABEL_EDIT_SERVICE not in labels and LABEL_EDIT_DOCTOR not in labels
+    # 2026-10-26: the service stays (the difference of the sinal is settled at Confirmar);
+    # the doctor is still hidden with a paid sinal. Four options -> a WhatsApp list.
+    kind, *_rest = sent()[0]
+    assert kind == "list"
+    labels = [row[1] for row in sent()[0][4]]
+    assert LABEL_EDIT_SERVICE in labels and LABEL_EDIT_DOCTOR not in labels
     assert calendar.created == [] and calendar.cancelled == []

@@ -268,3 +268,33 @@ class BrainMessageVisitDiscardOut(BaseModel):
     """`discarded` (deleted now) or `absent` (nothing here, e.g. a retry). Both mean "done"."""
 
     status: Literal["discarded", "absent"]
+
+
+# --- TASK-053 (owner decision 2026-10-12): the patient's view of the clinic's convenios ---
+
+
+class PatientInsurancePlanOut(BaseModel):
+    """One convenio as a PATIENT may see it - no id, no doctor, no catalog note."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    payment_text: str
+    clinic_note: str | None = None
+    deposit: Literal["charged", "not_charged", "varies"]
+
+
+class PatientDepositOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    percent: int | None = None
+
+
+class PatientInsuranceOverviewOut(BaseModel):
+    """`GET /internal/brain-message/insurance-overview` (brain-api relays it to the Portal)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    deposit: PatientDepositOut
+    plans: list[PatientInsurancePlanOut]

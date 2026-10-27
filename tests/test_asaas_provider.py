@@ -170,6 +170,30 @@ async def test_customer_rejection_without_a_document_is_payer_document_required(
     assert with_document.value.code == "customer_failed"
 
 
+async def test_charge_rejected_for_a_missing_document_is_payer_document_required(monkeypatch):
+    # Sandbox fact (TASK-067): POST /customers ACCEPTS a customer without cpfCnpj, then
+    # POST /payments answers 400 invalid_object "preencher o CPF ou CNPJ do cliente".
+    missing = AsaasError(400, "invalid_object", document_missing=True)
+    _install(monkeypatch, FakeAsaasClient(errors={"create_pix_payment": missing}))
+    with pytest.raises(ProviderError) as asked:
+        await AsaasProvider().create_pix_charge(_account(), _request())
+    assert asked.value.code == "payer_document_required"
+    assert asked.value.retryable is False
+
+    # With a document already sent, the same answer is just a failed charge (no loop of questions).
+    _install(monkeypatch, FakeAsaasClient(errors={"create_pix_payment": missing}))
+    with pytest.raises(ProviderError) as sent:
+        await AsaasProvider().create_pix_charge(_account(), _request(payer_document="52998224725"))
+    assert sent.value.code == "charge_failed"
+
+    # A 400 that is NOT about the document stays a failed charge.
+    other = AsaasError(400, "invalid_object")
+    _install(monkeypatch, FakeAsaasClient(errors={"create_pix_payment": other}))
+    with pytest.raises(ProviderError) as unrelated:
+        await AsaasProvider().create_pix_charge(_account(), _request())
+    assert unrelated.value.code == "charge_failed"
+
+
 async def test_charge_failure_is_a_provider_error_and_5xx_is_retryable(monkeypatch):
     _install(monkeypatch, FakeAsaasClient(errors={"create_pix_payment": AsaasError(503)}))
     with pytest.raises(ProviderError) as failure:
@@ -297,3 +321,22 @@ async def test_the_api_key_is_handed_to_the_client_factory_and_nowhere_else(monk
     monkeypatch.setattr(asaas_provider, "client_for", factory)
     await AsaasProvider().get_charge(_account(), "pay_1")
     assert seen == [KEY]
+
+
+def test_a_bare_payment_date_today_is_read_as_now_not_midnight():
+    today = datetime.now(asaas_provider._ASAAS_TZ).date().isoformat()
+    moment = asaas_provider._paid_moment(today)
+    assert moment is not None
+    assert abs((datetime.now(UTC) - moment).total_seconds()) < 5
+
+
+def test_a_bare_payment_date_in_the_past_is_noon_of_that_day_in_brasilia():
+    moment = asaas_provider._paid_moment("2026-01-10")
+    local = moment.astimezone(asaas_provider._ASAAS_TZ)
+    assert local.strftime("%Y-%m-%d %H:%M") == "2026-01-10 12:00"
+
+
+def test_a_payment_date_with_a_time_is_kept_as_is():
+    moment = asaas_provider._paid_moment("2026-01-10 08:15:30")
+    assert moment.astimezone(asaas_provider._ASAAS_TZ).strftime("%H:%M:%S") == "08:15:30"
+    assert asaas_provider._paid_moment(None) is None

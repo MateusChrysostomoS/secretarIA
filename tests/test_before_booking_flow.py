@@ -191,15 +191,16 @@ async def test_the_persistence_seam_parks_the_conversation_and_sends_the_pix_in_
     conversation = await _conversation(db, world)
     assert conversation.flow_state == FlowState.AWAITING_DEPOSIT
     assert conversation.flow_selected_type == "Consulta"
-    assert [kind for kind, *_ in sender.sent] == ["text", "text", "buttons"]
-    intro, code, card = sender.sent
+    assert [kind for kind, *_ in sender.sent] == ["text", "buttons"]  # ONE message per Pix
+    intro, card = sender.sent
     assert "sinal de R$ 60,00" in intro[2] and "30 minutos" in intro[2]
     assert "04/03/2030 às 10:00" in intro[2]  # the clinic's timezone, not UTC
-    assert code[2] == "PIXCOPIAECOLA"
+    assert intro[2].rstrip().endswith("```PIXCOPIAECOLA```")  # the code, fenced, at the end
+    assert not any(item[2] == "PIXCOPIAECOLA" for item in sender.sent)
     assert [label for _id, label in card[3]] == ["Já paguei", "Trocar horário", "Cancelar reserva"]
     async with db() as session:
         rows = list(await session.scalars(select(Message)))
-    assert {row.body for row in rows} >= {"PIXCOPIAECOLA"}  # WhatsApp history recorded
+    assert any("```PIXCOPIAECOLA```" in row.body for row in rows)  # WhatsApp history recorded
 
 
 async def test_a_portal_patient_with_no_phone_gets_the_pix_as_portal_messages(db, env):
@@ -224,7 +225,8 @@ async def test_a_portal_patient_with_no_phone_gets_the_pix_as_portal_messages(db
                 select(Message).where(Message.conversation_id == world.conversation.id)
             )
         ]
-    assert "PIXCOPIAECOLA" in bodies and len(bodies) == 3
+    assert len(bodies) == 2 and any("```PIXCOPIAECOLA```" in body for body in bodies)
+    assert "PIXCOPIAECOLA" not in bodies
 
 
 async def test_a_pix_that_cannot_be_delivered_voids_the_charge_frees_the_slot_and_calls_a_human(
@@ -277,7 +279,7 @@ async def test_one_failed_send_is_retried_once_and_the_rest_still_goes_out(db, e
     await tasks._apply_flow_result(
         _reply(world), result, world.patient.wa_id, tenant=world.tenant, waba_token="wt"
     )
-    assert [kind for kind, *_ in sender.sent] == ["text", "text", "buttons"]
+    assert [kind for kind, *_ in sender.sent] == ["text", "buttons"]
     assert env.provider.called("cancel_charge") == 0
     assert (await _conversation(db, world)).flow_state == FlowState.AWAITING_DEPOSIT
 

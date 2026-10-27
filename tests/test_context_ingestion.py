@@ -318,3 +318,77 @@ async def test_the_draft_step_is_skipped_when_the_material_covered_every_message
     source = await _source(db, source_text=TEXT)
     await job.ingest_context_source({}, str(source.id))
     assert drafter.calls == 0
+
+
+CATALOG_TEXT = (
+    "Dr. Carlos Mendes (Cardiologista) atende às segundas e quartas, das 08:00 às 18:00. "
+    "Eletrocardiograma (20 min) - R$ 150,00 (Dr. Carlos). "
+    "Aceitamos os convênios Bradesco Saúde e Amil."
+)
+
+
+async def test_catalog_items_reach_the_proposal_and_nothing_is_written(db, monkeypatch):
+    from secretaria.models import Service, TenantInsurancePlan
+    from secretaria.services.context_catalog_proposal import (
+        ExtractedHours,
+        ExtractedInsurancePlan,
+        ExtractedProfessional,
+        ExtractedService,
+    )
+    from secretaria.services.insurance_catalog import ensure_catalog_seeded
+
+    extraction = ContextExtraction(
+        professionals=[
+            ExtractedProfessional(
+                name="Dr. Carlos Mendes",
+                specialty="Cardiologista",
+                hours=[ExtractedHours(days=["monday", "wednesday"], start="08:00", end="18:00")],
+                evidence=(
+                    "Dr. Carlos Mendes (Cardiologista) atende às segundas e quartas, "
+                    "das 08:00 às 18:00"
+                ),
+            )
+        ],
+        services=[
+            ExtractedService(
+                name="Eletrocardiograma",
+                duration_min=20,
+                price="R$ 150,00",
+                professional_names=["Dr. Carlos"],
+                evidence="Eletrocardiograma (20 min) - R$ 150,00 (Dr. Carlos)",
+            )
+        ],
+        insurance_plans=[
+            ExtractedInsurancePlan(
+                name="Bradesco Saúde", evidence="Aceitamos os convênios Bradesco Saúde e Amil"
+            ),
+            ExtractedInsurancePlan(
+                name="Amil", evidence="Aceitamos os convênios Bradesco Saúde e Amil"
+            ),
+        ],
+    )
+    monkeypatch.setattr(job, "_extraction_model", lambda: _Model(extraction))
+    async with db() as session:
+        await ensure_catalog_seeded(session)
+        await session.commit()
+    source = await _source(db, source_text=CATALOG_TEXT)
+
+    await job.ingest_context_source({}, str(source.id))
+
+    done = await _reload(db, source)
+    assert done.status == "done"
+    proposal = done.proposal
+    assert [p["name"] for p in proposal["professionals"]] == ["Dr. Carlos Mendes"]
+    assert proposal["professionals"][0]["matched_id"] is None
+    assert proposal["professionals"][0]["hours"]["monday"] == [{"start": "08:00", "end": "18:00"}]
+    assert [s["name"] for s in proposal["catalog_services"]] == ["Eletrocardiograma"]
+    insurance = proposal["insurance"]
+    assert insurance["default_mode"] == "shared" and insurance["applicable"] is True
+    assert sorted(p["name"] for p in insurance["plans"]) == ["Amil", "Bradesco Saúde"]
+    assert all(p["catalog_id"] for p in insurance["plans"])
+    assert any(n["kind"] == "decision" for n in proposal["notes"])
+    # The job proposes. It never registers a doctor, a service or a plan by itself.
+    async with db() as session:
+        assert (await session.scalars(select(Service))).first() is None
+        assert (await session.scalars(select(TenantInsurancePlan))).first() is None
+        assert len(list(await session.scalars(select(Professional)))) == 0

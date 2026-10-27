@@ -67,10 +67,74 @@ def test_the_menu_has_five_buttons_and_the_alterar_dados_description():
     assert result.bubbles[0].body.startswith("*Alterar Dados*")
 
 
-def test_a_paid_deposit_hides_service_doctor_and_insurance():
+def test_a_paid_deposit_offers_the_service_but_hides_doctor_and_insurance():
+    """2026-10-26: the service may change with a paid sinal (the difference is settled by
+    services/payments/service_change.py); the doctor and the convênio still may not."""
     result = enter_edit_menu(tenant(), appointment(), ae.EditContext(paid_deposit=True))
-    assert _labels(result) == [ae.LABEL_EDIT_DATE, ae.LABEL_EDIT_TIME, ae.LABEL_EDIT_MORE]
+    assert _labels(result) == [
+        ae.LABEL_EDIT_DATE,
+        ae.LABEL_EDIT_TIME,
+        ae.LABEL_EDIT_SERVICE,
+        ae.LABEL_EDIT_MORE,
+    ]
     assert ae.EDIT_PIX_NOTICE in result.bubbles[0].body
+    assert "médico ou convênio" in ae.EDIT_PIX_NOTICE
+    assert "diferença" in ae.EDIT_PIX_NOTICE
+
+
+def test_a_paid_deposit_at_the_reschedule_limit_still_offers_the_service():
+    ctx = ae.EditContext(paid_deposit=True, reschedule_blocked=True)
+    result = enter_edit_menu(tenant(), appointment(), ctx)
+    assert _labels(result) == [ae.LABEL_EDIT_SERVICE, ae.LABEL_EDIT_MORE]
+
+
+def test_the_menu_text_lists_only_the_options_it_offers():
+    """Browser proof 2026-10-26: with a paid sinal the "Mudar médico" button was gone but the
+    text still listed it. The bullets follow the buttons; the plain menu is unchanged."""
+    plain = enter_edit_menu(tenant(), appointment(), ae.EditContext()).bubbles[0].body
+    assert plain == ae.EDIT_MENU_BODY
+
+    paid = enter_edit_menu(tenant(), appointment(), ae.EditContext(paid_deposit=True))
+    body = paid.bubbles[0].body
+    assert "• *Mudar médico*" not in body
+    assert "• *Mudar serviço*" in body and "• *Mudar data*" in body
+    assert "• *Outro*: mudar o paciente." in body  # the convênio is hidden too
+    assert ae.EDIT_PIX_NOTICE in body
+
+    blocked = enter_edit_menu(tenant(), appointment(), ae.EditContext(reschedule_blocked=True))
+    body = blocked.bubbles[0].body
+    assert "• *Mudar data*" not in body and "• *Mudar horário*" not in body
+    assert "• *Mudar médico*" in body and ae.EDIT_LIMIT_NOTICE in body
+
+
+async def test_the_second_menu_text_drops_the_insurance_with_a_paid_deposit():
+    more = await _step(fr.STEP_EDIT_MENU, ae.LABEL_EDIT_MORE, ctx=context(paid_deposit=True))
+    assert "Mudar convênio" not in more.bubbles[0].body
+    assert "• *Mudar paciente*" in more.bubbles[0].body
+
+    plain = await _step(fr.STEP_EDIT_MENU, ae.LABEL_EDIT_MORE)
+    assert plain.bubbles[0].body == ae.EDIT_MORE_BODY
+
+
+async def test_with_a_paid_deposit_mudar_servico_opens_the_service_list():
+    result = await _step(fr.STEP_EDIT_MENU, ae.LABEL_EDIT_SERVICE, ctx=context(paid_deposit=True))
+    assert result.flow_step == fr.STEP_EDIT_SERVICE
+    assert isinstance(result.bubbles[0], SlotsBubble)
+
+
+async def test_with_a_paid_deposit_the_service_entry_works_inside_another_picker():
+    calendar = EditCalendar(slots=slots("14:00"))
+    result = await _step(
+        fr.STEP_EDIT_SLOT,
+        ae.LABEL_EDIT_SERVICE,
+        ctx=context(calendar, paid_deposit=True),
+    )
+    assert result.flow_step == fr.STEP_EDIT_SERVICE
+
+
+async def test_with_a_paid_deposit_the_doctor_typed_by_hand_is_not_honoured():
+    result = await _step(fr.STEP_EDIT_MENU, ae.LABEL_EDIT_DOCTOR, ctx=context(paid_deposit=True))
+    assert result.action == "delegate_llm"
 
 
 async def test_a_paid_deposit_also_hides_the_insurance_in_the_second_menu():

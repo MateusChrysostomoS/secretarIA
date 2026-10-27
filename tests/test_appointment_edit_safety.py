@@ -167,7 +167,12 @@ async def test_new_pix_restrictions_block_confirmation_of_a_parked_draft(change)
             reschedule_blocked=True,
         ),
     )
-    assert result.appointment_edit is None
+    if change == "service":
+        # 2026-10-26: a paid sinal no longer blocks the service; the worker settles the
+        # difference (services/payments/service_change.py) and only then touches the agenda.
+        assert result.appointment_edit["calendar_deferred"] is True
+    else:
+        assert result.appointment_edit is None
     assert not cal.created and not cal.detail_updates
 
 
@@ -225,7 +230,9 @@ async def test_switch_off_cannot_open_an_edit_from_a_legacy_reminder(db):  # noq
     assert not any(item[2].startswith("*Alterar Dados*") for item in sent())
 
 
-async def test_switch_off_discards_an_edit_without_writing_calendar():
+async def test_switch_off_no_longer_discards_an_edit():
+    # Owner 2026-10-27: "Alterar Dados" rides on the entry card every patient gets, so the
+    # edit works whatever the clinic's reminder switch.
     appt = appointment()
     draft = draft_for(appt).with_changes(insurance="Amil")
     cal = EditCalendar()
@@ -237,8 +244,7 @@ async def test_switch_off_discards_an_edit_without_writing_calendar():
         professionals(),
         context(cal),
     )
-    assert result.flow_state == FlowState.MENU
-    assert result.appointment_edit is None and not cal.detail_updates
+    assert result.appointment_edit is not None
 
 
 async def test_next_day_page_keeps_the_appointment_anchor():

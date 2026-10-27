@@ -272,6 +272,9 @@ def confirmation_text(
         "Adicionar à sua agenda:\n"
         f"{build_patient_calendar_link(local_start, local_end, summary, tz=tz)}"
     )
+    from secretaria.services.payments.deposit_lifecycle import reschedule_rules_text
+
+    lines.append(reschedule_rules_text(tenant))
     return "\n\n".join(lines)
 
 

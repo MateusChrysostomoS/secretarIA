@@ -90,6 +90,16 @@ async def _consultation_overlaps(
     return found is not None
 
 
+async def _end_read(session: AsyncSession) -> None:
+    """End the READ-ONLY transaction before a calendar call (session 07): Google answers in
+    seconds or times out, and an open transaction there is an "idle in transaction" connection.
+    Nothing is pending here (the writes come after the event exists); with pending writes the
+    transaction is left as it is. Reads after this see the latest committed rows, which is all
+    the checks ever had (READ COMMITTED; no row is locked before the claim)."""
+    if session.in_transaction() and not (session.new or session.dirty or session.deleted):
+        await session.commit()
+
+
 async def _kept(session: AsyncSession, offer_id: UUID) -> KeepResult:
     offer = await session.get(DepositReleaseOffer, offer_id, populate_existing=True)
     if offer is not None and offer.decision == DECISION_KEPT and offer.new_appointment_id:
@@ -131,6 +141,7 @@ async def accept_keep(
     if calendar is None:
         return KeepResult(ACCEPT_UNAVAILABLE)
     own_event = keep_event_id(offer_id, calendar=calendar)
+    await _end_read(session)
     try:
         events = await calendar.check_availability(start, end)
     except Exception as exc:  # noqa: BLE001 - Google down: nothing changes, the clinic retries
@@ -150,6 +161,7 @@ async def accept_keep(
     patient = await session.get(Patient, released.patient_id) if released.patient_id else None
     display = released.attendee_name or (patient.name if patient is not None else None)
     service = released.appointment_type or "Consulta"
+    await _end_read(session)
     try:
         event = await create_event_exclusive(
             calendar,

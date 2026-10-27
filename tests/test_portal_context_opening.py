@@ -55,6 +55,11 @@ from secretaria.models.conversation import FlowState, HandoverState  # noqa: E40
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE  # noqa: E402
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
 from secretaria.services.flow_router import LABEL_CANCEL_APPT, LABEL_RESCHEDULE  # noqa: E402
+from secretaria.services.reminder_text import (  # noqa: E402
+    LABEL_CANCEL,
+    LABEL_CONFIRM,
+    LABEL_EDIT,
+)
 from secretaria.workers import tasks  # noqa: E402
 from secretaria.workers.portal import open as open_job  # noqa: E402
 from secretaria.workers.shared import opening  # noqa: E402
@@ -174,6 +179,7 @@ async def _appointment(
     start: datetime,
     status=AppointmentStatus.SCHEDULED,
     professional_name: str | None = None,
+    card_confirmations: int = 0,
 ):
     async with db() as session:
         professional_id = None
@@ -192,6 +198,7 @@ async def _appointment(
                 end_at=start + timedelta(minutes=30),
                 status=status,
                 professional_id=professional_id,
+                card_confirmation_count=card_confirmations,
             )
         )
         await session.commit()
@@ -249,12 +256,31 @@ async def test_the_clinics_own_menu_question_wins_over_the_default(db) -> None:
 
 
 async def test_an_upcoming_appointment_is_detected(db) -> None:
+    # Owner 2026-10-27: the reminder card, even with the clinic's reminders switched off.
     tenant, patient, conversation = await _seed(db)
     await _appointment(
         db, tenant, patient, start=NOW + timedelta(days=5), professional_name="Dra. Ana"
     )
     message = await _resolve(conversation, tenant)
     assert message.kind is opening.OpeningKind.UPCOMING
+    assert message.body.startswith("LEMBRE-SE:") and "Dra. Ana" in message.body
+    assert message.labels == [LABEL_CONFIRM, LABEL_CANCEL, LABEL_EDIT]
+    assert message.appointment_id is not None
+
+
+async def test_after_three_card_confirmations_the_greeting_comes_back(db) -> None:
+    tenant, patient, conversation = await _seed(db)
+    await _appointment(
+        db,
+        tenant,
+        patient,
+        start=NOW + timedelta(days=5),
+        professional_name="Dra. Ana",
+        card_confirmations=3,
+    )
+    message = await _resolve(conversation, tenant)
+    assert message.kind is opening.OpeningKind.UPCOMING
+    assert message.appointment_id is None
     assert "Dra. Ana" in message.body
     assert message.labels[0] == LABEL_RESCHEDULE
     assert LABEL_CANCEL_APPT in message.labels[1]
@@ -390,6 +416,19 @@ async def test_entering_an_old_conversation_sends_the_opening_without_any_tap(db
 async def test_entering_with_an_upcoming_appointment_sends_that_card(db) -> None:
     tenant, patient, conversation = await _seed(db)
     await _appointment(db, tenant, patient, start=NOW + timedelta(days=4))
+    await _enter(tenant)
+    (sent,) = await _outbound(db, conversation)
+    assert sent.body.startswith("LEMBRE-SE:")
+    assert [o["title"] for o in sent.interactive["options"]] == [
+        LABEL_CONFIRM,
+        LABEL_CANCEL,
+        LABEL_EDIT,
+    ]
+
+
+async def test_entering_after_three_card_confirmations_sends_the_greeting(db) -> None:
+    tenant, patient, conversation = await _seed(db)
+    await _appointment(db, tenant, patient, start=NOW + timedelta(days=4), card_confirmations=3)
     await _enter(tenant)
     (sent,) = await _outbound(db, conversation)
     assert "Vi aqui que você já tem uma consulta marcada" in sent.body

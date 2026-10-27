@@ -89,6 +89,8 @@ def _result_response(result: ConnectionResult) -> JSONResponse:
         status=result.status or "incomplete",
         incomplete_reason=result.incomplete_reason,
         capabilities=result.capabilities,
+        excess_groups=list(result.excess_groups),
+        excess_labels=_labels(result.excess_groups),
     )
     return JSONResponse(body.model_dump(), status_code=200)
 

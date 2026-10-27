@@ -63,6 +63,13 @@ class CalendarDepositRead(BaseModel):
     # received that the clinic still has to decide about). Additive: a consumer that does not
     # know the key ignores it.
     needs_attention: bool = False
+    # Plan 2026-10-26 (troca de serviço com sinal pago), additive. `held_cents`: what the clinic
+    # holds for a PAID sinal once service differences changed it (sinal + paid differences -
+    # differences asked back); null = `amount_cents`. `pending_difference_cents`: a difference
+    # Pix waiting for the patient's payment (the service changes only when it is paid); null =
+    # none. Amounts only - never the Pix code or the charge id.
+    held_cents: int | None = None
+    pending_difference_cents: int | None = None
 
 
 class CalendarReminderRead(BaseModel):
@@ -396,6 +403,32 @@ class AppointmentRelease(BaseModel):
     justification: str | None = Field(default=None, max_length=1000)
 
 
+class AppointmentServiceChangeRead(BaseModel):
+    """A new service on an appointment whose Pix sinal is PAID (plan 2026-10-26 Task 7).
+
+    `status`:
+    * `awaiting_payment` - the patient was sent a Pix of only the difference
+      (`diff_cents`, valid until `expires_at`); the appointment keeps `old_service` (and
+      its agenda slot) until that Pix is paid;
+    * `asked` - the service changed now and the patient was asked whether they want the
+      difference (`diff_cents`) back; a "yes" opens a payment-attention item for the clinic;
+    * `applied_now` - the service changed now; nothing to pay or ask (or, 2026-10-27, the Pix
+      of the difference could not be created: the patient is told the difference is settled
+      with the clinic and a `service_diff_collect_due` attention item is opened).
+    `patient_notice` is the delivery code of THAT message (same vocabulary as the
+    appointment's `patient_notice`; null for `applied_now` unless the difference is to be
+    collected). Never carries the Pix code.
+    """
+
+    status: Literal["awaiting_payment", "asked", "applied_now"]
+    diff_cents: int
+    old_service: str
+    new_service: str
+    adjustment_id: str | None = None
+    expires_at: datetime | None = None
+    patient_notice: str | None = None
+
+
 class AppointmentActionRead(AppointmentRead):
     """An appointment after a clinic action that may tell the patient (TASK-032 R7).
 
@@ -407,6 +440,22 @@ class AppointmentActionRead(AppointmentRead):
 
     patient_notice: str | None = None
     whatsapp_link: str | None = None
+
+
+class AppointmentEditRead(AppointmentActionRead):
+    """POST /appointments/{id}/edit: the action read plus `service_change`, set (non-null)
+    only when a new service met a PAID sinal (plan 2026-10-26 Task 7). Additive: the other
+    clinic actions keep `AppointmentActionRead`'s keys."""
+
+    service_change: AppointmentServiceChangeRead | None = None
+
+
+class AppointmentCancelRead(AppointmentActionRead):
+    """POST /appointments/{id}/cancel: the action read plus `voided_difference_cents` - the
+    unpaid difference Pix (service change on a paid sinal, plan 2026-10-26) this cancellation
+    cancelled, in cents; null when there was none. Additive; never a refund statement."""
+
+    voided_difference_cents: int | None = None
 
 
 class AppointmentReleaseRead(AppointmentRead):

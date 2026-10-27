@@ -210,6 +210,14 @@ class Appointment(Base):
     confirmation_count: Mapped[int] = mapped_column(
         Integer, default=0, server_default=text("0")
     )
+    # 2026-10-27 (owner): how many times the PATIENT tapped Confirmar on a reminder card of
+    # the current start (chat or scheduled; each card row counts once), NOT capped. Only
+    # stops the card sent when the patient enters the conversation, at 3
+    # (services/reminder_opening.py); the 1 d / 1 h reminders ignore it. Written only by
+    # services/reminder_schedule.py; rescheduling zeroes it.
+    card_confirmation_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0")
+    )
     first_confirmed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

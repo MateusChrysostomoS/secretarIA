@@ -713,6 +713,11 @@ _ACTION_BUTTON_PREFIXES: tuple[str, ...] = (
     "relcancel|",
     "relgot|",
     "relmiss|",
+    # 2026-10-26: "quer a diferença do sinal de volta?" after a change to a cheaper service. The
+    # trailing id is the DepositAdjustment's; workers/shared/service_change_actions.py honours it
+    # only for the patient of that sinal, in the tapping conversation's clinic.
+    "svcdiffyes|",
+    "svcdiffno|",
 )
 
 

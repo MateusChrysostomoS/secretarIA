@@ -14,7 +14,6 @@ from secretaria.models import (
     AppointmentStatus,
     Conversation,
     FlowState,
-    PixDepositStatus,
     Professional,
     Tenant,
     is_live_status,
@@ -48,6 +47,7 @@ from secretaria.services.patient_context import (
     load_upcoming_appointments,
 )
 from secretaria.services.payments import deposit_lifecycle
+from secretaria.services.payments.service_change import REFUND_ACTIONS
 from secretaria.services.release_offer import RELEASE_OFFER_ACTIONS
 from secretaria.services.reminder_text import REMINDER_ROW_ACTIONS
 from secretaria.services.service_catalog import (
@@ -64,8 +64,7 @@ from secretaria.workers.shared.context import (
     _ReplyContext,
 )
 from secretaria.workers.shared.deposit import (
-    _hours_until_start,
-    _pix_retention_warning_line,
+    _cancel_warning_line,
     _send_reschedule_limit_buttons,
 )
 from secretaria.workers.shared.flow_runner import (
@@ -88,6 +87,7 @@ from secretaria.workers.shared.sender import (
     _reply_sender,
     _send_simple_text,
 )
+from secretaria.workers.shared.service_change_actions import handle_service_diff_tap
 from secretaria.workers.shared.text import (
     _as_utc,
 )
@@ -240,6 +240,12 @@ async def _handle_action_button(
     except ValueError:
         return  # already validated by extract_action_button; defensive only
 
+    # 2026-10-26: "quer a diferença do sinal de volta?" - the id is a DepositAdjustment's, checked
+    # against the conversation's patient by the handler. Answered there, nothing follows.
+    if action in REFUND_ACTIONS:
+        await handle_service_diff_tap(reply, action, appt_uuid)
+        return
+
     # TASK-032 R2/R3: the reminder buttons carry a REMINDER row id, not an
     # appointment id; their handler checks the row against the patient. Some
     # steps of the "Cancelar" path continue in a branch below, with the
@@ -324,15 +330,8 @@ async def _handle_action_button(
         if action == "apptcancel":
             tenant_config = await load_tenant_config(session, tenant)
             deposit = await deposit_lifecycle.get_deposit_for_appointment(session, appointment.id)
-            hours_until = _hours_until_start(appointment, datetime.now(UTC))
-            inside_window = (
-                deposit is not None
-                and deposit.status == PixDepositStatus.PAID
-                and hours_until is not None
-                and hours_until <= tenant.pix_refund_window_hours
-            )
-            if inside_window:
-                warning = _pix_retention_warning_line(tenant, deposit)
+            warning = _cancel_warning_line(tenant, deposit, appointment, datetime.now(UTC))
+            if warning is not None:
                 body = f"{warning} Cancelar mesmo assim ou prefere reagendar?"
                 await client.send_buttons(
                     reply.patient_ref,

@@ -171,6 +171,12 @@ class Tenant(Base):
     # Hours before the appointment start within which a cancellation still
     # gets a FULL refund (see deposit_lifecycle.on_appointment_cancelled).
     pix_refund_window_hours: Mapped[int] = mapped_column(Integer, server_default="24", default=24)
+    # Days before the appointment from which a service change to a CHEAPER service asks the
+    # patient whether they want the sinal difference back (0 = always ask; the R$ 10 floor still
+    # applies - services/payments/service_change_policy.py). Closer than this, the clinic keeps it.
+    pix_difference_refund_min_days: Mapped[int] = mapped_column(
+        Integer, server_default="2", default=2
+    )
     # "total" (clinic keeps the whole deposit) | "partial" (see
     # pix_partial_refund_percent) — applied when a cancellation lands OUTSIDE
     # the refund window (i.e. too close to the appointment).

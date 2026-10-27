@@ -14,6 +14,7 @@ from secretaria.workers.shared import appointment_edit_support as support
 from tests._edit_flow_support import (
     DOCTOR_A,
     DOCTOR_B,
+    START_UTC,
     EditCalendar,
     appointment,
     context,
@@ -148,6 +149,46 @@ async def test_only_the_service_changing_does_not_ask_for_a_free_slot_check():
     assert result.appointment_edit is not None
     assert result.appointment_edit["time_changed"] is False
     assert calendar.checked == []
+
+
+async def test_with_a_paid_deposit_a_service_change_defers_the_calendar_to_the_worker():
+    """The money decides (a dearer service waits for the Pix of the difference): the router
+    checks the window but writes NOTHING on the agenda; the worker does, once it is decided."""
+    calendar = EditCalendar()
+    appt = appointment()
+    draft = draft_for(appt).with_changes(service="Retorno", end_at="2030-10-15T15:40")
+
+    result = await _confirm(draft, ctx=context(calendar, paid_deposit=True), appt=appt)
+
+    edit = result.appointment_edit
+    assert edit["calendar_deferred"] is True and edit["calendar"] is calendar
+    assert edit["appointment_type"] == "Retorno"
+    assert edit["google_event_id"] == "evt-old" and edit["time_changed"] is False
+    assert calendar.checked  # the new window (20 min) was checked
+    assert calendar.detail_updates == [] and calendar.created == []
+
+
+async def test_a_paid_service_change_into_a_busy_window_goes_back_to_day_and_time():
+    calendar = EditCalendar(free=False)
+    appt = appointment(appointment_type="Retorno", end_at=START_UTC + timedelta(minutes=20))
+    draft = draft_for(appt).with_changes(service="Consulta", end_at="2030-10-15T16:00")
+
+    result = await _confirm(draft, ctx=context(calendar, paid_deposit=True), appt=appt)
+
+    assert result.appointment_edit is None
+    assert result.flow_step == fr.STEP_EDIT_DAY
+    assert calendar.detail_updates == []
+
+
+async def test_without_a_paid_deposit_a_service_change_still_writes_the_calendar_here():
+    calendar = EditCalendar()
+    appt = appointment()
+    draft = draft_for(appt).with_changes(service="Retorno", end_at="2030-10-15T15:40")
+
+    result = await _confirm(draft, ctx=context(calendar), appt=appt)
+
+    assert len(calendar.detail_updates) == 1
+    assert not result.appointment_edit.get("calendar_deferred")
 
 
 # --- The worker: the same row, the old event, the reminders ----------------------------

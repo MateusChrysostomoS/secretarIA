@@ -8,10 +8,12 @@ from types import SimpleNamespace
 from urllib.parse import urlsplit
 from uuid import UUID
 
+from sqlalchemy import select
+
 from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
-from secretaria.models import Tenant
+from secretaria.models import Professional, Tenant
 from secretaria.models.context_source import (
     KIND_URL,
     STATUS_DONE,
@@ -30,6 +32,7 @@ from secretaria.services.context_extraction import (
     extract_context,
 )
 from secretaria.services.greeting_template import clinic_description_budget
+from secretaria.services.insurance_catalog import list_catalog, list_tenant_plans
 from secretaria.services.safe_fetch import FetchError, UnsafeUrlError, fetch_public_page
 from secretaria.services.service_catalog import load_service_catalog
 from secretaria.services.tenant_config import list_active_professionals
@@ -121,6 +124,15 @@ async def _load_inputs(sid: UUID) -> dict:
         tenant = await session.get(Tenant, source.tenant_id)
         catalog = await load_service_catalog(session, source.tenant_id)
         professionals = await list_active_professionals(session, source.tenant_id)
+        # Matching must also see a doctor who is switched off: registering "Dr. Carlos" again
+        # next to his inactive row would be a duplicate the clinic cannot tell apart.
+        roster = list(
+            await session.scalars(
+                select(Professional).where(Professional.tenant_id == source.tenant_id)
+            )
+        )
+        insurance_catalog = await list_catalog(session)
+        tenant_plans = await list_tenant_plans(session, source.tenant_id)
         return {
             "kind": source.kind,
             "url": source.url,
@@ -134,6 +146,29 @@ async def _load_inputs(sid: UUID) -> dict:
             "specialties": sorted(
                 {(p.specialty or "").strip() for p in professionals if (p.specialty or "").strip()}
             ),
+            "catalog_inputs": {
+                "roster": [
+                    SimpleNamespace(
+                        id=p.id,
+                        name=p.name,
+                        specialty=p.specialty,
+                        about=p.about,
+                        business_hours=p.business_hours,
+                    )
+                    for p in roster
+                ],
+                "catalog": [SimpleNamespace(id=s.id, name=s.name) for s in catalog],
+                "insurance_catalog": [
+                    SimpleNamespace(id=e.id, name=e.name, aliases=list(e.aliases or []))
+                    for e in insurance_catalog
+                ],
+                "clinic_plan_names": [
+                    (entry.name if entry is not None else str(plan.custom_name or ""))
+                    for plan, entry in tenant_plans
+                ],
+                "insurance_mode": tenant.insurance_mode,
+                "default_duration": tenant.appointment_duration_min or 50,
+            },
             "clinic_name": tenant.clinic_name,
             "facts": tenant.clinic_facts,
             "address": tenant.address,
@@ -201,10 +236,15 @@ async def ingest_context_source(ctx: dict, source_id: str) -> None:
             description_budget=budget,
             current_messages=saved_messages,
             drafts=drafts,
+            catalog_inputs=inp["catalog_inputs"],
         )
         payload = {
             "fields": [asdict(f) for f in proposal.fields],
             "services": [asdict(s) for s in proposal.services],
+            "professionals": [asdict(p) for p in proposal.professionals],
+            "catalog_services": [asdict(s) for s in proposal.catalog_services],
+            "insurance": asdict(proposal.insurance) if proposal.insurance else None,
+            "notes": [asdict(n) for n in proposal.notes],
         }
         await _finish(sid, status=STATUS_DONE, error_code=None, proposal=payload)
         logger.info(
@@ -212,6 +252,8 @@ async def ingest_context_source(ctx: dict, source_id: str) -> None:
             source_id=source_id,
             fields=len(payload["fields"]),
             services=len(payload["services"]),
+            professionals=len(payload["professionals"]),
+            catalog_services=len(payload["catalog_services"]),
         )
     except (UnsafeUrlError, FetchError, ExtractionError, ExtractionFailed) as exc:
         await _finish(sid, status=STATUS_FAILED, error_code=exc.code, proposal=None)

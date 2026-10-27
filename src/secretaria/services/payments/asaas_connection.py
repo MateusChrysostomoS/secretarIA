@@ -114,6 +114,11 @@ async def _register_webhook(
         "sendType": "SEQUENTIALLY",
         "events": WEBHOOK_EVENTS,
     }
+    # Asaas requires it (real sandbox: 400 without); who gets the "queue paused" e-mail is an
+    # operator decision, so it comes from settings and is left out when unset, never sent empty.
+    alert_email = get_settings().ASAAS_WEBHOOK_ALERT_EMAIL.strip()
+    if alert_email:
+        body["email"] = alert_email
     try:
         existing = next(
             (
@@ -154,7 +159,8 @@ async def _register_webhook(
 def _mark_connected(row: ClinicPaymentAccount, now: datetime) -> None:
     row.status = ACCOUNT_CONNECTED
     row.incomplete_reason = None
-    row.excess_groups = []
+    # `excess_groups` is NOT reset here: while the excess refusal is OFF (TASK-053) a connected
+    # account may carry the informational groups of its last probe; the probe paths set it.
     row.probe_inconclusive_days = 0
     row.connected_at = row.connected_at or now
     row.last_verified_at = now
@@ -174,6 +180,7 @@ def _result_of(row: ClinicPaymentAccount, outcome: str) -> ConnectionResult:
         outcome=outcome,  # type: ignore[arg-type]
         status=row.status,
         incomplete_reason=row.incomplete_reason,
+        excess_groups=tuple(row.excess_groups or []),
         capabilities=dict(row.capabilities or {}),
     )
 
@@ -224,7 +231,8 @@ async def connect_asaas_account(
     await cfg.set_asaas_api_key(session, tenant_id, api_key)  # dual-write (legacy readers)
     await cfg.set_asaas_webhook_token(session, tenant_id, token)
     row.capabilities = dict(verdict.capabilities)
-    row.excess_groups = []
+    # Empty unless the excess refusal is OFF and the key holds extra groups (information, TASK-053).
+    row.excess_groups = list(verdict.excess_groups)
     row.last_probe_at = now
     row.probe_inconclusive_days = 0
 
@@ -344,9 +352,9 @@ async def recheck_asaas_account(
         logger.warning("asaas_key_recheck_refused", verdict=verdict.code, tenant_id=str(tenant_id))
         return "refused"
 
-    # ACCEPTED: the key is fine; now the webhook.
+    # ACCEPTED: the key is fine; now the webhook. The groups are informational (TASK-053).
     row.capabilities = dict(verdict.capabilities)
-    row.excess_groups = []
+    row.excess_groups = list(verdict.excess_groups)
     client = asaas_provider.client_for(account.api_key)
     try:
         hooks = (await client.list_webhooks()).get("data") or []

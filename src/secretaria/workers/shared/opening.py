@@ -8,9 +8,10 @@ half: a patient the clinic already KNOWS — a logged-in account, a verified
 code, an account returning to its history — gets ONE of three messages:
 
   1. a live upcoming appointment → the canonical appointment reminder with
-     [Confirmar, Cancelar, Alterar Dados] when reminders v2 is enabled. Its
-     chat reminder row and ids use the existing reminder action handlers;
-     switched-off clinics retain the previous greeting;
+     [Confirmar, Cancelar, Alterar Dados], whether or not the clinic switched
+     the scheduled reminders on (owner 2026-10-27). Its chat reminder row and
+     ids use the existing reminder action handlers; once the patient confirmed
+     on a card 3 times (`entry_card_retired`) the previous greeting is used;
   2. the first appearance after a consult → "Como foi a sua consulta do dia
      DD/MM/AAAA?" plus the clinic's own post-consult text when configured;
   3. everyone else → the clinic's menu question (or "Como posso te ajudar?")
@@ -42,7 +43,6 @@ from secretaria.models import (
     Tenant,
     is_live_status,
 )
-from secretaria.services import reminder_hooks
 from secretaria.services.flow_router import (
     FlowRouterResult,
     MenuBubble,
@@ -54,6 +54,7 @@ from secretaria.services.patient_context import (
     find_post_consult_followup,
     resolve_patient_opening_state,
 )
+from secretaria.services.reminder_opening import entry_card_retired
 from secretaria.services.reminder_text import (
     LABEL_CANCEL,
     LABEL_CONFIRM,
@@ -157,16 +158,18 @@ async def resolve_opening_message(conversation_id: UUID, tenant: Tenant) -> Open
             in (PatientOpeningState.HAS_UPCOMING_SOON, PatientOpeningState.HAS_UPCOMING)
             and context.future_appointments
         ):
-            if reminder_hooks.enabled_for(tenant):
-                appointment = await session.scalar(
-                    select(Appointment).where(
-                        Appointment.id == UUID(context.future_appointments[0]["id"]),
-                        Appointment.tenant_id == tenant.id,
-                        Appointment.patient_id == patient.id,
-                    )
+            # Owner 2026-10-27: the reminder card whatever the clinic's reminder switch,
+            # until the patient confirmed it 3 times; then the greeting below.
+            appointment = await session.scalar(
+                select(Appointment).where(
+                    Appointment.id == UUID(context.future_appointments[0]["id"]),
+                    Appointment.tenant_id == tenant.id,
+                    Appointment.patient_id == patient.id,
                 )
-                if appointment is None:
-                    return None
+            )
+            if appointment is None:
+                return None
+            if not entry_card_retired(appointment):
                 content = await load_reminder_content(session, tenant, appointment)
                 return OpeningMessage(
                     kind=OpeningKind.UPCOMING,

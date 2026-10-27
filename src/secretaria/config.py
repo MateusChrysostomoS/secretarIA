@@ -382,6 +382,11 @@ class Settings(BaseSettings):
     # a deliberate opt-in. Reuses SMTP_HOST/SMTP_PORT/SMTP_USERNAME/
     # SMTP_PASSWORD above (same mail server) but has its own From identity.
     EMAIL_ENABLED: bool = False
+    # The plan's cap on professionals (and the "multi_professional" add-on gate) is NOT enforced
+    # while this is False - owner's decision, 2026-10-23: no limit until the secretarIA billing is
+    # finished. Turning it on restores the exact previous behaviour (403 not entitled / 409 limit
+    # reached) on every path that creates or reactivates a professional.
+    PROFESSIONAL_LIMIT_ENFORCED: bool = False
     EMAIL_FROM_ADDRESS: str = ""
     EMAIL_FROM_NAME: str = "SecretarIA"
     # Staff notifications use the unified portal's fixed /agenda route.
@@ -455,6 +460,19 @@ class Settings(BaseSettings):
     # in `asaas_probes.QUALIFIED_EXCESS_GROUPS`. ON = trust the four minimum probes. Set it to
     # true only on purpose, after the merge; a wrong probe can only ever REFUSE a good key.
     ASAAS_PROBES_QUALIFIED: bool = False
+    # TASK-053 (spec 2026-10-11 section 7, owner decision): refuse a key that holds MORE permissions
+    # than the product needs (decision D14). OFF (the default) = a key that can do what the product
+    # needs (Clientes, Cobrancas, Webhooks) is ACCEPTED; the four minimum excess groups are still
+    # probed (read-only GETs) and any granted one is returned as INFORMATION (`excess_groups`), and
+    # `ASAAS_PROBES_QUALIFIED` plays no part. ON = the D14 refusal, gated by the qualification as
+    # before. Turn it on only after the Asaas sandbox proves a key can be limited.
+    ASAAS_REFUSE_EXCESS_PERMISSIONS: bool = False
+    # TASK-067 session 03 (proved on the REAL Asaas sandbox): POST /webhooks answers 400
+    # "O parametro email deve ser informado" without an `email`. It is the address Asaas writes
+    # to when it pauses a clinic's webhook queue. Empty = the field is omitted (and the real
+    # Asaas will refuse the webhook, leaving the account `incomplete`): set it in production
+    # before connecting a clinic.
+    ASAAS_WEBHOOK_ALERT_EMAIL: str = ""
 
     @property
     def payments_webhook_base_url(self) -> str:

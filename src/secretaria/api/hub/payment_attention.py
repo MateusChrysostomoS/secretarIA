@@ -70,7 +70,9 @@ def _item_out(row: ItemRow) -> AttentionItemOut:
     return AttentionItemOut(
         id=str(item.id),
         reason=item.reason,
-        reason_text=attention_view.reason_text(item.reason, item.suggested_refund_cents),
+        reason_text=attention_view.reason_text(
+            item.reason, item.suggested_refund_cents, item.amount_cents
+        ),
         patient_display_name=row.patient_name,
         service_label=item.service_label,
         slot_start=item.slot_start,

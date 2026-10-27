@@ -124,8 +124,15 @@ def test_the_deposit_wire_carries_exactly_three_keys():
     additive, defaulted key: a consumer that does not know it ignores it); nothing else may
     widen it (never the provider charge id, the fulfillment_status column itself, the booking
     snapshot or the payer)."""
-    assert set(CalendarDepositRead.model_fields) == {"status", "amount_cents", "needs_attention"}
-    assert CalendarDepositRead(status="confirmado_pago", amount_cents=1).needs_attention is False
+    # Plan 2026-10-26 (troca de serviço com sinal pago) added two more AMOUNTS, both defaulted
+    # to null: what the clinic holds after paid service differences and a difference Pix still
+    # waiting - never a charge id or a Pix code.
+    assert set(CalendarDepositRead.model_fields) == {
+        "status", "amount_cents", "needs_attention", "held_cents", "pending_difference_cents"
+    }
+    read = CalendarDepositRead(status="confirmado_pago", amount_cents=1)
+    assert read.needs_attention is False
+    assert read.held_cents is None and read.pending_difference_cents is None
 
 
 # ---------------------------------------------------------------------------
@@ -799,6 +806,8 @@ async def test_the_deposit_carries_its_real_status_value_and_amount(
         "status": status.value,
         "amount_cents": 4550,
         "needs_attention": False,  # fulfillment_status is not "needs_attention"
+        "held_cents": None,  # no service change on this sinal
+        "pending_difference_cents": None,
     }
 
 
@@ -815,7 +824,9 @@ async def test_a_paid_deposit_says_nothing_about_the_appointment_and_leaks_no_pa
     resp = await _events(client)
 
     body = resp.json()[0]
-    assert set(body["deposit"]) == {"status", "amount_cents", "needs_attention"}
+    assert set(body["deposit"]) == {
+        "status", "amount_cents", "needs_attention", "held_cents", "pending_difference_cents"
+    }
     assert body["status"] == "scheduled"
     assert body["confirmation_count"] == 0
     assert "NAO-VAZAR" not in resp.text

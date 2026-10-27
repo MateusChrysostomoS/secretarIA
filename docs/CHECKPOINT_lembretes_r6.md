@@ -29,7 +29,7 @@ Graphify atualizado via AST, sem LLM; consultas encontram os módulos de ediçã
 ## O que entrou onde
 
 - `services/reminder_text.py` e `schemas/webhook.py`: Confirmar / Cancelar / Alterar Dados e `remedit`; ids antigos continuam decodificando.
-- `workers/shared/reminder_actions.py`: confirmação seguida do menu recorrente; Cancelar pede confirmação diretamente e a continuação cancela e pergunta o motivo. Com o interruptor OFF os cartões de lembrete antigos não abrem a edição.
+- `workers/shared/reminder_actions.py`: confirmação seguida do menu recorrente; Cancelar pede confirmação diretamente e a continuação cancela e pergunta o motivo. Com o interruptor OFF os cartões de lembrete antigos (cron) não abrem a edição; o cartão de entrada (linha `chat`) abre desde 2026-10-27 (`CHECKPOINT_primeira_mensagem_lembrete.md`, Seguimento A).
 - `services/appointment_edit.py`, `appointment_edit_flow.py`: menu de alteração, data próxima da consulta, horário, serviços do médico atual, médicos com disponibilidade, convênio e paciente. Uma confirmação completa fecha cada escolha; Alterar Mais Dados mantém o mesmo rascunho.
 - `models/conversation.py`, `workers/shared/state_expiry.py`, `turn_router.py`, `orchestrator.py`, `flow_runner.py`, `ai/tools.py`: `EDIT_BOOKING`, coluna `flow_edit_draft`, persistência, snapshots e limpeza/expiração universal. A consulta não muda enquanto há somente um rascunho.
 - `services/calendar.py`: alteração de título/descrição/janela, disponibilidade e identidade física da agenda (o alias primary não confunde contas distintas). Mesmo médico ou agenda física compartilhada preserva o evento; agenda diferente cria primeiro.
@@ -55,7 +55,7 @@ Graphify atualizado via AST, sem LLM; consultas encontram os módulos de ediçã
 | Reservas adquiridas depois da lista bloqueiam Confirmar | `test_a_hold_acquired_after_the_picker_blocks_confirm` |
 | Cinco opções são lista no WhatsApp e botões no Portal | `test_five_labels_become_a_list_on_a_three_button_channel`, `test_send_buttons_records_all_five_portal_options` |
 | Cartões antigos continuam atendidos no caminho novo | `test_legacy_ids_still_resolve` e sete cenários R3 substituídos nos próprios arquivos |
-| OFF impede entrada/aplicação do caminho novo | `test_switch_off_cannot_open_an_edit_from_a_legacy_reminder`, `test_switch_off_discards_an_edit_without_writing_calendar` |
+| OFF impede entrada pelo lembrete antigo (cron); desde 2026-10-27 a edição em si independe do interruptor | `test_switch_off_cannot_open_an_edit_from_a_legacy_reminder`, `test_switch_off_no_longer_discards_an_edit` |
 | Paginação preserva a âncora da consulta | `test_next_day_page_keeps_the_appointment_anchor` |
 | Nome copiado não chega à IA antes/depois do descarte | `test_an_existing_attendee_is_masked_during_edit_and_after_discard` |
 | Pergunta livre mantém a etapa, o rascunho e contexto anônimo | `test_free_text_hands_the_turn_to_the_ai_and_keeps_the_draft`, `test_edit_detour_explains_the_parked_confirmation_without_identifiers` |

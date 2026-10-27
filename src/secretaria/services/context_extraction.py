@@ -17,12 +17,26 @@ Three defences, all deterministic and tested:
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
 from secretaria.schemas.clinic_facts import ClinicFacts
+from secretaria.services.context_catalog_proposal import (
+    ExtractedInsurancePlan,
+    ExtractedProfessional,
+    ExtractedService,
+    ProposedCatalogService,
+    ProposedInsurance,
+    ProposedNote,
+    ProposedProfessional,
+    build_catalog_proposal,
+    verify_plan,
+    verify_professional,
+    verify_service,
+)
+from secretaria.services.service_catalog import normalize as normalize_service
 
 FENCE_OPEN = "<fonte>"
 FENCE_CLOSE = "</fonte>"
@@ -46,9 +60,32 @@ REGRAS:
    `post_consult_knowledge`): preencha SOMENTE se o material trouxer esse texto (por exemplo uma
    página de orientações de pós-consulta ou de pós-operatório, ou uma mensagem de boas-vindas).
    Nunca escreva orientação médica com conhecimento próprio. Se o material não tiver, devolva null.
-7. Serviços: só preencha `service_guidance` para serviços que existem na lista abaixo, usando o
-   nome exatamente como está na lista. Orientações são o que o paciente deve fazer antes
+7. Orientações de preparo (`service_guidance`): só para serviços que existem na lista abaixo,
+   usando o nome exatamente como está na lista. Orientações são o que o paciente deve fazer antes
    (jejum, exames, documentos, preparo).
+8. Profissionais (`professionals`): TODOS os que o material apresenta. Para cada um: nome como
+   está escrito, `specialty` (a especialidade dita), `about` (o que o material diz além disso:
+   registro profissional, formação, foco), `email` se aparecer, e `hours`: grupos de dias da
+   semana em inglês (monday..sunday) com `start`/`end` em "HH:MM", SÓ se o material disser dias e
+   horários de atendimento dele. Se disser "segundas, quartas e sextas, das 08:00 às 18:00", é um
+   grupo com os três dias. `evidence` é a frase daquele profissional; se os dias e horários
+   estiverem em outra frase, copie-a em `hours_evidence`.
+9. Serviços (`services`): TODOS os serviços, consultas e exames oferecidos, com o nome como está
+   escrito. `duration_min` (só o número de minutos, se dito), `price` curto como está escrito
+   ("R$ 400,00", "Gratuito"; até 40 caracteres - condições longas vão em `description`),
+   `description`, `requirements` (preparo, se dito) e `professional_names` com os nomes de quem
+   faz, como o material os cita. Se o material diz que vale para todos os profissionais, use
+   `all_professionals`. `evidence` é a frase do serviço.
+10. Convênios (`insurance_plans`): cada convênio/plano que o material diz que a clínica aceita,
+   com o nome como escrito. Se o material explica como funciona (reembolso, particular, guia),
+   copie em `how_it_works`. Não liste convênios que a clínica NÃO aceita.
+11. `assumptions`: se, para preencher algo, você precisou decidir por conta própria porque o
+   material disse só uma parte (por exemplo: entendeu que um preço vale para mais de um
+   profissional; juntou duas informações; interpretou "manhã" como um horário), escreva UMA frase
+   curta e clara para a clínica por decisão. Se não decidiu nada, devolva lista vazia. Nunca
+   esconda uma decisão e nunca invente fatos para preencher lacunas: se faltar, deixe vazio.
+12. Pode haver pouca informação: devolva só o que o material realmente traz. Material que fala só
+   de endereço não deve gerar profissionais nem serviços.
 """
 
 # No `max_length` below on purpose: a structured-output model that returns a value one character
@@ -107,6 +144,12 @@ class ContextExtraction(BaseModel):
     documents_to_bring: ExtractedList | None = None
     faq: list[ExtractedFaq] = Field(default_factory=list)
     service_guidance: list[ServiceGuidance] = Field(default_factory=list)
+    # The clinic's catalog (TASK-067): who works there, what is offered and which plans are taken.
+    professionals: list[ExtractedProfessional] = Field(default_factory=list)
+    services: list[ExtractedService] = Field(default_factory=list)
+    insurance_plans: list[ExtractedInsurancePlan] = Field(default_factory=list)
+    # The model's own account of what it had to decide because the material was half-silent.
+    assumptions: list[str] = Field(default_factory=list)
 
 
 class StructuredModel(Protocol):
@@ -185,6 +228,16 @@ def verify_against_source(extraction: ContextExtraction, source_text: str) -> Co
         keep[name] = item if item is not None and _backed(item, source) else None
     keep["faq"] = [f for f in extraction.faq if _backed(f, source)]
     keep["service_guidance"] = [s for s in extraction.service_guidance if _backed(s, source)]
+    keep["professionals"] = [
+        v for p in extraction.professionals if (v := verify_professional(p, source)) is not None
+    ]
+    keep["services"] = [
+        v for s in extraction.services if (v := verify_service(s, source)) is not None
+    ]
+    keep["insurance_plans"] = [
+        v for p in extraction.insurance_plans if (v := verify_plan(p, source)) is not None
+    ]
+    keep["assumptions"] = extraction.assumptions
     return ContextExtraction(**keep)
 
 
@@ -217,6 +270,11 @@ class ProposedService:
 class Proposal:
     fields: list[ProposedField]
     services: list[ProposedService]
+    # TASK-067: the catalog side. Empty when the material says nothing about it.
+    professionals: list[ProposedProfessional] = field(default_factory=list)
+    catalog_services: list[ProposedCatalogService] = field(default_factory=list)
+    insurance: ProposedInsurance | None = None
+    notes: list[ProposedNote] = field(default_factory=list)
 
 
 _LIMITS = {
@@ -238,6 +296,18 @@ _LABELS = {
     "documents_to_bring": "Documentos a levar",
     "address": "Endereço",
     "faq": "Perguntas frequentes",
+}
+
+
+# What `build_catalog_proposal` needs from the database; a caller without it (older tests) gets an
+# empty clinic, so the catalog side still runs and simply matches nothing.
+_NO_CATALOG: dict[str, Any] = {
+    "roster": [],
+    "catalog": [],
+    "insurance_catalog": [],
+    "clinic_plan_names": [],
+    "insurance_mode": None,
+    "default_duration": 50,
 }
 
 
@@ -271,6 +341,7 @@ def build_proposal(
     description_budget: int = 180,
     current_messages: dict[str, str | None] | None = None,
     drafts: dict[str, str] | None = None,
+    catalog_inputs: dict[str, Any] | None = None,
 ) -> Proposal:
     """Clamp the verified extraction to what the hub accepts and compare it with what is saved.
 
@@ -378,9 +449,22 @@ def build_proposal(
     # Whatever survived must be saveable: run it through the real schema once.
     ClinicFacts(**{f.key: f.value for f in fields if f.key in ClinicFacts.model_fields})
 
+    catalog_side = build_catalog_proposal(
+        professionals=extraction.professionals,
+        services=extraction.services,
+        plans=extraction.insurance_plans,
+        model_notes=extraction.assumptions,
+        **(catalog_inputs or _NO_CATALOG),
+    )
+    # A service this source CREATES carries its own orientations: listing them again as guidance
+    # for a service "that is not in the catalog" would show the same lines twice.
+    created = {normalize_service(s.name) for s in catalog_side.catalog_services if not s.matched_id}
+
     by_name = {s.name.strip().casefold(): s for s in services}
     proposed_services: list[ProposedService] = []
     for guidance in extraction.service_guidance[:40]:
+        if normalize_service(guidance.service_name) in created:
+            continue
         requirements = [_clip(r, 300) for r in guidance.requirements if r.strip()][:20]
         if not requirements:
             continue
@@ -402,7 +486,14 @@ def build_proposal(
                 _status(requirements, current),
             )
         )
-    return Proposal(fields=fields, services=proposed_services)
+    return Proposal(
+        fields=fields,
+        services=proposed_services,
+        professionals=catalog_side.professionals,
+        catalog_services=catalog_side.catalog_services,
+        insurance=catalog_side.insurance,
+        notes=catalog_side.notes,
+    )
 
 
 # ---------------------------------------------------------------------------- run

@@ -216,6 +216,30 @@ async def test_cancel_confirm_question_gets_deposit_warning_inside_window(db):
         assert conv.flow_managing_appointment_id == appt.id
 
 
+async def test_cancel_confirm_question_warns_the_deposit_is_lost_at_the_reschedule_limit(db):
+    # Far from the appointment (outside the refund window): only the limit rule applies.
+    tenant, patient, conversation, appt = await _seed(
+        db, appointment_start_at=datetime.now(UTC) + timedelta(hours=300), pix_reschedule_limit=2
+    )
+    await _seed_deposit(db, appt, status=PixDepositStatus.PAID, reschedule_count=2)
+
+    result = FlowRouterResult(
+        action="reply",
+        bubbles=[MenuBubble(body="Confirmar o cancelamento?\n\nresumo", labels=["Sim", "Não"])],
+        flow_state=FlowState.MANAGE_BOOKING,
+        flow_step=STEP_MANAGE_CANCEL_CONFIRM,
+        flow_managing_appointment_id=appt.id,
+    )
+    await tasks._apply_flow_result(
+        _reply_ctx(conversation), result, patient.wa_id, redis=None, tenant=tenant, waba_token="tok"
+    )
+
+    body = _FakeWhatsAppClient.created[-1].sent[0][2]
+    assert "já usou as 2 remarcações" in body
+    assert "o sinal fica com a clínica, sem devolução" in body
+    assert "Confirmar o cancelamento?" in body
+
+
 async def test_cancel_confirm_question_unchanged_without_paid_deposit(db):
     tenant, patient, conversation, appt = await _seed(
         db, appointment_start_at=datetime.now(UTC) + timedelta(hours=1)
@@ -372,7 +396,10 @@ async def test_reschedule_entry_not_blocked_under_limit_shows_day_ask(db):
     )
 
     body = _FakeWhatsAppClient.created[-1].sent[0][2]
-    assert body == day_ask
+    # The first render warns how many reschedules are left and what the last one costs.
+    assert body.endswith(day_ask)
+    assert "restam 2 remarcações (limite de 2)" in body
+    assert "o sinal fica com a clínica, sem devolução" in body
 
     async with db() as session:
         conv = await session.get(Conversation, conversation.id)

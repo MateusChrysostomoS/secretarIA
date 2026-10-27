@@ -220,7 +220,7 @@ async def test_the_after_flow_now_reaches_a_portal_patient_too(db, monkeypatch):
             session, tenant, appointment, patient, 6000, "COPYPASTE", waba_token="wt"
         )
     rows = await _rows(db, conversation)
-    assert len(rows) == 1 and "COPYPASTE" in rows[0].body
+    assert len(rows) == 1 and rows[0].body.rstrip().endswith("```COPYPASTE```")
     assert FakeWhatsApp.built == []
 
 

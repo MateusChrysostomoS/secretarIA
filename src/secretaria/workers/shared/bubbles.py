@@ -9,6 +9,7 @@ from secretaria.ai.formatter import (
 )
 from secretaria.core.whatsapp_limits import MAX_BUTTONS_PER_MESSAGE
 from secretaria.services.flow_router import (
+    ActionButtonsBubble,
     MenuBubble,
 )
 from secretaria.services.whatsapp import (
@@ -29,6 +30,9 @@ def _bubble_buttons(
     if isinstance(bubble, MenuBubble):
         # Generic N-button reply card; the tapped label becomes the next body.
         return [(f"menu|{i}", label) for i, label in enumerate(bubble.labels)]
+    if isinstance(bubble, ActionButtonsBubble):
+        # Its own `<action>|<uuid>` ids: the tap is routed as an action, not as the label.
+        return list(bubble.buttons)
     if isinstance(bubble, ButtonBubble):
         return [
             (BUTTON_ID_CONFIRM, bubble.confirm_label),
@@ -100,6 +104,9 @@ def _bubble_history_body(bubble: TextBubble | ButtonBubble | SlotsBubble | MenuB
         return bubble.body
     if isinstance(bubble, MenuBubble):
         labels = ", ".join(bubble.labels)
+        return f"{bubble.body}\n(opções: {labels})" if labels else bubble.body
+    if isinstance(bubble, ActionButtonsBubble):
+        labels = ", ".join(label for _id, label in bubble.buttons)
         return f"{bubble.body}\n(opções: {labels})" if labels else bubble.body
     if isinstance(bubble, SlotsBubble):
         labels = ", ".join(row[1] for row in bubble.rows)

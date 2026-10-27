@@ -34,7 +34,7 @@ from secretaria.models import (
 )
 from secretaria.plugins.base import InboundContext
 from secretaria.plugins.registry import agent_tools_for, run_on_inbound
-from secretaria.services.appointment_edit import EditContext
+from secretaria.services.appointment_edit import EditContext, asks_to_edit_appointment
 from secretaria.services.appointment_edit_flow import apply_ai_edit
 from secretaria.services.booking_scope import (
     booking_topology,
@@ -48,6 +48,7 @@ from secretaria.services.flow_router import (
     LABEL_MANAGE_APPOINTMENT,
     LABEL_OTHER,
     LABEL_RESCHEDULE,
+    STEP_HUMAN_OFFER,
     FlowRouterResult,
     MenuBubble,
     ai_draft_v2_enabled,
@@ -131,7 +132,10 @@ from secretaria.workers.shared.actions import (
     _handle_action_button,
     _handle_greeting_button_unavailable,
 )
-from secretaria.workers.shared.appointment_edit_support import build_edit_context
+from secretaria.workers.shared.appointment_edit_support import (
+    build_edit_context,
+    typed_edit_entry,
+)
 from secretaria.workers.shared.booking_hold import (
     SlotTakenAtPromotion,
     _hold_minutes_left,
@@ -1169,6 +1173,24 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                 return
         # Skip the deterministic block so "Sim" isn't re-interpreted as input.
         flow_snapshot = None
+
+    # A TYPED "mudar o serviço" / "alterar dados" (at the menu, after "Outro", in LLM mode)
+    # opens the reminder card's "Alterar Dados" menu, never the AI's reschedule (owner,
+    # 2026-10-27). Exactly one upcoming appointment, else the turn goes on unchanged.
+    if (
+        flow_snapshot is not None
+        and flow_snapshot[0].flow_state in (FlowState.IDLE, FlowState.MENU, FlowState.LLM)
+        and flow_snapshot[0].flow_step != STEP_HUMAN_OFFER
+        and flow_snapshot[0].patient_id is not None
+        and asks_to_edit_appointment(reply.inbound_body)
+    ):
+        async with async_session_factory() as session:
+            edit_entry = await typed_edit_entry(session, tenant, flow_snapshot[0].patient_id)
+        if edit_entry is not None:
+            await _apply_flow_result(
+                reply, edit_entry, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+            )
+            return
 
     # Deterministic flow engine: when enabled, try to handle the turn with zero
     # LLM calls. Returns True when fully handled; False falls through to the LLM.

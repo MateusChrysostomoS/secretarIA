@@ -5,7 +5,8 @@ local day: the patient who has not answered by B makes the clinic return the dep
 (`expires_at`) = T + 24 h: an offer still undecided then is "cancelled for lack of answer".
 
 `business_hours` is chosen by the CALLER (services/release_offer.py): the hours of the
-consultation's doctor (the clinic's when there is no doctor; "clinic with a secretary" = Task 16).
+consultation's doctor (the clinic's when there is no doctor, or when it has a working secretary:
+Task 16, services/brain_staff.py).
 Shape `{"monday": [{"start": "08:00", "end": "12:00"}, ...]}` (schemas/config.py); closing = the
 latest `end` of T's weekday, in `Tenant.timezone`. There is no holiday calendar in the product.
 

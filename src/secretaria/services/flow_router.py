@@ -750,6 +750,19 @@ class MenuBubble:
     kind: Literal["menu"] = "menu"
 
 
+@dataclass
+class ActionButtonsBubble:
+    """A reply card whose buttons carry their OWN ids, `<action>|<uuid>`: a tap is an ACTION
+    (`schemas/webhook.py::decode_action_id` -> `workers/shared/actions._handle_action_button`)
+    on both channels, whatever the conversation is doing at the time - unlike a MenuBubble,
+    whose tapped label comes back as the next body. First use: the "quer a diferença do sinal
+    de volta?" question after a change to a cheaper service (2026-10-26). At most 3 buttons."""
+
+    body: str
+    buttons: list[tuple[str, str]] = field(default_factory=list)
+    kind: Literal["action_buttons"] = "action_buttons"
+
+
 @dataclass(frozen=True)
 class DayBranch:
     """Which flow the shared day/time branch is currently running inside.

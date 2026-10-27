@@ -29,7 +29,7 @@ from secretaria.core.whatsapp_limits import (
     truncate_plain,
 )
 from secretaria.models import FlowState
-from secretaria.services import appointment_edit as ae, flow_router as fr, reminder_hooks
+from secretaria.services import appointment_edit as ae, flow_router as fr
 from secretaria.services.appointment_calendar_origin import CalendarOriginUnresolved
 from secretaria.services.attendee import (
     ATTENDEE_NAME_INVALID,
@@ -168,14 +168,17 @@ def _menu_labels(ctx: ae.EditContext) -> list[str]:
     labels: list[str] = []
     if not ctx.reschedule_blocked:
         labels += [ae.LABEL_EDIT_DATE, ae.LABEL_EDIT_TIME]
+    # A paid sinal keeps the service (the worker settles the difference at Confirmar) and
+    # hides the doctor (2026-10-26).
+    labels.append(ae.LABEL_EDIT_SERVICE)
     if not ctx.paid_deposit:
-        labels += [ae.LABEL_EDIT_SERVICE, ae.LABEL_EDIT_DOCTOR]
+        labels.append(ae.LABEL_EDIT_DOCTOR)
     labels.append(ae.LABEL_EDIT_MORE)
     return labels
 
 
 def _menu_result(draft: ae.EditDraft, ctx: ae.EditContext) -> fr.FlowRouterResult:
-    body = ae.EDIT_MENU_BODY
+    body = ae.edit_menu_body(_menu_labels(ctx), insurance=not ctx.paid_deposit)
     if ctx.paid_deposit:
         body = f"{body}\n\n{ae.EDIT_PIX_NOTICE}"
     if ctx.reschedule_blocked:
@@ -190,7 +193,8 @@ def _menu_result(draft: ae.EditDraft, ctx: ae.EditContext) -> fr.FlowRouterResul
 def _more_result(draft: ae.EditDraft, ctx: ae.EditContext) -> fr.FlowRouterResult:
     labels = [] if ctx.paid_deposit else [ae.LABEL_EDIT_INSURANCE]
     labels += [ae.LABEL_EDIT_PATIENT, ae.LABEL_EDIT_BACK]
-    return _result(draft, [fr.MenuBubble(body=ae.EDIT_MORE_BODY, labels=labels)], fr.STEP_EDIT_MORE)
+    body = ae.edit_more_body(labels)
+    return _result(draft, [fr.MenuBubble(body=body, labels=labels)], fr.STEP_EDIT_MORE)
 
 
 def enter_edit_menu(
@@ -278,8 +282,20 @@ async def _after_slot_affecting_change(
     return await _reslot_picker(conversation, tenant, draft, professionals, ctx)
 
 
+def _no_room(draft: ae.EditDraft, ctx: ae.EditContext) -> fr.FlowRouterResult:
+    """The new window does not fit and the time may not move (Pix reschedule limit): the
+    service goes back to what it was, with the one line that says why."""
+    keep = {key: draft.original[key] for key in ("service", "start_at", "end_at")}
+    menu = _menu_result(draft.with_changes(**keep).with_stage(), ctx)
+    menu.bubbles.insert(0, TextBubble(body=ae.EDIT_SERVICE_NO_ROOM))
+    return menu
+
+
 async def _reslot_picker(conversation, tenant, draft, professionals, ctx) -> fr.FlowRouterResult:
     """Day, then time, for the draft's doctor/service - behind the one-line explanation."""
+    if ctx.reschedule_blocked:
+        # A day/time picker the patient may not use would loop back to the menu.
+        return _no_room(draft, ctx)
     reslot = draft.with_stage(mode="reslot")
     picker = await fr.enter_day_picker(
         _carrier(conversation, reslot),
@@ -642,6 +658,8 @@ async def _apply_confirm(
     event (same doctor) or creates it on the new doctor's agenda (the old one is deleted by
     the worker AFTER the database commit - `workers/shared/appointment_edit_apply.py`). The
     row itself is updated by the worker; this returns `appointment_edit` and never persists.
+    Exception: a service change on a PAID sinal is only checked here (`calendar_deferred`) -
+    the worker decides the money first and writes the agenda only if the change stands now.
     """
     changed = draft.changed()
     if not changed:
@@ -699,11 +717,18 @@ async def _apply_confirm(
         insurance=draft.current["insurance"],
         attendee_name=draft.current["attendee_name"],
     )
+    # A SERVICE change on a paid sinal is a money decision (2026-10-26): a dearer service waits
+    # for the Pix of the difference and must not reach the agenda before it is paid. The window
+    # was checked above; the worker writes the agenda only when the change stands now
+    # (`workers/shared/appointment_edit_apply.py` -> `service_change.sync_agenda_event`).
+    deferred = bool(ctx.paid_deposit and "serviço" in changed)
     # When the window moves, exclusive on the secretarIA agenda: the free check above and
     # the write are one atomic step there (plain on Google). An edit that keeps the window
     # (convênio, who it is for) is never refused for an overlap the clinic itself made.
     try:
-        if calendar_changed:
+        if deferred:
+            new_event_id, link = event_id, None
+        elif calendar_changed:
             created = await create_event_exclusive(
                 new_cal, start=start, end=end, summary=summary, description=description
             )
@@ -740,6 +765,7 @@ async def _apply_confirm(
         "original": dict(draft.original),
         "calendar": new_cal,
         "patient_name": patient_name,
+        "calendar_deferred": deferred,
     }
     doctor = _doctor(professionals, draft)
     recap = ae.build_edit_recap(
@@ -770,9 +796,11 @@ async def edit_step(
     ctx: ae.EditContext | None,
     patient_name: str | None = None,
 ) -> fr.FlowRouterResult:
-    """Route one inbound turn while the conversation is in `FlowState.EDIT_BOOKING`."""
-    if not reminder_hooks.enabled_for(tenant):
-        return _leave(tenant, professionals, TextBubble(body=ae.EDIT_KEPT))
+    """Route one inbound turn while the conversation is in `FlowState.EDIT_BOOKING`.
+
+    Not tied to the clinic's reminder switch (owner 2026-10-27): "Alterar Dados" rides on
+    the card every patient gets on entering the conversation, reminders on or off.
+    """
     draft = ae.EditDraft.from_json(getattr(conversation, "flow_edit_draft", None))
     appt = fr._find_appt_by_id(appointments, fr._managing_appt_id_str(conversation))
     if draft is None or appt is None or ctx is None or str(appt.get("id")) != draft.appointment_id:
@@ -789,8 +817,9 @@ async def edit_step(
     step = conversation.flow_step
     match = fr._label_match
 
+    # A paid sinal still allows the SERVICE (2026-10-26: Confirmar hands the difference of the
+    # sinal to the worker), never the doctor or the convênio.
     paid_steps = (
-        fr.STEP_EDIT_SERVICE,
         fr.STEP_EDIT_DOCTOR,
         fr.STEP_EDIT_INSURANCE,
         fr.STEP_EDIT_INSURANCE_OTHER,
@@ -798,7 +827,7 @@ async def edit_step(
     time_steps = (*fr._EDIT_DAY_STEPS, fr.STEP_EDIT_TIME_TOO, fr.STEP_EDIT_SLOT)
     restricted = set()
     if ctx.paid_deposit:
-        restricted.update(("serviço", "médico", "convênio"))
+        restricted.update(("médico", "convênio"))
     if ctx.reschedule_blocked:
         restricted.update(("data", "horário"))
     if (
@@ -822,7 +851,7 @@ async def edit_step(
             return await _begin_date(conversation, tenant, draft, professionals, ctx)
         if match(body, ae.LABEL_EDIT_TIME) and not ctx.reschedule_blocked:
             return await _slots_for(conversation, tenant, draft, draft.start, professionals, ctx)
-        if match(body, ae.LABEL_EDIT_SERVICE) and not ctx.paid_deposit:
+        if match(body, ae.LABEL_EDIT_SERVICE):
             return _service_list(draft, tenant, professionals, ctx)
         if match(body, ae.LABEL_EDIT_DOCTOR) and not ctx.paid_deposit:
             return await _doctor_list(draft, tenant, appt, professionals, ctx)
@@ -838,7 +867,7 @@ async def edit_step(
             return await _begin_date(conversation, tenant, draft, professionals, ctx)
         if match(body, ae.LABEL_EDIT_TIME) and not ctx.reschedule_blocked:
             return await _slots_for(conversation, tenant, draft, draft.start, professionals, ctx)
-        if match(body, ae.LABEL_EDIT_SERVICE) and not ctx.paid_deposit:
+        if match(body, ae.LABEL_EDIT_SERVICE):
             return _service_list(draft.with_stage(), tenant, professionals, ctx)
         if match(body, ae.LABEL_EDIT_DOCTOR) and not ctx.paid_deposit:
             return await _doctor_list(draft, tenant, appt, professionals, ctx)
@@ -1020,7 +1049,9 @@ async def apply_ai_edit(conversation, tenant, proposal, appointments, profession
     }
     if any(proposal.get(keep_keys[field]) for field in keep):
         return await unchanged()
-    if ctx.paid_deposit and any(proposal.get(k) for k in ("professional", "service", "insurance")):
+    # A paid sinal: the service may only be DRAFTED (Confirmar settles the difference in the
+    # worker); the doctor and the convênio never.
+    if ctx.paid_deposit and any(proposal.get(k) for k in ("professional", "insurance")):
         return await unchanged()
     if ctx.reschedule_blocked and any(proposal.get(k) for k in ("day", "time")):
         return await unchanged()
@@ -1102,7 +1133,7 @@ async def apply_ai_edit(conversation, tenant, proposal, appointments, profession
     if opened:
         if (
             opened not in fields
-            or (ctx.paid_deposit and opened in {"service", "doctor", "insurance"})
+            or (ctx.paid_deposit and opened in {"doctor", "insurance"})
             or (ctx.reschedule_blocked and opened in {"date", "time"})
         ):
             return await unchanged()

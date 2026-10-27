@@ -29,15 +29,17 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.logging import get_logger
-from secretaria.models import Appointment, AppointmentStatus, Tenant
+from secretaria.models import Appointment, AppointmentStatus, Tenant, deposit_adjustment as adj
 from secretaria.models.booking_hold import BookingHold
 from secretaria.models.payment_attention_item import (
+    ATTENTION_OPEN,
     REASON_AMOUNT_OVER,
     REASON_AMOUNT_UNDER,
     REASON_ORPHAN_PAYMENT,
     REASON_PAID_THEN_CANCELLED,
     REASON_REFERENCE_MISMATCH,
     REASON_REFUNDED_EXTERNALLY,
+    PaymentAttentionItem,
 )
 from secretaria.models.payment_webhook_event import (
     EVENT_FAILED,
@@ -54,7 +56,7 @@ from secretaria.models.pix_deposit import (
 )
 from secretaria.services import tenant_config as cfg
 from secretaria.services.appointment_status import SOURCE_SYSTEM, log_status_transition
-from secretaria.services.payments import alerts, attention, registry
+from secretaria.services.payments import alerts, attention, registry, service_change
 from secretaria.services.payments.provider import (
     NormalizedPaymentEvent,
     PaymentAccount,
@@ -79,6 +81,14 @@ class EventResult:
     notify_paid_deposit_id: UUID | None = None
     notify_expired_appointment_id: UUID | None = None
     alert_kind: str | None = None
+    # A service-change difference (`deposit_adjustments`) that was just applied / expired: the
+    # caller runs `service_change.run_applied_hooks` / `run_expired_hooks` after the commit.
+    applied_adjustment_id: UUID | None = None
+    expired_adjustment_id: UUID | None = None
+    # A paid difference that could not be applied (ORPHAN item): the patient's neutral notice.
+    not_applied_adjustment_id: UUID | None = None
+    # Follow-up C (2026-10-27): set when it was UNDERPAID - the notice quotes what arrived.
+    not_applied_paid_cents: int | None = None
 
 
 def expected_reference(deposit: PixDeposit) -> str | None:
@@ -196,6 +206,17 @@ async def apply_normalized_event(
         session, tenant_id=tenant.id, provider=event.provider, charge_id=event.provider_charge_id
     )
     if deposit is None:
+        # Not a sinal: maybe the difference Pix of a service change (`deposit_adjustments`).
+        adjustment = await service_change.find_adjustment(
+            session,
+            tenant_id=tenant.id,
+            charge_id=event.provider_charge_id,
+            provider=event.provider,
+        )
+        if adjustment is not None:
+            return await _on_adjustment_event(
+                session, tenant, account, provider, adjustment, event, now
+            )
         return await _on_unknown_charge(session, tenant, event)
     if event.status is PaymentStatus.PAID:
         return await _on_paid(session, tenant, account, provider, deposit, event, now)
@@ -529,6 +550,214 @@ async def _on_refunded(
     return EventResult("refund_observed")
 
 
+# --------------------------------------------------------------------------
+# the difference Pix of a service change (services/payments/service_change.py)
+# --------------------------------------------------------------------------
+
+
+async def _on_adjustment_event(
+    session: AsyncSession,
+    tenant: Tenant,
+    account: PaymentAccount | None,
+    provider: PaymentProvider,
+    adjustment: adj.DepositAdjustment,
+    event: NormalizedPaymentEvent,
+    now: datetime,
+) -> EventResult:
+    deposit = await session.get(PixDeposit, adjustment.deposit_id)
+    if deposit is None or deposit.tenant_id != tenant.id:
+        return EventResult("ignored_unknown_charge")
+    if event.status is PaymentStatus.PAID:
+        return await _on_adjustment_paid(
+            session, tenant, account, provider, adjustment, deposit, event, now
+        )
+    if event.status is PaymentStatus.EXPIRED:
+        if adjustment.status != adj.STATUS_AWAITING_PAYMENT:
+            return EventResult("adjustment_expired_replay")
+        if account is None:
+            return EventResult("ignored_no_account")
+        # Same rule as the sinal: an OVERDUE/DELETED is a hint; a paid charge is never expired.
+        state = await provider.get_charge(account, event.provider_charge_id)
+        if state.status is PaymentStatus.PAID:
+            paid_event = replace(
+                event, status=PaymentStatus.PAID, paid_at=state.paid_at,
+                paid_amount_cents=state.paid_amount_cents,
+            )
+            return await _on_adjustment_paid(
+                session, tenant, account, provider, adjustment, deposit, paid_event, now
+            )
+        if not await service_change.move_adjustment(
+            session, adjustment, from_status=adj.STATUS_AWAITING_PAYMENT,
+            to_status=adj.STATUS_EXPIRED, now=now,
+        ):
+            return EventResult("adjustment_expired_replay")
+        return EventResult("adjustment_expired", expired_adjustment_id=adjustment.id)
+    if event.status is PaymentStatus.REFUNDED:
+        # Only the items of THIS charge (the difference): an item of the sinal itself (e.g. a
+        # cancellation refund) is another sum of money and stays as it is.
+        await session.execute(
+            update(PaymentAttentionItem)
+            .where(
+                PaymentAttentionItem.tenant_id == tenant.id,
+                PaymentAttentionItem.deposit_id == deposit.id,
+                PaymentAttentionItem.provider == event.provider,
+                PaymentAttentionItem.provider_charge_id == event.provider_charge_id,
+                PaymentAttentionItem.status == ATTENTION_OPEN,
+                PaymentAttentionItem.provider_refund_seen_at.is_(None),
+            )
+            .values(provider_refund_seen_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        return EventResult("adjustment_refund_observed")
+    return EventResult("ignored_other")
+
+
+async def _on_adjustment_paid(
+    session: AsyncSession,
+    tenant: Tenant,
+    account: PaymentAccount | None,
+    provider: PaymentProvider,
+    adjustment: adj.DepositAdjustment,
+    deposit: PixDeposit,
+    event: NormalizedPaymentEvent,
+    now: datetime,
+) -> EventResult:
+    """A paid difference: verified at the provider (status, reference = the adjustment id,
+    amount >= the difference), then `awaiting_payment -> applied` ONCE and the `pending_edit`
+    written in this same transaction. Paid after it expired/was cancelled, or onto a
+    consultation that is gone or moved on: an ORPHAN item, the service never changes."""
+    charge_id = event.provider_charge_id
+    if account is None:
+        logger.warning("payment_event_unverifiable_no_account", tenant_id=str(tenant.id))
+        return EventResult("ignored_no_account")
+    try:
+        state = await provider.get_charge(account, charge_id)
+    except ProviderError as exc:
+        if exc.status_code == 404:
+            return EventResult("ignored_not_paid_at_provider")
+        raise
+    if state.status is not PaymentStatus.PAID:
+        logger.warning(
+            "payment_event_not_confirmed_by_provider",
+            tenant_id=str(tenant.id),
+            provider=event.provider,
+            provider_status=state.status.value,
+        )
+        return EventResult("ignored_not_paid_at_provider")
+
+    paid = state.paid_amount_cents or 0
+    # Lock order (TASK-067 s07): the APPOINTMENT row before the adjustment row, like every
+    # cancellation (guarded UPDATE of the appointment, then `settle_open_adjustments`). Claiming
+    # the adjustment first and then waiting for the appointment deadlocked on Postgres
+    # (tests/test_service_change_postgres.py). Taken after the provider call: no lock is held
+    # while the network answers.
+    appointment = (
+        await session.scalar(
+            select(Appointment)
+            .where(
+                Appointment.id == adjustment.appointment_id,
+                Appointment.tenant_id == tenant.id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if adjustment.appointment_id
+        else None
+    )
+    await session.refresh(adjustment)  # what the transaction we queued behind decided
+
+    async def item(reason: str) -> None:
+        await attention.open_attention_item(
+            session,
+            tenant_id=tenant.id,
+            reason=reason,
+            dedupe_key=attention.attention_dedupe_key(event.provider, charge_id, reason),
+            deposit=deposit,
+            provider_charge_id=charge_id,
+            amount_cents=adjustment.diff_cents,
+            paid_amount_cents=paid,
+            paid_at=state.paid_at or event.paid_at,
+            **{**_slot(appointment), "service_label": adjustment.new_service},
+        )
+
+    if adjustment.status == adj.STATUS_APPLIED:
+        return EventResult("adjustment_already_applied")
+    if adjustment.status != adj.STATUS_AWAITING_PAYMENT:
+        return await _adjustment_paid_late(session, tenant, event, item)
+    if state.external_reference != str(adjustment.id):
+        await item(REASON_REFERENCE_MISMATCH)
+        await service_change.move_adjustment(
+            session, adjustment, from_status=adj.STATUS_AWAITING_PAYMENT,
+            to_status=adj.STATUS_CANCELLED, now=now,
+        )
+        return EventResult("adjustment_reference_mismatch")
+    if paid < adjustment.diff_cents:
+        await item(REASON_AMOUNT_UNDER)
+        await service_change.move_adjustment(
+            session, adjustment, from_status=adj.STATUS_AWAITING_PAYMENT,
+            to_status=adj.STATUS_CANCELLED, now=now,
+        )
+        # Follow-up C: the patient is told the exact shortfall ONCE, after the commit (a later
+        # event of this charge finds the adjustment no longer awaiting -> `_adjustment_paid_late`
+        # -> replay, no notice). No new Pix for the rest, no refund by us.
+        # Minor 2: only with a REAL amount - never "Recebemos R$ 0,00"; else the item only.
+        known = isinstance(state.paid_amount_cents, int) and state.paid_amount_cents > 0
+        return EventResult(
+            "adjustment_amount_under",
+            not_applied_adjustment_id=adjustment.id if known else None,
+            not_applied_paid_cents=paid if known else None,
+        )
+
+    if not await service_change.move_adjustment(
+        session, adjustment, from_status=adj.STATUS_AWAITING_PAYMENT,
+        to_status=adj.STATUS_APPLIED, now=now,
+    ):
+        # Another worker / the sweep got there first.
+        if adjustment.status == adj.STATUS_APPLIED:
+            return EventResult("adjustment_already_applied")
+        return await _adjustment_paid_late(session, tenant, event, item)
+
+    fields = await service_change.apply_paid_adjustment(session, tenant, adjustment, now=now)
+    if fields is None:
+        await service_change.move_adjustment(
+            session, adjustment, from_status=adj.STATUS_APPLIED,
+            to_status=adj.STATUS_CANCELLED, now=now,
+        )
+        await item(REASON_ORPHAN_PAYMENT)
+        return EventResult(
+            "adjustment_not_applicable", not_applied_adjustment_id=adjustment.id
+        )
+    if paid > adjustment.diff_cents:
+        await item(REASON_AMOUNT_OVER)
+    return EventResult("adjustment_applied", applied_adjustment_id=adjustment.id)
+
+
+async def _adjustment_paid_late(
+    session: AsyncSession,
+    tenant: Tenant,
+    event: NormalizedPaymentEvent,
+    open_item: Callable[[str], Awaitable[None]],
+) -> EventResult:
+    """A PAID event for a difference that is no longer awaiting payment (expired, voided by a
+    cancellation, or refused/not applicable earlier). The money needs the clinic ONCE per
+    charge: when this charge already has an item of ANY reason (the AMOUNT_UNDER /
+    REFERENCE_MISMATCH / ORPHAN of a previous event - Asaas sends RECEIVED and CONFIRMED with
+    different event ids), the replay is a no-op; otherwise one ORPHAN item."""
+    existing = await session.scalar(
+        select(PaymentAttentionItem.id)
+        .where(
+            PaymentAttentionItem.tenant_id == tenant.id,
+            PaymentAttentionItem.provider == event.provider,
+            PaymentAttentionItem.provider_charge_id == event.provider_charge_id,
+        )
+        .limit(1)
+    )
+    if existing is not None:
+        return EventResult("adjustment_paid_replay")
+    await open_item(REASON_ORPHAN_PAYMENT)
+    return EventResult("adjustment_paid_late")
+
+
 async def run_post_commit(
     session: AsyncSession,
     tenant: Tenant,
@@ -558,6 +787,26 @@ async def run_post_commit(
                 await deposit_lifecycle._notify_expired(session, tenant, appointment)
         except Exception as exc:  # noqa: BLE001
             logger.warning("payment_expired_notice_failed", error_type=type(exc).__name__)
+    if result.applied_adjustment_id is not None:
+        try:
+            await service_change.run_applied_hooks(
+                session, tenant, result.applied_adjustment_id, redis=redis
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("payment_adjustment_notice_failed", error_type=type(exc).__name__)
+    if result.not_applied_adjustment_id is not None:
+        try:
+            await service_change.run_not_applied_hooks(
+                session, tenant, result.not_applied_adjustment_id,
+                paid_cents=result.not_applied_paid_cents,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("payment_adjustment_notice_failed", error_type=type(exc).__name__)
+    if result.expired_adjustment_id is not None:
+        try:
+            await service_change.run_expired_hooks(session, tenant, result.expired_adjustment_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("payment_adjustment_notice_failed", error_type=type(exc).__name__)
     if result.alert_kind is not None:
         try:
             await alerts.send_payment_alert(redis, tenant, result.alert_kind)

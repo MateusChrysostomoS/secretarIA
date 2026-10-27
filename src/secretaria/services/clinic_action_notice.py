@@ -34,15 +34,17 @@ from secretaria.models.appointment_reminder import (
     REMINDER_KIND_STAFF_EDIT,
 )
 from secretaria.services import reminder_hooks, reminder_schedule
+from secretaria.services.appointment_status import SOURCE_HUB
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.patient_context import as_utc
+from secretaria.services.payments import service_change
 from secretaria.services.reminder_text import (
     ReminderContent,
     load_reminder_content,
     local_start,
     reminder_buttons,
 )
-from secretaria.services.staff_appointment_edit import FieldChange
+from secretaria.services.staff_appointment_edit import FieldChange, ServiceChangeOutcome
 from secretaria.services.staff_patient_message import (
     NOTICE_FAILED,
     NoticeResult,
@@ -361,3 +363,79 @@ async def notify_staff_edit(
     )
     # once_per_start=False never skips; the fallback only keeps the return type honest.
     return result if result is not None else NoticeResult(NOTICE_FAILED)
+
+
+# --- A new service on a PAID sinal (plan 2026-10-26 Task 7) ---------------------------
+
+
+async def notify_service_change(
+    session: AsyncSession,
+    tenant: Tenant,
+    appointment: Appointment,
+    patient: Patient | None,
+    change: ServiceChangeOutcome,
+    *,
+    allow_paid: bool,
+    now: datetime,
+) -> NoticeResult | None:
+    """The money message of a clinic's service change, with the engine's own copy:
+
+    * `awaiting_payment` -> the difference and "só muda depois que o pagamento for
+      confirmado" and the Pix copia-e-cola at the end of the SAME message (fenced, see
+      `payments/pix_message`; one message, never a second one with the bare code);
+    * `asked` -> "quer a diferença de volta?" with the two fixed ACTION buttons
+      (`svcdiffyes|<adjustment>` / `svcdiffno|<adjustment>`, routed on both channels);
+    * `applied_now` -> nothing (the "A clínica alterou" card already says it): None - except
+      when the Pix of the difference could not be created (`DECISION_COLLECT`, follow-up B):
+      then "a diferença será acertada diretamente com a clínica".
+    Never promises an automatic refund. Never raises (send_clinic_notice)."""
+    key = f"svcdiff:{change.adjustment_id}"
+    if change.status == "awaiting_payment":
+        ttl = tenant.deposit_hold_ttl_minutes or service_change.DEFAULT_PIX_TTL_MINUTES
+        result = await send_clinic_notice(
+            session,
+            tenant,
+            appointment,
+            patient,
+            body=service_change.difference_pix_text(
+                change.new_service,
+                change.diff_cents,
+                change.pix_copy_paste,
+                ttl,
+                source=SOURCE_HUB,
+            ),
+            allow_paid=allow_paid,
+            usage_key=key,
+            now=now,
+        )
+        return result
+    if (
+        change.status == "applied_now"
+        and change.decision == service_change.DECISION_COLLECT
+        and change.adjustment_id is not None
+    ):
+        return await send_clinic_notice(
+            session,
+            tenant,
+            appointment,
+            patient,
+            body=service_change.collect_due_text(
+                change.new_service, change.diff_cents, source=SOURCE_HUB
+            ),
+            allow_paid=allow_paid,
+            usage_key=key,
+            now=now,
+        )
+    if change.status == "asked" and change.adjustment_id is not None:
+        return await send_clinic_notice(
+            session,
+            tenant,
+            appointment,
+            patient,
+            body=service_change.refund_question_text(change.new_service, change.diff_cents),
+            buttons=service_change.refund_question_buttons(change.adjustment_id),
+            allow_paid=allow_paid,
+            usage_key=key,
+            now=now,
+        )
+    return None

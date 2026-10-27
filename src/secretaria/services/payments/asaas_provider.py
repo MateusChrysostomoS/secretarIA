@@ -21,7 +21,7 @@ Asaas facts this wrapper encodes (docs.asaas.com, verified 2026-09-29, see the s
 import hmac
 import json
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
@@ -93,6 +93,18 @@ def _parse_dt(value: object) -> datetime | None:
     return None
 
 
+def _paid_moment(value: object) -> datetime | None:
+    """`_parse_dt` for a payment date: a bare 'YYYY-MM-DD' carries no time, so it would read as
+    midnight. Today's date is the moment we observe it (now); an older one is noon of that day."""
+    parsed = _parse_dt(value)
+    if parsed is None or not isinstance(value, str) or len(value) != 10:
+        return parsed
+    now = datetime.now(UTC)
+    if parsed.astimezone(_ASAAS_TZ).date() == now.astimezone(_ASAAS_TZ).date():
+        return now
+    return parsed + timedelta(hours=12)
+
+
 def _charge_status(payment: Mapping) -> PaymentStatus:
     if payment.get("deleted") is True:
         return PaymentStatus.EXPIRED
@@ -154,7 +166,19 @@ class AsaasProvider:
                 request.due_date.isoformat(),
             )
         except AsaasError as exc:
-            raise _provider_error(exc, "charge_failed") from exc
+            # Sandbox fact: the customer was created WITHOUT cpfCnpj (Asaas allows it) and only
+            # the charge is refused for it. Same signal as above: the caller must collect one.
+            missing_document = exc.document_missing and not request.payer_document
+            if missing_document and not request.provider_customer_id:
+                # The document-less customer made a moment ago is useless; do not leave it behind
+                # in the clinic's own Asaas account (the retry creates a fresh one WITH the CPF).
+                try:
+                    await client.delete_customer(customer_id)
+                except Exception:  # best effort: the question to the patient matters more
+                    pass
+            raise _provider_error(
+                exc, "payer_document_required" if missing_document else "charge_failed"
+            ) from exc
 
         charge_id = payment.get("id")
         if not charge_id:
@@ -231,7 +255,7 @@ class AsaasProvider:
             status=_charge_status(payment),
             paid_amount_cents=_cents(payment.get("value")),
             external_reference=payment.get("externalReference") or None,
-            paid_at=_parse_dt(payment.get("paymentDate") or payment.get("confirmedDate")),
+            paid_at=_paid_moment(payment.get("paymentDate") or payment.get("confirmedDate")),
             refunds=_refunds(payment),
         )
 

@@ -48,6 +48,14 @@ async def run_payment_expiry(ctx: dict) -> None:
         )
     if any(asdict(report).values()):
         logger.info("payment_expiry_tick", **asdict(report))
+    # The service-change differences (unpaid Pix of a dearer service, unanswered refund
+    # question): own session, so a failure never touches the sinal expiry above.
+    async with async_session_factory() as session:
+        adjustments = await jobs.expire_due_adjustments(
+            session, now=datetime.now(UTC), enqueue=enqueue_for(ctx)
+        )
+    if adjustments:
+        logger.info("payment_adjustment_expiry_tick", resolved=adjustments)
 
 
 async def run_payment_reconciliation(ctx: dict) -> None:

@@ -2,6 +2,7 @@
 
 Branch `feature/out-of-mvp` (Pix): TASK-050 trouxe a `main` e portou o Pix para os workers divididos; ver [checkpoint](docs/CHECKPOINT_task050_main_into_out_of_mvp.md).
 TASK-067 (sessão 01): fontes da TASK-026 (`/tenants/me/context-sources`, job `ingest_context_source`, merge de migração `f3b9d1c7a5e2`) portadas e mescladas em `feature/out-of-mvp` (local, sem push, sem deploy); migração → API+worker → front: [checkpoint](docs/CHECKPOINT_context_sources.md).
+TASK-067 (sessão 02, LOCAL, não commitada): Parte B da TASK-053 — `ASAAS_REFUSE_EXCESS_PERMISSIONS` (padrão off: excesso só informativo), grupos extras na conexão, `asaas_environment`, prova do "desligar sem conta" e `GET /internal/brain-message/insurance-overview`; contrato congelado da tela: [checkpoint §8](docs/CHECKPOINT_pix_provider_core.md).
 TASK-055: agenda, retorno Google e convites usam `BRAIN_MESSAGE_PUBLIC_URL` na API e no worker; [guia](docs/CHECKPOINT_urls_publicas.md). Commit e push para origin/main autorizados; sem deploy manual.
 
 TASK-054: inativos, capacidade interativa e boas-vindas cifradas no ARQ; local, sem publicação: [checkpoint](docs/CHECKPOINT_equipe_primeiro_acesso.md).
@@ -155,7 +156,7 @@ neither" do `README.md`.
 
 ## Documentação
 
-`docs/CHECKPOINT_task052_liberar_sinal_pago.md` — TASK-052: liberar horário com sinal pago dá ao paciente Manter (pedido; a clínica aceita/recusa em 24 h) / Remarcar (a qualquer momento; leva o sinal só se o Asaas confirmar paga e sem estorno na hora; senão sinal novo — fail-safe) / Cancelar (avisa a clínica na hora com o passo a passo do Asaas); sem resposta, aviso em B e "cancelado por falta de resposta" em T+24h; contrato da aba da TASK-054 (todos os papéis, escopo da agenda); B usa o horário do médico (papel de secretária pendente, Task 16); modelos Meta PENDENTES; integra em `feature/out-of-mvp`; **construído, NÃO deployado**.
+`docs/CHECKPOINT_task052_liberar_sinal_pago.md` — TASK-052: liberar horário com sinal pago dá ao paciente Manter (pedido; a clínica aceita/recusa em 24 h) / Remarcar (a qualquer momento; leva o sinal só se o Asaas confirmar paga e sem estorno na hora; senão sinal novo — fail-safe) / Cancelar (avisa a clínica na hora com o passo a passo do Asaas); sem resposta, aviso em B e "cancelado por falta de resposta" em T+24h; contrato da aba da TASK-054 (todos os papéis, escopo da agenda); B usa o horário da clínica se o brain-api diz que há secretária ativa, senão o do médico (Task 16 ligada localmente na TASK-067 s06, checkpoint §8); modelos Meta PENDENTES; integra em `feature/out-of-mvp`; **construído, NÃO deployado**.
 `docs/CHECKPOINT_subagendas_convite.md` — TASK-054: criação de subagenda no convite, vínculo próprio e reativação em conta compartilhada da clínica; integração à main local autorizada, sem deploy; estado em `BRAIN/tasks/TASK-054/CALENDAR_IMPLEMENTATION.md`.
 
 `docs/CHECKPOINT_lembretes_r7.md` — TASK-044 R7: ações da clínica na agenda avisam o paciente (confirmar com botões, compareceu → pós-consulta, Editar/Remarcar, cancelar no Portal, autorização permanente de aviso pago), quem vê a agenda por papel (brain-api `agenda_scope`, aplicado no servidor), lembrete extra na configuração e dados do Editar na agenda; migração aditiva `d8e3a5c1f7b2`; local, não mesclado/pushado/deployado; deploy: migração → brain-api → API+worker → front; contrato do R5 no plano.

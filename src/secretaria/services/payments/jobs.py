@@ -3,6 +3,8 @@
 
 * `expire_due_charges`     - `before` charges whose Pix window ended: ASK the provider first,
                              void, then mark expired. Never expires blind.
+* `expire_due_adjustments` - the service-change differences (unpaid Pix of a dearer service,
+                             unanswered "quer a diferença de volta?"), same rules.
 * `reconcile_open_charges` - the safety net for a webhook that never arrived: polls the provider
                              for unpaid charges and injects a synthetic PAID event.
 * `requeue_stuck_events` / `requeue_stuck_fulfillments` - the two sweeps that make "durable
@@ -26,7 +28,8 @@ from sqlalchemy import func, null, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.logging import get_logger
-from secretaria.models import PaymentWebhookEvent, PixDeposit, Tenant
+from secretaria.models import Appointment, PaymentWebhookEvent, PixDeposit, Tenant
+from secretaria.models.appointment import LIVE_APPOINTMENT_STATUSES
 from secretaria.models.clinic_payment_account import PAYMENT_PROVIDERS
 from secretaria.models.payment_webhook_event import EVENT_RECEIVED
 from secretaria.models.pix_deposit import (
@@ -107,9 +110,29 @@ async def inject_paid_event(
     """Record a synthetic PAID event for a charge the provider reports paid, and enqueue it
     through the SAME path a webhook takes. Idempotent by `reconcile:<charge>:PAID`. Returns
     whether a new event was written (False = it already existed and is on its way)."""
-    charge_id = deposit.provider_charge_id or deposit.asaas_payment_id or ""
-    event = NormalizedPaymentEvent(
+    return await inject_paid_event_for_charge(
+        session,
+        tenant_id=deposit.tenant_id,
         provider=deposit.provider,
+        charge_id=deposit.provider_charge_id or deposit.asaas_payment_id or "",
+        state=state,
+        enqueue=enqueue,
+    )
+
+
+async def inject_paid_event_for_charge(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    provider: str,
+    charge_id: str,
+    state: ChargeState,
+    enqueue: EnqueueFn,
+) -> bool:
+    """`inject_paid_event` for any charge of ours (a sinal or the difference of a service
+    change, `service_change.expire_adjustments`): same event id, same idempotency."""
+    event = NormalizedPaymentEvent(
+        provider=provider,
         event_id=f"reconcile:{charge_id}:PAID",
         provider_charge_id=charge_id,
         status=PaymentStatus.PAID,
@@ -122,8 +145,8 @@ async def inject_paid_event(
         session,
         PaymentWebhookEvent,
         {
-            "tenant_id": deposit.tenant_id,
-            "provider": deposit.provider,
+            "tenant_id": tenant_id,
+            "provider": provider,
             "event_id": event.event_id,
             "provider_charge_id": charge_id,
             "event_type": "reconcile",
@@ -243,6 +266,20 @@ async def _expire_one(
             await session.rollback()
             logger.warning("payment_expiry_hook_failed", error_type=type(exc).__name__)
     await session.commit()
+
+
+async def expire_due_adjustments(
+    session: AsyncSession, *, now: datetime, enqueue: EnqueueFn, limit: int = 50
+) -> int:
+    """The service-change sweep (`service_change.expire_adjustments`): a refund question
+    unanswered for 24 h becomes credit; an unpaid difference Pix past its window is checked at
+    the provider, voided and expired (the old service stays); a difference cancelled while the
+    provider was down has its void retried until it succeeds. Run on every expiry tick."""
+    from secretaria.services.payments import service_change
+
+    return await service_change.expire_adjustments(
+        session, now=now, enqueue=enqueue, limit=limit
+    )
 
 
 async def reconcile_open_charges(
@@ -401,16 +438,23 @@ async def recover_paid_notices(
 
     The marker is written only after a successful send. A crash after send but before marker
     may duplicate the notice; losing it permanently would be worse.
+
+    Only a consultation that is still going to happen is told "sua consulta está garantida": the
+    processor sends NO notice when the payment found it cancelled/missing (it opens a clinic
+    item instead), so the NULL marker there is not a lost notice (session 07, TASK-067).
     """
     from secretaria.services.payments import deposit_lifecycle
 
     ids = (
         await session.scalars(
             select(PixDeposit.id)
+            .join(Appointment, Appointment.id == PixDeposit.appointment_id)
             .where(
                 PixDeposit.status == PixDepositStatus.PAID,
                 PixDeposit.deposit_timing == DEPOSIT_TIMING_AFTER,
                 PixDeposit.paid_notice_sent_at.is_(None),
+                Appointment.tenant_id == PixDeposit.tenant_id,
+                Appointment.status.in_(LIVE_APPOINTMENT_STATUSES),
                 PixDeposit.paid_at.is_not(None),
                 PixDeposit.paid_at <= now - timedelta(minutes=1),
             )
@@ -423,7 +467,19 @@ async def recover_paid_notices(
         try:
             deposit = await session.get(PixDeposit, deposit_id)
             tenant = await session.get(Tenant, deposit.tenant_id) if deposit is not None else None
-            if deposit is not None and tenant is not None and deposit.paid_notice_sent_at is None:
+            appointment = (
+                await session.get(Appointment, deposit.appointment_id)
+                if deposit is not None and deposit.appointment_id is not None
+                else None
+            )
+            if (
+                deposit is not None
+                and tenant is not None
+                and deposit.paid_notice_sent_at is None
+                # re-read: the consultation may have been cancelled since the batch query
+                and appointment is not None
+                and appointment.status in LIVE_APPOINTMENT_STATUSES
+            ):
                 await deposit_lifecycle._notify_paid(session, tenant, deposit)
                 deposit.paid_notice_sent_at = now
                 sent += 1

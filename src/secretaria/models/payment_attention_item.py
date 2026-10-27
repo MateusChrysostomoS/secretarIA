@@ -38,6 +38,17 @@ REASON_REFUNDED_EXTERNALLY = "refunded_externally"
 # TASK-052: the clinic released a PAID slot and the refund fell due (cancelled, no answer by B or
 # in 24 h, or the clinic refused "Manter") - the clinic returns the deposit in the provider's panel.
 REASON_RELEASED_REFUND_DUE = "released_refund_due"
+# 2026-10-26: the patient changed to a CHEAPER service and asked for the sinal difference back; the
+# clinic returns it in the provider's panel (never automatic).
+REASON_SERVICE_DIFF_REFUND_DUE = "service_diff_refund_due"
+# 2026-10-26: the Pix of a service-change difference was paid and the row changed, but the agenda
+# event could not follow (the longer window is no longer free, or the agenda was unreachable):
+# the clinic adjusts the agenda - never two overlapping events, never the payment undone.
+REASON_SERVICE_DIFF_AGENDA_PENDING = "service_diff_agenda_pending"
+# 2026-10-27 (follow-up B): the Pix of a service-change difference could not be created (the
+# provider was down or erroring), so the dearer service stood at once without it: the clinic
+# collects the difference (`amount_cents`) itself. Money NOT received - never part of a refund.
+REASON_SERVICE_DIFF_COLLECT_DUE = "service_diff_collect_due"
 
 ATTENTION_REASONS = frozenset(
     {
@@ -52,6 +63,9 @@ ATTENTION_REASONS = frozenset(
         REASON_PROMOTION_FAILED,
         REASON_REFUNDED_EXTERNALLY,
         REASON_RELEASED_REFUND_DUE,
+        REASON_SERVICE_DIFF_REFUND_DUE,
+        REASON_SERVICE_DIFF_AGENDA_PENDING,
+        REASON_SERVICE_DIFF_COLLECT_DUE,
     }
 )
 

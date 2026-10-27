@@ -104,6 +104,8 @@ async def test_a_good_key_connects_and_the_response_carries_only_the_status(clie
         "status": "connected",
         "incomplete_reason": None,
         "capabilities": CAPS,
+        "excess_groups": [],
+        "excess_labels": [],
     }
     assert KEY not in response.text and "authToken" not in response.text
     async with maker() as session:
@@ -265,3 +267,130 @@ async def test_the_paths_are_in_the_openapi_schema(client, world):
     schema = (await client.get("/openapi.json")).json()
     assert ENDPOINT in schema["paths"] and CONNECTION in schema["paths"]
     assert f"{ENDPOINT}/asaas/retry-webhook" in schema["paths"]
+
+
+# --------------------------------------------------------------------------
+# TASK-053 (spec 2026-10-11 section 7): extra permissions are information while
+# ASAAS_REFUSE_EXCESS_PERMISSIONS is off; the frozen JSONs of session 03 come from here.
+# --------------------------------------------------------------------------
+
+
+async def test_an_accepted_key_with_extra_permissions_answers_200_with_the_labels(client, world):
+    """While ASAAS_REFUSE_EXCESS_PERMISSIONS is off the key is accepted and the screen gets the
+    extra groups as INFORMATION (a note, never a block)."""
+    tenant, _, maker, _, _, verdict = world
+    verdict["value"] = Verdict(VerdictKind.ACCEPTED, None, (), ("TRANSFER",), dict(CAPS))
+    response = await _put(client, {"api_key": KEY})
+    assert response.status_code == 200
+    assert response.json() == {
+        "provider": "asaas",
+        "status": "connected",
+        "incomplete_reason": None,
+        "capabilities": CAPS,
+        "excess_groups": ["TRANSFER"],
+        "excess_labels": ["Transferências"],
+    }
+    assert KEY not in response.text
+    listed = (await client.get(ENDPOINT)).json()
+    assert listed[0]["excess_labels"] == ["Transferências"] and listed[0]["status"] == "connected"
+
+
+def _real_probes(monkeypatch, fake, *, refuse=None, qualified=None, **replies):
+    """Undo the fixture's stub: the REAL probe suite runs against the fake Asaas client."""
+    from secretaria.services.payments import asaas_probes
+    from secretaria.services.payments.asaas import ProbeResponse
+
+    granted = ProbeResponse(200, None, True, None)
+    fake.probe_map = {spec.path: granted for spec in asaas_probes.REQUIRED_PROBES}
+    every = [*asaas_probes.REQUIRED_PROBES, *asaas_probes.EXCESS_PROBES]
+    for group, reply in replies.items():
+        fake.probe_map[next(s.path for s in every if s.group == group)] = reply
+    monkeypatch.setattr(asaas_connection, "run_probe_suite", asaas_probes.run_probe_suite)
+    monkeypatch.setattr(asaas_probes, "QUALIFIED_EXCESS_GROUPS", frozenset())
+    for name, value in (
+        ("ASAAS_REFUSE_EXCESS_PERMISSIONS", refuse),
+        ("ASAAS_PROBES_QUALIFIED", qualified),
+    ):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    get_settings.cache_clear()
+    return granted
+
+
+async def test_flag_off_the_real_probes_connect_a_key_holding_extras(client, world, monkeypatch):
+    """The G1 fix end to end: with BOTH flags at their defaults (off), a key that can do what the
+    product needs is connected - before TASK-053 every key was a 503 probes_not_qualified."""
+    import structlog
+
+    tenant, _, maker, _, fake, _ = world
+    granted = _real_probes(monkeypatch, fake, TRANSFER=None)
+    fake.probe_map["/transfers"] = granted
+    with structlog.testing.capture_logs() as logs:
+        response = await _put(client, {"api_key": KEY})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["status"], body["excess_groups"]) == ("connected", ["TRANSFER"])
+    assert KEY not in response.text and KEY not in repr(logs)
+
+
+async def test_flag_off_the_real_probes_still_refuse_a_key_missing_a_needed_permission(
+    client, world, monkeypatch
+):
+    from secretaria.services.payments.asaas import ProbeResponse
+
+    tenant, _, maker, _, fake, _ = world
+    _real_probes(
+        monkeypatch, fake, WEBHOOK=ProbeResponse(403, "insufficient_permission", False, None)
+    )
+    response = await _put(client, {"api_key": KEY})
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": {
+            "code": "missing_permission",
+            "missing_groups": ["WEBHOOK"],
+            "excess_groups": [],
+            "missing_labels": ["Webhooks"],
+            "excess_labels": [],
+        }
+    }
+    async with maker() as session:
+        assert (await session.scalars(select(ClinicPaymentAccount))).all() == []
+
+
+async def test_flag_off_a_provider_outage_is_a_503_and_stores_nothing(client, world, monkeypatch):
+    from secretaria.services.payments.asaas import ProbeResponse
+
+    tenant, _, maker, _, fake, _ = world
+    _real_probes(monkeypatch, fake, PAYMENT=ProbeResponse(503, None, False, None))
+    monkeypatch.setattr("secretaria.services.payments.asaas_probes._RETRY_WAITS", (0.0, 0.0))
+    response = await _put(client, {"api_key": KEY})
+    assert response.status_code == 503
+    assert response.json() == {"detail": {"code": "verification_unavailable"}}
+    assert KEY not in response.text
+    async with maker() as session:
+        assert (await session.scalars(select(ClinicPaymentAccount))).all() == []
+
+
+async def test_flag_on_without_qualification_keeps_the_old_fail_closed_503(
+    client, world, monkeypatch
+):
+    tenant, _, maker, _, fake, _ = world
+    _real_probes(monkeypatch, fake, refuse="true")
+    response = await _put(client, {"api_key": KEY})
+    assert response.status_code == 503
+    assert response.json() == {"detail": {"code": "probes_not_qualified"}}
+    assert fake.calls == []
+
+
+async def test_flag_on_and_qualified_refuses_the_extras_as_d14(client, world, monkeypatch):
+    tenant, _, maker, _, fake, _ = world
+    granted = _real_probes(monkeypatch, fake, refuse="true", qualified="true")
+    fake.probe_map["/transfers"] = granted
+    response = await _put(client, {"api_key": KEY})
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "key_excess_permissions"
+    assert response.json()["detail"]["excess_labels"] == ["Transferências"]
+    async with maker() as session:
+        assert (await session.scalars(select(ClinicPaymentAccount))).all() == []

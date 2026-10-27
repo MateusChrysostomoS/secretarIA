@@ -38,6 +38,7 @@ from secretaria.models.deposit_release_offer import (
     DepositReleaseOffer,
 )
 from secretaria.services import release_offer as ro, release_offer_dispatch
+from secretaria.services.payments import adjustment_queries
 from secretaria.services.payments.money import format_brl
 from secretaria.services.tenant_config import get_waba_token
 from secretaria.workers.shared.context import _ReplyContext
@@ -188,7 +189,12 @@ async def _on_cancel(session, offer, now) -> _Answer:
     await session.commit()
     if outcome == ro.CANCEL_NOTIFIED:
         deposit = await session.get(PixDeposit, deposit_id)
-        amount = format_brl(deposit.amount_cents) if deposit is not None else ""
+        # What the clinic holds (sinal + paid service differences), plan 2026-10-26 Task 8.
+        amount = (
+            format_brl(await adjustment_queries.held_total_cents(session, deposit))
+            if deposit is not None
+            else ""
+        )
         return _Answer(
             text=ro.CANCEL_DONE_TEXT.format(amount=amount),
             follow=("rebookno", None),
