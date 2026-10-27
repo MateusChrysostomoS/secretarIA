@@ -151,6 +151,8 @@ neither" do `README.md`.
 
 ## Documentação
 
+`docs/CHECKPOINT_convenio_paginado_antecedencia.md` — 2026-10-27 (Instituto Gicovate): lista de convênios paginada ("Ver mais convênios", nenhum plano cortado) e antecedência mínima por médico (`professionals.min_booking_notice_hours`, migração `c3d9e1f5a7b2`; só consulta nova, remarcar/cancelar livres); branch `feat/convenio-paginado-antecedencia`, sem deploy; ordem: migração → API+worker → front.
+
 `docs/CHECKPOINT_subagendas_convite.md` — TASK-054: criação de subagenda no convite, vínculo próprio e reativação em conta compartilhada da clínica; integração à main local autorizada, sem deploy; estado em `BRAIN/tasks/TASK-054/CALENDAR_IMPLEMENTATION.md`.
 
 `docs/CHECKPOINT_lembretes_r7.md` — TASK-044 R7: ações da clínica na agenda avisam o paciente (confirmar com botões, compareceu → pós-consulta, Editar/Remarcar, cancelar no Portal, autorização permanente de aviso pago), quem vê a agenda por papel (brain-api `agenda_scope`, aplicado no servidor), lembrete extra na configuração e dados do Editar na agenda; migração aditiva `d8e3a5c1f7b2`; local, não mesclado/pushado/deployado; deploy: migração → brain-api → API+worker → front; contrato do R5 no plano.
