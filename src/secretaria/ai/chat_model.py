@@ -1,6 +1,8 @@
-"""Which vendor's chat model answers: Anthropic's Claude (default) or OpenAI.
+"""Which vendor's chat model answers: Anthropic's Claude Haiku, or OpenAI only without a Claude key.
 
-One switch, `LLM_PROVIDER` ("anthropic" | "openai"), read at each model build. Every chat call
+Owner rule (2026-10-27): Claude Haiku answers EVERY chat call whenever ANTHROPIC_API_KEY is
+configured; OpenAI is used only when no Anthropic key is configured at all. There is no other
+switch - the presence of the key decides, read at each model build. Every chat call
 site (the conversation agent in ai/graph.py, the scoped-help decision in ai/scoped_help.py, the
 context-source extraction in workers/shared/context_ingestion.py) builds its model here, so the
 two vendors never drift apart in which knobs they get. Audio transcription is NOT a chat call:
@@ -29,7 +31,7 @@ import anthropic
 import httpx
 import openai
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, SystemMessage
 
 from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
@@ -67,24 +69,22 @@ _fallback_logged = False
 
 
 def provider() -> str:
-    """The vendor that will actually answer; anything unknown fails loudly at build time.
+    """The vendor that will actually answer: Claude with an Anthropic key, OpenAI without one.
 
-    Claude is the default. When Claude is chosen but ANTHROPIC_API_KEY is missing while
-    OPENAI_API_KEY is set (a deploy that forgot the new key), the chat falls back to OpenAI
-    and says so once per process at ERROR: patients keep getting answers, and the log shows
-    the misconfiguration. With neither key, the build fails as before.
+    When no Anthropic key is configured but OPENAI_API_KEY is (a deploy that forgot the key),
+    the chat runs on OpenAI and says so once per process at ERROR: patients keep getting
+    answers, and the log shows the misconfiguration. With neither key the build fails.
     """
     global _fallback_logged
     s = get_settings()
-    value = (s.LLM_PROVIDER or ANTHROPIC).strip().lower()
-    if value not in (OPENAI, ANTHROPIC):
-        raise RuntimeError(f"LLM_PROVIDER must be 'openai' or 'anthropic', got {value!r}.")
-    if value == ANTHROPIC and not s.ANTHROPIC_API_KEY and s.OPENAI_API_KEY:
+    if s.ANTHROPIC_API_KEY:
+        return ANTHROPIC
+    if s.OPENAI_API_KEY:
         if not _fallback_logged:
             logger.error("llm_provider_fallback", wanted=ANTHROPIC, using=OPENAI)
             _fallback_logged = True
         return OPENAI
-    return value
+    return ANTHROPIC  # build_chat_model then fails loudly: ANTHROPIC_API_KEY missing
 
 
 def model_name() -> str:
@@ -115,6 +115,8 @@ def build_chat_model(*, openai_max_tokens: int, max_retries: int, timeout: float
         effort = (s.ANTHROPIC_EFFORT or "").strip().lower()
         if effort:
             kwargs["output_config"] = {"effort": effort}
+        if (s.ANTHROPIC_THINKING or "").strip().lower() == "disabled":
+            kwargs["thinking"] = {"type": "disabled"}
         if s.ANTHROPIC_SECRETARIA_MODEL in _REFUSAL_FALLBACK_MODELS:
             kwargs["betas"] = [_REFUSAL_FALLBACK_BETA]
             kwargs["model_kwargs"] = {"fallbacks": "default"}
@@ -171,6 +173,20 @@ def build_structured_model(
             warnings.simplefilter("ignore", UserWarning)
             return model.with_structured_output(schema, method=method)
     return model.with_structured_output(schema, method=method)
+
+
+def system_message(content: str) -> SystemMessage:
+    """The system prompt as the vendor caches it best.
+
+    OpenAI caches a long shared prefix by itself: plain text. Claude caches only up to a marked
+    block, so the prompt is one text block with an ephemeral (5-minute) cache mark - the tools
+    render before it, so they ride the same cache entry.
+    """
+    if provider() == ANTHROPIC:
+        return SystemMessage(
+            content=[{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+        )
+    return SystemMessage(content=content)
 
 
 def reply_text(message: BaseMessage | None) -> str:

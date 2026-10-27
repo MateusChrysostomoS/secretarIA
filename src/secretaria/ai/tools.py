@@ -22,6 +22,7 @@ from uuid import UUID
 from langchain_core.tools import tool
 from pseudonymize_core import has_unresolved_tokens
 
+from secretaria.ai.formatter import whatsapp_markup
 from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
 from secretaria.services.availability import slot_taken_at_confirm
@@ -135,7 +136,7 @@ def handback_message(message: str | None) -> str | None:
     resolve (the model invented or mangled one) would be printed to the patient as
     "[PACIENTE_...]", so such words are dropped - the card alone still answers.
     """
-    text = (message or "").strip()[:HANDBACK_MESSAGE_MAX].rstrip()
+    text = whatsapp_markup((message or "").strip()[:HANDBACK_MESSAGE_MAX].rstrip())
     if text and has_unresolved_tokens(text):
         logger.warning("handback_message_unresolved_tokens", message_len=len(text))
         return None
@@ -1574,6 +1575,9 @@ async def set_booking_draft(
             responda o que ele perguntou ou contou, sem anunciar qual lista vem a
             seguir (o fluxo decide e mostra logo abaixo); se nenhuma opção da
             clínica corresponde exatamente ao que ele descreveu, diga isso.
+            Nunca diga que anotou, registrou ou reservou nada, nem que vai
+            verificar a agenda: o fluxo confere e o paciente confirma no botão
+            (ex.: "Perfeito, é só conferir os dados abaixo.").
             Deixe vazio só se não houver nada a dizer.
     """
     # Existing three-field calls retain their old validation/landing. Only an
@@ -1751,6 +1755,9 @@ async def set_booking_draft_v2(
             responda o que ele perguntou ou contou, sem anunciar qual lista vem a
             seguir (o fluxo decide e mostra logo abaixo); se nenhuma opção da
             clínica corresponde exatamente ao que ele descreveu, diga isso.
+            Nunca diga que anotou, registrou ou reservou nada, nem que vai
+            verificar a agenda: o fluxo confere e o paciente confirma no botão
+            (ex.: "Perfeito, é só conferir os dados abaixo.").
             Deixe vazio só se não houver nada a dizer.
     """
     tenant_id = _tenant_id_ctx.get()

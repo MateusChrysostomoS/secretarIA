@@ -276,14 +276,15 @@ class Settings(BaseSettings):
     # Context extraction (TASK-026) needs a budget of its own: OPENAI_MAX_TOKENS (2500) also covers
     # reasoning tokens and would truncate a structured extraction to nothing.
     OPENAI_CONTEXT_EXTRACTION_MAX_TOKENS: int = 8000
-    # --- Chat vendor switch (ai/chat_model.py) ---
-    # "anthropic" (Claude, the default since TASK-069) or "openai" for EVERY chat call: the
-    # conversation agent, the scoped-help decision and the context-source extraction. Audio
+    # --- Chat vendor (ai/chat_model.py) ---
+    # Claude Haiku answers EVERY chat call (the conversation agent, the scoped-help decision and
+    # the context-source extraction) whenever ANTHROPIC_API_KEY is set; OpenAI answers only when
+    # no Anthropic key is configured (owner rule, 2026-10-27) - there is no other switch. Audio
     # transcription stays on OpenAI/Groq either way, so OPENAI_API_KEY is still needed for it.
     # Set ANTHROPIC_API_KEY on the API AND the worker together: the worker runs the patient
     # turns. Without it (and with OPENAI_API_KEY set) the chat falls back to OpenAI and logs
     # `llm_provider_fallback` at ERROR, so a deploy that forgot the key never goes silent.
-    LLM_PROVIDER: str = "anthropic"
+    # A leftover LLM_PROVIDER in the environment is ignored.
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_SECRETARIA_MODEL: str = "claude-haiku-5-5"
     # Claude's thinking counts against this cap (as gpt-5's reasoning does against
@@ -292,6 +293,10 @@ class Settings(BaseSettings):
     # Thinking depth: "low" | "medium" | "high" | "xhigh" | "max"; empty = the model's default
     # (medium on Claude Haiku 5.5). Lower = faster and cheaper turns.
     ANTHROPIC_EFFORT: str = ""
+    # "adaptive" (the model's own default) or "disabled". Off answers sooner, but a model without
+    # thinking may write a tool call as visible text - decide on the live evaluation
+    # (tests/llm_eval), never by default.
+    ANTHROPIC_THINKING: str = "adaptive"
     CONTEXT_SOURCES_PER_DAY: int = 10  # <= 0 disables the cap (repo convention)
     CONTEXT_SOURCES_IN_FLIGHT: int = 2
     # Wall-clock budget for ONE whole agent turn (every LLM call + tool call +

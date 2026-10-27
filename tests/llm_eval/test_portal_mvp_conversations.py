@@ -1,7 +1,7 @@
 """Bateria opt-in: o modelo REAL escolhe a ferramenta certa dado o estado (MVP Portal).
 
 Não roda em CI: `RUN_LLM_EVAL=1 OPENAI_API_KEY=... uv run python -m pytest tests/llm_eval -v`
-(Claude: `LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=...`).
+(Claude: `ANTHROPIC_API_KEY=...`).
 Mede só a primeira decisão (qual ferramenta, com quais argumentos) sobre o prompt de
 produção + o bloco de estado — barato, sem DB nem calendário.
 """

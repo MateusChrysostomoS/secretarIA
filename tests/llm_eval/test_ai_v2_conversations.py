@@ -3,7 +3,7 @@
     RUN_LLM_EVAL=1 LLM_EVAL_RUNS=5 \\
         uv run python -m pytest tests/llm_eval/test_ai_v2_conversations.py -v
 
-with OPENAI_API_KEY exported in that shell only (for Claude: LLM_PROVIDER=anthropic +
+with OPENAI_API_KEY exported in that shell only (for Claude:
 ANTHROPIC_API_KEY). Same shape as
 test_portal_mvp_conversations.py (which keeps evaluating the v1 prompt): the production
 model (`OPENAI_SECRETARIA_MODEL`, with the production `max_completion_tokens`) reads the

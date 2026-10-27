@@ -1,4 +1,4 @@
-"""The chat-vendor switch (ai/chat_model.py): OpenAI by default, Claude when LLM_PROVIDER says so.
+"""The chat vendor (ai/chat_model.py): Claude with an Anthropic key, OpenAI only without one.
 
 No network: the models are only built and inspected, never invoked. The real-model proof lives
 in the task ledger (TASK-069).
@@ -19,13 +19,13 @@ from secretaria.ai import chat_model, trace
 
 def _settings(**over):
     base = {
-        "LLM_PROVIDER": "openai",
         "OPENAI_API_KEY": "sk-test",
         "OPENAI_SECRETARIA_MODEL": "gpt-5-mini",
         "ANTHROPIC_API_KEY": "sk-ant-test",
         "ANTHROPIC_SECRETARIA_MODEL": "claude-opus-5-5",
         "ANTHROPIC_MAX_TOKENS": 16000,
         "ANTHROPIC_EFFORT": "",
+        "ANTHROPIC_THINKING": "adaptive",
     }
     base.update(over)
     return SimpleNamespace(**base)
@@ -43,8 +43,8 @@ class _Shape(BaseModel):
     answer: str
 
 
-def test_default_is_openai_with_the_callers_token_cap(use):
-    use()
+def test_openai_answers_only_without_an_anthropic_key_with_the_callers_token_cap(use):
+    use(ANTHROPIC_API_KEY="")
     model = chat_model.build_chat_model(openai_max_tokens=2500, max_retries=5, timeout=60)
     assert isinstance(model, ChatOpenAI)
     assert model.model_name == "gpt-5-mini"
@@ -53,8 +53,8 @@ def test_default_is_openai_with_the_callers_token_cap(use):
     assert chat_model.token_cap(2500) == 2500
 
 
-def test_anthropic_gets_claude_with_its_own_budget_and_refusal_fallback(use):
-    use(LLM_PROVIDER="Anthropic ")
+def test_an_anthropic_key_gets_claude_with_its_own_budget_and_refusal_fallback(use):
+    use()
     model = chat_model.build_chat_model(openai_max_tokens=2500, max_retries=5, timeout=60)
     assert isinstance(model, ChatAnthropic)
     assert model.model == "claude-opus-5-5"
@@ -70,7 +70,6 @@ def test_anthropic_gets_claude_with_its_own_budget_and_refusal_fallback(use):
 
 def test_effort_is_passed_and_haiku_gets_no_fallback(use):
     use(
-        LLM_PROVIDER="anthropic",
         ANTHROPIC_SECRETARIA_MODEL="claude-haiku-5-5",
         ANTHROPIC_EFFORT="LOW",
     )
@@ -80,11 +79,9 @@ def test_effort_is_passed_and_haiku_gets_no_fallback(use):
     assert "fallbacks" not in (model.model_kwargs or {})
 
 
-@pytest.mark.parametrize("provider", ["openai", "anthropic"])
-def test_missing_key_fails_loudly(use, provider):
-    key = f"{provider.upper()}_API_KEY"
-    use(LLM_PROVIDER=provider, OPENAI_API_KEY="", ANTHROPIC_API_KEY="")
-    with pytest.raises(RuntimeError, match=key):
+def test_no_key_at_all_fails_loudly(use):
+    use(OPENAI_API_KEY="", ANTHROPIC_API_KEY="")
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
         chat_model.build_chat_model(openai_max_tokens=2500, max_retries=5, timeout=60)
 
 
@@ -93,7 +90,7 @@ def test_claude_without_its_key_falls_back_to_openai_and_says_so(use, monkeypatc
     errors = []
     monkeypatch.setattr(chat_model, "_fallback_logged", False)
     monkeypatch.setattr(chat_model.logger, "error", lambda event, **kw: errors.append(event))
-    use(LLM_PROVIDER="anthropic", ANTHROPIC_API_KEY="")
+    use(ANTHROPIC_API_KEY="")
     model = chat_model.build_chat_model(openai_max_tokens=2500, max_retries=5, timeout=60)
     assert isinstance(model, ChatOpenAI)
     assert chat_model.model_name() == "gpt-5-mini"
@@ -104,14 +101,15 @@ def test_claude_haiku_is_the_shipped_default():
     from secretaria.config import Settings
 
     fields = Settings.model_fields
-    assert fields["LLM_PROVIDER"].default == "anthropic"
+    assert "LLM_PROVIDER" not in fields  # the key decides, not a switch
     assert fields["ANTHROPIC_SECRETARIA_MODEL"].default == "claude-haiku-5-5"
 
 
-def test_unknown_provider_is_refused(use):
-    use(LLM_PROVIDER="gemini")
-    with pytest.raises(RuntimeError, match="LLM_PROVIDER"):
-        chat_model.build_chat_model(openai_max_tokens=2500, max_retries=5, timeout=60)
+def test_a_leftover_llm_provider_setting_cannot_pull_the_chat_back_to_openai(use):
+    # Owner rule: with an Anthropic key set, Claude answers - whatever the old switch says.
+    use(LLM_PROVIDER="openai")
+    model = chat_model.build_chat_model(openai_max_tokens=2500, max_retries=5, timeout=60)
+    assert isinstance(model, ChatAnthropic)
 
 
 @pytest.mark.parametrize(
@@ -119,7 +117,7 @@ def test_unknown_provider_is_refused(use):
 )
 def test_structured_output_method_per_vendor(use, monkeypatch, provider, method):
     # Claude Opus/Sonnet 5.5 reject a forced tool call, which is what function_calling does.
-    use(LLM_PROVIDER=provider)
+    use(ANTHROPIC_API_KEY="sk-ant-test" if provider == "anthropic" else "")
     seen = {}
     cls = ChatAnthropic if provider == "anthropic" else ChatOpenAI
 
@@ -192,7 +190,7 @@ def test_markdown_bold_becomes_whatsapp_bold():
 def test_big_schemas_can_opt_out_of_claudes_constrained_output(use, monkeypatch):
     # The context extraction's schema is refused by Claude's constrained output ("Schema is
     # too complex"); it asks for the tool instead.
-    use(LLM_PROVIDER="anthropic")
+    use()
     seen = {}
 
     def fake(self, schema, *, method, **kw):
@@ -204,3 +202,42 @@ def test_big_schemas_can_opt_out_of_claudes_constrained_output(use, monkeypatch)
         _Shape, openai_max_tokens=100, max_retries=1, timeout=5, native_schema=False
     )
     assert seen["method"] == "function_calling"
+
+
+def test_thinking_stays_the_models_default_unless_switched_off(monkeypatch):
+    base = dict(
+        ANTHROPIC_API_KEY="k",
+        OPENAI_API_KEY="",
+        ANTHROPIC_SECRETARIA_MODEL="claude-haiku-5-5",
+        ANTHROPIC_MAX_TOKENS=4096,
+        ANTHROPIC_EFFORT="",
+        ANTHROPIC_THINKING="adaptive",
+    )
+
+    def build(**over):
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(chat_model, "get_settings", lambda: SimpleNamespace(**{**base, **over}))
+        return chat_model.build_chat_model(openai_max_tokens=2500, max_retries=2, timeout=30)
+
+    assert build().thinking is None
+    assert build(ANTHROPIC_THINKING="disabled").thinking == {"type": "disabled"}
+
+
+def test_claude_caches_the_system_prompt_and_openai_gets_plain_text(monkeypatch):
+    from types import SimpleNamespace
+
+    def use(anthropic_key="k"):
+        monkeypatch.setattr(
+            chat_model,
+            "get_settings",
+            lambda: SimpleNamespace(ANTHROPIC_API_KEY=anthropic_key, OPENAI_API_KEY="o"),
+        )
+
+    use()
+    assert chat_model.system_message("regras").content == [
+        {"type": "text", "text": "regras", "cache_control": {"type": "ephemeral"}}
+    ]
+    # No Anthropic key -> OpenAI answers, so the prompt is plain text there.
+    use(anthropic_key="")
+    assert chat_model.system_message("regras").content == "regras"

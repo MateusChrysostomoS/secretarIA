@@ -122,7 +122,7 @@ def _get_decision_model() -> Any:
     global _decision_model
     if _decision_model is not None:
         return _decision_model
-    # OpenAI or Claude, per LLM_PROVIDER (ai/chat_model.py picks the structured-output method).
+    # Claude, or OpenAI without an Anthropic key (chat_model.py picks the output method).
     _decision_model = build_structured_model(
         _ScopedHelpDecision,
         openai_max_tokens=get_settings().OPENAI_MAX_TOKENS,

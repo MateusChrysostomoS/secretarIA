@@ -53,7 +53,7 @@ def _structured_model(name: str, schema):
         from secretaria.ai.chat_model import build_structured_model
 
         try:
-            # OpenAI or Claude, per LLM_PROVIDER; a missing key is a model failure for the job.
+            # Claude, or OpenAI without a Claude key; a missing key is a model failure for the job.
             _models[name] = build_structured_model(
                 schema,
                 openai_max_tokens=get_settings().OPENAI_CONTEXT_EXTRACTION_MAX_TOKENS,

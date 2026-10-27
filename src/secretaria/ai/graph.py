@@ -20,7 +20,7 @@ from dataclasses import replace
 from typing import Any
 from uuid import UUID
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.prebuilt import create_react_agent
 from sqlalchemy import select
 
@@ -29,6 +29,7 @@ from secretaria.ai.chat_model import (
     build_chat_model,
     model_name,
     reply_text,
+    system_message,
     token_cap,
     whatsapp_emphasis,
 )
@@ -420,7 +421,7 @@ def _prompt_with_today(state: dict) -> list[BaseMessage]:
                 google_refresh_token=None,
             )
         )
-    return [SystemMessage(content=content), *state["messages"]]
+    return [system_message(content), *state["messages"]]
 
 
 def _tool_cache_key(tool: Any) -> str:
@@ -475,7 +476,7 @@ def build_agent(
         tools = list(wrap_tools_with_output_allowlist(tools))
     tools = list(wrap_tools_with_pseudonymizer(tools))
 
-    # OpenAI or Claude, per LLM_PROVIDER (ai/chat_model.py).
+    # Claude, or OpenAI without an Anthropic key (ai/chat_model.py).
     model = build_chat_model(
         openai_max_tokens=get_settings().OPENAI_MAX_TOKENS,
         # Default is 2 — bumping to 5 cushions us against SSL_EOF /

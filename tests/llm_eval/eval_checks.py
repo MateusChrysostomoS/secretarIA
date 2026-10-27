@@ -289,7 +289,7 @@ def offered_slots(text: str, windows: Sequence[Mapping[str, str]]) -> list[tuple
 
 
 def real_chat_model():
-    """The production vendor's chat model (LLM_PROVIDER: OpenAI or Claude), production token cap.
+    """The production vendor's chat model (Claude, else OpenAI without a key), production cap.
 
     Skips the test when that vendor's key is not exported in this shell.
     """

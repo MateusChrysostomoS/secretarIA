@@ -5,15 +5,16 @@ Estado: **LOCAL, não commitado** — worktree `C:\TECH\BRAIN-worktrees\TASK-069
 
 ## O que entrou
 
-- `ai/chat_model.py` (novo): `LLM_PROVIDER` (`anthropic` padrão desde 2026-10-22, decisão do dono | `openai`) decide o modelo de TODA chamada
+- `ai/chat_model.py` (novo): a presença de `ANTHROPIC_API_KEY` decide (regra do dono, 2026-10-27: Claude Haiku em todos os pontos; OpenAI só se não houver chave da Anthropic; `LLM_PROVIDER` foi removido e é ignorado) o modelo de TODA chamada
   de chat — agente da conversa (`ai/graph.py` `build_agent`), decisão do scoped help
   (`ai/scoped_help.py` `_get_decision_model`) e leitura de fontes de contexto
   (`workers/shared/context_ingestion.py` `_structured_model`). Transcrição de áudio continua OpenAI/Groq.
-- Config (`config.py`, `.env.example`): `LLM_PROVIDER`, `ANTHROPIC_API_KEY`,
+- Config (`config.py`, `.env.example`): `ANTHROPIC_API_KEY`, `ANTHROPIC_THINKING` (`adaptive` | `disabled`, trazido da `main`),
   `ANTHROPIC_SECRETARIA_MODEL` (padrão `claude-haiku-5-5`, decisão do dono), `ANTHROPIC_MAX_TOKENS` (16000; o
   thinking conta no teto), `ANTHROPIC_EFFORT` (vazio = padrão do modelo, `medium` no Haiku 5.5).
-- Rede de segurança: `anthropic` sem `ANTHROPIC_API_KEY` mas com `OPENAI_API_KEY` → usa OpenAI e loga
-  `llm_provider_fallback` (ERROR, uma vez por processo); sem nenhuma chave, falha como antes.
+- Reserva: sem `ANTHROPIC_API_KEY` mas com `OPENAI_API_KEY` → usa OpenAI e loga
+  `llm_provider_fallback` (ERROR, uma vez por processo); sem nenhuma chave, falha com "ANTHROPIC_API_KEY missing".
+- O texto fixo do sistema vai com marca de cache (`system_message`, trazido da `main`) quando o Claude responde.
 - Diferenças absorvidas em `chat_model`:
   - saída estruturada: Claude usa `output_config.format` (`method="json_schema"`); o schema da
     extração de contexto é grande demais para isso (400 "Schema is too complex") e usa

@@ -222,3 +222,20 @@ def test_row_cap_is_the_shared_constant_not_a_local_copy() -> None:
     from secretaria.core import whatsapp_limits
 
     assert MAX_LIST_ROWS is whatsapp_limits.MAX_LIST_ROWS
+
+
+# Markdown bold reaches the patient as WhatsApp bold (Claude Haiku 5.5, 2026-10-21:
+# the Portal printed "*23/10*" for "**23/10**").
+def test_markdown_bold_becomes_whatsapp_bold():
+    from secretaria.ai.formatter import whatsapp_markup
+
+    assert whatsapp_markup("a sexta **23/10** ou **30/10**?") == "a sexta *23/10* ou *30/10*?"
+    assert whatsapp_markup("já *em negrito* fica") == "já *em negrito* fica"
+    assert whatsapp_markup("2 ** 3 não é negrito") == "2 ** 3 não é negrito"
+    assert [b.body for b in parse("Você quer **23/10**?")] == ["Você quer *23/10*?"]
+
+
+def test_a_handback_message_gets_whatsapp_bold_too():
+    from secretaria.ai.tools import handback_message
+
+    assert handback_message("Confira a **quinta, 22/10**.") == "Confira a *quinta, 22/10*."

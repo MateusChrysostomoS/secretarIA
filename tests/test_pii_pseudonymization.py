@@ -147,7 +147,7 @@ async def test_the_request_body_sent_to_claude_is_masked(
 
     conversation = await _seed(db, body="oi")
     claude = get_settings().model_copy(
-        update={"LLM_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "sk-ant-test"}
+        update={"ANTHROPIC_API_KEY": "sk-ant-test"}
     )
     monkeypatch.setattr(chat_model, "get_settings", lambda: claude)
     monkeypatch.setattr(graph, "_AGENTS", {})
