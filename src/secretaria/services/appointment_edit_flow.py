@@ -510,11 +510,17 @@ async def _doctor_step(conversation, tenant, body, draft, appt, professionals, c
 # --- Convênio -------------------------------------------------------------------------
 
 
-def _insurance_list(draft: ae.EditDraft, tenant, professionals) -> fr.FlowRouterResult:
-    """The clinic's plans, each marked by whether the CURRENT doctor takes it; never filtered."""
+def _insurance_list(
+    draft: ae.EditDraft, tenant, professionals, *, page: int = 0
+) -> fr.FlowRouterResult:
+    """The clinic's plans, each marked by whether the CURRENT doctor takes it; never filtered.
+
+    Paged like the booking's list (`fr.insurance_page`): no plan is ever cut.
+    """
     doctor = _doctor(professionals, draft)
     rows: list[tuple] = []
-    for plan in fr._tenant_insurance_plans(tenant)[: fr.MAX_INSURANCE_PLAN_ROWS]:
+    shown, next_page = fr.insurance_page(fr._tenant_insurance_plans(tenant), page)
+    for plan in shown:
         name = str(plan["name"])
         description = None
         if doctor is not None and plan.get("id"):
@@ -525,6 +531,7 @@ def _insurance_list(draft: ae.EditDraft, tenant, professionals) -> fr.FlowRouter
                 else f"{ae.MARK_BUSY} não aceito pelo médico"
             )
         rows.append((f"ins|{name}", fr.truncate_list_row_title(name), description))
+    rows.extend((row_id, title, None) for row_id, title in fr.insurance_more_row(next_page))
     rows.append(("ins|particular", fr.LABEL_INSURANCE_PARTICULAR, None))
     rows.append(("ins|outro", fr.LABEL_INSURANCE_OTHER, None))
     return _result(
@@ -542,6 +549,9 @@ def _insurance_list(draft: ae.EditDraft, tenant, professionals) -> fr.FlowRouter
 
 
 def _insurance_step(conversation, tenant, body, draft, professionals):
+    more = fr.insurance_more_page(body)
+    if more is not None:
+        return _insurance_list(draft, tenant, professionals, page=more)
     if fr._label_match(body, fr.LABEL_INSURANCE_OTHER):
         return _result(
             draft, [TextBubble(body=fr.INSURANCE_PROMPT_OTHER)], fr.STEP_EDIT_INSURANCE_OTHER

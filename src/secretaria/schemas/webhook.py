@@ -562,6 +562,7 @@ def minimal_event_payload(payload: dict) -> dict:
 #   daymore|<page>       -> "Ver mais dias (1)"            day-picker paging
 #   dayagain|<page>      -> "Escolher outro dia (1)"       slot list -> day list
 #   dayback|<target>     -> "Voltar (service)"             day/slot list -> back
+#   insmore|<page>       -> "Ver mais convênios (1)"       convênio-list paging
 #
 # The right-hand column is the ROUTING text (`inbound_routing_text`): what the
 # flow router and the agent's history read. It is never the stored message
@@ -581,6 +582,7 @@ _PAYLOAD_ROW_PREFIXES: tuple[str, ...] = (
     "daymore|",
     "dayagain|",
     "dayback|",
+    "insmore|",
 )
 
 

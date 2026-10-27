@@ -171,6 +171,14 @@ INSURANCE_SKIP_NO_MODE = "no_mode"
 MAX_PROFESSIONAL_ROWS = 10
 MAX_CATALOG_OPTION_ROWS = MAX_PROFESSIONAL_ROWS - 1
 MAX_INSURANCE_PLAN_ROWS = 8
+# A clinic may accept any number of convênios: past MAX_INSURANCE_PLAN_ROWS the list
+# pages, INSURANCE_PAGE_SIZE plans + "Ver mais convênios" + Particular + Outro = 10 rows.
+# The page cursor rides in the tap (`insmore|<page>`, schemas/webhook.py), exactly like
+# the day picker's "Ver mais dias": no conversation column. A clinic with up to
+# MAX_INSURANCE_PLAN_ROWS plans keeps its single, unpaged list.
+INSURANCE_PAGE_SIZE = MAX_INSURANCE_PLAN_ROWS - 1
+ROW_INSURANCE_MORE_PREFIX = "insmore|"
+LABEL_MORE_INSURANCES = "Ver mais convênios"
 # Same hard WhatsApp limit for the manage flow's "pick an appointment" list
 # (_manage_pick_list_bubble). A patient with more upcoming appointments than
 # this is not expected in practice; extras are dropped (with a warning).
@@ -2748,8 +2756,40 @@ def _match_insurance_plan(tenant: Tenant, body: str | None) -> str | None:
 
 match_insurance_plan = _match_insurance_plan
 
+def insurance_page(plans: list, page: int) -> tuple[list, int | None]:
+    """The plans one convênio-list page shows, and the next page's cursor (None = last).
+
+    Up to MAX_INSURANCE_PLAN_ROWS plans fit one page with Particular + Outro. Past that,
+    every page shows INSURANCE_PAGE_SIZE plans and keeps one row for "Ver mais
+    convênios", so no plan is ever cut (Instituto Gicovate, 2026-10-27: 9 plans and the
+    ninth, Unimed, never appeared). A cursor past the end restarts at the first page.
+    """
+    if len(plans) <= MAX_INSURANCE_PLAN_ROWS:
+        return list(plans), None
+    pages = -(-len(plans) // INSURANCE_PAGE_SIZE)
+    page = page if 0 <= page < pages else 0
+    start = page * INSURANCE_PAGE_SIZE
+    return list(plans[start : start + INSURANCE_PAGE_SIZE]), (
+        page + 1 if page + 1 < pages else None
+    )
+
+
+def insurance_more_row(next_page: int | None) -> list[tuple[str, str]]:
+    """The "Ver mais convênios" row for `next_page`, or nothing on the last page."""
+    if next_page is None:
+        return []
+    return [(f"{ROW_INSURANCE_MORE_PREFIX}{next_page}", LABEL_MORE_INSURANCES)]
+
+
+def insurance_more_page(body: str | None) -> int | None:
+    """The page a "Ver mais convênios" tap asks for, or None when `body` is not that tap."""
+    if not _control_match(body, LABEL_MORE_INSURANCES):
+        return None
+    return _as_page(_row_payload(body))
+
+
 def _enter_insurance(
-    tenant: Tenant, conversation: Conversation | None = None
+    tenant: Tenant, conversation: Conversation | None = None, *, page: int = 0
 ) -> FlowRouterResult:
     """Render the convênio list: the clinic's plans + Particular + Outro.
 
@@ -2757,16 +2797,15 @@ def _enter_insurance(
     convênio is the first question after pra-quem), and names the booking in
     progress otherwise - a booking begun before that order shipped, or an LLM
     hand-back with the service already chosen - whose service/doctor must ride
-    along to the day picker.
+    along to the day picker. `page` is the "Ver mais convênios" cursor
+    (`insurance_page`).
     """
     plans = _tenant_insurances(tenant)
-    if len(plans) > MAX_INSURANCE_PLAN_ROWS:
-        logger.warning(
-            "flow_insurance_list_truncated", total=len(plans), shown=MAX_INSURANCE_PLAN_ROWS
-        )
+    shown, next_page = insurance_page(plans, page)
     rows: list[tuple[str, str]] = [
-        (f"ins|{plan}", truncate_list_row_title(plan)) for plan in plans[:MAX_INSURANCE_PLAN_ROWS]
+        (f"ins|{plan}", truncate_list_row_title(plan)) for plan in shown
     ]
+    rows.extend(insurance_more_row(next_page))
     rows.append(("ins|particular", LABEL_INSURANCE_PARTICULAR))
     rows.append(("ins|outro", LABEL_INSURANCE_OTHER))
     logger.info(
@@ -2820,6 +2859,9 @@ async def _handle_insurance(
     has its service (begun before the convênio-first order shipped, or an LLM
     hand-back) goes straight to the day picker, as it always did.
     """
+    more = insurance_more_page(body)
+    if more is not None:
+        return _enter_insurance(tenant, conversation, page=more)
     if _label_match(body, LABEL_INSURANCE_OTHER):
         return FlowRouterResult(
             action="reply",
