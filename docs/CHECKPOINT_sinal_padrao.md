@@ -47,9 +47,13 @@ de o brain-api responder — o motivo `entitlement_unresolvable` deixou de exist
 
 ## Fora deste repo (pendente, decisão comercial)
 
-- **brain-api** (`services/catalog.py`) e **brain-frontend** (`cadastro/_components/AddonsStep.tsx`)
-  ainda VENDEM o add-on "Sinal via Pix" (R$79/mês, item no Stripe). Tirar da venda mexe em
-  cobrança/Stripe e em assinaturas existentes — não foi feito aqui; precisa de autorização do dono.
+- **Retirado da venda (2026-10-28, autorizado pelo dono)**, branch `feat/sinal-fora-da-venda`
+  em brain-api e brain-frontend: `catalog.AddonDef.sellable=False` para `pix_deposit` (a chave
+  continua no conjunto de add-ons); o checkout descarta, o PATCH de add-ons do cadastro recusa
+  e o `checkout-config` responde indisponível; o cadastro não mostra mais o cartão "Sinal via
+  Pix". Fora do código, pendente: arquivar o preço no Stripe e decidir sobre assinaturas que já
+  tenham o item (continuam cobradas até alguém removê-lo). Não tirar `pix_deposit` do
+  `STRIPE_PRICE_MAP` enquanto houver assinatura com o item: o webhook ainda o reconhece por ele.
 - **Brain-Message-Frontend** ainda tem texto para `addon_required`/`entitlement_unresolvable`; fica
   inofensivo (o backend não envia mais esses códigos) e pode ser limpo depois.
 
