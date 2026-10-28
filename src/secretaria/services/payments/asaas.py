@@ -36,10 +36,18 @@ class AsaasError(Exception):
     short symbolic code hint — NEVER response body text (ids/status only)."""
 
     def __init__(
-        self, status_code: int, code_hint: str | None = None, *, document_missing: bool = False
+        self,
+        status_code: int,
+        code_hint: str | None = None,
+        *,
+        document_missing: bool = False,
+        text_reason: str | None = None,
     ) -> None:
         self.status_code = status_code
         self.code_hint = code_hint
+        # A short fixed keyword ("document", ...) from `_classify_text`, or None. It names WHAT
+        # the free text complained about; the text itself is never kept.
+        self.text_reason = text_reason
         # True only when Asaas said the CUSTOMER lacks a CPF/CNPJ (sandbox fact: POST /customers
         # accepts one without it, then POST /payments answers 400 invalid_object).
         # A boolean, never text.
@@ -83,6 +91,13 @@ def _mentions_missing_document(response: httpx.Response) -> bool:
         if isinstance(text, str) and "cpf" in text.lower() and "cnpj" in text.lower():
             return True
     return False
+
+
+def _classify_text(response: httpx.Response) -> str | None:
+    """Fixed keyword for what an error's free text complains about, or None. The text is only
+    TESTED here, never stored, logged or raised. Only "document" is known today; further
+    keywords (value, pix_key, account) are added after the real responses are captured."""
+    return "document" if _mentions_missing_document(response) else None
 
 
 @dataclass(frozen=True)
@@ -131,13 +146,13 @@ class AsaasClient:
 
         if response.status_code >= 300:
             code_hint = _extract_code_hint(response)
+            text_reason = _classify_text(response) if response.status_code == 400 else None
             logger.error("asaas_http_error", path=path, status_code=response.status_code)
             raise AsaasError(
                 response.status_code,
                 code_hint,
-                document_missing=(
-                    response.status_code == 400 and _mentions_missing_document(response)
-                ),
+                document_missing=text_reason == "document",
+                text_reason=text_reason,
             )
 
         if not response.content:

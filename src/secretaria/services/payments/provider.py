@@ -44,11 +44,21 @@ class ProviderError(Exception):
     (network error, HTTP 429, HTTP 5xx). The message never includes a response body."""
 
     def __init__(
-        self, code: str, *, status_code: int | None = None, retryable: bool = False
+        self,
+        code: str,
+        *,
+        status_code: int | None = None,
+        retryable: bool = False,
+        reason: str | None = None,
+        stage: str | None = None,
     ) -> None:
         self.code = code
         self.status_code = status_code
         self.retryable = retryable
+        # Closed-vocabulary failure reason (`failure_reason.FailureReason` value) and the step
+        # that failed ("customer" / "charge" / ...). Both stay None until the provider classifies.
+        self.reason = reason
+        self.stage = stage
         super().__init__(f"payment provider error: {code}")
 
 
