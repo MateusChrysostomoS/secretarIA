@@ -56,7 +56,7 @@ sem o gestor da clínica trocar `deposit_timing` para `before` na configuração
 
 1. **Bloqueio de sinal obrigatório vira transferência para humano** (`action="handover"`): o spec
    pede "oferecer atendente"; oferecer um botão exigiria mais um estado. A conversa vai para a
-   secretária e o evento fica no log (`booking_gate_deposit_blocked`). **Sem e-mail à clínica:** o plano previa o
+   secretária e o evento fica no log (`booking_gate_deposit_blocked`). (Desde a TASK-071 Plano 2, o `reason` desse log guarda o motivo fechado da falha e o valor simbólico antigo está em `code`: ver `CHECKPOINT_pix_provider_core.md` §8.4.) **Sem e-mail à clínica:** o plano previa o
    e-mail `deposit_required_failed` (debounce de 6 h), mas a F1, depois da revisão, só admite o e-mail de
    "consulta cancelada com sinal já pago" (resposta 13 do dono, Global Constraint 19); a execução seguiu a decisão
    posterior do dono e ajustou os testes das Tasks 6, 7, 9, 14 e 15 para `emails == []`.
@@ -209,7 +209,7 @@ O teste de `test_before_interplay.py` usava uma data fixa de julho de 2026 (já 
 para 2030.
 
 **Decisões que ficam para o dono (Ruling):**
-- **Sinal obrigatório bloqueado não avisa a clínica** (I6): só há o log `booking_gate_deposit_blocked` e a conversa em humano. Uma causa sistêmica
+- **Sinal obrigatório bloqueado não avisa a clínica** (I6): só há o log `booking_gate_deposit_blocked` e a conversa em humano. (Chave do log mudou na TASK-071 Plano 2: `reason` = motivo fechado, `code` = valor antigo; ver `CHECKPOINT_pix_provider_core.md` §8.4.) Uma causa sistêmica
   (chave do Asaas revogada, entitlement fora do ar) para TODAS as reservas de uma clínica `before` sem que ela saiba. A resposta 13 fala de
   e-mail; um sinal na tela (ex.: "agenda bloqueada: motivo X" em `GET /payment-settings`) não a contradiz e precisa de decisão de produto.
 - **Teto da janela vs. piso do Mercado Pago (30 min):** a janela agora nunca passa do início da consulta; para um horário a menos de 30 min o Pix

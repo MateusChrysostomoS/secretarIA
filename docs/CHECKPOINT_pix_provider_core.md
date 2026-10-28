@@ -249,7 +249,24 @@ Matriz estado da conta × sinal (decisão D-A 2 + emenda 2026-10-12):
 `POST /customers` aceita cliente SEM `cpfCnpj`; é `POST /payments` que responde 400 `invalid_object` ("é necessário preencher o CPF ou CNPJ do cliente"). O veredito C4
 da F1 ficava incompleto: o provedor só traduzia o 400 do CLIENTE para `payer_document_required`. Agora `AsaasError.document_missing` (booleano) marca o 400 da COBRANÇA e
 `create_pix_charge` o traduz para o mesmo código, que dispara a pergunta do CPF no chat (Portal e WhatsApp, modos `before` e `after`). Com documento já enviado vira `charge_failed`
-(sem laço de perguntas). O cliente criado sem CPF é apagado em melhor esforço.
+(sem laço de perguntas). Todo cliente criado NESTA chamada é apagado em melhor esforço (depois de anular a cobrança) quando a cobrança falha ou é anulada; um cliente já guardado nunca é apagado, e uma exclusão que falha nunca substitui o erro original (vira só o log `asaas_customer_cleanup_failed`, com o tipo do erro).
+
+### §8.4 Motivo de falha da cobrança, limpeza do cliente órfão e nova tentativa do QR (TASK-071 Plano 2, 2026-10-28)
+
+Antes, uma cobrança Pix que falhava deixava só um código simbólico genérico (`charge_failed`) e ninguém sabia dizer por quê. Agora toda falha grava um **motivo fechado**, sem texto livre do Asaas.
+
+- **Lista fechada de motivos:** `FailureReason` em `secretaria/services/payments/failure_reason.py` (`classify` só devolve membros dela; o que não reconhece é `unknown`; `user_text` dá a frase em português para a clínica). O `ProviderError` ganhou `reason`, `stage` (`config` / `customer` / `charge` / `qr` / `persist`) e `code_hint` (código simbólico curto do Asaas, nunca o texto dele); o `ChargeStartError` de `booking_charge` repassa os mesmos campos.
+- **Log `payment_charge_failed`:** campos `tenant_id`, `stage`, `reason`, `status`, `code_hint`. Emitido **uma única vez**, em `begin_payment` (`_log_charge_failed`); **não** é emitido para a pergunta rotineira de CPF/e-mail (`_is_payer_data_question`), que não é falha.
+- **`booking_gate_deposit_blocked` enriquecido:** `reason` agora guarda o motivo fechado e o valor simbólico antigo passou para `code`. **Quem buscava `reason=charge_failed` nos logs deve buscar `code=charge_failed`.** Ganhou também `stage` e `status` (None quando nenhuma cobrança foi tentada).
+- **`pix_deposit_charge_failed`** (caminho do sinal no modo `after`, `maybe_create_deposit`): mantém o nome e o `code`; ganhou `reason`, `stage`, `status` e `code_hint` (None quando o provedor não classificou).
+- **Nova tentativa do QR:** `_fetch_pix_qr` em `asaas_provider` tenta 2 vezes (quando a primeira lança erro ou responde sem `payload`), com pausa `ASAAS_QR_RETRY_DELAY_SECONDS` (opcional, padrão 1.5 s; **não exige configuração no painel**). Cada tentativa que falha loga `asaas_qr_failed` com `attempt`, `status`, `code_hint` e `error_type` (nunca corpo, id da cobrança nem dados do pagador). Sem QR depois da 2ª tentativa, o motivo é `qr_unavailable`.
+- **Cliente órfão:** ver §8.3 (limpeza de todo cliente criado na chamada; `_discard_customer_created_here` em `booking_charge` e `_discard_customer` em `asaas_provider`).
+
+**Pendências conhecidas (Plano 3/4), de propósito fora desta entrega:**
+- a nova tentativa do QR também dispara em 4xx permanente (deveria só tentar de novo em erro transitório);
+- a sessão do banco fica aberta durante as chamadas ao provedor (risco de conexão "idle in transaction");
+- `no_api_key` (chave ausente) cai no texto de `api_key_invalid`, que não distingue "sem chave" de "chave inválida";
+- o caminho de troca de serviço com aumento de preço (`service_change`) ainda pode deixar um cliente órfão no Asaas.
 
 ## 9. Troca de serviço com diferença do sinal (TASK-067, 2026-10-26 — LOCAL: não commitada, não publicada, não deployada)
 Spec: `docs/superpowers/specs/2026-10-26-troca-servico-diferenca-sinal-design.md`; plano: `docs/superpowers/plans/2026-10-26-troca-servico-diferenca-sinal.md`. Antes, com o sinal pago o paciente não trocava de serviço e a equipe trocava sem tratar o dinheiro.
