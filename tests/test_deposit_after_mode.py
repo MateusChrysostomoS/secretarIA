@@ -172,6 +172,42 @@ async def test_a_provider_failure_persists_nothing_and_never_raises(db, monkeypa
     assert _Whatsapp.sent == []
 
 
+async def test_a_provider_failure_logs_the_closed_reason(db, monkeypatch):
+    from tests.before_support import recorded_logs
+
+    fake = _provider(monkeypatch)
+    fake.create_error = ProviderError(
+        "charge_failed",
+        status_code=400,
+        reason="charge_rejected",
+        stage="charge",
+        code_hint="invalid_object",
+    )
+    async with db() as session:
+        tenant, patient, appointment = await _seed(session)
+        with recorded_logs() as logs:
+            assert await _create(session, tenant, patient, appointment) is None
+    (line,) = [e for e in logs if e["event"] == "pix_deposit_charge_failed"]
+    assert line["code"] == "charge_failed"
+    assert (line["reason"], line["stage"], line["status"], line["code_hint"]) == (
+        "charge_rejected",
+        "charge",
+        400,
+        "invalid_object",
+    )
+    assert set(line) == {
+        "event",
+        "log_level",
+        "code",
+        "reason",
+        "stage",
+        "status",
+        "code_hint",
+        "tenant_id",
+        "appointment_id",
+    }
+
+
 async def test_a_payer_document_requirement_is_a_clean_skip_until_f2_collects_it(db, monkeypatch):
     fake = _provider(monkeypatch)
     fake.create_error = ProviderError("payer_document_required", status_code=400)

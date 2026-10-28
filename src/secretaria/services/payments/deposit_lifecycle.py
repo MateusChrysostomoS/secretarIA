@@ -503,9 +503,16 @@ async def maybe_create_deposit(
             # already gave stays for the answer that completes the request).
             raise payer_data.PayerDataNeeded(needed, provider_name) from None
         await payer_data.discard(redis, tenant_id=tenant.id, conversation_id=conversation_id)
+        # Closed vocabulary only (reason/stage/status/code_hint are None when the provider did
+        # not classify the failure): no free text, no ids, nothing about the payer.
+        provider_error = exc if isinstance(exc, ProviderError) else None
         logger.warning(
             "pix_deposit_charge_failed",
-            code=exc.code if isinstance(exc, ProviderError) else type(exc).__name__,
+            code=provider_error.code if provider_error else type(exc).__name__,
+            reason=str(provider_error.reason) if provider_error and provider_error.reason else None,
+            stage=provider_error.stage if provider_error else None,
+            status=provider_error.status_code if provider_error else None,
+            code_hint=provider_error.code_hint if provider_error else None,
             tenant_id=str(tenant.id),
             appointment_id=str(appointment.id),
         )
