@@ -1,11 +1,11 @@
 ﻿{
     "metadata_schema":  "brain.graphify-metadata/v1",
     "repository":  "secretarIA",
-    "repository_path":  "C:\\TECH\\BRAIN-worktrees\\TASK-054-calendar\\secretarIA",
-    "branch":  "task/TASK-054-calendar",
-    "commit":  "1ae6823d93287057b3247b3ca3b1f6ac3766d00a",
-    "generated_at":  "2026-10-13T12:27:23.3272179Z",
+    "repository_path":  "C:\\TECH\\BRAIN\\secretarIA",
+    "branch":  "main",
+    "commit":  "e352978e716ea3f54b5d3666168cdabaed915dd8",
+    "generated_at":  "2026-10-28T02:06:15.7448848Z",
     "graphify_version":  "0.9.5",
     "graph_schema":  "networkx-node-link (unversioned upstream)",
-    "graph_sha256":  "04a71381f09acafd06f0ad84937a13af051e79349fdee089c4d9ae10d527c258"
+    "graph_sha256":  "24945709805dc778e9e23b1e6a1a39c3d2a83b0f1895d2a3557b5832fa39eb63"
 }
