@@ -158,6 +158,7 @@ PROFESSIONAL_CONFIG_FIELDS: tuple[str, ...] = (
     "google_calendar_id",
     "business_hours",
     "appointment_types",
+    "min_booking_notice_hours",
 )
 
 
@@ -477,6 +478,7 @@ async def professional_list_item(
         specialty=professional.specialty,
         about=professional.about,
         context_doctor_message=professional.context_doctor_message,
+        min_booking_notice_hours=professional.min_booking_notice_hours,
         # The stored OWN value, flattened for older clients, PLUS the flag that
         # says whether that flatness is inheritance or an empty override. Both
         # flags come from the same predicates the runtime resolvers use, so the

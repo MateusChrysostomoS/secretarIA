@@ -172,6 +172,8 @@ async def test_list_shape_is_whitelisted(
         "specialty",
         "about",
         "context_doctor_message",
+        # Additive (2026-10-27): the doctor's minimum notice for a new booking, in hours.
+        "min_booking_notice_hours",
         "business_hours",
         # Additive since the null/empty round: says whether the (possibly empty)
         # value above is inheritance or an own override. Asserted here on
@@ -466,6 +468,37 @@ async def test_put_config_partial_update_leaves_other_fields_untouched(
     body = response.json()
     assert body["specialty"] == "Pediatria"
     assert body["name"] == "Original Name"  # PUT /config never touches `name`
+
+
+async def test_put_config_min_booking_notice_round_trips_null_and_zero(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prof = await _seed_professional(db, tenant)
+    monkeypatch.setattr(professionals_api, "get_entitlements", _never_called_fake)
+    url = f"{ENDPOINT}/{prof.id}/config"
+
+    saved = await client.put(url, json={"min_booking_notice_hours": 24})
+    assert saved.status_code == 200
+    assert saved.json()["min_booking_notice_hours"] == 24
+    untouched = await client.put(url, json={"specialty": "Cirurgia"})
+    assert untouched.json()["min_booking_notice_hours"] == 24  # absent = left alone
+    cleared = await client.put(url, json={"min_booking_notice_hours": None})
+    assert cleared.json()["min_booking_notice_hours"] is None  # back to the 12h default
+    no_limit = await client.put(url, json={"min_booking_notice_hours": 0})
+    assert no_limit.status_code == 200
+    assert no_limit.json()["min_booking_notice_hours"] == 0  # explicit "no limit"
+
+
+@pytest.mark.parametrize("hours", [-1, 721])
+async def test_put_config_rejects_a_min_booking_notice_out_of_range(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch, hours: int
+) -> None:
+    prof = await _seed_professional(db, tenant)
+    monkeypatch.setattr(professionals_api, "get_entitlements", _never_called_fake)
+    response = await client.put(
+        f"{ENDPOINT}/{prof.id}/config", json={"min_booking_notice_hours": hours}
+    )
+    assert response.status_code == 422
 
 
 async def test_put_config_appointment_type_requirements_round_trip(

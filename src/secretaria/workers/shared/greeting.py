@@ -280,6 +280,9 @@ def _flow_professionals(
             specialty=p.specialty,
             about=p.about,
             context_doctor_message=p.context_doctor_message,
+            # The doctor's minimum notice for a new booking (services/availability.py::
+            # booking_notice_floor reads it off this snapshot).
+            min_booking_notice_hours=p.min_booking_notice_hours,
             appointment_types=(
                 resolve_entries(p.appointment_types, services)
                 if p.appointment_types

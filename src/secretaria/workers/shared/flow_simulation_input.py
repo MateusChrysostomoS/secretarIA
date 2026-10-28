@@ -89,6 +89,7 @@ async def load_simulation_inputs(
             specialty=p.specialty,
             about=p.about,
             context_doctor_message=p.context_doctor_message,
+            min_booking_notice_hours=getattr(p, "min_booking_notice_hours", None),
             appointment_types=(
                 resolve_entries(p.appointment_types, catalog)
                 if p.appointment_types

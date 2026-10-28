@@ -488,6 +488,12 @@ class Settings(BaseSettings):
     # this setting only names it ahead of time.
     REMINDER_DEPOSIT_TEMPLATE_NAME: str = "appointment_reminder_deposit"
 
+    # --- Minimum booking notice (services/availability.py::booking_notice_hours) ---
+    # Hours applied to a NEW patient booking when the doctor never set
+    # `professionals.min_booking_notice_hours` (NULL). The doctor's own value wins,
+    # 0 included (= no limit). 0 here = no default rule at all. Owner, 2026-10-27: 12.
+    BOOKING_NOTICE_DEFAULT_HOURS: int = 12
+
     # --- Reminder engine v2 (TASK-032 R2, workers/reminder_engine.py) ---
     # Approved Meta utility template with 6 body parameters and 3 quick-reply
     # buttons (Confirmar / Cancelar / Outro). The exact texts to submit are in

@@ -30,6 +30,7 @@ from collections.abc import Sequence
 from datetime import date, datetime, timedelta, tzinfo
 from typing import TYPE_CHECKING
 
+from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
 from secretaria.services.booking_hold import overlaps
 
@@ -99,6 +100,39 @@ def held_slots(
     kept = {id(slot) for slot in free}
     return [slot for slot in slots if id(slot) not in kept]
 
+def booking_notice_hours(professional: object | None) -> int:
+    """The minimum notice, in hours, a NEW booking with `professional` needs (0 = none).
+
+    The doctor's own `Professional.min_booking_notice_hours` wins, 0 included (an
+    explicit "no limit"). Not configured (NULL, a snapshot without the field, no
+    professional at all, or a value that is not a whole number >= 0) falls back to the
+    clinic-wide default `BOOKING_NOTICE_DEFAULT_HOURS` (owner, 2026-10-27: 12h).
+    """
+    own = getattr(professional, "min_booking_notice_hours", None)
+    if isinstance(own, int) and not isinstance(own, bool) and own >= 0:
+        return own
+    return max(get_settings().BOOKING_NOTICE_DEFAULT_HOURS, 0)
+
+
+def booking_notice_floor(professional: object | None, now: datetime) -> datetime | None:
+    """The earliest start a patient may BOOK with `professional`, or None (no rule).
+
+    A new booking made through the secretarIA never starts less than
+    `booking_notice_hours` after `now`. Only new bookings ask this; cancelling and
+    rescheduling do not.
+    """
+    hours = booking_notice_hours(professional)
+    return now + timedelta(hours=hours) if hours > 0 else None
+
+
+def at_or_after(
+    slots: Sequence[dict], not_before: datetime | None, tz: tzinfo | None
+) -> list[dict]:
+    """The calendar slot dicts that start at or after `not_before` (all of them when None)."""
+    if not_before is None:
+        return list(slots)
+    return [slot for slot in slots if slot_start(slot["start"], tz) >= not_before]
+
 
 async def free_slots_for_day(
     calendar: CalendarService,
@@ -107,9 +141,11 @@ async def free_slots_for_day(
     duration_minutes: int,
     holds: Sequence[Window] = (),
     max_slots: int = FREE_SLOT_SCAN_MAX,
+    not_before: datetime | None = None,
 ) -> list[datetime]:
     """Every free slot START on `day` (clinic-local, aware), held windows excluded.
 
+    `not_before` drops the slots that start earlier (`booking_notice_floor`).
     Raises `CalendarUnavailableError` exactly like the calendar does.
     """
     tz = calendar.tzinfo
@@ -118,7 +154,9 @@ async def free_slots_for_day(
         slot_minutes=duration_minutes,
         max_slots=max(max_slots, slot_scan_limit(duration_minutes)),
     )
-    kept = without_holds(slots, holds, duration_minutes=duration_minutes, tz=tz)
+    kept = at_or_after(
+        without_holds(slots, holds, duration_minutes=duration_minutes, tz=tz), not_before, tz
+    )
     return [slot_start(slot["start"], tz).astimezone(tz) for slot in kept]
 
 
@@ -135,21 +173,38 @@ async def available_day_starts(
     window_days: int,
     duration_minutes: int,
     holds: Sequence[Window] = (),
+    not_before: datetime | None = None,
 ) -> list[datetime]:
     """Clinic-local midnights of the days with at least one free slot, in order.
 
     ONE calendar read for the whole window (`list_available_days`). With holds, only the
     days a hold touches are re-read slot by slot and dropped when nothing is left.
+
+    `not_before` (`booking_notice_floor`): the scan still covers the same days, but days
+    before the floor's date are dropped and the floor's own day is re-read slot by slot,
+    kept only when a slot at or after the floor is free. The window never grows, so the
+    picker's "next 20 days" stays the same 20 days.
     """
     days = await calendar.list_available_days(
         start_day=start, days=window_days, slot_minutes=duration_minutes
     )
-    if not holds:
+    floor_day = None
+    if not_before is not None:
+        floor_day = not_before.astimezone(calendar.tzinfo).date()
+        days = [day_start for day_start in days if day_start.date() >= floor_day]
+    if not holds and floor_day is None:
         return days
     kept: list[datetime] = []
     for day_start in days:
-        if _touches_day(day_start, holds, calendar.tzinfo) and not await free_slots_for_day(
-            calendar, day=day_start.date(), duration_minutes=duration_minutes, holds=holds
+        on_floor_day = day_start.date() == floor_day
+        if (on_floor_day or _touches_day(day_start, holds, calendar.tzinfo)) and not (
+            await free_slots_for_day(
+                calendar,
+                day=day_start.date(),
+                duration_minutes=duration_minutes,
+                holds=holds,
+                not_before=not_before if on_floor_day else None,
+            )
         ):
             continue
         kept.append(day_start)
@@ -163,6 +218,7 @@ async def days_with_free_slots(
     window_days: int,
     duration_minutes: int,
     holds: Sequence[Window] = (),
+    not_before: datetime | None = None,
 ) -> list[date]:
     """`available_day_starts`, as dates."""
     starts = await available_day_starts(
@@ -171,6 +227,7 @@ async def days_with_free_slots(
         window_days=window_days,
         duration_minutes=duration_minutes,
         holds=holds,
+        not_before=not_before,
     )
     return [day_start.date() for day_start in starts]
 

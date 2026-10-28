@@ -24,13 +24,14 @@ def _migration():
     return module
 
 
-def test_the_migration_is_the_single_head_on_top_of_r9():
+def test_the_migration_is_in_the_single_heads_history_on_top_of_r9():
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "migrations"))
     scripts = ScriptDirectory.from_config(config)
     heads = scripts.get_heads()
     assert len(heads) == 1
-    assert REVISION in {r.revision for r in scripts.walk_revisions(head=heads[0])}
+    history = {rev.revision for rev in scripts.walk_revisions(base="base", head=heads[0])}
+    assert REVISION in history
     assert _migration().down_revision == DOWN_REVISION
 
 

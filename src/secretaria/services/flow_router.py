@@ -74,7 +74,10 @@ from secretaria.services.attendee import (
     real_attendee_name,
 )
 from secretaria.services.availability import (
+    at_or_after,
     available_day_starts,
+    booking_notice_floor,
+    booking_notice_hours,
     held_slots,
     slot_scan_limit,
     slot_taken_at_confirm,
@@ -175,6 +178,14 @@ INSURANCE_SKIP_NO_MODE = "no_mode"
 MAX_PROFESSIONAL_ROWS = 10
 MAX_CATALOG_OPTION_ROWS = MAX_PROFESSIONAL_ROWS - 1
 MAX_INSURANCE_PLAN_ROWS = 8
+# A clinic may accept any number of convênios: past MAX_INSURANCE_PLAN_ROWS the list
+# pages, INSURANCE_PAGE_SIZE plans + "Ver mais convênios" + Particular + Outro = 10 rows.
+# The page cursor rides in the tap (`insmore|<page>`, schemas/webhook.py), exactly like
+# the day picker's "Ver mais dias": no conversation column. A clinic with up to
+# MAX_INSURANCE_PLAN_ROWS plans keeps its single, unpaged list.
+INSURANCE_PAGE_SIZE = MAX_INSURANCE_PLAN_ROWS - 1
+ROW_INSURANCE_MORE_PREFIX = "insmore|"
+LABEL_MORE_INSURANCES = "Ver mais convênios"
 # Same hard WhatsApp limit for the manage flow's "pick an appointment" list
 # (_manage_pick_list_bubble). A patient with more upcoming appointments than
 # this is not expected in practice; extras are dropped (with a warning).
@@ -506,6 +517,12 @@ def held_times_text(labels: list[str]) -> str:
 # there first (`availability.slot_taken_at_confirm`). One short line; the same
 # day's fresh times follow it (`_reoffer_taken_slot`).
 SLOT_TAKEN_AT_CONFIRM_MESSAGE = "Esse horário acabou de ser ocupado 😕"
+
+
+def booking_notice_message(hours: int) -> str:
+    """The line a patient reads when a time is inside the doctor's minimum notice."""
+    unit = "hora" if hours == 1 else "horas"
+    return f"Os agendamentos precisam de pelo menos {hours} {unit} de antecedência."
 NO_AVAILABLE_DAYS_MESSAGE = (
     "Não encontrei horários livres nos próximos dias. "
     "Escolha uma opção abaixo e a gente te ajuda."
@@ -2802,8 +2819,40 @@ def _match_insurance_plan(tenant: Tenant, body: str | None) -> str | None:
 
 match_insurance_plan = _match_insurance_plan
 
+def insurance_page(plans: list, page: int) -> tuple[list, int | None]:
+    """The plans one convênio-list page shows, and the next page's cursor (None = last).
+
+    Up to MAX_INSURANCE_PLAN_ROWS plans fit one page with Particular + Outro. Past that,
+    every page shows INSURANCE_PAGE_SIZE plans and keeps one row for "Ver mais
+    convênios", so no plan is ever cut (Instituto Gicovate, 2026-10-27: 9 plans and the
+    ninth, Unimed, never appeared). A cursor past the end restarts at the first page.
+    """
+    if len(plans) <= MAX_INSURANCE_PLAN_ROWS:
+        return list(plans), None
+    pages = -(-len(plans) // INSURANCE_PAGE_SIZE)
+    page = page if 0 <= page < pages else 0
+    start = page * INSURANCE_PAGE_SIZE
+    return list(plans[start : start + INSURANCE_PAGE_SIZE]), (
+        page + 1 if page + 1 < pages else None
+    )
+
+
+def insurance_more_row(next_page: int | None) -> list[tuple[str, str]]:
+    """The "Ver mais convênios" row for `next_page`, or nothing on the last page."""
+    if next_page is None:
+        return []
+    return [(f"{ROW_INSURANCE_MORE_PREFIX}{next_page}", LABEL_MORE_INSURANCES)]
+
+
+def insurance_more_page(body: str | None) -> int | None:
+    """The page a "Ver mais convênios" tap asks for, or None when `body` is not that tap."""
+    if not _control_match(body, LABEL_MORE_INSURANCES):
+        return None
+    return _as_page(_row_payload(body))
+
+
 def _enter_insurance(
-    tenant: Tenant, conversation: Conversation | None = None
+    tenant: Tenant, conversation: Conversation | None = None, *, page: int = 0
 ) -> FlowRouterResult:
     """Render the convênio list: the clinic's plans + Particular + Outro.
 
@@ -2811,13 +2860,11 @@ def _enter_insurance(
     convênio is the first question after pra-quem), and names the booking in
     progress otherwise - a booking begun before that order shipped, or an LLM
     hand-back with the service already chosen - whose service/doctor must ride
-    along to the day picker.
+    along to the day picker. `page` is the "Ver mais convênios" cursor
+    (`insurance_page`).
     """
     plans = _tenant_insurance_plans(tenant)
-    if len(plans) > MAX_INSURANCE_PLAN_ROWS:
-        logger.warning(
-            "flow_insurance_list_truncated", total=len(plans), shown=MAX_INSURANCE_PLAN_ROWS
-        )
+    shown, next_page = insurance_page(plans, page)
     # The row description says how payment works for the plan (the catalog mechanism): public,
     # fixed copy - never the clinic's own note, never anything that decides the deposit.
     rows: list[tuple] = [
@@ -2826,8 +2873,9 @@ def _enter_insurance(
             truncate_list_row_title(str(plan["name"])),
             insurance_payment_description(plan.get("mechanism")),
         )
-        for plan in plans[:MAX_INSURANCE_PLAN_ROWS]
+        for plan in shown
     ]
+    rows.extend(insurance_more_row(next_page))
     rows.append(("ins|particular", LABEL_INSURANCE_PARTICULAR))
     rows.append(("ins|outro", LABEL_INSURANCE_OTHER))
     logger.info(
@@ -2881,6 +2929,9 @@ async def _handle_insurance(
     has its service (begun before the convênio-first order shipped, or an LLM
     hand-back) goes straight to the day picker, as it always did.
     """
+    more = insurance_more_page(body)
+    if more is not None:
+        return _enter_insurance(tenant, conversation, page=more)
     if _label_match(body, LABEL_INSURANCE_OTHER):
         return FlowRouterResult(
             action="reply",
@@ -3472,6 +3523,7 @@ async def enter_day_picker(
             start=start,
             window_days=DAY_PICKER_WINDOW_DAYS,
             duration_minutes=duration_minutes,
+            not_before=_booking_floor(conversation, professionals, branch, calendar.tzinfo),
         )
         if anchor is not None:
             # The days NEAREST the current one come first (ties: the earlier day), so
@@ -3558,14 +3610,26 @@ async def _enter_slot_picker(
     if calendar is None:
         return _calendar_unavailable(conversation, branch, branch.day_step)
     reserved = await _hold_windows(_hold_owner(conversation, professionals))
+    floor = _booking_floor(conversation, professionals, branch, calendar.tzinfo)
     try:
         slots = await calendar.list_free_slots(
             day=target,
             slot_minutes=duration_minutes,
-            max_slots=slot_scan_limit(duration_minutes) if reserved else SLOT_PICKER_MAX_SLOTS,
+            max_slots=(
+                slot_scan_limit(duration_minutes)
+                if reserved or floor is not None
+                else SLOT_PICKER_MAX_SLOTS
+            ),
         )
     except CalendarUnavailableError:
         return _calendar_unavailable(conversation, branch, branch.day_step)
+
+    # The doctor's minimum notice: a slot starting too soon is not offered at all. The
+    # whole day was read, so the times after the floor still fill the page.
+    if floor is not None:
+        slots = at_or_after(slots, floor, calendar.tzinfo)
+        if not reserved:
+            slots = slots[:SLOT_PICKER_MAX_SLOTS]
 
     # A slot another conversation is HOLDING is not free, even though Google
     # has never heard of it: between "Confirmar" and a verified code (or a paid Pix) the
@@ -3831,6 +3895,25 @@ def _booking_duration(
     if service is None:
         return tenant.appointment_duration_min or 30
     return _service_duration(service, tenant)
+
+
+def _notice_now(tz) -> datetime:
+    """"Now" for the minimum-notice rule - one seam, so tests can pin the clock."""
+    return datetime.now(tz)
+
+
+def _booking_floor(
+    conversation: Conversation, professionals: list | None, branch: DayBranch, tz
+) -> datetime | None:
+    """The earliest start a NEW booking may have (the doctor's minimum notice), or None.
+
+    Only the first-booking branch has one: rescheduling (MANAGE) and editing an
+    appointment (EDIT) are never limited by it - the clinic's rule is about how late a
+    patient may book, not about moving what is already booked.
+    """
+    if branch is not BOOKING_DAY_BRANCH:
+        return None
+    return booking_notice_floor(_booking_professional(conversation, professionals), _notice_now(tz))
 
 
 def _booking_professional(conversation: Conversation, professionals: list | None) -> Any | None:
@@ -4188,6 +4271,27 @@ async def _handle_confirmation(
         professionals, _selected_professional_id(conversation)
     )
     insurance = _selected_insurance(conversation)
+
+    # The doctor's minimum notice, asked one last time at the write: the list or the AI's
+    # card may be older than the rule's boundary (or the AI may have proposed the time).
+    booking_owner = _booking_professional(conversation, professionals)
+    floor = booking_notice_floor(booking_owner, _notice_now(calendar.tzinfo))
+    if floor is not None and start < floor:
+        logger.info(
+            "flow_booking_inside_notice",
+            conversation_id=str(getattr(conversation, "id", None)),
+            notice_hours=booking_notice_hours(booking_owner),
+        )
+        return await enter_day_picker(
+            conversation,
+            tenant,
+            calendar,
+            duration_minutes=duration,
+            branch=BOOKING_DAY_BRANCH,
+            back_target=BACK_TARGET_SERVICE,
+            prefix=booking_notice_message(booking_notice_hours(booking_owner)),
+            professionals=professionals,
+        )
 
     if await slot_taken_at_confirm(
         calendar,

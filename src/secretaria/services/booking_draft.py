@@ -34,7 +34,11 @@ from secretaria.ai.formatter import TextBubble
 from secretaria.models import FlowState
 from secretaria.services import flow_router as fr
 from secretaria.services.attendee import ATTENDEE_SELF, real_attendee_name
-from secretaria.services.availability import free_slots_for_day
+from secretaria.services.availability import (
+    booking_notice_floor,
+    booking_notice_hours,
+    free_slots_for_day,
+)
 from secretaria.services.booking_details import booking_details_text
 from secretaria.services.booking_hold import BookingGate
 from secretaria.services.booking_scope import sole_active_professional
@@ -810,14 +814,24 @@ async def _land_day(
 
     duration = fr._booking_duration(state, tenant, services)
     holds = await fr._hold_windows(fr._hold_owner(state, professionals))
+    # The doctor's minimum notice: a day (or time) the patient named that falls inside it
+    # is never offered, and the patient is told why instead of "no free time".
+    floor = booking_notice_floor(owner, now.astimezone(cal.tzinfo))
     try:
-        free = await free_slots_for_day(cal, day=draft.day, duration_minutes=duration, holds=holds)
+        free = await free_slots_for_day(
+            cal, day=draft.day, duration_minutes=duration, holds=holds, not_before=floor
+        )
     except CalendarUnavailableError:
         unavailable = fr._calendar_unavailable(state, fr.BOOKING_DAY_BRANCH, fr.STEP_AWAITING_DAY)
         return done(unavailable, *base)
     if not free:
         dropped_day(DROP_DAY_UNAVAILABLE)
-        return await day_picker(DRAFT_DAY_UNAVAILABLE_PREFIX)
+        inside_notice = floor is not None and draft.day <= floor.date()
+        return await day_picker(
+            fr.booking_notice_message(booking_notice_hours(owner))
+            if inside_notice
+            else DRAFT_DAY_UNAVAILABLE_PREFIX
+        )
 
     names = (*base, FIELD_DAY)
     if draft.time is not None:
