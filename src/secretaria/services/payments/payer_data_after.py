@@ -77,10 +77,7 @@ async def ask_after_booking(
     conversation.flow_state = FlowState.AWAITING_PAYER_DATA
     conversation.flow_step = payer_data.step_for("after", kind, 0)
     await session.commit()
-    question = notify.Buttons(
-        payer_data.ask_text(kind, provider),
-        ((payer_data.OPTOUT_REPLY_ID, payer_data.LABEL_OPTOUT),),
-    )
+    question = notify.Text(payer_data.ask_text(kind, provider))
     try:
         await notify.deliver(
             session,

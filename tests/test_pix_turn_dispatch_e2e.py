@@ -275,11 +275,11 @@ async def _asked_for_the_cpf(db):
     return world
 
 
-async def test_an_invalid_cpf_is_asked_again_with_the_way_out(db, env):
+async def test_an_invalid_cpf_is_asked_again_without_a_button(db, env):
     world = await _asked_for_the_cpf(db)
     await _turn("meu cpf é 123", redis=FakeArqPool())
 
-    assert env.sender.sent == [("buttons", pdata.invalid_text("document"), [pdata.LABEL_OPTOUT])]
+    assert env.sender.sent == [("text", pdata.invalid_text("document"))]
     assert env.llm_calls == [] and _charge_requests(env) == []
     assert (await _conversation(db, world)).flow_state == FlowState.AWAITING_PAYER_DATA
 

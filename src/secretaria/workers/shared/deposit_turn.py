@@ -207,9 +207,10 @@ async def _handle_payer_data(
 ) -> None:
     """The ends of the payer-data wait (the inbound ladder already moved the state).
 
-    "invalid" asks again with the way out one tap away; "captured_after" stores the answer and
-    resumes the Pix of the consultation that was waiting; "expired" offers the retry card in the
-    `before` timing (the slot can be picked again); "optout", "exhausted" and an `after` "expired"
+    "invalid" asks again in plain text (no button; a typed refusal still ends the wait);
+    "captured_after" stores the answer and resumes the Pix of the consultation that was waiting;
+    "expired" offers the retry card in the `before` timing (the slot can be picked again);
+    "optout", "exhausted" and an `after` "expired"
     free everything and hand the conversation to a human with a message that says what stood
     (`before`: the slot was NOT reserved; `after`: the consultation stands). All of them forget
     whatever was stored. Best-effort sends, like every other reply of the worker.
@@ -224,12 +225,11 @@ async def _handle_payer_data(
         await _resume_after_deposit(reply, tenant=tenant, waba_token=waba_token, redis=redis)
         return
     if action == "invalid":
-        await _send_buttons_reply(
+        await _send_plain_reply(
             reply,
             tenant=tenant,
             waba_token=waba_token,
             body=payer_data.invalid_text(kind),
-            buttons=[(payer_data.OPTOUT_REPLY_ID, payer_data.LABEL_OPTOUT)],
             event="payer_data_reasked",
         )
         return
@@ -327,9 +327,7 @@ def _payer_data_request(held, tenant: Tenant, kind: str, provider: str | None) -
     local = held.start_at.astimezone(_tenant_tzinfo(tenant))
     return FlowRouterResult(
         action="reply",
-        bubbles=[
-            MenuBubble(body=payer_data.ask_text(kind, provider), labels=[payer_data.LABEL_OPTOUT])
-        ],
+        bubbles=[TextBubble(body=payer_data.ask_text(kind, provider))],
         flow_state=FlowState.AWAITING_PAYER_DATA,
         flow_step=payer_data.step_for("before", kind, 0),
         flow_selected_type=held.appointment_type,

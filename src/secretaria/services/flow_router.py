@@ -4378,9 +4378,8 @@ async def _handle_confirmation(
             return FlowRouterResult(
                 action="reply",
                 bubbles=[
-                    MenuBubble(
-                        body=payer_data.ask_text(decision.payer_field, decision.payer_provider),
-                        labels=[payer_data.LABEL_OPTOUT],
+                    TextBubble(
+                        body=payer_data.ask_text(decision.payer_field, decision.payer_provider)
                     )
                 ],
                 flow_state=FlowState.AWAITING_PAYER_DATA,

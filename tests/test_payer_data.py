@@ -151,16 +151,40 @@ def test_the_address_that_says_cancel_is_still_captured():
     assert _read("email", "cancelar@example.com").kind == "captured"
 
 
-def test_the_copy_names_the_provider_says_what_is_kept_and_offers_the_way_out():
-    doc = pdata.ask_text("document", "asaas")
-    assert "Asaas" in doc and "CPF ou CNPJ" in doc and "envie só os números" in doc
+def test_ask_text_doc_is_the_short_sentence():
+    for provider in ("asaas", "mercadopago", None):
+        text = pdata.ask_text("document", provider)
+        assert text == pdata.ASK_DOCUMENT_TEXT
+        for forbidden in ("Asaas", "Não quero informar", "guardado", "toque em"):
+            assert forbidden not in text
+
+
+def test_the_document_sentence_is_the_exact_text_with_real_accents():
+    assert pdata.ASK_DOCUMENT_TEXT == (
+        "Envie seu CPF para que possamos cadastrá-lo no nosso sistema de pagamento "
+        "para que você consiga marcar a sua consulta."
+    )
+    assert chr(92) not in pdata.ASK_DOCUMENT_TEXT  # no literal backslash escape leaked in
+
+
+def test_the_email_request_keeps_its_text_has_no_button_and_not_the_cpf_sentence():
     mail = pdata.ask_text("email", "mercadopago")
     assert "Mercado Pago" in mail and "e-mail" in mail and "CPF" not in mail
-    for text in (doc, mail):
-        assert "não fica guardado no nosso cadastro" in text
-        assert pdata.LABEL_OPTOUT in text
+    assert "não fica guardado no nosso cadastro" in mail
+    assert pdata.LABEL_OPTOUT not in mail and "toque em" not in mail
+    assert mail != pdata.ASK_DOCUMENT_TEXT
+
+
+def test_the_retry_text_does_not_mention_a_button():
+    for kind in KINDS:
+        assert pdata.LABEL_OPTOUT not in pdata.invalid_text(kind)
+        assert "toque" not in pdata.invalid_text(kind)
+
+
+def test_the_old_optout_names_survive_for_buttons_already_sent():
+    assert pdata.OPTOUT_REPLY_ID == "payer_data_optout"
     assert len(pdata.LABEL_OPTOUT) <= 20  # a WhatsApp reply-button title
-    assert "Asaas" not in pdata.ask_text("document", None)
+    assert pdata.looks_like_optout(pdata.LABEL_OPTOUT)
 
 
 @pytest.mark.parametrize("timing", ["before", "after"])

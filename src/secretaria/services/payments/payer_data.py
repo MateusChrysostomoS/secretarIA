@@ -79,6 +79,13 @@ _TAG: dict[str, str] = {"document": "doc", "email": "mail"}
 _KIND_OF_TAG = {tag: kind for kind, tag in _TAG.items()}
 
 REDACTED_BODY = "[dado oculto]"
+# The one sentence that asks for the CPF/CNPJ (single source for WhatsApp and Portal).
+ASK_DOCUMENT_TEXT = (
+    "Envie seu CPF para que possamos cadastrá-lo no nosso sistema de pagamento para que você "
+    "consiga marcar a sua consulta."
+)
+# No new request sends the opt-out button, but a chat that was sent one earlier can still tap it
+# (and a typed "não quero" goes through `looks_like_optout`): keep the label and the id.
 LABEL_OPTOUT = "Não quero informar"
 OPTOUT_REPLY_ID = "payer_data_optout"
 _AWAITING_STATE = "AWAITING_PAYER_DATA"
@@ -118,13 +125,17 @@ def _noun(kind: Kind) -> str:
 
 
 def ask_text(kind: Kind, provider: str | None) -> str:
-    """The question, with the one-sentence consent: what for, who receives it, what we keep."""
+    """The question. For the CPF/CNPJ it is ONE plain sentence (`ASK_DOCUMENT_TEXT`, owner
+    decision 2026-10-28), on both channels and for any provider, and NO request carries the opt-out
+    button any more (a typed "não quero" and an old button tap are still understood). The e-mail
+    variant (Mercado Pago) keeps its explanation, minus the button."""
+    if kind == "document":
+        return ASK_DOCUMENT_TEXT
     name = PROVIDER_LABELS.get(provider or "", "provedor de pagamento")
-    how = "envie só os números" if kind == "document" else "envie só o endereço"
     return (
         f"Para gerar o Pix, o {name} (nosso provedor de pagamento) exige o {_noun(kind)} de quem "
-        f"paga: {how}, ele é enviado ao {name} para emitir a cobrança e não fica guardado no "
-        f'nosso cadastro. Se preferir não informar, toque em "{LABEL_OPTOUT}".'
+        f"paga: envie só o endereço, ele é enviado ao {name} para emitir a cobrança e não fica "
+        "guardado no nosso cadastro. Se preferir não informar, é só me avisar."
     )
 
 

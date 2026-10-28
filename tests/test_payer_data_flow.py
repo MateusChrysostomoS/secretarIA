@@ -23,6 +23,7 @@ import pytest_asyncio
 from sqlalchemy import select, update
 
 from secretaria.ai import graph
+from secretaria.ai.formatter import TextBubble
 from secretaria.config import Settings
 from secretaria.core.database import Base
 from secretaria.models import (
@@ -388,8 +389,8 @@ async def test_the_portal_is_asked_only_after_the_code_and_the_hold_is_not_kept_
     assert result.flow_state is FlowState.AWAITING_PAYER_DATA
     assert result.flow_step == pdata.step_for("before", kind, 0)
     (bubble,) = result.bubbles
-    assert bubble.labels == [pdata.LABEL_OPTOUT]
-    assert pdata.PROVIDER_LABELS[PROVIDER[kind]] in bubble.body
+    assert isinstance(bubble, TextBubble) and not hasattr(bubble, "labels")
+    assert bubble.body == pdata.ask_text(kind, PROVIDER[kind])
     assert result.flow_selected_type == "Consulta"
     assert result.flow_selected_slot == "2030-03-04T10:00"  # the clinic's local 10:00, replayable
     assert await _holds(db) == [] and await _deposits(db) == []
@@ -451,7 +452,8 @@ async def test_the_confirmation_that_needs_the_value_parks_the_chat_and_creates_
     )
     assert result.flow_selected_slot == "2030-03-04T10:00"
     (bubble,) = result.bubbles
-    assert bubble.labels == [pdata.LABEL_OPTOUT]
+    assert isinstance(bubble, TextBubble) and not hasattr(bubble, "labels")
+    assert bubble.body == pdata.ask_text(kind, PROVIDER[kind])
     assert await _holds(db) == [] and await _deposits(db) == []
 
 
@@ -558,6 +560,17 @@ async def test_the_opt_out_ends_the_wait_without_holding_or_charging_anything(db
     assert (await _conversation(db, world)).flow_state == FlowState.IDLE
     assert await _holds(db) == [] and await _deposits(db) == []
     assert env.provider.called("create_pix_charge") == 0
+
+
+async def test_old_optout_button_tap_still_handled(db, env, kind):
+    """A chat that was sent the old card can still tap its button: the reply id and the label keep
+    meaning "no", even though no new request carries them."""
+    world = await _waiting_for_data(db, kind)
+    # A real tap arrives as the button's title in the body plus its id (the label is what is read).
+    reply = await _inbound(pdata.LABEL_OPTOUT, reply_id=pdata.OPTOUT_REPLY_ID)
+    assert reply.payer_data_action == "optout" and reply.payer_data_answer is None
+    assert (await _conversation(db, world)).flow_state == FlowState.IDLE
+    assert await _holds(db) == [] and await _deposits(db) == []
 
 
 async def test_silence_past_the_window_leaves_the_state_on_its_own_without_any_cron(db, env, kind):
@@ -711,7 +724,7 @@ async def test_a_refusal_frees_everything_says_so_and_calls_a_human(db, env, kin
     assert await _holds(db) == [] and await _deposits(db) == []
 
 
-async def test_an_invalid_answer_asks_again_with_the_way_out_one_tap_away(db, env, kind):
+async def test_invalid_document_retry_has_no_button(db, env, kind):
     world = await _waiting_for_data(db, kind)
     tenant = await _tenant(db, world)
     await tasks._handle_payer_data(
@@ -720,7 +733,7 @@ async def test_an_invalid_answer_asks_again_with_the_way_out_one_tap_away(db, en
         waba_token="wt",
         redis=FakeRedis(),
     )
-    assert env.sender.sent == [("buttons", pdata.invalid_text(kind), [pdata.LABEL_OPTOUT])]
+    assert env.sender.sent == [("text", pdata.invalid_text(kind))]
     assert (await _conversation(db, world)).handover_state != HandoverState.HUMAN_ACTIVE
 
 
