@@ -1,0 +1,862 @@
+{
+  "commit": "c9b6ba2d767756a88429496f066406c7ada79c8a",
+  "date": "2026-10-28",
+  "routes": [
+    {
+      "method": "POST",
+      "path": "/admin/insurance-catalog",
+      "module": "api.admin.insurance",
+      "function": "create_insurance_catalog_entry",
+      "source": "src/secretaria/api/admin/insurance.py",
+      "line": 44
+    },
+    {
+      "method": "GET",
+      "path": "/admin/insurance-catalog/unmatched",
+      "module": "api.admin.insurance",
+      "function": "list_unmatched_insurance_strings",
+      "source": "src/secretaria/api/admin/insurance.py",
+      "line": 95
+    },
+    {
+      "method": "POST",
+      "path": "/admin/reset",
+      "module": "api.admin.panel",
+      "function": "reset_data",
+      "source": "src/secretaria/api/admin/panel.py",
+      "line": 102
+    },
+    {
+      "method": "GET",
+      "path": "/admin/tenants",
+      "module": "api.admin.tenants",
+      "function": "list_tenants",
+      "source": "src/secretaria/api/admin/tenants.py",
+      "line": 236
+    },
+    {
+      "method": "DELETE",
+      "path": "/admin/tenants/{tenant_id}",
+      "module": "api.admin.tenants",
+      "function": "delete_tenant",
+      "source": "src/secretaria/api/admin/tenants.py",
+      "line": 325
+    },
+    {
+      "method": "GET",
+      "path": "/admin/tenants/{tenant_id}/calendar/health",
+      "module": "api.admin.tenants",
+      "function": "tenant_calendar_health",
+      "source": "src/secretaria/api/admin/tenants.py",
+      "line": 274
+    },
+    {
+      "method": "POST",
+      "path": "/admin/tenants/{tenant_id}/calendar/sync-local",
+      "module": "api.admin.tenants",
+      "function": "tenant_calendar_sync_local",
+      "source": "src/secretaria/api/admin/tenants.py",
+      "line": 298
+    },
+    {
+      "method": "GET",
+      "path": "/build",
+      "module": "api.health",
+      "function": "build",
+      "source": "src/secretaria/api/health.py",
+      "line": 26
+    },
+    {
+      "method": "GET",
+      "path": "/health",
+      "module": "api.health",
+      "function": "health",
+      "source": "src/secretaria/api/health.py",
+      "line": 20
+    },
+    {
+      "method": "GET",
+      "path": "/internal/brain-message/conversations/{external_id}/messages",
+      "module": "api.internal",
+      "function": "list_brain_message_messages",
+      "source": "src/secretaria/api/internal.py",
+      "line": 696
+    },
+    {
+      "method": "POST",
+      "path": "/internal/brain-message/inbound",
+      "module": "api.internal",
+      "function": "brain_message_inbound",
+      "source": "src/secretaria/api/internal.py",
+      "line": 482
+    },
+    {
+      "method": "GET",
+      "path": "/internal/brain-message/insurance-overview",
+      "module": "api.internal",
+      "function": "brain_message_insurance_overview",
+      "source": "src/secretaria/api/internal.py",
+      "line": 1144
+    },
+    {
+      "method": "GET",
+      "path": "/internal/brain-message/media/{message_id}",
+      "module": "api.internal",
+      "function": "get_brain_message_media",
+      "source": "src/secretaria/api/internal.py",
+      "line": 978
+    },
+    {
+      "method": "POST",
+      "path": "/internal/brain-message/messages/read",
+      "module": "api.internal",
+      "function": "mark_brain_message_read",
+      "source": "src/secretaria/api/internal.py",
+      "line": 910
+    },
+    {
+      "method": "POST",
+      "path": "/internal/brain-message/open",
+      "module": "api.internal",
+      "function": "brain_message_open",
+      "source": "src/secretaria/api/internal.py",
+      "line": 590
+    },
+    {
+      "method": "POST",
+      "path": "/internal/brain-message/typing",
+      "module": "api.internal",
+      "function": "patient_typing",
+      "source": "src/secretaria/api/internal.py",
+      "line": 1037
+    },
+    {
+      "method": "POST",
+      "path": "/internal/brain-message/visits/discard",
+      "module": "api.internal",
+      "function": "discard_brain_message_visit_route",
+      "source": "src/secretaria/api/internal.py",
+      "line": 1113
+    },
+    {
+      "method": "POST",
+      "path": "/internal/brain-message/visits/merge",
+      "module": "api.internal",
+      "function": "merge_brain_message_visit_route",
+      "source": "src/secretaria/api/internal.py",
+      "line": 1077
+    },
+    {
+      "method": "POST",
+      "path": "/internal/notifications/email",
+      "module": "api.internal_provisioning",
+      "function": "notifications_email",
+      "source": "src/secretaria/api/internal_provisioning.py",
+      "line": 312
+    },
+    {
+      "method": "DELETE",
+      "path": "/internal/privacy/tenants/{tenant_id}/subjects/{wa_id}",
+      "module": "api.internal_privacy",
+      "function": "erase_subject",
+      "source": "src/secretaria/api/internal_privacy.py",
+      "line": 202
+    },
+    {
+      "method": "GET",
+      "path": "/internal/privacy/tenants/{tenant_id}/subjects/{wa_id}/export",
+      "module": "api.internal_privacy",
+      "function": "export_subject",
+      "source": "src/secretaria/api/internal_privacy.py",
+      "line": 120
+    },
+    {
+      "method": "POST",
+      "path": "/internal/tenants",
+      "module": "api.internal_provisioning",
+      "function": "provision_tenant",
+      "source": "src/secretaria/api/internal_provisioning.py",
+      "line": 98
+    },
+    {
+      "method": "POST",
+      "path": "/internal/tenants/{tenant_id}/activate",
+      "module": "api.internal_provisioning",
+      "function": "activate",
+      "source": "src/secretaria/api/internal_provisioning.py",
+      "line": 284
+    },
+    {
+      "method": "GET",
+      "path": "/internal/tenants/{tenant_id}/appointments",
+      "module": "api.internal",
+      "function": "list_tenant_appointments",
+      "source": "src/secretaria/api/internal.py",
+      "line": 189
+    },
+    {
+      "method": "POST",
+      "path": "/internal/tenants/{tenant_id}/asaas-connection",
+      "module": "api.internal_provisioning",
+      "function": "asaas_connection",
+      "source": "src/secretaria/api/internal_provisioning.py",
+      "line": 166
+    },
+    {
+      "method": "GET",
+      "path": "/internal/tenants/{tenant_id}/config-status",
+      "module": "api.internal_provisioning",
+      "function": "config_status",
+      "source": "src/secretaria/api/internal_provisioning.py",
+      "line": 203
+    },
+    {
+      "method": "POST",
+      "path": "/internal/tenants/{tenant_id}/patient-cleanup",
+      "module": "api.internal_patient_cleanup",
+      "function": "execute",
+      "source": "src/secretaria/api/internal_patient_cleanup.py",
+      "line": 29
+    },
+    {
+      "method": "GET",
+      "path": "/internal/tenants/{tenant_id}/patient-cleanup/preview",
+      "module": "api.internal_patient_cleanup",
+      "function": "preview",
+      "source": "src/secretaria/api/internal_patient_cleanup.py",
+      "line": 21
+    },
+    {
+      "method": "GET",
+      "path": "/internal/tenants/{tenant_id}/patients",
+      "module": "api.internal",
+      "function": "list_tenant_patients",
+      "source": "src/secretaria/api/internal.py",
+      "line": 224
+    },
+    {
+      "method": "GET",
+      "path": "/internal/tenants/{tenant_id}/professionals",
+      "module": "api.internal_provisioning",
+      "function": "internal_professional_roster",
+      "source": "src/secretaria/api/internal_provisioning.py",
+      "line": 71
+    },
+    {
+      "method": "POST",
+      "path": "/internal/tenants/{tenant_id}/professionals",
+      "module": "api.internal_provisioning",
+      "function": "attach_professional",
+      "source": "src/secretaria/api/internal_provisioning.py",
+      "line": 248
+    },
+    {
+      "method": "POST",
+      "path": "/internal/tenants/{tenant_id}/whatsapp-connection",
+      "module": "api.internal_provisioning",
+      "function": "whatsapp_connection",
+      "source": "src/secretaria/api/internal_provisioning.py",
+      "line": 128
+    },
+    {
+      "method": "GET",
+      "path": "/oauth/google/callback",
+      "module": "api.hub.oauth",
+      "function": "oauth_callback",
+      "source": "src/secretaria/api/hub/oauth.py",
+      "line": 148
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/analytics/advanced",
+      "module": "api.hub.analytics",
+      "function": "analytics_advanced",
+      "source": "src/secretaria/api/hub/analytics.py",
+      "line": 104
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/analytics/summary",
+      "module": "api.hub.analytics",
+      "function": "analytics_summary",
+      "source": "src/secretaria/api/hub/analytics.py",
+      "line": 63
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/calendar/appointments",
+      "module": "api.hub.calendar",
+      "function": "create_appointment",
+      "source": "src/secretaria/api/hub/calendar.py",
+      "line": 982
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/calendar/appointments/{appointment_id}/cancel",
+      "module": "api.hub.calendar",
+      "function": "cancel_appointment",
+      "source": "src/secretaria/api/hub/calendar.py",
+      "line": 1141
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/calendar/appointments/{appointment_id}/cancel-preview",
+      "module": "api.hub.calendar",
+      "function": "cancel_preview",
+      "source": "src/secretaria/api/hub/calendar.py",
+      "line": 1106
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/calendar/appointments/{appointment_id}/edit",
+      "module": "api.hub.calendar",
+      "function": "edit_appointment",
+      "source": "src/secretaria/api/hub/calendar.py",
+      "line": 1561
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/calendar/appointments/{appointment_id}/message",
+      "module": "api.hub.calendar",
+      "function": "message_patient",
+      "source": "src/secretaria/api/hub/calendar.py",
+      "line": 1488
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/calendar/appointments/{appointment_id}/release",
+      "module": "api.hub.calendar",
+      "function": "release_appointment",
+      "source": "src/secretaria/api/hub/calendar.py",
+      "line": 1261
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/calendar/appointments/{appointment_id}/reschedule",
+      "module": "api.hub.calendar",
+      "function": "reschedule_appointment",
+      "source": "src/secretaria/api/hub/calendar.py",
+      "line": 1687
+    },
+    {
+      "method": "PATCH",
+      "path": "/tenants/me/calendar/appointments/{appointment_id}/status",
+      "module": "api.hub.calendar",
+      "function": "update_appointment_status",
+      "source": "src/secretaria/api/hub/calendar.py",
+      "line": 1789
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/calendar/awaiting-payment",
+      "module": "api.hub.calendar",
+      "function": "list_awaiting_payment",
+      "source": "src/secretaria/api/hub/calendar.py",
+      "line": 936
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/calendar/blocks",
+      "module": "api.hub.calendar",
+      "function": "create_block",
+      "source": "src/secretaria/api/hub/calendar.py",
+      "line": 1057
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/calendar/disconnect",
+      "module": "api.hub.oauth",
+      "function": "calendar_disconnect",
+      "source": "src/secretaria/api/hub/oauth.py",
+      "line": 253
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/calendar/events",
+      "module": "api.hub.calendar",
+      "function": "list_events",
+      "source": "src/secretaria/api/hub/calendar.py",
+      "line": 741
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/calendar/health",
+      "module": "api.hub.oauth",
+      "function": "calendar_health",
+      "source": "src/secretaria/api/hub/oauth.py",
+      "line": 269
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/calendar/oauth/start",
+      "module": "api.hub.oauth",
+      "function": "oauth_start",
+      "source": "src/secretaria/api/hub/oauth.py",
+      "line": 97
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/calendar/viewer",
+      "module": "api.hub.calendar",
+      "function": "agenda_viewer",
+      "source": "src/secretaria/api/hub/calendar.py",
+      "line": 718
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/config",
+      "module": "api.hub.config",
+      "function": "get_config",
+      "source": "src/secretaria/api/hub/config.py",
+      "line": 94
+    },
+    {
+      "method": "PUT",
+      "path": "/tenants/me/config",
+      "module": "api.hub.config",
+      "function": "update_config",
+      "source": "src/secretaria/api/hub/config.py",
+      "line": 102
+    },
+    {
+      "method": "PUT",
+      "path": "/tenants/me/configuration",
+      "module": "api.hub.config",
+      "function": "update_configuration",
+      "source": "src/secretaria/api/hub/config.py",
+      "line": 157
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/context-completeness",
+      "module": "api.hub.context_completeness",
+      "function": "get_context_completeness",
+      "source": "src/secretaria/api/hub/context_completeness.py",
+      "line": 53
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/context-sources",
+      "module": "api.hub.context_sources",
+      "function": "list_sources",
+      "source": "src/secretaria/api/hub/context_sources.py",
+      "line": 273
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/context-sources",
+      "module": "api.hub.context_sources",
+      "function": "create_source",
+      "source": "src/secretaria/api/hub/context_sources.py",
+      "line": 234
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/context-sources/file",
+      "module": "api.hub.context_sources",
+      "function": "create_source_from_file",
+      "source": "src/secretaria/api/hub/context_sources.py",
+      "line": 255
+    },
+    {
+      "method": "DELETE",
+      "path": "/tenants/me/context-sources/{source_id}",
+      "module": "api.hub.context_sources",
+      "function": "delete_source",
+      "source": "src/secretaria/api/hub/context_sources.py",
+      "line": 300
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/context-sources/{source_id}",
+      "module": "api.hub.context_sources",
+      "function": "get_source",
+      "source": "src/secretaria/api/hub/context_sources.py",
+      "line": 287
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/conversations",
+      "module": "api.hub.conversations",
+      "function": "list_conversations",
+      "source": "src/secretaria/api/hub/conversations.py",
+      "line": 390
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/conversations/{conversation_id}/handover",
+      "module": "api.hub.conversations",
+      "function": "update_handover",
+      "source": "src/secretaria/api/hub/conversations.py",
+      "line": 451
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/conversations/{conversation_id}/messages",
+      "module": "api.hub.conversations",
+      "function": "list_messages",
+      "source": "src/secretaria/api/hub/conversations.py",
+      "line": 483
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/conversations/{conversation_id}/messages",
+      "module": "api.hub.conversations",
+      "function": "send_message",
+      "source": "src/secretaria/api/hub/conversations.py",
+      "line": 599
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/conversations/{conversation_id}/messages/read",
+      "module": "api.hub.conversations",
+      "function": "mark_messages_read",
+      "source": "src/secretaria/api/hub/conversations.py",
+      "line": 538
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/conversations/{conversation_id}/messages/{message_id}/media",
+      "module": "api.hub.conversations",
+      "function": "get_message_media",
+      "source": "src/secretaria/api/hub/conversations.py",
+      "line": 746
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/conversations/{conversation_id}/typing",
+      "module": "api.hub.conversations",
+      "function": "get_typing",
+      "source": "src/secretaria/api/hub/conversations.py",
+      "line": 501
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/conversations/{conversation_id}/typing",
+      "module": "api.hub.conversations",
+      "function": "staff_typing",
+      "source": "src/secretaria/api/hub/conversations.py",
+      "line": 518
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/insurance-catalog",
+      "module": "api.hub.insurance",
+      "function": "get_insurance_catalog",
+      "source": "src/secretaria/api/hub/insurance.py",
+      "line": 161
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/insurance-mode",
+      "module": "api.hub.insurance",
+      "function": "get_insurance_mode",
+      "source": "src/secretaria/api/hub/insurance.py",
+      "line": 124
+    },
+    {
+      "method": "PUT",
+      "path": "/tenants/me/insurance-mode",
+      "module": "api.hub.insurance",
+      "function": "put_insurance_mode",
+      "source": "src/secretaria/api/hub/insurance.py",
+      "line": 129
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/insurance-plans",
+      "module": "api.hub.insurance",
+      "function": "get_tenant_insurance_plans",
+      "source": "src/secretaria/api/hub/insurance.py",
+      "line": 183
+    },
+    {
+      "method": "PUT",
+      "path": "/tenants/me/insurance-plans",
+      "module": "api.hub.insurance",
+      "function": "put_tenant_insurance_plans",
+      "source": "src/secretaria/api/hub/insurance.py",
+      "line": 191
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/insurance-plans/custom",
+      "module": "api.hub.insurance",
+      "function": "post_tenant_insurance_plan_custom",
+      "source": "src/secretaria/api/hub/insurance.py",
+      "line": 230
+    },
+    {
+      "method": "PATCH",
+      "path": "/tenants/me/insurance-plans/{plan_id}",
+      "module": "api.hub.insurance",
+      "function": "patch_tenant_insurance_plan",
+      "source": "src/secretaria/api/hub/insurance.py",
+      "line": 261
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/payment-accounts",
+      "module": "api.hub.payment_accounts",
+      "function": "list_payment_accounts",
+      "source": "src/secretaria/api/hub/payment_accounts.py",
+      "line": 147
+    },
+    {
+      "method": "DELETE",
+      "path": "/tenants/me/payment-accounts/asaas",
+      "module": "api.hub.payment_accounts",
+      "function": "disconnect_asaas",
+      "source": "src/secretaria/api/hub/payment_accounts.py",
+      "line": 221
+    },
+    {
+      "method": "PUT",
+      "path": "/tenants/me/payment-accounts/asaas/connection",
+      "module": "api.hub.payment_accounts",
+      "function": "put_asaas_connection",
+      "source": "src/secretaria/api/hub/payment_accounts.py",
+      "line": 167
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/payment-accounts/asaas/retry-webhook",
+      "module": "api.hub.payment_accounts",
+      "function": "retry_asaas_webhook",
+      "source": "src/secretaria/api/hub/payment_accounts.py",
+      "line": 197
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/payment-attention-items",
+      "module": "api.hub.payment_attention",
+      "function": "list_attention_items",
+      "source": "src/secretaria/api/hub/payment_attention.py",
+      "line": 97
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/payment-attention-items/{item_id}/resolve",
+      "module": "api.hub.payment_attention",
+      "function": "resolve_attention_item",
+      "source": "src/secretaria/api/hub/payment_attention.py",
+      "line": 126
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/payment-settings",
+      "module": "api.hub.payment_settings",
+      "function": "get_payment_settings",
+      "source": "src/secretaria/api/hub/payment_settings.py",
+      "line": 44
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/professionals",
+      "module": "api.hub.professionals",
+      "function": "list_professionals",
+      "source": "src/secretaria/api/hub/professionals.py",
+      "line": 179
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/professionals",
+      "module": "api.hub.professionals",
+      "function": "create_professional",
+      "source": "src/secretaria/api/hub/professionals.py",
+      "line": 190
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/professionals/calendars",
+      "module": "api.hub.professionals",
+      "function": "create_professional_calendars",
+      "source": "src/secretaria/api/hub/professionals.py",
+      "line": 303
+    },
+    {
+      "method": "PATCH",
+      "path": "/tenants/me/professionals/{professional_id}",
+      "module": "api.hub.professionals",
+      "function": "update_professional",
+      "source": "src/secretaria/api/hub/professionals.py",
+      "line": 216
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/professionals/{professional_id}/calendar",
+      "module": "api.hub.professionals",
+      "function": "create_professional_calendar",
+      "source": "src/secretaria/api/hub/professionals.py",
+      "line": 435
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/professionals/{professional_id}/calendar/disconnect",
+      "module": "api.hub.oauth",
+      "function": "professional_calendar_disconnect",
+      "source": "src/secretaria/api/hub/oauth.py",
+      "line": 228
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/professionals/{professional_id}/calendar/oauth/start",
+      "module": "api.hub.oauth",
+      "function": "professional_oauth_start",
+      "source": "src/secretaria/api/hub/oauth.py",
+      "line": 116
+    },
+    {
+      "method": "PUT",
+      "path": "/tenants/me/professionals/{professional_id}/config",
+      "module": "api.hub.professionals",
+      "function": "update_professional_config",
+      "source": "src/secretaria/api/hub/professionals.py",
+      "line": 247
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/professionals/{professional_id}/insurance-plans",
+      "module": "api.hub.insurance",
+      "function": "get_professional_insurance_plans",
+      "source": "src/secretaria/api/hub/insurance.py",
+      "line": 329
+    },
+    {
+      "method": "PUT",
+      "path": "/tenants/me/professionals/{professional_id}/insurance-plans",
+      "module": "api.hub.insurance",
+      "function": "put_professional_insurance_plans",
+      "source": "src/secretaria/api/hub/insurance.py",
+      "line": 371
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/professionals/{professional_id}/insurance-plans/custom",
+      "module": "api.hub.insurance",
+      "function": "post_professional_insurance_plan_custom",
+      "source": "src/secretaria/api/hub/insurance.py",
+      "line": 460
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/release-offers",
+      "module": "api.hub.release_offers",
+      "function": "list_release_offers",
+      "source": "src/secretaria/api/hub/release_offers.py",
+      "line": 201
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/release-offers/{offer_id}/keep/accept",
+      "module": "api.hub.release_offers",
+      "function": "accept_offer_keep",
+      "source": "src/secretaria/api/hub/release_offers.py",
+      "line": 255
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/release-offers/{offer_id}/keep/refuse",
+      "module": "api.hub.release_offers",
+      "function": "refuse_offer_keep",
+      "source": "src/secretaria/api/hub/release_offers.py",
+      "line": 282
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/release-offers/{offer_id}/refunded",
+      "module": "api.hub.release_offers",
+      "function": "mark_offer_refunded",
+      "source": "src/secretaria/api/hub/release_offers.py",
+      "line": 219
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/services",
+      "module": "api.hub.services",
+      "function": "list_services",
+      "source": "src/secretaria/api/hub/services.py",
+      "line": 143
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/services",
+      "module": "api.hub.services",
+      "function": "create_service",
+      "source": "src/secretaria/api/hub/services.py",
+      "line": 159
+    },
+    {
+      "method": "PATCH",
+      "path": "/tenants/me/services/{service_id}",
+      "module": "api.hub.services",
+      "function": "update_service",
+      "source": "src/secretaria/api/hub/services.py",
+      "line": 255
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/simulation/turn",
+      "module": "api.hub.simulation",
+      "function": "simulation_turn",
+      "source": "src/secretaria/api/hub/simulation.py",
+      "line": 77
+    },
+    {
+      "method": "GET",
+      "path": "/tenants/me/units",
+      "module": "api.hub.units",
+      "function": "list_units",
+      "source": "src/secretaria/api/hub/units.py",
+      "line": 95
+    },
+    {
+      "method": "POST",
+      "path": "/tenants/me/units",
+      "module": "api.hub.units",
+      "function": "create_unit",
+      "source": "src/secretaria/api/hub/units.py",
+      "line": 106
+    },
+    {
+      "method": "PATCH",
+      "path": "/tenants/me/units/{unit_id}",
+      "module": "api.hub.units",
+      "function": "update_unit",
+      "source": "src/secretaria/api/hub/units.py",
+      "line": 128
+    },
+    {
+      "method": "GET",
+      "path": "/webhook",
+      "module": "api.webhook",
+      "function": "verify_webhook",
+      "source": "src/secretaria/api/webhook.py",
+      "line": 40
+    },
+    {
+      "method": "POST",
+      "path": "/webhook",
+      "module": "api.webhook",
+      "function": "receive_webhook",
+      "source": "src/secretaria/api/webhook.py",
+      "line": 79
+    },
+    {
+      "method": "POST",
+      "path": "/webhooks/asaas",
+      "module": "api.webhook_asaas",
+      "function": "receive_asaas_webhook",
+      "source": "src/secretaria/api/webhook_asaas.py",
+      "line": 48
+    },
+    {
+      "method": "POST",
+      "path": "/webhooks/{provider}/{webhook_slug}",
+      "module": "api.webhook_payments",
+      "function": "receive_payment_webhook",
+      "source": "src/secretaria/api/webhook_payments.py",
+      "line": 69
+    }
+  ]
+}

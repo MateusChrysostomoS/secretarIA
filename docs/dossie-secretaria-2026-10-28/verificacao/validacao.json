@@ -1,0 +1,158 @@
+{
+  "pdf_pages": 18,
+  "text_chars_per_page": [
+    945,
+    1748,
+    1952,
+    1885,
+    2140,
+    2385,
+    1952,
+    1823,
+    1521,
+    1518,
+    2001,
+    2375,
+    2621,
+    1941,
+    2306,
+    2087,
+    2160,
+    1834
+  ],
+  "layout": [
+    {
+      "id": "inicio",
+      "scroll": 1123,
+      "client": 1123,
+      "bottomToFooter": 186,
+      "horizontal": false
+    },
+    {
+      "id": "leitura",
+      "scroll": 1123,
+      "client": 1123,
+      "bottomToFooter": 63,
+      "horizontal": false
+    },
+    {
+      "id": "jornada",
+      "scroll": 1123,
+      "client": 1123,
+      "bottomToFooter": 27,
+      "horizontal": false
+    },
+    {
+      "id": "arquitetura",
+      "scroll": 1123,
+      "client": 1123,
+      "bottomToFooter": 74,
+      "horizontal": false
+    },
+    {
+      "id": "dados",
+      "scroll": 1123,
+      "client": 1123,
+      "bottomToFooter": 20,
+      "horizontal": false
+    },
+    {
+      "id": "integracoes",
+      "scroll": 1123,
+      "client": 1123,
+      "bottomToFooter": 86,
+      "horizontal": false
+    },
+    {
+      "id": "apis",
+      "scroll": 1123,
+      "client": 1123,
+      "bottomToFooter": 59,
+      "horizontal": false
+    },
+    {
+      "id": "custo",
+      "scroll": 1123,
+      "client": 1123,
+      "bottomToFooter": 23,
+      "horizontal": false
+    },
+    {
+      "id": "cenarios",
+      "scroll": 1123,
+      "client": 1123,
+      "bottomToFooter": 19,
+      "horizontal": false
+    },
+    {
+      "id": "simulador",
+      "scroll": 1123,
+      "client": 1123,
+      "bottomToFooter": 28,
+      "horizontal": false
+    },
+    {
+      "id": "operacao",
+      "scroll": 1123,
+      "client": 1123,
+      "bottomToFooter": 14,
+      "horizontal": false
+    },
+    {
+      "id": "gestao",
+      "scroll": 1123,
+      "client": 1123,
+      "bottomToFooter": 13,
+      "horizontal": false
+    },
+    {
+      "id": "evidencias",
+      "scroll": 1123,
+      "client": 1123,
+      "bottomToFooter": 39,
+      "horizontal": false
+    },
+    {
+      "id": "api-1",
+      "scroll": 1123,
+      "client": 1123,
+      "bottomToFooter": 66,
+      "horizontal": false
+    },
+    {
+      "id": "api-2",
+      "scroll": 1123,
+      "client": 1123,
+      "bottomToFooter": 66,
+      "horizontal": false
+    },
+    {
+      "id": "api-3",
+      "scroll": 1123,
+      "client": 1123,
+      "bottomToFooter": 52,
+      "horizontal": false
+    },
+    {
+      "id": "api-4",
+      "scroll": 1123,
+      "client": 1123,
+      "bottomToFooter": 66,
+      "horizontal": false
+    },
+    {
+      "id": "api-5",
+      "scroll": 1123,
+      "client": 1123,
+      "bottomToFooter": 149,
+      "horizontal": false
+    }
+  ],
+  "overflow_failures": [],
+  "javascript_errors": [],
+  "simulator_cases": 6,
+  "mobile": {
+    "width": 390,
+    "scroll": 390
+  }
+}
