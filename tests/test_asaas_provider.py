@@ -564,9 +564,7 @@ async def test_a_refused_charge_deletes_the_customer_created_for_it(monkeypatch,
 
 @pytest.mark.parametrize("status", [400, 503])
 async def test_a_refused_charge_never_deletes_a_stored_customer(monkeypatch, status):
-    fake = _install(
-        monkeypatch, FakeAsaasClient(errors={"create_pix_payment": AsaasError(status)})
-    )
+    fake = _install(monkeypatch, FakeAsaasClient(errors={"create_pix_payment": AsaasError(status)}))
     with pytest.raises(ProviderError):
         await AsaasProvider().create_pix_charge(
             _account(), _request(provider_customer_id="cus_known")
