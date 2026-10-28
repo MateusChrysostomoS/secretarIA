@@ -452,6 +452,9 @@ class Settings(BaseSettings):
     # --- Asaas / Pix deposit ---
     ASAAS_BASE_URL: str = "https://api.asaas.com/v3"
     ASAAS_TIMEOUT_SECONDS: float = 10.0
+    # TASK-071 plano 2: the Pix QR is fetched up to TWICE (the charge exists, the QR can lag behind
+    # it); this is the pause between the two attempts. OPTIONAL: the default needs no panel config.
+    ASAAS_QR_RETRY_DELAY_SECONDS: float = 1.5
     # Public https base URL of THIS API (e.g. https://secretaria.example.com), used to register
     # each clinic's per-clinic payment webhook (`<base>/webhooks/<provider>/<slug>`) at the
     # provider. Empty = the connection service leaves the account `incomplete`

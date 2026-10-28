@@ -216,6 +216,140 @@ async def test_a_qr_failure_keeps_the_charge_and_reports_no_copy_paste(monkeypat
     assert created.copy_paste is None
 
 
+class _QrSequenceClient(FakeAsaasClient):
+    """`get_pix_qr` answers (or raises) the scripted outcomes in order; the last one repeats."""
+
+    def __init__(self, outcomes, **kwargs):
+        super().__init__(**kwargs)
+        self._outcomes = list(outcomes)
+
+    async def get_pix_qr(self, payment_id):
+        self.calls.append(("get_pix_qr", payment_id))
+        outcome = self._outcomes.pop(0) if len(self._outcomes) > 1 else self._outcomes[0]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+def _qr_calls(fake: FakeAsaasClient) -> int:
+    return [c[0] for c in fake.calls].count("get_pix_qr")
+
+
+def _qr_logs(logs: list[dict]) -> list[dict]:
+    return [entry for entry in logs if entry["event"] == "asaas_qr_failed"]
+
+
+async def test_qr_second_attempt_succeeds(monkeypatch):
+    fake = _install(
+        monkeypatch,
+        _QrSequenceClient([AsaasError(503), {"payload": "00020126segunda", "expirationDate": ""}]),
+    )
+    created = await AsaasProvider().create_pix_charge(_account(), _request())
+
+    assert created.copy_paste == "00020126segunda"
+    assert _qr_calls(fake) == 2
+    assert "delete_payment" not in [c[0] for c in fake.calls]  # the provider never voids here
+
+
+async def test_qr_missing_payload_on_first_attempt_is_retried(monkeypatch):
+    fake = _install(monkeypatch, _QrSequenceClient([{"encodedImage": "b64"}, {"payload": "pix2"}]))
+    created = await AsaasProvider().create_pix_charge(_account(), _request())
+    assert created.copy_paste == "pix2"
+    assert _qr_calls(fake) == 2
+
+
+async def test_qr_first_attempt_ok_makes_a_single_call(monkeypatch):
+    fake = _install(monkeypatch, FakeAsaasClient())
+    created = await AsaasProvider().create_pix_charge(_account(), _request())
+    assert created.copy_paste is not None
+    assert _qr_calls(fake) == 1
+
+
+async def test_qr_fails_twice_keeps_best_effort_contract(monkeypatch):
+    from tests.before_support import recorded_logs
+
+    fake = _install(
+        monkeypatch, FakeAsaasClient(errors={"get_pix_qr": RuntimeError("qr down for Maria")})
+    )
+    with recorded_logs() as logs:
+        created = await AsaasProvider().create_pix_charge(_account(), _request())
+
+    assert created.provider_charge_id == "pay_fake"
+    assert created.copy_paste is None and created.expires_at is None
+    assert _qr_calls(fake) == 2  # exactly two attempts, never a third
+    attempts = _qr_logs(logs)
+    assert [entry["attempt"] for entry in attempts] == [1, 2]
+    for entry in attempts:  # a non-Asaas error: no status/code, the type name only, no free text
+        assert entry == {
+            "event": "asaas_qr_failed",
+            "log_level": "warning",
+            "attempt": entry["attempt"],
+            "status": None,
+            "code_hint": None,
+            "error_type": "RuntimeError",
+        }
+
+
+async def test_qr_fails_with_no_payload_twice_logs_a_fixed_marker(monkeypatch):
+    from tests.before_support import recorded_logs
+
+    fake = _install(monkeypatch, FakeAsaasClient(qr_payload=None))
+    with recorded_logs() as logs:
+        created = await AsaasProvider().create_pix_charge(_account(), _request())
+
+    assert created.copy_paste is None
+    assert _qr_calls(fake) == 2
+    seen = [(e["attempt"], e["error_type"], e["status"], e["code_hint"]) for e in _qr_logs(logs)]
+    assert seen == [(1, "no_payload", None, None), (2, "no_payload", None, None)]
+
+
+async def test_qr_failure_log_carries_status_and_code_hint_only(monkeypatch):
+    from tests.before_support import recorded_logs
+
+    boom = AsaasError(404, "invalid_action", text_reason="document")
+    _install(monkeypatch, FakeAsaasClient(errors={"get_pix_qr": boom}))
+    with recorded_logs() as logs:
+        await AsaasProvider().create_pix_charge(_account(), _request())
+
+    (first, second) = _qr_logs(logs)
+    for entry in (first, second):
+        assert set(entry) == {
+            "event",
+            "log_level",
+            "attempt",
+            "status",
+            "code_hint",
+            "error_type",
+        }
+        assert (entry["status"], entry["code_hint"], entry["error_type"]) == (
+            404,
+            "invalid_action",
+            "AsaasError",
+        )
+    assert "document" not in json.dumps(_qr_logs(logs))  # text_reason never reaches the log
+
+
+async def test_qr_retry_pauses_for_the_configured_delay(monkeypatch):
+    from secretaria.config import get_settings
+
+    pauses: list[float] = []
+
+    async def fake_sleep(seconds):
+        pauses.append(seconds)
+
+    monkeypatch.setattr(asaas_provider.asyncio, "sleep", fake_sleep)
+    monkeypatch.setenv("ASAAS_QR_RETRY_DELAY_SECONDS", "1.5")
+    get_settings.cache_clear()
+    try:
+        _install(monkeypatch, FakeAsaasClient(errors={"get_pix_qr": AsaasError(503)}))
+        await AsaasProvider().create_pix_charge(_account(), _request())
+    finally:
+        monkeypatch.delenv("ASAAS_QR_RETRY_DELAY_SECONDS", raising=False)
+        get_settings.cache_clear()
+
+    assert pauses == [1.5]  # one pause, between the two attempts only
+
+
 async def test_description_is_cut_to_the_255_characters_asaas_accepts(monkeypatch):
     captured = {}
 

@@ -26,6 +26,8 @@ os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 # test whose fake agenda offers slots relative to the REAL clock pass or fail by the time
 # of day. The suite runs with no default; tests/test_booking_min_notice.py turns it on.
 os.environ["BOOKING_NOTICE_DEFAULT_HOURS"] = "0"
+# The Pix QR is fetched twice with a 1.5 s pause in production; the suite runs it with no pause.
+os.environ["ASAAS_QR_RETRY_DELAY_SECONDS"] = "0"
 
 
 @pytest.fixture(autouse=True)

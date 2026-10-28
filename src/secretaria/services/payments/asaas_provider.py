@@ -18,6 +18,7 @@ Asaas facts this wrapper encodes (docs.asaas.com, verified 2026-09-29, see the s
   * `OVERDUE` (the day after the due date) and `DELETED` both mean "no longer payable" here.
 """
 
+import asyncio
 import hmac
 import json
 from collections.abc import Mapping
@@ -25,6 +26,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
+from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
 from secretaria.services.payments.asaas import AsaasClient, AsaasError
 from secretaria.services.payments.failure_reason import FailureReason, classify
@@ -204,14 +206,7 @@ class AsaasProvider:
                 await self._discard_customer(client, customer_id)
             raise ProviderError("charge_missing_id", reason=FailureReason.unknown, stage="charge")
 
-        copy_paste: str | None = None
-        expires_at: datetime | None = None
-        try:
-            qr = await client.get_pix_qr(str(charge_id))
-            copy_paste = qr.get("payload") or None
-            expires_at = _parse_dt(qr.get("expirationDate"))
-        except Exception as exc:  # noqa: BLE001 - the QR is best-effort by contract
-            logger.warning("asaas_qr_failed", error_type=type(exc).__name__)
+        copy_paste, expires_at = await self._fetch_pix_qr(client, str(charge_id))
 
         return CreatedCharge(
             provider_charge_id=str(charge_id),
@@ -220,6 +215,42 @@ class AsaasProvider:
             provider_customer_id=customer_id,
             customer_created_here=created_here,
         )
+
+    @staticmethod
+    async def _fetch_pix_qr(
+        client: AsaasClient, charge_id: str
+    ) -> tuple[str | None, datetime | None]:
+        """The QR is best-effort by contract (the caller turns "no code" into `qr_unavailable`),
+        but the charge already exists, so the QR gets ONE second chance: Asaas can lag in
+        serving it. A second attempt happens when the first raised OR answered without a
+        `payload`; the pause between them is `ASAAS_QR_RETRY_DELAY_SECONDS`.
+
+        Each failed attempt logs `asaas_qr_failed` with the attempt number, the HTTP `status` and
+        symbolic `code_hint` (only when it was an AsaasError) and the error type - never the
+        body text, the charge id, or anything about the payer."""
+        for attempt in (1, 2):
+            status: int | None = None
+            code_hint: str | None = None
+            try:
+                qr = await client.get_pix_qr(charge_id)
+                payload = qr.get("payload") or None
+                if payload:
+                    return payload, _parse_dt(qr.get("expirationDate"))
+                error_type = "no_payload"
+            except Exception as exc:  # noqa: BLE001 - the QR is best-effort by contract
+                error_type = type(exc).__name__
+                if isinstance(exc, AsaasError):
+                    status, code_hint = exc.status_code or None, exc.code_hint
+            logger.warning(
+                "asaas_qr_failed",
+                attempt=attempt,
+                status=status,
+                code_hint=code_hint,
+                error_type=error_type,
+            )
+            if attempt == 1:
+                await asyncio.sleep(max(0.0, get_settings().ASAAS_QR_RETRY_DELAY_SECONDS))
+        return None, None
 
     @staticmethod
     async def _discard_customer(client: AsaasClient, customer_id: str) -> None:

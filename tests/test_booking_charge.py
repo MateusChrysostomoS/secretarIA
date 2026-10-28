@@ -416,6 +416,28 @@ async def test_qr_failure_surfaces_qr_unavailable(db, asaas):
     assert await _holds(db) == [] and await _deposits(db) == []
 
 
+async def test_two_qr_errors_still_end_in_qr_unavailable_after_two_attempts(db, asaas):
+    from secretaria.services.payments.asaas import AsaasError
+    from tests.before_support import recorded_logs
+
+    fake = asaas(errors={"get_pix_qr": AsaasError(404, "invalid_action")})
+    async with db() as session:
+        world = await make_world(session)
+    with recorded_logs() as logs, pytest.raises(booking_charge.ChargeStartError) as raised:
+        await _begin(world, payer_document=CPF)
+
+    assert [c[0] for c in fake.calls].count("get_pix_qr") == 2
+    assert raised.value.code == "no_copy_paste"
+    assert (raised.value.stage, raised.value.reason) == ("qr", "qr_unavailable")
+    assert ("delete_payment", "pay_fake") in fake.calls  # voided, as before
+    qr_logs = [entry for entry in logs if entry["event"] == "asaas_qr_failed"]
+    assert [(e["attempt"], e["status"], e["code_hint"]) for e in qr_logs] == [
+        (1, 404, "invalid_action"),
+        (2, 404, "invalid_action"),
+    ]
+    assert await _holds(db) == [] and await _deposits(db) == []
+
+
 async def test_persist_failure_surfaces_persist_failed(db, provider, monkeypatch):
     from tests.before_support import recorded_logs
 
