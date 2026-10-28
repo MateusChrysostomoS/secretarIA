@@ -239,3 +239,20 @@ async def test_a_conversation_that_already_waits_for_a_pix_cannot_start_a_second
     decision = await _decide(_gate(world, armed=False))
     assert (decision.outcome, decision.blocked_reason) == ("blocked", "charge_pending")
     assert len(await _holds(db)) == 1 and len(await _deposits(db)) == 1
+
+
+async def test_a_blocked_booking_logs_the_safe_reason_stage_and_status(db, env):
+    from secretaria.services.payments.provider import ProviderError
+    from tests.before_support import recorded_logs
+
+    env.provider.create_error = ProviderError(
+        "charge_failed", status_code=401, reason="api_key_invalid", stage="charge"
+    )
+    async with db() as session:
+        world = await make_world(session)
+    with recorded_logs() as logs:
+        decision = await _decide(_gate(world, armed=False, redis=FakeRedis()))
+    assert (decision.outcome, decision.blocked_reason) == ("blocked", "charge_failed")
+    (line,) = [e for e in logs if e["event"] == "booking_gate_deposit_blocked"]
+    assert (line["reason"], line["stage"], line["status"]) == ("api_key_invalid", "charge", 401)
+    assert line["code"] == "charge_failed"

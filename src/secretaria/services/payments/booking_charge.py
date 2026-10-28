@@ -37,6 +37,7 @@ from secretaria.services import booking_hold, tenant_config as cfg
 from secretaria.services.booking_hold import HeldSlot, LiveChargeHoldError
 from secretaria.services.payments import accounts, registry
 from secretaria.services.payments.deposit_gate import DepositQuote
+from secretaria.services.payments.failure_reason import FailureReason
 from secretaria.services.payments.provider import ChargeRequest, PaymentStatus, ProviderError
 
 logger = get_logger(__name__)
@@ -45,10 +46,27 @@ logger = get_logger(__name__)
 class ChargeStartError(Exception):
     """The Pix could not be started. `code` is symbolic (a provider code, `no_copy_paste`,
     `no_account`, `no_provider`, `no_patient`, `charge_pending` or `persist_failed`); by the time
-    this is raised the hold is released and no live charge is left behind."""
+    this is raised the hold is released and no live charge is left behind.
 
-    def __init__(self, code: str) -> None:
+    `reason` (a `FailureReason`), `stage` ("customer" / "charge" / "qr" / "persist" / "config"),
+    `status_code` and `code_hint` are the SAFE record of why: no free text, no personal data.
+    They stay None for the outcomes that are not a failed charge (`no_patient`,
+    `charge_pending`)."""
+
+    def __init__(
+        self,
+        code: str,
+        *,
+        reason: FailureReason | None = None,
+        stage: str | None = None,
+        status_code: int | None = None,
+        code_hint: str | None = None,
+    ) -> None:
         self.code = code
+        self.reason = reason
+        self.stage = stage
+        self.status_code = status_code
+        self.code_hint = code_hint
         super().__init__(f"could not start the deposit: {code}")
 
 
@@ -83,6 +101,11 @@ async def _create_with_one_retry(provider, account, request):
             raise
         logger.info("payment_charge_retry", code=exc.code)
         return await provider.create_pix_charge(account, request)
+
+
+def _known_reason(value: str | None) -> FailureReason:
+    """A provider's reason, or `unknown` when it gave none (or one outside the vocabulary)."""
+    return FailureReason(value) if value in set(FailureReason) else FailureReason.unknown
 
 
 async def _release_hold(hold_id: UUID) -> None:
@@ -171,13 +194,34 @@ async def begin_payment(
             payer_document=payer_document,
             payer_email=payer_email,
         )
-    except ChargeStartError:
+    except ChargeStartError as exc:
         await _release_hold(hold.id)
+        _log_charge_failed(tenant_id, exc)
         raise
     except Exception as exc:  # noqa: BLE001 - whatever it was, the hold must not be left over
         await _release_hold(hold.id)
         logger.error("payment_begin_failed", error_type=type(exc).__name__)
-        raise ChargeStartError("persist_failed") from exc
+        failure = ChargeStartError(
+            "persist_failed", reason=FailureReason.persist_failed, stage="persist"
+        )
+        _log_charge_failed(tenant_id, failure)
+        raise failure from exc
+
+
+def _log_charge_failed(tenant_id: UUID, exc: ChargeStartError) -> None:
+    """The ONE operational record of a failed charge: stage + closed reason + HTTP status +
+    the provider's short symbolic code. Nothing else may be added here (no name, document,
+    phone, e-mail, key or provider text)."""
+    if exc.reason is None:
+        return
+    logger.warning(
+        "payment_charge_failed",
+        tenant_id=str(tenant_id),
+        stage=exc.stage,
+        reason=str(exc.reason),
+        status=exc.status_code,
+        code_hint=exc.code_hint,
+    )
 
 
 async def _create_and_record(
@@ -199,7 +243,7 @@ async def _create_and_record(
     provider_name = quote.provider or PROVIDER_ASAAS
     provider = registry.find_provider(provider_name)
     if provider is None:
-        raise ChargeStartError("no_provider")
+        raise ChargeStartError("no_provider", reason=FailureReason.unknown, stage="config")
 
     async with async_session_factory() as session:
         tenant = await session.get(Tenant, tenant_id)
@@ -210,7 +254,7 @@ async def _create_and_record(
             session, tenant_id=tenant_id, provider=provider_name, timing="before"
         )
         if account is None:
-            raise ChargeStartError("no_account")
+            raise ChargeStartError("no_account", reason=FailureReason.no_account, stage="config")
         customer_id = await accounts.get_customer_id(
             session, tenant_id=tenant_id, patient_id=patient_id, provider=provider_name
         )
@@ -233,17 +277,25 @@ async def _create_and_record(
                 ),
             )
         except ProviderError as exc:
-            raise ChargeStartError(exc.code) from exc
+            raise ChargeStartError(
+                exc.code,
+                reason=_known_reason(exc.reason),
+                stage=exc.stage or "charge",
+                status_code=exc.status_code,
+                code_hint=exc.code_hint,
+            ) from exc
 
         if not created.provider_charge_id:
             # Path 9 of the nine silent `None`s (spec 7): an answer with no charge id. There is
             # nothing to void and nothing to record: the booking is blocked, never confirmed.
-            raise ChargeStartError("no_charge_id")
+            raise ChargeStartError("no_charge_id", reason=FailureReason.unknown, stage="charge")
 
         # The charge exists at the provider from here on: every later failure voids it.
         try:
             if not created.copy_paste:
-                raise ChargeStartError("no_copy_paste")
+                raise ChargeStartError(
+                    "no_copy_paste", reason=FailureReason.qr_unavailable, stage="qr"
+                )
             if created.provider_customer_id and created.provider_customer_id != customer_id:
                 await accounts.remember_customer_id(
                     session,

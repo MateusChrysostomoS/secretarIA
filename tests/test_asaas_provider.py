@@ -340,3 +340,61 @@ def test_a_payment_date_with_a_time_is_kept_as_is():
     moment = asaas_provider._paid_moment("2026-01-10 08:15:30")
     assert moment.astimezone(asaas_provider._ASAAS_TZ).strftime("%H:%M:%S") == "08:15:30"
     assert asaas_provider._paid_moment(None) is None
+
+
+# --------------------------------------------------------------------------
+# Plano 2, Task 2: a safe reason + stage on every create failure
+# --------------------------------------------------------------------------
+
+
+async def test_a_customer_failure_carries_stage_reason_and_code_hint(monkeypatch):
+    _install(monkeypatch, FakeAsaasClient(errors={"create_customer": AsaasError(400, "bad")}))
+    with pytest.raises(ProviderError) as failure:
+        await AsaasProvider().create_pix_charge(_account(), _request(payer_document="1"))
+    assert failure.value.code == "customer_failed"
+    assert (failure.value.stage, failure.value.reason) == ("customer", "customer_rejected")
+    assert (failure.value.status_code, failure.value.code_hint) == (400, "bad")
+
+
+async def test_a_customer_document_complaint_is_customer_document_invalid(monkeypatch):
+    error = AsaasError(400, "invalid_cpfCnpj", text_reason="document")
+    _install(monkeypatch, FakeAsaasClient(errors={"create_customer": error}))
+    with pytest.raises(ProviderError) as failure:
+        await AsaasProvider().create_pix_charge(_account(), _request(payer_document="1"))
+    assert failure.value.reason == "customer_document_invalid"
+
+
+@pytest.mark.parametrize(
+    "status, reason",
+    [
+        (400, "charge_rejected"),
+        (401, "api_key_invalid"),
+        (403, "permission_denied"),
+        (429, "rate_limited"),
+        (503, "provider_unavailable"),
+        (0, "provider_unavailable"),
+    ],
+)
+async def test_a_charge_failure_carries_stage_and_reason(monkeypatch, status, reason):
+    _install(monkeypatch, FakeAsaasClient(errors={"create_pix_payment": AsaasError(status)}))
+    with pytest.raises(ProviderError) as failure:
+        await AsaasProvider().create_pix_charge(_account(), _request(payer_document="1"))
+    assert failure.value.code == "charge_failed"
+    assert (failure.value.stage, failure.value.reason) == ("charge", reason)
+
+
+async def test_a_missing_document_keeps_its_code_and_gains_a_reason(monkeypatch):
+    missing = AsaasError(400, "invalid_object", document_missing=True)
+    _install(monkeypatch, FakeAsaasClient(errors={"create_pix_payment": missing}))
+    with pytest.raises(ProviderError) as asked:
+        await AsaasProvider().create_pix_charge(_account(), _request())
+    assert asked.value.code == "payer_document_required"
+    assert (asked.value.stage, asked.value.reason) == ("charge", "charge_rejected")
+
+
+async def test_a_missing_api_key_is_a_config_failure():
+    account = PaymentAccount(tenant_id=uuid4(), provider="asaas", api_key=None)
+    with pytest.raises(ProviderError) as failure:
+        await AsaasProvider().create_pix_charge(account, _request())
+    assert failure.value.code == "no_api_key"
+    assert (failure.value.stage, failure.value.reason) == ("config", "api_key_invalid")

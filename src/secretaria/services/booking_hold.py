@@ -724,18 +724,30 @@ class BookingGate:
                 return None
             return deposit_gate.DepositQuote("blocked", "quote_failed")
 
-    async def _blocked(self, reason: str) -> GateDecision:
+    async def _blocked(
+        self,
+        code: str,
+        *,
+        reason: str | None = None,
+        stage: str | None = None,
+        status: int | None = None,
+    ) -> GateDecision:
         """A deposit is due but cannot be asked for: the booking is not made and a human takes over.
 
         No clinic e-mail (owner answer 13: the only clinic e-mail is a paid deposit the patient
-        cancelled); the log line above is the operational record."""
+        cancelled); the log line above is the operational record. `code` is the symbolic outcome
+        (it stays `GateDecision.blocked_reason`); `reason`/`stage`/`status` are the closed-
+        vocabulary record of a failed charge, None when no charge was attempted."""
         logger.warning(
             "booking_gate_deposit_blocked",
+            code=code,
             reason=reason,
+            stage=stage,
+            status=status,
             tenant_id=str(self._tenant_id),
             conversation_id=str(self._conversation_id),
         )
-        return GateDecision("blocked", blocked_reason=reason)
+        return GateDecision("blocked", blocked_reason=code)
 
     async def _forget_payer_data(self) -> None:
         """The provider call that needed the data has been made: forget all of it (D7)."""
@@ -823,7 +835,12 @@ class BookingGate:
             # The provider saw the data (or failed for another reason): forget it. A provider
             # that STILL asks for what it was given is the D3 "blocked", never a second question.
             await self._forget_payer_data()
-            return await self._blocked(exc.code)
+            return await self._blocked(
+                exc.code,
+                reason=str(exc.reason) if exc.reason else None,
+                stage=exc.stage,
+                status=exc.status_code,
+            )
         if payment is None:
             # No provider call was made: the data (if any) stays for the next try (its TTL).
             return GateDecision("slot_taken")

@@ -51,6 +51,7 @@ class ProviderError(Exception):
         retryable: bool = False,
         reason: str | None = None,
         stage: str | None = None,
+        code_hint: str | None = None,
     ) -> None:
         self.code = code
         self.status_code = status_code
@@ -59,6 +60,8 @@ class ProviderError(Exception):
         # that failed ("customer" / "charge" / ...). Both stay None until the provider classifies.
         self.reason = reason
         self.stage = stage
+        # The provider's short symbolic error code (never its free text), for the log line.
+        self.code_hint = code_hint
         super().__init__(f"payment provider error: {code}")
 
 

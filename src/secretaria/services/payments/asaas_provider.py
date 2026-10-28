@@ -27,6 +27,7 @@ from zoneinfo import ZoneInfo
 
 from secretaria.core.logging import get_logger
 from secretaria.services.payments.asaas import AsaasClient, AsaasError
+from secretaria.services.payments.failure_reason import FailureReason, classify
 from secretaria.services.payments.provider import (
     ChargeRequest,
     ChargeState,
@@ -66,9 +67,19 @@ def client_for(api_key: str) -> AsaasClient:
     return AsaasClient(api_key)
 
 
-def _provider_error(exc: AsaasError, code: str) -> ProviderError:
+def _provider_error(exc: AsaasError, code: str, stage: str | None = None) -> ProviderError:
+    """`code` is the old symbolic code (callers depend on it); with a `stage` the error also
+    carries the closed-vocabulary reason, from status + code hint + fixed keyword only."""
     retryable = exc.status_code == 0 or exc.status_code == 429 or exc.status_code >= 500
-    return ProviderError(code, status_code=exc.status_code or None, retryable=retryable)
+    reason = classify(stage, exc.status_code, exc.code_hint, exc.text_reason) if stage else None
+    return ProviderError(
+        code,
+        status_code=exc.status_code or None,
+        retryable=retryable,
+        reason=reason,
+        stage=stage,
+        code_hint=exc.code_hint,
+    )
 
 
 def _cents(value: object) -> int | None:
@@ -128,7 +139,7 @@ class AsaasProvider:
     @staticmethod
     def _client(account: PaymentAccount) -> AsaasClient:
         if not account.api_key:
-            raise ProviderError("no_api_key")
+            raise ProviderError("no_api_key", reason=FailureReason.api_key_invalid, stage="config")
         return client_for(account.api_key)
 
     async def create_pix_charge(
@@ -152,10 +163,14 @@ class AsaasProvider:
                 # that carried no document is the signal the caller must collect one (F2).
                 missing_document = exc.status_code == 400 and not request.payer_document
                 raise _provider_error(
-                    exc, "payer_document_required" if missing_document else "customer_failed"
+                    exc,
+                    "payer_document_required" if missing_document else "customer_failed",
+                    "customer",
                 ) from exc
             if not customer_id:
-                raise ProviderError("customer_missing_id")
+                raise ProviderError(
+                    "customer_missing_id", reason=FailureReason.unknown, stage="customer"
+                )
 
         try:
             payment = await client.create_pix_payment(
@@ -177,12 +192,14 @@ class AsaasProvider:
                 except Exception:  # best effort: the question to the patient matters more
                     pass
             raise _provider_error(
-                exc, "payer_document_required" if missing_document else "charge_failed"
+                exc,
+                "payer_document_required" if missing_document else "charge_failed",
+                "charge",
             ) from exc
 
         charge_id = payment.get("id")
         if not charge_id:
-            raise ProviderError("charge_missing_id")
+            raise ProviderError("charge_missing_id", reason=FailureReason.unknown, stage="charge")
 
         copy_paste: str | None = None
         expires_at: datetime | None = None

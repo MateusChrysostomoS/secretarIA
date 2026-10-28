@@ -308,3 +308,156 @@ async def test_every_call_uses_the_account_of_the_charges_own_clinic(db, provide
     async with db() as session:
         await booking_charge.abandon_charge(session, world.tenant, started.deposit_id)
     assert set(provider.tenants_seen) == {world.tenant_id}
+
+
+# --------------------------------------------------------------------------
+# Plano 2, Task 2: every failed charge carries a SAFE reason + stage up to one log line
+# --------------------------------------------------------------------------
+
+CPF = "52998224725"
+
+
+@pytest.fixture
+def asaas(monkeypatch):
+    """The REAL `AsaasProvider` in the registry, with a fake Asaas client behind `client_for`."""
+    from secretaria.services.payments import asaas_provider
+    from tests.payments_support import FakeAsaasClient
+
+    def install(**kwargs) -> FakeAsaasClient:
+        fake = FakeAsaasClient(**kwargs)
+        monkeypatch.setattr(asaas_provider, "client_for", lambda api_key: fake)
+        return fake
+
+    monkeypatch.setitem(registry._PROVIDERS, "asaas", asaas_provider.AsaasProvider())
+    return install
+
+
+def _charge_failed_logs(logs):
+    return [entry for entry in logs if entry["event"] == "payment_charge_failed"]
+
+
+async def test_customer_400_logs_customer_rejected(db, asaas):
+    from secretaria.services.payments.asaas import AsaasError
+    from tests.before_support import recorded_logs
+
+    asaas(errors={"create_customer": AsaasError(400, "invalid_name")})
+    async with db() as session:
+        world = await make_world(session)
+    with recorded_logs() as logs, pytest.raises(booking_charge.ChargeStartError) as raised:
+        await _begin(world, payer_document=CPF, payer_email="maria@example.com")
+
+    assert raised.value.code == "customer_failed"  # the old symbolic code does not change
+    assert (raised.value.stage, raised.value.reason) == ("customer", "customer_rejected")
+    assert raised.value.status_code == 400
+    (line,) = _charge_failed_logs(logs)
+    assert line == {
+        "event": "payment_charge_failed",
+        "log_level": "warning",
+        "tenant_id": str(world.tenant_id),
+        "stage": "customer",
+        "reason": "customer_rejected",
+        "status": 400,
+        "code_hint": "invalid_name",
+    }
+    dumped = str(logs)
+    for secret in ("Maria", CPF, "5511999999999", "maria@example.com", "'key'"):
+        assert secret not in dumped
+    assert await _holds(db) == []
+
+
+async def test_charge_401_is_api_key_invalid(db, asaas):
+    from secretaria.services.payments.asaas import AsaasError
+    from tests.before_support import recorded_logs
+
+    fake = asaas(errors={"create_pix_payment": AsaasError(401)})
+    async with db() as session:
+        world = await make_world(session)
+    with recorded_logs() as logs, pytest.raises(booking_charge.ChargeStartError) as raised:
+        await _begin(world, payer_document=CPF)
+
+    assert raised.value.code == "charge_failed"
+    assert (raised.value.stage, raised.value.reason) == ("charge", "api_key_invalid")
+    assert [c[0] for c in fake.calls].count("create_pix_payment") == 1  # 401 is not retried
+    (line,) = _charge_failed_logs(logs)
+    assert (line["stage"], line["reason"], line["status"]) == ("charge", "api_key_invalid", 401)
+
+
+async def test_charge_503_retried_once_then_provider_unavailable(db, asaas):
+    from secretaria.services.payments.asaas import AsaasError
+    from tests.before_support import recorded_logs
+
+    fake = asaas(errors={"create_pix_payment": AsaasError(503)})
+    async with db() as session:
+        world = await make_world(session)
+    with recorded_logs() as logs, pytest.raises(booking_charge.ChargeStartError) as raised:
+        await _begin(world, payer_document=CPF)
+
+    assert [c[0] for c in fake.calls].count("create_pix_payment") == 2  # exactly one retry
+    assert (raised.value.stage, raised.value.reason) == ("charge", "provider_unavailable")
+    (line,) = _charge_failed_logs(logs)  # logged once, for the final failure
+    assert (line["reason"], line["status"]) == ("provider_unavailable", 503)
+    assert await _holds(db) == []
+
+
+async def test_qr_failure_surfaces_qr_unavailable(db, asaas):
+    from tests.before_support import recorded_logs
+
+    fake = asaas(qr_payload=None)
+    async with db() as session:
+        world = await make_world(session)
+    with recorded_logs() as logs, pytest.raises(booking_charge.ChargeStartError) as raised:
+        await _begin(world, payer_document=CPF)
+
+    assert raised.value.code == "no_copy_paste"
+    assert (raised.value.stage, raised.value.reason) == ("qr", "qr_unavailable")
+    assert ("delete_payment", "pay_fake") in fake.calls  # the charge was voided
+    (line,) = _charge_failed_logs(logs)
+    assert (line["stage"], line["reason"]) == ("qr", "qr_unavailable")
+    assert await _holds(db) == [] and await _deposits(db) == []
+
+
+async def test_persist_failure_surfaces_persist_failed(db, provider, monkeypatch):
+    from tests.before_support import recorded_logs
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(accounts, "remember_customer_id", boom)
+    async with db() as session:
+        world = await make_world(session)
+    with recorded_logs() as logs, pytest.raises(booking_charge.ChargeStartError) as raised:
+        await _begin(world)
+
+    assert raised.value.code == "persist_failed"
+    assert (raised.value.stage, raised.value.reason) == ("persist", "persist_failed")
+    (line,) = _charge_failed_logs(logs)
+    assert (line["stage"], line["reason"], line["status"]) == ("persist", "persist_failed", None)
+    assert any(entry["event"] == "payment_begin_failed" for entry in logs)
+
+
+async def test_no_account_surfaces_no_account(db, provider):
+    from tests.before_support import recorded_logs
+
+    async with db() as session:
+        world = await make_world(session, with_account=False)
+    with recorded_logs() as logs, pytest.raises(booking_charge.ChargeStartError) as raised:
+        await _begin(world)
+
+    assert raised.value.code == "no_account"
+    assert (raised.value.stage, raised.value.reason) == ("config", "no_account")
+    (line,) = _charge_failed_logs(logs)
+    assert (line["stage"], line["reason"]) == ("config", "no_account")
+
+
+async def test_a_pending_charge_has_no_reason_and_logs_nothing(db, provider):
+    from tests.before_support import recorded_logs
+
+    async with db() as session:
+        world = await make_world(session)
+    await _begin(world)
+    provider.created_charge = new_charge("pay_2")
+    with recorded_logs() as logs, pytest.raises(booking_charge.ChargeStartError) as raised:
+        await _begin(world)
+    assert raised.value.code == "charge_pending"
+    assert raised.value.reason is None and raised.value.stage is None
+    assert _charge_failed_logs(logs) == []
