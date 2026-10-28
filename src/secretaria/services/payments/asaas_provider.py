@@ -148,7 +148,10 @@ class AsaasProvider:
         client = self._client(account)
 
         customer_id = request.provider_customer_id
-        if not customer_id:
+        # Only a customer created by THIS call may ever be deleted on failure; a stored one
+        # (from an earlier charge of the same patient) is never touched.
+        created_here = not customer_id
+        if created_here:
             try:
                 if request.payer_document:
                     customer_id = await client.create_customer(
@@ -184,21 +187,21 @@ class AsaasProvider:
             # Sandbox fact: the customer was created WITHOUT cpfCnpj (Asaas allows it) and only
             # the charge is refused for it. Same signal as above: the caller must collect one.
             missing_document = exc.document_missing and not request.payer_document
-            if missing_document and not request.provider_customer_id:
-                # The document-less customer made a moment ago is useless; do not leave it behind
-                # in the clinic's own Asaas account (the retry creates a fresh one WITH the CPF).
-                try:
-                    await client.delete_customer(customer_id)
-                except Exception:  # best effort: the question to the patient matters more
-                    pass
-            raise _provider_error(
+            failure = _provider_error(
                 exc,
                 "payer_document_required" if missing_document else "charge_failed",
                 "charge",
-            ) from exc
+            )
+            # The customer made a moment ago has no charge: do not leave it behind in the
+            # clinic's own Asaas account (a retry creates a fresh one, WITH the CPF if asked).
+            if created_here:
+                await self._discard_customer(client, customer_id)
+            raise failure from exc
 
         charge_id = payment.get("id")
         if not charge_id:
+            if created_here:
+                await self._discard_customer(client, customer_id)
             raise ProviderError("charge_missing_id", reason=FailureReason.unknown, stage="charge")
 
         copy_paste: str | None = None
@@ -215,7 +218,17 @@ class AsaasProvider:
             copy_paste=copy_paste,
             expires_at=expires_at,
             provider_customer_id=customer_id,
+            customer_created_here=created_here,
         )
+
+    @staticmethod
+    async def _discard_customer(client: AsaasClient, customer_id: str) -> None:
+        """Best effort: a failure here is logged by type only and never replaces the error
+        the caller is about to raise."""
+        try:
+            await client.delete_customer(customer_id)
+        except Exception as exc:  # noqa: BLE001 - the original failure is what matters
+            logger.warning("asaas_customer_cleanup_failed", error_type=type(exc).__name__)
 
     def verify_webhook(
         self,

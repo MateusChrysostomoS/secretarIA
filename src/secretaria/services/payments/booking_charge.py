@@ -103,6 +103,22 @@ async def _create_with_one_retry(provider, account, request):
         return await provider.create_pix_charge(account, request)
 
 
+async def _discard_customer_created_here(provider, account, created) -> None:
+    """Delete the provider customer that THIS charge created, so a voided charge leaves no
+    orphan customer (the patient's name and CPF) in the clinic's account. A customer stored from
+    an earlier charge is never deleted. Best effort: an optional provider capability, and a
+    failure is logged by type only - it never replaces the error being raised."""
+    if not created.customer_created_here or not created.provider_customer_id:
+        return
+    delete_customer = getattr(provider, "delete_customer", None)
+    if delete_customer is None:
+        return
+    try:
+        await delete_customer(account, created.provider_customer_id)
+    except Exception as exc:  # noqa: BLE001 - the original failure is what matters
+        logger.warning("payment_begin_customer_cleanup_failed", error_type=type(exc).__name__)
+
+
 def _known_reason(value: str | None) -> FailureReason:
     """A provider's reason, or `unknown` when it gave none (or one outside the vocabulary)."""
     return FailureReason(value) if value in set(FailureReason) else FailureReason.unknown
@@ -357,6 +373,8 @@ async def _create_and_record(
                 await provider.cancel_charge(account, created.provider_charge_id)
             except Exception as exc:  # noqa: BLE001 - best effort; an unpaid charge is inert
                 logger.warning("payment_begin_void_failed", error_type=type(exc).__name__)
+            # After the void (Asaas may refuse to delete a customer with a live charge).
+            await _discard_customer_created_here(provider, account, created)
             raise
 
     return PaymentStart(

@@ -398,3 +398,61 @@ async def test_a_missing_api_key_is_a_config_failure():
         await AsaasProvider().create_pix_charge(account, _request())
     assert failure.value.code == "no_api_key"
     assert (failure.value.stage, failure.value.reason) == ("config", "api_key_invalid")
+
+
+# --------------------------------------------------------------------------
+# Task 3B: a customer created for a charge that failed is not left in the clinic's Asaas.
+
+
+async def test_a_fresh_customer_is_marked_created_here_and_a_known_one_is_not(monkeypatch):
+    _install(monkeypatch, FakeAsaasClient(customer_id="cus_9"))
+    fresh = await AsaasProvider().create_pix_charge(_account(), _request())
+    assert fresh.customer_created_here is True
+
+    _install(monkeypatch, FakeAsaasClient())
+    known = await AsaasProvider().create_pix_charge(
+        _account(), _request(provider_customer_id="cus_known")
+    )
+    assert known.customer_created_here is False
+
+
+@pytest.mark.parametrize("status", [400, 503])
+async def test_a_refused_charge_deletes_the_customer_created_for_it(monkeypatch, status):
+    fake = _install(
+        monkeypatch,
+        FakeAsaasClient(customer_id="cus_new", errors={"create_pix_payment": AsaasError(status)}),
+    )
+    with pytest.raises(ProviderError) as failure:
+        await AsaasProvider().create_pix_charge(_account(), _request(payer_document="1"))
+    assert failure.value.code == "charge_failed"
+    assert ("delete_customer", "cus_new") in fake.calls
+
+
+@pytest.mark.parametrize("status", [400, 503])
+async def test_a_refused_charge_never_deletes_a_stored_customer(monkeypatch, status):
+    fake = _install(
+        monkeypatch, FakeAsaasClient(errors={"create_pix_payment": AsaasError(status)})
+    )
+    with pytest.raises(ProviderError):
+        await AsaasProvider().create_pix_charge(
+            _account(), _request(provider_customer_id="cus_known")
+        )
+    assert "delete_customer" not in [c[0] for c in fake.calls]
+
+
+async def test_a_failed_customer_cleanup_keeps_the_original_charge_error(monkeypatch):
+    fake = _install(
+        monkeypatch,
+        FakeAsaasClient(
+            errors={
+                "create_pix_payment": AsaasError(401, "invalid_access_token"),
+                "delete_customer": AsaasError(500),
+            }
+        ),
+    )
+    with pytest.raises(ProviderError) as failure:
+        await AsaasProvider().create_pix_charge(_account(), _request(payer_document="1"))
+    assert failure.value.code == "charge_failed"
+    assert (failure.value.stage, failure.value.reason) == ("charge", "api_key_invalid")
+    assert (failure.value.status_code, failure.value.code_hint) == (401, "invalid_access_token")
+    assert ("delete_customer", "cus_fake") in fake.calls

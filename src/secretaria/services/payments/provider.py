@@ -109,6 +109,9 @@ class CreatedCharge:
     expires_at: datetime | None = None
     # The customer id used (new or reused) so the caller can remember it per patient.
     provider_customer_id: str | None = None
+    # True only when the provider created that customer IN THIS CALL (not a stored one): if the
+    # charge is then voided, the caller deletes it so no orphan customer stays at the provider.
+    customer_created_here: bool = False
 
 
 @dataclass(frozen=True)

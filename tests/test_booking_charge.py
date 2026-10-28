@@ -511,3 +511,93 @@ async def test_an_e_mail_question_is_not_logged_but_a_repeated_one_is(db, provid
         await _begin(world, payer_document=CPF, payer_email="maria@example.com")
     (line,) = _charge_failed_logs(logs)
     assert line["reason"] == "charge_rejected"
+
+
+# --------------------------------------------------------------------------
+# Task 3B: no orphan customer is left in the clinic's Asaas when the charge is voided.
+
+
+async def test_qr_failure_voids_charge_and_deletes_customer_created_here(db, asaas):
+    fake = asaas(customer_id="cus_new", qr_payload=None)
+    async with db() as session:
+        world = await make_world(session)
+    with pytest.raises(booking_charge.ChargeStartError) as raised:
+        await _begin(world, payer_document=CPF)
+
+    assert raised.value.code == "no_copy_paste"
+    names = [c[0] for c in fake.calls]
+    assert ("delete_payment", "pay_fake") in fake.calls
+    assert ("delete_customer", "cus_new") in fake.calls
+    assert names.index("delete_payment") < names.index("delete_customer")  # void first
+    assert await _holds(db) == [] and await _deposits(db) == []
+
+
+async def test_persist_failure_voids_charge_and_deletes_customer_created_here(
+    db, asaas, monkeypatch
+):
+    async def boom(*args, **kwargs):
+        raise RuntimeError("database went away")
+
+    fake = asaas(customer_id="cus_new")
+    monkeypatch.setattr(accounts, "remember_customer_id", boom)
+    async with db() as session:
+        world = await make_world(session)
+    with pytest.raises(booking_charge.ChargeStartError) as raised:
+        await _begin(world, payer_document=CPF)
+
+    assert raised.value.code == "persist_failed"
+    names = [c[0] for c in fake.calls]
+    assert ("delete_payment", "pay_fake") in fake.calls
+    assert ("delete_customer", "cus_new") in fake.calls
+    assert names.index("delete_payment") < names.index("delete_customer")
+    assert await _holds(db) == [] and await _deposits(db) == []
+
+
+async def test_stored_customer_is_never_deleted_on_failure(db, asaas):
+    fake = asaas(qr_payload=None)
+    async with db() as session:
+        world = await make_world(session)
+        await accounts.remember_customer_id(
+            session,
+            tenant_id=world.tenant_id,
+            patient_id=world.patient.id,
+            provider="asaas",
+            provider_customer_id="cus_stored",
+        )
+        await session.commit()
+    with pytest.raises(booking_charge.ChargeStartError) as raised:
+        await _begin(world, payer_document=CPF)
+
+    assert raised.value.code == "no_copy_paste"
+    names = [c[0] for c in fake.calls]
+    assert "create_customer" not in names
+    assert ("create_pix_payment", "cus_stored") == fake.calls[0][:2]
+    assert ("delete_payment", "pay_fake") in fake.calls
+    assert "delete_customer" not in names
+
+
+async def test_customer_delete_failure_does_not_hide_original_reason(db, asaas):
+    from secretaria.services.payments.asaas import AsaasError
+    from tests.before_support import recorded_logs
+
+    fake = asaas(
+        customer_id="cus_new", qr_payload=None, errors={"delete_customer": AsaasError(500)}
+    )
+    async with db() as session:
+        world = await make_world(session)
+    with recorded_logs() as logs, pytest.raises(booking_charge.ChargeStartError) as raised:
+        await _begin(world, payer_document=CPF)
+
+    assert raised.value.code == "no_copy_paste"
+    assert (raised.value.stage, raised.value.reason) == ("qr", "qr_unavailable")
+    assert ("delete_customer", "cus_new") in fake.calls
+    (line,) = _charge_failed_logs(logs)
+    assert (line["stage"], line["reason"]) == ("qr", "qr_unavailable")
+    (cleanup,) = [e for e in logs if e["event"] == "payment_begin_customer_cleanup_failed"]
+    assert cleanup == {
+        "event": "payment_begin_customer_cleanup_failed",
+        "log_level": "warning",
+        "error_type": "ProviderError",
+    }
+    assert "cus_new" not in str(logs) and CPF not in str(logs)
+    assert await _holds(db) == [] and await _deposits(db) == []
