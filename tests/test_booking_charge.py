@@ -461,3 +461,53 @@ async def test_a_pending_charge_has_no_reason_and_logs_nothing(db, provider):
     assert raised.value.code == "charge_pending"
     assert raised.value.reason is None and raised.value.stage is None
     assert _charge_failed_logs(logs) == []
+
+
+async def test_a_cpf_question_is_not_logged_as_a_failed_charge(db, asaas):
+    """No CPF given yet and Asaas asks for one: the caller asks the patient, nothing failed."""
+    from secretaria.services.payments.asaas import AsaasError
+    from tests.before_support import recorded_logs
+
+    asaas(errors={"create_customer": AsaasError(400, "invalid_cpfCnpj")})
+    async with db() as session:
+        world = await make_world(session)
+    with recorded_logs() as logs, pytest.raises(booking_charge.ChargeStartError) as raised:
+        await _begin(world)
+
+    assert raised.value.code == "payer_document_required"
+    assert _charge_failed_logs(logs) == []
+    assert await _holds(db) == []
+
+
+async def test_a_cpf_given_and_still_refused_is_logged_as_a_failed_charge(db, asaas):
+    """The CPF WAS given and the customer is still refused: the real blocked case, logged."""
+    from secretaria.services.payments.asaas import AsaasError
+    from tests.before_support import recorded_logs
+
+    asaas(errors={"create_customer": AsaasError(400, "invalid_cpfCnpj")})
+    async with db() as session:
+        world = await make_world(session)
+    with recorded_logs() as logs, pytest.raises(booking_charge.ChargeStartError) as raised:
+        await _begin(world, payer_document=CPF)
+
+    assert raised.value.code == "customer_failed"
+    (line,) = _charge_failed_logs(logs)
+    assert (line["stage"], line["reason"], line["status"]) == ("customer", "customer_rejected", 400)
+
+
+async def test_an_e_mail_question_is_not_logged_but_a_repeated_one_is(db, provider):
+    from tests.before_support import recorded_logs
+
+    provider.create_error = ProviderError(
+        "payer_email_required", status_code=400, reason="charge_rejected", stage="charge"
+    )
+    async with db() as session:
+        world = await make_world(session)
+    with recorded_logs() as logs, pytest.raises(booking_charge.ChargeStartError):
+        await _begin(world, payer_document=CPF)
+    assert _charge_failed_logs(logs) == []
+
+    with recorded_logs() as logs, pytest.raises(booking_charge.ChargeStartError):
+        await _begin(world, payer_document=CPF, payer_email="maria@example.com")
+    (line,) = _charge_failed_logs(logs)
+    assert line["reason"] == "charge_rejected"

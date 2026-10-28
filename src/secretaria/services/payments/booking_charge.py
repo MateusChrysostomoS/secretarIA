@@ -35,7 +35,7 @@ from secretaria.models.clinic_payment_account import PROVIDER_ASAAS
 from secretaria.models.pix_deposit import DEPOSIT_TIMING_BEFORE, PixDepositStatus
 from secretaria.services import booking_hold, tenant_config as cfg
 from secretaria.services.booking_hold import HeldSlot, LiveChargeHoldError
-from secretaria.services.payments import accounts, registry
+from secretaria.services.payments import accounts, payer_data, registry
 from secretaria.services.payments.deposit_gate import DepositQuote
 from secretaria.services.payments.failure_reason import FailureReason
 from secretaria.services.payments.provider import ChargeRequest, PaymentStatus, ProviderError
@@ -196,7 +196,8 @@ async def begin_payment(
         )
     except ChargeStartError as exc:
         await _release_hold(hold.id)
-        _log_charge_failed(tenant_id, exc)
+        if not _is_payer_data_question(exc, payer_document, payer_email):
+            _log_charge_failed(tenant_id, exc)
         raise
     except Exception as exc:  # noqa: BLE001 - whatever it was, the hold must not be left over
         await _release_hold(hold.id)
@@ -206,6 +207,20 @@ async def begin_payment(
         )
         _log_charge_failed(tenant_id, failure)
         raise failure from exc
+
+
+def _is_payer_data_question(
+    exc: ChargeStartError, payer_document: str | None, payer_email: str | None
+) -> bool:
+    """The provider asks for a CPF/e-mail the patient has not given yet: the callers turn that
+    into a question to the patient, it is not a failed charge. Asked AGAIN after it was given,
+    it is the real blocked case and is logged."""
+    kind = payer_data.kind_for_code(exc.code)
+    if kind == "document":
+        return payer_document is None
+    if kind == "email":
+        return payer_email is None
+    return False
 
 
 def _log_charge_failed(tenant_id: UUID, exc: ChargeStartError) -> None:
