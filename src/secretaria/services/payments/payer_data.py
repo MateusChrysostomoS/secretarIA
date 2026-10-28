@@ -308,6 +308,15 @@ def should_redact_inbound(flow_state: object, flow_step: str | None, body: str |
     )
 
 
+def is_redacted_placeholder(body: str | None) -> bool:
+    """Whether `body` is the text stored in place of the patient's CPF/e-mail answer.
+
+    The marker exists for the history (the clinic console and the AI see that an answer was given);
+    the patient's own transcript must not show it, so every patient-facing reader asks this.
+    """
+    return body == REDACTED_BODY
+
+
 # ---- the transient store ----------------------------------------------------------------------
 
 
