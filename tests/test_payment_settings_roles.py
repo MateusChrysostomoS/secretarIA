@@ -15,7 +15,7 @@ from httpx import AsyncClient
 from secretaria.api.hub.deps import get_current_tenant
 from secretaria.core.database import get_session
 from secretaria.models import Tenant
-from secretaria.services.payments import deposit_gate, registry
+from secretaria.services.payments import registry
 from tests.before_support import entitlement_summary, make_world
 from tests.hub_auth import install_fake_brain_api, make_hub_token, reset_fake_brain_api
 from tests.payments_support import FakeProvider, make_sessionmaker
@@ -64,7 +64,6 @@ def _gate(monkeypatch):
     async def entitlements(tenant_id, redis):
         return entitlement_summary()
 
-    monkeypatch.setattr(deposit_gate, "get_entitlements", entitlements)
     yield
     reset_fake_brain_api()
     from secretaria.main import app
@@ -172,12 +171,8 @@ async def test_the_role_refusal_comes_before_the_payment_rules_and_brain_api(
 ):
     world = await _world(db)
 
-    async def entitlement_must_not_be_asked(tenant_id, redis):
-        raise AssertionError("a role refusal must not reach the add-on check")
-
-    monkeypatch.setattr(deposit_gate, "get_entitlements", entitlement_must_not_be_asked)
     response = await _put(client, world, "secretary", {"deposit_timing": "before"})
-    assert response.status_code == 403  # not the 422 `addon_required` a manager would get
+    assert response.status_code == 403  # a role refusal, never a payment-rule 422
     assert response.json()["detail"]["code"] == "forbidden_role"
 
 

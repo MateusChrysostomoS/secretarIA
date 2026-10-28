@@ -20,7 +20,7 @@ from secretaria.core.database import get_session
 from secretaria.core.subscription import SubscriptionClaim
 from secretaria.models import PixDeposit, Tenant
 from secretaria.models.pix_deposit import PixDepositStatus
-from secretaria.services.payments import deposit_gate, registry
+from secretaria.services.payments import registry
 from tests.before_support import entitlement_summary, make_world
 from tests.payments_support import FakeProvider, make_sessionmaker
 
@@ -46,7 +46,6 @@ def _entitlement(monkeypatch):
     async def get(tenant_id, redis):
         return Entitlement.value
 
-    monkeypatch.setattr(deposit_gate, "get_entitlements", get)
     monkeypatch.setitem(registry._PROVIDERS, "asaas", FakeProvider())
 
 
@@ -130,13 +129,15 @@ async def test_an_unknown_timing_or_provider_is_refused(client: AsyncClient, db)
     assert (await _put(client, {"payment_provider": "pagseguro"})).status_code == 422
 
 
-async def test_before_is_refused_without_the_addon_and_nothing_is_saved(client: AsyncClient, db):
+async def test_before_is_accepted_without_the_old_addon(client: AsyncClient, db):
+    """The deposit is a core SecretarIA capability since 2026-10-28: switched on + a connected
+    account is all `before` needs; the plan's add-ons are never consulted."""
     world = await _world(db)
     Entitlement.value = entitlement_summary(addon=False)
     response = await _put(client, {"deposit_timing": "before", "deposit_hold_ttl_minutes": 90})
-    assert response.status_code == 422 and _code(response) == "addon_required"
+    assert response.status_code == 200
     stored = await _stored(db, world.tenant_id)
-    assert (stored.deposit_timing, stored.deposit_hold_ttl_minutes) == ("after", 30)
+    assert (stored.deposit_timing, stored.deposit_hold_ttl_minutes) == ("before", 90)
 
 
 async def test_before_is_refused_with_deposits_switched_off(client: AsyncClient, db):
@@ -162,10 +163,10 @@ async def test_before_is_refused_without_a_connected_and_verified_account(
     assert _code(response) == "account_not_ready"
 
 
-async def test_before_is_refused_when_the_entitlement_cannot_be_read(client: AsyncClient, db):
+async def test_before_never_waits_on_brain_api(client: AsyncClient, db):
     await _world(db)
     Entitlement.value = None
-    assert _code(await _put(client, {"deposit_timing": "before"})) == "entitlement_unresolvable"
+    assert (await _put(client, {"deposit_timing": "before"})).status_code == 200
 
 
 async def test_a_save_that_touches_neither_field_is_never_blocked_by_these_rules(
@@ -190,10 +191,9 @@ async def test_going_back_to_after_is_always_allowed(client: AsyncClient, db):
 
 
 async def test_the_legacy_single_scope_put_enforces_the_same_rules(client: AsyncClient, db):
-    world = await _world(db)
-    Entitlement.value = entitlement_summary(addon=False)
+    world = await _world(db, with_account=False)
     response = await _put(client, {"deposit_timing": "before"}, path="/tenants/me/config")
-    assert response.status_code == 422 and _code(response) == "addon_required"
+    assert response.status_code == 422 and _code(response) == "account_not_ready"
     assert (await _stored(db, world.tenant_id)).deposit_timing == "after"
 
 
@@ -294,7 +294,6 @@ async def test_the_settings_read_explains_every_disabled_control(client: AsyncCl
     }
     assert [b["code"] for b in body["before_blockers"]] == [
         "deposit_disabled",
-        "addon_required",
         "account_not_ready",
     ]
     assert all(b["message"] for b in body["before_blockers"])

@@ -413,8 +413,7 @@ async def _blocked_by_required_deposit(tool_name: str) -> dict | None:
     itself would skip all of it, so on such a clinic it refuses BEFORE any Google call or DB
     write and sends the agent to the button flow (`start_guided_booking` / `show_main_menu`).
     Fail-closed: if the clinic cannot be read, the answer is "refuse", never "book without the
-    deposit". A clinic that switched deposits off, is on `after`, or lost the add-on is not
-    affected: cancelling the add-on must never stop the agenda.
+    deposit". A clinic that switched deposits off or is on `after` is not affected.
     """
     tenant_id = _tenant_id_ctx.get()
     if tenant_id is None:

@@ -60,7 +60,6 @@ def env(monkeypatch) -> Env:
         e.emails.append((to_email, kind))
 
     monkeypatch.setattr(holds, "request_code", request_code)
-    monkeypatch.setattr(deposit_gate, "get_entitlements", entitlements)
     monkeypatch.setattr(email, "send_payment_alert", send_email)
     monkeypatch.setitem(registry._PROVIDERS, "asaas", e.provider)
     return e
@@ -154,11 +153,12 @@ async def test_a_service_without_a_price_commits_even_on_before(db, env):
     assert await _holds(db) == [] and await _deposits(db) == []
 
 
-async def test_a_cancelled_addon_commits_and_never_stops_the_agenda(db, env):
+async def test_a_clinic_without_the_old_addon_still_asks_for_the_deposit(db, env):
+    # Owner's decision 2026-10-28: the deposit is core SecretarIA, not an add-on.
     env.entitlement = entitlement_summary(addon=False)
     async with db() as session:
         world = await make_world(session)
-    assert (await _decide(_gate(world, armed=False))).outcome == "commit"
+    assert (await _decide(_gate(world, armed=False))).outcome == "awaiting_payment"
 
 
 async def test_a_missing_credential_blocks_the_booking_and_holds_nothing(
@@ -191,17 +191,6 @@ async def test_a_blocked_booking_never_e_mails_the_clinic_however_often_it_repea
     await _decide(_gate(world, armed=False, redis=redis))
     await _decide(_gate(world, armed=False, redis=redis))
     assert env.emails == []
-
-
-async def test_an_unreadable_entitlement_blocks_instead_of_booking_for_free(db, env):
-    env.entitlement = None
-    async with db() as session:
-        world = await make_world(session)
-    decision = await _decide(_gate(world, armed=False))
-    assert (decision.outcome, decision.blocked_reason) == (
-        "blocked",
-        "entitlement_unresolvable",
-    )
 
 
 async def test_a_failure_deciding_after_the_clinic_is_known_to_be_on_before_blocks(

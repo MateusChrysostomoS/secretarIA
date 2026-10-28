@@ -167,7 +167,6 @@ def env(monkeypatch, kind) -> Env:
         e.emails.append((to_email, code))
 
     monkeypatch.setattr(holds, "request_code", request_code)
-    monkeypatch.setattr(deposit_gate, "get_entitlements", entitlements)
     monkeypatch.setattr(email, "send_payment_alert", send_email)
     monkeypatch.setitem(registry._PROVIDERS, PROVIDER[kind], e.provider)
     monkeypatch.setattr(workers_ns, "_reply_sender", lambda reply, tenant, token: e.sender)

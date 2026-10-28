@@ -26,7 +26,7 @@ from secretaria.models.deposit_release_offer import DepositReleaseEmail, Deposit
 from secretaria.services import booking_hold as holds, release_carry_check, release_offer
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.flow_router import FlowRouterResult
-from secretaria.services.payments import deposit_gate, registry
+from secretaria.services.payments import registry
 from secretaria.services.payments.provider import ChargeState, PaymentAccount, PaymentStatus
 from secretaria.workers import tasks
 from tests._reminder_fixtures import db  # noqa: F401
@@ -222,7 +222,6 @@ async def _on_before(db, world, monkeypatch):  # noqa: F811
     async def _entitled(tenant_id, redis):
         return entitlement_summary()
 
-    monkeypatch.setattr(deposit_gate, "get_entitlements", _entitled)
     gate = holds.BookingGate(
         tenant_id=world.tenant.id,
         conversation_id=world.conversation.id,

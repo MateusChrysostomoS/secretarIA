@@ -1,14 +1,14 @@
 """pix_deposit plugin: ask for a Pix deposit right after a booking (post_booking).
 
-Entitlement-gated addon (`pix_deposit`). The entitlement key gates the WHOLE
-deposit lifecycle at the plugin-platform boundary — a tenant not entitled to
-this addon never reaches `deposit_lifecycle.maybe_create_deposit` at all, no
-matter how `tenants.pix_deposit_enabled` is configured. The tenant-level
-`pix_deposit_enabled` flag is checked a SECOND time, inside
-`maybe_create_deposit` itself (services/payments/deposit_lifecycle.py) — so
-the feature is fail-closed on BOTH axes: the entitlement (billing/plan) and
-the tenant's own opt-in switch must both be true before a real Asaas charge
-is ever created.
+CORE capability of SecretarIA (`entitlement_keys=()`), NOT an addon — decision
+of the owner, 2026-10-28 (docs/CHECKPOINT_sinal_padrao.md). It used to be gated
+by the `pix_deposit` entitlement, which silently skipped the deposit for every
+clinic that had connected Asaas but never bought the addon. What gates a real
+charge now is only the clinic's own setup, checked inside
+`maybe_create_deposit` (services/payments/deposit_lifecycle.py): deposits
+switched on (`tenants.pix_deposit_enabled`), a priced service, and a connected
+payment account. The registry still respects `summary.active` (an inactive
+subscription runs no plugin at all).
 
 Hook contract: `registry.run_post_booking` (plugins/post_booking.py) calls
 `_post_booking` with a DETACHED `PostBookingContext` — the session that
@@ -92,7 +92,5 @@ async def _post_booking(ctx: PostBookingContext) -> None:
         )
 
 
-PIX_DEPOSIT_SPEC = PluginSpec(
-    id="pix_deposit", entitlement_keys=("pix_deposit",), post_booking=_post_booking
-)
+PIX_DEPOSIT_SPEC = PluginSpec(id="pix_deposit", entitlement_keys=(), post_booking=_post_booking)
 register(PIX_DEPOSIT_SPEC)

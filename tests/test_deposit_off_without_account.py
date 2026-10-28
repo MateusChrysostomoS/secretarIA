@@ -32,7 +32,6 @@ from secretaria.services import booking_hold as holds
 from secretaria.services.payments import (
     accounts,
     booking_charge,
-    deposit_gate,
     deposit_lifecycle,
     registry,
 )
@@ -72,7 +71,6 @@ def provider(monkeypatch) -> FakeProvider:
     async def request_code(tenant_id, external_id):
         return RequestCodeResult(RequestCodeOutcome.SENT, email_masked="m***a@gmail.com")
 
-    monkeypatch.setattr(deposit_gate, "get_entitlements", entitlements)
     monkeypatch.setattr(holds, "request_code", request_code)
     return fake
 

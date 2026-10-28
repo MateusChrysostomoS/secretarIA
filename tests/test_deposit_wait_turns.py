@@ -26,7 +26,7 @@ from secretaria.models import (
 )
 from secretaria.models.pix_deposit import PixDepositStatus
 from secretaria.services import booking_hold as holds, email, flow_router as fr
-from secretaria.services.payments import booking_charge, deposit_gate, deposit_lifecycle, registry
+from secretaria.services.payments import booking_charge, deposit_lifecycle, registry
 from secretaria.services.payments.deposit_gate import DepositQuote
 from secretaria.services.payments.provider import ChargeState, PaymentStatus, ProviderError
 from secretaria.workers import tasks
@@ -91,7 +91,6 @@ def env(monkeypatch) -> Env:
     async def send_email(to_email, clinic_name, kind):
         e.emails.append((to_email, kind))
 
-    monkeypatch.setattr(deposit_gate, "get_entitlements", entitlements)
     monkeypatch.setattr(email, "send_payment_alert", send_email)
     monkeypatch.setitem(registry._PROVIDERS, "asaas", e.provider)
     monkeypatch.setattr(workers_ns, "_reply_sender", lambda reply, tenant, token: e.sender)

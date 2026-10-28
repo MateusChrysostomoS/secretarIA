@@ -46,7 +46,6 @@ def env(monkeypatch):
     async def send_email(to_email, clinic_name, kind):
         emails.append(kind)
 
-    monkeypatch.setattr(deposit_gate, "get_entitlements", entitlements)
     monkeypatch.setattr(email, "send_payment_alert", send_email)
     monkeypatch.setitem(registry._PROVIDERS, "asaas", provider)
     return type("Env", (), {"provider": provider, "emails": emails})

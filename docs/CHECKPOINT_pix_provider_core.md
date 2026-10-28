@@ -213,8 +213,8 @@ provider_switch_blockers:[{code,message}], asaas_environment:"sandbox"|"producti
 
 Configuração — `PUT /tenants/me/configuration` com `{"tenant": {…só os campos alterados…}}`; campos ausentes ficam como
 estão. Desligar de emergência: `{"tenant":{"pix_deposit_enabled":false}}` → `200` com qualquer estado de conta (inclusive
-ilegível para a tela). Recusas: `422 {"detail":{"code","message"}}` com `deposit_disabled|addon_required|
-entitlement_unresolvable|account_not_ready|provider_unavailable|open_deposits`; prazo fora de 30–120 = `422` do Pydantic.
+ilegível para a tela). Recusas: `422 {"detail":{"code","message"}}` com `deposit_disabled|account_not_ready|
+provider_unavailable|open_deposits` (`addon_required`/`entitlement_unresolvable` saíram em 2026-10-28: `CHECKPOINT_sinal_padrao.md`); prazo fora de 30–120 = `422` do Pydantic.
 
 Paciente — `GET /patient-access/insurance-overview` (brain-api) → `200 {"product":"secretaria","payload":{"deposit":
 {"enabled":true,"percent":30},"plans":[{"name":"GEAP","payment_text":"Pagamento: confirme as condições com a clínica.",

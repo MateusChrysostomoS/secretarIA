@@ -7,15 +7,15 @@ amount is the existing `pix_deposit_percent`.
 
 The rules live in the SERVICE, not in the database (spec 6.4):
 
-* `before` is accepted only when deposits are switched on, the `pix_deposit` add-on is active and
-  the provider's account is connected AND verified - a `before` clinic that cannot create a Pix
-  would block every one of its bookings;
+* `before` is accepted only when deposits are switched on and the provider's account is connected
+  AND verified - a `before` clinic that cannot create a Pix would block every one of its bookings.
+  The deposit is a core SecretarIA capability since 2026-10-28, so no add-on is checked
+  (docs/CHECKPOINT_sinal_padrao.md);
 * the provider can be changed only while nothing is pending with the current one (an open Pix, or
   a paid one still being confirmed): switching under a live charge would strand its money;
 * a provider with no wrapper registered (Mercado Pago before its phase) cannot be selected.
 
-Both functions are READ-ONLY (`hub_configuration` runs the validator before it mutates anything,
-because it may call brain-api for the entitlement and the save transaction must not wait on that).
+Both functions are READ-ONLY (`hub_configuration` runs the validator before it mutates anything).
 """
 
 from dataclasses import dataclass
@@ -31,21 +31,15 @@ from secretaria.models.pix_deposit import (
     FULFILLMENT_PROMOTING,
     PixDepositStatus,
 )
-from secretaria.services.payments import accounts, deposit_gate, registry
+from secretaria.services.payments import accounts, registry
 
 BLOCKER_DEPOSIT_DISABLED = "deposit_disabled"
-BLOCKER_ADDON_REQUIRED = "addon_required"
-BLOCKER_ENTITLEMENT_UNRESOLVABLE = "entitlement_unresolvable"
 BLOCKER_ACCOUNT_NOT_READY = "account_not_ready"
 BLOCKER_PROVIDER_UNAVAILABLE = "provider_unavailable"
 BLOCKER_OPEN_DEPOSITS = "open_deposits"
 
 MESSAGES = {
     BLOCKER_DEPOSIT_DISABLED: "Ative o sinal via Pix antes de escolher quando cobrar.",
-    BLOCKER_ADDON_REQUIRED: "O sinal via Pix não está contratado nesta clínica.",
-    BLOCKER_ENTITLEMENT_UNRESOLVABLE: (
-        "Não foi possível confirmar o plano agora. Tente de novo em instantes."
-    ),
     BLOCKER_ACCOUNT_NOT_READY: (
         "Conecte e valide a conta do provedor antes de cobrar antes de confirmar."
     ),
@@ -92,11 +86,6 @@ async def before_blockers(
     blockers: list[str] = []
     if not (tenant.pix_deposit_enabled if enabled is None else enabled):
         blockers.append(BLOCKER_DEPOSIT_DISABLED)
-    active = await deposit_gate.is_addon_active(tenant.id, redis)
-    if active is None:
-        blockers.append(BLOCKER_ENTITLEMENT_UNRESOLVABLE)
-    elif not active:
-        blockers.append(BLOCKER_ADDON_REQUIRED)
     name = provider or tenant.payment_provider
     account = await accounts.load_charge_account(
         session, tenant_id=tenant.id, provider=name, timing="before"

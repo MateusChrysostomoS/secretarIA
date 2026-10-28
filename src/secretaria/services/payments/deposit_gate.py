@@ -3,19 +3,22 @@
 `quote_deposit` is the decision the flow makes BEFORE it reserves a slot. It answers one of
 three things and never touches the provider:
 
-* `no_deposit`  - the feature is off for this booking (timing `after`, add-on cancelled, plan
+* `no_deposit`  - the feature is off for this booking (timing `after`, deposits switched off, plan
                   or service that carries no deposit). The booking commits exactly as it always
-                  did: cancelling the add-on must never stop a clinic's agenda.
+                  did.
 * `required`    - a deposit is due; carries the amount, the provider and the hold TTL.
 * `blocked`     - a deposit IS due but the system cannot ask for it (no patient, no usable
-                  credential, provider unknown, entitlement unresolvable). The booking is NOT
-                  made: "never confirm without the deposit" is the owner's rule (decision D3).
+                  credential, provider unknown). The booking is NOT made: "never confirm without
+                  the deposit" is the owner's rule (decision D3).
+
+The deposit is a CORE SecretarIA capability since 2026-10-28, not the `pix_deposit` add-on
+(docs/CHECKPOINT_sinal_padrao.md): no brain-api entitlement is read here any more.
 
 Those are the first six of the nine silent `None` paths of `maybe_create_deposit` (spec section
 7); the last three (customer / charge / no id) and the two extras (no QR, send failed) happen
 when the charge is actually created and are decided in `booking_charge.py`.
 
-The function is a pure decision over rows and one entitlement read: no I/O against a PSP, no
+The function is a pure decision over rows: no I/O against a PSP, no
 message, no state change. It reuses `deposit_lifecycle`'s own price and convenio resolution so
 the amount the gate quotes is byte for byte the one `maybe_create_deposit` computes for `after`.
 """
@@ -31,14 +34,11 @@ from secretaria.core.logging import get_logger
 from secretaria.models import Tenant
 from secretaria.models.clinic_payment_account import PROVIDER_ASAAS
 from secretaria.models.pix_deposit import DEPOSIT_TIMING_BEFORE
-from secretaria.services.entitlements_client import get_entitlements, is_entitled
 from secretaria.services.insurance_catalog import resolve_booking_plan_ids
 from secretaria.services.payments import accounts, deposit_lifecycle, registry
 from secretaria.services.payments.money import parse_brl_to_cents
 
 logger = get_logger(__name__)
-
-ADDON_KEY = "pix_deposit"
 
 # The hold (and the Pix window) a clinic can configure: the Mercado Pago floor is 30 minutes
 # (spec section 12.1), the ceiling keeps a slot from being parked for hours.
@@ -49,13 +49,11 @@ HOLD_TTL_DEFAULT_MINUTES = 30
 # Reasons. `no_deposit` reasons keep the vocabulary of `deposit_lifecycle.DEPOSIT_SKIP_*`.
 REASON_TIMING_AFTER = "timing_after"
 REASON_DISABLED = "disabled"
-REASON_NO_ENTITLEMENT = "no_entitlement"
 REASON_INSURANCE_NO_CHARGE = "insurance_no_charge"
 REASON_NO_SERVICE = "no_service"
 REASON_UNPARSEABLE_PRICE = "unparseable_price"
 REASON_ZERO_AMOUNT = "zero_amount"
 REASON_REQUIRED = "required"
-REASON_ENTITLEMENT_UNRESOLVABLE = "entitlement_unresolvable"
 REASON_NO_PATIENT = "no_patient"
 REASON_NO_PROVIDER = "no_provider"
 REASON_NO_CREDENTIAL = "no_credential"
@@ -93,25 +91,13 @@ def timing_is_before(tenant: Tenant) -> bool:
     return (tenant.deposit_timing or "after") == DEPOSIT_TIMING_BEFORE
 
 
-async def is_addon_active(tenant_id: UUID, redis=None) -> bool | None:
-    """The `pix_deposit` add-on state: True/False, or None when brain-api cannot say (and no
-    stale copy exists). Callers treat None as "unknown", never as "off"."""
-    summary = await get_entitlements(tenant_id, redis)
-    if summary is None:
-        return None
-    return is_entitled(summary, ADDON_KEY)
-
-
 async def before_gate_active(tenant: Tenant, redis=None) -> bool:
     """Whether bookings of this clinic must go through the deposit gate at all.
 
-    True when the timing is `before`, the clinic switched deposits on, and the add-on is active
-    OR unknown: the LLM tools use this as their fail-closed guard, so an unreadable entitlement
-    refuses a direct booking instead of letting one slip past the deposit.
+    True when the timing is `before` and the clinic switched deposits on: the LLM tools use this
+    as their fail-closed guard, refusing a direct booking that would slip past the deposit.
     """
-    if not timing_is_before(tenant) or not tenant.pix_deposit_enabled:
-        return False
-    return await is_addon_active(tenant.id, redis) is not False
+    return timing_is_before(tenant) and bool(tenant.pix_deposit_enabled)
 
 
 async def quote_deposit(
@@ -129,12 +115,6 @@ async def quote_deposit(
         return DepositQuote("no_deposit", REASON_TIMING_AFTER)
     if not tenant.pix_deposit_enabled:
         return DepositQuote("no_deposit", REASON_DISABLED)
-
-    active = await is_addon_active(tenant.id, redis)
-    if active is False:
-        return DepositQuote("no_deposit", REASON_NO_ENTITLEMENT)
-    if active is None:
-        return DepositQuote("blocked", REASON_ENTITLEMENT_UNRESOLVABLE)
 
     # A stand-in for the appointment that does not exist yet: the lifecycle helpers below read
     # only these four attributes, so the gate and the `after` hook can never disagree.

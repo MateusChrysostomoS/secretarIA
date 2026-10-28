@@ -18,7 +18,7 @@ from sqlalchemy import select
 from secretaria.models import Appointment, BookingHold, Conversation, FlowState, Message, PixDeposit
 from secretaria.models.pix_deposit import PixDepositStatus
 from secretaria.services import booking_hold as holds, email, flow_router as fr
-from secretaria.services.payments import booking_charge, deposit_gate, deposit_lifecycle, registry
+from secretaria.services.payments import booking_charge, deposit_lifecycle, registry
 from secretaria.services.payments.provider import ChargeState, PaymentStatus
 from secretaria.services.pending_identity import RequestCodeOutcome, RequestCodeResult
 from secretaria.workers import tasks
@@ -98,7 +98,6 @@ def env(monkeypatch) -> Env:
     async def request_code(tenant_id, external_id):
         return RequestCodeResult(RequestCodeOutcome.NOT_PENDING)
 
-    monkeypatch.setattr(deposit_gate, "get_entitlements", entitlements)
     monkeypatch.setattr(email, "send_payment_alert", send_email)
     monkeypatch.setattr(holds, "request_code", request_code)
     monkeypatch.setitem(registry._PROVIDERS, "asaas", e.provider)

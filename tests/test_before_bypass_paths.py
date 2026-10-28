@@ -34,7 +34,6 @@ from secretaria.models import (
 )
 from secretaria.plugins import multi_professional as mp, multi_unit as mu
 from secretaria.services import booking_hold as holds
-from secretaria.services.payments import deposit_gate
 from secretaria.services.tenant_config import set_google_refresh_token
 from tests.before_support import entitlement_summary, make_world
 from tests.payments_support import make_sessionmaker
@@ -63,7 +62,6 @@ def _entitlement(monkeypatch):
     async def get(tenant_id, redis):
         return Entitlement.value
 
-    monkeypatch.setattr(deposit_gate, "get_entitlements", get)
 
 
 class Calendar:
@@ -136,7 +134,7 @@ async def test_the_llm_cannot_create_a_consultation_on_a_before_clinic(db):
 
 
 @pytest.mark.parametrize(
-    "case", ["after", "deposit_off", "addon_cancelled"]
+    "case", ["after", "deposit_off"]
 )
 async def test_a_clinic_that_is_not_gated_keeps_its_llm_booking(db, case):
     async with db() as session:
@@ -145,18 +143,19 @@ async def test_a_clinic_that_is_not_gated_keeps_its_llm_booking(db, case):
             timing="after" if case == "after" else "before",
             pix_deposit_enabled=case != "deposit_off",
         )
-    if case == "addon_cancelled":
-        Entitlement.value = entitlement_summary(addon=False)
     calendar = Calendar()
     with _agent(world.tenant_id, calendar, world.conversation.id):
         result = await ai_tools.create_event.ainvoke(CREATE_ARGS)
     assert "error" not in result and len(calendar.created) == 1
 
 
-async def test_an_unreadable_entitlement_refuses_instead_of_booking_without_the_deposit(db):
+@pytest.mark.parametrize("entitlement", [None, "addon_off"])
+async def test_a_before_clinic_refuses_whatever_its_plan_says(db, entitlement):
+    """The deposit is core SecretarIA since 2026-10-28: neither an unreadable plan nor a clinic
+    that never bought the old add-on lets the LLM book past the deposit."""
     async with db() as session:
         world = await make_world(session)
-    Entitlement.value = None
+    Entitlement.value = entitlement_summary(addon=False) if entitlement else None
     calendar = Calendar()
     with _agent(world.tenant_id, calendar, world.conversation.id):
         result = await ai_tools.create_event.ainvoke(CREATE_ARGS)

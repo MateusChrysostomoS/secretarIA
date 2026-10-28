@@ -5,7 +5,7 @@ tests/test_deposit_lifecycle.py: a real DB, monkeypatched in place of
 `async_session_factory`. `deposit_lifecycle.maybe_create_deposit` is
 monkeypatched with a recorder (this file is NOT the place to re-test the
 money brain itself — that's tests/test_deposit_lifecycle.py's job); these
-tests only cover the plugin's OWN responsibilities: entitlement gating via
+tests only cover the plugin's OWN responsibilities: core (ungated) registration in
 the registry, the no-patient no-op, re-fetching detached rows into a fresh
 session-attached instance, and staying fail-open when the lifecycle call
 explodes.
@@ -131,23 +131,29 @@ def _detached_ctx(tenant, patient, appointment, *, waba_token="tok") -> PostBook
 
 
 # --------------------------------------------------------------------------
-# Registry gating — fail-closed on the addon, fail-open once entitled
+# Registry gating — a CORE capability since 2026-10-28 (owner's decision): no
+# addon needed, only an active subscription
 # --------------------------------------------------------------------------
 
 
-def test_addon_off_excludes_plugin_from_enabled_plugins():
+def test_plugin_runs_without_the_old_addon():
     summary = _summary(addons={**_ALL_ADDONS_OFF, "pix_deposit": False})
-    assert "pix_deposit" not in [s.id for s in enabled_plugins(summary)]
+    assert "pix_deposit" in [s.id for s in enabled_plugins(summary)]
 
 
-def test_addon_on_includes_plugin_in_enabled_plugins():
+def test_plugin_still_runs_for_a_clinic_that_bought_the_old_addon():
     summary = _summary(addons={**_ALL_ADDONS_OFF, "pix_deposit": True})
     assert "pix_deposit" in [s.id for s in enabled_plugins(summary)]
 
 
+def test_an_inactive_subscription_runs_no_deposit_hook():
+    summary = _summary(active=False, status="canceled")
+    assert "pix_deposit" not in [s.id for s in enabled_plugins(summary)]
+
+
 def test_spec_shape():
     assert pix_deposit.PIX_DEPOSIT_SPEC.id == "pix_deposit"
-    assert pix_deposit.PIX_DEPOSIT_SPEC.entitlement_keys == ("pix_deposit",)
+    assert pix_deposit.PIX_DEPOSIT_SPEC.entitlement_keys == ()
 
 
 # --------------------------------------------------------------------------

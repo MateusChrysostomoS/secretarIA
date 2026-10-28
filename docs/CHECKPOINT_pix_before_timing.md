@@ -36,8 +36,8 @@ sem o gestor da clínica trocar `deposit_timing` para `before` na configuração
 - `PUT /tenants/me/configuration` e `PUT /tenants/me/config` aceitam, dentro de `tenant`,
   `payment_provider` (`asaas|mercadopago`), `deposit_timing` (`before|after`) e
   `deposit_hold_ttl_minutes` (30-120). Recusa: `422 {"detail": {"code", "message"}}` com `code` em
-  `deposit_disabled | addon_required | entitlement_unresolvable | account_not_ready |
-  provider_unavailable | open_deposits`; o limite 30-120 é o `422` padrão do Pydantic. Um `PUT` que toque um desses três campos exige GESTOR: `403 {"detail": {"code": "forbidden_role" | "role_claim_missing", "message"}}` (secretária, médico sem flag de gestor ou token sem papel; nada é salvo, e o erro vem antes de qualquer validação). Um save que não toca os três campos segue aberto como antes.
+  `deposit_disabled | account_not_ready |
+  provider_unavailable | open_deposits` (sem add-on desde 2026-10-28: `CHECKPOINT_sinal_padrao.md`); o limite 30-120 é o `422` padrão do Pydantic. Um `PUT` que toque um desses três campos exige GESTOR: `403 {"detail": {"code": "forbidden_role" | "role_claim_missing", "message"}}` (secretária, médico sem flag de gestor ou token sem papel; nada é salvo, e o erro vem antes de qualquer validação). Um save que não toca os três campos segue aberto como antes.
 - `GET /tenants/me/config` devolve os três campos. `GET /tenants/me/payment-settings` devolve o
   estado e o PORQUÊ dos controles desabilitados (`before_blockers`, `provider_switch_blockers`).
 - `GET /tenants/me/payment-attention-items?status=open|resolved&limit&cursor` -> `{open_count,

@@ -37,7 +37,6 @@ from secretaria.models import (
 from secretaria.services import booking_hold as holds, email
 from secretaria.services.payments import (
     booking_charge,
-    deposit_gate,
     deposit_lifecycle,
     payer_data as pdata,
     registry,
@@ -142,7 +141,6 @@ def env(monkeypatch) -> Env:
         e.llm_calls.append(args[0] if args else "")
         return LLM_TEXT
 
-    monkeypatch.setattr(deposit_gate, "get_entitlements", entitlements)
     monkeypatch.setattr(workers_ns, "get_entitlements", entitlements)
     monkeypatch.setattr(workers_ns, "get_waba_token", waba_token)
     monkeypatch.setattr(workers_ns, "run_agent", llm)

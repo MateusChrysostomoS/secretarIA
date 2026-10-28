@@ -1,10 +1,11 @@
 """`quote_deposit` - the decision the `before` flow makes before it reserves a slot
 (spec sections 5.3 and 7, the first six of the nine `maybe_create_deposit` silent paths).
 
-One test per row of the table in the plan: feature off / add-on cancelled / convenio without
-deposit / service without a readable price / zero amount are LEGITIMATE `no_deposit` (the booking
-commits as before); no patient / no credential / unknown provider / an entitlement nobody can
-read are BLOCKED (the booking is never made without its deposit).
+One test per row of the table in the plan: feature off / convenio without deposit / service
+without a readable price / zero amount are LEGITIMATE `no_deposit` (the booking commits as
+before); no patient / no credential / unknown provider are BLOCKED (the booking is never made
+without its deposit). Since 2026-10-28 the deposit is a core SecretarIA capability: the gate
+never asks brain-api about the old `pix_deposit` add-on (docs/CHECKPOINT_sinal_padrao.md).
 """
 
 from uuid import uuid4
@@ -15,7 +16,6 @@ import pytest_asyncio
 from secretaria.models import Patient, Tenant
 from secretaria.models.insurance import TenantInsurancePlan
 from secretaria.services import tenant_config as cfg
-from secretaria.services.entitlements_client import EntitlementSummary
 from secretaria.services.payments import accounts, deposit_gate
 from tests.payments_support import FakeProvider, make_sessionmaker
 
@@ -27,35 +27,11 @@ async def db():
     await engine.dispose()
 
 
-def _summary(*, active=True, addon=True) -> EntitlementSummary:
-    return EntitlementSummary(
-        tenant_id="t",
-        status="active" if active else "canceled",
-        active=active,
-        secretaria_enabled=True,
-        plan="pro",
-        secretaria_tier="secretaria",
-        addons={"pix_deposit": addon},
-        limits={},
-    )
-
-
 @pytest.fixture
-def entitlement(monkeypatch):
-    """`entitlement.set(summary_or_None)` scripts what brain-api answers."""
-    state = {"value": _summary()}
-
-    async def fake(tenant_id, redis):
-        return state["value"]
-
-    monkeypatch.setattr(deposit_gate, "get_entitlements", fake)
-
-    class Handle:
-        @staticmethod
-        def set(value):
-            state["value"] = value
-
-    return Handle
+def entitlement():
+    """The gate reads no entitlement any more; kept as a named fixture so every case below states
+    the same precondition (a clinic with or without the old add-on is treated the same)."""
+    return None
 
 
 @pytest.fixture(autouse=True)
@@ -135,28 +111,15 @@ async def test_path_1_the_feature_switched_off_is_a_normal_booking(db, entitleme
     assert (quote.outcome, quote.reason) == ("no_deposit", "disabled")
 
 
-async def test_a_cancelled_addon_never_stops_the_agenda(db, entitlement):
-    entitlement.set(_summary(addon=False))
+async def test_the_deposit_no_longer_depends_on_the_old_addon(db, entitlement):
+    # Owner's decision 2026-10-28: the deposit is part of SecretarIA, not an add-on. A clinic
+    # that switched it on and connected its account is charged, whatever its plan says.
+    assert not hasattr(deposit_gate, "is_addon_active")
+    assert not hasattr(deposit_gate, "get_entitlements")
     async with db() as session:
         tenant, patient = await _seed(session)
         quote = await _quote(session, tenant, patient)
-    assert (quote.outcome, quote.reason) == ("no_deposit", "no_entitlement")
-
-
-async def test_an_inactive_subscription_is_not_entitled_either(db, entitlement):
-    entitlement.set(_summary(active=False))
-    async with db() as session:
-        tenant, patient = await _seed(session)
-        quote = await _quote(session, tenant, patient)
-    assert quote.reason == "no_entitlement"
-
-
-async def test_an_entitlement_nobody_can_read_blocks_instead_of_guessing(db, entitlement):
-    entitlement.set(None)
-    async with db() as session:
-        tenant, patient = await _seed(session)
-        quote = await _quote(session, tenant, patient)
-    assert (quote.outcome, quote.reason) == ("blocked", "entitlement_unresolvable")
+    assert quote.outcome == "required"
 
 
 async def test_path_2_a_plan_that_does_not_charge_a_deposit_books_normally(db, entitlement):
@@ -261,17 +224,3 @@ async def test_the_llm_guard_is_active_only_for_an_enabled_before_clinic(db, ent
     assert await deposit_gate.before_gate_active(before) is True
     assert await deposit_gate.before_gate_active(after) is False
     assert await deposit_gate.before_gate_active(off) is False
-
-
-async def test_the_llm_guard_fails_closed_when_the_entitlement_is_unreadable(db, entitlement):
-    entitlement.set(None)
-    async with db() as session:
-        tenant, _ = await _seed(session)
-    assert await deposit_gate.before_gate_active(tenant) is True
-
-
-async def test_the_llm_guard_steps_aside_when_the_addon_was_cancelled(db, entitlement):
-    entitlement.set(_summary(addon=False))
-    async with db() as session:
-        tenant, _ = await _seed(session)
-    assert await deposit_gate.before_gate_active(tenant) is False

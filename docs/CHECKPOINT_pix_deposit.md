@@ -1,5 +1,8 @@
 # CHECKPOINT — Pix deposit (sinal) add-on + appointment payment lifecycle
 
+> **Atualização 2026-10-28:** o sinal deixou de ser add-on — é recurso padrão da SecretarIA; nenhum
+> ponto lê mais o add-on `pix_deposit`. Ver `docs/CHECKPOINT_sinal_padrao.md`.
+
 > **Atualização 2026-09-29 (TASK-016):** os caminhos de estorno automático descritos abaixo
 > (`_refund`, `refunded`, `partial_refund`, `refund_failed`) foram REMOVIDOS: nenhum caminho devolve
 > dinheiro, o cancelamento com sinal pago vira um item de atenção para a clínica. O webhook global
