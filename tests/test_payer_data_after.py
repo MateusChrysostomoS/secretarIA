@@ -94,6 +94,8 @@ class FakeWhatsApp:
         return cls()
 
     async def send_text_message(self, to, body):
+        if FakeWhatsApp.fail_on == "text":
+            raise RuntimeError("meta down")
         FakeWhatsApp.log.append(("text", body))
         return {"messages": [{"id": f"wamid.{len(FakeWhatsApp.log)}"}]}
 
@@ -269,7 +271,7 @@ async def test_the_hook_asks_when_the_provider_needs_a_field_and_the_consultatio
     assert await _still_booked(db, appointment)
 
 
-async def test_asking_arms_the_wait_and_sends_the_question_with_the_way_out(db, env, kind):
+async def test_after_timing_request_has_no_button(db, env, kind):
     world, appointment = await _booked(db, kind)
     redis = FakeRedis()
 
@@ -281,7 +283,7 @@ async def test_asking_arms_the_wait_and_sends_the_question_with_the_way_out(db, 
         pdata.step_for("after", kind, 0),
     )
     assert await pdata.recall_pending(redis, **_key(world)) == appointment.id
-    assert FakeWhatsApp.log == [("buttons", pdata.ask_text(kind, PROVIDER[kind]))]
+    assert FakeWhatsApp.log == [("text", pdata.ask_text(kind, PROVIDER[kind]))]
     assert redis.ttls[f"payer_pending:{world.tenant_id}:{world.conversation.id}"] == (
         pdata.DATA_TTL_SECONDS
     )
@@ -310,7 +312,7 @@ async def test_a_question_that_cannot_be_delivered_frees_the_chat_and_forgets_th
 ):
     world, appointment = await _booked(db, kind)
     redis = FakeRedis()
-    FakeWhatsApp.fail_on = "buttons"
+    FakeWhatsApp.fail_on = "text"
     assert await _ask(db, world, appointment, kind, redis) is False
     conversation = await _conversation(db, world)
     assert (conversation.flow_state, conversation.flow_step) == (FlowState.IDLE, None)
@@ -416,7 +418,7 @@ async def test_a_provider_that_wants_both_fields_is_asked_for_the_second_after_t
     assert conversation.flow_step == pdata.step_for("after", "email", 0)
     assert await pdata.recall(redis, kind="document", **_key(world)) == DOCUMENT  # not asked twice
     assert await pdata.recall_pending(redis, **_key(world)) == appointment.id
-    assert FakeWhatsApp.log == [("buttons", pdata.ask_text("email", "asaas"))]
+    assert FakeWhatsApp.log == [("text", pdata.ask_text("email", "asaas"))]
     assert await _deposits(db) == []
 
 
