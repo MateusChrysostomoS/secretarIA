@@ -58,7 +58,7 @@ def classify(
 _USER_TEXT: dict[FailureReason, str] = {
     FailureReason.customer_rejected: "O Asaas não aceitou o cadastro do paciente.",
     FailureReason.customer_document_invalid: (
-        "O Asaas não aceitou o CPF ou CNPJ informado pelo paciente."
+        "O Asaas não aceitou o CPF informado pelo paciente."
     ),
     FailureReason.charge_rejected: "O Asaas não aceitou a cobrança do sinal.",
     FailureReason.value_too_low: "O valor do sinal é menor que o mínimo aceito pelo Asaas.",
@@ -110,7 +110,7 @@ _ACTION_TEXT: dict[FailureReason, str] = {
         "Confira no painel do Asaas se a conta está liberada para cadastrar clientes"
     ),
     FailureReason.customer_document_invalid: (
-        "Nada a fazer na clínica: peça ao paciente o CPF ou CNPJ correto "
+        "Nada a fazer na clínica: peça ao paciente o CPF correto "
         "ao confirmar a consulta com ele"
     ),
     FailureReason.charge_rejected: "Confira no painel do Asaas se a conta pode criar cobranças",

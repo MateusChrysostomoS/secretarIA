@@ -59,3 +59,26 @@ def test_cnpj_check_digits(digits, valid):
 )
 def test_extract_document_reads_the_usual_spellings_and_nothing_else(text, expected):
     assert pd.extract_document(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("52998224725", CPF),
+        ("529.982.247-25", CPF),
+        ("  529.982.247-25 ", CPF),  # surrounding whitespace is trimmed
+        ("meu cpf é 529.982.247-25", None),  # owner, 2026-10-29: only the CPF itself
+        (" 529 982 247 25 ", None),
+        ("529982247-25", None),
+        ("529-982-247-25", None),
+        (CNPJ, None),  # the CNPJ is no longer an answer
+        ("11.222.333/0001-81", None),
+        ("529.982.247-26", None),  # wrong check digits
+        ("111.111.111-11", None),
+        ("５２９９８２２４７２５", None),  # full-width digits are not the two spellings
+        ("", None),
+        (None, None),
+    ],
+)
+def test_parse_cpf_answer_accepts_only_the_two_spellings(text, expected):
+    assert pd.parse_cpf_answer(text) == expected

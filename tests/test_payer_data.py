@@ -68,12 +68,53 @@ def _read(kind, body, *, attempts=0, silent_for=timedelta(minutes=1)):
 
 @pytest.mark.parametrize(
     ("kind", "typed"),
-    [("document", "529.982.247-25"), ("document", CNPJ), ("email", "Maria.Silva@Example.com")],
+    [
+        ("document", "529.982.247-25"),
+        ("document", CPF),
+        ("document", "  529.982.247-25 "),  # surrounding whitespace is trimmed
+        ("email", "Maria.Silva@Example.com"),
+    ],
 )
 def test_a_valid_value_is_captured_and_never_shown_in_a_repr(kind, typed):
     reading = _read(kind, typed)
     assert reading.kind == "captured"
     assert reading.value is not None and reading.value not in repr(reading)
+
+
+@pytest.mark.parametrize(
+    "typed",
+    [
+        CNPJ,  # owner, 2026-10-29: the CNPJ is no longer accepted
+        "11.222.333/0001-81",
+        "meu cpf é 529.982.247-25",  # a CPF inside a sentence
+        "529.982.247-25 obrigado",
+        "529 982 247 25",  # spaces
+        "529982247-25",  # half formatted
+        "529.982.24725",
+        "529/982/247-25",  # another separator
+        "52998224726",  # wrong check digits
+        "529.982.247-26",
+        "111.111.111-11",  # one repeated digit
+        "529982247250",  # 12 digits
+    ],
+)
+def test_the_cpf_is_accepted_only_as_11_digits_or_the_formatted_spelling(typed):
+    reading = _read("document", typed)
+    assert (reading.kind, reading.value) == ("invalid", None)
+
+
+def test_the_cpf_retry_names_the_two_accepted_formats_and_no_cnpj():
+    assert pdata.invalid_text("document") == (
+        "Não consegui validar esse CPF. Envie só o CPF, em um destes formatos: "
+        "12345678901 ou 123.456.789-01."
+    )
+    for text in (
+        pdata.invalid_text("document"),
+        pdata.optout_text("before", "document"),
+        pdata.optout_text("after", "document"),
+        pdata.ASK_DOCUMENT_TEXT,
+    ):
+        assert "CNPJ" not in text
 
 
 def test_the_field_asked_is_the_field_read():
@@ -208,6 +249,10 @@ def test_the_refusal_copy_says_whether_the_consultation_stands(timing):
         ("AWAITING_PAYER_DATA", "payer_data:before:doc:0", CPF, True),
         ("AWAITING_PAYER_DATA", "payer_data:before:mail:0", EMAIL, True),
         ("AWAITING_DEPOSIT", None, "529.982.247-25", True),  # the same document sent twice
+        # The redaction net stays permissive (owner 2026-10-29 only narrowed the ANSWER): a CPF
+        # inside a sentence and a CNPJ are still kept out of the history.
+        ("AWAITING_DEPOSIT", None, "meu cpf é 529.982.247-25", True),
+        ("SERVICE_CATALOG", "awaiting_confirmation", CNPJ, True),
         ("AWAITING_DEPOSIT", None, "meu e-mail: maria@example.com", True),  # ditto, an e-mail
         ("SERVICE_CATALOG", "awaiting_confirmation", CPF, True),  # the charge did not start
         ("SERVICE_CATALOG", "awaiting_retry_choice", EMAIL, True),  # the slot was taken meanwhile

@@ -73,11 +73,11 @@ EMAIL = "maria.silva@example.com"
 VALUE = {"document": DOCUMENT, "email": EMAIL}
 # What the patient may type, and the value the reading extracts from it.
 TYPED = {
-    "document": [("529.982.247-25", DOCUMENT), (CNPJ, CNPJ)],
+    "document": [("529.982.247-25", DOCUMENT), (" 52998224725 ", DOCUMENT)],
     "email": [("maria.silva@Example.com", EMAIL), ("meu email é maria.silva@example.com", EMAIL)],
 }
 INVALID = {
-    "document": ["52998224726", "meu cpf é 123", "111.111.111-11"],
+    "document": ["52998224726", "meu cpf é 529.982.247-25", CNPJ],
     "email": ["maria@", "meu email é maria.silva", "maria..silva@example.com"],
 }
 PHONE_NUMBER_ID = "5511000000001"

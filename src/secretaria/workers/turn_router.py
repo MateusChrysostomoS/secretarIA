@@ -247,7 +247,7 @@ async def _route_inbound_turn(
     elif payer_data.should_redact_inbound(
         conversation.flow_state, conversation.flow_step, stored_body
     ):
-        # Decision D7: the answer to "qual é o CPF ou CNPJ / e-mail?" (typed, a transcribed voice
+        # Decision D7: the answer to "qual é o CPF / e-mail?" (typed, a transcribed voice
         # note, a repeat of it) is personal data that must never become a `messages` row, so the
         # staff console, the patient transcript and the LLM history never hold it. The value
         # travels ONLY in this turn's in-memory routing variable (`body`), exactly like the code.

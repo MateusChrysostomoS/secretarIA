@@ -30,6 +30,13 @@ e-mail code), so the raw value never becomes a `messages` row: not for the staff
 `pii-field-capture-pseudonymization` recipe (which registers a STORED value with the pseudonymizer)
 because here there is no stored value to register; the pseudonymizer (CPF and e-mail by pattern, NOT
 CNPJ) stays as the second net for a value typed unprompted.
+
+WHAT COUNTS AS AN ANSWER (owner, 2026-10-29)
+--------------------------------------------
+The CPF only, written as exactly 11 digits or as 123.456.789-01 (`payer_document.parse_cpf_answer`):
+a CPF inside a sentence, other separators and the CNPJ are asked again, naming the two formats.
+The redaction rule above deliberately uses the permissive detector (`extract_document`, any CPF or
+CNPJ anywhere), so narrowing the answer never lets a document into the history.
 """
 
 from __future__ import annotations
@@ -43,7 +50,7 @@ from uuid import UUID
 
 from secretaria.core import crypto
 from secretaria.core.logging import get_logger
-from secretaria.services.payments.payer_document import extract_document
+from secretaria.services.payments.payer_document import extract_document, parse_cpf_answer
 from secretaria.services.payments.payer_email import extract_email
 
 logger = get_logger(__name__)
@@ -79,7 +86,7 @@ _TAG: dict[str, str] = {"document": "doc", "email": "mail"}
 _KIND_OF_TAG = {tag: kind for kind, tag in _TAG.items()}
 
 REDACTED_BODY = "[dado oculto]"
-# The one sentence that asks for the CPF/CNPJ (single source for WhatsApp and Portal).
+# The one sentence that asks for the CPF (single source for WhatsApp and Portal).
 ASK_DOCUMENT_TEXT = (
     "Envie seu CPF para que possamos cadastrá-lo no nosso sistema de pagamento para que você "
     "consiga marcar a sua consulta."
@@ -121,11 +128,11 @@ class PayerData:
 
 
 def _noun(kind: Kind) -> str:
-    return "CPF ou CNPJ" if kind == "document" else "e-mail"
+    return "CPF" if kind == "document" else "e-mail"
 
 
 def ask_text(kind: Kind, provider: str | None) -> str:
-    """The question. For the CPF/CNPJ it is ONE plain sentence (`ASK_DOCUMENT_TEXT`, owner
+    """The question. For the CPF it is ONE plain sentence (`ASK_DOCUMENT_TEXT`, owner
     decision 2026-10-28), on both channels and for any provider, and NO request carries the opt-out
     button any more (a typed "não quero" and an old button tap are still understood). The e-mail
     variant (Mercado Pago) keeps its explanation, minus the button."""
@@ -141,9 +148,10 @@ def ask_text(kind: Kind, provider: str | None) -> str:
 
 def invalid_text(kind: Kind) -> str:
     if kind == "document":
+        # Owner, 2026-10-29: only the CPF, in one of the two accepted spellings.
         return (
-            "Não consegui validar esse número. Envie o CPF (11 dígitos) ou o CNPJ (14 dígitos), "
-            "só os números."
+            "Não consegui validar esse CPF. Envie só o CPF, em um destes formatos: "
+            "12345678901 ou 123.456.789-01."
         )
     return (
         "Não consegui validar esse e-mail. Envie o endereço completo, "
@@ -219,8 +227,9 @@ def looks_like_optout(text: str | None) -> bool:
 
 
 def extract_value(kind: Kind, text: str | None) -> str | None:
-    """The value of `kind` written in `text` (document digits or e-mail), or None."""
-    return extract_document(text) if kind == "document" else extract_email(text)
+    """The patient's answer read as `kind` (the CPF's digits or the e-mail), or None. The CPF is
+    strict (`parse_cpf_answer`): exactly 11 digits or 123.456.789-01, nothing around it."""
+    return parse_cpf_answer(text) if kind == "document" else extract_email(text)
 
 
 @dataclass(frozen=True)
