@@ -490,10 +490,18 @@ def _format_patient_identity(config: TenantRuntimeConfig, *, name_tool: bool = T
         if name_tool
         else ""
     )
+    ask_name = (
+        " Enquanto o nome faltar, TODA resposta sua termina pedindo o nome em uma frase "
+        "curta (ex.: \"Aliás, como posso te chamar?\"), depois de responder o que o paciente "
+        "perguntou."
+        if not identity.name_known
+        else ""
+    )
     return head + (
         "O que falta, peça com naturalidade durante a conversa, uma coisa por vez e sem "
-        f"travar o que o paciente quer.{save} Você não grava e-mail por aqui: se faltar e "
-        "ele quiser informar, diga que a recepção registra. Não peça de novo o que já temos."
+        f"travar o que o paciente quer.{ask_name}{save} Você não grava e-mail por aqui: se "
+        "faltar e ele quiser informar, diga que a recepção registra. Não peça de novo o que "
+        "já temos."
     )
 
 
