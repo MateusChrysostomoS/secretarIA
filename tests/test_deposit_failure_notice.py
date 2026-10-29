@@ -232,8 +232,13 @@ async def test_redis_key_never_contains_a_plain_email(env):
         assert key.startswith(f"deposit_fail_mail:{env.tenant_id}:")
         assert "@" not in key
         assert "clinica" not in key.lower()
-    digest = hashlib.sha256(CLINIC_EMAIL.strip().lower().encode()).hexdigest()[:16]
+    # Salted with the tenant: the same address hashes differently per clinic, and the bare
+    # (unsalted) digest of the address is never what the key carries.
+    material = f"{env.tenant_id}:{CLINIC_EMAIL.strip().lower()}"
+    digest = hashlib.sha256(material.encode()).hexdigest()[:16]
     assert f"deposit_fail_mail:{env.tenant_id}:{digest}:20261028" in env.redis.store
+    unsalted = hashlib.sha256(CLINIC_EMAIL.strip().lower().encode()).hexdigest()[:16]
+    assert not any(unsalted in key for key in keys)
     assert all(ttl == 48 * 3600 for ttl in env.redis.ttls.values())
 
 
@@ -264,3 +269,16 @@ async def test_without_a_redis_argument_an_unreachable_redis_still_does_not_rais
     assert env.sent == []
     row = await _account_row(env)
     assert row.last_charge_failure_reason is not None
+
+
+def test_counter_key_is_salted_with_the_tenant():
+    from uuid import uuid4
+
+    from secretaria.services.payments.deposit_failure_notice import _counter_key
+
+    a, b = uuid4(), uuid4()
+    key_a = _counter_key(a, "Someone@Example.com ", "20261028")
+    key_b = _counter_key(b, "someone@example.com", "20261028")
+    assert key_a.split(":")[2] != key_b.split(":")[2]  # same address, different clinic
+    assert key_a == _counter_key(a, "someone@example.com", "20261028")  # normalized
+    assert "@" not in key_a and "example" not in key_a

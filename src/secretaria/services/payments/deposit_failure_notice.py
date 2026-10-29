@@ -11,8 +11,9 @@ because the charge failed for a technical reason (TASK-071, Plan 3, task 2).
    linked address, the doctor (`fetch_professional_emails`, asked of brain-api, never stored),
    AT MOST `DAILY_EMAIL_CAP` e-mails per recipient per LOCAL day (the clinic's timezone). The
    count is one Redis `INCR` per recipient, so concurrent failures can never send a 4th one.
-   The key carries a hash of the address, never the address (`deposit_fail_mail:{tenant}:
-   {sha256(email)[:16]}:{YYYYMMDD}`), and expires after 48 h.
+   The key carries a tenant-salted hash of the address, never the address
+   (`deposit_fail_mail:{tenant}:{sha256(f"{tenant}:{email}")[:16]}:{YYYYMMDD}`), and expires
+   after 48 h.
 
 It NEVER raises into the booking (ruling R8): every error is swallowed and logged with a fixed
 event name and sanitized fields (tenant id, reason, stage, outcome) - never an address, a name, a
@@ -195,7 +196,10 @@ def _now() -> datetime:
 
 
 def _counter_key(tenant_id: UUID, address: str, local_day: str) -> str:
-    digest = hashlib.sha256(address.strip().lower().encode()).hexdigest()[:16]
+    # Salted with the tenant id, so the digest is not the bare hash of an address (which a list
+    # of known addresses could reverse) and the same address hashes differently per clinic.
+    material = f"{tenant_id}:{address.strip().lower()}"
+    digest = hashlib.sha256(material.encode()).hexdigest()[:16]
     return f"deposit_fail_mail:{tenant_id}:{digest}:{local_day}"
 
 
