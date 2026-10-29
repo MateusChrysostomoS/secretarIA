@@ -126,16 +126,14 @@ def charge_health(row: ClinicPaymentAccount) -> ChargeHealth:
     since); `ok` when a success exists and is at least as new as the last failure; otherwise
     `untested` (never charged).
 
-    A failure OLDER than the account's last successful connection check (`last_verified_at`:
-    a (re)connection, the "Tentar de novo" webhook step or the daily recheck) is stale: the
-    clinic did what the e-mail asked, so the verdict is `untested` - never `ok`, which only a
-    real successful charge earns."""
+    Owner, 2026-10-29: `failing` (the red "Sinal com problema") clears ONLY with a real
+    successful charge (`record_charge_success`) newer than the last failure. A connection check
+    (`last_verified_at`: a reconnection, the "Tentar de novo" webhook step, the daily recheck)
+    never clears it - the daily recheck used to turn the badge grey with nothing fixed. The
+    breaker reads the connection check on its own (`deposit_failure_notice.breaker_open`)."""
     failure_at = row.last_charge_failure_at
     ok_at = row.last_charge_ok_at
     if failure_at is not None and (ok_at is None or _utc(failure_at) > _utc(ok_at)):
-        verified_at = getattr(row, "last_verified_at", None)
-        if verified_at is not None and _utc(failure_at) < _utc(verified_at):
-            return "untested"
         return "failing"
     if ok_at is not None:
         return "ok"

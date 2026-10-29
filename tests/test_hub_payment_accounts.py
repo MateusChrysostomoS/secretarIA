@@ -469,7 +469,11 @@ async def test_a_stray_stored_reason_is_shown_as_unknown(client, world):
     assert "free text" not in json.dumps(item)
 
 
-async def test_reconnecting_after_a_failure_clears_the_red_badge_but_is_not_green(client, world):
+async def test_reconnecting_after_a_failure_keeps_the_red_badge_until_a_charge_works(
+    client, world
+):
+    """Owner, 2026-10-29: the red "Sinal com problema" only clears with a successful charge -
+    a reconnection (or the daily recheck) alone leaves it red."""
     tenant, _, maker, _, _, _ = world
     item = await _listed(client, world, failure="api_key_invalid")
     assert item["charge_health"] == "failing"
@@ -479,12 +483,11 @@ async def test_reconnecting_after_a_failure_clears_the_red_badge_but_is_not_gree
         await session.commit()
     assert (await _put(client, {"api_key": KEY})).status_code == 200
     (item,) = (await client.get(ENDPOINT)).json()
-    assert item["charge_health"] == "untested"
-    assert item["last_charge_failure_reason"] == "api_key_invalid"  # kept as history
-    async with maker() as session:  # a failure after the reconnection is red again
-        await accounts.record_charge_failure(
-            session, tenant_id=tenant.id, provider="asaas", reason="api_key_invalid", stage="charge"
-        )
+    assert item["charge_health"] == "failing"
+    assert item["last_charge_failure_reason"] == "api_key_invalid"
+    async with maker() as session:  # a real charge works: green
+        await accounts.record_charge_success(session, tenant_id=tenant.id, provider="asaas")
         await session.commit()
     (item,) = (await client.get(ENDPOINT)).json()
-    assert item["charge_health"] == "failing"
+    assert item["charge_health"] == "ok"
+    assert item["last_charge_failure_reason"] == "api_key_invalid"  # kept as history

@@ -205,38 +205,35 @@ def test_the_model_column_lengths_match_the_brief(column, length):
     assert ClinicPaymentAccount.__table__.c[column].nullable is True
 
 
-# --- final review, finding 1: a (re)connection makes an older failure stale -------------------
+# --- owner, 2026-10-29: only a real successful charge clears `failing` -------------------------
 
 
-def test_a_failure_older_than_the_last_verification_is_untested_never_ok():
+def test_a_connection_check_after_the_failure_does_not_clear_failing():
+    """The daily recheck (and a reconnection) refreshes `last_verified_at`; it used to turn the
+    red badge grey with nothing fixed. Only a newer successful charge clears it now."""
     t0 = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
-    # reconnected after the failure, never charged: untested (not failing, not ok)
     row = SimpleNamespace(
         last_charge_failure_at=t0,
         last_charge_ok_at=None,
         last_verified_at=t0 + timedelta(minutes=1),
     )
-    assert accounts.charge_health(row) == "untested"
-    # an OLDER success does not turn a reconnection green: green only after a real charge
-    row.last_charge_ok_at = t0 - timedelta(days=1)
-    assert accounts.charge_health(row) == "untested"
-    # a failure AFTER the reconnection is failing again
-    row.last_charge_failure_at = t0 + timedelta(minutes=2)
     assert accounts.charge_health(row) == "failing"
-    # a success after the reconnection is ok
-    row.last_charge_failure_at = t0
+    # an OLDER success does not clear it either
+    row.last_charge_ok_at = t0 - timedelta(days=1)
+    assert accounts.charge_health(row) == "failing"
+    # a success after the failure is ok
     row.last_charge_ok_at = t0 + timedelta(minutes=3)
     assert accounts.charge_health(row) == "ok"
-
-
-def test_verification_alone_never_makes_the_account_ok():
-    t0 = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
-    row = SimpleNamespace(last_charge_failure_at=None, last_charge_ok_at=None, last_verified_at=t0)
-    assert accounts.charge_health(row) == "untested"
-    # naive (SQLite) verification time still compares
+    # naive (SQLite) times still compare
     row = SimpleNamespace(
         last_charge_failure_at=t0,
         last_charge_ok_at=None,
         last_verified_at=datetime(2026, 10, 28, 13),
     )
+    assert accounts.charge_health(row) == "failing"
+
+
+def test_verification_alone_never_makes_the_account_ok():
+    t0 = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
+    row = SimpleNamespace(last_charge_failure_at=None, last_charge_ok_at=None, last_verified_at=t0)
     assert accounts.charge_health(row) == "untested"

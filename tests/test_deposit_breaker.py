@@ -456,5 +456,8 @@ def test_a_reconnection_after_the_failure_closes_the_breaker():
     assert breaker_open(row, now) is True  # verified BEFORE the failure: still open
     row.last_verified_at = now - timedelta(minutes=1)  # the clinic reconnected
     assert breaker_open(row, now) is False
+    # Owner, 2026-10-29: the badge stays red (only a real charge clears it); the breaker alone
+    # reads the connection check, so the next patient's charge is tried at once.
+    assert accounts.charge_health(row) == "failing"
     row.last_charge_failure_at = now  # and the next real charge fails again
     assert breaker_open(row, now) is True
