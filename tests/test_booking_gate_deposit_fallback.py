@@ -1213,3 +1213,98 @@ async def test_whatsapp_waived_booking_whose_row_fails_offers_a_person_and_alert
     conversation = await _conversation(db, world)
     assert conversation.handover_state != HandoverState.HUMAN_ACTIVE
     assert conversation.flow_step == fr.STEP_HUMAN_OFFER
+
+
+# ---- re-review (2026-10-29): positive success signal; the doctor from the appointment ----------
+
+
+async def test_a_slot_taken_without_a_reoffer_sends_no_booked_without_deposit_email(
+    db, env, monkeypatch
+):
+    """`_promote_booking_hold` may answer a plain "taken" text with nothing booked: only an
+    appointment that exists counts as booked, so no "booked without deposit" e-mail."""
+    world, tenant, reply = await _portal_code_hold(db, contact_email="clinic@example.com")
+    waived = await tasks._payment_after_code(reply, tenant=tenant, redis=await _remembered(world))
+    assert waived == DepositWaived("account_not_enabled")
+    env.calendar.conflicts = [True]  # taken on the agenda meanwhile
+
+    async def no_context(*args, **kwargs):
+        return None
+
+    from secretaria.workers.shared import booking_hold as worker_holds
+
+    monkeypatch.setattr(worker_holds, "_load_draft_context", no_context)
+
+    text = await _promote_waived(
+        reply, tenant=tenant, waba_token=None, redis=FakeRedis(), waived=waived
+    )
+
+    assert isinstance(text, str) and "está confirmado" not in text
+    assert await _rows(db, Appointment) == []
+    assert env.alerts == []
+    assert accounts.charge_health(await _account(db, world)) == "failing"  # still recorded
+
+
+async def test_the_waived_write_failure_card_and_alert_carry_the_appointment_context(
+    db, env, monkeypatch
+):
+    """The confirmation result carries the booking in `appointment`, not in `flow_selected_*`:
+    the card keeps the service/doctor and the orphan alert reaches the doctor."""
+    from uuid import uuid4 as new_id
+
+    from secretaria.workers.shared import flow_runner
+
+    world = await _asked_for_the_cpf(db, contact_email="clinic@example.com")
+    doctor = new_id()
+    applied: list = []
+    alerts: list[dict] = []
+
+    async def capture(reply, result, *args, **kwargs):
+        applied.append(result)
+        return True
+
+    async def handoff_alert(**kwargs):
+        alerts.append(kwargs)
+        return 1
+
+    async def no_calendar_alert(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(flow_runner, "_apply_flow_result", capture)
+    monkeypatch.setattr(flow_runner, "notify_human_handoff", handoff_alert)
+    monkeypatch.setattr(flow_runner, "_send_calendar_alert", no_calendar_alert)
+    result = fr.FlowRouterResult(
+        action="reply",
+        appointment={
+            "google_event_id": "evt-9",
+            "appointment_type": "Retorno",
+            "professional_id": doctor,
+            "insurance": "Unimed",
+            "attendee_name": "João",
+            "deposit_waived_reason": "unknown",
+        },
+    )
+    async with db() as session:
+        tenant = await session.get(type(world.tenant), world.tenant_id)
+    reply = tasks._ReplyContext(
+        conversation_id=world.conversation.id,
+        patient_ref=world.patient.wa_id,
+        inbound_body=fr.LABEL_CONFIRM,
+        channel="whatsapp",
+        tenant_id=world.tenant_id,
+    )
+
+    await flow_runner._waived_booking_not_written(
+        reply, result, None, tenant, "wt", orphan_event=True
+    )
+
+    (alert,) = alerts
+    assert alert["professional_id"] == doctor
+    (card,) = applied
+    assert card.flow_step == fr.STEP_HUMAN_OFFER
+    assert (
+        card.flow_selected_type,
+        card.flow_selected_professional_id,
+        card.flow_selected_insurance,
+        card.flow_attendee_name,
+    ) == ("Retorno", doctor, "Unimed", "João")

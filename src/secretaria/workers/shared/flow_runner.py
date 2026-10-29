@@ -207,6 +207,17 @@ async def _waived_booking_not_written(
     the clinic's calendar alert as before, then the explanation + Sim / Não card instead of the
     automatic hand-over. `orphan_event`: an event exists with no row - the clinic (and the
     doctor) also get the hand-off alert, without the conversation being handed over."""
+    # The confirmation result carries the booking in `appointment` (its `flow_selected_*` are
+    # cleared); a `calendar_unavailable` result carries it in `flow_selected_*`.
+    booking = result.appointment or {}
+    draft = SimpleNamespace(
+        flow_selected_type=booking.get("appointment_type") or result.flow_selected_type,
+        flow_selected_professional_id=(
+            booking.get("professional_id") or result.flow_selected_professional_id
+        ),
+        flow_selected_insurance=booking.get("insurance") or result.flow_selected_insurance,
+        flow_attendee_name=booking.get("attendee_name") or result.flow_attendee_name,
+    )
     logger.error(
         "worker_deposit_waived_booking_not_written",
         conversation_id=str(reply.conversation_id),
@@ -218,7 +229,7 @@ async def _waived_booking_not_written(
             await notify_human_handoff(
                 tenant=tenant,
                 conversation_id=reply.conversation_id,
-                professional_id=result.flow_selected_professional_id,
+                professional_id=booking.get("professional_id"),
                 reason="could_not_help",
                 occurrence_id=uuid5(NAMESPACE_URL, f"orphan-event:{reply.conversation_id}:"
                                     f"{(result.appointment or {}).get('google_event_id')}"),
@@ -227,7 +238,7 @@ async def _waived_booking_not_written(
             logger.error("worker_orphan_event_alert_failed", error_type=type(exc).__name__)
     await _apply_flow_result(
         reply,
-        _offer_human(deposit_lifecycle.BEFORE_CONFIRM_FAILED_TEXT, draft=result),
+        _offer_human(deposit_lifecycle.BEFORE_CONFIRM_FAILED_TEXT, draft=draft),
         None,
         redis=redis,
         tenant=tenant,

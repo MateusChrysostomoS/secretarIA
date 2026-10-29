@@ -32,7 +32,14 @@ from sqlalchemy import select
 from secretaria.ai.formatter import TextBubble
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
-from secretaria.models import Conversation, FlowState, Patient, Tenant
+from secretaria.models import (
+    Appointment,
+    AppointmentStatus,
+    Conversation,
+    FlowState,
+    Patient,
+    Tenant,
+)
 from secretaria.services.booking_hold import (
     HeldSlot,
     LiveChargeHoldError,
@@ -51,7 +58,6 @@ from secretaria.services.flow_router import (
 from secretaria.services.payments import deposit_failure_notice, deposit_lifecycle
 from secretaria.services.payments.failure_reason import FailureReason
 from secretaria.services.pending_identity import (
-    BOOKING_HOLD_EXPIRED_MESSAGE,
     BOOKING_SLOT_TAKEN_MESSAGE,
 )
 from secretaria.workers.shared.booking_hold import (
@@ -241,6 +247,26 @@ async def _rehold_for_promotion(
     return None
 
 
+async def _appointment_exists(reply: _ReplyContext, held: HeldSlot | None) -> bool:
+    """Whether the promotion wrote the appointment of `held` for this conversation. A failed
+    read is "no" (the e-mail is skipped; the charge failure is still recorded)."""
+    if held is None:
+        return False
+    try:
+        async with async_session_factory() as session:
+            found = await session.scalar(
+                select(Appointment.id).where(
+                    Appointment.conversation_id == reply.conversation_id,
+                    Appointment.start_at == held.start_at,
+                    Appointment.status == AppointmentStatus.SCHEDULED,
+                )
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("deposit_waived_booking_check_failed", error_type=type(exc).__name__)
+        return False
+    return found is not None
+
+
 async def _promote_waived(
     reply: _ReplyContext,
     *,
@@ -267,7 +293,9 @@ async def _promote_waived(
         hand_over=False,
     )
     failed = promoted == _PROMOTE_FAILED_MESSAGE
-    booked = isinstance(promoted, str) and not failed and promoted != BOOKING_HOLD_EXPIRED_MESSAGE
+    # A positive signal, never "any other text": the promotion also answers texts with nothing
+    # booked (expiry, a taken slot without a re-offer). Booked = the appointment row exists.
+    booked = isinstance(promoted, str) and not failed and await _appointment_exists(reply, held)
     notice = waived.notice
     if notice is not None:
         await _notify_deposit_waived(
