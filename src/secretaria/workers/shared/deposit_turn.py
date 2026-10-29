@@ -31,7 +31,7 @@ from secretaria.models import (
     Tenant,
 )
 from secretaria.services import deposit_wait
-from secretaria.services.booking_hold import latest_hold_in
+from secretaria.services.booking_hold import conversation_has_live_charge, latest_hold_in
 from secretaria.services.flow_router import (
     LABEL_RETRY_MENU,
     LABEL_RETRY_YES,
@@ -381,15 +381,23 @@ async def _payment_after_code(
         patient_id = await session.scalar(
             select(Conversation.patient_id).where(Conversation.id == reply.conversation_id)
         )
-        quote = await deposit_gate.quote_deposit(
-            session,
-            tenant,
-            patient_id=patient_id,
-            appointment_type=held.appointment_type,
-            professional_id=held.professional_id,
-            insurance=held.insurance,
-            redis=redis,
-        )
+        try:
+            quote = await deposit_gate.quote_deposit(
+                session,
+                tenant,
+                patient_id=patient_id,
+                appointment_type=held.appointment_type,
+                professional_id=held.professional_id,
+                insurance=held.insurance,
+                redis=redis,
+            )
+        except Exception as exc:  # noqa: BLE001 - as the gate: a technical failure, `quote_failed`
+            logger.warning(
+                "deposit_after_code_quote_failed",
+                error_type=type(exc).__name__,
+                conversation_id=str(reply.conversation_id),
+            )
+            quote = deposit_gate.DepositQuote("blocked", "quote_failed")
     if not quote.required and not quote.blocked:
         return None
 
@@ -409,6 +417,10 @@ async def _payment_after_code(
     if quote.blocked:
         if not continues_without_deposit(quote.reason):
             return await blocked(quote.reason)
+        if await conversation_has_live_charge(reply.conversation_id):
+            # Ruling R13 (as the gate): a dropped deposit never books beside a payable Pix of
+            # this conversation - that is `charge_pending`, not a technical failure.
+            return await blocked("charge_pending")
         # TASK-071 Plan 3 (ruling R6): the deposit cannot be asked for for a technical reason.
         # The code-phase hold is untouched: tell the clinic and promote it exactly as a booking
         # with no deposit due (None).

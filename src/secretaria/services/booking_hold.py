@@ -206,6 +206,25 @@ async def latest_hold_in(session, conversation_id: UUID) -> HeldSlot | None:
     return HeldSlot.of(row) if row is not None else None
 
 
+async def conversation_has_live_charge(conversation_id: UUID) -> bool:
+    """Whether a hold of this conversation still backs a payable Pix (what `place_hold` refuses
+    with `LiveChargeHoldError`). Reads on a session of its own; a failed read is False
+    (fail-open, like the whole gate). Used before a deposit is dropped (ruling R13)."""
+    try:
+        async with async_session_factory() as session:
+            found = await session.scalar(
+                select(BookingHold.id).where(
+                    BookingHold.conversation_id == conversation_id,
+                    BookingHold.charge_id.is_not(None),
+                    BookingHold.expires_at > _now(),
+                )
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("booking_gate_live_charge_read_failed", error_type=type(exc).__name__)
+        return False
+    return found is not None
+
+
 async def release_in(session, hold_id: UUID) -> None:
     """Drop one hold on a session the caller owns. Caller commits."""
     await session.execute(delete(BookingHold).where(BookingHold.id == hold_id))
@@ -894,19 +913,7 @@ class BookingGate:
     async def _has_live_charge(self) -> bool:
         """Whether this conversation's hold still backs a payable Pix (what `place_hold` refuses
         with `LiveChargeHoldError`). A failed read is False (fail-open, like the whole gate)."""
-        try:
-            async with async_session_factory() as session:
-                found = await session.scalar(
-                    select(BookingHold.id).where(
-                        BookingHold.conversation_id == self._conversation_id,
-                        BookingHold.charge_id.is_not(None),
-                        BookingHold.expires_at > _now(),
-                    )
-                )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("booking_gate_live_charge_read_failed", error_type=type(exc).__name__)
-            return False
-        return found is not None
+        return await conversation_has_live_charge(self._conversation_id)
 
     async def _decide_required(
         self,

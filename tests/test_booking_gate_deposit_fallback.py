@@ -10,6 +10,7 @@ refusal path.
 
 import itertools
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -35,6 +36,7 @@ from secretaria.services.payments import (
     accounts,
     booking_charge,
     deposit_failure_notice,
+    deposit_gate,
     deposit_lifecycle,
     payer_data as pdata,
     registry,
@@ -858,3 +860,58 @@ async def test_paid_and_normal_bookings_have_no_waived_reason(db, env):
         snapshot = booking_promotion.BookingSnapshot.from_deposit(deposit)
         promoted = await booking_promotion.promote(session, tenant, deposit, snapshot, env.calendar)
     assert promoted.appointment.deposit_waived_reason is None
+
+
+# ---- final review, finding 2: the quote itself raising after the Portal code ------------------
+
+
+async def test_payment_after_code_quote_error_promotes_without_deposit(db, env, monkeypatch):
+    """A DB error while quoting is `quote_failed` (as in the gate): book without the deposit,
+    reason `unknown`, the clinic is told; never a crashed turn."""
+    world, tenant, reply = await _portal_code_hold(db, contact_email="clinic@example.com")
+
+    async def broken_quote(*args, **kwargs):
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(deposit_gate, "quote_deposit", broken_quote)
+
+    result = await tasks._payment_after_code(reply, tenant=tenant, redis=FakeRedis())
+
+    assert result == DepositWaived("unknown")
+    (hold,) = await _rows(db, BookingHold)
+    assert (hold.phase, hold.charge_id) == ("code", None)
+    assert len(env.alerts) == 1
+    assert env.provider.called("create_pix_charge") == 0
+
+
+async def test_payment_after_code_quote_error_beside_a_live_charge_hands_over(
+    db, env, monkeypatch
+):
+    """The same live-charge safety as the gate (ruling R13): a dropped deposit never books
+    beside a payable Pix of this conversation."""
+    world, tenant, reply = await _portal_code_hold(db, contact_email="clinic@example.com")
+    async with db() as session:
+        session.add(
+            BookingHold(
+                tenant_id=world.tenant_id,
+                conversation_id=world.conversation.id,
+                start_at=SLOT_START + timedelta(days=1),
+                end_at=SLOT_END + timedelta(days=1),
+                expires_at=datetime.now(UTC) + timedelta(minutes=20),
+                phase="payment",
+                charge_id=uuid4(),
+                created_at=datetime.now(UTC) - timedelta(hours=1),  # not the latest hold
+            )
+        )
+        await session.commit()
+
+    async def broken_quote(*args, **kwargs):
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(deposit_gate, "quote_deposit", broken_quote)
+
+    result = await tasks._payment_after_code(reply, tenant=tenant, redis=FakeRedis())
+
+    assert isinstance(result, fr.FlowRouterResult) and result.action == "handover"
+    assert env.alerts == []
+    assert await _rows(db, Appointment) == []
