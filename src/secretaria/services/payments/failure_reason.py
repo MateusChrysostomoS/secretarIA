@@ -85,3 +85,39 @@ _USER_TEXT: dict[FailureReason, str] = {
 def user_text(reason: FailureReason) -> str:
     """Plain-Portuguese sentence for one reason: no names, documents, e-mails or provider text."""
     return _USER_TEXT[reason]
+
+
+_ACTION_TEXT: dict[FailureReason, str] = {
+    FailureReason.customer_rejected: (
+        "Confira no painel do Asaas se a conta está liberada para cadastrar clientes"
+    ),
+    FailureReason.customer_document_invalid: (
+        "Nada a fazer na clínica: peça ao paciente o CPF ou CNPJ correto "
+        "ao confirmar a consulta com ele"
+    ),
+    FailureReason.charge_rejected: "Confira no painel do Asaas se a conta pode criar cobranças",
+    FailureReason.value_too_low: (
+        "Aumente o valor do sinal no Portal para pelo menos o mínimo aceito pelo Asaas"
+    ),
+    FailureReason.account_not_enabled: "Conclua o cadastro no painel do Asaas",
+    FailureReason.pix_key_missing: "Cadastre uma chave Pix no painel do Asaas",
+    FailureReason.qr_unavailable: "Cadastre uma chave Pix no painel do Asaas",
+    FailureReason.api_key_invalid: "Gere uma nova chave de API e reconecte no Portal",
+    FailureReason.permission_denied: (
+        "Gere uma nova chave de API com permissão para cobranças e reconecte no Portal"
+    ),
+    FailureReason.rate_limited: "Nada a fazer: o Asaas costuma voltar ao normal em poucos minutos",
+    FailureReason.provider_unavailable: (
+        "Nada a fazer: o Asaas costuma voltar ao normal em poucos minutos"
+    ),
+    FailureReason.persist_failed: "Avise o suporte da SecretarIA e confira a cobrança no Asaas",
+    FailureReason.no_account: "Conecte a conta do Asaas no Portal",
+    FailureReason.unknown: "Confira o painel do Asaas e a conexão no Portal; se persistir, "
+    "fale com o suporte",
+}
+
+
+def action_text(reason: FailureReason) -> str:
+    """One-line "what to do" for the clinic, per reason. Kept next to `user_text`: both are
+    fixed plain-Portuguese copy with no names, documents, e-mails or provider text."""
+    return _ACTION_TEXT[reason]

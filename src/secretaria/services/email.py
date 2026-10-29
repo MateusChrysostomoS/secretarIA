@@ -201,6 +201,48 @@ async def send_paid_cancellation_alert(to_email: str, clinic_name: str) -> bool:
     return True
 
 
+DEPOSIT_UNAVAILABLE_SUBJECT = "Sinal do Pix não funcionou: consulta marcada sem sinal"
+
+
+async def send_deposit_unavailable_alert(
+    to_email: str,
+    clinic_name: str,
+    *,
+    patient_name: str | None,
+    service: str | None,
+    when_local: str,
+    reason_text: str,
+    action_text: str,
+) -> bool:
+    """Email the clinic (or the doctor) that a consultation was booked WITHOUT its Pix deposit
+    because the charge failed for a technical reason (TASK-071, Plan 3).
+
+    Same channel as `send_paid_cancellation_alert`: SMTP only, NEVER raises, and True only when
+    the message was handed to the SMTP server. The body names the patient and the consultation
+    (name, service, local time) and a fixed reason / action from `failure_reason`; it never
+    carries a document, a phone number or the patient's e-mail, and none of that reaches a log.
+    The daily cap (3 per recipient) is enforced by the caller, `deposit_failure_notice`.
+    """
+    settings = get_settings()
+    if not settings.SMTP_HOST:
+        return False
+    who = f"O paciente {patient_name.strip()}" if (patient_name or "").strip() else "Um paciente"
+    what = (service or "").strip() or "consulta"
+    body = (
+        f"Olá,\n\n{who} marcou uma consulta ({what}, {when_local}) sem o sinal pago, por "
+        f"causa de problemas técnicos com o Asaas. Motivo: {reason_text.strip().rstrip('.')}. "
+        f"O que fazer: {action_text.strip().rstrip('.')}. "
+        "Para não lotar sua caixa, avisamos no máximo 3 vezes por dia.\n\n— Equipe SecretarIA"
+    )
+    try:
+        await asyncio.to_thread(_send_sync, to_email, DEPOSIT_UNAVAILABLE_SUBJECT, body)
+    except Exception as exc:
+        logger.warning("deposit_unavailable_email_failed", error_type=type(exc).__name__)
+        return False
+    logger.info("deposit_unavailable_email_sent", clinic=clinic_name)
+    return True
+
+
 async def send_cancellation_escalation_alert(
     to_email: str, clinic_name: str, whatsapp_link: str | None
 ) -> None:
