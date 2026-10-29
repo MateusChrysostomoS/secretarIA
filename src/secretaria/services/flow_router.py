@@ -702,6 +702,10 @@ class FlowRouterResult:
     # worker (workers/shared/draft_resolution.py::_resume_booking_draft) re-runs the
     # resolver over the draft instead of showing this result's list. Never persisted.
     resume_draft: bool = False
+    # On an action="calendar_unavailable" result of a booking whose deposit was DROPPED
+    # (TASK-071 Plan 3 review fix, 2026-10-29): the worker keeps the clinic's calendar alert but
+    # offers a person (Sim / Não) instead of handing over. Never persisted.
+    deposit_waived_reason: str | None = None
     # WHICH static config the professional is missing, on an
     # action="professional_config_incomplete" result and nowhere else. WHO it
     # is missing rides on `flow_selected_professional_id` above rather than in
@@ -4512,6 +4516,7 @@ async def _handle_confirmation(
             flow_selected_slot=conversation.flow_selected_slot,
             flow_selected_professional_id=_selected_professional_id(conversation),
             flow_selected_insurance=_selected_insurance(conversation),
+            deposit_waived_reason=deposit_waived_reason,
         )
 
     # `canonical_type` is the catalog's own spelling, never whatever

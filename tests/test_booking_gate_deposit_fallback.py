@@ -133,7 +133,11 @@ class Calendar:
     async def has_conflict(self, start, end, ignore_event_id=None):
         return self.conflicts.pop(0) if self.conflicts else False
 
+    create_error: Exception | None = None
+
     async def create_event(self, start, end, summary, description="", **kwargs):
+        if self.create_error is not None:
+            raise self.create_error
         self.created.append(start)
         return {"id": f"evt-{len(self.created)}", "htmlLink": "https://calendar/evt"}
 
@@ -1138,3 +1142,74 @@ async def test_an_event_that_cannot_be_removed_alerts_the_clinic_without_handing
     assert alert["conversation_id"] == world.conversation.id
     conversation = await _conversation(db, world)
     assert conversation.handover_state != HandoverState.HUMAN_ACTIVE
+
+
+# ---- review fix 2 (2026-10-29): the WhatsApp gate's waived commit that cannot be written --------
+
+
+def _calendar_alerts(monkeypatch) -> list[str]:
+    sent: list[str] = []
+
+    async def calendar_alert(to_email, clinic_name):
+        sent.append(to_email)
+
+    monkeypatch.setattr(workers_ns, "send_calendar_alert", calendar_alert)
+    return sent
+
+
+async def test_whatsapp_waived_booking_on_an_unreachable_agenda_offers_a_person(
+    db, env, monkeypatch
+):
+    """The deposit was dropped and the agenda refused the event: the clinic still gets the
+    calendar alert, the patient gets the explanation + Sim / Não card, nobody takes over."""
+    from secretaria.services.calendar import CalendarUnavailableError
+
+    world = await _asked_for_the_cpf(db, contact_email="clinic@example.com")
+    env.calendar.create_error = CalendarUnavailableError("down")
+    calendar_alerts = _calendar_alerts(monkeypatch)
+
+    await _turn("529.982.247-25", redis=FakeArqPool())
+
+    assert env.sender.bodies() == [
+        deposit_lifecycle.BEFORE_CONFIRM_FAILED_TEXT,
+        fr.HUMAN_OFFER_BOOKING_BODY,
+    ]
+    assert calendar_alerts == ["clinic@example.com"]
+    assert await _rows(db, Appointment) == []
+    conversation = await _conversation(db, world)
+    assert conversation.handover_state != HandoverState.HUMAN_ACTIVE
+    assert (conversation.flow_state, conversation.flow_step) == (FlowState.LLM, fr.STEP_HUMAN_OFFER)
+
+
+async def test_whatsapp_waived_booking_whose_row_fails_offers_a_person_and_alerts(
+    db, env, monkeypatch
+):
+    """The event was written and the row was not: same card, the calendar alert, and the
+    hand-off alert (without handing over) so somebody removes the event."""
+    world = await _asked_for_the_cpf(db, contact_email="clinic@example.com")
+    calendar_alerts = _calendar_alerts(monkeypatch)
+    handoff_alerts: list[dict] = []
+
+    async def handoff_alert(**kwargs):
+        handoff_alerts.append(kwargs)
+        return 1
+
+    async def broken_plan_ids(*args, **kwargs):
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(workers_ns, "notify_human_handoff", handoff_alert)
+    monkeypatch.setattr(workers_ns, "resolve_booking_plan_ids", broken_plan_ids)
+
+    await _turn("529.982.247-25", redis=FakeArqPool())
+
+    assert env.sender.bodies() == [
+        deposit_lifecycle.BEFORE_CONFIRM_FAILED_TEXT,
+        fr.HUMAN_OFFER_BOOKING_BODY,
+    ]
+    assert env.calendar.created  # the orphan the alert is about
+    assert calendar_alerts == ["clinic@example.com"]
+    (alert,) = handoff_alerts
+    assert alert["conversation_id"] == world.conversation.id
+    conversation = await _conversation(db, world)
+    assert conversation.handover_state != HandoverState.HUMAN_ACTIVE
+    assert conversation.flow_step == fr.STEP_HUMAN_OFFER

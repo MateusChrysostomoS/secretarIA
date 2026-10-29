@@ -1,6 +1,7 @@
 """flow_runner - split out of workers/tasks.py (TASK-023)."""
 
 from types import SimpleNamespace
+from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import select, update
 
@@ -48,6 +49,7 @@ from secretaria.services.flow_router import (
     main_menu_buttons,
     route,
 )
+from secretaria.services.handoff_notification import notify_human_handoff
 from secretaria.services.insurance_catalog import (
     resolve_booking_plan_ids,
 )
@@ -77,6 +79,7 @@ from secretaria.workers.shared.context import (
 from secretaria.workers.shared.deposit import (
     _apply_deposit_awareness,
 )
+from secretaria.workers.shared.deposit_fallback import _offer_human
 from secretaria.workers.shared.deposit_request import (
     _abort_deposit_request,
     _send_deposit_request_notice,
@@ -91,6 +94,7 @@ from secretaria.workers.shared.draft_resolution import (
 from secretaria.workers.shared.handover import (
     _handle_calendar_unavailable,
     _handle_professional_config_incomplete,
+    _send_calendar_alert,
     _set_conversation_human_active,
 )
 from secretaria.workers.shared.llm_context import (
@@ -187,6 +191,47 @@ async def _run_flow(
         return True
     return await _apply_flow_result(
         reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+    )
+
+
+async def _waived_booking_not_written(
+    reply: _ReplyContext,
+    result: FlowRouterResult,
+    redis,
+    tenant: Tenant | None,
+    waba_token: str | None,
+    *,
+    orphan_event: bool = False,
+) -> None:
+    """A booking whose deposit was dropped could not be written (agenda down / row refused):
+    the clinic's calendar alert as before, then the explanation + Sim / Não card instead of the
+    automatic hand-over. `orphan_event`: an event exists with no row - the clinic (and the
+    doctor) also get the hand-off alert, without the conversation being handed over."""
+    logger.error(
+        "worker_deposit_waived_booking_not_written",
+        conversation_id=str(reply.conversation_id),
+        orphan_event=orphan_event,
+    )
+    await _send_calendar_alert(reply, redis)
+    if orphan_event and tenant is not None:
+        try:
+            await notify_human_handoff(
+                tenant=tenant,
+                conversation_id=reply.conversation_id,
+                professional_id=result.flow_selected_professional_id,
+                reason="could_not_help",
+                occurrence_id=uuid5(NAMESPACE_URL, f"orphan-event:{reply.conversation_id}:"
+                                    f"{(result.appointment or {}).get('google_event_id')}"),
+            )
+        except Exception as exc:  # noqa: BLE001 - best effort
+            logger.error("worker_orphan_event_alert_failed", error_type=type(exc).__name__)
+    await _apply_flow_result(
+        reply,
+        _offer_human(deposit_lifecycle.BEFORE_CONFIRM_FAILED_TEXT, draft=result),
+        None,
+        redis=redis,
+        tenant=tenant,
+        waba_token=waba_token,
     )
 
 
@@ -663,12 +708,24 @@ async def _apply_flow_result(
         return True
 
     if result.action == "calendar_unavailable":
+        if result.deposit_waived_reason is not None:
+            # The deposit was dropped and the agenda refused the booking: the clinic's alert
+            # stays, the hand-over becomes the patient's choice (owner, 2026-10-29).
+            await _waived_booking_not_written(reply, result, redis, tenant, waba_token)
+            return True
         await _handle_calendar_unavailable(reply, redis=redis, tenant=tenant, waba_token=waba_token)
         return True
     # A booking was made on Google Calendar but recording it failed: do NOT
     # tell the patient it is confirmed. Hand off to a human to reconcile the
     # (now orphaned) event instead of claiming success or risking a re-book.
     if result.appointment is not None and not persisted:
+        if result.appointment.get("deposit_waived_reason"):
+            # Same as above for a booking without its deposit; the orphaned event is reported
+            # with the hand-off alert (no hand-over) so somebody removes it.
+            await _waived_booking_not_written(
+                reply, result, redis, tenant, waba_token, orphan_event=True
+            )
+            return True
         await _handle_calendar_unavailable(reply, redis=redis, tenant=tenant, waba_token=waba_token)
         return True
     # The professional the patient reached cannot be booked at all because

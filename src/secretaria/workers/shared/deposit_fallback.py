@@ -186,15 +186,25 @@ def _slot_taken_retry(held: HeldSlot, tenant: Tenant) -> FlowRouterResult:
     )
 
 
-def _offer_human(sentence: str, held: HeldSlot | None = None) -> FlowRouterResult:
+def _offer_human(
+    sentence: str, held: HeldSlot | None = None, *, draft=None
+) -> FlowRouterResult:
     """`sentence` (what happened), then the Sim / Não card of `enter_human_offer` asking
     `HUMAN_OFFER_BOOKING_BODY` (the time was not booked).
 
     Owner, 2026-10-29: in the deposit flow the patient CHOOSES - "✅ Sim" hands the chat to the
     team exactly like any accepted offer (`flow_router._handle_human_offer`), "❌ Não" keeps it
-    with the AI. The reservation's doctor / service survive (when known) so an accepted offer
-    still alerts the right doctor."""
+    with the AI. The reservation's doctor / service survive (when known: `held`, or `draft` - any
+    object with the `flow_selected_*` / `flow_attendee_name` fields, such as the failed result or
+    the conversation) so an accepted offer still alerts the right doctor."""
     result = enter_human_offer(body=HUMAN_OFFER_BOOKING_BODY)
+    if draft is not None:
+        result.flow_selected_type = getattr(draft, "flow_selected_type", None)
+        result.flow_selected_professional_id = getattr(
+            draft, "flow_selected_professional_id", None
+        )
+        result.flow_selected_insurance = getattr(draft, "flow_selected_insurance", None)
+        result.flow_attendee_name = getattr(draft, "flow_attendee_name", None)
     if held is not None:
         result.flow_selected_type = held.appointment_type
         result.flow_selected_professional_id = held.professional_id

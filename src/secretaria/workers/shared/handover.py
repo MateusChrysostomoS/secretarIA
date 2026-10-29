@@ -138,11 +138,6 @@ async def _handle_calendar_unavailable(
     """
     logger.error("worker_calendar_unavailable", conversation_id=str(reply.conversation_id))
     await _set_conversation_human_active(reply.conversation_id)
-    async with async_session_factory() as session:
-        alert_tenant = await session.scalar(
-            select(Tenant).join(Conversation, Conversation.tenant_id == Tenant.id)
-            .where(Conversation.id == reply.conversation_id)
-        )
 
     # Fail closed (PROMPT_FIX_21): the handover above already happened, so a
     # human still sees the conversation even when the patient-facing notice
@@ -150,8 +145,18 @@ async def _handle_calendar_unavailable(
     client = _reply_sender(reply, tenant, waba_token)
     if client is not None:
         await _send_simple_text(reply.patient_ref, CALENDAR_UNAVAILABLE_MESSAGE, client=client)
+    await _send_calendar_alert(reply, redis)
 
-    # Alert the clinic owner by email (at most once every CALENDAR_ALERT_SILENCE_SECONDS).
+
+async def _send_calendar_alert(reply: _ReplyContext, redis=None) -> None:
+    """E-mail the clinic owner that the agenda failed (at most once every
+    CALENDAR_ALERT_SILENCE_SECONDS). Shared by `_handle_calendar_unavailable` and the deposit
+    fallback, which keeps this alert but offers a person instead of handing over."""
+    async with async_session_factory() as session:
+        alert_tenant = await session.scalar(
+            select(Tenant).join(Conversation, Conversation.tenant_id == Tenant.id)
+            .where(Conversation.id == reply.conversation_id)
+        )
     if alert_tenant is not None and alert_tenant.contact_email:
         settings = get_settings()
         alert_key = f"calendar:alert:{alert_tenant.id}"
