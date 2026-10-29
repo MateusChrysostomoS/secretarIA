@@ -291,7 +291,7 @@ async def test_the_opt_out_says_nothing_was_reserved_and_offers_a_human(db, env)
 
     assert env.sender.sent == [
         ("text", pdata.optout_text("before", "document")),
-        ("buttons", fr.HUMAN_OFFER_BODY, [fr.LABEL_YES, fr.LABEL_NO]),
+        ("buttons", fr.HUMAN_OFFER_BOOKING_BODY, [fr.LABEL_YES, fr.LABEL_NO]),
     ]
     assert env.llm_calls == [] and _charge_requests(env) == []
     conversation = await _conversation(db, world)
@@ -317,7 +317,7 @@ async def test_nao_after_three_invalid_cpfs_keeps_the_chat_with_the_ai(db, env):
         await _turn("123", redis=FakeArqPool())
     assert env.sender.sent[-2:] == [
         ("text", pdata.exhausted_text("before")),
-        ("buttons", fr.HUMAN_OFFER_BODY, [fr.LABEL_YES, fr.LABEL_NO]),
+        ("buttons", fr.HUMAN_OFFER_BOOKING_BODY, [fr.LABEL_YES, fr.LABEL_NO]),
     ]
     env.sender.sent.clear()
 

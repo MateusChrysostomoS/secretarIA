@@ -289,6 +289,14 @@ HUMAN_OFFER_BODY = (
     "Não sou capaz de atender essa sua necessidade por aqui. Quer que eu chame nosso "
     "atendente humano? (Pode demorar alguns minutos)"
 )
+# The same card, asked when a deposit-flow booking could not be made (TASK-071 Plan 3 follow-up,
+# owner 2026-10-29): the time was NOT booked, so the generic "Não sou capaz..." opener does not
+# fit. Only the body differs - same step, labels and `_handle_human_offer` (recognised by
+# STEP_HUMAN_OFFER, never by this text).
+HUMAN_OFFER_BOOKING_BODY = (
+    "Quer que eu chame nosso atendente humano para te ajudar a marcar? "
+    "(Pode demorar alguns minutos)"
+)
 # "❌ Não" keeps the conversation with the AI (owner, 2026-10-07): no menu, so a
 # patient who was mid-booking does not lose what they had chosen.
 HUMAN_OFFER_DECLINED_BODY = (
@@ -1700,11 +1708,14 @@ def _enter_other(conversation: Conversation | None = None) -> FlowRouterResult:
     return result
 
 
-def enter_human_offer(conversation: Conversation | None = None) -> FlowRouterResult:
+def enter_human_offer(
+    conversation: Conversation | None = None, *, body: str = HUMAN_OFFER_BODY
+) -> FlowRouterResult:
     """The fixed "quer que eu chame nosso atendente humano?" card (TASK-038).
 
     Waits in LLM mode on STEP_HUMAN_OFFER, keeping the booking answers like any
-    delegation; `_handle_human_offer` reads the tap.
+    delegation; `_handle_human_offer` reads the tap. `body` is the question
+    (`HUMAN_OFFER_BOOKING_BODY` in the deposit flow); the mechanics never change.
     """
     result = (
         _delegate_llm_keeping_draft(conversation)
@@ -1712,7 +1723,7 @@ def enter_human_offer(conversation: Conversation | None = None) -> FlowRouterRes
         else FlowRouterResult(action="delegate_llm", flow_state=FlowState.LLM)
     )
     result.action = "reply"
-    result.bubbles = [MenuBubble(body=HUMAN_OFFER_BODY, labels=[LABEL_YES, LABEL_NO])]
+    result.bubbles = [MenuBubble(body=body, labels=[LABEL_YES, LABEL_NO])]
     result.flow_step = STEP_HUMAN_OFFER
     return result
 

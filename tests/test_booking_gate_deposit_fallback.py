@@ -454,7 +454,10 @@ async def test_patient_declining_cpf_does_not_trigger_fallback(db, env):
 
     await _turn(pdata.LABEL_OPTOUT, redis=FakeArqPool(), reply_id=pdata.OPTOUT_REPLY_ID)
 
-    assert env.sender.bodies() == [pdata.optout_text("before", "document"), fr.HUMAN_OFFER_BODY]
+    assert env.sender.bodies() == [
+        pdata.optout_text("before", "document"),
+        fr.HUMAN_OFFER_BOOKING_BODY,
+    ]
     assert await _rows(db, Appointment) == [] and env.calendar.created == []
     assert env.alerts == [] and env.provider.called("create_pix_charge") == 0
     conversation = await _conversation(db, world)
@@ -641,7 +644,7 @@ def _assert_human_offer(result) -> None:
     assert result is not None and result.action == "reply"
     assert [b.body for b in result.bubbles] == [
         deposit_lifecycle.BEFORE_CONFIRM_FAILED_TEXT,
-        fr.HUMAN_OFFER_BODY,
+        fr.HUMAN_OFFER_BOOKING_BODY,
     ]
     assert result.bubbles[1].labels == [fr.LABEL_YES, fr.LABEL_NO]
     assert (result.flow_state, result.flow_step) == (FlowState.LLM, fr.STEP_HUMAN_OFFER)

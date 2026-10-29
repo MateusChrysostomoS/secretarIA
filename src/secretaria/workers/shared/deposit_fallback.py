@@ -35,6 +35,7 @@ from secretaria.core.logging import get_logger
 from secretaria.models import Conversation, FlowState, Patient, Tenant
 from secretaria.services.booking_hold import HeldSlot, LiveChargeHoldError, place_hold
 from secretaria.services.flow_router import (
+    HUMAN_OFFER_BOOKING_BODY,
     LABEL_RETRY_MENU,
     LABEL_RETRY_YES,
     STEP_AWAITING_RETRY,
@@ -159,13 +160,14 @@ def _slot_taken_retry(held: HeldSlot, tenant: Tenant) -> FlowRouterResult:
 
 
 def _offer_human(sentence: str, held: HeldSlot | None = None) -> FlowRouterResult:
-    """`sentence` (what happened), then the fixed Sim / Não card of `enter_human_offer`.
+    """`sentence` (what happened), then the Sim / Não card of `enter_human_offer` asking
+    `HUMAN_OFFER_BOOKING_BODY` (the time was not booked).
 
     Owner, 2026-10-29: in the deposit flow the patient CHOOSES - "✅ Sim" hands the chat to the
     team exactly like any accepted offer (`flow_router._handle_human_offer`), "❌ Não" keeps it
     with the AI. The reservation's doctor / service survive (when known) so an accepted offer
     still alerts the right doctor."""
-    result = enter_human_offer()
+    result = enter_human_offer(body=HUMAN_OFFER_BOOKING_BODY)
     if held is not None:
         result.flow_selected_type = held.appointment_type
         result.flow_selected_professional_id = held.professional_id

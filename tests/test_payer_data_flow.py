@@ -736,7 +736,7 @@ async def test_a_refusal_frees_everything_says_so_and_offers_a_human(db, env, ki
     assert await _recall(world, redis, kind) is None
     assert env.sender.sent == [
         ("text", expected),
-        ("buttons", fr.HUMAN_OFFER_BODY, [fr.LABEL_YES, fr.LABEL_NO]),
+        ("buttons", fr.HUMAN_OFFER_BOOKING_BODY, [fr.LABEL_YES, fr.LABEL_NO]),
     ]
     assert "equipe" not in expected
     conversation = await _conversation(db, world)

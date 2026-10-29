@@ -529,3 +529,19 @@ async def test_a_whatsapp_tap_on_the_offer_routes_like_the_portal(
     res = await route(_offer_pending(), _tenant(), None, routed)
     assert res.action == expected_action
 
+
+
+def test_the_booking_offer_is_the_same_card_with_its_own_question():
+    """Owner, 2026-10-29: the deposit flow's offer (the time was not booked) asks its own
+    question; the mechanics (step, labels, the tap's handling) are the generic card's."""
+    assert flow_router.HUMAN_OFFER_BOOKING_BODY == (
+        "Quer que eu chame nosso atendente humano para te ajudar a marcar? "
+        "(Pode demorar alguns minutos)"
+    )
+    res = flow_router.enter_human_offer(body=flow_router.HUMAN_OFFER_BOOKING_BODY)
+    (card,) = res.bubbles
+    assert card.body == flow_router.HUMAN_OFFER_BOOKING_BODY
+    assert card.labels == ["✅ Sim", "❌ Não"]
+    assert (res.flow_state, res.flow_step) == (FlowState.LLM, flow_router.STEP_HUMAN_OFFER)
+    # the generic card is untouched
+    assert flow_router.enter_human_offer().bubbles[0].body == flow_router.HUMAN_OFFER_BODY
