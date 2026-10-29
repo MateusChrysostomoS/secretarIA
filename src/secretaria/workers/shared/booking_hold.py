@@ -4,7 +4,7 @@ import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -59,6 +59,7 @@ from secretaria.services.flow_router import (
     booking_gate_scope,
     reoffer_taken_booking_slot,
 )
+from secretaria.services.handoff_notification import notify_human_handoff
 from secretaria.services.insurance_catalog import (
     resolve_booking_plan_ids,
 )
@@ -242,7 +243,9 @@ async def _promote_booking_hold(
 
     `hand_over=False` (the deposit fallback, owner 2026-10-29): when the booking cannot be
     written, `_PROMOTE_FAILED_MESSAGE` is still returned but the chat is NOT handed to a person -
-    the caller offers one instead (Sim / Não).
+    the caller offers one instead (Sim / Não). The reservation is then released (nobody is
+    rescuing it, so it must not block the slot), and an event already written with no row
+    behind it is removed again (`_drop_orphan_event`).
 
     `deposit_waived_reason` (TASK-071 Plan 3, task 6): set by the worker paths that confirm the
     booking WITHOUT the deposit after a technical failure (`deposit_fallback`); it is stored on
@@ -319,6 +322,8 @@ async def _promote_booking_hold(
         )
         if hand_over:
             await _set_conversation_human_active(reply.conversation_id)
+        else:
+            await _release_hold(held.id)
         return _PROMOTE_FAILED_MESSAGE
 
     if await slot_taken_at_confirm(
@@ -379,6 +384,8 @@ async def _promote_booking_hold(
         )
         if hand_over:
             await _set_conversation_human_active(reply.conversation_id)
+        else:
+            await _release_hold(held.id)
         return _PROMOTE_FAILED_MESSAGE
 
     appointment = Appointment(
@@ -441,7 +448,7 @@ async def _promote_booking_hold(
         # The event EXISTS on Google and the row does not. Same answer the
         # flow path gives in the same situation: never tell the patient it is
         # confirmed, hand it to a human to reconcile. (`hand_over=False`: the patient is
-        # offered one instead; the orphaned event stays visible on the clinic's own agenda.)
+        # offered one instead, so the event is removed again - or the clinic is told.)
         logger.error(
             "booking_hold_promote_persist_failed",
             error_type=type(exc).__name__,
@@ -450,6 +457,9 @@ async def _promote_booking_hold(
         )
         if hand_over:
             await _set_conversation_human_active(reply.conversation_id)
+        else:
+            await _drop_orphan_event(reply, tenant, held, calendar, event.get("id"))
+            await _release_hold(held.id)
         return _PROMOTE_FAILED_MESSAGE
 
     await _release_hold(held.id)
@@ -574,6 +584,41 @@ async def _patient_display_name(patient_id) -> str | None:
         return None
     async with async_session_factory() as session:
         return await session.scalar(select(Patient.name).where(Patient.id == patient_id))
+
+async def _drop_orphan_event(
+    reply: _ReplyContext, tenant: Tenant, held: HeldSlot, calendar, event_id: str | None
+) -> None:
+    """Best effort: remove the event a failed promotion left on the agenda with no appointment
+    behind it (review fix, 2026-10-29). When it cannot be removed, the clinic (and the doctor)
+    get the operational hand-off alert WITHOUT the conversation being handed over, so somebody
+    deletes it. Never raises; logs ids and error types only."""
+    try:
+        if event_id:
+            await calendar.cancel_event(event_id)
+            logger.info(
+                "booking_hold_orphan_event_removed",
+                conversation_id=str(reply.conversation_id),
+                tenant_id=str(tenant.id),
+            )
+            return
+    except Exception as exc:  # noqa: BLE001 - the alert below is the fallback
+        logger.error(
+            "booking_hold_orphan_event_remove_failed",
+            error_type=type(exc).__name__,
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(tenant.id),
+        )
+    try:
+        await notify_human_handoff(
+            tenant=tenant,
+            conversation_id=reply.conversation_id,
+            professional_id=held.professional_id,
+            reason="could_not_help",
+            occurrence_id=uuid5(NAMESPACE_URL, f"orphan-event:{held.id}"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("booking_hold_orphan_event_alert_failed", error_type=type(exc).__name__)
+
 
 # Said when the code was good but the appointment could not be created. Never
 # claims a booking, never blames the patient, and is always paired with a

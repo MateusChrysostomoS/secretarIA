@@ -181,6 +181,9 @@ class NoticeOutcome(StrEnum):
     capped = "capped"
     no_recipient = "no_recipient"
     send_failed = "send_failed"
+    # `send_email=False`: the failure was recorded, nobody was e-mailed (the booking it would
+    # describe was not made - review fix, 2026-10-29).
+    skipped = "skipped"
 
 
 @dataclass
@@ -291,10 +294,13 @@ async def _notify(
     provider: str,
     redis,
     record: bool = True,
+    send_email: bool = True,
 ) -> NoticeResult:
     clinic_name, clinic_email, tz = await _record_and_load(
         tenant_id, provider, reason, stage, record=record
     )
+    if not send_email:
+        return NoticeResult(NoticeOutcome.skipped)
 
     # Distinct recipients by normalized address (same address for clinic and doctor = one mail).
     recipients: dict[str, str] = {}
@@ -356,8 +362,12 @@ async def notify_deposit_failure(
     provider: str = "asaas",
     redis=None,
     record: bool = True,
+    send_email: bool = True,
 ) -> NoticeResult:
     """Record the failed deposit and e-mail the clinic (and the doctor) within the daily cap.
+
+    `send_email=False` records only (the badge stays truthful): the e-mail says the patient booked
+    WITHOUT the deposit, so it is never sent for a booking that was not made.
 
     `redis` is any client with `incr` / `expire` (the arq pool the callers already hold); when
     omitted a short-lived client is opened from `REDIS_URL`. `record=False` (a deposit skipped by
@@ -382,6 +392,7 @@ async def notify_deposit_failure(
             provider=provider,
             redis=redis,
             record=record,
+            send_email=send_email,
         )
     except Exception as exc:  # noqa: BLE001 - ruling R8: never into the booking
         logger.warning(

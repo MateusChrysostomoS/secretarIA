@@ -511,7 +511,9 @@ async def test_when_the_deposit_cannot_be_asked_the_code_hold_is_promoted_withou
         (kept,) = list(await session.scalars(select(BookingHold)))
     assert (kept.id, kept.phase) == (held.id, "code")
     assert env.emails == []  # the old payment alert stays unused
-    assert [(w["reason"], w["stage"]) for w in env.waived] == [("no_account", "quote")]
+    # Review fix: the clinic's notice rides on the result, sent once the booking exists.
+    assert env.waived == []
+    assert (result.notice.reason, result.notice.stage) == ("no_account", "quote")
 
 
 # ---- review fix I4: the lazy expiry asks the provider before it says "expired" ------------------

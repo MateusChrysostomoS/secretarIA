@@ -150,7 +150,7 @@ from secretaria.workers.shared.context import (
 from secretaria.workers.shared.degrade import (
     _handle_service_unavailable,
 )
-from secretaria.workers.shared.deposit_fallback import DepositWaived
+from secretaria.workers.shared.deposit_fallback import DepositWaived, _promote_waived
 from secretaria.workers.shared.deposit_turn import (
     _handle_deposit_wait,
     _handle_payer_data,
@@ -916,9 +916,9 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             paying = await _payment_after_code(reply, tenant=tenant, redis=redis)
             # TASK-071 Plan 3 (task 6): the deposit was dropped for a technical reason - promote
             # exactly like "no deposit due", carrying the reason onto the appointment.
-            deposit_waived_reason: str | None = None
+            waived: DepositWaived | None = None
             if isinstance(paying, DepositWaived):
-                deposit_waived_reason, paying = paying.reason, None
+                waived, paying = paying, None
             if paying is not None:
                 await _send_plain_reply(
                     reply,
@@ -938,13 +938,29 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             # two facts in the order they happened - account active, then
             # appointment confirmed - and so a promotion that fails never
             # follows a message implying it worked.
-            promoted = await _promote_booking_hold(
-                reply,
-                tenant=tenant,
-                waba_token=waba_token,
-                redis=redis,
-                deposit_waived_reason=deposit_waived_reason,
-            )
+            if waived is not None:
+                # The deposit was dropped: never an automatic hand-over (owner, 2026-10-29). A
+                # booking that cannot be written answers the explanation + Sim / Não card, and
+                # the clinic's "booked without deposit" e-mail only follows a real booking.
+                promoted = await _promote_waived(
+                    reply, tenant=tenant, waba_token=waba_token, redis=redis, waived=waived
+                )
+            else:
+                promoted = await _promote_booking_hold(
+                    reply, tenant=tenant, waba_token=waba_token, redis=redis
+                )
+            if isinstance(promoted, FlowRouterResult):
+                await _send_plain_reply(
+                    reply,
+                    tenant=tenant,
+                    waba_token=waba_token,
+                    body=CODE_ACCEPTED_MESSAGE,
+                    event="pending_code_reply_sent",
+                )
+                await _apply_flow_result(
+                    reply, promoted, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+                )
+                return
             if isinstance(promoted, SlotTakenAtPromotion):
                 # The code was good, the held time was filled on the agenda
                 # while it was being typed. Same order of facts: the account

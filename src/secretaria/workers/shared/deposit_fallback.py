@@ -25,7 +25,7 @@ When the booking cannot be written at all, nobody takes the chat over on their o
 nosso atendente humano?" card (`flow_router.enter_human_offer`, Sim / Não) - `_offer_human`.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from sqlalchemy import select
 
@@ -33,7 +33,12 @@ from secretaria.ai.formatter import TextBubble
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import Conversation, FlowState, Patient, Tenant
-from secretaria.services.booking_hold import HeldSlot, LiveChargeHoldError, place_hold
+from secretaria.services.booking_hold import (
+    HeldSlot,
+    LiveChargeHoldError,
+    latest_hold_in,
+    place_hold,
+)
 from secretaria.services.flow_router import (
     HUMAN_OFFER_BOOKING_BODY,
     LABEL_RETRY_MENU,
@@ -45,7 +50,10 @@ from secretaria.services.flow_router import (
 )
 from secretaria.services.payments import deposit_failure_notice, deposit_lifecycle
 from secretaria.services.payments.failure_reason import FailureReason
-from secretaria.services.pending_identity import BOOKING_SLOT_TAKEN_MESSAGE
+from secretaria.services.pending_identity import (
+    BOOKING_HOLD_EXPIRED_MESSAGE,
+    BOOKING_SLOT_TAKEN_MESSAGE,
+)
 from secretaria.workers.shared.booking_hold import (
     _PROMOTE_FAILED_MESSAGE,
     SlotTakenAtPromotion,
@@ -58,13 +66,29 @@ logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
+class WaiverNotice:
+    """What `_notify_deposit_waived` needs, kept until the booking is known to exist (review fix,
+    2026-10-29): the clinic's e-mail says the patient booked WITHOUT the deposit, so it is sent
+    only after a successful promotion; on failure the charge failure is still recorded."""
+
+    held: HeldSlot
+    code: str
+    reason: FailureReason
+    stage: str
+    provider: str | None = None
+    record: bool = True
+
+
+@dataclass(frozen=True)
 class DepositWaived:
     """`_payment_after_code`'s answer when the deposit was DROPPED for a technical reason (task
-    6): the code-phase hold is ready for `_promote_booking_hold`, exactly like "no deposit due"
-    (None), and `reason` (a `FailureReason` value) goes with it onto the appointment so the
-    agenda can mark the booking made without its deposit. The clinic was already told."""
+    6): the code-phase hold is ready for the promotion, exactly like "no deposit due" (None), and
+    `reason` (a `FailureReason` value) goes with it onto the appointment so the agenda can mark
+    the booking made without its deposit. `notice` is the clinic's notice, delivered by
+    `_promote_waived` once the outcome of the booking is known."""
 
     reason: str
+    notice: WaiverNotice | None = field(default=None, compare=False)
 
 
 async def _notify_deposit_waived(
@@ -78,11 +102,13 @@ async def _notify_deposit_waived(
     redis,
     provider: str | None = None,
     record: bool = True,
+    send_email: bool = True,
 ) -> None:
     """Log the dropped deposit (ids + closed vocabulary) and tell the clinic. Never raises.
 
     `record=False` is the breaker's skip (task 5): the clinic is told, but no new failure is
-    recorded, so the breaker's cooldown keeps counting from the last REAL charge failure."""
+    recorded, so the breaker's cooldown keeps counting from the last REAL charge failure.
+    `send_email=False`: the booking was not made - record only, no "booked without deposit" mail."""
     logger.warning(
         "deposit_waived_after_hold",
         code=code,
@@ -119,6 +145,7 @@ async def _notify_deposit_waived(
         provider=provider or tenant.payment_provider or "asaas",
         redis=redis,
         record=record,
+        send_email=send_email,
     )
 
 
@@ -184,17 +211,9 @@ def _confirm_failed(held: HeldSlot | None = None) -> FlowRouterResult:
 
 
 async def _rehold_for_promotion(
-    reply: _ReplyContext,
-    tenant: Tenant,
-    held: HeldSlot,
-    *,
-    code: str,
-    reason: FailureReason,
-    stage: str,
-    redis,
-    provider: str | None = None,
+    reply: _ReplyContext, tenant: Tenant, held: HeldSlot
 ) -> FlowRouterResult | None:
-    """Reserve the slot again and tell the clinic; None = ready for `_promote_booking_hold`.
+    """Reserve the slot again; None = ready for `_promote_waived` (which tells the clinic).
 
     Otherwise the result to apply instead: the slot was taken meanwhile (other times), or this
     conversation still has a live charge (nothing is booked; a person is offered)."""
@@ -209,17 +228,53 @@ async def _rehold_for_promotion(
         return _confirm_failed(held)
     if fresh is None:
         return _slot_taken_retry(held, tenant)
-    await _notify_deposit_waived(
-        reply,
-        tenant,
-        held,
-        code=code,
-        reason=reason,
-        stage=stage,
-        redis=redis,
-        provider=provider,
-    )
     return None
+
+
+async def _promote_waived(
+    reply: _ReplyContext,
+    *,
+    tenant: Tenant,
+    waba_token: str | None,
+    redis,
+    waived: DepositWaived,
+) -> str | SlotTakenAtPromotion | FlowRouterResult | None:
+    """Promote the code-phase hold of a booking whose deposit was DROPPED, then tell the clinic.
+
+    The promotion never hands the chat over (`hand_over=False`); a booking that cannot be written
+    answers the explanation + Sim / Não card (`_confirm_failed`, a `FlowRouterResult`) and its hold
+    is already released. The clinic's "booked without the deposit" e-mail goes out only when the
+    booking exists; otherwise the charge failure is recorded and nothing is mailed. Other answers
+    are the promotion's own (confirmation text, `SlotTakenAtPromotion`, expiry text, None)."""
+    async with async_session_factory() as session:
+        held = await latest_hold_in(session, reply.conversation_id)
+    promoted = await _promote_booking_hold(
+        reply,
+        tenant=tenant,
+        waba_token=waba_token,
+        redis=redis,
+        deposit_waived_reason=waived.reason,
+        hand_over=False,
+    )
+    failed = promoted == _PROMOTE_FAILED_MESSAGE
+    booked = isinstance(promoted, str) and not failed and promoted != BOOKING_HOLD_EXPIRED_MESSAGE
+    notice = waived.notice
+    if notice is not None:
+        await _notify_deposit_waived(
+            reply,
+            tenant,
+            notice.held,
+            code=notice.code,
+            reason=notice.reason,
+            stage=notice.stage,
+            redis=redis,
+            provider=notice.provider,
+            record=notice.record,
+            send_email=booked,
+        )
+    if failed:
+        return _confirm_failed(held)
+    return promoted
 
 
 async def _confirm_without_deposit(
@@ -236,24 +291,23 @@ async def _confirm_without_deposit(
     """Book the reserved slot WITHOUT the deposit and return what the patient is told: the
     normal confirmation, the same day's other times, or the offer of a person when it cannot be
     written."""
-    instead = await _rehold_for_promotion(
-        reply, tenant, held, code=code, reason=reason, stage=stage, redis=redis
-    )
+    instead = await _rehold_for_promotion(reply, tenant, held)
     if instead is not None:
         return instead
-    promoted = await _promote_booking_hold(
+    promoted = await _promote_waived(
         reply,
         tenant=tenant,
         waba_token=waba_token,
         redis=redis,
-        deposit_waived_reason=str(reason),
-        hand_over=False,
+        waived=DepositWaived(
+            str(reason), WaiverNotice(held, code=code, reason=reason, stage=stage)
+        ),
     )
     if isinstance(promoted, SlotTakenAtPromotion):
         return promoted.reoffer
-    if promoted is None or promoted == _PROMOTE_FAILED_MESSAGE:
-        # Not written (`hand_over=False`: the promotion left the chat with us); its own message
-        # speaks of an account activation that this path never had.
+    if isinstance(promoted, FlowRouterResult):
+        return promoted  # not written: the explanation + Sim / Não card
+    if promoted is None:
         return _confirm_failed(held)
     return FlowRouterResult(
         action="reply",

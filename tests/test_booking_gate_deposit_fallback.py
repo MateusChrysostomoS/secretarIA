@@ -49,7 +49,7 @@ from secretaria.services.payments.deposit_gate import DepositQuote
 from secretaria.services.payments.provider import ChargeState, PaymentStatus, ProviderError
 from secretaria.services.pending_identity import RequestCodeOutcome, RequestCodeResult
 from secretaria.workers import tasks
-from secretaria.workers.shared.deposit_fallback import DepositWaived
+from secretaria.workers.shared.deposit_fallback import DepositWaived, _promote_waived
 from tests._patching import workers_ns
 from tests.before_support import (
     SLOT_END,
@@ -120,7 +120,15 @@ class Calendar:
 
     def __init__(self, conflicts: list[bool] | None = None) -> None:
         self.created: list = []
+        self.cancelled: list = []
+        self.cancel_error: Exception | None = None
         self.conflicts = list(conflicts or [])
+
+    async def cancel_event(self, event_id):
+        if self.cancel_error is not None:
+            raise self.cancel_error
+        self.cancelled.append(event_id)
+        return True
 
     async def has_conflict(self, start, end, ignore_event_id=None):
         return self.conflicts.pop(0) if self.conflicts else False
@@ -505,6 +513,12 @@ async def test_payment_after_code_failure_keeps_a_promotable_hold_and_tells_the_
     (hold,) = await _rows(db, BookingHold)
     assert (hold.phase, hold.charge_id) == ("code", None)
     assert await _rows(db, PixDeposit) == []
+    # Review fix: the "booked without deposit" e-mail waits for the booking to exist.
+    assert env.alerts == []
+    text = await _promote_waived(
+        reply, tenant=tenant, waba_token=None, redis=FakeRedis(), waived=result
+    )
+    assert "está confirmado" in text
     assert len(env.alerts) == 1
 
 
@@ -525,11 +539,12 @@ async def test_payment_after_code_quote_failure_promotes_without_deposit(db, env
     world, tenant, reply = await _portal_code_hold(
         db, with_account=False, contact_email="clinic@example.com"
     )
-    assert await tasks._payment_after_code(
-        reply, tenant=tenant, redis=FakeRedis()
-    ) == DepositWaived("no_account")
+    waived = await tasks._payment_after_code(reply, tenant=tenant, redis=FakeRedis())
+    assert waived == DepositWaived("no_account")
     (hold,) = await _rows(db, BookingHold)
     assert hold.phase == "code"
+    assert env.alerts == []
+    await _promote_waived(reply, tenant=tenant, waba_token=None, redis=FakeRedis(), waived=waived)
     assert len(env.alerts) == 1
 
 
@@ -819,8 +834,9 @@ async def test_verified_code_turn_promotes_with_the_waived_reason(db, env, monke
     async def waived(reply, *, tenant, redis):
         return DepositWaived("pix_key_missing")
 
-    async def promote(reply, *, tenant, waba_token, redis, deposit_waived_reason=None):
+    async def promote(reply, *, tenant, waba_token, redis, deposit_waived_reason=None, **kw):
         seen["reason"] = deposit_waived_reason
+        seen["hand_over"] = kw.get("hand_over", True)
         return None
 
     async def verified(tenant_id, external_id, code):
@@ -844,7 +860,7 @@ async def test_verified_code_turn_promotes_with_the_waived_reason(db, env, monke
     )
     await tasks._send_bot_reply(inbound, redis=None)
 
-    assert seen == {"reason": "pix_key_missing"}
+    assert seen == {"reason": "pix_key_missing", "hand_over": False}
 
 
 async def test_abort_deposit_request_records_waived_reason(db, env):
@@ -919,6 +935,8 @@ async def test_payment_after_code_quote_error_promotes_without_deposit(db, env, 
     assert result == DepositWaived("unknown")
     (hold,) = await _rows(db, BookingHold)
     assert (hold.phase, hold.charge_id) == ("code", None)
+    assert env.alerts == []  # sent once the booking exists
+    await _promote_waived(reply, tenant=tenant, waba_token=None, redis=FakeRedis(), waived=result)
     assert len(env.alerts) == 1
     assert env.provider.called("create_pix_charge") == 0
 
@@ -1006,3 +1024,117 @@ async def test_promotion_survives_a_failed_phone_read(db, env, monkeypatch):
     (appointment,) = await _rows(db, Appointment)
     assert appointment.phone is None
     assert len(env.calendar.created) == 1
+
+
+# ---- review fix (2026-10-29): a waived booking that cannot be written never hands over ----------
+
+
+async def _verified_code_turn(db, world, redis):
+    from secretaria.services.pending_identity import VerifyOutcome, VerifyResult
+
+    async def verified(tenant_id, external_id, code):
+        return VerifyResult(VerifyOutcome.VERIFIED)
+
+    import secretaria.workers.orchestrator as orchestrator
+
+    orchestrator_verify = orchestrator.verify_code
+    orchestrator.verify_code = verified
+    try:
+        async with db() as session:
+            conversation = await session.get(Conversation, world.conversation.id)
+            conversation.flow_state = FlowState.AWAITING_EMAIL_CODE
+            patient = await session.get(type(world.patient), world.patient.id)
+            patient.lgpd_accepted_at = datetime.now(UTC)
+            await session.commit()
+        inbound = await tasks._persist_brain_message_inbound(
+            tenant_id=world.tenant_id,
+            external_id=world.patient.external_id,
+            text="123456",
+            patient_name="Maria",
+        )
+        await tasks._send_bot_reply(inbound, redis=redis)
+    finally:
+        orchestrator.verify_code = orchestrator_verify
+
+
+async def test_portal_waived_booking_that_cannot_be_written_offers_a_person(
+    db, env, monkeypatch
+):
+    """Portal, `before`: valid code, the Pix fails (deposit dropped), then the agenda is gone. The
+    patient reads the code line, the explanation and the Sim / Não card - no automatic hand-over,
+    no "booked without deposit" e-mail, the hold released, the charge failure still recorded."""
+    from secretaria.services.pending_identity import CODE_ACCEPTED_MESSAGE
+
+    world, tenant, reply = await _portal_code_hold(db, contact_email="clinic@example.com")
+
+    async def no_calendar(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(workers_ns, "_appointment_calendar", no_calendar)
+
+    await _verified_code_turn(db, world, await _remembered(world))
+
+    assert env.sender.bodies() == [
+        CODE_ACCEPTED_MESSAGE,
+        deposit_lifecycle.BEFORE_CONFIRM_FAILED_TEXT,
+        fr.HUMAN_OFFER_BOOKING_BODY,
+    ]
+    conversation = await _conversation(db, world)
+    assert conversation.handover_state != HandoverState.HUMAN_ACTIVE
+    assert (conversation.flow_state, conversation.flow_step) == (FlowState.LLM, fr.STEP_HUMAN_OFFER)
+    assert await _rows(db, Appointment) == []
+    assert await _rows(db, BookingHold) == []  # the slot is free for others
+    assert env.alerts == []  # no "booked without deposit" for a booking that does not exist
+    assert accounts.charge_health(await _account(db, world)) == "failing"  # still recorded
+
+
+async def _portal_persist_failure(db, env, monkeypatch):
+    world, tenant, reply = await _portal_code_hold(db, contact_email="clinic@example.com")
+
+    async def broken_plan_ids(*args, **kwargs):
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(workers_ns, "resolve_booking_plan_ids", broken_plan_ids)
+    alerts: list[dict] = []
+
+    async def handoff_alert(**kwargs):
+        alerts.append(kwargs)
+        return 1
+
+    monkeypatch.setattr(workers_ns, "notify_human_handoff", handoff_alert)
+    waived = await tasks._payment_after_code(reply, tenant=tenant, redis=await _remembered(world))
+    assert waived == DepositWaived("account_not_enabled")
+    return world, tenant, reply, waived, alerts
+
+
+async def test_an_event_left_without_its_booking_is_removed_again(db, env, monkeypatch):
+    world, tenant, reply, waived, alerts = await _portal_persist_failure(db, env, monkeypatch)
+
+    result = await _promote_waived(
+        reply, tenant=tenant, waba_token=None, redis=FakeRedis(), waived=waived
+    )
+
+    assert isinstance(result, fr.FlowRouterResult) and result.flow_step == fr.STEP_HUMAN_OFFER
+    assert env.calendar.created and env.calendar.cancelled == ["evt-1"]
+    assert alerts == []  # removed: nobody needs to clean it up
+    assert await _rows(db, Appointment) == [] and await _rows(db, BookingHold) == []
+    assert env.alerts == []
+    conversation = await _conversation(db, world)
+    assert conversation.handover_state != HandoverState.HUMAN_ACTIVE
+
+
+async def test_an_event_that_cannot_be_removed_alerts_the_clinic_without_handing_over(
+    db, env, monkeypatch
+):
+    world, tenant, reply, waived, alerts = await _portal_persist_failure(db, env, monkeypatch)
+    env.calendar.cancel_error = RuntimeError("google down")
+
+    result = await _promote_waived(
+        reply, tenant=tenant, waba_token=None, redis=FakeRedis(), waived=waived
+    )
+
+    assert isinstance(result, fr.FlowRouterResult)
+    (alert,) = alerts
+    assert alert["conversation_id"] == world.conversation.id
+    conversation = await _conversation(db, world)
+    assert conversation.handover_state != HandoverState.HUMAN_ACTIVE

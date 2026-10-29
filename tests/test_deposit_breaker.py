@@ -367,7 +367,7 @@ async def test_open_breaker_on_portal_takes_the_code_hold_then_promotes_without_
     async with db() as session:
         (hold,) = list(await session.scalars(select(BookingHold)))
     assert (hold.phase, hold.charge_id) == ("code", None)
-    assert len(env.alerts) == 1
+    assert env.alerts == []  # review fix: the e-mail follows the booking
 
     calendar = Calendar()
 
@@ -375,14 +375,13 @@ async def test_open_breaker_on_portal_takes_the_code_hold_then_promotes_without_
         return calendar
 
     monkeypatch.setattr(workers_ns, "_appointment_calendar", appointment_calendar)
-    text = await tasks._promote_booking_hold(
-        reply,
-        tenant=tenant,
-        waba_token=None,
-        redis=None,
-        deposit_waived_reason=waived.reason,
+    from secretaria.workers.shared.deposit_fallback import _promote_waived
+
+    text = await _promote_waived(
+        reply, tenant=tenant, waba_token=None, redis=FakeRedis(), waived=waived
     )
     assert "está confirmado" in text
+    assert len(env.alerts) == 1
     async with db() as session:
         (appointment,) = list(await session.scalars(select(Appointment)))
     assert appointment.status == AppointmentStatus.SCHEDULED

@@ -58,7 +58,7 @@ from secretaria.workers.shared.booking_hold import _release_hold, _tenant_tzinfo
 from secretaria.workers.shared.context import _ReplyContext
 from secretaria.workers.shared.deposit_fallback import (
     DepositWaived,
-    _notify_deposit_waived,
+    WaiverNotice,
     _offer_human,
     _rehold_for_promotion,
 )
@@ -443,18 +443,12 @@ async def _payment_after_code(
             # this conversation - that is `charge_pending`, not a technical failure.
             return await blocked("charge_pending")
         # TASK-071 Plan 3 (ruling R6): the deposit cannot be asked for for a technical reason.
-        # The code-phase hold is untouched: tell the clinic and promote it exactly as a booking
-        # with no deposit due (None).
-        await _notify_deposit_waived(
-            reply,
-            tenant,
-            held,
-            code=quote.reason,
-            reason=failure_reason_for(quote.reason),
-            stage="quote",
-            redis=redis,
+        # The code-phase hold is untouched: promote it exactly as a booking with no deposit due
+        # (None); the clinic is told by `_promote_waived` once the booking exists.
+        reason = failure_reason_for(quote.reason)
+        return DepositWaived(
+            str(reason), WaiverNotice(held, code=quote.reason, reason=reason, stage="quote")
         )
-        return DepositWaived(str(failure_reason_for(quote.reason)))
     # TASK-071 Plan 3, task 5: the clinic's account is known to be failing for an account-level
     # reason (the breaker is open). No CPF question, no customer, no charge: the code-phase hold
     # is promoted exactly as a booking with no deposit due, and the clinic is told (no new
@@ -462,18 +456,17 @@ async def _payment_after_code(
     provider = quote.provider or tenant.payment_provider or "asaas"
     breaker = await breaker_reason(tenant.id, provider)
     if breaker is not None:
-        await _notify_deposit_waived(
-            reply,
-            tenant,
-            held,
-            code="breaker_open",
-            reason=breaker,
-            stage=BREAKER_STAGE,
-            redis=redis,
-            provider=provider,
-            record=False,
+        return DepositWaived(
+            str(breaker),
+            WaiverNotice(
+                held,
+                code="breaker_open",
+                reason=breaker,
+                stage=BREAKER_STAGE,
+                provider=provider,
+                record=False,
+            ),
         )
-        return DepositWaived(str(breaker))
     payer = await payer_data.recall_all(
         redis, tenant_id=tenant.id, conversation_id=reply.conversation_id
     )
@@ -506,17 +499,19 @@ async def _payment_after_code(
         # the reservation; it is placed again (code phase) and the caller promotes it like any
         # booking with no deposit due (None), re-checking the slot on the agenda first.
         waived = failure_reason_for(exc.code, exc.reason)
-        instead = await _rehold_for_promotion(
-            reply,
-            tenant,
-            held,
-            code=exc.code,
-            reason=waived,
-            stage=exc.stage or "charge",
-            redis=redis,
-            provider=quote.provider,
+        instead = await _rehold_for_promotion(reply, tenant, held)
+        if instead is not None:
+            return instead
+        return DepositWaived(
+            str(waived),
+            WaiverNotice(
+                held,
+                code=exc.code,
+                reason=waived,
+                stage=exc.stage or "charge",
+                provider=quote.provider,
+            ),
         )
-        return instead if instead is not None else DepositWaived(str(waived))
     if payment is None:
         return FlowRouterResult(
             action="reply",
