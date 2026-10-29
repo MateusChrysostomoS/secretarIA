@@ -110,7 +110,9 @@ def _breaker_cooldown() -> timedelta:
 def breaker_open(row, now: datetime) -> bool:
     """Whether the deposit step must be skipped for the account `row` at `now`: its health is
     `failing`, the last failure is an account-level one (`BREAKER_REASONS`, compared by value:
-    the column holds the string) and it happened less than the cooldown ago."""
+    the column holds the string) and it happened less than the cooldown ago. A failure older
+    than the account's last connection check reads as `untested` (`charge_health`), so a clinic
+    that reconnected closes the breaker at once."""
     if row is None or accounts.charge_health(row) != "failing":
         return False
     if row.last_charge_failure_reason not in {reason.value for reason in BREAKER_REASONS}:

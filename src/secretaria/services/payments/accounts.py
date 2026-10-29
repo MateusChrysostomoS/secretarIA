@@ -124,10 +124,18 @@ async def record_charge_success(session: AsyncSession, *, tenant_id: UUID, provi
 def charge_health(row: ClinicPaymentAccount) -> ChargeHealth:
     """`failing` when the last failure is newer than the last success (or nothing succeeded
     since); `ok` when a success exists and is at least as new as the last failure; otherwise
-    `untested` (never charged)."""
+    `untested` (never charged).
+
+    A failure OLDER than the account's last successful connection check (`last_verified_at`:
+    a (re)connection, the "Tentar de novo" webhook step or the daily recheck) is stale: the
+    clinic did what the e-mail asked, so the verdict is `untested` - never `ok`, which only a
+    real successful charge earns."""
     failure_at = row.last_charge_failure_at
     ok_at = row.last_charge_ok_at
     if failure_at is not None and (ok_at is None or _utc(failure_at) > _utc(ok_at)):
+        verified_at = getattr(row, "last_verified_at", None)
+        if verified_at is not None and _utc(failure_at) < _utc(verified_at):
+            return "untested"
         return "failing"
     if ok_at is not None:
         return "ok"

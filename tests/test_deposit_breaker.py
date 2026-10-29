@@ -118,6 +118,9 @@ async def _fail(db, world, reason: str, *, at: datetime | None = None) -> None:
                 session, tenant_id=world.tenant_id, provider="asaas"
             )
             row.last_charge_failure_at = at
+            # The world was verified "now"; a back-dated failure needs a verification before it,
+            # or it would read as stale (a reconnection after the failure closes the breaker).
+            row.last_verified_at = at - timedelta(hours=1)
         await session.commit()
 
 
@@ -436,3 +439,22 @@ async def test_breaker_read_error_is_treated_as_closed(db, env, monkeypatch):
 
     monkeypatch.setattr(deposit_failure_notice.accounts, "get_account_row", broken)
     assert await deposit_failure_notice.breaker_reason(world.tenant_id, "asaas") is None
+
+
+def test_a_reconnection_after_the_failure_closes_the_breaker():
+    now = datetime.now(UTC)
+    row = type(
+        "Row",
+        (),
+        {
+            "last_charge_failure_reason": "api_key_invalid",
+            "last_charge_failure_at": now - timedelta(minutes=5),
+            "last_charge_ok_at": None,
+            "last_verified_at": now - timedelta(minutes=10),
+        },
+    )()
+    assert breaker_open(row, now) is True  # verified BEFORE the failure: still open
+    row.last_verified_at = now - timedelta(minutes=1)  # the clinic reconnected
+    assert breaker_open(row, now) is False
+    row.last_charge_failure_at = now  # and the next real charge fails again
+    assert breaker_open(row, now) is True

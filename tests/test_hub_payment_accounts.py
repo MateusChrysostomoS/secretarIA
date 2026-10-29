@@ -6,6 +6,7 @@ sends a key also proves the key is in NO response - success, refusal, validation
 """
 
 import json
+from datetime import timedelta
 from uuid import uuid4
 
 import pytest
@@ -466,3 +467,24 @@ async def test_a_stray_stored_reason_is_shown_as_unknown(client, world):
     assert item["last_charge_failure_reason"] == "unknown"
     assert item["last_charge_failure_text"] == user_text(FailureReason.unknown)
     assert "free text" not in json.dumps(item)
+
+
+async def test_reconnecting_after_a_failure_clears_the_red_badge_but_is_not_green(client, world):
+    tenant, _, maker, _, _, _ = world
+    item = await _listed(client, world, failure="api_key_invalid")
+    assert item["charge_health"] == "failing"
+    async with maker() as session:  # the failure happened before the reconnection
+        row = await accounts.get_account_row(session, tenant_id=tenant.id, provider="asaas")
+        row.last_charge_failure_at = row.last_verified_at - timedelta(minutes=1)
+        await session.commit()
+    assert (await _put(client, {"api_key": KEY})).status_code == 200
+    (item,) = (await client.get(ENDPOINT)).json()
+    assert item["charge_health"] == "untested"
+    assert item["last_charge_failure_reason"] == "api_key_invalid"  # kept as history
+    async with maker() as session:  # a failure after the reconnection is red again
+        await accounts.record_charge_failure(
+            session, tenant_id=tenant.id, provider="asaas", reason="api_key_invalid", stage="charge"
+        )
+        await session.commit()
+    (item,) = (await client.get(ENDPOINT)).json()
+    assert item["charge_health"] == "failing"
