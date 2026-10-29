@@ -1319,3 +1319,36 @@ async def test_without_the_flag_the_consent_gate_still_asks(db, calls):
     )
     assert reply is not None
     assert reply.send_consent_reminder or reply.send_consent_notice
+
+
+@pytest.mark.asyncio
+async def test_resuming_a_code_wait_after_a_long_silence_renews_the_carried_choice(db, calls):
+    """TASK-072 review H1: "quer continuar?" -> "sim" on a code wait mails a NEW code. The
+    carried choice gets a fresh lease there too, so the card names the slot and every reader
+    (promotion, the deposit leg, the card) agrees it is still there."""
+    tenant = await _seed_tenant(db)
+    patient, conversation = await _seed_conversation(
+        db, tenant, flow_state=FlowState.AWAITING_EMAIL_CODE
+    )
+    await _place(db, tenant, conversation, HELD_START, patient=patient)
+    await _expire(db, conversation)  # silent for longer than the lease
+    assert await holds.live_hold(conversation.id) is None
+
+    reply = tasks._ReplyContext(
+        channel=CHANNEL_BRAIN_MESSAGE,
+        conversation_id=conversation.id,
+        tenant_id=tenant.id,
+        patient_ref=EXTERNAL_ID,
+        inbound_body="sim",
+        reactivation=tasks._ReactivationDirective(
+            kind="resume", origin=FlowState.AWAITING_EMAIL_CODE.value
+        ),
+    )
+    await tasks._send_bot_reply(reply, redis=None)
+
+    assert calls.code_requests == [EXTERNAL_ID]
+    held = await holds.live_hold(conversation.id)
+    assert held is not None and held.start_at == HELD_START
+    card = (await _outbound(db, tenant))[-1]
+    assert BOOKING_GATE_SENTENCE in card
+    assert "05/01/2099 às 10:00" in card

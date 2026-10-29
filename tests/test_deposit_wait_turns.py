@@ -30,6 +30,7 @@ from secretaria.services.payments import booking_charge, deposit_lifecycle, regi
 from secretaria.services.payments.deposit_gate import DepositQuote
 from secretaria.services.payments.provider import ChargeState, PaymentStatus, ProviderError
 from secretaria.workers import tasks
+from secretaria.workers.shared import booking_hold as worker_holds, deposit_turn
 from tests._patching import workers_ns
 from tests.before_support import (
     SLOT_END,
@@ -461,16 +462,128 @@ async def test_a_clinic_on_after_promotes_exactly_as_before(db, env):
     assert await tasks._payment_after_code(reply, tenant=tenant, redis=None) is None
 
 
-async def test_a_code_hold_that_expired_before_the_code_is_not_turned_into_a_payment(db, env):
+async def test_a_late_code_on_a_deposit_clinic_still_asks_for_the_pix_and_books_nothing(db, env):
+    """TASK-072 review H1. A code-phase row is the patient's choice, not a reservation, so its
+    `expires_at` decides nothing on EITHER side: the patient came back after the row's lease ran
+    out, typed the right code - the clinic asks for a deposit first, so a Pix is requested on
+    that row, and the code alone never creates the appointment."""
+    from secretaria.models import Appointment
+
     world, held, tenant, reply = await _code_held_portal(db)
     async with db() as session:
         await session.execute(
             update(BookingHold)
             .where(BookingHold.id == held.id)
-            .values(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+            .values(expires_at=datetime.now(UTC) - timedelta(minutes=90))
         )
         await session.commit()
-    assert await tasks._payment_after_code(reply, tenant=tenant, redis=None) is None
+
+    result = await tasks._payment_after_code(reply, tenant=tenant, redis=None)
+
+    assert result is not None and result.flow_state is FlowState.AWAITING_DEPOSIT
+    assert result.deposit_request["amount_cents"] == 6000
+    assert env.provider.called("create_pix_charge") == 1
+    # The orchestrator promotes only when there is no Pix to ask; even if it did, the row is
+    # a payment hold now and only the payment may create the appointment.
+    promoted = await tasks._promote_booking_hold(reply, tenant=tenant, waba_token=None, redis=None)
+    assert promoted is None
+    async with db() as session:
+        assert list(await session.scalars(select(Appointment))) == []
+
+
+class _DayCalendar:
+    """Just enough calendar for the day picker; the slot re-check itself is scripted."""
+
+    def __init__(self, tz):
+        self.tzinfo = tz
+
+    async def list_available_days(self, start_day, days, slot_minutes=None, **kw):
+        base = start_day.replace(hour=0, minute=0, second=0, microsecond=0)
+        return [base + timedelta(days=3)]
+
+
+async def _assert_back_on_the_day_picker(db, env, result, world):
+    assert result.action == "reply"
+    assert result.deposit_request is None
+    assert result.flow_state is FlowState.SERVICE_CATALOG
+    assert result.flow_step == fr.STEP_AWAITING_DAY
+    assert result.flow_selected_type == "Consulta"
+    [picker] = result.bubbles
+    assert picker.body.startswith(f"{fr.SLOT_TAKEN_AT_CONFIRM_MESSAGE} {fr.DAY_PICKER_BODY}")
+    assert "guardado" not in picker.body
+    assert env.provider.called("create_pix_charge") == 0
+    async with db() as session:
+        own = list(
+            await session.scalars(
+                select(BookingHold).where(BookingHold.conversation_id == world.conversation.id)
+            )
+        )
+    assert own == []  # nothing is held or charged for a slot that is gone
+
+
+async def test_a_slot_taken_on_the_agenda_before_the_pix_goes_back_to_the_day_picker(
+    db, env, monkeypatch
+):
+    """TASK-072 review M1: the code-phase row reserved nothing, so the slot is re-checked on the
+    doctor's agenda BEFORE any charge; taken -> no Pix, the day picker with the booking kept."""
+    world, held, tenant, reply = await _code_held_portal(db)
+    calendar = _DayCalendar(held.start_at.tzinfo)
+
+    async def _calendar(tenant_, held_):
+        return calendar
+
+    async def _taken(*a, **k):
+        return True
+
+    monkeypatch.setattr(deposit_turn, "_held_calendar", _calendar)
+    monkeypatch.setattr(worker_holds, "slot_taken_at_confirm", _taken)
+
+    result = await tasks._payment_after_code(reply, tenant=tenant, redis=None)
+
+    await _assert_back_on_the_day_picker(db, env, result, world)
+
+
+async def test_a_slot_another_pix_took_before_the_pix_goes_back_to_the_day_picker(
+    db, env, monkeypatch
+):
+    """Same M1 check, the other way a slot is taken now: another patient's Pix."""
+    from uuid import uuid4
+
+    from secretaria.models import Patient
+
+    world, held, tenant, reply = await _code_held_portal(db)
+    async with db() as session:
+        rival = Patient(id=uuid4(), tenant_id=world.tenant_id, wa_id="5511777777777")
+        session.add(rival)
+        await session.flush()
+        rival_conversation = Conversation(
+            id=uuid4(), tenant_id=world.tenant_id, patient_id=rival.id
+        )
+        session.add(rival_conversation)
+        await session.commit()
+    assert await holds.place_hold(
+        tenant_id=world.tenant_id,
+        conversation_id=rival_conversation.id,
+        patient_id=rival.id,
+        professional_id=None,
+        appointment_type="Consulta",
+        insurance=None,
+        start_at=SLOT_START,
+        end_at=SLOT_END,
+        ttl_minutes=30,
+        phase="payment",
+        charge_id=uuid4(),
+    )
+    calendar = _DayCalendar(held.start_at.tzinfo)
+
+    async def _calendar(tenant_, held_):
+        return calendar
+
+    monkeypatch.setattr(deposit_turn, "_held_calendar", _calendar)
+
+    result = await tasks._payment_after_code(reply, tenant=tenant, redis=None)
+
+    await _assert_back_on_the_day_picker(db, env, result, world)
 
 
 async def test_a_payment_phase_hold_is_never_promoted_by_a_code(db, env):

@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
+from secretaria.ai.formatter import TextBubble
 from secretaria.ai.graph import (
     BOOKING_DRAFT_SENTINEL_PREFIX,
     CALENDAR_UNAVAILABLE_SENTINEL,
@@ -23,6 +24,7 @@ from secretaria.core.logging import get_logger
 from secretaria.models import (
     Appointment,
     Conversation,
+    FlowState,
     Patient,
     Tenant,
 )
@@ -426,10 +428,50 @@ async def _promote_booking_hold(
         confirmation = f"{confirmation}\n\n{release_offer.CARRY_REFUSED_NOTE}"
     return confirmation
 
+async def _held_calendar(tenant: Tenant, held: HeldSlot):
+    """The calendar a held booking would be written to (the doctor's own), or None.
+
+    Same resolution `_promote_booking_hold` uses, for the payment leg (TASK-072 review M1),
+    which must re-check the slot before it charges. Best-effort: a failure answers None and the
+    caller skips only the calendar half of the check (the payment's own fulfillment re-checks).
+    """
+    try:
+        async with async_session_factory() as session:
+            target = _appointment_calendar_target(
+                {"professional_id": held.professional_id},
+                await list_active_professionals(session, tenant.id),
+            )
+            return await _appointment_calendar(session, tenant, target)
+    except Exception as exc:
+        logger.warning("booking_hold_calendar_lookup_failed", error_type=type(exc).__name__)
+        return None
+
+
+async def _taken_day_picker(
+    reply: _ReplyContext, tenant: Tenant, held: HeldSlot, calendar
+) -> FlowRouterResult:
+    """`_slot_taken_reoffer` as a plain result to apply: the day picker with the booking kept,
+    or - with no calendar / no conversation to rebuild from - the "just taken" line and IDLE.
+    Never a charge, never a "guardado" wording (TASK-072 review M1)."""
+    if calendar is not None:
+        taken = await _slot_taken_reoffer(reply, tenant, held, calendar)
+        if isinstance(taken, SlotTakenAtPromotion):
+            return taken.reoffer
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[TextBubble(body=_SLOT_TAKEN_NO_REOFFER_MESSAGE)],
+        flow_state=FlowState.IDLE,
+    )
+
+
 async def _held_slot_unavailable(
     reply: _ReplyContext, tenant: Tenant, held: HeldSlot, calendar
 ) -> bool:
     """The commit-time double check of a gated booking (TASK-072). True = do not write it.
+
+    Asked before the appointment is written (`_promote_booking_hold`) AND before a Pix is
+    started for it (`deposit_turn._payment_after_code`). `calendar=None` skips only the
+    calendar read.
 
     Three ways the chosen window stopped being bookable while the code was typed, since a
     code-phase row reserves nothing:
@@ -467,6 +509,8 @@ async def _held_slot_unavailable(
             tenant_id=str(tenant.id),
         )
         return True
+    if calendar is None:
+        return False
     return await slot_taken_at_confirm(
         calendar,
         held.start_at,

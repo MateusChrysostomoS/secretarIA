@@ -36,6 +36,7 @@ from secretaria.plugins.base import InboundContext
 from secretaria.plugins.registry import agent_tools_for, run_on_inbound
 from secretaria.services.appointment_edit import EditContext, asks_to_edit_appointment
 from secretaria.services.appointment_edit_flow import apply_ai_edit
+from secretaria.services.booking_hold import refresh_code_hold
 from secretaria.services.booking_scope import (
     booking_topology,
 )
@@ -693,6 +694,10 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             result = await request_code(reply.tenant_id, reply.patient_ref)
         if result.outcome is RequestCodeOutcome.SENT:
             await _write_flow_state(reply.conversation_id, FlowState.AWAITING_EMAIL_CODE)
+            if not patient_owes_consent and reply.conversation_id is not None:
+                # A new code for the same booking: the carried choice gets a fresh lease, so
+                # the card names it and every reader agrees it is there (TASK-072 review H1).
+                await refresh_code_hold(reply.conversation_id)
             # The card, not a bare line: a resumed wait offers the same three
             # exits the original notice did, and names the same inbox.
             await _send_code_notice(
