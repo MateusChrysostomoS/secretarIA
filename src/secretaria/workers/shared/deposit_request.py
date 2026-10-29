@@ -122,7 +122,8 @@ async def _abort_deposit_request(
     (TASK-071 Plan 3: a technical failure never stops the booking; the clinic is told).
 
     Returns the result the caller applies - the normal confirmation, the same day's other times
-    when the slot was taken meanwhile, or a hand-over when the booking cannot be written - or
+    when the slot was taken meanwhile, or the offer of a person (Sim / Não) when the booking
+    cannot be written - or
     None when the provider says the Pix was paid after all (the paid path confirms it). Once
     voided, the deposit row is no longer waiting and its deadline can cancel nothing."""
     deposit_id = request["deposit_id"]
@@ -152,14 +153,14 @@ async def _abort_deposit_request(
     ):
         # The charge may still be live and payable (or was resolved elsewhere): booking next to
         # a payable Pix would turn its payment into a "slot no longer available". Nothing is
-        # confirmed here; a person takes the conversation.
+        # confirmed here; the patient is offered a person (owner, 2026-10-29: never on their own).
         logger.warning(
             "deposit_request_void_unconfirmed",
             outcome=outcome,
             tenant_id=str(tenant.id),
             conversation_id=str(reply.conversation_id),
         )
-        return _confirm_failed()
+        return _confirm_failed(held)
     return await _confirm_without_deposit(
         reply,
         tenant=tenant,

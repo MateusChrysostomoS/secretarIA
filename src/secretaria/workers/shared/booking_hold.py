@@ -236,8 +236,13 @@ async def _promote_booking_hold(
     waba_token: str | None,
     redis,
     deposit_waived_reason: str | None = None,
+    hand_over: bool = True,
 ) -> str | SlotTakenAtPromotion | None:
     """Turn this conversation's reservation into a real appointment.
+
+    `hand_over=False` (the deposit fallback, owner 2026-10-29): when the booking cannot be
+    written, `_PROMOTE_FAILED_MESSAGE` is still returned but the chat is NOT handed to a person -
+    the caller offers one instead (Sim / Não).
 
     `deposit_waived_reason` (TASK-071 Plan 3, task 6): set by the worker paths that confirm the
     booking WITHOUT the deposit after a technical failure (`deposit_fallback`); it is stored on
@@ -312,7 +317,8 @@ async def _promote_booking_hold(
             conversation_id=str(reply.conversation_id),
             tenant_id=str(tenant.id),
         )
-        await _set_conversation_human_active(reply.conversation_id)
+        if hand_over:
+            await _set_conversation_human_active(reply.conversation_id)
         return _PROMOTE_FAILED_MESSAGE
 
     if await slot_taken_at_confirm(
@@ -371,7 +377,8 @@ async def _promote_booking_hold(
             conversation_id=str(reply.conversation_id),
             tenant_id=str(tenant.id),
         )
-        await _set_conversation_human_active(reply.conversation_id)
+        if hand_over:
+            await _set_conversation_human_active(reply.conversation_id)
         return _PROMOTE_FAILED_MESSAGE
 
     appointment = Appointment(
@@ -433,14 +440,16 @@ async def _promote_booking_hold(
     except Exception as exc:
         # The event EXISTS on Google and the row does not. Same answer the
         # flow path gives in the same situation: never tell the patient it is
-        # confirmed, hand it to a human to reconcile.
+        # confirmed, hand it to a human to reconcile. (`hand_over=False`: the patient is
+        # offered one instead; the orphaned event stays visible on the clinic's own agenda.)
         logger.error(
             "booking_hold_promote_persist_failed",
             error_type=type(exc).__name__,
             conversation_id=str(reply.conversation_id),
             tenant_id=str(tenant.id),
         )
-        await _set_conversation_human_active(reply.conversation_id)
+        if hand_over:
+            await _set_conversation_human_active(reply.conversation_id)
         return _PROMOTE_FAILED_MESSAGE
 
     await _release_hold(held.id)

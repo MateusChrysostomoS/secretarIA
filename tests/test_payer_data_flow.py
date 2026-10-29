@@ -715,7 +715,9 @@ async def test_keeping_the_answer_stores_it_encrypted_and_a_redis_outage_books_w
 
 
 @pytest.mark.parametrize("action", ["optout", "exhausted"])
-async def test_a_refusal_frees_everything_says_so_and_calls_a_human(db, env, kind, action):
+async def test_a_refusal_frees_everything_says_so_and_offers_a_human(db, env, kind, action):
+    """Owner, 2026-10-29: the patient chooses. What happened, then the fixed "quer que eu
+    chame nosso atendente humano?" card (Sim / Não); nobody takes over on their own."""
     world = await _waiting_for_data(db, kind)
     tenant = await _tenant(db, world)
     redis = FakeRedis()
@@ -732,8 +734,17 @@ async def test_a_refusal_frees_everything_says_so_and_calls_a_human(db, env, kin
     )
 
     assert await _recall(world, redis, kind) is None
-    assert env.sender.sent == [("text", expected)]
-    assert (await _conversation(db, world)).handover_state == HandoverState.HUMAN_ACTIVE
+    assert env.sender.sent == [
+        ("text", expected),
+        ("buttons", fr.HUMAN_OFFER_BODY, [fr.LABEL_YES, fr.LABEL_NO]),
+    ]
+    assert "equipe" not in expected
+    conversation = await _conversation(db, world)
+    assert conversation.handover_state != HandoverState.HUMAN_ACTIVE
+    assert (conversation.flow_state, conversation.flow_step) == (
+        FlowState.LLM,
+        fr.STEP_HUMAN_OFFER,
+    )
     assert await _holds(db) == [] and await _deposits(db) == []
 
 
@@ -851,7 +862,7 @@ async def _outbound_bodies(db) -> list[str | None]:
 
 
 async def test_no_outbound_bubble_contains_redaction_marker(db, env, kind):
-    """A whole turn around the answer (invalid x3, each re-asked, then handed to a human): the
+    """A whole turn around the answer (invalid x3, each re-asked, then a person offered): the
     marker is what is STORED for the answer; it is not what the bot says, in any bubble or row."""
     world = await _waiting_for_data(db, kind)
     tenant = await _tenant(db, world)
@@ -859,7 +870,7 @@ async def test_no_outbound_bubble_contains_redaction_marker(db, env, kind):
         reply = await _inbound(answer)
         await tasks._handle_payer_data(reply, tenant=tenant, waba_token="wt", redis=FakeRedis())
 
-    assert len(env.sender.sent) == 3  # two re-asks and the hand-over: non-vacuous
+    assert len(env.sender.sent) == 4  # two re-asks, what happened and the offer: non-vacuous
     assert await _inbound_bodies(db) == [pdata.REDACTED_BODY] * 3  # stored, as the history needs
     assert pdata.REDACTED_BODY not in repr(env.sender.sent)
     assert all(pdata.REDACTED_BODY not in (body or "") for body in await _outbound_bodies(db))

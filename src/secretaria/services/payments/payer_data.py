@@ -158,9 +158,11 @@ def optout_text(timing: Timing, kind: Kind) -> str:
             f"{_noun(kind)} de quem paga; vou chamar a equipe da clínica para combinar como "
             "seguir."
         )
+    # `before`: the fixed "quer que eu chame nosso atendente humano?" card follows (owner,
+    # 2026-10-29: the patient chooses), so nothing here promises the team.
     return (
         f"Tudo bem, não vou pedir o {_noun(kind)}. Como o Pix precisa dele, o horário não foi "
-        "reservado; vou chamar a equipe da clínica para combinar como seguir."
+        "reservado."
     )
 
 
@@ -172,7 +174,7 @@ def exhausted_text(timing: Timing) -> str:
         )
     return (
         "Não consegui validar o dado depois de três tentativas, então o horário não foi "
-        "reservado. Vou chamar a equipe da clínica para combinar como seguir."
+        "reservado."
     )
 
 

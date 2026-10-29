@@ -34,7 +34,7 @@ from secretaria.models import (
     MessageSender,
     PixDeposit,
 )
-from secretaria.services import booking_hold as holds, email
+from secretaria.services import booking_hold as holds, email, flow_router as fr
 from secretaria.services.payments import (
     booking_charge,
     deposit_lifecycle,
@@ -284,15 +284,50 @@ async def test_an_invalid_cpf_is_asked_again_without_a_button(db, env):
     assert (await _conversation(db, world)).flow_state == FlowState.AWAITING_PAYER_DATA
 
 
-async def test_the_opt_out_hands_the_chat_to_a_human_and_says_nothing_was_reserved(db, env):
+async def test_the_opt_out_says_nothing_was_reserved_and_offers_a_human(db, env):
+    """Owner, 2026-10-29: the patient chooses - the fixed Sim / Não card, nobody takes over."""
     world = await _asked_for_the_cpf(db)
     await _turn(pdata.LABEL_OPTOUT, redis=FakeArqPool(), reply_id=pdata.OPTOUT_REPLY_ID)
 
-    assert env.sender.bodies() == [pdata.optout_text("before", "document")]
+    assert env.sender.sent == [
+        ("text", pdata.optout_text("before", "document")),
+        ("buttons", fr.HUMAN_OFFER_BODY, [fr.LABEL_YES, fr.LABEL_NO]),
+    ]
     assert env.llm_calls == [] and _charge_requests(env) == []
     conversation = await _conversation(db, world)
-    assert conversation.flow_state == FlowState.IDLE
-    assert conversation.handover_state == HandoverState.HUMAN_ACTIVE
+    assert (conversation.flow_state, conversation.flow_step) == (FlowState.LLM, fr.STEP_HUMAN_OFFER)
+    assert conversation.handover_state != HandoverState.HUMAN_ACTIVE
+
+
+async def test_sim_after_the_opt_out_hands_the_chat_to_a_human(db, env):
+    world = await _asked_for_the_cpf(db)
+    await _turn(pdata.LABEL_OPTOUT, redis=FakeArqPool(), reply_id=pdata.OPTOUT_REPLY_ID)
+    env.sender.sent.clear()
+
+    await _turn(fr.LABEL_YES, redis=FakeArqPool())
+
+    assert env.sender.bodies() == [fr.SCOPED_HELP_ESCALATE_MESSAGE]
+    assert env.llm_calls == []
+    assert (await _conversation(db, world)).handover_state == HandoverState.HUMAN_ACTIVE
+
+
+async def test_nao_after_three_invalid_cpfs_keeps_the_chat_with_the_ai(db, env):
+    world = await _asked_for_the_cpf(db)
+    for _ in range(pdata.MAX_INVALID_ATTEMPTS):
+        await _turn("123", redis=FakeArqPool())
+    assert env.sender.sent[-2:] == [
+        ("text", pdata.exhausted_text("before")),
+        ("buttons", fr.HUMAN_OFFER_BODY, [fr.LABEL_YES, fr.LABEL_NO]),
+    ]
+    env.sender.sent.clear()
+
+    await _turn(fr.LABEL_NO, redis=FakeArqPool())
+
+    assert env.sender.bodies() == [fr.HUMAN_OFFER_DECLINED_BODY]
+    assert env.llm_calls == []
+    conversation = await _conversation(db, world)
+    assert conversation.flow_state == FlowState.LLM and conversation.flow_step is None
+    assert conversation.handover_state != HandoverState.HUMAN_ACTIVE
 
 
 # ---- (c) a valid answer: the turn's Redis reaches the booking gate ---------------------------

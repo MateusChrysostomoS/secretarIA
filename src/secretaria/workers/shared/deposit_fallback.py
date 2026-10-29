@@ -19,6 +19,10 @@ stays in `AWAITING_DEPOSIT` and no deposit deadline can cancel the booking later
 
 The clinic (and the doctor) are told by `deposit_failure_notice.notify_deposit_failure`, which
 never raises. Log lines carry ids and closed vocabularies only.
+
+When the booking cannot be written at all, nobody takes the chat over on their own (owner,
+2026-10-29): the patient is told the time was not booked and gets the fixed "quer que eu chame
+nosso atendente humano?" card (`flow_router.enter_human_offer`, Sim / Não) - `_offer_human`.
 """
 
 from dataclasses import dataclass
@@ -36,6 +40,7 @@ from secretaria.services.flow_router import (
     STEP_AWAITING_RETRY,
     FlowRouterResult,
     MenuBubble,
+    enter_human_offer,
 )
 from secretaria.services.payments import deposit_failure_notice, deposit_lifecycle
 from secretaria.services.payments.failure_reason import FailureReason
@@ -153,13 +158,27 @@ def _slot_taken_retry(held: HeldSlot, tenant: Tenant) -> FlowRouterResult:
     )
 
 
-def _confirm_failed() -> FlowRouterResult:
-    """The booking itself could not be written (database / agenda): a person takes over."""
-    return FlowRouterResult(
-        action="handover",
-        bubbles=[TextBubble(body=deposit_lifecycle.BEFORE_CONFIRM_FAILED_TEXT)],
-        flow_state=FlowState.IDLE,
-    )
+def _offer_human(sentence: str, held: HeldSlot | None = None) -> FlowRouterResult:
+    """`sentence` (what happened), then the fixed Sim / Não card of `enter_human_offer`.
+
+    Owner, 2026-10-29: in the deposit flow the patient CHOOSES - "✅ Sim" hands the chat to the
+    team exactly like any accepted offer (`flow_router._handle_human_offer`), "❌ Não" keeps it
+    with the AI. The reservation's doctor / service survive (when known) so an accepted offer
+    still alerts the right doctor."""
+    result = enter_human_offer()
+    if held is not None:
+        result.flow_selected_type = held.appointment_type
+        result.flow_selected_professional_id = held.professional_id
+        result.flow_selected_insurance = held.insurance
+        result.flow_attendee_name = held.attendee_name
+    result.bubbles = [TextBubble(body=sentence), *result.bubbles]
+    return result
+
+
+def _confirm_failed(held: HeldSlot | None = None) -> FlowRouterResult:
+    """The booking itself could not be written (database / agenda): say the time was not booked
+    and offer a person (Sim / Não)."""
+    return _offer_human(deposit_lifecycle.BEFORE_CONFIRM_FAILED_TEXT, held)
 
 
 async def _rehold_for_promotion(
@@ -176,7 +195,7 @@ async def _rehold_for_promotion(
     """Reserve the slot again and tell the clinic; None = ready for `_promote_booking_hold`.
 
     Otherwise the result to apply instead: the slot was taken meanwhile (other times), or this
-    conversation still has a live charge (a person takes over)."""
+    conversation still has a live charge (nothing is booked; a person is offered)."""
     try:
         fresh = await _hold_again(held)
     except LiveChargeHoldError:
@@ -185,7 +204,7 @@ async def _rehold_for_promotion(
             tenant_id=str(tenant.id),
             conversation_id=str(reply.conversation_id),
         )
-        return _confirm_failed()
+        return _confirm_failed(held)
     if fresh is None:
         return _slot_taken_retry(held, tenant)
     await _notify_deposit_waived(
@@ -213,7 +232,8 @@ async def _confirm_without_deposit(
     redis,
 ) -> FlowRouterResult:
     """Book the reserved slot WITHOUT the deposit and return what the patient is told: the
-    normal confirmation, the same day's other times, or a hand-over when it cannot be written."""
+    normal confirmation, the same day's other times, or the offer of a person when it cannot be
+    written."""
     instead = await _rehold_for_promotion(
         reply, tenant, held, code=code, reason=reason, stage=stage, redis=redis
     )
@@ -225,13 +245,14 @@ async def _confirm_without_deposit(
         waba_token=waba_token,
         redis=redis,
         deposit_waived_reason=str(reason),
+        hand_over=False,
     )
     if isinstance(promoted, SlotTakenAtPromotion):
         return promoted.reoffer
     if promoted is None or promoted == _PROMOTE_FAILED_MESSAGE:
-        # Not written (the promotion already handed the chat to a person); its own message
+        # Not written (`hand_over=False`: the promotion left the chat with us); its own message
         # speaks of an account activation that this path never had.
-        return _confirm_failed()
+        return _confirm_failed(held)
     return FlowRouterResult(
         action="reply",
         bubbles=[TextBubble(body=promoted)],

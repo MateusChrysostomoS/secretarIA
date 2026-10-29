@@ -1145,10 +1145,10 @@ BEFORE_BLOCKED_TEXT = (
     "clínica, que continua o seu atendimento por aqui."
 )
 # The deposit was dropped (technical failure) but the booking itself could not be written right
-# now (database/agenda unreachable): a person takes over, the slot is not claimed as booked.
+# now (database/agenda unreachable): the slot is not claimed as booked, and the fixed "quer que eu
+# chame nosso atendente humano?" card follows (owner, 2026-10-29: the patient chooses).
 BEFORE_CONFIRM_FAILED_TEXT = (
-    "Não consegui fechar o seu agendamento agora. Vou passar a conversa para a equipe da "
-    "clínica, que confirma o horário com você por aqui."
+    "Não consegui concluir o seu agendamento agora, então o horário não ficou marcado."
 )
 BEFORE_LATE_TAKEN_TEXT = (
     "Recebemos o seu pagamento, mas o horário que você escolheu não está mais disponível. "

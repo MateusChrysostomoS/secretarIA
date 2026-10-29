@@ -59,6 +59,7 @@ from secretaria.workers.shared.context import _ReplyContext
 from secretaria.workers.shared.deposit_fallback import (
     DepositWaived,
     _notify_deposit_waived,
+    _offer_human,
     _rehold_for_promotion,
 )
 from secretaria.workers.shared.deposit_request import _arq_enqueue, _retry_buttons
@@ -223,10 +224,11 @@ async def _handle_payer_data(
     "invalid" asks again in plain text (no button; a typed refusal still ends the wait);
     "captured_after" stores the answer and resumes the Pix of the consultation that was waiting;
     "expired" offers the retry card in the `before` timing (the slot can be picked again);
-    "optout", "exhausted" and an `after` "expired"
-    free everything and hand the conversation to a human with a message that says what stood
-    (`before`: the slot was NOT reserved; `after`: the consultation stands). All of them forget
-    whatever was stored. Best-effort sends, like every other reply of the worker.
+    "optout" and "exhausted" in `before` say the slot was NOT reserved and offer a person with
+    the fixed Sim / Não card (owner, 2026-10-29: the patient chooses, nobody takes over on their
+    own); "optout", "exhausted" and "expired" in `after` hand the conversation to a human with a
+    message that says the consultation stands. All of them forget whatever was stored.
+    Best-effort sends, like every other reply of the worker.
     """
     if tenant is None or reply.conversation_id is None:
         return
@@ -257,11 +259,21 @@ async def _handle_payer_data(
             event="payer_data_expired_notice_sent",
         )
         return
-    await _set_conversation_human_active(reply.conversation_id)
     body = {
         "optout": payer_data.optout_text(timing, kind),
         "exhausted": payer_data.exhausted_text(timing),
     }.get(action or "", payer_data.expired_text(timing))
+    if timing == "before" and action in ("optout", "exhausted"):
+        logger.info(
+            "payer_data_human_offered",
+            outcome=action,
+            conversation_id=str(reply.conversation_id),
+        )
+        await _apply_flow_result(
+            reply, _offer_human(body), None, redis=redis, tenant=tenant, waba_token=waba_token
+        )
+        return
+    await _set_conversation_human_active(reply.conversation_id)
     await _send_plain_reply(
         reply,
         tenant=tenant,

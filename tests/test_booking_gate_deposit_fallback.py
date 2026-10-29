@@ -454,12 +454,13 @@ async def test_patient_declining_cpf_does_not_trigger_fallback(db, env):
 
     await _turn(pdata.LABEL_OPTOUT, redis=FakeArqPool(), reply_id=pdata.OPTOUT_REPLY_ID)
 
-    assert env.sender.bodies() == [pdata.optout_text("before", "document")]
+    assert env.sender.bodies() == [pdata.optout_text("before", "document"), fr.HUMAN_OFFER_BODY]
     assert await _rows(db, Appointment) == [] and env.calendar.created == []
     assert env.alerts == [] and env.provider.called("create_pix_charge") == 0
     conversation = await _conversation(db, world)
-    assert conversation.flow_state == FlowState.IDLE
-    assert conversation.handover_state == HandoverState.HUMAN_ACTIVE
+    # Owner, 2026-10-29: the patient chooses (Sim / Não); nobody takes over on their own.
+    assert (conversation.flow_state, conversation.flow_step) == (FlowState.LLM, fr.STEP_HUMAN_OFFER)
+    assert conversation.handover_state != HandoverState.HUMAN_ACTIVE
 
 
 # ---- worker path 2: the Portal code verified before the Pix (`_payment_after_code`) ----------
@@ -617,7 +618,7 @@ async def test_abort_deposit_request_never_books_over_a_pix_whose_void_was_not_c
 ):
     """Fix round 1: `abandon_charge` answers "voided" even when the provider could not be asked
     (`get_charge` raised) or refused the void (`cancel_charge` raised). The Pix may still be
-    payable, so nothing is booked: a person takes over."""
+    payable, so nothing is booked: the patient is offered a person (owner, 2026-10-29)."""
     world, abort = await _undeliverable_pix(db, env)
     if broken == "cancel_charge":
         env.provider.cancel_error = RuntimeError("asaas down")
@@ -626,13 +627,47 @@ async def test_abort_deposit_request_never_books_over_a_pix_whose_void_was_not_c
 
     result = await abort()
 
-    assert result is not None and result.action == "handover"
-    assert [b.body for b in result.bubbles] == [deposit_lifecycle.BEFORE_CONFIRM_FAILED_TEXT]
+    _assert_human_offer(result)
     assert await _rows(db, Appointment) == []  # never a booking next to a payable Pix
     assert env.calendar.created == []
     # The row is still waiting (the expiry job voids it) - and nothing confirmed stands beside it.
     assert len(await _awaiting_deposits(db)) == 1
     assert env.alerts == []
+
+
+def _assert_human_offer(result) -> None:
+    """The booking could not be written: say so, then the fixed Sim / Não card (owner,
+    2026-10-29) - never an automatic hand-over."""
+    assert result is not None and result.action == "reply"
+    assert [b.body for b in result.bubbles] == [
+        deposit_lifecycle.BEFORE_CONFIRM_FAILED_TEXT,
+        fr.HUMAN_OFFER_BODY,
+    ]
+    assert result.bubbles[1].labels == [fr.LABEL_YES, fr.LABEL_NO]
+    assert (result.flow_state, result.flow_step) == (FlowState.LLM, fr.STEP_HUMAN_OFFER)
+    assert "equipe" not in deposit_lifecycle.BEFORE_CONFIRM_FAILED_TEXT
+
+
+async def test_abort_deposit_request_offers_a_human_when_the_booking_cannot_be_written(
+    db, env, monkeypatch
+):
+    """The Pix was voided but the agenda cannot be reached: nothing is booked, the clinic is not
+    told a booking exists, and the chat is NOT handed over before the patient chooses."""
+    from secretaria.workers.shared import booking_hold as worker_holds
+
+    world, abort = await _undeliverable_pix(db, env)
+
+    async def no_calendar(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(worker_holds, "_appointment_calendar", no_calendar)
+
+    result = await abort()
+
+    _assert_human_offer(result)
+    assert await _rows(db, Appointment) == []
+    conversation = await _conversation(db, world)
+    assert conversation.handover_state != HandoverState.HUMAN_ACTIVE
 
 
 async def test_next_successful_charge_clears_failing_health(db, env):
