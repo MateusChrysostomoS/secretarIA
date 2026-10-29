@@ -298,6 +298,11 @@ def read_turn(
 # The flow steps (`services/flow_router.py`: STEP_AWAITING_CONFIRMATION / STEP_AWAITING_RETRY) a
 # chat sits on right after the value was taken; a test pins these spellings to the router's.
 _SHAPE_STEPS = frozenset({"awaiting_confirmation", "awaiting_retry_choice"})
+# `flow_router.STEP_HUMAN_OFFER` (pinned by the same test): the Sim / Não card a refusal or the
+# third invalid answer leaves open (owner, 2026-10-29). A document typed in reply is no longer an
+# answer, so it would otherwise reach the history unmasked.
+_HUMAN_OFFER_STEP = "awaiting_human_offer"
+_LLM_STATE = "LLM"
 
 
 def should_redact_inbound(flow_state: object, flow_step: str | None, body: str | None) -> bool:
@@ -306,7 +311,8 @@ def should_redact_inbound(flow_state: object, flow_step: str | None, body: str |
     While the question is open EVERY answer is redacted (a typo, "cpf 123", a voice-note
     transcript: none of it may reach the history, and a shape test could miss it). Right after the
     value was taken (a Pix is open, the slot was taken, the confirmation card is back) a message
-    that CARRIES a valid document or e-mail, sent a second time, is redacted too.
+    that CARRIES a valid document or e-mail, sent a second time, is redacted too. So is a message
+    carrying a document while the Sim / Não card of an opt-out / third invalid answer is open.
     """
     state = str(flow_state)
     if state == _AWAITING_STATE:
@@ -314,6 +320,10 @@ def should_redact_inbound(flow_state: object, flow_step: str | None, body: str |
     in_the_aftermath = state == _WAITING_FOR_PIX_STATE or (
         state == _CATALOG_STATE and flow_step in _SHAPE_STEPS
     )
+    if state == _LLM_STATE and flow_step == _HUMAN_OFFER_STEP:
+        # The Sim / Não card: only a document (the permissive net) - an e-mail typed to the AI
+        # there is ordinary conversation.
+        return extract_document(body) is not None
     return in_the_aftermath and (
         extract_document(body) is not None or extract_email(body) is not None
     )

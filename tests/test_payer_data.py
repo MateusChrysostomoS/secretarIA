@@ -253,6 +253,12 @@ def test_the_refusal_copy_says_whether_the_consultation_stands(timing):
         # inside a sentence and a CNPJ are still kept out of the history.
         ("AWAITING_DEPOSIT", None, "meu cpf é 529.982.247-25", True),
         ("SERVICE_CATALOG", "awaiting_confirmation", CNPJ, True),
+        # Review fix: the Sim / Não card right after an opt-out / third invalid answer - a
+        # document typed in reply (now refused as an answer) stays out of the history too.
+        ("LLM", "awaiting_human_offer", "é o CNPJ 11.222.333/0001-81", True),
+        ("LLM", "awaiting_human_offer", "meu cpf é 529.982.247-25", True),
+        ("LLM", "awaiting_human_offer", "✅ Sim", False),
+        ("LLM", None, CPF, False),  # the free conversation itself is not rewritten
         ("AWAITING_DEPOSIT", None, "meu e-mail: maria@example.com", True),  # ditto, an e-mail
         ("SERVICE_CATALOG", "awaiting_confirmation", CPF, True),  # the charge did not start
         ("SERVICE_CATALOG", "awaiting_retry_choice", EMAIL, True),  # the slot was taken meanwhile

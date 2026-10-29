@@ -663,6 +663,7 @@ async def test_the_same_value_sent_again_while_the_pix_is_open_is_never_stored(d
 
 def test_the_redaction_steps_are_the_routers_own_spellings():
     assert pdata._SHAPE_STEPS == {fr.STEP_AWAITING_CONFIRMATION, fr.STEP_AWAITING_RETRY}
+    assert pdata._HUMAN_OFFER_STEP == fr.STEP_HUMAN_OFFER
 
 
 def test_the_data_never_outlives_the_shortest_reservation_a_clinic_can_configure():
