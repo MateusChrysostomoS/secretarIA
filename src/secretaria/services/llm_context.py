@@ -23,6 +23,7 @@ from datetime import datetime
 from secretaria.models import FlowState
 from secretaria.services import flow_router as fr
 from secretaria.services.attendee import ATTENDEE_SELF
+from secretaria.services.tenant_config import ClinicFeatures, PatientIdentityStatus
 
 _BOOKING = "do agendamento"
 _MANAGE = "da consulta já marcada"
@@ -208,3 +209,35 @@ def build_conversation_state(conversation, tenant, professionals) -> str | None:
         lines.append(f"- Convênios cadastrados na clínica: {len(plans)} (valores omitidos).")
     lines.extend(_topology_lines(tenant, professionals))
     return "\n".join(lines)
+
+
+def build_patient_identity(
+    patient_name: str | None, patient_email: str | None, *, email_on_account: bool = False
+) -> PatientIdentityStatus:
+    """Which identity data we hold for the patient of this turn (TASK-072).
+
+    Booleans only: the system prompt is not pseudonymized, so no value goes in it.
+    `email_on_account`: the channel proves an e-mail before the first message (the Portal's
+    inline identity), so the address exists on the account even when `Patient.email` - a
+    booking-time copy - is still empty.
+    """
+    return PatientIdentityStatus(
+        name_known=bool((patient_name or "").strip()),
+        email_known=email_on_account or bool((patient_email or "").strip()),
+    )
+
+
+def build_clinic_features(tenant, flow_tenant=None) -> ClinicFeatures | None:
+    """Which optional features are ON for the clinic (TASK-072), or None without a tenant.
+
+    `tenant` is the `Tenant` row (the deposit switch lives there); `flow_tenant` is the
+    worker's flow snapshot, whose `insurance_plans` carry the clinic's real convênio rows.
+    """
+    if tenant is None:
+        return None
+    plans = fr.insurance_plan_names(flow_tenant if flow_tenant is not None else tenant)
+    return ClinicFeatures(
+        deposit_enabled=bool(getattr(tenant, "pix_deposit_enabled", False)),
+        insurance_plan_count=len(plans),
+        online_booking=fr.flows_enabled(tenant),
+    )

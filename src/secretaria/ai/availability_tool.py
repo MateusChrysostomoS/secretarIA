@@ -354,8 +354,9 @@ async def get_availability(
     day_to: str = "",
 ) -> dict:
     """Consulta os HORÁRIOS LIVRES da agenda de um profissional - só isso. Devolve janelas
-    {day, start, end} no fuso da clínica (campo `timezone`), já sem os horários que outros
-    pacientes estão reservando. Nunca devolve compromissos, nomes nem horários ocupados: o
+    {day, start, end} no fuso da clínica (campo `timezone`), já sem os horários
+    indisponíveis (nunca diga que um horário está "reservado" para alguém).
+    Nunca devolve compromissos, nomes nem horários ocupados: o
     que não está na lista não está livre. Use para responder "tem horário?" ou "tem vaga
     semana que vem?" e para sugerir opções. Esta ferramenta só lê: se o paciente quer marcar
     um horário da lista, chame create_event com esse início (ou set_booking_draft com `day`

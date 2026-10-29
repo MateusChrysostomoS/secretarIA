@@ -2005,6 +2005,66 @@ async def get_service_info(service_name: str) -> dict:
     }
 
 
+_NAME_NOT_SAVED_ERROR = (
+    "Não consegui gravar esse nome. Peça ao paciente só o nome e sobrenome, sem frase."
+)
+_NAME_ALREADY_SAVED_ERROR = (
+    "Já há um nome registrado para este paciente: não troque. Se ele quiser corrigir, "
+    "ofereça a recepção."
+)
+_NAME_UNAVAILABLE_ERROR = "Não consegui gravar o nome agora. Siga a conversa normalmente."
+
+
+@tool
+async def save_patient_name(name: str) -> dict:
+    """Grava o NOME do paciente desta conversa quando o bloco DADOS DO PACIENTE diz que ainda
+    não temos e ele acabou de dizer. Só preenche um nome vazio: nunca troca um nome já gravado.
+
+    Args:
+        name: Só o nome (e sobrenome) como o paciente disse, sem frase nem saudação.
+    """
+    from secretaria.services.patient_name import parse_patient_name
+
+    tenant_id, conversation_id = _tenant_id_ctx.get(), _conversation_id_ctx.get()
+    if tenant_id is None or conversation_id is None:
+        return {"error": _NAME_UNAVAILABLE_ERROR}
+    parsed = parse_patient_name(name)
+    if parsed is None:
+        return {"error": _NAME_NOT_SAVED_ERROR}
+    from secretaria.core.database import async_session_factory
+    from secretaria.models import Conversation, Patient
+
+    try:
+        async with async_session_factory() as session:
+            async with session.begin():
+                conversation = await session.get(Conversation, conversation_id)
+                if conversation is None or conversation.tenant_id != tenant_id:
+                    return {"error": _NAME_UNAVAILABLE_ERROR}
+                patient = (
+                    await session.get(Patient, conversation.patient_id)
+                    if conversation.patient_id is not None
+                    else None
+                )
+                if patient is None or patient.tenant_id != tenant_id:
+                    return {"error": _NAME_UNAVAILABLE_ERROR}
+                if (patient.name or "").strip():
+                    return {"error": _NAME_ALREADY_SAVED_ERROR}
+                patient.name = parsed
+                channel, external_id = patient.channel, patient.external_id
+    except Exception as exc:
+        logger.warning("agent_tool_save_name_failed", error_type=type(exc).__name__)
+        return {"error": _NAME_UNAVAILABLE_ERROR}
+    logger.info("agent_patient_name_saved", tenant_id=str(tenant_id))
+    from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
+
+    if channel == CHANNEL_BRAIN_MESSAGE and external_id:
+        # The Portal keeps the name on the account for the next clinic (best effort).
+        from secretaria.services.pending_identity import report_name
+
+        await report_name(tenant_id, external_id, parsed)
+    return {"saved": True}
+
+
 @tool
 async def request_human_handoff(reason: str) -> dict:
     """ÚLTIMO RECURSO: passa a conversa DIRETO para uma pessoa da equipe. Use SOMENTE

@@ -83,6 +83,31 @@ class RuntimeServiceGuide:
 
 
 @dataclass(frozen=True)
+class PatientIdentityStatus:
+    """Which identity data of THIS patient we already hold (TASK-072).
+
+    Booleans on purpose: the system prompt is not pseudonymized, so neither the name nor the
+    e-mail ever rides in it - only whether each exists.
+    """
+
+    name_known: bool
+    email_known: bool
+
+
+@dataclass(frozen=True)
+class ClinicFeatures:
+    """Which optional features are ON for THIS clinic, as the agent must treat them (TASK-072).
+
+    The agent used to promise a feature the clinic had switched off (a deposit wait on a clinic
+    without the deposit). `insurance_plan_count == 0` means particular only.
+    """
+
+    deposit_enabled: bool
+    insurance_plan_count: int
+    online_booking: bool = True
+
+
+@dataclass(frozen=True)
 class TenantRuntimeConfig:
     """Everything needed to run the agent for one tenant, resolved + decrypted."""
 
@@ -140,6 +165,10 @@ class TenantRuntimeConfig:
     # alongside it so its orientations stay reachable. Defaulted so every existing constructor
     # keeps working.
     service_guides: list[RuntimeServiceGuide] = field(default_factory=list)
+    # Per-turn, set by the worker (services/llm_context.py::build_patient_identity /
+    # build_clinic_features) through run_agent - NEVER loaded from DB here. None = no block.
+    patient_identity: PatientIdentityStatus | None = None
+    clinic_features: ClinicFeatures | None = None
 
 
 def _filter_active_types(appointment_types: list | None) -> list[dict]:
