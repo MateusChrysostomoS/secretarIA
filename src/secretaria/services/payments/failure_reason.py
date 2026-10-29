@@ -87,6 +87,24 @@ def user_text(reason: FailureReason) -> str:
     return _USER_TEXT[reason]
 
 
+def coerce(value: "FailureReason | str | None") -> FailureReason | None:
+    """A stored or carried reason back into the closed vocabulary: None/blank stays None (no
+    reason), anything not in the vocabulary becomes `unknown` - never raises, so a stray value
+    can never be stored or shown as it is."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        return FailureReason(value)
+    except ValueError:
+        return FailureReason.unknown
+
+
+def text_for(value: "FailureReason | str | None") -> str | None:
+    """`user_text` of a stored reason (unknown values read as `unknown`), None without one."""
+    reason = coerce(value)
+    return user_text(reason) if reason is not None else None
+
+
 _ACTION_TEXT: dict[FailureReason, str] = {
     FailureReason.customer_rejected: (
         "Confira no painel do Asaas se a conta está liberada para cadastrar clientes"

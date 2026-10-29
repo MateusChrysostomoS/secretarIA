@@ -117,7 +117,7 @@ from secretaria.services.calendar import (
 from secretaria.services.insurance_catalog import AppointmentPlan, load_appointment_plans
 from secretaria.services.local_calendar import LocalCalendarService, list_unpushed_events
 from secretaria.services.patient_context import as_utc
-from secretaria.services.payments import adjustment_queries, deposit_lifecycle
+from secretaria.services.payments import adjustment_queries, deposit_lifecycle, failure_reason
 from secretaria.services.tenant_config import (
     TenantRuntimeConfig,
     list_active_professionals,
@@ -814,6 +814,7 @@ async def list_events(
                 Appointment.appointment_type,
                 Appointment.attendee_name,
                 Appointment.phone,
+                Appointment.deposit_waived_reason,
                 Patient.channel.label("patient_channel"),
                 Patient.name.label("patient_name"),
             )
@@ -897,6 +898,7 @@ async def list_events(
         )
         state = reminder_schedule.display_state(row, current) if row is not None else None
         owner_name = professional_names.get(row.professional_id) if row is not None else None
+        waived = failure_reason.coerce(row.deposit_waived_reason) if row is not None else None
         reads.append(
             CalendarEventRead(
                 id=e["id"],
@@ -907,6 +909,8 @@ async def list_events(
                 insurance=_insurance_label(row.insurance) if row is not None else None,
                 insurance_plan=_insurance_plan_read(plan),
                 deposit=_deposit_read(deposits.get(row.id)) if row is not None else None,
+                deposit_waived_reason=waived.value if waived is not None else None,
+                deposit_waived_text=failure_reason.text_for(waived),
                 status=row.status if row is not None else None,
                 confirmation_count=row.confirmation_count if row is not None else None,
                 display_state=state,

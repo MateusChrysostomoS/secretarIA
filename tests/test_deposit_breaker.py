@@ -356,7 +356,10 @@ async def test_open_breaker_on_portal_takes_the_code_hold_then_promotes_without_
         channel="brain_message",
         tenant_id=world.tenant_id,
     )
-    assert await tasks._payment_after_code(reply, tenant=tenant, redis=FakeRedis()) is None
+    from secretaria.workers.shared.deposit_fallback import DepositWaived
+
+    waived = await tasks._payment_after_code(reply, tenant=tenant, redis=FakeRedis())
+    assert waived == DepositWaived("account_not_enabled")
     assert env.provider.calls == []
     async with db() as session:
         (hold,) = list(await session.scalars(select(BookingHold)))
@@ -369,11 +372,30 @@ async def test_open_breaker_on_portal_takes_the_code_hold_then_promotes_without_
         return calendar
 
     monkeypatch.setattr(workers_ns, "_appointment_calendar", appointment_calendar)
-    text = await tasks._promote_booking_hold(reply, tenant=tenant, waba_token=None, redis=None)
+    text = await tasks._promote_booking_hold(
+        reply,
+        tenant=tenant,
+        waba_token=None,
+        redis=None,
+        deposit_waived_reason=waived.reason,
+    )
     assert "está confirmado" in text
     async with db() as session:
         (appointment,) = list(await session.scalars(select(Appointment)))
     assert appointment.status == AppointmentStatus.SCHEDULED
+    # Task 6: the agenda marks the booking made without the deposit (breaker skip, Portal).
+    assert appointment.deposit_waived_reason == "account_not_enabled"
+
+
+async def test_open_breaker_on_whatsapp_records_waived_reason(db, env):
+    """Task 6, router path: the breaker's commit carries the reason to the appointment."""
+    async with db() as session:
+        world = await make_world(session)
+    await _fail(db, world, "pix_key_missing")
+
+    result = await _confirm(world, env)
+
+    assert result.appointment["deposit_waived_reason"] == "pix_key_missing"
 
 
 @pytest.mark.parametrize("armed", [False, True])

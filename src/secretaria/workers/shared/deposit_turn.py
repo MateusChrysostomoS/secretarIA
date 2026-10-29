@@ -57,6 +57,7 @@ from secretaria.services.pending_identity import BOOKING_HOLD_EXPIRED_MESSAGE
 from secretaria.workers.shared.booking_hold import _release_hold, _tenant_tzinfo
 from secretaria.workers.shared.context import _ReplyContext
 from secretaria.workers.shared.deposit_fallback import (
+    DepositWaived,
     _notify_deposit_waived,
     _rehold_for_promotion,
 )
@@ -360,15 +361,16 @@ def _payer_data_request(held, tenant: Tenant, kind: str, provider: str | None) -
 
 async def _payment_after_code(
     reply: _ReplyContext, *, tenant: Tenant | None, redis
-) -> FlowRouterResult | None:
+) -> FlowRouterResult | DepositWaived | None:
     """The Portal code was verified for a held slot: does the clinic want a deposit first?
 
     None = no, promote exactly as before. Otherwise the result to apply: the Pix request on the
     SAME hold (extended to the payment phase, `booking_charge.begin_payment`), or - when the
     deposit cannot be asked for (`charge_pending` / `no_patient` only) - a hand-over, or a
     plain "the slot was released" when someone else took it meanwhile. A TECHNICAL failure of
-    the deposit (TASK-071 Plan 3) is None too: the clinic is told and the slot is promoted
-    without the deposit (reserved again when `begin_payment` had released it).
+    the deposit (TASK-071 Plan 3) is a `DepositWaived`: promote it like None (the clinic is
+    told; the slot was reserved again when `begin_payment` had released it), handing its
+    `reason` to `_promote_booking_hold` so the appointment carries the agenda mark (task 6).
     """
     if tenant is None or reply.conversation_id is None:
         return None
@@ -419,7 +421,7 @@ async def _payment_after_code(
             stage="quote",
             redis=redis,
         )
-        return None
+        return DepositWaived(str(failure_reason_for(quote.reason)))
     # TASK-071 Plan 3, task 5: the clinic's account is known to be failing for an account-level
     # reason (the breaker is open). No CPF question, no customer, no charge: the code-phase hold
     # is promoted exactly as a booking with no deposit due, and the clinic is told (no new
@@ -438,7 +440,7 @@ async def _payment_after_code(
             provider=provider,
             record=False,
         )
-        return None
+        return DepositWaived(str(breaker))
     payer = await payer_data.recall_all(
         redis, tenant_id=tenant.id, conversation_id=reply.conversation_id
     )
@@ -470,16 +472,18 @@ async def _payment_after_code(
         # TASK-071 Plan 3: a technical failure never stops the booking. `begin_payment` released
         # the reservation; it is placed again (code phase) and the caller promotes it like any
         # booking with no deposit due (None), re-checking the slot on the agenda first.
-        return await _rehold_for_promotion(
+        waived = failure_reason_for(exc.code, exc.reason)
+        instead = await _rehold_for_promotion(
             reply,
             tenant,
             held,
             code=exc.code,
-            reason=failure_reason_for(exc.code, exc.reason),
+            reason=waived,
             stage=exc.stage or "charge",
             redis=redis,
             provider=quote.provider,
         )
+        return instead if instead is not None else DepositWaived(str(waived))
     if payment is None:
         return FlowRouterResult(
             action="reply",

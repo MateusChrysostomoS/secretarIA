@@ -186,6 +186,12 @@ class Appointment(Base):
     # before this column existed and every "é pra mim" booking after. Same
     # informational shape as `insurance`. PII: see load_pseudonymizer.
     attendee_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # TASK-071 Plan 3 (task 6): the booking was confirmed WITHOUT the deposit because the Pix
+    # failed for a technical reason. Holds a closed `FailureReason` value only (never provider
+    # text); the agenda derives the plain sentence (`failure_reason.user_text`) when it reads
+    # it. NULL for every ordinary or paid booking. A reschedule moves this same row, so the
+    # mark stays with the booking that still has no deposit.
+    deposit_waived_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     status: Mapped[AppointmentStatus] = mapped_column(
         # The Postgres `appointment_status` type stores the lowercase enum
         # *values* ("scheduled", ...) — see the c4d8e2f1a5b6 migration. Without

@@ -143,6 +143,12 @@ class CalendarEventRead(BaseModel):
     # asks for a deposit), a clinic/plan without deposit, or a charge that could
     # not be created. The backend does not tell those apart and neither does the UI.
     deposit: CalendarDepositRead | None = None
+    # TASK-071 Plan 3 (task 6): the booking was confirmed WITHOUT the deposit because the Pix
+    # failed for a technical reason. `deposit_waived_reason` is a closed `FailureReason` value,
+    # `deposit_waived_text` its plain sentence for the clinic (`failure_reason.user_text`).
+    # Both None for ordinary and paid bookings and for events with no local Appointment.
+    deposit_waived_reason: str | None = None
+    deposit_waived_text: str | None = None
     # TASK-032 (spec 4.4). Additive; all None for an event with no local
     # Appointment (a block, or something typed into Google). `status` is the
     # appointment status VALUE; `display_state` is one of "unconfirmed",

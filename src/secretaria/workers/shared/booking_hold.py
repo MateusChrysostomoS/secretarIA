@@ -63,6 +63,7 @@ from secretaria.services.insurance_catalog import (
     resolve_booking_plan_ids,
 )
 from secretaria.services.local_calendar import create_event_exclusive
+from secretaria.services.payments.failure_reason import coerce as coerce_failure_reason
 from secretaria.services.pending_identity import (
     BOOKING_HOLD_EXPIRED_MESSAGE,
     CODE_NOTICE_BUTTONS,
@@ -222,14 +223,25 @@ async def _send_booking_gate_notice(
         event="booking_gate_notice_sent",
     )
 
+def _waived_value(reason: str | None) -> str | None:
+    """The closed `FailureReason` value to store (an unknown string reads as `unknown`)."""
+    waived = coerce_failure_reason(reason)
+    return waived.value if waived is not None else None
+
+
 async def _promote_booking_hold(
     reply: _ReplyContext,
     *,
     tenant: Tenant | None,
     waba_token: str | None,
     redis,
+    deposit_waived_reason: str | None = None,
 ) -> str | SlotTakenAtPromotion | None:
     """Turn this conversation's reservation into a real appointment.
+
+    `deposit_waived_reason` (TASK-071 Plan 3, task 6): set by the worker paths that confirm the
+    booking WITHOUT the deposit after a technical failure (`deposit_fallback`); it is stored on
+    the appointment (a closed `FailureReason` value) so the agenda can mark it. None otherwise.
 
     Returns the extra paragraph to append to the code-accepted message, or
     None. None means "this conversation was never gated" - a patient whose
@@ -363,6 +375,7 @@ async def _promote_booking_hold(
         professional_id=held.professional_id,
         insurance=held.insurance,
         attendee_name=held.attendee_name,
+        deposit_waived_reason=_waived_value(deposit_waived_reason),
     )
     # TASK-032 R3: the appointment a "Marcar outra" booking replaced, if any.
     replaced: ReplacedAppointment | None = None

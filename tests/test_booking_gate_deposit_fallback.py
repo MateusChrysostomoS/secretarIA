@@ -47,6 +47,7 @@ from secretaria.services.payments.deposit_gate import DepositQuote
 from secretaria.services.payments.provider import ChargeState, PaymentStatus, ProviderError
 from secretaria.services.pending_identity import RequestCodeOutcome, RequestCodeResult
 from secretaria.workers import tasks
+from secretaria.workers.shared.deposit_fallback import DepositWaived
 from tests._patching import workers_ns
 from tests.before_support import (
     SLOT_END,
@@ -493,7 +494,8 @@ async def test_payment_after_code_failure_keeps_a_promotable_hold_and_tells_the_
 
     result = await tasks._payment_after_code(reply, tenant=tenant, redis=await _remembered(world))
 
-    assert result is None  # the caller promotes it like any booking with no deposit due
+    # The caller promotes it like any booking with no deposit due (task 6: with the reason).
+    assert result == DepositWaived("account_not_enabled")
     (hold,) = await _rows(db, BookingHold)
     assert (hold.phase, hold.charge_id) == ("code", None)
     assert await _rows(db, PixDeposit) == []
@@ -502,10 +504,9 @@ async def test_payment_after_code_failure_keeps_a_promotable_hold_and_tells_the_
 
 async def test_payment_after_code_promotion_confirms_and_never_says_blocked(db, env):
     world, tenant, reply = await _portal_code_hold(db)
-    assert (
-        await tasks._payment_after_code(reply, tenant=tenant, redis=await _remembered(world))
-        is None
-    )
+    assert await tasks._payment_after_code(
+        reply, tenant=tenant, redis=await _remembered(world)
+    ) == DepositWaived("account_not_enabled")
 
     text = await tasks._promote_booking_hold(reply, tenant=tenant, waba_token=None, redis=None)
 
@@ -518,7 +519,9 @@ async def test_payment_after_code_quote_failure_promotes_without_deposit(db, env
     world, tenant, reply = await _portal_code_hold(
         db, with_account=False, contact_email="clinic@example.com"
     )
-    assert await tasks._payment_after_code(reply, tenant=tenant, redis=FakeRedis()) is None
+    assert await tasks._payment_after_code(
+        reply, tenant=tenant, redis=FakeRedis()
+    ) == DepositWaived("no_account")
     (hold,) = await _rows(db, BookingHold)
     assert hold.phase == "code"
     assert len(env.alerts) == 1
@@ -659,3 +662,199 @@ async def test_next_successful_charge_clears_failing_health(db, env):
     )
 
     assert accounts.charge_health(await _account(db, world)) == "ok"
+
+
+# ---- task 6: the agenda mark of a booking made WITHOUT the deposit (rulings R5, R13) ----------
+#
+# Every path above that books without the deposit stores the closed `FailureReason` on the
+# appointment (`deposit_waived_reason`); the agenda shows "Sem sinal (falha técnica)" from it.
+# Paid and ordinary bookings never carry one.
+
+
+async def test_fallback_booking_records_waived_reason(db, env):
+    """Router path: the gate's fallback after `begin_payment` failed, persisted by the runner."""
+    await _asked_for_the_cpf(db)
+
+    await _turn("529.982.247-25", redis=FakeArqPool())
+
+    (appointment,) = await _rows(db, Appointment)
+    assert appointment.deposit_waived_reason == "account_not_enabled"
+
+
+async def test_quote_level_waiver_records_waived_reason(db, env):
+    """Router path, ruling R6: the deposit could not even be quoted (no usable account)."""
+    async with db() as session:
+        world = await make_world(session, with_account=False)
+
+    result = await _confirm(world, env)
+
+    assert result.appointment is not None
+    assert result.appointment["deposit_waived_reason"] == "no_account"
+
+
+@pytest.mark.parametrize("armed", [False, True])
+async def test_quote_level_waiver_never_books_next_to_a_live_charge(db, env, armed):
+    """Ruling R13: like the breaker, the R6 waiver never commits beside a payable Pix of the same
+    conversation - `charge_pending` keeps blocking (Portal and WhatsApp)."""
+    from uuid import uuid4
+
+    env.code_outcome = RequestCodeOutcome.SENT
+    async with db() as session:
+        world = await make_world(
+            session,
+            channel="brain_message" if armed else "whatsapp",
+            with_account=False,
+            contact_email="clinic@example.com",
+        )
+    assert await holds.place_hold(
+        tenant_id=world.tenant_id,
+        conversation_id=world.conversation.id,
+        patient_id=world.patient.id,
+        professional_id=None,
+        appointment_type="Consulta",
+        insurance=None,
+        start_at=SLOT_START + timedelta(hours=2),
+        end_at=SLOT_END + timedelta(hours=2),
+        phase="payment",
+        charge_id=uuid4(),
+    )
+
+    result = await _confirm(world, env, armed=armed)
+
+    assert result.action == "handover"
+    assert [b.body for b in result.bubbles] == [deposit_lifecycle.BEFORE_BLOCKED_TEXT]
+    assert result.appointment is None and env.calendar.created == []
+    assert env.alerts == []  # not a technical failure: nothing to tell the clinic
+
+
+async def test_payer_data_unavailable_records_waived_reason(db, env):
+    """Worker path 1: the payer answer could not be kept, the turn books without the deposit."""
+
+    class Down(FakeArqPool):
+        async def set(self, *args, **kwargs):
+            raise ConnectionError("redis down")
+
+    await _asked_for_the_cpf(db)
+
+    await _turn("529.982.247-25", redis=Down())
+
+    (appointment,) = await _rows(db, Appointment)
+    assert appointment.deposit_waived_reason == "unknown"
+
+
+async def test_payment_after_code_fallback_records_waived_reason(db, env):
+    """Worker path 2: the Portal code was verified and the Pix could not be started. The result
+    carries the reason to the promotion, which stores it on the appointment."""
+    world, tenant, reply = await _portal_code_hold(db)
+
+    result = await tasks._payment_after_code(reply, tenant=tenant, redis=await _remembered(world))
+
+    assert result == DepositWaived("account_not_enabled")
+    text = await tasks._promote_booking_hold(
+        reply,
+        tenant=tenant,
+        waba_token=None,
+        redis=None,
+        deposit_waived_reason=result.reason,
+    )
+    assert "está confirmado" in text
+    (appointment,) = await _rows(db, Appointment)
+    assert appointment.deposit_waived_reason == "account_not_enabled"
+
+
+async def test_payment_after_code_quote_failure_names_the_reason(db, env):
+    world, tenant, reply = await _portal_code_hold(db, with_account=False)
+
+    result = await tasks._payment_after_code(reply, tenant=tenant, redis=FakeRedis())
+
+    assert result == DepositWaived("no_account")
+
+
+async def test_verified_code_turn_promotes_with_the_waived_reason(db, env, monkeypatch):
+    """The orchestrator hands the reason `_payment_after_code` returned to the promotion."""
+    from secretaria.services.pending_identity import VerifyOutcome, VerifyResult
+    world, tenant, reply = await _portal_code_hold(db)
+    seen: dict = {}
+
+    async def waived(reply, *, tenant, redis):
+        return DepositWaived("pix_key_missing")
+
+    async def promote(reply, *, tenant, waba_token, redis, deposit_waived_reason=None):
+        seen["reason"] = deposit_waived_reason
+        return None
+
+    async def verified(tenant_id, external_id, code):
+        return VerifyResult(VerifyOutcome.VERIFIED)
+
+    monkeypatch.setattr(workers_ns, "_payment_after_code", waived)
+    monkeypatch.setattr(workers_ns, "_promote_booking_hold", promote)
+    monkeypatch.setattr(workers_ns, "verify_code", verified)
+    async with db() as session:
+        conversation = await session.get(Conversation, world.conversation.id)
+        conversation.flow_state = FlowState.AWAITING_EMAIL_CODE
+        patient = await session.get(type(world.patient), world.patient.id)
+        patient.lgpd_accepted_at = datetime.now(UTC)
+        await session.commit()
+
+    inbound = await tasks._persist_brain_message_inbound(
+        tenant_id=world.tenant_id,
+        external_id=world.patient.external_id,
+        text="123456",
+        patient_name="Maria",
+    )
+    await tasks._send_bot_reply(inbound, redis=None)
+
+    assert seen == {"reason": "pix_key_missing"}
+
+
+async def test_abort_deposit_request_records_waived_reason(db, env):
+    """Worker path 3: the Pix was created but could not be delivered."""
+    world, abort = await _undeliverable_pix(db, env)
+
+    await abort()
+
+    (appointment,) = await _rows(db, Appointment)
+    assert appointment.deposit_waived_reason == "unknown"
+
+
+async def test_paid_and_normal_bookings_have_no_waived_reason(db, env):
+    from secretaria.services import booking_promotion
+
+    # Normal: a clinic that charges no deposit up front books exactly as before.
+    async with db() as session:
+        world = await make_world(session, timing="after")
+    result = await _confirm(world, env)
+    assert result.appointment is not None
+    assert "deposit_waived_reason" not in result.appointment
+
+    # Normal Portal booking: the code hold promoted with no deposit due.
+    world, tenant, reply = await _portal_code_hold(db, timing="after")
+    assert "está confirmado" in await tasks._promote_booking_hold(
+        reply, tenant=tenant, waba_token=None, redis=None
+    )
+    (appointment,) = await _rows(db, Appointment)
+    assert appointment.deposit_waived_reason is None
+
+    # Paid: the promotion of a paid deposit never marks the booking.
+    env.provider.refuse = False
+    async with db() as session:
+        world = await make_world(session)
+    started = await booking_charge.begin_payment(
+        tenant_id=world.tenant_id,
+        conversation_id=world.conversation.id,
+        patient_id=world.patient.id,
+        quote=QUOTE,
+        professional_id=None,
+        appointment_type="Consulta",
+        insurance=None,
+        attendee_name=None,
+        start_at=SLOT_START,
+        end_at=SLOT_END,
+        payer_document=DOCUMENT,
+    )
+    async with db() as session:
+        deposit = await session.get(PixDeposit, started.deposit_id)
+        tenant = await session.get(type(world.tenant), world.tenant_id)
+        snapshot = booking_promotion.BookingSnapshot.from_deposit(deposit)
+        promoted = await booking_promotion.promote(session, tenant, deposit, snapshot, env.calendar)
+    assert promoted.appointment.deposit_waived_reason is None

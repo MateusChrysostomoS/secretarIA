@@ -35,6 +35,7 @@ from secretaria.services.payments import (
 from secretaria.services.payments.deposit_gate import DepositQuote
 from secretaria.services.payments.provider import ChargeState, PaymentStatus, ProviderError
 from secretaria.workers import tasks
+from secretaria.workers.shared.deposit_fallback import DepositWaived
 from tests._patching import workers_ns
 from tests.before_support import (
     SLOT_END,
@@ -498,13 +499,14 @@ async def test_a_payment_phase_hold_is_never_promoted_by_a_code(db, env):
 
 async def test_when_the_deposit_cannot_be_asked_the_code_hold_is_promoted_without_it(db, env):
     """TASK-071 Plan 3, ruling R6 (was "...the hold is released and a human is called"): no
-    usable credential is technical, so the code-phase hold stays for the normal promotion (None)
-    and the clinic is told."""
+    usable credential is technical, so the code-phase hold stays for the normal promotion
+    (`DepositWaived`) and the clinic is told."""
     world, held, tenant, reply = await _code_held_portal(
         db, with_account=False, contact_email="c@example.com"
     )
     result = await tasks._payment_after_code(reply, tenant=tenant, redis=FakeArqPool())
-    assert result is None
+    # Promoted like "no deposit due"; task 6 carries the reason onto the appointment.
+    assert result == DepositWaived("no_account")
     async with db() as session:
         (kept,) = list(await session.scalars(select(BookingHold)))
     assert (kept.id, kept.phase) == (held.id, "code")

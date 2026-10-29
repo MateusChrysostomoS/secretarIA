@@ -21,6 +21,8 @@ The clinic (and the doctor) are told by `deposit_failure_notice.notify_deposit_f
 never raises. Log lines carry ids and closed vocabularies only.
 """
 
+from dataclasses import dataclass
+
 from sqlalchemy import select
 
 from secretaria.ai.formatter import TextBubble
@@ -47,6 +49,16 @@ from secretaria.workers.shared.booking_hold import (
 from secretaria.workers.shared.context import _ReplyContext
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class DepositWaived:
+    """`_payment_after_code`'s answer when the deposit was DROPPED for a technical reason (task
+    6): the code-phase hold is ready for `_promote_booking_hold`, exactly like "no deposit due"
+    (None), and `reason` (a `FailureReason` value) goes with it onto the appointment so the
+    agenda can mark the booking made without its deposit. The clinic was already told."""
+
+    reason: str
 
 
 async def _notify_deposit_waived(
@@ -207,7 +219,13 @@ async def _confirm_without_deposit(
     )
     if instead is not None:
         return instead
-    promoted = await _promote_booking_hold(reply, tenant=tenant, waba_token=waba_token, redis=redis)
+    promoted = await _promote_booking_hold(
+        reply,
+        tenant=tenant,
+        waba_token=waba_token,
+        redis=redis,
+        deposit_waived_reason=str(reason),
+    )
     if isinstance(promoted, SlotTakenAtPromotion):
         return promoted.reoffer
     if promoted is None or promoted == _PROMOTE_FAILED_MESSAGE:

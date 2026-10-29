@@ -102,6 +102,7 @@ from secretaria.services.local_calendar import create_event_exclusive, update_ev
 from secretaria.services.patient_context import as_utc
 from secretaria.services.payments import payer_data
 from secretaria.services.payments.deposit_lifecycle import BEFORE_BLOCKED_TEXT
+from secretaria.services.payments.failure_reason import coerce as coerce_failure_reason
 from secretaria.services.pending_identity import BOOKING_SLOT_TAKEN_MESSAGE
 from secretaria.services.sensitive_claim_guard import unbacked_claim
 from secretaria.services.service_catalog import normalize, professionals_offering
@@ -4330,6 +4331,8 @@ async def _handle_confirmation(
             professionals=professionals,
         )
 
+    # TASK-071 Plan 3 (task 6): why this booking goes ahead WITHOUT the deposit, when it does.
+    deposit_waived_reason: str | None = None
     if gate is not None and (gate.armed or gate.deposit_capable):
         decision = await gate.decide(
             start_at=start,
@@ -4460,6 +4463,8 @@ async def _handle_confirmation(
                     back_target=BACK_TARGET_SERVICE,
                     professionals=professionals,
                 )
+            waived = coerce_failure_reason(decision.deposit_waived_reason)
+            deposit_waived_reason = waived.value if waived is not None else None
         # "commit" falls through to exactly the code that was here before.
 
     try:
@@ -4522,6 +4527,10 @@ async def _handle_confirmation(
     # Same omit-when-absent rule: an "é pra mim" booking keeps today's dict.
     if attendee_name:
         appointment["attendee_name"] = attendee_name
+    # Same omit-when-absent rule: only a booking made without its deposit carries the mark
+    # the agenda shows ("Sem sinal (falha técnica)"), persisted by `flow_runner` with the row.
+    if deposit_waived_reason is not None:
+        appointment["deposit_waived_reason"] = deposit_waived_reason
     # ONE bubble, not two: the patient keeps a single message they can
     # screenshot or forward, and it costs one WhatsApp send instead of two.
     # The labelled blank line is what separates the link from the confirmation

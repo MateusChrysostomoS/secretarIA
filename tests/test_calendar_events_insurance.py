@@ -92,6 +92,9 @@ NEW_EVENT_KEYS = {"status", "confirmation_count", "display_state", "attention", 
     "patient_name",
     # Native agenda (2026-10-20): which agenda holds the event, "google" | "local".
     "calendar_backend",
+    # TASK-071 Plan 3 (task 6): booked without the deposit after a technical failure.
+    "deposit_waived_reason",
+    "deposit_waived_text",
 }
 
 

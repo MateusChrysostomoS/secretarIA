@@ -150,6 +150,7 @@ from secretaria.workers.shared.context import (
 from secretaria.workers.shared.degrade import (
     _handle_service_unavailable,
 )
+from secretaria.workers.shared.deposit_fallback import DepositWaived
 from secretaria.workers.shared.deposit_turn import (
     _handle_deposit_wait,
     _handle_payer_data,
@@ -913,6 +914,11 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             # moves the SAME hold to the payment phase and asks for the deposit; the
             # appointment is then created by the payment, never here.
             paying = await _payment_after_code(reply, tenant=tenant, redis=redis)
+            # TASK-071 Plan 3 (task 6): the deposit was dropped for a technical reason - promote
+            # exactly like "no deposit due", carrying the reason onto the appointment.
+            deposit_waived_reason: str | None = None
+            if isinstance(paying, DepositWaived):
+                deposit_waived_reason, paying = paying.reason, None
             if paying is not None:
                 await _send_plain_reply(
                     reply,
@@ -937,6 +943,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                 tenant=tenant,
                 waba_token=waba_token,
                 redis=redis,
+                deposit_waived_reason=deposit_waived_reason,
             )
             if isinstance(promoted, SlotTakenAtPromotion):
                 # The code was good, the held time was filled on the agenda

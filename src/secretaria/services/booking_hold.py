@@ -625,6 +625,11 @@ class BookingGate:
                 failure_reason_for(None, self._waive_deposit),
                 "payer_data",
             )
+        if waiver is not None and await self._has_live_charge():
+            # Ruling R13 (as the breaker): a dropped deposit never books beside a payable Pix of
+            # this conversation - that is `charge_pending`, not a technical failure. On the
+            # Portal `place_hold` would refuse the hold and the gate would fail open to commit.
+            return await self._blocked("charge_pending")
 
         decision = await self._decide_without_deposit(
             start_at=start_at,
