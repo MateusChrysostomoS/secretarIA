@@ -80,7 +80,8 @@ V2_FULL = frozenset(
 # blind-tool lines and the rule-A addition); the v1 prompt for the same config is 11,043. The
 # ceiling leaves ~5% for wording fixes - a rule that needs more room should replace text, not
 # pile on top of it.
-PROMPT_V2_MAX_CHARS = 12_000
+# TASK-072 (2026-10-29): 12,000 -> 12,500 for the fixed "AO RESPONDER" block (~400 characters).
+PROMPT_V2_MAX_CHARS = 12_500
 
 _REAL_CLINIC_TODAY = prompts_v2._clinic_today
 

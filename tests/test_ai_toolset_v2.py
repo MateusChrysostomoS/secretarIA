@@ -95,6 +95,7 @@ _HANDBACKS = {
     "set_booking_draft",
     "request_human_handoff",
     "offer_human_handoff",
+    "save_patient_name",
 }
 
 _RETIRED = {"start_guided_booking", "select_professional_and_continue"}

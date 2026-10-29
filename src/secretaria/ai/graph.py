@@ -94,7 +94,11 @@ from secretaria.services.pii_pseudonymization import (
     load_pseudonymizer,
     persist_pseudonymizer,
 )
-from secretaria.services.tenant_config import TenantRuntimeConfig
+from secretaria.services.tenant_config import (
+    ClinicFeatures,
+    PatientIdentityStatus,
+    TenantRuntimeConfig,
+)
 
 logger = get_logger(__name__)
 
@@ -373,7 +377,7 @@ def _turn_system_prompt(config: TenantRuntimeConfig) -> str:
     prompt = (
         secretary_system_prompt_v2(config, tool_names=_turn_tool_names())
         if _ai_toolset_v2_ctx.get()
-        else secretary_system_prompt(config)
+        else secretary_system_prompt(config, name_tool=not _editing_ctx.get())
     )
     if _editing_ctx.get():
         prompt += """
@@ -701,6 +705,8 @@ async def run_agent(
     toolset_v2: bool = False,
     editing: bool = False,
     channel: str = CHANNEL_WHATSAPP,
+    patient_identity: PatientIdentityStatus | None = None,
+    clinic_features: ClinicFeatures | None = None,
 ) -> str:
     """arq-side entry point: build history + run agent + return reply text.
 
@@ -708,6 +714,9 @@ async def run_agent(
     `channel` is the conversation's channel (`_ReplyContext.channel`), so the
     prompt names the surface the patient is on (ai/prompts.py); the default
     keeps every existing caller on the WhatsApp wording.
+    `patient_identity` / `clinic_features` (TASK-072): booleans on which identity data we hold
+    and which optional features are ON for the clinic, built by the worker
+    (services/llm_context.py); None leaves the prompt without those blocks.
     `tenant_config` provides per-tenant Calendar credentials and prompt data.
     When None, falls back to the single-tenant env-var scaffold (Fase A / dev).
     `extra_tools` are plugin-contributed LangChain tools for THIS tenant's
@@ -764,6 +773,11 @@ async def run_agent(
         tenant_config = replace(tenant_config, conversation_state=conversation_state)
     if tenant_config is not None and channel != tenant_config.channel:
         tenant_config = replace(tenant_config, channel=channel)
+    if tenant_config is not None and (patient_identity is not None or clinic_features is not None):
+        # TASK-072: per-turn facts (booleans only), never loaded from the DB here.
+        tenant_config = replace(
+            tenant_config, patient_identity=patient_identity, clinic_features=clinic_features
+        )
 
     # Build a per-tenant CalendarService and inject it via ContextVar so the
     # cached process-wide agent uses the right credentials for this call.

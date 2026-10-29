@@ -156,6 +156,7 @@ neither" do `README.md`.
 
 ## Documentação
 
+`docs/CHECKPOINT_task072_contexto_ia.md` — TASK-072 (bateria real 2026-10-29): a IA recebe blocos de turno "DADOS DO PACIENTE" (nome/e-mail: so a situacao) e "RECURSOS DESTA CLÍNICA" (sinal/convênio/marcar ligado ou desligado; nunca mencionar o desligado), regra de responder todas as partes de uma mensagem e ferramenta `save_patient_name` (só preenche nome vazio); local, sem push/deploy.
 `docs/CHECKPOINT_task052_liberar_sinal_pago.md` — TASK-052: liberar horário com sinal pago dá ao paciente Manter (pedido; a clínica aceita/recusa em 24 h) / Remarcar (a qualquer momento; leva o sinal só se o Asaas confirmar paga e sem estorno na hora; senão sinal novo — fail-safe) / Cancelar (avisa a clínica na hora com o passo a passo do Asaas); sem resposta, aviso em B e "cancelado por falta de resposta" em T+24h; contrato da aba da TASK-054 (todos os papéis, escopo da agenda); B usa o horário da clínica se o brain-api diz que há secretária ativa, senão o do médico (Task 16 ligada localmente na TASK-067 s06, checkpoint §8); modelos Meta PENDENTES; integra em `feature/out-of-mvp`; **construído, NÃO deployado**.
 `docs/CHECKPOINT_convenio_paginado_antecedencia.md` — 2026-10-27 (Instituto Gicovate): lista de convênios paginada ("Ver mais convênios", nenhum plano cortado) e antecedência mínima por médico (`professionals.min_booking_notice_hours`, migração `c3d9e1f5a7b2`; só consulta nova, remarcar/cancelar livres); branch `feat/convenio-paginado-antecedencia`, sem deploy; ordem: migração → API+worker → front.
 

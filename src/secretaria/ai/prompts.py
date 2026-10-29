@@ -452,8 +452,86 @@ _CHANNEL_WORDING: dict[str, dict[str, str]] = {
 }
 
 
-def secretary_system_prompt(config: TenantRuntimeConfig, *, now: datetime | None = None) -> str:
-    """Render the full system prompt for a specific tenant."""
+# --------------------------------------------------------------------------
+# TASK-072: what the agent knows about the patient and about the clinic's switches
+# --------------------------------------------------------------------------
+
+
+def _format_answering_rules() -> str:
+    """Two rules found in the live battery of 2026-10-29, shared by the v1 and v2 prompts."""
+    return (
+        "\n\n================ AO RESPONDER ================\n"
+        "- Mensagem com VÁRIAS perguntas (ex.: preço e endereço): responda NA MESMA resposta "
+        "todas as partes que o contexto permite. Só para a parte que você não sabe, diga isso "
+        "e ofereça a recepção; nunca deixe parte para o próximo turno.\n"
+        "- Horário que não está livre só está indisponível: nunca diga que está "
+        '"reservado", "guardado" ou "aguardando" outro paciente ou pagamento.'
+    )
+
+
+def _format_patient_identity(config: TenantRuntimeConfig, *, name_tool: bool = True) -> str:
+    """The "DADOS DO PACIENTE" block: only whether the name / e-mail exist, never the values."""
+    identity = config.patient_identity
+    if identity is None:
+        return ""
+    name = "já temos." if identity.name_known else "ainda NÃO temos."
+    email = "já temos." if identity.email_known else "ainda NÃO temos."
+    head = (
+        "\n\n================ DADOS DO PACIENTE (só a situação, nunca os valores) "
+        "================\n"
+        f"- Nome: {name}\n"
+        f"- E-mail: {email}\n"
+    )
+    if identity.name_known and identity.email_known:
+        return head + "Não peça esses dados de novo."
+    save = (
+        " Quando o paciente disser o nome, chame save_patient_name (só grava se ainda não "
+        "houver nome)."
+        if name_tool
+        else ""
+    )
+    return head + (
+        "O que falta, peça com naturalidade durante a conversa, uma coisa por vez e sem "
+        f"travar o que o paciente quer.{save} Você não grava e-mail por aqui: se faltar e "
+        "ele quiser informar, diga que a recepção registra. Não peça de novo o que já temos."
+    )
+
+
+def _format_clinic_features(config: TenantRuntimeConfig) -> str:
+    """The "RECURSOS DESTA CLÍNICA" block: what is ON / OFF here, and the ban on the OFF ones."""
+    features = config.clinic_features
+    if features is None:
+        return ""
+    deposit = (
+        "LIGADO (quem cobra e confirma é o fluxo; você não cobra nem confirma pagamento)"
+        if features.deposit_enabled
+        else "DESLIGADO"
+    )
+    insurance = (
+        f"aceita convênios ({features.insurance_plan_count} cadastrados; o fluxo mostra a lista)"
+        if features.insurance_plan_count
+        else "nenhum convênio cadastrado (atendimento particular)"
+    )
+    booking = "LIGADO" if features.online_booking else "DESLIGADO"
+    return (
+        "\n\n================ RECURSOS DESTA CLÍNICA (ligado/desligado) ================\n"
+        f"- Sinal (Pix antecipado): {deposit}\n"
+        f"- Convênios: {insurance}\n"
+        f"- Marcar, remarcar e cancelar pelo chat: {booking}\n"
+        "Nunca mencione, ofereça nem prometa um recurso DESLIGADO (ex.: com o sinal desligado, "
+        'nunca fale de sinal, Pix, pagamento antecipado nem "aguardando pagamento"). Sobre '
+        "convênio, só confirme os cadastrados; se perguntarem por outro, diga que não consta "
+        "e ofereça a recepção."
+    )
+
+
+def secretary_system_prompt(
+    config: TenantRuntimeConfig, *, now: datetime | None = None, name_tool: bool = True
+) -> str:
+    """Render the full system prompt for a specific tenant.
+
+    `name_tool`: whether this turn has `save_patient_name` (False in an appointment edit).
+    """
     tz = config.timezone
     surface = _CHANNEL_WORDING.get(config.channel, _CHANNEL_WORDING[CHANNEL_WHATSAPP])
     clinic = config.clinic_name
@@ -476,12 +554,16 @@ def secretary_system_prompt(config: TenantRuntimeConfig, *, now: datetime | None
     post_consult_section = _format_post_consult_knowledge(config)
     appointment_context_section = _format_appointment_context(config)
     conversation_state_section = _format_conversation_state(config)
+    identity_section = _format_patient_identity(config, name_tool=name_tool)
+    features_section = _format_clinic_features(config)
+    answering_section = _format_answering_rules()
 
     return (
         f"Você é a secretária virtual da {clinic}. Sua função é acolher pacientes "
         f"{surface['where']} e agendar, remarcar ou cancelar consultas no Google Calendar "
         "da clínica."
-        f"{safety_section}{priorities_section}{professional_section}{clinic_facts_section}{post_consult_section}"
+        f"{safety_section}{priorities_section}{answering_section}{professional_section}"
+        f"{clinic_facts_section}{features_section}{identity_section}{post_consult_section}"
         f"{appointment_context_section}{conversation_state_section}\n\n"
         "CONTEXTO OPERACIONAL:\n"
         f"{date_context(tz, now=now)}"

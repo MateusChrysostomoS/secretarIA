@@ -64,7 +64,11 @@ from secretaria.services.greeting_template import (
 from secretaria.services.insurance_catalog import (
     load_tenant_insurance,
 )
-from secretaria.services.llm_context import build_conversation_state
+from secretaria.services.llm_context import (
+    build_clinic_features,
+    build_conversation_state,
+    build_patient_identity,
+)
 from secretaria.services.patient_context import (
     PatientOpeningState,
     load_upcoming_appointments,
@@ -370,6 +374,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
     manage_calendar_owned = False
     edit_context: EditContext | None = None
     patient_name = None
+    patient_email = None
     patient_wa = reply.patient_ref
     # Whether this patient still owes LGPD consent. Only the identity turns
     # read it: a code asked BEFORE consent (an e-mail that already had an
@@ -422,6 +427,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                     patient = await session.get(Patient, conversation.patient_id)
                     if patient is not None:
                         patient_name = patient.name
+                        patient_email = patient.email
                         patient_wa = patient.wa_id or patient_wa
                         patient_owes_consent = patient.lgpd_accepted_at is None
                 if tenant is not None:
@@ -1299,6 +1305,15 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             # The prompt names the surface the patient is on: "chat da clínica"
             # on the Portal, never "WhatsApp" (live test, 2026-10-05).
             channel=reply.channel,
+            # TASK-072: which identity data we hold and which features are ON (booleans).
+            patient_identity=build_patient_identity(
+                patient_name,
+                patient_email,
+                email_on_account=policy_for(reply.channel).has_inline_identity,
+            ),
+            clinic_features=build_clinic_features(
+                tenant, flow_snapshot[1] if flow_snapshot is not None else None
+            ),
         )
     except Exception as exc:
         if not editing:

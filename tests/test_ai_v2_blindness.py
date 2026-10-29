@@ -379,6 +379,7 @@ def _scripted_calls(own_ref: str, other_ref: str) -> dict[str, list[dict]]:
         "manage_existing_appointment": [{"action": "cancel", "appointment": own_ref}],
         "request_human_handoff": [{"reason": "nenhum"}, {"reason": "could_not_help"}],
         "offer_human_handoff": [{"message": "N?o tenho essa informa??o."}],
+        "save_patient_name": [{"name": "Joana Prado"}, {"name": "ok?"}],
         "create_event": [
             {"start": f"{last}T09:00", "service": "Consulta"},
             {"start": "amanhã às 10"},
