@@ -70,6 +70,18 @@ CONTINUE_WITHOUT_DEPOSIT: frozenset[str] = frozenset(
 # there is no patient to charge.
 KEEPS_BLOCKING: frozenset[str] = frozenset({"charge_pending", "no_patient"})
 
+# Stages where the deposit is dropped although the CHARGE did not fail: our message could not be
+# delivered (`delivery`, the charge was created fine) or the payer field could not be kept
+# (`payer_data`, Redis). The booking still goes on without the deposit, but the account is NOT
+# marked failing and the clinic gets no "Sinal do Pix" e-mail: that is about the provider only.
+NOT_A_CHARGE_FAILURE_STAGES: frozenset[str] = frozenset({"delivery", "payer_data"})
+
+
+def tells_the_clinic(stage: str) -> bool:
+    """Whether a dropped deposit at `stage` is a charge failure the clinic must hear about."""
+    return stage not in NOT_A_CHARGE_FAILURE_STAGES
+
+
 _REASON_FOR_CODE: dict[str, FailureReason] = {
     "no_account": FailureReason.no_account,
     "no_credential": FailureReason.no_account,

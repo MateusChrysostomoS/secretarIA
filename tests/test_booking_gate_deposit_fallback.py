@@ -438,7 +438,9 @@ async def test_payer_data_unavailable_books_without_deposit_instead_of_blocking(
     (appointment,) = await _rows(db, Appointment)
     assert appointment.status == AppointmentStatus.SCHEDULED
     assert env.provider.called("create_pix_charge") == 0  # the deposit step was dropped
-    assert len(env.alerts) == 1
+    # Fix round 1: Redis, not the charge, failed - no e-mail, account health untouched.
+    assert env.alerts == []
+    assert accounts.charge_health(await _account(db, world)) != "failing"
     conversation = await _conversation(db, world)
     assert conversation.flow_state == FlowState.IDLE
     assert conversation.handover_state != HandoverState.HUMAN_ACTIVE
@@ -541,7 +543,8 @@ async def test_payment_after_code_slot_taken_meanwhile_offers_the_retry(db, env,
 # ---- worker path 3: the Pix that could not be delivered (`_abort_deposit_request`) -----------
 
 
-async def test_abort_deposit_request_books_without_deposit_and_voids_the_pix(db, env):
+async def _undeliverable_pix(db, env):
+    """A Pix created fine (the account is marked healthy) whose message could not be delivered."""
     env.provider.refuse = False
     async with db() as session:
         world = await make_world(session, contact_email="clinic@example.com")
@@ -571,13 +574,22 @@ async def test_abort_deposit_request_books_without_deposit_and_voids_the_pix(db,
         tenant_id=world.tenant_id,
     )
 
-    result = await tasks._abort_deposit_request(
-        reply,
-        {"deposit_id": started.deposit_id},
-        tenant=tenant,
-        waba_token="wt",
-        redis=FakeArqPool(),
-    )
+    async def abort():
+        return await tasks._abort_deposit_request(
+            reply,
+            {"deposit_id": started.deposit_id},
+            tenant=tenant,
+            waba_token="wt",
+            redis=FakeArqPool(),
+        )
+
+    return world, abort
+
+
+async def test_abort_deposit_request_books_without_deposit_and_voids_the_pix(db, env):
+    world, abort = await _undeliverable_pix(db, env)
+
+    result = await abort()
 
     assert result is not None and result.action == "reply"
     assert "está confirmado" in result.bubbles[0].body
@@ -588,7 +600,34 @@ async def test_abort_deposit_request_books_without_deposit_and_voids_the_pix(db,
     assert await _awaiting_deposits(db) == []  # the Pix is voided: no deadline can cancel it
     assert env.provider.called("cancel_charge") == 1
     assert await _rows(db, BookingHold) == []
-    assert len(env.alerts) == 1
+    # Fix round 1: the charge worked, only the delivery failed - no "Sinal do Pix" e-mail and
+    # the account stays healthy (`record_charge_success` from the charge is not overwritten).
+    assert env.alerts == []
+    assert accounts.charge_health(await _account(db, world)) == "ok"
+
+
+@pytest.mark.parametrize("broken", ["cancel_charge", "get_charge"])
+async def test_abort_deposit_request_never_books_over_a_pix_whose_void_was_not_confirmed(
+    db, env, broken
+):
+    """Fix round 1: `abandon_charge` answers "voided" even when the provider could not be asked
+    (`get_charge` raised) or refused the void (`cancel_charge` raised). The Pix may still be
+    payable, so nothing is booked: a person takes over."""
+    world, abort = await _undeliverable_pix(db, env)
+    if broken == "cancel_charge":
+        env.provider.cancel_error = RuntimeError("asaas down")
+    else:
+        env.provider.get_error = RuntimeError("asaas down")
+
+    result = await abort()
+
+    assert result is not None and result.action == "handover"
+    assert [b.body for b in result.bubbles] == [deposit_lifecycle.BEFORE_CONFIRM_FAILED_TEXT]
+    assert await _rows(db, Appointment) == []  # never a booking next to a payable Pix
+    assert env.calendar.created == []
+    # The row is still waiting (the expiry job voids it) - and nothing confirmed stands beside it.
+    assert len(await _awaiting_deposits(db)) == 1
+    assert env.alerts == []
 
 
 async def test_next_successful_charge_clears_failing_health(db, env):

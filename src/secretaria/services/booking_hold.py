@@ -841,7 +841,7 @@ class BookingGate:
             tenant_id=str(self._tenant_id),
             conversation_id=str(self._conversation_id),
         )
-        if self._tenant_id is not None:
+        if self._tenant_id is not None and deposit_failure_notice.tells_the_clinic(stage):
             await deposit_failure_notice.notify_deposit_failure(
                 tenant_id=self._tenant_id,
                 patient_name=attendee_name or await self._patient_name(),

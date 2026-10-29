@@ -69,6 +69,10 @@ async def _notify_deposit_waived(
         tenant_id=str(tenant.id),
         conversation_id=str(reply.conversation_id),
     )
+    if not deposit_failure_notice.tells_the_clinic(stage):
+        # The charge itself did not fail (e.g. our message could not be delivered): the
+        # account stays healthy and the clinic gets no deposit-failure e-mail.
+        return
     patient_name = held.attendee_name
     if not patient_name:
         try:

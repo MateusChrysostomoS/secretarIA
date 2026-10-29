@@ -246,8 +246,8 @@ async def test_a_pix_that_cannot_be_delivered_voids_the_charge_and_books_without
     db, env, monkeypatch
 ):
     """TASK-071 Plan 3 (was: "...frees the slot and calls a human" with BEFORE_BLOCKED_TEXT): a
-    Pix nobody received is voided and the slot is booked WITHOUT the deposit; the clinic is
-    told. The confirmation is attempted on the same (failing) channel, best effort."""
+    Pix nobody received is voided and the slot is booked WITHOUT the deposit (no clinic e-mail:
+    the charge itself worked). The confirmation is attempted on the same channel, best effort."""
     env.provider.state = ChargeState(PaymentStatus.PENDING)
     async with db() as session:
         world = await make_world(session, contact_email="clinic@example.com")
@@ -275,7 +275,7 @@ async def test_a_pix_that_cannot_be_delivered_voids_the_charge_and_books_without
     conversation = await _conversation(db, world)
     assert conversation.flow_state == FlowState.IDLE
     assert env.emails == []  # the old payment alert stays unused
-    assert [w["stage"] for w in env.waived] == ["delivery"]
+    assert env.waived == []  # fix round 1: a delivery failure is not a charge failure
     assert all(deposit_lifecycle.BEFORE_BLOCKED_TEXT not in item[2] for item in sender.sent)
 
 

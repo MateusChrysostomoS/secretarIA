@@ -13,9 +13,11 @@ Imports only `shared/` modules that never import `flow_runner` or `sentinels`, s
 those may import this module without a cycle.
 """
 
+from sqlalchemy import select
+
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
-from secretaria.models import Conversation, Tenant
+from secretaria.models import Conversation, PixDeposit, PixDepositStatus, Tenant
 from secretaria.models.conversation import FlowState
 from secretaria.services import deposit_wait
 from secretaria.services.booking_hold import latest_hold_in
@@ -126,17 +128,37 @@ async def _abort_deposit_request(
     deposit_id = request["deposit_id"]
     held = None
     outcome = None
+    void_confirmed = False
     try:
         async with async_session_factory() as session:
             held = await latest_hold_in(session, reply.conversation_id)
             outcome = await booking_charge.abandon_charge(session, tenant, deposit_id)
+            # `abandon_charge` answers "voided" even when the provider could not be asked or
+            # refused the void (the slot is freed and the expiry job voids it later). Only a
+            # row that LEFT `AWAITING` proves the Pix can no longer be paid.
+            status = await session.scalar(
+                select(PixDeposit.status).where(PixDeposit.id == deposit_id)
+            )
+            void_confirmed = status is not None and status != PixDepositStatus.AWAITING
     except Exception as exc:
         logger.error("deposit_request_abort_failed", error_type=type(exc).__name__)
     if outcome == "paid":
         return None
-    if outcome != "voided" or held is None or held.charge_id != deposit_id:
-        # The charge may still be live (or was resolved elsewhere): nothing may be confirmed
-        # here. A person takes the conversation.
+    if (
+        outcome != "voided"
+        or not void_confirmed
+        or held is None
+        or held.charge_id != deposit_id
+    ):
+        # The charge may still be live and payable (or was resolved elsewhere): booking next to
+        # a payable Pix would turn its payment into a "slot no longer available". Nothing is
+        # confirmed here; a person takes the conversation.
+        logger.warning(
+            "deposit_request_void_unconfirmed",
+            outcome=outcome,
+            tenant_id=str(tenant.id),
+            conversation_id=str(reply.conversation_id),
+        )
         return _confirm_failed()
     return await _confirm_without_deposit(
         reply,
