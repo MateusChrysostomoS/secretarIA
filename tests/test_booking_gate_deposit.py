@@ -214,11 +214,42 @@ async def test_a_failure_deciding_after_the_clinic_is_known_to_be_on_before_book
         raise RuntimeError("database went away")
 
     monkeypatch.setattr(deposit_gate, "quote_deposit", boom)
+    monkeypatch.setattr(deposit_gate, "_retry_sleep", _no_sleep)
     async with db() as session:
         world = await make_world(session)
     decision = await _decide(_gate(world, armed=False))
     assert (decision.outcome, decision.deposit_waived_reason) == ("commit", "unknown")
     assert [w["stage"] for w in env.waived] == ["quote"]
+
+
+async def _no_sleep(seconds: float) -> None:
+    return None
+
+
+async def test_a_transient_failure_deciding_the_deposit_is_retried_on_a_fresh_session(
+    db, env, monkeypatch
+):
+    """Owner, 2026-10-29: retried before giving up. The first attempt's session may hold a failed
+    transaction, so the retry runs on a NEW one, and the real quote decides the booking."""
+    real = deposit_gate.quote_deposit
+    sessions: list = []
+
+    async def flaky(session, *args, **kwargs):
+        sessions.append(session)
+        if len(sessions) == 1:
+            raise RuntimeError("database went away")
+        return await real(session, *args, **kwargs)
+
+    monkeypatch.setattr(deposit_gate, "quote_deposit", flaky)
+    monkeypatch.setattr(deposit_gate, "_retry_sleep", _no_sleep)
+    async with db() as session:
+        world = await make_world(session)
+    decision = await _decide(_gate(world, armed=False))
+
+    assert len(sessions) == 2 and sessions[0] is not sessions[1]
+    assert decision.deposit_waived_reason is None  # the real quote, not `quote_failed`
+    assert decision.outcome == "awaiting_payment"
+    assert env.waived == []
 
 
 async def test_a_window_another_conversation_holds_is_slot_taken_and_nothing_is_charged(db, env):

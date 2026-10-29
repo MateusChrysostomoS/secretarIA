@@ -393,8 +393,11 @@ async def _payment_after_code(
         patient_id = await session.scalar(
             select(Conversation.patient_id).where(Conversation.id == reply.conversation_id)
         )
-        try:
-            quote = await deposit_gate.quote_deposit(
+
+    async def attempt():
+        # A fresh session per attempt (`quote_with_retries`): a failed one is never reused.
+        async with async_session_factory() as session:
+            return await deposit_gate.quote_deposit(
                 session,
                 tenant,
                 patient_id=patient_id,
@@ -403,13 +406,19 @@ async def _payment_after_code(
                 insurance=held.insurance,
                 redis=redis,
             )
-        except Exception as exc:  # noqa: BLE001 - as the gate: a technical failure, `quote_failed`
-            logger.warning(
-                "deposit_after_code_quote_failed",
-                error_type=type(exc).__name__,
-                conversation_id=str(reply.conversation_id),
-            )
-            quote = deposit_gate.DepositQuote("blocked", "quote_failed")
+
+    try:
+        # Owner, 2026-10-29: a transient error is tried again (3 attempts) before `quote_failed`.
+        quote = await deposit_gate.quote_with_retries(
+            attempt, event="deposit_after_code_quote_retried"
+        )
+    except Exception as exc:  # noqa: BLE001 - as the gate: a technical failure, `quote_failed`
+        logger.warning(
+            "deposit_after_code_quote_failed",
+            error_type=type(exc).__name__,
+            conversation_id=str(reply.conversation_id),
+        )
+        quote = deposit_gate.DepositQuote("blocked", "quote_failed")
     if not quote.required and not quote.blocked:
         return None
 

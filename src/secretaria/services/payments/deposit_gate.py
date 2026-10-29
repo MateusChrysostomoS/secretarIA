@@ -23,6 +23,8 @@ message, no state change. It reuses `deposit_lifecycle`'s own price and convenio
 the amount the gate quotes is byte for byte the one `maybe_create_deposit` computes for `after`.
 """
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Literal
@@ -59,6 +61,35 @@ REASON_NO_PROVIDER = "no_provider"
 REASON_NO_CREDENTIAL = "no_credential"
 
 Outcome = Literal["no_deposit", "required", "blocked"]
+
+# Owner, 2026-10-29: a throw while deciding the deposit (a database hiccup) is tried again right
+# away before the caller falls back to `quote_failed` - 3 attempts in total, with these waits
+# between them (read at call time, so a test can shorten them).
+QUOTE_RETRY_DELAYS: tuple[float, ...] = (0.2, 0.5)
+
+
+async def _retry_sleep(seconds: float) -> None:
+    await asyncio.sleep(seconds)
+
+
+async def quote_with_retries[T](attempt: Callable[[], Awaitable[T]], *, event: str) -> T:
+    """Run `attempt` up to `1 + len(QUOTE_RETRY_DELAYS)` times; the first answer wins and the last
+    error is raised when every attempt failed (the caller keeps its own fallback).
+
+    `attempt` must open its OWN session: an exception may leave a session in a failed
+    transaction (Postgres refuses every statement until a rollback), so a retry never reuses
+    the one that failed. Each retried failure is logged as `event` with the attempt number and
+    the error type only."""
+    delays = QUOTE_RETRY_DELAYS
+    for index in range(len(delays) + 1):
+        try:
+            return await attempt()
+        except Exception as exc:  # noqa: BLE001 - the caller decides what a final failure means
+            if index >= len(delays):
+                raise
+            logger.warning(event, attempt=index + 1, error_type=type(exc).__name__)
+            await _retry_sleep(delays[index])
+    raise AssertionError("unreachable")  # pragma: no cover - the loop returns or raises
 
 
 def clamp_ttl(minutes: int | None) -> int:

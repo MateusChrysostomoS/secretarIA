@@ -909,6 +909,7 @@ async def test_payment_after_code_quote_error_promotes_without_deposit(db, env, 
         raise RuntimeError("database went away")
 
     monkeypatch.setattr(deposit_gate, "quote_deposit", broken_quote)
+    monkeypatch.setattr(deposit_gate, "QUOTE_RETRY_DELAYS", (0.0, 0.0))
 
     result = await tasks._payment_after_code(reply, tenant=tenant, redis=FakeRedis())
 
@@ -917,6 +918,34 @@ async def test_payment_after_code_quote_error_promotes_without_deposit(db, env, 
     assert (hold.phase, hold.charge_id) == ("code", None)
     assert len(env.alerts) == 1
     assert env.provider.called("create_pix_charge") == 0
+
+
+async def test_payment_after_code_retries_a_transient_quote_error(db, env, monkeypatch):
+    """Owner, 2026-10-29: the calculation is retried (fresh session each time) before it falls
+    back to `quote_failed`; a transient error followed by success yields the real quote."""
+    world, tenant, reply = await _portal_code_hold(
+        db, with_account=False, contact_email="clinic@example.com"
+    )
+    real = deposit_gate.quote_deposit
+    sessions: list = []
+
+    async def flaky(session, *args, **kwargs):
+        sessions.append(session)
+        if len(sessions) == 1:
+            raise RuntimeError("database went away")
+        return await real(session, *args, **kwargs)
+
+    async def no_sleep(seconds):
+        return None
+
+    monkeypatch.setattr(deposit_gate, "quote_deposit", flaky)
+    monkeypatch.setattr(deposit_gate, "_retry_sleep", no_sleep)
+
+    result = await tasks._payment_after_code(reply, tenant=tenant, redis=FakeRedis())
+
+    assert len(sessions) == 2 and sessions[0] is not sessions[1]
+    # The REAL quote (no account -> `no_account`), not the `quote_failed` -> `unknown` fallback.
+    assert result == DepositWaived("no_account")
 
 
 async def test_payment_after_code_quote_error_beside_a_live_charge_hands_over(
@@ -944,6 +973,7 @@ async def test_payment_after_code_quote_error_beside_a_live_charge_hands_over(
         raise RuntimeError("database went away")
 
     monkeypatch.setattr(deposit_gate, "quote_deposit", broken_quote)
+    monkeypatch.setattr(deposit_gate, "QUOTE_RETRY_DELAYS", (0.0, 0.0))
 
     result = await tasks._payment_after_code(reply, tenant=tenant, redis=FakeRedis())
 

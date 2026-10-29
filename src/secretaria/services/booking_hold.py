@@ -773,7 +773,10 @@ class BookingGate:
         carry_check = await release_carry_check.ensure_checked(self._conversation_id)
 
         on_before = False
-        try:
+
+        async def attempt():
+            nonlocal on_before
+            # A fresh session per attempt (`quote_with_retries`): a failed one is never reused.
             async with async_session_factory() as session:
                 tenant = await session.get(Tenant, self._tenant_id)
                 if tenant is None or not deposit_gate.timing_is_before(tenant):
@@ -803,6 +806,13 @@ class BookingGate:
                     insurance=insurance,
                     redis=self._redis,
                 )
+
+        try:
+            # Owner, 2026-10-29: a transient error is tried again (3 attempts) before the
+            # fallback below.
+            return await deposit_gate.quote_with_retries(
+                attempt, event="booking_gate_quote_retried"
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("booking_gate_quote_failed", error_type=type(exc).__name__)
             if not on_before:
