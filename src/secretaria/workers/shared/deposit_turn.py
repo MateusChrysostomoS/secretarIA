@@ -269,8 +269,16 @@ async def _handle_payer_data(
             outcome=action,
             conversation_id=str(reply.conversation_id),
         )
+        async with async_session_factory() as session:
+            conversation = await session.get(Conversation, reply.conversation_id)
+        # The inbound ladder kept the service / doctor / convênio (not the time) for this card.
         await _apply_flow_result(
-            reply, _offer_human(body), None, redis=redis, tenant=tenant, waba_token=waba_token
+            reply,
+            _offer_human(body, draft=conversation),
+            None,
+            redis=redis,
+            tenant=tenant,
+            waba_token=waba_token,
         )
         return
     await _set_conversation_human_active(reply.conversation_id)

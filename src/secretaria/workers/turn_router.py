@@ -723,12 +723,16 @@ async def _route_inbound_turn(
         else:  # "optout" / "exhausted" / "expired" in `after`: nothing else is asked or charged
             conversation.flow_state = FlowState.IDLE
             conversation.flow_step = None
-            conversation.flow_selected_type = None
             conversation.flow_selected_day = None
             conversation.flow_selected_slot = None
-            conversation.flow_selected_professional_id = None
-            conversation.flow_selected_insurance = None
-            conversation.flow_attendee_name = None
+            if info.timing == "after":
+                conversation.flow_selected_type = None
+                conversation.flow_selected_professional_id = None
+                conversation.flow_selected_insurance = None
+                conversation.flow_attendee_name = None
+            # `before` optout / exhausted: the service, doctor, convênio and attendee stay for the
+            # Sim / Não card (`deposit_turn._handle_payer_data`), so an accepted offer alerts the
+            # right doctor; the refused time is dropped.
         return _ReplyContext(inbound_body="", payer_data_action=reading.kind, **turn)
 
     # `before` timing: the slot is HELD and a Pix is open. The whole turn belongs to the wait

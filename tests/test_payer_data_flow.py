@@ -557,7 +557,9 @@ async def test_three_invalid_answers_hand_the_chat_to_a_human_and_none_is_stored
     assert third.payer_data_action == "exhausted"
 
     conversation = await _conversation(db, world)
-    assert conversation.flow_state == FlowState.IDLE and conversation.flow_selected_type is None
+    assert conversation.flow_state == FlowState.IDLE
+    # Review fix: the service stays for the Sim / Não card; the refused time does not.
+    assert (conversation.flow_selected_type, conversation.flow_selected_slot) == ("Consulta", None)
     assert await _inbound_bodies(db) == [pdata.REDACTED_BODY] * 3
     persisted = await _everything_persisted(db)
     assert all(typed.casefold() not in persisted.casefold() for typed in INVALID[kind])

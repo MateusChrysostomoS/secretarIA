@@ -287,6 +287,10 @@ async def test_an_invalid_cpf_is_asked_again_without_a_button(db, env):
 async def test_the_opt_out_says_nothing_was_reserved_and_offers_a_human(db, env):
     """Owner, 2026-10-29: the patient chooses - the fixed Sim / Não card, nobody takes over."""
     world = await _asked_for_the_cpf(db)
+    async with db() as session:
+        conversation = await session.get(Conversation, world.conversation.id)
+        conversation.flow_selected_insurance = "Unimed"
+        await session.commit()
     await _turn(pdata.LABEL_OPTOUT, redis=FakeArqPool(), reply_id=pdata.OPTOUT_REPLY_ID)
 
     assert env.sender.sent == [
@@ -297,6 +301,13 @@ async def test_the_opt_out_says_nothing_was_reserved_and_offers_a_human(db, env)
     conversation = await _conversation(db, world)
     assert (conversation.flow_state, conversation.flow_step) == (FlowState.LLM, fr.STEP_HUMAN_OFFER)
     assert conversation.handover_state != HandoverState.HUMAN_ACTIVE
+    # Review fix: the service / convênio (and doctor) survive on the card, so an accepted
+    # offer alerts the right people; the refused time does not.
+    assert (conversation.flow_selected_type, conversation.flow_selected_insurance) == (
+        "Consulta",
+        "Unimed",
+    )
+    assert conversation.flow_selected_slot is None
 
 
 async def test_sim_after_the_opt_out_hands_the_chat_to_a_human(db, env):
