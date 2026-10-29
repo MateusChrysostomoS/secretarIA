@@ -305,6 +305,9 @@ async def test_a_slot_held_by_another_reservation_is_a_conflict_too(db, env):
         insurance=None,
         start_at=SLOT_START,
         end_at=SLOT_END,
+        # TASK-072: only a Pix (payment phase) blocks a slot; a code wait reserves nothing.
+        phase="payment",
+        charge_id=uuid4(),
     )
     assert await _fulfill(db, deposit_id) == "slot_taken"
 

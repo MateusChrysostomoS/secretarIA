@@ -119,6 +119,9 @@ async def test_a_window_somebody_else_holds_is_slot_taken_and_nothing_is_created
         insurance=None,
         start_at=SLOT_START,
         end_at=SLOT_END,
+        # TASK-072: only a Pix (payment phase) blocks a slot; a code wait reserves nothing.
+        phase="payment",
+        charge_id=uuid4(),
     )
     assert rival_hold is not None
     assert await _begin(world) is None

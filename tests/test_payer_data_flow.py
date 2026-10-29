@@ -342,6 +342,9 @@ async def test_a_taken_slot_keeps_the_value_for_the_next_try_but_a_failed_charge
         insurance=None,
         start_at=SLOT_START,
         end_at=SLOT_END,
+        # TASK-072: only a Pix (payment phase) blocks a slot; a code wait reserves nothing.
+        phase="payment",
+        charge_id=uuid4(),
     )
     await _remember(world, redis, kind)
     assert (await _decide(_gate(world, armed=False, redis=redis))).outcome == "slot_taken"

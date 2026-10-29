@@ -11,13 +11,16 @@ exactly [start, end) on the agenda the write goes to. What each section proves:
 
   1. the conflict test itself (`CalendarService.has_conflict`): half-open, and the
      patient's own event never takes its own new time
-  2. guided "Confirmar": taken -> nothing created or held, one line + the same day's
-     fresh times; free -> booked exactly as before; read failure -> booked (fail-open)
+  2. guided "Confirmar": taken -> nothing created or held, back to the DAY picker
+     ("Para quando você gostaria? Escolha um dia:", prefixed with the "just taken"
+     line, TASK-072) with service/doctor/convênio kept; free -> booked exactly as
+     before; read failure -> booked (fail-open)
   3. reschedule "Confirmar": same three outcomes, the event being moved excluded
   4. the Portal code gate, end to end: taken on the DOCTOR's agenda while the code was
-     typed -> no event, hold released, account confirmed, same doctor/service re-offered,
-     and the next tap books on that same agenda; busy only on the CLINIC calendar ->
-     booked on the doctor's (the re-check reads the calendar the event is written to)
+     typed -> no event, hold released, account confirmed, back to the day picker with
+     the same doctor/service/convênio (TASK-072), and day -> time -> "Confirmar" books on
+     that same agenda without a second code; busy only on the CLINIC calendar -> booked
+     on the doctor's (the re-check reads the calendar the event is written to)
   5. the v1 AI booking tools: taken -> the booking-draft hand-back (same service, doctor,
      day) with the fixed line, never a write
 
@@ -53,7 +56,7 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from secretaria.ai import tools as ai_tools  # noqa: E402
-from secretaria.ai.formatter import SlotsBubble, TextBubble  # noqa: E402
+from secretaria.ai.formatter import SlotsBubble  # noqa: E402
 from secretaria.config import Settings  # noqa: E402
 from secretaria.core.database import Base  # noqa: E402
 from secretaria.models import (  # noqa: E402
@@ -82,9 +85,10 @@ from secretaria.services.calendar import (  # noqa: E402
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE  # noqa: E402
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
+    DAY_PICKER_BODY,
     SLOT_TAKEN_AT_CONFIRM_MESSAGE,
     STEP_AWAITING_CONFIRMATION,
-    STEP_AWAITING_SLOT,
+    STEP_AWAITING_DAY,
     STEP_MANAGE_CONFIRM,
     STEP_MANAGE_SLOT,
     route,
@@ -270,17 +274,16 @@ async def test_confirm_on_a_slot_taken_since_the_list_creates_nothing_and_relist
     assert res.appointment is None
     # Exactly the confirmed window (the 40-minute service), on the agenda it would go to.
     assert agenda.reads == [(_at("08:00"), _at("08:40"))]
-    # One short line, then the same day's fresh times - not a dead end, not the LLM.
+    # TASK-072: the "just taken" line, then the DAY picker - not a dead end, not the LLM.
     assert res.action == "reply"
-    assert isinstance(res.bubbles[0], TextBubble)
-    assert res.bubbles[0].body == SLOT_TAKEN_AT_CONFIRM_MESSAGE
-    assert isinstance(res.bubbles[1], SlotsBubble)
-    assert agenda.listed_days == [date(2099, 1, 5)]
-    # The booking in progress is kept: the next tap books the same service.
+    [picker] = res.bubbles
+    assert isinstance(picker, SlotsBubble)
+    assert picker.body == f"{SLOT_TAKEN_AT_CONFIRM_MESSAGE} {DAY_PICKER_BODY}"
+    # The booking in progress is kept: the patient only picks a new day and time.
     assert res.flow_state == FlowState.SERVICE_CATALOG
-    assert res.flow_step == STEP_AWAITING_SLOT
+    assert res.flow_step == STEP_AWAITING_DAY
     assert res.flow_selected_type == "Primeira Consulta"
-    assert res.flow_selected_day == SLOT_DAY
+    assert res.flow_selected_day is None
     assert res.flow_selected_slot is None
     assert res.flow_selected_insurance == "Particular"
     assert res.flow_attendee_name == ""
@@ -304,7 +307,7 @@ async def test_confirm_keeps_the_chosen_doctor_when_the_slot_was_taken():
     )
 
     assert agenda.created == []
-    assert res.flow_step == STEP_AWAITING_SLOT
+    assert res.flow_step == STEP_AWAITING_DAY
     assert res.flow_selected_professional_id == _DOCTOR_ID
 
 
@@ -364,7 +367,8 @@ async def test_a_gated_portal_confirm_on_a_taken_slot_places_no_hold():
     assert gate.decided == []
     assert agenda.created == []
     assert res.booking_hold is None
-    assert res.bubbles[0].body == SLOT_TAKEN_AT_CONFIRM_MESSAGE
+    assert res.bubbles[0].body.startswith(SLOT_TAKEN_AT_CONFIRM_MESSAGE)
+    assert res.flow_step == STEP_AWAITING_DAY
 
 
 # --------------------------------------------------------------------------
@@ -684,27 +688,30 @@ async def test_code_turn_on_a_slot_taken_on_the_doctors_agenda_books_nothing_and
     assert await _rows(db, BookingHold) == [], "the hold must go back on sale"
     # The re-check read the agenda the event would have been written to.
     assert ("read", "cal-dr-a") in google.ops
-    # The account is confirmed first, on its own; then the one line, then the times.
+    # The account is confirmed first, on its own; then the "just taken" line on the
+    # DAY picker (TASK-072, owner 2026-10-29).
     sent = await _outbound(db, conv)
-    assert sent[-3] == CODE_ACCEPTED_MESSAGE
-    assert sent[-2] == SLOT_TAKEN_AT_CONFIRM_MESSAGE
-    assert "14:40" in sent[-1]
+    assert sent[-2] == CODE_ACCEPTED_MESSAGE
+    assert sent[-1].startswith(f"{SLOT_TAKEN_AT_CONFIRM_MESSAGE} {DAY_PICKER_BODY}")
     assert not any("confirmado" in body for body in sent)
-    # Same doctor, same service, same convênio, on the slot step - never IDLE.
+    # Same doctor, same service, same convênio, on the DAY step - never IDLE, never menu.
     async with db() as s:
         row = await s.get(Conversation, conv.id)
     assert row.flow_state == FlowState.SERVICE_CATALOG
-    assert row.flow_step == STEP_AWAITING_SLOT
+    assert row.flow_step == STEP_AWAITING_DAY
     assert row.flow_selected_professional_id == dr_a.id
     assert row.flow_selected_type == "Cirurgia de Catarata"
     assert row.flow_selected_insurance == "Particular"
-    assert row.flow_selected_day == start.date().isoformat()
+    assert row.flow_selected_day is None
     assert [e["source"] for e in recheck_log.events("booking_slot_taken_at_confirm")] == [
         "booking_hold_promotion"
     ]
 
-    # The re-offer is a real step: the next tap books, on Dr. A's agenda.
-    slot = f"{start.date().isoformat()}T14:40"
+    # The day picker is a real step: day -> time -> "Confirmar" books on Dr. A's agenda,
+    # with no second code (the account was verified a turn ago).
+    new_day = (datetime.now(TZ) + timedelta(days=3)).date().isoformat()
+    await _portal(tenant, "dia", f"day|{new_day}|0")
+    slot = f"{new_day}T14:40"
     await _portal(tenant, "🗓️ 14:40", f"slot|{slot}")
     await _portal(tenant, "✅ Confirmar", "confirm_yes")
 

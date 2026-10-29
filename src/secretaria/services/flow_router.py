@@ -514,8 +514,9 @@ def held_times_text(labels: list[str]) -> str:
 
 # The exact time the patient CONFIRMED was filled on the agenda between the list
 # and the tap - the clinic, another channel or a person in Google Calendar got
-# there first (`availability.slot_taken_at_confirm`). One short line; the same
-# day's fresh times follow it (`_reoffer_taken_slot`).
+# there first (`availability.slot_taken_at_confirm`). One short line; on the booking
+# branch it prefixes the day picker, on reschedule the same day's times follow it
+# (`_reoffer_taken_slot`).
 SLOT_TAKEN_AT_CONFIRM_MESSAGE = "Esse horário acabou de ser ocupado 😕"
 
 
@@ -4105,15 +4106,30 @@ async def _reoffer_taken_slot(
     back_target: str | None,
     professionals: list | None,
 ) -> FlowRouterResult:
-    """The confirmed time was just taken on the agenda: say so, then that day's times again.
+    """The confirmed time was just taken on the agenda: say so, then let the patient re-pick.
 
-    The twin of the "Sim, outro horário" retry (`_relist_stored_day`) without its extra
-    tap - there is nothing to ask, the time is simply gone. One short line
-    (`SLOT_TAKEN_AT_CONFIRM_MESSAGE`), then the fresh slot list of the SAME day on the SAME
-    branch, so the service, doctor and convênio (booking) or the appointment being moved
-    (reschedule) ride along through `_day_branch_fields`. A day with nothing left falls
-    back to the day picker inside `_enter_slot_picker`, as it does for any stale day.
+    BOOKING branch (TASK-072, owner decision 2026-10-29): back to the DAY picker - the step
+    whose prompt is `DAY_PICKER_BODY` ("Para quando você gostaria? Escolha um dia:") - with
+    `SLOT_TAKEN_AT_CONFIRM_MESSAGE` as its prefix line. The service, doctor, convênio and
+    attendee ride along (`_day_branch_fields` + the public entry's `_carry_booking`), so the
+    patient only picks a new day and time. Every booking commit point lands here: the
+    confirm-time re-check and the Portal promotion after the code.
+
+    Other branches (reschedule) keep the earlier behaviour: one short line, then the fresh
+    slot list of the SAME day (a day with nothing left falls back to the day picker inside
+    `_enter_slot_picker`, as it does for any stale day).
     """
+    if branch is BOOKING_DAY_BRANCH:
+        return await enter_day_picker(
+            conversation,
+            tenant,
+            calendar,
+            duration_minutes=duration_minutes,
+            branch=branch,
+            back_target=back_target,
+            prefix=SLOT_TAKEN_AT_CONFIRM_MESSAGE,
+            professionals=professionals,
+        )
     local = start.astimezone(calendar.tzinfo) if start.tzinfo else start
     result = await _enter_slot_picker(
         conversation,
@@ -4142,9 +4158,10 @@ async def reoffer_taken_booking_slot(
     """`_reoffer_taken_slot` on the booking branch, for an entry that is not `route()`.
 
     The Portal code-gate promotion (`workers/shared/booking_hold.py::_promote_booking_hold`)
-    finds the held window taken AFTER the code was verified, with no route() turn around
-    it; it hands in a conversation-shaped snapshot rebuilt from the hold and gets back an
-    ordinary result to persist. The carries are applied here, as every public entry does.
+    finds the chosen window taken AFTER the code was verified, with no route() turn around
+    it; it hands in a conversation-shaped snapshot rebuilt from the hold and gets back the
+    day picker (prefixed with the "just taken" line) to persist. The carries are applied
+    here, as every public entry does.
     """
     result = await _reoffer_taken_slot(
         conversation,

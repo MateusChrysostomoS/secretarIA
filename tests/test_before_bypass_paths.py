@@ -211,6 +211,9 @@ async def _hold_for_another_conversation(db, world, *, professional_id=None, min
         start_at=HOLD_START,
         end_at=HOLD_END,
         ttl_minutes=minutes_left,
+        # TASK-072: only a Pix (payment phase) blocks a slot; a code wait reserves nothing.
+        phase="payment",
+        charge_id=uuid4(),
     )
     return conversation, held
 

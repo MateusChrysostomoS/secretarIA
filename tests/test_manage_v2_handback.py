@@ -442,6 +442,9 @@ async def test_a_held_new_time_lands_on_that_days_slot_list(wired):
         insurance=None,
         start_at=start,
         end_at=start + timedelta(minutes=30),
+        # TASK-072: only a Pix (payment phase) blocks a slot; a code wait reserves nothing.
+        phase="payment",
+        charge_id=uuid4(),
     )
 
     await _manage(bundle, ManageRequest("reschedule", day=NEW_DAY, time=dt.time(14, 0)))

@@ -93,7 +93,7 @@ async def run_identity_gate(
             body,
             FlowState(origin),
             channel=channel,
-            pre_consent=patient.lgpd_accepted_at is None,
+            pre_consent=not patient.lgpd_accepted,
             appointment_stands=await _code_appointment_stands_in(
                 session, conversation, patient, FlowState(origin)
             ),
@@ -118,7 +118,7 @@ async def run_identity_gate(
             body,
             pending_origin,
             channel=channel,
-            pre_consent=patient.lgpd_accepted_at is None,
+            pre_consent=not patient.lgpd_accepted,
             appointment_stands=await _code_appointment_stands_in(
                 session, conversation, patient, pending_origin
             ),
@@ -184,7 +184,7 @@ async def run_identity_gate(
         #            is an offer, the appointment is already committed, and
         #            a patient with a different question must not have to
         #            answer this one first.
-        pre_consent = patient.lgpd_accepted_at is None
+        pre_consent = not patient.lgpd_accepted
         # The shape of what was not recognised, never its text (TASK-042): enough to tell
         # a stray tap from a typo'd code from a sentence if the 2026-10-09 incident returns.
         logger.info(

@@ -226,6 +226,9 @@ async def test_a_window_another_conversation_holds_is_slot_taken_and_nothing_is_
         insurance=None,
         start_at=SLOT_START,
         end_at=SLOT_END,
+        # TASK-072: only a Pix (payment phase) blocks a slot; a code wait reserves nothing.
+        phase="payment",
+        charge_id=uuid4(),
     )
     assert (await _decide(_gate(world, armed=False))).outcome == "slot_taken"
     assert env.provider.called("create_pix_charge") == 0

@@ -109,8 +109,9 @@ async def reset_conversation_for_debug(
     conversation.flow_edit_draft = None
     conversation.reactivation_origin = None
 
-    # The fact the consent gate reads (`_route_inbound_turn`); NULL = consent owed.
+    # The fact the consent gate reads (`_route_inbound_turn`): False = consent owed.
     patient.lgpd_accepted_at = None
+    patient.lgpd_accepted = False
     await session.flush()
 
     return {

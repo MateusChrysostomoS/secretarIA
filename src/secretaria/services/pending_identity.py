@@ -276,11 +276,14 @@ BOOKING_GATE_SENTENCE = (
     "*código de 6 dígitos* que chegou no seu e-mail."
 )
 
-# What the patient is holding while they do it. The minutes are named because
-# a reservation the patient cannot see the end of is not a reservation they can
-# act on — and because the honest thing to say about a slot we are keeping from
-# other people is how long we are keeping it.
-_BOOKING_GATE_HOLD_LINE = "⏳ Guardei o horário *{when}* para você por {minutes} minutos."
+# The slot the patient chose, and what is still missing. TASK-072 (owner,
+# 2026-10-29): NO slot is kept for anybody for a period of time, so the notice
+# must never promise one ("Guardei o horário ... por 10 minutos" is gone). The
+# choice travels with the patient; the slot is re-checked when the booking is
+# written (`workers/shared/booking_hold.py::_promote_booking_hold`).
+_BOOKING_GATE_SLOT_LINE = (
+    "📅 Horário escolhido: *{when}*. Só falta confirmar o seu e-mail para finalizar o agendamento."
+)
 
 # The webmail each masked domain belongs to. Deliberately short: it covers the
 # Brazilian consumer inboxes that actually show up, and an unknown domain gets
@@ -323,10 +326,8 @@ def provider_link(email_masked: str | None) -> tuple[str, str] | None:
     return None
 
 
-def booking_gate_body(
-    email_masked: str | None, *, when: str | None = None, hold_minutes: int | None = None
-) -> str:
-    """The gate notice: the owner's sentence, the inbox, the link, the hold.
+def booking_gate_body(email_masked: str | None, *, when: str | None = None) -> str:
+    """The gate notice: the owner's sentence, the inbox, the link, the chosen slot.
 
     Pure. Every part after the first sentence is optional and disappears
     cleanly when its input is missing, so a brain-api that sends no mask, an
@@ -342,14 +343,12 @@ def booking_gate_body(
     `docs/CHECKPOINT_secretaria_booking_code_gate.md`.
     """
     parts = [BOOKING_GATE_SENTENCE]
-    parts.extend(_booking_gate_details(email_masked, when=when, hold_minutes=hold_minutes))
+    parts.extend(_booking_gate_details(email_masked, when=when))
     return "\n\n".join(parts)
 
 
-def _booking_gate_details(
-    email_masked: str | None, *, when: str | None, hold_minutes: int | None
-) -> list[str]:
-    """The inbox / link / reservation paragraphs, in order. Pure."""
+def _booking_gate_details(email_masked: str | None, *, when: str | None) -> list[str]:
+    """The inbox / link / chosen-slot paragraphs, in order. Pure."""
     parts: list[str] = []
     masked = masked_email_or_none(email_masked)
     if masked is not None:
@@ -358,14 +357,14 @@ def _booking_gate_details(
     if provider is not None:
         name, url = provider
         parts.append(f"Abrir o {name}:\n{url}")
-    if when and hold_minutes:
-        parts.append(_BOOKING_GATE_HOLD_LINE.format(when=when, minutes=hold_minutes))
+    if when:
+        parts.append(_BOOKING_GATE_SLOT_LINE.format(when=when))
     return parts
 
 
-# The patient typed something that is not six digits WHILE a slot is held for
-# them. Before the gate existed this ended the wait (the account was an offer);
-# now leaving would cost them the reservation, so the wait is repeated instead
+# The patient typed something that is not six digits WHILE their chosen slot is
+# waiting on the code. Before the gate existed this ended the wait (the account
+# was an offer); now leaving would cost them the booking, so the wait is repeated instead
 # — with the card, whose "⬅️ Voltar" button is the explicit exit that keeps the
 # conversation from being stuck. See `workers/tasks.py`'s identity gate.
 BOOKING_GATE_REPROMPT_SENTENCE = (
@@ -373,12 +372,10 @@ BOOKING_GATE_REPROMPT_SENTENCE = (
 )
 
 
-def booking_gate_reprompt_body(
-    email_masked: str | None, *, when: str | None = None, hold_minutes: int | None = None
-) -> str:
-    """The same notice, re-asked, saying the reservation is still standing."""
+def booking_gate_reprompt_body(email_masked: str | None, *, when: str | None = None) -> str:
+    """The same notice, re-asked, naming the slot the code will book."""
     parts = [BOOKING_GATE_REPROMPT_SENTENCE]
-    parts.extend(_booking_gate_details(email_masked, when=when, hold_minutes=hold_minutes))
+    parts.extend(_booking_gate_details(email_masked, when=when))
     return "\n\n".join(parts)
 
 

@@ -10,6 +10,10 @@ Este documento **supera**, para o canal `brain_message`, a decisão registrada e
 válida como histórico — não a reescreva. O que mudou é a decisão de produto, tomada pelo dono
 depois de ver o efeito colateral em produção.
 
+> **TASK-072 (2026-10-29):** a linha da fase `code` deixou de ser reserva — não bloqueia
+> ninguém, só carrega a escolha até a gravação, que faz dupla checagem e volta ao seletor de dia
+> se ocupado. Ver [CHECKPOINT_task072_horario_sem_reserva.md](CHECKPOINT_task072_horario_sem_reserva.md).
+
 ## 1. O que passou a valer
 
 ```

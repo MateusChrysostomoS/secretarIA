@@ -434,7 +434,7 @@ async def _route_inbound_turn(
                 body,
                 FlowState.AWAITING_NAME,
                 channel=channel,
-                pre_consent=patient.lgpd_accepted_at is None,
+                pre_consent=not patient.lgpd_accepted,
             )
         # A direct answer first; a self-introduction inside a longer sentence
         # ("meu nome é Ana, tudo bem?") second, through the same extractor the
@@ -490,8 +490,7 @@ async def _route_inbound_turn(
     # consent is honoured only from a resting state, so it never cuts a
     # booking in progress.
     if _is_name_change_request(body, interactive_reply_id) and (
-        patient.lgpd_accepted_at is None
-        or conversation.flow_state in (FlowState.IDLE, FlowState.MENU)
+        not patient.lgpd_accepted or conversation.flow_state in (FlowState.IDLE, FlowState.MENU)
     ):
         conversation.flow_step = None
         conversation.reactivation_origin = None
@@ -556,7 +555,7 @@ async def _route_inbound_turn(
     # and answers anything but an acceptance with "Reenviar LGPD"
     # (see the `wf_condutor_generico_universal` n8n workflow).
     #
-    # It is a gate on a FACT about the subject (`lgpd_accepted_at`),
+    # It is a gate on a FACT about the subject (`lgpd_accepted`, TASK-072),
     # NOT a `FlowState`. That distinction matters: a non-IDLE flow
     # state whose only exit is the patient tapping a button is the
     # shape that permanently parked conversations before (see
@@ -567,8 +566,9 @@ async def _route_inbound_turn(
         # Idempotent, like the `/menu` branch below: a second
         # delivery (or a tap on the old button further up the
         # thread) re-sends the same menu and writes nothing new.
-        if patient.lgpd_accepted_at is None:
+        if not patient.lgpd_accepted:
             patient.lgpd_accepted_at = datetime.now(UTC)
+            patient.lgpd_accepted = True
             # The Patient column is the operational flag; this row
             # is the immutable audit record. Different lifetimes on
             # purpose - see models/patient.py.
@@ -608,7 +608,7 @@ async def _route_inbound_turn(
             greeting_buttons=_greeting_buttons_for(tenant, CONSENT_ACCEPTED_MESSAGE),
         )
 
-    if patient.lgpd_accepted_at is None:
+    if not patient.lgpd_accepted:
         if is_first_contact:
             # The state is NOT moved here: `_send_bot_reply` writes
             # AWAITING_NAME only once it is about to ask (past the entitlement

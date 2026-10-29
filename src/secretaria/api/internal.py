@@ -387,7 +387,7 @@ async def _attachment_gate(
             Patient.external_id == external_id,
         )
     )
-    if patient is None or patient.lgpd_accepted_at is None:
+    if patient is None or not patient.lgpd_accepted:
         raise attachments.AttachmentRefused(attachments.ATTACHMENT_CONSENT_REQUIRED)
     await _enforce_attachment_quota(
         session, tenant_id=tenant_id, patient_id=patient.id, incoming_bytes=incoming_bytes
