@@ -822,10 +822,12 @@ class BookingGate:
         attendee_name: str | None,
         provider: str | None = None,
         status: int | None = None,
+        record: bool = True,
     ) -> GateDecision:
         """Drop the deposit step and book (TASK-071 Plan 3): the clinic and the doctor are told
-        (`notify_deposit_failure`, which also marks the payment account as failing and never
-        raises) and the router commits the booking WITHOUT a deposit.
+        (`notify_deposit_failure`, which also marks the payment account as failing - unless
+        `record` is False, the breaker's skip - and never raises) and the router commits the
+        booking WITHOUT a deposit.
 
         The one seam every "the deposit cannot be taken, book anyway" decision of the gate goes
         through. `stage` is a fixed literal, `reason` a closed `FailureReason`: no provider text,
@@ -852,6 +854,7 @@ class BookingGate:
                 professional_id=professional_id,
                 provider=provider or self._provider_name(),
                 redis=self._redis,
+                record=record,
             )
         return GateDecision("commit", deposit_waived_reason=str(reason))
 
@@ -883,6 +886,23 @@ class BookingGate:
             self._redis, tenant_id=self._tenant_id, conversation_id=self._conversation_id
         )
 
+    async def _has_live_charge(self) -> bool:
+        """Whether this conversation's hold still backs a payable Pix (what `place_hold` refuses
+        with `LiveChargeHoldError`). A failed read is False (fail-open, like the whole gate)."""
+        try:
+            async with async_session_factory() as session:
+                found = await session.scalar(
+                    select(BookingHold.id).where(
+                        BookingHold.conversation_id == self._conversation_id,
+                        BookingHold.charge_id.is_not(None),
+                        BookingHold.expires_at > _now(),
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("booking_gate_live_charge_read_failed", error_type=type(exc).__name__)
+            return False
+        return found is not None
+
     async def _decide_required(
         self,
         quote,
@@ -895,7 +915,44 @@ class BookingGate:
         attendee_name: str | None,
     ) -> GateDecision:
         """A deposit is due. Portal first proves the address (decision D12: never charge an
-        identity nobody proved), WhatsApp goes straight to the Pix."""
+        identity nobody proved), WhatsApp goes straight to the Pix.
+
+        Unless the breaker is open (TASK-071 Plan 3, task 5): the clinic's account is known to be
+        failing for an account-level reason, so the deposit step is dropped BEFORE any hold, CPF
+        question or charge, exactly as if no deposit were due (ruling R4)."""
+        from secretaria.services.payments import deposit_failure_notice
+
+        provider = quote.provider or self._provider_name()
+        breaker = await deposit_failure_notice.breaker_reason(self._tenant_id, provider)
+        if breaker is not None:
+            if await self._has_live_charge():
+                # Not technical: this conversation already has a payable Pix (it keeps blocking,
+                # exactly as `begin_payment` would have answered on the normal path).
+                return await self._blocked("charge_pending")
+            decision = await self._decide_without_deposit(
+                start_at=start_at,
+                end_at=end_at,
+                professional_id=professional_id,
+                appointment_type=appointment_type,
+                insurance=insurance,
+                attendee_name=attendee_name,
+            )
+            if decision.outcome != "commit":
+                # "held": the Portal code first; the worker skips the Pix after it
+                # (`deposit_turn._payment_after_code`). "slot_taken": nothing is booked.
+                return decision
+            return await self.continue_without_deposit(
+                code="breaker_open",
+                reason=breaker,
+                stage=deposit_failure_notice.BREAKER_STAGE,
+                start_at=start_at,
+                professional_id=professional_id,
+                appointment_type=appointment_type,
+                attendee_name=attendee_name,
+                provider=provider,
+                record=False,
+            )
+
         held: HeldSlot | None = None
         if self._armed:
             try:

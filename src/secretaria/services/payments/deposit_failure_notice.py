@@ -3,8 +3,10 @@ because the charge failed for a technical reason (TASK-071, Plan 3, task 2).
 
 `notify_deposit_failure` does two independent things, in this order:
 
-1. ALWAYS records the failure on the clinic's payment account (reason + stage + when), even when
-   no e-mail goes out: the badge in the Portal depends on it, not on the e-mail;
+1. records the failure on the clinic's payment account (reason + stage + when), even when no
+   e-mail goes out: the badge in the Portal depends on it, not on the e-mail. The one exception
+   is a deposit skipped by the breaker (`record=False`, task 5): nothing new failed, and
+   refreshing the timestamp would keep the breaker open for as long as patients keep booking;
 2. e-mails the clinic (`Tenant.contact_email`) and, when the consultation has a doctor with a
    linked address, the doctor (`fetch_professional_emails`, asked of brain-api, never stored),
    AT MOST `DAILY_EMAIL_CAP` e-mails per recipient per LOCAL day (the clinic's timezone). The
@@ -20,7 +22,7 @@ a flood); that recipient counts as `send_failed`.
 
 import hashlib
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -80,6 +82,60 @@ NOT_A_CHARGE_FAILURE_STAGES: frozenset[str] = frozenset({"delivery", "payer_data
 def tells_the_clinic(stage: str) -> bool:
     """Whether a dropped deposit at `stage` is a charge failure the clinic must hear about."""
     return stage not in NOT_A_CHARGE_FAILURE_STAGES
+
+
+# TASK-071 Plan 3, task 5 (the "breaker"): the failures that belong to the clinic's ACCOUNT, so
+# the next charge would fail the same way. While one of them is the account's latest failure (and
+# younger than `DEPOSIT_BREAKER_COOLDOWN_MINUTES`) the deposit step is skipped: no CPF question,
+# no customer, no charge. A patient-level failure (`customer_document_invalid`, ...) or a passing
+# one (`provider_unavailable`, `rate_limited`) never opens it.
+BREAKER_REASONS: frozenset[FailureReason] = frozenset(
+    {
+        FailureReason.api_key_invalid,
+        FailureReason.permission_denied,
+        FailureReason.qr_unavailable,
+        FailureReason.account_not_enabled,
+        FailureReason.pix_key_missing,
+    }
+)
+# The fixed stage of a deposit skipped by the breaker: the clinic is told (with the cap) but the
+# skip is NOT recorded as a new failure, so the cooldown counts from the last REAL one.
+BREAKER_STAGE = "breaker"
+
+
+def _breaker_cooldown() -> timedelta:
+    return timedelta(minutes=get_settings().DEPOSIT_BREAKER_COOLDOWN_MINUTES)
+
+
+def breaker_open(row, now: datetime) -> bool:
+    """Whether the deposit step must be skipped for the account `row` at `now`: its health is
+    `failing`, the last failure is an account-level one (`BREAKER_REASONS`, compared by value:
+    the column holds the string) and it happened less than the cooldown ago."""
+    if row is None or accounts.charge_health(row) != "failing":
+        return False
+    if row.last_charge_failure_reason not in {reason.value for reason in BREAKER_REASONS}:
+        return False
+    failed_at = accounts._utc(row.last_charge_failure_at)
+    return accounts._utc(now) - failed_at < _breaker_cooldown()
+
+
+async def breaker_reason(tenant_id: UUID, provider: str) -> FailureReason | None:
+    """The account's last failure reason when the breaker is OPEN for (tenant, provider), else
+    None. Reads the row in a short session of its own; any error reads as a CLOSED breaker
+    (logged): the breaker may only ever skip a charge, never break a booking."""
+    try:
+        async with async_session_factory() as session:
+            row = await accounts.get_account_row(session, tenant_id=tenant_id, provider=provider)
+            if not breaker_open(row, _now()):
+                return None
+            return FailureReason(row.last_charge_failure_reason)
+    except Exception as exc:  # noqa: BLE001 - a closed breaker is the safe answer
+        logger.warning(
+            "deposit_breaker_read_failed",
+            tenant_id=str(tenant_id),
+            error_type=type(exc).__name__,
+        )
+        return None
 
 
 _REASON_FOR_CODE: dict[str, FailureReason] = {
@@ -157,13 +213,20 @@ def _when_local(start_at: datetime, tz: ZoneInfo) -> str:
 
 
 async def _record_and_load(
-    tenant_id: UUID, provider: str, reason: FailureReason, stage: str
+    tenant_id: UUID, provider: str, reason: FailureReason, stage: str, *, record: bool = True
 ) -> tuple[str, str | None, ZoneInfo]:
-    """Record the failure (committed) and return (clinic name, contact e-mail, clinic tz)."""
+    """Record the failure (committed, unless `record` is False) and return (clinic name, contact
+    e-mail, clinic tz)."""
     async with async_session_factory() as session:
         tenant = await session.get(Tenant, tenant_id)
         if tenant is None:
             return "", None, ZoneInfo("UTC")
+        if not record:
+            return (
+                tenant.clinic_name,
+                (tenant.contact_email or "").strip() or None,
+                _tenant_tz(tenant),
+            )
         try:
             await accounts.record_charge_failure(
                 session, tenant_id=tenant_id, provider=provider, reason=reason, stage=stage
@@ -217,8 +280,11 @@ async def _notify(
     professional_id: UUID | None,
     provider: str,
     redis,
+    record: bool = True,
 ) -> NoticeResult:
-    clinic_name, clinic_email, tz = await _record_and_load(tenant_id, provider, reason, stage)
+    clinic_name, clinic_email, tz = await _record_and_load(
+        tenant_id, provider, reason, stage, record=record
+    )
 
     # Distinct recipients by normalized address (same address for clinic and doctor = one mail).
     recipients: dict[str, str] = {}
@@ -279,11 +345,15 @@ async def notify_deposit_failure(
     professional_id: UUID | None = None,
     provider: str = "asaas",
     redis=None,
+    record: bool = True,
 ) -> NoticeResult:
     """Record the failed deposit and e-mail the clinic (and the doctor) within the daily cap.
 
     `redis` is any client with `incr` / `expire` (the arq pool the callers already hold); when
-    omitted a short-lived client is opened from `REDIS_URL`. Never raises.
+    omitted a short-lived client is opened from `REDIS_URL`. `record=False` (a deposit skipped by
+    the breaker, task 5) e-mails without recording a new failure: refreshing
+    `last_charge_failure_at` on every skip would keep the breaker open for as long as patients
+    keep booking, and the real charge would never be tried again. Never raises.
     """
     owned = None
     try:
@@ -301,6 +371,7 @@ async def notify_deposit_failure(
             professional_id=professional_id,
             provider=provider,
             redis=redis,
+            record=record,
         )
     except Exception as exc:  # noqa: BLE001 - ruling R8: never into the booking
         logger.warning(

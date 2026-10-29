@@ -47,6 +47,8 @@ from secretaria.services.payments import (
     payer_data_after,
 )
 from secretaria.services.payments.deposit_failure_notice import (
+    BREAKER_STAGE,
+    breaker_reason,
     continues_without_deposit,
     failure_reason_for,
 )
@@ -416,6 +418,25 @@ async def _payment_after_code(
             reason=failure_reason_for(quote.reason),
             stage="quote",
             redis=redis,
+        )
+        return None
+    # TASK-071 Plan 3, task 5: the clinic's account is known to be failing for an account-level
+    # reason (the breaker is open). No CPF question, no customer, no charge: the code-phase hold
+    # is promoted exactly as a booking with no deposit due, and the clinic is told (no new
+    # failure is recorded, so the cooldown keeps counting from the last real one).
+    provider = quote.provider or tenant.payment_provider or "asaas"
+    breaker = await breaker_reason(tenant.id, provider)
+    if breaker is not None:
+        await _notify_deposit_waived(
+            reply,
+            tenant,
+            held,
+            code="breaker_open",
+            reason=breaker,
+            stage=BREAKER_STAGE,
+            redis=redis,
+            provider=provider,
+            record=False,
         )
         return None
     payer = await payer_data.recall_all(

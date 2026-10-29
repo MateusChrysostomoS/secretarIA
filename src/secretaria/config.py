@@ -481,6 +481,11 @@ class Settings(BaseSettings):
     # Asaas will refuse the webhook, leaving the account `incomplete`): set it in production
     # before connecting a clinic.
     ASAAS_WEBHOOK_ALERT_EMAIL: str = ""
+    # TASK-071 Plan 3, task 5 (the deposit "breaker"): while a clinic's payment account is known
+    # to be failing for an ACCOUNT-level reason, the deposit step is skipped (no CPF question, no
+    # charge) for this many minutes after the last REAL charge failure; the next booking after
+    # that tries the charge again. Optional: no Easypanel setting is needed.
+    DEPOSIT_BREAKER_COOLDOWN_MINUTES: int = 30
 
     @property
     def payments_webhook_base_url(self) -> str:

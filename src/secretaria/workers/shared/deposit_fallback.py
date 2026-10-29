@@ -59,8 +59,12 @@ async def _notify_deposit_waived(
     stage: str,
     redis,
     provider: str | None = None,
+    record: bool = True,
 ) -> None:
-    """Log the dropped deposit (ids + closed vocabulary) and tell the clinic. Never raises."""
+    """Log the dropped deposit (ids + closed vocabulary) and tell the clinic. Never raises.
+
+    `record=False` is the breaker's skip (task 5): the clinic is told, but no new failure is
+    recorded, so the breaker's cooldown keeps counting from the last REAL charge failure."""
     logger.warning(
         "deposit_waived_after_hold",
         code=code,
@@ -96,6 +100,7 @@ async def _notify_deposit_waived(
         professional_id=held.professional_id,
         provider=provider or tenant.payment_provider or "asaas",
         redis=redis,
+        record=record,
     )
 
 
