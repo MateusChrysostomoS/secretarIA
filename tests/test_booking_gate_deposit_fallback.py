@@ -915,3 +915,26 @@ async def test_payment_after_code_quote_error_beside_a_live_charge_hands_over(
     assert isinstance(result, fr.FlowRouterResult) and result.action == "handover"
     assert env.alerts == []
     assert await _rows(db, Appointment) == []
+
+
+# ---- final review, finding 3: the phone read never orphans a calendar event -------------------
+
+
+async def test_promotion_survives_a_failed_phone_read(db, env, monkeypatch):
+    """`appointments.phone` is read BEFORE the event is written, and a failed read is None: an
+    event never exists without its appointment because of it."""
+    world, tenant, reply = await _portal_code_hold(db)
+
+    async def broken_phone(patient_id):
+        raise RuntimeError("database went away")
+
+    from secretaria.workers.shared import booking_hold as worker_holds
+
+    monkeypatch.setattr(worker_holds, "_patient_phone", broken_phone)
+
+    text = await tasks._promote_booking_hold(reply, tenant=tenant, waba_token=None, redis=None)
+
+    assert "está confirmado" in text
+    (appointment,) = await _rows(db, Appointment)
+    assert appointment.phone is None
+    assert len(env.calendar.created) == 1

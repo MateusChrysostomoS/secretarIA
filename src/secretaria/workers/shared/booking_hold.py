@@ -333,6 +333,23 @@ async def _promote_booking_hold(
     # on the ungated path (flow_router._handle_confirmation).
     event_name = held.attendee_name or await _patient_display_name(patient_id)
     summary = f"{service_type} - {event_name}" if event_name else service_type
+    # NOT the patient_ref: on Brain-Message that is a 36-character UUID and
+    # `appointments.phone` is VARCHAR(32). Writing it there is the defect
+    # 697c24a fixed; a Portal patient simply has no phone number. A WhatsApp
+    # patient promoted here (a Pix that could not be delivered, TASK-071 Plan 3)
+    # keeps their number, as on the flow path (`flow_runner`). Read BEFORE the
+    # event is written, and a failed read is None: it must never leave an event
+    # on the agenda without its appointment.
+    try:
+        phone = await _patient_phone(patient_id)
+    except Exception as exc:  # noqa: BLE001 - the number is optional on the row
+        logger.warning(
+            "booking_hold_promote_phone_read_failed",
+            error_type=type(exc).__name__,
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(tenant.id),
+        )
+        phone = None
     try:
         # Exclusive on the secretarIA agenda (atomic with its own re-check); plain on
         # Google, where the re-check above is the whole protection.
@@ -366,12 +383,7 @@ async def _promote_booking_hold(
         appointment_type=service_type[:120],
         start_at=held.start_at,
         end_at=held.end_at,
-        # NOT the patient_ref: on Brain-Message that is a 36-character UUID and
-        # `appointments.phone` is VARCHAR(32). Writing it there is the defect
-        # 697c24a fixed; a Portal patient simply has no phone number. A WhatsApp
-        # patient promoted here (a Pix that could not be delivered, TASK-071 Plan 3)
-        # keeps their number, as on the flow path (`flow_runner`).
-        phone=await _patient_phone(patient_id),
+        phone=phone,  # read before the event (see above)
         professional_id=held.professional_id,
         insurance=held.insurance,
         attendee_name=held.attendee_name,
