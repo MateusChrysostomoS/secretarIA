@@ -252,6 +252,39 @@ async def test_a_transient_failure_deciding_the_deposit_is_retried_on_a_fresh_se
     assert env.waived == []
 
 
+async def test_on_before_learnt_by_an_earlier_attempt_survives_later_failures(
+    db, env, monkeypatch
+):
+    """`BookingGate._deposit_quote` retries: attempt 1 learns the clinic is on `before` and then
+    fails; attempts 2 and 3 fail BEFORE reading the timing. The verdict is still the `before`
+    fallback (`quote_failed` -> booked without the deposit, reason `unknown`), never the
+    fail-open None of a clinic not known to charge up front."""
+    real_timing = deposit_gate.timing_is_before
+    timing_calls: list[int] = []
+    quote_calls: list[int] = []
+
+    def flaky_timing(tenant):
+        timing_calls.append(1)
+        if len(timing_calls) > 1:
+            raise RuntimeError("database went away")
+        return real_timing(tenant)
+
+    async def boom(*args, **kwargs):
+        quote_calls.append(1)
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(deposit_gate, "timing_is_before", flaky_timing)
+    monkeypatch.setattr(deposit_gate, "quote_deposit", boom)
+    monkeypatch.setattr(deposit_gate, "_retry_sleep", _no_sleep)
+    async with db() as session:
+        world = await make_world(session)
+
+    decision = await _decide(_gate(world, armed=False))
+
+    assert len(timing_calls) == 3 and len(quote_calls) == 1  # 3 attempts, 1 reached the quote
+    assert (decision.outcome, decision.deposit_waived_reason) == ("commit", "unknown")
+
+
 async def test_a_window_another_conversation_holds_is_slot_taken_and_nothing_is_charged(db, env):
     from secretaria.models import Conversation, Patient
 
