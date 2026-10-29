@@ -356,8 +356,10 @@ async def _promote_booking_hold(
         end_at=held.end_at,
         # NOT the patient_ref: on Brain-Message that is a 36-character UUID and
         # `appointments.phone` is VARCHAR(32). Writing it there is the defect
-        # 697c24a fixed; a Portal patient simply has no phone number.
-        phone=None,
+        # 697c24a fixed; a Portal patient simply has no phone number. A WhatsApp
+        # patient promoted here (a Pix that could not be delivered, TASK-071 Plan 3)
+        # keeps their number, as on the flow path (`flow_runner`).
+        phone=await _patient_phone(patient_id),
         professional_id=held.professional_id,
         insurance=held.insurance,
         attendee_name=held.attendee_name,
@@ -523,6 +525,14 @@ async def _slot_taken_reoffer(
             professionals=ctx.professionals,
         )
     return SlotTakenAtPromotion(reoffer=result)
+
+async def _patient_phone(patient_id) -> str | None:
+    """The patient's WhatsApp number for `appointments.phone`, or None (a Portal patient)."""
+    if patient_id is None:
+        return None
+    async with async_session_factory() as session:
+        return await session.scalar(select(Patient.wa_id).where(Patient.id == patient_id))
+
 
 async def _patient_display_name(patient_id) -> str | None:
     """The patient's name for the calendar event title, or None."""

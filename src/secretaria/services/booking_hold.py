@@ -36,6 +36,7 @@ from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import BookingHold, Conversation, Tenant
 from secretaria.services.patient_context import load_upcoming_appointments
+from secretaria.services.payments.failure_reason import FailureReason
 from secretaria.services.pending_identity import RequestCodeOutcome, request_code
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -502,6 +503,9 @@ class GateDecision:
     blocked_reason: str | None = None
     payer_field: str | None = None
     payer_provider: str | None = None
+    # TASK-071 Plan 3 (ruling R5): set on a `commit` whose deposit was DROPPED because it failed
+    # for a technical reason (a `FailureReason` value). The clinic was already told.
+    deposit_waived_reason: str | None = None
 
 
 class BookingGate:
@@ -530,6 +534,7 @@ class BookingGate:
         external_id: str | None,
         armed: bool,
         redis=None,
+        waive_deposit: str | None = None,
     ) -> None:
         self._tenant_id = tenant_id
         self._conversation_id = conversation_id
@@ -539,6 +544,10 @@ class BookingGate:
         # Cache for the add-on entitlement lookup of `quote_deposit` (`before` timing); optional.
         self._redis = redis
         self._tenant: Tenant | None = None
+        # TASK-071 Plan 3: a `FailureReason` value when the worker already knows the deposit
+        # cannot be taken on this turn (the payer field could not be kept): the deposit step is
+        # dropped and the booking goes on as if none were due (the clinic is told).
+        self._waive_deposit = waive_deposit
 
     @property
     def armed(self) -> bool:
@@ -583,24 +592,76 @@ class BookingGate:
         # `before` timing: a deposit gates the booking on EVERY channel. The quote is the first
         # thing decided (nothing is reserved yet); every clinic on `after` (all of them today)
         # leaves here with `quote is None` and takes the code unchanged from before.
+        from secretaria.services.payments.deposit_failure_notice import (
+            continues_without_deposit,
+            failure_reason_for,
+        )
+
         quote = await self._deposit_quote(
             appointment_type=appointment_type,
             professional_id=professional_id,
             insurance=insurance,
         )
+        # (code, reason, stage) of a deposit that is dropped for a technical reason (ruling R6):
+        # the booking then takes the NORMAL no-deposit path below and the clinic is told.
+        waiver: tuple[str, FailureReason, str] | None = None
         if quote is not None and quote.blocked:
-            return await self._blocked(quote.reason)
-        if quote is not None and quote.required:
-            return await self._decide_required(
-                quote,
-                start_at=start_at,
-                end_at=end_at,
-                professional_id=professional_id,
-                appointment_type=appointment_type,
-                insurance=insurance,
-                attendee_name=attendee_name,
+            if not continues_without_deposit(quote.reason):
+                return await self._blocked(quote.reason)
+            waiver = (quote.reason, failure_reason_for(quote.reason), "quote")
+        elif quote is not None and quote.required:
+            if self._waive_deposit is None:
+                return await self._decide_required(
+                    quote,
+                    start_at=start_at,
+                    end_at=end_at,
+                    professional_id=professional_id,
+                    appointment_type=appointment_type,
+                    insurance=insurance,
+                    attendee_name=attendee_name,
+                )
+            waiver = (
+                "payer_data_unavailable",
+                failure_reason_for(None, self._waive_deposit),
+                "payer_data",
             )
 
+        decision = await self._decide_without_deposit(
+            start_at=start_at,
+            end_at=end_at,
+            professional_id=professional_id,
+            appointment_type=appointment_type,
+            insurance=insurance,
+            attendee_name=attendee_name,
+        )
+        if waiver is None or decision.outcome != "commit":
+            # A "held" slot is decided again once the code is verified (the deposit question is
+            # asked there, `workers/shared/deposit_turn.py::_payment_after_code`); a slot taken
+            # by somebody else books nothing. Only a real booking tells the clinic.
+            return decision
+        code, reason, stage = waiver
+        return await self.continue_without_deposit(
+            code=code,
+            reason=reason,
+            stage=stage,
+            start_at=start_at,
+            professional_id=professional_id,
+            appointment_type=appointment_type,
+            attendee_name=attendee_name,
+            provider=(quote.provider if quote is not None else None),
+        )
+
+    async def _decide_without_deposit(
+        self,
+        *,
+        start_at: datetime,
+        end_at: datetime,
+        professional_id: UUID | None,
+        appointment_type: str | None,
+        insurance: str | None,
+        attendee_name: str | None,
+    ) -> GateDecision:
+        """The gate as it was before any deposit existed: Portal code hold, or commit."""
         if not self._armed:
             return GateDecision("commit")
 
@@ -749,6 +810,71 @@ class BookingGate:
         )
         return GateDecision("blocked", blocked_reason=code)
 
+    async def continue_without_deposit(
+        self,
+        *,
+        code: str,
+        reason: FailureReason,
+        stage: str,
+        start_at: datetime,
+        professional_id: UUID | None,
+        appointment_type: str | None,
+        attendee_name: str | None,
+        provider: str | None = None,
+        status: int | None = None,
+    ) -> GateDecision:
+        """Drop the deposit step and book (TASK-071 Plan 3): the clinic and the doctor are told
+        (`notify_deposit_failure`, which also marks the payment account as failing and never
+        raises) and the router commits the booking WITHOUT a deposit.
+
+        The one seam every "the deposit cannot be taken, book anyway" decision of the gate goes
+        through. `stage` is a fixed literal, `reason` a closed `FailureReason`: no provider text,
+        no personal data in the log line."""
+        from secretaria.services.payments import deposit_failure_notice
+
+        logger.warning(
+            "booking_gate_deposit_waived",
+            code=code,
+            reason=str(reason),
+            stage=stage,
+            status=status,
+            tenant_id=str(self._tenant_id),
+            conversation_id=str(self._conversation_id),
+        )
+        if self._tenant_id is not None:
+            await deposit_failure_notice.notify_deposit_failure(
+                tenant_id=self._tenant_id,
+                patient_name=attendee_name or await self._patient_name(),
+                service=appointment_type,
+                start_at=start_at,
+                reason=reason,
+                stage=stage,
+                professional_id=professional_id,
+                provider=provider or self._provider_name(),
+                redis=self._redis,
+            )
+        return GateDecision("commit", deposit_waived_reason=str(reason))
+
+    def _provider_name(self) -> str:
+        from secretaria.models.clinic_payment_account import PROVIDER_ASAAS
+
+        return (getattr(self._tenant, "payment_provider", None) or PROVIDER_ASAAS)
+
+    async def _patient_name(self) -> str | None:
+        """The patient's name for the clinic's e-mail (never logged). Best effort."""
+        from secretaria.models import Patient
+
+        if self._patient_id is None:
+            return None
+        try:
+            async with async_session_factory() as session:
+                return await session.scalar(
+                    select(Patient.name).where(Patient.id == self._patient_id)
+                )
+        except Exception as exc:  # noqa: BLE001 - a name is never worth a booking
+            logger.warning("booking_gate_patient_name_failed", error_type=type(exc).__name__)
+            return None
+
     async def _forget_payer_data(self) -> None:
         """The provider call that needed the data has been made: forget all of it (D7)."""
         from secretaria.services.payments import payer_data
@@ -833,8 +959,27 @@ class BookingGate:
                     "needs_payer_data", payer_field=needed, payer_provider=quote.provider
                 )
             # The provider saw the data (or failed for another reason): forget it. A provider
-            # that STILL asks for what it was given is the D3 "blocked", never a second question.
+            # that STILL asks for what it was given is never a second question.
             await self._forget_payer_data()
+            from secretaria.services.payments.deposit_failure_notice import (
+                continues_without_deposit,
+                failure_reason_for,
+            )
+
+            if continues_without_deposit(exc.code, exc.reason):
+                # TASK-071 Plan 3: a TECHNICAL failure never stops the booking. `begin_payment`
+                # released the hold; the router's `commit` re-checks the slot before the event.
+                return await self.continue_without_deposit(
+                    code=exc.code,
+                    reason=failure_reason_for(exc.code, exc.reason),
+                    stage=exc.stage or "charge",
+                    status=exc.status_code,
+                    start_at=start_at,
+                    professional_id=professional_id,
+                    appointment_type=appointment_type,
+                    attendee_name=attendee_name,
+                    provider=quote.provider,
+                )
             return await self._blocked(
                 exc.code,
                 reason=str(exc.reason) if exc.reason else None,

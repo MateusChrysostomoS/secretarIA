@@ -258,10 +258,22 @@ async def test_the_before_gate_charges_a_new_pix_when_asaas_says_refunded(
 ):
     provider.state = ChargeState(status=PaymentStatus.REFUNDED)
     world = await _rescheduling(db)
+    from secretaria.services.payments import deposit_failure_notice
+
+    waived: list[dict] = []
+
+    async def notify(**kwargs):
+        waived.append(kwargs)
+
+    monkeypatch.setattr(deposit_failure_notice, "notify_deposit_failure", notify)
 
     decision = await _on_before(db, world, monkeypatch)
 
-    assert decision.outcome != "commit"  # the normal `before` path: a NEW Pix is asked for
+    # The normal `before` path: a NEW deposit is due (never the carried one). This world has no
+    # connected `before` account, which since TASK-071 Plan 3 is a technical failure: the booking
+    # commits WITHOUT the deposit and the clinic is told (it used to be `blocked`).
+    assert decision.outcome != "commit" or decision.deposit_waived_reason is not None
+    assert len(waived) == (1 if decision.outcome == "commit" else 0)
     async with db() as session:
         offer = await session.scalar(select(DepositReleaseOffer))
     assert (offer.carry_check, offer.refund_status) == ("refunded", "due")

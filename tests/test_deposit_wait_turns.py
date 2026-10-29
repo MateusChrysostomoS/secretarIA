@@ -26,7 +26,12 @@ from secretaria.models import (
 )
 from secretaria.models.pix_deposit import PixDepositStatus
 from secretaria.services import booking_hold as holds, email, flow_router as fr
-from secretaria.services.payments import booking_charge, deposit_lifecycle, registry
+from secretaria.services.payments import (
+    booking_charge,
+    deposit_failure_notice,
+    deposit_lifecycle,
+    registry,
+)
 from secretaria.services.payments.deposit_gate import DepositQuote
 from secretaria.services.payments.provider import ChargeState, PaymentStatus, ProviderError
 from secretaria.workers import tasks
@@ -79,6 +84,7 @@ class Env:
         self.provider.state = ChargeState(PaymentStatus.PENDING)
         self.sender = Sender()
         self.emails: list[tuple[str, str]] = []
+        self.waived: list[dict] = []  # TASK-071 Plan 3: deposits dropped, clinic told
 
 
 @pytest.fixture
@@ -91,9 +97,13 @@ def env(monkeypatch) -> Env:
     async def send_email(to_email, clinic_name, kind):
         e.emails.append((to_email, kind))
 
+    async def notify(**kwargs):
+        e.waived.append(kwargs)
+
     monkeypatch.setattr(email, "send_payment_alert", send_email)
     monkeypatch.setitem(registry._PROVIDERS, "asaas", e.provider)
     monkeypatch.setattr(workers_ns, "_reply_sender", lambda reply, tenant, token: e.sender)
+    monkeypatch.setattr(deposit_failure_notice, "notify_deposit_failure", notify)
     return e
 
 
@@ -486,17 +496,20 @@ async def test_a_payment_phase_hold_is_never_promoted_by_a_code(db, env):
         assert list(await session.scalars(select(Appointment))) == []
 
 
-async def test_when_the_deposit_cannot_be_asked_the_hold_is_released_and_a_human_is_called(
-    db, env
-):
+async def test_when_the_deposit_cannot_be_asked_the_code_hold_is_promoted_without_it(db, env):
+    """TASK-071 Plan 3, ruling R6 (was "...the hold is released and a human is called"): no
+    usable credential is technical, so the code-phase hold stays for the normal promotion (None)
+    and the clinic is told."""
     world, held, tenant, reply = await _code_held_portal(
         db, with_account=False, contact_email="c@example.com"
     )
     result = await tasks._payment_after_code(reply, tenant=tenant, redis=FakeArqPool())
-    assert result.action == "handover"
+    assert result is None
     async with db() as session:
-        assert list(await session.scalars(select(BookingHold))) == []
-    assert env.emails == []  # owner answer 13: no operational e-mail
+        (kept,) = list(await session.scalars(select(BookingHold)))
+    assert (kept.id, kept.phase) == (held.id, "code")
+    assert env.emails == []  # the old payment alert stays unused
+    assert [(w["reason"], w["stage"]) for w in env.waived] == [("no_account", "quote")]
 
 
 # ---- review fix I4: the lazy expiry asks the provider before it says "expired" ------------------

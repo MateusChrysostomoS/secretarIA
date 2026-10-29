@@ -46,6 +46,7 @@ from secretaria.services import (
 from secretaria.services.payments import (
     accounts,
     booking_charge,
+    deposit_failure_notice,
     deposit_gate,
     payer_data as pdata,
     registry,
@@ -142,6 +143,7 @@ class Env:
         self.sender = Sender()
         self.emails: list[tuple[str, str]] = []
         self.code_outcome = RequestCodeOutcome.NOT_PENDING
+        self.waived: list[dict] = []  # TASK-071 Plan 3: deposits dropped, clinic told
 
 
 @pytest_asyncio.fixture
@@ -170,7 +172,11 @@ def env(monkeypatch, kind) -> Env:
     monkeypatch.setattr(holds, "request_code", request_code)
     monkeypatch.setattr(email, "send_payment_alert", send_email)
     monkeypatch.setitem(registry._PROVIDERS, PROVIDER[kind], e.provider)
+    async def notify(**kwargs):
+        e.waived.append(kwargs)
+
     monkeypatch.setattr(workers_ns, "_reply_sender", lambda reply, tenant, token: e.sender)
+    monkeypatch.setattr(deposit_failure_notice, "notify_deposit_failure", notify)
     return e
 
 
@@ -303,7 +309,7 @@ async def test_a_customer_asaas_already_knows_is_never_asked_again(db, env, monk
     assert request.payer_document is None and request.provider_customer_id == "cus_known"
 
 
-async def test_a_provider_that_still_wants_it_after_it_was_given_blocks_instead_of_looping(
+async def test_a_provider_that_still_wants_it_after_it_was_given_books_without_it_not_looping(
     db, env, kind
 ):
     redis = FakeRedis()
@@ -314,7 +320,10 @@ async def test_a_provider_that_still_wants_it_after_it_was_given_blocks_instead_
         "payer_document_required" if kind == "document" else "payer_email_required"
     )
     decision = await _decide(_gate(world, armed=False, redis=redis))
-    assert decision.outcome == "blocked"  # asking again would be a loop the patient cannot win
+    # Asking again would be a loop the patient cannot win; TASK-071 Plan 3: a provider that still
+    # refuses what it was given is a technical failure, so the booking commits WITHOUT the deposit.
+    assert decision.outcome == "commit" and decision.deposit_waived_reason is not None
+    assert len(env.waived) == 1
     assert await _recall(world, redis, kind) is None  # the provider saw it: forgotten
     assert await _holds(db) == [] and await _deposits(db) == []
 
@@ -350,7 +359,8 @@ async def test_a_taken_slot_keeps_the_value_for_the_next_try_but_a_failed_charge
     await holds.release(rival_hold.id)  # the rival gives the slot up; the provider now refuses
     env.provider.create_error = ProviderError("customer_failed", status_code=400)
     decision = await _decide(_gate(world, armed=False, redis=redis))
-    assert (decision.outcome, decision.blocked_reason) == ("blocked", "customer_failed")
+    # TASK-071 Plan 3 (was `blocked`): technical, so it books without the deposit.
+    assert (decision.outcome, decision.deposit_waived_reason) == ("commit", "unknown")
     assert await _recall(world, redis, kind) is None  # the provider saw it (or failed): forgotten
     assert await _holds(db) == [] and await _deposits(db) == []
 
@@ -676,7 +686,7 @@ async def _tenant(db, world):
         return await session.get(type(world.tenant), world.tenant_id)
 
 
-async def test_keeping_the_answer_stores_it_encrypted_and_a_redis_outage_fails_closed(
+async def test_keeping_the_answer_stores_it_encrypted_and_a_redis_outage_books_without_deposit(
     db, env, kind
 ):
     world = await _waiting_for_data(db, kind)
@@ -694,11 +704,14 @@ async def test_keeping_the_answer_stores_it_encrypted_and_a_redis_outage_fails_c
 
     down = Down()
     assert await tasks._keep_payer_data(reply, tenant=tenant, redis=down) is False
-    await tasks._payer_data_unavailable(reply, tenant=tenant, waba_token="wt", redis=down)
+    # TASK-071 Plan 3 (was: IDLE + human + BEFORE_BLOCKED_TEXT): the turn goes on as the
+    # "Confirmar" with the deposit step waived; nothing is said here, the router books.
+    waived = await tasks._payer_data_unavailable(reply, tenant=tenant, waba_token="wt", redis=down)
+    assert waived is not None
+    assert (waived.deposit_waived_reason, waived.payer_data_answer) == ("unknown", None)
+    assert env.sender.sent == []
     conversation = await _conversation(db, world)
-    assert conversation.flow_state == FlowState.IDLE
-    assert conversation.handover_state == HandoverState.HUMAN_ACTIVE
-    assert env.sender.sent[-1] == ("text", tasks.deposit_lifecycle.BEFORE_BLOCKED_TEXT)
+    assert conversation.handover_state != HandoverState.HUMAN_ACTIVE
 
 
 @pytest.mark.parametrize("action", ["optout", "exhausted"])

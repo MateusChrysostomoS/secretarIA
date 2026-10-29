@@ -3,10 +3,11 @@
 In `after` timing those paths stay tolerated (the consultation already exists). In `before` timing
 every one of them is an EXPLICIT decision taken before or while the slot is reserved: the four
 that are a clinic's own choice (feature off, convenio without deposit, no readable price, zero
-amount) book normally; the five that are errors (no patient, no usable credential, the customer
-cannot be created, the charge cannot be created, the answer has no charge id) plus the two extras
-(no Pix code, the message cannot be sent) BLOCK the booking. Whatever the row, the invariant is the
-same: no dangling hold, no orphan charge, and never a consultation without its deposit.
+amount) book normally; of the five that are errors, "no patient" still BLOCKS the booking, while
+the TECHNICAL ones (no usable credential, the customer cannot be created, the charge cannot be
+created, the answer has no charge id) plus the two extras (no Pix code, the message cannot be sent)
+book WITHOUT the deposit and tell the clinic (TASK-071 Plan 3, which replaced "never a consultation
+without its deposit"). Whatever the row: no dangling hold and no orphan charge.
 """
 
 from uuid import uuid4
@@ -18,7 +19,12 @@ from sqlalchemy import select
 from secretaria.models import BookingHold, PixDeposit
 from secretaria.models.insurance import TenantInsurancePlan
 from secretaria.services import booking_hold as holds, email
-from secretaria.services.payments import booking_charge, deposit_gate, registry
+from secretaria.services.payments import (
+    booking_charge,
+    deposit_failure_notice,
+    deposit_gate,
+    registry,
+)
 from secretaria.services.payments.deposit_gate import DepositQuote
 from secretaria.services.payments.provider import ProviderError
 from tests.before_support import SLOT_END, SLOT_START, entitlement_summary, make_world, new_charge
@@ -46,9 +52,15 @@ def env(monkeypatch):
     async def send_email(to_email, clinic_name, kind):
         emails.append(kind)
 
+    waived: list[dict] = []
+
+    async def notify(**kwargs):  # TASK-071 Plan 3: the clinic is told (recorded, never sent)
+        waived.append(kwargs)
+
     monkeypatch.setattr(email, "send_payment_alert", send_email)
     monkeypatch.setitem(registry._PROVIDERS, "asaas", provider)
-    return type("Env", (), {"provider": provider, "emails": emails})
+    monkeypatch.setattr(deposit_failure_notice, "notify_deposit_failure", notify)
+    return type("Env", (), {"provider": provider, "emails": emails, "waived": waived})
 
 
 async def _decide(db, world, *, insurance=None):
@@ -115,13 +127,15 @@ async def test_row_3_no_patient_is_an_error_decided_before_anything_is_reserved(
     assert (quote.outcome, quote.reason) == ("blocked", "no_patient")
 
 
-async def test_row_4_no_usable_credential_blocks_alerts_and_holds_nothing(db, env):
+async def test_row_4_no_usable_credential_books_without_the_deposit_and_holds_nothing(db, env):
+    """TASK-071 Plan 3, ruling R6 (was "...blocks"): technical, so it books and tells the clinic."""
     async with db() as session:
         world = await make_world(session, with_account=False, contact_email="c@example.com")
     decision = await _decide(db, world)
-    assert (decision.outcome, decision.blocked_reason) == ("blocked", "no_credential")
+    assert (decision.outcome, decision.deposit_waived_reason) == ("commit", "no_account")
     await _nothing_left_behind(db)
-    assert env.emails == []  # owner answer 13: no operational e-mail; a human takes the chat
+    assert env.emails == []  # the old payment alert stays unused
+    assert len(env.waived) == 1
 
 
 @pytest.mark.parametrize(
@@ -134,18 +148,20 @@ async def test_row_4_no_usable_credential_blocks_alerts_and_holds_nothing(db, en
         ("QR", None, new_charge(copy_paste=None), "no_copy_paste"),
     ],
 )
-async def test_the_rows_that_are_errors_block_alert_and_leave_no_dangling_hold(
+async def test_the_rows_that_are_technical_errors_book_without_deposit_and_leave_no_dangling_hold(
     db, env, row, error, created, code
 ):
+    """TASK-071 Plan 3 (was "...block"): every row here is a technical failure."""
     env.provider.create_error = error
     if created is not None:
         env.provider.created_charge = created
     async with db() as session:
         world = await make_world(session, contact_email="c@example.com")
     decision = await _decide(db, world)
-    assert (decision.outcome, decision.blocked_reason) == ("blocked", code)
+    assert decision.outcome == "commit" and decision.deposit_waived_reason is not None
     await _nothing_left_behind(db)  # never a hold without a live charge, never an orphan row
-    assert env.emails == []  # owner answer 13: no operational e-mail; a human takes the chat
+    assert env.emails == []  # the old payment alert stays unused
+    assert len(env.waived) == 1
     if row == "QR":
         assert env.provider.called("cancel_charge") == 1  # a charge without a code is voided
 

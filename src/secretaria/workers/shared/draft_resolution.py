@@ -164,6 +164,7 @@ def _turn_booking_gate(
         external_id=reply.patient_ref,
         armed=policy_for(reply.channel).arms_booking_gate,
         redis=redis,
+        waive_deposit=reply.deposit_waived_reason,
     )
 
 

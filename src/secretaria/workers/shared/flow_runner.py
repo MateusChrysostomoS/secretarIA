@@ -652,9 +652,14 @@ async def _apply_flow_result(
             reply, result.deposit_request, tenant=tenant, waba_token=waba_token
         )
         if not delivered:
-            await _abort_deposit_request(
+            # TASK-071 Plan 3: the Pix is voided and the slot is booked WITHOUT the deposit.
+            fallback = await _abort_deposit_request(
                 reply, result.deposit_request, tenant=tenant, waba_token=waba_token, redis=redis
             )
+            if fallback is not None:
+                await _apply_flow_result(
+                    reply, fallback, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
+                )
         return True
 
     if result.action == "calendar_unavailable":

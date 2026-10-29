@@ -1086,9 +1086,15 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
         return
     if reply.payer_data_answer is not None:
         if not await _keep_payer_data(reply, tenant=tenant, redis=redis):
-            # Fail CLOSED: without a place to keep it the flow cannot go on (never "book anyway").
-            await _payer_data_unavailable(reply, tenant=tenant, waba_token=waba_token, redis=redis)
-            return
+            # TASK-071 Plan 3: without a place to keep it the deposit cannot be taken, and a
+            # technical failure never stops the booking: the turn goes on with the deposit step
+            # waived (`before`). `after` hands the Pix to a person and the turn ends.
+            waived = await _payer_data_unavailable(
+                reply, tenant=tenant, waba_token=waba_token, redis=redis
+            )
+            if waived is None:
+                return
+            reply = waived
         # The turn goes on as the "Confirmar" the answer completes (`inbound_body` is already that
         # label); the rest of this function, the flow router, does the booking. Drop the value from
         # the context now that it is stored.

@@ -117,6 +117,10 @@ class _ReplyContext:
     payer_data_timing: str = "before"
     payer_data_attempts: int = 0
     payer_data_answer: str | None = field(default=None, repr=False)
+    # TASK-071 Plan 3: the `before` answer could not be kept (Redis down), so this turn's
+    # "Confirmar" books WITHOUT the deposit (a `FailureReason` value for the clinic's e-mail).
+    # Read by `draft_resolution._turn_booking_gate`; never set on any other path.
+    deposit_waived_reason: str | None = None
     # --- Brain-Message inline identity (services/pending_identity.py) ----
     # Set on a Brain-Message FIRST contact. The greeting goes out, then
     # `_send_bot_reply` asks brain-api whether this visitor still owes an

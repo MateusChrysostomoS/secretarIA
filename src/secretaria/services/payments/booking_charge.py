@@ -377,6 +377,17 @@ async def _create_and_record(
             await _discard_customer_created_here(provider, account, created)
             raise
 
+        # TASK-071 Plan 3: the charge worked, so the account is healthy again (the Portal badge
+        # and the breaker read it). Best effort: a failure here never undoes a live charge.
+        try:
+            await accounts.record_charge_success(
+                session, tenant_id=tenant_id, provider=provider_name
+            )
+            await session.commit()
+        except Exception as exc:  # noqa: BLE001
+            await session.rollback()
+            logger.warning("payment_charge_success_record_failed", error_type=type(exc).__name__)
+
     return PaymentStart(
         deposit_id=deposit_id,
         amount_cents=quote.amount_cents,

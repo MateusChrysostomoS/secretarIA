@@ -18,7 +18,12 @@ from sqlalchemy import select
 from secretaria.models import Appointment, BookingHold, Conversation, FlowState, Message, PixDeposit
 from secretaria.models.pix_deposit import PixDepositStatus
 from secretaria.services import booking_hold as holds, email, flow_router as fr
-from secretaria.services.payments import booking_charge, deposit_lifecycle, registry
+from secretaria.services.payments import (
+    booking_charge,
+    deposit_failure_notice,
+    deposit_lifecycle,
+    registry,
+)
 from secretaria.services.payments.provider import ChargeState, PaymentStatus
 from secretaria.services.pending_identity import RequestCodeOutcome, RequestCodeResult
 from secretaria.workers import tasks
@@ -83,6 +88,7 @@ class Env:
         self.provider.created_charge = new_charge()
         self.emails: list[tuple[str, str]] = []
         self.calendar = Calendar()
+        self.waived: list[dict] = []  # TASK-071 Plan 3: deposits dropped, clinic told
 
 
 @pytest.fixture
@@ -98,9 +104,17 @@ def env(monkeypatch) -> Env:
     async def request_code(tenant_id, external_id):
         return RequestCodeResult(RequestCodeOutcome.NOT_PENDING)
 
+    async def notify(**kwargs):
+        e.waived.append(kwargs)
+
+    async def appointment_calendar(*args, **kwargs):
+        return e.calendar
+
     monkeypatch.setattr(email, "send_payment_alert", send_email)
     monkeypatch.setattr(holds, "request_code", request_code)
     monkeypatch.setitem(registry._PROVIDERS, "asaas", e.provider)
+    monkeypatch.setattr(deposit_failure_notice, "notify_deposit_failure", notify)
+    monkeypatch.setattr(workers_ns, "_appointment_calendar", appointment_calendar)
     return e
 
 
@@ -228,9 +242,12 @@ async def test_a_portal_patient_with_no_phone_gets_the_pix_as_portal_messages(db
     assert "PIXCOPIAECOLA" not in bodies
 
 
-async def test_a_pix_that_cannot_be_delivered_voids_the_charge_frees_the_slot_and_calls_a_human(
+async def test_a_pix_that_cannot_be_delivered_voids_the_charge_and_books_without_the_deposit(
     db, env, monkeypatch
 ):
+    """TASK-071 Plan 3 (was: "...frees the slot and calls a human" with BEFORE_BLOCKED_TEXT): a
+    Pix nobody received is voided and the slot is booked WITHOUT the deposit; the clinic is
+    told. The confirmation is attempted on the same (failing) channel, best effort."""
     env.provider.state = ChargeState(PaymentStatus.PENDING)
     async with db() as session:
         world = await make_world(session, contact_email="clinic@example.com")
@@ -251,12 +268,15 @@ async def test_a_pix_that_cannot_be_delivered_voids_the_charge_frees_the_slot_an
     async with db() as session:
         assert list(await session.scalars(select(BookingHold))) == []
         (deposit,) = list(await session.scalars(select(PixDeposit)))
-    assert deposit.status == PixDepositStatus.EXPIRED
+        (appointment,) = list(await session.scalars(select(Appointment)))
+    assert deposit.status == PixDepositStatus.EXPIRED  # nothing left waiting for a deadline
+    assert appointment.status.value == "scheduled"
+    assert len(env.calendar.created) == 1
     conversation = await _conversation(db, world)
     assert conversation.flow_state == FlowState.IDLE
-    assert conversation.handover_state.value == "HUMAN_ACTIVE"
-    assert env.emails == []  # owner answer 13: no operational e-mail
-    assert sender.calls >= 3  # two attempts at the first message + the blocked notice tries
+    assert env.emails == []  # the old payment alert stays unused
+    assert [w["stage"] for w in env.waived] == ["delivery"]
+    assert all(deposit_lifecycle.BEFORE_BLOCKED_TEXT not in item[2] for item in sender.sent)
 
 
 async def test_one_failed_send_is_retried_once_and_the_rest_still_goes_out(db, env, monkeypatch):
@@ -283,14 +303,17 @@ async def test_one_failed_send_is_retried_once_and_the_rest_still_goes_out(db, e
     assert (await _conversation(db, world)).flow_state == FlowState.AWAITING_DEPOSIT
 
 
-async def test_a_blocked_deposit_makes_no_booking_holds_nothing_and_hands_over(db, env):
+async def test_a_deposit_that_cannot_be_asked_for_books_without_it_and_tells_the_clinic(db, env):
+    """TASK-071 Plan 3, ruling R6 (was: "...makes no booking, holds nothing and hands over"): no
+    usable credential is a technical failure, so the booking is made WITHOUT the deposit."""
     async with db() as session:
         world = await make_world(session, with_account=False, contact_email="c@example.com")
     result = await _confirm(world, env)
-    assert result.action == "handover"
-    assert [b.body for b in result.bubbles] == [deposit_lifecycle.BEFORE_BLOCKED_TEXT]
-    assert result.appointment is None and result.deposit_request is None
-    assert env.calendar.created == []
+    assert result.action == "reply" and result.appointment is not None
+    assert result.deposit_request is None
+    assert deposit_lifecycle.BEFORE_BLOCKED_TEXT not in [b.body for b in result.bubbles]
+    assert len(env.calendar.created) == 1
+    assert [w["reason"] for w in env.waived] == ["no_account"]
     async with db() as session:
         assert list(await session.scalars(select(BookingHold))) == []
 

@@ -4094,6 +4094,25 @@ async def _relist_stored_day(
     )
 
 
+async def _slot_lost_since_confirm(
+    gate: BookingGate,
+    calendar: CalendarService,
+    start: datetime,
+    end: datetime,
+    professional_id: UUID | None,
+    conversation_id: object,
+) -> bool:
+    """The slot was free at "Confirmar"; is it still? Asked again after a deposit that failed
+    (TASK-071 Plan 3): the agenda the event goes to, then the holds of OTHER conversations
+    (`busy_windows` already leaves this conversation's own out). Both reads fail open."""
+    if await slot_taken_at_confirm(
+        calendar, start, end, source="flow_confirm_deposit_waived", conversation_id=conversation_id
+    ):
+        return True
+    windows = await gate.busy_windows(professional_id)
+    return any(other_start < end and start < other_end for other_start, other_end in windows)
+
+
 async def _reoffer_taken_slot(
     conversation: Conversation,
     tenant: Tenant,
@@ -4358,10 +4377,12 @@ async def _handle_confirmation(
                 },
             )
         if decision.outcome == "blocked":
-            # A deposit is due and cannot be asked for (spec 7): the booking is NOT made and a
-            # human takes the conversation (`action="handover"`). There is no clinic e-mail for
-            # this (owner answer 13): the log line of the gate is the operational record, so the
-            # copy must not say the clinic was alerted.
+            # A deposit is due and cannot be asked for for a reason that is NOT technical (a Pix
+            # already open for this conversation, no patient): the booking is NOT made and a
+            # human takes the conversation (`action="handover"`). A technical failure never
+            # lands here since TASK-071 Plan 3: the gate answers `commit` with
+            # `deposit_waived_reason` and the clinic is e-mailed. The copy must not say the
+            # clinic was alerted.
             return FlowRouterResult(
                 action="handover",
                 bubbles=[TextBubble(body=BEFORE_BLOCKED_TEXT)],
@@ -4422,6 +4443,23 @@ async def _handle_confirmation(
                     ),
                 },
             )
+        if decision.outcome == "commit" and decision.deposit_waived_reason is not None:
+            # TASK-071 Plan 3: the deposit failed for a technical reason and is dropped. The
+            # reservation `begin_payment` made is gone and the provider call took time, so the
+            # slot is asked about AGAIN (agenda + other conversations' holds) before the event.
+            if await _slot_lost_since_confirm(
+                gate, calendar, start, end, professional_id, getattr(conversation, "id", None)
+            ):
+                return await _reoffer_taken_slot(
+                    conversation,
+                    tenant,
+                    calendar,
+                    start,
+                    duration_minutes=duration,
+                    branch=BOOKING_DAY_BRANCH,
+                    back_target=BACK_TARGET_SERVICE,
+                    professionals=professionals,
+                )
         # "commit" falls through to exactly the code that was here before.
 
     try:

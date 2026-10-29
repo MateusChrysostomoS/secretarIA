@@ -18,20 +18,21 @@ from secretaria.core.logging import get_logger
 from secretaria.models import Conversation, Tenant
 from secretaria.models.conversation import FlowState
 from secretaria.services import deposit_wait
+from secretaria.services.booking_hold import latest_hold_in
 from secretaria.services.channel_sender import sender_persists_outbound
 from secretaria.services.flow_router import (
     LABEL_RETRY_MENU,
     LABEL_RETRY_YES,
     WHEN_FORMAT,
+    FlowRouterResult,
 )
 from secretaria.services.payments import booking_charge, deposit_lifecycle
+from secretaria.services.payments.failure_reason import FailureReason
 from secretaria.services.whatsapp import interactive_buttons_record
 from secretaria.workers.shared.booking_hold import _tenant_tzinfo
 from secretaria.workers.shared.context import _ReplyContext
-from secretaria.workers.shared.dispatch import _send_plain_reply
-from secretaria.workers.shared.handover import _set_conversation_human_active
+from secretaria.workers.shared.deposit_fallback import _confirm_failed, _confirm_without_deposit
 from secretaria.workers.shared.sender import _record_outbound, _reply_sender
-from secretaria.workers.shared.state_expiry import _write_flow_state
 
 logger = get_logger(__name__)
 
@@ -114,22 +115,38 @@ async def _abort_deposit_request(
     tenant: Tenant,
     waba_token: str | None,
     redis,
-) -> None:
-    """The Pix could not be delivered: void the charge, free the slot and hand the conversation
-    to a human (nothing was created, nothing is owed). No clinic e-mail (owner answer 13)."""
+) -> FlowRouterResult | None:
+    """The Pix could not be delivered: void the charge and book the slot WITHOUT the deposit
+    (TASK-071 Plan 3: a technical failure never stops the booking; the clinic is told).
+
+    Returns the result the caller applies - the normal confirmation, the same day's other times
+    when the slot was taken meanwhile, or a hand-over when the booking cannot be written - or
+    None when the provider says the Pix was paid after all (the paid path confirms it). Once
+    voided, the deposit row is no longer waiting and its deadline can cancel nothing."""
+    deposit_id = request["deposit_id"]
+    held = None
+    outcome = None
     try:
         async with async_session_factory() as session:
-            await booking_charge.abandon_charge(session, tenant, request["deposit_id"])
+            held = await latest_hold_in(session, reply.conversation_id)
+            outcome = await booking_charge.abandon_charge(session, tenant, deposit_id)
     except Exception as exc:
         logger.error("deposit_request_abort_failed", error_type=type(exc).__name__)
-    await _write_flow_state(reply.conversation_id, FlowState.IDLE)
-    await _set_conversation_human_active(reply.conversation_id)
-    await _send_plain_reply(
+    if outcome == "paid":
+        return None
+    if outcome != "voided" or held is None or held.charge_id != deposit_id:
+        # The charge may still be live (or was resolved elsewhere): nothing may be confirmed
+        # here. A person takes the conversation.
+        return _confirm_failed()
+    return await _confirm_without_deposit(
         reply,
         tenant=tenant,
+        held=held,
+        code="delivery_failed",
+        reason=FailureReason.unknown,
+        stage="delivery",
         waba_token=waba_token,
-        body=deposit_lifecycle.BEFORE_BLOCKED_TEXT,
-        event="deposit_request_blocked_notice_sent",
+        redis=redis,
     )
 
 

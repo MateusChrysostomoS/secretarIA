@@ -1137,9 +1137,18 @@ BEFORE_CHANGE_TEXT = "Tudo bem, liberei o horário e cancelei o Pix. Quer escolh
 BEFORE_EXPIRED_TEXT = (
     "O prazo do Pix acabou e o horário foi liberado. Quer escolher outro horário?"
 )
+# Only for what is NOT a technical failure of the deposit (TASK-071 Plan 3): a Pix already open
+# for this conversation (`charge_pending`) or no patient to charge (`no_patient`). A technical
+# failure books WITHOUT the deposit and tells the clinic (`deposit_failure_notice`).
 BEFORE_BLOCKED_TEXT = (
     "Não consegui iniciar o seu agendamento agora. Vou passar a conversa para a equipe da "
     "clínica, que continua o seu atendimento por aqui."
+)
+# The deposit was dropped (technical failure) but the booking itself could not be written right
+# now (database/agenda unreachable): a person takes over, the slot is not claimed as booked.
+BEFORE_CONFIRM_FAILED_TEXT = (
+    "Não consegui fechar o seu agendamento agora. Vou passar a conversa para a equipe da "
+    "clínica, que confirma o horário com você por aqui."
 )
 BEFORE_LATE_TAKEN_TEXT = (
     "Recebemos o seu pagamento, mas o horário que você escolheu não está mais disponível. "

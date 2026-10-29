@@ -14,6 +14,7 @@ Every state change goes through `shared/flow_runner.py::_apply_flow_result` (or
 `_write_flow_state`), the single persistence seam.
 """
 
+from dataclasses import replace as dataclass_replace
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -45,9 +46,18 @@ from secretaria.services.payments import (
     payer_data,
     payer_data_after,
 )
+from secretaria.services.payments.deposit_failure_notice import (
+    continues_without_deposit,
+    failure_reason_for,
+)
+from secretaria.services.payments.failure_reason import FailureReason
 from secretaria.services.pending_identity import BOOKING_HOLD_EXPIRED_MESSAGE
 from secretaria.workers.shared.booking_hold import _release_hold, _tenant_tzinfo
 from secretaria.workers.shared.context import _ReplyContext
+from secretaria.workers.shared.deposit_fallback import (
+    _notify_deposit_waived,
+    _rehold_for_promotion,
+)
 from secretaria.workers.shared.deposit_request import _arq_enqueue, _retry_buttons
 from secretaria.workers.shared.dispatch import _send_buttons_reply, _send_plain_reply
 from secretaria.workers.shared.flow_runner import _apply_flow_result
@@ -260,31 +270,38 @@ async def _handle_payer_data(
 
 async def _payer_data_unavailable(
     reply: _ReplyContext, *, tenant: Tenant | None, waba_token: str | None, redis
-) -> None:
-    """The value could not be kept (Redis unreachable). `before`: a deposit is due and cannot be
-    asked for, so this is the D3 "blocked" outcome (the clinic is told, a human takes over).
-    `after`: the consultation stands; a human takes over the Pix."""
+) -> _ReplyContext | None:
+    """The value could not be kept (Redis unreachable).
+
+    `before` (TASK-071 Plan 3): a technical failure of the deposit never stops the booking. The
+    answer is dropped and the turn goes on as the "Confirmar" it completes, with the deposit
+    step waived: the returned context is the one the caller continues with (the booking gate
+    books WITHOUT the deposit and tells the clinic). `after`: the consultation stands; a human
+    takes over the Pix and None is returned (the turn is over)."""
     if tenant is None or reply.conversation_id is None:
-        return
+        return None
     logger.error(
         "payer_data_store_unavailable",
         conversation_id=str(reply.conversation_id),
         tenant_id=str(tenant.id),
         timing=reply.payer_data_timing,
     )
+    if reply.payer_data_timing != "after":
+        return dataclass_replace(
+            reply,
+            payer_data_answer=None,
+            deposit_waived_reason=FailureReason.unknown.value,
+        )
     await _write_flow_state(reply.conversation_id, FlowState.IDLE)
     await _set_conversation_human_active(reply.conversation_id)
-    if reply.payer_data_timing == "after":
-        body = payer_data.AFTER_FAILED_TEXT
-    else:
-        body = deposit_lifecycle.BEFORE_BLOCKED_TEXT
     await _send_plain_reply(
         reply,
         tenant=tenant,
         waba_token=waba_token,
-        body=body,
+        body=payer_data.AFTER_FAILED_TEXT,
         event="payer_data_unavailable_notice_sent",
     )
+    return None
 
 
 async def _resume_after_deposit(
@@ -346,8 +363,10 @@ async def _payment_after_code(
 
     None = no, promote exactly as before. Otherwise the result to apply: the Pix request on the
     SAME hold (extended to the payment phase, `booking_charge.begin_payment`), or - when the
-    deposit cannot be asked for - a hand-over with the clinic alerted, or a plain "the slot was
-    released" when someone else took it meanwhile.
+    deposit cannot be asked for (`charge_pending` / `no_patient` only) - a hand-over, or a
+    plain "the slot was released" when someone else took it meanwhile. A TECHNICAL failure of
+    the deposit (TASK-071 Plan 3) is None too: the clinic is told and the slot is promoted
+    without the deposit (reserved again when `begin_payment` had released it).
     """
     if tenant is None or reply.conversation_id is None:
         return None
@@ -384,7 +403,21 @@ async def _payment_after_code(
         )
 
     if quote.blocked:
-        return await blocked(quote.reason)
+        if not continues_without_deposit(quote.reason):
+            return await blocked(quote.reason)
+        # TASK-071 Plan 3 (ruling R6): the deposit cannot be asked for for a technical reason.
+        # The code-phase hold is untouched: tell the clinic and promote it exactly as a booking
+        # with no deposit due (None).
+        await _notify_deposit_waived(
+            reply,
+            tenant,
+            held,
+            code=quote.reason,
+            reason=failure_reason_for(quote.reason),
+            stage="quote",
+            redis=redis,
+        )
+        return None
     payer = await payer_data.recall_all(
         redis, tenant_id=tenant.id, conversation_id=reply.conversation_id
     )
@@ -411,7 +444,21 @@ async def _payment_after_code(
             # `begin_payment` already released the reservation; the answer replays "Confirmar".
             return _payer_data_request(held, tenant, needed, quote.provider)
         await payer_data.discard(redis, tenant_id=tenant.id, conversation_id=reply.conversation_id)
-        return await blocked(exc.code)
+        if not continues_without_deposit(exc.code, exc.reason):
+            return await blocked(exc.code)
+        # TASK-071 Plan 3: a technical failure never stops the booking. `begin_payment` released
+        # the reservation; it is placed again (code phase) and the caller promotes it like any
+        # booking with no deposit due (None), re-checking the slot on the agenda first.
+        return await _rehold_for_promotion(
+            reply,
+            tenant,
+            held,
+            code=exc.code,
+            reason=failure_reason_for(exc.code, exc.reason),
+            stage=exc.stage or "charge",
+            redis=redis,
+            provider=quote.provider,
+        )
     if payment is None:
         return FlowRouterResult(
             action="reply",

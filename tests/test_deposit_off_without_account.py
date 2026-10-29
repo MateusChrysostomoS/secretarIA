@@ -10,9 +10,9 @@ depend on the account again:
     ever reads the account, so the `before` booking gate commits (WhatsApp) or asks only for the
     e-mail code (Portal), and nothing is held for payment or charged;
   * `deposit_lifecycle.maybe_create_deposit` skips a clinic with the deposit off (`after`).
-And the other side, unchanged on purpose: with the deposit still ON and a broken account, a
-`before` clinic stays fail-closed (the booking is refused, nothing held) - the screen tells the
-clinic to switch it off.
+And the other side: with the deposit still ON and a broken account, a `before` clinic books
+WITHOUT the deposit and the clinic is e-mailed (TASK-071 Plan 3, ruling R6 - it used to refuse the
+booking), nothing held for payment - the screen still tells the clinic to switch it off.
 """
 
 from datetime import UTC, datetime
@@ -32,6 +32,7 @@ from secretaria.services import booking_hold as holds
 from secretaria.services.payments import (
     accounts,
     booking_charge,
+    deposit_failure_notice,
     deposit_lifecycle,
     registry,
 )
@@ -71,7 +72,12 @@ def provider(monkeypatch) -> FakeProvider:
     async def request_code(tenant_id, external_id):
         return RequestCodeResult(RequestCodeOutcome.SENT, email_masked="m***a@gmail.com")
 
+    async def notify(**kwargs):  # TASK-071 Plan 3: the clinic is told, never a real e-mail here
+        fake.waived.append(kwargs)
+
+    fake.waived = []
     monkeypatch.setattr(holds, "request_code", request_code)
+    monkeypatch.setattr(deposit_failure_notice, "notify_deposit_failure", notify)
     return fake
 
 
@@ -227,13 +233,15 @@ async def test_with_the_deposit_off_an_after_clinic_books_and_asks_for_nothing(
 
 
 @pytest.mark.parametrize("account", BROKEN)
-async def test_with_the_deposit_on_a_broken_account_keeps_a_before_clinic_fail_closed(
+async def test_with_the_deposit_on_a_broken_account_a_before_clinic_books_without_it(
     db, provider, account
 ):
-    """Unchanged on purpose: the booking is refused and nothing is held; the clinic's way out is
-    switching the deposit off (previous tests), which the screen says in words."""
+    """TASK-071 Plan 3, ruling R6 (was "...keeps a before clinic fail-closed"): a broken account
+    is a technical failure of the deposit, so the booking commits WITHOUT it and the clinic is
+    told; nothing is held for payment or charged."""
     world = await _world(db, account=account, timing="before", enabled=True)
     decision = await _decide(world, armed=False)
-    assert (decision.outcome, decision.blocked_reason) == ("blocked", "no_credential")
+    assert (decision.outcome, decision.deposit_waived_reason) == ("commit", "no_account")
     assert await _rows(db, BookingHold) == [] and await _rows(db, PixDeposit) == []
     assert provider.called("create_pix_charge") == 0
+    assert [w["stage"] for w in provider.waived] == ["quote"]

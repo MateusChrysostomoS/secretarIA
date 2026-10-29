@@ -40,6 +40,66 @@ logger = get_logger(__name__)
 DAILY_EMAIL_CAP = 3
 _COUNTER_TTL_SECONDS = 48 * 60 * 60
 
+# TASK-071 Plan 3, task 3: the `ChargeStartError.code`s (and the quote-level `blocked` reasons of
+# `deposit_gate.quote_deposit`) that are a TECHNICAL failure of the deposit. None of them may
+# stop the patient from booking: the consultation is confirmed WITHOUT the deposit and the clinic
+# is told (`notify_deposit_failure`). `payer_*_required` only reaches this set once the patient
+# already GAVE that field (the provider still asks): before that it is a question, not a failure.
+CONTINUE_WITHOUT_DEPOSIT: frozenset[str] = frozenset(
+    {
+        # provider answers (booking_charge / asaas_provider)
+        "charge_failed",
+        "customer_failed",
+        "payer_document_required",
+        "payer_email_required",
+        "customer_missing_id",
+        "charge_missing_id",
+        "no_api_key",
+        # booking_charge's own outcomes
+        "no_charge_id",
+        "no_copy_paste",
+        "persist_failed",
+        "no_account",
+        "no_provider",
+        # quote-level `blocked` reasons (deposit_gate / BookingGate._deposit_quote)
+        "no_credential",
+        "quote_failed",
+    }
+)
+# NOT technical, and they keep blocking: a live charge already exists for this conversation, or
+# there is no patient to charge.
+KEEPS_BLOCKING: frozenset[str] = frozenset({"charge_pending", "no_patient"})
+
+_REASON_FOR_CODE: dict[str, FailureReason] = {
+    "no_account": FailureReason.no_account,
+    "no_credential": FailureReason.no_account,
+    "persist_failed": FailureReason.persist_failed,
+    "no_copy_paste": FailureReason.qr_unavailable,
+    "no_api_key": FailureReason.api_key_invalid,
+}
+
+
+def continues_without_deposit(code: str | None, reason: object = None) -> bool:
+    """Whether a failure to start the deposit lets the booking go on without it.
+
+    A listed code always does; so does any other code the provider layer CLASSIFIED (it carries
+    a `reason`: a provider code nobody listed yet must not reopen the blocked booking). The two
+    `KEEPS_BLOCKING` codes never do."""
+    if code in KEEPS_BLOCKING:
+        return False
+    return code in CONTINUE_WITHOUT_DEPOSIT or reason is not None
+
+
+def failure_reason_for(code: str | None, reason: object = None) -> FailureReason:
+    """The closed reason for the clinic's e-mail: the classified one when there is one, else the
+    closest one for the code, else `unknown`."""
+    if reason is not None:
+        try:
+            return FailureReason(str(reason))
+        except ValueError:
+            pass
+    return _REASON_FOR_CODE.get(code or "", FailureReason.unknown)
+
 
 class NoticeOutcome(StrEnum):
     sent = "sent"

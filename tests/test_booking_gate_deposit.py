@@ -2,8 +2,8 @@
 
 WhatsApp goes straight to the Pix; the Portal proves the address FIRST (decision D12) and the
 payment starts on the same hold once the code is verified; a clinic on `after` (every clinic
-today) leaves the gate exactly as it was; a deposit that cannot be asked for BLOCKS the booking,
-tells the clinic and leaves nothing held.
+today) leaves the gate exactly as it was; a deposit that cannot be taken for a TECHNICAL reason
+is dropped and the booking commits (TASK-071 Plan 3); nothing is left held.
 """
 
 from uuid import uuid4
@@ -14,7 +14,12 @@ from sqlalchemy import select
 
 from secretaria.models import BookingHold, PixDeposit
 from secretaria.services import booking_hold as holds, email
-from secretaria.services.payments import booking_charge, deposit_gate, registry
+from secretaria.services.payments import (
+    booking_charge,
+    deposit_failure_notice,
+    deposit_gate,
+    registry,
+)
 from secretaria.services.pending_identity import RequestCodeOutcome, RequestCodeResult
 from tests.before_support import (
     SLOT_END,
@@ -43,6 +48,7 @@ class Env:
         self.entitlement = entitlement_summary()
         self.provider = FakeProvider()
         self.provider.created_charge = new_charge()
+        self.waived: list[dict] = []  # TASK-071 Plan 3: deposits dropped, clinic told
 
 
 @pytest.fixture
@@ -59,9 +65,13 @@ def env(monkeypatch) -> Env:
     async def send_email(to_email, clinic_name, kind):
         e.emails.append((to_email, kind))
 
+    async def notify(**kwargs):
+        e.waived.append(kwargs)
+
     monkeypatch.setattr(holds, "request_code", request_code)
     monkeypatch.setattr(email, "send_payment_alert", send_email)
     monkeypatch.setitem(registry._PROVIDERS, "asaas", e.provider)
+    monkeypatch.setattr(deposit_failure_notice, "notify_deposit_failure", notify)
     return e
 
 
@@ -161,27 +171,29 @@ async def test_a_clinic_without_the_old_addon_still_asks_for_the_deposit(db, env
     assert (await _decide(_gate(world, armed=False))).outcome == "awaiting_payment"
 
 
-async def test_a_missing_credential_blocks_the_booking_and_holds_nothing(
-    db, env
-):
+async def test_a_missing_credential_books_without_the_deposit_and_holds_nothing(db, env):
+    """TASK-071 Plan 3, ruling R6 (was: "...blocks the booking"): a technical failure."""
     async with db() as session:
         world = await make_world(session, with_account=False, contact_email="clinic@example.com")
     decision = await _decide(_gate(world, armed=False, redis=FakeRedis()))
-    assert (decision.outcome, decision.blocked_reason) == ("blocked", "no_credential")
+    assert (decision.outcome, decision.deposit_waived_reason) == ("commit", "no_account")
     assert await _holds(db) == [] and await _deposits(db) == []
-    assert env.emails == []  # owner answer 13: no operational e-mail
+    assert env.emails == []  # the old payment alert stays unused
+    assert [(w["reason"], w["stage"]) for w in env.waived] == [("no_account", "quote")]
 
 
-async def test_a_provider_failure_blocks_and_leaves_no_hold(db, env):
+async def test_a_provider_failure_books_without_the_deposit_and_leaves_no_hold(db, env):
+    """TASK-071 Plan 3 (was: "...blocks"): the booking commits without the deposit."""
     from secretaria.services.payments.provider import ProviderError
 
     env.provider.create_error = ProviderError("http_500", status_code=500, retryable=True)
     async with db() as session:
         world = await make_world(session, contact_email="clinic@example.com")
     decision = await _decide(_gate(world, armed=False, redis=FakeRedis()))
-    assert (decision.outcome, decision.blocked_reason) == ("blocked", "http_500")
+    assert (decision.outcome, decision.deposit_waived_reason) == ("commit", "unknown")
     assert await _holds(db) == []
     assert env.emails == []
+    assert len(env.waived) == 1
 
 
 async def test_a_blocked_booking_never_e_mails_the_clinic_however_often_it_repeats(db, env):
@@ -193,9 +205,11 @@ async def test_a_blocked_booking_never_e_mails_the_clinic_however_often_it_repea
     assert env.emails == []
 
 
-async def test_a_failure_deciding_after_the_clinic_is_known_to_be_on_before_blocks(
+async def test_a_failure_deciding_after_the_clinic_is_known_to_be_on_before_books_without_it(
     db, env, monkeypatch
 ):
+    """TASK-071 Plan 3, ruling R6 (was: "...blocks"): `quote_failed` is technical."""
+
     async def boom(*args, **kwargs):
         raise RuntimeError("database went away")
 
@@ -203,7 +217,8 @@ async def test_a_failure_deciding_after_the_clinic_is_known_to_be_on_before_bloc
     async with db() as session:
         world = await make_world(session)
     decision = await _decide(_gate(world, armed=False))
-    assert (decision.outcome, decision.blocked_reason) == ("blocked", "quote_failed")
+    assert (decision.outcome, decision.deposit_waived_reason) == ("commit", "unknown")
+    assert [w["stage"] for w in env.waived] == ["quote"]
 
 
 async def test_a_window_another_conversation_holds_is_slot_taken_and_nothing_is_charged(db, env):
@@ -241,7 +256,9 @@ async def test_a_conversation_that_already_waits_for_a_pix_cannot_start_a_second
     assert len(await _holds(db)) == 1 and len(await _deposits(db)) == 1
 
 
-async def test_a_blocked_booking_logs_the_safe_reason_stage_and_status(db, env):
+async def test_a_waived_deposit_logs_the_safe_reason_stage_and_status(db, env):
+    """TASK-071 Plan 3 (was `booking_gate_deposit_blocked`): a technical failure now logs the
+    distinct `booking_gate_deposit_waived` event, with the same closed vocabulary."""
     from secretaria.services.payments.provider import ProviderError
     from tests.before_support import recorded_logs
 
@@ -252,7 +269,11 @@ async def test_a_blocked_booking_logs_the_safe_reason_stage_and_status(db, env):
         world = await make_world(session)
     with recorded_logs() as logs:
         decision = await _decide(_gate(world, armed=False, redis=FakeRedis()))
-    assert (decision.outcome, decision.blocked_reason) == ("blocked", "charge_failed")
-    (line,) = [e for e in logs if e["event"] == "booking_gate_deposit_blocked"]
+    assert (decision.outcome, decision.deposit_waived_reason) == ("commit", "api_key_invalid")
+    assert not [e for e in logs if e["event"] == "booking_gate_deposit_blocked"]
+    (line,) = [e for e in logs if e["event"] == "booking_gate_deposit_waived"]
     assert (line["reason"], line["stage"], line["status"]) == ("api_key_invalid", "charge", 401)
     assert line["code"] == "charge_failed"
+    assert set(line) <= {
+        "event", "log_level", "code", "reason", "stage", "status", "tenant_id", "conversation_id"
+    }
