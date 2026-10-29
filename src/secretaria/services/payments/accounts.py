@@ -7,6 +7,7 @@ decrypt point are `services/tenant_config.py` (`get_payment_account`,
 """
 
 import uuid
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
@@ -22,6 +23,7 @@ from secretaria.models.clinic_payment_account import (
 )
 from secretaria.models.patient_payment_customer import PatientPaymentCustomer
 from secretaria.services import tenant_config as cfg
+from secretaria.services.payments.failure_reason import FailureReason
 from secretaria.services.payments.provider import PaymentAccount
 
 Timing = Literal["before", "after"]
@@ -67,6 +69,67 @@ async def get_or_create_account_row(
         session.add(row)
         await session.flush()
     return row
+
+
+ChargeHealth = Literal["ok", "failing", "untested"]
+
+
+def _utc(value: datetime) -> datetime:
+    """Naive datetimes (SQLite) are taken as UTC so they compare with aware ones."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+async def record_charge_failure(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    provider: str,
+    reason: FailureReason | str,
+    stage: str,
+) -> None:
+    """Remember that the last Pix charge with this account failed (`reason` is stored as its
+    string value, `stage` is a short step name - never provider text or patient data).
+
+    Flushes; the caller commits. Does nothing when the (tenant, provider) row does not exist:
+    recording a failure never creates an account.
+    """
+    row = await get_account_row(session, tenant_id=tenant_id, provider=provider)
+    if row is None:
+        return
+    try:
+        reason_value = FailureReason(reason).value
+    except ValueError:  # a failure recorder must never raise: keep the vocabulary closed
+        reason_value = FailureReason.unknown.value
+    row.last_charge_failure_reason = reason_value
+    row.last_charge_failure_stage = stage[:16]
+    row.last_charge_failure_at = datetime.now(UTC)
+    await session.flush()
+
+
+async def record_charge_success(session: AsyncSession, *, tenant_id: UUID, provider: str) -> None:
+    """Remember that a Pix charge with this account just worked. The last failure stays on
+    the row as history; `charge_health` compares the two timestamps.
+
+    Flushes; the caller commits. Does nothing when the (tenant, provider) row does not exist.
+    """
+    row = await get_account_row(session, tenant_id=tenant_id, provider=provider)
+    if row is None:
+        return
+    row.last_charge_ok_at = datetime.now(UTC)
+    await session.flush()
+
+
+def charge_health(row: ClinicPaymentAccount) -> ChargeHealth:
+    """`failing` when the last failure is newer than the last success (or nothing succeeded
+    since); `ok` when a success exists and is at least as new as the last failure; otherwise
+    `untested` (never charged)."""
+    failure_at = row.last_charge_failure_at
+    ok_at = row.last_charge_ok_at
+    if failure_at is not None and (ok_at is None or _utc(failure_at) > _utc(ok_at)):
+        return "failing"
+    if ok_at is not None:
+        return "ok"
+    return "untested"
 
 
 async def load_charge_account(

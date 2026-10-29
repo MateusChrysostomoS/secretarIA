@@ -84,6 +84,18 @@ class ClinicPaymentAccount(Base):
         DateTime(timezone=True), nullable=True
     )
     last_probe_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Charge health (TASK-071, Plan 3): the last failed / successful Pix charge made with this
+    # account. The reason is a `FailureReason` value and the stage a short step name - never
+    # provider text. A failure stays as history after a later success; health is derived by
+    # `services/payments/accounts.py::charge_health`.
+    last_charge_failure_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_charge_failure_stage: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    last_charge_failure_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_charge_ok_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # --- secrets: Fernet ciphertext, NEVER logged, NEVER returned by a response ---
     api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     webhook_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)

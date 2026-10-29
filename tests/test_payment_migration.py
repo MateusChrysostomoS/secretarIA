@@ -51,8 +51,15 @@ NEW_TABLES = (
 )
 TOUCHED = NEW_TABLES + ("pix_deposits", "tenants", "booking_holds")
 # Columns a LATER revision adds to this revision's tables (TASK-017, `e2b7c4a9d1f5`): the models
-# declare them, this revision's CREATE TABLE rightly does not.
-ADDED_BY_LATER_REVISIONS = {("payment_attention_items", "alerted_at")}
+# declare them, this revision's CREATE TABLE rightly does not. The `last_charge_*` health
+# columns come from `d4f7a1c9e2b6` (TASK-071, Plan 3).
+ADDED_BY_LATER_REVISIONS = {
+    ("payment_attention_items", "alerted_at"),
+    ("clinic_payment_accounts", "last_charge_failure_reason"),
+    ("clinic_payment_accounts", "last_charge_failure_stage"),
+    ("clinic_payment_accounts", "last_charge_failure_at"),
+    ("clinic_payment_accounts", "last_charge_ok_at"),
+}
 
 
 def _config() -> Config:
