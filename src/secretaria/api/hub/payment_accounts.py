@@ -126,6 +126,7 @@ async def _guard(request: Request, tenant: Tenant) -> JSONResponse | None:
 
 def _status_out(row: ClinicPaymentAccount) -> PaymentAccountStatusOut:
     excess = tuple(row.excess_groups or [])
+    health = accounts.charge_health_view(row)
     return PaymentAccountStatusOut(
         provider=row.provider,
         status=row.status,
@@ -136,6 +137,10 @@ def _status_out(row: ClinicPaymentAccount) -> PaymentAccountStatusOut:
         connected_at=row.connected_at,
         last_verified_at=row.last_verified_at,
         ready_for_before=(row.status == "connected" and row.last_verified_at is not None),
+        charge_health=health.health,
+        last_charge_failure_reason=health.last_failure_reason,
+        last_charge_failure_text=health.last_failure_text,
+        last_charge_failure_at=health.last_failure_at,
     )
 
 

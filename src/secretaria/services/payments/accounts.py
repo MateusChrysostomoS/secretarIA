@@ -7,6 +7,7 @@ decrypt point are `services/tenant_config.py` (`get_payment_account`,
 """
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
@@ -23,6 +24,7 @@ from secretaria.models.clinic_payment_account import (
 )
 from secretaria.models.patient_payment_customer import PatientPaymentCustomer
 from secretaria.services import tenant_config as cfg
+from secretaria.services.payments import failure_reason
 from secretaria.services.payments.failure_reason import FailureReason
 from secretaria.services.payments.provider import PaymentAccount
 
@@ -130,6 +132,31 @@ def charge_health(row: ClinicPaymentAccount) -> ChargeHealth:
     if ok_at is not None:
         return "ok"
     return "untested"
+
+
+@dataclass(frozen=True)
+class ChargeHealthView:
+    """What the clinic's screen shows about the account's charges (TASK-071 Plan 3, task 4):
+    the verdict, and the last failure as a closed category, its plain sentence and when (UTC).
+    Never provider text: a stored value outside the vocabulary reads as `unknown`."""
+
+    health: ChargeHealth
+    last_failure_reason: str | None
+    last_failure_text: str | None
+    last_failure_at: datetime | None
+
+
+def charge_health_view(row: ClinicPaymentAccount) -> ChargeHealthView:
+    """`charge_health` plus the last failure of the row, ready for the status endpoint. The last
+    failure stays as history once a newer success turned the verdict `ok`."""
+    reason = failure_reason.coerce(row.last_charge_failure_reason)
+    failed_at = row.last_charge_failure_at
+    return ChargeHealthView(
+        health=charge_health(row),
+        last_failure_reason=reason.value if reason is not None else None,
+        last_failure_text=failure_reason.text_for(reason),
+        last_failure_at=_utc(failed_at) if failed_at is not None else None,
+    )
 
 
 async def load_charge_account(

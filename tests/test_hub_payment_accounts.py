@@ -217,6 +217,9 @@ async def test_listing_shows_status_only_and_never_a_secret(client, world):
     assert set(item) == {
         "provider", "status", "incomplete_reason", "capabilities", "excess_groups",
         "excess_labels", "connected_at", "last_verified_at", "ready_for_before",
+        # TASK-071 Plan 3 (task 4): the charge health the Portal's badge reads.
+        "charge_health", "last_charge_failure_reason", "last_charge_failure_text",
+        "last_charge_failure_at",
     }
     assert item["provider"] == "asaas" and item["ready_for_before"] is True
     assert KEY not in response.text and "legacy" not in response.text
@@ -394,3 +397,72 @@ async def test_flag_on_and_qualified_refuses_the_extras_as_d14(client, world, mo
     assert response.json()["detail"]["excess_labels"] == ["Transferências"]
     async with maker() as session:
         assert (await session.scalars(select(ClinicPaymentAccount))).all() == []
+
+
+# ---- TASK-071 Plan 3, task 4: the charge health of the account (the Portal's badge) ----------
+
+
+async def _listed(client, world, *, failure=None, success=False):
+    """Connect THIS clinic, optionally record a charge failure / success, return its item."""
+    tenant, _, maker, _, _, _ = world
+    assert (await _put(client, {"api_key": KEY})).status_code == 200
+    async with maker() as session:
+        if failure is not None:
+            await accounts.record_charge_failure(
+                session, tenant_id=tenant.id, provider="asaas", reason=failure, stage="charge"
+            )
+        if success:
+            await accounts.record_charge_success(session, tenant_id=tenant.id, provider="asaas")
+        await session.commit()
+    response = await client.get(ENDPOINT)
+    assert response.status_code == 200
+    (item,) = response.json()
+    return item
+
+
+async def test_charge_health_is_untested_before_any_charge(client, world):
+    item = await _listed(client, world)
+    assert item["charge_health"] == "untested"
+    assert item["last_charge_failure_reason"] is None
+    assert item["last_charge_failure_text"] is None
+    assert item["last_charge_failure_at"] is None
+
+
+async def test_charge_health_failing_carries_the_reason_its_text_and_when(client, world):
+    from datetime import UTC, datetime
+
+    from secretaria.services.payments.failure_reason import FailureReason, user_text
+
+    item = await _listed(client, world, failure=FailureReason.pix_key_missing)
+
+    assert item["charge_health"] == "failing"
+    assert item["last_charge_failure_reason"] == "pix_key_missing"
+    assert item["last_charge_failure_text"] == user_text(FailureReason.pix_key_missing)
+    at = datetime.fromisoformat(item["last_charge_failure_at"])
+    assert at.tzinfo is not None  # an ISO instant the Portal can show in the clinic's time
+    assert abs((datetime.now(UTC) - at).total_seconds()) < 60
+    assert KEY not in json.dumps(item)
+
+
+async def test_charge_health_ok_only_after_a_successful_charge(client, world):
+    item = await _listed(client, world, failure="rate_limited", success=True)
+
+    assert item["charge_health"] == "ok"
+    # The last failure stays as history (the badge shows it only while failing).
+    assert item["last_charge_failure_reason"] == "rate_limited"
+    assert item["last_charge_failure_text"]
+
+
+async def test_a_stray_stored_reason_is_shown_as_unknown(client, world):
+    from secretaria.services.payments.failure_reason import FailureReason, user_text
+
+    tenant, _, maker, _, _, _ = world
+    item = await _listed(client, world, failure="provider_unavailable")
+    async with maker() as session:
+        row = await accounts.get_account_row(session, tenant_id=tenant.id, provider="asaas")
+        row.last_charge_failure_reason = "Asaas: free text"  # never written by the code
+        await session.commit()
+    (item,) = (await client.get(ENDPOINT)).json()
+    assert item["last_charge_failure_reason"] == "unknown"
+    assert item["last_charge_failure_text"] == user_text(FailureReason.unknown)
+    assert "free text" not in json.dumps(item)

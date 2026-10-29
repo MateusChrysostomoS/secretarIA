@@ -8,6 +8,7 @@ parses that one field by hand so a validation error can never echo it back.
 """
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -30,6 +31,14 @@ class PaymentAccountStatusOut(BaseModel):
     last_verified_at: datetime | None = None
     # True only when this account may gate a booking (`before` timing): connected AND verified.
     ready_for_before: bool = False
+    # TASK-071 Plan 3 (task 4): did the last Pix charge with this account work? "ok" only after a
+    # successful charge is on record, "failing" while the last failure is newer, "untested"
+    # before any charge. The last failure is a closed category (`FailureReason` value), its
+    # plain sentence for the clinic, and when it happened; all None when nothing ever failed.
+    charge_health: Literal["ok", "failing", "untested"] = "untested"
+    last_charge_failure_reason: str | None = None
+    last_charge_failure_text: str | None = None
+    last_charge_failure_at: datetime | None = None
 
 
 class AsaasConnectionResultOut(BaseModel):
