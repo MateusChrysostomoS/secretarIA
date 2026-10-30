@@ -36,6 +36,7 @@ from secretaria.plugins.base import InboundContext
 from secretaria.plugins.registry import agent_tools_for, run_on_inbound
 from secretaria.services.appointment_edit import EditContext, asks_to_edit_appointment
 from secretaria.services.appointment_edit_flow import apply_ai_edit
+from secretaria.services.booking_hold import refresh_code_hold
 from secretaria.services.booking_scope import (
     booking_topology,
 )
@@ -64,7 +65,11 @@ from secretaria.services.greeting_template import (
 from secretaria.services.insurance_catalog import (
     load_tenant_insurance,
 )
-from secretaria.services.llm_context import build_conversation_state
+from secretaria.services.llm_context import (
+    build_clinic_features,
+    build_conversation_state,
+    build_patient_identity,
+)
 from secretaria.services.patient_context import (
     PatientOpeningState,
     load_upcoming_appointments,
@@ -122,6 +127,7 @@ from secretaria.workers.portal.attachments import (
 from secretaria.workers.portal.identity import (
     _account_code_dead_end,
     _code_wait_booking,
+    _continue_after_email_change,
     _continue_after_email_claim,
     _finish_account_code_before_consent,
     _handle_identity_card_action,
@@ -138,7 +144,6 @@ from secretaria.workers.shared.appointment_edit_support import (
 )
 from secretaria.workers.shared.booking_hold import (
     SlotTakenAtPromotion,
-    _hold_minutes_left,
     _hold_when,
     _is_agent_sentinel,
     _promote_booking_hold,
@@ -371,6 +376,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
     manage_calendar_owned = False
     edit_context: EditContext | None = None
     patient_name = None
+    patient_email = None
     patient_wa = reply.patient_ref
     # Whether this patient still owes LGPD consent. Only the identity turns
     # read it: a code asked BEFORE consent (an e-mail that already had an
@@ -423,8 +429,9 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                     patient = await session.get(Patient, conversation.patient_id)
                     if patient is not None:
                         patient_name = patient.name
+                        patient_email = patient.email
                         patient_wa = patient.wa_id or patient_wa
-                        patient_owes_consent = patient.lgpd_accepted_at is None
+                        patient_owes_consent = not patient.lgpd_accepted
                 if tenant is not None:
                     # Active-professionals snapshot (plain objects — the flow
                     # router does no DB I/O). Loaded whenever a tenant
@@ -688,6 +695,10 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             result = await request_code(reply.tenant_id, reply.patient_ref)
         if result.outcome is RequestCodeOutcome.SENT:
             await _write_flow_state(reply.conversation_id, FlowState.AWAITING_EMAIL_CODE)
+            if not patient_owes_consent and reply.conversation_id is not None:
+                # A new code for the same booking: the carried choice gets a fresh lease, so
+                # the card names it and every reader agrees it is there (TASK-072 review H1).
+                await refresh_code_hold(reply.conversation_id)
             # The card, not a bare line: a resumed wait offers the same three
             # exits the original notice did, and names the same inbox.
             await _send_code_notice(
@@ -745,20 +756,16 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
         return
 
     if reply.pending_code_reprompt is not None:
-        # The card again, saying the reservation is still standing. No mask:
+        # The card again, naming the slot the code will book. No mask:
         # brain-api hands one back only on a fresh `request_code`, and this
-        # turn asked for no new code - so the notice names the window and the
-        # minutes instead of inventing an inbox.
+        # turn asked for no new code - so the notice names the window instead
+        # of inventing an inbox.
         held = reply.pending_code_reprompt
         await _send_buttons_reply(
             reply,
             tenant=tenant,
             waba_token=waba_token,
-            body=booking_gate_reprompt_body(
-                None,
-                when=_hold_when(held, tenant),
-                hold_minutes=_hold_minutes_left(held),
-            ),
+            body=booking_gate_reprompt_body(None, when=_hold_when(held, tenant)),
             buttons=list(CODE_NOTICE_BUTTONS),
             event="booking_gate_reprompt_sent",
         )
@@ -853,10 +860,10 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             return
         if outcome is ClaimOutcome.CLAIMED:
             # A patient who already consented re-typing an address ("📩 Mudar
-            # e-mail" on the post-booking card): unchanged from before the
-            # name step existed.
-            await _write_flow_state(reply.conversation_id, FlowState.IDLE)
-            await _send_consent_notice(reply, tenant=tenant, waba_token=waba_token)
+            # e-mail" on the code card). TASK-072: this used to send the LGPD
+            # notice again and drop the booking in progress (the "Ivo" report);
+            # now the code goes to the new address, the booking stays.
+            await _continue_after_email_change(reply, claim, tenant=tenant, waba_token=waba_token)
             return
         # A second browser may have completed the same account between the
         # first-contact probe and this claim. Re-read only on the authoritative
@@ -1328,6 +1335,15 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             # The prompt names the surface the patient is on: "chat da clínica"
             # on the Portal, never "WhatsApp" (live test, 2026-10-05).
             channel=reply.channel,
+            # TASK-072: which identity data we hold and which features are ON (booleans).
+            patient_identity=build_patient_identity(
+                patient_name,
+                patient_email,
+                email_on_account=policy_for(reply.channel).has_inline_identity,
+            ),
+            clinic_features=build_clinic_features(
+                tenant, flow_snapshot[1] if flow_snapshot is not None else None
+            ),
         )
     except Exception as exc:
         if not editing:

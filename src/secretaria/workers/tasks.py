@@ -347,7 +347,6 @@ from secretaria.workers.shared.actions import (
 )
 from secretaria.workers.shared.booking_hold import (
     _PROMOTE_FAILED_MESSAGE,
-    _hold_minutes_left,
     _hold_when,
     _is_agent_sentinel,
     _log_booking_scope,

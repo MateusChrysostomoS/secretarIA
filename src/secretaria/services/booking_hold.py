@@ -1,7 +1,19 @@
-"""Slot reservations: the ten minutes between "Confirmar" and a verified code.
+"""Booking holds: the chosen slot carried between "Confirmar" and a verified code.
 
 `models/booking_hold.py` says WHY the table exists; this module is the only
-thing allowed to write it, and the two rules it exists to enforce are:
+thing allowed to write it.
+
+TASK-072 (owner decision 2026-10-29): a CODE-phase row no longer reserves anything.
+It only carries the patient's chosen slot (doctor, service, convenio, attendee)
+through the code step - verification, resend, e-mail change - and blocks NOBODY:
+not the slot lists other patients see, not the AI tools, not the clinic's own
+manual booking or reschedule. Only a PAYMENT-phase row (a Pix being paid, out of
+TASK-072's scope) still makes its window busy (`BLOCKING_PHASE`). The slot is
+re-checked when the booking is actually written (`workers/shared/booking_hold.py
+::_promote_booking_hold`), and a taken slot sends the patient back to the day
+picker with the rest of the booking kept.
+
+The two rules this module still enforces:
 
 1. **The database row comes first, the Google event last.** A hold is a
    promise about a window, made in Postgres, that costs nothing to abandon.
@@ -44,12 +56,17 @@ if TYPE_CHECKING:  # pragma: no cover
 
 logger = get_logger(__name__)
 
-# The same ten minutes brain-api gives the OTP challenge
-# (`brain-api/docs/CHECKPOINT_portal_sessao_pendente.md` §5.4). ONE clock: a
-# hold that outlived the code would reserve a slot no code could still
-# confirm, and a code that outlived the hold would confirm a slot somebody
-# else may already have taken.
-HOLD_TTL_MINUTES = 10
+# How long a CODE-phase row remembers the patient's choice. Not a reservation
+# (TASK-072: a code-phase row blocks nobody), so it no longer has to match the
+# 10-minute OTP clock: it only bounds how long an abandoned choice lingers
+# before housekeeping drops it. Refreshed on every new code (resend, e-mail
+# change: `refresh_code_hold`), so a patient who asks for a second code keeps
+# their slot choice. The payment phase passes its own TTL.
+HOLD_TTL_MINUTES = 60
+
+# The only phase whose window is BUSY for everybody else (a Pix being paid). A
+# code-phase row is the patient's choice in transit and reserves nothing.
+BLOCKING_PHASE = "payment"
 
 
 def _aware(value: datetime) -> datetime:
@@ -140,7 +157,10 @@ async def held_windows(
     *,
     exclude_conversation: UUID | None = None,
 ) -> list[tuple[datetime, datetime]]:
-    """Live holds on ONE agenda, as [start, end) windows.
+    """Live BLOCKING holds (payment phase) on ONE agenda, as [start, end) windows.
+
+    TASK-072: code-phase rows are not returned - a patient waiting for a code
+    reserves nothing, so their choice never hides a slot from anybody else.
 
     `professional_id=None` means the tenant-level agenda, the same meaning it
     carries on `appointments.professional_id` — so a hold on Dr. A never hides
@@ -153,6 +173,7 @@ async def held_windows(
     """
     stmt = select(BookingHold.start_at, BookingHold.end_at).where(
         BookingHold.tenant_id == tenant_id,
+        BookingHold.phase == BLOCKING_PHASE,
         BookingHold.expires_at > _now(),
     )
     stmt = stmt.where(
@@ -264,6 +285,37 @@ async def release(hold_id: UUID) -> None:
         logger.warning("booking_hold_release_failed", hold_id=str(hold_id), error=str(exc))
 
 
+async def refresh_code_hold(conversation_id: UUID) -> HeldSlot | None:
+    """Give this conversation's CODE-phase row a fresh `HOLD_TTL_MINUTES`, and return it.
+
+    Called whenever a NEW code is mailed for the same booking (resend, e-mail change -
+    TASK-072): the patient's chosen slot keeps travelling with them. Safe on an expired
+    row (it reserves nothing, so reviving it hides no slot from anybody). None when there
+    is no code-phase row (never gated, already promoted, or a payment-phase row, which this
+    never touches). Best-effort: a failure is logged and answers None.
+    """
+    try:
+        async with async_session_factory() as session:
+            async with session.begin():
+                row = await session.scalar(
+                    select(BookingHold)
+                    .where(BookingHold.conversation_id == conversation_id)
+                    .order_by(BookingHold.created_at.desc())
+                )
+                if row is None or (row.phase or "code") != "code":
+                    return None
+                row.expires_at = _now() + timedelta(minutes=HOLD_TTL_MINUTES)
+                await session.flush()
+                return HeldSlot.of(row)
+    except Exception as exc:  # pragma: no cover - logged, never raised at a caller
+        logger.warning(
+            "booking_hold_refresh_failed",
+            conversation_id=str(conversation_id),
+            error_type=type(exc).__name__,
+        )
+        return None
+
+
 def hold_lock_key(tenant_id: UUID, professional_id: UUID | None) -> str:
     """The advisory-lock key of ONE agenda (a clinic's, or one professional's)."""
     return f"booking_hold:{tenant_id}:{professional_id}"
@@ -311,7 +363,12 @@ async def place_hold(
     phase: str = "code",
     charge_id: UUID | None = None,
 ) -> HeldSlot | None:
-    """Reserve [start_at, end_at) for this conversation. None = somebody else has it.
+    """Record [start_at, end_at) for this conversation. None = a Pix is holding it.
+
+    TASK-072: only PAYMENT-phase rows of other conversations conflict - two
+    patients may both carry the same slot through their code step; whoever
+    writes the booking first gets it, and the other is sent back to the day
+    picker at their own commit (`_promote_booking_hold`).
 
     `phase="payment"` + `charge_id` reserve the slot for a Pix (TASK-017): the TTL is then the
     clinic's deposit window instead of the 10-minute code clock. Raises `LiveChargeHoldError`
@@ -358,6 +415,7 @@ async def place_hold(
                 await session.execute(
                     select(BookingHold.start_at, BookingHold.end_at).where(
                         BookingHold.tenant_id == tenant_id,
+                        BookingHold.phase == BLOCKING_PHASE,
                         BookingHold.expires_at > now,
                         agenda,
                     )
@@ -405,11 +463,32 @@ async def extend_to_payment(
 
     The same row, so the slot is never free in between: `expires_at` moves to now + the
     clinic's TTL and `phase`/`charge_id` are set in ONE conditional UPDATE. None when the hold
-    already expired or vanished (the caller then tries a fresh `place_hold`).
+    already expired or vanished, or when a live payment hold of another conversation now
+    overlaps it (the caller then tries a fresh `place_hold`, which answers "taken").
     """
     now = _now()
     async with async_session_factory() as session:
         async with session.begin():
+            row = await session.get(BookingHold, hold_id)
+            if row is None:
+                return None
+            # TASK-072: a code-phase row reserved nothing, so another patient's Pix may have
+            # taken the window meanwhile. Becoming a BLOCKING hold is a commit point: the
+            # same serialised conflict test `place_hold` runs, against payment holds only.
+            await _serialize_agenda(session, row.tenant_id, row.professional_id)
+            if await live_hold_overlaps(
+                session,
+                row.tenant_id,
+                _aware(row.start_at),
+                _aware(row.end_at),
+                professional_id=row.professional_id,
+            ):
+                logger.info(
+                    "booking_hold_conflict",
+                    tenant_id=str(row.tenant_id),
+                    conversation_id=str(row.conversation_id),
+                )
+                return None
             result = await session.execute(
                 update(BookingHold)
                 .where(BookingHold.id == hold_id, BookingHold.expires_at > now)
@@ -436,7 +515,10 @@ async def live_hold_overlaps(
     professional_id: UUID | None | Literal["any"] = "any",
     exclude_charge_id: UUID | None = None,
 ) -> bool:
-    """Is any live hold of this clinic on [start_at, end_at)?
+    """Is any live BLOCKING (payment-phase) hold of this clinic on [start_at, end_at)?
+
+    TASK-072: a code-phase row reserves nothing, so it never blocks the hub, a reschedule,
+    a promotion or a Pix.
 
     `professional_id="any"` (the default) ignores whose agenda a hold belongs to: the hub's
     manual booking has no professional to compare with, so any live hold blocks it. A concrete
@@ -444,7 +526,9 @@ async def live_hold_overlaps(
     `exclude_charge_id` is the promotion's own hold: it must not block its own payment.
     """
     stmt = select(BookingHold.start_at, BookingHold.end_at).where(
-        BookingHold.tenant_id == tenant_id, BookingHold.expires_at > _now()
+        BookingHold.tenant_id == tenant_id,
+        BookingHold.phase == BLOCKING_PHASE,
+        BookingHold.expires_at > _now(),
     )
     if professional_id != "any":
         stmt = stmt.where(
@@ -579,7 +663,10 @@ class BookingGate:
         return self._tenant_id is not None and self._conversation_id is not None
 
     async def busy_windows(self, professional_id: UUID | None) -> list[tuple[datetime, datetime]]:
-        """Windows other conversations are holding on this agenda, for slot lists."""
+        """Windows other conversations' Pix holds keep busy on this agenda, for slot lists.
+
+        Code-phase rows are never among them (TASK-072): a patient waiting for a code
+        hides nothing from anybody."""
         if self._tenant_id is None:
             return []
         try:
@@ -589,8 +676,8 @@ class BookingGate:
                 exclude_conversation=self._conversation_id,
             )
         except Exception as exc:
-            # A failed read must never hide the whole agenda. Worst case a held
-            # slot is offered twice and `decide` answers `slot_taken`.
+            # A failed read must never hide the whole agenda. Worst case a slot
+            # under a Pix is offered twice and `decide` answers `slot_taken`.
             logger.warning("booking_hold_windows_failed", error=str(exc))
             return []
 

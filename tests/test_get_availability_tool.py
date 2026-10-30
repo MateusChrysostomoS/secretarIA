@@ -900,6 +900,9 @@ async def _hold(tenant, professional_id, start_hour, minutes=30, conversation_id
         insurance=None,
         start_at=start,
         end_at=start + timedelta(minutes=minutes),
+        # TASK-072: only a Pix (payment phase) blocks a slot; a code wait reserves nothing.
+        phase="payment",
+        charge_id=uuid4(),
     )
     assert placed is not None
 

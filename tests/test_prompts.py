@@ -357,9 +357,11 @@ def test_legacy_prompt_keeps_calendar_path_without_flow_state():
 # digests (rendered at 1c1ce2c, the day pinned to 2026-10-08) catch a drift of one character.
 # Changing the v1 prompt on purpose = re-render, update the digest, say so in the commit.
 # Re-rendered 2026-10-20: rule 7 of COMO ESCREVER (buttons are a "mensagem", never a "card").
+# Re-rendered 2026-10-29 (TASK-072): the fixed "AO RESPONDER" block (several questions in one reply,
+# an unavailable time is never "reserved"); the DADOS/RECURSOS blocks only render with turn facts.
 _V1_DIGESTS = {
-    "minimal": (13884, "074a8358a95e3764598c1479691b57084811537e87ea58dfb060db2399a13eca"),
-    "full": (19615, "13ca27cbbc7baed879af8fbac50f898ba87cb90fe983294478874faa25bcae31"),
+    "minimal": (14303, "2ff10c94e10135b2f8237a72624957bb69f96abe813bfe410feb00e328af41d7"),
+    "full": (20034, "957847aa784a03d43207a0878c4cb8fddb5aecff6754e18233038fbe5df34c7f"),
 }
 
 

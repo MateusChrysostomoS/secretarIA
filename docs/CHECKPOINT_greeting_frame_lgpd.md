@@ -1,5 +1,7 @@
 # CHECKPOINT — Moldura de saudação + aviso de LGPD (2026-08-31)
 
+> **TASK-072 (2026-10-29):** o gate lê `patients.lgpd_accepted` (booleano, migração `d4f8a2c6e1b9`); `lgpd_accepted_at` fica como auditoria. Ver [CHECKPOINT_task072_horario_sem_reserva.md](CHECKPOINT_task072_horario_sem_reserva.md).
+
 > Estado: **COMMITADO E DEPLOYADO** (`8995f48`). Conferido em 2026-09-01 por
 > `GET /build` da API de produção: `source_fingerprint` bate byte a byte com o HEAD local,
 > `deploy_parity: "match"` entre `api` e `worker`, `alembic_head: e3b7c1d5a9f2` — ou seja, as três

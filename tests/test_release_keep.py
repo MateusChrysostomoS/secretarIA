@@ -221,6 +221,9 @@ async def test_another_conversations_hold_means_taken(db, calendar):
                 start_at=RELEASED_START,
                 end_at=RELEASED_START + timedelta(minutes=30),
                 expires_at=datetime.now(UTC) + timedelta(minutes=30),
+                # TASK-072: only a Pix (payment phase) blocks a slot; a code wait reserves nothing.
+                phase="payment",
+                charge_id=uuid4(),
             )
         )
         await session.commit()

@@ -1,6 +1,5 @@
 """booking_hold - split out of workers/tasks.py (TASK-023)."""
 
-import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -9,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
+from secretaria.ai.formatter import TextBubble
 from secretaria.ai.graph import (
     BOOKING_DRAFT_SENTINEL_PREFIX,
     CALENDAR_UNAVAILABLE_SENTINEL,
@@ -24,6 +24,7 @@ from secretaria.core.logging import get_logger
 from secretaria.models import (
     Appointment,
     Conversation,
+    FlowState,
     Patient,
     Tenant,
 )
@@ -40,9 +41,9 @@ from secretaria.services.appointment_status import (
 from secretaria.services.attendee import ATTENDEE_SELF
 from secretaria.services.availability import slot_taken_at_confirm
 from secretaria.services.booking_hold import (
-    HOLD_TTL_MINUTES,
     HeldSlot,
     latest_hold_in,
+    live_hold_overlaps,
     release_in as release_hold_in,
 )
 from secretaria.services.booking_scope import resolve_booking_owner_id
@@ -66,7 +67,6 @@ from secretaria.services.insurance_catalog import (
 from secretaria.services.local_calendar import create_event_exclusive
 from secretaria.services.payments.failure_reason import coerce as coerce_failure_reason
 from secretaria.services.pending_identity import (
-    BOOKING_HOLD_EXPIRED_MESSAGE,
     CODE_NOTICE_BUTTONS,
     booking_gate_body,
 )
@@ -145,16 +145,6 @@ def _is_agent_sentinel(reply_text: str) -> bool:
         or reply_text.startswith(START_GUIDED_BOOKING_SENTINEL_PREFIX)
     )
 
-def _hold_minutes_left(held: HeldSlot) -> int:
-    """Whole minutes still on the reservation, never below 1.
-
-    Rounded UP, and floored at one: telling a patient "0 minutos" while the
-    hold is technically still live would read as "you already lost it", and
-    the honest ceiling is the one the clock will actually enforce.
-    """
-    remaining = (held.expires_at - datetime.now(UTC)).total_seconds()
-    return max(1, min(HOLD_TTL_MINUTES, math.ceil(remaining / 60)))
-
 def _tenant_tzinfo(tenant: Tenant | None):
     """The clinic's timezone, falling back to the product default."""
     name = getattr(tenant, "timezone", None) or "America/Sao_Paulo"
@@ -178,8 +168,9 @@ class SlotTakenAtPromotion:
     """`_promote_booking_hold`'s third answer: the code was good, the slot is gone.
 
     Not a paragraph like the other two, because the patient's next step is not text: the
-    caller says the account is active, then persists and sends `reoffer` (the "just
-    taken" line plus the same day's fresh times) instead of leaving the conversation IDLE.
+    caller says the account is active, then persists and sends `reoffer` (the day picker,
+    prefixed with the "just taken" line, the rest of the booking kept - TASK-072) instead
+    of leaving the conversation IDLE.
     """
 
     reoffer: FlowRouterResult
@@ -215,11 +206,7 @@ async def _send_booking_gate_notice(
         reply,
         tenant=tenant,
         waba_token=waba_token,
-        body=booking_gate_body(
-            hold.get("email_masked"),
-            when=hold.get("when"),
-            hold_minutes=HOLD_TTL_MINUTES,
-        ),
+        body=booking_gate_body(hold.get("email_masked"), when=hold.get("when")),
         buttons=list(CODE_NOTICE_BUTTONS),
         event="booking_gate_notice_sent",
     )
@@ -263,12 +250,18 @@ async def _promote_booking_hold(
     previous wave; a hold dropped before the row exists would free a slot the
     patient just paid for with a code.
 
-    One read comes before the create: a hold only blocks other HOLDS, never the
-    clinic's own Google writes, so the window may have been filled on the
-    doctor's agenda while the code was being typed. `slot_taken_at_confirm`
-    asks the very calendar the event would be written to; taken, nothing is
-    created, the hold is released and a `SlotTakenAtPromotion` carries the
-    re-offer back. A failed read books as before (fail-open).
+    The DOUBLE CHECK (TASK-072, owner decision 2026-10-29) comes before the
+    create: a code-phase hold reserves nothing, so while the code was being typed
+    the window may have been filled on the doctor's agenda (another patient, the
+    clinic, Google), taken by another patient's Pix, or simply passed. Each of
+    those is "taken": nothing is created, the hold is released and a
+    `SlotTakenAtPromotion` carries the day picker back, with service, doctor,
+    convenio and attendee kept. A failed calendar read books as before (fail-open).
+
+    The row's `expires_at` is NOT a reason to refuse any more: it only bounds how
+    long the choice is remembered (`services/booking_hold.py::HOLD_TTL_MINUTES`),
+    never a reservation, so a patient whose code arrived late still books when the
+    slot is free.
     """
     if tenant is None:
         return None
@@ -281,19 +274,6 @@ async def _promote_booking_hold(
         # appointment (`services/payments/fulfillment.py`). Promoting here would confirm a
         # consultation nobody paid for.
         return None
-
-    if held.expires_at <= datetime.now(UTC):
-        # The ten minutes ran out. The slot went back on sale the moment the
-        # clock passed, so there is nothing to promote and nothing to undo -
-        # say so plainly rather than confirming an appointment that does not
-        # exist. The account IS active: the code itself was still good.
-        await _release_hold(held.id)
-        logger.info(
-            "booking_hold_expired_at_verify",
-            conversation_id=str(reply.conversation_id),
-            tenant_id=str(tenant.id),
-        )
-        return BOOKING_HOLD_EXPIRED_MESSAGE
 
     async with async_session_factory() as session:
         # The owner is resolved against ORM rows read here, never against the
@@ -312,9 +292,8 @@ async def _promote_booking_hold(
             select(Conversation.patient_id).where(Conversation.id == reply.conversation_id)
         )
     if calendar is None:
-        # No agenda to book on. The reservation is KEPT: it costs nothing, it
-        # expires on its own, and dropping it here would hand the slot to
-        # somebody else while a human is still trying to rescue this booking.
+        # No agenda to book on. The row is KEPT: it costs nothing, reserves
+        # nothing, and carries what a human needs to rescue this booking.
         logger.error(
             "booking_hold_promote_no_calendar",
             conversation_id=str(reply.conversation_id),
@@ -326,14 +305,7 @@ async def _promote_booking_hold(
             await _release_hold(held.id)
         return _PROMOTE_FAILED_MESSAGE
 
-    if await slot_taken_at_confirm(
-        calendar,
-        held.start_at,
-        held.end_at,
-        source="booking_hold_promotion",
-        conversation_id=reply.conversation_id,
-        tenant_id=tenant.id,
-    ):
+    if await _held_slot_unavailable(reply, tenant, held, calendar):
         # Released, unlike the no-calendar case above: there is nothing left to
         # rescue - the time belongs to somebody else's event now.
         await _release_hold(held.id)
@@ -502,6 +474,99 @@ async def _promote_booking_hold(
         confirmation = f"{confirmation}\n\n{release_offer.CARRY_REFUSED_NOTE}"
     return confirmation
 
+async def _held_calendar(tenant: Tenant, held: HeldSlot):
+    """The calendar a held booking would be written to (the doctor's own), or None.
+
+    Same resolution `_promote_booking_hold` uses, for the payment leg (TASK-072 review M1),
+    which must re-check the slot before it charges. Best-effort: a failure answers None and the
+    caller skips only the calendar half of the check (the payment's own fulfillment re-checks).
+    """
+    try:
+        async with async_session_factory() as session:
+            target = _appointment_calendar_target(
+                {"professional_id": held.professional_id},
+                await list_active_professionals(session, tenant.id),
+            )
+            return await _appointment_calendar(session, tenant, target)
+    except Exception as exc:
+        logger.warning("booking_hold_calendar_lookup_failed", error_type=type(exc).__name__)
+        return None
+
+
+async def _taken_day_picker(
+    reply: _ReplyContext, tenant: Tenant, held: HeldSlot, calendar
+) -> FlowRouterResult:
+    """`_slot_taken_reoffer` as a plain result to apply: the day picker with the booking kept,
+    or - with no calendar / no conversation to rebuild from - the "just taken" line and IDLE.
+    Never a charge, never a "guardado" wording (TASK-072 review M1)."""
+    if calendar is not None:
+        taken = await _slot_taken_reoffer(reply, tenant, held, calendar)
+        if isinstance(taken, SlotTakenAtPromotion):
+            return taken.reoffer
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[TextBubble(body=_SLOT_TAKEN_NO_REOFFER_MESSAGE)],
+        flow_state=FlowState.IDLE,
+    )
+
+
+async def _held_slot_unavailable(
+    reply: _ReplyContext, tenant: Tenant, held: HeldSlot, calendar
+) -> bool:
+    """The commit-time double check of a gated booking (TASK-072). True = do not write it.
+
+    Asked before the appointment is written (`_promote_booking_hold`) AND before a Pix is
+    started for it (`deposit_turn._payment_after_code`). `calendar=None` skips only the
+    calendar read.
+
+    Three ways the chosen window stopped being bookable while the code was typed, since a
+    code-phase row reserves nothing:
+      * it already started (a code typed very late);
+      * another conversation's Pix now holds it (a payment-phase hold - the only kind that
+        still blocks; read best-effort, a failed read does not stop the booking);
+      * an event now sits on it in the calendar the booking would be written to
+        (`slot_taken_at_confirm`, fail-open).
+    """
+    if held.start_at <= datetime.now(UTC):
+        logger.info(
+            "booking_slot_taken_at_confirm",
+            source="booking_hold_promotion_past",
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(tenant.id),
+        )
+        return True
+    try:
+        async with async_session_factory() as session:
+            pix_holds_it = await live_hold_overlaps(
+                session,
+                tenant.id,
+                held.start_at,
+                held.end_at,
+                professional_id=held.professional_id,
+            )
+    except Exception as exc:
+        logger.warning("booking_hold_promote_hold_check_failed", error_type=type(exc).__name__)
+        pix_holds_it = False
+    if pix_holds_it:
+        logger.info(
+            "booking_slot_taken_at_confirm",
+            source="booking_hold_promotion_payment_hold",
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(tenant.id),
+        )
+        return True
+    if calendar is None:
+        return False
+    return await slot_taken_at_confirm(
+        calendar,
+        held.start_at,
+        held.end_at,
+        source="booking_hold_promotion",
+        conversation_id=reply.conversation_id,
+        tenant_id=tenant.id,
+    )
+
+
 async def _release_hold(hold_id) -> None:
     """Drop the reservation, on THIS module's session factory. Best-effort.
 
@@ -519,7 +584,12 @@ async def _release_hold(hold_id) -> None:
 async def _slot_taken_reoffer(
     reply: _ReplyContext, tenant: Tenant, held: HeldSlot, calendar
 ) -> SlotTakenAtPromotion | str:
-    """The same day's fresh times, for the doctor, service and convênio the hold carried.
+    """The DAY picker again, for the doctor, service, convênio and attendee the hold carried.
+
+    TASK-072 (owner decision 2026-10-29): the patient goes back to "Para quando você
+    gostaria? Escolha um dia:" prefixed with the "just taken" line, and only picks a new
+    day and time; their account is verified by now, so the next "Confirmar" commits without
+    another code (the gate stands down on NOT_PENDING).
 
     `_handle_confirmation` cleared the flow fields when it placed the hold (the hold row
     carries them instead), so the booking is rebuilt here from `held` onto a FRESH
@@ -558,7 +628,7 @@ async def _slot_taken_reoffer(
         }
     )
     minutes = int((held.end_at - held.start_at).total_seconds() // 60)
-    # Holds of OTHER conversations stay hidden on this list too, as on any slot list.
+    # Pix holds of OTHER conversations stay hidden on the slot list that follows, as on any.
     with booking_gate_scope(_turn_booking_gate(reply, tenant)):
         result = await reoffer_taken_booking_slot(
             state,

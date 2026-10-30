@@ -413,7 +413,10 @@ async def test_slot_taken_during_fallback_offers_other_times(db, env):
     result = await _confirm(world, env, redis=await _remembered(world))
 
     assert env.calendar.created == [] and result.appointment is None
-    assert result.bubbles[0].body == fr.SLOT_TAKEN_AT_CONFIRM_MESSAGE
+    # TASK-072: a taken slot goes back to the day picker with the booking kept.
+    assert result.bubbles[0].body.startswith(
+        f"{fr.SLOT_TAKEN_AT_CONFIRM_MESSAGE} {fr.DAY_PICKER_BODY}"
+    )
     assert BLOCKED_WORDS not in " ".join(getattr(b, "body", "") for b in result.bubbles)
 
 

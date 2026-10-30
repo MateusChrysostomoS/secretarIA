@@ -385,7 +385,7 @@ async def _brain_message_entry_decision(
         reason = None
         if conversation.handover_state == HandoverState.HUMAN_ACTIVE:
             reason = "human_active"
-        elif patient.lgpd_accepted_at is None:
+        elif not patient.lgpd_accepted:
             reason = "consent_pending"
         elif conversation.flow_state in _IDENTITY_WAITS:
             # Never skipped by an opening, however old: the name/e-mail/code

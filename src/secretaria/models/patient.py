@@ -3,9 +3,18 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, UniqueConstraint, func, text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    String,
+    UniqueConstraint,
+    false,
+    func,
+    text,
+)
 from sqlalchemy.engine.default import DefaultExecutionContext
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from secretaria.core.database import Base
 
@@ -40,6 +49,13 @@ class Patient(Base):
     """
 
     __tablename__ = "patients"
+
+    @validates("lgpd_accepted_at")
+    def _sync_lgpd_accepted(self, _key: str, value: datetime | None) -> datetime | None:
+        """Stamping consent sets `lgpd_accepted`; clearing it (debug reset) unsets it."""
+        self.lgpd_accepted = value is not None
+        return value
+
     __table_args__ = (
         # The historical identity. KEPT alongside the channel-aware constraint
         # below, not replaced by it, and deliberately so: it is redundant for
@@ -131,6 +147,16 @@ class Patient(Base):
     # "when did this person agree?" at all.
     lgpd_accepted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    # TASK-072 (owner, 2026-10-29): THE fact the consent gate reads. Once True the
+    # LGPD notice is never sent to this patient again - not after "Mudar e-mail",
+    # not on a new visit of the same conversation, not on re-entry. The timestamp
+    # above stays as the "when" (audit); this boolean is the single source of truth
+    # for "whether". Migration `d4f8a2c6e1b9` backfilled it from the timestamp.
+    # Kept coherent with the timestamp by `_sync_lgpd_accepted` below, so a writer
+    # that only stamps (or clears) `lgpd_accepted_at` cannot leave the two disagreeing.
+    lgpd_accepted: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
     )
     # The CLINIC's own Asaas customer id for this patient (Asaas accounts are
     # per-tenant — see tenant_credentials.asaas_api_key_encrypted). Reused

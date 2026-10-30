@@ -16,6 +16,7 @@ from secretaria.services.booking_hold import (
     HeldSlot,
     appointment_stands_in,
     live_hold_in,
+    refresh_code_hold,
 )
 from secretaria.services.patient_name import (
     NAME_REQUEST_AFTER_EMAIL_MESSAGE,
@@ -44,7 +45,6 @@ from secretaria.services.pending_identity import (
     unbooked_code_notice_body,
 )
 from secretaria.workers.shared.booking_hold import (
-    _hold_minutes_left,
     _hold_when,
 )
 from secretaria.workers.shared.context import (
@@ -107,9 +107,7 @@ async def _send_code_notice(
         if stands:
             body = code_notice_body(email_masked)
         elif held is not None:
-            body = booking_gate_body(
-                email_masked, when=_hold_when(held, tenant), hold_minutes=_hold_minutes_left(held)
-            )
+            body = booking_gate_body(email_masked, when=_hold_when(held, tenant))
         else:
             body = unbooked_code_notice_body(email_masked)
     await _send_buttons_reply(
@@ -162,7 +160,7 @@ async def _code_appointment_stands_in(
     code wait expires. Only a POST-consent code wait can have a booking behind
     it; every other origin answers False without a query.
     """
-    if origin != FlowState.AWAITING_EMAIL_CODE or patient.lgpd_accepted_at is None:
+    if origin != FlowState.AWAITING_EMAIL_CODE or not patient.lgpd_accepted:
         return False
     return await appointment_stands_in(
         session,
@@ -232,6 +230,57 @@ async def _continue_after_email_claim(
         event="patient_name_requested",
         offer_email_change=True,
     )
+
+async def _continue_after_email_change(
+    reply: _ReplyContext,
+    claim: ClaimResult,
+    *,
+    tenant: Tenant,
+    waba_token: str | None,
+) -> None:
+    """A patient who ALREADY consented typed a new address ("📩 Mudar e-mail").
+
+    TASK-072 (owner, 2026-10-29 - the "Ivo" report): straight to the code mailed to the
+    NEW address, with the booking in progress intact. Never the LGPD notice again
+    (`Patient.lgpd_accepted` is already true), never the name question (consent means it
+    was already asked), never the menu. The chosen slot (the code-phase hold row, carrying
+    doctor, service, convenio and attendee) gets a fresh lease and the card names it, so a
+    correct code books it through `_promote_booking_hold` and its commit-time double check.
+
+    A code that cannot be mailed leaves the wait, exactly as a failed resend does
+    (`code_give_up_message`): the patient is never parked on a code that is not coming.
+    """
+    result = RequestCodeResult(RequestCodeOutcome.UNAVAILABLE)
+    if reply.tenant_id is not None:
+        result = await request_code(reply.tenant_id, reply.patient_ref)
+    if result.outcome is RequestCodeOutcome.SENT:
+        await _write_flow_state(reply.conversation_id, FlowState.AWAITING_EMAIL_CODE)
+        if reply.conversation_id is not None:
+            await refresh_code_hold(reply.conversation_id)
+        await _send_code_notice(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            email_masked=result.email_masked or claim.email_masked,
+            event="pending_email_changed_code_sent",
+        )
+        return
+    logger.warning(
+        "pending_email_changed_code_unavailable",
+        outcome=result.outcome.value,
+        conversation_id=str(reply.conversation_id),
+        tenant_id=str(reply.tenant_id),
+    )
+    await _write_flow_state(reply.conversation_id, FlowState.IDLE)
+    stands, _held = await _code_wait_booking(reply.conversation_id)
+    await _send_plain_reply(
+        reply,
+        tenant=tenant,
+        waba_token=waba_token,
+        body=code_give_up_message(stands),
+        event="pending_email_changed_code_unavailable",
+    )
+
 
 async def _account_code_dead_end(
     reply: _ReplyContext,
@@ -405,6 +454,9 @@ async def _handle_identity_card_action(
         # one short transaction while covering the case where something else
         # moved it between the tap and here.
         await _write_flow_state(reply.conversation_id, FlowState.AWAITING_EMAIL_CODE)
+        if not pre_consent and reply.conversation_id is not None:
+            # A new code for the same booking: the chosen slot keeps travelling (TASK-072).
+            await refresh_code_hold(reply.conversation_id)
         await _send_code_notice(
             reply,
             tenant=tenant,
@@ -454,8 +506,9 @@ async def _record_verified_account_consent(conversation_id: UUID | None) -> bool
                 subject_ref = patient.external_id or patient.wa_id
                 if not subject_ref:
                     return False
-                if patient.lgpd_accepted_at is None:
+                if not patient.lgpd_accepted:
                     patient.lgpd_accepted_at = datetime.now(UTC)
+                    patient.lgpd_accepted = True
                     session.add(
                         ConsentEvent(
                             tenant_id=conversation.tenant_id,

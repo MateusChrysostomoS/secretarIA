@@ -15,7 +15,6 @@ Every state change goes through `shared/flow_runner.py::_apply_flow_result` (or
 """
 
 from dataclasses import replace as dataclass_replace
-from datetime import UTC, datetime
 
 from sqlalchemy import select
 
@@ -53,8 +52,13 @@ from secretaria.services.payments.deposit_failure_notice import (
     failure_reason_for,
 )
 from secretaria.services.payments.failure_reason import FailureReason
-from secretaria.services.pending_identity import BOOKING_HOLD_EXPIRED_MESSAGE
-from secretaria.workers.shared.booking_hold import _release_hold, _tenant_tzinfo
+from secretaria.workers.shared.booking_hold import (
+    _held_calendar,
+    _held_slot_unavailable,
+    _release_hold,
+    _taken_day_picker,
+    _tenant_tzinfo,
+)
 from secretaria.workers.shared.context import _ReplyContext
 from secretaria.workers.shared.deposit_fallback import (
     DepositWaived,
@@ -396,7 +400,10 @@ async def _payment_after_code(
         return None
     async with async_session_factory() as session:
         held = await latest_hold_in(session, reply.conversation_id)
-        if held is None or held.phase != "code" or held.expires_at <= datetime.now(UTC):
+        # TASK-072 review H1: the SAME lifetime rule `_promote_booking_hold` applies - a
+        # code-phase row is the patient's choice, not a reservation, so its `expires_at` never
+        # decides anything here. Checking it on one side only let a late code skip the Pix.
+        if held is None or held.phase != "code":
             return None
         patient_id = await session.scalar(
             select(Conversation.patient_id).where(Conversation.id == reply.conversation_id)
@@ -475,6 +482,13 @@ async def _payment_after_code(
                 record=False,
             ),
         )
+    # TASK-072 review M1: the code-phase row reserved nothing, so before any charge the slot gets
+    # the same commit-time check the promotion runs (started, another Pix, the doctor's agenda).
+    # Taken -> nothing is charged; back to the day picker with the booking kept.
+    calendar = await _held_calendar(tenant, held)
+    if await _held_slot_unavailable(reply, tenant, held, calendar):
+        await _release_hold(held.id)
+        return await _taken_day_picker(reply, tenant, held, calendar)
     payer = await payer_data.recall_all(
         redis, tenant_id=tenant.id, conversation_id=reply.conversation_id
     )
@@ -521,11 +535,10 @@ async def _payment_after_code(
             ),
         )
     if payment is None:
-        return FlowRouterResult(
-            action="reply",
-            bubbles=[TextBubble(body=BOOKING_HOLD_EXPIRED_MESSAGE)],
-            flow_state=FlowState.IDLE,
-        )
+        # Another Pix took the window between the check and the hold (or the slot is about to
+        # start): the same day picker, never "o horário que eu tinha guardado expirou".
+        await _release_hold(held.id)
+        return await _taken_day_picker(reply, tenant, held, calendar)
     await payer_data.discard(redis, tenant_id=tenant.id, conversation_id=reply.conversation_id)
     return FlowRouterResult(
         action="reply",

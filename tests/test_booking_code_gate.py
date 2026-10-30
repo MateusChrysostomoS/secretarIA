@@ -9,13 +9,14 @@ which one applies is whether a reservation exists (`services/booking_hold.py`).
 What each section proves, in the order the owner's checklist asks for it:
 
   1. the gate notice says exactly what the owner wrote, and can name the inbox
-  2. a reserved slot is invisible to everybody else, and FREES ITSELF on the
-     clock - no job, no sweeper, nobody pressing anything
+  2. a code-phase hold reserves NOTHING (TASK-072, owner 2026-10-29): other
+     patients still see and book the slot; only a Pix (payment phase) blocks
   3. confirming a slot creates nothing on Google and nothing in `appointments`
   4. WhatsApp is untouched: same turn, same event, same row, no reservation
   5. the appointment is created at the moment the code is verified, and the
      post_booking hooks (PreCheck handoff included) fire from THAT point
-  6. an expired reservation is never promoted into an appointment
+  6. a late code still books a free slot (the hold's clock is memory, not a
+     reservation), and a Pix-held slot is never booked over (TASK-072)
   7. the LLM cannot announce a verification no tool performed
   8. free text during a held wait repeats the card instead of costing the slot
 
@@ -71,13 +72,20 @@ from secretaria.services import (
 )
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE  # noqa: E402
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
+from secretaria.services.greeting_template import (  # noqa: E402
+    CONSENT_BUTTON_LABEL,
+    LGPD_TERMS_URL,
+)
+from secretaria.services.patient_name import NAME_REQUEST_AFTER_EMAIL_MESSAGE  # noqa: E402
 from secretaria.services.pending_identity import (  # noqa: E402
     BOOKING_GATE_REPROMPT_SENTENCE,
     BOOKING_GATE_SENTENCE,
-    BOOKING_HOLD_EXPIRED_MESSAGE,
     CODE_GIVE_UP_UNCONFIRMED_MESSAGE,
     CODE_NOTICE_BUTTONS,
+    IDENTITY_CHANGE_EMAIL_ACTION,
     IDENTITY_RESEND_ACTION,
+    ClaimOutcome,
+    ClaimResult,
     RequestCodeOutcome,
     RequestCodeResult,
     VerifyOutcome,
@@ -92,6 +100,8 @@ from secretaria.services.sensitive_claim_guard import (  # noqa: E402
     unbacked_claim,
 )
 from secretaria.workers import tasks  # noqa: E402
+from secretaria.workers.shared import booking_hold as worker_holds  # noqa: E402
+from secretaria.workers.shared.booking_hold import SlotTakenAtPromotion  # noqa: E402
 from tests._reminders_v2 import HookSpy  # noqa: E402
 
 EXTERNAL_ID = "00000000-0000-4000-8000-000000000001"
@@ -338,7 +348,7 @@ def _async(value):
 
 
 def test_the_gate_notice_opens_with_the_owners_exact_sentence():
-    body = booking_gate_body(EMAIL_MASKED, when="05/01/2099 às 10:00", hold_minutes=10)
+    body = booking_gate_body(EMAIL_MASKED, when="05/01/2099 às 10:00")
     # Verbatim, not paraphrased: the owner dictated this line.
     assert body.startswith(
         "Para registrá-lo(a) no sistema e confirmar a sua consulta, verifique o "
@@ -347,15 +357,19 @@ def test_the_gate_notice_opens_with_the_owners_exact_sentence():
     assert BOOKING_GATE_SENTENCE in body
 
 
-def test_the_notice_names_the_masked_inbox_the_reservation_and_the_webmail():
-    body = booking_gate_body(EMAIL_MASKED, when="05/01/2099 às 10:00", hold_minutes=10)
+def test_the_notice_names_the_masked_inbox_the_chosen_slot_and_the_webmail():
+    body = booking_gate_body(EMAIL_MASKED, when="05/01/2099 às 10:00")
     assert EMAIL_MASKED in body
     # The "Abrir e-mail" affordance, as a link: the card is capped at three
     # buttons and a URL button would need frontend work that is out of scope.
     assert "https://mail.google.com/" in body
     assert "Gmail" in body
     assert "05/01/2099 às 10:00" in body
-    assert "10 minutos" in body
+    # TASK-072 (owner, 2026-10-29): no slot is kept for anybody for a period of time,
+    # so the notice never promises one - it says what is still missing instead.
+    assert "10 minutos" not in body
+    assert "Guardei" not in body
+    assert "Só falta confirmar o seu e-mail para finalizar o agendamento." in body
 
 
 def test_the_webmail_is_derived_from_the_mask_never_from_an_address():
@@ -373,51 +387,104 @@ def test_without_a_mask_the_notice_is_just_the_sentence():
 
 
 # --------------------------------------------------------------------------
-# 2. A reserved slot blocks everybody else - and frees ITSELF on the clock
+# 2. A code-phase hold reserves nothing (TASK-072); only a Pix blocks
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_a_reservation_blocks_other_patients_then_expires_on_its_own(db):
-    """The checklist's "horário libera sozinho", end to end.
+async def _place_payment(db, tenant, conversation, start, *, minutes=30, professional_id=None):
+    return await holds.place_hold(
+        tenant_id=tenant.id,
+        conversation_id=conversation.id,
+        patient_id=None,
+        professional_id=professional_id,
+        appointment_type="Consulta",
+        insurance=None,
+        start_at=start,
+        end_at=start + timedelta(minutes=minutes),
+        ttl_minutes=30,
+        phase="payment",
+        charge_id=uuid4(),
+    )
 
-    Three facts in one test because they are one fact: while the reservation
-    is live nobody else can take the window; when the ten minutes pass NOTHING
-    RUNS, and the window is free again for the next patient who asks.
+
+@pytest.mark.asyncio
+async def test_a_code_wait_blocks_nobody_else(db):
+    """TASK-072 bug (a): patient A at the code step must not hide the slot from B.
+
+    Owner, 2026-10-29: "nenhum horário fica guardado para um paciente por tempo".
+    The row still carries A's choice (A can still read it back), but every
+    "is this busy?" question - the slot lists, the AI tools, the hub's manual
+    booking, another patient's own hold - answers "free".
     """
     tenant = await _seed_tenant(db)
     _, mine = await _seed_conversation(db, tenant)
-    _, theirs = await _seed_conversation(db, tenant, external_id=OTHER_EXTERNAL_ID)
+    patient_b, theirs = await _seed_conversation(db, tenant, external_id=OTHER_EXTERNAL_ID)
     start = datetime(2099, 1, 5, 13, 0, tzinfo=UTC)
 
     assert await _place(db, tenant, mine, start) is not None
+    assert (await holds.live_hold(mine.id)).start_at == start  # A's choice is carried
 
-    # Visible to the other conversation as busy...
-    assert await holds.held_windows(tenant.id, None, exclude_conversation=theirs.id) == [
-        (start, start + timedelta(minutes=30))
-    ]
-    # ...and invisible to the patient who is holding it, so their own choice
-    # does not vanish from their own list.
-    assert await holds.held_windows(tenant.id, None, exclude_conversation=mine.id) == []
-
-    # The other patient cannot take it.
-    assert await _place(db, tenant, theirs, start) is None
-
-    await _expire(db, mine)
-
-    # Free again, with no sweeper having run.
+    # B's slot lists: nothing hidden.
     assert await holds.held_windows(tenant.id, None, exclude_conversation=theirs.id) == []
-    assert await holds.live_hold(mine.id) is None
-    # And the other patient can now book the very same window.
+    gate_b = holds.BookingGate(
+        tenant_id=tenant.id,
+        conversation_id=theirs.id,
+        patient_id=patient_b.id,
+        external_id=OTHER_EXTERNAL_ID,
+        armed=True,
+    )
+    assert await gate_b.busy_windows(None) == []
+    # The clinic's manual booking / reschedule checks: not held.
+    async with db() as session:
+        assert not await holds.live_hold_overlaps(
+            session, tenant.id, start, start + timedelta(minutes=30)
+        )
+    # And B can carry the very same slot through their own code step.
     assert await _place(db, tenant, theirs, start) is not None
+    assert len(await _hold_rows(db, tenant)) == 2
 
 
 @pytest.mark.asyncio
-async def test_a_hold_on_one_agenda_does_not_hide_another_professionals_slot(db):
+async def test_a_pix_hold_still_blocks_everybody_else(db):
+    """Out of TASK-072's scope and unchanged: a slot waiting for a deposit stays busy."""
+    tenant = await _seed_tenant(db)
+    _, payer = await _seed_conversation(db, tenant)
+    _, other = await _seed_conversation(db, tenant, external_id=OTHER_EXTERNAL_ID)
+    start = datetime(2099, 1, 5, 13, 0, tzinfo=UTC)
+
+    assert await _place_payment(db, tenant, payer, start) is not None
+
+    assert await holds.held_windows(tenant.id, None, exclude_conversation=other.id) == [
+        (start, start + timedelta(minutes=30))
+    ]
+    async with db() as session:
+        assert await holds.live_hold_overlaps(
+            session, tenant.id, start, start + timedelta(minutes=30)
+        )
+    assert await _place(db, tenant, other, start) is None
+
+
+@pytest.mark.asyncio
+async def test_a_code_hold_cannot_become_a_pix_hold_over_another_pix(db):
+    """Two patients may carry the same slot through the code step now; the second one to
+    reach the payment step must not get a second Pix hold on top of the first."""
+    tenant = await _seed_tenant(db)
+    _, first = await _seed_conversation(db, tenant)
+    _, second = await _seed_conversation(db, tenant, external_id=OTHER_EXTERNAL_ID)
+    start = datetime(2099, 1, 5, 13, 0, tzinfo=UTC)
+    held = await _place(db, tenant, second, start)
+    assert held is not None
+    assert await _place_payment(db, tenant, first, start) is not None
+
+    assert await holds.extend_to_payment(held.id, ttl_minutes=30, charge_id=uuid4()) is None
+
+
+@pytest.mark.asyncio
+async def test_a_pix_hold_on_one_agenda_does_not_hide_another_professionals_slot(db):
     tenant = await _seed_tenant(db)
     _, mine = await _seed_conversation(db, tenant)
     _, theirs = await _seed_conversation(db, tenant, external_id=OTHER_EXTERNAL_ID)
-    await _place(db, tenant, mine, datetime(2099, 1, 5, 13, 0, tzinfo=UTC))
+    await _place_payment(db, tenant, mine, datetime(2099, 1, 5, 13, 0, tzinfo=UTC))
     # A different professional's agenda is a different set of windows.
     assert await holds.held_windows(tenant.id, uuid4(), exclude_conversation=theirs.id) == []
 
@@ -664,12 +731,10 @@ async def test_the_verified_code_is_what_creates_the_appointment(db, calls, monk
 
 
 @pytest.mark.asyncio
-async def test_an_expired_reservation_is_never_promoted(db, calls, monkeypatch):
-    """The other half of "horário libera sozinho".
-
-    The code still works, the slot does NOT come back, and nobody is told they
-    have an appointment they do not have.
-    """
+async def test_a_late_code_still_books_a_free_slot(db, calls, monkeypatch):
+    """TASK-072: the hold's clock is how long the CHOICE is remembered, never a
+    reservation - so a code typed after it ran out still books, when the
+    commit-time double check finds the slot free."""
     tenant = await _seed_tenant(db)
     patient, conversation = await _seed_conversation(
         db, tenant, flow_state=FlowState.AWAITING_EMAIL_CODE
@@ -684,10 +749,41 @@ async def test_an_expired_reservation_is_never_promoted(db, calls, monkeypatch):
         _reply(conversation), tenant=tenant, waba_token=None, redis=None
     )
 
-    assert extra == BOOKING_HOLD_EXPIRED_MESSAGE
+    assert "Pronto! Seu agendamento está confirmado." in extra
+    assert len(calls.events) == 1
+    assert len(await _appointments(db, tenant)) == 1
+
+
+@pytest.mark.asyncio
+async def test_promotion_never_books_over_another_patients_pix(db, calls, monkeypatch):
+    """The double check at commit also asks the holds that DO block (a Pix)."""
+    tenant = await _seed_tenant(db)
+    patient, conversation = await _seed_conversation(
+        db, tenant, flow_state=FlowState.AWAITING_EMAIL_CODE
+    )
+    _, payer = await _seed_conversation(db, tenant, external_id=OTHER_EXTERNAL_ID)
+    start = datetime(2099, 1, 5, 13, 0, tzinfo=UTC)
+    await _place(db, tenant, conversation, start, patient=patient)
+    assert await _place_payment(db, tenant, payer, start) is not None
+    monkeypatch.setattr(
+        workers_ns, "_appointment_calendar", lambda *a, **k: _async(_FakeCalendar(calls))
+    )
+    offered = []
+
+    async def _fake_reoffer(reply, tenant_, held, calendar):
+        offered.append(held.start_at)
+        return SlotTakenAtPromotion(reoffer=fr.FlowRouterResult(action="reply"))
+
+    monkeypatch.setattr(worker_holds, "_slot_taken_reoffer", _fake_reoffer)
+
+    result = await tasks._promote_booking_hold(
+        _reply(conversation), tenant=tenant, waba_token=None, redis=None
+    )
+
+    assert isinstance(result, SlotTakenAtPromotion)
+    assert offered == [start]
     assert calls.events == []
     assert await _appointments(db, tenant) == []
-    assert calls.hooks == []
 
 
 @pytest.mark.asyncio
@@ -827,6 +923,7 @@ async def test_free_text_during_a_held_wait_repeats_the_card_and_keeps_the_slot(
 
     sent = await _outbound(db, tenant)
     assert BOOKING_GATE_REPROMPT_SENTENCE in sent[-1]
+    assert "minutos" not in sent[-1]  # TASK-072: no time-boxed promise
     # Still TASK-003's three-button card, not a bare line: the flattened row
     # carries every label the patient was offered.
     for _, label in CODE_NOTICE_BUTTONS:
@@ -1036,5 +1133,222 @@ async def test_resending_the_code_on_a_held_slot_keeps_the_gate_wording(db, call
     card = (await _outbound(db, tenant))[-1]
     assert calls.code_requests == [EXTERNAL_ID]
     assert "já está confirmada" not in card
+    assert BOOKING_GATE_SENTENCE in card
+    assert "05/01/2099 às 10:00" in card
+
+
+# --------------------------------------------------------------------------
+# 10. TASK-072 (owner, 2026-10-29): "📩 Mudar e-mail" keeps the booking, and
+#     an accepted LGPD consent is never asked again (`Patient.lgpd_accepted`)
+# --------------------------------------------------------------------------
+
+NEW_EMAIL_MASKED = "i***o@gmail.com"
+
+
+def _wire_email_change(monkeypatch, calls):
+    """brain-api's two calls on the "Mudar e-mail" leg, faked: cancel the old code, claim
+    the new address (a NEW inbox, so `account_exists` is False)."""
+    claimed: list[str] = []
+
+    async def _cancel(tenant_id, external_id):
+        return True
+
+    async def _claim(tenant_id, external_id, email):
+        claimed.append(email)
+        return ClaimResult(ClaimOutcome.CLAIMED)
+
+    async def _request(tenant_id, external_id):
+        calls.code_requests.append(external_id)
+        return RequestCodeResult(RequestCodeOutcome.SENT, email_masked=NEW_EMAIL_MASKED)
+
+    monkeypatch.setattr(workers_ns, "cancel_pending_code", _cancel)
+    monkeypatch.setattr(workers_ns, "claim_email", _claim)
+    monkeypatch.setattr(workers_ns, "request_code", _request)
+    return claimed
+
+
+async def _portal_turn(tenant, text_, reply_id=None):
+    reply = await tasks._persist_brain_message_inbound(
+        tenant_id=tenant.id,
+        external_id=EXTERNAL_ID,
+        text=text_,
+        interactive_reply_id=reply_id,
+        patient_name="Maria",
+    )
+    await tasks._send_bot_reply(reply, redis=None)
+
+
+async def _state(db, conversation):
+    async with db() as session:
+        return await session.scalar(
+            select(Conversation.flow_state).where(Conversation.id == conversation.id)
+        )
+
+
+def _no_consent_notice(sent: list[str]) -> None:
+    for body in sent:
+        assert CONSENT_BUTTON_LABEL not in body
+        assert LGPD_TERMS_URL not in body
+
+
+@pytest.mark.asyncio
+async def test_changing_the_email_at_the_code_step_keeps_the_booking(db, calls, monkeypatch):
+    """The "Ivo" report: "Mudar e-mail" -> new address -> LGPD asked AGAIN, then the
+    booking (16/11 09:30, convênio, serviço) lost and the patient dumped on the menu.
+
+    Now: straight to the code sent to the NEW address, same slot on the card, no LGPD,
+    no name question, no menu - and the right code books exactly the chosen slot."""
+    claimed = _wire_email_change(monkeypatch, calls)
+    monkeypatch.setattr(
+        workers_ns, "_appointment_calendar", lambda *a, **k: _async(_FakeCalendar(calls))
+    )
+    tenant = await _seed_tenant(db)
+    patient, conversation = await _seed_conversation(
+        db, tenant, flow_state=FlowState.AWAITING_EMAIL_CODE
+    )
+    held = await _place(db, tenant, conversation, HELD_START, patient=patient)
+    async with db() as session:
+        row = await session.get(BookingHold, held.id)
+        row.insurance = "Unimed"
+        row.appointment_type = "Consulta de retorno"
+        await session.commit()
+    await tasks._send_booking_gate_notice(
+        _reply(conversation),
+        {"email_masked": EMAIL_MASKED, "when": "05/01/2099 às 10:00"},
+        tenant=tenant,
+        waba_token=None,
+    )
+
+    await _portal_turn(tenant, "📩 Mudar e-mail", IDENTITY_CHANGE_EMAIL_ACTION)
+    assert await _state(db, conversation) is FlowState.AWAITING_EMAIL
+    await _portal_turn(tenant, "ivo.novo@gmail.com")
+
+    sent = await _outbound(db, tenant)
+    assert claimed == ["ivo.novo@gmail.com"]
+    _no_consent_notice(sent)
+    assert NAME_REQUEST_AFTER_EMAIL_MESSAGE not in sent
+    # The code card for the NEW inbox, naming the same slot.
+    assert BOOKING_GATE_SENTENCE in sent[-1]
+    assert NEW_EMAIL_MASKED in sent[-1]
+    assert "05/01/2099 às 10:00" in sent[-1]
+    assert await _state(db, conversation) is FlowState.AWAITING_EMAIL_CODE
+    assert calls.code_requests == [EXTERNAL_ID]
+    [kept] = await _hold_rows(db, tenant)
+    assert kept.id == held.id
+    assert kept.insurance == "Unimed"
+
+    await _portal_turn(tenant, "123456")
+
+    [appointment] = await _appointments(db, tenant)
+    assert holds._aware(appointment.start_at) == HELD_START
+    assert appointment.insurance == "Unimed"
+    assert appointment.appointment_type == "Consulta de retorno"
+    assert "Pronto! Seu agendamento está confirmado." in (await _outbound(db, tenant))[-1]
+    _no_consent_notice(await _outbound(db, tenant))
+
+
+@pytest.mark.asyncio
+async def test_resending_the_code_refreshes_the_carried_choice(db, calls):
+    """A new code for the same booking gives the carried choice a fresh lease."""
+    tenant = await _seed_tenant(db)
+    patient, conversation = await _seed_conversation(
+        db, tenant, flow_state=FlowState.AWAITING_EMAIL_CODE
+    )
+    await _place(db, tenant, conversation, HELD_START, patient=patient, ttl=1)
+    await tasks._send_booking_gate_notice(
+        _reply(conversation),
+        {"email_masked": EMAIL_MASKED, "when": "05/01/2099 às 10:00"},
+        tenant=tenant,
+        waba_token=None,
+    )
+
+    await _portal_turn(tenant, "↩️ Reenviar código", IDENTITY_RESEND_ACTION)
+
+    held = await holds.live_hold(conversation.id)
+    assert held is not None
+    left = (held.expires_at - datetime.now(UTC)).total_seconds() / 60
+    assert left > holds.HOLD_TTL_MINUTES - 1
+
+
+def test_stamping_consent_sets_the_flag_and_clearing_it_unsets_it():
+    patient = Patient(tenant_id=uuid4(), external_id=EXTERNAL_ID, lgpd_accepted_at=None)
+    assert not patient.lgpd_accepted
+    patient.lgpd_accepted_at = datetime.now(UTC)
+    assert patient.lgpd_accepted is True
+    patient.lgpd_accepted_at = None
+    assert patient.lgpd_accepted is False
+
+
+@pytest.mark.asyncio
+async def test_the_flag_alone_is_what_the_consent_gate_reads(db, calls):
+    """`lgpd_accepted` True (even with no timestamp) -> the LGPD notice never comes back."""
+    tenant = await _seed_tenant(db)
+    patient, conversation = await _seed_conversation(db, tenant)
+    async with db() as session:
+        row = await session.get(Patient, patient.id)
+        row.lgpd_accepted = True
+        # Bypass the validator: the timestamp is audit only, the flag is the truth.
+        session.add(row)
+        await session.execute(
+            text("UPDATE patients SET lgpd_accepted_at = NULL WHERE id = :id"),
+            {"id": patient.id.hex},
+        )
+        await session.commit()
+
+    reply = await tasks._persist_brain_message_inbound(
+        tenant_id=tenant.id, external_id=EXTERNAL_ID, text="oi", patient_name="Maria"
+    )
+    assert reply is not None
+    assert not reply.send_consent_reminder
+    assert not reply.send_consent_notice
+
+
+@pytest.mark.asyncio
+async def test_without_the_flag_the_consent_gate_still_asks(db, calls):
+    tenant = await _seed_tenant(db)
+    patient, conversation = await _seed_conversation(db, tenant)
+    async with db() as session:
+        row = await session.get(Patient, patient.id)
+        row.lgpd_accepted_at = None
+        await session.commit()
+        await session.refresh(row)
+        assert row.lgpd_accepted is False
+
+    reply = await tasks._persist_brain_message_inbound(
+        tenant_id=tenant.id, external_id=EXTERNAL_ID, text="oi", patient_name="Maria"
+    )
+    assert reply is not None
+    assert reply.send_consent_reminder or reply.send_consent_notice
+
+
+@pytest.mark.asyncio
+async def test_resuming_a_code_wait_after_a_long_silence_renews_the_carried_choice(db, calls):
+    """TASK-072 review H1: "quer continuar?" -> "sim" on a code wait mails a NEW code. The
+    carried choice gets a fresh lease there too, so the card names the slot and every reader
+    (promotion, the deposit leg, the card) agrees it is still there."""
+    tenant = await _seed_tenant(db)
+    patient, conversation = await _seed_conversation(
+        db, tenant, flow_state=FlowState.AWAITING_EMAIL_CODE
+    )
+    await _place(db, tenant, conversation, HELD_START, patient=patient)
+    await _expire(db, conversation)  # silent for longer than the lease
+    assert await holds.live_hold(conversation.id) is None
+
+    reply = tasks._ReplyContext(
+        channel=CHANNEL_BRAIN_MESSAGE,
+        conversation_id=conversation.id,
+        tenant_id=tenant.id,
+        patient_ref=EXTERNAL_ID,
+        inbound_body="sim",
+        reactivation=tasks._ReactivationDirective(
+            kind="resume", origin=FlowState.AWAITING_EMAIL_CODE.value
+        ),
+    )
+    await tasks._send_bot_reply(reply, redis=None)
+
+    assert calls.code_requests == [EXTERNAL_ID]
+    held = await holds.live_hold(conversation.id)
+    assert held is not None and held.start_at == HELD_START
+    card = (await _outbound(db, tenant))[-1]
     assert BOOKING_GATE_SENTENCE in card
     assert "05/01/2099 às 10:00" in card

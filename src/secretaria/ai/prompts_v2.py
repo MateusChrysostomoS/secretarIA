@@ -35,9 +35,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from secretaria.ai.prompts import (
     _CLINIC_FACTS_FOOTER,
+    _format_answering_rules,
     _format_appointment_types,
     _format_business_hours,
     _format_clinic_facts,
+    _format_clinic_features,
+    _format_patient_identity,
     _format_post_consult_knowledge,
     _format_professional_context,
     _format_safety_rules,
@@ -227,6 +230,12 @@ def _format_tools_v2(names: frozenset[str]) -> str:
             "o paciente perguntar. Use o nome exato do catálogo. Se o resultado não tem a "
             "informação, admita isso; nunca invente."
         )
+    if "save_patient_name" in names:
+        lines.append(
+            "- save_patient_name: grava o nome do paciente quando ele o disser e o bloco "
+            "DADOS DO PACIENTE mostrar que ainda não temos. Só o nome, sem frase. Não troca "
+            "um nome já gravado."
+        )
     if "offer_human_handoff" in names:
         lines.append(
             "- offer_human_handoff: se a informação falta ou você não consegue ajudar "
@@ -388,10 +397,13 @@ def secretary_system_prompt_v2(config: TenantRuntimeConfig, *, tool_names: Itera
         f"{_format_channel_v2(config)}"
         f"{_format_safety_rules()}"
         f"{_format_rules_v2()}"
+        f"{_format_answering_rules()}"
         f"{_format_tools_v2(names)}"
         f"{_format_writing_v2(clinic)}"
         f"{_format_professional_context(config)}"
         f"{_format_clinic_facts_v2(config)}"
+        f"{_format_clinic_features(config)}"
+        f"{_format_patient_identity(config, name_tool='save_patient_name' in names)}"
         f"{_format_post_consult_knowledge(config)}"
         f"{_format_appointment_context_v2(config, names)}"
         f"{_format_conversation_state_v2(config)}"

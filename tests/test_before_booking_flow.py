@@ -352,6 +352,9 @@ async def test_a_fully_held_day_is_offered_and_says_which_times_are_held(db, env
         insurance=None,
         start_at=start,
         end_at=start + timedelta(minutes=30),
+        # TASK-072: only a Pix (payment phase) holds a slot; a code wait reserves nothing.
+        phase="payment",
+        charge_id=uuid4(),
     )
 
     held_local = start.astimezone(TZ)

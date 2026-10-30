@@ -1,4 +1,11 @@
-"""BookingHold - the slot a Brain-Message visitor holds while they prove their address.
+"""BookingHold - the slot a Brain-Message visitor CHOSE while they prove their address.
+
+TASK-072 (owner, 2026-10-29): a `phase="code"` row is NOT a reservation any more.
+It carries the choice (window, doctor, service, convenio, attendee) through the
+code step and blocks nobody; only a `phase="payment"` row (a Pix being paid)
+makes its window busy (`services/booking_hold.py::BLOCKING_PHASE`). The slot is
+re-checked when the booking is written. Where the text below says "reserve" or
+"10 minutes", read it as the payment phase / the pre-TASK-072 history.
 
 ## Why this table exists
 
