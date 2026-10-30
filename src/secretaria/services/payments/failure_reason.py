@@ -70,9 +70,7 @@ _USER_TEXT: dict[FailureReason, str] = {
         "O Asaas criou a cobrança, mas não devolveu o código Pix. "
         "Normalmente falta cadastrar uma chave Pix na conta do Asaas."
     ),
-    FailureReason.api_key_invalid: (
-        "A chave do Asaas guardada não é mais válida. Cole uma chave nova na conexão."
-    ),
+    FailureReason.api_key_invalid: "A chave do Asaas guardada não é mais válida.",
     FailureReason.permission_denied: "A chave do Asaas não tem permissão para criar cobranças.",
     FailureReason.rate_limited: "O Asaas recebeu pedidos demais e pediu para aguardar um pouco.",
     FailureReason.provider_unavailable: "O Asaas ficou fora do ar ou não respondeu a tempo.",
@@ -120,9 +118,12 @@ _ACTION_TEXT: dict[FailureReason, str] = {
     FailureReason.account_not_enabled: "Conclua o cadastro no painel do Asaas",
     FailureReason.pix_key_missing: "Cadastre uma chave Pix no painel do Asaas",
     FailureReason.qr_unavailable: "Cadastre uma chave Pix no painel do Asaas",
-    FailureReason.api_key_invalid: "Gere uma nova chave de API e reconecte no Portal",
+    FailureReason.api_key_invalid: (
+        "Gere uma chave nova no painel do Asaas e cole na configuração do sinal no Portal"
+    ),
     FailureReason.permission_denied: (
-        "Gere uma nova chave de API com permissão para cobranças e reconecte no Portal"
+        "Gere no painel do Asaas uma chave nova com permissão para cobranças e cole na "
+        "configuração do sinal no Portal"
     ),
     FailureReason.rate_limited: "Nada a fazer: o Asaas costuma voltar ao normal em poucos minutos",
     FailureReason.provider_unavailable: (
@@ -130,8 +131,7 @@ _ACTION_TEXT: dict[FailureReason, str] = {
     ),
     FailureReason.persist_failed: "Avise o suporte da SecretarIA e confira a cobrança no Asaas",
     FailureReason.no_account: "Conecte a conta do Asaas no Portal",
-    FailureReason.unknown: "Confira o painel do Asaas e a conexão no Portal; se persistir, "
-    "fale com o suporte",
+    FailureReason.unknown: "Avise o suporte da SecretarIA",
 }
 
 
@@ -139,3 +139,36 @@ def action_text(reason: FailureReason) -> str:
     """One-line "what to do" for the clinic, per reason. Kept next to `user_text`: both are
     fixed plain-Portuguese copy with no names, documents, e-mails or provider text."""
     return _ACTION_TEXT[reason]
+
+
+class ActionLink(StrEnum):
+    """Where the clinic fixes a reason: the Asaas panel or the deposit settings in the Portal."""
+
+    asaas_panel = "asaas_panel"
+    portal_deposit = "portal_deposit"
+
+
+# Owner's decision (2026-10-29): the e-mail carries a link straight to where the "O que fazer"
+# happens. Reasons with nothing for the clinic to do (patient's CPF, Asaas busy or down, unknown
+# -> support) carry none.
+_ACTION_LINKS: dict[FailureReason, tuple[ActionLink, ...]] = {
+    FailureReason.customer_rejected: (ActionLink.asaas_panel,),
+    FailureReason.customer_document_invalid: (),
+    FailureReason.charge_rejected: (ActionLink.asaas_panel,),
+    FailureReason.value_too_low: (ActionLink.portal_deposit,),
+    FailureReason.account_not_enabled: (ActionLink.asaas_panel,),
+    FailureReason.pix_key_missing: (ActionLink.asaas_panel,),
+    FailureReason.qr_unavailable: (ActionLink.asaas_panel,),
+    FailureReason.api_key_invalid: (ActionLink.asaas_panel, ActionLink.portal_deposit),
+    FailureReason.permission_denied: (ActionLink.asaas_panel, ActionLink.portal_deposit),
+    FailureReason.rate_limited: (),
+    FailureReason.provider_unavailable: (),
+    FailureReason.persist_failed: (ActionLink.asaas_panel,),
+    FailureReason.no_account: (ActionLink.portal_deposit,),
+    FailureReason.unknown: (),
+}
+
+
+def action_links(reason: FailureReason) -> tuple[ActionLink, ...]:
+    """The places (in order) the e-mail links to for this reason; empty when there is none."""
+    return _ACTION_LINKS[reason]

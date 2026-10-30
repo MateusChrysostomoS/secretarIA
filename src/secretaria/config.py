@@ -490,6 +490,20 @@ class Settings(BaseSettings):
     @property
     def payments_webhook_base_url(self) -> str:
         return self.PAYMENTS_WEBHOOK_BASE_URL.strip().rstrip("/")
+
+    # TASK-071: links of the "consulta marcada sem sinal" e-mail. The Asaas panel follows the API
+    # host (sandbox API = sandbox panel); the Portal link opens "Pagamento do sinal" in Contexto
+    # (same `#anchor` form as `/contexto/#gcal`). Empty base = no Portal link.
+    @property
+    def ASAAS_PANEL_URL(self) -> str:
+        if "sandbox" in self.ASAAS_BASE_URL.lower():
+            return "https://sandbox.asaas.com/login"
+        return "https://www.asaas.com/login"
+
+    @property
+    def PORTAL_DEPOSIT_SETTINGS_URL(self) -> str:
+        base = self.BRAIN_MESSAGE_PUBLIC_URL.strip().rstrip("/")
+        return f"{base}/contexto/#pix" if base else ""
     # Meta utility (HSM) template name for a deposit reminder with 3
     # quick-reply buttons (wave S3 - not sent yet by this wave). The template
     # itself needs external Meta approval before it can actually be used;

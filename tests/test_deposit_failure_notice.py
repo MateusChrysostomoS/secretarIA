@@ -145,6 +145,7 @@ async def test_email_has_patient_name_service_time_and_reason_but_no_document_ph
     )
     # The fixture swapped in a recording fake; this test goes through the REAL sender.
     monkeypatch.setattr(email_module, "send_deposit_unavailable_alert", _REAL_SEND)
+    _link_settings(monkeypatch)
     result = await _notify(env, reason=FailureReason.pix_key_missing)
     assert result.outcome == "sent"
     assert len(captured) == 1
@@ -157,9 +158,59 @@ async def test_email_has_patient_name_service_time_and_reason_but_no_document_ph
     assert user_text(FailureReason.pix_key_missing).rstrip(".") in body
     assert action_text(FailureReason.pix_key_missing).rstrip(".") in body
     assert "no máximo 3 vezes por dia" in body
+    # Owner's wording (2026-10-29): the cause is not blamed on Asaas, and the e-mail links to
+    # where the fix happens - the Asaas panel for a missing Pix key.
+    assert "por causa de um problema na cobrança do sinal" in body
+    assert "problemas técnicos com o Asaas" not in body
+    assert "Abrir o painel do Asaas: https://www.asaas.com/login" in body
+    assert "Portal" not in body
     for private in (PATIENT_CPF, PATIENT_PHONE, PATIENT_EMAIL):
         assert private not in body
         assert private not in subject
+
+
+def _link_settings(monkeypatch, *, portal_base: str = "https://portal.example.com"):
+    from secretaria.config import Settings
+
+    settings = Settings(
+        ASAAS_BASE_URL="https://api.asaas.com/v3", BRAIN_MESSAGE_PUBLIC_URL=portal_base
+    )
+    monkeypatch.setattr(notice, "get_settings", lambda: settings)
+
+
+def test_links_follow_the_reason(monkeypatch):
+    _link_settings(monkeypatch)
+    asaas = ("Abrir o painel do Asaas", "https://www.asaas.com/login")
+    portal = (
+        "Abrir a configuração do sinal no Portal",
+        "https://portal.example.com/contexto/#pix",
+    )
+    assert notice._email_links(FailureReason.pix_key_missing) == [asaas]
+    assert notice._email_links(FailureReason.value_too_low) == [portal]
+    assert notice._email_links(FailureReason.no_account) == [portal]
+    assert notice._email_links(FailureReason.api_key_invalid) == [asaas, portal]
+    for reason in (
+        FailureReason.customer_document_invalid,
+        FailureReason.rate_limited,
+        FailureReason.provider_unavailable,
+        FailureReason.unknown,
+    ):
+        assert notice._email_links(reason) == []
+
+
+def test_portal_link_is_dropped_without_a_portal_address(monkeypatch):
+    _link_settings(monkeypatch, portal_base="")
+    assert notice._email_links(FailureReason.value_too_low) == []
+    assert notice._email_links(FailureReason.api_key_invalid) == [
+        ("Abrir o painel do Asaas", "https://www.asaas.com/login")
+    ]
+
+
+def test_sandbox_api_links_the_sandbox_panel():
+    from secretaria.config import Settings
+
+    settings = Settings(ASAAS_BASE_URL="https://sandbox.asaas.com/api/v3")
+    assert settings.ASAAS_PANEL_URL == "https://sandbox.asaas.com/login"
 
 
 async def test_missing_contact_email_records_failure_without_sending(env):

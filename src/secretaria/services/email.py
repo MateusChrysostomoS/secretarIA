@@ -213,6 +213,7 @@ async def send_deposit_unavailable_alert(
     when_local: str,
     reason_text: str,
     action_text: str,
+    links: list[tuple[str, str]] | None = None,
 ) -> bool:
     """Email the clinic (or the doctor) that a consultation was booked WITHOUT its Pix deposit
     because the charge failed for a technical reason (TASK-071, Plan 3).
@@ -222,16 +223,20 @@ async def send_deposit_unavailable_alert(
     (name, service, local time) and a fixed reason / action from `failure_reason`; it never
     carries a document, a phone number or the patient's e-mail, and none of that reaches a log.
     The daily cap (3 per recipient) is enforced by the caller, `deposit_failure_notice`.
+    `links` are (label, url) lines placed right under "O que fazer" (the Asaas panel and/or the
+    deposit settings in the Portal, per reason).
     """
     settings = get_settings()
     if not settings.SMTP_HOST:
         return False
     who = f"O paciente {patient_name.strip()}" if (patient_name or "").strip() else "Um paciente"
     what = (service or "").strip() or "consulta"
+    link_lines = "".join(f"\n{label}: {url}" for label, url in (links or []) if url)
     body = (
         f"Olá,\n\n{who} marcou uma consulta ({what}, {when_local}) sem o sinal pago, por "
-        f"causa de problemas técnicos com o Asaas. Motivo: {reason_text.strip().rstrip('.')}. "
-        f"O que fazer: {action_text.strip().rstrip('.')}. "
+        "causa de um problema na cobrança do sinal.\n\n"
+        f"Motivo: {reason_text.strip().rstrip('.')}.\n"
+        f"O que fazer: {action_text.strip().rstrip('.')}.{link_lines}\n\n"
         "Para não lotar sua caixa, avisamos no máximo 3 vezes por dia.\n\n— Equipe SecretarIA"
     )
     try:

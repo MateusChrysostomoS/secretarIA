@@ -36,7 +36,13 @@ from secretaria.services import email
 from secretaria.services.brain_professionals import fetch_professional_emails
 from secretaria.services.payments import accounts
 from secretaria.services.payments.deposit_lifecycle import _tenant_tz
-from secretaria.services.payments.failure_reason import FailureReason, action_text, user_text
+from secretaria.services.payments.failure_reason import (
+    ActionLink,
+    FailureReason,
+    action_links,
+    action_text,
+    user_text,
+)
 
 logger = get_logger(__name__)
 
@@ -282,6 +288,22 @@ async def _within_cap(redis, key: str) -> bool:
     return int(count) <= DAILY_EMAIL_CAP
 
 
+_LINK_LABELS = {
+    ActionLink.asaas_panel: "Abrir o painel do Asaas",
+    ActionLink.portal_deposit: "Abrir a configuração do sinal no Portal",
+}
+
+
+def _email_links(reason: FailureReason) -> list[tuple[str, str]]:
+    """(label, url) of each place this reason is fixed; a link without a URL is left out."""
+    settings = get_settings()
+    urls = {
+        ActionLink.asaas_panel: getattr(settings, "ASAAS_PANEL_URL", ""),
+        ActionLink.portal_deposit: getattr(settings, "PORTAL_DEPOSIT_SETTINGS_URL", ""),
+    }
+    return [(_LINK_LABELS[link], urls[link]) for link in action_links(reason) if urls[link]]
+
+
 async def _notify(
     *,
     tenant_id: UUID,
@@ -335,6 +357,7 @@ async def _notify(
                 when_local=when_local,
                 reason_text=user_text(reason),
                 action_text=action_text(reason),
+                links=_email_links(reason),
             )
         except Exception as exc:  # noqa: BLE001 - e-mail is best effort
             delivered = False
