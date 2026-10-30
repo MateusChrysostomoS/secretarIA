@@ -130,9 +130,15 @@ def charge_health(row: ClinicPaymentAccount) -> ChargeHealth:
     successful charge (`record_charge_success`) newer than the last failure. A connection check
     (`last_verified_at`: a reconnection, the "Tentar de novo" webhook step, the daily recheck)
     never clears it - the daily recheck used to turn the badge grey with nothing fixed. The
-    breaker reads the connection check on its own (`deposit_failure_notice.breaker_open`)."""
+    breaker reads the connection check on its own (`deposit_failure_notice.breaker_open`).
+
+    TASK-071 Plan 4: a success older than the current API key (`key_connected_at`) belongs to a
+    key that is gone, so it is not proof and counts as no success at all."""
     failure_at = row.last_charge_failure_at
     ok_at = row.last_charge_ok_at
+    key_at = getattr(row, "key_connected_at", None)
+    if ok_at is not None and key_at is not None and _utc(ok_at) < _utc(key_at):
+        ok_at = None
     if failure_at is not None and (ok_at is None or _utc(failure_at) > _utc(ok_at)):
         return "failing"
     if ok_at is not None:

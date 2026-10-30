@@ -106,6 +106,11 @@ class ClinicPaymentAccount(Base):
     onboarding_checked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # When the CURRENT API key was stored (a new key replaces the old one): a charge that worked
+    # with a previous key is not proof for this one (`accounts.charge_health`).
+    key_connected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # Setup checklist items only the manager can confirm (TASK-071, Plan 4): whitelisted keys
     # (`checklist.MANUAL_ITEMS`) -> {"done": bool, "at": iso, "by": user id}. A reconnection
     # never clears them.
