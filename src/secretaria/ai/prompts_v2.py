@@ -240,7 +240,8 @@ def _format_tools_v2(names: frozenset[str]) -> str:
         lines.append(
             "- offer_human_handoff: se a informação falta ou você não consegue ajudar "
             "depois de tentar, oferece atendente com Sim/Não; o paciente decide. "
-            "Em message diga brevemente o que faltou, sem prometer contato futuro."
+            "Em message: antes o que você sabe, depois o que faltou, sem prometer "
+            "contato futuro."
         )
     if "request_human_handoff" in names:
         lines.append(

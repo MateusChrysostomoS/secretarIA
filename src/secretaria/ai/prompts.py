@@ -463,7 +463,8 @@ def _format_answering_rules() -> str:
         "\n\n================ AO RESPONDER ================\n"
         "- Mensagem com VÁRIAS perguntas (ex.: preço e endereço): responda NA MESMA resposta "
         "todas as partes que o contexto permite. Só para a parte que você não sabe, diga isso "
-        "e ofereça a recepção; nunca deixe parte para o próximo turno.\n"
+        "e ofereça a recepção; nunca deixe parte para o próximo turno. Ao oferecer "
+        "atendente, ponha essas respostas no texto da oferta.\n"
         "- Horário que não está livre só está indisponível: nunca diga que está "
         '"reservado", "guardado" ou "aguardando" outro paciente ou pagamento.'
     )
