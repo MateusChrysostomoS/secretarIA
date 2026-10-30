@@ -38,4 +38,5 @@ cadastro). Cole as linhas na seção abaixo.
 - `pix_key_missing` / `account_not_enabled` aparecem na criação da cobrança ou só no QR?
 - Quais estados de `/myAccount/status` coexistem com cobrança funcionando (conta com documentos
   pendentes).
+- Um segundo cliente com o mesmo CPF/CNPJ volta com o MESMO id (`customer_again.same_customer_id`)? Se sim, o "Testar cobrança" pode cair num cliente existente: o código já não apaga um cliente guardado para paciente e pede ao Asaas para não notificar o cliente de teste, mas a medição decide se isso basta.
 - Cobrança apagada gera tarifa? (conferir no extrato do Asaas depois da medição.)

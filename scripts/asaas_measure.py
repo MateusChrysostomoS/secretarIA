@@ -7,7 +7,7 @@ with `getpass` (nothing is echoed or stored), for the Asaas API key and for a va
 the owner, then walks through, deleting everything it creates:
 
   1. GET /myAccount/status           -> the four onboarding states (fixed words only)
-  2. a test customer
+  2. a test customer (and a second one with the same document, to see whether Asaas reuses it)
   3. Pix charges of R$ 1,00 / 4,99 / 5,00 / 9,99 / 10,00, each one created, its QR code asked
      for, and voided
 
@@ -150,6 +150,16 @@ def run(api_key: str, document: str) -> None:
         customer_id = _json_field(created, "id") if created.status_code < 300 else None
         if not customer_id:
             return
+
+        # 2b. does Asaas hand back the SAME customer for a repeated document? (decides whether the
+        # clinic's "Testar cobranca" could ever touch an existing customer)
+        again = client.post(
+            "/customers", json={"name": "Medicao Brain 2 - pode apagar", "cpfCnpj": document}
+        )
+        again_id = _json_field(again, "id") if again.status_code < 300 else None
+        emit("customer_again", again, same_customer_id=bool(again_id) and again_id == customer_id)
+        if again_id and again_id != customer_id:
+            emit("customer_again_deleted", client.delete(f"/customers/{again_id}"))
 
         # 3. charges
         due = (date.today() + timedelta(days=1)).isoformat()
