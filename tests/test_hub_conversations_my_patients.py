@@ -184,6 +184,7 @@ async def test_mine_lists_only_the_viewers_patients_newest_first(
         "id",
         "patient_wa_id",
         "patient_name",
+        "patient_email",
         "handover_state",
         "last_message_at",
         # The console list signals: the same row shape as the default list.

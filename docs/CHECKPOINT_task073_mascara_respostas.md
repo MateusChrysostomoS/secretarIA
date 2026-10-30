@@ -48,6 +48,12 @@ Sem migração. secretarIA **API + worker juntos** (toca `workers/`); o frontend
 - secretarIA: ruff limpo nos arquivos tocados; testes afetados 236 + 10 passando (inclui o novo
   `test_the_claimed_email_is_saved_on_the_patient_for_the_console` e
   `test_list_carries_the_patients_email_for_the_console_context`).
+- secretarIA, suíte completa (2026-10-30, em 8 blocos de 50 arquivos por causa da memória): todos os
+  testes passam. Um teste de formato exato da lista do console
+  (`test_hub_conversations_my_patients`) precisou aceitar o campo novo `patient_email` — ajustado.
+  `test_get_availability_tool::test_the_agent_builds_the_tool_behind_the_guard` falha só no worktree
+  (sem `.env` local, escolhe o provedor Claude e pede `ANTHROPIC_API_KEY`); passa no checkout
+  principal e passa no worktree com qualquer `OPENAI_API_KEY` definida — ambiente, não regressão.
 - Frontend: `tsc` limpo, 3211 testes, `npm run build` verde.
 - NÃO provado: Portal real no navegador (código digitado → uma bolha `••••••` na ordem certa, também
   após F5) e o contexto da paciente com o e-mail numa clínica real. Fazer na clínica de teste
