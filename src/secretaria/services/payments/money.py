@@ -79,3 +79,9 @@ def format_brl(cents: int) -> str:
     reais, remainder = divmod(abs(cents), 100)
     grouped = f"{reais:,}".replace(",", ".")
     return f"{sign}R$ {grouped},{remainder:02d}"
+
+
+# Smallest Pix charge the real Asaas accepts, in cents. MEASURED on 2026-10-30 with the clinic
+# owner's own account (`scripts/asaas_measure.py`, docs/ASAAS_MEDICOES.md): R$ 1,00 and R$ 4,99
+# were refused with HTTP 400, R$ 5,00 / 9,99 / 10,00 were created and answered a Pix code.
+ASAAS_MIN_PIX_CENTS = 500

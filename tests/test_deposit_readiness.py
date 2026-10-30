@@ -193,13 +193,22 @@ async def test_price_formats(db, price, priced):
     assert ("no_prices" not in found) is priced
 
 
-async def test_amount_below_minimum_only_with_a_measured_minimum(db, monkeypatch):
+async def test_amount_below_the_measured_minimum_is_a_warning(db):
+    """Measured on the real Asaas (2026-10-30): the smallest Pix charge is R$ 5,00."""
+    assert readiness.MIN_PIX_CENTS == 500
     async with db() as session:
-        tenant, _ = await _seed(session, types=[_type(price="R$ 10,00")], percent=30)  # R$ 3,00
-        assert "amount_below_minimum" not in await _codes(session, tenant)  # nothing measured yet
-        monkeypatch.setattr(readiness, "MIN_PIX_CENTS", 500)
-        found = await _codes(session, tenant)
-    assert found["amount_below_minimum"].severity == "warning"
+        # R$ 10,00 at 30% = R$ 3,00 -> flagged; R$ 200,00 at 30% = R$ 60,00 -> fine
+        low, _ = await _seed(session, types=[_type("Retorno", "R$ 10,00")], percent=30)
+        fine, _ = await _seed(session, types=[_type(price="R$ 200,00")], percent=30)
+        edge, _ = await _seed(session, types=[_type(price="R$ 50,00")], percent=10)  # R$ 5,00
+        found_low = await _codes(session, low)
+        found_fine = await _codes(session, fine)
+        found_edge = await _codes(session, edge)
+    assert found_low["amount_below_minimum"].severity == "warning"
+    assert found_low["amount_below_minimum"].names == ("Retorno",)
+    assert "R$ 5,00" in found_low["amount_below_minimum"].text
+    assert "amount_below_minimum" not in found_fine
+    assert "amount_below_minimum" not in found_edge  # exactly the minimum is accepted
 
 
 async def test_onboarding_pending_when_any_state_is_not_approved(db):

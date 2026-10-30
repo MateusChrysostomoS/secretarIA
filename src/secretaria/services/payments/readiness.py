@@ -32,17 +32,20 @@ from secretaria.models.clinic_payment_account import (
 from secretaria.services import tenant_config as cfg
 from secretaria.services.payments import accounts, failure_reason
 from secretaria.services.payments.deposit_gate import timing_is_before
-from secretaria.services.payments.money import format_brl, parse_brl_to_cents
+from secretaria.services.payments.money import (
+    ASAAS_MIN_PIX_CENTS,
+    format_brl,
+    parse_brl_to_cents,
+)
 from secretaria.services.payments.onboarding import stored_onboarding
 from secretaria.services.service_catalog import load_service_catalog
 
 Severity = Literal["blocker", "warning", "info"]
 Badge = Literal["ok", "failing", "untested"]
 
-# Smallest Pix charge Asaas accepts, in cents. NOT known from the documentation: it is filled in
-# only after `scripts/asaas_measure.py` measured it (docs/ASAAS_MEDICOES.md). While it is None the
-# `amount_below_minimum` item never appears - the screen does not guess a rule.
-MIN_PIX_CENTS: int | None = None
+# Smallest Pix charge Asaas accepts (measured, see `money.ASAAS_MIN_PIX_CENTS`). Kept as a module
+# name so a test can switch the rule off with `None`.
+MIN_PIX_CENTS: int | None = ASAAS_MIN_PIX_CENTS
 
 # Where the clinic fixes an item. The Portal maps these to a link or a section of its screen.
 WHERE_ASAAS_PANEL = "asaas_panel"

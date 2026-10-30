@@ -588,3 +588,22 @@ async def test_a_failed_customer_cleanup_keeps_the_original_charge_error(monkeyp
     assert (failure.value.stage, failure.value.reason) == ("charge", "api_key_invalid")
     assert (failure.value.status_code, failure.value.code_hint) == (401, "invalid_access_token")
     assert ("delete_customer", "cus_fake") in fake.calls
+
+
+async def test_a_refused_charge_below_the_measured_minimum_is_value_too_low(monkeypatch):
+    """Measured on the real Asaas (2026-10-30): R$ 1,00 and R$ 4,99 are refused with a 400,
+    R$ 5,00 is accepted. The same 400 above the minimum is just a refused charge."""
+    from secretaria.services.payments.failure_reason import FailureReason
+
+    refused = AsaasError(400, "invalid_object")
+    for cents, expected in (
+        (100, FailureReason.value_too_low),
+        (499, FailureReason.value_too_low),
+        (500, FailureReason.charge_rejected),
+        (6000, FailureReason.charge_rejected),
+    ):
+        _install(monkeypatch, FakeAsaasClient(errors={"create_pix_payment": refused}))
+        with pytest.raises(ProviderError) as failure:
+            await AsaasProvider().create_pix_charge(_account(), _request(amount_cents=cents))
+        assert failure.value.reason == expected, cents
+        assert failure.value.stage == "charge"

@@ -17,26 +17,30 @@ consulta o QR de cada uma e apaga tudo. Cada passo imprime uma linha JSON (`step
 `code`, `kw_value`, `kw_pix_key`, `kw_account`, `kw_document`, `qr_has_pix_code`, estados do
 cadastro). Cole as linhas na seção abaixo.
 
-## Resultado
+## Resultado — rodado pelo dono em 2026-10-30, conta real (produção)
 
-**PENDENTE** — ainda não rodado pelo dono. Até lá:
+Relatório (só números e verdadeiro/falso):
 
-- `MIN_PIX_CENTS` (valor mínimo do Pix) **não existe** no código; o item `amount_below_minimum`
-  do checklist fica desligado.
-- O "Testar cobrança" usa R$ 5,00 (`PROBE_AMOUNT_CENTS = 500`), o piso de cobrança do Asaas
-  conforme a documentação pública; revisar quando a medição chegar.
-- As palavras-chave de `_classify_text` (valor, chave Pix, conta) continuam só as que já existem.
+| Passo | status | code | observação |
+|---|---|---|---|
+| `account_status` | 200 | — | general APPROVED, documents APPROVED, commercial APPROVED, **bank PENDING** |
+| `customer` | 200 | — | cliente de teste criado |
+| `customer_again` (mesmo CPF/CNPJ) | 200 | — | `same_customer_id: false` |
+| `charge_100` (R$ 1,00) | **400** | invalid_object | `kw_value: true` (o texto fala de valor) |
+| `charge_499` (R$ 4,99) | **400** | invalid_object | `kw_value: true` |
+| `charge_500` (R$ 5,00) | 200 | — | QR com código Pix: **sim** |
+| `charge_999` (R$ 9,99) | 200 | — | QR com código Pix: **sim** |
+| `charge_1000` (R$ 10,00) | 200 | — | QR com código Pix: **sim** |
+| todas as exclusões (cobranças e clientes) | 200 | — | tudo que o script criou foi apagado |
 
-### Relatório (a preencher)
+### Conclusões
+1. **Valor mínimo do Pix = R$ 5,00.** Abaixo disso o Asaas recusa a cobrança com 400. No código: `money.ASAAS_MIN_PIX_CENTS = 500`; `readiness.MIN_PIX_CENTS` passou a valer (item `amount_below_minimum`); `AsaasProvider.create_pix_charge` marca um 400 abaixo de R$ 5,00 como `value_too_low`. O texto do Asaas **não** foi capturado (o script só guarda verdadeiro/falso), então a regra usa o valor enviado como prova, não palavras do texto; `_classify_text` continua só com "document".
+2. **A chave de API lê `/myAccount/status`** (200): o item "cadastro concluído" é preenchido pelo sistema, não por clique.
+3. **Cadastro incompleto não impede cobrar:** com `bank` PENDING, cobranças R$ 5,00+ foram criadas e devolveram código Pix. O estado do cadastro é só informação (aviso amarelo), nunca bloqueio; quem prova que cobra é a cobrança real.
+4. **Esta conta devolve o código Pix** (`qr_has_pix_code: true`): há chave Pix (ou o Asaas gera o código sem ela). Os casos `pix_key_missing` / `account_not_enabled` **não** puderam ser provocados e continuam não medidos.
+5. **O Asaas NÃO reaproveita cliente para o mesmo CPF/CNPJ** (`same_customer_id: false`, cria outro): o risco de o "Testar cobrança" cair num cliente existente não se confirma. As proteções (cliente de teste sem notificação; nunca apagar cliente guardado de paciente) ficam como defesa extra.
+6. **Cobrança apagada e tarifa:** não dá para medir pelo script. Conferir no extrato do Asaas se as 3 cobranças apagadas (R$ 5,00 / 9,99 / 10,00) geraram tarifa.
 
-| Data | Passo | status | code | kw_value | kw_pix_key | kw_account | kw_document | qr_has_pix_code |
-|---|---|---|---|---|---|---|---|---|
-
-### Perguntas que o relatório responde
-
-- Menor valor Pix aceito.
-- `pix_key_missing` / `account_not_enabled` aparecem na criação da cobrança ou só no QR?
-- Quais estados de `/myAccount/status` coexistem com cobrança funcionando (conta com documentos
-  pendentes).
-- Um segundo cliente com o mesmo CPF/CNPJ volta com o MESMO id (`customer_again.same_customer_id`)? Se sim, o "Testar cobrança" pode cair num cliente existente: o código já não apaga um cliente guardado para paciente e pede ao Asaas para não notificar o cliente de teste, mas a medição decide se isso basta.
-- Cobrança apagada gera tarifa? (conferir no extrato do Asaas depois da medição.)
+### Pendente
+- Capturar o texto real do 400 de valor mínimo (para palavras-chave em `_classify_text`): exigiria alterar o script para guardar o texto fora do chat; não necessário para o funcionamento atual.
+- Medir o caso "sem chave Pix" numa conta de teste.

@@ -30,6 +30,7 @@ from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
 from secretaria.services.payments.asaas import AsaasClient, AsaasError
 from secretaria.services.payments.failure_reason import FailureReason, classify
+from secretaria.services.payments.money import ASAAS_MIN_PIX_CENTS
 from secretaria.services.payments.provider import (
     ChargeRequest,
     ChargeState,
@@ -200,6 +201,14 @@ class AsaasProvider:
                 "payer_document_required" if missing_document else "charge_failed",
                 "charge",
             )
+            # Measured (docs/ASAAS_MEDICOES.md): Asaas refuses a Pix charge under R$ 5,00 with a
+            # plain 400. Its text is never read, so the amount we sent is the evidence.
+            if (
+                exc.status_code == 400
+                and request.amount_cents < ASAAS_MIN_PIX_CENTS
+                and failure.reason == FailureReason.charge_rejected
+            ):
+                failure.reason = FailureReason.value_too_low
             # The customer made a moment ago has no charge: do not leave it behind in the
             # clinic's own Asaas account (a retry creates a fresh one, WITH the CPF if asked).
             if created_here:
