@@ -72,6 +72,7 @@ from secretaria.plugins import (
 )
 from secretaria.plugins.base import PostBookingContext  # noqa: E402
 from secretaria.services import pending_identity as pending_service  # noqa: E402
+from secretaria.services.answer_masks import CODE_MASK  # noqa: E402
 from secretaria.services.channel_sender import (  # noqa: E402
     CHANNEL_BRAIN_MESSAGE,
     CHANNEL_WHATSAPP,
@@ -791,7 +792,18 @@ async def test_the_right_code_activates_the_account_and_ends_the_wait(db, calls)
     assert (await _outbound(db, tenant))[-1] == CODE_ACCEPTED_MESSAGE
     assert await _flow_state(db, tenant) == FlowState.IDLE
     assert "123456" not in await _inbound(db, tenant)
-    assert (await _inbound(db, tenant))[-1] == "[código oculto]"
+    assert (await _inbound(db, tenant))[-1] == CODE_MASK
+
+
+async def test_the_claimed_email_is_saved_on_the_patient_for_the_console(db, calls) -> None:
+    """The clinic's patient context shows the address as soon as it is saved (owner, 2026-10-30)."""
+    tenant = await _seed_tenant(db)
+    await _bm_turn(tenant, "oi")
+    await _bm_turn(tenant, EMAIL)
+
+    async with db() as session:
+        patient = await session.scalar(select(Patient).where(Patient.tenant_id == tenant.id))
+    assert patient is not None and patient.email == EMAIL
 
 
 async def test_a_wrong_code_reprompts_and_keeps_the_patient_able_to_retry(db, calls) -> None:

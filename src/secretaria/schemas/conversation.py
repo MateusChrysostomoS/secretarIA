@@ -32,6 +32,9 @@ class ConversationRead(BaseModel):
     id: str
     patient_wa_id: str | None
     patient_name: str | None
+    # The address the patient gave (`Patient.email`), for the console's patient context so
+    # the clinic finds it without asking. Additive: NULL until an address is saved.
+    patient_email: str | None = None
     handover_state: str
     last_message_at: datetime | None
     needs_human: bool = False

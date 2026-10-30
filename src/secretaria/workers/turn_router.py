@@ -21,6 +21,7 @@ from secretaria.schemas.webhook import (
     inbound_routing_text,
 )
 from secretaria.services import deposit_wait
+from secretaria.services.answer_masks import CODE_MASK
 from secretaria.services.flow_router import (
     LABEL_CONFIRM,
     STEP_AWAITING_CONFIRMATION,
@@ -233,9 +234,10 @@ async def _route_inbound_turn(
 
     # An OTP is an authentication secret, not conversation content. Keep the
     # real value only in this turn's in-memory routing variable; the staff
-    # console / patient transcript receives a fixed redaction. This check is
-    # deliberately state- and channel-bound so an ordinary six-digit message
-    # elsewhere keeps its original meaning and display.
+    # console, the patient transcript and the AI history receive a fixed mask
+    # (services/answer_masks.py). This check is deliberately state- and
+    # channel-bound so an ordinary six-digit message elsewhere keeps its
+    # original meaning and display.
     policy = policy_for(channel)
     persisted_body = stored_body
     if (
@@ -243,7 +245,7 @@ async def _route_inbound_turn(
         and conversation.flow_state == FlowState.AWAITING_EMAIL_CODE
         and parse_code(body) is not None
     ):
-        persisted_body = "[código oculto]"
+        persisted_body = CODE_MASK
     elif payer_data.should_redact_inbound(
         conversation.flow_state, conversation.flow_step, stored_body
     ):

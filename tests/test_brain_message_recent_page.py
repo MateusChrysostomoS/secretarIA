@@ -298,7 +298,11 @@ def _minute(n: int) -> datetime:
     return BASE + timedelta(minutes=n)
 
 
-async def test_patient_transcript_hides_redacted_document_answer(client, db) -> None:
+
+async def test_patient_transcript_shows_the_masked_answer_in_order(client, db) -> None:
+    # The patient's own CPF / code answer is stored as a mask (services/answer_masks.py), and BOTH
+    # readers show that row as it is: no row is hidden from the patient any more (owner,
+    # 2026-10-30), and nothing reads like a system marker.
     tenant = await _seed(db, 0)
     await _add_rows(
         db,
@@ -310,16 +314,11 @@ async def test_patient_transcript_hides_redacted_document_answer(client, db) -> 
             ("patient", "obrigada tambem", _minute(3)),
         ],
     )
+    expected = ["Envie seu CPF", REDACTED_BODY, "Recebi, obrigada", "obrigada tambem"]
     body = (await client.get(_url(), params={"tenant_id": str(tenant.id)}, headers=KEY)).json()
-    assert [m["body"] for m in body["data"]] == [
-        "Envie seu CPF",
-        "Recebi, obrigada",
-        "obrigada tambem",
-    ]
+    assert [m["body"] for m in body["data"]] == expected
     assert body["has_more"] is False
 
-    # The clinic console is a different reader: it keeps the row (the staff sees that an
-    # answer was given), and so does the database.
     from secretaria.api.hub.deps import get_current_tenant
     from secretaria.main import app
 
@@ -337,104 +336,5 @@ async def test_patient_transcript_hides_redacted_document_answer(client, db) -> 
         ).json()
     finally:
         app.dependency_overrides.pop(get_current_tenant, None)
-    assert [m["body"] for m in console] == [
-        "Envie seu CPF",
-        REDACTED_BODY,
-        "Recebi, obrigada",
-        "obrigada tambem",
-    ]
-
-
-async def test_only_the_patients_own_marker_row_is_hidden(client, db) -> None:
-    # The same text from the BOT (outbound) is not the redacted answer: nothing but the
-    # inbound/patient row is dropped, so a clinic that really writes it is still read.
-    tenant = await _seed(db, 0)
-    await _add_rows(
-        db,
-        tenant,
-        [("bot", REDACTED_BODY, _minute(0)), ("patient", REDACTED_BODY, _minute(1))],
-    )
-    body = (await client.get(_url(), params={"tenant_id": str(tenant.id)}, headers=KEY)).json()
-    assert [(m["sender"], m["body"]) for m in body["data"]] == [("bot", REDACTED_BODY)]
-
-
-async def test_a_hidden_row_at_the_page_boundary_loses_no_visible_message(client, db) -> None:
-    # a(t0) b(t1) MARKER(t2) c(t3), limit=2: the newest page is [MARKER, c]. has_more is
-    # decided from the rows read (not from what is shown) and the next `before` is the oldest
-    # created_at the caller SAW (c's): the next page re-reads MARKER (hidden again) and b.
-    tenant = await _seed(db, 0)
-    await _add_rows(
-        db,
-        tenant,
-        [
-            ("bot", "a", _minute(0)),
-            ("bot", "b", _minute(1)),
-            ("patient", REDACTED_BODY, _minute(2)),
-            ("bot", "c", _minute(3)),
-        ],
-    )
-    params = {"tenant_id": str(tenant.id), "limit": 2}
-    first = (await client.get(_url(), params=params, headers=KEY)).json()
-    assert [m["body"] for m in first["data"]] == ["c"]
-    assert first["has_more"] is True  # a, b are older: the paging must go on
-
-    second = (
-        await client.get(
-            _url(), params={**params, "before": first["data"][0]["created_at"]}, headers=KEY
-        )
-    ).json()
-    assert [m["body"] for m in second["data"]] == ["b"]
-    assert second["has_more"] is True
-
-    third = (
-        await client.get(
-            _url(), params={**params, "before": second["data"][0]["created_at"]}, headers=KEY
-        )
-    ).json()
-    assert [m["body"] for m in third["data"]] == ["a"]
-    assert third["has_more"] is False
-
-    seen = [m["body"] for page in (third, second, first) for m in page["data"]]
-    assert seen == ["a", "b", "c"]  # nothing lost, nothing repeated, in order
-
-
-async def test_a_hidden_row_inside_a_tie_group_keeps_the_group_whole(client, db) -> None:
-    # One transaction stamps the answer and the reply with the same created_at. The group
-    # completion must still see the hidden row (it is hidden only when the page is built).
-    tenant = await _seed(db, 0)
-    await _add_rows(
-        db,
-        tenant,
-        [
-            ("bot", "ask", _minute(0)),
-            ("patient", REDACTED_BODY, _minute(1)),
-            ("bot", "thanks", _minute(1)),
-            ("bot", "last", _minute(2)),
-        ],
-    )
-    body = (
-        await client.get(_url(), params={"tenant_id": str(tenant.id), "limit": 2}, headers=KEY)
-    ).json()
-    assert REDACTED_BODY not in [m["body"] for m in body["data"]]
-    assert [m["body"] for m in body["data"]] == ["thanks", "last"]
-    assert body["has_more"] is True  # "ask" is older
-
-
-async def test_the_since_branch_hides_the_marker_and_keeps_its_neighbours(client, db) -> None:
-    tenant = await _seed(db, 0)
-    await _add_rows(
-        db,
-        tenant,
-        [
-            ("bot", "old", _minute(0)),
-            ("bot", "before", _minute(5)),
-            ("patient", REDACTED_BODY, _minute(6)),
-            ("bot", "after", _minute(7)),
-        ],
-    )
-    cursor = _minute(1).isoformat()
-    body = (
-        await client.get(_url(), params={"tenant_id": str(tenant.id), "since": cursor}, headers=KEY)
-    ).json()
-    assert [m["body"] for m in body["data"]] == ["before", "after"]
-    assert body["has_more"] is False
+    assert [m["body"] for m in console] == expected
+    assert not any("oculto" in (m["body"] or "") for m in console)

@@ -212,6 +212,28 @@ from secretaria.workers.shared.state_expiry import (
 logger = get_logger(__name__)
 
 
+async def _remember_claimed_email(reply, email: str | None) -> None:
+    """Save the address the patient just gave in `Patient.email`, for the console's patient context.
+
+    Best-effort and never logged (the address is personal data): a failure only means the
+    clinic sees it after the first booking instead of right away. brain-api stays the identity
+    authority - this is the local copy `booking_notifications` already keeps current.
+    """
+    if not email:
+        return
+    try:
+        async with async_session_factory() as session:
+            async with session.begin():
+                conversation = await session.get(Conversation, reply.conversation_id)
+                if conversation is None or conversation.patient_id is None:
+                    return
+                patient = await session.get(Patient, conversation.patient_id)
+                if patient is not None and patient.tenant_id == conversation.tenant_id:
+                    patient.email = email
+    except Exception as exc:
+        logger.warning("patient_email_claim_remember_failed", error_type=type(exc).__name__)
+
+
 async def _send_turn_fallback(reply: _ReplyContext, redis, *, cause: str) -> None:
     """Send the fixed apology for a turn that ended without an answer. Never raises.
 
@@ -854,6 +876,10 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
         if reply.tenant_id is not None:
             claim = await claim_email(reply.tenant_id, reply.patient_ref, reply.pending_email_claim)
         outcome = claim.outcome
+        if outcome is ClaimOutcome.CLAIMED:
+            # The clinic's patient context shows the address as soon as it is saved, not only
+            # after a booking (booking_notifications keeps the copy current from then on).
+            await _remember_claimed_email(reply, reply.pending_email_claim)
         if outcome is ClaimOutcome.CLAIMED and patient_owes_consent:
             # The opening: brain-api just told us whether this inbox is new.
             await _continue_after_email_claim(reply, claim, tenant=tenant, waba_token=waba_token)
