@@ -108,7 +108,7 @@ class ClinicPaymentAccount(Base):
     )
     # When the CURRENT API key was stored (a new key replaces the old one): a charge that worked
     # with a previous key is not proof for this one (`accounts.charge_health`).
-    key_connected_at: Mapped[datetime | None] = mapped_column(
+    credentials_changed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     # Setup checklist items only the manager can confirm (TASK-071, Plan 4): whitelisted keys

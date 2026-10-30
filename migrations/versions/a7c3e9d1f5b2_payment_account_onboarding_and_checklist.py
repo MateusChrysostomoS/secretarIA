@@ -4,7 +4,7 @@ Seven nullable columns, no backfill and no server default. The four `onboarding_
 (PENDING | APPROVED | REJECTED | AWAITING_APPROVAL | UNKNOWN) read from GET /myAccount/status;
 they stay NULL when the clinic's key cannot read that status. `setup_checklist` is a JSON object
 whose keys are whitelisted in the code (the items only the manager can confirm).
-`key_connected_at` is when the current API key was stored: a charge that worked with an older
+`credentials_changed_at` is when the current API key was stored: a charge that worked with an older
 key is not proof for the new one. Purely additive.
 
 Deploy: migration first, then `secretaria_api` + `secretaria-worker` together.
@@ -45,14 +45,14 @@ def upgrade() -> None:
     )
     op.add_column(
         "clinic_payment_accounts",
-        sa.Column("key_connected_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("credentials_changed_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.add_column("clinic_payment_accounts", sa.Column("setup_checklist", sa.JSON(), nullable=True))
 
 
 def downgrade() -> None:
     op.drop_column("clinic_payment_accounts", "setup_checklist")
-    op.drop_column("clinic_payment_accounts", "key_connected_at")
+    op.drop_column("clinic_payment_accounts", "credentials_changed_at")
     op.drop_column("clinic_payment_accounts", "onboarding_checked_at")
     for name in reversed(_STATE_COLUMNS):
         op.drop_column("clinic_payment_accounts", name)

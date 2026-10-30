@@ -173,4 +173,4 @@ async def test_recheck_losing_read_access_clears_the_states(db, asaas):
 async def test_connecting_a_key_stamps_when_it_was_stored(db, asaas):
     """A charge that worked before this moment belongs to the previous key (charge_health)."""
     tenant = await _connect(db)
-    assert (await _row(db, tenant)).key_connected_at is not None
+    assert (await _row(db, tenant)).credentials_changed_at is not None

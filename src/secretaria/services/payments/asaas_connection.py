@@ -236,7 +236,7 @@ async def connect_asaas_account(
     row.last_probe_at = now
     row.probe_inconclusive_days = 0
     # A new key: a charge that worked with the previous one is no longer proof (charge_health).
-    row.key_connected_at = now
+    row.credentials_changed_at = now
 
     client = asaas_provider.client_for(api_key)
     # Informational: the registration states, when this key may read them. Never blocks.

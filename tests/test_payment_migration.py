@@ -65,7 +65,7 @@ ADDED_BY_LATER_REVISIONS = {
     ("clinic_payment_accounts", "onboarding_commercial"),
     ("clinic_payment_accounts", "onboarding_bank"),
     ("clinic_payment_accounts", "onboarding_checked_at"),
-    ("clinic_payment_accounts", "key_connected_at"),
+    ("clinic_payment_accounts", "credentials_changed_at"),
     ("clinic_payment_accounts", "setup_checklist"),
 }
 

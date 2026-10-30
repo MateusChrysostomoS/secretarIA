@@ -310,7 +310,8 @@ async def test_reconnecting_with_a_new_key_withdraws_the_proof(db):
         await session.refresh(row)
         assert accounts.charge_health(row) == "ok"
 
-        row.key_connected_at = datetime.now(UTC) + timedelta(seconds=5)  # the key was replaced
+        # the key was replaced
+        row.credentials_changed_at = datetime.now(UTC) + timedelta(seconds=5)
         await session.commit()
         assert accounts.charge_health(row) == "untested"
 
