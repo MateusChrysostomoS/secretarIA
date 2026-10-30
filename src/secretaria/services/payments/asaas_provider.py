@@ -156,8 +156,14 @@ class AsaasProvider:
         if created_here:
             try:
                 if request.payer_document:
+                    # Only the clinic's own test charge asks Asaas not to notify the payer.
+                    quiet = request.notifications_disabled
+                    extra = {"notification_disabled": True} if quiet else {}
                     customer_id = await client.create_customer(
-                        request.payer_name, request.payer_phone, cpf_cnpj=request.payer_document
+                        request.payer_name,
+                        request.payer_phone,
+                        cpf_cnpj=request.payer_document,
+                        **extra,
                     )
                 else:
                     customer_id = await client.create_customer(

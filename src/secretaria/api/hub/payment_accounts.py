@@ -47,7 +47,11 @@ from secretaria.config import get_settings
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
 from secretaria.models import ClinicPaymentAccount, Tenant
-from secretaria.models.clinic_payment_account import ACCOUNT_REVOKED, PROVIDER_ASAAS
+from secretaria.models.clinic_payment_account import (
+    ACCOUNT_PENDING,
+    ACCOUNT_REVOKED,
+    PROVIDER_ASAAS,
+)
 from secretaria.schemas.payment_accounts import (
     AsaasConnectionResultOut,
     ChecklistItemOut,
@@ -178,7 +182,14 @@ async def list_payment_accounts(
             .order_by(ClinicPaymentAccount.provider)
         )
     ).all()
-    return [_status_out(row) for row in rows]
+    # A bare `pending` row with no key is only the home of the checklist ticks (a manager may
+    # tick "chave Pix cadastrada" before pasting the API key): it is not a connection, and
+    # listing it would make the connection panel say "Verificando..." forever.
+    return [
+        _status_out(row)
+        for row in rows
+        if not (row.status == ACCOUNT_PENDING and not row.api_key_encrypted)
+    ]
 
 
 async def _read_json_object(request: Request, keys: set[str]) -> dict | None:
@@ -218,7 +229,11 @@ async def _checklist_out(session: AsyncSession, tenant: Tenant) -> ChecklistOut:
         last_charge_failure_reason=health.last_failure_reason if health else None,
         last_charge_failure_text=health.last_failure_text if health else None,
         last_charge_failure_at=health.last_failure_at if health else None,
-        onboarding_readable=bool(row is not None and onboarding.stored_onboarding(row)),
+        onboarding_readable=bool(
+            row is not None
+            and row.status != ACCOUNT_REVOKED
+            and onboarding.stored_onboarding(row)
+        ),
         asaas_panel_url=built.asaas_panel_url,
     )
 

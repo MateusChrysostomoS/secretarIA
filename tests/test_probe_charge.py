@@ -256,3 +256,47 @@ async def test_a_malformed_body_never_echoes_the_document(client, world, provide
     )
     assert response.status_code == 422 and CPF not in response.text
     assert provider.calls == []
+
+
+async def test_probe_asks_asaas_not_to_notify_the_test_customer(db, provider):
+    async with db() as session:
+        tenant = await _seed(session)
+        await _run(session, tenant)
+    assert provider.calls[0][1].notifications_disabled is True
+
+
+async def test_probe_never_deletes_a_customer_that_belongs_to_a_patient(db, provider):
+    """If Asaas hands back an existing customer (same document), it is not ours to delete."""
+    from secretaria.models import Patient
+    from secretaria.models.patient_payment_customer import PatientPaymentCustomer
+
+    async with db() as session:
+        tenant = await _seed(session)
+        patient = Patient(id=uuid4(), tenant_id=tenant.id, wa_id="5511999990000", name="Maria")
+        session.add(patient)
+        await session.flush()
+        session.add(
+            PatientPaymentCustomer(
+                tenant_id=tenant.id, patient_id=patient.id, provider="asaas",
+                provider_customer_id="cus_probe",
+            )
+        )
+        await session.commit()
+        result = await _run(session, tenant)
+    assert result.ok is True
+    assert ("cancel_charge", "pay_probe") in provider.calls
+    assert ("delete_customer", "cus_probe") not in provider.calls
+
+
+async def test_a_document_refusal_is_not_recorded_as_an_account_failure(db, provider):
+    provider.create_error = ProviderError(
+        "customer_failed", status_code=400,
+        reason=FailureReason.customer_document_invalid, stage="customer",
+    )
+    async with db() as session:
+        tenant = await _seed(session)
+        result = await _run(session, tenant)
+        row = await _row(session, tenant)
+    assert (result.ok, result.reason) == (False, FailureReason.customer_document_invalid)
+    assert row.last_charge_failure_reason is None
+    assert accounts.charge_health(row) == "untested"

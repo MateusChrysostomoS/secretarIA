@@ -164,7 +164,12 @@ class AsaasClient:
         return data if isinstance(data, dict) else {}
 
     async def create_customer(
-        self, name: str, mobile_phone: str | None, cpf_cnpj: str | None = None
+        self,
+        name: str,
+        mobile_phone: str | None,
+        cpf_cnpj: str | None = None,
+        *,
+        notification_disabled: bool = False,
     ) -> str:
         """POST /customers -> the new (or Asaas-resolved) customer id.
 
@@ -176,6 +181,8 @@ class AsaasClient:
             body["mobilePhone"] = mobile_phone
         if cpf_cnpj:
             body["cpfCnpj"] = cpf_cnpj
+        if notification_disabled:
+            body["notificationDisabled"] = True
         data = await self._request("POST", "/customers", json=body)
         return str(data.get("id") or "")
 

@@ -319,3 +319,34 @@ async def test_reconnecting_with_a_new_key_withdraws_the_proof(db):
         row.last_charge_ok_at = datetime.now(UTC) + timedelta(seconds=10)
         await session.commit()
         assert accounts.charge_health(row) == "ok"
+
+
+async def test_an_old_failure_that_a_success_had_buried_stays_buried_after_a_new_key(db):
+    """Failure Monday, success Tuesday, new key Wednesday: nothing has failed with the new key."""
+    async with db() as session:
+        tenant, row = await _seed(session)
+        row.last_charge_failure_reason = "pix_key_missing"
+        row.last_charge_failure_at = datetime(2026, 10, 26, 12, tzinfo=UTC)
+        row.last_charge_ok_at = datetime(2026, 10, 27, 12, tzinfo=UTC)
+        row.credentials_changed_at = datetime(2026, 10, 28, 12, tzinfo=UTC)
+        await session.commit()
+        assert accounts.charge_health(row) == "untested"
+
+        # a failure NEWER than the success is not buried: it stays
+        row.last_charge_failure_at = datetime(2026, 10, 27, 18, tzinfo=UTC)
+        assert accounts.charge_health(row) == "failing"
+
+
+async def test_deposit_on_but_charged_after_has_its_own_sentence(db):
+    async with db() as session:
+        tenant, _ = await _seed(session, timing="after")
+        found = await _codes(session, tenant)
+    assert "depois" in found["sinal_off"].text
+    assert "desligado" not in found["sinal_off"].text
+
+
+async def test_a_numeric_price_is_priced_like_the_gate_does(db):
+    async with db() as session:
+        tenant, _ = await _seed(session, types=[_type(price=200)])
+        found = await _codes(session, tenant)
+    assert "no_prices" not in found

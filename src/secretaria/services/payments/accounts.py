@@ -138,6 +138,10 @@ def charge_health(row: ClinicPaymentAccount) -> ChargeHealth:
     ok_at = row.last_charge_ok_at
     key_at = getattr(row, "credentials_changed_at", None)
     if ok_at is not None and key_at is not None and _utc(ok_at) < _utc(key_at):
+        # The success belonged to a key that is gone. A failure it had already superseded
+        # (older than that success) stays buried: nothing failed with the new key.
+        if failure_at is not None and _utc(failure_at) <= _utc(ok_at):
+            failure_at = None
         ok_at = None
     if failure_at is not None and (ok_at is None or _utc(failure_at) > _utc(ok_at)):
         return "failing"

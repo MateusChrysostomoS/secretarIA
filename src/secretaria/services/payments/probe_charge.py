@@ -23,11 +23,13 @@ from datetime import date, datetime
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.logging import get_logger
 from secretaria.models import Tenant
 from secretaria.models.clinic_payment_account import PROVIDER_ASAAS
+from secretaria.models.patient_payment_customer import PatientPaymentCustomer
 from secretaria.services import tenant_config as cfg
 from secretaria.services.payments import accounts, payer_document as payer_doc, registry
 from secretaria.services.payments.failure_reason import FailureReason, coerce
@@ -73,9 +75,23 @@ def _tenant_today(tenant: Tenant | None) -> date:
     return datetime.now(zone).date()
 
 
-async def _cleanup(provider, account, created) -> bool:
-    """Remove the test charge, then the test customer. Each is tried even when the other fails;
-    the answer is whether both are gone. Only error types are logged."""
+async def _is_a_patients_customer(session: AsyncSession, tenant_id: UUID, created) -> bool:
+    """Whether the customer Asaas returned is one stored for a patient of THIS clinic."""
+    if not created.provider_customer_id:
+        return False
+    found = await session.scalar(
+        select(PatientPaymentCustomer.id).where(
+            PatientPaymentCustomer.tenant_id == tenant_id,
+            PatientPaymentCustomer.provider == PROVIDER_ASAAS,
+            PatientPaymentCustomer.provider_customer_id == created.provider_customer_id,
+        )
+    )
+    return found is not None
+
+
+async def _cleanup(provider, account, created, *, delete_customer: bool = True) -> bool:
+    """Remove the test charge, then the test customer (unless it is a patient's). Each is tried
+    even when the other fails; the answer is whether both are gone. Only error types are logged."""
     clean = True
     try:
         await provider.cancel_charge(account, created.provider_charge_id)
@@ -83,10 +99,10 @@ async def _cleanup(provider, account, created) -> bool:
         clean = False
         logger.warning("probe_charge_cancel_failed", error_type=type(exc).__name__)
     customer_id = created.provider_customer_id
-    delete_customer = getattr(provider, "delete_customer", None)
-    if customer_id and created.customer_created_here and delete_customer is not None:
+    drop = getattr(provider, "delete_customer", None)
+    if delete_customer and customer_id and created.customer_created_here and drop is not None:
         try:
-            await delete_customer(account, customer_id)
+            await drop(account, customer_id)
         except Exception as exc:  # noqa: BLE001
             clean = False
             logger.warning("probe_charge_customer_delete_failed", error_type=type(exc).__name__)
@@ -126,6 +142,7 @@ async def run_probe_charge(
         due_date=_tenant_today(tenant),
         payer_name=PROBE_NAME,
         payer_document=digits,
+        notifications_disabled=True,
     )
     del digits
 
@@ -155,8 +172,15 @@ async def run_probe_charge(
                 logger.warning("probe_charge_failed", stage=stage, reason=reason.value)
     finally:
         if created is not None:
-            cleaned = await _cleanup(provider, account, created)
+            # Asaas may hand back an EXISTING customer for a repeated document: one that belongs
+            # to a patient of this clinic is never ours to delete.
+            keep_customer = await _is_a_patients_customer(session, tenant_id, created)
+            cleaned = await _cleanup(provider, account, created, delete_customer=not keep_customer)
 
+    if reason is FailureReason.customer_document_invalid:
+        # The manager typed a document Asaas refused: that says nothing about the account.
+        await session.commit()
+        return ProbeResult(False, reason, stage, cleaned)
     if reason is None:
         await accounts.record_charge_success(session, tenant_id=tenant_id, provider=PROVIDER_ASAAS)
     else:

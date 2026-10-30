@@ -88,7 +88,8 @@ def _incomplete_text(reason: str | None) -> str:
 def _deposit_cents(price_text: object, percent: int) -> int | None:
     """The deposit this price would produce, in cents, or None when nothing would be charged
     (unreadable price, or a deposit of R$ 0,00). Same arithmetic as `quote_deposit`."""
-    price_cents = parse_brl_to_cents(price_text if isinstance(price_text, str) else None)
+    # `quote_deposit` reads `str(price)` (a JSON number is a price too), so this does as well.
+    price_cents = parse_brl_to_cents(str(price_text) if price_text else None)
     if price_cents is None:
         return None
     amount = round(price_cents * percent / 100)
@@ -150,11 +151,15 @@ async def evaluate_deposit_readiness(
         return []
     items: list[ReadinessItem] = []
     if not (tenant.pix_deposit_enabled and timing_is_before(tenant)):
+        charged_after = bool(tenant.pix_deposit_enabled)  # on, but only after the booking
         items.append(
             ReadinessItem(
                 "sinal_off",
                 "blocker",
-                "O sinal está desligado: nenhum paciente será cobrado.",
+                "O sinal está configurado para ser cobrado depois do agendamento. Este checklist "
+                "vale para o sinal cobrado antes de confirmar a consulta."
+                if charged_after
+                else "O sinal está desligado: nenhum paciente será cobrado.",
                 WHERE_PORTAL_DEPOSIT,
             )
         )

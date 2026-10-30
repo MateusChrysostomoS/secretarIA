@@ -78,7 +78,7 @@ class FakeAsaasClient:
         if name in self.errors:
             raise self.errors[name]
 
-    async def create_customer(self, name, mobile_phone, cpf_cnpj=None):
+    async def create_customer(self, name, mobile_phone, cpf_cnpj=None, **kwargs):
         self.calls.append(("create_customer", name, mobile_phone, cpf_cnpj))
         self._maybe_raise("create_customer")
         return self.customer_id

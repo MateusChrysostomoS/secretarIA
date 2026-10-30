@@ -368,3 +368,28 @@ async def test_bad_bodies_are_rejected_without_echo(client, world):
         response = await client.put(ENDPOINT, content=json.dumps(body), headers=HEADERS)
         assert response.status_code == 422, body
         assert response.json()["detail"]["code"] == "invalid_body"
+
+
+async def test_a_rejected_registration_is_a_warning(db):
+    async with db() as session:
+        tenant, _ = await _seed(
+            session, onboarding=("APPROVED", "REJECTED", "APPROVED", "APPROVED")
+        )
+        item = (await _view(session, tenant))["asaas_registration"]
+    assert item.state == "warning"
+    assert "recus" in item.hint
+
+
+async def test_a_bare_pending_row_is_not_listed_as_a_connection(client, world):
+    """Ticking an item before connecting must not make the connection panel say "Verificando…"."""
+    tenant, maker, role = world
+    async with maker() as session:
+        row = await accounts.get_account_row(session, tenant_id=tenant.id, provider="asaas")
+        await session.delete(row)
+        await session.commit()
+    put = await client.put(
+        ENDPOINT, content=json.dumps({"item": "pix_key_registered", "done": True}), headers=HEADERS
+    )
+    assert put.status_code == 200
+    listed = await client.get("/tenants/me/payment-accounts", headers=HEADERS)
+    assert listed.status_code == 200 and listed.json() == []

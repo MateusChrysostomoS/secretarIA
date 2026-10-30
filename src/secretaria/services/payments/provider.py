@@ -98,6 +98,8 @@ class ChargeRequest:
     # Provider-side expiry, honoured only by providers that support it (Mercado Pago);
     # Asaas expires per DAY, so its expiry is enforced by our own job.
     expires_at: datetime | None = None
+    # TASK-071 Plan 4: ask the provider not to notify the payer (the clinic's own test charge).
+    notifications_disabled: bool = False
 
 
 @dataclass(frozen=True)

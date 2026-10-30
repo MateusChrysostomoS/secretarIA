@@ -121,6 +121,16 @@ def checklist_view(
     if onboarding is not None:
         if onboarding.all_approved:
             registration = ChecklistItem("asaas_registration", label2, "done", "system", link=panel)
+        elif "REJECTED" in (
+            onboarding.general,
+            onboarding.documents,
+            onboarding.commercial,
+            onboarding.bank,
+        ):
+            registration = ChecklistItem(
+                "asaas_registration", label2, "warning", "system",
+                "O Asaas recusou parte do cadastro. Confira o que falta no painel do Asaas.", panel,
+            )
         else:
             registration = ChecklistItem(
                 "asaas_registration", label2, "pending", "system",
