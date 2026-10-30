@@ -53,7 +53,6 @@ from secretaria.models import (
     HandoverState,
     Message,
     MessageDirection,
-    MessageSender,
     Patient,
 )
 from secretaria.models.message import status_of
@@ -84,7 +83,6 @@ from secretaria.schemas.internal import (
 from secretaria.services import media_storage, message_status
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.patient_insurance_overview import patient_insurance_overview
-from secretaria.services.payments import payer_data
 from secretaria.services.typing_indicator import mark_typing, typing_by as typing_by_for
 from secretaria.services.visit_merge import discard_empty_visit
 
@@ -163,20 +161,6 @@ def _appointment_dto(row: Appointment) -> InternalAppointment:
         end_at=row.end_at,
         status=row.status,
         phone=row.phone,
-    )
-
-
-def _is_redacted_answer(row: Message) -> bool:
-    """The patient's own CPF/e-mail answer, as stored: the placeholder row, not a message to show.
-
-    Applied to the rows AFTER they were read (never in the SQL): paging, `has_more`, the tie
-    groups and the `since` cursor all count the stored rows, so a hidden one cannot lose a
-    visible neighbour. The clinic console and the AI history read the row as it is.
-    """
-    return (
-        row.direction == MessageDirection.INBOUND
-        and row.sender == MessageSender.PATIENT
-        and payer_data.is_redacted_placeholder(row.body)
     )
 
 
@@ -899,7 +883,6 @@ async def list_brain_message_messages(
                 updated_at=row.updated_at,
             )
             for row in rows
-            if not _is_redacted_answer(row)
         ],
         has_more=has_more,
         typing=typer is not None,

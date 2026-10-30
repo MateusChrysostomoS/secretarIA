@@ -302,6 +302,24 @@ async def test_list_includes_brain_message_patient_with_no_wa_id(
     assert body[0]["patient_name"] == "Paciente Brain-Message"
 
 
+async def test_list_carries_the_patients_email_for_the_console_context(
+    client: AsyncClient, db, tenant
+) -> None:
+    """The clinic's patient context shows the address the patient gave (owner, 2026-10-30):
+    present once saved, NULL (never an empty string) before."""
+    with_email = await _seed_patient(
+        db, tenant, wa_id="5511444444444", name="Com e-mail", email="maria@exemplo.com"
+    )
+    without_email = await _seed_patient(db, tenant, wa_id="5511555555555", name="Sem e-mail")
+    conv_with = await _seed_conversation(db, tenant, with_email)
+    conv_without = await _seed_conversation(db, tenant, without_email)
+
+    body = (await client.get(ENDPOINT)).json()
+    by_id = {row["id"]: row for row in body}
+    assert by_id[str(conv_with.id)]["patient_email"] == "maria@exemplo.com"
+    assert by_id[str(conv_without.id)]["patient_email"] is None
+
+
 async def test_list_is_empty_for_a_tenant_with_no_conversations(client: AsyncClient) -> None:
     response = await client.get(ENDPOINT)
     assert response.status_code == 200

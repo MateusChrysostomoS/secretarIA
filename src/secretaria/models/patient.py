@@ -116,7 +116,8 @@ class Patient(Base):
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Booking contact copy; brain-api remains the identity authority and refreshes
     # it on each booking. Registered in load_pseudonymizer so history never sends
-    # it to the LLM in clear text. Never logged or exposed by a read schema.
+    # it to the LLM in clear text. Never logged. Staff read it in one place only: the console's
+    # patient context (`ConversationRead.patient_email`), saved the moment the address is claimed.
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Explicit opt-out from proactive reminder sends (plugins/reminders.py).
     # Reminders otherwise ride on the booking relationship itself — a patient

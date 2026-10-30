@@ -153,6 +153,7 @@ def _read_model(
         id=str(conversation.id),
         patient_wa_id=patient.wa_id,
         patient_name=patient.name,
+        patient_email=patient.email,
         handover_state=conversation.handover_state.value,
         last_message_at=last_message_at,
         needs_human=signals.needs_human,

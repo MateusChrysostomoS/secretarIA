@@ -24,12 +24,13 @@ item, the deposit row or the booking snapshot. The provider keeps what it needs 
 WHY THE PATIENT'S ANSWER NEVER REACHES THE MESSAGE HISTORY (nor the LLM)
 ------------------------------------------------------------------------
 The answer is an ordinary inbound message. `should_redact_inbound` makes the worker store the fixed
-`REDACTED_BODY` instead of what was typed (the same boundary that already hides the portal's
-e-mail code), so the raw value never becomes a `messages` row: not for the staff console, not for
-`ai/graph.py::_load_history`, not for the LLM. This is stricter than the
-`pii-field-capture-pseudonymization` recipe (which registers a STORED value with the pseudonymizer)
-because here there is no stored value to register; the pseudonymizer (CPF and e-mail by pattern, NOT
-CNPJ) stays as the second net for a value typed unprompted.
+`REDACTED_BODY` (a row of bullets, `services/answer_masks.py`) instead of what was typed (the same
+boundary that already masks the portal's e-mail code), so the raw value never becomes a `messages`
+row: not for the staff console, not for `ai/graph.py::_load_history`, not for the LLM. The patient's
+own transcript reads the same row - the mask, with no row hidden anywhere (owner, 2026-10-30).
+This is stricter than the `pii-field-capture-pseudonymization` recipe (which registers a STORED
+value with the pseudonymizer) because here there is no stored value to register; the pseudonymizer
+(CPF and e-mail by pattern, NOT CNPJ) stays as the second net for a value typed unprompted.
 
 WHAT COUNTS AS AN ANSWER (owner, 2026-10-29)
 --------------------------------------------
@@ -50,6 +51,7 @@ from uuid import UUID
 
 from secretaria.core import crypto
 from secretaria.core.logging import get_logger
+from secretaria.services.answer_masks import PAYER_DATA_MASK
 from secretaria.services.payments.payer_document import extract_document, parse_cpf_answer
 from secretaria.services.payments.payer_email import extract_email
 
@@ -85,7 +87,9 @@ STEP_PREFIX = "payer_data:"
 _TAG: dict[str, str] = {"document": "doc", "email": "mail"}
 _KIND_OF_TAG = {tag: kind for kind, tag in _TAG.items()}
 
-REDACTED_BODY = "[dado oculto]"
+# What is stored in place of the answer (services/answer_masks.py): a row of bullets, read the same
+# by the clinic, the patient's transcript and the AI history.
+REDACTED_BODY = PAYER_DATA_MASK
 # The one sentence that asks for the CPF (single source for WhatsApp and Portal).
 ASK_DOCUMENT_TEXT = (
     "Envie seu CPF para que possamos cadastrá-lo no nosso sistema de pagamento para que você "
@@ -327,15 +331,6 @@ def should_redact_inbound(flow_state: object, flow_step: str | None, body: str |
     return in_the_aftermath and (
         extract_document(body) is not None or extract_email(body) is not None
     )
-
-
-def is_redacted_placeholder(body: str | None) -> bool:
-    """Whether `body` is the text stored in place of the patient's CPF/e-mail answer.
-
-    The marker exists for the history (the clinic console and the AI see that an answer was given);
-    the patient's own transcript must not show it, so every patient-facing reader asks this.
-    """
-    return body == REDACTED_BODY
 
 
 # ---- the transient store ----------------------------------------------------------------------

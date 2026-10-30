@@ -27,7 +27,8 @@ class ChannelPolicy:
     channel: str
     # Brain-Message: reaching the clinic IS delivery, so the inbound row is stamped delivered.
     stamps_delivery_on_inbound: bool
-    # A six-digit login code typed in chat is stored as "[código oculto]", not as typed.
+    # A six-digit login code typed in chat is stored as a row of bullets (answer_masks.CODE_MASK),
+    # not as typed.
     redacts_email_code: bool
     # The visitor proves an e-mail inside the chat (e-mail -> code -> "quer continuar?").
     has_inline_identity: bool

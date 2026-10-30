@@ -43,6 +43,7 @@ from secretaria.services import (
     flow_router as fr,
     pii_pseudonymization as pii_store,
 )
+from secretaria.services.answer_masks import CODE_MASK, PAYER_DATA_MASK
 from secretaria.services.payments import (
     accounts,
     booking_charge,
@@ -848,15 +849,15 @@ async def test_the_answer_never_reaches_the_llm_history(db, env, kind, monkeypat
     assert _free(repr(seen[0]), kind)
 
 
-# ---- the placeholder of the redacted answer is storage-only, never a bubble --------------------
+# ---- the stored stand-in of the answer is a mask, not a system marker --------------------------
 
 
-def test_is_redacted_placeholder_is_the_one_stored_marker_and_nothing_else():
-    assert pdata.is_redacted_placeholder(pdata.REDACTED_BODY) is True
-    assert pdata.is_redacted_placeholder("[dado oculto] ") is False
-    assert pdata.is_redacted_placeholder("") is False
-    assert pdata.is_redacted_placeholder(None) is False
-    assert pdata.is_redacted_placeholder("oi") is False
+def test_the_stored_stand_in_is_a_row_of_bullets_that_reveals_nothing_of_the_answer():
+    assert pdata.REDACTED_BODY == PAYER_DATA_MASK
+    assert set(pdata.REDACTED_BODY) == {"•"}
+    # Neither a document-shaped nor an address-shaped mask: one length for every answer.
+    assert not any(ch in pdata.REDACTED_BODY for ch in ".-@[]*")
+    assert PAYER_DATA_MASK != CODE_MASK
 
 
 async def _outbound_bodies(db) -> list[str | None]:
