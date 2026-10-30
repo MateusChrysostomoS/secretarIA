@@ -169,19 +169,25 @@ def checklist_view(
         pix = ChecklistItem("pix_key_registered", label3, "pending", "user", hint, panel)
 
     # 4. Prices
-    label4 = "Colocar preço em todos os serviços"
+    label4 = "Colocar preço em todos os serviços (sinal de pelo menos R$ 5,00)"
     if "no_prices" in by_code:
         prices = ChecklistItem(
             "service_prices", label4, "pending", "system", by_code["no_prices"].text
         )
-    elif "services_without_price" in by_code:
-        missing = by_code["services_without_price"]
-        prices = ChecklistItem(
-            "service_prices", label4, "warning", "system",
-            f"{missing.text} {', '.join(missing.names)}.", names=missing.names,
-        )
     else:
-        prices = ChecklistItem("service_prices", label4, "done", "system")
+        # Services that will not charge, for either reason: no readable price, or a deposit under
+        # the smallest Pix Asaas accepts. Each line carries its own names and sentence.
+        problems = [
+            by_code[code]
+            for code in ("services_without_price", "amount_below_minimum")
+            if code in by_code
+        ]
+        if problems:
+            hint = " ".join(f"{p.text} {', '.join(p.names)}." for p in problems)
+            names = tuple(name for p in problems for name in p.names)
+            prices = ChecklistItem("service_prices", label4, "warning", "system", hint, names=names)
+        else:
+            prices = ChecklistItem("service_prices", label4, "done", "system")
 
     # 5. Deposit switched on
     sinal = (

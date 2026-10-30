@@ -205,7 +205,7 @@ async def test_amount_below_the_measured_minimum_is_a_warning(db):
         found_fine = await _codes(session, fine)
         found_edge = await _codes(session, edge)
     assert found_low["amount_below_minimum"].severity == "warning"
-    assert found_low["amount_below_minimum"].names == ("Retorno",)
+    assert found_low["amount_below_minimum"].names == ("Retorno: sinal de R$ 3,00",)
     assert "R$ 5,00" in found_low["amount_below_minimum"].text
     assert "amount_below_minimum" not in found_fine
     assert "amount_below_minimum" not in found_edge  # exactly the minimum is accepted

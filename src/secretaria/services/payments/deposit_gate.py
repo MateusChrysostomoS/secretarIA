@@ -38,7 +38,7 @@ from secretaria.models.clinic_payment_account import PROVIDER_ASAAS
 from secretaria.models.pix_deposit import DEPOSIT_TIMING_BEFORE
 from secretaria.services.insurance_catalog import resolve_booking_plan_ids
 from secretaria.services.payments import accounts, deposit_lifecycle, registry
-from secretaria.services.payments.money import parse_brl_to_cents
+from secretaria.services.payments.money import ASAAS_MIN_PIX_CENTS, parse_brl_to_cents
 
 logger = get_logger(__name__)
 
@@ -55,6 +55,7 @@ REASON_INSURANCE_NO_CHARGE = "insurance_no_charge"
 REASON_NO_SERVICE = "no_service"
 REASON_UNPARSEABLE_PRICE = "unparseable_price"
 REASON_ZERO_AMOUNT = "zero_amount"
+REASON_BELOW_MINIMUM = "below_minimum"
 REASON_REQUIRED = "required"
 REASON_NO_PATIENT = "no_patient"
 REASON_NO_PROVIDER = "no_provider"
@@ -173,11 +174,15 @@ async def quote_deposit(
     amount_cents = round(price_cents * tenant.pix_deposit_percent / 100)
     if amount_cents <= 0:
         return DepositQuote("no_deposit", REASON_ZERO_AMOUNT)
+    provider_name = tenant.payment_provider or PROVIDER_ASAAS
+    if provider_name == PROVIDER_ASAAS and amount_cents < ASAAS_MIN_PIX_CENTS:
+        # Measured (2026-10-30): Asaas refuses a Pix under R$ 5,00. Asking the patient for a CPF
+        # and then failing is worse than not charging; the clinic is told in the Portal checklist.
+        return DepositQuote("no_deposit", REASON_BELOW_MINIMUM)
 
     # From here on a deposit IS due, so anything missing is an operational error, not a choice.
     if patient_id is None:
         return DepositQuote("blocked", REASON_NO_PATIENT)
-    provider_name = tenant.payment_provider or PROVIDER_ASAAS
     if registry.find_provider(provider_name) is None:
         return DepositQuote("blocked", REASON_NO_PROVIDER)
     account = await accounts.load_charge_account(

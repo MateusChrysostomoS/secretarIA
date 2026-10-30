@@ -393,3 +393,36 @@ async def test_a_bare_pending_row_is_not_listed_as_a_connection(client, world):
     assert put.status_code == 200
     listed = await client.get("/tenants/me/payment-accounts", headers=HEADERS)
     assert listed.status_code == 200 and listed.json() == []
+
+
+async def test_prices_item_warns_with_the_deposit_of_each_service_below_the_minimum(db):
+    """The clinic sees, per service, the deposit the percentage produces and that it is under
+    R$ 5,00 (Asaas refuses a smaller Pix), so nobody finds out when a patient is already booking."""
+    async with db() as session:
+        tenant, _ = await _seed(
+            session,
+            types=[_type("Consulta", "R$ 200,00"), _type("Retorno", "R$ 10,00")],
+            percent=30,
+        )
+        item = (await _view(session, tenant))["service_prices"]
+    assert item.state == "warning"
+    assert "Retorno: sinal de R$ 3,00" in item.hint
+    assert "R$ 5,00" in item.hint
+    assert "Consulta" not in item.hint
+    assert item.names == ("Retorno: sinal de R$ 3,00",)
+
+
+async def test_prices_item_merges_unpriced_and_below_minimum(db):
+    async with db() as session:
+        tenant, _ = await _seed(
+            session,
+            types=[
+                _type("Consulta", "R$ 200,00"),
+                _type("Retorno", "R$ 10,00"),
+                _type("Extra", ""),
+            ],
+            percent=30,
+        )
+        item = (await _view(session, tenant))["service_prices"]
+    assert item.state == "warning"
+    assert "Extra" in item.hint and "Retorno: sinal de R$ 3,00" in item.hint

@@ -725,3 +725,30 @@ def test_cancellation_notice_texts_for_each_outcome():
     # Gone outcomes (the platform no longer refunds) and the silent ones say nothing.
     for silent in ("voided", None, "refunded", "partial_refund", "refund_failed"):
         assert deposit_lifecycle.cancellation_notice(silent, tenant, deposit) is None
+
+
+async def test_guard_below_the_asaas_minimum_returns_none(db, monkeypatch):
+    """1% of R$ 200,00 is R$ 2,00, under the smallest Pix Asaas accepts: no charge is attempted,
+    and the skip is logged with its own reason (not as a missing account or provider)."""
+    from secretaria.services.payments import registry
+    from tests.payments_support import FakeProvider
+
+    fake = FakeProvider()
+    monkeypatch.setitem(registry._PROVIDERS, "asaas", fake)
+    skips: list[str] = []
+    monkeypatch.setattr(
+        deposit_lifecycle,
+        "_log_deposit_skip",
+        lambda tenant, appointment, reason: skips.append(reason),
+    )
+    async with db() as session:
+        tenant, patient, appointment = await _seed(session, pix_deposit_percent=1)
+        await session.commit()
+        deposit = await deposit_lifecycle.maybe_create_deposit(
+            session, tenant=tenant, patient=patient, appointment=appointment, waba_token="tok"
+        )
+    assert deposit is None
+    assert fake.called("create_pix_charge") == 0
+    assert skips[-1] == "below_minimum"
+    async with db() as session2:
+        assert (await session2.scalars(select(PixDeposit))).all() == []

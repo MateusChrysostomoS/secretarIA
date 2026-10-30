@@ -224,3 +224,22 @@ async def test_the_llm_guard_is_active_only_for_an_enabled_before_clinic(db, ent
     assert await deposit_gate.before_gate_active(before) is True
     assert await deposit_gate.before_gate_active(after) is False
     assert await deposit_gate.before_gate_active(off) is False
+
+
+async def test_a_deposit_below_the_asaas_minimum_books_normally(db, entitlement):
+    """Measured on the real Asaas (2026-10-30): a Pix charge under R$ 5,00 is refused. Asking the
+    patient for a CPF and then failing is worse than not charging: the clinic is warned in the
+    Portal checklist instead."""
+    async with db() as session:
+        tenant, patient = await _seed(
+            session,
+            pix_deposit_percent=30,
+            appointment_types=[
+                {"name": "Consulta", "duration_min": 30, "is_active": True, "price": "R$ 10,00"}
+            ],
+        )
+        low = await _quote(session, tenant, patient)  # 30% of R$ 10,00 = R$ 3,00
+        tenant.pix_deposit_percent = 50
+        edge = await _quote(session, tenant, patient)  # exactly R$ 5,00
+    assert (low.outcome, low.reason) == ("no_deposit", "below_minimum")
+    assert (edge.outcome, edge.amount_cents) == ("required", 500)

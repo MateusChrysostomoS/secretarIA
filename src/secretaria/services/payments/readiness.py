@@ -218,7 +218,9 @@ async def evaluate_deposit_readiness(
         if MIN_PIX_CENTS is not None:
             low = tuple(
                 dict.fromkeys(
-                    label for label, cents in prices if cents is not None and cents < MIN_PIX_CENTS
+                    f"{label}: sinal de {format_brl(cents)}"
+                    for label, cents in prices
+                    if cents is not None and cents < MIN_PIX_CENTS
                 )
             )
             if low:
@@ -226,8 +228,9 @@ async def evaluate_deposit_readiness(
                     ReadinessItem(
                         "amount_below_minimum",
                         "warning",
-                        "O sinal destes serviços fica abaixo do mínimo do Asaas "
-                        f"({format_brl(MIN_PIX_CENTS)}).",
+                        f"O sinal destes serviços fica abaixo do mínimo do Asaas "
+                        f"({format_brl(MIN_PIX_CENTS)}) e não será cobrado. Aumente a "
+                        "porcentagem do sinal ou o preço do serviço.",
                         WHERE_PORTAL_DEPOSIT,
                         low,
                     )

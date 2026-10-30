@@ -58,7 +58,11 @@ from secretaria.services.payments import (
     payer_data,
     registry,
 )
-from secretaria.services.payments.money import format_brl, parse_brl_to_cents
+from secretaria.services.payments.money import (
+    ASAAS_MIN_PIX_CENTS,
+    format_brl,
+    parse_brl_to_cents,
+)
 from secretaria.services.payments.pix_message import pix_code_tail
 from secretaria.services.payments.provider import ChargeRequest, PaymentStatus, ProviderError
 from secretaria.services.service_catalog import load_service_catalog, service_by_name
@@ -105,6 +109,7 @@ DEPOSIT_SKIP_NO_PROVIDER = "no_provider"
 DEPOSIT_SKIP_NO_SERVICE = "no_service"
 DEPOSIT_SKIP_UNPARSEABLE_PRICE = "unparseable_price"
 DEPOSIT_SKIP_ZERO_AMOUNT = "zero_amount"
+DEPOSIT_SKIP_BELOW_MINIMUM = "below_minimum"
 # The booking's convênio is one of the clinic's plans that the clinic marked
 # "não cobra sinal" (tenant_insurance_plans.charge_deposit = false). Owner's
 # decision 2026-09-25: per clinic AND per plan, never inferred from the
@@ -467,6 +472,10 @@ async def maybe_create_deposit(
     amount_cents = round(price_cents * tenant.pix_deposit_percent / 100)
     if amount_cents <= 0:
         _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_ZERO_AMOUNT)
+        return None
+    if provider_name == PROVIDER_ASAAS and amount_cents < ASAAS_MIN_PIX_CENTS:
+        # Measured (2026-10-30): Asaas refuses a Pix under R$ 5,00, so no charge is attempted.
+        _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_BELOW_MINIMUM)
         return None
 
     # The reference we send the provider is the deposit's OWN id (not the appointment's:
