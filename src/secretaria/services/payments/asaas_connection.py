@@ -40,7 +40,7 @@ from secretaria.models.clinic_payment_account import (
     PROVIDER_ASAAS,
 )
 from secretaria.services import tenant_config as cfg
-from secretaria.services.payments import accounts, alerts, asaas_provider, jobs
+from secretaria.services.payments import accounts, alerts, asaas_provider, jobs, onboarding
 from secretaria.services.payments.asaas_probes import (
     CODE_KEY_INVALID,
     CODE_KEY_RESTRICTED,
@@ -237,6 +237,8 @@ async def connect_asaas_account(
     row.probe_inconclusive_days = 0
 
     client = asaas_provider.client_for(api_key)
+    # Informational: the registration states, when this key may read them. Never blocks.
+    onboarding.store_onboarding(row, await onboarding.read_onboarding(client), now)
     failure = await _register_webhook(client, row, token, webhook_base_url)
     if failure is None:
         _mark_connected(row, now)
@@ -356,6 +358,8 @@ async def recheck_asaas_account(
     row.capabilities = dict(verdict.capabilities)
     row.excess_groups = list(verdict.excess_groups)
     client = asaas_provider.client_for(account.api_key)
+    # The "cadastro concluido" tick lights up by itself once Asaas approves the account.
+    onboarding.store_onboarding(row, await onboarding.read_onboarding(client), now)
     try:
         hooks = (await client.list_webhooks()).get("data") or []
     except Exception as exc:  # noqa: BLE001 - cannot look: leave the state as it is

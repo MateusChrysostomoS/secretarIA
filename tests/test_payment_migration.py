@@ -59,6 +59,13 @@ ADDED_BY_LATER_REVISIONS = {
     ("clinic_payment_accounts", "last_charge_failure_stage"),
     ("clinic_payment_accounts", "last_charge_failure_at"),
     ("clinic_payment_accounts", "last_charge_ok_at"),
+    # The onboarding states and the setup checklist come from `a7c3e9d1f5b2` (TASK-071, Plan 4).
+    ("clinic_payment_accounts", "onboarding_general"),
+    ("clinic_payment_accounts", "onboarding_docs"),
+    ("clinic_payment_accounts", "onboarding_commercial"),
+    ("clinic_payment_accounts", "onboarding_bank"),
+    ("clinic_payment_accounts", "onboarding_checked_at"),
+    ("clinic_payment_accounts", "setup_checklist"),
 }
 
 

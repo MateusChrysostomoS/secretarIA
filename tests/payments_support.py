@@ -47,7 +47,19 @@ class FakeAsaasClient:
         errors: dict[str, Exception] | None = None,
         probe_map: dict | None = None,
         probe_delay: float = 0.0,
+        account_status: dict | None = None,
     ) -> None:
+        # GET /myAccount/status body; the default is a fully approved account.
+        self.account_status = (
+            account_status
+            if account_status is not None
+            else {
+                "general": "APPROVED",
+                "documentation": "APPROVED",
+                "commercialInfo": "APPROVED",
+                "bankAccountInfo": "APPROVED",
+            }
+        )
         self.customer_id = customer_id
         self.payment_id = payment_id
         self.qr_payload = qr_payload
@@ -102,6 +114,11 @@ class FakeAsaasClient:
         self.calls.append(("delete_customer", customer_id))
         self._maybe_raise("delete_customer")
         return {"deleted": True}
+
+    async def get_account_status(self):
+        self.calls.append(("get_account_status",))
+        self._maybe_raise("get_account_status")
+        return dict(self.account_status)
 
     async def list_webhooks(self, limit=100):
         self.calls.append(("list_webhooks",))

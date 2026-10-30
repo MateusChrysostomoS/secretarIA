@@ -205,6 +205,11 @@ class AsaasClient:
         """GET /payments/{id}/pixQrCode -> {payload, encodedImage, expirationDate, ...}."""
         return await self._request("GET", f"/payments/{payment_id}/pixQrCode")
 
+    async def get_account_status(self) -> dict:
+        """GET /myAccount/status -> the four onboarding states (`general`, `documentation`,
+        `commercialInfo`, `bankAccountInfo`). A key without that permission answers 403."""
+        return await self._request("GET", "/myAccount/status")
+
     async def get_payment(self, payment_id: str) -> dict:
         """GET /payments/{id} -> {id, status, value, externalReference, deleted, ...}."""
         return await self._request("GET", f"/payments/{payment_id}")

@@ -96,6 +96,20 @@ class ClinicPaymentAccount(Base):
     last_charge_ok_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Asaas onboarding states (TASK-071, Plan 4: GET /myAccount/status). Fixed words only
+    # (PENDING | APPROVED | REJECTED | AWAITING_APPROVAL | UNKNOWN); all None when the key cannot
+    # read them. `onboarding_checked_at` is when we last looked (readable or not).
+    onboarding_general: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    onboarding_docs: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    onboarding_commercial: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    onboarding_bank: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    onboarding_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Setup checklist items only the manager can confirm (TASK-071, Plan 4): whitelisted keys
+    # (`checklist.MANUAL_ITEMS`) -> {"done": bool, "at": iso, "by": user id}. A reconnection
+    # never clears them.
+    setup_checklist: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # --- secrets: Fernet ciphertext, NEVER logged, NEVER returned by a response ---
     api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     webhook_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)

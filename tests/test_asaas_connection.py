@@ -283,7 +283,8 @@ async def test_without_a_public_base_url_the_account_cannot_become_connected(db,
         result = await _connect(session, tenant, webhook_base_url=None)
         row = await _row(session, tenant)
     assert result.incomplete_reason == "webhook_create_failed" and row.status == "incomplete"
-    assert asaas.calls == []
+    # No webhook call; the (informational) onboarding read is the only thing allowed through.
+    assert [call for call in asaas.calls if call[0] != "get_account_status"] == []
 
 
 async def test_a_retry_without_a_stored_key_is_refused(db, asaas):
