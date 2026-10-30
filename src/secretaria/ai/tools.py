@@ -2098,9 +2098,10 @@ async def offer_human_handoff(message: str = "") -> dict:
     tente de verdade com o que você sabe.
 
     Args:
-        message: UMA frase curta dizendo o que você não tem ou não consegue (ex.: "Não
-            tenho o valor dessa cirurgia aqui."), enviada antes da pergunta. Deixe vazio
-            se não houver nada a dizer.
+        message: O único texto que o paciente lê antes da pergunta. Se ele perguntou mais
+            de uma coisa, responda aqui PRIMEIRO o que você sabe (ex.: "Não atendemos aos
+            sábados.") e depois, numa frase curta, o que você não tem (ex.: "Não tenho o
+            valor dessa cirurgia aqui."). Deixe vazio se não houver nada a dizer.
     """
     raise HumanHandoffOfferRequested(intro=handback_message(message))
 

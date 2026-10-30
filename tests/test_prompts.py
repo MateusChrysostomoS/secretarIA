@@ -359,9 +359,10 @@ def test_legacy_prompt_keeps_calendar_path_without_flow_state():
 # Re-rendered 2026-10-20: rule 7 of COMO ESCREVER (buttons are a "mensagem", never a "card").
 # Re-rendered 2026-10-29 (TASK-072): the fixed "AO RESPONDER" block (several questions in one reply,
 # an unavailable time is never "reserved"); the DADOS/RECURSOS blocks only render with turn facts.
+# Re-rendered 2026-10-29 (TASK-072 reteste): a handoff offer's text carries the answered parts.
 _V1_DIGESTS = {
-    "minimal": (14303, "2ff10c94e10135b2f8237a72624957bb69f96abe813bfe410feb00e328af41d7"),
-    "full": (20034, "957847aa784a03d43207a0878c4cb8fddb5aecff6754e18233038fbe5df34c7f"),
+    "minimal": (14368, "c8d0af33fd3299e87b490f6fd49c2d71a622eec2fcd73d7af3404280ef4b74c4"),
+    "full": (20099, "b5bf6b4b4e1441a19302b647905b97ac3a27abeecc112456169293d8fea554af"),
 }
 
 
