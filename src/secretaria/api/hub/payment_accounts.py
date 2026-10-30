@@ -48,8 +48,25 @@ from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
 from secretaria.models import ClinicPaymentAccount, Tenant
 from secretaria.models.clinic_payment_account import ACCOUNT_REVOKED, PROVIDER_ASAAS
-from secretaria.schemas.payment_accounts import AsaasConnectionResultOut, PaymentAccountStatusOut
-from secretaria.services.payments import accounts, asaas_connection
+from secretaria.schemas.payment_accounts import (
+    AsaasConnectionResultOut,
+    ChecklistItemOut,
+    ChecklistOut,
+    ChecklistProgressOut,
+    PaymentAccountStatusOut,
+    ReadinessItemOut,
+    TestChargeResultOut,
+)
+from secretaria.services.brain_professionals import fetch_professional_emails
+from secretaria.services.payments import (
+    accounts,
+    asaas_connection,
+    checklist,
+    failure_reason,
+    onboarding,
+    probe_charge,
+    readiness,
+)
 from secretaria.services.payments.asaas_connection import ConnectionResult
 from secretaria.services.payments.asaas_probes import GROUP_LABELS
 from secretaria.services.payments.rate_limit import RateLimiterUnavailable, allow
@@ -162,6 +179,130 @@ async def list_payment_accounts(
         )
     ).all()
     return [_status_out(row) for row in rows]
+
+
+async def _read_json_object(request: Request, keys: set[str]) -> dict | None:
+    """The body when it is a JSON object with EXACTLY `keys`, else None. Parsed by hand: a
+    framework validation error would echo the offending input (a document, for the test charge)."""
+    raw = await request.body()
+    if len(raw) > MAX_BODY_BYTES:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) and set(data) == keys else None
+
+
+async def _checklist_out(session: AsyncSession, tenant: Tenant) -> ChecklistOut:
+    """The checklist of one clinic, ready to serialise. Doctor e-mails come from brain-api (never
+    stored); when it does not answer the doctor-email line is simply left out."""
+    emails = await fetch_professional_emails(tenant.id)
+    built = await checklist.build_checklist(
+        session, tenant_id=tenant.id, professional_emails=emails
+    )
+    pending = await readiness.evaluate_deposit_readiness(
+        session, tenant_id=tenant.id, professional_emails=emails, check_when_off=True
+    )
+    row = await accounts.get_account_row(session, tenant_id=tenant.id, provider=PROVIDER_ASAAS)
+    health = accounts.charge_health_view(row) if row is not None else None
+    return ChecklistOut(
+        items=[
+            ChecklistItemOut(**{**item.__dict__, "names": list(item.names)})
+            for item in built.items
+        ],
+        progress=ChecklistProgressOut(done=built.done, total=built.total),
+        badge=built.badge,
+        readiness=[ReadinessItemOut(**{**i.__dict__, "names": list(i.names)}) for i in pending],
+        charge_health=health.health if health else "untested",
+        last_charge_failure_reason=health.last_failure_reason if health else None,
+        last_charge_failure_text=health.last_failure_text if health else None,
+        last_charge_failure_at=health.last_failure_at if health else None,
+        onboarding_readable=bool(row is not None and onboarding.stored_onboarding(row)),
+        asaas_panel_url=built.asaas_panel_url,
+    )
+
+
+@router.get(
+    "/asaas/checklist",
+    response_model=ChecklistOut,
+    dependencies=[Depends(require_clinic_clinician)],
+)
+async def get_asaas_checklist(
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> ChecklistOut:
+    """"Checklist para ter seu sinal e evitar no-show": what is done, what is pending and the
+    badge (green only with proof). Manager or doctor may read it."""
+    return await _checklist_out(session, tenant)
+
+
+@router.put(
+    "/asaas/checklist",
+    response_model=ChecklistOut,
+    dependencies=[Depends(require_clinic_manager)],
+)
+async def put_asaas_checklist(
+    request: Request,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> ChecklistOut | JSONResponse:
+    """The manager's click on an item only they can confirm. Body: `{"item": <whitelisted>,
+    "done": <bool>}` and nothing else."""
+    data = await _read_json_object(request, {"item", "done"})
+    if (
+        data is None
+        or data["item"] not in checklist.MANUAL_ITEMS
+        or not isinstance(data["done"], bool)
+    ):
+        return JSONResponse(_detail("invalid_body"), status_code=422)
+    claim = getattr(request.state, "staff_subscription_claim", None)
+    await checklist.set_manual_item(
+        session,
+        tenant_id=tenant.id,
+        item=data["item"],
+        done=data["done"],
+        by=(getattr(claim, "role", None) or "manager"),
+    )
+    await session.commit()
+    return await _checklist_out(session, tenant)
+
+
+@router.post(
+    "/asaas/test-charge",
+    response_model=TestChargeResultOut,
+    dependencies=[Depends(require_clinic_manager)],
+)
+async def post_asaas_test_charge(
+    request: Request,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> TestChargeResultOut | JSONResponse:
+    """"Testar cobrança": create a real Pix charge on the clinic's own Asaas account and void it
+    at once. Body: `{"document": "<CPF or CNPJ>"}` and nothing else; the document is used in
+    memory for this one call, never stored, logged or echoed. Fails closed without Redis (the
+    one-at-a-time lock needs it)."""
+    pool = getattr(request.app.state, "arq_pool", None)
+    if pool is None:
+        return JSONResponse(_detail("rate_limiter_unavailable"), status_code=503)
+    data = await _read_json_object(request, {"document"})
+    if data is None or not isinstance(data["document"], str):
+        return JSONResponse(_detail("invalid_body"), status_code=422)
+    document = data["document"]
+    del data
+    result = await probe_charge.run_probe_charge(
+        session, tenant_id=tenant.id, payer_document=document, redis=pool
+    )
+    del document
+    if result.busy:
+        return JSONResponse(_detail("probe_in_progress"), status_code=429)
+    return TestChargeResultOut(
+        ok=result.ok,
+        reason=result.reason.value if result.reason else None,
+        reason_text=failure_reason.text_for(result.reason),
+        stage=result.stage,
+        cleaned=result.cleaned,
+    )
 
 
 @router.put(

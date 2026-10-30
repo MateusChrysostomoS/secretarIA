@@ -133,26 +133,34 @@ async def evaluate_deposit_readiness(
     *,
     tenant_id: UUID,
     professional_emails: dict[str, str] | None = None,
+    check_when_off: bool = False,
 ) -> list[ReadinessItem]:
     """The pending items of one clinic's deposit setup.
 
     `professional_emails` is brain-api's `{professional_id: email}` (the caller fetches it, this
     function does no I/O of its own beyond the database); `None` means "unknown" and the doctor
-    e-mail item is simply left out."""
+    e-mail item is simply left out.
+
+    With the deposit switched off the answer is `sinal_off` alone: a clinic that does not charge
+    is not told about its Asaas account or prices. The setup checklist wants the other items
+    even then (a clinic prepares everything BEFORE switching the deposit on), so it passes
+    `check_when_off=True` and gets `sinal_off` first, followed by the rest."""
     tenant = await session.get(Tenant, tenant_id)
     if tenant is None:
         return []
+    items: list[ReadinessItem] = []
     if not (tenant.pix_deposit_enabled and timing_is_before(tenant)):
-        return [
+        items.append(
             ReadinessItem(
                 "sinal_off",
                 "blocker",
                 "O sinal está desligado: nenhum paciente será cobrado.",
                 WHERE_PORTAL_DEPOSIT,
             )
-        ]
+        )
+        if not check_when_off:
+            return items
 
-    items: list[ReadinessItem] = []
     row = await accounts.get_account_row(session, tenant_id=tenant_id, provider=PROVIDER_ASAAS)
 
     # --- the Asaas account -------------------------------------------------------------

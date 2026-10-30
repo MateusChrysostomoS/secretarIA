@@ -275,6 +275,12 @@ class FakeProvider:
         if self.cancel_error:
             raise self.cancel_error
 
+    async def delete_customer(self, account, provider_customer_id):
+        self.calls.append(("delete_customer", provider_customer_id))
+        self.tenants_seen.append(account.tenant_id)
+        if getattr(self, "delete_customer_error", None):
+            raise self.delete_customer_error
+
     def called(self, name: str) -> int:
         return sum(1 for call in self.calls if call[0] == name)
 

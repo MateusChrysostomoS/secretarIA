@@ -41,6 +41,69 @@ class PaymentAccountStatusOut(BaseModel):
     last_charge_failure_at: datetime | None = None
 
 
+class ChecklistItemOut(BaseModel):
+    """One line of "Checklist para ter seu sinal e evitar no-show" (TASK-071, Plan 4)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    key: str
+    label: str
+    # done | pending | warning | unknown
+    state: str
+    # system (filled by the system) | user (confirmed by the manager)
+    source: str
+    hint: str | None = None
+    link: str | None = None
+    names: list[str] = []
+
+
+class ChecklistProgressOut(BaseModel):
+    done: int
+    total: int
+
+
+class ReadinessItemOut(BaseModel):
+    code: str
+    severity: str
+    text: str
+    where: str | None = None
+    names: list[str] = []
+
+
+class ChecklistOut(BaseModel):
+    """The whole checklist: items, the "N de 8" progress, the badge (green ONLY with proof) and the
+    pending list. Fixed texts and closed vocabularies only - never provider text or patient data."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    items: list[ChecklistItemOut]
+    progress: ChecklistProgressOut
+    badge: Literal["ok", "failing", "untested"]
+    readiness: list[ReadinessItemOut]
+    charge_health: Literal["ok", "failing", "untested"] = "untested"
+    last_charge_failure_reason: str | None = None
+    last_charge_failure_text: str | None = None
+    last_charge_failure_at: datetime | None = None
+    # False when the API key cannot read the Asaas registration (the Portal then says "confira no
+    # painel" and never claims approval).
+    onboarding_readable: bool = False
+    asaas_panel_url: str = ""
+
+
+class TestChargeResultOut(BaseModel):
+    """The answer of "Testar cobrança". `reason` is a closed category, `reason_text` its plain
+    sentence; `cleaned` False means the test charge could not be removed (do it in the panel)."""
+
+    __test__ = False  # not a pytest class, despite the name
+
+    ok: bool
+    reason: str | None = None
+    reason_text: str | None = None
+    stage: str | None = None
+    cleaned: bool = True
+    busy: bool = False
+
+
 class AsaasConnectionResultOut(BaseModel):
     """The answer to connect / retry / disconnect. No key, no token, no group detail (a refusal
     is a 422 whose `detail` carries the group codes and labels instead)."""
