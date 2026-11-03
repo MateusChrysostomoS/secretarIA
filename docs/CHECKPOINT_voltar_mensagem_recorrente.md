@@ -12,6 +12,8 @@ marcada). Vale no WhatsApp e no Portal (mesmo caminho).
 
 - Clínica **sem** a mensagem configurada: continua o cartão de menu de sempre.
 - `/menu`, `menu`, `/reset`, `recomeçar`, `início`: continuam o cartão de menu de sempre (só `voltar` ganha a mensagem).
+- **Só digitado:** o toque no botão "Voltar" dos cartões (Gerenciar consulta / edição) mantém o menu de sempre,
+  sem a mensagem (`turn_router` exige que não haja `interactive_reply_id`).
 - `{{name}}` é preenchido com o nome do paciente; se a mensagem ficar vazia depois de preenchida (só `{{name}}` e
   paciente sem nome), cai no cartão de menu de sempre.
 
@@ -31,9 +33,9 @@ marcada). Vale no WhatsApp e no Portal (mesmo caminho).
 
 ## Validação
 
-- `tests/test_menu_command.py`: 66 passaram (inclui os testes novos: predicado, mensagem + botões, sem mensagem,
+- `tests/test_menu_command.py`: 67 passaram (inclui os testes novos: predicado, mensagem + botões, sem mensagem,
   `/menu` sem mensagem, corte de mensagem longa, `voltar` no meio da marcação, mensagem que renderiza vazia,
-  mensagem só com espaços).
+  mensagem só com espaços, toque em botão "Voltar").
 - Suíte completa: 7633 passaram, 2 falharam — `tests/test_service_change_agenda.py::
   test_a_paid_difference_that_also_moved_the_time_replans_and_tells_once` e
   `::test_a_clinic_initiated_paid_move_replans_but_sends_no_patient_change_notice`. **Ambas já falham em `main`

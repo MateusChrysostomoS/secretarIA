@@ -723,3 +723,35 @@ async def test_voltar_whitespace_only_message_sends_plain_menu(
     await tasks._handle_patient_messages(_value("voltar", wam_id="wamid.voltar.blank"))
 
     await _sent_body_equals_plain_menu(db, seeded["tenant"].id)
+
+
+async def test_tapping_an_in_card_voltar_button_keeps_the_plain_menu(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a TYPED `voltar` gets the recurring message. The "Voltar" buttons inside the manage /
+    edit cards arrive as a tap (reply id `menu|2`, routing text exactly "Voltar") and keep the
+    plain menu card."""
+    _set_allowlist(monkeypatch, "")
+    seeded = await _seed(db)
+    await _set_returning_message(db, seeded["tenant"].id, RETURNING_MESSAGE)
+    tap = WebhookValue.model_validate(
+        {
+            "metadata": {"phone_number_id": PHONE_NUMBER_ID},
+            "contacts": [{"wa_id": WA_ID, "profile": {"name": "Maria"}}],
+            "messages": [
+                {
+                    "id": "wamid.voltar.tap",
+                    "from": WA_ID,
+                    "type": "interactive",
+                    "interactive": {
+                        "type": "button_reply",
+                        "button_reply": {"id": "menu|2", "title": "Voltar"},
+                    },
+                }
+            ],
+        }
+    )
+
+    await tasks._handle_patient_messages(tap)
+
+    await _sent_body_equals_plain_menu(db, seeded["tenant"].id)

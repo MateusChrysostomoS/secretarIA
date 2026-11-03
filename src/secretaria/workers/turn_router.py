@@ -663,7 +663,8 @@ async def _route_inbound_turn(
             patient_ref=patient_ref,
             inbound_body=body or "",
             menu_requested=True,
-            menu_back_greeting=is_back_command(body),
+            # Typed only: the "Voltar" buttons inside the manage/edit cards arrive as a tap.
+            menu_back_greeting=is_back_command(body) and interactive_reply_id is None,
         )
 
     # A provider needs a payer field (decision D7) and the patient was asked for it: this message
