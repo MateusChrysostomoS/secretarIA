@@ -74,9 +74,19 @@ def test_obligations_are_present_whatever_the_clinic_configured(description: str
 def test_description_is_rendered_into_the_slot() -> None:
     rendered = render_greeting("Clínica São Lucas", "Oftalmologia e cirurgia refrativa.")
 
-    assert "Oftalmologia e cirurgia refrativa." in rendered
-    # Placed above the disclosure, where the clinic's own pitch belongs.
+    # The description completes the identification sentence, inline.
+    assert (
+        "Sou a SecretarIA, assistente virtual do consultório do Clínica São Lucas "
+        "Oftalmologia e cirurgia refrativa.\n"
+    ) in rendered
     assert rendered.index("Oftalmologia e cirurgia") < rendered.index("🤖 Importante")
+
+
+def test_empty_description_leaves_no_trailing_space_on_the_identification_line() -> None:
+    rendered = render_greeting("Clínica São Lucas", "")
+
+    assert "do consultório do Clínica São Lucas\n" in rendered
+    assert " \n" not in rendered
 
 
 @pytest.mark.parametrize("description", ["", None, "  \n\n  "])
@@ -220,7 +230,11 @@ def test_preview_template_reconstitutes_the_real_message(
     template = greeting_preview_template(clinic_name)
     before, _, after = template.partition(PREVIEW_PLACEHOLDER)
 
-    as_the_hub_shows_it = re.sub(r"\n{3,}", "\n\n", before + description.strip() + after)
+    # The description now sits inline at the end of the identification line, so
+    # an empty one leaves a dangling separator space; the backend drops it (a
+    # trailing space is invisible in the hub's pre-wrap preview).
+    as_the_hub_shows_it = re.sub(r"[ \t]+\n", "\n", before + description.strip() + after)
+    as_the_hub_shows_it = re.sub(r"\n{3,}", "\n\n", as_the_hub_shows_it)
 
     assert as_the_hub_shows_it == render_greeting(clinic_name, description)
 
@@ -238,13 +252,14 @@ def test_preview_template_contains_exactly_one_placeholder() -> None:
 # --------------------------------------------------------------------------
 
 # Captured from `render_greeting("GinecoAqui", "")` / the preview / the budget
-# at HEAD 7ae484d, BEFORE the `patient_name` slot existed. The no-name path must
-# stay byte-for-byte identical: WhatsApp always takes it, and its 1024-char
-# budget is measured on it.
-_NO_NAME_GREETING_SHA256 = "52206c49125ed5e341ae862f3c4fe540b52c0413a8af182531de699a5a0e9381"
-_NO_NAME_GREETING_LEN = 793
-_PREVIEW_SHA256 = "e43e76fe668527e57e715056e7c50d8f85d83d7e1e583a605d38361fa2ecccab"
-_GINECOAQUI_BUDGET = 229
+# after the second line became "Sou a SecretarIA, assistente virtual do
+# consultório do <nome> <descrição>" (originally pinned at HEAD 7ae484d, before
+# the `patient_name` slot existed). The no-name path must stay byte-for-byte
+# identical: WhatsApp always takes it, and its 1024-char budget is measured on it.
+_NO_NAME_GREETING_SHA256 = "ef449eb47bfde29d8cc28d3a00449737e3e165a5dbedbd3dae632c1be32fb801"
+_NO_NAME_GREETING_LEN = 797
+_PREVIEW_SHA256 = "f1ee10eeaf4b5f185e82eb08b4d6854b4b3e84f4da8ceca010251c04bacc2bae"
+_GINECOAQUI_BUDGET = 226
 
 
 def _sha256(text: str) -> str:

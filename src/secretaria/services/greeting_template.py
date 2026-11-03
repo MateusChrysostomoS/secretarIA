@@ -88,8 +88,9 @@ CONSENT_EVENT_KIND = "terms_accepted"
 # The frame
 # ---------------------------------------------------------------------------
 # Written as ONE literal so what a reviewer reads is what the patient receives.
-# `{clinic_description}` sits high (right after the identification) because it
-# is the part the clinic controls and the part a patient actually scans;
+# `{clinic_description}` completes the identification sentence inline ("Sou a
+# SecretarIA, assistente virtual do consultório do <nome> <descrição>") because
+# it is the part the clinic controls and the part a patient actually scans;
 # everything below it is obligation copy whose order is deliberate:
 # automated-assistant disclosure -> what the bot can do -> how to talk to it ->
 # emergency escape -> the invitation to start.
@@ -101,9 +102,7 @@ CONSENT_EVENT_KIND = "terms_accepted"
 # nothing is worse than not advertising one.
 GREETING_FRAME = """\
 👋 Olá! Bem-vindo(a) à {clinic_name}{patient_suffix}!
-Sou a secretária virtual e cuido dos agendamentos por aqui. 😊
-
-{clinic_description}
+Sou a SecretarIA, assistente virtual do consultório do {clinic_name} {clinic_description}
 
 🤖 Importante: você conversa com um *assistente virtual automatizado*, que usa \
 inteligência artificial para organizar o seu atendimento. Nenhuma orientação \
@@ -156,12 +155,12 @@ def render_greeting(
         patient_suffix=f", {patient}" if patient else "",
         clinic_description=description,
     )
-    # Collapse the run of blank lines an empty slot leaves behind. Done with a
-    # regex, not `replace("\n\n\n", "\n\n")`: an empty slot leaves FOUR
-    # newlines, and `str.replace` consumes only the first three of them, so the
-    # greeting still opened with a visible extra blank line. Applied
-    # unconditionally, so a description typed with trailing blank lines cannot
-    # reintroduce the gap either.
+    # The description now completes the second sentence inline, so an empty one
+    # leaves the separator space dangling at the end of that line: drop it.
+    rendered = re.sub(r"[ \t]+\n", "\n", rendered)
+    # Collapse any run of blank lines (e.g. a description typed with trailing
+    # blank lines). Done with a regex, not `replace("\n\n\n", "\n\n")`, which
+    # consumes only three of four newlines.
     return re.sub(r"\n{3,}", "\n\n", rendered)
 
 
