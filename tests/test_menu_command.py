@@ -264,12 +264,14 @@ def _set_allowlist(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
     monkeypatch.setattr(workers_ns, "get_settings", lambda: fake_settings)
 
 
-def _value(body: str, *, wam_id: str, wa_id: str = WA_ID) -> WebhookValue:
+def _value(
+    body: str, *, wam_id: str, wa_id: str = WA_ID, profile_name: str = "Maria"
+) -> WebhookValue:
     """One inbound text message, in the exact shape the worker receives."""
     return WebhookValue.model_validate(
         {
             "metadata": {"phone_number_id": PHONE_NUMBER_ID},
-            "contacts": [{"wa_id": wa_id, "profile": {"name": "Maria"}}],
+            "contacts": [{"wa_id": wa_id, "profile": {"name": profile_name}}],
             "messages": [
                 {
                     "id": wam_id,
@@ -590,6 +592,23 @@ async def _set_returning_message(db, tenant_id, message: str | None) -> None:
         await session.commit()
 
 
+async def _clear_patient_name(db, patient_id) -> None:
+    async with db() as session:
+        patient = await session.get(Patient, patient_id)
+        patient.name = None
+        await session.commit()
+
+
+async def _sent_body_equals_plain_menu(db, tenant_id) -> None:
+    from secretaria.services.flow_router import menu_label
+
+    assert len(_FakeWhatsAppClient.sent) == 1
+    _kind, _to, body, _buttons = _FakeWhatsAppClient.sent[0]
+    async with db() as session:
+        tenant = await session.get(Tenant, tenant_id)
+    assert body == menu_label(tenant)
+
+
 async def test_voltar_sends_returning_message_with_menu_buttons(
     db, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -597,7 +616,8 @@ async def test_voltar_sends_returning_message_with_menu_buttons(
     seeded = await _seed(db)
     await _set_returning_message(db, seeded["tenant"].id, RETURNING_MESSAGE)
 
-    await tasks._handle_patient_messages(_value("voltar", wam_id="wamid.voltar.msg"))
+    value = _value("voltar", wam_id="wamid.voltar.msg", profile_name="Joana")
+    await tasks._handle_patient_messages(value)
 
     assert len(_FakeWhatsAppClient.sent) == 1
     kind, to, body, buttons = _FakeWhatsAppClient.sent[0]
@@ -676,3 +696,30 @@ async def test_voltar_midflow_resets_state_and_keeps_rows(
     async with db() as session:
         conversation = await session.get(Conversation, seeded["conversation"].id)
         assert conversation.flow_state == FlowState.MENU
+
+
+async def test_voltar_message_that_renders_empty_falls_back_to_plain_menu(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`{{name}}` alone + a patient without a name renders to "": never an empty card."""
+    _set_allowlist(monkeypatch, "")
+    seeded = await _seed(db)
+    await _clear_patient_name(db, seeded["patient"].id)
+    await _set_returning_message(db, seeded["tenant"].id, "{{name}}")
+
+    value = _value("voltar", wam_id="wamid.voltar.empty", profile_name="")
+    await tasks._handle_patient_messages(value)
+
+    await _sent_body_equals_plain_menu(db, seeded["tenant"].id)
+
+
+async def test_voltar_whitespace_only_message_sends_plain_menu(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_allowlist(monkeypatch, "")
+    seeded = await _seed(db)
+    await _set_returning_message(db, seeded["tenant"].id, "   \t  ")
+
+    await tasks._handle_patient_messages(_value("voltar", wam_id="wamid.voltar.blank"))
+
+    await _sent_body_equals_plain_menu(db, seeded["tenant"].id)

@@ -1173,6 +1173,11 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             if reply.menu_back_greeting
             else ""
         )
+        # A message that renders to "" (e.g. only `{{name}}` for a nameless patient) falls back
+        # to the plain menu label rather than sending an empty card.
+        greeting_body = (
+            _render_greeting_template(returning_message, patient_name) if returning_message else ""
+        ) or None
         await _handle_show_main_menu(
             reply,
             tenant,
@@ -1181,11 +1186,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             redis=redis,
             waba_token=waba_token,
             source="command",
-            greeting_body=(
-                _render_greeting_template(returning_message, patient_name)
-                if returning_message
-                else None
-            ),
+            greeting_body=greeting_body,
         )
         return
 
