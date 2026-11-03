@@ -13,6 +13,7 @@ from secretaria.ai.graph import (
 )
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
+from secretaria.core.whatsapp_limits import MAX_INTERACTIVE_BODY_CHARS, truncate_plain
 from secretaria.models import (
     Conversation,
     FlowState,
@@ -93,6 +94,7 @@ async def _handle_show_main_menu(
     redis=None,
     waba_token: str | None = None,
     source: str = _AGENT_TOOL_SOURCE,
+    greeting_body: str | None = None,
 ) -> bool:
     """Non-destructive menu return. The ONE way back to the menu.
 
@@ -143,7 +145,13 @@ async def _handle_show_main_menu(
         action="reply",
         bubbles=[
             MenuBubble(
-                body=menu_label(tenant),
+                # `greeting_body` (only `voltar`, only when the clinic configured one) replaces the
+                # plain label as the card body; the buttons under it are the same menu either way.
+                body=(
+                    menu_label(tenant)
+                    if greeting_body is None
+                    else truncate_plain(greeting_body, MAX_INTERACTIVE_BODY_CHARS)
+                ),
                 labels=main_menu_buttons(),
             )
         ],

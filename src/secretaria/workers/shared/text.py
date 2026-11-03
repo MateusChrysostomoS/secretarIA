@@ -103,6 +103,17 @@ def is_menu_command(body: str | None) -> bool:
         return False
     return body.strip().lower() in _MENU_COMMANDS
 
+def is_back_command(body: str | None) -> bool:
+    """True when the patient typed exactly `voltar` (whole body, any case).
+
+    The one menu command that also carries the clinic's recurring-patient
+    message as the menu card body; `/menu` and the other aliases keep the plain
+    menu label.
+    """
+    if not body:
+        return False
+    return body.strip().lower() == "voltar"
+
 def _is_consent_acceptance(body: str | None) -> bool:
     """True for a tap on (or a typed match of) the LGPD "Concordo" button.
 

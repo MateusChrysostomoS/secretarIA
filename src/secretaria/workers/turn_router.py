@@ -96,6 +96,7 @@ from secretaria.workers.shared.text import (
     _is_consent_acceptance,
     _is_name_change_request,
     extract_patient_name,
+    is_back_command,
     is_menu_command,
 )
 
@@ -662,6 +663,7 @@ async def _route_inbound_turn(
             patient_ref=patient_ref,
             inbound_body=body or "",
             menu_requested=True,
+            menu_back_greeting=is_back_command(body),
         )
 
     # A provider needs a payer field (decision D7) and the patient was asked for it: this message

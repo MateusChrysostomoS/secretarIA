@@ -208,6 +208,7 @@ from secretaria.workers.shared.sentinels import (
 from secretaria.workers.shared.state_expiry import (
     _write_flow_state,
 )
+from secretaria.workers.shared.text import _render_greeting_template
 
 logger = get_logger(__name__)
 
@@ -1166,6 +1167,12 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
     # blocks so the command is never re-interpreted as input to whatever step
     # the patient was on.
     if reply.menu_requested:
+        # Only a literal `voltar` carries the clinic's recurring-patient message as the card body.
+        returning_message = (
+            ((tenant.returning_greeting_message or "").strip() if tenant is not None else "")
+            if reply.menu_back_greeting
+            else ""
+        )
         await _handle_show_main_menu(
             reply,
             tenant,
@@ -1174,6 +1181,11 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             redis=redis,
             waba_token=waba_token,
             source="command",
+            greeting_body=(
+                _render_greeting_template(returning_message, patient_name)
+                if returning_message
+                else None
+            ),
         )
         return
 

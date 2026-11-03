@@ -497,6 +497,7 @@ from secretaria.workers.shared.text import (
     _is_consent_acceptance,
     _render_greeting_template,
     extract_patient_name,
+    is_back_command,
     is_menu_command,
     is_remove_context_command,
 )

@@ -123,6 +123,19 @@ def test_non_triggers(body: str | None) -> None:
     assert tasks.is_menu_command(body) is False
 
 
+@pytest.mark.parametrize("body", ["voltar", "VOLTAR", "  voltar  "])
+def test_is_back_command_true(body: str) -> None:
+    assert tasks.is_back_command(body) is True
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["menu", "/menu", "recomeçar", "quero voltar na segunda", "", None],
+)
+def test_is_back_command_false(body: str | None) -> None:
+    assert tasks.is_back_command(body) is False
+
+
 def test_menu_aliases_are_not_the_destructive_command() -> None:
     """The whole point of the rename: no `/menu`-ish word reaches the wipe."""
     for body in ("/menu", "/MENU", "  /menu  ", "/reset", "/recomeçar", "/inicio", "/início"):
@@ -561,3 +574,105 @@ async def test_menu_records_the_processed_event(db, monkeypatch: pytest.MonkeyPa
             select(ProcessedEvent.event_id).where(ProcessedEvent.event_id == "wamid.menu.claim")
         )
     assert claimed == "wamid.menu.claim"
+
+
+# --------------------------------------------------------------------------
+# `voltar` carries the clinic's recurring-patient message as the card body
+# --------------------------------------------------------------------------
+
+RETURNING_MESSAGE = "Olá, {{name}}! Bem-vinda de volta à Clinic."
+
+
+async def _set_returning_message(db, tenant_id, message: str | None) -> None:
+    async with db() as session:
+        tenant = await session.get(Tenant, tenant_id)
+        tenant.returning_greeting_message = message
+        await session.commit()
+
+
+async def test_voltar_sends_returning_message_with_menu_buttons(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_allowlist(monkeypatch, "")
+    seeded = await _seed(db)
+    await _set_returning_message(db, seeded["tenant"].id, RETURNING_MESSAGE)
+
+    await tasks._handle_patient_messages(_value("voltar", wam_id="wamid.voltar.msg"))
+
+    assert len(_FakeWhatsAppClient.sent) == 1
+    kind, to, body, buttons = _FakeWhatsAppClient.sent[0]
+    assert kind == "buttons"
+    assert to == WA_ID
+    assert body == "Olá, Maria! Bem-vinda de volta à Clinic."
+    labels = " | ".join(str(b) for b in buttons)
+    for expected in ("Agendar", "Outro", "Gerenciar consulta"):
+        assert expected in labels, expected
+
+
+async def test_voltar_without_returning_message_sends_plain_menu(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_allowlist(monkeypatch, "")
+    seeded = await _seed(db)
+    await _set_returning_message(db, seeded["tenant"].id, None)
+
+    await tasks._handle_patient_messages(_value("voltar", wam_id="wamid.voltar.none"))
+
+    assert len(_FakeWhatsAppClient.sent) == 1
+    _kind, _to, body, _buttons = _FakeWhatsAppClient.sent[0]
+    async with db() as session:
+        tenant = await session.get(Tenant, seeded["tenant"].id)
+    from secretaria.services.flow_router import menu_label
+
+    assert body == menu_label(tenant)
+
+
+async def test_slash_menu_never_sends_returning_message(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_allowlist(monkeypatch, "")
+    seeded = await _seed(db)
+    await _set_returning_message(db, seeded["tenant"].id, RETURNING_MESSAGE)
+
+    await tasks._handle_patient_messages(_value("/menu", wam_id="wamid.slash.menu"))
+
+    assert len(_FakeWhatsAppClient.sent) == 1
+    _kind, _to, body, _buttons = _FakeWhatsAppClient.sent[0]
+    async with db() as session:
+        tenant = await session.get(Tenant, seeded["tenant"].id)
+    from secretaria.services.flow_router import menu_label
+
+    assert body == menu_label(tenant)
+
+
+async def test_voltar_truncates_oversized_message(db, monkeypatch: pytest.MonkeyPatch) -> None:
+    from secretaria.core.whatsapp_limits import MAX_INTERACTIVE_BODY_CHARS
+
+    _set_allowlist(monkeypatch, "")
+    seeded = await _seed(db)
+    await _set_returning_message(db, seeded["tenant"].id, "x" * 1500)
+
+    await tasks._handle_patient_messages(_value("voltar", wam_id="wamid.voltar.long"))
+
+    assert len(_FakeWhatsAppClient.sent) == 1
+    _kind, _to, body, _buttons = _FakeWhatsAppClient.sent[0]
+    assert 0 < len(body) <= MAX_INTERACTIVE_BODY_CHARS
+
+
+async def test_voltar_midflow_resets_state_and_keeps_rows(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_allowlist(monkeypatch, "")
+    seeded = await _seed(db, flow_state=FlowState.SERVICE_CATALOG)
+    await _set_returning_message(db, seeded["tenant"].id, RETURNING_MESSAGE)
+    before = await _snapshot(db)
+
+    await tasks._handle_patient_messages(_value("voltar", wam_id="wamid.voltar.mid"))
+
+    after = await _snapshot(db)
+    assert after["messages"] == before["messages"] + 2
+    for key in ("patients", "conversations", "appointments", "consent_events", "deposits"):
+        assert after[key] == before[key], key
+    async with db() as session:
+        conversation = await session.get(Conversation, seeded["conversation"].id)
+        assert conversation.flow_state == FlowState.MENU

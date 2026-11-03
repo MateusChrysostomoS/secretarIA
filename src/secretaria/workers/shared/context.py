@@ -97,6 +97,9 @@ class _ReplyContext:
     # allowlist, tenant-active, handover, entitlement and plugin gates have
     # all been cleared like any other turn (PROMPT_FIX_18).
     menu_requested: bool = False
+    # With `menu_requested`: the command was exactly `voltar`, so the menu card's body is the
+    # clinic's recurring-patient message (when configured) instead of the plain menu label.
+    menu_back_greeting: bool = False
     # --- `before` timing: the conversation waits for a Pix (FlowState.AWAITING_DEPOSIT) ---
     # Set by `_persist_inbound_message` while the conversation is parked. "paid" / "change" /
     # "cancel" are the card's taps, "other" is any other text (the card is repeated),
