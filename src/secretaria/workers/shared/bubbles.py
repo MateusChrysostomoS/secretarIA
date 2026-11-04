@@ -84,12 +84,18 @@ async def _send_bubble(
     if buttons is not None:
         return await client.send_buttons(to=to, body=bubble.body, buttons=buttons)
     if isinstance(bubble, SlotsBubble):
+        calendar = (
+            {"calendar_days": bubble.calendar_days}
+            if bubble.calendar_days and getattr(client, "SUPPORTS_CALENDAR", False)
+            else {}
+        )
         return await client.send_list(
             to=to,
             body=bubble.body,
             button_label=bubble.button_label,
             rows=_slots_rows(bubble),
             section_title=bubble.section_title,
+            **calendar,
         )
     return await client.send_text_message(to=to, body=bubble.body)
 

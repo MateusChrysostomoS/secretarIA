@@ -22,6 +22,7 @@ from secretaria.schemas.webhook import decode_action_id
 from secretaria.services.channel_sender import (
     CHANNEL_BRAIN_MESSAGE,
 )
+from secretaria.services.flow_router import calendar_day_row_id
 from secretaria.services.payments.service_change import REFUND_ACTIONS
 from secretaria.services.release_offer import RELEASE_OFFER_ACTIONS
 from secretaria.services.reminder_text import REMINDER_ROW_ACTIONS
@@ -62,6 +63,12 @@ def offered_reply_ids(cards: list[dict | None]) -> set[str]:
         for option in card.get("options") or []:
             if isinstance(option, dict) and isinstance(option.get("id"), str):
                 ids.add(option["id"])
+        # A day tapped on the card's calendar comes back as a day row would.
+        calendar = card.get("calendar")
+        days = calendar.get("days") if isinstance(calendar, dict) else None
+        for day in days if isinstance(days, list) else []:
+            if isinstance(day, str):
+                ids.add(calendar_day_row_id(day))
     return ids
 
 async def _validated_brain_message_reply_id(

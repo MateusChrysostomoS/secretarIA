@@ -236,6 +236,10 @@ class BrainMessageSender:
     # portal"), so a wide menu stays buttons here and becomes a list only on WhatsApp.
     MAX_BUTTONS = 8
 
+    # The Portal draws a month calendar for a card carrying `calendar_days`; WhatsApp has only
+    # the card's rows.
+    SUPPORTS_CALENDAR = True
+
     persists_outbound = True
 
     def __init__(
@@ -371,10 +375,14 @@ class BrainMessageSender:
         button_label: str,
         rows: list[tuple[str, str, str | None]],
         section_title: str = "Opções",
+        *,
+        calendar_days: list[str] | None = None,
     ) -> dict:
         return await self._record(
             interactive_history_body(body, [row[1] for row in rows]),
-            interactive=interactive_list_record(body, button_label, rows, section_title),
+            interactive=interactive_list_record(
+                body, button_label, rows, section_title, calendar_days=calendar_days
+            ),
         )
 
     async def send_template(

@@ -459,6 +459,7 @@ async def test_the_hub_serves_the_card_and_the_tap_that_answered_it(
         "options": [{"id": "consent|accept", "title": "✅ Concordo", "description": None}],
         "button_label": None,
         "section_title": None,
+        "calendar": None,
     }
     assert tap["interactive"] is None
     assert tap["interactive_reply_id"] == "consent|accept"

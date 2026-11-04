@@ -430,11 +430,14 @@ _WEEKDAY_SHORT_PT = ("Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom")
 # How far ahead the day scan looks, and how many days one page shows. The
 # window is a SEARCH bound; what limits the screen is the page size, because
 # WhatsApp allows at most MAX_LIST_ROWS(10) rows per list message. 8 days
-# leaves exactly two control slots ("Ver mais dias" + "Escolher outro
-# Serviço"/"Outro"), so a page is always <= 10 rows whatever combination of
-# controls applies.
+# leaves exactly two control slots ("Outra data" or "Ver mais dias" + "Escolher
+# outro Serviço"/"Outro"), so a page is always <= 10 rows whatever combination
+# of controls applies.
 DAY_PICKER_WINDOW_DAYS = 20
 DAY_PICKER_PAGE_SIZE = 8
+# "Outra data" (owner, 2026-11-04: a patient may want a date far ahead): how far its scan
+# looks. Still one calendar read for the whole window, made only when the patient asks.
+DAY_CALENDAR_WINDOW_DAYS = 180
 # Slots per day page: same reserve, for "Escolher outro dia" + "Escolher
 # outro Serviço".
 SLOT_PICKER_MAX_SLOTS = 8
@@ -446,12 +449,22 @@ SLOT_PICKER_MAX_SLOTS = 8
 # conversations column: nothing about pagination has to be persisted.
 ROW_DAY_PREFIX = "day|"
 ROW_DAY_MORE_PREFIX = "daymore|"
+ROW_DAY_CALENDAR_PREFIX = "daycal|"
 ROW_DAY_AGAIN_PREFIX = "dayagain|"
 ROW_DAY_BACK_PREFIX = "dayback|"
+# Second field of a "Ver mais dias" row inside the long scan: the next page stays in it.
+DAY_CURSOR_CALENDAR = "cal"
+
+
+def calendar_day_row_id(day: str) -> str:
+    """The row id a day tapped on a card's calendar comes back as (page 0: the short list)."""
+    return f"{ROW_DAY_PREFIX}{day}|0"
+
 
 # "Ver mais dias" stays bare on purpose: it moves FORWARD through the same list,
 # so wearing the back arrow would point the wrong way, and it is not a day.
 LABEL_MORE_DAYS = "Ver mais dias"
+LABEL_OTHER_DATE = decorate(EMOJI_SCHEDULE, "Outra data")
 # Shortened from "Escolher outro dia" / "Escolher outro Serviço" to make room for
 # the arrow. This is not cosmetic: "⬅️ " costs THREE characters (the arrow carries
 # a U+FE0F variation selector), and "⬅️ Escolher outro Serviço" is 25 - one over
@@ -487,6 +500,7 @@ def _day_back_label(back_target: str | None) -> str:
 
 DAY_PICKER_BODY = "Para quando você gostaria? Escolha um dia:"
 DAY_PICKER_RESCHEDULE_BODY = "Para quando você gostaria de remarcar? Escolha um dia:"
+DAY_CALENDAR_BODY = "Escolha a data que preferir:"
 # Prefix prepended to the picker body after a free-text date we could not read.
 DAY_NOT_UNDERSTOOD_PREFIX = "Não entendi a data."
 # ...and the extra line shown once the "Outro" escape row is offered.
@@ -3440,6 +3454,12 @@ def _as_page(raw: str | None) -> int:
         return 0
 
 
+def _more_days_cursor(payload: str | None) -> tuple[int, bool]:
+    """A "Ver mais dias" payload as (page, still in the long scan)."""
+    page, _, scan = (payload or "").partition("|")
+    return _as_page(page), scan == DAY_CURSOR_CALENDAR
+
+
 def _day_branch_fields(conversation: Conversation, branch: DayBranch) -> dict:
     """The flow-state fields THIS branch must carry through the day/slot steps.
 
@@ -3495,16 +3515,24 @@ async def enter_day_picker(
     step: str | None = None,
     professionals: list | None = None,
     anchor: datetime | None = None,
+    calendar_view: bool = False,
 ) -> FlowRouterResult:
     """Render the tappable day list: only days that actually have a free slot.
 
     `anchor` centres the scan on the current appointment, showing the nearest days.
 
+    `calendar_view` is the "Outra data" screen: the scan reaches DAY_CALENDAR_WINDOW_DAYS from
+    today, under the same rules as the short list (the doctor's hours, calendar and minimum
+    notice). The bubble carries every free day in `calendar_days` for a channel that draws a
+    calendar; its rows are the same days paged for a channel that does not. A short window with
+    nothing free opens this screen by itself instead of saying the agenda is full.
+
     Costs ONE calendar call for the whole window
     (`CalendarService.list_available_days`), never one per day. Rows:
 
         <= DAY_PICKER_PAGE_SIZE(8) day rows
-        + "Ver mais dias"            when the window holds more
+        + "Outra data"               always, on the short list
+        + "Ver mais dias"            on the long scan, when it holds more
         + the back-control row       when `back_target` is set — labelled via
                                       `_day_back_label` ("Escolher outro
                                       Serviço" for the service destination)
@@ -3515,7 +3543,7 @@ async def enter_day_picker(
     built as one screen. `step` overrides the step written (the retry/escape
     renders reuse this function verbatim), `prefix` prepends one short line.
     """
-    if anchor is None and branch.flow_state is FlowState.EDIT_BOOKING:
+    if anchor is None and not calendar_view and branch.flow_state is FlowState.EDIT_BOOKING:
         raw = getattr(conversation, "flow_edit_draft", None)
         if isinstance(raw, dict):
             value = (raw.get("current") or {}).get("start_at")
@@ -3538,7 +3566,7 @@ async def enter_day_picker(
         days = await available_day_starts(
             calendar,
             start=start,
-            window_days=DAY_PICKER_WINDOW_DAYS,
+            window_days=DAY_CALENDAR_WINDOW_DAYS if calendar_view else DAY_PICKER_WINDOW_DAYS,
             duration_minutes=duration_minutes,
             not_before=_booking_floor(conversation, professionals, branch, calendar.tzinfo),
         )
@@ -3550,6 +3578,21 @@ async def enter_day_picker(
             days = sorted(days, key=lambda day: (abs((day.date() - anchor_day).days), day))
     except CalendarUnavailableError:
         return _calendar_unavailable(conversation, branch, step)
+
+    if not days and not calendar_view:
+        # Nothing soon is not "nothing": a booked-up doctor may have room further ahead.
+        return await enter_day_picker(
+            conversation,
+            tenant,
+            calendar,
+            duration_minutes=duration_minutes,
+            branch=branch,
+            back_target=back_target,
+            prefix=prefix,
+            step=step,
+            professionals=professionals,
+            calendar_view=True,
+        )
 
     if not days:
         # Genuinely nothing bookable in the window — not a failure, and not
@@ -3574,8 +3617,12 @@ async def enter_day_picker(
         (f"{ROW_DAY_PREFIX}{day.date().isoformat()}|{page}", _day_row_label(day))
         for day in shown
     ]
-    if len(days) > offset + DAY_PICKER_PAGE_SIZE:
-        rows.append((f"{ROW_DAY_MORE_PREFIX}{page + 1}", LABEL_MORE_DAYS))
+    if not calendar_view:
+        rows.append((f"{ROW_DAY_CALENDAR_PREFIX}{page + 1}", LABEL_OTHER_DATE))
+    elif len(days) > offset + DAY_PICKER_PAGE_SIZE:
+        rows.append(
+            (f"{ROW_DAY_MORE_PREFIX}{page + 1}|{DAY_CURSOR_CALENDAR}", LABEL_MORE_DAYS)
+        )
     escape = step == branch.day_escape_step
     if escape:
         # The escape row takes the last control slot, displacing the
@@ -3587,7 +3634,8 @@ async def enter_day_picker(
     elif back_target:
         rows.append((f"{ROW_DAY_BACK_PREFIX}{back_target}", _day_back_label(back_target)))
 
-    body = f"{prefix} {branch.day_body}" if prefix else branch.day_body
+    day_body = DAY_CALENDAR_BODY if calendar_view else branch.day_body
+    body = f"{prefix} {day_body}" if prefix else day_body
     if escape:
         body = f"{body}\n\n{DAY_ESCAPE_HINT}"
     return FlowRouterResult(
@@ -3596,8 +3644,9 @@ async def enter_day_picker(
             SlotsBubble(
                 body=body[:MAX_LIST_BODY_CHARS],
                 rows=rows[:MAX_LIST_ROWS],
-                button_label="Ver dias",
-                section_title="Dias disponíveis",
+                button_label="Ver datas" if calendar_view else "Ver dias",
+                section_title="Datas disponíveis" if calendar_view else "Dias disponíveis",
+                calendar_days=[day.date().isoformat() for day in days] if calendar_view else [],
             )
         ],
         flow_state=branch.flow_state,
@@ -3804,7 +3853,7 @@ async def _handle_day_step(
         )
     if step == branch.day_escape_step and _control_match(body, LABEL_OTHER):
         return _delegate_llm_keeping_draft(conversation)
-    if _control_match(body, LABEL_MORE_DAYS):
+    if _control_match(body, LABEL_OTHER_DATE):
         return await enter_day_picker(
             conversation,
             tenant,
@@ -3815,6 +3864,21 @@ async def _handle_day_step(
             back_target=back_target,
             step=step,
             professionals=professionals,
+            calendar_view=True,
+        )
+    if _control_match(body, LABEL_MORE_DAYS):
+        page, calendar_view = _more_days_cursor(_row_payload(body))
+        return await enter_day_picker(
+            conversation,
+            tenant,
+            calendar,
+            duration_minutes=duration_minutes,
+            branch=branch,
+            page=page,
+            back_target=back_target,
+            step=step,
+            professionals=professionals,
+            calendar_view=calendar_view,
         )
 
     if calendar is None:

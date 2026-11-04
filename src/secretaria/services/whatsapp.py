@@ -66,6 +66,8 @@ def interactive_list_record(
     button_label: str,
     rows: list[tuple[str, str, str | None]],
     section_title: str = "Opções",
+    *,
+    calendar_days: list[str] | None = None,
 ) -> dict:
     """What `send_list` puts on the patient's screen, as data.
 
@@ -73,8 +75,12 @@ def interactive_list_record(
     section): `{"kind": "list", "body", "button_label", "section_title",
     "options": [{"id", "title", "description"}]}`. `send_list` builds its
     payload from this record, for the reason `interactive_buttons_record` gives.
+
+    `calendar_days` (Portal only) adds `"calendar": {"days": [iso, ...]}`: the days its calendar
+    lets the patient tap, kept apart from `options` so the row cap, the agent's history line and
+    the staff console's list all stay as they are.
     """
-    return {
+    record = {
         "kind": "list",
         "body": truncate_plain(body, MAX_INTERACTIVE_BODY_CHARS),
         "button_label": truncate_plain(button_label, MAX_LIST_OPEN_BUTTON_CHARS),
@@ -90,6 +96,9 @@ def interactive_list_record(
             for rid, title, desc in rows[:MAX_LIST_ROWS]
         ],
     }
+    if calendar_days:
+        record["calendar"] = {"days": list(calendar_days)}
+    return record
 
 
 class TenantWhatsAppCredentialMissing(RuntimeError):

@@ -164,6 +164,7 @@ _PAYLOAD_TAPS = [
     (f"prof|{_UUID}", "🥼 Dra. Ana", _UUID),
     ("day|2027-03-01|0", "🗓️ Seg, 01/03", "2027-03-01|0"),
     ("daymore|2", "Ver mais dias", "2"),
+    ("daycal|1", "🗓️ Outra data", "1"),
     ("dayagain|2", "⬅️ Outro dia", "2"),
     ("dayback|service", "⬅️ Outro serviço", "service"),
     ("insmore|1", "Ver mais convênios", "1"),

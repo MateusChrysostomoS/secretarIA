@@ -212,8 +212,9 @@ async def test_full_agenda_still_answers_the_old_no_days_message():
     assert res.action == "reply"
     assert res.professional_config_gap is None
     assert res.bubbles[0].body == NO_AVAILABLE_DAYS_MESSAGE
-    # It reached the calendar: this branch is the *dynamic* one.
-    assert calendar.day_scans == 1
+    # It reached the calendar: this branch is the *dynamic* one. Two reads: the
+    # short window came back empty, so the long one was tried before giving up.
+    assert calendar.day_scans == 2
 
 
 async def test_a_complete_professional_still_reaches_the_day_picker():

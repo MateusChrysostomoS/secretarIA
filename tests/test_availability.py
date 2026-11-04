@@ -166,6 +166,7 @@ async def test_the_day_picker_is_byte_identical_after_the_extraction():
     assert bubble.rows == [
         ("day|2026-10-05|0", fr._day_row_label(days[0])),
         ("day|2026-10-06|0", fr._day_row_label(days[1])),
+        ("daycal|1", fr.LABEL_OTHER_DATE),
         ("dayback|service", fr.LABEL_ANOTHER_SERVICE),
     ]
     assert (bubble.button_label, bubble.section_title) == ("Ver dias", "Dias disponíveis")

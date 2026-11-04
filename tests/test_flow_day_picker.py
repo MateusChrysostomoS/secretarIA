@@ -49,6 +49,7 @@ from secretaria.services.flow_router import (  # noqa: E402
     LABEL_BACK,
     LABEL_MORE_DAYS,
     LABEL_OTHER,
+    LABEL_OTHER_DATE,
     MANAGE_DAY_BRANCH,
     STEP_AWAITING_DAY,
     STEP_AWAITING_DAY_ESCAPE,
@@ -323,9 +324,8 @@ async def test_day_picker_shows_a_full_page_plus_its_two_controls():
     )
     labels = _row_labels(result.bubbles[0])
     assert len(labels) == MAX_LIST_ROWS
-    # Every DAY row carries the calendar emoji; the two CONTROL rows below do
-    # not - "Ver mais dias" pages forward through the same list rather than
-    # naming a day, and the back row wears the arrow instead.
+    # Every DAY row carries the calendar emoji, and so does "Outra data", which also leads to a
+    # date; the back row wears the arrow instead.
     assert labels[:DAY_PICKER_PAGE_SIZE] == [
         "🗓️ Seg, 01/03",
         "🗓️ Ter, 02/03",
@@ -336,8 +336,8 @@ async def test_day_picker_shows_a_full_page_plus_its_two_controls():
         "🗓️ Dom, 07/03",
         "🗓️ Seg, 08/03",
     ]
-    assert labels[-2:] == [LABEL_MORE_DAYS, LABEL_ANOTHER_SERVICE]
-    assert LABEL_MORE_DAYS == "Ver mais dias"
+    assert labels[-2:] == [LABEL_OTHER_DATE, LABEL_ANOTHER_SERVICE]
+    assert LABEL_OTHER_DATE == "🗓️ Outra data"
     assert LABEL_ANOTHER_SERVICE == "⬅️ Outro serviço"
 
 
@@ -360,7 +360,7 @@ async def test_day_picker_only_lists_days_the_calendar_reported_free():
     result = await enter_day_picker(
         _conversation(), _tenant(), _Calendar(day_count=3), duration_minutes=30
     )
-    assert [row[0] for row in result.bubbles[0].rows] == [
+    assert [row[0] for row in result.bubbles[0].rows if row[0].startswith("day|")] == [
         "day|2027-03-01|0",
         "day|2027-03-02|0",
         "day|2027-03-03|0",
@@ -397,7 +397,7 @@ async def test_ver_mais_dias_pages_forward_and_the_next_page_still_books():
     )
 
     second = await route(
-        _conversation(), tenant, calendar, _control_tap(first.bubbles[0], LABEL_MORE_DAYS)
+        _conversation(), tenant, calendar, _control_tap(first.bubbles[0], LABEL_OTHER_DATE)
     )
     labels = _row_labels(second.bubbles[0])
     assert labels[0] == "🗓️ Ter, 09/03"  # page 2 starts where page 1 stopped

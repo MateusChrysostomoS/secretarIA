@@ -85,6 +85,9 @@ class SlotsBubble:
     kind: Literal["slots"] = "slots"
     button_label: str = "Ver horários"
     section_title: str = "Horários livres"
+    # ISO dates a channel able to draw a calendar offers on it (`SUPPORTS_CALENDAR`). The rows
+    # stay the card for every other channel, and the WhatsApp cap of 10 rows still holds.
+    calendar_days: list[str] = field(default_factory=list)
 
 
 Bubble = TextBubble | ButtonBubble | SlotsBubble

@@ -580,6 +580,7 @@ _PAYLOAD_ROW_PREFIXES: tuple[str, ...] = (
     "prof|",
     "day|",
     "daymore|",
+    "daycal|",
     "dayagain|",
     "dayback|",
     "insmore|",

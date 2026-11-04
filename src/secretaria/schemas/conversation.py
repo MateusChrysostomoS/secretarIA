@@ -57,6 +57,12 @@ class InteractiveOption(BaseModel):
     description: str | None = None
 
 
+class InteractiveCalendar(BaseModel):
+    """The days a list card's calendar lets the patient tap (ISO dates, in order)."""
+
+    days: list[str]
+
+
 class InteractiveRead(BaseModel):
     """What an interactive outbound message offered — `Message.interactive`.
 
@@ -72,6 +78,8 @@ class InteractiveRead(BaseModel):
     # List only: the button that opens the list, and the heading over its rows.
     button_label: str | None = None
     section_title: str | None = None
+    # List only, Portal only: see services/whatsapp.py::interactive_list_record.
+    calendar: InteractiveCalendar | None = None
 
 
 def interactive_read_or_none(blob: object, *, message_id: object) -> InteractiveRead | None:

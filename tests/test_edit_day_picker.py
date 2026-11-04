@@ -39,7 +39,7 @@ async def test_with_an_anchor_the_nearest_days_come_first_and_are_shown_in_order
     rows = result.bubbles[0].rows
     day_ids = [row[0] for row in rows if row[0].startswith(fr.ROW_DAY_PREFIX)]
     assert day_ids == [f"day|2026-10-{d}|0" for d in (12, 14, 15, 16, 17, 19, 20, 21)]
-    assert any(row[1] == fr.LABEL_MORE_DAYS for row in rows)  # 12 days, 8 shown
+    assert any(row[1] == fr.LABEL_OTHER_DATE for row in rows)
 
 
 async def test_without_an_anchor_the_picker_is_unchanged():
