@@ -27,6 +27,7 @@ from secretaria.core.crypto import EncryptionError
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
 from secretaria.models import Professional, Tenant
+from secretaria.schemas.contact_email import ContactEmailRead, ContactEmailUpdate
 from secretaria.schemas.internal_provisioning import (
     ActivateOut,
     AsaasConnectionIn,
@@ -43,7 +44,7 @@ from secretaria.schemas.internal_provisioning import (
     WhatsappConnectionOut,
 )
 from secretaria.schemas.professional import ProfessionalListItem
-from secretaria.services import provisioning
+from secretaria.services import contact_email as contact_email_service, provisioning
 from secretaria.services.email import is_known_template
 from secretaria.services.hub_configuration import professional_list_item
 from secretaria.services.professional_calendar_setup import prepare_shared_professional_calendar
@@ -82,6 +83,45 @@ async def internal_professional_roster(
         .order_by(Professional.created_at, Professional.id)
     )
     return [await professional_list_item(session, row, tenant) for row in rows]
+
+
+@router.get(
+    "/tenants/{tenant_id}/contact-email",
+    response_model=ContactEmailRead,
+    summary="Read the clinic's operational e-mail (internal)",
+    responses=_NOT_FOUND_RESPONSES,
+)
+async def internal_get_contact_email(
+    tenant_id: _TENANT_PATH,
+    session: AsyncSession = Depends(get_session),
+) -> ContactEmailRead:
+    tenant = await session.get(Tenant, tenant_id)
+    if tenant is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown tenant")
+    return ContactEmailRead(contact_email=tenant.contact_email)
+
+
+@router.patch(
+    "/tenants/{tenant_id}/contact-email",
+    response_model=ContactEmailRead,
+    summary="Set or clear the clinic's operational e-mail (internal)",
+    description=(
+        "Body `{contact_email: str | null}` (key required). The address is trimmed and "
+        "lowercased; null or a blank string clears it; an invalid address is 422."
+    ),
+    responses=_NOT_FOUND_RESPONSES,
+)
+async def internal_update_contact_email(
+    tenant_id: _TENANT_PATH,
+    body: ContactEmailUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> ContactEmailRead:
+    tenant = await session.get(Tenant, tenant_id)
+    if tenant is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown tenant")
+    stored = contact_email_service.set_contact_email(tenant, body.contact_email)
+    await session.commit()
+    return ContactEmailRead(contact_email=stored)
 
 
 @router.post(

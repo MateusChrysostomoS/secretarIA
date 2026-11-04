@@ -40,8 +40,9 @@ from secretaria.core.logging import get_logger
 from secretaria.core.subscription import SubscriptionClaim
 from secretaria.models import Tenant
 from secretaria.schemas.config import TenantConfigRead, TenantConfigUpdate
+from secretaria.schemas.contact_email import ContactEmailRead, ContactEmailUpdate
 from secretaria.schemas.hub_configuration import HubConfigurationRead, HubConfigurationUpdate
-from secretaria.services import hub_configuration as hubcfg
+from secretaria.services import contact_email as contact_email_service, hub_configuration as hubcfg
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/tenants/me", tags=["hub-config"])
@@ -96,6 +97,21 @@ async def get_config(
     session: AsyncSession = Depends(get_session),
 ) -> TenantConfigRead:
     return await hubcfg.tenant_read_model(session, tenant)
+
+
+@router.patch("/contact-email", response_model=ContactEmailRead)
+async def update_contact_email(
+    body: ContactEmailUpdate,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> ContactEmailRead:
+    """The clinic's operational e-mail; the ONLY writer of it (config PUTs ignore the field).
+
+    Open to any authenticated user of the tenant, like the non-payment fields of the config.
+    """
+    stored = contact_email_service.set_contact_email(tenant, body.contact_email)
+    await session.commit()
+    return ContactEmailRead(contact_email=stored)
 
 
 @router.put("/config", response_model=TenantConfigRead)

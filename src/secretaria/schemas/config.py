@@ -365,6 +365,9 @@ class TenantConfigRead(BaseModel):
     """
 
     clinic_name: str
+    # Read-only here: the clinic's operational e-mail (payment/booking/handoff alerts). The only
+    # writer is PATCH /tenants/me/contact-email, so a config save can never clobber it.
+    contact_email: str | None = None
     # The clinic's own slot in the greeting frame, plus everything the hub UI
     # needs to show the clinic exactly what its patients will receive WITHOUT
     # re-typing the frame in TypeScript. `greeting_preview_template` is the

@@ -422,6 +422,7 @@ async def tenant_read_model(session: AsyncSession, tenant: Tenant) -> TenantConf
     asaas_connected = await cfg.has_asaas_api_key(session, tenant.id)
     return TenantConfigRead(
         clinic_name=tenant.clinic_name,
+        contact_email=tenant.contact_email,
         clinic_description=tenant.clinic_description,
         # Rendered SERVER-SIDE, by the same function the worker sends, so the
         # preview the clinic approves in the hub and the message the patient
