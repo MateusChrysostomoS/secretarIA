@@ -18,6 +18,7 @@ from secretaria.models import (
 from secretaria.services.entitlements_client import get_entitlements
 from secretaria.services.greeting_template import (
     render_greeting,
+    tenant_city,
 )
 from secretaria.services.tenant_config import (
     get_waba_token,
@@ -257,7 +258,11 @@ async def _handle_remove_context_command(
                 # degrade below is now unreachable for a tenant with a name, and
                 # this command is once again a faithful rehearsal of what a
                 # brand-new patient sees.
-                greeting = render_greeting(tenant.clinic_name, _fit_clinic_description(tenant))
+                greeting = render_greeting(
+                    tenant.clinic_name,
+                    _fit_clinic_description(tenant),
+                    city=tenant_city(tenant.address),
+                )
                 waba_token = await get_waba_token(session, tenant.id)
         except IntegrityError:
             logger.info("worker_remove_context_duplicate_race", wam_id=wam_id)

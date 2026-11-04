@@ -31,7 +31,7 @@ from secretaria.services.context_extraction import (
     draft_missing_messages,
     extract_context,
 )
-from secretaria.services.greeting_template import clinic_description_budget
+from secretaria.services.greeting_template import clinic_description_budget, tenant_city
 from secretaria.services.insurance_catalog import list_catalog, list_tenant_plans
 from secretaria.services.safe_fetch import FetchError, UnsafeUrlError, fetch_public_page
 from secretaria.services.service_catalog import load_service_catalog
@@ -173,7 +173,8 @@ async def _load_inputs(sid: UUID) -> dict:
             "facts": tenant.clinic_facts,
             "address": tenant.address,
             "description": tenant.clinic_description,
-            "budget": clinic_description_budget(tenant.clinic_name),  # THIS clinic's greeting slot
+            # THIS clinic's greeting slot
+            "budget": clinic_description_budget(tenant.clinic_name, tenant_city(tenant.address)),
             "saved_messages": {
                 "returning_greeting_message": tenant.returning_greeting_message,
                 "post_consult_message": tenant.post_consult_message,

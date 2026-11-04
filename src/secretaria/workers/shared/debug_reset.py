@@ -41,7 +41,7 @@ from secretaria.models import (
     Patient,
     Tenant,
 )
-from secretaria.services.greeting_template import render_greeting
+from secretaria.services.greeting_template import render_greeting, tenant_city
 from secretaria.workers.shared.context import _ReplyContext
 from secretaria.workers.shared.greeting import _fit_clinic_description
 
@@ -138,7 +138,9 @@ def debug_reset_reply(
         tenant_id=tenant.id,
         patient_ref=patient_ref,
         inbound_body="",
-        greeting_override=render_greeting(tenant.clinic_name, _fit_clinic_description(tenant)),
+        greeting_override=render_greeting(
+            tenant.clinic_name, _fit_clinic_description(tenant), city=tenant_city(tenant.address)
+        ),
         greeting_buttons=[],
         debug_reset=True,
     )

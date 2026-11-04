@@ -44,6 +44,7 @@ from secretaria.services.greeting_template import (  # noqa: E402
     clinic_description_budget,
     greeting_preview_template,
     render_greeting,
+    tenant_city,
 )
 from secretaria.workers import tasks  # noqa: E402
 
@@ -74,12 +75,78 @@ def test_obligations_are_present_whatever_the_clinic_configured(description: str
 def test_description_is_rendered_into_the_slot() -> None:
     rendered = render_greeting("Clínica São Lucas", "Oftalmologia e cirurgia refrativa.")
 
-    # The description completes the identification sentence, inline.
+    # Comma after the name, first letter lower-cased to continue the sentence.
     assert (
-        "Sou a SecretarIA, assistente virtual do consultório do Clínica São Lucas "
-        "Oftalmologia e cirurgia refrativa.\n"
+        "Sou a SecretarIA, assistente virtual do consultório do Clínica São Lucas, "
+        "oftalmologia e cirurgia refrativa.\n"
     ) in rendered
-    assert rendered.index("Oftalmologia e cirurgia") < rendered.index("🤖 Importante")
+    assert rendered.index("oftalmologia e cirurgia") < rendered.index("🤖 Importante")
+
+
+def test_city_closes_the_identification_sentence() -> None:
+    rendered = render_greeting(
+        "Chrysostomo For Eyes",
+        "Clínica especializada em saúde ocular, cirurgia refrativa e catarata.",
+        city="Belo Horizonte",
+    )
+
+    assert (
+        "Sou a SecretarIA, assistente virtual do consultório do Chrysostomo For Eyes, "
+        "clínica especializada em saúde ocular, cirurgia refrativa e catarata, "
+        "em Belo Horizonte.\n"
+    ) in rendered
+
+
+def test_city_goes_after_a_multi_sentence_description_and_the_period_stays_last() -> None:
+    rendered = render_greeting(
+        "Clinic", "Clínica de olhos. Atendimento particular e por convênio.", city="Recife"
+    )
+
+    assert "convênio, em Recife.\n" in rendered
+
+
+def test_city_without_description() -> None:
+    rendered = render_greeting("Clinic", "", city="Recife")
+
+    assert "assistente virtual do consultório do Clinic, em Recife\n" in rendered
+
+
+@pytest.mark.parametrize("address", [None, {}, {"city": ""}, {"city": None}, "x", {"city": 3}])
+def test_tenant_city_ignores_missing_or_odd_values(address: object) -> None:
+    assert tenant_city(address) == ""
+    assert "em " not in render_greeting("Clinic", "", city=tenant_city(address)).split("\n")[1]
+
+
+def test_tenant_city_reads_and_strips_the_address_city() -> None:
+    assert tenant_city({"city": "  Belo Horizonte ", "state": "MG"}) == "Belo Horizonte"
+
+
+@pytest.mark.parametrize(
+    ("description", "expected_start"),
+    [
+        ("Clínica de olhos", "clínica de olhos"),
+        ("CRM-based clinic", "CRM-based clinic"),
+        ("iPhone clinic", "iPhone clinic"),
+        ("clínica já minúscula", "clínica já minúscula"),
+    ],
+)
+def test_first_letter_is_lowered_only_for_ordinary_words(
+    description: str, expected_start: str
+) -> None:
+    rendered = render_greeting("Clinic", description)
+
+    assert f"do consultório do Clinic, {expected_start}\n" in rendered
+
+
+@pytest.mark.parametrize("city", ["", "Belo Horizonte", "São José dos Campos"])
+@pytest.mark.parametrize("clinic_name", CLINIC_NAMES)
+def test_budget_stays_exact_with_a_city(clinic_name: str, city: str) -> None:
+    budget = clinic_description_budget(clinic_name, city)
+
+    at_budget = render_greeting(clinic_name, "x" * budget, city=city)
+    over_budget = render_greeting(clinic_name, "x" * (budget + 1), city=city)
+    assert len(at_budget) == MAX_INTERACTIVE_BODY_CHARS
+    assert len(over_budget) > MAX_INTERACTIVE_BODY_CHARS
 
 
 def test_empty_description_leaves_no_trailing_space_on_the_identification_line() -> None:
@@ -209,13 +276,16 @@ def test_consent_acceptance_ignores_everything_else(body: str | None) -> None:
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("city", ["", "Belo Horizonte"])
 @pytest.mark.parametrize("clinic_name", CLINIC_NAMES)
 @pytest.mark.parametrize(
     "description",
-    ["", "Oftalmologia e cirurgia refrativa.", "Atendemos convênios.\n\nEstacionamento."],
+    # No empty description here: the hub shows its "(sua descrição aparece aqui)"
+    # hint in the slot instead, so the comma before it is expected in the preview.
+    ["oftalmologia e cirurgia refrativa", "atendemos convênios.\n\nEstacionamento"],
 )
 def test_preview_template_reconstitutes_the_real_message(
-    clinic_name: str, description: str
+    clinic_name: str, description: str, city: str
 ) -> None:
     """The invariant the whole hub preview rests on.
 
@@ -227,7 +297,11 @@ def test_preview_template_reconstitutes_the_real_message(
     it, INCLUDING its blank-run collapse (MessagesSection.tsx::collapseBlankRun),
     which is the one piece of logic mirrored on that side.
     """
-    template = greeting_preview_template(clinic_name)
+    # Descriptions here start lower-case and carry no closing punctuation: the
+    # backend also lower-cases the first letter and moves the closing
+    # punctuation after the city, two touch-ups the frontend preview does not
+    # mirror (see the tests below for the real message).
+    template = greeting_preview_template(clinic_name, city)
     before, _, after = template.partition(PREVIEW_PLACEHOLDER)
 
     # The description now sits inline at the end of the identification line, so
@@ -236,7 +310,7 @@ def test_preview_template_reconstitutes_the_real_message(
     as_the_hub_shows_it = re.sub(r"[ \t]+\n", "\n", before + description.strip() + after)
     as_the_hub_shows_it = re.sub(r"\n{3,}", "\n\n", as_the_hub_shows_it)
 
-    assert as_the_hub_shows_it == render_greeting(clinic_name, description)
+    assert as_the_hub_shows_it == render_greeting(clinic_name, description, city=city)
 
 
 def test_preview_template_contains_exactly_one_placeholder() -> None:
@@ -258,8 +332,8 @@ def test_preview_template_contains_exactly_one_placeholder() -> None:
 # identical: WhatsApp always takes it, and its 1024-char budget is measured on it.
 _NO_NAME_GREETING_SHA256 = "ef449eb47bfde29d8cc28d3a00449737e3e165a5dbedbd3dae632c1be32fb801"
 _NO_NAME_GREETING_LEN = 797
-_PREVIEW_SHA256 = "f1ee10eeaf4b5f185e82eb08b4d6854b4b3e84f4da8ceca010251c04bacc2bae"
-_GINECOAQUI_BUDGET = 226
+_PREVIEW_SHA256 = "035e686c174322f7a5e4fa7374f21bed8aaee7a6ce558259ac96682ac62d3030"
+_GINECOAQUI_BUDGET = 225
 
 
 def _sha256(text: str) -> str:
@@ -297,6 +371,7 @@ def test_select_greeting_names_patient_only_on_portal(channel: str, expect_name:
     tenant = SimpleNamespace(
         clinic_name="GinecoAqui",
         clinic_description="",
+        address={"city": "Belo Horizonte"},
         returning_greeting_message=None,
     )
     patient = SimpleNamespace(name="Mateus", channel=channel)
@@ -308,4 +383,4 @@ def test_select_greeting_names_patient_only_on_portal(channel: str, expect_name:
     assert greeting is not None
     assert ("GinecoAqui, Mateus!" in greeting) is expect_name
     if not expect_name:
-        assert greeting == render_greeting("GinecoAqui", "")
+        assert greeting == render_greeting("GinecoAqui", "", city="Belo Horizonte")

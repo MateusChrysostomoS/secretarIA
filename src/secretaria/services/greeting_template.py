@@ -102,7 +102,7 @@ CONSENT_EVENT_KIND = "terms_accepted"
 # nothing is worse than not advertising one.
 GREETING_FRAME = """\
 👋 Olá! Bem-vindo(a) à {clinic_name}{patient_suffix}!
-Sou a SecretarIA, assistente virtual do consultório do {clinic_name} {clinic_description}
+Sou a SecretarIA, assistente virtual {identification}
 
 🤖 Importante: você conversa com um *assistente virtual automatizado*, que usa \
 inteligência artificial para organizar o seu atendimento. Nenhuma orientação \
@@ -127,10 +127,57 @@ agendamento.
 🚨 Em emergência, não use este canal: procure o pronto-socorro ou ligue 192."""
 
 
+_TRAILING_PUNCT = re.compile(r"[.!?…]+$")
+
+
+def tenant_city(address: object) -> str:
+    """The city out of `Tenant.address` (a JSON dict), or "" when not collected."""
+    if not isinstance(address, dict):
+        return ""
+    city = address.get("city")
+    return city.strip() if isinstance(city, str) else ""
+
+
+def _lower_first(text: str) -> str:
+    """Lower-case the first letter so the description continues the sentence
+    ("..., clínica especializada em ..."). Leaves an acronym or CamelCase first
+    word alone ("CRM", "iPhone") and never changes the text's length."""
+    if not text or not text[0].isupper():
+        return text
+    first_word = text.split(None, 1)[0]
+    if any(ch.isupper() for ch in first_word[1:]):
+        return text
+    lowered = text[0].lower()
+    return lowered + text[1:] if len(lowered) == 1 else text
+
+
+def _identification(name: str, description: str, city: str) -> str:
+    """The tail of "Sou a SecretarIA, assistente virtual <tail>".
+
+    "do consultório do <nome>, <descrição>, em <cidade>" — description and city
+    are each optional. The description's own closing punctuation is moved after
+    the city so the sentence ends once ("..., em Belo Horizonte."). The overhead
+    around the description is constant, so `clinic_description_budget` stays exact.
+    """
+    base = f"do consultório do {name}" if name else "da nossa clínica"
+    desc = _lower_first(description)
+    punct = ""
+    if desc:
+        match = _TRAILING_PUNCT.search(desc)
+        if match:
+            punct = match.group()
+            desc = desc[: match.start()].rstrip()
+    parts = [p for p in (desc, f"em {city}" if city else "") if p]
+    if not parts:
+        return base
+    return f"{base}, " + ", ".join(parts) + punct
+
+
 def render_greeting(
     clinic_name: str | None,
     clinic_description: str | None,
     patient_name: str | None = None,
+    city: str | None = None,
 ) -> str:
     """Render the frame for one tenant. Pure; never raises on missing input.
 
@@ -153,10 +200,9 @@ def render_greeting(
     rendered = GREETING_FRAME.format(
         clinic_name=name or "nossa clínica",
         patient_suffix=f", {patient}" if patient else "",
-        clinic_description=description,
+        identification=_identification(name, description, (city or "").strip()),
     )
-    # The description now completes the second sentence inline, so an empty one
-    # leaves the separator space dangling at the end of that line: drop it.
+    # Defensive: never leave trailing spaces at the end of a line.
     rendered = re.sub(r"[ \t]+\n", "\n", rendered)
     # Collapse any run of blank lines (e.g. a description typed with trailing
     # blank lines). Done with a regex, not `replace("\n\n\n", "\n\n")`, which
@@ -178,7 +224,7 @@ _BUDGET_PROBE = "x"
 FRAME_FIXED_CHARS = len(render_greeting("", ""))
 
 
-def clinic_description_budget(clinic_name: str | None) -> int:
+def clinic_description_budget(clinic_name: str | None, city: str | None = None) -> int:
     """How many characters of description still fit for THIS clinic.
 
     The greeting always ships with action buttons attached, so the whole
@@ -199,7 +245,7 @@ def clinic_description_budget(clinic_name: str | None) -> int:
     outright. Subtracting the probe leaves the true cost of the frame
     INCLUDING the separators a real description reinstates.
     """
-    probe = render_greeting(clinic_name, _BUDGET_PROBE)
+    probe = render_greeting(clinic_name, _BUDGET_PROBE, city=city)
     frame_cost = len(probe) - len(_BUDGET_PROBE)
     return max(0, MAX_INTERACTIVE_BODY_CHARS - frame_cost)
 
@@ -213,11 +259,11 @@ def clinic_description_budget(clinic_name: str | None) -> int:
 PREVIEW_PLACEHOLDER = "{{descricao}}"
 
 
-def greeting_preview_template(clinic_name: str | None) -> str:
+def greeting_preview_template(clinic_name: str | None, city: str | None = None) -> str:
     """The frame for this clinic with `PREVIEW_PLACEHOLDER` in the slot.
 
     Byte-for-byte what `render_greeting` produces, except the clinic's own text
     is replaced by the token — so whatever the hub renders around the token IS
     the message the patient receives, including the clinic's name.
     """
-    return render_greeting(clinic_name, PREVIEW_PLACEHOLDER)
+    return render_greeting(clinic_name, PREVIEW_PLACEHOLDER, city=city)

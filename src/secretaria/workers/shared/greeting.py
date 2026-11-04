@@ -35,6 +35,7 @@ from secretaria.services.flow_router import (
 from secretaria.services.greeting_template import (
     clinic_description_budget,
     render_greeting,
+    tenant_city,
 )
 from secretaria.services.insurance_catalog import (
     TenantInsurance,
@@ -144,7 +145,9 @@ def _first_contact_reply(
         tenant_id=tenant.id,
         patient_ref=patient_ref,
         inbound_body=inbound_body,
-        greeting_override=render_greeting(tenant.clinic_name, _fit_clinic_description(tenant)),
+        greeting_override=render_greeting(
+            tenant.clinic_name, _fit_clinic_description(tenant), city=tenant_city(tenant.address)
+        ),
         greeting_buttons=[],
         send_consent_notice=not ask_name,
         send_name_request=ask_name,
@@ -182,6 +185,7 @@ def _select_greeting(
         tenant.clinic_name,
         _fit_clinic_description(tenant),
         patient_name=patient.name if policy_for(patient.channel).greets_by_name else None,
+        city=tenant_city(tenant.address),
     )
 
 def _fit_clinic_description(tenant: Tenant) -> str:
@@ -195,7 +199,8 @@ def _fit_clinic_description(tenant: Tenant) -> str:
     truncate, so Meta 400s and the patient receives NOTHING.
     """
     description = (tenant.clinic_description or "").strip()
-    return truncate_plain(description, clinic_description_budget(tenant.clinic_name))
+    budget = clinic_description_budget(tenant.clinic_name, tenant_city(tenant.address))
+    return truncate_plain(description, budget)
 
 def _greeting_buttons_for(
     tenant: Tenant,

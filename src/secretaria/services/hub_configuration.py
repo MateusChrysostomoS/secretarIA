@@ -46,6 +46,7 @@ from secretaria.services import reminder_schedule, tenant_config as cfg
 from secretaria.services.greeting_template import (
     clinic_description_budget,
     greeting_preview_template,
+    tenant_city,
 )
 from secretaria.services.payments import settings as payment_settings
 from secretaria.services.service_catalog import entry_service_id, load_service_catalog
@@ -329,7 +330,7 @@ async def apply_tenant_config(session: AsyncSession, tenant: Tenant, data: dict)
     # so a PUT that changes `clinic_name` and `clinic_description` together is
     # judged against the name it is actually saving, not the stored one.
     if "clinic_description" in data:
-        budget = clinic_description_budget(tenant.clinic_name)
+        budget = clinic_description_budget(tenant.clinic_name, tenant_city(tenant.address))
         typed = len((tenant.clinic_description or "").strip())
         if typed > budget:
             raise ClinicDescriptionTooLong(
@@ -426,8 +427,12 @@ async def tenant_read_model(session: AsyncSession, tenant: Tenant) -> TenantConf
         # preview the clinic approves in the hub and the message the patient
         # receives cannot drift. The alternative — re-typing the frame in the
         # frontend — guarantees they eventually do.
-        greeting_preview_template=greeting_preview_template(tenant.clinic_name),
-        clinic_description_max=clinic_description_budget(tenant.clinic_name),
+        greeting_preview_template=greeting_preview_template(
+            tenant.clinic_name, tenant_city(tenant.address)
+        ),
+        clinic_description_max=clinic_description_budget(
+            tenant.clinic_name, tenant_city(tenant.address)
+        ),
         returning_greeting_message=tenant.returning_greeting_message,
         persona_notes=tenant.persona_notes,
         post_consult_message=tenant.post_consult_message,
