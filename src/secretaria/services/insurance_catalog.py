@@ -312,8 +312,10 @@ def _plan_display_name(plan: TenantInsurancePlan, entry: InsuranceCatalog | None
 async def list_tenant_plans(
     session: AsyncSession, tenant_id: UUID
 ) -> list[tuple[TenantInsurancePlan, InsuranceCatalog | None]]:
-    """The clinic's enabled plans (catalog-backed AND custom), by display name.
+    """The clinic's enabled plans (catalog-backed AND custom), in the clinic's order.
 
+    Plans the clinic placed (`sort_order`) come first, by position; the rest follow
+    by display name - which is the whole list for a clinic that never ordered.
     LEFT JOIN because a custom "Outro" row (TASK-008) has no catalog entry.
     """
     rows = await session.execute(
@@ -322,8 +324,37 @@ async def list_tenant_plans(
         .where(TenantInsurancePlan.tenant_id == tenant_id)
     )
     pairs = [(plan, entry) for plan, entry in rows.all()]
-    pairs.sort(key=lambda pair: normalize(_plan_display_name(*pair)))
+    pairs.sort(key=lambda pair: _plan_sort_key(*pair))
     return pairs
+
+
+def _plan_sort_key(
+    plan: TenantInsurancePlan, entry: InsuranceCatalog | None
+) -> tuple[int, int, str]:
+    position = getattr(plan, "sort_order", None)
+    if position is None:
+        return (1, 0, normalize(_plan_display_name(plan, entry)))
+    return (0, position, normalize(_plan_display_name(plan, entry)))
+
+
+async def set_tenant_plan_order(
+    session: AsyncSession, tenant: Tenant, plan_ids: Sequence[UUID]
+) -> None:
+    """Put the clinic's plans in the order of `plan_ids` (`tenant_insurance_plans.id`).
+
+    Listed plans get positions 0..n-1; every other plan of the clinic is un-placed
+    (NULL) and so follows them alphabetically - sending just ["<Unimed>"] puts Unimed
+    first and leaves the rest as they were. Raises PlanNotFound (nothing written)
+    when an id is not one of this clinic's plans. No commit.
+    """
+    wanted = [UUID(str(plan_id)) for plan_id in plan_ids]
+    current = {plan.id: plan for plan, _entry in await list_tenant_plans(session, tenant.id)}
+    if any(plan_id not in current for plan_id in wanted):
+        raise PlanNotFound()
+    positions = {plan_id: index for index, plan_id in enumerate(dict.fromkeys(wanted))}
+    for plan_id, plan in current.items():
+        plan.sort_order = positions.get(plan_id)
+    await session.flush()
 
 
 async def list_professional_plans(

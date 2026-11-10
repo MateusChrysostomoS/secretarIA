@@ -41,6 +41,7 @@ from secretaria.schemas.insurance import (
     ProfessionalInsurancePlansUpdate,
     TenantInsurancePlanCustomCreate,
     TenantInsurancePlanDepositUpdate,
+    TenantInsurancePlanOrderUpdate,
     TenantInsurancePlanRead,
     TenantInsurancePlansUpdate,
 )
@@ -57,6 +58,7 @@ from secretaria.services.insurance_catalog import (
     professional_accepted_tenant_plan_ids,
     set_professional_clinic_plans,
     set_professional_independent_plans,
+    set_tenant_plan_order,
     set_tenant_plans,
     update_tenant_plan_charge_deposit,
 )
@@ -101,6 +103,7 @@ async def _tenant_plans(session: AsyncSession, tenant: Tenant) -> list[TenantIns
             is_custom=entry is None,
             custom_payment_note=plan.custom_payment_note if entry is None else None,
             charge_deposit=plan.charge_deposit,
+            sort_order=plan.sort_order,
         )
         for plan, entry in await list_tenant_plans(session, tenant.id)
     ]
@@ -255,6 +258,33 @@ async def post_tenant_insurance_plan_custom(
         custom_payment_note=plan.custom_payment_note,
         charge_deposit=plan.charge_deposit,
     )
+
+
+@router.put("/insurance-plans/order", response_model=list[TenantInsurancePlanRead])
+async def put_tenant_insurance_plan_order(
+    body: TenantInsurancePlanOrderUpdate,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> list[TenantInsurancePlanRead]:
+    """Choose the order the patient sees the clinic's convênios in.
+
+    The listed plans come first, in the given order; the rest follow alphabetically.
+    404 when an id is not one of this clinic's plans (nothing is changed).
+    """
+    try:
+        plan_ids = [UUID(plan_id) for plan_id in body.plan_ids]
+        await set_tenant_plan_order(session, tenant, plan_ids)
+    except (ValueError, PlanNotFound):
+        await session.rollback()
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Plan not found") from None
+    await session.commit()
+    plans = await _tenant_plans(session, tenant)
+    logger.info(
+        "hub_insurance_plan_order_updated",
+        tenant_id=str(tenant.id),
+        placed_count=sum(1 for plan in plans if plan.sort_order is not None),
+    )
+    return plans
 
 
 @router.patch("/insurance-plans/{plan_id}", response_model=TenantInsurancePlanRead)

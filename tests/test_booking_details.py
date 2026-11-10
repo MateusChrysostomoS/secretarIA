@@ -54,7 +54,8 @@ def test_every_item_the_skipped_steps_would_have_shown():
         "Confira os detalhes da sua consulta:\n"
         "\n"
         "🥼 Profissional: Dra. Ana — Cardiologia\n"
-        "🏥 Serviço: Consulta — R$250\n"
+        # Under a convênio the particular price is not shown (Instituto Gicovate, 2026-11-09).
+        "🏥 Serviço: Consulta\n"
         "Convênio: Unimed\n"
         "👤 Para: Maria da Silva\n"
         "Endereço: Rua A, 1, Sala 2, Centro, São Paulo/SP, CEP 01000-000\n"
@@ -125,7 +126,7 @@ def test_a_text_longer_than_the_whatsapp_limit_drops_the_description_then_requir
     text = booking_details_text(
         service=service,
         professional=ANA,
-        insurance="Unimed",
+        insurance="Particular",
         attendee_name=ATTENDEE_SELF,
         address="Rua A, 1, Recife",
     )
@@ -134,7 +135,7 @@ def test_a_text_longer_than_the_whatsapp_limit_drops_the_description_then_requir
     for line in (
         "🥼 Profissional: Dra. Ana — Cardiologia",
         "🏥 Serviço: Consulta — R$250",
-        "Convênio: Unimed",
+        "Convênio: Particular",
         "👤 Para: você",
         "Endereço: Rua A, 1, Recife",
     ):
@@ -220,3 +221,43 @@ def test_the_service_card_spells_the_price_exactly_as_before(price, first_line):
     assert fr._service_detail_text(service, _tenant()) == (
         f"{first_line}\n\nAvaliação completa.\n\nDeseja agendar esse serviço?"
     )
+
+
+# --------------------------------------------------------------------------
+# Price under a convênio (Instituto Gicovate, 2026-11-09: "o Unimed não tem valor")
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("insurance", [None, "", "Particular", "particular "])
+def test_particular_or_no_answer_shows_the_price(insurance):
+    text = booking_details_text(
+        service=FULL, professional=None, insurance=insurance, attendee_name=None, address=None
+    )
+    assert "🏥 Serviço: Consulta — R$250" in text
+
+
+@pytest.mark.parametrize("insurance", ["Unimed", "Cassi do meu pai"])
+def test_a_convenio_hides_the_particular_price(insurance):
+    text = booking_details_text(
+        service=FULL, professional=None, insurance=insurance, attendee_name=None, address=None
+    )
+    assert "R$" not in text
+    assert f"Convênio: {insurance}" in text
+
+
+def test_service_card_under_convenio_names_the_plan_not_the_price():
+    service = {"name": "Primeira Consulta", "price": "200", "description": "Consulta inicial."}
+
+    card = fr._service_detail_text(service, _tenant(), "Unimed")
+
+    assert card.startswith("Primeira Consulta — convênio Unimed\n\n")
+    assert "R$" not in card
+
+
+def test_service_card_for_particular_keeps_the_price():
+    service = {"name": "Primeira Consulta", "price": "200", "description": "Consulta inicial."}
+
+    assert fr._service_detail_text(service, _tenant(), "Particular").startswith(
+        "Primeira Consulta R$200\n\n"
+    )
+    assert fr._service_detail_text(service, _tenant()).startswith("Primeira Consulta R$200\n\n")

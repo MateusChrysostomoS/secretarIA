@@ -862,3 +862,69 @@ async def test_the_mechanism_adds_no_select_per_plan(db):
         return len(seen)
 
     assert await _selects(1) == await _selects(3)
+
+
+# --------------------------------------------------------------------------
+# Clinic-chosen order (Instituto Gicovate, 2026-11-09: Unimed first)
+# --------------------------------------------------------------------------
+
+
+async def test_plans_are_alphabetical_until_the_clinic_orders_them(db):
+    from secretaria.services.insurance_catalog import set_tenant_plan_order
+
+    async with db() as session:
+        tenant = await _tenant(session)
+        await set_tenant_plans(session, tenant, [(UNIMED, True), (AMIL, True), (BRADESCO, True)])
+        before = [p["name"] for p in (await load_tenant_insurance(session, tenant.id)).plans]
+        assert before == sorted(before, key=str.casefold)
+
+        unimed = await _plan_id(session, tenant.id, UNIMED)
+        await set_tenant_plan_order(session, tenant, [UUID(unimed)])
+        after = [p["name"] for p in (await load_tenant_insurance(session, tenant.id)).plans]
+
+    # Unimed first; the plans never placed keep their alphabetical order behind it.
+    assert after[0] == "Unimed"
+    assert after[1:] == [name for name in before if name != "Unimed"]
+
+
+async def test_order_of_another_clinics_plan_is_refused_and_writes_nothing(db):
+    from secretaria.services.insurance_catalog import PlanNotFound, set_tenant_plan_order
+
+    async with db() as session:
+        mine = await _tenant(session)
+        other = await _tenant(session)
+        await set_tenant_plans(session, mine, [(UNIMED, True), (AMIL, True)])
+        await set_tenant_plans(session, other, [(UNIMED, True)])
+        foreign = await _plan_id(session, other.id, UNIMED)
+        with pytest.raises(PlanNotFound):
+            await set_tenant_plan_order(session, mine, [UUID(foreign)])
+        orders = [plan.sort_order for plan, _ in await list_tenant_plans(session, mine.id)]
+    assert orders == [None, None]
+
+
+async def test_http_put_order_returns_the_list_in_the_new_order(client: AsyncClient, hub, db):
+    tenant, _ana = hub
+    async with db() as session:
+        await set_tenant_plans(session, tenant, [(UNIMED, True), (AMIL, True), (BRADESCO, True)])
+        await session.commit()
+    plans = (await client.get("/tenants/me/insurance-plans")).json()
+    by_name = {plan["name"]: plan["id"] for plan in plans}
+
+    response = await client.put(
+        "/tenants/me/insurance-plans/order",
+        json={"plan_ids": [by_name["Unimed"], by_name["Bradesco Saúde"]]},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [plan["name"] for plan in body] == ["Unimed", "Bradesco Saúde", "Amil"]
+    assert [plan["sort_order"] for plan in body] == [0, 1, None]
+    got = (await client.get("/tenants/me/insurance-plans")).json()
+    assert [plan["name"] for plan in got] == ["Unimed", "Bradesco Saúde", "Amil"]
+
+
+async def test_http_put_order_with_unknown_id_is_404(client: AsyncClient, hub):
+    response = await client.put(
+        "/tenants/me/insurance-plans/order", json={"plan_ids": [str(uuid4())]}
+    )
+    assert response.status_code == 404

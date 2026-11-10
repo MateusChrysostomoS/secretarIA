@@ -63,6 +63,34 @@ def price_text(price: Any) -> str | None:
     return text
 
 
+# What a booking without convênio records (flow_router.LABEL_INSURANCE_PARTICULAR).
+# Duplicated as a literal on purpose: flow_router imports this module.
+_PARTICULAR = "particular"
+
+
+def is_convenio(insurance: Any) -> bool:
+    """True when the patient answered the convênio step with an actual plan.
+
+    "Particular" (and any spelling of it) and no answer at all are False. A typed
+    "Outro convênio" name is True: it is still a convênio.
+    """
+    text = _clean(insurance)
+    return bool(text) and text.casefold() != _PARTICULAR
+
+
+def service_price_text(service: Mapping[str, Any], insurance: Any = None) -> str | None:
+    """The service price the PATIENT should read, given the convênio answer.
+
+    The catalog price is the clinic's PARTICULAR price. A patient booking under a
+    convênio does not pay it (Instituto Gicovate, 2026-11-09: "o Unimed não tem
+    valor" yet the card read "Primeira Consulta R$200"), so under a convênio
+    there is no price to show - None.
+    """
+    if is_convenio(insurance):
+        return None
+    return price_text(service.get("price"))
+
+
 def clinic_address_line(address: Any) -> str | None:
     """One line out of `Tenant.address`, or None when there is no street.
 
@@ -109,7 +137,7 @@ def _identity_lines(
             f"{EMOJI_DOCTOR} Profissional: {doctor}" + (f" — {specialty}" if specialty else "")
         )
     name = _clean(service.get("name")) or "Consulta"
-    price = price_text(service.get("price"))
+    price = service_price_text(service, insurance)
     lines.append(f"{EMOJI_SERVICE} Serviço: {name}" + (f" — {price}" if price else ""))
     plan = _clean(insurance)
     if plan:

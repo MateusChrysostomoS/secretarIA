@@ -81,6 +81,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -189,6 +190,10 @@ class TenantInsurancePlan(Base):
     # DEPOSIT_SKIP_INSURANCE_NO_CHARGE). Default True = today's behaviour: the
     # convênio changes nothing until the clinic unticks it for this plan.
     charge_deposit: Mapped[bool] = mapped_column(Boolean, server_default=text("true"), default=True)
+    # The clinic's chosen position in the patient's convênio list (0 = first). NULL =
+    # never placed: such plans follow every placed one, alphabetically. Set only by
+    # `insurance_catalog.set_tenant_plan_order` (Instituto Gicovate, 2026-11-09).
+    sort_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

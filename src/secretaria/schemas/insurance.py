@@ -37,6 +37,9 @@ class TenantInsurancePlanRead(BaseModel):
     is_custom: bool
     custom_payment_note: str | None = None
     charge_deposit: bool
+    # Position the clinic chose in the patient's list (0 = first); None = not placed,
+    # follows the placed ones alphabetically. The list itself comes back in this order.
+    sort_order: int | None = None
 
 
 class TenantInsurancePlanIn(BaseModel):
@@ -67,6 +70,18 @@ class TenantInsurancePlanCustomCreate(BaseModel):
     custom_name: str = Field(min_length=1, max_length=120)
     custom_payment_note: str = Field(min_length=1, max_length=2000)
     charge_deposit: bool = True
+
+
+class TenantInsurancePlanOrderUpdate(BaseModel):
+    """PUT /tenants/me/insurance-plans/order - the patient list's order.
+
+    `plan_ids` (`tenant_insurance_plans.id`) first, in this order; every plan left
+    out follows alphabetically. An empty list restores the alphabetical order.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    plan_ids: list[str] = Field(default_factory=list, max_length=100)
 
 
 class TenantInsurancePlanDepositUpdate(BaseModel):

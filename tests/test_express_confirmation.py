@@ -123,7 +123,7 @@ async def test_every_detail_of_a_multi_doctor_booking_for_someone_else():
     assert details.body == (
         "Confira os detalhes da sua consulta:\n\n"
         "🥼 Profissional: Dra. Ana — Cardiologia\n"
-        "🏥 Serviço: Consulta — R$250\n"
+        "🏥 Serviço: Consulta\n"  # convênio: no particular price (Gicovate, 2026-11-09)
         "Convênio: Unimed\n"
         "👤 Para: Maria da Silva\n"
         f"Endereço: {ADDRESS}\n\n"

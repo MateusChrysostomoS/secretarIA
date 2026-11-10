@@ -83,7 +83,7 @@ from secretaria.services.availability import (
     slot_taken_at_confirm,
     without_holds,
 )
-from secretaria.services.booking_details import price_text
+from secretaria.services.booking_details import is_convenio, service_price_text
 from secretaria.services.booking_hold import BookingGate
 from secretaria.services.booking_scope import (
     canonical_service_name,
@@ -3333,11 +3333,19 @@ async def _catalog_step(
     return _preserve(conversation, "delegate_llm")
 
 
-def _service_detail_text(service: dict, tenant: Tenant) -> str:
+def _service_detail_text(service: dict, tenant: Tenant, insurance: str | None = None) -> str:
+    """The service card body. Under a convênio the particular price is left out
+    and the plan is named instead ("Primeira Consulta — convênio Unimed")."""
     name = str(service.get("name", "Consulta"))
-    price = price_text(service.get("price"))
+    price = service_price_text(service, insurance)
     long_description = service.get("long_description") or service.get("description")
-    parts = [f"{name} {price}" if price else name]
+    if price:
+        headline = f"{name} {price}"
+    elif is_convenio(insurance):
+        headline = f"{name} — convênio {str(insurance).strip()}"
+    else:
+        headline = name
+    parts = [headline]
     if long_description:
         parts.append(str(long_description))
     parts.append("Deseja agendar esse serviço?")
@@ -3359,7 +3367,7 @@ def _enter_service_detail(
         action="reply",
         bubbles=[
             ButtonBubble(
-                body=_service_detail_text(service, tenant),
+                body=_service_detail_text(service, tenant, _selected_insurance(conversation)),
                 confirm_label=LABEL_BOOK_SERVICE,
                 cancel_label=LABEL_OTHER_SERVICE,
             )
@@ -5459,7 +5467,9 @@ async def _resume_bubbles(
             conversation,
             [
                 ButtonBubble(
-                    body=_service_detail_text(service, tenant),
+                    body=_service_detail_text(
+                        service, tenant, _selected_insurance(conversation)
+                    ),
                     confirm_label=LABEL_BOOK_SERVICE,
                     cancel_label=LABEL_OTHER_SERVICE,
                 )

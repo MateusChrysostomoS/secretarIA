@@ -20,6 +20,7 @@ from secretaria.models import (
     Professional,
     Tenant,
 )
+from secretaria.services.booking_details import service_price_text
 from secretaria.services.booking_scope import (
     sole_active_professional,
 )
@@ -500,7 +501,8 @@ def _adapt_greeting_has_upcoming(
     header_line += "."
 
     service = upcoming_data.nearest_service
-    price = service.get("price") if service else None
+    # Under a convênio the catalog (particular) price is not what the patient pays.
+    price = service_price_text(service, nearest.get("insurance")) if service else None
     service_line = f"{service_name} — {price}" if price else service_name
     description = (
         (service.get("long_description") or service.get("description")) if service else None

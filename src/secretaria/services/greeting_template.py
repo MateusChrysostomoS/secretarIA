@@ -30,6 +30,7 @@ written down ONCE and the preview can never drift from what is actually sent.
 """
 
 import re
+import unicodedata
 
 from secretaria.core.whatsapp_limits import MAX_INTERACTIVE_BODY_CHARS
 
@@ -101,7 +102,7 @@ CONSENT_EVENT_KIND = "terms_accepted"
 # checking the command still exists — advertising an escape hatch that does
 # nothing is worse than not advertising one.
 GREETING_FRAME = """\
-👋 Olá! Bem-vindo(a) à {clinic_name}{patient_suffix}!
+👋 Olá{patient_suffix}! Bem-vindo(a) {welcome_target}!
 Sou a SecretarIA, assistente virtual {identification}
 
 🤖 Importante: você conversa com um *assistente virtual automatizado*, que usa \
@@ -151,15 +152,66 @@ def _lower_first(text: str) -> str:
     return lowered + text[1:] if len(lowered) == 1 else text
 
 
+# First words that take a masculine article ("ao Instituto ...", "do Instituto ...").
+# Anything else keeps the feminine one the frame always used ("à Clínica ...").
+# Pt-BR clinic names are overwhelmingly "Clínica X" or "Instituto/Consultório/
+# Centro X"; a brand-only name ("Vignolli") falls to the feminine default,
+# which is what every clinic got before this list existed.
+_MASCULINE_FIRST_WORDS = frozenset(
+    {
+        "instituto",
+        "consultorio",
+        "centro",
+        "espaco",
+        "hospital",
+        "nucleo",
+        "ambulatorio",
+        "laboratorio",
+        "grupo",
+        "complexo",
+        "studio",
+        "estudio",
+        "dr",
+        "doutor",
+        "consultorios",
+    }
+)
+
+
+def _fold(text: str) -> str:
+    """Lower-case, accent-free form used only for comparisons."""
+    decomposed = unicodedata.normalize("NFKD", text.lower())
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
+def _is_masculine(name: str) -> bool:
+    first = _fold(name).split(None, 1)[0].rstrip(".") if name.strip() else ""
+    return first in _MASCULINE_FIRST_WORDS
+
+
+def _welcome_target(name: str) -> str:
+    """ "ao Instituto Gicovate" / "à Clínica Vignolli" / "à nossa clínica"."""
+    if not name:
+        return "à nossa clínica"
+    return f"{'ao' if _is_masculine(name) else 'à'} {name}"
+
+
 def _identification(name: str, description: str, city: str) -> str:
     """The tail of "Sou a SecretarIA, assistente virtual <tail>".
 
-    "do consultório do <nome>, <descrição>, em <cidade>" — description and city
-    are each optional. The description's own closing punctuation is moved after
-    the city so the sentence ends once ("..., em Belo Horizonte."). The overhead
-    around the description is constant, so `clinic_description_budget` stays exact.
+    "do/da <nome>, <descrição>, em <cidade>" — description and city are each
+    optional. The city is left out when the description already names it
+    (Instituto Gicovate's description ends "..., em Campos dos Goytacazes",
+    which printed the city twice). The description's own closing punctuation
+    is moved after the city so the sentence ends once ("..., em Belo
+    Horizonte."). `clinic_description_budget` measures with a one-character
+    probe, which never names the city, so it stays the conservative (larger)
+    cost.
     """
-    base = f"do consultório do {name}" if name else "da nossa clínica"
+    if name:
+        base = f"{'do' if _is_masculine(name) else 'da'} {name}"
+    else:
+        base = "da nossa clínica"
     desc = _lower_first(description)
     punct = ""
     if desc:
@@ -167,10 +219,12 @@ def _identification(name: str, description: str, city: str) -> str:
         if match:
             punct = match.group()
             desc = desc[: match.start()].rstrip()
+    if city and desc and _fold(city) in _fold(desc):
+        city = ""
     parts = [p for p in (desc, f"em {city}" if city else "") if p]
     if not parts:
-        return base
-    return f"{base}, " + ", ".join(parts) + punct
+        return base + "."
+    return f"{base}, " + ", ".join(parts) + (punct or ".")
 
 
 def render_greeting(
@@ -198,7 +252,7 @@ def render_greeting(
     description = (clinic_description or "").strip()
     patient = (patient_name or "").strip()
     rendered = GREETING_FRAME.format(
-        clinic_name=name or "nossa clínica",
+        welcome_target=_welcome_target(name),
         patient_suffix=f", {patient}" if patient else "",
         identification=_identification(name, description, (city or "").strip()),
     )
