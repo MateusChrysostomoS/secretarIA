@@ -5,6 +5,7 @@ POST  /tenants/me/services        - create one canonical service; with `offer`,
                                     also offered by that professional, in the
                                     same transaction.
 PATCH /tenants/me/services/{id}   - rename / edit copy / retire.
+PUT   /tenants/me/services/order  - the clinic's order for the patient's list (TASK-081).
 
 This is the ONE place a service's name and descriptive copy are edited. A
 professional never types a service name again: they pick an id from here and
@@ -40,7 +41,13 @@ from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
 from secretaria.models import Professional, Tenant
 from secretaria.models.service import Service
-from secretaria.schemas.service import ServiceCreate, ServiceCreated, ServiceRead, ServiceUpdate
+from secretaria.schemas.service import (
+    ServiceCreate,
+    ServiceCreated,
+    ServiceOrderUpdate,
+    ServiceRead,
+    ServiceUpdate,
+)
 from secretaria.services import hub_configuration as hubcfg
 from secretaria.services.service_catalog import (
     find_near_duplicates,
@@ -205,6 +212,13 @@ async def create_service(
         if similar:
             raise _similar_error(payload.name, similar)
 
+    # A new service goes to the END of the clinic's order (TASK-081) unless the caller
+    # placed it: with the old default 0 it jumped ahead of everything the clinic had ordered.
+    sort_order = (
+        payload.sort_order
+        if "sort_order" in payload.model_fields_set
+        else max((row.sort_order for row in catalog), default=-1) + 1
+    )
     service = Service(
         id=uuid4(),
         tenant_id=tenant.id,
@@ -214,7 +228,7 @@ async def create_service(
         long_description=payload.long_description,
         requirements=payload.requirements,
         is_active=payload.is_active,
-        sort_order=payload.sort_order,
+        sort_order=sort_order,
     )
     session.add(service)
     if professional is not None and payload.offer is not None:
@@ -249,6 +263,38 @@ async def create_service(
             else None
         ),
     )
+
+
+@router.put("/order", response_model=list[ServiceRead])
+async def order_services(
+    payload: ServiceOrderUpdate,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> list[ServiceRead]:
+    """Set the order the patient sees the clinic's services in (first id = first row).
+
+    Ids must be this clinic's own rows, each once; an unknown, foreign or repeated id
+    changes nothing (404/422). Rows left out keep their relative order after the listed
+    ones. The catalog owns `sort_order` (services/service_catalog.py::resolve_entries), so
+    one write reorders every doctor's list at once.
+    """
+    catalog = await load_service_catalog(session, tenant.id)
+    by_id = {str(row.id): row for row in catalog}
+    wanted = payload.service_ids
+    if len(set(wanted)) != len(wanted):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="duplicate_service_ids")
+    if any(service_id not in by_id for service_id in wanted):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="service_not_found")
+    listed_ids = set(wanted)
+    listed = [by_id[service_id] for service_id in wanted]
+    rest = [row for row in catalog if str(row.id) not in listed_ids]
+    for index, row in enumerate([*listed, *rest]):
+        row.sort_order = index
+    await session.commit()
+    logger.info("service_catalog_reordered", tenant_id=str(tenant.id), count=len(listed))
+    catalog = await load_service_catalog(session, tenant.id)
+    offering = await _offering(session, tenant, catalog)
+    return [_read_model(row, offering) for row in catalog]
 
 
 @router.patch("/{service_id}", response_model=ServiceRead)

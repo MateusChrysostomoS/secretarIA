@@ -175,8 +175,11 @@ def resolve_entries(
 
       - `name` and the descriptive fields come from the CATALOG (one spelling
         per clinic, and a description that a professional save cannot blank);
-      - `price`, `duration_min`, `is_active`, `sort_order` stay the
-        PROFESSIONAL's (they legitimately differ between doctors);
+      - `price`, `duration_min`, `is_active` stay the PROFESSIONAL's (they
+        legitimately differ between doctors);
+      - `sort_order` is the CATALOG's (TASK-081): the order of the services is
+        the clinic's one decision ("Ordem na conversa"), so the patient sees the
+        same order whichever doctor's list happens to be read first;
       - `service_id` is stamped on the result even when the entry was matched
         by name, so callers downstream of resolution can group by identity
         without repeating the match.
@@ -209,6 +212,7 @@ def resolve_entries(
         for field in _CATALOG_OWNED_FIELDS:
             value = getattr(service, field, None)
             merged[field] = list(value or []) if field == "requirements" else value
+        merged["sort_order"] = service.sort_order
         resolved.append(merged)
     return resolved
 

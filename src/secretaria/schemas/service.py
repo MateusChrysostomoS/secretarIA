@@ -117,3 +117,13 @@ class ServiceCreated(ServiceRead):
     """
 
     professional: ProfessionalListItem | None = None
+
+
+class ServiceOrderUpdate(BaseModel):
+    """PUT /tenants/me/services/order - the clinic's order for the patient's service list.
+
+    Ids of THIS clinic's catalog rows, first = shown first (TASK-081). Rows left out (a
+    retired service the screen does not show) keep their relative order after the listed ones.
+    """
+
+    service_ids: list[str] = Field(min_length=1, max_length=200)

@@ -292,8 +292,9 @@ async def test_two_professionals_with_the_service_in_the_tenant_list_has_no_dupl
 ) -> None:
     config = await _clinic(maker, professionals=2, catalog=[CATARATA], tenant_extra=(SVC,))
 
-    # Tenant-level entries carry no sort_order, so they sort by name.
-    assert [t.name for t in config.appointment_types] == [SVC, "Consulta"]
+    # The catalog owns the order (TASK-081): the tenant-level SVC entry resolves to its catalog
+    # row and takes that row's sort_order (1); "Consulta" is in no catalog and keeps 0.
+    assert [t.name for t in config.appointment_types] == ["Consulta", SVC]
     prompt = prompts.secretary_system_prompt(config)
     assert f"- {SVC} (90 min) {MARKER}" in prompt
     assert GUIDES_LINE not in prompt
