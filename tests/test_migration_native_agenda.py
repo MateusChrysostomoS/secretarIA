@@ -45,8 +45,12 @@ def test_upgrade_creates_the_table_the_model_maps_and_downgrade_drops_it(tmp_pat
             migration.upgrade()
             inspector = sa.inspect(conn)
             columns = {c["name"]: c for c in inspector.get_columns("calendar_events")}
-            assert set(columns) == {c.name for c in CalendarEvent.__table__.columns}
-            for name, column in CalendarEvent.__table__.columns.items():
+            # `unit_id` was added later by e4a8c2f6b1d9 (TASK-083), not by this migration.
+            model_columns = {
+                n: c for n, c in CalendarEvent.__table__.columns.items() if n != "unit_id"
+            }
+            assert set(columns) == set(model_columns)
+            for name, column in model_columns.items():
                 assert columns[name]["nullable"] is column.nullable, name
             indexes = {
                 i["name"]: i["column_names"] for i in inspector.get_indexes("calendar_events")

@@ -91,6 +91,8 @@ class BookingHold(Base):
     professional_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("professionals.id", ondelete="CASCADE"), nullable=True, index=True
     )
+    # TASK-083: the unit the patient chose, carried to promotion (no FK: a label).
+    unit_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
     appointment_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
     # The convênio label the patient picked, carried so promotion writes the
     # same appointment the ungated path would have written.

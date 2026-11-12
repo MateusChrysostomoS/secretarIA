@@ -4,6 +4,7 @@ Importing this package registers every table on `Base.metadata`, which is
 what Alembic autogenerate and the test fixtures rely on.
 """
 
+from secretaria.models.agenda import Agenda
 from secretaria.models.analytics_event import AnalyticsEvent
 from secretaria.models.appointment import (
     LIVE_APPOINTMENT_STATUSES,
@@ -41,6 +42,7 @@ from secretaria.models.processed_event import ProcessedEvent
 from secretaria.models.professional import Professional
 from secretaria.models.professional_credentials import ProfessionalCredentials
 from secretaria.models.professional_edit_notice import ProfessionalEditNotice
+from secretaria.models.professional_unit import ProfessionalUnit
 from secretaria.models.rebooking_decline import RebookingDecline
 from secretaria.models.service import Service
 from secretaria.models.tenant import Tenant
@@ -52,6 +54,7 @@ __all__ = [
     "TERMINAL_APPOINTMENT_STATUSES",
     "INSURANCE_MECHANISMS",
     "INSURANCE_MODES",
+    "Agenda",
     "AnalyticsEvent",
     "Appointment",
     "AppointmentStatus",
@@ -87,6 +90,7 @@ __all__ = [
     "RebookingDecline",
     "ProfessionalCredentials",
     "ProfessionalInsurancePlan",
+    "ProfessionalUnit",
     "Service",
     "Tenant",
     "TenantCredentials",

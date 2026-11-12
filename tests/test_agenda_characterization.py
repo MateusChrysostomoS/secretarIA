@@ -1,3 +1,4 @@
+# ruff: noqa: F811
 """TASK-083 characterization: what the agenda does TODAY, with no shared `agenda_id`.
 
 These tests pin the pre-multi-unit behaviour so the shared-agenda work (spec §3: without an
@@ -74,7 +75,8 @@ async def test_free_slots_of_a_tenant_ignore_another_tenants_events(db):
     cal_c = agenda(tenant_c.id)
     slots = await cal_c.list_free_slots(day=start.astimezone(cal_c.tzinfo), max_slots=30)
     assert "10:00" in [s["label"] for s in slots]
-    assert await cal_c.check_availability(start - timedelta(hours=1), end + timedelta(hours=1)) == []
+    around = (start - timedelta(hours=1), end + timedelta(hours=1))
+    assert await cal_c.check_availability(*around) == []
     # Control: the tenant that owns the event does not offer the slot.
     cal_p = agenda(tenant_p.id)
     own = await cal_p.list_free_slots(day=start.astimezone(cal_p.tzinfo), max_slots=30)
@@ -87,8 +89,9 @@ async def test_slot_taken_at_confirm_ignores_another_tenants_events(db):
     start, end = _window()
     await agenda(tenant_p.id).create_event(start, end, "Consulta - P")
 
-    assert not await slot_taken_at_confirm(agenda(tenant_c.id), start, end, source="characterization")
-    assert await slot_taken_at_confirm(agenda(tenant_p.id), start, end, source="characterization")
+    source = "characterization"
+    assert not await slot_taken_at_confirm(agenda(tenant_c.id), start, end, source=source)
+    assert await slot_taken_at_confirm(agenda(tenant_p.id), start, end, source=source)
 
 
 async def test_local_exclusive_write_ignores_another_tenants_events(db):

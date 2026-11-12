@@ -100,4 +100,13 @@ class Professional(Base):
     # never limited by it.
     min_booking_notice_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # TASK-083: the shared calendar identity of this PERSON across clinics. Every
+    # `professionals` row of one brain-api account points at the same `agendas` row
+    # (services/agenda_linking.py), and services/agenda.py reads the siblings' busy time
+    # through it. NULL = not linked: every path behaves exactly as before the column
+    # existed. SET NULL: deleting an agenda just unlinks.
+    agenda_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("agendas.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

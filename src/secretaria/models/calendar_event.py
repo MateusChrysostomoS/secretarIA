@@ -76,6 +76,9 @@ class CalendarEvent(Base):
     status: Mapped[str] = mapped_column(
         String(16), server_default=EVENT_STATUS_CONFIRMED, default=EVENT_STATUS_CONFIRMED
     )
+    # TASK-083: the unit the visit happens at - a historical label only (no FK, like
+    # `appointments.unit_id`): the busy time is the whole agenda's, never per unit.
+    unit_id: Mapped[UUID | None] = mapped_column(nullable=True)
     # Set once the row was pushed to Google (services/calendar_sync.py).
     google_event_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
