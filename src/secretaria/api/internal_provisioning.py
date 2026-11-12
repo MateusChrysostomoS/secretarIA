@@ -45,6 +45,7 @@ from secretaria.schemas.internal_provisioning import (
 )
 from secretaria.schemas.professional import ProfessionalListItem
 from secretaria.services import contact_email as contact_email_service, provisioning
+from secretaria.services.agenda_linking import try_link_professional
 from secretaria.services.email import is_known_template
 from secretaria.services.hub_configuration import professional_list_item
 from secretaria.services.professional_calendar_setup import prepare_shared_professional_calendar
@@ -307,7 +308,11 @@ async def attach_professional(
     await session.commit()
     tenant = await session.get(Tenant, professional.tenant_id)
     await prepare_shared_professional_calendar(session, tenant, professional)
-    return ProfessionalAttachOut(professional_id=professional.id, created=created)
+    # TASK-083: best-effort link to the person's shared agenda; never changes this answer. The id
+    # is read first: a failed link rolls the session back, which expires `professional`.
+    professional_id = professional.id
+    await try_link_professional(session, tenant_id, professional_id)
+    return ProfessionalAttachOut(professional_id=professional_id, created=created)
 
 
 @router.post(

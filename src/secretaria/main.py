@@ -24,6 +24,7 @@ from secretaria.api import (
 )
 from secretaria.api.admin import insurance as admin_insurance, panel, tenants
 from secretaria.api.hub import (
+    agendas,
     analytics,
     calendar,
     config,
@@ -152,6 +153,8 @@ def create_app() -> FastAPI:
     # in the routers themselves; see api/hub/professionals.py, api/hub/units.py).
     app.include_router(professionals.router)
     app.include_router(units.router)
+    # Shared per-person agenda (TASK-083): sync + "is this agenda shared" (counts only).
+    app.include_router(agendas.router)
     # Per-conversation manual handover control for the dashboard (list +
     # BOT_ACTIVE/HUMAN_ACTIVE toggle); see api/hub/conversations.py.
     app.include_router(conversations.router)

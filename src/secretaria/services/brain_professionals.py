@@ -21,6 +21,9 @@ Contract (brain-api, api/internal.py):
   - GET {BRAIN_API_BASE_URL}/internal/tenants/{tenant_id}/professional-emails
     -> 200 {"items": [{"professional_id": <uuid str>, "email": <str>}]}
 
+A second read lives at the bottom of this module: `fetch_professional_accounts`
+(GET .../professional-accounts -> a BARE list of {professional_id, account_id}; TASK-083).
+
 Deliberately a BATCH read of the whole tenant, not a per-professional lookup:
 the caller (plugins/professional_notification.py) runs once per booking, and a
 per-id endpoint would invite an N+1 the moment anything wants two of them.
@@ -117,3 +120,81 @@ async def fetch_professional_emails(tenant_id: UUID) -> dict[str, str] | None:
             emails[professional_id] = email
     logger.info("professional_emails_fetched", tenant_id=str(tenant_id), linked_count=len(emails))
     return emails
+
+
+async def fetch_professional_accounts(tenant_id: UUID) -> dict[str, str] | None:
+    """`{professional_id: account_id}` for one tenant's professionals that have a brain-api user.
+
+    TASK-083 (shared per-person agenda): `account_id` (brain-api's `StaffAccount.id`) is the ONLY
+    identity secretarIA trusts to decide that two `professionals` rows, at two clinics, are the same
+    person (services/agenda_linking.py). Never an e-mail, never a name.
+
+    Contract (brain-api, api/internal.py, same gate as `professional-emails`):
+      GET {BRAIN_API_BASE_URL}/internal/tenants/{tenant_id}/professional-accounts
+      -> 200 [{"professional_id": <uuid str>, "account_id": <uuid str>}]   (a BARE list)
+
+    Same fail-soft contract as `fetch_professional_emails`: `None` when the answer is unknown
+    (unconfigured, network error/timeout, non-200, bad JSON, not a list); `{}` when brain-api
+    answered and nobody is linked. Both ids are canonicalised through `UUID` (lower-case), so one
+    account always yields one key; a row that is not a pair of valid UUIDs is skipped.
+
+    Logs counts and the tenant id only: no account id, no professional id.
+    """
+    settings = get_settings()
+    if not settings.BRAIN_API_BASE_URL or not settings.INTERNAL_API_KEY:
+        logger.warning("professional_accounts_fetch_unconfigured", tenant_id=str(tenant_id))
+        return None
+
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.BRAIN_API_BASE_URL,
+            headers={"X-Internal-Api-Key": settings.INTERNAL_API_KEY},
+            timeout=settings.BRAIN_API_TIMEOUT_SECONDS,
+        ) as client:
+            response = await client.get(f"/internal/tenants/{tenant_id}/professional-accounts")
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "professional_accounts_fetch_failed",
+            reason="network_error",
+            error=str(exc),
+            tenant_id=str(tenant_id),
+        )
+        return None
+
+    if response.status_code != 200:
+        logger.warning(
+            "professional_accounts_fetch_failed",
+            reason="non_200_status",
+            status_code=response.status_code,
+            tenant_id=str(tenant_id),
+        )
+        return None
+
+    try:
+        body = response.json()
+    except ValueError:
+        logger.warning(
+            "professional_accounts_fetch_failed", reason="invalid_json", tenant_id=str(tenant_id)
+        )
+        return None
+
+    if not isinstance(body, list):
+        logger.warning(
+            "professional_accounts_fetch_failed", reason="bad_shape", tenant_id=str(tenant_id)
+        )
+        return None
+
+    accounts: dict[str, str] = {}
+    for raw in body:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            professional_id = str(UUID(str(raw.get("professional_id") or "")))
+            account_id = str(UUID(str(raw.get("account_id") or "")))
+        except ValueError:
+            continue  # unusable row, not fatal: keep the rest
+        accounts[professional_id] = account_id
+    logger.info(
+        "professional_accounts_fetched", tenant_id=str(tenant_id), linked_count=len(accounts)
+    )
+    return accounts
