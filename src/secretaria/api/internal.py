@@ -16,6 +16,8 @@ This is a DIFFERENT mechanism from:
   * `api/admin/panel.py` — the `X-Admin-Token` admin surface (a separate secret).
 """
 
+import logging
+import re
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
@@ -94,6 +96,36 @@ from secretaria.services.visit_merge import discard_empty_visit
 from secretaria.workers.shared.flow_simulation_input import load_simulation_inputs
 
 logger = get_logger(__name__)
+
+_OPTIONS_PATH = re.compile(r"/brain-message/messages/[^/?]+/options\?")
+_QUERY_VALUE = re.compile(r"(?<=[?&])q=[^&#\s]*")
+
+
+class OptionsQueryLogFilter(logging.Filter):
+    """Blank the search text (`q`) of the options route in uvicorn's access log line.
+
+    The route is a GET (TASK-082 CONTRACT.md §c4), so the patient's own words ride in
+    the URL, and uvicorn prints the full URL at INFO. Like core/logging.py's arq filter
+    it sits on the LOGGER and rewrites only what it must: `q` on this route's path; the
+    cursor, the ids and every other route's line are left as they are.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            path = args[2]
+            if _OPTIONS_PATH.search(path):
+                record.args = (*args[:2], _QUERY_VALUE.sub("q=REDACTED", path), *args[3:])
+        return True
+
+
+def _install_options_query_log_filter() -> None:
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, OptionsQueryLogFilter) for f in access.filters):
+        access.addFilter(OptionsQueryLogFilter())
+
+
+_install_options_query_log_filter()
 
 # Declaring the scheme (instead of a bare Header dependency) makes Swagger render the
 # "Authorize" lock on these routes; auto_error is off so we return our own status/message.
@@ -1075,7 +1107,7 @@ async def get_brain_message_options(
     try:
         list_options.decode_cursor(cursor)
     except list_options.InvalidCursor:
-        raise HTTPException(status_code=422, detail="invalid_cursor") from None
+        raise HTTPException(status_code=422, detail={"code": "invalid_cursor"}) from None
     try:
         message_uuid: UUID | None = UUID(message_id)
     except ValueError:
@@ -1100,7 +1132,9 @@ async def get_brain_message_options(
     tenant = await session.get(Tenant, tenant_id) if source is not None else None
     if source is None or tenant is None:
         logger.info("brain_message_options_not_found", tenant_id=str(tenant_id))
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="options_not_found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail={"code": "options_not_found"}
+        )
     # The same snapshots the flow router built the card from (THIS tenant's only).
     inputs = await load_simulation_inputs(session, tenant)
     await session.close()

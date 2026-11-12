@@ -16,6 +16,7 @@ os.environ.setdefault("META_PHONE_NUMBER_ID", "1234567890")
 os.environ.setdefault("ENCRYPTION_KEY", "gBSpATEZoI21UX0_59nHvxdUDJ4drCttg2RAEaPJc1w=")
 os.environ["INTERNAL_API_KEY"] = "test-internal-key"
 
+import logging  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 from uuid import UUID, uuid4  # noqa: E402
 
@@ -204,7 +205,8 @@ async def test_a_tampered_cursor_is_422(client, db, bad) -> None:
     message_id = await _send_service_card(db, tenant, conversation)
     response = await _get(client, message_id, tenant.id, cursor=bad)
     assert response.status_code == 422
-    assert response.json()["detail"] == "invalid_cursor"
+    # `detail.code` - the shape brain-api maps (results/s2-brain-api-proxy.md).
+    assert response.json()["detail"] == {"code": "invalid_cursor"}
 
 
 @pytest.mark.parametrize("size", [0, 11, -1])
@@ -247,6 +249,45 @@ async def test_a_long_search_is_clamped_and_never_logged(client, db) -> None:
     assert response.status_code == 200 and response.json()["total"] == 0
     assert missing.status_code == 404
     assert not any("pacienteprocurou" in repr(entry) for entry in logs)
+
+
+def _access_record(path: str) -> logging.LogRecord:
+    """A record shaped like uvicorn's access log line (its args are the request)."""
+    return logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        __file__,
+        0,
+        '%s - "%s %s HTTP/%s" %d',
+        ("10.0.0.1:5000", "GET", path, "1.1", 200),
+        None,
+    )
+
+
+def test_the_access_log_never_carries_the_search_text() -> None:
+    """uvicorn prints the full URL at INFO; `q` (the patient's words) is in it.
+
+    The filter sits on the `uvicorn.access` LOGGER (core/logging.py's arq precedent),
+    installed when the route module loads; it blanks only `q` on this route.
+    """
+    from secretaria.api import internal
+
+    access = logging.getLogger("uvicorn.access")
+    assert any(isinstance(f, internal.OptionsQueryLogFilter) for f in access.filters)
+
+    record = _access_record(
+        "/internal/brain-message/messages/abc/options?tenant_id=t&q=meu%20exame&cursor=eyJ2"
+    )
+    for log_filter in access.filters:
+        log_filter.filter(record)
+    line = record.getMessage()
+    assert "exame" not in line
+    assert "q=REDACTED" in line and "cursor=eyJ2" in line and "tenant_id=t" in line
+
+    other = _access_record("/internal/brain-message/conversations/x/messages?q=keep")
+    for log_filter in access.filters:
+        log_filter.filter(other)
+    assert "q=keep" in other.getMessage()
 
 
 # --------------------------------------------------------------------------
@@ -292,7 +333,7 @@ async def test_every_miss_is_the_same_404(client, db) -> None:
     for mid, tid, ext in misses:
         response = await _get(client, mid, tid, ext)
         assert response.status_code == 404, (mid, response.text)
-        assert response.json()["detail"] == "options_not_found"
+        assert response.json()["detail"] == {"code": "options_not_found"}
     # Control: the owner still reads it.
     assert (await _get(client, message_id, tenant.id)).status_code == 200
 
