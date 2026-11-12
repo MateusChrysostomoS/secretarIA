@@ -1,10 +1,19 @@
 """Request/response schemas for the doctor-hub conversations endpoints."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from secretaria.core.attachments import stored_attachment_or_none
 from secretaria.core.logging import get_logger
@@ -63,6 +72,19 @@ class InteractiveCalendar(BaseModel):
     days: list[str]
 
 
+class InteractiveSourceRead(BaseModel):
+    """A paged catalogue card's pointer, as the wire shows it (TASK-082).
+
+    The stored blob also holds `v` and the server-only `scope`; neither is ever
+    projected - the options route rebuilds the list from the stored row by message id.
+    """
+
+    kind: Literal["service", "professional", "insurance"]
+    total: int
+    pinned_ids: list[str] = []
+    next_cursor: str | None = None
+
+
 class InteractiveRead(BaseModel):
     """What an interactive outbound message offered — `Message.interactive`.
 
@@ -80,6 +102,26 @@ class InteractiveRead(BaseModel):
     section_title: str | None = None
     # List only, Portal only: see services/whatsapp.py::interactive_list_record.
     calendar: InteractiveCalendar | None = None
+    # List only, Portal only: page 1 of a longer list (services/list_options.py).
+    source: InteractiveSourceRead | None = None
+
+    @field_validator("source", mode="wrap")
+    @classmethod
+    def _tolerant_source(cls, value: Any, handler: Any) -> InteractiveSourceRead | None:
+        # A pointer that lost its shape costs the card its paging, never the card itself.
+        try:
+            return handler(value)
+        except ValidationError:
+            return None
+
+    @model_serializer(mode="wrap")
+    def _source_only_when_paged(self, handler: Any) -> dict:
+        # CONTRACT.md §c3: `source` is ABSENT (not null) on old, WhatsApp, calendar and
+        # button cards, so every reader of a card that does not page sees today's shape.
+        data = handler(self)
+        if data.get("source") is None:
+            data.pop("source", None)
+        return data
 
 
 def interactive_read_or_none(blob: object, *, message_id: object) -> InteractiveRead | None:

@@ -12,6 +12,7 @@ from secretaria.services.flow_router import (
     ActionButtonsBubble,
     MenuBubble,
 )
+from secretaria.services.list_options import card_source, first_page_rows
 from secretaria.services.whatsapp import (
     WhatsAppClient,
     interactive_buttons_record,
@@ -83,6 +84,21 @@ async def _send_bubble(
     buttons = _bubble_buttons(bubble)
     if buttons is not None:
         return await client.send_buttons(to=to, body=bubble.body, buttons=buttons)
+    if (
+        isinstance(bubble, SlotsBubble)
+        and bubble.source is not None
+        and getattr(client, "SUPPORTS_OPTION_SOURCE", False)
+    ):
+        # The Portal pages the list itself: page 1 (full titles) + the pinned rows, and the
+        # pointer its options route resolves (TASK-082). WhatsApp falls through to its rows.
+        return await client.send_list(
+            to=to,
+            body=bubble.body,
+            button_label=bubble.button_label,
+            rows=first_page_rows(bubble.source),
+            section_title=bubble.section_title,
+            option_source=card_source(bubble.source),
+        )
     if isinstance(bubble, SlotsBubble):
         calendar = (
             {"calendar_days": bubble.calendar_days}

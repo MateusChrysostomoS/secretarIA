@@ -54,6 +54,7 @@ from secretaria.models import (
     Message,
     MessageDirection,
     Patient,
+    Tenant,
 )
 from secretaria.models.message import status_of
 from secretaria.schemas.conversation import (
@@ -68,6 +69,7 @@ from secretaria.schemas.internal import (
     BrainMessageMessage,
     BrainMessageMessageList,
     BrainMessageOpen,
+    BrainMessageOptionsPage,
     BrainMessageReadMark,
     BrainMessageTyping,
     BrainMessageVisitDiscard,
@@ -80,11 +82,16 @@ from secretaria.schemas.internal import (
     PatientInsuranceOverviewOut,
     TypingAck,
 )
-from secretaria.services import media_storage, message_status
+from secretaria.services import list_options, media_storage, message_status
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.patient_insurance_overview import patient_insurance_overview
 from secretaria.services.typing_indicator import mark_typing, typing_by as typing_by_for
 from secretaria.services.visit_merge import discard_empty_visit
+
+# The read-only loader of the snapshots `flow_router.route()` receives (the hub's
+# simulation route reuses it the same way): the options route must rebuild a card's
+# list from exactly what the router built it from.
+from secretaria.workers.shared.flow_simulation_input import load_simulation_inputs
 
 logger = get_logger(__name__)
 
@@ -1020,6 +1027,93 @@ async def get_brain_message_media(
     if record is None:
         logger.info("brain_message_media_not_found", tenant_id=str(tenant_id))
     return await stream_attachment(record)
+
+
+@router.get(
+    "/brain-message/messages/{message_id}/options",
+    response_model=BrainMessageOptionsPage,
+    summary="One page of a Portal list card's options, optionally searched (internal)",
+    description=(
+        "A Portal catalogue card (services, doctors, convênios) carries page 1 of its list; "
+        "this route serves the rest, 10 at a time, and searches the WHOLE list with `q`. "
+        "The list is rebuilt from the card's own stored pointer, so the caller cannot choose "
+        "what is listed. Ownership is checked in one query against tenant_id + external_id. "
+        "Requires the X-Internal-Api-Key header."
+    ),
+    responses={
+        **_INTERNAL_RESPONSES,
+        404: {"description": "No such list card in this patient's conversation - one answer."},
+        422: {"description": "invalid_cursor, or page_size outside 1..10."},
+    },
+)
+async def get_brain_message_options(
+    message_id: Annotated[str, Path(description="The card's message id (messages.id, a UUID).")],
+    tenant_id: Annotated[UUID, Query(description="Tenant UUID — REQUIRED; the outer scope.")],
+    external_id: Annotated[
+        str,
+        Query(min_length=1, max_length=64, description="The patient's Brain-Message id."),
+    ],
+    cursor: Annotated[
+        str | None, Query(description="Opaque; the `next_cursor` of the previous page.")
+    ] = None,
+    page_size: Annotated[int, Query(ge=1, le=list_options.MAX_PAGE_SIZE)] = (
+        list_options.PAGE_SIZE
+    ),
+    q: Annotated[
+        str | None,
+        Query(description="Search text; clamped to 60 characters, never an error, never logged."),
+    ] = None,
+    session: AsyncSession = Depends(get_session),
+) -> BrainMessageOptionsPage:
+    """Page / search one card's list, only inside its owner's conversation (TASK-082).
+
+    Same one-query ownership as the media route: a card of another patient or clinic,
+    an inbound row, a card without a pointer (sent before TASK-082, or not a catalogue
+    list), an unknown or malformed id - the same 404, confirming nothing. `q` is the
+    patient's own words: it is never logged, not even its length.
+    """
+    try:
+        list_options.decode_cursor(cursor)
+    except list_options.InvalidCursor:
+        raise HTTPException(status_code=422, detail="invalid_cursor") from None
+    try:
+        message_uuid: UUID | None = UUID(message_id)
+    except ValueError:
+        message_uuid = None
+    source = None
+    if message_uuid is not None:
+        card = await session.scalar(
+            select(Message.interactive)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .join(Patient, Patient.id == Conversation.patient_id)
+            .where(
+                Message.id == message_uuid,
+                Message.direction == MessageDirection.OUTBOUND,
+                Conversation.tenant_id == tenant_id,
+                Patient.tenant_id == tenant_id,
+                Patient.channel == CHANNEL_BRAIN_MESSAGE,
+                Patient.external_id == external_id,
+                Message.interactive.is_not(None),
+            )
+        )
+        source = list_options.stored_source(card)
+    tenant = await session.get(Tenant, tenant_id) if source is not None else None
+    if source is None or tenant is None:
+        logger.info("brain_message_options_not_found", tenant_id=str(tenant_id))
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="options_not_found")
+    # The same snapshots the flow router built the card from (THIS tenant's only).
+    inputs = await load_simulation_inputs(session, tenant)
+    await session.close()
+    page = list_options.options_page(
+        source["kind"],
+        source["scope"],
+        inputs.tenant,
+        inputs.professionals,
+        cursor=cursor,
+        page_size=page_size,
+        q=q,
+    )
+    return BrainMessageOptionsPage(items=page.items, next_cursor=page.next_cursor, total=page.total)
 
 
 @router.post(

@@ -36,6 +36,7 @@ from secretaria.ai.formatter import (
     MAX_LIST_ROWS,
     Bubble,
     ButtonBubble,
+    OptionSource,
     SlotsBubble,
     TextBubble,
 )
@@ -50,6 +51,7 @@ from secretaria.core.whatsapp_limits import (
     EMOJI_SERVICE,
     MAX_INTERACTIVE_BODY_CHARS,
     MAX_LIST_ROW_DESCRIPTION_CHARS,
+    MAX_LIST_ROW_TITLE_CHARS,
     decorate,
     decorate_and_truncate,
     decorate_if_fits,
@@ -1639,8 +1641,55 @@ def _service_row_title(name: str | None) -> str:
     return decorate_if_fits(EMOJI_SERVICE, str(name or ""))
 
 
+# --------------------------------------------------------------------------
+# Portal rows of the catalogue lists (TASK-082). The router stays channel-neutral:
+# each list bubble carries BOTH the WhatsApp rows (cut, capped - unchanged) and an
+# `OptionSource` with the whole list as Portal rows; `workers/shared/bubbles.py`
+# picks one per channel. `services/list_options.py` rebuilds the same rows from a
+# card's stored scope, through these same helpers, for the options route and taps.
+# --------------------------------------------------------------------------
+
+# The fixed last row of the doctor-first service list (`svchelp|0`, "Não sei").
+SERVICE_HELP_ROW: tuple[str, str, str | None] = ("svchelp|0", LABEL_DONT_KNOW, None)
+PROFESSIONAL_HELP_ROW: tuple[str, str, str | None] = (
+    "profhelp|0",
+    LABEL_DONT_KNOW,
+    "Te ajudo a escolher",
+)
+
+
+def portal_service_title(name: str | None) -> str:
+    """A `svc|` row's Portal title: WhatsApp's emoji rule, never the 24-char cut."""
+    value = str(name or "").strip()
+    if len(EMOJI_SERVICE) + 1 + len(value) <= MAX_LIST_ROW_TITLE_CHARS:
+        return decorate(EMOJI_SERVICE, value)
+    return value
+
+
+def portal_service_rows(services: list[dict]) -> list[tuple[str, str, str | None]]:
+    """Every service as a Portal row, in the order given (the router's own order)."""
+    return [
+        (f"svc|{s.get('name', '')}", portal_service_title(s.get("name")), None) for s in services
+    ]
+
+
+def service_scope(professional_id: UUID | str | None) -> dict:
+    """The stored scope of a service list built from `professional_id`'s catalogue.
+
+    Mirrors how every router branch picks `services`: the selected doctor's own
+    `professional_appointment_types`, else the tenant's `active_appointment_types`.
+    """
+    if professional_id is None:
+        return {"list": "tenant"}
+    return {"list": "doctor", "professional_id": str(professional_id)}
+
+
 def _service_list_bubble(
-    tenant: Tenant, services: list[dict], header: str | None = None
+    tenant: Tenant,
+    services: list[dict],
+    header: str | None = None,
+    *,
+    scope: dict | None = None,
 ) -> Bubble:
     """The tappable service list, optionally introduced by `header`.
 
@@ -1672,6 +1721,16 @@ def _service_list_bubble(
         rows=rows,
         button_label="Ver serviços",
         section_title="Serviços",
+        source=(
+            OptionSource(
+                kind="service",
+                scope=scope,
+                items=portal_service_rows(services),
+                pinned=[SERVICE_HELP_ROW],
+            )
+            if scope is not None
+            else None
+        ),
     )
 
 
@@ -2026,7 +2085,7 @@ async def _enter_menu_choice(
             )
         return FlowRouterResult(
             action="reply",
-            bubbles=[_service_list_bubble(tenant, services)],
+            bubbles=[_service_list_bubble(tenant, services, scope=service_scope(None))],
             flow_state=FlowState.SERVICE_CATALOG,
             flow_step=STEP_AWAITING_SERVICE,
         )
@@ -2278,7 +2337,7 @@ def _start_booking(
         )
     return FlowRouterResult(
         action="reply",
-        bubbles=[_service_list_bubble(tenant, services)],
+        bubbles=[_service_list_bubble(tenant, services, scope=service_scope(None))],
         flow_state=FlowState.SERVICE_CATALOG,
         flow_step=STEP_AWAITING_SERVICE,
     )
@@ -2405,15 +2464,8 @@ def _professional_rows(
     rows: list[tuple[str, str, str | None]] = []
     marked = 0
     for professional in professionals:
-        specialty = (getattr(professional, "specialty", None) or "").strip() or None
-        description = specialty
-        if plan is not None and _accepts_plan(tenant, professional, str(plan["id"])):
-            marked += 1
-            description = truncate_plain(
-                f"{INSURANCE_ACCEPTED_MARK} · {specialty}" if specialty
-                else INSURANCE_ACCEPTED_MARK,
-                MAX_LIST_ROW_DESCRIPTION_CHARS,
-            )
+        description, accepted = _professional_description(tenant, professional, plan)
+        marked += accepted
         rows.append(
             (f"prof|{professional.id}", _professional_row_title(professional.name), description)
         )
@@ -2423,6 +2475,46 @@ def _professional_rows(
     return rows, plan
 
 
+def _professional_description(
+    tenant: Tenant, professional: Any, plan: dict | None
+) -> tuple[str | None, bool]:
+    """A `prof|` row's description (specialty, marked when they take `plan`) + the mark."""
+    specialty = (getattr(professional, "specialty", None) or "").strip() or None
+    if plan is not None and _accepts_plan(tenant, professional, str(plan["id"])):
+        return (
+            truncate_plain(
+                f"{INSURANCE_ACCEPTED_MARK} · {specialty}" if specialty
+                else INSURANCE_ACCEPTED_MARK,
+                MAX_LIST_ROW_DESCRIPTION_CHARS,
+            ),
+            True,
+        )
+    return specialty, False
+
+
+def portal_professional_rows(
+    tenant: Tenant, professionals: list, insurance: str | None
+) -> list[tuple[str, str, str | None]]:
+    """Every doctor as a Portal row: full "🥼 <name>", the same description WhatsApp shows."""
+    plan = _selected_plan(tenant, insurance)
+    return [
+        (
+            f"prof|{professional.id}",
+            decorate(EMOJI_DOCTOR, str(professional.name or "")),
+            _professional_description(tenant, professional, plan)[0],
+        )
+        for professional in professionals
+    ]
+
+
+def professional_scope(insurance: str | None, pool: list | None = None) -> dict:
+    """The stored scope of a doctor list; `pool` narrows it to those doctors only."""
+    scope: dict = {"insurance": insurance}
+    if pool is not None:
+        scope["only_ids"] = [str(p.id) for p in pool]
+    return scope
+
+
 def _professional_list_body(question: str, plan: dict | None) -> str:
     if plan is None:
         return question
@@ -2430,7 +2522,11 @@ def _professional_list_body(question: str, plan: dict | None) -> str:
 
 
 def _enter_professional_list(
-    tenant: Tenant, professionals: list, *, insurance: str | None = None
+    tenant: Tenant,
+    professionals: list,
+    *,
+    insurance: str | None = None,
+    pool: bool = False,
 ) -> FlowRouterResult:
     """Render the tappable doctor list ("Escolher médico").
 
@@ -2456,6 +2552,14 @@ def _enter_professional_list(
     # arrive as the plain "Não sei" title (see extract_inbound_body), never as
     # a pseudo-professional id.
     rows.append(("profhelp|0", LABEL_DONT_KNOW, "Te ajudo a escolher"))
+    # `pool`: a caller-chosen subset (rebooking's "Outro médico"), not the whole roster -
+    # the stored scope names those doctors so later pages never widen the list.
+    source = OptionSource(
+        kind="professional",
+        scope=professional_scope(insurance, professionals if pool else None),
+        items=portal_professional_rows(tenant, professionals, insurance),
+        pinned=[PROFESSIONAL_HELP_ROW],
+    )
     return FlowRouterResult(
         action="reply",
         bubbles=[
@@ -2466,6 +2570,7 @@ def _enter_professional_list(
                 rows=rows,
                 button_label="Ver profissionais",
                 section_title="Profissionais",
+                source=source,
             )
         ],
         flow_state=FlowState.SERVICE_CATALOG,
@@ -2557,6 +2662,11 @@ def _enter_clinic_service_catalog(tenant: Tenant, professionals: list) -> FlowRo
                 rows=rows,
                 button_label="Ver serviços",
                 section_title="Serviços",
+                source=OptionSource(
+                    kind="service",
+                    scope={"list": "clinic"},
+                    items=portal_service_rows(services),
+                ),
             )
         ],
         flow_state=FlowState.SERVICE_CATALOG,
@@ -2596,6 +2706,11 @@ def _enter_service_professional_list(
                 rows=rows,
                 button_label="Ver profissionais",
                 section_title="Profissionais",
+                source=OptionSource(
+                    kind="professional",
+                    scope=professional_scope(insurance),
+                    items=portal_professional_rows(tenant, professionals, insurance),
+                ),
             )
         ],
         flow_state=FlowState.SERVICE_CATALOG,
@@ -2868,6 +2983,24 @@ def insurance_page(plans: list, page: int) -> tuple[list, int | None]:
     )
 
 
+INSURANCE_PINNED_ROWS: tuple[tuple[str, str, str | None], ...] = (
+    ("ins|particular", LABEL_INSURANCE_PARTICULAR, None),
+    ("ins|outro", LABEL_INSURANCE_OTHER, None),
+)
+
+
+def portal_insurance_rows(plans: list) -> list[tuple[str, str, str | None]]:
+    """Every clinic plan as a Portal row: the full name + how payment works for it."""
+    return [
+        (
+            f"ins|{plan['name']}",
+            str(plan["name"]),
+            insurance_payment_description(plan.get("mechanism")),
+        )
+        for plan in plans
+    ]
+
+
 def insurance_more_row(next_page: int | None) -> list[tuple[str, str]]:
     """The "Ver mais convênios" row for `next_page`, or nothing on the last page."""
     if next_page is None:
@@ -2909,6 +3042,13 @@ def _enter_insurance(
     rows.extend(insurance_more_row(next_page))
     rows.append(("ins|particular", LABEL_INSURANCE_PARTICULAR))
     rows.append(("ins|outro", LABEL_INSURANCE_OTHER))
+    # The Portal pages the WHOLE catalogue itself (no "Ver mais convênios" row there).
+    source = OptionSource(
+        kind="insurance",
+        scope={},
+        items=portal_insurance_rows(plans),
+        pinned=list(INSURANCE_PINNED_ROWS),
+    )
     logger.info(
         "insurance_step_presented",
         conversation_id=str(getattr(conversation, "id", None)),
@@ -2925,6 +3065,7 @@ def _enter_insurance(
                 rows=rows,
                 button_label="Ver convênios",
                 section_title="Convênios",
+                source=source,
             )
         ],
         flow_state=FlowState.SERVICE_CATALOG,
@@ -3265,7 +3406,13 @@ async def _catalog_step(
         if _norm(body) == _norm(LABEL_OTHER_SERVICE):
             return FlowRouterResult(
                 action="reply",
-                bubbles=[_service_list_bubble(tenant, services)],
+                bubbles=[
+                    _service_list_bubble(
+                        tenant,
+                        services,
+                        scope=service_scope(_selected_professional_id(conversation)),
+                    )
+                ],
                 flow_state=FlowState.SERVICE_CATALOG,
                 flow_step=STEP_AWAITING_SERVICE,
                 flow_selected_professional_id=_selected_professional_id(conversation),
@@ -3821,7 +3968,11 @@ def _handle_day_back(
     if target == BACK_TARGET_SERVICE and services:
         return FlowRouterResult(
             action="reply",
-            bubbles=[_service_list_bubble(tenant, services)],
+            bubbles=[
+                _service_list_bubble(
+                    tenant, services, scope=service_scope(_selected_professional_id(conversation))
+                )
+            ],
             flow_state=FlowState.SERVICE_CATALOG,
             flow_step=STEP_AWAITING_SERVICE,
             flow_selected_type=conversation.flow_selected_type,
@@ -5453,14 +5604,27 @@ async def _resume_bubbles(
     if step == STEP_AWAITING_SERVICE:
         if not services:
             return _menu_fallback()
-        return _preserve_reply(conversation, [_service_list_bubble(tenant, services)])
+        return _preserve_reply(
+            conversation,
+            [
+                _service_list_bubble(
+                    tenant, services, scope=service_scope(_selected_professional_id(conversation))
+                )
+            ],
+        )
 
     if step == STEP_AWAITING_SERVICE_CONFIRM:
         service = _match_service(services, conversation.flow_selected_type)
         if service is None:
             return _preserve_reply(
                 conversation,
-                [_service_list_bubble(tenant, services)],
+                [
+                    _service_list_bubble(
+                        tenant,
+                        services,
+                        scope=service_scope(_selected_professional_id(conversation)),
+                    )
+                ],
                 step=STEP_AWAITING_SERVICE,
             )
         return _preserve_reply(
@@ -5658,7 +5822,7 @@ async def enter_rebooking(
         result.flow_selected_type = service_name
         return result
 
-    result = _enter_professional_list(tenant, pool)
+    result = _enter_professional_list(tenant, pool, pool=True)
     if prefix:
         result.bubbles.insert(0, TextBubble(body=prefix))
     # Keep the service so the doctor is the ONLY thing still to choose.

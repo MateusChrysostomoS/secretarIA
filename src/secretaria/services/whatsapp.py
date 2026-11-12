@@ -101,6 +101,41 @@ def interactive_list_record(
     return record
 
 
+def interactive_portal_list_record(
+    body: str,
+    button_label: str,
+    rows: list[tuple[str, str, str | None]],
+    section_title: str,
+    *,
+    source: dict,
+) -> dict:
+    """A Portal catalogue card: page 1 + pinned rows with FULL titles, and its pointer.
+
+    The Portal twin of `interactive_list_record` for a paged list (TASK-082): no 24-char
+    title cut and no 10-row cap - `rows` is already page 1 of the list plus its fixed
+    rows (services/list_options.py::first_page_rows). WhatsApp never builds one of these.
+    `source` is stored as given (`list_options.card_source`); the wire drops its `v` and
+    `scope` (schemas/conversation.py::InteractiveSourceRead).
+    """
+    return {
+        "kind": "list",
+        "body": truncate_plain(body, MAX_INTERACTIVE_BODY_CHARS),
+        "button_label": truncate_plain(button_label, MAX_LIST_OPEN_BUTTON_CHARS),
+        "section_title": truncate_plain(section_title, MAX_LIST_SECTION_TITLE_CHARS),
+        "options": [
+            {
+                "id": rid[:MAX_LIST_ROW_ID_CHARS],
+                "title": str(title),
+                "description": (
+                    truncate_plain(desc, MAX_LIST_ROW_DESCRIPTION_CHARS) if desc else None
+                ),
+            }
+            for rid, title, desc in rows
+        ],
+        "source": source,
+    }
+
+
 class TenantWhatsAppCredentialMissing(RuntimeError):
     """A tenant-scoped send was attempted without that tenant's credentials.
 

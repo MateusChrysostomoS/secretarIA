@@ -74,6 +74,27 @@ class ButtonBubble:
     cancel_label: str = "Cancelar"
 
 
+# Rows on a paged card's first page and per options request (services/list_options.py).
+OPTION_PAGE_SIZE = 10
+
+
+@dataclass
+class OptionSource:
+    """Where a catalogue list's rows come from, for a channel that pages it (TASK-082).
+
+    `kind` is "service" | "professional" | "insurance"; `scope` is the server-only
+    pointer `services/list_options.py::resolve` rebuilds the list from (never sent to a
+    browser); `items` is the WHOLE ordered list as Portal rows (full titles, no cap);
+    `pinned` are the fixed rows ("Não sei", "Particular", "Outro") drawn after it.
+    WhatsApp ignores all of this and sends `SlotsBubble.rows`, exactly as before.
+    """
+
+    kind: str
+    scope: dict
+    items: list[tuple] = field(default_factory=list)
+    pinned: list[tuple] = field(default_factory=list)
+
+
 @dataclass
 class SlotsBubble:
     body: str
@@ -88,6 +109,9 @@ class SlotsBubble:
     # ISO dates a channel able to draw a calendar offers on it (`SUPPORTS_CALENDAR`). The rows
     # stay the card for every other channel, and the WhatsApp cap of 10 rows still holds.
     calendar_days: list[str] = field(default_factory=list)
+    # A catalogue list a channel with `SUPPORTS_OPTION_SOURCE` pages instead of cutting
+    # (workers/shared/bubbles.py::_send_bubble). None for every other list.
+    source: OptionSource | None = None
 
 
 Bubble = TextBubble | ButtonBubble | SlotsBubble

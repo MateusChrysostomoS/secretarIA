@@ -232,6 +232,26 @@ class BrainMessageMessageList(BaseModel):
     accepts_typing: bool = False
 
 
+class BrainMessageOptionItem(BaseModel):
+    """One row of a paged Portal list: what the patient sees and taps (TASK-082)."""
+
+    id: str
+    title: str
+    description: str | None = None
+
+
+class BrainMessageOptionsPage(BaseModel):
+    """`GET /internal/brain-message/messages/{message_id}/options` response (TASK-082).
+
+    `items` never holds the card's pinned rows; `total` counts the matches for `q`
+    (the whole list without it); `next_cursor` is opaque, null on the last page.
+    """
+
+    items: list[BrainMessageOptionItem]
+    next_cursor: str | None = None
+    total: int
+
+
 class BrainMessageTyping(BaseModel):
     """The PATIENT is typing (a heartbeat). Scope is the session's; nothing else is accepted."""
 

@@ -99,9 +99,13 @@ class Message(Base):
     # `body` above stays the flattened text the agent's history reads (a list
     # gains "(opções: A, B)"), untouched; this is the half a HUMAN screen needs -
     # the staff console draws real controls from it, and links a later tap back
-    # to it through `interactive_reply_id`. NULL for text, for inbound rows, for
-    # rows written before the column, and on Brain-Message, whose patient
-    # receives the options as plain text (services/channel_sender.py).
+    # to it through `interactive_reply_id`. NULL for text, for inbound rows and for
+    # rows written before the column. The Portal (Brain-Message) records its cards
+    # too (services/channel_sender.py::BrainMessageSender); a Portal catalogue list
+    # (TASK-082) holds page 1 only, with full titles, plus
+    #   "source": {"v", "kind", "scope", "pinned_ids", "total", "next_cursor"}
+    # - the pointer services/list_options.py resolves for the rest of the list.
+    # `scope` is server-only: the wire projection never carries it.
     # `none_as_null=True`, like `attachment` below (same reasoning): a text message
     # must be SQL NULL here, never the JSON literal 'null', because
     # `workers/tasks.py::_validated_brain_message_reply_id` selects the
