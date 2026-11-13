@@ -39,6 +39,9 @@ class _AnyProfessional(dict):
     def get(self, key, default=None):
         return ACCOUNT
 
+    def __contains__(self, key):  # everyone is listed, so the unlink pass leaves them alone
+        return True
+
 
 @pytest_asyncio.fixture
 async def world(db, monkeypatch):

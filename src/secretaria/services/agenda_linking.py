@@ -16,8 +16,12 @@ professional simply keeps no `agenda_id`, which is exactly today's behaviour (sp
 onboarding path of a professional that is already saved and must never be undone by a linking
 problem. A later `POST /tenants/me/agendas/sync` or `scripts/reconcile_agendas.py` catches up.
 
-A professional brain-api does not list (no user bound yet, or the user unbound) is left exactly as
-it is - an absent row is not proof that the person changed.
+A professional brain-api does not list is never LINKED. When brain-api ANSWERED (a real 200, an
+empty list included) and a professional of this tenant that currently has an `agenda_id` is absent,
+it is UNLINKED (`agenda_id = NULL`): brain-api lists only memberships the person accepted and still
+holds (not pending, not revoked, account not disabled - final wave C1/I1), so absence means the
+doctor left this clinic and the clinic must stop sharing his agenda. A failed call (`None`) never
+unlinks anything.
 
 Callers own the transaction: `ensure_agenda_for_professional` and `sync_tenant_agendas` only flush;
 `try_link_professional` and `reconcile_all_tenants` commit.
@@ -45,7 +49,7 @@ class AgendaSyncResult:
 
     linked:   the tenant's professionals that belong to an agenda;
     shared:   of those, how many share it with at least one other professional (any tenant);
-    changed:  professionals newly linked (or moved to another agenda) by THIS call;
+    changed:  professionals newly linked, moved to another agenda or unlinked by THIS call;
     brain_ok: False when brain-api could not be asked (nothing was changed).
     """
 
@@ -91,6 +95,16 @@ async def ensure_agenda_for_professional(
     return agenda
 
 
+async def _end_read(session: AsyncSession) -> None:
+    """End the READ-ONLY transaction before asking brain-api (final wave M3): the call can take
+    `BRAIN_API_TIMEOUT_SECONDS`, and an open transaction there is an "idle in transaction"
+    connection. Same rule as `services/release_keep._end_read`: with pending ORM writes the
+    caller's transaction is left as it is. The rows read stay usable (`expire_on_commit=False`);
+    the writes after the call are by primary key, under the per-account lock."""
+    if session.in_transaction() and not (session.new or session.dirty or session.deleted):
+        await session.commit()
+
+
 async def _tenant_counts(session: AsyncSession, tenant_id: UUID) -> tuple[int, int]:
     """`(linked, shared)` for one tenant's professionals, from the database as it is now."""
     sibling = aliased(Professional)
@@ -130,6 +144,7 @@ async def sync_tenant_agendas(
     changed = 0
     brain_ok = True
     if professionals:
+        await _end_read(session)
         accounts = await fetch_professional_accounts(tenant_id)
         if accounts is None:
             brain_ok = False
@@ -147,6 +162,14 @@ async def sync_tenant_agendas(
                 agenda = await ensure_agenda_for_professional(session, professional, account_id)
                 if before != agenda.id:
                     changed += 1
+            # brain-api ANSWERED (an empty list included) and no longer lists these: the person
+            # left this clinic (revoked, unbound, or an invite never accepted). Their row leaves
+            # the agenda so this clinic stops sharing it. Never on a failure (brain_ok False).
+            for professional in professionals:
+                if professional.agenda_id is not None and str(professional.id) not in accounts:
+                    professional.agenda_id = None
+                    changed += 1
+            await session.flush()
 
     linked, shared = await _tenant_counts(session, tenant_id)
     logger.info(

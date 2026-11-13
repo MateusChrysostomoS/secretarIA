@@ -6,15 +6,20 @@ professional that has no account yet and links nothing. This tick catches up wit
 clicking "sync".
 
 What it does: picks the tenants that still have at least one ACTIVE professional with no
-`agenda_id`, and runs `services/agenda_linking.sync_tenant_agendas` for each - one brain-api call
-per tenant, each tenant in its OWN session/transaction.
+`agenda_id` (to link) AND the tenants that have a linked professional (to re-check: a doctor who
+left the clinic - revoked, unbound - is UNLINKED, final wave I1), and runs
+`services/agenda_linking.sync_tenant_agendas` for each - one brain-api call per tenant, each tenant
+in its OWN session/transaction.
 
-* Bounded: at most `AGENDA_RECONCILE_MAX_TENANTS_PER_RUN` tenants per tick, picked in random order
-  so a tenant whose professionals brain-api never returns cannot starve the others forever.
-* Tolerant: a brain-api failure links nothing for that tenant (the service returns
+* Bounded: at most `AGENDA_RECONCILE_MAX_TENANTS_PER_RUN` tenants per tick, half (rounded up) for
+  tenants waiting for a link and the rest for linked tenants, unused capacity going to the other
+  group (`_tenants_to_reconcile`); random order inside each group, so a tenant whose professionals
+  brain-api never returns cannot starve the others forever. Linked tenants are re-polled on every
+  tick they are picked - that is the price of noticing a departure without a "last checked" column.
+* Tolerant: a brain-api failure links AND unlinks nothing for that tenant (the service returns
   `brain_ok=False`); an unexpected error is logged (tenant id + error type only), sweep goes on.
 * Idempotent: a professional brain-api does not list stays NULL and is simply picked again by a
-  later tick; a tenant with everything linked is never picked.
+  later tick; re-checking a tenant nothing changed at writes nothing.
 
 Layering: workers -> services. Registered in `workers/arq_worker.py`.
 """
@@ -42,21 +47,42 @@ def agenda_reconcile_minutes(settings: Settings | None = None) -> set[int]:
     return set(range(AGENDA_RECONCILE_OFFSET_MINUTE % interval, 60, interval))
 
 
-async def _tenants_with_unlinked_professionals(limit: int) -> list[UUID]:
+async def _tenants_to_reconcile(limit: int) -> list[UUID]:
+    """At most `limit` tenants, from two DISJOINT groups, each in random order:
+
+    * waiting: an ACTIVE professional still has no `agenda_id` (to link);
+    * linked:  nothing waiting, but some professional has an `agenda_id` (to re-check, so a
+      doctor who left the clinic is unlinked - final wave I1).
+
+    Half the bound (rounded up) goes to `waiting`, the rest to `linked`; capacity a group does not
+    use goes to the other. Neither group can starve the other. Two bounded index-friendly queries.
+    """
+    waiting_unlinked = exists().where(
+        Professional.tenant_id == Tenant.id,
+        Professional.is_active.is_(True),
+        Professional.agenda_id.is_(None),
+    )
+    has_link = exists().where(
+        Professional.tenant_id == Tenant.id, Professional.agenda_id.is_not(None)
+    )
     async with async_session_factory() as session:
-        rows = await session.scalars(
-            select(Tenant.id)
-            .where(
-                exists().where(
-                    Professional.tenant_id == Tenant.id,
-                    Professional.is_active.is_(True),
-                    Professional.agenda_id.is_(None),
-                )
+        waiting = list(
+            await session.scalars(
+                select(Tenant.id).where(waiting_unlinked).order_by(func.random()).limit(limit)
             )
-            .order_by(func.random())
-            .limit(limit)
         )
-        return list(rows)
+        linked = list(
+            await session.scalars(
+                select(Tenant.id)
+                .where(has_link, ~waiting_unlinked)
+                .order_by(func.random())
+                .limit(limit)
+            )
+        )
+    first = (limit + 1) // 2
+    picked = waiting[:first] + linked[: limit - first]
+    spare = limit - len(picked)
+    return picked + (waiting[first:] + linked[limit - first :])[:spare]
 
 
 async def run_agenda_reconcile(ctx: dict) -> dict[str, int]:
@@ -65,7 +91,7 @@ async def run_agenda_reconcile(ctx: dict) -> dict[str, int]:
     counts = {"tenants": 0, "changed": 0, "brain_unavailable": 0, "failed": 0}
     if limit == 0:
         return counts
-    for tenant_id in await _tenants_with_unlinked_professionals(limit):
+    for tenant_id in await _tenants_to_reconcile(limit):
         counts["tenants"] += 1
         async with async_session_factory() as session:
             try:

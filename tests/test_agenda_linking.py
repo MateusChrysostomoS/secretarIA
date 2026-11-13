@@ -292,6 +292,139 @@ async def test_account_locks_are_taken_in_sorted_account_order(db, monkeypatch):
     assert taken == accounts == sorted(taken)
 
 
+async def _link(db, monkeypatch, tenant, mapping):
+    _fake_accounts(monkeypatch, {tenant.id: mapping})
+    async with db() as session:
+        await sync_tenant_agendas(session, tenant.id)
+        await session.commit()
+
+
+async def test_a_pending_invite_brain_api_does_not_list_is_never_linked(db, monkeypatch):
+    """Final wave C1: brain-api answers only ACCEPTED memberships. Clinic C invited the doctor
+    who works at clinic P; while the invite is pending C's row is absent from C's answer (the
+    real client parses brain-api's filtered bare list), so it never joins P's agenda."""
+    tenant_p = await seed_tenant(db, name="Clínica P")
+    tenant_c = await seed_tenant(db, name="Clínica C")
+    y_p = await seed_professional(db, tenant_p, "Dr. Y")
+    y_c = await seed_professional(db, tenant_c, "Dr. Y")
+    await _link(db, monkeypatch, tenant_p, {str(y_p.id): ACCOUNT_A})
+
+    def handler(request):  # brain-api's answer for C: Y's membership is still pending
+        assert str(tenant_c.id) in request.url.path
+        return httpx.Response(200, json=[])
+
+    await _through_real_client(monkeypatch, handler)
+    real_fetch = brain_professionals.fetch_professional_accounts
+    monkeypatch.setattr(agenda_linking, "fetch_professional_accounts", real_fetch)
+    async with db() as session:
+        result = await sync_tenant_agendas(session, tenant_c.id)
+        await session.commit()
+    id_p, id_c = await _agenda_ids(db, y_p, y_c)
+    assert id_p is not None and id_c is None
+    assert (result.linked, result.shared, result.brain_ok) == (0, 0, True)
+
+
+async def test_a_linked_professional_brain_api_stops_listing_is_unlinked(db, monkeypatch):
+    """Final wave I1: the doctor left clinic C (revoked / unbound). C's row leaves his agenda, so C
+    stops seeing his windows at P; P's row and C's other professionals are untouched."""
+    tenant_p = await seed_tenant(db, name="Clínica P")
+    tenant_c = await seed_tenant(db, name="Clínica C")
+    y_p = await seed_professional(db, tenant_p, "Dr. Y")
+    y_c = await seed_professional(db, tenant_c, "Dr. Y")
+    other_c = await seed_professional(db, tenant_c, "Dr. Other")
+    await _link(db, monkeypatch, tenant_p, {str(y_p.id): ACCOUNT_A})
+    await _link(db, monkeypatch, tenant_c, {str(y_c.id): ACCOUNT_A, str(other_c.id): ACCOUNT_B})
+    id_p, id_c, id_other = await _agenda_ids(db, y_p, y_c, other_c)
+    assert id_p == id_c is not None and id_other is not None
+
+    _fake_accounts(monkeypatch, {tenant_c.id: {str(other_c.id): ACCOUNT_B}})
+    async with db() as session:
+        result = await sync_tenant_agendas(session, tenant_c.id)
+        await session.commit()
+
+    assert await _agenda_ids(db, y_p, y_c, other_c) == [id_p, None, id_other]
+    assert (result.linked, result.shared, result.changed) == (1, 0, 1)
+
+    async with db() as session:  # idempotent: nothing left to unlink
+        again = await sync_tenant_agendas(session, tenant_c.id)
+        await session.commit()
+    assert again.changed == 0
+    assert await _agenda_ids(db, y_p, y_c, other_c) == [id_p, None, id_other]
+
+
+async def test_an_empty_successful_answer_unlinks_everyone_of_that_tenant_only(db, monkeypatch):
+    tenant_p = await seed_tenant(db)
+    tenant_c = await seed_tenant(db)
+    y_p = await seed_professional(db, tenant_p, "Dr. Y")
+    y_c = await seed_professional(db, tenant_c, "Dr. Y")
+    await _link(db, monkeypatch, tenant_p, {str(y_p.id): ACCOUNT_A})
+    await _link(db, monkeypatch, tenant_c, {str(y_c.id): ACCOUNT_A})
+
+    _fake_accounts(monkeypatch, {tenant_c.id: {}})
+    async with db() as session:
+        await sync_tenant_agendas(session, tenant_c.id)
+        await session.commit()
+    id_p, id_c = await _agenda_ids(db, y_p, y_c)
+    assert id_p is not None and id_c is None
+
+
+async def test_a_brain_api_failure_never_unlinks(db, monkeypatch):
+    tenant = await seed_tenant(db)
+    pro = await seed_professional(db, tenant, "Dr. X")
+    await _link(db, monkeypatch, tenant, {str(pro.id): ACCOUNT_A})
+    (linked_id,) = await _agenda_ids(db, pro)
+
+    _fake_accounts(monkeypatch, None)  # unconfigured / timeout / 5xx / bad body / old route
+    async with db() as session:
+        result = await sync_tenant_agendas(session, tenant.id)
+        await try_link_professional(session, tenant.id, pro.id)
+        await session.commit()
+    assert result.brain_ok is False and result.changed == 0
+    assert await _agenda_ids(db, pro) == [linked_id]
+
+    for status in (404, 500):  # the real client: old route (404) and server error alike
+        await _through_real_client(monkeypatch, lambda r, s=status: httpx.Response(s))
+        monkeypatch.setattr(
+            agenda_linking,
+            "fetch_professional_accounts",
+            brain_professionals.fetch_professional_accounts,
+        )
+        async with db() as session:
+            await sync_tenant_agendas(session, tenant.id)
+            await session.commit()
+        assert await _agenda_ids(db, pro) == [linked_id]
+
+
+async def test_the_attach_trigger_unlinks_only_its_own_professional(db, monkeypatch):
+    tenant = await seed_tenant(db)
+    one = await seed_professional(db, tenant, "Dr. One")
+    two = await seed_professional(db, tenant, "Dr. Two")
+    await _link(db, monkeypatch, tenant, {str(one.id): ACCOUNT_A, str(two.id): ACCOUNT_B})
+    _fake_accounts(monkeypatch, {tenant.id: {}})
+    async with db() as session:
+        await try_link_professional(session, tenant.id, one.id)
+    id_one, id_two = await _agenda_ids(db, one, two)
+    assert id_one is None and id_two is not None
+
+
+async def test_the_read_transaction_is_closed_before_brain_api_is_asked(db, monkeypatch):
+    """Final wave M3: brain-api can take seconds; an open read there is idle-in-transaction."""
+    tenant = await seed_tenant(db)
+    pro = await seed_professional(db, tenant, "Dr. X")
+    seen: list[bool] = []
+    async with db() as session:
+
+        async def fake(tenant_id):
+            seen.append(session.in_transaction())
+            return {str(pro.id): ACCOUNT_A}
+
+        monkeypatch.setattr(agenda_linking, "fetch_professional_accounts", fake)
+        result = await sync_tenant_agendas(session, tenant.id)
+        await session.commit()
+    assert seen == [False]
+    assert result.changed == 1 and await _agenda_ids(db, pro) != [None]
+
+
 async def test_try_link_professional_never_raises_even_if_rollback_fails(monkeypatch):
     class BrokenSession:
         async def commit(self):

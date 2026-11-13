@@ -246,8 +246,9 @@ class Settings(BaseSettings):
     # brain-api binds `users.professional_id` AFTER the internal attach, so linking a new
     # professional to their person's agenda at attach time usually finds nothing. This cron
     # catches up: every AGENDA_RECONCILE_INTERVAL_MINUTES (1-60) it re-syncs the tenants that
-    # still have an active professional with no agenda, at most AGENDA_RECONCILE_MAX_TENANTS_PER_RUN
-    # tenants per tick (one brain-api call each), so a slow brain-api cannot make a tick unbounded.
+    # still have an active professional with no agenda (link) and the tenants with a linked one
+    # (re-check: unlink a doctor who left), at most AGENDA_RECONCILE_MAX_TENANTS_PER_RUN tenants
+    # per tick (one brain-api call each), so a slow brain-api cannot make a tick unbounded.
     AGENDA_RECONCILE_INTERVAL_MINUTES: int = 15
     AGENDA_RECONCILE_MAX_TENANTS_PER_RUN: int = 25
 

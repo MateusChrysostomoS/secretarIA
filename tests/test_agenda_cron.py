@@ -35,7 +35,18 @@ async def _agenda_id(db, professional):
         return (await session.get(Professional, professional.id)).agenda_id
 
 
-async def test_cron_picks_only_tenants_with_active_unlinked_professionals(db, monkeypatch):
+async def _force_link(db, professional) -> None:
+    async with db() as session:
+        agenda = Agenda(person_key=str(uuid4()))
+        session.add(agenda)
+        await session.flush()
+        (await session.get(Professional, professional.id)).agenda_id = agenda.id
+        await session.commit()
+
+
+async def test_cron_picks_tenants_to_link_and_tenants_with_links_to_recheck(db, monkeypatch):
+    """Final wave I1: a tenant whose professionals are all linked is still re-checked, because
+    a doctor who left the clinic must be UNLINKED; inactive-only and empty tenants are not."""
     needs = await seed_tenant(db, name="Needs")
     linked = await seed_tenant(db, name="Linked")
     inactive_only = await seed_tenant(db, name="InactiveOnly")
@@ -43,21 +54,58 @@ async def test_cron_picks_only_tenants_with_active_unlinked_professionals(db, mo
     pro_needs = await seed_professional(db, needs, "Dr. N")
     pro_linked = await seed_professional(db, linked, "Dr. L")
     pro_inactive = await seed_professional(db, inactive_only, "Dr. I")
+    await _force_link(db, pro_linked)
     async with db() as session:
-        agenda = Agenda(person_key=str(uuid4()))
-        session.add(agenda)
-        await session.flush()
-        (await session.get(Professional, pro_linked.id)).agenda_id = agenda.id
         (await session.get(Professional, pro_inactive.id)).is_active = False
         await session.commit()
-    asked = _wire(monkeypatch, db, {needs.id: {str(pro_needs.id): ACCOUNT}})
+    asked = _wire(
+        monkeypatch,
+        db,
+        {needs.id: {str(pro_needs.id): ACCOUNT}, linked.id: {}},  # Dr. L left "Linked"
+    )
 
     counts = await agenda_cron.run_agenda_reconcile({})
 
-    assert asked == [needs.id]  # not Linked, not InactiveOnly, not Empty
-    assert empty.id not in asked
-    assert counts == {"tenants": 1, "changed": 1, "brain_unavailable": 0, "failed": 0}
+    assert sorted(asked) == sorted([needs.id, linked.id])  # not InactiveOnly, not Empty
+    assert empty.id not in asked and inactive_only.id not in asked
+    assert counts == {"tenants": 2, "changed": 2, "brain_unavailable": 0, "failed": 0}
     assert await _agenda_id(db, pro_needs) is not None
+    assert await _agenda_id(db, pro_linked) is None  # unlinked
+
+
+async def test_a_linked_tenant_whose_brain_api_call_fails_keeps_its_links(db, monkeypatch):
+    tenant = await seed_tenant(db)
+    pro = await seed_professional(db, tenant, "Dr. L")
+    await _force_link(db, pro)
+    before = await _agenda_id(db, pro)
+    asked = _wire(monkeypatch, db, {})  # missing key -> None = brain-api failure
+
+    counts = await agenda_cron.run_agenda_reconcile({})
+
+    assert asked == [tenant.id] and counts["brain_unavailable"] == 1
+    assert await _agenda_id(db, pro) == before
+
+
+async def test_the_bound_is_shared_so_linking_and_rechecking_both_progress(db, monkeypatch):
+    """At most N tenants per tick, and neither group can starve the other: with many tenants
+    still waiting for a link, linked tenants still get re-checked (and vice versa)."""
+    waiting = [await seed_tenant(db, name=f"W{i}") for i in range(4)]
+    linked = [await seed_tenant(db, name=f"L{i}") for i in range(4)]
+    for tenant in waiting:
+        await seed_professional(db, tenant, "Dr.")  # brain-api never lists them
+    for tenant in linked:
+        await _force_link(db, await seed_professional(db, tenant, "Dr."))
+    asked = _wire(monkeypatch, db, {t.id: {} for t in waiting} | {t.id: None for t in linked})
+    # (linked tenants: brain-api down, so they stay linked and stay candidates)
+
+    counts = await agenda_cron.run_agenda_reconcile({})  # limit from the next line's default
+    assert counts["tenants"] == len(asked)
+    asked.clear()
+    monkeypatch.setattr(get_settings(), "AGENDA_RECONCILE_MAX_TENANTS_PER_RUN", 2)
+    await agenda_cron.run_agenda_reconcile({})
+    assert len(asked) == 2
+    assert len({*asked} & {t.id for t in waiting}) == 1
+    assert len({*asked} & {t.id for t in linked}) == 1
 
 
 async def test_one_tenant_failing_does_not_stop_the_others(db, monkeypatch):
@@ -90,12 +138,14 @@ async def test_the_per_run_bound_is_respected_and_later_ticks_finish_the_job(db,
     first = await agenda_cron.run_agenda_reconcile({})
     assert first["tenants"] == 2 and len(asked) == 2
 
-    for _ in range(4):  # already-linked tenants are never picked again, so this converges
-        await agenda_cron.run_agenda_reconcile({})
-    assert len(asked) == 5 and len(set(asked)) == 5
+    for _ in range(4):  # at least one waiting tenant per tick, so this converges
+        assert (await agenda_cron.run_agenda_reconcile({}))["tenants"] <= 2
+    assert set(asked) == {t.id for t in tenants}
     for tenant in tenants:
         assert await _agenda_id(db, pros[tenant.id]) is not None
-    assert (await agenda_cron.run_agenda_reconcile({}))["tenants"] == 0  # nothing left
+    # Linked tenants are still re-checked (unlinking), but nothing changes any more.
+    again = await agenda_cron.run_agenda_reconcile({})
+    assert again["tenants"] == 2 and again["changed"] == 0
 
 
 async def test_a_professional_brain_api_does_not_return_stays_null_and_is_retried(db, monkeypatch):
@@ -112,7 +162,9 @@ async def test_a_professional_brain_api_does_not_return_stays_null_and_is_retrie
     assert asked == [tenant.id, tenant.id]
     assert second["changed"] == 1 and await _agenda_id(db, pro) is not None
 
-    assert (await agenda_cron.run_agenda_reconcile({}))["tenants"] == 0  # idempotent: not picked
+    third = await agenda_cron.run_agenda_reconcile({})  # re-checked (unlink), idempotent
+    assert (third["tenants"], third["changed"]) == (1, 0)
+    assert await _agenda_id(db, pro) is not None
 
 
 async def test_a_zero_bound_does_nothing(db, monkeypatch):
