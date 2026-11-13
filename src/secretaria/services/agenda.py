@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import and_, func, select, text
+from sqlalchemy import ColumnElement, and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.database import async_session_factory
@@ -109,6 +109,36 @@ async def sibling_professional_ids(
     return list(rows)
 
 
+async def agenda_members(session: AsyncSession, agenda_id: UUID) -> list[tuple[UUID, UUID]]:
+    """`(tenant_id, professional_id)` of every professional on one agenda (any tenant)."""
+    rows = await session.execute(
+        select(Professional.tenant_id, Professional.id)
+        .where(Professional.agenda_id == agenda_id)
+        .order_by(Professional.id)
+    )
+    return [(tenant_id, pid) for tenant_id, pid in rows.all()]
+
+
+def owned_events(members: Iterable[tuple[UUID, UUID]]) -> ColumnElement[bool]:
+    """`calendar_events` rows owned by these `(tenant_id, professional_id)` pairs.
+
+    Final wave M2: the table's only index is `(tenant_id, professional_id, start_at)`
+    (models/calendar_event.py), so a predicate on `professional_id` alone cannot use it and
+    scans the table on Postgres - under the person's advisory lock. Grouped per tenant
+    (`tenant_id = t AND professional_id IN (...)`, OR-ed) it can. Same rows as before: a
+    professional belongs to exactly one tenant. Never call with an empty `members`.
+    """
+    by_tenant: dict[UUID, list[UUID]] = {}
+    for tenant_id, pid in members:
+        by_tenant.setdefault(tenant_id, []).append(pid)
+    return or_(
+        *(
+            and_(CalendarEvent.tenant_id == tenant_id, CalendarEvent.professional_id.in_(ids))
+            for tenant_id, ids in sorted(by_tenant.items())
+        )
+    )
+
+
 async def shared_busy(
     session: AsyncSession,
     professional_id: UUID | None,
@@ -120,9 +150,17 @@ async def shared_busy(
 
     `start`/`end` may be in any zone: they are converted to UTC before querying."""
     start, end = _utc(start), _utc(end)
-    sibling_ids = await sibling_professional_ids(session, professional_id)
-    if not sibling_ids:
+    agenda_id = await agenda_id_of(session, professional_id)
+    if agenda_id is None:
         return []
+    siblings = [
+        (tenant_id, pid)
+        for tenant_id, pid in await agenda_members(session, agenda_id)
+        if pid != professional_id
+    ]
+    if not siblings:
+        return []
+    sibling_ids = [pid for _tenant_id, pid in siblings]
 
     windows: set[tuple[datetime, datetime]] = set()
 
@@ -140,7 +178,7 @@ async def shared_busy(
 
     events = await session.execute(
         select(CalendarEvent.start_at, CalendarEvent.end_at).where(
-            CalendarEvent.professional_id.in_(sibling_ids),
+            owned_events(siblings),
             and_(
                 CalendarEvent.status == EVENT_STATUS_CONFIRMED,
                 CalendarEvent.busy.is_(True),
@@ -166,7 +204,7 @@ async def shared_busy(
     # A sibling's fresh Google exclusive write whose appointment row may not exist yet.
     leases = await session.execute(
         select(CalendarEvent.start_at, CalendarEvent.end_at).where(
-            CalendarEvent.professional_id.in_(sibling_ids),
+            owned_events(siblings),
             CalendarEvent.status == EVENT_STATUS_GOOGLE_LEASE,
             CalendarEvent.created_at > datetime.now(UTC) - GOOGLE_WRITE_LEASE,
             CalendarEvent.start_at < end,

@@ -238,3 +238,74 @@ async def test_write_lock_takes_one_stable_advisory_key_per_agenda_on_postgres()
     assert all(-(2**63) <= k < 2**63 for k in keys)
     assert agenda_service.agenda_lock_key(first) == f"agenda:{first}"
     assert agenda_service.agenda_lock_key(other) != agenda_service.agenda_lock_key(first)
+
+
+# --------------------------------------------------------------------------
+# Final wave M2: every calendar_events read/sweep of the siblings carries tenant_id, so the only
+# index there - (tenant_id, professional_id, start_at) - serves it on Postgres (no full scan
+# under the person's advisory lock).
+# --------------------------------------------------------------------------
+
+
+def _event_statements(session, seen: list):
+    real = session.execute
+
+    async def recording(statement, *args, **kwargs):
+        sql = str(statement.compile(compile_kwargs={"literal_binds": False}))
+        if "calendar_events" in sql:
+            seen.append(sql)
+        return await real(statement, *args, **kwargs)
+
+    return recording
+
+
+async def test_the_siblings_event_reads_filter_on_tenant_and_professional(db, monkeypatch):
+    tenant_p, _c, x_p, x_c, _y, _a = await _shared_world(db)
+    await _add(db, _event(tenant_p, x_p))
+    seen: list[str] = []
+    async with db() as session:
+        monkeypatch.setattr(session, "execute", _event_statements(session, seen))
+        busy = await shared_busy(session, x_c.id, START - timedelta(hours=1), END)
+    assert [(w.start, w.end) for w in busy] == [(START, END)]
+    assert len(seen) == 2  # local busy events + Google leases
+    for sql in seen:
+        assert "calendar_events.tenant_id" in sql and "calendar_events.professional_id" in sql
+
+
+async def test_the_lease_sweep_and_own_lease_check_filter_on_tenant(db, monkeypatch):
+    from contextlib import asynccontextmanager
+
+    from secretaria.services import local_calendar
+    from tests._local_agenda import wire_local_agenda
+
+    _p, tenant_c, _x_p, x_c, _y, _a = await _shared_world(db)
+    wire_local_agenda(monkeypatch, db)
+    seen: list[str] = []
+    real_lock = local_calendar.person_agenda_write_lock
+
+    @asynccontextmanager
+    async def recording_lock(professional_id):
+        async with real_lock(professional_id) as (session, agenda_id):
+            monkeypatch.setattr(session, "execute", _event_statements(session, seen))
+            monkeypatch.setattr(session, "scalar", _scalar_recorder(session, seen))
+            yield session, agenda_id
+
+    monkeypatch.setattr(local_calendar, "person_agenda_write_lock", recording_lock)
+    lease = await local_calendar.reserve_person_window(tenant_c.id, x_c.id, START, END)
+    assert lease is not None and lease != local_calendar.NO_AGENDA
+    sweeps = [sql for sql in seen if sql.startswith("DELETE")]
+    assert len(sweeps) == 1 and "calendar_events.tenant_id" in sweeps[0]
+    own = [sql for sql in seen if sql.startswith("SELECT calendar_events.id")]
+    assert own and all("calendar_events.tenant_id" in sql for sql in own)
+
+
+def _scalar_recorder(session, seen: list):
+    real = session.scalar
+
+    async def recording(statement, *args, **kwargs):
+        sql = str(statement.compile(compile_kwargs={"literal_binds": False}))
+        if "calendar_events" in sql:
+            seen.append(sql)
+        return await real(statement, *args, **kwargs)
+
+    return recording

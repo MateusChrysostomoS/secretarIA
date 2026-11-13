@@ -85,12 +85,13 @@ from secretaria.models.calendar_event import (
     EVENT_STATUS_GOOGLE_LEASE,
     CalendarEvent,
 )
-from secretaria.models.professional import Professional
 from secretaria.services.agenda import (
     GOOGLE_WRITE_LEASE,
     agenda_id_of,
     agenda_lock_key,
+    agenda_members,
     agenda_write_lock as shared_agenda_write_lock,
+    owned_events,
     shared_busy,
 )
 from secretaria.services.calendar import (
@@ -265,18 +266,20 @@ async def reserve_person_window(
         if agenda_id is None:
             return NO_AGENDA
         now = _now()
-        await session.execute(
-            delete(CalendarEvent)
-            .where(
-                CalendarEvent.status == EVENT_STATUS_GOOGLE_LEASE,
-                CalendarEvent.created_at <= now - GOOGLE_WRITE_LEASE,
-                CalendarEvent.professional_id.in_(
-                    select(Professional.id).where(Professional.agenda_id == agenda_id)
-                ),
+        # Final wave M2: by (tenant_id, professional_id), the calendar_events index's prefix.
+        members = await agenda_members(session, agenda_id)
+        if members:
+            await session.execute(
+                delete(CalendarEvent)
+                .where(
+                    CalendarEvent.status == EVENT_STATUS_GOOGLE_LEASE,
+                    CalendarEvent.created_at <= now - GOOGLE_WRITE_LEASE,
+                    owned_events(members),
+                )
+                .execution_options(synchronize_session=False)
             )
-            .execution_options(synchronize_session=False)
-        )
         own = select(CalendarEvent.id).where(
+            CalendarEvent.tenant_id == tenant_id,
             CalendarEvent.professional_id == professional_id,
             _fresh_lease(now),
             _overlapping(start_utc, end_utc),
