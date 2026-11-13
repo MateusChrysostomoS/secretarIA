@@ -16,8 +16,6 @@ This is a DIFFERENT mechanism from:
   * `api/admin/panel.py` — the `X-Admin-Token` admin surface (a separate secret).
 """
 
-import logging
-import re
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
@@ -72,6 +70,7 @@ from secretaria.schemas.internal import (
     BrainMessageMessageList,
     BrainMessageOpen,
     BrainMessageOptionsPage,
+    BrainMessageOptionsQuery,
     BrainMessageReadMark,
     BrainMessageTyping,
     BrainMessageVisitDiscard,
@@ -96,36 +95,6 @@ from secretaria.services.visit_merge import discard_empty_visit
 from secretaria.workers.shared.flow_simulation_input import load_simulation_inputs
 
 logger = get_logger(__name__)
-
-_OPTIONS_PATH = re.compile(r"/brain-message/messages/[^/?]+/options\?")
-_QUERY_VALUE = re.compile(r"(?<=[?&])q=[^&#\s]*")
-
-
-class OptionsQueryLogFilter(logging.Filter):
-    """Blank the search text (`q`) of the options route in uvicorn's access log line.
-
-    The route is a GET (TASK-082 CONTRACT.md §c4), so the patient's own words ride in
-    the URL, and uvicorn prints the full URL at INFO. Like core/logging.py's arq filter
-    it sits on the LOGGER and rewrites only what it must: `q` on this route's path; the
-    cursor, the ids and every other route's line are left as they are.
-    """
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        args = record.args
-        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
-            path = args[2]
-            if _OPTIONS_PATH.search(path):
-                record.args = (*args[:2], _QUERY_VALUE.sub("q=REDACTED", path), *args[3:])
-        return True
-
-
-def _install_options_query_log_filter() -> None:
-    access = logging.getLogger("uvicorn.access")
-    if not any(isinstance(f, OptionsQueryLogFilter) for f in access.filters):
-        access.addFilter(OptionsQueryLogFilter())
-
-
-_install_options_query_log_filter()
 
 # Declaring the scheme (instead of a bare Header dependency) makes Swagger render the
 # "Authorize" lock on these routes; auto_error is off so we return our own status/message.
@@ -1061,16 +1030,18 @@ async def get_brain_message_media(
     return await stream_attachment(record)
 
 
-@router.get(
+@router.post(
     "/brain-message/messages/{message_id}/options",
     response_model=BrainMessageOptionsPage,
     summary="One page of a Portal list card's options, optionally searched (internal)",
     description=(
         "A Portal catalogue card (services, doctors, convênios) carries page 1 of its list; "
         "this route serves the rest, 10 at a time, and searches the WHOLE list with `q`. "
-        "The list is rebuilt from the card's own stored pointer, so the caller cannot choose "
-        "what is listed. Ownership is checked in one query against tenant_id + external_id. "
-        "Requires the X-Internal-Api-Key header."
+        "A POST with everything in the JSON body: the search text is what the patient typed, "
+        "and a URL ends up in every access log on the way. The list is rebuilt from the "
+        "card's own stored pointer, so the caller cannot choose what is listed. Ownership is "
+        "checked in one query against tenant_id + external_id. Requires the "
+        "X-Internal-Api-Key header."
     ),
     responses={
         **_INTERNAL_RESPONSES,
@@ -1080,21 +1051,7 @@ async def get_brain_message_media(
 )
 async def get_brain_message_options(
     message_id: Annotated[str, Path(description="The card's message id (messages.id, a UUID).")],
-    tenant_id: Annotated[UUID, Query(description="Tenant UUID — REQUIRED; the outer scope.")],
-    external_id: Annotated[
-        str,
-        Query(min_length=1, max_length=64, description="The patient's Brain-Message id."),
-    ],
-    cursor: Annotated[
-        str | None, Query(description="Opaque; the `next_cursor` of the previous page.")
-    ] = None,
-    page_size: Annotated[int, Query(ge=1, le=list_options.MAX_PAGE_SIZE)] = (
-        list_options.PAGE_SIZE
-    ),
-    q: Annotated[
-        str | None,
-        Query(description="Search text; clamped to 60 characters, never an error, never logged."),
-    ] = None,
+    payload: BrainMessageOptionsQuery,
     session: AsyncSession = Depends(get_session),
 ) -> BrainMessageOptionsPage:
     """Page / search one card's list, only inside its owner's conversation (TASK-082).
@@ -1104,6 +1061,7 @@ async def get_brain_message_options(
     list), an unknown or malformed id - the same 404, confirming nothing. `q` is the
     patient's own words: it is never logged, not even its length.
     """
+    tenant_id, external_id, cursor = payload.tenant_id, payload.external_id, payload.cursor
     try:
         list_options.decode_cursor(cursor)
     except list_options.InvalidCursor:
@@ -1144,8 +1102,8 @@ async def get_brain_message_options(
         inputs.tenant,
         inputs.professionals,
         cursor=cursor,
-        page_size=page_size,
-        q=q,
+        page_size=payload.page_size,
+        q=payload.q,
     )
     return BrainMessageOptionsPage(items=page.items, next_cursor=page.next_cursor, total=page.total)
 
