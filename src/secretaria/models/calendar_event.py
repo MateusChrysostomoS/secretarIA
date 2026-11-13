@@ -47,6 +47,12 @@ from secretaria.core.database import Base
 
 EVENT_STATUS_CONFIRMED = "confirmed"
 EVENT_STATUS_CANCELLED = "cancelled"
+# TASK-083: a short-lived LEASE left by an exclusive write on a GOOGLE agenda that shares a
+# person's agenda (services/calendar.py::CalendarService.exclusive_write). It is not an event
+# of any agenda - no read of this table lists it, nothing pushes it - only the person's OTHER
+# clinics count it as busy (services/agenda.py::shared_busy) until the caller's appointment
+# row exists. Carries the window and the Google id, never a summary or description.
+EVENT_STATUS_GOOGLE_LEASE = "google_lease"
 
 
 class CalendarEvent(Base):
@@ -71,8 +77,9 @@ class CalendarEvent(Base):
     end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     # Google's `transparency`: False is "show me as free" - listed nowhere as busy.
     busy: Mapped[bool] = mapped_column(Boolean, server_default=true(), default=True)
-    # "confirmed" | "cancelled". A cancel is a status, never a DELETE: idempotent, and
-    # the row is still there for the history a Google "deleted" event also keeps.
+    # "confirmed" | "cancelled" (| "google_lease", see EVENT_STATUS_GOOGLE_LEASE). A cancel
+    # is a status, never a DELETE: idempotent, and the row is still there for the history a
+    # Google "deleted" event also keeps.
     status: Mapped[str] = mapped_column(
         String(16), server_default=EVENT_STATUS_CONFIRMED, default=EVENT_STATUS_CONFIRMED
     )

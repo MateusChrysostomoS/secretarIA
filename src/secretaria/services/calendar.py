@@ -16,11 +16,13 @@ a worker thread with asyncio.to_thread to keep the event loop responsive.
 """
 
 import asyncio
+import copy
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import quote, urlencode
-from uuid import UUID
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
@@ -177,12 +179,14 @@ class CalendarEventNotFoundError(LookupError):
 class CalendarSlotTakenError(Exception):
     """An EXCLUSIVE write was refused: something busy already overlaps [start, end).
 
-    Raised only by the secretarIA's own agenda, which can make "create this booking
-    unless the time is taken" one atomic step (services/local_calendar.py). Google
-    cannot, so on a Google agenda the caller's `slot_taken_at_confirm` re-check stays
-    the whole protection, as before. NOT a `CalendarUnavailableError`: nothing is
-    down, somebody else just got the time first - every patient write site answers it
-    with the same "esse horário acabou de ser ocupado" branch as that re-check.
+    Raised by the secretarIA's own agenda, which can make "create this booking unless
+    the time is taken" one atomic step (services/local_calendar.py), and - TASK-083 -
+    by a Google agenda whose owner shares a person's agenda with another clinic
+    (`CalendarService.exclusive_write`). Any other Google agenda cannot, so there the
+    caller's `slot_taken_at_confirm` re-check stays the whole protection, as before.
+    NOT a `CalendarUnavailableError`: nothing is down, somebody else just got the time
+    first - every patient write site answers it with the same "esse horário acabou de
+    ser ocupado" branch as that re-check.
     """
 
 
@@ -410,6 +414,138 @@ class CalendarService:
     def shared_busy_provider(self) -> "SharedBusyProvider | None":
         """The sibling-busy read seam, or None (no shared agenda: nothing extra is read)."""
         return getattr(self, "_shared_busy_provider", None)
+
+    # ---- TASK-083 spec §7 items 3-4: exclusive writes and the staff's own view ----------
+
+    @property
+    def supports_exclusive_write(self) -> bool:
+        """Whether `create_event`/`update_event`/`update_event_details` honour `exclusive=True`.
+
+        The patient write sites ask this (services/local_calendar.py::create_event_exclusive
+        & co.) instead of the backend's class. A Google agenda can do it only for a
+        professional who shares a person's agenda with another clinic (the read seam is
+        attached exactly then): there it is `exclusive_write`. Every other Google agenda
+        answers False and its writes stay the plain calls they always were. The
+        secretarIA's own agenda always answers True.
+        """
+        return (
+            getattr(self, "_tenant_id", None) is not None
+            and getattr(self, "_owner_professional_id", None) is not None
+            and self.shared_busy_provider is not None
+        )
+
+    def own_agenda_view(self) -> "CalendarService":
+        """This agenda WITHOUT the person's other clinics: the staff's own-only checks.
+
+        Spec §7.4: the hub may squeeze a booking over the doctor's time at another clinic
+        (it is told, `conflicts_other_agenda`, never refused), but its own agenda still
+        blocks as before. The view reads no sibling window and writes exclusively over
+        its own agenda only. Without a shared agenda it is this very object - nothing
+        changes, not even identity.
+        """
+        if self.shared_busy_provider is None:
+            return self
+        view = copy.copy(self)
+        view._shared_busy_provider = None
+        # Read by LocalCalendarService: an exclusive write of the view skips the person's
+        # agenda (lock and siblings) and checks this agenda's own events only.
+        view._shared_writes = False
+        return view
+
+    async def overlaps_shared_busy(self, start: datetime, end: datetime) -> bool:
+        """Whether [start, end) overlaps the person's busy time at ANOTHER clinic.
+
+        Only a yes/no leaves here (nothing about the other clinic). No read at all
+        without a shared agenda.
+        """
+        return bool(await self._shared_busy_items(start, end))
+
+    async def exclusive_write(
+        self,
+        start: datetime,
+        end: datetime,
+        write: Callable[[], Awaitable[dict]],
+        *,
+        ignore_event_id: str | None = None,
+    ) -> dict:
+        """Run the Google `write` only if [start, end) is free on the person's WHOLE agenda.
+
+        Under the person's agenda lock (services/local_calendar.py::person_agenda_write_lock:
+        the in-process lock keyed by `agenda_lock_key` and the Postgres advisory lock, the
+        same two a local exclusive write of a sibling takes) it re-reads the siblings' busy
+        windows on the locked transaction and this Google calendar itself (`ignore_event_id`
+        is the event being moved or a retried deterministic id), raises
+        `CalendarSlotTakenError` when anything overlaps, else writes - and leaves a LEASE,
+        a bare-window row the siblings count as busy until the caller's appointment row
+        exists (models/calendar_event.py::EVENT_STATUS_GOOGLE_LEASE). Their Google cannot
+        see ours, so without it a sibling locking right after us would find nothing.
+
+        Lock order: this takes ONLY the person's lock - never an owner lock - and `write`
+        must never be a local exclusive write (that one takes owner then person: a nested
+        call would wait on the person lock held here forever).
+        """
+        # Imported here: local_calendar subclasses this class; agenda pulls the models in.
+        from sqlalchemy import delete
+
+        from secretaria.models.calendar_event import EVENT_STATUS_GOOGLE_LEASE, CalendarEvent
+        from secretaria.services import local_calendar
+        from secretaria.services.agenda import GOOGLE_WRITE_LEASE, shared_busy
+
+        owner = self._owner_professional_id
+        start_dt, end_dt = self._ensure_tz(start), self._ensure_tz(end)
+        start_utc, end_utc = start_dt.astimezone(UTC), end_dt.astimezone(UTC)
+        async with local_calendar.person_agenda_write_lock(owner) as (session, agenda_id):
+            if agenda_id is None:
+                # The agenda was dissolved after this object was built: today's plain write.
+                return await write()
+            if await shared_busy(session, owner, start_utc, end_utc) or await self._own_overlap(
+                start_dt, end_dt, ignore_event_id
+            ):
+                logger.info(
+                    "calendar_slot_taken",
+                    tenant_id=str(self._tenant_id),
+                    professional_id=str(owner),
+                )
+                raise CalendarSlotTakenError("The slot is already taken on this person's agenda.")
+            event = await write()
+            now = datetime.now(UTC)
+            await session.execute(
+                delete(CalendarEvent).where(
+                    CalendarEvent.professional_id == owner,
+                    CalendarEvent.status == EVENT_STATUS_GOOGLE_LEASE,
+                    CalendarEvent.created_at <= now - GOOGLE_WRITE_LEASE,
+                )
+            )
+            session.add(
+                CalendarEvent(
+                    id=f"lease_{uuid4().hex}",
+                    tenant_id=self._tenant_id,
+                    professional_id=owner,
+                    summary=None,
+                    description=None,
+                    start_at=start_utc,
+                    end_at=end_utc,
+                    busy=True,
+                    status=EVENT_STATUS_GOOGLE_LEASE,
+                    google_event_id=str(event.get("id") or "")[:255] or None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            return event
+
+    async def _own_overlap(
+        self, start: datetime, end: datetime, ignore_event_id: str | None
+    ) -> bool:
+        """THIS Google calendar's own busy events over [start, end) - no sibling window."""
+        start_iso, end_iso = start.isoformat(), end.isoformat()
+        items = await asyncio.to_thread(
+            lambda: self._events_page(start_iso, end_iso, DEFAULT_MAX_EVENTS)[0]
+        )
+        busy = self._busy_ranges(
+            [ev for ev in items if ignore_event_id is None or ev.get("id") != ignore_event_id]
+        )
+        return any(bs < end and be > start for bs, be in busy)
 
     def _attach_shared_busy(self, config: "TenantRuntimeConfig", owner: UUID | None) -> None:
         """Give this agenda its siblings' busy time when its owner shares a person's agenda.
@@ -915,6 +1051,7 @@ class CalendarService:
         description: str = "",
         reminders: list[dict] | None = None,
         *,
+        exclusive: bool = False,
         event_id: str | None = None,
     ) -> dict:
         """Create an event on the clinic's calendar. Returns the inserted event.
@@ -925,7 +1062,19 @@ class CalendarService:
         therefore success: the existing event is fetched and returned. Without `event_id` the
         behaviour is exactly what it always was.
         The connect-time sync also uses this id to avoid copying a local event twice.
+
+        `exclusive=True` goes through `exclusive_write` when this agenda
+        `supports_exclusive_write` (a shared person's agenda), and is ignored otherwise.
         """
+        if exclusive and self.supports_exclusive_write:
+            return await self.exclusive_write(
+                start,
+                end,
+                lambda: self.create_event(
+                    start, end, summary, description, reminders, event_id=event_id
+                ),
+                ignore_event_id=event_id,
+            )
         start_dt = self._ensure_tz(start)
         end_dt = self._ensure_tz(end)
         tz_name = str(self._tz)
@@ -981,13 +1130,27 @@ class CalendarService:
         event_id: str,
         start: datetime,
         end: datetime,
+        *,
+        exclusive: bool = False,
     ) -> dict:
-        """Move an existing event to a new [start, end) window. Returns the updated event."""
+        """Move an existing event to a new [start, end) window. Returns the updated event.
+
+        `exclusive=True`: see `create_event` (the event itself never blocks its own move).
+        """
+        exclusive = exclusive and self.supports_exclusive_write
         if self._handles_local_ids(event_id):
             event_id, local = await self._local_event_target(event_id)
             if local is not None:
+                # Exclusive THERE, outside any lock of ours (see `exclusive_write`).
+                if exclusive:
+                    return await local.update_event(event_id, start, end, exclusive=True)
                 return await local.update_event(event_id, start, end)
-        return await self._patch_event(event_id, self._window_body(start, end))
+        body = self._window_body(start, end)
+        if exclusive:
+            return await self.exclusive_write(
+                start, end, lambda: self._patch_event(event_id, body), ignore_event_id=event_id
+            )
+        return await self._patch_event(event_id, body)
 
     async def update_event_details(
         self,
@@ -996,20 +1159,31 @@ class CalendarService:
         end: datetime,
         summary: str,
         description: str = "",
+        *,
+        exclusive: bool = False,
     ) -> dict:
         """Move an event AND rewrite its title and description (TASK-032 R6, "Alterar Dados").
 
         The same single patch `update_event` does, plus the two fields that carry the
         service, the convênio and the attendee - so editing any of them leaves the doctor's
-        agenda telling the truth.
+        agenda telling the truth. `exclusive=True`: see `update_event`.
         """
+        exclusive = exclusive and self.supports_exclusive_write
         if self._handles_local_ids(event_id):
             event_id, local = await self._local_event_target(event_id)
             if local is not None:
+                if exclusive:
+                    return await local.update_event_details(
+                        event_id, start, end, summary, description, exclusive=True
+                    )
                 return await local.update_event_details(event_id, start, end, summary, description)
         body = self._window_body(start, end)
         body["summary"] = summary
         body["description"] = description
+        if exclusive:
+            return await self.exclusive_write(
+                start, end, lambda: self._patch_event(event_id, body), ignore_event_id=event_id
+            )
         return await self._patch_event(event_id, body)
 
     def _window_body(self, start: datetime, end: datetime) -> dict:

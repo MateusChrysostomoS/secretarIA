@@ -18,7 +18,10 @@ two fields on purpose: there is nothing else to leak.
   predicate `local_calendar._counts_as_busy` applies (not imported: services/local_calendar.py
   will import THIS module, and the two must not form a cycle);
 * `booking_holds` in the `payment` phase that have not expired (`BLOCKING_PHASE`; a code-phase hold
-  reserves nothing, TASK-072).
+  reserves nothing, TASK-072);
+* fresh Google-write LEASES (`calendar_events` rows in status `google_lease`, younger than
+  `GOOGLE_WRITE_LEASE`): a Google agenda's booking is invisible to the other clinic's Google, so
+  the exclusive Google write leaves its bare window here until the appointment row exists.
 
 A local booking writes an appointment AND a calendar event on the same window; identical windows are
 returned once.
@@ -37,7 +40,7 @@ agendas is fail-soft, and that lives in services/agenda_linking.py.
 import hashlib
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import and_, func, select, text
@@ -51,8 +54,15 @@ from secretaria.models import (
     CalendarEvent,
     Professional,
 )
-from secretaria.models.calendar_event import EVENT_STATUS_CONFIRMED
+from secretaria.models.calendar_event import EVENT_STATUS_CONFIRMED, EVENT_STATUS_GOOGLE_LEASE
 from secretaria.services.booking_hold import BLOCKING_PHASE
+
+# How long a Google exclusive write's lease (models/calendar_event.py::EVENT_STATUS_GOOGLE_LEASE)
+# counts as the sibling's busy time. It only has to bridge the gap between the Google write and
+# the caller committing its appointment row (the same turn: seconds); past it the appointment
+# row is what counts. Generous on purpose: a lease that outlives a cancel only keeps one window
+# busy a little longer, never double-books.
+GOOGLE_WRITE_LEASE = timedelta(minutes=2)
 
 
 @dataclass(frozen=True)
@@ -152,6 +162,18 @@ async def shared_busy(
         )
     )
     windows.update((_aware(s), _aware(e)) for s, e in holds.all())
+
+    # A sibling's fresh Google exclusive write whose appointment row may not exist yet.
+    leases = await session.execute(
+        select(CalendarEvent.start_at, CalendarEvent.end_at).where(
+            CalendarEvent.professional_id.in_(sibling_ids),
+            CalendarEvent.status == EVENT_STATUS_GOOGLE_LEASE,
+            CalendarEvent.created_at > datetime.now(UTC) - GOOGLE_WRITE_LEASE,
+            CalendarEvent.start_at < end,
+            CalendarEvent.end_at > start,
+        )
+    )
+    windows.update((_aware(s), _aware(e)) for s, e in leases.all())
 
     return [BusyWindow(s, e) for s, e in sorted(windows)]
 

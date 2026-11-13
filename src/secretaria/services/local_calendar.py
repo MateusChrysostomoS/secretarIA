@@ -200,6 +200,34 @@ async def agenda_write_lock(
         yield session
 
 
+@asynccontextmanager
+async def person_agenda_write_lock(
+    professional_id: UUID,
+) -> AsyncIterator[tuple[AsyncSession, UUID | None]]:
+    """A session whose transaction holds ONLY the person's agenda lock (TASK-083 §7 item 3).
+
+    For a GOOGLE agenda's exclusive write (services/calendar.py::CalendarService.
+    exclusive_write): no `calendar_events` agenda of its own to lock, but the same person's
+    lock a sibling's local exclusive write takes (`agenda_write_lock(shared=True)`), so the
+    two backends serialize on one key. Yields `(session, agenda_id)`; `agenda_id` None (the
+    agenda was dissolved) takes no lock at all. Commits on exit, then releases the in-process
+    lock, then closes - the same exit order as `agenda_write_lock`.
+
+    Never call a local exclusive write while holding this: it takes owner THEN person, and
+    the in-process lock is not re-entrant.
+    """
+    async with (
+        async_session_factory() as session,
+        AsyncExitStack() as person_lock,
+        session.begin(),
+    ):
+        agenda_id = await agenda_id_of(session, professional_id)
+        if agenda_id is not None:
+            await person_lock.enter_async_context(_process_lock(agenda_lock_key(agenda_id)))
+            await shared_agenda_write_lock(session, agenda_id)
+        yield session, agenda_id
+
+
 # --------------------------------------------------------------------------
 # Queries
 # --------------------------------------------------------------------------
@@ -333,6 +361,19 @@ class LocalCalendarService(CalendarService):
         # Informational only (nothing here sends it anywhere): names the agenda in logs.
         self._calendar_id = f"secretaria:{professional_id or 'clinic'}"
         self._refresh_token_override = None
+        # TASK-083: an exclusive write also guards the person's agenda at other clinics.
+        # False only on `own_agenda_view()` (the hub's own-only checks, spec §7.4).
+        self._shared_writes = True
+
+    @property
+    def supports_exclusive_write(self) -> bool:
+        """Always: `exclusive=True` is atomic here (see `agenda_write_lock`)."""
+        return True
+
+    async def exclusive_write(self, start, end, write, *, ignore_event_id=None) -> dict:
+        """Not here: the local writes take `exclusive=True` themselves, under their own lock.
+        Wrapping one in another exclusive write would wait on its own lock forever."""
+        raise TypeError("Use create_event/update_event(exclusive=True) on the local agenda.")
 
     @classmethod
     def for_config(
@@ -484,7 +525,9 @@ class LocalCalendarService(CalendarService):
         """
         start_utc, end_utc = self._window(start, end)
         owner = self._owner_professional_id
-        async with agenda_write_lock(self._tenant_id, owner, shared=exclusive) as session:
+        async with agenda_write_lock(
+            self._tenant_id, owner, shared=exclusive and self._shared_writes
+        ) as session:
             if event_id is not None:
                 if not event_id.startswith(LOCAL_EVENT_ID_PREFIX):
                     raise ValueError("Native agenda event ids must have the local prefix.")
@@ -563,7 +606,9 @@ class LocalCalendarService(CalendarService):
         if found is None:
             raise CalendarEventNotFoundError(event_id)
         owner = found[0]
-        async with agenda_write_lock(self._tenant_id, owner, shared=exclusive) as session:
+        async with agenda_write_lock(
+            self._tenant_id, owner, shared=exclusive and self._shared_writes
+        ) as session:
             row = await session.scalar(
                 select(CalendarEvent)
                 .where(CalendarEvent.tenant_id == self._tenant_id, CalendarEvent.id == event_id)
@@ -640,9 +685,18 @@ class LocalCalendarService(CalendarService):
 # A patient's own booking or move must never land on a time somebody else holds. Each
 # patient write site already re-reads the agenda right before writing
 # (services/availability.py::slot_taken_at_confirm); these make the write itself refuse
-# on the secretarIA agenda, where that is atomic, and raise `CalendarSlotTakenError`,
-# which each site answers exactly like a taken re-check. On any other calendar (Google,
-# a test double) they are the plain call, byte for byte as before.
+# where that can be atomic and raise `CalendarSlotTakenError`, which each site answers
+# exactly like a taken re-check. Where is decided by the calendar's own capability,
+# `supports_exclusive_write` (TASK-083 spec §7 item 3), not by its class: always on the
+# secretarIA agenda, and on a Google agenda whose owner shares a person's agenda with
+# another clinic (services/calendar.py::CalendarService.exclusive_write). On any other
+# calendar (a plain Google agenda, a test double) they are the plain call, byte for byte
+# as before.
+
+
+def _writes_exclusively(calendar) -> bool:
+    """`is True`, not truthiness: a Mock's auto-attribute must read as "no"."""
+    return getattr(calendar, "supports_exclusive_write", False) is True
 
 
 async def create_event_exclusive(
@@ -651,7 +705,7 @@ async def create_event_exclusive(
 ) -> dict:
     # Only payment/release retries choose an id; preserve other callers' exact arguments.
     identity = {"event_id": event_id} if event_id is not None else {}
-    if isinstance(calendar, LocalCalendarService):
+    if _writes_exclusively(calendar):
         return await calendar.create_event(
             start=start, end=end, summary=summary, description=description, exclusive=True,
             **identity,
@@ -664,7 +718,7 @@ async def create_event_exclusive(
 async def update_event_exclusive(
     calendar, event_id: str, *, start: datetime, end: datetime
 ) -> dict:
-    if isinstance(calendar, LocalCalendarService):
+    if _writes_exclusively(calendar):
         return await calendar.update_event(event_id, start=start, end=end, exclusive=True)
     return await calendar.update_event(event_id, start=start, end=end)
 
@@ -672,7 +726,7 @@ async def update_event_exclusive(
 async def update_event_details_exclusive(
     calendar, event_id: str, start: datetime, end: datetime, summary: str, description: str = ""
 ) -> dict:
-    if isinstance(calendar, LocalCalendarService):
+    if _writes_exclusively(calendar):
         return await calendar.update_event_details(
             event_id, start, end, summary, description, exclusive=True
         )
