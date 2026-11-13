@@ -253,6 +253,68 @@ async def test_put_empty_set_not_entitled_clears_links(client, world, monkeypatc
     assert not any(r["linked"] for r in response.json()["units"])
 
 
+async def test_put_reducing_but_still_over_one_without_entitlement_is_403(
+    client, world, monkeypatch
+):
+    """Final wave T6: the RESULTING set decides - three links reduced to two is still more than
+    one unit without the add-on (403, nothing written); reduced to one is allowed."""
+    w = world
+    for position, unit in enumerate((w["centro"], w["norte"], w["sul"])):
+        await _seed_link(w, w["doctor"], unit, sort_order=position)
+    _entitlements(monkeypatch, entitled=False)
+
+    still_two = await _put(client, w["doctor"], _link(w["centro"]), _link(w["norte"]))
+    assert still_two.status_code == 403
+    assert still_two.json()["detail"] == "multi_unit_not_entitled"
+    assert len(await _db_links(w, w["doctor"])) == 3
+
+    one = await _put(client, w["doctor"], _link(w["centro"]))
+    assert one.status_code == 200, one.text
+    assert set(await _db_links(w, w["doctor"])) == {str(w["centro"].id)}
+
+
+async def test_put_a_concurrent_save_is_a_409_not_a_500(client, world, monkeypatch):
+    """Final wave T6: two saves at once may collide on the (professional, unit) key; the loser
+    gets a plain 409 and nothing half-written, never an unhandled 500."""
+    from sqlalchemy.exc import IntegrityError
+
+    async def colliding(*_args, **_kwargs):
+        raise IntegrityError("INSERT professional_units", {}, Exception("duplicate key"))
+
+    monkeypatch.setattr(pu_api.pu, "replace_links", colliding)
+    response = await _put(client, world["doctor"], _link(world["centro"]))
+    assert response.status_code == 409
+    assert response.json()["detail"] == "professional_units_changed"
+
+
+async def test_replace_locks_the_professional_row_first():
+    """Final wave T6: the replace starts with SELECT ... FOR UPDATE on the professional (a
+    no-op on SQLite), so two saves of one professional run one after the other on Postgres."""
+    from types import SimpleNamespace
+
+    seen: list[str] = []
+
+    class _Session:
+        async def execute(self, statement, *args, **kwargs):
+            seen.append(str(statement.compile()))
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=list))
+
+        async def scalars(self, statement, *args, **kwargs):
+            seen.append(str(statement.compile()))
+            return []
+
+        def add(self, row):
+            pass
+
+        async def flush(self):
+            pass
+
+    professional = SimpleNamespace(id=uuid4(), tenant_id=uuid4())
+    await pu_service.replace_links(_Session(), professional, [])
+    assert seen and seen[0].startswith("SELECT professionals.id")
+    assert "FOR UPDATE" in seen[0]
+
+
 async def test_put_two_links_entitled_within_limit(client, world, monkeypatch):
     _entitlements(monkeypatch, entitled=True, limits={"units": 2})
     response = await _put(client, world["doctor"], _link(world["centro"]), _link(world["norte"]))

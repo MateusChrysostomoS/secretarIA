@@ -164,7 +164,16 @@ async def replace_links(
     `wanted` must already be validated and filtered by `resolve_active_target_units`. Links to
     DEACTIVATED units (and their hours) are never read or written here. `sort_order` is the
     position in `wanted`. The caller commits.
+
+    Starts by locking the professional's row (`SELECT ... FOR UPDATE`; a no-op on SQLite) so
+    two concurrent saves of one professional run one after the other instead of colliding on
+    the (professional, unit) key (final wave T6).
     """
+    await session.execute(
+        select(Professional.id)
+        .where(Professional.id == professional.id, Professional.tenant_id == professional.tenant_id)
+        .with_for_update()
+    )
     active_ids = [unit.id for unit in await active_units(session, professional.tenant_id)]
     if active_ids:
         await session.execute(

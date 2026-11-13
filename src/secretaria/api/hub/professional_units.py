@@ -12,6 +12,8 @@ PUT /tenants/me/professionals/{professional_id}/units
       * links and hours of DEACTIVATED units are preserved untouched; a deactivated unit's id in
         the body is ignored, not an error;
       * a unit of another tenant (or an unknown id) is a 404 and nothing is written;
+      * two saves at once: the professional's row is locked for the replace; a save that still
+        collides answers 409 `professional_units_changed` and keeps nothing;
       * multi-unit entitlement is judged on the RESULTING set: 403 `multi_unit_not_entitled` only
         when it would hold MORE than one active unit (one link is just "the clinic's address" and
         needs nothing); 409 `unit_limit_reached` when it exceeds `limits["units"]`; an entitlement
@@ -22,6 +24,7 @@ no link flags (extra fields are a 422). Without links nothing changes anywhere e
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.api.hub.deps import (
@@ -112,7 +115,9 @@ async def put_professional_units(
     session: AsyncSession = Depends(get_session),
 ) -> ProfessionalUnitsRead:
     professional = await _get_professional(session, tenant, professional_id)
-    claim: SubscriptionClaim = request.state.staff_subscription_claim
+    claim: SubscriptionClaim | None = getattr(request.state, "staff_subscription_claim", None)
+    if claim is None:  # fail closed: never an AttributeError -> 500
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or inactive subscription token")
     ensure_clinic_manager_or_own_professional(claim, professional.id)
 
     wanted = [
@@ -127,8 +132,17 @@ async def put_professional_units(
     if len(targets) > 1:
         await _require_entitled_within_limit(tenant, len(targets))
 
-    await pu.replace_links(session, professional, targets)
-    await session.commit()
+    ids = {"tenant_id": str(tenant.id), "professional_id": str(professional.id)}
+    try:
+        await pu.replace_links(session, professional, targets)
+        await session.commit()
+    except IntegrityError:
+        # Two saves at once (final wave T6): the row lock serializes them on Postgres; anything
+        # that still collides is the other save winning - nothing of this one is kept. (The ids
+        # were read before: a rollback expires the ORM rows.)
+        await session.rollback()
+        logger.info("hub_professional_units_conflict", **ids)
+        raise HTTPException(status.HTTP_409_CONFLICT, "professional_units_changed") from None
     logger.info(
         "hub_professional_units_replaced",
         tenant_id=str(tenant.id),
