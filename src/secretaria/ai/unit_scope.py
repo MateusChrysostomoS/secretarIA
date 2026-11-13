@@ -90,7 +90,15 @@ async def resolve_tool_unit(
     unit, error = await _resolve_unit_or_error(tenant_id, name)
     if error is not None:
         return None, error
-    return UnitOption(id=unit.id, name=unit.name, address=unit.address, business_hours={}), None
+    return (
+        UnitOption(
+            id=unit.id,
+            name=str(getattr(unit, "name", "") or ""),
+            address=getattr(unit, "address", None),
+            business_hours={},
+        ),
+        None,
+    )
 
 
 def outside_unit_hours(unit: UnitOption | None, start: datetime, end: datetime, tz) -> dict | None:

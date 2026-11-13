@@ -168,6 +168,7 @@ _PAYLOAD_TAPS = [
     ("dayagain|2", "⬅️ Outro dia", "2"),
     ("dayback|service", "⬅️ Outro serviço", "service"),
     ("insmore|1", "Ver mais convênios", "1"),
+    (f"unit|{_UUID}", "Centro", _UUID),  # TASK-083
 ]
 
 

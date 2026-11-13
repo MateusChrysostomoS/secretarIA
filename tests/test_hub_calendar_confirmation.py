@@ -42,6 +42,10 @@ NEW_KEYS = {"status", "confirmation_count", "display_state", "attention", "remin
     # TASK-071 Plan 3 (task 6): booked without the deposit after a technical failure.
     "deposit_waived_reason",
     "deposit_waived_text",
+    # TASK-083 (frozen hub contract): where the consultation happens.
+    "unit_id",
+    "unit_name",
+    "unit_address",
 }
 
 
