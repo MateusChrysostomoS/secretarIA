@@ -318,7 +318,7 @@ Testes novos: `tests/test_emoji_decoration.py` (41 casos: o mapeamento pedido, o
 render↔match nas três formas, e a ponta a ponta) + 13 casos de aritmética do orçamento em
 `tests/test_whatsapp_limits.py`.
 
-## §6 — Quarta rodada (2026-11-13, TASK-082 S4): listas longas paginadas, busca digitada, limite no cadastro
+## §6 — Quarta rodada (2026-11-13, TASK-082 S4 + correção F1): listas longas paginadas, limite no cadastro
 
 O teto de 10 linhas por lista **continua** (`MAX_LIST_ROWS`, 24 no título, 20 no botão — os
 mesmos helpers). O que muda é o que acontece quando o catálogo passa disso.
@@ -329,24 +329,37 @@ mesmos helpers). O que muda é o que acontece quando o catálogo passa disso.
   **idêntica** à de antes (≤9 com "Não sei", ≤10 sem). Acima disso: **8 por página** +
   "Ver mais serviços" / "Ver mais profissionais" + as fixas — nunca > 10. Cursor fora do
   fim → página 0 (mesmo critério de `insurance_page`).
-- A página (e, numa lista filtrada, a chave de busca) vai **no id da linha**:
-  `svcmore|<pág>[|<chave>]`, `profmore|<pág>[|<chave>]`, `insmore|<pág>|<chave>` — prefixos
+- A página vai **no id da linha**: `svcmore|<pág>`, `profmore|<pág>`, `insmore|<pág>` — prefixos
   em `_PAYLOAD_ROW_PREFIXES` (pinado em `tests/test_webhook_parsing.py`). Nenhuma coluna nova.
+  Um `|…` a mais (cartão montado pela S4 antes da F1) é ignorado ao ler (`flow_router._more_page`).
 - Vale para serviços, profissionais, catálogo da clínica, profissionais do serviço e as listas
   do "alterar consulta" (`appointment_edit_flow`). "Não sei" fica em **toda** página.
 - Os eventos `flow_*_list_truncated` foram mantidos (agora `info`, com `page`, `paged=True`).
 - O Portal não muda: o cartão segue com o `source` da S1 (lista inteira), igual em toda página.
 
-### Busca digitada (`services/catalog_search.py`)
+### Texto digitado numa lista = igual ao `main` (correção F1, CONTRACT.md D8–D10)
 
-Chave = NFKD sem acento/emoji/símbolo/pontuação, casefold, espaços colapsados; "contém";
-mínimo 2 caracteres; texto **cortado em 60**. Depois do match exato falhar: **1 achado →
-selecionado**; **vários → lista curta** só com eles (≤8 + "Ver mais"); **nenhum →** "Não
-encontrei…" + a lista inteira de novo (não vai para a LLM). Ainda vai para a LLM: pergunta /
-frase (`_reads_as_conversation`), mais de 3 palavras, ou nada buscável. Convênio: fragmento
-mostra só os planos achados para tocar — **mesmo com 1 achado** (cobertura não se adivinha).
-Log `flow_catalog_typed_search` só com tipo + contagem — **nunca o texto**. Listas paginadas
-ganham "Digite parte do nome para buscar." no corpo.
+A busca digitada da S4 (`services/catalog_search.py`, "Encontrei estas opções", "Não encontrei
+nenhum…", lista filtrada, "Digite parte do nome para buscar.") **foi removida** por decisão do
+dono (2026-11-13, após a revisão S6: "sim"/"oi"/"ok" escolhiam médico sozinhos; "atendente"
+não chegava à IA; no Portal a busca virava cartão cortado com "Ver mais").
+
+- Nos dois canais, texto digitado numa lista volta a ser exatamente o do `main`: nome exato
+  ainda é reconhecido (`_match_service` / `_match_professional` / `_match_insurance_plan`);
+  qualquer outra coisa → `delegate_llm` (convênio: texto livre guardado, como antes). Só um
+  **toque** escolhe uma opção (D9). No cartão, só "Não sei" leva à IA.
+- "Ver mais serviços/profissionais" só conta como **toque** (título + `(pág)`); digitado sem a
+  página, não é esse controle (`catalog_more_page`). "Ver mais convênios" digitado continua
+  como no `main` (1ª página).
+- **WhatsApp, "ver mais" digitado (D10):** "ver mais" (qualquer caixa/acento, opcionalmente +
+  "serviços"/"profissionais"/"convênios") vira o toque na linha "Ver mais" do **último cartão
+  enviado nesta conversa** (tenant + paciente). Resolvido no caminho de entrada do WhatsApp,
+  antes do roteador (`workers/whatsapp/typed_more.py`, chamado em
+  `workers/whatsapp/inbound.py::_persist_inbound_message`); o roteador segue sem banco. Fica
+  gravado como o toque (título da linha + id). Sem essa linha no último cartão → nada muda.
+  Log `whatsapp_typed_more_as_tap` só com tenant + prefixo da linha. Portal: sem mudança.
+- A busca existe **só** na barra de busca da lista do Portal (`list_options.normalize_query`,
+  rota de opções — intocada).
 
 ### Limite no cadastro (`core/catalog_limits.py`)
 
@@ -356,6 +369,11 @@ paciente mostra, por modo). Regra "não cresce além do limite": recusa só se o
 Clínica que já passou do limite continua editando/apagando. Rotas do hub de config,
 profissionais, serviços e convênios; leitura e dados existentes intocados; sem migração.
 
+**Lacunas conhecidas (revisão S6, achado 14):** trocar o modo de convênio
+(`PUT /tenants/me/insurance-mode`, compartilhado → independente) **não** é limitado pelos 60 —
+pode saltar acima do limite; e dois cadastros simultâneos com 119 serviços podem passar os dois
+(sem trava). Aceito por ora.
+
 ### Validação da 4ª rodada
 
 `uv run python -m pytest` (com `BOT_ALLOWLIST_WA_IDS=""`, em 6 blocos por falta de memória)
@@ -363,6 +381,12 @@ profissionais, serviços e convênios; leitura e dados existentes intocados; sem
 (`test_service_change_agenda` ×2, já falhavam antes da tarefa). Testes novos:
 `tests/test_whatsapp_catalog_paging.py` (52) e `tests/test_catalog_limits.py` (22).
 `ruff check` limpo nos arquivos tocados; diferenças de `ruff format` restantes são do HEAD.
+
+Correção F1: mesma suíte, 6 blocos → **7976 passando**, 35 pulados, 1 xfail, **2 falhas
+pré-existentes** (as mesmas 2 de `test_service_change_agenda`, que falham também no `main`
+`ea505ca`). Testes: `tests/test_whatsapp_catalog_paging.py` (busca → comportamento do `main`),
+`tests/test_whatsapp_typed_more.py` (novo, "ver mais" digitado); os dois testes antigos de
+"blá blá" voltaram às asserções do `main`.
 
 ## Pendências
 

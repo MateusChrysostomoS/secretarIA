@@ -411,13 +411,10 @@ def _service_list(
     *,
     after_doctor: bool = False,
     page: int = 0,
-    query: str = "",
-    header: str | None = None,
 ) -> fr.FlowRouterResult:
     """The services of the draft's doctor only (owner, 2026-10-07).
 
-    Pages on WhatsApp like the booking's list (`fr.catalog_page`, TASK-082 S4); `query`
-    lists a typed fragment's hits only, without a Portal pointer.
+    Pages on WhatsApp like the booking's list (`fr.catalog_page`, TASK-082 S4).
     """
     doctor = _doctor(professionals, draft)
     services = _services_of(tenant, doctor)
@@ -425,27 +422,19 @@ def _service_list(
         menu = _menu_result(draft.with_stage(), ctx)
         menu.bubbles.insert(0, TextBubble(body=ae.EDIT_NO_SERVICES))
         return menu
-    rows, paged = fr.service_page_rows(
-        services, page, query, fixed_rows=0, event="edit_service_list_paged"
-    )
-    if query and header is None:
-        header = fr.SEARCH_HITS_HEADER
+    rows = fr.service_page_rows(services, page, fixed_rows=0, event="edit_service_list_paged")
     return _result(
         draft.with_stage(**({"after_doctor": "1"} if after_doctor else {})),
         [
             SlotsBubble(
-                body=fr._list_body(header, ae.EDIT_SERVICE_BODY, paged=paged),
+                body=ae.EDIT_SERVICE_BODY,
                 rows=rows,
                 button_label="Ver serviços",
                 section_title="Serviços",
-                source=(
-                    None
-                    if query
-                    else OptionSource(
-                        kind="service",
-                        scope=fr.service_scope(doctor.id if doctor is not None else None),
-                        items=fr.portal_service_rows(services),
-                    )
+                source=OptionSource(
+                    kind="service",
+                    scope=fr.service_scope(doctor.id if doctor is not None else None),
+                    items=fr.portal_service_rows(services),
                 ),
             )
         ],
@@ -455,35 +444,14 @@ def _service_list(
 
 async def _service_step(conversation, tenant, body, draft, appt, professionals, ctx):
     after_doctor = bool(draft.stage.get("after_doctor"))
-    more = fr.catalog_more_cursor(body, fr.LABEL_MORE_SERVICES)
+    more = fr.catalog_more_page(body, fr.LABEL_MORE_SERVICES)
     if more is not None:
         return _service_list(
-            draft,
-            tenant,
-            professionals,
-            ctx,
-            after_doctor=after_doctor,
-            page=more[0],
-            query=more[1],
+            draft, tenant, professionals, ctx, after_doctor=after_doctor, page=more
         )
-    services = _services_of(tenant, _doctor(professionals, draft))
-    service = fr._match_service(services, body)
+    service = fr._match_service(_services_of(tenant, _doctor(professionals, draft)), body)
     if service is None:
-        query, hits = fr.typed_search(services, body, fr._service_name, kind="edit_service")
-        if len(hits) == 1:
-            service = hits[0]
-        elif hits or not fr._no_hit_goes_to_model(body, query):
-            return _service_list(
-                draft,
-                tenant,
-                professionals,
-                ctx,
-                after_doctor=after_doctor,
-                query=query if hits else "",
-                header=None if hits else fr.SEARCH_NO_HIT_SERVICE,
-            )
-        else:
-            return fr._preserve(conversation, "delegate_llm")
+        return fr._preserve(conversation, "delegate_llm")
     minutes = fr._service_duration(service, tenant)
     new = draft.with_changes(
         service=str(service.get("name")),
@@ -561,25 +529,18 @@ async def _doctor_list(
     ctx,
     *,
     page: int = 0,
-    query: str = "",
-    header: str | None = None,
 ) -> fr.FlowRouterResult:
     """Every doctor, marked free (✅) or busy (❌) at the appointment's current day and time.
 
     The agenda is asked for the doctors on screen: the WhatsApp page shown, the Portal's
     first page (`OPTION_PAGE_SIZE`); the Portal's later pages carry no free/busy mark.
-    WhatsApp pages (`page`) and filters (`query`, a typed fragment - no Portal pointer
-    then) like the booking's doctor list (TASK-082 S4).
+    WhatsApp pages (`page`) like the booking's doctor list (TASK-082 S4).
     """
     plan = fr._selected_plan(tenant, draft.current["insurance"])
     when = draft.start.strftime("%d/%m %H:%M")
     roster = list(professionals or [])
-    shown, more, paged = fr.professional_page(
-        roster, page, query, fixed_rows=0, event="edit_doctor_list_paged"
-    )
-    to_check = list(shown)
-    if not query:
-        to_check += [p for p in roster[:OPTION_PAGE_SIZE] if p not in shown]
+    shown, more = fr.professional_page(roster, page, fixed_rows=0, event="edit_doctor_list_paged")
+    to_check = list(shown) + [p for p in roster[:OPTION_PAGE_SIZE] if p not in shown]
     availability: dict[str, str] = {}
     for professional in to_check:
         pid = str(professional.id)
@@ -608,26 +569,20 @@ async def _doctor_list(
         for professional in shown
     ]
     rows.extend((row_id, title, None) for row_id, title in more)
-    if query and header is None:
-        header = fr.SEARCH_HITS_HEADER
     return _result(
         draft.with_stage(),
         [
             SlotsBubble(
-                body=fr._list_body(header, ae.EDIT_DOCTOR_BODY, paged=paged),
+                body=ae.EDIT_DOCTOR_BODY,
                 rows=rows,
                 button_label="Ver médicos",
                 section_title="Médicos",
-                source=(
-                    None
-                    if query
-                    else OptionSource(
-                        kind="professional",
-                        scope={"insurance": draft.current["insurance"], "edit": True},
-                        items=edit_professional_rows(
-                            tenant, roster, draft.current["insurance"], availability
-                        ),
-                    )
+                source=OptionSource(
+                    kind="professional",
+                    scope={"insurance": draft.current["insurance"], "edit": True},
+                    items=edit_professional_rows(
+                        tenant, roster, draft.current["insurance"], availability
+                    ),
                 ),
             )
         ],
@@ -637,26 +592,12 @@ async def _doctor_list(
 
 async def _doctor_step(conversation, tenant, body, draft, appt, professionals, ctx):
     roster = list(professionals or [])
-    more = fr.catalog_more_cursor(body, fr.LABEL_MORE_PROFESSIONALS)
+    more = fr.catalog_more_page(body, fr.LABEL_MORE_PROFESSIONALS)
     if more is not None:
-        return await _doctor_list(draft, tenant, appt, roster, ctx, page=more[0], query=more[1])
+        return await _doctor_list(draft, tenant, appt, roster, ctx, page=more)
     professional = fr._match_professional(roster, body)
     if professional is None:
-        query, hits = fr.typed_search(roster, body, fr._professional_name, kind="edit_doctor")
-        if len(hits) == 1:
-            professional = hits[0]
-        elif hits or not fr._no_hit_goes_to_model(body, query):
-            return await _doctor_list(
-                draft,
-                tenant,
-                appt,
-                roster,
-                ctx,
-                query=query if hits else "",
-                header=None if hits else fr.SEARCH_NO_HIT_PROFESSIONAL,
-            )
-        else:
-            return fr._preserve(conversation, "delegate_llm")
+        return fr._preserve(conversation, "delegate_llm")
     new = draft.with_changes(professional_id=str(professional.id))
     service = fr._match_service(
         professional_appointment_types(professional, tenant), new.current["service"]
@@ -673,17 +614,15 @@ async def _doctor_step(conversation, tenant, body, draft, appt, professionals, c
 
 
 def _insurance_list(
-    draft: ae.EditDraft, tenant, professionals, *, page: int = 0, query: str = ""
+    draft: ae.EditDraft, tenant, professionals, *, page: int = 0
 ) -> fr.FlowRouterResult:
     """The clinic's plans, each marked by whether the CURRENT doctor takes it; never filtered.
 
-    Paged like the booking's list (`fr.insurance_page`): no plan is ever cut. `query`
-    (a typed fragment, TASK-082 S4) lists only its hits, to tap - no Portal pointer then.
+    Paged like the booking's list (`fr.insurance_page`): no plan is ever cut.
     """
     doctor = _doctor(professionals, draft)
     plans = fr._tenant_insurance_plans(tenant)
-    listed = fr.catalog_search.partial_matches(plans, query, fr._plan_name) if query else plans
-    shown, next_page = fr.insurance_page(listed, page)
+    shown, next_page = fr.insurance_page(plans, page)
     rows: list[tuple] = [
         (
             f"ins|{plan['name']}",
@@ -692,31 +631,21 @@ def _insurance_list(
         )
         for plan in shown
     ]
-    rows.extend((row_id, title, None) for row_id, title in fr.insurance_more_row(next_page, query))
+    rows.extend((row_id, title, None) for row_id, title in fr.insurance_more_row(next_page))
     rows.extend(fr.INSURANCE_PINNED_ROWS)
     return _result(
         draft.with_stage(),
         [
             SlotsBubble(
-                body=fr._list_body(
-                    fr.SEARCH_HITS_HEADER if query else None,
-                    "Qual o convênio dessa consulta?",
-                    paged=not query and (next_page is not None or page > 0),
-                ),
+                body="Qual o convênio dessa consulta?",
                 rows=rows,
                 button_label="Ver convênios",
                 section_title="Convênios",
-                source=(
-                    None
-                    if query
-                    else OptionSource(
-                        kind="insurance",
-                        scope={
-                            "edit_doctor_id": str(doctor.id) if doctor is not None else None
-                        },
-                        items=edit_insurance_rows(tenant, plans, doctor),
-                        pinned=list(fr.INSURANCE_PINNED_ROWS),
-                    )
+                source=OptionSource(
+                    kind="insurance",
+                    scope={"edit_doctor_id": str(doctor.id) if doctor is not None else None},
+                    items=edit_insurance_rows(tenant, plans, doctor),
+                    pinned=list(fr.INSURANCE_PINNED_ROWS),
                 ),
             )
         ],
@@ -742,9 +671,9 @@ def edit_insurance_rows(tenant, plans: list, doctor) -> list[tuple[str, str, str
 
 
 def _insurance_step(conversation, tenant, body, draft, professionals):
-    more = fr.insurance_more_cursor(body)
+    more = fr.insurance_more_page(body)
     if more is not None:
-        return _insurance_list(draft, tenant, professionals, page=more[0], query=more[1])
+        return _insurance_list(draft, tenant, professionals, page=more)
     if fr._label_match(body, fr.LABEL_INSURANCE_OTHER):
         return _result(
             draft, [TextBubble(body=fr.INSURANCE_PROMPT_OTHER)], fr.STEP_EDIT_INSURANCE_OTHER
@@ -753,9 +682,6 @@ def _insurance_step(conversation, tenant, body, draft, professionals):
     if matched is None and fr._says_no_insurance(body):
         matched = fr.LABEL_INSURANCE_PARTICULAR
     if matched is None:
-        hits, query = fr.insurance_hits(tenant, body)
-        if hits:
-            return _insurance_list(draft, tenant, professionals, query=query)
         if fr._reads_as_conversation(body):
             return fr._preserve(conversation, "delegate_llm")
         return _insurance_list(draft, tenant, professionals)

@@ -419,27 +419,10 @@ async def test_unmatched_professional_delegates_preserving_state():
     conv = _conversation(
         flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_AWAITING_PROFESSIONAL
     )
-    res = await route(
-        conv,
-        _tenant(),
-        None,
-        "na verdade queria falar sobre outra coisa",
-        professionals=_professionals(),
-    )
+    res = await route(conv, _tenant(), None, "blá blá", professionals=_professionals())
     assert res.action == "delegate_llm"
     assert res.flow_state == FlowState.SERVICE_CATALOG
     assert res.flow_step == STEP_AWAITING_PROFESSIONAL
-
-
-async def test_a_short_unmatched_doctor_name_reoffers_the_list_preserving_state():
-    # TASK-082 S4: a name attempt with no hit says so and lists again - not the model.
-    from secretaria.services.flow_router import SEARCH_NO_HIT_PROFESSIONAL
-
-    conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_AWAITING_PROFESSIONAL)
-    res = await route(conv, _tenant(), None, "blá blá", professionals=_professionals())
-    assert res.action == "reply"
-    assert res.flow_step == STEP_AWAITING_PROFESSIONAL
-    assert res.bubbles[0].body.startswith(SEARCH_NO_HIT_PROFESSIONAL)
 
 
 async def test_stale_selected_professional_delegates_llm():

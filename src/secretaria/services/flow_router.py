@@ -61,7 +61,6 @@ from secretaria.core.whatsapp_limits import (
     truncate_plain,
 )
 from secretaria.models import FlowState
-from secretaria.services import catalog_search
 from secretaria.services.appointment_edit import EditContext
 from secretaria.services.attendee import (
     ATTENDEE_NAME_INVALID,
@@ -182,22 +181,18 @@ MAX_PROFESSIONAL_ROWS = 10
 MAX_CATALOG_OPTION_ROWS = MAX_PROFESSIONAL_ROWS - 1
 # TASK-082 S4: services and doctors page on WhatsApp the way convênios do. A list that
 # fits keeps its single page; a longer one shows CATALOG_PAGE_SIZE items + "Ver mais ..."
-# + the list's fixed rows ("Não sei"), never more than MAX_LIST_ROWS. The page (and, on a
-# filtered list, the search key) rides in the tap - `svcmore|<page>[|<key>]` /
-# `profmore|<page>[|<key>]`, registered in schemas/webhook.py::_PAYLOAD_ROW_PREFIXES -
-# so paging needs no conversation column. WhatsApp only: a Portal card carries the
-# whole list behind its `source` pointer and pages it itself (S1).
+# + the list's fixed rows ("Não sei"), never more than MAX_LIST_ROWS. The page rides in
+# the tap - `svcmore|<page>` / `profmore|<page>`, registered in
+# schemas/webhook.py::_PAYLOAD_ROW_PREFIXES - so paging needs no conversation column.
+# WhatsApp only: a Portal card carries the whole list behind its `source` pointer and
+# pages it itself (S1). Typed text at a list is NOT searched (TASK-082 F1, CONTRACT.md
+# D8): an exact name is recognised as before, anything else goes to the model; a typed
+# "ver mais" on WhatsApp becomes the tap before routing (workers/whatsapp/typed_more.py).
 CATALOG_PAGE_SIZE = 8
 ROW_SERVICE_MORE_PREFIX = "svcmore|"
 ROW_PROFESSIONAL_MORE_PREFIX = "profmore|"
 LABEL_MORE_SERVICES = "Ver mais serviços"
 LABEL_MORE_PROFESSIONALS = "Ver mais profissionais"
-# Typed partial search (services/catalog_search.py): told on every paged list, and the
-# fixed lines a filtered or a no-hit list opens with.
-CATALOG_SEARCH_HINT = "Digite parte do nome para buscar."
-SEARCH_HITS_HEADER = "Encontrei estas opções:"
-SEARCH_NO_HIT_SERVICE = "Não encontrei nenhum serviço com esse nome."
-SEARCH_NO_HIT_PROFESSIONAL = "Não encontrei nenhum profissional com esse nome."
 MAX_INSURANCE_PLAN_ROWS = 8
 # A clinic may accept any number of convênios: past MAX_INSURANCE_PLAN_ROWS the list
 # pages, INSURANCE_PAGE_SIZE plans + "Ver mais convênios" + Particular + Outro = 10 rows.
@@ -1707,31 +1702,21 @@ def _service_name(service: dict) -> str:
 
 
 def service_page_rows(
-    services: list[dict], page: int, query: str, *, fixed_rows: int, event: str
-) -> tuple[list[tuple[str, str]], bool]:
-    """One WhatsApp page of a `svc|` list (+ its "Ver mais serviços" row) and "is it paged?".
+    services: list[dict], page: int, *, fixed_rows: int, event: str
+) -> list[tuple[str, str]]:
+    """One WhatsApp page of a `svc|` list, plus its "Ver mais serviços" row when needed.
 
-    `query` (a `catalog_search` key) narrows the list to its hits first. Logs `event`
-    (the old `*_truncated` name, kept for the dashboards) when the list needs pages.
+    Logs `event` (the old `*_truncated` name, kept for the dashboards) when the list
+    needs pages.
     """
-    listed = catalog_search.partial_matches(services, query, _service_name) if query else services
-    shown, next_page = catalog_page(listed, page, fixed_rows=fixed_rows)
-    paged = len(shown) < len(listed)
-    if paged:
-        logger.info(event, total=len(listed), shown=len(shown), page=page, paged=True)
+    shown, next_page = catalog_page(services, page, fixed_rows=fixed_rows)
+    if len(shown) < len(services):
+        logger.info(event, total=len(services), shown=len(shown), page=page, paged=True)
     rows: list[tuple[str, str]] = [
         (f"svc|{_service_name(s)}", _service_row_title(s.get("name"))) for s in shown
     ]
-    rows.extend(catalog_more_row(ROW_SERVICE_MORE_PREFIX, LABEL_MORE_SERVICES, next_page, query))
-    return rows, paged
-
-
-def _list_body(*parts: str | None, paged: bool) -> str:
-    """A list body from its non-empty parts, plus the search hint on a paged list."""
-    text = "\n\n".join(part for part in parts if part)
-    if paged:
-        text = f"{text}\n\n{CATALOG_SEARCH_HINT}"
-    return text[:MAX_LIST_BODY_CHARS]
+    rows.extend(catalog_more_row(ROW_SERVICE_MORE_PREFIX, LABEL_MORE_SERVICES, next_page))
+    return rows
 
 
 def _service_list_bubble(
@@ -1741,7 +1726,6 @@ def _service_list_bubble(
     *,
     scope: dict | None = None,
     page: int = 0,
-    query: str = "",
 ) -> Bubble:
     """The tappable service list, optionally introduced by `header`.
 
@@ -1752,20 +1736,17 @@ def _service_list_bubble(
     body's own limit so a long hub-written `about` can never make the message
     unsendable.
 
-    `page` / `query` (TASK-082 S4): the WhatsApp page and, for a typed fragment, the
-    search key - a filtered list has no Portal pointer (it is not the catalogue).
+    `page` (TASK-082 S4): the WhatsApp page; the Portal pointer is the same on every page.
     """
-    rows, paged = service_page_rows(
-        services, page, query, fixed_rows=1, event="flow_service_list_truncated"
-    )
+    rows = service_page_rows(services, page, fixed_rows=1, event="flow_service_list_truncated")
     # Fixed last row: opens the scoped service-help node (STEP_SERVICE_HELP).
     # The id prefix is NOT "svc|" on purpose - extract_inbound_body echoes the
     # row TITLE for unknown prefixes, so the tap arrives as plain "Não sei".
     rows.append(("svchelp|0", LABEL_DONT_KNOW))
-    if query and header is None:
-        header = SEARCH_HITS_HEADER
+    question = "Qual serviço você gostaria de agendar?"
+    body = f"{header}\n\n{question}" if header else question
     return SlotsBubble(
-        body=_list_body(header, "Qual serviço você gostaria de agendar?", paged=paged),
+        body=body[:MAX_LIST_BODY_CHARS],
         rows=rows,
         button_label="Ver serviços",
         section_title="Serviços",
@@ -1776,7 +1757,7 @@ def _service_list_bubble(
                 items=portal_service_rows(services),
                 pinned=[SERVICE_HELP_ROW],
             )
-            if scope is not None and not query
+            if scope is not None
             else None
         ),
     )
@@ -2569,31 +2550,19 @@ def _professional_list_body(question: str, plan: dict | None) -> str:
     return f"{question}\n\n{EMOJI_AFFIRMATIVE} = aceita {plan['name']}"
 
 
-def _professional_name(professional: Any) -> str:
-    return str(getattr(professional, "name", "") or "")
-
-
 def professional_page(
-    professionals: list, page: int, query: str, *, fixed_rows: int, event: str
-) -> tuple[list, list[tuple[str, str]], bool]:
-    """One WhatsApp page of a doctor list: (doctors shown, "Ver mais" row, is it paged?).
+    professionals: list, page: int, *, fixed_rows: int, event: str
+) -> tuple[list, list[tuple[str, str]]]:
+    """One WhatsApp page of a doctor list: (doctors shown, its "Ver mais" row or nothing).
 
-    `query` (a `catalog_search` key) narrows the roster to its hits first. Logs `event`
-    (the old `*_truncated` name, kept for the dashboards) when the list needs pages.
+    Logs `event` (the old `*_truncated` name, kept for the dashboards) when the list
+    needs pages.
     """
-    listed = (
-        catalog_search.partial_matches(professionals, query, _professional_name)
-        if query
-        else professionals
-    )
-    shown, next_page = catalog_page(listed, page, fixed_rows=fixed_rows)
-    paged = len(shown) < len(listed)
-    if paged:
-        logger.info(event, total=len(listed), shown=len(shown), page=page, paged=True)
-    more = catalog_more_row(
-        ROW_PROFESSIONAL_MORE_PREFIX, LABEL_MORE_PROFESSIONALS, next_page, query
-    )
-    return shown, more, paged
+    shown, next_page = catalog_page(professionals, page, fixed_rows=fixed_rows)
+    if len(shown) < len(professionals):
+        logger.info(event, total=len(professionals), shown=len(shown), page=page, paged=True)
+    more = catalog_more_row(ROW_PROFESSIONAL_MORE_PREFIX, LABEL_MORE_PROFESSIONALS, next_page)
+    return shown, more
 
 
 def _enter_professional_list(
@@ -2603,8 +2572,6 @@ def _enter_professional_list(
     insurance: str | None = None,
     pool: bool = False,
     page: int = 0,
-    query: str = "",
-    header: str | None = None,
 ) -> FlowRouterResult:
     """Render the tappable doctor list ("Escolher médico").
 
@@ -2614,11 +2581,10 @@ def _enter_professional_list(
     (`_professional_rows`: every doctor listed, never filtered). Up to
     MAX_CATALOG_OPTION_ROWS doctors fit one page with the reserved "Não sei"
     scoped-help row appended last; a longer roster pages (`catalog_page`, TASK-082
-    S4: `page`), and `query` (a typed fragment's search key) lists only its hits -
-    without a Portal pointer, since a search result is not the roster.
+    S4: `page`). The Portal pointer is the whole roster on every page.
     """
-    shown, more, paged = professional_page(
-        professionals, page, query, fixed_rows=1, event="flow_professional_list_truncated"
+    shown, more = professional_page(
+        professionals, page, fixed_rows=1, event="flow_professional_list_truncated"
     )
     rows, plan = _professional_rows(tenant, shown, insurance)
     rows.extend((row_id, title, None) for row_id, title in more)
@@ -2629,28 +2595,18 @@ def _enter_professional_list(
     rows.append(("profhelp|0", LABEL_DONT_KNOW, "Te ajudo a escolher"))
     # `pool`: a caller-chosen subset (rebooking's "Outro médico"), not the whole roster -
     # the stored scope names those doctors so later pages never widen the list.
-    source = (
-        None
-        if query
-        else OptionSource(
-            kind="professional",
-            scope=professional_scope(insurance, professionals if pool else None),
-            items=portal_professional_rows(tenant, professionals, insurance),
-            pinned=[PROFESSIONAL_HELP_ROW],
-        )
+    source = OptionSource(
+        kind="professional",
+        scope=professional_scope(insurance, professionals if pool else None),
+        items=portal_professional_rows(tenant, professionals, insurance),
+        pinned=[PROFESSIONAL_HELP_ROW],
     )
-    if query and header is None:
-        header = SEARCH_HITS_HEADER
     return FlowRouterResult(
         action="reply",
         bubbles=[
             SlotsBubble(
-                body=_list_body(
-                    header,
-                    _professional_list_body(
-                        "Com qual profissional você gostaria de agendar?", plan
-                    ),
-                    paged=paged,
+                body=_professional_list_body(
+                    "Com qual profissional você gostaria de agendar?", plan
                 ),
                 rows=rows,
                 button_label="Ver profissionais",
@@ -2714,8 +2670,6 @@ def _enter_clinic_service_catalog(
     professionals: list,
     *,
     page: int = 0,
-    query: str = "",
-    header: str | None = None,
 ) -> FlowRouterResult:
     """Render the clinic-wide service list ("Escolher serviço").
 
@@ -2727,7 +2681,7 @@ def _enter_clinic_service_catalog(
     pointing at the wrong re-entry.
 
     Up to MAX_LIST_ROWS services fit one page; a longer catalogue pages (`page`,
-    TASK-082 S4) and `query` lists only a typed fragment's hits (no Portal pointer).
+    TASK-082 S4).
     """
     services = _clinic_service_catalog(tenant, professionals)
     if not services:
@@ -2739,27 +2693,21 @@ def _enter_clinic_service_catalog(
             ],
             flow_state=FlowState.MENU,
         )
-    rows, paged = service_page_rows(
-        services, page, query, fixed_rows=0, event="flow_clinic_service_list_truncated"
+    rows = service_page_rows(
+        services, page, fixed_rows=0, event="flow_clinic_service_list_truncated"
     )
-    if query and header is None:
-        header = SEARCH_HITS_HEADER
     return FlowRouterResult(
         action="reply",
         bubbles=[
             SlotsBubble(
-                body=_list_body(header, "Qual serviço você gostaria de agendar?", paged=paged),
+                body="Qual serviço você gostaria de agendar?",
                 rows=rows,
                 button_label="Ver serviços",
                 section_title="Serviços",
-                source=(
-                    None
-                    if query
-                    else OptionSource(
-                        kind="service",
-                        scope={"list": "clinic"},
-                        items=portal_service_rows(services),
-                    )
+                source=OptionSource(
+                    kind="service",
+                    scope={"list": "clinic"},
+                    items=portal_service_rows(services),
                 ),
             )
         ],
@@ -2775,8 +2723,6 @@ def _enter_service_professional_list(
     *,
     insurance: str | None = None,
     page: int = 0,
-    query: str = "",
-    header: str | None = None,
 ) -> FlowRouterResult:
     """EVERY active doctor, with the service already stored - and marked.
 
@@ -2792,40 +2738,25 @@ def _enter_service_professional_list(
     normal flow at that service's own detail card — never back at the service
     list, which the patient has already answered.
 
-    Pages like every doctor list (`page`, TASK-082 S4); `query` lists a typed
-    fragment's hits only (no Portal pointer).
+    Pages like every doctor list (`page`, TASK-082 S4).
     """
-    shown, more, paged = professional_page(
-        professionals,
-        page,
-        query,
-        fixed_rows=0,
-        event="flow_service_professional_list_truncated",
+    shown, more = professional_page(
+        professionals, page, fixed_rows=0, event="flow_service_professional_list_truncated"
     )
     rows, plan = _professional_rows(tenant, shown, insurance)
     rows.extend((row_id, title, None) for row_id, title in more)
-    if query and header is None:
-        header = SEARCH_HITS_HEADER
     return FlowRouterResult(
         action="reply",
         bubbles=[
             SlotsBubble(
-                body=_list_body(
-                    header,
-                    _professional_list_body(f"Quem você prefere para {service_name}?", plan),
-                    paged=paged,
-                ),
+                body=_professional_list_body(f"Quem você prefere para {service_name}?", plan),
                 rows=rows,
                 button_label="Ver profissionais",
                 section_title="Profissionais",
-                source=(
-                    None
-                    if query
-                    else OptionSource(
-                        kind="professional",
-                        scope=professional_scope(insurance),
-                        items=portal_professional_rows(tenant, professionals, insurance),
-                    )
+                source=OptionSource(
+                    kind="professional",
+                    scope=professional_scope(insurance),
+                    items=portal_professional_rows(tenant, professionals, insurance),
                 ),
             )
         ],
@@ -2846,23 +2777,13 @@ def _handle_catalog_service(
     the filtered doctor list. None -> the catalog changed under us mid-flow;
     a fixed reply plus the menu, never the LLM.
     """
-    more = catalog_more_cursor(body, LABEL_MORE_SERVICES)
+    more = catalog_more_page(body, LABEL_MORE_SERVICES)
     if more is not None:
-        return _enter_clinic_service_catalog(tenant, professionals, page=more[0], query=more[1])
+        return _enter_clinic_service_catalog(tenant, professionals, page=more)
     services = _clinic_service_catalog(tenant, professionals)
     service = _match_service(services, body)
     if service is None:
-        query, hits = typed_search(services, body, _service_name, kind="service")
-        if len(hits) == 1:
-            service = hits[0]
-        elif hits:
-            return _enter_clinic_service_catalog(tenant, professionals, query=query)
-        elif _no_hit_goes_to_model(body, query):
-            return _preserve(conversation, "delegate_llm")
-        else:
-            return _enter_clinic_service_catalog(
-                tenant, professionals, header=SEARCH_NO_HIT_SERVICE
-            )
+        return _preserve(conversation, "delegate_llm")
     service_name = str(service.get("name", ""))
     offering = _professionals_offering(tenant, professionals, service_name)
     if len(offering) == 1:
@@ -2887,85 +2808,35 @@ def _handle_catalog_service(
     )
 
 
-def typed_search(entries: list, body: str | None, name_of, *, kind: str) -> tuple[str, list]:
-    """A typed fragment's (search key, hits) over `entries` (TASK-082 S4).
-
-    Called only after the exact match failed. Logs the kind and the hit count -
-    never the text, which can be health data.
-    """
-    query = catalog_search.normalize_query(body)
-    hits = catalog_search.partial_matches(entries, query, name_of)
-    if query:
-        logger.info("flow_catalog_typed_search", kind=kind, hits=min(len(hits), 2))
-    return query, hits
-
-
-# More words than a patient types to look a name up ("cardio", "dra ana", "exame de
-# vista"); longer text with no hit is talk ("desculpa, quero mudar o médico").
-_SEARCH_MAX_WORDS = 3
-
-
-def _no_hit_goes_to_model(body: str | None, query: str) -> bool:
-    """A typed text with no hit still goes to the LLM when it is talk, not a name.
-
-    A question or a sentence (`_reads_as_conversation`, or more than
-    `_SEARCH_MAX_WORDS` words), or nothing searchable at all (only emoji/punctuation,
-    a media message). A short name attempt with no hit gets "não encontrei" and the
-    list again - the LLM is the last resort, not the answer to a typo.
-    """
-    return not query or len(query.split()) > _SEARCH_MAX_WORDS or _reads_as_conversation(body)
-
-
 def _handle_service_professional(
     conversation: Conversation,
     tenant: Tenant,
     body: str,
     professionals: list,
-    *,
-    professional: Any | None = None,
 ) -> FlowRouterResult:
     """Doctor tap inside the service-first branch: straight to the detail card.
 
     The service was already chosen (`flow_selected_type`), so this must NOT
     re-render that doctor's whole service list the way
     `_enter_professional_services` does — that would ask a question the
-    patient has already answered. `professional` is a doctor the caller already
-    resolved (a typed fragment's single hit); otherwise `body` is matched here,
-    and a "Ver mais" tap or a typed fragment pages/filters the list (TASK-082 S4).
+    patient has already answered. A "Ver mais profissionais" tap pages the list
+    (TASK-082 S4); anything that names no doctor goes to the model, as before.
     """
+    more = catalog_more_page(body, LABEL_MORE_PROFESSIONALS)
+    if more is not None:
+        return _preserve_reply(
+            conversation,
+            _enter_service_professional_list(
+                tenant,
+                professionals or [],
+                conversation.flow_selected_type or "",
+                insurance=_selected_insurance(conversation),
+                page=more,
+            ).bubbles,
+        )
+    professional = _match_professional(professionals or [], body)
     if professional is None:
-        more = catalog_more_cursor(body, LABEL_MORE_PROFESSIONALS)
-        if more is not None:
-            return _preserve_reply(
-                conversation,
-                _enter_service_professional_list(
-                    tenant,
-                    professionals or [],
-                    conversation.flow_selected_type or "",
-                    insurance=_selected_insurance(conversation),
-                    page=more[0],
-                    query=more[1],
-                ).bubbles,
-            )
-        professional = _match_professional(professionals or [], body)
-    if professional is None:
-        query, hits = typed_search(professionals or [], body, _professional_name, kind="doctor")
-        if len(hits) == 1:
-            professional = hits[0]
-        elif hits or not _no_hit_goes_to_model(body, query):
-            return _preserve_reply(
-                conversation,
-                _enter_service_professional_list(
-                    tenant,
-                    professionals or [],
-                    conversation.flow_selected_type or "",
-                    insurance=_selected_insurance(conversation),
-                    query=query if hits else "",
-                    header=None if hits else SEARCH_NO_HIT_PROFESSIONAL,
-                ).bubbles,
-            )
-        else:
-            return _preserve(conversation, "delegate_llm")
+        return _preserve(conversation, "delegate_llm")
     service = _match_service(
         professional_appointment_types(professional, tenant), conversation.flow_selected_type
     )
@@ -3197,25 +3068,34 @@ def catalog_page(items: list, page: int, *, fixed_rows: int) -> tuple[list, int 
     return list(items[start : start + size]), (page + 1 if page + 1 < pages else None)
 
 
-def catalog_more_row(
-    prefix: str, label: str, next_page: int | None, query: str = ""
-) -> list[tuple[str, str]]:
-    """The "Ver mais ..." row for `next_page` (the search key rides along), or nothing."""
+def catalog_more_row(prefix: str, label: str, next_page: int | None) -> list[tuple[str, str]]:
+    """The "Ver mais ..." row for `next_page` (`<prefix><page>`), or nothing."""
     if next_page is None:
         return []
-    payload = f"{next_page}|{query}" if query else str(next_page)
-    return [(f"{prefix}{payload}", label)]
+    return [(f"{prefix}{next_page}", label)]
 
 
-def catalog_more_cursor(body: str | None, label: str) -> tuple[int, str] | None:
-    """(page, search key) a "Ver mais ..." tap asks for; None when `body` is not that tap.
+def _more_page(payload: str | None) -> int:
+    """The page of a "Ver mais ..." payload; anything after a second "|" is ignored.
 
-    Typed without the payload, it is the first page of the unfiltered list.
+    A card built by the pre-F1 branch carried a search key there (`svcmore|1|cardio`,
+    CONTRACT.md D10): such a tap still pages, the key is dropped.
     """
-    if not _control_match(body, label):
+    return _as_page((payload or "").partition("|")[0])
+
+
+def catalog_more_page(body: str | None, label: str) -> int | None:
+    """The page a "Ver mais serviços/profissionais" TAP asks for, or None.
+
+    Only the tap (title + its "(page)" payload) counts: a typed "Ver mais ..." with no
+    payload is not this control here, so typed text routes exactly as on `main` (where
+    the row did not exist). On WhatsApp a typed "ver mais" is turned into the tap of
+    the latest card's row before routing (workers/whatsapp/typed_more.py, D10).
+    """
+    payload = _row_payload(body)
+    if payload is None or not _control_match(body, label):
         return None
-    page, _, query = (_row_payload(body) or "").partition("|")
-    return _as_page(page), catalog_search.normalize_query(query)
+    return _more_page(payload)
 
 
 INSURANCE_PINNED_ROWS: tuple[tuple[str, str, str | None], ...] = (
@@ -3236,38 +3116,20 @@ def portal_insurance_rows(plans: list) -> list[tuple[str, str, str | None]]:
     ]
 
 
-def insurance_more_row(next_page: int | None, query: str = "") -> list[tuple[str, str]]:
+def insurance_more_row(next_page: int | None) -> list[tuple[str, str]]:
     """The "Ver mais convênios" row for `next_page`, or nothing on the last page."""
-    return catalog_more_row(ROW_INSURANCE_MORE_PREFIX, LABEL_MORE_INSURANCES, next_page, query)
-
-
-def insurance_more_cursor(body: str | None) -> tuple[int, str] | None:
-    """(page, search key) a "Ver mais convênios" tap asks for, or None."""
-    return catalog_more_cursor(body, LABEL_MORE_INSURANCES)
+    return catalog_more_row(ROW_INSURANCE_MORE_PREFIX, LABEL_MORE_INSURANCES, next_page)
 
 
 def insurance_more_page(body: str | None) -> int | None:
-    """The page a "Ver mais convênios" tap asks for, or None when `body` is not that tap."""
-    cursor = insurance_more_cursor(body)
-    return None if cursor is None else cursor[0]
+    """The page a "Ver mais convênios" tap asks for, or None when `body` is not that tap.
 
-
-def _plan_name(plan: dict) -> str:
-    return str(plan.get("name") or "")
-
-
-def insurance_hits(tenant: Tenant, body: str | None) -> tuple[list[dict], str]:
-    """The clinic plans a typed fragment names (TASK-082 S4), with its search key.
-
-    A fragment only NARROWS the list the patient then taps - it never stores a plan
-    by itself, even with one hit: a guessed match would decide the patient's coverage
-    (`insurance_catalog.match_plan`'s rule). No hit keeps today's free-text answer.
+    As on `main`: a typed "Ver mais convênios" (no payload) is the first page. A
+    pre-F1 card's trailing "|<key>" is ignored (`_more_page`).
     """
-    query = catalog_search.normalize_query(body)
-    return (
-        catalog_search.partial_matches(_tenant_insurance_plans(tenant), query, _plan_name),
-        query,
-    )
+    if not _control_match(body, LABEL_MORE_INSURANCES):
+        return None
+    return _more_page(_row_payload(body))
 
 
 def _enter_insurance(
@@ -3275,7 +3137,6 @@ def _enter_insurance(
     conversation: Conversation | None = None,
     *,
     page: int = 0,
-    query: str = "",
 ) -> FlowRouterResult:
     """Render the convênio list: the clinic's plans + Particular + Outro.
 
@@ -3284,12 +3145,10 @@ def _enter_insurance(
     progress otherwise - a booking begun before that order shipped, or an LLM
     hand-back with the service already chosen - whose service/doctor must ride
     along to the day picker. `page` is the "Ver mais convênios" cursor
-    (`insurance_page`); `query` a typed fragment's search key (only its hits are
-    listed, and the card has no Portal pointer - it is not the catalogue).
+    (`insurance_page`).
     """
     plans = _tenant_insurance_plans(tenant)
-    listed = catalog_search.partial_matches(plans, query, _plan_name) if query else plans
-    shown, next_page = insurance_page(listed, page)
+    shown, next_page = insurance_page(plans, page)
     # The row description says how payment works for the plan (the catalog mechanism): public,
     # fixed copy - never the clinic's own note, never anything that decides the deposit.
     rows: list[tuple] = [
@@ -3300,25 +3159,16 @@ def _enter_insurance(
         )
         for plan in shown
     ]
-    rows.extend(insurance_more_row(next_page, query))
+    rows.extend(insurance_more_row(next_page))
     rows.append(("ins|particular", LABEL_INSURANCE_PARTICULAR))
     rows.append(("ins|outro", LABEL_INSURANCE_OTHER))
     # The Portal pages the WHOLE catalogue itself (no "Ver mais convênios" row there).
-    source = (
-        None
-        if query
-        else OptionSource(
-            kind="insurance",
-            scope={},
-            items=portal_insurance_rows(plans),
-            pinned=list(INSURANCE_PINNED_ROWS),
-        )
+    source = OptionSource(
+        kind="insurance",
+        scope={},
+        items=portal_insurance_rows(plans),
+        pinned=list(INSURANCE_PINNED_ROWS),
     )
-    body = "Você vai usar convênio? Escolha uma opção:"
-    if query:
-        body = f"{SEARCH_HITS_HEADER}\n\n{body}"
-    elif next_page is not None or page:
-        body = f"{body}\n\n{CATALOG_SEARCH_HINT}"
     logger.info(
         "insurance_step_presented",
         conversation_id=str(getattr(conversation, "id", None)),
@@ -3331,7 +3181,7 @@ def _enter_insurance(
         action="reply",
         bubbles=[
             SlotsBubble(
-                body=body,
+                body="Você vai usar convênio? Escolha uma opção:",
                 rows=rows,
                 button_label="Ver convênios",
                 section_title="Convênios",
@@ -3371,9 +3221,9 @@ async def _handle_insurance(
     has its service (begun before the convênio-first order shipped, or an LLM
     hand-back) goes straight to the day picker, as it always did.
     """
-    more = insurance_more_cursor(body)
+    more = insurance_more_page(body)
     if more is not None:
-        return _enter_insurance(tenant, conversation, page=more[0], query=more[1])
+        return _enter_insurance(tenant, conversation, page=more)
     if _label_match(body, LABEL_INSURANCE_OTHER):
         return FlowRouterResult(
             action="reply",
@@ -3386,12 +3236,6 @@ async def _handle_insurance(
     matched = _match_insurance_plan(tenant, body)
     if matched is None and _says_no_insurance(body):
         matched = LABEL_INSURANCE_PARTICULAR
-    if matched is None:
-        # A fragment of one or more of the clinic's plans: list them to tap (never
-        # stored as a guess). TASK-082 S4.
-        hits, query = insurance_hits(tenant, body)
-        if hits:
-            return _enter_insurance(tenant, conversation, query=query)
     if matched is None and _reads_as_conversation(body):
         logger.info(
             "insurance_free_text_to_llm",
@@ -3623,7 +3467,7 @@ async def _catalog_step(
 
     if step == STEP_AWAITING_PROFESSIONAL:
         roster = professionals or []
-        more = catalog_more_cursor(body, LABEL_MORE_PROFESSIONALS)
+        more = catalog_more_page(body, LABEL_MORE_PROFESSIONALS)
         if more is not None:
             # The whole roster, as the first page listed it (a rebooking pool's later
             # pages list the roster too - the tap is matched against it anyway).
@@ -3633,39 +3477,21 @@ async def _catalog_step(
                     tenant,
                     roster,
                     insurance=_selected_insurance(conversation),
-                    page=more[0],
-                    query=more[1],
+                    page=more,
                 ).bubbles,
             )
         if _label_match(body, LABEL_DONT_KNOW):
             return _enter_professional_help(conversation)
         professional = _match_professional(roster, body)
         if professional is None:
-            query, hits = typed_search(roster, body, _professional_name, kind="doctor")
-            if len(hits) == 1:
-                professional = hits[0]
-            elif hits or not _no_hit_goes_to_model(body, query):
-                return _preserve_reply(
-                    conversation,
-                    _enter_professional_list(
-                        tenant,
-                        roster,
-                        insurance=_selected_insurance(conversation),
-                        query=query if hits else "",
-                        header=None if hits else SEARCH_NO_HIT_PROFESSIONAL,
-                    ).bubbles,
-                )
-            else:
-                return _preserve(conversation, "delegate_llm")
+            return _preserve(conversation, "delegate_llm")
         if conversation.flow_selected_type:
             # A service may already be chosen when an empty LLM handback
             # reopens the professional list. Recheck the doctor's catalogue
             # before continuing to the selected service's detail card.
             return _resume_parked_draft(
                 conversation,
-                _handle_service_professional(
-                    conversation, tenant, body, roster, professional=professional
-                ),
+                _handle_service_professional(conversation, tenant, body, roster),
             )
         return _resume_parked_draft(
             conversation, _enter_professional_services(professional, tenant)
@@ -3682,34 +3508,17 @@ async def _catalog_step(
 
     if step == STEP_AWAITING_SERVICE:
         scope = service_scope(_selected_professional_id(conversation))
-        more = catalog_more_cursor(body, LABEL_MORE_SERVICES)
+        more = catalog_more_page(body, LABEL_MORE_SERVICES)
         if more is not None:
             return _preserve_reply(
                 conversation,
-                [_service_list_bubble(tenant, services, scope=scope, page=more[0], query=more[1])],
+                [_service_list_bubble(tenant, services, scope=scope, page=more)],
             )
         if _label_match(body, LABEL_DONT_KNOW):
             return _enter_service_help(conversation)
         service = _match_service(services, body)
         if service is None:
-            query, hits = typed_search(services, body, _service_name, kind="service")
-            if len(hits) == 1:
-                service = hits[0]
-            elif hits or not _no_hit_goes_to_model(body, query):
-                return _preserve_reply(
-                    conversation,
-                    [
-                        _service_list_bubble(
-                            tenant,
-                            services,
-                            None if hits else SEARCH_NO_HIT_SERVICE,
-                            scope=scope,
-                            query=query if hits else "",
-                        )
-                    ],
-                )
-            else:
-                return _preserve(conversation, "delegate_llm")
+            return _preserve(conversation, "delegate_llm")
         return _resume_parked_draft(
             conversation, _enter_service_detail(service, conversation, tenant)
         )
