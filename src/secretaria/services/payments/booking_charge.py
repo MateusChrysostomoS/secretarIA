@@ -143,6 +143,7 @@ async def begin_payment(
     existing_hold: HeldSlot | None = None,
     payer_document: str | None = None,
     payer_email: str | None = None,
+    unit_id: UUID | None = None,
 ) -> PaymentStart | None:
     """Hold the slot for the deposit window and create its Pix.
 
@@ -188,6 +189,7 @@ async def begin_payment(
                 attendee_name=attendee_name,
                 phase="payment",
                 charge_id=deposit_id,
+                unit_id=unit_id,
             )
         except LiveChargeHoldError as exc:
             raise ChargeStartError("charge_pending") from exc
@@ -363,6 +365,9 @@ async def _create_and_record(
                         "attendee_name": attendee_name,
                         "start_at": hold.start_at.isoformat(),
                         "end_at": hold.end_at.isoformat(),
+                        # TASK-083: the unit, only when the booking has one (the paid
+                        # promotion writes it on the appointment and the event).
+                        **({"unit_id": str(hold.unit_id)} if hold.unit_id else {}),
                     },
                 )
             )

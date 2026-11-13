@@ -42,7 +42,7 @@ from secretaria.models.pix_deposit import (
     PixDeposit,
     PixDepositStatus,
 )
-from secretaria.services import booking_promotion, deposit_wait
+from secretaria.services import booking_promotion, deposit_wait, unit_booking
 from secretaria.services.calendar import CalendarUnavailableError
 from secretaria.services.payments import attention, booking_charge, deposit_lifecycle, notify
 
@@ -318,8 +318,13 @@ async def _finish(
         await _enqueue_hooks(redis, tenant, appointment)
 
     patient = await session.get(Patient, deposit.patient_id) if deposit.patient_id else None
+    unit = await unit_booking.tenant_unit(session, tenant.id, snapshot.unit_id)
     text = booking_promotion.confirmation_text(
-        tenant, snapshot, patient.name if patient else None, late_reopened=late
+        tenant,
+        snapshot,
+        patient.name if patient else None,
+        late_reopened=late,
+        unit_location=unit_booking.unit_location(unit.name, unit.address) if unit else None,
     )
     if await _send_once(session, tenant, deposit, text) == "failed":
         started = _promotion_started_at(deposit)

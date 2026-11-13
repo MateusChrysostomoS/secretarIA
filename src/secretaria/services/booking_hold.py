@@ -105,6 +105,8 @@ class HeldSlot:
     phase: str = "code"
     # The `pix_deposits` row this hold waits for, in the payment phase.
     charge_id: UUID | None = None
+    # TASK-083 spec §8: the unit the patient chose; the promotion writes it on the booking.
+    unit_id: UUID | None = None
 
     @classmethod
     def of(cls, row: BookingHold) -> "HeldSlot":
@@ -122,6 +124,7 @@ class HeldSlot:
             attendee_name=row.attendee_name,
             phase=row.phase or "code",
             charge_id=row.charge_id,
+            unit_id=row.unit_id,
         )
 
 
@@ -362,6 +365,7 @@ async def place_hold(
     attendee_name: str | None = None,
     phase: str = "code",
     charge_id: UUID | None = None,
+    unit_id: UUID | None = None,
 ) -> HeldSlot | None:
     """Record [start_at, end_at) for this conversation. None = a Pix is holding it.
 
@@ -442,6 +446,7 @@ async def place_hold(
                 expires_at=expires_at,
                 phase=phase,
                 charge_id=charge_id,
+                unit_id=unit_id,
             )
             session.add(row)
             await session.flush()
@@ -690,8 +695,11 @@ class BookingGate:
         appointment_type: str | None,
         insurance: str | None,
         attendee_name: str | None = None,
+        unit_id: UUID | None = None,
     ) -> GateDecision:
-        """Hold the slot and mail a code / ask for the Pix, or tell the router to commit."""
+        """Hold the slot and mail a code / ask for the Pix, or tell the router to commit.
+
+        `unit_id` (TASK-083): the unit the patient chose, recorded on the hold."""
         if self._tenant_id is None:
             return GateDecision("commit")
 
@@ -725,6 +733,7 @@ class BookingGate:
                     appointment_type=appointment_type,
                     insurance=insurance,
                     attendee_name=attendee_name,
+                    unit_id=unit_id,
                 )
             waiver = (
                 "payer_data_unavailable",
@@ -744,6 +753,7 @@ class BookingGate:
             appointment_type=appointment_type,
             insurance=insurance,
             attendee_name=attendee_name,
+            unit_id=unit_id,
         )
         if waiver is None or decision.outcome != "commit":
             # A "held" slot is decided again once the code is verified (the deposit question is
@@ -771,6 +781,7 @@ class BookingGate:
         appointment_type: str | None,
         insurance: str | None,
         attendee_name: str | None,
+        unit_id: UUID | None = None,
     ) -> GateDecision:
         """The gate as it was before any deposit existed: Portal code hold, or commit."""
         if not self._armed:
@@ -787,6 +798,7 @@ class BookingGate:
                 start_at=start_at,
                 end_at=end_at,
                 attendee_name=attendee_name,
+                unit_id=unit_id,
             )
         except Exception as exc:
             # The hold could not be written. Committing now is the fail-open
@@ -1022,6 +1034,7 @@ class BookingGate:
         appointment_type: str | None,
         insurance: str | None,
         attendee_name: str | None,
+        unit_id: UUID | None = None,
     ) -> GateDecision:
         """A deposit is due. Portal first proves the address (decision D12: never charge an
         identity nobody proved), WhatsApp goes straight to the Pix.
@@ -1045,6 +1058,7 @@ class BookingGate:
                 appointment_type=appointment_type,
                 insurance=insurance,
                 attendee_name=attendee_name,
+                unit_id=unit_id,
             )
             if decision.outcome != "commit":
                 # "held": the Portal code first; the worker skips the Pix after it
@@ -1075,6 +1089,7 @@ class BookingGate:
                     start_at=start_at,
                     end_at=end_at,
                     attendee_name=attendee_name,
+                    unit_id=unit_id,
                 )
             except LiveChargeHoldError:
                 return await self._blocked("charge_pending")
@@ -1114,6 +1129,7 @@ class BookingGate:
                 existing_hold=held,
                 payer_document=payer.document,
                 payer_email=payer.email,
+                **({"unit_id": unit_id} if unit_id is not None else {}),
             )
         except booking_charge.ChargeStartError as exc:
             needed = payer_data.kind_for_code(exc.code)

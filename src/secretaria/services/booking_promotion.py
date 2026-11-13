@@ -37,7 +37,7 @@ from secretaria.models import (
     Professional,
     Tenant,
 )
-from secretaria.services import booking_hold
+from secretaria.services import booking_hold, unit_booking
 from secretaria.services.calendar import CalendarService, build_patient_calendar_link
 from secretaria.services.insurance_catalog import resolve_booking_plan_ids
 from secretaria.services.local_calendar import LocalCalendarService, create_event_exclusive
@@ -60,6 +60,8 @@ class BookingSnapshot:
     attendee_name: str | None
     start_at: datetime
     end_at: datetime
+    # TASK-083 spec §8: the unit the patient chose (absent from snapshots without one).
+    unit_id: UUID | None = None
 
     @classmethod
     def from_deposit(cls, deposit: PixDeposit) -> "BookingSnapshot | None":
@@ -73,6 +75,7 @@ class BookingSnapshot:
             professional_id = raw.get("professional_id")
             conversation_id = raw.get("conversation_id")
             appointment_type = str(raw.get("appointment_type") or "Consulta")
+            unit_id = UUID(raw["unit_id"]) if raw.get("unit_id") else None
         except (KeyError, TypeError, ValueError):
             return None
         return cls(
@@ -85,6 +88,7 @@ class BookingSnapshot:
             attendee_name=raw.get("attendee_name"),
             start_at=start_at,
             end_at=end_at,
+            unit_id=unit_id,
         )
 
 
@@ -180,6 +184,9 @@ async def promote(
             return Promotion(existing, created=False)
 
     patient = await session.get(Patient, snapshot.patient_id) if snapshot.patient_id else None
+    # TASK-083: the chosen unit's id on a secretarIA event, its location on a Google event.
+    unit = await unit_booking.tenant_unit(session, tenant.id, snapshot.unit_id)
+    calendar = unit_booking.scoped_calendar(calendar, unit, with_hours=False)
     display = snapshot.attendee_name or (patient.name if patient is not None else None)
     summary = (
         f"{snapshot.appointment_type} - {display}" if display else snapshot.appointment_type
@@ -214,6 +221,7 @@ async def promote(
         insurance_professional_plan_id=professional_plan_id,
         attendee_name=snapshot.attendee_name,
         status=AppointmentStatus.SCHEDULED,
+        unit_id=unit.id if unit is not None else None,
     )
     session.add(appointment)
     await session.flush()
@@ -246,9 +254,16 @@ async def promote(
 
 
 def confirmation_text(
-    tenant: Tenant, snapshot: BookingSnapshot, patient_name: str | None, *, late_reopened: bool
+    tenant: Tenant,
+    snapshot: BookingSnapshot,
+    patient_name: str | None,
+    *,
+    late_reopened: bool,
+    unit_location: str | None = None,
 ) -> str:
-    """The "consulta confirmada" bubble, sent only once the payment was identified."""
+    """The "consulta confirmada" bubble, sent only once the payment was identified.
+
+    `unit_location` (TASK-083): "<unit> — <address>" of the booking's unit, or None."""
     from zoneinfo import ZoneInfo
 
     try:
@@ -268,8 +283,9 @@ def confirmation_text(
         "Pagamento recebido! Seu agendamento está confirmado. ✅\n\n"
         f"{snapshot.appointment_type}\n"
         + (f"Paciente: {snapshot.attendee_name}\n" if snapshot.attendee_name else "")
-        + f"{local_start.strftime('%d/%m/%Y às %H:%M')}\n\n"
-        "Adicionar à sua agenda:\n"
+        + f"{local_start.strftime('%d/%m/%Y às %H:%M')}\n"
+        + (f"Local: {unit_location}\n" if unit_location else "")
+        + "\nAdicionar à sua agenda:\n"
         f"{build_patient_calendar_link(local_start, local_end, summary, tz=tz)}"
     )
     from secretaria.services.payments.deposit_lifecycle import reschedule_rules_text

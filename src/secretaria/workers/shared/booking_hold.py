@@ -73,6 +73,7 @@ from secretaria.services.pending_identity import (
 from secretaria.services.tenant_config import (
     list_active_professionals,
 )
+from secretaria.services.unit_booking import scoped_calendar, tenant_unit, unit_location
 from secretaria.workers.shared.context import (
     _ReplyContext,
 )
@@ -288,6 +289,10 @@ async def _promote_booking_hold(
             await list_active_professionals(session, tenant.id),
         )
         calendar = await _appointment_calendar(session, tenant, target)
+        # TASK-083 spec §8: the unit the patient chose rides on the hold - its id lands on a
+        # secretarIA event, its location on a Google one, and the row and the text name it.
+        unit = await tenant_unit(session, tenant.id, held.unit_id)
+        calendar = scoped_calendar(calendar, unit, with_hours=False)
         patient_id = await session.scalar(
             select(Conversation.patient_id).where(Conversation.id == reply.conversation_id)
         )
@@ -374,6 +379,7 @@ async def _promote_booking_hold(
         insurance=held.insurance,
         attendee_name=held.attendee_name,
         deposit_waived_reason=_waived_value(deposit_waived_reason),
+        unit_id=unit.id if unit is not None else None,
     )
     # TASK-032 R3: the appointment a "Marcar outra" booking replaced, if any.
     replaced: ReplacedAppointment | None = None
@@ -462,8 +468,9 @@ async def _promote_booking_hold(
         "Pronto! Seu agendamento está confirmado. \u2705\n\n"
         f"{service_type}\n"
         + (f"Paciente: {held.attendee_name}\n" if held.attendee_name else "")
-        + f"{local_start.strftime(WHEN_FORMAT)}\n\n"
-        "Adicionar à sua agenda:\n"
+        + f"{local_start.strftime(WHEN_FORMAT)}\n"
+        + (f"Local: {unit_location(unit.name, unit.address)}\n" if unit is not None else "")
+        + "\nAdicionar à sua agenda:\n"
         f"{build_patient_calendar_link(local_start, local_end, summary, tz=tz)}"
     )
     if replaced is not None:
@@ -619,6 +626,8 @@ async def _slot_taken_reoffer(
                 None if held.professional_id == implied else held.professional_id
             ),
             "flow_selected_insurance": held.insurance,
+            # TASK-083: the same unit, so the day picker that follows lists its hours.
+            "flow_selected_unit_id": held.unit_id,
             "flow_attendee_name": held.attendee_name or ATTENDEE_SELF,
             "flow_selected_day": None,
             "flow_selected_slot": None,
