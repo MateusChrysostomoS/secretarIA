@@ -51,6 +51,13 @@ writing, so two patients can never both get one slot. Plain writes stay permissi
 Google's: the clinic may overlap on purpose (an encaixe, a block over a booking), and
 the hub's staff edit has its own `allow_overlap` switch for that.
 
+Shared person's agenda (TASK-083, services/agenda.py). When the owner's `professionals` row
+shares an `agendas` row with the same person at other clinics, an exclusive write also takes
+THAT agenda's lock (in process and on Postgres, same transaction) and its re-check counts the
+siblings' busy windows, so two clinics can never both book the person for one window. Reads
+get the same windows through `shared_busy_provider` (CalendarService). Without an agenda
+nothing of this runs.
+
 Every call commits in its own short session (`async_session_factory`), exactly as a
 Google call commits outside the caller's transaction - so every caller's existing
 "the event exists, the row failed" compensation keeps meaning the same thing.
@@ -60,7 +67,7 @@ import asyncio
 import hashlib
 import weakref
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, ClassVar
 from uuid import UUID, uuid4
@@ -76,6 +83,12 @@ from secretaria.models.calendar_event import (
     EVENT_STATUS_CANCELLED,
     EVENT_STATUS_CONFIRMED,
     CalendarEvent,
+)
+from secretaria.services.agenda import (
+    agenda_id_of,
+    agenda_lock_key,
+    agenda_write_lock as shared_agenda_write_lock,
+    shared_busy,
 )
 from secretaria.services.calendar import (
     DEFAULT_MAX_EVENTS,
@@ -148,14 +161,39 @@ async def _advisory_lock(session: AsyncSession, agenda_key: str) -> None:
     )
 
 
+# `session.info` key: the shared person's agenda the write holds (None: no shared agenda).
+_SHARED_AGENDA = "secretaria.shared_agenda_id"
+
+
 @asynccontextmanager
 async def agenda_write_lock(
-    tenant_id: UUID, professional_id: UUID | None
+    tenant_id: UUID, professional_id: UUID | None, *, shared: bool = False
 ) -> AsyncIterator[AsyncSession]:
-    """A session whose one transaction holds the agenda's write lock; commits on exit."""
+    """A session whose one transaction holds the agenda's write lock; commits on exit.
+
+    `shared=True` (the EXCLUSIVE writes) also takes the lock of the PERSON's agenda when the
+    owner has one (TASK-083 spec §7 item 2): the in-process `asyncio.Lock` keyed by
+    `services/agenda.py::agenda_lock_key` and its `pg_advisory_xact_lock`, in this same
+    transaction - so a writer of the same person at ANOTHER clinic, whatever its backend,
+    waits until this one has committed. The agenda is looked up here, under the owner lock,
+    not taken from how the calendar object was built: no factory path can skip it.
+
+    Lock order is always owner, then person (the coarser lock last, never the other way
+    round), and the person's in-process lock is released only after the commit.
+    """
     key = _agenda_key(tenant_id, professional_id)
-    async with async_session_factory() as session, _process_lock(key), session.begin():
+    async with (
+        async_session_factory() as session,
+        _process_lock(key),
+        AsyncExitStack() as person_lock,
+        session.begin(),
+    ):
         await _advisory_lock(session, key)
+        agenda_id = await agenda_id_of(session, professional_id) if shared else None
+        if agenda_id is not None:
+            await person_lock.enter_async_context(_process_lock(agenda_lock_key(agenda_id)))
+            await shared_agenda_write_lock(session, agenda_id)
+        session.info[_SHARED_AGENDA] = agenda_id
         yield session
 
 
@@ -201,7 +239,13 @@ async def _overlap_exists(
     )
     if except_id is not None:
         stmt = stmt.where(CalendarEvent.id != except_id)
-    return (await session.scalar(stmt.limit(1))) is not None
+    if (await session.scalar(stmt.limit(1))) is not None:
+        return True
+    # The same person at another clinic (spec §7 item 2): read on THIS locked transaction, so
+    # the answer cannot go stale before the write. Only when the write holds a shared agenda.
+    if session.info.get(_SHARED_AGENDA) is None:
+        return False
+    return bool(await shared_busy(session, professional_id, start_utc, end_utc))
 
 
 async def google_copy_id(tenant_id: UUID, event_id: str) -> str | None:
@@ -296,6 +340,7 @@ class LocalCalendarService(CalendarService):
         instance._tz = ZoneInfo(config.timezone)
         instance._business_hours = config.business_hours or {}
         instance._default_slot_minutes = config.appointment_duration_min or 30
+        instance._attach_shared_busy(config, professional_id)
         return instance
 
     @classmethod
@@ -313,6 +358,7 @@ class LocalCalendarService(CalendarService):
         local._tz = calendar._tz
         local._business_hours = calendar._business_hours
         local._default_slot_minutes = calendar._default_slot_minutes
+        local._shared_busy_provider = calendar.shared_busy_provider
         return local
 
     @property
@@ -385,8 +431,13 @@ class LocalCalendarService(CalendarService):
     async def check_availability(
         self, start: datetime, end: datetime, max_results: int = DEFAULT_MAX_EVENTS
     ) -> list[dict]:
-        """Busy events overlapping [start, end). `max_results` is accepted, not applied."""
-        return [_read_item(row, self._tz) for row in await self._busy_rows(start, end)]
+        """Busy events overlapping [start, end). `max_results` is accepted, not applied.
+
+        Plus, with a shared agenda, the siblings' bare windows (CalendarService.
+        _shared_busy_items). `list_events` - the hub's own listing - never includes them.
+        """
+        own = [_read_item(row, self._tz) for row in await self._busy_rows(start, end)]
+        return own + await self._shared_busy_items(start, end)
 
     async def list_events(
         self, start: datetime, end: datetime, max_events: int = HUB_LIST_MAX_EVENTS
@@ -430,7 +481,7 @@ class LocalCalendarService(CalendarService):
         """
         start_utc, end_utc = self._window(start, end)
         owner = self._owner_professional_id
-        async with agenda_write_lock(self._tenant_id, owner) as session:
+        async with agenda_write_lock(self._tenant_id, owner, shared=exclusive) as session:
             if event_id is not None:
                 if not event_id.startswith(LOCAL_EVENT_ID_PREFIX):
                     raise ValueError("Native agenda event ids must have the local prefix.")
@@ -509,7 +560,7 @@ class LocalCalendarService(CalendarService):
         if found is None:
             raise CalendarEventNotFoundError(event_id)
         owner = found[0]
-        async with agenda_write_lock(self._tenant_id, owner) as session:
+        async with agenda_write_lock(self._tenant_id, owner, shared=exclusive) as session:
             row = await session.scalar(
                 select(CalendarEvent)
                 .where(CalendarEvent.tenant_id == self._tenant_id, CalendarEvent.id == event_id)

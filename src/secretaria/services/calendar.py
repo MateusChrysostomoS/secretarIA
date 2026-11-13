@@ -24,6 +24,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
+    from secretaria.services.agenda import SharedBusyProvider
     from secretaria.services.local_calendar import LocalCalendarService
     from secretaria.services.tenant_config import TenantRuntimeConfig
 
@@ -399,6 +400,51 @@ class CalendarService:
         # (`_local_event_target`). None on the bare env-token service (dev scripts).
         self._tenant_id: UUID | None = None
         self._owner_professional_id: UUID | None = None
+        # TASK-083 spec §7 item 1: the busy windows of the owner's SIBLINGS (the same person's
+        # rows at other clinics, services/agenda.py). Set by `from_tenant_config` only when the
+        # owner has an agenda WITH a sibling; None everywhere else, which keeps every read
+        # exactly as before - same results, no extra query.
+        self._shared_busy_provider: SharedBusyProvider | None = None
+
+    @property
+    def shared_busy_provider(self) -> "SharedBusyProvider | None":
+        """The sibling-busy read seam, or None (no shared agenda: nothing extra is read)."""
+        return getattr(self, "_shared_busy_provider", None)
+
+    def _attach_shared_busy(self, config: "TenantRuntimeConfig", owner: UUID | None) -> None:
+        """Give this agenda its siblings' busy time when its owner shares a person's agenda.
+
+        `config.shared_agenda_professional_ids` is resolved by tenant_config.py (one grouped
+        read, and none at all for a clinic without agendas), so this stays synchronous and
+        builds nothing for everybody else.
+        """
+        if owner is None or owner not in config.shared_agenda_professional_ids:
+            return
+        # Imported here: services/agenda.py pulls the models and booking_hold in.
+        from secretaria.services.agenda import shared_busy_provider
+
+        self._shared_busy_provider = shared_busy_provider(owner)
+
+    async def _shared_busy_items(self, start: datetime, end: datetime) -> list[dict]:
+        """The siblings' busy windows as `check_availability` items - and nothing else.
+
+        `id` and `summary` are None on purpose: only the window crosses clinics (spec §7.6).
+        A caller that compares ids against its own event (booking_promotion, release_keep)
+        therefore counts these as somebody else's, which they are.
+        """
+        provider = self.shared_busy_provider
+        if provider is None:
+            return []
+        windows = await provider(self._ensure_tz(start), self._ensure_tz(end))
+        return [
+            {
+                "id": None,
+                "summary": None,
+                "start": window.start.astimezone(self._tz).isoformat(),
+                "end": window.end.astimezone(self._tz).isoformat(),
+            }
+            for window in windows
+        ]
 
     def references_same_calendar(self, other: object) -> bool:
         """Identify the physical agenda without exporting credentials.
@@ -459,6 +505,7 @@ class CalendarService:
         instance._default_slot_minutes = config.appointment_duration_min or 30
         instance._tenant_id = config.tenant_id
         instance._owner_professional_id = owner
+        instance._attach_shared_busy(config, owner)
         return instance
 
     @classmethod
@@ -591,6 +638,11 @@ class CalendarService:
         one-day question; a multi-day window must raise it (see
         `list_available_days`) or the busy list silently truncates and free
         time gets reported where there is none.
+
+        With a shared agenda (`shared_busy_provider`) the siblings' busy windows
+        are appended as bare items (no id, no summary), so every reader built on
+        this one - the slot walk, `has_conflict`/`is_slot_free`, the confirm
+        re-check, the AI tool, hold/Pix promotion - sees them unchanged.
         """
         start_iso = self._ensure_tz(start).isoformat()
         end_iso = self._ensure_tz(end).isoformat()
@@ -598,7 +650,8 @@ class CalendarService:
         def _list() -> list[dict]:
             return self._events_page(start_iso, end_iso, max_results)[0]
 
-        return await asyncio.to_thread(_list)
+        items = await asyncio.to_thread(_list)
+        return items + await self._shared_busy_items(start, end)
 
     async def list_events(
         self, start: datetime, end: datetime, max_events: int = HUB_LIST_MAX_EVENTS
@@ -1022,7 +1075,10 @@ class CalendarService:
         """
         start_dt, end_dt = self._ensure_tz(start), self._ensure_tz(end)
         events = await self.check_availability(start_dt, end_dt)
-        busy = self._busy_ranges([ev for ev in events if ev.get("id") != ignore_event_id])
+        # A sibling's window has no id: it must never match "no event to ignore" (None).
+        busy = self._busy_ranges(
+            [ev for ev in events if ignore_event_id is None or ev.get("id") != ignore_event_id]
+        )
         return any(busy_start < end_dt and busy_end > start_dt for busy_start, busy_end in busy)
 
     async def add_attendee(self, event_id: str, email: str) -> dict:

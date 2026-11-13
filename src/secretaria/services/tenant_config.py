@@ -38,6 +38,7 @@ from secretaria.models.professional import Professional
 from secretaria.models.professional_credentials import ProfessionalCredentials
 from secretaria.models.service import Service
 from secretaria.models.tenant_credentials import TenantCredentials
+from secretaria.services.agenda import professionals_with_siblings
 from secretaria.services.calendar import (
     CalendarService,
     CalendarUnavailableError,
@@ -169,6 +170,11 @@ class TenantRuntimeConfig:
     # build_clinic_features) through run_agent - NEVER loaded from DB here. None = no block.
     patient_identity: PatientIdentityStatus | None = None
     clinic_features: ClinicFeatures | None = None
+    # TASK-083: the ACTIVE professionals of this tenant whose person's agenda is shared with
+    # another `professionals` row (services/agenda.py). A calendar built for one of them gets
+    # the siblings' busy time (CalendarService.from_tenant_config). Empty - and computed with
+    # no query - for every clinic without agendas, which keeps today's behaviour.
+    shared_agenda_professional_ids: frozenset[UUID] = frozenset()
 
 
 def _filter_active_types(appointment_types: list | None) -> list[dict]:
@@ -788,6 +794,18 @@ async def resolve_professional_calendar(
         raise ValueError(
             "resolve_professional_calendar needs a tenant_config (or a tenant row to load one)"
         )
+    if (
+        isinstance(getattr(professional, "agenda_id", None), UUID)
+        and professional.id not in tenant_config.shared_agenda_professional_ids
+        and await professionals_with_siblings(session, [professional])
+    ):
+        # A professional the config did not cover (inactive, or a hand-built config): his
+        # agenda is shared all the same. No read at all without an agenda (spec §3).
+        tenant_config = replace(
+            tenant_config,
+            shared_agenda_professional_ids=tenant_config.shared_agenda_professional_ids
+            | {professional.id},
+        )
     return CalendarService.for_professional(tenant_config, **overrides)
 
 
@@ -1113,6 +1131,9 @@ async def load_tenant_config(session: AsyncSession, tenant: Tenant) -> TenantRun
         address=tenant.address,
         clinic_facts=tenant.clinic_facts,
         service_guides=runtime_service_guides(services, offered),
+        shared_agenda_professional_ids=await professionals_with_siblings(
+            session, active_professionals
+        ),
     )
 
 

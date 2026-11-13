@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from secretaria.models import Professional, Tenant
-from secretaria.services import local_calendar
+from secretaria.services import agenda as agenda_service, local_calendar
 from secretaria.services.local_calendar import LocalCalendarService
 from secretaria.services.tenant_config import TenantRuntimeConfig
 
@@ -22,6 +22,8 @@ WEEK_HOURS = {
 
 def wire_local_agenda(monkeypatch, db) -> None:
     monkeypatch.setattr(local_calendar, "async_session_factory", db)
+    # The shared-agenda read seam (TASK-083) opens its own short sessions too.
+    monkeypatch.setattr(agenda_service, "async_session_factory", db)
 
 
 async def seed_tenant(db, *, hours: dict | None = None, name: str = "Clínica Local") -> Tenant:

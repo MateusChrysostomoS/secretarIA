@@ -35,13 +35,15 @@ agendas is fail-soft, and that lives in services/agenda_linking.py.
 """
 
 import hashlib
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import and_, select, text
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from secretaria.core.database import async_session_factory
 from secretaria.models import (
     LIVE_APPOINTMENT_STATUSES,
     Appointment,
@@ -142,6 +144,57 @@ async def shared_busy(
     windows.update((_aware(s), _aware(e)) for s, e in holds.all())
 
     return [BusyWindow(s, e) for s, e in sorted(windows)]
+
+
+# --------------------------------------------------------------------------
+# The read seam CalendarService consumes (spec §7 item 1)
+# --------------------------------------------------------------------------
+
+SharedBusyProvider = Callable[[datetime, datetime], Awaitable[list[BusyWindow]]]
+
+
+async def professionals_with_siblings(
+    session: AsyncSession, professionals: Iterable[Professional]
+) -> frozenset[UUID]:
+    """The ids, among `professionals`, whose agenda has at least one OTHER professional.
+
+    No query at all when none of them has an agenda (spec §3: nothing changes, nothing extra
+    is read); otherwise one grouped count. Siblings are any row on the agenda, active or not,
+    exactly as `sibling_professional_ids` counts them.
+    """
+    by_id = {
+        p.id: p.agenda_id
+        for p in professionals
+        # isinstance, not `is not None`: a stand-in row without the column reads as no agenda.
+        if isinstance(getattr(p, "agenda_id", None), UUID)
+    }
+    if not by_id:
+        return frozenset()
+    shared = set(
+        await session.scalars(
+            select(Professional.agenda_id)
+            .where(Professional.agenda_id.in_(set(by_id.values())))
+            .group_by(Professional.agenda_id)
+            .having(func.count(Professional.id) > 1)
+        )
+    )
+    return frozenset(pid for pid, agenda_id in by_id.items() if agenda_id in shared)
+
+
+def shared_busy_provider(professional_id: UUID) -> SharedBusyProvider:
+    """`shared_busy` for one professional, as the CalendarService's optional read seam.
+
+    Each call reads in its OWN short session (like every local-agenda read, and like a Google
+    read happens outside the caller's transaction): it takes no lock, holds no connection past
+    the call and never joins - or waits on - the caller's transaction. Built only for a
+    professional that has siblings (services/calendar.py::CalendarService.from_tenant_config).
+    """
+
+    async def _provider(start: datetime, end: datetime) -> list[BusyWindow]:
+        async with async_session_factory() as session:
+            return await shared_busy(session, professional_id, start, end)
+
+    return _provider
 
 
 # --------------------------------------------------------------------------
