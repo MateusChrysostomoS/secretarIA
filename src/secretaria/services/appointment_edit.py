@@ -175,7 +175,8 @@ class EditDraft:
     Immutable: every change returns a new draft. `stage` is transient bookkeeping for
     the step in progress (`mode`, `target_day`, ...) and is never part of the diff.
     `current`/`original` hold: service, professional_id (str | None), start_at/end_at
-    (naive clinic-local ISO minutes), insurance, attendee_name (None = the patient).
+    (naive clinic-local ISO minutes), insurance, attendee_name (None = the patient); and,
+    only for a booking with a unit, `unit_id` (TASK-083: it follows a doctor change).
     """
 
     appointment_id: str
@@ -197,6 +198,10 @@ class EditDraft:
         }
         if appt.get("google_calendar_source") is not None:
             values["google_calendar_source"] = appt["google_calendar_source"]
+        # TASK-083: only a booking WITH a unit carries the key, so every other draft (and the
+        # `original` comparisons made with it) stays exactly as before.
+        if appt.get("unit_id") is not None:
+            values["unit_id"] = str(appt["unit_id"])
         return cls(appointment_id=str(appt["id"]), current=dict(values), original=dict(values))
 
     def to_json(self) -> dict:
@@ -227,7 +232,8 @@ class EditDraft:
         )
 
     def with_changes(self, **fields: str | None) -> EditDraft:
-        unknown = set(fields) - set(_FIELDS)
+        # `unit_id` (TASK-083) is optional: it follows a doctor change and is never in the diff.
+        unknown = set(fields) - set(_FIELDS) - {"unit_id"}
         if unknown:
             raise ValueError(f"unknown draft fields: {sorted(unknown)}")
         return replace(self, current={**self.current, **fields})

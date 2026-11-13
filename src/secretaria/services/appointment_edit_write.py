@@ -36,6 +36,9 @@ def row_draft(appointment, timezone: str | None) -> EditDraft:
             "end_at": appointment.end_at,
             "insurance": appointment.insurance,
             "attendee_name": appointment.attendee_name,
+            # Same optional key the patient's snapshot carries (`EditDraft.from_appointment`),
+            # so a draft's `original` still equals the row's.
+            "unit_id": getattr(appointment, "unit_id", None),
         },
         ZoneInfo(timezone or "America/Sao_Paulo"),
     )
@@ -67,6 +70,10 @@ async def write_appointment_edit(
     appointment.insurance_plan_id = plan_id
     appointment.insurance_professional_plan_id = professional_plan_id
     appointment.attendee_name = edit["attendee_name"]
+    # TASK-083: only an edit that moves the booking's unit (a doctor change) carries the key;
+    # every other edit leaves the unit exactly as it is.
+    if "unit_id" in edit:
+        appointment.unit_id = edit["unit_id"]
     appointment.google_event_id = edit["google_event_id"]
     if edit.get("calendar_changed", edit["doctor_changed"]):
         appointment.google_event_link = edit.get("google_event_link")

@@ -5195,13 +5195,15 @@ def _appointment_unit_calendar(
     calendar: CalendarService | None, appt: dict | None, professionals: list | None
 ) -> Any:
     """A reschedule keeps the appointment's unit (TASK-083 spec §8): its new day and time are
-    offered within THAT unit's hours. Unchanged for an appointment without a unit, or whose
-    unit the owner no longer attends at (the agenda's own hours then)."""
-    if not appt or not appt.get("unit_id"):
+    offered within THAT unit's hours. An appointment without a unit (or whose unit the owner no
+    longer attends at) of a doctor who has units is offered within the units' hours - the only
+    one's, or their union (final wave I2, `flow_units.appointment_calendar`). Unchanged for a
+    doctor without units."""
+    if not appt:
         return calendar
     owner_id = appt.get("professional_id")
     try:
-        unit_id = UUID(str(appt["unit_id"]))
+        unit_id = UUID(str(appt["unit_id"])) if appt.get("unit_id") else None
         if owner_id:
             owner = _find_professional_by_id(professionals, UUID(str(owner_id)))
         else:
@@ -5209,7 +5211,7 @@ def _appointment_unit_calendar(
             owner = rows[0] if len(rows) == 1 else None
     except (TypeError, ValueError):
         return calendar
-    return _unit_calendar(calendar, flow_units.find_unit(owner, unit_id))
+    return flow_units.appointment_calendar(calendar, unit_id, owner)
 
 
 async def _manage_step(

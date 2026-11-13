@@ -29,7 +29,7 @@ from secretaria.core.whatsapp_limits import (
     truncate_plain,
 )
 from secretaria.models import FlowState
-from secretaria.services import appointment_edit as ae, flow_router as fr
+from secretaria.services import appointment_edit as ae, flow_router as fr, flow_units
 from secretaria.services.appointment_calendar_origin import CalendarOriginUnresolved
 from secretaria.services.attendee import (
     ATTENDEE_NAME_INVALID,
@@ -111,6 +111,36 @@ def _carrier(conversation, draft: ae.EditDraft) -> fr._DayPickerState:
 
 def _doctor(professionals, draft: ae.EditDraft):
     return fr._find_professional_by_id(professionals, _uuid(draft.current["professional_id"]))
+
+
+def _calendar(ctx: ae.EditContext, draft: ae.EditDraft, professionals) -> Any | None:
+    """The draft's agenda as seen from its unit (TASK-083 final wave I1), like the manage
+    flow's "Remarcar" (`flow_router._appointment_unit_calendar`): the booking's unit hours,
+    else the doctor's only unit / the union of their units; the plain agenda for a doctor
+    without units. May raise `CalendarOriginUnresolved` exactly like `ctx.calendar_for`."""
+    return flow_units.appointment_calendar(
+        ctx.calendar_for(draft.calendar_professional_id),
+        _uuid(draft.current.get("unit_id")),
+        _doctor(professionals, draft),
+    )
+
+
+def _with_doctor(draft: ae.EditDraft, professional) -> ae.EditDraft:
+    """The draft with `professional` as its doctor AND the unit that follows: back to the
+    original doctor -> the original unit; else `flow_units.unit_after_doctor_change`. A draft
+    that never had a unit and gets none stays byte-identical (no `unit_id` key)."""
+    new = draft.with_changes(professional_id=str(professional.id))
+    if str(professional.id) == draft.original["professional_id"]:
+        unit = _uuid(draft.original.get("unit_id"))
+    else:
+        unit = flow_units.unit_after_doctor_change(
+            professional,
+            _uuid(draft.current.get("unit_id")),
+            _uuid(draft.original.get("unit_id")),
+        )
+    if unit is None and "unit_id" not in draft.current:
+        return new
+    return new.with_changes(unit_id=str(unit) if unit is not None else None)
 
 
 def _services_of(tenant, professional) -> list[dict]:
@@ -237,7 +267,7 @@ async def _begin_date(conversation, tenant, draft, professionals, ctx) -> fr.Flo
     return await fr.enter_day_picker(
         _carrier(conversation, draft),
         tenant,
-        ctx.calendar_for(draft.calendar_professional_id),
+        _calendar(ctx, draft, professionals),
         duration_minutes=draft.duration_minutes,
         branch=fr.EDIT_DAY_BRANCH,
         anchor=draft.start,
@@ -252,7 +282,7 @@ async def _slots_for(
     return await fr._enter_slot_picker(
         _carrier(conversation, draft),
         tenant,
-        ctx.calendar_for(draft.calendar_professional_id),
+        _calendar(ctx, draft, professionals),
         datetime.combine(day.date(), time.min),
         duration_minutes=draft.duration_minutes,
         branch=fr.EDIT_DAY_BRANCH,
@@ -269,7 +299,7 @@ async def _after_slot_affecting_change(
     NEW doctor/service, behind a one-line explanation (spec P1) - never a confirmation
     for a slot that does not exist.
     """
-    calendar = ctx.calendar_for(draft.calendar_professional_id)
+    calendar = _calendar(ctx, draft, professionals)
     free = await _slot_free(
         calendar,
         draft.start,
@@ -300,7 +330,7 @@ async def _reslot_picker(conversation, tenant, draft, professionals, ctx) -> fr.
     picker = await fr.enter_day_picker(
         _carrier(conversation, reslot),
         tenant,
-        ctx.calendar_for(reslot.calendar_professional_id),
+        _calendar(ctx, reslot, professionals),
         duration_minutes=reslot.duration_minutes,
         branch=fr.EDIT_DAY_BRANCH,
         anchor=reslot.start,
@@ -312,7 +342,7 @@ async def _reslot_picker(conversation, tenant, draft, professionals, ctx) -> fr.
 
 
 async def _day_step(conversation, tenant, body, draft, appt, professionals, ctx):
-    calendar = ctx.calendar_for(draft.calendar_professional_id)
+    calendar = _calendar(ctx, draft, professionals)
     if draft.stage.get("mode") == "date":
         target, _page = fr._day_from_body(body)
         if target is None and calendar is not None:
@@ -352,7 +382,7 @@ async def _time_too_step(conversation, tenant, body, draft, appt, professionals,
     if fr._label_match(body, ae.LABEL_TIME_TOO_NO):
         start = datetime.combine(day.date(), draft.start.time())
         end = start + timedelta(minutes=draft.duration_minutes)
-        calendar = ctx.calendar_for(draft.calendar_professional_id)
+        calendar = _calendar(ctx, draft, professionals)
         if await _slot_free(
             calendar,
             start,
@@ -373,7 +403,7 @@ async def _slot_step(conversation, tenant, body, draft, appt, professionals, ctx
     control = await fr._handle_slot_controls(
         conversation,
         tenant,
-        ctx.calendar_for(draft.calendar_professional_id),
+        _calendar(ctx, draft, professionals),
         body,
         duration_minutes=draft.duration_minutes,
         branch=fr.EDIT_DAY_BRANCH,
@@ -475,9 +505,14 @@ async def _doctor_list(draft, tenant, appt, professionals, ctx) -> fr.FlowRouter
         )
         same = ctx.same_calendar(calendar_pid, draft.original_calendar_professional_id)
         ignore = own_event if same else None
-        free = await _availability(
-            ctx.calendar_for(calendar_pid), draft.start, draft.end, ignore, pid
+        # Marked within the unit the booking would have with THIS doctor (TASK-083).
+        candidate = _with_doctor(draft, professional)
+        calendar = flow_units.appointment_calendar(
+            ctx.calendar_for(calendar_pid),
+            _uuid(candidate.current.get("unit_id")),
+            professional,
         )
+        free = await _availability(calendar, draft.start, draft.end, ignore, pid)
         parts: list[str] = []
         if free is not None:
             parts.append(
@@ -511,7 +546,7 @@ async def _doctor_step(conversation, tenant, body, draft, appt, professionals, c
     professional = fr._match_professional(professionals or [], body)
     if professional is None:
         return fr._preserve(conversation, "delegate_llm")
-    new = draft.with_changes(professional_id=str(professional.id))
+    new = _with_doctor(draft, professional)
     service = fr._match_service(
         professional_appointment_types(professional, tenant), new.current["service"]
     )
@@ -684,7 +719,7 @@ async def _apply_confirm(
         return _service_list(draft, tenant, professionals, ctx, after_doctor=True)
     event_id = str(appt.get("google_event_id") or "")
     try:
-        new_cal = ctx.calendar_for(draft.calendar_professional_id)
+        new_cal = _calendar(ctx, draft, professionals)
     except CalendarOriginUnresolved:
         return _unavailable(draft)
     doctor_changed = "médico" in changed
@@ -777,6 +812,10 @@ async def _apply_confirm(
         "patient_name": patient_name,
         "calendar_deferred": deferred,
     }
+    # TASK-083: a doctor change that moved the booking's unit writes the new one on the row
+    # (`appointment_edit_write`); without that the key is absent and the unit stays as it is.
+    if draft.current.get("unit_id") != draft.original.get("unit_id"):
+        edit["unit_id"] = _uuid(draft.current.get("unit_id"))
     doctor = _doctor(professionals, draft)
     recap = ae.build_edit_recap(
         draft,
@@ -973,7 +1012,7 @@ async def redisplay_edit(conversation, tenant, appointments, professionals, ctx)
         result = await fr.enter_day_picker(
             _carrier(conversation, draft),
             tenant,
-            ctx.calendar_for(draft.calendar_professional_id),
+            _calendar(ctx, draft, professionals),
             duration_minutes=draft.duration_minutes,
             branch=fr.EDIT_DAY_BRANCH,
             anchor=draft.start,
@@ -1076,7 +1115,7 @@ async def apply_ai_edit(conversation, tenant, proposal, appointments, profession
         doctor = matches[0] if len(matches) == 1 else None
         if doctor is None:
             return await unchanged()
-        new = new.with_changes(professional_id=str(doctor.id))
+        new = _with_doctor(new, doctor)
     if proposal.get("service"):
         service = fr._match_service(_services_of(tenant, doctor), proposal["service"])
         if service is None:
@@ -1113,7 +1152,7 @@ async def apply_ai_edit(conversation, tenant, proposal, appointments, profession
         if start.replace(tzinfo=_tz(tenant)) <= datetime.now(_tz(tenant)):
             return await unchanged()
         if not await _slot_free(
-            ctx.calendar_for(new.calendar_professional_id),
+            _calendar(ctx, new, professionals),
             start,
             end,
             _ignore_event(new, appt, ctx),

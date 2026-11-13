@@ -676,7 +676,10 @@ async def test_a_reschedule_is_offered_within_the_appointments_unit_hours_and_ke
     assert set(moved.appointment_reschedule) == {"google_event_id", "start_at", "end_at"}
 
 
-async def test_a_reschedule_without_a_unit_reads_the_whole_agenda_as_today():
+async def test_a_reschedule_without_a_unit_by_a_doctor_with_units_uses_their_units_hours():
+    """Final wave I2: a booking from before the units (or a hub "encaixe" with no unit) of a
+    doctor who now attends at two units is offered within the UNION of their hours - never the
+    clinic's / the 08-18 fallback - and no unit is stamped (none was chosen)."""
     centro, sul = _units(2)
     doctor = _doctor([centro, sul])
     agenda = _Agenda()
@@ -684,4 +687,46 @@ async def test_a_reschedule_without_a_unit_reads_the_whole_agenda_as_today():
         "reschedule", _tenant(), [_upcoming(doctor, sul, with_unit=False)], [doctor],
         calendar=agenda,
     )
+    assert agenda.log.day_hours == [{**CENTRO_HOURS, **SUL_HOURS}]
+
+
+async def test_a_reschedule_without_a_unit_by_a_doctor_with_one_unit_uses_its_hours():
+    (centro,) = _units(1)
+    doctor = _doctor([centro])
+    agenda = _Agenda()
+    await fr.enter_manage_action(
+        "reschedule", _tenant(), [_upcoming(doctor, centro, with_unit=False)], [doctor],
+        calendar=agenda,
+    )
+    assert agenda.log.day_hours == [CENTRO_HOURS]
+
+
+async def test_a_reschedule_by_a_doctor_without_units_reads_the_whole_agenda_as_today():
+    (centro,) = _units(1)
+    doctor = _doctor([])
+    agenda = _Agenda()
+    await fr.enter_manage_action(
+        "reschedule", _tenant(), [_upcoming(doctor, centro, with_unit=False)], [doctor],
+        calendar=agenda,
+    )
     assert agenda.log.day_hours == [CLINIC_HOURS]
+
+
+def test_the_union_of_unit_hours_merges_overlapping_windows_per_day():
+    from secretaria.services.flow_units import union_hours
+
+    morning = UnitOption(
+        id=uuid4(), name="A", address=None,
+        business_hours={"monday": [{"start": "08:00", "end": "12:00"}]},
+    )
+    overlap = UnitOption(
+        id=uuid4(), name="B", address=None,
+        business_hours={
+            "monday": [{"start": "11:00", "end": "14:00"}, {"start": "16:00", "end": "18:00"}],
+            "friday": [{"start": "09:00", "end": "10:00"}],
+        },
+    )
+    assert union_hours([morning, overlap]) == {
+        "monday": [{"start": "08:00", "end": "14:00"}, {"start": "16:00", "end": "18:00"}],
+        "friday": [{"start": "09:00", "end": "10:00"}],
+    }

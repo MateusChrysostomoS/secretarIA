@@ -91,6 +91,66 @@ def scope(calendar: Any, conversation: Any, professional: Any | None) -> Any:
     return scoped_calendar(calendar, effective_unit(conversation, professional))
 
 
+def union_hours(units: list) -> dict:
+    """Every unit's open windows merged per weekday (overlapping/touching windows joined)."""
+    spans: dict[str, list[tuple[str, str]]] = {}
+    for unit in units:
+        for day, windows in (getattr(unit, "business_hours", None) or {}).items():
+            for window in windows or []:
+                if isinstance(window, dict) and window.get("start") and window.get("end"):
+                    spans.setdefault(day, []).append((str(window["start"]), str(window["end"])))
+    merged: dict[str, list[dict]] = {}
+    for day, pairs in spans.items():
+        joined: list[list[str]] = []
+        for start, end in sorted(pairs):
+            if joined and start <= joined[-1][1]:
+                joined[-1][1] = max(joined[-1][1], end)
+            else:
+                joined.append([start, end])
+        merged[day] = [{"start": start, "end": end} for start, end in joined]
+    return merged
+
+
+def appointment_calendar(calendar: Any, unit_id: UUID | None, owner: Any | None) -> Any:
+    """An EXISTING booking's agenda for a new day/time (reschedule, "Alterar Dados").
+
+    * the owner offers no bookable unit -> `calendar` itself (today's behaviour, byte for byte);
+    * the booking's unit is one the owner still offers -> that unit's hours (and its id/location);
+    * otherwise (no unit - a booking from before the units, a hub "encaixe" - or a unit the
+      owner no longer offers): the owner's only bookable unit, or with several the UNION of their
+      hours with NO unit stamped (none was chosen). Never the agenda's own hours / the 08-18
+      fallback when the doctor's real hours live on the units (final wave I1/I2).
+    """
+    units = bookable_units(owner)
+    if not units:
+        return calendar
+    unit = find_unit(owner, unit_id)
+    if unit is None and len(units) == 1:
+        unit = units[0]
+    if unit is not None:
+        return scoped_calendar(calendar, unit)
+    with_unit = getattr(calendar, "with_unit", None)
+    if calendar is None or not callable(with_unit):
+        return calendar
+    return with_unit(None, None, business_hours=union_hours(units))
+
+
+def unit_after_doctor_change(
+    professional: Any | None, current_unit_id: UUID | None, original_unit_id: UUID | None
+) -> UUID | None:
+    """The unit a booking keeps when its doctor changes to `professional`.
+
+    The current (then the original) unit if the new doctor attends it (an active link); else the
+    new doctor's only bookable unit; else none - with several units nobody chose one.
+    """
+    offered = {unit.id for unit in offered_units(professional)}
+    for candidate in (current_unit_id, original_unit_id):
+        if candidate is not None and candidate in offered:
+            return candidate
+    units = bookable_units(professional)
+    return units[0].id if len(units) == 1 else None
+
+
 def unit_rows(units: list) -> list[tuple[str, str, str | None]]:
     """One payload row per unit: the name as title, the address as description."""
     rows: list[tuple[str, str, str | None]] = []
@@ -141,6 +201,7 @@ __all__ = [
     "ROW_UNIT_PREFIX",
     "STEP_AWAITING_UNIT",
     "UNIT_LIST_BODY",
+    "appointment_calendar",
     "bookable_units",
     "effective_unit",
     "find_unit",
@@ -148,6 +209,8 @@ __all__ = [
     "offered_units",
     "scope",
     "selected_unit_id",
+    "union_hours",
+    "unit_after_doctor_change",
     "unit_choice_needed",
     "unit_rows",
 ]
