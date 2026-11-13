@@ -189,6 +189,7 @@ def _slot_taken_retry(held: HeldSlot, tenant: Tenant) -> FlowRouterResult:
         flow_selected_professional_id=held.professional_id,
         flow_selected_insurance=held.insurance,
         flow_attendee_name=held.attendee_name,
+        flow_selected_unit_id=getattr(held, "unit_id", None),
     )
 
 
