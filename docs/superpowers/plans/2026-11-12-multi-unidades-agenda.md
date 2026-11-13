@@ -23,10 +23,13 @@ Worktrees (branch `task/TASK-083-multi-unidades`, base `main`): `C:\TECH\BRAIN-w
 - Hub secretarIA (auth do hub, como `units.py`):
   - `GET /tenants/me/professionals/{pid}/units` → `{"units":[{"unit_id","name","address","is_active","linked":bool,"business_hours": <dict|null>}]}` (todas as unidades ativas do tenant, `linked` marca o vínculo).
   - `PUT /tenants/me/professionals/{pid}/units` body `{"links":[{"unit_id","business_hours":<dict|null>}]}` (substitui o conjunto; vazio = sem vínculos). Erros: 403 `multi_unit_not_entitled` (só quando passa de 1 unidade vinculada), 409 `unit_limit_reached`, 404 unidade de outro tenant.
+  - Permissões: `GET .../units` é legível por QUALQUER membro da equipe do tenant (a secretária precisa dele ao agendar); `PUT .../units` só gestor ou o próprio médico. O frontend bloqueia a marcação multi-unidade em 403/5xx do GET até o retry funcionar.
+  - `PUT .../units` responde `200` com o MESMO formato do `GET` (`{"units":[...]}`, estado após a gravação). O `PUT` só substitui vínculos de unidades ATIVAS do tenant; vínculos e horários de unidades desativadas são preservados intactos (por isso a tela diz "os vínculos ficam guardados"); `unit_id` de unidade desativada no corpo é ignorado, não erro.
   - `GET /tenants/me/professionals/{pid}/agenda` → `{"shared":bool,"other_tenants_count":int}`.
   - `POST /tenants/me/agendas/sync` → `{"linked":int,"shared":int}`.
   - `GET /tenants/me/units` ganha `professionals_count:int`.
   - Resposta de criação/edição de consulta pelo hub ganha `conflicts_other_agenda:bool` (default false).
+  - Leitura da agenda do hub (eventos/consultas de `GET /tenants/me/calendar/...`): cada item ganha `unit_id`, `unit_name`, `unit_address` (todos opcionais/null). Corpo de criação de consulta pelo hub aceita `unit_id` opcional (valida que a unidade é do tenant e vinculada ao profissional quando ele tem vínculos). Frontend já assume esses nomes (Task 9, `lib/agenda/hub-mapping.ts`).
 
 ### Task 1: Caracterização + migração + modelos
 
