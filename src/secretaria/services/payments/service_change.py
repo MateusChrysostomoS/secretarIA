@@ -86,7 +86,7 @@ from secretaria.models.payment_attention_item import (
     REASON_SERVICE_DIFF_REFUND_DUE,
 )
 from secretaria.models.pix_deposit import PixDepositStatus
-from secretaria.services import booking_hold, tenant_config as cfg
+from secretaria.services import agenda, booking_hold, tenant_config as cfg
 from secretaria.services.appointment_calendar_origin import (
     CalendarOriginUnresolved,
     calendar_professional_id,
@@ -477,7 +477,8 @@ async def _window_fits(
 ) -> bool:
     """Does [start, end) still fit for this row? A window inside the row's own current one
     always fits (max(old, new) length is what is checked). Otherwise no other live booking of
-    the same agenda (doctor, or the clinic's when there is none) and no live hold may overlap.
+    the same agenda (doctor, or the clinic's when there is none), no live hold and - TASK-083 -
+    nothing of the same doctor at another clinic sharing his agenda may overlap.
     Database only: the Google agenda is re-checked by `update_agenda_after_payment` after the
     commit (no network call while the webhook holds the row lock)."""
     current_start = as_utc(appointment.start_at)
@@ -503,9 +504,13 @@ async def _window_fits(
     )
     if clash is not None:
         return False
-    return not await booking_hold.live_hold_overlaps(
+    if await booking_hold.live_hold_overlaps(
         session, tenant.id, start, end, professional_id=appointment.professional_id
-    )
+    ):
+        return False
+    # TASK-083 spec §7 item 5: the same doctor at ANOTHER clinic (a shared person's agenda) -
+    # bare windows only; nothing without an agenda (no read at all for the clinic's agenda).
+    return not await agenda.shared_busy(session, appointment.professional_id, start, end)
 
 
 def _notice(adjustment: DepositAdjustment, patient_id: UUID | None) -> AdjustmentNotice:

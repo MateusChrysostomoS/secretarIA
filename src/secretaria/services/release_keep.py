@@ -9,7 +9,8 @@ deposit is re-pointed (`release_offer.claim_keep`) in ONE transaction with the o
 
 TAKEN (nothing changes; the clinic may refuse or try later) when, on the OWNING calendar, Google
 has someone else's event over the slot, another conversation holds it, or the clinic has another
-live consultation of the same professional (or of the clinic, without a professional) over it.
+live consultation of the same professional (or of the clinic, without a professional) over it -
+or, TASK-083, the same doctor is busy then at another clinic sharing his agenda.
 `CalendarService.is_slot_free` is NOT used: it hard-codes an 8-18 window.
 
 Order: checks -> create the event -> INSERT + claim. Losing the claim rolls back and deletes the
@@ -34,7 +35,13 @@ from secretaria.models.deposit_release_offer import (
     REFUND_DUE,
     DepositReleaseOffer,
 )
-from secretaria.services import booking_hold, booking_promotion, release_carry_check, release_offer
+from secretaria.services import (
+    agenda,
+    booking_hold,
+    booking_promotion,
+    release_carry_check,
+    release_offer,
+)
 from secretaria.services.local_calendar import LocalCalendarService, create_event_exclusive
 
 logger = get_logger(__name__)
@@ -87,7 +94,11 @@ async def _consultation_overlaps(
         )
         .limit(1)
     )
-    return found is not None
+    if found is not None:
+        return True
+    # TASK-083 spec §7 item 5: the same doctor at ANOTHER clinic (a shared person's agenda) -
+    # bare windows only; nothing without an agenda (the clinic's own agenda: no read at all).
+    return bool(await agenda.shared_busy(session, released.professional_id, start, end))
 
 
 async def _end_read(session: AsyncSession) -> None:
