@@ -52,6 +52,7 @@ from secretaria.services.local_calendar import (
     update_event_details_exclusive,
 )
 from secretaria.services.tenant_config import professional_appointment_types
+from secretaria.services.unit_booking import event_unit_fields
 
 logger = get_logger(__name__)
 
@@ -123,6 +124,16 @@ def _calendar(ctx: ae.EditContext, draft: ae.EditDraft, professionals) -> Any | 
         _uuid(draft.current.get("unit_id")),
         _doctor(professionals, draft),
     )
+
+
+def _draft_unit(draft: ae.EditDraft, doctor) -> Any | None:
+    """The draft's CURRENT unit as the doctor's snapshot carries it (name, address), or None -
+    no unit, or one the doctor no longer offers (the description then simply has no unit lines;
+    the router does no I/O to look it up)."""
+    unit_id = _uuid(draft.current.get("unit_id"))
+    if unit_id is None:
+        return None
+    return next((u for u in flow_units.offered_units(doctor) if u.id == unit_id), None)
 
 
 def _with_doctor(draft: ae.EditDraft, professional) -> ae.EditDraft:
@@ -761,6 +772,8 @@ async def _apply_confirm(
         service=draft.current["service"],
         insurance=draft.current["insurance"],
         attendee_name=draft.current["attendee_name"],
+        # TASK-083 follow-up: the booking's CURRENT unit keeps its lines after "Alterar Dados".
+        **event_unit_fields(_draft_unit(draft, doctor), doctor),
     )
     # A SERVICE change on a paid sinal is a money decision (2026-10-26): a dearer service waits
     # for the Pix of the difference and must not reach the agenda before it is paid. The window

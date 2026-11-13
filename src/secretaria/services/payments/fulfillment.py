@@ -319,12 +319,17 @@ async def _finish(
 
     patient = await session.get(Patient, deposit.patient_id) if deposit.patient_id else None
     unit = await unit_booking.tenant_unit(session, tenant.id, snapshot.unit_id)
+    # TASK-083 follow-up: the doctor named in the confirmation and in the patient's link details.
+    professional_name = await unit_booking.professional_name(
+        session, tenant.id, snapshot.professional_id
+    )
     text = booking_promotion.confirmation_text(
         tenant,
         snapshot,
         patient.name if patient else None,
         late_reopened=late,
-        unit_location=unit_booking.unit_location(unit.name, unit.address) if unit else None,
+        unit=unit,
+        professional_name=professional_name,
     )
     if await _send_once(session, tenant, deposit, text) == "failed":
         started = _promotion_started_at(deposit)

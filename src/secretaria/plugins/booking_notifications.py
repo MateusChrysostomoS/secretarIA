@@ -17,6 +17,7 @@ never mails or invites twice. Nothing here logs an address or patient text.
 """
 
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
@@ -32,6 +33,7 @@ from secretaria.services.brain_patients import fetch_patient_email_result
 from secretaria.services.calendar import (
     CalendarService,
     build_patient_calendar_link,
+    build_patient_link_details,
     is_local_event_id,
 )
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
@@ -39,7 +41,13 @@ from secretaria.services.email import EmailOutcome, send_transactional_email_res
 from secretaria.services.flow_router import LABEL_INSURANCE_PARTICULAR
 from secretaria.services.insurance_catalog import load_appointment_plans
 from secretaria.services.tenant_config import load_tenant_config, resolve_professional_calendar
-from secretaria.services.unit_booking import tenant_unit, unit_line, unit_location
+from secretaria.services.unit_booking import (
+    professional_name,
+    tenant_unit,
+    unit_fields,
+    unit_line,
+    unit_location,
+)
 
 logger = get_logger(__name__)
 
@@ -49,6 +57,10 @@ CLINIC_TEMPLATE = "appointment_booked_clinic"
 # Only true of a booking on Google: the secretarIA's own agenda sends no invite
 # (services/local_calendar.py), so its patient is not promised one.
 GOOGLE_INVITE_LINE = "Você também recebe um convite do Google Agenda, com lembrete.\n\n"
+
+# The link details' convênio when the booking has one the e-mails may not spell out (see
+# `booking_link_details`): "Convênio: informado no agendamento".
+INSURANCE_GIVEN = "informado no agendamento"
 
 
 def invite_line(appointment) -> str:
@@ -169,6 +181,48 @@ async def booking_unit_location(tenant, appointment) -> str | None:
         logger.warning("booking_notification_unit_lookup_failed", error_type=type(exc).__name__)
         return None
     return unit_location(unit.name, unit.address) if unit is not None else None
+
+
+async def booking_link_details(tenant, appointment, insurance_line: str | None = None) -> str:
+    """The "Detalhes" of the event the patient adds from the e-mail's link (TASK-083 follow-up,
+    owner 2026-11-13): service, doctor, date/time, unit and address, convênio - the same builder
+    as the event, never a name, a phone, an e-mail or clinical text.
+
+    Tenant-scoped lookups, best-effort: a failed read only drops that line (the date and the
+    service are always there). The convênio follows the e-mails' own rule (`_insurance_line`):
+    only a configured plan's name or "Particular" is spelled out - a patient-typed or legacy
+    string is untrusted text and never reaches an e-mail, not even inside the link
+    (`insurance_line`: that line when the caller already has it, else it is resolved here).
+    """
+    if insurance_line is None:
+        insurance_line = await _insurance_line(tenant, appointment)
+    if insurance_line.startswith("Convênio: "):
+        insurance = insurance_line.removeprefix("Convênio: ").strip()
+    else:
+        insurance = INSURANCE_GIVEN if insurance_line else None
+    professional = unit = None
+    try:
+        async with async_session_factory() as session:
+            professional = await professional_name(
+                session, tenant.id, getattr(appointment, "professional_id", None)
+            )
+            if getattr(appointment, "unit_id", None) is not None:
+                unit = await tenant_unit(session, tenant.id, appointment.unit_id)
+    except Exception as exc:
+        logger.warning("booking_notification_details_lookup_failed", error_type=type(exc).__name__)
+    try:
+        tz = ZoneInfo(getattr(tenant, "timezone", None) or "America/Sao_Paulo")
+    except Exception:  # noqa: BLE001 - a bad zone name falls back to the product default
+        tz = ZoneInfo("America/Sao_Paulo")
+    return build_patient_link_details(
+        service=appointment.appointment_type or "Consulta",
+        insurance=insurance,
+        start=_as_utc(appointment.start_at),
+        tz=tz,
+        # No attendee: the e-mail link's title never carried a name either.
+        professional=professional,
+        **unit_fields(unit),
+    )
 
 
 def agenda_line() -> str:
@@ -307,6 +361,7 @@ async def _post_booking(ctx: PostBookingContext) -> None:
             _as_utc(appointment.start_at),
             _as_utc(appointment.end_at),
             appointment.appointment_type or "Consulta",
+            await booking_link_details(tenant, appointment, insurance_line),
             location=await booking_unit_location(tenant, appointment),
         )
         patient_vars = {

@@ -575,3 +575,75 @@ async def test_a_private_booking_is_named_particular_in_the_emails():
     appointment.insurance = "unimed sei la"
     line = await bn._insurance_line(SimpleNamespace(id=uuid4()), appointment)
     assert line.strip() == "Convênio informado; consulte o agendamento."
+
+
+# --------------------------------------------------------------------------
+# TASK-083 follow-up (owner 2026-11-13): the e-mail's link carries unit, address, doctor, date
+# --------------------------------------------------------------------------
+
+
+def _details(variables: dict) -> str:
+    from urllib.parse import parse_qs, urlparse
+
+    link = variables["calendar_line"].splitlines()[1]
+    return parse_qs(urlparse(link).query)["details"][0]
+
+
+async def _seed_unit_and_doctor(ctx) -> None:
+    from secretaria.models import Professional, Tenant, Unit
+
+    async with bn.async_session_factory() as session:
+        session.add(Tenant(id=ctx.tenant.id, clinic_name="Clinic"))
+        await session.flush()
+        doctor = Professional(id=uuid4(), tenant_id=ctx.tenant.id, name="Dra. Ana")
+        unit = Unit(id=uuid4(), tenant_id=ctx.tenant.id, name="Zona Sul", address="Av. B, 20")
+        session.add_all([doctor, unit])
+        await session.commit()
+    ctx.appointment.professional_id = doctor.id
+    ctx.appointment.unit_id = unit.id
+
+
+async def test_the_patient_link_details_name_the_unit_address_doctor_and_date(world):
+    sent, _ = world
+    ctx = _ctx()
+    ctx.appointment.insurance = "Particular"
+    await _seed_unit_and_doctor(ctx)
+    await bn._post_booking(ctx)
+    variables = next(v for _, t, v in sent if t == bn.PATIENT_TEMPLATE)
+    assert _details(variables) == (
+        "Serviço: Limpeza\n"
+        "Profissional: Dra. Ana\n"
+        "Data e horário: segunda-feira, 05/10/2026 às 14:00\n"
+        "Unidade: Zona Sul\n"
+        "Endereço: Av. B, 20\n"
+        "Convênio: Particular"
+    )
+
+
+async def test_the_patient_link_never_spells_an_untrusted_insurance_or_a_name(world):
+    sent, _ = world
+    ctx = _ctx()
+    ctx.appointment.insurance = "Private Patient Name"
+    ctx.appointment.attendee_name = "Third Party Name"
+    await bn._post_booking(ctx)
+    variables = next(v for _, t, v in sent if t == bn.PATIENT_TEMPLATE)
+    details = _details(variables)
+    assert "Private Patient Name" not in details and "Third Party Name" not in details
+    assert "Convênio: informado no agendamento" in details
+    # Without a unit: no unit lines, the rest is there.
+    assert "Unidade" not in details and "Endereço" not in details
+    assert "Data e horário: segunda-feira, 05/10/2026 às 14:00" in details
+
+
+async def test_a_failed_details_lookup_still_sends_the_patient_link(world, monkeypatch):
+    sent, _ = world
+    ctx = _ctx()
+    ctx.appointment.unit_id = uuid4()
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(bn, "tenant_unit", boom)
+    await bn._post_booking(ctx)
+    variables = next(v for _, t, v in sent if t == bn.PATIENT_TEMPLATE)
+    assert "Serviço: Limpeza" in _details(variables)

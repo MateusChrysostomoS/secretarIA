@@ -55,8 +55,17 @@ from secretaria.ai.unit_scope import (
 from secretaria.core.logging import get_logger
 from secretaria.plugins.base import PluginSpec
 from secretaria.plugins.registry import register
-from secretaria.services.calendar import build_event_description, build_patient_calendar_link
-from secretaria.services.unit_booking import scoped_calendar, unit_location
+from secretaria.services.calendar import (
+    build_event_description,
+    build_patient_calendar_link,
+    build_patient_link_details,
+)
+from secretaria.services.unit_booking import (
+    event_unit_fields,
+    scoped_calendar,
+    unit_fields,
+    unit_location,
+)
 
 logger = get_logger(__name__)
 
@@ -179,9 +188,24 @@ async def create_event_at_unit(
         return outside
     attendee_name = await _conversation_attendee_name()
     insurance = await _conversation_insurance()
+    # TASK-083 follow-up: the event (and the patient's link) say where and with whom.
     auto_description = build_event_description(
-        service=canonical_type, insurance=insurance, attendee_name=attendee_name
+        service=canonical_type,
+        insurance=insurance,
+        attendee_name=attendee_name,
+        **event_unit_fields(unit, owner),
     )
+    link_details = build_patient_link_details(
+        service=canonical_type,
+        insurance=insurance,
+        start=fallback_start,
+        tz=cal.tzinfo,
+        attendee_name=attendee_name,
+        professional=getattr(owner, "name", None),
+        **unit_fields(unit),
+    )
+    if description:
+        link_details = f"{link_details}\n\n{description}".strip()
     description = (
         f"{auto_description}\n\n{description}".strip() if description else auto_description
     )
@@ -223,7 +247,7 @@ async def create_event_at_unit(
             fallback_start,
             fallback_end,
             summary,
-            description,
+            link_details,
             tz=cal.tzinfo,
             location=unit_location(unit.name, unit.address),
         ),

@@ -12,6 +12,7 @@ a fake booking gate. The same `route()` serves WhatsApp (unarmed gate: the booki
 import os
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -99,6 +100,7 @@ class _Log:
         self.day_hours: list = []
         self.slot_hours: list = []
         self.created: list = []
+        self.descriptions: list = []
 
 
 class _Agenda:
@@ -134,6 +136,7 @@ class _Agenda:
 
     async def create_event(self, start, end, summary, description=""):
         self.log.created.append((self.unit_id, self.location, summary))
+        self.log.descriptions.append(description)
         return {"id": "evt-1", "htmlLink": None}
 
     async def update_event(self, event_id, start, end):
@@ -422,12 +425,87 @@ async def test_the_recap_and_the_whatsapp_confirmation_name_the_unit_and_its_add
     assert booked.appointment["unit_id"] == sul.id
     assert agenda.log.created == [(sul.id, "Zona Sul — Av. B, 20", "Consulta - Maria")]
     [text] = [b for b in booked.bubbles if isinstance(b, TextBubble)]
-    assert "Zona Sul — Av. B, 20" in text.body
+    # Follow-up (owner 2026-11-13): the unit and its address each on their own line.
+    assert "Unidade: Zona Sul\nEndereço: Av. B, 20\n" in text.body
     # Final wave F3: the patient's "add to my calendar" link carries the unit's location.
     assert "location=Zona%20Sul%20%E2%80%94%20Av.%20B%2C%2020" in text.body
     assert gate.decided[0]["unit_id"] == sul.id
     # The booking is over: the unit is not carried any further.
     assert booked.flow_selected_unit_id is None
+
+
+def _link_details(body: str) -> str:
+    """The decoded `details` of the patient's add-to-calendar link inside a confirmation."""
+    [link] = [line for line in body.splitlines() if line.startswith("https://calendar.google")]
+    return parse_qs(urlparse(link).query)["details"][0]
+
+
+async def _book(units: list, unit_id=None, *, insurance=None):
+    doctor = _doctor(units)
+    agenda = _Agenda()
+    booked = await fr.route(
+        _conversation(
+            flow_step=fr.STEP_AWAITING_CONFIRMATION,
+            flow_selected_day="2099-01-06",
+            flow_selected_slot="2099-01-06T09:00",
+            flow_selected_unit_id=unit_id,
+            flow_selected_insurance=insurance,
+        ),
+        _tenant(),
+        agenda,
+        fr.LABEL_CONFIRM,
+        patient_name="Maria",
+        professionals=[doctor],
+        gate=_Gate(armed=False),
+    )
+    [text] = [b for b in booked.bubbles if isinstance(b, TextBubble)]
+    return agenda, booked, text.body
+
+
+async def test_the_event_and_the_patient_link_say_unit_address_and_doctor():
+    """Owner 2026-11-13: the last message (with the link) makes the unit and the address
+    clear, and the event the patient adds from it carries them in its "Detalhes"."""
+    centro, sul = _units(2)
+    agenda, booked, body = await _book([centro, sul], sul.id, insurance="Particular")
+    [description] = agenda.log.descriptions
+    assert description == (
+        "Serviço: Consulta\n"
+        "Profissional: Dra. Ana\n"
+        "Unidade: Zona Sul\n"
+        "Endereço: Av. B, 20\n"
+        "Convênio: Particular"
+    )
+    # The confirmation names the unit and its address on their own lines.
+    assert "Profissional: Dra. Ana\nUnidade: Zona Sul\nEndereço: Av. B, 20\n" in body
+    # The link's details (decoded): what the patient's Google Calendar shows.
+    assert _link_details(body) == (
+        "Serviço: Consulta\n"
+        "Profissional: Dra. Ana\n"
+        "Data e horário: terça-feira, 06/01/2099 às 09:00\n"
+        "Unidade: Zona Sul\n"
+        "Endereço: Av. B, 20\n"
+        "Convênio: Particular"
+    )
+
+
+async def test_one_unit_without_the_question_still_stamps_its_lines():
+    """A doctor with ONE unit is never asked which one - the booking still carries it."""
+    [centro] = _units(1)
+    agenda, booked, body = await _book([centro])
+    assert booked.appointment["unit_id"] == centro.id
+    assert "Unidade: Centro\nEndereço: Rua A, 10" in agenda.log.descriptions[0]
+    assert "Unidade: Centro\nEndereço: Rua A, 10\n" in body
+    assert "Unidade: Centro\nEndereço: Rua A, 10" in _link_details(body)
+
+
+async def test_without_units_the_event_description_is_todays_and_the_link_gains_details():
+    agenda, _booked, body = await _book([])
+    assert agenda.log.descriptions == ["Serviço: Consulta\nConvênio: não informado"]
+    assert "Unidade" not in body and "Endereço" not in body
+    details = _link_details(body)
+    assert "Unidade" not in details and "Endereço" not in details
+    assert "Data e horário: terça-feira, 06/01/2099 às 09:00" in details
+    assert "Profissional: Dra. Ana" in details
 
 
 async def test_a_booking_without_units_keeps_the_exact_confirmation_dict_and_text():

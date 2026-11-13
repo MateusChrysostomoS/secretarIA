@@ -508,8 +508,11 @@ async def test_base_create_event_passes_the_description_into_the_patient_link(db
             }
         )
     details = parse_qs(urlparse(result["patient_calendar_link"]).query)["details"][0]
+    # TASK-083 follow-up: the patient's details also carry the date line (and, at a unit, the
+    # unit and its address - none here).
     assert details.splitlines() == [
         f"Servi\u00e7o: {_SERVICE}",
+        "Data e hor\u00e1rio: segunda-feira, 03/08/2026 \u00e0s 08:00",
         "Conv\u00eanio: n\u00e3o informado",
         "",
         "Trazer exames",

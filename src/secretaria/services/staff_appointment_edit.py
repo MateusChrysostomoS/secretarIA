@@ -93,6 +93,7 @@ from secretaria.services.tenant_config import (
     active_appointment_types,
     professional_appointment_types,
 )
+from secretaria.services.unit_booking import booking_unit_fields
 
 logger = get_logger(__name__)
 
@@ -260,6 +261,8 @@ class _Before:
     attendee_name: str | None
     event_id: str
     google_calendar_source: str | None
+    # TASK-083 follow-up: the booking's unit, so a restored event keeps its unit lines.
+    unit_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -305,6 +308,27 @@ async def _professional(
             Professional.id == professional_id, Professional.tenant_id == tenant_id
         )
     )
+
+
+async def _unit_kept(
+    session: AsyncSession,
+    tenant_id: UUID,
+    unit_id: UUID | None,
+    professional_id: UUID | None,
+    *,
+    doctor_changed: bool,
+) -> UUID | None:
+    """The unit a booking keeps after a hub edit (TASK-083 final wave I3): a doctor change keeps
+    it only if the new doctor attends it (an active link); time moves never touch it."""
+    if unit_id is None or not doctor_changed:
+        return unit_id
+    new_doctor = await _professional(session, tenant_id, professional_id)
+    offered = (
+        await professional_units.available_unit_ids(session, new_doctor)
+        if new_doctor is not None
+        else []
+    )
+    return unit_id if unit_id in offered else None
 
 
 async def _offered_service(
@@ -503,10 +527,12 @@ async def _move_event(
     patient_name: str | None,
     *,
     check_end: datetime | None = None,
+    where: dict | None = None,
 ) -> _Moved:
     """Patch (or, on another agenda, create) the event as `target`. `check_end`: the free
     check covers up to there instead of `target.end_at` (a paid service change whose longer
-    window is written only later)."""
+    window is written only later). `where`: the unit lines of the booking's unit after this
+    edit (`unit_booking.booking_unit_fields`), so the rebuilt description keeps them."""
     old_calendar = await calendar_for(_owner_id(before))
     doctor_moved = target.professional_id != before.professional_id
     new_calendar = await calendar_for(target.professional_id) if doctor_moved else old_calendar
@@ -531,7 +557,10 @@ async def _move_event(
         )
     summary = _summary(target.service, target.attendee_name, patient_name)
     description = build_event_description(
-        service=target.service, insurance=target.insurance, attendee_name=target.attendee_name
+        service=target.service,
+        insurance=target.insurance,
+        attendee_name=target.attendee_name,
+        **(where or {}),
     )
     try:
         if calendar_changed:
@@ -574,9 +603,14 @@ async def _move_event(
 
 
 async def _undo_move(
-    appointment_id: UUID, moved: _Moved | None, before: _Before, patient_name: str | None
+    appointment_id: UUID,
+    moved: _Moved | None,
+    before: _Before,
+    patient_name: str | None,
+    where: dict | None = None,
 ) -> None:
-    """Best effort: take Google back to the committed row after a failed write."""
+    """Best effort: take Google back to the committed row after a failed write (`where`: that
+    row's unit lines, see `_move_event`)."""
     if moved is None:
         return
     try:
@@ -592,6 +626,7 @@ async def _undo_move(
                 service=before.service,
                 insurance=before.insurance,
                 attendee_name=before.attendee_name,
+                **(where or {}),
             ),
         )
     except Exception as exc:
@@ -640,6 +675,7 @@ async def apply_staff_edit(
         attendee_name=appointment.attendee_name,
         event_id=(appointment.google_event_id or "").strip(),
         google_calendar_source=appointment.google_calendar_source,
+        unit_id=getattr(appointment, "unit_id", None),
     )
     names = await _names(session, tenant_id, {before.professional_id, target.professional_id})
     changes = _changes(_clinic_tz(tenant), before, target, names, appointment.phone)
@@ -689,6 +725,15 @@ async def apply_staff_edit(
     moved = None
     conflicts_other_agenda = False
     if needs_google:
+        # TASK-083 follow-up: the rebuilt description keeps the unit the booking has AFTER this
+        # edit (a doctor change may drop it - the same rule the row write applies below).
+        kept_unit = await _unit_kept(
+            session,
+            tenant_id,
+            before.unit_id,
+            now_target.professional_id,
+            doctor_changed=target.professional_id != before.professional_id,
+        )
         moved = await _move_event(
             appointment_id,
             before,
@@ -697,6 +742,9 @@ async def apply_staff_edit(
             calendar_for,
             patient_name,
             check_end=widest_end,
+            where=await booking_unit_fields(
+                session, tenant_id, kept_unit, now_target.professional_id
+            ),
         )
         conflicts_other_agenda = moved.conflicts_other_agenda
     elif deposit is not None and before.event_id and window_grows and not request.allow_overlap:
@@ -756,13 +804,14 @@ async def apply_staff_edit(
         # doctor attends it (an active link); otherwise the unit is cleared. Time moves by the
         # clinic stay permissive and never touch the unit.
         if edit["doctor_changed"] and locked.unit_id is not None:
-            new_doctor = await _professional(session, tenant_id, now_target.professional_id)
-            offered = (
-                await professional_units.available_unit_ids(session, new_doctor)
-                if new_doctor is not None
-                else []
+            kept = await _unit_kept(
+                session,
+                tenant_id,
+                locked.unit_id,
+                now_target.professional_id,
+                doctor_changed=True,
             )
-            if locked.unit_id not in offered:
+            if kept is None:
                 edit["unit_id"] = None
         fields = await write_appointment_edit(
             session,
@@ -841,6 +890,7 @@ async def apply_staff_edit(
                 attendee_name=committed.attendee_name,
                 event_id=(committed.google_event_id or "").strip(),
                 google_calendar_source=committed.google_calendar_source,
+                unit_id=getattr(committed, "unit_id", None),
             )
         if moved is None and synced_on is not None:
             # Only the service was written on the agenda: put that event back too.
@@ -852,7 +902,14 @@ async def apply_staff_edit(
                 old_calendar=synced_on,
                 new_calendar=synced_on,
             )
-        await _undo_move(appointment_id, moved, restore, patient_name)
+        restore_where = (
+            await booking_unit_fields(
+                session, tenant_id, restore.unit_id, restore.professional_id
+            )
+            if moved is not None
+            else {}
+        )
+        await _undo_move(appointment_id, moved, restore, patient_name, restore_where)
         raise
 
     if moved is not None and moved.calendar_changed:

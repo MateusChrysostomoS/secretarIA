@@ -46,6 +46,7 @@ class _Log:
         self.slot_hours: list = []
         self.checked_hours: list = []
         self.created: list = []
+        self.descriptions: list = []
 
 
 class _Agenda:
@@ -85,9 +86,11 @@ class _Agenda:
 
     async def create_event(self, start, end, summary, description=""):
         self.log.created.append((self.unit_id, self.location))
+        self.log.descriptions.append(description)
         return {"id": "evt-new", "htmlLink": None}
 
     async def update_event_details(self, event_id, start, end, summary, description=""):
+        self.log.descriptions.append(description)
         return {"id": event_id}
 
 
@@ -310,6 +313,64 @@ async def test_without_any_unit_the_draft_and_the_edit_are_exactly_todays():
         draft=draft,
     )
     assert "unit_id" not in confirmed.appointment_edit
+
+
+# --- The event's description keeps (or follows) the unit (TASK-083 follow-up) -------------
+
+
+async def test_an_edit_at_the_same_unit_keeps_the_unit_lines_in_the_event():
+    doctor = _doctor("Dra. Ana", [CENTRO, SUL])
+    agenda = _Agenda()
+    appt = _appt(doctor)
+    draft = ae.EditDraft.from_appointment(appt, TZ).with_changes(insurance="Amil")
+    confirmed = await _step(
+        fr.STEP_EDIT_CONFIRM,
+        fr.LABEL_CONFIRM,
+        appt=appt,
+        doctors=[doctor],
+        calendars={doctor.id: agenda},
+        draft=draft,
+    )
+    assert confirmed.appointment_edit is not None
+    assert agenda.log.descriptions == [
+        "Serviço: Consulta\n"
+        "Profissional: Dra. Ana\n"
+        "Unidade: Centro\n"
+        "Endereço: Rua A, 10\n"
+        "Convênio: Amil"
+    ]
+
+
+async def test_a_doctor_change_writes_the_new_units_lines():
+    new = _doctor("Dr. Beto", [NORTE])
+    result, appt, doctors, calendars = await _change_doctor(new)
+    await _step(
+        fr.STEP_EDIT_CONFIRM,
+        fr.LABEL_CONFIRM,
+        appt=appt,
+        doctors=doctors,
+        calendars=calendars,
+        draft=_draft(result),
+    )
+    [description] = calendars[new.id].log.descriptions
+    assert "Profissional: Dr. Beto\nUnidade: Norte\nConvênio:" in description
+    assert "Endereço" not in description  # Norte has no address
+
+
+async def test_without_a_unit_the_edited_events_description_is_todays():
+    doctor = _doctor("Dra. Ana", [])
+    agenda = _Agenda()
+    appt = _appt(doctor, None)
+    draft = ae.EditDraft.from_appointment(appt, TZ).with_changes(insurance="Amil")
+    await _step(
+        fr.STEP_EDIT_CONFIRM,
+        fr.LABEL_CONFIRM,
+        appt=appt,
+        doctors=[doctor],
+        calendars={doctor.id: agenda},
+        draft=draft,
+    )
+    assert agenda.log.descriptions == ["Serviço: Consulta\nConvênio: Amil"]
 
 
 # --- The writer -------------------------------------------------------------------------

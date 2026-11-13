@@ -86,7 +86,7 @@ from secretaria.models.payment_attention_item import (
     REASON_SERVICE_DIFF_REFUND_DUE,
 )
 from secretaria.models.pix_deposit import PixDepositStatus
-from secretaria.services import agenda, booking_hold, tenant_config as cfg
+from secretaria.services import agenda, booking_hold, tenant_config as cfg, unit_booking
 from secretaria.services.appointment_calendar_origin import (
     CalendarOriginUnresolved,
     calendar_professional_id,
@@ -1631,6 +1631,13 @@ async def sync_agenda_event(
         service=appointment.appointment_type,
         insurance=appointment.insurance,
         attendee_name=appointment.attendee_name,
+        # TASK-083 follow-up: the row's CURRENT unit keeps its lines after a service change.
+        **await unit_booking.booking_unit_fields(
+            session,
+            tenant.id,
+            getattr(appointment, "unit_id", None),
+            getattr(appointment, "professional_id", None),
+        ),
     )
     if not window_changed:
         await calendar.update_event_details(event_id, start, end, summary, description)

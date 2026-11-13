@@ -68,6 +68,7 @@ class _Agenda:
 
     async def create_event(self, start, end, summary, description=""):
         self.log["created"].append(self.unit)
+        self.log.setdefault("descriptions", []).append(description)
         return {"id": f"evt-{len(self.log['created'])}", "status": "confirmed", "htmlLink": None}
 
 
@@ -239,6 +240,58 @@ async def test_the_base_tools_book_at_the_doctors_only_unit(db):
     [appointment] = await _appointments(db)
     assert appointment.unit_id == centro.id
     assert agenda.log["created"] == [(centro.id, "Centro — Rua A, 10", CENTRO_HOURS)]
+
+
+def _details(result: dict) -> str:
+    from urllib.parse import parse_qs, urlparse
+
+    return parse_qs(urlparse(result["patient_calendar_link"]).query)["details"][0]
+
+
+_UNIT_LINES = "Profissional: Dra. Ana\nUnidade: Centro\nEndereço: Rua A, 10\n"
+
+
+async def test_every_ai_booking_tool_writes_the_unit_lines_and_fills_the_patient_link(
+    db, monkeypatch
+):
+    """TASK-083 follow-up: the event (clinic side) and the patient's link details say where."""
+    tenant, _centro, _sul, doctors = await _seed(db, links={"Dra. Ana": ["Centro"]})
+    agenda = _Agenda()
+
+    async def _calendar(tenant_id, professional):
+        return agenda
+
+    monkeypatch.setattr(mp, "_professional_calendar", _calendar)
+    with _context(tenant.id, calendar=agenda, sole=doctors["Dra. Ana"].id):
+        base = await ai_tools.create_event.ainvoke(WINDOW)
+        at_unit = await mu.create_event_at_unit.ainvoke({"unit_name": "Centro", **WINDOW})
+    with _context(tenant.id):
+        for_doctor = await mp.create_event_for_professional.ainvoke(
+            {"professional_name": "Dra. Ana", "description": "Nota", **WINDOW}
+        )
+    assert len(agenda.log["descriptions"]) == 3
+    for description in agenda.log["descriptions"]:
+        assert _UNIT_LINES in description
+        assert "Data e horário" not in description  # the event has its own time
+    assert agenda.log["descriptions"][2].endswith("\n\nNota")
+    for result in (base, at_unit, for_doctor):
+        assert _details(result).startswith(
+            "Profissional: Dra. Ana\n"
+            "Data e horário: sexta-feira, 10/07/2026 às 09:00\n"
+            "Unidade: Centro\n"
+            "Endereço: Rua A, 10\n"
+            "Convênio: não informado"
+        )
+    assert _details(for_doctor).endswith("\n\nNota")
+
+
+async def test_an_ai_booking_without_a_unit_keeps_todays_event_description(db):
+    tenant, _centro, _sul, doctors = await _seed(db, links={"Dra. Ana": []})
+    agenda = _Agenda()
+    with _context(tenant.id, calendar=agenda, sole=doctors["Dra. Ana"].id):
+        booked = await ai_tools.create_event.ainvoke(WINDOW)
+    assert agenda.log["descriptions"] == ["Convênio: não informado"]
+    assert "Unidade" not in _details(booked)
 
 
 async def test_get_availability_reads_each_unit_within_its_own_hours(db, monkeypatch):

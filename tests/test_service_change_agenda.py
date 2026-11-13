@@ -113,6 +113,31 @@ async def test_sync_without_a_window_change_does_not_check_the_slot(db):
     assert calendar.updates[0][3] == "Consulta - Paciente"
 
 
+async def test_sync_keeps_the_rows_unit_lines_and_without_a_unit_is_todays(db):
+    """TASK-083 follow-up: a service change never strips the event's unit lines."""
+    from secretaria.models import Unit
+
+    async with db() as session:
+        tenant, _patient, appointment, _deposit = await base._seed(session)
+        appointment = await session.get(Appointment, appointment.id)
+        plain = AgendaCalendar()
+        await service_change.sync_agenda_event(
+            session, tenant, appointment, plain, patient_name="Maria", window_changed=False
+        )
+        unit = Unit(id=uuid4(), tenant_id=tenant.id, name="Centro", address="Rua A, 10")
+        session.add(unit)
+        await session.flush()
+        appointment.unit_id = unit.id
+        at_unit = AgendaCalendar()
+        await service_change.sync_agenda_event(
+            session, tenant, appointment, at_unit, patient_name="Maria", window_changed=False
+        )
+
+    assert "Unidade" not in plain.updates[0][4]
+    assert "Unidade: Centro\nEndereço: Rua A, 10\n" in at_unit.updates[0][4]
+    assert at_unit.updates[0][4].startswith("Serviço: Consulta\n")
+
+
 async def test_sync_refuses_a_window_that_is_not_free(db):
     async with db() as session:
         tenant, _patient, appointment, _deposit = await base._seed(session)

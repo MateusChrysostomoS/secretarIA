@@ -9,6 +9,7 @@ Without a unit nothing changes (the existing fulfillment tests).
 """
 
 from datetime import UTC, datetime
+from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 from sqlalchemy import select, update
@@ -46,7 +47,20 @@ def _scoping(env):
         return calendar
 
     calendar.with_unit = with_unit
+    original = calendar.create_event
+    calendar.descriptions = []
+
+    async def create_event(start, end, summary, description="", *, event_id=None):
+        calendar.descriptions.append(description)
+        return await original(start, end, summary, description, event_id=event_id)
+
+    calendar.create_event = create_event
     return scoped
+
+
+def _link_details(text: str) -> str:
+    [link] = [line for line in text.splitlines() if line.startswith("https://calendar.google")]
+    return parse_qs(urlparse(link).query)["details"][0]
 
 
 async def test_the_unit_rides_the_pix_from_the_hold_to_the_appointment(db, env):
@@ -96,7 +110,15 @@ async def test_the_unit_rides_the_pix_from_the_hold_to_the_appointment(db, env):
     # The event was written through the unit's agenda (location; the window keeps its hours).
     assert scoped == [(unit.id, "Centro — Rua A, 10", None)]
     (_channel, text) = env.notices[0]
-    assert "Local: Centro — Rua A, 10" in text
+    # Follow-up (owner 2026-11-13): the unit and its address on their own lines, in the event's
+    # description (a paid booking at a unit now gets one) and in the patient's link details.
+    assert "Unidade: Centro\nEndereço: Rua A, 10\n" in text
+    assert env.calendar.descriptions == [
+        "Serviço: Consulta\nUnidade: Centro\nEndereço: Rua A, 10\nConvênio: não informado"
+    ]
+    details = _link_details(text)
+    assert "Unidade: Centro\nEndereço: Rua A, 10" in details
+    assert "Data e horário: segunda-feira, 04/03/2030 às 10:00" in details
 
 
 async def test_a_pix_without_a_unit_keeps_todays_snapshot_and_text(db, env):
@@ -112,6 +134,9 @@ async def test_a_pix_without_a_unit_keeps_todays_snapshot_and_text(db, env):
     assert appointment.unit_id is None
     assert scoped == []
     assert "Local:" not in env.notices[0][1]
+    assert "Unidade" not in env.notices[0][1]
+    # No unit: the paid event's description stays exactly what it was (none).
+    assert env.calendar.descriptions == [""]
 
 
 async def test_a_code_hold_moved_to_the_payment_phase_keeps_its_unit(db, env):

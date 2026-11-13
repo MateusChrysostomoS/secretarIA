@@ -52,6 +52,7 @@ from secretaria.services.calendar import (
     CalendarUnavailableError,
     build_event_description,
     build_patient_calendar_link,
+    build_patient_link_details,
 )
 from secretaria.services.flow_router import (
     SLOT_TAKEN_AT_CONFIRM_MESSAGE,
@@ -73,7 +74,14 @@ from secretaria.services.pending_identity import (
 from secretaria.services.tenant_config import (
     list_active_professionals,
 )
-from secretaria.services.unit_booking import scoped_calendar, tenant_unit, unit_location
+from secretaria.services.unit_booking import (
+    confirmation_unit_lines,
+    event_unit_fields,
+    scoped_calendar,
+    tenant_unit,
+    unit_fields,
+    unit_location,
+)
 from secretaria.workers.shared.context import (
     _ReplyContext,
 )
@@ -289,6 +297,8 @@ async def _promote_booking_hold(
             await list_active_professionals(session, tenant.id),
         )
         calendar = await _appointment_calendar(session, tenant, target)
+        # The doctor the texts name: the owning row only ("tenant" is a tenant-level booking).
+        owner = None if isinstance(target, str) else target
         # TASK-083 spec §8: the unit the patient chose rides on the hold - its id lands on a
         # secretarIA event, its location on a Google one, and the row and the text name it.
         unit = await tenant_unit(session, tenant.id, held.unit_id)
@@ -347,6 +357,8 @@ async def _promote_booking_hold(
             description=build_event_description(
                 service=service_type, insurance=held.insurance,
                 channel=reply.channel, attendee_name=held.attendee_name,
+                # TASK-083 follow-up: at a unit, the event says where and with whom.
+                **event_unit_fields(unit, owner),
             ),
         )
     except CalendarSlotTakenError:
@@ -469,12 +481,22 @@ async def _promote_booking_hold(
         f"{service_type}\n"
         + (f"Paciente: {held.attendee_name}\n" if held.attendee_name else "")
         + f"{local_start.strftime(WHEN_FORMAT)}\n"
-        + (f"Local: {unit_location(unit.name, unit.address)}\n" if unit is not None else "")
+        + confirmation_unit_lines(unit, owner)
         + "\nAdicionar à sua agenda:\n"
         + build_patient_calendar_link(
             local_start,
             local_end,
             summary,
+            # TASK-083 follow-up: the patient's event carries the same details (unit, address).
+            build_patient_link_details(
+                service=service_type,
+                insurance=held.insurance,
+                start=local_start,
+                tz=tz,
+                attendee_name=held.attendee_name,
+                professional=getattr(owner, "name", None),
+                **unit_fields(unit),
+            ),
             tz=tz,
             location=unit_location(unit.name, unit.address) if unit is not None else None,
         )

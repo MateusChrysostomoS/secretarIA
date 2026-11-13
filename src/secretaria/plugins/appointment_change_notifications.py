@@ -57,6 +57,7 @@ from secretaria.models import (
 )
 from secretaria.plugins.booking_notifications import (
     agenda_line,
+    booking_link_details,
     booking_unit_location,
     professional_line,
 )
@@ -329,9 +330,10 @@ async def _notify(
             _as_utc(appointment.start_at),
             _as_utc(appointment.end_at),
             appointment.appointment_type or "Consulta",
+            await booking_link_details(tenant, appointment),
             location=await booking_unit_location(tenant, appointment),
         )
-        calendar_line = f"Adicionar à sua agenda:\n{link}\n\n"
+        calendar_line =f"Adicionar à sua agenda:\n{link}\n\n"
     return await _send_once(
         key, to, template, {**variables, "calendar_line": calendar_line}, log=log
     )

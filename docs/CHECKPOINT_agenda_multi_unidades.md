@@ -138,6 +138,13 @@ commit. A reserva do Google pega **só** o da pessoa. Nunca chame escrita local 
   e-mails (`plugins/booking_notifications.booking_unit_location`) e no lembrete em texto livre
   (`services/reminder_text.py`, linha "Local: ..."). `workers/shared/draft_resolution` deixou de zerar o
   endereço quando há unidade.
+- **Descrição do evento e "Detalhes" do link do paciente (follow-up, dono 2026-11-13):** com unidade, a descrição
+  do evento da clínica ganha `Profissional:`/`Unidade:`/`Endereço:` (`unit_booking.event_unit_fields`; sem unidade
+  fica idêntica), inclusive após "Alterar Dados", edição pelo hub, troca de serviço e Pix pago (unidade ATUAL da
+  consulta, `unit_booking.booking_unit_fields`; falha de leitura não bloqueia a agenda). O link do paciente agora
+  leva `details` (`calendar.build_patient_link_details`: serviço, profissional, data e horário, unidade, endereço,
+  convênio) nas confirmações do chat, do Pix e nos e-mails; a mensagem final mostra `Unidade:` e `Endereço:` em
+  linhas próprias (`unit_booking.confirmation_unit_lines`).
 - "Alterar Dados"/Remarcar (`services/appointment_edit_flow.py`) seguem a unidade da consulta; troca de médico
   mantém a unidade só se o novo médico a atende, senão a única unidade dele, senão limpa. Remarcar consulta sem
   unidade de médico que agora tem unidades usa a união dos horários das unidades (sem carimbar unidade).

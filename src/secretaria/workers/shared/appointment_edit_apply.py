@@ -42,6 +42,7 @@ from secretaria.services.payments import deposit_lifecycle, service_change
 from secretaria.services.payments.service_change import ServiceChangeResult
 from secretaria.services.professional_edit_outbox import record_professional_edit
 from secretaria.services.tenant_config import list_active_professionals
+from secretaria.services.unit_booking import booking_unit_fields
 from secretaria.workers.shared.appointment_edit_support import edit_guards
 from secretaria.workers.shared.llm_context import (
     _appointment_calendar,
@@ -290,6 +291,8 @@ async def compensate_appointment_edit(tenant, patient_id, edit: dict) -> None:
                 service=row.appointment_type,
                 insurance=row.insurance,
                 attendee_name=row.attendee_name,
+                # TASK-083 follow-up: the committed row's CURRENT unit keeps its lines.
+                **await booking_unit_fields(session, tenant.id, row.unit_id, row.professional_id),
             )
         await calendar.update_event_details(
             edit["google_event_id"], start, end, summary, description

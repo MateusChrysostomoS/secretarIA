@@ -24,6 +24,7 @@ os.environ.setdefault("META_PHONE_NUMBER_ID", "1234567890")
 os.environ.setdefault("ENCRYPTION_KEY", "gBSpATEZoI21UX0_59nHvxdUDJ4drCttg2RAEaPJc1w=")
 
 from datetime import UTC, datetime, timedelta  # noqa: E402
+from urllib.parse import parse_qs, urlparse  # noqa: E402
 from uuid import uuid4  # noqa: E402
 from zoneinfo import ZoneInfo  # noqa: E402
 
@@ -265,6 +266,12 @@ def _next(weekday: int) -> datetime:
     return day
 
 
+def _link_details(text: str) -> str:
+    """The decoded `details` of the patient's add-to-calendar link inside a confirmation."""
+    [link] = [line for line in text.splitlines() if line.startswith("https://calendar.google")]
+    return parse_qs(urlparse(link).query)["details"][0]
+
+
 def _offered_days(rows) -> set[int]:
     return {
         datetime.fromisoformat(row_id.split("|")[1]).weekday()
@@ -331,7 +338,14 @@ async def test_whatsapp_books_at_the_chosen_unit_within_its_hours(db):
     assert event.start_at.replace(tzinfo=UTC) == start_local.astimezone(UTC)
     confirmation = _WireClient.sends[-1][1]
     assert "Pronto! Seu agendamento está confirmado." in confirmation
-    assert "Local: Zona Sul — Av. B, 20" in confirmation
+    # Follow-up (owner 2026-11-13): doctor, unit and address each on their own line; the
+    # agenda's event and the patient's link details carry them too.
+    assert "Profissional: Dra. Ana\nUnidade: Zona Sul\nEndereço: Av. B, 20\n" in confirmation
+    assert "Unidade: Zona Sul\nEndereço: Av. B, 20" in event.description
+    assert "Profissional: Dra. Ana" in event.description
+    details = _link_details(confirmation)
+    assert "Unidade: Zona Sul\nEndereço: Av. B, 20" in details
+    assert "Data e horário: terça-feira, " in details
     assert (await _conversation(db, conversation.id)).flow_selected_unit_id is None
 
 
@@ -390,4 +404,46 @@ async def test_the_portal_holds_with_the_unit_and_the_code_books_at_it(db):
         [event] = list(await session.scalars(select(CalendarEvent)))
     assert appointment.unit_id == sul.id
     assert event.unit_id == sul.id
-    assert "Local: Zona Sul — Av. B, 20" in extra
+    assert "Profissional: Dra. Ana\nUnidade: Zona Sul\nEndereço: Av. B, 20\n" in extra
+    assert "Unidade: Zona Sul\nEndereço: Av. B, 20" in event.description
+    assert "Agendado pelo: Portal" in event.description
+    assert "Unidade: Zona Sul\nEndereço: Av. B, 20" in _link_details(extra)
+
+
+@pytest.mark.asyncio
+async def test_one_unit_booking_end_to_end_carries_the_units_lines(db):
+    """A doctor with ONE unit (a personal-assistant doctor with one place) is never asked which
+    unit; the booking, the agenda's event and the patient's link still name it."""
+    tenant, _doctor, centro, _sul, conversation = await _seed(db, channel="whatsapp", units=1)
+    await _turn(tenant, "whatsapp", fr.LABEL_BOOK_SERVICE)
+    monday = _next(0)
+    await _turn(tenant, "whatsapp", "Seg", f"day|{monday.date().isoformat()}|0")
+    slot = monday.replace(hour=9).replace(tzinfo=None).isoformat(timespec="minutes")
+    await _turn(tenant, "whatsapp", "09:00", f"slot|{slot}")
+    await _turn(tenant, "whatsapp", fr.LABEL_CONFIRM)
+    async with db() as session:
+        [appointment] = list(await session.scalars(select(Appointment)))
+        [event] = list(await session.scalars(select(CalendarEvent)))
+    assert appointment.unit_id == centro.id
+    assert "Unidade: Centro\nEndereço: Rua A, 10" in event.description
+    confirmation = _WireClient.sends[-1][1]
+    assert "Unidade: Centro\nEndereço: Rua A, 10\n" in confirmation
+    assert "Unidade: Centro\nEndereço: Rua A, 10" in _link_details(confirmation)
+
+
+@pytest.mark.asyncio
+async def test_a_booking_without_units_keeps_todays_event_description(db):
+    tenant, _doctor, _centro, _sul, conversation = await _seed(db, channel="whatsapp", units=0)
+    await _turn(tenant, "whatsapp", fr.LABEL_BOOK_SERVICE)
+    monday = _next(0)
+    await _turn(tenant, "whatsapp", "Seg", f"day|{monday.date().isoformat()}|0")
+    slot = monday.replace(hour=9).replace(tzinfo=None).isoformat(timespec="minutes")
+    await _turn(tenant, "whatsapp", "09:00", f"slot|{slot}")
+    await _turn(tenant, "whatsapp", fr.LABEL_CONFIRM)
+    async with db() as session:
+        [appointment] = list(await session.scalars(select(Appointment)))
+        [event] = list(await session.scalars(select(CalendarEvent)))
+    assert appointment.unit_id is None
+    assert event.description == "Serviço: Consulta\nConvênio: não informado"
+    confirmation = _WireClient.sends[-1][1]
+    assert "Unidade" not in confirmation and "Local:" not in confirmation

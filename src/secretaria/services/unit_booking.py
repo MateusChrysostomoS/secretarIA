@@ -26,10 +26,14 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from secretaria.core.logging import get_logger
+from secretaria.models.professional import Professional
 from secretaria.models.professional_unit import ProfessionalUnit
 from secretaria.models.unit import Unit
 from secretaria.services import professional_units
 from secretaria.services.tenant_config import professional_business_hours
+
+logger = get_logger(__name__)
 
 _WEEKDAY_KEYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
@@ -77,6 +81,102 @@ def unit_line(name: Any, address: Any) -> str:
     if not name_text:
         return ""
     return f"Unidade: {name_text}\n" + (f"Endereço: {address_text}\n" if address_text else "")
+
+
+def _name_of(professional: Any) -> str:
+    """A professional row/snapshot's name, or the name itself when given as text."""
+    if isinstance(professional, str):
+        return _clean(professional)
+    return _clean(getattr(professional, "name", None)) if professional is not None else ""
+
+
+def unit_fields(unit: Any | None) -> dict:
+    """`build_event_description`'s "Unidade"/"Endereço" keywords for `unit`, or {} without one."""
+    if unit is None:
+        return {}
+    fields: dict = {}
+    name, address = _clean(getattr(unit, "name", None)), _clean(getattr(unit, "address", None))
+    if name:
+        fields["unit_name"] = name
+    if address:
+        fields["unit_address"] = address
+    return fields
+
+
+def event_unit_fields(unit: Any | None, professional: Any = None) -> dict:
+    """The CLINIC event's new lines for a booking AT A UNIT: the unit, its address and (when
+    known) the professional. {} without a unit, so a clinic without units keeps its event
+    description byte for byte (the professional line is new only alongside a unit)."""
+    fields = unit_fields(unit)
+    if not fields:
+        return {}
+    name = _name_of(professional)
+    if name:
+        fields["professional"] = name
+    return fields
+
+
+def confirmation_unit_lines(unit: Any | None, professional: Any = None) -> str:
+    """The booked confirmation's "where" (TASK-083 follow-up, owner 2026-11-13): for a booking at
+    a unit, "Profissional: X\\n" (when known) + "Unidade: Y\\nEndereço: Z\\n" - the unit's name and
+    its address each on its own line. "" without a unit: a clinic without units keeps its text."""
+    if unit is None:
+        return ""
+    name, address = _clean(getattr(unit, "name", None)), _clean(getattr(unit, "address", None))
+    if not name:
+        return f"Endereço: {address}\n" if address else ""
+    doctor = _name_of(professional)
+    return (f"Profissional: {doctor}\n" if doctor else "") + unit_line(name, address)
+
+
+async def booking_unit_fields(
+    session: AsyncSession,
+    tenant_id: UUID,
+    unit_id: UUID | None,
+    professional_id: UUID | None = None,
+) -> dict:
+    """`event_unit_fields` for an EXISTING booking (edit, reschedule, service change), read here.
+
+    Tenant-scoped (a stray foreign id names nothing). Best-effort: a failed read never blocks the
+    calendar write - it degrades to no unit lines and a warning (ids and error type only).
+    """
+    if unit_id is None:
+        return {}
+    try:
+        unit = await tenant_unit(session, tenant_id, unit_id)
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        logger.warning(
+            "event_description_unit_lookup_failed",
+            tenant_id=str(tenant_id),
+            error_type=type(exc).__name__,
+        )
+        return {}
+    if unit is None:
+        return {}
+    return event_unit_fields(unit, await professional_name(session, tenant_id, professional_id))
+
+
+async def professional_name(
+    session: AsyncSession, tenant_id: UUID, professional_id: UUID | None
+) -> str | None:
+    """THIS clinic's professional's name for a text, or None (unknown id, another clinic's, or a
+    failed read - logged with the error type only: a name is never worth failing a booking)."""
+    if professional_id is None:
+        return None
+    try:
+        name = await session.scalar(
+            select(Professional.name).where(
+                Professional.id == professional_id, Professional.tenant_id == tenant_id
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        logger.warning(
+            "event_description_professional_lookup_failed",
+            tenant_id=str(tenant_id),
+            error_type=type(exc).__name__,
+        )
+        return None
+    return _clean(name) or None
 
 
 def _own_hours(raw: dict) -> dict:
@@ -225,10 +325,15 @@ __all__ = [
     "UnitOption",
     "UnitRefused",
     "attach_unit_options",
+    "booking_unit_fields",
     "calendar_at_unit",
     "check_unit",
+    "confirmation_unit_lines",
+    "event_unit_fields",
+    "professional_name",
     "scoped_calendar",
     "tenant_unit",
+    "unit_fields",
     "unit_line",
     "unit_location",
     "unit_options_for",

@@ -465,3 +465,43 @@ async def test_a_foreign_remedit_opens_nothing(db, edit_calendar):  # noqa: F811
     await _tap(other, "remedit", rid)
 
     assert (await get_conversation(db, other)).flow_state == FlowState.IDLE
+
+
+# --- TASK-083 follow-up: a compensation restores the event WITH the row's unit -------------
+
+
+class _RestoreCalendar:
+    def __init__(self):
+        self.restored: list[str] = []
+
+    async def update_event_details(self, event_id, start, end, summary, description=""):
+        self.restored.append(description)
+        return {"id": event_id}
+
+
+async def test_the_compensation_restores_the_rows_unit_lines(db, monkeypatch):  # noqa: F811
+    from secretaria.models import Appointment, Unit
+    from secretaria.workers.shared import appointment_edit_apply as apply_module
+
+    monkeypatch.setattr(apply_module, "async_session_factory", db)
+    world = await seed_world(
+        db, start_at=datetime.now(UTC) + timedelta(days=3), google_event_id="evt-old"
+    )
+    async with db() as session:
+        unit = Unit(id=uuid4(), tenant_id=world.tenant.id, name="Centro", address="Rua A, 10")
+        session.add(unit)
+        await session.flush()
+        (await session.get(Appointment, world.appointment.id)).unit_id = unit.id
+        await session.commit()
+    calendar = _RestoreCalendar()
+    edit = {
+        "calendar": calendar,
+        "appointment_id": world.appointment.id,
+        "google_event_id": "evt-old",
+        "doctor_changed": False,
+    }
+
+    await apply_module.compensate_appointment_edit(world.tenant, world.patient.id, edit)
+
+    [description] = calendar.restored
+    assert "Unidade: Centro\nEndereço: Rua A, 10\n" in description

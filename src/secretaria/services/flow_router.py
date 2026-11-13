@@ -96,6 +96,7 @@ from secretaria.services.calendar import (
     CalendarUnavailableError,
     build_event_description,
     build_patient_calendar_link,
+    build_patient_link_details,
 )
 from secretaria.services.insurance_catalog import match_plan
 from secretaria.services.insurance_payment_copy import insurance_payment_description
@@ -111,6 +112,11 @@ from secretaria.services.tenant_config import (
     active_appointment_types,
     professional_appointment_types,
     professional_business_hours,
+)
+from secretaria.services.unit_booking import (
+    confirmation_unit_lines,
+    event_unit_fields,
+    unit_fields,
 )
 
 if TYPE_CHECKING:
@@ -4825,6 +4831,8 @@ async def _handle_confirmation(
             description=build_event_description(
                 service=canonical_type or service_type, insurance=insurance,
                 attendee_name=attendee_name,
+                # TASK-083 follow-up: at a unit, the event says where and with whom.
+                **event_unit_fields(unit, booking_owner),
             ),
         )
     except CalendarSlotTakenError:
@@ -4896,15 +4904,27 @@ async def _handle_confirmation(
     # metadata, never product copy - see models/insurance.py).
     plan = _selected_plan(tenant, insurance)
     payment_note = str(plan["note"]).strip() if plan and plan.get("note") else None
+    # TASK-083 follow-up (owner, 2026-11-13): the event the patient adds from the link carries
+    # the same details - service, doctor, date, unit and address - in its "Detalhes".
+    link_details = build_patient_link_details(
+        service=canonical_type or service_type,
+        insurance=insurance,
+        start=start,
+        tz=calendar.tzinfo,
+        attendee_name=attendee_name,
+        professional=getattr(booking_owner, "name", None),
+        **unit_fields(unit),
+    )
     confirmation = (
         "Pronto! Seu agendamento está confirmado. ✅\n\n"
         f"{service_type}\n{_attendee_line(conversation)}"
-        f"{start.strftime('%d/%m/%Y às %H:%M')}\n{_unit_line(unit)}\n"
+        f"{start.strftime('%d/%m/%Y às %H:%M')}\n{confirmation_unit_lines(unit, booking_owner)}\n"
         "Adicionar à sua agenda:\n"
         + build_patient_calendar_link(
             start,
             end,
             summary,
+            link_details,
             tz=calendar.tzinfo,
             location=getattr(unit, "location", None) if unit is not None else None,
         )

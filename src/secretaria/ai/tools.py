@@ -40,13 +40,19 @@ from secretaria.services.calendar import (
     CalendarSlotTakenError,
     build_event_description,
     build_patient_calendar_link,
+    build_patient_link_details,
 )
 from secretaria.services.flow_router import SLOT_TAKEN_AT_CONFIRM_MESSAGE
 from secretaria.services.local_calendar import create_event_exclusive
 from secretaria.services.manage_request import ManageRequest, parse_appointment_ref
 from secretaria.services.precheck import HandoffOutcome, request_precheck_handoff
 from secretaria.services.service_catalog import find_by_name, missing_from
-from secretaria.services.unit_booking import scoped_calendar, unit_location
+from secretaria.services.unit_booking import (
+    event_unit_fields,
+    scoped_calendar,
+    unit_fields,
+    unit_location,
+)
 
 if TYPE_CHECKING:
     from secretaria.services.tenant_config import TenantRuntimeConfig
@@ -568,6 +574,30 @@ async def _sole_professional_unit(
             "botões pergunta a unidade."
         }
     return unit, error
+
+
+async def _sole_professional_name() -> str | None:
+    """The one-doctor clinic's professional's name for the event texts, or None.
+
+    Best-effort (TASK-083 follow-up): a failed read only drops the "Profissional" line.
+    """
+    tenant_id = _tenant_id_ctx.get()
+    professional_id = _sole_professional_id()
+    if tenant_id is None or professional_id is None:
+        return None
+    from secretaria.ai.unit_scope import sole_professional_row
+
+    try:
+        owner = await sole_professional_row(tenant_id, professional_id)
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        logger.warning("agent_tool_professional_lookup_failed", error=type(exc).__name__)
+        return None
+    return (getattr(owner, "name", None) or "").strip() or None
+
+
+def _with_notes(text: str, notes: str) -> str:
+    """The generated description followed by the model's own notes, when it wrote any."""
+    return f"{text}\n\n{notes}".strip() if notes else text
 
 
 def _effective_service_catalog() -> list:
@@ -1265,12 +1295,27 @@ async def create_event(
     if attendee_name:
         summary = f"{canonical_type or 'Consulta'} - {attendee_name}"
     insurance = await _conversation_insurance()
+    # TASK-083 follow-up: at a unit, the event (and the patient's link) say where and with whom.
+    owner_name = await _sole_professional_name() if unit is not None else None
     auto_description = build_event_description(
-        service=canonical_type, insurance=insurance, attendee_name=attendee_name
+        service=canonical_type,
+        insurance=insurance,
+        attendee_name=attendee_name,
+        **event_unit_fields(unit, owner_name),
     )
-    description = (
-        f"{auto_description}\n\n{description}".strip() if description else auto_description
+    link_details = _with_notes(
+        build_patient_link_details(
+            service=canonical_type,
+            insurance=insurance,
+            start=fallback_start,
+            tz=cal.tzinfo,
+            attendee_name=attendee_name,
+            professional=owner_name,
+            **unit_fields(unit),
+        ),
+        description,
     )
+    description = _with_notes(auto_description, description)
     await _hand_back_if_slot_taken(
         cal, fallback_start, fallback_end, tool_name="create_event", appointment_type=canonical_type
     )
@@ -1308,7 +1353,7 @@ async def create_event(
             fallback_start,
             fallback_end,
             summary,
-            description,
+            link_details,
             tz=cal.tzinfo,
             location=(
                 unit_location(getattr(unit, "name", None), getattr(unit, "address", None))

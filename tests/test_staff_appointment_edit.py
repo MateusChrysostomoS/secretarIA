@@ -185,6 +185,68 @@ async def test_a_time_move_by_the_clinic_keeps_the_unit(db):
     assert (await reload_appointment(db, world.appointment.id)).unit_id == centro.id
 
 
+async def _unit_at(db, tenant_id, name, address, *attending) -> Unit:
+    unit = await _unit(db, tenant_id, name, *attending)
+    async with db() as session:
+        (await session.get(Unit, unit.id)).address = address
+        await session.commit()
+    return unit
+
+
+async def test_a_hub_time_move_keeps_the_unit_lines_in_the_event(db):
+    """TASK-083 follow-up: the rebuilt description never loses the booking's unit."""
+    world = await _world(db, professional_name="Dra. Ana")
+    centro = await _unit_at(
+        db, world.tenant.id, "Centro", "Rua A, 10", world.appointment.professional_id
+    )
+    await _set_unit(db, world.appointment.id, centro.id)
+    world.appointment = await reload_appointment(db, world.appointment.id)
+
+    await _edit(db, world, _req(start_at=world.start_at + timedelta(days=1)))
+
+    [(_id, _start, _end, _summary, description)] = FakeCalendar.get(
+        str(world.appointment.professional_id)
+    ).updated or FakeCalendar.get("tenant").updated
+    assert "Profissional: Dra. Ana\nUnidade: Centro\nEndereço: Rua A, 10\n" in description
+
+
+async def test_a_hub_doctor_change_writes_the_kept_unit_or_none(db):
+    world = await _world(db, professional_name="Dra. Ana")
+    old_pro = world.appointment.professional_id
+    stays = await add_professional(db, world.tenant.id, "Dr. Bruno")
+    leaves = await add_professional(db, world.tenant.id, "Dr. Carlos")
+    centro = await _unit_at(db, world.tenant.id, "Centro", "Rua A, 10", old_pro, stays)
+    await _set_unit(db, world.appointment.id, centro.id)
+    world.appointment = await reload_appointment(db, world.appointment.id)
+
+    await _edit(db, world, _req(professional_id=stays))
+    [(_s, _e, _summary, kept)] = FakeCalendar.get(str(stays)).created
+    assert "Profissional: Dr. Bruno\nUnidade: Centro\nEndereço: Rua A, 10\n" in kept
+
+    world.appointment = await reload_appointment(db, world.appointment.id)
+    await _edit(db, world, _req(professional_id=leaves))
+    [(_s, _e, _summary, dropped)] = FakeCalendar.get(str(leaves)).created
+    assert "Unidade" not in dropped and "Profissional" not in dropped
+
+
+async def test_a_failed_unit_lookup_never_blocks_the_hub_edit(db, monkeypatch):
+    world = await _world(db, professional_name="Dra. Ana")
+    centro = await _unit_at(
+        db, world.tenant.id, "Centro", "Rua A, 10", world.appointment.professional_id
+    )
+    await _set_unit(db, world.appointment.id, centro.id)
+    world.appointment = await reload_appointment(db, world.appointment.id)
+    from secretaria.services import unit_booking
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(unit_booking, "tenant_unit", boom)
+    new = world.start_at + timedelta(days=1)
+    await _edit(db, world, _req(start_at=new))
+    assert _utc((await reload_appointment(db, world.appointment.id)).start_at) == new
+
+
 async def test_a_doctor_on_the_same_agenda_keeps_the_event(db):
     world = await _world(db, professional_name="Dra. Ana")
     old_pro = world.appointment.professional_id

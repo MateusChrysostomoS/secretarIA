@@ -23,6 +23,7 @@ caller does the rest, each step behind its own idempotency guard.
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import update
@@ -38,7 +39,12 @@ from secretaria.models import (
     Tenant,
 )
 from secretaria.services import booking_hold, unit_booking
-from secretaria.services.calendar import CalendarService, build_patient_calendar_link
+from secretaria.services.calendar import (
+    CalendarService,
+    build_event_description,
+    build_patient_calendar_link,
+    build_patient_link_details,
+)
 from secretaria.services.insurance_catalog import resolve_booking_plan_ids
 from secretaria.services.local_calendar import LocalCalendarService, create_event_exclusive
 from secretaria.services.tenant_config import load_tenant_config, resolve_professional_calendar
@@ -191,11 +197,27 @@ async def promote(
     summary = (
         f"{snapshot.appointment_type} - {display}" if display else snapshot.appointment_type
     )
+    # TASK-083 follow-up: a paid booking AT A UNIT gets the event description every other booking
+    # path writes, with where and with whom. Without a unit it stays exactly as before (none).
+    where = await unit_booking.booking_unit_fields(
+        session, tenant.id, snapshot.unit_id, snapshot.professional_id
+    )
+    description = (
+        build_event_description(
+            service=snapshot.appointment_type,
+            insurance=snapshot.insurance,
+            attendee_name=snapshot.attendee_name,
+            **where,
+        )
+        if where
+        else ""
+    )
     event = await create_event_exclusive(
         calendar,
         start=snapshot.start_at,
         end=snapshot.end_at,
         summary=summary,
+        description=description,
         event_id=event_id_for(deposit.id, calendar=calendar),
     )
     google_event_id = event.get("id") or event_id_for(deposit.id, calendar=calendar)
@@ -259,11 +281,14 @@ def confirmation_text(
     patient_name: str | None,
     *,
     late_reopened: bool,
-    unit_location: str | None = None,
+    unit: Any | None = None,
+    professional_name: str | None = None,
 ) -> str:
     """The "consulta confirmada" bubble, sent only once the payment was identified.
 
-    `unit_location` (TASK-083): "<unit> — <address>" of the booking's unit, or None."""
+    `unit` (TASK-083): the booking's unit row, or None. With one, the text names the doctor (when
+    known), the unit and its address on their own lines, and the patient's add-to-calendar link
+    carries the same details in its "Detalhes" (follow-up, owner 2026-11-13)."""
     from zoneinfo import ZoneInfo
 
     try:
@@ -274,6 +299,11 @@ def confirmation_text(
     local_end = snapshot.end_at.astimezone(tz)
     display = snapshot.attendee_name or patient_name
     summary = f"{snapshot.appointment_type} - {display}" if display else snapshot.appointment_type
+    location = (
+        unit_booking.unit_location(getattr(unit, "name", None), getattr(unit, "address", None))
+        if unit is not None
+        else None
+    )
     lines = []
     if late_reopened:
         from secretaria.services.payments.deposit_lifecycle import before_late_reopened_text
@@ -284,10 +314,23 @@ def confirmation_text(
         f"{snapshot.appointment_type}\n"
         + (f"Paciente: {snapshot.attendee_name}\n" if snapshot.attendee_name else "")
         + f"{local_start.strftime('%d/%m/%Y às %H:%M')}\n"
-        + (f"Local: {unit_location}\n" if unit_location else "")
+        + unit_booking.confirmation_unit_lines(unit, professional_name)
         + "\nAdicionar à sua agenda:\n"
         + build_patient_calendar_link(
-            local_start, local_end, summary, tz=tz, location=unit_location or None
+            local_start,
+            local_end,
+            summary,
+            build_patient_link_details(
+                service=snapshot.appointment_type,
+                insurance=snapshot.insurance,
+                start=local_start,
+                tz=tz,
+                attendee_name=snapshot.attendee_name,
+                professional=professional_name,
+                **unit_booking.unit_fields(unit),
+            ),
+            tz=tz,
+            location=location,
         )
     )
     from secretaria.services.payments.deposit_lifecycle import reschedule_rules_text

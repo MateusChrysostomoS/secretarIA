@@ -19,7 +19,7 @@ import asyncio
 import copy
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import quote, urlencode
 from uuid import UUID
@@ -54,22 +54,67 @@ DEFAULT_EVENT_REMINDERS: list[dict] = [
 _CHANNEL_LABELS = {"brain_message": "Portal", "whatsapp": "WhatsApp"}
 
 
+_WEEKDAY_NAMES_PT = (
+    "segunda-feira",
+    "terça-feira",
+    "quarta-feira",
+    "quinta-feira",
+    "sexta-feira",
+    "sábado",
+    "domingo",
+)
+
+
+def _one_line(value: object) -> str:
+    """`value` as one trimmed line: a stray newline cannot forge another labelled line."""
+    return " ".join(str(value or "").split())
+
+
+def format_event_when(start: datetime, tz: tzinfo | None = None) -> str:
+    """ "terça-feira, 17/11/2026 às 14:00" on the clinic's clock. Pure.
+
+    An aware `start` is shown in `tz` when given; a naive one is already the clinic's local time.
+    """
+    if tz is not None and start.tzinfo is not None:
+        start = start.astimezone(tz)
+    return f"{_WEEKDAY_NAMES_PT[start.weekday()]}, {start.strftime('%d/%m/%Y às %H:%M')}"
+
+
 def build_event_description(
     *,
     service: str | None,
     insurance: str | None,
     channel: str | None = None,
     attendee_name: str | None = None,
+    unit_name: str | None = None,
+    unit_address: str | None = None,
+    professional: str | None = None,
+    when: str | None = None,
 ) -> str:
     """The event's description: what a doctor needs to recognise the booking.
 
     The convênio is ALWAYS stated (or "não informado"): the clinic asked for it to
     be explicit in the event. No phone, no e-mail, no clinical text — the summary
     already carries the name, and this lands on a calendar other people may see.
+
+    TASK-083 follow-up (owner, 2026-11-13): WHERE and WITH WHOM - `professional`
+    ("Profissional: ..."), `when` (already-formatted local date/time, see
+    `format_event_when`), `unit_name` / `unit_address` ("Unidade: ..." / "Endereço: ...").
+    All optional: without them the text is byte for byte what it always was. The same
+    builder fills the PATIENT's add-to-calendar link (`build_patient_link_details`).
     """
     lines: list[str] = []
     if service:
         lines.append(f"Serviço: {service}")
+    for label, value in (
+        ("Profissional", professional),
+        ("Data e horário", when),
+        ("Unidade", unit_name),
+        ("Endereço", unit_address),
+    ):
+        text = _one_line(value)
+        if text:
+            lines.append(f"{label}: {text}")
     lines.append(f"Convênio: {insurance}" if insurance else "Convênio: não informado")
     if attendee_name:
         lines.append(f"Consulta para: {attendee_name}")
@@ -77,6 +122,34 @@ def build_event_description(
     if label:
         lines.append(f"Agendado pelo: {label}")
     return "\n".join(lines)
+
+
+def build_patient_link_details(
+    *,
+    service: str | None,
+    insurance: str | None,
+    start: datetime,
+    tz: tzinfo | None = None,
+    attendee_name: str | None = None,
+    professional: str | None = None,
+    unit_name: str | None = None,
+    unit_address: str | None = None,
+) -> str:
+    """The "Detalhes" of the event the PATIENT adds by tapping `build_patient_calendar_link`.
+
+    The event description's builder with the date line, the doctor whenever known and the unit
+    (name and address) whenever the booking has one. Never the channel, and - like the event -
+    no phone, no e-mail, no clinical text.
+    """
+    return build_event_description(
+        service=service,
+        insurance=insurance,
+        attendee_name=attendee_name,
+        professional=professional,
+        when=format_event_when(start, tz),
+        unit_name=unit_name,
+        unit_address=unit_address,
+    )
 
 SCOPES = [
     "https://www.googleapis.com/auth/calendar.events",

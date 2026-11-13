@@ -244,6 +244,39 @@ async def test_a_move_mails_the_clinic_and_the_portal_patient_but_never_the_doct
     assert "hub.example.com" not in patient
 
 
+async def test_a_moves_patient_link_details_name_the_unit_address_doctor_and_new_time(world):
+    """TASK-083 follow-up: the rescheduled mail's add-to-calendar link carries the details."""
+    from urllib.parse import parse_qs, urlparse
+
+    from secretaria.models import Unit
+
+    _tenant, appointment = await _rows(
+        world, status=AppointmentStatus.RESCHEDULED, start_at=MOVED_TO
+    )
+    async with world.db() as session:
+        unit = Unit(
+            id=uuid4(), tenant_id=appointment.tenant_id, name="Centro", address="Rua A, 10"
+        )
+        session.add(unit)
+        await session.flush()
+        (await session.get(Appointment, appointment.id)).unit_id = unit.id
+        await session.commit()
+
+    await _run_move(appointment)
+
+    patient = world.mailer.body("appointment_rescheduled_patient")
+    [link] = [line for line in patient.splitlines() if line.startswith("https://calendar.google")]
+    details = parse_qs(urlparse(link).query)["details"][0]
+    assert details == (
+        "Serviço: Consulta\n"
+        "Profissional: Dra. Ana\n"
+        "Data e horário: quarta-feira, 16/10/2030 às 10:00\n"
+        "Unidade: Centro\n"
+        "Endereço: Rua A, 10\n"
+        "Convênio: não informado"
+    )
+
+
 async def test_a_whatsapp_patient_gets_no_mail_of_their_own(world):
     _tenant, appointment = await _rows(world, channel="whatsapp")
 
