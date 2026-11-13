@@ -318,6 +318,52 @@ Testes novos: `tests/test_emoji_decoration.py` (41 casos: o mapeamento pedido, o
 render↔match nas três formas, e a ponta a ponta) + 13 casos de aritmética do orçamento em
 `tests/test_whatsapp_limits.py`.
 
+## §6 — Quarta rodada (2026-11-13, TASK-082 S4): listas longas paginadas, busca digitada, limite no cadastro
+
+O teto de 10 linhas por lista **continua** (`MAX_LIST_ROWS`, 24 no título, 20 no botão — os
+mesmos helpers). O que muda é o que acontece quando o catálogo passa disso.
+
+### Paginação (fim do corte silencioso)
+
+- `flow_router.catalog_page(items, page, fixed_rows)`: lista que cabe em `10 - fixas` fica
+  **idêntica** à de antes (≤9 com "Não sei", ≤10 sem). Acima disso: **8 por página** +
+  "Ver mais serviços" / "Ver mais profissionais" + as fixas — nunca > 10. Cursor fora do
+  fim → página 0 (mesmo critério de `insurance_page`).
+- A página (e, numa lista filtrada, a chave de busca) vai **no id da linha**:
+  `svcmore|<pág>[|<chave>]`, `profmore|<pág>[|<chave>]`, `insmore|<pág>|<chave>` — prefixos
+  em `_PAYLOAD_ROW_PREFIXES` (pinado em `tests/test_webhook_parsing.py`). Nenhuma coluna nova.
+- Vale para serviços, profissionais, catálogo da clínica, profissionais do serviço e as listas
+  do "alterar consulta" (`appointment_edit_flow`). "Não sei" fica em **toda** página.
+- Os eventos `flow_*_list_truncated` foram mantidos (agora `info`, com `page`, `paged=True`).
+- O Portal não muda: o cartão segue com o `source` da S1 (lista inteira), igual em toda página.
+
+### Busca digitada (`services/catalog_search.py`)
+
+Chave = NFKD sem acento/emoji/símbolo/pontuação, casefold, espaços colapsados; "contém";
+mínimo 2 caracteres; texto **cortado em 60**. Depois do match exato falhar: **1 achado →
+selecionado**; **vários → lista curta** só com eles (≤8 + "Ver mais"); **nenhum →** "Não
+encontrei…" + a lista inteira de novo (não vai para a LLM). Ainda vai para a LLM: pergunta /
+frase (`_reads_as_conversation`), mais de 3 palavras, ou nada buscável. Convênio: fragmento
+mostra só os planos achados para tocar — **mesmo com 1 achado** (cobertura não se adivinha).
+Log `flow_catalog_typed_search` só com tipo + contagem — **nunca o texto**. Listas paginadas
+ganham "Digite parte do nome para buscar." no corpo.
+
+### Limite no cadastro (`core/catalog_limits.py`)
+
+40 serviços por profissional, 120 por clínica (ativos), 60 convênios (o que a lista do
+paciente mostra, por modo). Regra "não cresce além do limite": recusa só se o novo total
+> limite **e** > total salvo → 422 `{"code":"catalog_limit_exceeded","limit","count"}`.
+Clínica que já passou do limite continua editando/apagando. Rotas do hub de config,
+profissionais, serviços e convênios; leitura e dados existentes intocados; sem migração.
+
+### Validação da 4ª rodada
+
+`uv run python -m pytest` (com `BOT_ALLOWLIST_WA_IDS=""`, em 6 blocos por falta de memória)
+→ **7931 passando**, 35 pulados, 1 xfail, **2 falhas pré-existentes**
+(`test_service_change_agenda` ×2, já falhavam antes da tarefa). Testes novos:
+`tests/test_whatsapp_catalog_paging.py` (52) e `tests/test_catalog_limits.py` (22).
+`ruff check` limpo nos arquivos tocados; diferenças de `ruff format` restantes são do HEAD.
+
 ## Pendências
 
 1. **Commit + deploy dos dois serviços.** `flow_router.py`, `whatsapp.py` e
@@ -337,6 +383,9 @@ render↔match nas três formas, e a ponta a ponta) + 13 casos de aritmética do
 6. **`ServiceCard` não foi visto rodando.** O caminho está coberto por teste e o
    `HelpTip` tem precedente idêntico em `AvailabilitySection`, mas ninguém olhou
    o card com o "?" na tela — precisa de um hub com backend de verdade.
+7. **§6 (TASK-082 S4) commitado só localmente.** Toca `flow_router.py` e
+   `appointment_edit_flow.py` (worker) e as rotas do hub (API) → deploy dos **dois**
+   serviços. Não testado num número de WhatsApp real.
 
 Padrão generalizado na skill `third-party-text-limits`
 (`TECH/.claude/skills/third-party-text-limits/SKILL.md`).

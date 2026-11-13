@@ -168,6 +168,8 @@ _PAYLOAD_TAPS = [
     ("dayagain|2", "⬅️ Outro dia", "2"),
     ("dayback|service", "⬅️ Outro serviço", "service"),
     ("insmore|1", "Ver mais convênios", "1"),
+    ("svcmore|2", "Ver mais serviços", "2"),
+    ("profmore|1|ana", "Ver mais profissionais", "1|ana"),
 ]
 
 

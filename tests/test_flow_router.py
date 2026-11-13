@@ -262,11 +262,24 @@ def test_service_detail_text_does_not_double_prefix_an_already_priced_value():
 
 
 async def test_unmatched_service_delegates_preserving_state():
+    # A sentence with no service in it is talk: the model answers, the step is kept.
     conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_AWAITING_SERVICE)
-    res = await route(conv, _tenant(), None, "blá blá")
+    res = await route(conv, _tenant(), None, "na verdade queria falar sobre outra coisa")
     assert res.action == "delegate_llm"
     assert res.flow_state == FlowState.SERVICE_CATALOG
     assert res.flow_step == STEP_AWAITING_SERVICE
+
+
+async def test_a_short_unmatched_name_reoffers_the_list_preserving_state():
+    # TASK-082 S4: a name attempt with no hit says so and lists again - not the model.
+    from secretaria.services.flow_router import SEARCH_NO_HIT_SERVICE
+
+    conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_AWAITING_SERVICE)
+    res = await route(conv, _tenant(), None, "blá blá")
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.SERVICE_CATALOG
+    assert res.flow_step == STEP_AWAITING_SERVICE
+    assert res.bubbles[0].body.startswith(SEARCH_NO_HIT_SERVICE)
 
 
 async def test_service_confirm_opens_the_day_picker():

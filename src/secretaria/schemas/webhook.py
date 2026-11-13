@@ -563,6 +563,11 @@ def minimal_event_payload(payload: dict) -> dict:
 #   dayagain|<page>      -> "Escolher outro dia (1)"       slot list -> day list
 #   dayback|<target>     -> "Voltar (service)"             day/slot list -> back
 #   insmore|<page>       -> "Ver mais convênios (1)"       convênio-list paging
+#   svcmore|<page>       -> "Ver mais serviços (1)"        service-list paging
+#   profmore|<page>      -> "Ver mais profissionais (1)"   doctor-list paging
+#                           (TASK-082 S4; on a list filtered by a typed fragment
+#                            the payload is "<page>|<search key>", letters,
+#                            digits and spaces only - services/catalog_search.py)
 #
 # The right-hand column is the ROUTING text (`inbound_routing_text`): what the
 # flow router and the agent's history read. It is never the stored message
@@ -584,6 +589,8 @@ _PAYLOAD_ROW_PREFIXES: tuple[str, ...] = (
     "dayagain|",
     "dayback|",
     "insmore|",
+    "svcmore|",
+    "profmore|",
 )
 
 
