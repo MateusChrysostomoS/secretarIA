@@ -121,6 +121,20 @@ async def unit_options_for(
     return options
 
 
+async def attach_unit_options(
+    session: AsyncSession, tenant: Any, professional_rows: Iterable[Any], snapshots: Iterable[Any]
+) -> None:
+    """Put each router snapshot's offered units on it as `units` (one read for the roster).
+
+    `professional_rows` are the ORM rows (their hours resolve the NULL links); `snapshots` the
+    router-shaped copies (workers/shared/greeting.py::_flow_professionals) that travel into the
+    pure router. A snapshot without units gets `[]`: the flow is then exactly today's.
+    """
+    options = await unit_options_for(session, tenant, list(professional_rows))
+    for snapshot in snapshots:
+        snapshot.units = options.get(snapshot.id, [])
+
+
 def scoped_calendar(calendar: Any, unit: Any | None, *, with_hours: bool = True) -> Any:
     """`calendar` as seen from `unit` (its hours, id and location), or `calendar` itself.
 
@@ -210,6 +224,7 @@ async def check_unit(
 __all__ = [
     "UnitOption",
     "UnitRefused",
+    "attach_unit_options",
     "calendar_at_unit",
     "check_unit",
     "scoped_calendar",

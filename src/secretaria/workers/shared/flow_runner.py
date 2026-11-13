@@ -337,6 +337,7 @@ async def _apply_flow_result(
                     conv.flow_selected_slot = result.flow_selected_slot
                     conv.flow_selected_professional_id = result.flow_selected_professional_id
                     conv.flow_selected_insurance = result.flow_selected_insurance
+                    conv.flow_selected_unit_id = result.flow_selected_unit_id
                     conv.flow_managing_appointment_id = result.flow_managing_appointment_id
                     conv.flow_attendee_name = result.flow_attendee_name
                     conv.flow_draft = result.flow_draft

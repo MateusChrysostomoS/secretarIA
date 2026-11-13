@@ -109,6 +109,9 @@ async def load_upcoming_appointments(
             "professional_id": str(appt.professional_id) if appt.professional_id else None,
             **({"google_calendar_source": appt.google_calendar_source}
                if appt.google_calendar_source is not None else {}),
+            # TASK-083: the unit, only when the booking has one (a reschedule keeps it and is
+            # offered within its hours - flow_router._appointment_unit_calendar).
+            **({"unit_id": str(appt.unit_id)} if appt.unit_id is not None else {}),
         }
         for appt in rows
     ]

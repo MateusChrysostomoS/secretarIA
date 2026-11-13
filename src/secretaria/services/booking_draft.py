@@ -32,7 +32,7 @@ from uuid import UUID
 
 from secretaria.ai.formatter import TextBubble
 from secretaria.models import FlowState
-from secretaria.services import flow_router as fr
+from secretaria.services import flow_router as fr, flow_units
 from secretaria.services.attendee import ATTENDEE_SELF, real_attendee_name
 from secretaria.services.availability import (
     booking_notice_floor,
@@ -479,6 +479,9 @@ def _carry(result: FlowRouterResult, state: Any) -> FlowRouterResult:
         result.flow_selected_professional_id = state.flow_selected_professional_id
     if result.flow_attendee_name is None:
         result.flow_attendee_name = state.flow_attendee_name
+    if result.flow_selected_unit_id is None and result.flow_step in fr.UNIT_KEEP_STEPS:
+        # TASK-083: the unit the landing used (chosen before, or the doctor's only one).
+        result.flow_selected_unit_id = getattr(state, "flow_selected_unit_id", None)
     return result
 
 
@@ -571,6 +574,9 @@ async def _resolve(
         ),
         flow_selected_insurance=checked.insurance,
         flow_attendee_name=checked.attendee_name,
+        # TASK-083: a unit already chosen in the buttons; `_land_day` keeps it only when it is
+        # one the booking's doctor still offers (`flow_units.effective_unit`).
+        flow_selected_unit_id=getattr(conversation, "flow_selected_unit_id", None),
     )
 
     def done(result: FlowRouterResult, *names: str, fallback: str | None = None) -> DraftResolution:
@@ -711,14 +717,21 @@ def details_already_shown(
 
 
 def _booking_details(
-    checked: _Checked, state: Any, *, conversation: Any, tenant: Any, owner: Any | None
+    checked: _Checked,
+    state: Any,
+    *,
+    conversation: Any,
+    tenant: Any,
+    owner: Any | None,
+    unit: Any | None = None,
 ) -> str | None:
     """The details message for a landing past the service card, or None.
 
     None on a clinic without the AI draft v2 switch (P2's landings stay exactly as they
     were), without a resolved service, or when the patient already saw this booking's
-    details. `tenant.clinic_address` is the line workers/shared/draft_resolution.py put on
-    the snapshot (None when the clinic has none, or has units).
+    details. The address is the booking's UNIT when it has one (TASK-083 spec §8), else
+    `tenant.clinic_address`, the line workers/shared/draft_resolution.py put on the snapshot
+    (None when the clinic has none, or has units - then no unit means no address at all).
     """
     if not fr.ai_draft_v2_enabled(tenant) or checked.service is None:
         return None
@@ -733,7 +746,9 @@ def _booking_details(
         professional=owner,
         insurance=state.flow_selected_insurance,
         attendee_name=state.flow_attendee_name,
-        address=getattr(tenant, "clinic_address", None),
+        address=(
+            unit.location if unit is not None else getattr(tenant, "clinic_address", None)
+        ),
     )
 
 
@@ -783,11 +798,21 @@ async def _land_day(
     owner = fr._booking_professional(state, professionals)
     if owner is not None and not professional_business_hours(owner, tenant):
         return done(fr._professional_config_incomplete(owner, fr.PROFESSIONAL_GAP_HOURS), *base)
+    # TASK-083 spec §8: a doctor who attends at units books at one. Two or more and none
+    # chosen: the day picker's own choke point (`_ask_day`) asks it - never a day or a time
+    # without the unit. One: that unit, silently. None at all: today's landing.
+    unit = flow_units.effective_unit(state, owner)
+    state.flow_selected_unit_id = unit.id if unit is not None else None
+    if flow_units.offered_units(owner) and unit is None:
+        result = await fr._ask_day(state, tenant, None, None, professionals)
+        return done(result, *base)
 
     details = _booking_details(
-        checked, state, conversation=conversation, tenant=tenant, owner=owner
+        checked, state, conversation=conversation, tenant=tenant, owner=owner, unit=unit
     )
-    cal = await calendar(checked.professional if checked.multi else None)
+    cal = flow_units.scoped_calendar(
+        await calendar(checked.professional if checked.multi else None), unit
+    )
 
     def land(result: FlowRouterResult, *names: str) -> DraftResolution:
         return done(_with_details(result, details), *names)
@@ -910,7 +935,12 @@ async def _express_confirmation(
         if calendar is not None and slot_start.tzinfo is not None
         else slot_start
     )
-    card = fr._confirmation_card(state, start, professional=professional)
+    card = fr._confirmation_card(
+        state,
+        start,
+        professional=professional,
+        unit=flow_units.effective_unit(state, fr._booking_professional(state, professionals)),
+    )
     return FlowRouterResult(
         action="reply",
         bubbles=[TextBubble(body=details), card] if details else [card],

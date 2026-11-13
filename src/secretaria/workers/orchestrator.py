@@ -121,6 +121,7 @@ from secretaria.services.turn_safety_net import (
     take_held_intro,
 )
 from secretaria.services.typing_indicator import clear_typing, mark_typing
+from secretaria.services.unit_booking import attach_unit_options
 from secretaria.workers.portal.attachments import (
     _handle_attachment_received,
 )
@@ -478,6 +479,11 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                     # router can mark doctors without a query of its own.
                     tenant_insurance = await load_tenant_insurance(session, tenant.id)
                     flow_professionals = _flow_professionals(professional_rows, service_catalog)
+                    # TASK-083 spec §8: each doctor's offered units (one read for the roster),
+                    # so the pure router can ask "which unit?" and use that unit's hours.
+                    await attach_unit_options(
+                        session, tenant, professional_rows, flow_professionals
+                    )
                     selected_id = conversation.flow_selected_professional_id
                     if selected_id is not None:
                         selected_row = next(
@@ -521,6 +527,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                                 conversation.flow_selected_professional_id
                             ),
                             flow_selected_insurance=conversation.flow_selected_insurance,
+                            flow_selected_unit_id=conversation.flow_selected_unit_id,
                             flow_managing_appointment_id=(
                                 conversation.flow_managing_appointment_id
                             ),
@@ -1231,6 +1238,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                     flow_selected_professional_id=conv_snapshot.flow_selected_professional_id,
                     flow_selected_insurance=conv_snapshot.flow_selected_insurance,
                     flow_attendee_name=conv_snapshot.flow_attendee_name,
+                    flow_selected_unit_id=getattr(conv_snapshot, "flow_selected_unit_id", None),
                 ),
                 patient_wa,
                 redis=redis,

@@ -50,6 +50,7 @@ from secretaria.services.flow_router import (
 from secretaria.services.insurance_catalog import load_tenant_insurance
 from secretaria.services.service_catalog import load_service_catalog
 from secretaria.services.tenant_config import list_active_professionals
+from secretaria.services.unit_booking import attach_unit_options
 from secretaria.workers.shared.channel_policy import policy_for
 from secretaria.workers.shared.context import _ReplyContext
 from secretaria.workers.shared.greeting import _flow_professionals, _flow_tenant_snapshot
@@ -84,6 +85,7 @@ def _conversation_flow_snapshot(conversation: Conversation) -> SimpleNamespace:
         flow_selected_slot=conversation.flow_selected_slot,
         flow_selected_professional_id=conversation.flow_selected_professional_id,
         flow_selected_insurance=conversation.flow_selected_insurance,
+        flow_selected_unit_id=conversation.flow_selected_unit_id,
         flow_managing_appointment_id=conversation.flow_managing_appointment_id,
         flow_attendee_name=conversation.flow_attendee_name,
         flow_draft=conversation.flow_draft,
@@ -119,9 +121,16 @@ async def _load_draft_context(reply: _ReplyContext, tenant: Tenant) -> DraftCont
             .select_from(Unit)
             .where(Unit.tenant_id == tenant.id, Unit.is_active.is_(True))
         )
+        professionals = _flow_professionals(professional_rows, service_catalog)
+        # TASK-083 spec §8: each doctor's offered units, so the resolver asks "which unit?"
+        # (or uses the only one) and the booking details name THAT unit's address.
+        await attach_unit_options(session, tenant, professional_rows, professionals)
     tenant_snapshot = _flow_tenant_snapshot(
         tenant, professional_rows, service_catalog, tenant_insurance
     )
+    # The clinic's own address only when it has no unit: with units, the address a patient
+    # reads is the CHOSEN unit's (services/booking_draft.py::_booking_details), and without a
+    # chosen unit none at all - the clinic's could be the wrong building.
     tenant_snapshot.clinic_address = (
         None if active_units else clinic_address_line(getattr(tenant, "address", None))
     )
@@ -129,7 +138,7 @@ async def _load_draft_context(reply: _ReplyContext, tenant: Tenant) -> DraftCont
         tenant=tenant,
         conversation=snapshot,
         professional_rows=professional_rows,
-        professionals=_flow_professionals(professional_rows, service_catalog),
+        professionals=professionals,
         service_catalog=service_catalog,
         tenant_insurance=tenant_insurance,
         tenant_snapshot=tenant_snapshot,
