@@ -522,6 +522,8 @@ class LocalCalendarService(CalendarService):
         local._business_hours = calendar._business_hours
         local._default_slot_minutes = calendar._default_slot_minutes
         local._shared_busy_provider = calendar.shared_busy_provider
+        local._unit_id = getattr(calendar, "_unit_id", None)
+        local._location = getattr(calendar, "_location", None)
         return local
 
     @property
@@ -674,6 +676,8 @@ class LocalCalendarService(CalendarService):
                 status=EVENT_STATUS_CONFIRMED,
                 created_at=now,
                 updated_at=now,
+                # TASK-083: the unit of an agenda scoped to one (`with_unit`); None otherwise.
+                unit_id=getattr(self, "_unit_id", None),
             )
             session.add(row)
             # Built before the commit: every field was set here, nothing to reload.

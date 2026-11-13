@@ -387,6 +387,10 @@ class CalendarService:
     # Which backend answers: "google" here, "local" on LocalCalendarService. Read by the
     # hub (CalendarEventRead.calendar_backend) and the connect-time sync.
     backend: ClassVar[str] = "google"
+    # TASK-083 spec §8: the unit a booking on this agenda happens at (`with_unit`). Class-level
+    # None so every agenda built without one - and every copy - reads "no unit".
+    _unit_id: UUID | None = None
+    _location: str | None = None
 
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
@@ -458,6 +462,28 @@ class CalendarService:
         # agenda (lock and siblings) and checks this agenda's own events only.
         view._shared_writes = False
         return view
+
+    def with_unit(
+        self, unit_id: UUID | None, location: str | None, *, business_hours: dict | None = None
+    ) -> "CalendarService":
+        """This agenda as seen from one unit (TASK-083 spec §8) - a copy, never this object.
+
+        `business_hours` (when given) replaces the offered hours: the days and times listed are
+        the unit's. The BUSY time is untouched - the same person's whole agenda (and siblings).
+        A write through the copy records the unit: its id on a secretarIA event, its `location`
+        on a Google event.
+        """
+        scoped = copy.copy(self)
+        scoped._unit_id = unit_id
+        scoped._location = location
+        if business_hours is not None:
+            scoped._business_hours = business_hours
+        return scoped
+
+    @property
+    def unit_id(self) -> UUID | None:
+        """The unit this agenda object was scoped to (`with_unit`), or None."""
+        return getattr(self, "_unit_id", None)
 
     async def overlaps_shared_busy(self, start: datetime, end: datetime) -> bool:
         """Whether [start, end) overlaps the person's busy time at ANOTHER clinic.
@@ -1117,6 +1143,10 @@ class CalendarService:
         }
         if event_id is not None:
             body["id"] = event_id
+        location = getattr(self, "_location", None)
+        if location:
+            # TASK-083: where the visit happens, on an agenda scoped to a unit (`with_unit`).
+            body["location"] = location
         calendar_id = self._calendar_id
 
         def _insert() -> dict:

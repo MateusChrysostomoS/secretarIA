@@ -26,8 +26,10 @@ def test_there_is_exactly_one_head_and_it_is_this_migration_on_top_of_the_previo
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "migrations"))
     scripts = ScriptDirectory.from_config(config)
-    heads = scripts.get_heads()
-    assert heads == [REVISION]
+    # Later revisions may sit on top (Task 7: conversations.flow_selected_unit_id); this one
+    # stays in the single chain.
+    assert len(scripts.get_heads()) == 1
+    assert REVISION in {rev.revision for rev in scripts.walk_revisions()}
     assert _migration().down_revision == DOWN_REVISION
 
 
