@@ -122,7 +122,7 @@ async def sync_tenant_agendas(
     `only_professional_id` restricts the writes to that professional (the attach trigger); the
     returned counts always describe the whole tenant. A tenant with no professionals costs no call.
     """
-    stmt = select(Professional).where(Professional.tenant_id == tenant_id)
+    stmt = select(Professional).where(Professional.tenant_id == tenant_id).order_by(Professional.id)
     if only_professional_id is not None:
         stmt = stmt.where(Professional.id == only_professional_id)
     professionals = list(await session.scalars(stmt))
@@ -134,10 +134,15 @@ async def sync_tenant_agendas(
         if accounts is None:
             brain_ok = False
         else:
-            for professional in professionals:
-                account_id = accounts.get(str(professional.id))
-                if not account_id:
-                    continue
+            # Lock order: concurrent syncs (two clinics of one person, the cron) each take
+            # per-account advisory locks inside one transaction. Taking them in one global order
+            # (account id, then professional id) rules out an A->B / B->A deadlock.
+            pairs = sorted(
+                (account_id, professional.id, professional)
+                for professional in professionals
+                if (account_id := accounts.get(str(professional.id)))
+            )
+            for account_id, _professional_id, professional in pairs:
                 before = professional.agenda_id
                 agenda = await ensure_agenda_for_professional(session, professional, account_id)
                 if before != agenda.id:
@@ -167,7 +172,10 @@ async def try_link_professional(
         await sync_tenant_agendas(session, tenant_id, only_professional_id=professional_id)
         await session.commit()
     except Exception as exc:  # noqa: BLE001 - linking must never break onboarding
-        await session.rollback()
+        try:
+            await session.rollback()
+        except Exception:  # noqa: BLE001, S110 - a failed rollback must not break onboarding either
+            pass
         logger.warning(
             "agenda_link_failed",
             tenant_id=str(tenant_id),

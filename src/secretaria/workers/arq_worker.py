@@ -21,6 +21,7 @@ from secretaria.plugins.appointment_change_notifications import notify_appointme
 from secretaria.plugins.post_booking import run_post_booking_hooks
 from secretaria.plugins.professional_notification import retry_professional_notification
 from secretaria.plugins.reminders import send_appointment_reminders
+from secretaria.workers.agenda_cron import agenda_reconcile_minutes, run_agenda_reconcile
 from secretaria.workers.calendar_sync import sync_local_calendar_to_google
 from secretaria.workers.confirmation_warnings import process_confirmation_warnings
 from secretaria.workers.deploy_parity import check_deploy_parity_cron
@@ -236,6 +237,9 @@ class WorkerSettings:
         cron(run_payment_daily, hour={DAILY_HOUR}, minute={DAILY_MINUTE}),
         # One e-mail per item when a patient cancels a paid consultation (TASK-017, answer 13).
         cron(run_attention_alerts, minute=ATTENTION_ALERT_MINUTES),
+        # TASK-083: link professionals brain-api bound to an account after the attach
+        # (workers/agenda_cron.py). Interval/bound come from Settings; bounded, idempotent.
+        cron(run_agenda_reconcile, minute=agenda_reconcile_minutes()),
     ]
     on_startup = on_startup
     on_shutdown = on_shutdown

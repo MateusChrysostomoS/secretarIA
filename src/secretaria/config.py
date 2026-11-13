@@ -242,6 +242,15 @@ class Settings(BaseSettings):
     # 'completa' (unlike the retry cadence, there is no total-days cutoff).
     CONFIG_REMINDER_WEEKLY_DAYS: int = 7
 
+    # --- Shared-agenda reconcile cron (workers/agenda_cron.py - TASK-083) ---
+    # brain-api binds `users.professional_id` AFTER the internal attach, so linking a new
+    # professional to their person's agenda at attach time usually finds nothing. This cron
+    # catches up: every AGENDA_RECONCILE_INTERVAL_MINUTES (1-60) it re-syncs the tenants that
+    # still have an active professional with no agenda, at most AGENDA_RECONCILE_MAX_TENANTS_PER_RUN
+    # tenants per tick (one brain-api call each), so a slow brain-api cannot make a tick unbounded.
+    AGENDA_RECONCILE_INTERVAL_MINUTES: int = 15
+    AGENDA_RECONCILE_MAX_TENANTS_PER_RUN: int = 25
+
     # --- Inbound rate limiting (per WhatsApp id, Redis-backed) ---
     # Caps how many inbound messages one wa_id may send in a sliding window
     # before the bot goes silent for them, protecting against floods that would

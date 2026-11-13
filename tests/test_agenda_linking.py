@@ -268,3 +268,40 @@ async def test_person_lock_takes_one_stable_key_per_account_on_postgres_only(db)
     assert len(keys) == 3 and keys[0] == keys[1] != keys[2]
     async with db() as session:  # SQLite: nothing to execute
         await agenda_linking._person_lock(session, ACCOUNT_A)
+
+
+async def test_account_locks_are_taken_in_sorted_account_order(db, monkeypatch):
+    """Concurrent syncs (two clinics, the cron) must lock accounts in ONE global order."""
+    tenant = await seed_tenant(db)
+    pros = [await seed_professional(db, tenant, f"Dr. {i}") for i in range(4)]
+    accounts = sorted(str(uuid4()) for _ in pros)
+    # professional order and account order disagree on purpose
+    mapping = {str(p.id): a for p, a in zip(pros, reversed(accounts), strict=True)}
+    _fake_accounts(monkeypatch, {tenant.id: mapping})
+    taken: list[str] = []
+    real_lock = agenda_linking._person_lock
+
+    async def recording_lock(session, person_key):
+        taken.append(person_key)
+        await real_lock(session, person_key)
+
+    monkeypatch.setattr(agenda_linking, "_person_lock", recording_lock)
+    async with db() as session:
+        await sync_tenant_agendas(session, tenant.id)
+        await session.commit()
+    assert taken == accounts == sorted(taken)
+
+
+async def test_try_link_professional_never_raises_even_if_rollback_fails(monkeypatch):
+    class BrokenSession:
+        async def commit(self):
+            raise RuntimeError("commit failed")
+
+        async def rollback(self):
+            raise ConnectionError("connection already gone")
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("sync failed")
+
+    monkeypatch.setattr(agenda_linking, "sync_tenant_agendas", boom)
+    await try_link_professional(BrokenSession(), uuid4(), uuid4())  # must not raise
