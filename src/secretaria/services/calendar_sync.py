@@ -42,7 +42,7 @@ from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import Appointment, Professional, Tenant
 from secretaria.models.calendar_event import EVENT_STATUS_CONFIRMED, CalendarEvent
-from secretaria.services import local_calendar
+from secretaria.services import local_calendar, unit_booking
 from secretaria.services.calendar import (
     LOCAL_EVENT_ID_PREFIX,
     CalendarService,
@@ -132,6 +132,10 @@ async def _push_one(
             return "skipped"
         google_id = google_id_for(row.id)
         outcome = "pushed"
+        # TASK-083 final wave F3: an event at a unit reaches Google with the unit's location
+        # (tenant-scoped lookup: a stray foreign id names nothing). No unit: the same call.
+        unit = await unit_booking.tenant_unit(session, tenant_id, getattr(row, "unit_id", None))
+        calendar = unit_booking.scoped_calendar(calendar, unit, with_hours=False)
         try:
             created = await calendar.create_event(
                 as_utc(row.start_at),

@@ -70,7 +70,7 @@ from secretaria.core.logging import get_logger
 from secretaria.plugins.base import PluginSpec
 from secretaria.plugins.registry import register
 from secretaria.services.calendar import build_event_description, build_patient_calendar_link
-from secretaria.services.unit_booking import scoped_calendar
+from secretaria.services.unit_booking import scoped_calendar, unit_location
 
 logger = get_logger(__name__)
 
@@ -377,7 +377,12 @@ async def create_event_for_professional(
             # leave exactly the clinics paying for this addon with no link at
             # all. See services/calendar.py::build_patient_calendar_link.
             "patient_calendar_link": build_patient_calendar_link(
-                fallback_start, fallback_end, summary, description, tz=cal.tzinfo
+                fallback_start,
+                fallback_end,
+                summary,
+                description,
+                tz=cal.tzinfo,
+                location=unit_location(unit.name, unit.address) if unit is not None else None,
             ),
         },
         professional,

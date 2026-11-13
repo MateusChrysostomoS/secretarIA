@@ -39,7 +39,7 @@ from secretaria.services.email import EmailOutcome, send_transactional_email_res
 from secretaria.services.flow_router import LABEL_INSURANCE_PARTICULAR
 from secretaria.services.insurance_catalog import load_appointment_plans
 from secretaria.services.tenant_config import load_tenant_config, resolve_professional_calendar
-from secretaria.services.unit_booking import tenant_unit, unit_line
+from secretaria.services.unit_booking import tenant_unit, unit_line, unit_location
 
 logger = get_logger(__name__)
 
@@ -154,6 +154,21 @@ async def booking_unit_line(tenant, appointment) -> str:
         logger.warning("booking_notification_unit_lookup_failed", error_type=type(exc).__name__)
         return ""
     return unit_line(unit.name, unit.address) if unit is not None else ""
+
+
+async def booking_unit_location(tenant, appointment) -> str | None:
+    """ "<unit> — <address>" for the patient's add-to-calendar link (TASK-083 final wave F3),
+    else None. Same tenant-scoped, best-effort lookup as `booking_unit_line`."""
+    unit_id = getattr(appointment, "unit_id", None)
+    if unit_id is None:
+        return None
+    try:
+        async with async_session_factory() as session:
+            unit = await tenant_unit(session, tenant.id, unit_id)
+    except Exception as exc:
+        logger.warning("booking_notification_unit_lookup_failed", error_type=type(exc).__name__)
+        return None
+    return unit_location(unit.name, unit.address) if unit is not None else None
 
 
 def agenda_line() -> str:
@@ -292,6 +307,7 @@ async def _post_booking(ctx: PostBookingContext) -> None:
             _as_utc(appointment.start_at),
             _as_utc(appointment.end_at),
             appointment.appointment_type or "Consulta",
+            location=await booking_unit_location(tenant, appointment),
         )
         patient_vars = {
             **variables,

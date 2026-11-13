@@ -35,6 +35,8 @@ STEP_AWAITING_UNIT = "awaiting_unit"
 BACK_TARGET_UNIT = "unit"
 LABEL_ANOTHER_UNIT = decorate(EMOJI_BACK, "Outra unidade")
 UNIT_LIST_BODY = "Em qual unidade você prefere ser atendido(a)?"
+# The picked unit stopped being offered mid-booking and only one is left (final wave M1).
+UNIT_GONE_NOTICE = "A unidade escolhida não está mais disponível."
 UNIT_LIST_BUTTON = "Ver unidades"
 UNIT_LIST_SECTION = "Unidades"
 # `unit|<uuid>` is a payload row (schemas/webhook.py::_PAYLOAD_ROW_PREFIXES): the tap arrives

@@ -330,6 +330,7 @@ def build_patient_calendar_link(
     description: str = "",
     *,
     tz: ZoneInfo | None = None,
+    location: str | None = None,
 ) -> str:
     """The "adicionar à minha agenda" link to send the PATIENT. Pure, no I/O.
 
@@ -362,11 +363,12 @@ def build_patient_calendar_link(
     converted. Naive with no `tz` raises rather than assuming UTC and shipping
     a link that is off by the clinic's offset.
 
-    No `location`: the clinic's address is not on `TenantRuntimeConfig`, so the
-    LLM booking path could not fill one, and for a tenant running the
-    multi_unit addon the true address is the UNIT's rather than the clinic's.
-    A plausible-but-wrong address sitting in the patient's own calendar is
-    worse than no address at all.
+    `location` only for a booking AT A UNIT (TASK-083 final wave F3): the unit's
+    "name — address" (`unit_booking.unit_location`), the one place the booking
+    really happens. Never the clinic's address: it is not on
+    `TenantRuntimeConfig`, and a plausible-but-wrong address sitting in the
+    patient's own calendar is worse than none. Without it (None or "") the link
+    is byte-identical to what it always was.
     """
     params = {
         "action": "TEMPLATE",
@@ -375,6 +377,8 @@ def build_patient_calendar_link(
     }
     if description:
         params["details"] = description
+    if location:
+        params["location"] = location
     # quote (not the default quote_plus) so spaces are %20 and the `/` joining
     # the two stamps stays literal — the form Google's own docs show.
     query = urlencode(params, quote_via=quote, safe="/")

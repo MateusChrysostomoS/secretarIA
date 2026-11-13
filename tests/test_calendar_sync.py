@@ -426,3 +426,46 @@ async def test_the_hub_still_lists_pre_connection_bookings(client: AsyncClient, 
         assert (await session.scalar(
             select(CalendarEvent.google_event_id).where(CalendarEvent.id == past_event)
         )) is None
+
+
+# --------------------------------------------------------------------------
+# TASK-083 final wave F3: a local event at a unit reaches Google with its location
+# --------------------------------------------------------------------------
+
+
+async def test_a_local_event_at_a_unit_is_pushed_with_the_units_location(db, google, monkeypatch):
+    from secretaria.models.unit import Unit
+
+    locations: list = []
+    real_create = CalendarService.create_event
+
+    async def _with_location(self, *args, **kwargs):
+        locations.append(getattr(self, "_location", None))
+        return await real_create(self, *args, **kwargs)
+
+    monkeypatch.setattr(CalendarService, "create_event", _with_location)
+    tenant = await seed_tenant(db)
+    other = await seed_tenant(db)
+    at_unit, _ = await _book(db, tenant, tomorrow_at(10))
+    plain, _ = await _book(db, tenant, tomorrow_at(11))
+    foreign_unit, _ = await _book(db, tenant, tomorrow_at(12))
+    async with db() as session:
+        centro = Unit(tenant_id=tenant.id, name="Centro", address="Rua A, 10")
+        elsewhere = Unit(tenant_id=other.id, name="Outra", address="Rua X, 1")
+        session.add_all([centro, elsewhere])
+        await session.flush()
+        (await session.get(CalendarEvent, at_unit)).unit_id = centro.id
+        # A stray id of ANOTHER clinic's unit names nothing (tenant-scoped lookup).
+        (await session.get(CalendarEvent, foreign_unit)).unit_id = elsewhere.id
+        await session.commit()
+    await _connect_clinic(db, tenant)
+
+    summary = await push_future_local_events(tenant.id)
+
+    assert summary.pushed == 3
+    assert locations == ["Centro — Rua A, 10", None, None]
+    assert [c["id"] for c in google.created] == [
+        google_id_for(at_unit),
+        google_id_for(plain),
+        google_id_for(foreign_unit),
+    ]

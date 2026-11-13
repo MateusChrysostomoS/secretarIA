@@ -96,6 +96,21 @@ async def test_the_booking_e_mails_carry_the_unit_lines(db, monkeypatch):
         assert lines in body, template
 
 
+@pytest.mark.asyncio
+async def test_the_patients_calendar_link_location_is_the_tenants_own_unit_only(db, monkeypatch):
+    """Final wave F3: the e-mailed add-to-calendar link of a booking at a unit carries the
+    unit's "name — address"; none for a booking without one, nor for a foreign unit id."""
+    monkeypatch.setattr(booking_notifications, "async_session_factory", db)
+    tenant = await seed_tenant(db)
+    other = await seed_tenant(db, name="Outra")
+    unit = await _unit(db, tenant)
+    foreign = await _unit(db, other, "Alheia")
+    location = booking_notifications.booking_unit_location
+    assert await location(tenant, _appointment(tenant, unit.id)) == "Centro — Rua A, 10"
+    assert await location(tenant, _appointment(tenant, foreign.id)) is None
+    assert await location(tenant, _appointment(tenant)) is None
+
+
 def test_a_sender_that_does_not_know_the_unit_line_renders_nothing_for_it():
     body = _TEMPLATES["appointment_booked_clinic"].body.format_map(
         _SafeDict(

@@ -254,6 +254,6 @@ async def test_create_event_at_unit_returns_the_patient_link_too(db):
     assert urlparse(link).netloc == "calendar.google.com"
     assert query["action"] == ["TEMPLATE"]
     assert query["dates"] == ["20260710T140000Z/20260710T143000Z"]
-    # NOT the unit's address: see build_patient_calendar_link on why there is
-    # no `location` at all.
-    assert "location" not in query
+    # TASK-083 final wave F3: the booked UNIT's "name — address" (never the
+    # clinic's) - see build_patient_calendar_link.
+    assert query["location"] == ["Unidade Centro — Rua A, 1"]

@@ -29,6 +29,7 @@ from secretaria.services.booking_hold import GateDecision  # noqa: E402
 from secretaria.services.flow_units import (  # noqa: E402
     LABEL_ANOTHER_UNIT,
     STEP_AWAITING_UNIT,
+    UNIT_GONE_NOTICE,
 )
 from secretaria.services.unit_booking import UnitOption  # noqa: E402
 
@@ -422,6 +423,8 @@ async def test_the_recap_and_the_whatsapp_confirmation_name_the_unit_and_its_add
     assert agenda.log.created == [(sul.id, "Zona Sul — Av. B, 20", "Consulta - Maria")]
     [text] = [b for b in booked.bubbles if isinstance(b, TextBubble)]
     assert "Zona Sul — Av. B, 20" in text.body
+    # Final wave F3: the patient's "add to my calendar" link carries the unit's location.
+    assert "location=Zona%20Sul%20%E2%80%94%20Av.%20B%2C%2020" in text.body
     assert gate.decided[0]["unit_id"] == sul.id
     # The booking is over: the unit is not carried any further.
     assert booked.flow_selected_unit_id is None
@@ -449,6 +452,7 @@ async def test_a_booking_without_units_keeps_the_exact_confirmation_dict_and_tex
     assert agenda.log.created == [(None, None, "Consulta - Maria")]
     [text] = [b for b in booked.bubbles if isinstance(b, TextBubble)]
     assert "Local:" not in text.body
+    assert "location=" not in text.body
 
 
 async def test_the_portal_holds_the_slot_with_the_unit():
@@ -545,6 +549,33 @@ async def test_a_unit_deactivated_mid_booking_is_asked_again():
         professionals=[doctor],
     )
     assert result.flow_step == STEP_AWAITING_UNIT
+
+
+async def test_a_picked_unit_gone_before_confirmar_reopens_the_days_of_the_one_left():
+    """Final wave M1: picked Centro, Centro closed between the recap and "Confirmar", only Zona
+    Sul is left. Never book at Zona Sul at a time chosen within Centro's hours: the days are
+    offered again, now within Zona Sul's, and nothing is written."""
+    centro, sul = _units(2)
+    doctor = _doctor([sul])  # Centro was deactivated / unlinked
+    agenda = _Agenda()
+    result = await fr.route(
+        _conversation(
+            flow_step=fr.STEP_AWAITING_CONFIRMATION,
+            flow_selected_professional_id=doctor.id,
+            flow_selected_day="2099-01-05",
+            flow_selected_slot="2099-01-05T09:00",
+            flow_selected_unit_id=centro.id,
+        ),
+        _tenant(),
+        agenda,
+        fr.LABEL_CONFIRM,
+        professionals=[doctor],
+    )
+    assert agenda.log.created == []
+    assert result.flow_step == fr.STEP_AWAITING_DAY
+    assert agenda.log.day_hours == [SUL_HOURS]
+    assert result.flow_selected_unit_id == sul.id
+    assert result.bubbles[0].body.startswith(UNIT_GONE_NOTICE)
 
 
 def test_the_unit_row_prefix_carries_its_payload_on_both_channels():
@@ -684,7 +715,10 @@ async def test_a_reschedule_without_a_unit_by_a_doctor_with_units_uses_their_uni
     doctor = _doctor([centro, sul])
     agenda = _Agenda()
     await fr.enter_manage_action(
-        "reschedule", _tenant(), [_upcoming(doctor, sul, with_unit=False)], [doctor],
+        "reschedule",
+        _tenant(),
+        [_upcoming(doctor, sul, with_unit=False)],
+        [doctor],
         calendar=agenda,
     )
     assert agenda.log.day_hours == [{**CENTRO_HOURS, **SUL_HOURS}]
@@ -695,7 +729,10 @@ async def test_a_reschedule_without_a_unit_by_a_doctor_with_one_unit_uses_its_ho
     doctor = _doctor([centro])
     agenda = _Agenda()
     await fr.enter_manage_action(
-        "reschedule", _tenant(), [_upcoming(doctor, centro, with_unit=False)], [doctor],
+        "reschedule",
+        _tenant(),
+        [_upcoming(doctor, centro, with_unit=False)],
+        [doctor],
         calendar=agenda,
     )
     assert agenda.log.day_hours == [CENTRO_HOURS]
@@ -706,7 +743,10 @@ async def test_a_reschedule_by_a_doctor_without_units_reads_the_whole_agenda_as_
     doctor = _doctor([])
     agenda = _Agenda()
     await fr.enter_manage_action(
-        "reschedule", _tenant(), [_upcoming(doctor, centro, with_unit=False)], [doctor],
+        "reschedule",
+        _tenant(),
+        [_upcoming(doctor, centro, with_unit=False)],
+        [doctor],
         calendar=agenda,
     )
     assert agenda.log.day_hours == [CLINIC_HOURS]
@@ -716,11 +756,15 @@ def test_the_union_of_unit_hours_merges_overlapping_windows_per_day():
     from secretaria.services.flow_units import union_hours
 
     morning = UnitOption(
-        id=uuid4(), name="A", address=None,
+        id=uuid4(),
+        name="A",
+        address=None,
         business_hours={"monday": [{"start": "08:00", "end": "12:00"}]},
     )
     overlap = UnitOption(
-        id=uuid4(), name="B", address=None,
+        id=uuid4(),
+        name="B",
+        address=None,
         business_hours={
             "monday": [{"start": "11:00", "end": "14:00"}, {"start": "16:00", "end": "18:00"}],
             "friday": [{"start": "09:00", "end": "10:00"}],

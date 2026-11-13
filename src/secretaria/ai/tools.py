@@ -46,7 +46,7 @@ from secretaria.services.local_calendar import create_event_exclusive
 from secretaria.services.manage_request import ManageRequest, parse_appointment_ref
 from secretaria.services.precheck import HandoffOutcome, request_precheck_handoff
 from secretaria.services.service_catalog import find_by_name, missing_from
-from secretaria.services.unit_booking import scoped_calendar
+from secretaria.services.unit_booking import scoped_calendar, unit_location
 
 if TYPE_CHECKING:
     from secretaria.services.tenant_config import TenantRuntimeConfig
@@ -1310,6 +1310,11 @@ async def create_event(
             summary,
             description,
             tz=cal.tzinfo,
+            location=(
+                unit_location(getattr(unit, "name", None), getattr(unit, "address", None))
+                if unit is not None
+                else None
+            ),
         ),
     }
 

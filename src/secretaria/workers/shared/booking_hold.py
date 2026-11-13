@@ -471,7 +471,13 @@ async def _promote_booking_hold(
         + f"{local_start.strftime(WHEN_FORMAT)}\n"
         + (f"Local: {unit_location(unit.name, unit.address)}\n" if unit is not None else "")
         + "\nAdicionar à sua agenda:\n"
-        f"{build_patient_calendar_link(local_start, local_end, summary, tz=tz)}"
+        + build_patient_calendar_link(
+            local_start,
+            local_end,
+            summary,
+            tz=tz,
+            location=unit_location(unit.name, unit.address) if unit is not None else None,
+        )
     )
     if replaced is not None:
         confirmation = f"{confirmation}\n\n{_replaced_notice(tenant, replaced)}"

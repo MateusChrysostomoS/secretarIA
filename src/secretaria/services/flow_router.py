@@ -3273,6 +3273,7 @@ async def _catalog_step(
     )
     # TASK-083 spec §8: from the unit on, every read and write is the chosen unit's.
     booking_owner = _booking_professional(conversation, professionals)
+    unscoped_calendar = calendar
     calendar = flow_units.scope(calendar, conversation, booking_owner)
     back_target = _booking_back_target(conversation, professionals)
 
@@ -3280,6 +3281,10 @@ async def _catalog_step(
         return await _handle_unit_step(
             conversation, tenant, calendar, body, services, professionals
         )
+    picked_gone = (
+        flow_units.selected_unit_id(conversation) is not None
+        and flow_units.find_unit(booking_owner, flow_units.selected_unit_id(conversation)) is None
+    )
     if (
         step in UNIT_KEEP_STEPS
         and flow_units.unit_choice_needed(booking_owner)
@@ -3288,6 +3293,18 @@ async def _catalog_step(
         # Never a day, time or booking without the unit (a link added mid-booking, a unit
         # deactivated, a hand-back that skipped the question): ask it first.
         return _enter_unit_list(conversation, booking_owner)
+    if step in UNIT_KEEP_STEPS and picked_gone and flow_units.bookable_units(booking_owner):
+        # Final wave M1: the picked unit is gone and ONE is left. Its day and time were chosen
+        # within the gone unit's hours, so never carry them over silently: the days again,
+        # within the unit left (`_ask_day` records it as the pick).
+        return await _ask_day(
+            conversation,
+            tenant,
+            unscoped_calendar,
+            services,
+            professionals,
+            prefix=flow_units.UNIT_GONE_NOTICE,
+        )
 
     if step == STEP_AWAITING_PROFESSIONAL:
         if _label_match(body, LABEL_DONT_KNOW):
@@ -4884,7 +4901,13 @@ async def _handle_confirmation(
         f"{service_type}\n{_attendee_line(conversation)}"
         f"{start.strftime('%d/%m/%Y às %H:%M')}\n{_unit_line(unit)}\n"
         "Adicionar à sua agenda:\n"
-        f"{build_patient_calendar_link(start, end, summary, tz=calendar.tzinfo)}"
+        + build_patient_calendar_link(
+            start,
+            end,
+            summary,
+            tz=calendar.tzinfo,
+            location=getattr(unit, "location", None) if unit is not None else None,
+        )
         + (f"\n\n💳 Sobre o pagamento do convênio:\n{payment_note}" if payment_note else "")
     )
     return FlowRouterResult(

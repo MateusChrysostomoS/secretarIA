@@ -286,7 +286,9 @@ def confirmation_text(
         + f"{local_start.strftime('%d/%m/%Y às %H:%M')}\n"
         + (f"Local: {unit_location}\n" if unit_location else "")
         + "\nAdicionar à sua agenda:\n"
-        f"{build_patient_calendar_link(local_start, local_end, summary, tz=tz)}"
+        + build_patient_calendar_link(
+            local_start, local_end, summary, tz=tz, location=unit_location or None
+        )
     )
     from secretaria.services.payments.deposit_lifecycle import reschedule_rules_text
 

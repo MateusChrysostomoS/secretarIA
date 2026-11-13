@@ -205,3 +205,26 @@ def test_a_summary_with_url_metacharacters_cannot_forge_a_parameter():
     assert "location" not in params
     assert "x" not in params
     assert set(params) == {"action", "text", "dates"}
+
+
+# --------------------------------------------------------------------------
+# TASK-083 final wave F3: the unit's location (only when the booking has one)
+# --------------------------------------------------------------------------
+
+
+def test_a_booking_at_a_unit_carries_its_location():
+    start = datetime(2030, 10, 15, 15, 20, tzinfo=_SP)
+    link = build_patient_calendar_link(
+        start, start + timedelta(minutes=30), "Consulta", location="Centro — Rua A, 10"
+    )
+    assert _params(link)["location"] == "Centro — Rua A, 10"
+
+
+def test_without_a_location_the_link_is_byte_identical():
+    start = datetime(2030, 10, 15, 15, 20, tzinfo=_SP)
+    end = start + timedelta(minutes=30)
+    details = "Convênio: Unimed"
+    plain = build_patient_calendar_link(start, end, "Consulta", details)
+    for empty in (None, ""):
+        assert build_patient_calendar_link(start, end, "Consulta", details, location=empty) == plain
+    assert "location" not in _params(plain)
