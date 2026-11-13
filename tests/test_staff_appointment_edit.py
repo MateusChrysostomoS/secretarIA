@@ -14,6 +14,8 @@ from secretaria.models import (
     ProfessionalEditNotice,
     Tenant,
 )
+from secretaria.models.professional_unit import ProfessionalUnit
+from secretaria.models.unit import Unit
 from secretaria.services import staff_appointment_edit as sae
 from secretaria.services.calendar import CalendarUnavailableError
 from secretaria.services.staff_appointment_edit import StaffEditError, StaffEditRequest
@@ -128,6 +130,59 @@ async def test_a_doctor_on_another_agenda_is_created_there_and_the_old_event_del
     row = await reload_appointment(db, world.appointment.id)
     assert row.professional_id == new_pro and row.google_event_id == f"evt-new-{new_pro}"
     assert [n.changed_fields for n in await _notices(db, world.appointment.id)] == [["médico"]]
+
+
+async def _unit(db, tenant_id, name, *attending) -> Unit:
+    async with db() as session:
+        unit = Unit(tenant_id=tenant_id, name=name)
+        session.add(unit)
+        await session.flush()
+        for professional_id in attending:
+            session.add(ProfessionalUnit(professional_id=professional_id, unit_id=unit.id))
+        await session.commit()
+        return unit
+
+
+async def _set_unit(db, appointment_id, unit_id) -> None:
+    async with db() as session:
+        (await session.get(Appointment, appointment_id)).unit_id = unit_id
+        await session.commit()
+
+
+async def test_a_doctor_change_keeps_the_unit_only_if_the_new_doctor_attends_it(db):
+    """Final wave I3: the clinic moves a Centro booking to a doctor who does not work at
+    Centro -> the unit is cleared, never left pointing at a place the doctor is not."""
+    world = await _world(db, professional_name="Dra. Ana")
+    old_pro = world.appointment.professional_id
+    stays = await add_professional(db, world.tenant.id, "Dr. Bruno")
+    leaves = await add_professional(db, world.tenant.id, "Dr. Carlos")
+    unlinked = await add_professional(db, world.tenant.id, "Dr. Davi")
+    centro = await _unit(db, world.tenant.id, "Centro", old_pro, stays)
+    await _unit(db, world.tenant.id, "Norte", leaves)
+    await _set_unit(db, world.appointment.id, centro.id)
+
+    await _edit(db, world, _req(professional_id=stays))
+    assert (await reload_appointment(db, world.appointment.id)).unit_id == centro.id
+
+    world.appointment = await reload_appointment(db, world.appointment.id)
+    await _edit(db, world, _req(professional_id=leaves))
+    assert (await reload_appointment(db, world.appointment.id)).unit_id is None
+
+    await _set_unit(db, world.appointment.id, centro.id)
+    world.appointment = await reload_appointment(db, world.appointment.id)
+    await _edit(db, world, _req(professional_id=unlinked))  # no links at all
+    assert (await reload_appointment(db, world.appointment.id)).unit_id is None
+
+
+async def test_a_time_move_by_the_clinic_keeps_the_unit(db):
+    world = await _world(db, professional_name="Dra. Ana")
+    centro = await _unit(db, world.tenant.id, "Centro", world.appointment.professional_id)
+    await _set_unit(db, world.appointment.id, centro.id)
+    world.appointment = await reload_appointment(db, world.appointment.id)
+
+    await _edit(db, world, _req(start_at=world.start_at + timedelta(days=1)))
+
+    assert (await reload_appointment(db, world.appointment.id)).unit_id == centro.id
 
 
 async def test_a_doctor_on_the_same_agenda_keeps_the_event(db):

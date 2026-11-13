@@ -64,6 +64,7 @@ from secretaria.models import (
     is_live_status,
 )
 from secretaria.models.pix_deposit import PixDepositStatus
+from secretaria.services import professional_units
 from secretaria.services.appointment_calendar_origin import (
     CalendarOriginUnresolved,
     calendar_professional_id,
@@ -751,6 +752,18 @@ async def apply_staff_edit(
             "doctor_changed": target.professional_id != before.professional_id,
             "calendar_changed": bool(moved is not None and moved.calendar_changed),
         }
+        # TASK-083 final wave I3: a doctor change keeps the booking's unit only if the new
+        # doctor attends it (an active link); otherwise the unit is cleared. Time moves by the
+        # clinic stay permissive and never touch the unit.
+        if edit["doctor_changed"] and locked.unit_id is not None:
+            new_doctor = await _professional(session, tenant_id, now_target.professional_id)
+            offered = (
+                await professional_units.available_unit_ids(session, new_doctor)
+                if new_doctor is not None
+                else []
+            )
+            if locked.unit_id not in offered:
+                edit["unit_id"] = None
         fields = await write_appointment_edit(
             session,
             locked,
