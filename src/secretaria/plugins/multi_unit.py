@@ -43,12 +43,20 @@ from secretaria.ai.tools import (
     _localize_window,
     _match_by_name,
     _persist_appointment,
+    _sole_professional_id,
     _tenant_id_ctx,
+)
+from secretaria.ai.unit_scope import (
+    outside_unit_hours,
+    professional_unit_options,
+    resolve_tool_unit,
+    sole_professional_row,
 )
 from secretaria.core.logging import get_logger
 from secretaria.plugins.base import PluginSpec
 from secretaria.plugins.registry import register
 from secretaria.services.calendar import build_event_description, build_patient_calendar_link
+from secretaria.services.unit_booking import scoped_calendar
 
 logger = get_logger(__name__)
 
@@ -98,7 +106,10 @@ async def list_units() -> dict:
     tenant_id = _tenant_id_ctx.get()
     if tenant_id is None:
         return {"units": []}
-    units = await _active_units(tenant_id)
+    # TASK-083: a clinic whose doctor attends at some of its units offers only those.
+    owner = await sole_professional_row(tenant_id, _sole_professional_id())
+    offered = [u for u in await professional_unit_options(tenant_id, owner) if u.bookable]
+    units = offered or await _active_units(tenant_id)
     return {"units": [{"name": u.name, "address": u.address} for u in units]}
 
 
@@ -146,7 +157,12 @@ async def create_event_at_unit(
     if tenant_id is None:
         return {"error": "Nenhuma unidade configurada para esta clínica."}
 
-    unit, error = await _resolve_unit_or_error(tenant_id, unit_name)
+    # TASK-083: when the clinic's doctor attends at units, only one of THEIR units, within its
+    # hours; otherwise any active unit of the clinic, exactly as before.
+    owner = await sole_professional_row(tenant_id, _sole_professional_id())
+    unit, error = await resolve_tool_unit(tenant_id, owner, unit_name)
+    if error is None and unit is None:
+        unit, error = await _resolve_unit_or_error(tenant_id, unit_name)
     if error is not None:
         return error
 
@@ -156,8 +172,11 @@ async def create_event_at_unit(
     if service_error is not None:
         return service_error
 
-    cal = _get_calendar()
+    cal = scoped_calendar(_get_calendar(), unit)
     fallback_start, fallback_end = _localize_window(start, end, cal)
+    outside = outside_unit_hours(unit, fallback_start, fallback_end, cal.tzinfo)
+    if outside is not None:
+        return outside
     attendee_name = await _conversation_attendee_name()
     insurance = await _conversation_insurance()
     auto_description = build_event_description(

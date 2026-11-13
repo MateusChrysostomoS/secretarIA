@@ -46,6 +46,7 @@ from secretaria.services.local_calendar import create_event_exclusive
 from secretaria.services.manage_request import ManageRequest, parse_appointment_ref
 from secretaria.services.precheck import HandoffOutcome, request_precheck_handoff
 from secretaria.services.service_catalog import find_by_name, missing_from
+from secretaria.services.unit_booking import scoped_calendar
 
 if TYPE_CHECKING:
     from secretaria.services.tenant_config import TenantRuntimeConfig
@@ -530,6 +531,34 @@ def _sole_professional_id() -> UUID | None:
         return None
     config = _tenant_config_ctx.get()
     return getattr(config, "professional_id", None)
+
+
+async def _sole_professional_unit(tool_name: str) -> tuple[Any | None, dict | None]:
+    """The unit a base tool reads / books at on a one-doctor clinic (TASK-083 spec §8).
+
+    (None, None) without a unit (no link: today's behaviour). The doctor's only unit when there
+    is one. Two or more: a recoverable error - the base tools take no unit, so the model is sent
+    to the guided flow, which asks it. A failed read is "no unit" (logged): these tools must not
+    stop booking because a lookup failed.
+    """
+    tenant_id = _tenant_id_ctx.get()
+    professional_id = _sole_professional_id()
+    if tenant_id is None or professional_id is None:
+        return None, None
+    from secretaria.ai.unit_scope import resolve_tool_unit, sole_professional_row
+
+    try:
+        owner = await sole_professional_row(tenant_id, professional_id)
+        unit, error = await resolve_tool_unit(tenant_id, owner)
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        logger.warning("agent_tool_unit_lookup_failed", tool=tool_name, error=type(exc).__name__)
+        return None, None
+    if error is not None:
+        error = {
+            "error": f"{error['error']} Para marcar, chame start_guided_booking: o fluxo de "
+            "botões pergunta a unidade."
+        }
+    return unit, error
 
 
 def _effective_service_catalog() -> list:
@@ -1109,11 +1138,14 @@ async def list_free_slots(day: str, max_slots: int = 6) -> dict:
     blocked = _blocked_tenant_level("list_free_slots")
     if blocked is not None:
         return blocked
+    unit, unit_error = await _sole_professional_unit("list_free_slots")
+    if unit_error is not None:
+        return unit_error
     target_day = date.fromisoformat(day)
     day_dt = datetime.combine(target_day, datetime.min.time())
     held = await held_busy_windows(_sole_professional_id())
     extra = {"extra_busy": held} if held else {}
-    slots = await _get_calendar().list_free_slots(
+    slots = await scoped_calendar(_get_calendar(), unit).list_free_slots(
         day=day_dt,
         max_slots=min(max(max_slots, 1), 10),
         **extra,
@@ -1200,9 +1232,19 @@ async def create_event(
     canonical_type, error = _canonical_appointment_type(appointment_type, "create_event")
     if error is not None:
         return error
+    # TASK-083: the one-doctor clinic's unit (its id / location on the event, its hours).
+    unit, unit_error = await _sole_professional_unit("create_event")
+    if unit_error is not None:
+        return unit_error
 
-    cal = _get_calendar()
+    cal = scoped_calendar(_get_calendar(), unit)
     fallback_start, fallback_end = _localize_window(start, end, cal)
+    if unit is not None:
+        from secretaria.ai.unit_scope import outside_unit_hours
+
+        outside = outside_unit_hours(unit, fallback_start, fallback_end, cal.tzinfo)
+        if outside is not None:
+            return outside
     # A pra-quem answer the patient gave in the button flow before drifting
     # here (services/attendee.py). The model never books for a third party by
     # itself (ai/prompts.py sends it to show_main_menu), but when the flow has
@@ -1236,6 +1278,7 @@ async def create_event(
         fallback_end,
         canonical_type,
         professional_id=_sole_professional_id(),
+        unit_id=unit.id if unit is not None else None,
         attendee_name=attendee_name,
     )
 

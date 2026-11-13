@@ -1,0 +1,126 @@
+"""Which unit an agent tool reads or books at (TASK-083 spec §8).
+
+The deterministic flow asks the patient (services/flow_router.py "awaiting_unit"); the agent's
+tools apply the same rule to the unit the model names:
+
+* the professional attends at units (`professional_units`): the unit must be one of THEIR
+  bookable units - named, or implied when there is only one; two or more and none named is a
+  recoverable error that lists them, so the model asks the patient;
+* no link at all: today's rule - any active unit of the clinic may be named (a label only), and
+  none is required.
+
+The unit then scopes the agenda (`unit_booking.scoped_calendar`): its hours for the free times,
+its id / location on the event the booking writes. Database reads open their own session from
+`secretaria.core.database` at call time (the tools' tests substitute it there).
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+from uuid import UUID
+
+from secretaria.services.unit_booking import UnitOption, unit_options_for, within_hours
+
+OUTSIDE_UNIT_HOURS_ERROR = (
+    "Esse horário está fora do atendimento dessa unidade. Consulte os horários livres de novo "
+    "e ofereça um deles."
+)
+
+
+def _names(units: list) -> str:
+    return ", ".join(str(unit.name) for unit in units) or "nenhuma unidade"
+
+
+def _match(units: list, name: str) -> Any | None:
+    target = name.strip().casefold()
+    return next((unit for unit in units if str(unit.name).strip().casefold() == target), None)
+
+
+async def professional_unit_options(tenant_id: UUID, professional: Any | None) -> list[UnitOption]:
+    """The professional's offered units (hours resolved), or [] - also without a professional."""
+    if professional is None:
+        return []
+    from secretaria.core.database import async_session_factory
+    from secretaria.models import Tenant
+
+    async with async_session_factory() as session:
+        tenant = await session.get(Tenant, tenant_id)
+        if tenant is None:
+            return []
+        options = await unit_options_for(session, tenant, [professional])
+    return options.get(professional.id, [])
+
+
+async def resolve_tool_unit(
+    tenant_id: UUID, professional: Any | None, unit_name: str = ""
+) -> tuple[UnitOption | None, dict | None]:
+    """(the unit to use or None, None), or (None, a tool-error payload the model recovers from)."""
+    options = await professional_unit_options(tenant_id, professional)
+    name = (unit_name or "").strip()
+    if options:
+        bookable = [unit for unit in options if unit.bookable]
+        if name:
+            unit = _match(bookable, name)
+            if unit is None:
+                return None, {
+                    "error": (
+                        f"{getattr(professional, 'name', 'Este profissional')} não atende na "
+                        f"unidade '{name}'. Unidades em que atende: {_names(bookable)}."
+                    )
+                }
+            return unit, None
+        if len(bookable) == 1:
+            return bookable[0], None
+        if not bookable:
+            return None, {
+                "error": "Este profissional não tem horários de atendimento nas suas unidades."
+            }
+        return None, {
+            "error": (
+                f"Este profissional atende em mais de uma unidade: {_names(bookable)}. Pergunte "
+                "ao paciente em qual ele prefere e informe a unidade."
+            )
+        }
+    if not name:
+        return None, None
+    # No link: today's rule - any active unit of the clinic, as a label (the agenda's hours).
+    from secretaria.plugins.multi_unit import _resolve_unit_or_error
+
+    unit, error = await _resolve_unit_or_error(tenant_id, name)
+    if error is not None:
+        return None, error
+    return UnitOption(id=unit.id, name=unit.name, address=unit.address, business_hours={}), None
+
+
+def outside_unit_hours(unit: UnitOption | None, start: datetime, end: datetime, tz) -> dict | None:
+    """A tool-error when [start, end) is outside the unit's own hours, else None."""
+    hours = getattr(unit, "business_hours", None) if unit is not None else None
+    if not hours:
+        return None
+    local_start = start.astimezone(tz) if start.tzinfo else start
+    local_end = end.astimezone(tz) if end.tzinfo else end
+    if within_hours(hours, local_start, local_end):
+        return None
+    return {"error": OUTSIDE_UNIT_HOURS_ERROR}
+
+
+async def sole_professional_row(tenant_id: UUID, professional_id: UUID | None) -> Any | None:
+    """The clinic's single active professional's row (the base tools' booking owner), or None."""
+    if professional_id is None:
+        return None
+    from secretaria.core.database import async_session_factory
+    from secretaria.models import Professional
+
+    async with async_session_factory() as session:
+        row = await session.get(Professional, professional_id)
+    return row if row is not None and row.tenant_id == tenant_id else None
+
+
+__all__ = [
+    "OUTSIDE_UNIT_HOURS_ERROR",
+    "outside_unit_hours",
+    "professional_unit_options",
+    "resolve_tool_unit",
+    "sole_professional_row",
+]

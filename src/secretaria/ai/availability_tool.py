@@ -73,6 +73,7 @@ from secretaria.services.booking_scope import (
 )
 from secretaria.services.calendar import CalendarService, CalendarUnavailableError
 from secretaria.services.flow_router import DAY_PICKER_WINDOW_DAYS
+from secretaria.services.unit_booking import scoped_calendar
 
 logger = get_logger(__name__)
 
@@ -308,18 +309,41 @@ async def _read_availability(
     holds = await gate.busy_windows(target.owner_id)
     # The doctor's minimum notice for a new booking: times inside it are not free to book.
     floor = booking_notice_floor(target.professional, datetime.now(tz))
-    scan = await scan_free_windows(
-        calendar,
-        span=span,
-        duration_minutes=target.slot_minutes,
-        holds=holds,
-        not_before=floor,
-    )
+    # TASK-083 spec §8: a professional who attends at units is free only within a unit's hours
+    # (the busy time stays the whole agenda's). One unit: its hours. Several: each unit read
+    # within its own hours and every window says which unit it is at.
+    from secretaria.ai.unit_scope import professional_unit_options
+
+    try:
+        offered = await professional_unit_options(tenant_id, target.professional)
+    except Exception as exc:  # noqa: BLE001 - a read tool: the agenda's own hours then
+        logger.warning("agent_availability_units_failed", error_type=type(exc).__name__)
+        offered = []
+    units = [unit for unit in offered if unit.bookable]
+    labelled: list[tuple[Any, str | None]] = []
+    truncated = False
+    for unit in units or [None]:
+        unit_scan = await scan_free_windows(
+            scoped_calendar(calendar, unit),
+            span=span,
+            duration_minutes=target.slot_minutes,
+            holds=holds,
+            not_before=floor,
+        )
+        truncated = truncated or unit_scan.truncated
+        name = unit.name if unit is not None and len(units) > 1 else None
+        labelled.extend((window, name) for window in unit_scan.windows)
+    labelled.sort(key=lambda item: (item[0].day, item[0].start))
+    if len(labelled) > MAX_WINDOWS:
+        labelled, truncated = labelled[:MAX_WINDOWS], True
+    scan = WindowScan(windows=[window for window, _ in labelled], truncated=truncated)
 
     clamped = [*span.clamped, *([CLAMP_MAX_WINDOWS] if scan.truncated else [])]
     last = scan.windows[-1].day if scan.truncated else span.last
     result: dict[str, Any] = {
-        "windows": [window.payload() for window in scan.windows],
+        "windows": [
+            {**window.payload(), **({"unit": name} if name else {})} for window, name in labelled
+        ],
         "timezone": getattr(tz, "key", None) or str(tz),
         "slot_minutes": target.slot_minutes,
         "day_from": span.first.isoformat(),
@@ -327,6 +351,8 @@ async def _read_availability(
     }
     if target.professional is not None:
         result["professional"] = target.professional.name
+    if len(units) == 1:
+        result["unit"] = units[0].name
     if floor is not None:
         result["min_booking_notice_hours"] = booking_notice_hours(target.professional)
     if clamped:

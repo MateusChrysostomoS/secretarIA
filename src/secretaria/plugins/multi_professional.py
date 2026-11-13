@@ -65,10 +65,12 @@ from secretaria.ai.tools import (
     handback_message,
     held_busy_windows,
 )
+from secretaria.ai.unit_scope import outside_unit_hours, resolve_tool_unit
 from secretaria.core.logging import get_logger
 from secretaria.plugins.base import PluginSpec
 from secretaria.plugins.registry import register
 from secretaria.services.calendar import build_event_description, build_patient_calendar_link
+from secretaria.services.unit_booking import scoped_calendar
 
 logger = get_logger(__name__)
 
@@ -214,7 +216,7 @@ async def select_professional_and_continue(professional_name: str, message: str 
 
 @tool
 async def list_free_slots_for_professional(
-    professional_name: str, day: str, max_slots: int = 6
+    professional_name: str, day: str, max_slots: int = 6, unit_name: str = ""
 ) -> dict:
     """Lista até `max_slots` horários livres de UM profissional específico,
     dentro do horário comercial da clínica, para o dia especificado. Use
@@ -224,6 +226,8 @@ async def list_free_slots_for_professional(
         professional_name: Nome do profissional (ex: 'Dra. Ana').
         day: Dia no formato YYYY-MM-DD (ex: 2026-05-29).
         max_slots: Quantidade máxima de slots a retornar (default 6, máx 10).
+        unit_name: Unidade/local, quando o profissional atende em mais de uma (os horários
+            são os daquela unidade). Deixe em branco se ele atende em uma só ou em nenhuma.
     """
     blocked = _blocked_by_toolset_v2("list_free_slots_for_professional")
     if blocked is not None:
@@ -239,7 +243,11 @@ async def list_free_slots_for_professional(
     if professional is None:
         return _unknown_professional_error(professional_name, professionals)
 
-    cal = await _professional_calendar(tenant_id, professional)
+    # TASK-083: a professional who attends at units is read within ONE unit's hours.
+    unit, unit_error = await resolve_tool_unit(tenant_id, professional, unit_name)
+    if unit_error is not None:
+        return unit_error
+    cal = scoped_calendar(await _professional_calendar(tenant_id, professional), unit)
     target_day = date.fromisoformat(day)
     day_dt = datetime.combine(target_day, datetime.min.time())
     held = await held_busy_windows(professional.id)  # a code or a Pix pending is busy time
@@ -304,19 +312,19 @@ async def create_event_for_professional(
     if service_error is not None:
         return service_error
 
-    unit_id: UUID | None = None
-    if unit_name.strip():
-        # Imported lazily to avoid a hard dependency on the multi_unit plugin
-        # module when it isn't installed/entitled for this tenant.
-        from secretaria.plugins.multi_unit import _resolve_unit_or_error
+    # TASK-083: a professional who attends at units books at one of THEIR units (named, or
+    # the only one), within its hours; without links any active unit of the clinic may be
+    # named, as before (`ai/unit_scope.py`).
+    unit, error = await resolve_tool_unit(tenant_id, professional, unit_name)
+    if error is not None:
+        return error
+    unit_id: UUID | None = unit.id if unit is not None else None
 
-        unit, error = await _resolve_unit_or_error(tenant_id, unit_name)
-        if error is not None:
-            return error
-        unit_id = unit.id
-
-    cal = await _professional_calendar(tenant_id, professional)
+    cal = scoped_calendar(await _professional_calendar(tenant_id, professional), unit)
     fallback_start, fallback_end = _localize_window(start, end, cal)
+    outside = outside_unit_hours(unit, fallback_start, fallback_end, cal.tzinfo)
+    if outside is not None:
+        return outside
     attendee_name = await _conversation_attendee_name()
     insurance = await _conversation_insurance()
     auto_description = build_event_description(
