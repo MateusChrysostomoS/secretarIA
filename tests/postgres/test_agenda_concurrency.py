@@ -39,6 +39,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import delete, select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -62,6 +63,20 @@ pytestmark = pytest.mark.skipif(
 ROUNDS = 20
 WRITERS = 8
 MODES = ("in_process", "cross_process")
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _require_throwaway_database(url: str) -> None:
+    """These tests create and delete tenants: refuse anything but a local throwaway database
+    (a loopback host AND a database named t083*, as tests/postgres/README.md creates)."""
+    parsed = make_url(url)
+    if parsed.host not in _LOOPBACK_HOSTS or not (parsed.database or "").startswith("t083"):
+        pytest.fail(
+            "T083_PG_URL must point at a THROWAWAY Postgres: a loopback host and a database "
+            f"named t083* (got host={parsed.host!r}, database={parsed.database!r}). "
+            "See tests/postgres/README.md.",
+            pytrace=False,
+        )
 
 
 # --------------------------------------------------------------------------
@@ -81,6 +96,7 @@ class Pg:
 async def pg(monkeypatch):
     """An engine on T083_PG_URL; the agenda services' own sessions point at it. Every row a
     test creates is deleted again (tenants cascade to professionals and calendar events)."""
+    _require_throwaway_database(PG_URL)
     engine = create_async_engine(PG_URL, pool_size=WRITERS * 2, max_overflow=WRITERS * 2)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     wire_local_agenda(monkeypatch, factory)
@@ -440,7 +456,8 @@ async def test_mixed_backends_two_clinics_exactly_one_winner_per_round(pg, monke
     for round_no in range(ROUNDS):
         start, end = _window(round_no)
         inserts_before = len(google.inserts)
-        # Odd rounds give the local writers a lead: both backends must win some rounds.
+        # Odd rounds give the local writers a lead. Which backend wins is not asserted here:
+        # `test_mixed_backends_each_side_is_refused_over_the_others_win` pins both directions.
         result = await _race(
             _half_and_half(cal_p, cal_c),
             start,
@@ -463,8 +480,39 @@ async def test_mixed_backends_two_clinics_exactly_one_winner_per_round(pg, monke
             assert rows[0].google_event_id == winner
         assert await _unstamped_leases(pg, world) == 0
     print(f"mixed/{mode} winners by backend: {winners_by_backend}")
-    # Both directions were exercised: Google refused over a local win and vice versa.
-    assert winners_by_backend["google"] > 0 and winners_by_backend["local"] > 0
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_mixed_backends_each_side_is_refused_over_the_others_win(pg, monkeypatch, mode):
+    """Deterministic directions: one clinic's writers race ALONE (one winner), then the other
+    backend's writers race into the same window and are ALL refused - Google over a local
+    win, and local over a Google win."""
+    _apply_mode(monkeypatch, mode)
+    rng = random.Random(f"mixed-directions-{mode}")
+    _jitter(monkeypatch, rng)
+    google = _slow_google(monkeypatch, rng)
+    world = await _shared_world(pg)
+    cal_p = await _calendar(pg, world.tenant_p, world.x_p, google_token="tok-p")
+    cal_c = await _calendar(pg, world.tenant_c, world.x_c)
+    half = WRITERS // 2
+
+    for round_no, (first, second) in enumerate(((cal_c, cal_p), (cal_p, cal_c))):
+        start, end = _window(round_no)
+        inserts_before = len(google.inserts)
+        alone = await _race([first] * half, start, end, rng)
+        assert alone.unexpected == [] and len(alone.won) == 1, f"round {round_no}: {alone!r}"
+        assert len(alone.refused) == half - 1
+        winner = alone.won[0]["id"]
+        assert winner.startswith("loc_") is (first is cal_c)
+
+        late = await _race([second] * half, start, end, rng)
+        assert late.unexpected == [] and late.won == [], f"round {round_no}: {late!r}"
+        assert len(late.refused) == half
+        assert len(google.inserts) - inserts_before == (0 if first is cal_c else 1)
+        rows = await _occupying(pg, world, start, end)
+        assert len(rows) == 1, f"round {round_no}: {len(rows)} occupying rows"
+        assert winner in (rows[0].id, rows[0].google_event_id)
+        assert await _unstamped_leases(pg, world) == 0
 
 
 # --------------------------------------------------------------------------
@@ -502,8 +550,6 @@ async def test_concurrent_linking_of_one_person_converges_on_one_agenda(pg):
         key = f"t083-link-{uuid4().hex}"
         results = await _link_all(pg.factory, professionals, key)
 
-        errors = [r for r in results if isinstance(r, BaseException)]
-        assert errors == [], f"round {round_no}: {errors!r}"
         async with pg.factory() as session:
             agendas = list(await session.scalars(select(Agenda.id).where(Agenda.person_key == key)))
             linked = set(
@@ -513,7 +559,9 @@ async def test_concurrent_linking_of_one_person_converges_on_one_agenda(pg):
                     )
                 )
             )
-        pg.agenda_ids.extend(agendas)
+        pg.agenda_ids.extend(agendas)  # cleaned up even when an assert below fails
+        errors = [r for r in results if isinstance(r, BaseException)]
+        assert errors == [], f"round {round_no}: {errors!r}"
         assert len(agendas) == 1, f"round {round_no}: {len(agendas)} agendas rows"
         assert set(results) == {agendas[0]} and linked == {agendas[0]}
 
@@ -537,6 +585,7 @@ async def test_negative_control_local_without_locks_double_books(pg, monkeypatch
     rows = await _occupying(pg, world, start, end)
     print(f"negative/local: winners={len(result.won)} occupying_rows={len(rows)}")
     assert result.unexpected == []
+    assert barrier.arrived == WRITERS  # every writer passed the free check: a forced race
     assert len(result.won) > 1 and len(rows) > 1  # the double booking the locks prevent
 
 
@@ -554,6 +603,7 @@ async def test_negative_control_google_without_locks_double_books(pg, monkeypatc
 
     print(f"negative/google: winners={len(result.won)} google_inserts={len(google.inserts)}")
     assert result.unexpected == []
+    assert barrier.arrived == WRITERS  # every writer passed the free check: a forced race
     assert len(result.won) > 1 and len(google.inserts) > 1
 
 
@@ -618,7 +668,8 @@ async def test_negative_control_linking_without_the_person_lock_collides(pg, mon
 
     monkeypatch.setattr(agenda_linking, "_person_lock", _no_lock)
     professionals = await _two_clinic_doctors(pg)
-    _BarrierAfterAgendaRead.barrier = SoftBarrier(WRITERS, timeout=5)
+    barrier = SoftBarrier(WRITERS, timeout=5)
+    _BarrierAfterAgendaRead.barrier = barrier
     racing = async_sessionmaker(pg.engine, class_=_BarrierAfterAgendaRead, expire_on_commit=False)
     key = f"t083-link-{uuid4().hex}"
     try:
@@ -631,6 +682,7 @@ async def test_negative_control_linking_without_the_person_lock_collides(pg, mon
 
     collisions = [r for r in results if isinstance(r, IntegrityError)]
     print(f"negative/linking: integrity_errors={len(collisions)} of {WRITERS}")
+    assert barrier.arrived == WRITERS  # every linker missed the row before any inserted it
     assert len(collisions) == WRITERS - 1  # what the person lock prevents
 
 

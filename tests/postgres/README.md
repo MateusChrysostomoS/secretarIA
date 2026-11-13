@@ -6,6 +6,8 @@ there. Without `T083_PG_URL` every test here is skipped, so the normal suite is 
 
 Use a THROWAWAY database only - the tests create and delete their own tenants. Never point it at
 a real database and never take credentials from `.env`; the ones below are synthetic.
+The fixture refuses to run (a loud failure) unless `T083_PG_URL` has a loopback host AND a
+database name starting with `t083`.
 
 ```bash
 # 1. A throwaway Postgres (any free host port; 55483 here).
