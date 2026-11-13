@@ -41,6 +41,7 @@ from secretaria.services.tenant_config import (
     active_appointment_types,
     professional_appointment_types,
 )
+from secretaria.services.unit_booking import tenant_unit, unit_location as location_of_unit
 
 logger = get_logger(__name__)
 
@@ -72,6 +73,8 @@ class ReminderContent:
     doctor_name: str | None = None
     attendee_name: str | None = None
     requirements: tuple[str, ...] = ()
+    # TASK-083 spec §8: "<unit> — <address>" of the booking's unit, or None (no unit).
+    unit_location: str | None = None
 
 
 def _one_line(value: object) -> str:
@@ -126,10 +129,13 @@ def _requirement_items(requirements: Iterable[object]) -> list[str]:
 def reminder_sentence(content: ReminderContent) -> str:
     """The spec sentence (§4.2), with date AND time in the clinic's timezone."""
     local = local_start(content)
-    return (
+    sentence = (
         f"LEMBRE-SE: {_subject(content)} com {_doctor(content)} está marcada para o dia "
         f"{local:%d/%m/%Y} às {local:%H:%M} para {_service(content)}."
     )
+    where = _one_line(content.unit_location)
+    # TASK-083: where to go, for a booking at a unit. Unchanged otherwise.
+    return f"{sentence} Local: {where}." if where else sentence
 
 
 def build_reminder_body(
@@ -229,6 +235,12 @@ async def load_reminder_content(
             appointment_id=str(appointment.id),
             error_type=type(exc).__name__,
         )
+    unit_location = None
+    if getattr(appointment, "unit_id", None) is not None:
+        # Tenant-scoped (a stray foreign id names nothing); a deleted unit just drops the line.
+        unit = await tenant_unit(session, tenant.id, appointment.unit_id)
+        if unit is not None:
+            unit_location = location_of_unit(unit.name, unit.address)
     return ReminderContent(
         clinic_name=tenant.clinic_name,
         timezone=tenant.timezone,
@@ -237,6 +249,7 @@ async def load_reminder_content(
         doctor_name=owner.name if owner is not None else None,
         attendee_name=appointment.attendee_name,
         requirements=requirements,
+        unit_location=unit_location,
     )
 
 

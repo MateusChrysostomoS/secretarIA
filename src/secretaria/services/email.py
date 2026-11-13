@@ -505,6 +505,10 @@ class _SafeDict(dict):
     """
 
     def __missing__(self, key: str) -> str:
+        # TASK-083: `unit_line` is optional by nature (most bookings have no unit) and was
+        # added to templates a sibling caller might also send: absent, it says nothing.
+        if key == "unit_line":
+            return ""
         return "{" + key + "}"
 
 
@@ -546,6 +550,7 @@ _TEMPLATES: dict[str, EmailTemplate] = {
             "Serviço: {service}\n"
             "Quando: {when}\n"
             "{insurance_line}"
+            "{unit_line}"
             "\n"
             "{calendar_line}"
             "{invite_line}"
@@ -569,6 +574,7 @@ _TEMPLATES: dict[str, EmailTemplate] = {
             "Serviço: {service}\n"
             "Quando: {when}\n"
             "{insurance_line}"
+            "{unit_line}"
             "\n"
             "{agenda_line}"
             "— Equipe SecretarIA\n\n"
@@ -891,6 +897,7 @@ _TEMPLATES: dict[str, EmailTemplate] = {
             "Serviço: {service}\n"
             "Quando: {when}\n"
             "{insurance_line}"
+            "{unit_line}"
             "\n"
             "{agenda_line}"
             "{calendar_line}"

@@ -39,6 +39,7 @@ from secretaria.services.email import EmailOutcome, send_transactional_email_res
 from secretaria.services.flow_router import LABEL_INSURANCE_PARTICULAR
 from secretaria.services.insurance_catalog import load_appointment_plans
 from secretaria.services.tenant_config import load_tenant_config, resolve_professional_calendar
+from secretaria.services.unit_booking import tenant_unit, unit_line
 
 logger = get_logger(__name__)
 
@@ -137,6 +138,24 @@ async def professional_line(tenant, appointment) -> str:
     return f"Profissional: {name}\n" if name else ""
 
 
+async def booking_unit_line(tenant, appointment) -> str:
+    """ "Unidade: X\nEndereço: Y\n" for a booking at a unit (TASK-083), else "".
+
+    Tenant-scoped (a stray foreign id names nothing) and best-effort: a failed lookup only
+    drops the line.
+    """
+    unit_id = getattr(appointment, "unit_id", None)
+    if unit_id is None:
+        return ""
+    try:
+        async with async_session_factory() as session:
+            unit = await tenant_unit(session, tenant.id, unit_id)
+    except Exception as exc:
+        logger.warning("booking_notification_unit_lookup_failed", error_type=type(exc).__name__)
+        return ""
+    return unit_line(unit.name, unit.address) if unit is not None else ""
+
+
 def agenda_line() -> str:
     """The clinic's agenda screen (DOCTOR_AGENDA_URL), or "" when not configured."""
     url = (get_settings().DOCTOR_AGENDA_URL or "").strip()
@@ -144,7 +163,7 @@ def agenda_line() -> str:
 
 
 def _variables(
-    tenant, patient, appointment, insurance_line: str, professional: str = ""
+    tenant, patient, appointment, insurance_line: str, professional: str = "", unit: str = ""
 ) -> dict:
     return {
         "clinic_name": tenant.clinic_name,
@@ -154,6 +173,7 @@ def _variables(
         "when": _local_when(appointment.start_at, tenant.timezone),
         "insurance_line": insurance_line,
         "professional_line": professional,
+        "unit_line": unit,
         "agenda_line": agenda_line(),
     }
 
@@ -230,7 +250,12 @@ async def _post_booking(ctx: PostBookingContext) -> None:
     tenant, patient, appointment = ctx.tenant, ctx.patient, ctx.appointment
     insurance_line = await _insurance_line(tenant, appointment)
     variables = _variables(
-        tenant, patient, appointment, insurance_line, await professional_line(tenant, appointment)
+        tenant,
+        patient,
+        appointment,
+        insurance_line,
+        await professional_line(tenant, appointment),
+        await booking_unit_line(tenant, appointment),
     )
 
     clinic_email = (getattr(tenant, "contact_email", None) or "").strip()

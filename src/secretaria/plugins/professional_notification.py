@@ -71,6 +71,7 @@ from secretaria.plugins.base import PluginSpec, PostBookingContext
 from secretaria.plugins.registry import register
 from secretaria.services.brain_professionals import fetch_professional_emails
 from secretaria.services.email import EmailOutcome, send_transactional_email_result
+from secretaria.services.unit_booking import tenant_unit, unit_line
 
 logger = get_logger(__name__)
 
@@ -189,6 +190,22 @@ async def _load_professional(tenant_id: UUID, professional_id: UUID) -> Professi
         )
 
 
+async def _unit_line(tenant_id: UUID, appointment) -> str:
+    """The booking's unit lines (TASK-083), tenant-scoped, "" without one or on a failed read."""
+    unit_id = getattr(appointment, "unit_id", None)
+    if unit_id is None:
+        return ""
+    try:
+        async with async_session_factory() as session:
+            unit = await tenant_unit(session, tenant_id, unit_id)
+    except Exception as exc:  # noqa: BLE001 - a line is never worth the notification
+        logger.warning(
+            "professional_notification_unit_lookup_failed", error_type=type(exc).__name__
+        )
+        return ""
+    return unit_line(unit.name, unit.address) if unit is not None else ""
+
+
 def _skip(appointment_id, reason: str) -> None:
     logger.info(
         "professional_notification_skipped",
@@ -274,6 +291,8 @@ async def _deliver(tenant: Tenant, patient: Patient | None, appointment: Appoint
         # Pre-rendered lines: empty when there is nothing to say, so the
         # template itself needs no conditionals (see services/email.py).
         "insurance_line": f"Convênio: {insurance}\n" if insurance else "",
+        # TASK-083: where the visit happens, for a booking at a unit ("" otherwise).
+        "unit_line": await _unit_line(tenant.id, appointment),
         "agenda_line": f"Ver na agenda:\n{agenda_url}\n\n" if agenda_url else "",
         # The event on the clinic's own Google Calendar. Here — unlike the
         # patient-facing link (services/calendar.py::build_patient_calendar_link)
