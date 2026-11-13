@@ -16,6 +16,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from googleapiclient.errors import HttpError
 from sqlalchemy import event, select, update
 
 from secretaria.models import Agenda, Appointment, AppointmentStatus, CalendarEvent, Professional
@@ -23,7 +24,11 @@ from secretaria.models.calendar_event import EVENT_STATUS_GOOGLE_LEASE
 from secretaria.models.tenant import Tenant
 from secretaria.services import agenda as agenda_service, local_calendar
 from secretaria.services.agenda import agenda_lock_key, shared_busy
-from secretaria.services.calendar import CalendarService, CalendarSlotTakenError
+from secretaria.services.calendar import (
+    CalendarService,
+    CalendarSlotTakenError,
+    CalendarUnavailableError,
+)
 from secretaria.services.local_calendar import (
     LocalCalendarService,
     create_event_exclusive,
@@ -190,6 +195,10 @@ async def test_the_google_exclusive_write_also_rechecks_its_own_google(db, googl
 
     with pytest.raises(CalendarSlotTakenError):
         await create_event_exclusive(cal_c, start=start, end=end, summary="Consulta - C")
+    # The reservation made before that Google read is dropped again: P may book at once.
+    assert await _rows(db, EVENT_STATUS_GOOGLE_LEASE) == []
+    cal_p = await _google(db, tenant_p, x_p, "tok-p")
+    assert await create_event_exclusive(cal_p, start=start, end=end, summary="Consulta - P")
 
 
 async def test_two_google_clinics_writing_one_window_at_once_have_exactly_one_winner(db, google):
@@ -402,3 +411,127 @@ async def test_without_a_shared_agenda_the_google_write_is_plain(db, google, mon
         assert seen == []  # not a single database statement
     assert called == []
     assert await _rows(db) == []
+
+
+# --------------------------------------------------------------------------
+# Reserve first, write outside the lock (review fix)
+# --------------------------------------------------------------------------
+
+
+def _open_transactions(db):
+    """How many transactions are open on the test engine right now (begin - end events)."""
+    engine = db.kw["bind"].sync_engine
+    state = {"open": 0}
+
+    def _begin(conn):
+        state["open"] += 1
+
+    def _end(conn):
+        state["open"] -= 1
+
+    event.listen(engine, "begin", _begin)
+    event.listen(engine, "commit", _end)
+    event.listen(engine, "rollback", _end)
+
+    def _stop():
+        event.remove(engine, "begin", _begin)
+        event.remove(engine, "commit", _end)
+        event.remove(engine, "rollback", _end)
+
+    return state, _stop
+
+
+async def test_no_transaction_or_lock_is_held_while_google_answers(db, google):
+    tenant_p, tenant_c, x_p, x_c, agenda_id = await _world(db)
+    start, end = _window()
+    cal_c = await _google(db, tenant_c, x_c, "tok-c")
+    lock = local_calendar._process_lock(agenda_lock_key(agenda_id))
+    seen = []
+    state, stop = _open_transactions(db)
+    google.on_write = lambda: seen.append((state["open"], lock.locked()))
+    try:
+        booked = await create_event_exclusive(cal_c, start=start, end=end, summary="C")
+        own = await create_event_exclusive(
+            cal_c, start=start + timedelta(hours=2), end=end + timedelta(hours=2), summary="C2"
+        )
+        await update_event_exclusive(
+            cal_c, own["id"], start=start + timedelta(hours=3), end=end + timedelta(hours=3)
+        )
+    finally:
+        stop()
+    assert booked["id"]
+    assert seen == [(0, False), (0, False), (0, False)]  # 2 inserts + 1 patch, all unlocked
+
+
+async def test_a_google_write_that_fails_after_the_reservation_frees_the_window(db, google):
+    tenant_p, tenant_c, x_p, x_c, _ = await _world(db)
+    start, end = _window()
+    cal_c = await _google(db, tenant_c, x_c, "tok-c")
+    google.fail_next_write = HttpError(
+        resp=type("R", (), {"status": 503, "reason": "down"})(), content=b"{}"
+    )
+
+    with pytest.raises(CalendarUnavailableError):
+        await create_event_exclusive(cal_c, start=start, end=end, summary="Consulta - C")
+
+    assert await _rows(db, EVENT_STATUS_GOOGLE_LEASE) == []
+    cal_p = await _google(db, tenant_p, x_p, "tok-p")
+    assert await create_event_exclusive(cal_p, start=start, end=end, summary="Consulta - P")
+
+
+async def test_the_reservation_sweeps_the_agendas_expired_leases(db, google):
+    tenant_p, tenant_c, x_p, x_c, _ = await _world(db)
+    other_tenant = await seed_tenant(db, name="Clínica Z")
+    stranger = await seed_professional(db, other_tenant, "Dra. Z")
+    old = datetime.now(UTC) - agenda_service.GOOGLE_WRITE_LEASE - timedelta(minutes=1)
+    later, later_end = _window(15)
+    async with db() as session:
+        for index, (tenant, owner) in enumerate(
+            ((tenant_p, x_p), (tenant_c, x_c), (other_tenant, stranger))
+        ):
+            session.add(
+                CalendarEvent(
+                    id=f"lease_old{index}", tenant_id=tenant.id, professional_id=owner.id,
+                    start_at=later, end_at=later_end, busy=True,
+                    status=EVENT_STATUS_GOOGLE_LEASE, created_at=old, updated_at=old,
+                )
+            )
+        await session.commit()
+
+    start, end = _window()
+    cal_c = await _google(db, tenant_c, x_c, "tok-c")
+    await create_event_exclusive(cal_c, start=start, end=end, summary="Consulta - C")
+
+    ids = {row.id for row in await _rows(db, EVENT_STATUS_GOOGLE_LEASE)}
+    assert "lease_old0" not in ids and "lease_old1" not in ids  # both owners of the agenda
+    assert "lease_old2" in ids  # another person's agenda is not this write's business
+    assert len(ids) == 2  # + the fresh lease of this write
+
+
+async def test_the_exclusive_google_calls_get_an_explicit_timeout(db, google, monkeypatch):
+    tenant_p, tenant_c, x_p, x_c, _ = await _world(db)
+    start, end = _window()
+    cal_c = await _google(db, tenant_c, x_c, "tok-c")
+    monkeypatch.setattr(cal_c._settings, "GOOGLE_CALENDAR_EXCLUSIVE_TIMEOUT_SECONDS", 7.5)
+
+    await cal_c.check_availability(start, end)  # a plain read: the library default
+    await create_event_exclusive(cal_c, start=start, end=end, summary="Consulta - C")
+
+    assert google.timeouts == [None, 7.5]
+
+
+def test_the_timed_client_really_carries_the_socket_timeout(monkeypatch):
+    from google.oauth2.credentials import Credentials
+
+    monkeypatch.setattr(Credentials, "refresh", lambda self, request: None)
+    service = CalendarService()
+    service._settings = type(
+        "S", (), {"GOOGLE_CLIENT_ID": "id", "GOOGLE_CLIENT_SECRET": "secret",
+                  "GOOGLE_REFRESH_TOKEN": "tok"}
+    )()
+    timed = service._build_service(timeout=5.0)
+    assert timed._http.http.timeout == 5.0
+    from googleapiclient.http import DEFAULT_HTTP_TIMEOUT_SEC
+
+    plain = service._build_service()
+    assert plain._http.http.timeout == DEFAULT_HTTP_TIMEOUT_SEC  # untouched library default

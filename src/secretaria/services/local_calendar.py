@@ -73,7 +73,7 @@ from typing import TYPE_CHECKING, ClassVar
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import ColumnElement, and_, or_, select, text, update
+from sqlalchemy import ColumnElement, and_, delete, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.config import Settings
@@ -82,9 +82,12 @@ from secretaria.core.logging import get_logger
 from secretaria.models.calendar_event import (
     EVENT_STATUS_CANCELLED,
     EVENT_STATUS_CONFIRMED,
+    EVENT_STATUS_GOOGLE_LEASE,
     CalendarEvent,
 )
+from secretaria.models.professional import Professional
 from secretaria.services.agenda import (
+    GOOGLE_WRITE_LEASE,
     agenda_id_of,
     agenda_lock_key,
     agenda_write_lock as shared_agenda_write_lock,
@@ -206,12 +209,12 @@ async def person_agenda_write_lock(
 ) -> AsyncIterator[tuple[AsyncSession, UUID | None]]:
     """A session whose transaction holds ONLY the person's agenda lock (TASK-083 §7 item 3).
 
-    For a GOOGLE agenda's exclusive write (services/calendar.py::CalendarService.
-    exclusive_write): no `calendar_events` agenda of its own to lock, but the same person's
-    lock a sibling's local exclusive write takes (`agenda_write_lock(shared=True)`), so the
-    two backends serialize on one key. Yields `(session, agenda_id)`; `agenda_id` None (the
-    agenda was dissolved) takes no lock at all. Commits on exit, then releases the in-process
-    lock, then closes - the same exit order as `agenda_write_lock`.
+    For a GOOGLE agenda's reservation (`reserve_person_window`): no `calendar_events` agenda
+    of its own to lock, but the same person's lock a sibling's local exclusive write takes
+    (`agenda_write_lock(shared=True)`), so the two backends serialize on one key. Yields
+    `(session, agenda_id)`; `agenda_id` None (no agenda) takes no lock at all. Commits on exit,
+    then releases the in-process lock, then closes - the same exit order as
+    `agenda_write_lock`. Keep it SHORT: no network call may run inside.
 
     Never call a local exclusive write while holding this: it takes owner THEN person, and
     the in-process lock is not re-entrant.
@@ -226,6 +229,122 @@ async def person_agenda_write_lock(
             await person_lock.enter_async_context(_process_lock(agenda_lock_key(agenda_id)))
             await shared_agenda_write_lock(session, agenda_id)
         yield session, agenda_id
+
+
+# `reserve_person_window`'s answer when the professional has no agenda (any more).
+NO_AGENDA = object()
+
+
+def _fresh_lease(now: datetime) -> ColumnElement[bool]:
+    return and_(
+        CalendarEvent.status == EVENT_STATUS_GOOGLE_LEASE,
+        CalendarEvent.created_at > now - GOOGLE_WRITE_LEASE,
+    )
+
+
+async def reserve_person_window(
+    tenant_id: UUID,
+    professional_id: UUID,
+    start_utc: datetime,
+    end_utc: datetime,
+    *,
+    google_event_id: str | None = None,
+):
+    """Step 2 of a Google exclusive write: reserve [start, end) on the person's agenda.
+
+    One short transaction under the person's lock, no network I/O: sweep the agenda's
+    expired leases (every owner on it), refuse when a sibling is busy (`shared_busy`, which
+    counts their leases) or when a fresh lease of THIS professional overlaps (two writers of
+    one agenda exclude each other; a lease of `google_event_id` itself - the event being
+    moved, a retried deterministic id - does not count), else insert the lease and commit.
+
+    Returns the lease id; None when the window is taken; `NO_AGENDA` when the professional
+    has no agenda (the caller writes plainly).
+    """
+    async with person_agenda_write_lock(professional_id) as (session, agenda_id):
+        if agenda_id is None:
+            return NO_AGENDA
+        now = _now()
+        await session.execute(
+            delete(CalendarEvent)
+            .where(
+                CalendarEvent.status == EVENT_STATUS_GOOGLE_LEASE,
+                CalendarEvent.created_at <= now - GOOGLE_WRITE_LEASE,
+                CalendarEvent.professional_id.in_(
+                    select(Professional.id).where(Professional.agenda_id == agenda_id)
+                ),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        own = select(CalendarEvent.id).where(
+            CalendarEvent.professional_id == professional_id,
+            _fresh_lease(now),
+            _overlapping(start_utc, end_utc),
+        )
+        if google_event_id is not None:
+            own = own.where(
+                or_(
+                    CalendarEvent.google_event_id.is_(None),
+                    CalendarEvent.google_event_id != google_event_id,
+                )
+            )
+        if (await session.scalar(own.limit(1))) is not None or await shared_busy(
+            session, professional_id, start_utc, end_utc
+        ):
+            return None
+        lease_id = f"lease_{uuid4().hex}"
+        session.add(
+            CalendarEvent(
+                id=lease_id,
+                tenant_id=tenant_id,
+                professional_id=professional_id,
+                summary=None,
+                description=None,
+                start_at=start_utc,
+                end_at=end_utc,
+                busy=True,
+                status=EVENT_STATUS_GOOGLE_LEASE,
+                google_event_id=google_event_id[:255] if google_event_id else None,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        return lease_id
+
+
+async def release_person_window(lease_id: str) -> None:
+    """Drop a reservation whose Google write did not happen. Best effort, its own short
+    transaction; a failure is logged and the lease simply expires (`GOOGLE_WRITE_LEASE`)."""
+    try:
+        async with async_session_factory() as session, session.begin():
+            await session.execute(
+                delete(CalendarEvent)
+                .where(
+                    CalendarEvent.id == lease_id,
+                    CalendarEvent.status == EVENT_STATUS_GOOGLE_LEASE,
+                )
+                .execution_options(synchronize_session=False)
+            )
+    except Exception as exc:  # noqa: BLE001 - the expiry is the backstop
+        logger.warning("agenda_lease_release_failed", error_type=type(exc).__name__)
+
+
+async def stamp_person_window(lease_id: str, google_event_id: str) -> None:
+    """Record the Google id a reservation became, so a move of that very event does not
+    collide with its own lease. Best effort, like `release_person_window`."""
+    try:
+        async with async_session_factory() as session, session.begin():
+            await session.execute(
+                update(CalendarEvent)
+                .where(
+                    CalendarEvent.id == lease_id,
+                    CalendarEvent.status == EVENT_STATUS_GOOGLE_LEASE,
+                )
+                .values(google_event_id=google_event_id[:255])
+                .execution_options(synchronize_session=False)
+            )
+    except Exception as exc:  # noqa: BLE001 - only a later self-move could be refused
+        logger.warning("agenda_lease_stamp_failed", error_type=type(exc).__name__)
 
 
 # --------------------------------------------------------------------------

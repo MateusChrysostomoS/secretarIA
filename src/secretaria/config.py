@@ -343,6 +343,11 @@ class Settings(BaseSettings):
     # Single-tenant Fase A: refresh token in env. Multi-tenant: encrypted DB col.
     GOOGLE_REFRESH_TOKEN: str = ""
     GOOGLE_CALENDAR_ID: str = "primary"
+    # TASK-083: socket timeout (seconds) of the Google calls an EXCLUSIVE write makes for a
+    # doctor who shares his agenda with another clinic (services/calendar.py::
+    # CalendarService.exclusive_write): the slot is reserved for him meanwhile, so a hung call
+    # must not keep it. Every other Google call keeps the library's default.
+    GOOGLE_CALENDAR_EXCLUSIVE_TIMEOUT_SECONDS: float = 20.0
     # IANA tz used to interpret naive datetimes coming from the LLM.
     CLINIC_TIMEZONE: str = "America/Sao_Paulo"
 

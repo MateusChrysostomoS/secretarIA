@@ -420,8 +420,9 @@ async def test_release_keep_write_is_refused_on_google(db, calls, google, monkey
 
     result = await _accept(db, released, offer.id)
 
-    # Nothing is re-created; the clinic may refuse or try again (as on the local agenda).
-    assert result.outcome in {rk.ACCEPT_TAKEN, rk.ACCEPT_UNAVAILABLE}
+    # Nothing is re-created. The refused write lands in accept_keep's generic "calendar
+    # failed" branch - the clinic may refuse or try again (the same as on the local agenda).
+    assert result.outcome == rk.ACCEPT_UNAVAILABLE
     assert google.events_of("tok-c") == []
     async with db() as session:
         live = await session.scalars(

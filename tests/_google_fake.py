@@ -35,6 +35,12 @@ class GoogleFake:
         self.calendars: dict[str, dict[str, dict]] = {}
         self.inserts: list[tuple[str, str]] = []
         self.patches: list[tuple[str, str]] = []
+        # The socket timeout each built client got (None: the library default).
+        self.timeouts: list[float | None] = []
+        # Called (in the worker thread) right before an insert/patch lands; may raise.
+        self.on_write = None
+        # One-shot error for the next insert/patch (e.g. a 503).
+        self.fail_next_write: Exception | None = None
         self._lock = threading.Lock()
         self._seq = 0
 
@@ -54,6 +60,13 @@ class GoogleFake:
                 "end": {"dateTime": end.isoformat()},
             }
         return event_id
+
+    def _before_write(self) -> None:
+        if self.on_write is not None:
+            self.on_write()
+        if self.fail_next_write is not None:
+            error, self.fail_next_write = self.fail_next_write, None
+            raise error
 
     def client(self, token: str):
         fake = self
@@ -77,6 +90,7 @@ class GoogleFake:
 
             def insert(self, calendarId, body):  # noqa: N803
                 def run():
+                    fake._before_write()
                     with fake._lock:
                         event_id = body.get("id")
                         if event_id is None:
@@ -107,6 +121,7 @@ class GoogleFake:
 
             def patch(self, calendarId, eventId, body, **_kw):  # noqa: N803
                 def run():
+                    fake._before_write()
                     with fake._lock:
                         if eventId not in calendar:
                             raise _http_error(404)
@@ -137,7 +152,8 @@ def install_google_fake(monkeypatch) -> GoogleFake:
     """Route every real CalendarService's Google client to one shared `GoogleFake`."""
     fake = GoogleFake()
 
-    def _build(self):
+    def _build(self, *, timeout=None):
+        fake.timeouts.append(timeout)
         return fake.client(self._refresh_token_override)
 
     monkeypatch.setattr(CalendarService, "_build_service", _build)

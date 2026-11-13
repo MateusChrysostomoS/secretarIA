@@ -22,7 +22,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import quote, urlencode
-from uuid import UUID, uuid4
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
@@ -394,6 +394,8 @@ class CalendarService:
         self._calendar_id = self._settings.GOOGLE_CALENDAR_ID
         self._refresh_token_override: str | None = None
         self._service: Any | None = None
+        # The exclusive path's client with a socket timeout (`_timed_copy`), built on demand.
+        self._timed_service: Any | None = None
         # Per-tenant availability config. Empty business_hours => the legacy
         # fixed 08-18 window is used by list_free_slots (dev/Fase A fallback).
         self._business_hours: dict = {}
@@ -427,6 +429,11 @@ class CalendarService:
         attached exactly then): there it is `exclusive_write`. Every other Google agenda
         answers False and its writes stay the plain calls they always were. The
         secretarIA's own agenda always answers True.
+
+        Known limit (TASK-083 review, Minor 1): this follows the read seam attached at build
+        time, unlike the local write, which discovers the agenda itself. An INACTIVE doctor
+        reached through the AI tools' `calendar_factory` (whose config lists active doctors
+        only) therefore gets the plain Google write. Rare: an inactive doctor is not offered.
         """
         return (
             getattr(self, "_tenant_id", None) is not None
@@ -464,75 +471,87 @@ class CalendarService:
         self,
         start: datetime,
         end: datetime,
-        write: Callable[[], Awaitable[dict]],
+        write: Callable[["CalendarService"], Awaitable[dict]],
         *,
         ignore_event_id: str | None = None,
     ) -> dict:
         """Run the Google `write` only if [start, end) is free on the person's WHOLE agenda.
 
-        Under the person's agenda lock (services/local_calendar.py::person_agenda_write_lock:
-        the in-process lock keyed by `agenda_lock_key` and the Postgres advisory lock, the
-        same two a local exclusive write of a sibling takes) it re-reads the siblings' busy
-        windows on the locked transaction and this Google calendar itself (`ignore_event_id`
-        is the event being moved or a retried deterministic id), raises
-        `CalendarSlotTakenError` when anything overlaps, else writes - and leaves a LEASE,
-        a bare-window row the siblings count as busy until the caller's appointment row
-        exists (models/calendar_event.py::EVENT_STATUS_GOOGLE_LEASE). Their Google cannot
-        see ours, so without it a sibling locking right after us would find nothing.
+        RESERVE FIRST, WRITE OUTSIDE THE LOCK - no network call ever runs while a database
+        transaction or a lock is held:
 
-        Lock order: this takes ONLY the person's lock - never an owner lock - and `write`
-        must never be a local exclusive write (that one takes owner then person: a nested
-        call would wait on the person lock held here forever).
+        1. The Google client (token refresh included) is built first, with an explicit socket
+           timeout (`Settings.GOOGLE_CALENDAR_EXCLUSIVE_TIMEOUT_SECONDS`), outside everything.
+        2. A short locked transaction (services/local_calendar.py::reserve_person_window: the
+           person's in-process + advisory locks, the same a sibling's local exclusive write
+           takes) checks the siblings' busy time and every fresh LEASE of the person - his
+           own included, so two writers of this very agenda exclude each other too - inserts
+           this write's lease (models/calendar_event.py::EVENT_STATUS_GOOGLE_LEASE) and commits.
+        3. Outside: this Google calendar is re-read (`ignore_event_id` is the event being moved
+           or a retried deterministic id) and `write(calendar)` runs on the timed client.
+        4. Taken on Google, or the write failed: the lease is dropped (best effort; its
+           `GOOGLE_WRITE_LEASE` expiry is the backstop) and `CalendarSlotTakenError` / the
+           original error is raised. On success the lease stays until it expires - the
+           appointment row the caller writes is what keeps the window busy after that.
+
+        `write` receives the calendar to write through (the timed one). It must never be a
+        local exclusive write.
         """
-        # Imported here: local_calendar subclasses this class; agenda pulls the models in.
-        from sqlalchemy import delete
-
-        from secretaria.models.calendar_event import EVENT_STATUS_GOOGLE_LEASE, CalendarEvent
+        # Imported here: local_calendar subclasses this class.
         from secretaria.services import local_calendar
-        from secretaria.services.agenda import GOOGLE_WRITE_LEASE, shared_busy
 
         owner = self._owner_professional_id
         start_dt, end_dt = self._ensure_tz(start), self._ensure_tz(end)
-        start_utc, end_utc = start_dt.astimezone(UTC), end_dt.astimezone(UTC)
-        async with local_calendar.person_agenda_write_lock(owner) as (session, agenda_id):
-            if agenda_id is None:
-                # The agenda was dissolved after this object was built: today's plain write.
-                return await write()
-            if await shared_busy(session, owner, start_utc, end_utc) or await self._own_overlap(
-                start_dt, end_dt, ignore_event_id
-            ):
-                logger.info(
-                    "calendar_slot_taken",
-                    tenant_id=str(self._tenant_id),
-                    professional_id=str(owner),
-                )
-                raise CalendarSlotTakenError("The slot is already taken on this person's agenda.")
-            event = await write()
-            now = datetime.now(UTC)
-            await session.execute(
-                delete(CalendarEvent).where(
-                    CalendarEvent.professional_id == owner,
-                    CalendarEvent.status == EVENT_STATUS_GOOGLE_LEASE,
-                    CalendarEvent.created_at <= now - GOOGLE_WRITE_LEASE,
-                )
-            )
-            session.add(
-                CalendarEvent(
-                    id=f"lease_{uuid4().hex}",
-                    tenant_id=self._tenant_id,
-                    professional_id=owner,
-                    summary=None,
-                    description=None,
-                    start_at=start_utc,
-                    end_at=end_utc,
-                    busy=True,
-                    status=EVENT_STATUS_GOOGLE_LEASE,
-                    google_event_id=str(event.get("id") or "")[:255] or None,
-                    created_at=now,
-                    updated_at=now,
-                )
-            )
-            return event
+        timed = await self._timed_copy()
+        reservation = await local_calendar.reserve_person_window(
+            self._tenant_id,
+            owner,
+            start_dt.astimezone(UTC),
+            end_dt.astimezone(UTC),
+            google_event_id=ignore_event_id,
+        )
+        if reservation is local_calendar.NO_AGENDA:
+            # The agenda was dissolved after this object was built: today's plain write.
+            return await write(self)
+        if reservation is None:
+            self._log_slot_taken()
+            raise CalendarSlotTakenError("The slot is already taken on this person's agenda.")
+        try:
+            if await timed._own_overlap(start_dt, end_dt, ignore_event_id):
+                self._log_slot_taken()
+                raise CalendarSlotTakenError("The slot is already taken on this agenda.")
+            event = await write(timed)
+        except BaseException:
+            await local_calendar.release_person_window(reservation)
+            raise
+        if ignore_event_id is None and event.get("id"):
+            # Lets a later move of this very event pass its own lease (best effort).
+            await local_calendar.stamp_person_window(reservation, str(event["id"]))
+        return event
+
+    def _log_slot_taken(self) -> None:
+        # This clinic's own ids only: nothing of the other clinic is ever logged.
+        logger.info(
+            "calendar_slot_taken",
+            tenant_id=str(self._tenant_id),
+            professional_id=str(self._owner_professional_id),
+        )
+
+    async def _timed_copy(self) -> "CalendarService":
+        """This agenda over a Google client whose calls time out (the exclusive path only).
+
+        Built - credential refresh included - in a worker thread, before any lock is taken.
+        The plain client and every non-exclusive call are left exactly as they were.
+        """
+        timeout = float(
+            getattr(self._settings, "GOOGLE_CALENDAR_EXCLUSIVE_TIMEOUT_SECONDS", 20.0) or 20.0
+        )
+        if getattr(self, "_timed_service", None) is None:
+            self._timed_service = await asyncio.to_thread(self._build_service, timeout=timeout)
+        timed = copy.copy(self)
+        timed._service = self._timed_service
+        timed._shared_busy_provider = None
+        return timed
 
     async def _own_overlap(
         self, start: datetime, end: datetime, ignore_event_id: str | None
@@ -704,7 +723,9 @@ class CalendarService:
         )
         return cls.from_tenant_config(resolved, professional_id=professional_id)
 
-    def _build_service(self) -> Any:
+    def _build_service(self, *, timeout: float | None = None) -> Any:
+        """The Google client. `timeout` (seconds, exclusive writes only - `_timed_copy`) gives
+        its HTTP calls an explicit socket timeout; None keeps the library default, as always."""
         s = self._settings
         refresh_token = self._refresh_token_override or s.GOOGLE_REFRESH_TOKEN
         if not (s.GOOGLE_CLIENT_ID and s.GOOGLE_CLIENT_SECRET and refresh_token):
@@ -735,7 +756,13 @@ class CalendarService:
         except _NETWORK_ERRORS as exc:
             logger.error("calendar_token_refresh_network_error", error=str(exc))
             raise CalendarUnavailableError("Google Calendar unreachable during auth") from exc
-        return build("calendar", "v3", credentials=creds, cache_discovery=False)
+        if timeout is None:
+            return build("calendar", "v3", credentials=creds, cache_discovery=False)
+        import google_auth_httplib2
+        import httplib2
+
+        http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=timeout))
+        return build("calendar", "v3", http=http, cache_discovery=False)
 
     def _client(self) -> Any:
         if self._service is None:
@@ -1070,7 +1097,7 @@ class CalendarService:
             return await self.exclusive_write(
                 start,
                 end,
-                lambda: self.create_event(
+                lambda calendar: calendar.create_event(
                     start, end, summary, description, reminders, event_id=event_id
                 ),
                 ignore_event_id=event_id,
@@ -1148,7 +1175,10 @@ class CalendarService:
         body = self._window_body(start, end)
         if exclusive:
             return await self.exclusive_write(
-                start, end, lambda: self._patch_event(event_id, body), ignore_event_id=event_id
+                start,
+                end,
+                lambda calendar: calendar._patch_event(event_id, body),
+                ignore_event_id=event_id,
             )
         return await self._patch_event(event_id, body)
 
@@ -1182,7 +1212,10 @@ class CalendarService:
         body["description"] = description
         if exclusive:
             return await self.exclusive_write(
-                start, end, lambda: self._patch_event(event_id, body), ignore_event_id=event_id
+                start,
+                end,
+                lambda calendar: calendar._patch_event(event_id, body),
+                ignore_event_id=event_id,
             )
         return await self._patch_event(event_id, body)
 
