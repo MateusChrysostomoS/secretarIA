@@ -1,5 +1,7 @@
 # SecretarIA
 
+TASK-083 (2026-11-13, LOCAL, branch `task/TASK-083-multi-unidades`, sem push/deploy): multi-unidades por profissional + agenda compartilhada por pessoa entre clínicas (`services/agenda.py`, `agenda_linking.py`, passo `awaiting_unit`, rotas do hub de unidades/agenda; migrações `e4a8c2f6b1d9` → `b5d9e3f7a1c4` ANTES de API+worker; brain-api e `scripts/reconcile_agendas.py`): [checkpoint](docs/CHECKPOINT_agenda_multi_unidades.md).
+
 TASK-081 (2026-11-11): a ordem dos serviços na conversa do paciente é a do catálogo da clínica (`PUT /services/order`); sem migração; deploy pelo dono: [checkpoint](docs/CHECKPOINT_ordem_listas_paciente.md).
 
 Branch `feature/out-of-mvp` (Pix): TASK-050 trouxe a `main` e portou o Pix para os workers divididos; ver [checkpoint](docs/CHECKPOINT_task050_main_into_out_of_mvp.md).
