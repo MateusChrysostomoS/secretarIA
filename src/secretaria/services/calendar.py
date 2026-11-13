@@ -435,7 +435,11 @@ class CalendarService:
         provider = self.shared_busy_provider
         if provider is None:
             return []
-        windows = await provider(self._ensure_tz(start), self._ensure_tz(end))
+        # UTC bounds: a naive value means clinic time (`_ensure_tz`), and the query must not
+        # depend on the caller's zone (SQLite compares wall clocks).
+        windows = await provider(
+            self._ensure_tz(start).astimezone(UTC), self._ensure_tz(end).astimezone(UTC)
+        )
         return [
             {
                 "id": None,

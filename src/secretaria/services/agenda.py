@@ -68,6 +68,13 @@ def _aware(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
+def _utc(value: datetime) -> datetime:
+    """A query bound in UTC. SQLite drops the offset and compares wall clocks, so a bound in
+    the clinic's zone would miss rows (local_calendar.py converts every bound the same way).
+    A naive value is read as UTC, like the timestamps this module reads back."""
+    return _aware(value).astimezone(UTC)
+
+
 async def agenda_id_of(session: AsyncSession, professional_id: UUID | None) -> UUID | None:
     """The agenda a professional belongs to, or None (no agenda / unknown professional)."""
     if professional_id is None:
@@ -99,7 +106,10 @@ async def shared_busy(
     end: datetime,
 ) -> list[BusyWindow]:
     """Windows of the siblings' live appointments, local busy events and payment holds that
-    overlap `[start, end)`; sorted, deduplicated, windows only. `[]` without siblings."""
+    overlap `[start, end)`; sorted, deduplicated, windows only. `[]` without siblings.
+
+    `start`/`end` may be in any zone: they are converted to UTC before querying."""
+    start, end = _utc(start), _utc(end)
     sibling_ids = await sibling_professional_ids(session, professional_id)
     if not sibling_ids:
         return []
@@ -192,7 +202,7 @@ def shared_busy_provider(professional_id: UUID) -> SharedBusyProvider:
 
     async def _provider(start: datetime, end: datetime) -> list[BusyWindow]:
         async with async_session_factory() as session:
-            return await shared_busy(session, professional_id, start, end)
+            return await shared_busy(session, professional_id, _utc(start), _utc(end))
 
     return _provider
 

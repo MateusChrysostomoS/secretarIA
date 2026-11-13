@@ -189,6 +189,9 @@ async def agenda_write_lock(
         session.begin(),
     ):
         await _advisory_lock(session, key)
+        # The one extra read an exclusive write pays, agenda or not (none for the clinic's own
+        # agenda): a PK lookup of `professionals.agenda_id`. Kept on purpose - it makes the
+        # guard independent of how the calendar object was built (TASK-083 review ruling).
         agenda_id = await agenda_id_of(session, professional_id) if shared else None
         if agenda_id is not None:
             await person_lock.enter_async_context(_process_lock(agenda_lock_key(agenda_id)))

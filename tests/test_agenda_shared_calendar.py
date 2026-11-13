@@ -22,9 +22,10 @@ import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 
 from secretaria.models import (
     Agenda,
@@ -36,7 +37,7 @@ from secretaria.models import (
     Tenant,
 )
 from secretaria.services import local_calendar
-from secretaria.services.agenda import agenda_lock_key
+from secretaria.services.agenda import agenda_lock_key, shared_busy, shared_busy_provider
 from secretaria.services.availability import free_slots_for_day, slot_taken_at_confirm
 from secretaria.services.calendar import CalendarService, CalendarSlotTakenError
 from secretaria.services.local_calendar import (
@@ -75,10 +76,10 @@ async def _link(db, agenda_key: str, *professionals) -> object:
         return row.id
 
 
-async def _world(db):
+async def _world(db, *, hours: dict | None = None):
     """P's Dr. X and C's Dr. X share one agenda; each clinic has only him active."""
-    tenant_p = await seed_tenant(db, name="Clínica P")
-    tenant_c = await seed_tenant(db, name="Clínica C")
+    tenant_p = await seed_tenant(db, name="Clínica P", hours=hours)
+    tenant_c = await seed_tenant(db, name="Clínica C", hours=hours)
     x_p = await seed_professional(db, tenant_p, "Dr. X")
     x_c = await seed_professional(db, tenant_c, "Dr. X")
     agenda_id = await _link(db, "acct-x", x_p, x_c)
@@ -418,3 +419,144 @@ async def test_a_no_agenda_exclusive_write_takes_no_agenda_lock(db, monkeypatch)
         await _calendar(db, tenant, solo), start=start, end=end, summary="Consulta"
     )
     assert calls == []
+
+
+# --------------------------------------------------------------------------
+# Time zones: the sibling read always queries in UTC (SQLite compares wall clocks)
+# --------------------------------------------------------------------------
+
+SAO_PAULO = ZoneInfo("America/Sao_Paulo")
+LATE_HOURS = {
+    day: [{"start": "08:00", "end": "23:30"}]
+    for day in ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+}
+
+
+async def test_clinic_local_times_still_see_the_sibling(db):
+    tenant_p, tenant_c, x_p, x_c, _agenda = await _world(db)
+    start, end = _window()  # 10:00-10:30 clinic time, stored as 13:00-13:30 UTC
+    await (await _calendar(db, tenant_p, x_p)).create_event(start, end, "Consulta - P")
+    local_start, local_end = start.astimezone(SAO_PAULO), end.astimezone(SAO_PAULO)
+    cal_c = await _calendar(db, tenant_c, x_c)
+
+    assert await cal_c.has_conflict(local_start, local_end)
+    assert await cal_c.has_conflict(
+        local_start.replace(tzinfo=None), local_end.replace(tzinfo=None)
+    )
+    assert not await cal_c.is_slot_free(local_start, local_end)
+    assert await slot_taken_at_confirm(cal_c, local_start, local_end, source="shared_agenda_test")
+    assert len(await cal_c.check_availability(local_start, local_end)) == 1
+    assert "10:00" not in await _labels(cal_c, local_start)
+    with pytest.raises(CalendarSlotTakenError):
+        await create_event_exclusive(cal_c, start=local_start, end=local_end, summary="C")
+
+
+async def test_a_sibling_window_straddling_utc_midnight_is_seen_in_clinic_time(db):
+    tenant_p, tenant_c, x_p, x_c, _agenda = await _world(db, hours=LATE_HOURS)
+    # 20:30-21:30 clinic time = 23:30-00:30 UTC: the UTC date changes inside the window.
+    start = tomorrow_at(20, 30)
+    end = start + timedelta(hours=1)
+    assert start.date() != end.date()
+    await (await _calendar(db, tenant_p, x_p)).create_event(start, end, "Consulta - P")
+    cal_c = await _calendar(db, tenant_c, x_c)
+    probe_start = (start + timedelta(minutes=30)).astimezone(SAO_PAULO)  # 21:00 local
+    probe_end = probe_start + timedelta(minutes=30)
+
+    assert await cal_c.has_conflict(probe_start, probe_end)
+    assert not await cal_c.is_slot_free(probe_start, probe_end)
+    assert await slot_taken_at_confirm(cal_c, probe_start, probe_end, source="shared_agenda_test")
+    labels = await _labels(cal_c, probe_start)
+    assert "20:30" not in labels and "21:00" not in labels
+    assert "20:00" in labels and "21:30" in labels
+    with pytest.raises(CalendarSlotTakenError):
+        await create_event_exclusive(cal_c, start=probe_start, end=probe_end, summary="C")
+
+
+async def test_shared_busy_itself_normalizes_its_bounds_to_utc(db):
+    tenant_p, _tenant_c, x_p, x_c, _agenda = await _world(db)
+    start, end = _window()
+    await (await _calendar(db, tenant_p, x_p)).create_event(start, end, "Consulta - P")
+    provider = shared_busy_provider(x_c.id)
+
+    windows = await provider(start.astimezone(SAO_PAULO), end.astimezone(SAO_PAULO))
+    assert [(w.start, w.end) for w in windows] == [(start, end)]
+    async with db() as session:
+        local = await shared_busy(
+            session, x_c.id, start.astimezone(SAO_PAULO), end.astimezone(SAO_PAULO)
+        )
+    assert [(w.start, w.end) for w in local] == [(start, end)]
+
+
+# --------------------------------------------------------------------------
+# Cost without an agenda: no extra read; the write's one documented PK read
+# --------------------------------------------------------------------------
+
+
+def _statements(db) -> tuple[list[str], object]:
+    engine = db.kw["bind"].sync_engine
+    seen: list[str] = []
+
+    def _record(conn, cursor, statement, params, context, executemany):
+        seen.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _record)
+    return seen, lambda: event.remove(engine, "before_cursor_execute", _record)
+
+
+async def test_the_no_agenda_read_path_issues_no_extra_query(db, monkeypatch):
+    tenant = await seed_tenant(db)
+    solo = await seed_professional(db, tenant, "Dr. Solo")
+    lonely = await seed_professional(db, tenant, "Dra. Sozinha")
+    await _link(db, "acct-lonely", lonely)  # an agenda without a sibling
+    start, end = _window()
+
+    for professional in (solo, lonely):
+        cal = await _calendar(db, tenant, professional)
+        seen, stop = _statements(db)
+        try:
+            await cal.has_conflict(start, end)
+            assert len(seen) == 1  # the agenda's own busy rows, nothing else
+            seen.clear()
+            await cal.list_free_slots(day=start.astimezone(cal.tzinfo), max_slots=40)
+            assert len(seen) == 1
+        finally:
+            stop()
+
+    async with db() as session:
+        config = await load_tenant_config(session, await session.get(Tenant, tenant.id))
+    google = CalendarService.from_tenant_config(
+        replace(config, google_refresh_token="tok"), professional_id=solo.id
+    )
+    monkeypatch.setattr(CalendarService, "_events_page", lambda *a, **k: ([], None))
+    seen, stop = _statements(db)
+    try:
+        await google.has_conflict(start, end)
+    finally:
+        stop()
+    assert seen == []  # Google read: not a single database statement
+
+
+async def test_the_no_agenda_exclusive_write_does_exactly_one_extra_pk_read(db):
+    tenant = await seed_tenant(db)
+    solo = await seed_professional(db, tenant, "Dr. Solo")
+    cal = await _calendar(db, tenant, solo)
+    start, end = _window()
+
+    seen, stop = _statements(db)
+    try:
+        await create_event_exclusive(cal, start=start, end=end, summary="Consulta")
+    finally:
+        stop()
+    agenda_reads = [s for s in seen if "FROM professionals" in s]
+    assert len(agenda_reads) == 1 and "agenda_id" in agenda_reads[0]
+    assert not any("appointments" in s or "booking_holds" in s for s in seen)
+
+    # The clinic's own agenda (no professional) does not even read that.
+    clinic = await _clinic_calendar(db, await seed_tenant(db, name="Outra"))
+    later, later_end = _window(15)
+    clinic_seen, stop = _statements(db)
+    try:
+        await create_event_exclusive(clinic, start=later, end=later_end, summary="Consulta")
+    finally:
+        stop()
+    assert not any("FROM professionals" in s for s in clinic_seen)
