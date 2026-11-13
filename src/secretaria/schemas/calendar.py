@@ -185,6 +185,12 @@ class CalendarEventRead(BaseModel):
     # Every write route acts on both the same way; the console may label it. None only
     # from an agenda that does not say (never in production).
     calendar_backend: Literal["google", "local"] | None = None
+    # TASK-083 spec §8 (frozen contract): where the consultation happens - the appointment's
+    # unit (a unit of THIS clinic), else the unit a secretarIA event recorded. All three None
+    # without a unit; `unit_address` is only ever the unit's own address. Additive.
+    unit_id: str | None = None
+    unit_name: str | None = None
+    unit_address: str | None = None
 
 
 class AppointmentCreate(BaseModel):
@@ -202,6 +208,10 @@ class AppointmentCreate(BaseModel):
     # restricted to his own agenda may omit it (= his own) or send his own; a
     # clinic-wide viewer may name any active professional of the clinic or none.
     professional_id: UUID | None = None
+    # TASK-083 spec §8 (frozen contract): the unit it happens at. Validated: a unit of THIS
+    # clinic, active, and - when the professional attends at units - one of theirs. Absent is
+    # always accepted (an "encaixe" by the staff stays permissive): no unit is recorded.
+    unit_id: UUID | None = None
 
 
 class BlockCreate(BaseModel):

@@ -415,6 +415,8 @@ def _read_item(row: CalendarEvent, tz: ZoneInfo) -> dict:
         "summary": row.summary,
         "start": _aware(row.start_at).astimezone(tz).isoformat(),
         "end": _aware(row.end_at).astimezone(tz).isoformat(),
+        # TASK-083: the unit the event was booked at, only when it has one (the hub names it).
+        **({"unit_id": str(row.unit_id)} if getattr(row, "unit_id", None) else {}),
     }
 
 

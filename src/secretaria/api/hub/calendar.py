@@ -53,6 +53,7 @@ from secretaria.models import (
     PixDeposit,
     Professional,
     Tenant,
+    Unit,
 )
 from secretaria.models.appointment import LIVE_APPOINTMENT_STATUSES
 from secretaria.models.patient import Patient
@@ -126,6 +127,7 @@ from secretaria.services.tenant_config import (
     load_tenant_config,
     resolve_professional_calendar,
 )
+from secretaria.services.unit_booking import UnitRefused, check_unit, scoped_calendar
 from secretaria.workers.shared.appointment_edit_apply import AppliedEdit
 from secretaria.workers.shared.appointment_edit_notification import (
     enqueue_professional_edit_notification,
@@ -325,6 +327,32 @@ async def _creation_professional(
     if professional is None or not professional.is_active:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, _detail(*_UNKNOWN_PROFESSIONAL))
     return professional.id
+
+
+async def _creation_unit(
+    session: AsyncSession, tenant: Tenant, professional_id: UUID | None, requested: UUID | None
+) -> Unit | None:
+    """The unit a hub-created consultation happens at (TASK-083), or None. Runs BEFORE Google.
+
+    None sent -> None, always (a staff "encaixe" stays permissive, even for a doctor who
+    attends at several units). Sent: a unit of THIS clinic (else 404), active and - when the
+    doctor attends at units - one of theirs (else 422), each with a plain message.
+    """
+    if requested is None:
+        return None
+    professional = (
+        await session.scalar(
+            select(Professional).where(
+                Professional.id == professional_id, Professional.tenant_id == tenant.id
+            )
+        )
+        if professional_id is not None
+        else None
+    )
+    try:
+        return await check_unit(session, tenant.id, professional, requested)
+    except UnitRefused as refused:
+        raise HTTPException(refused.status_code, _detail(refused.code, refused.message)) from None
 
 
 async def _calendar_for_professional(
@@ -825,6 +853,7 @@ async def list_events(
                 Appointment.attendee_name,
                 Appointment.phone,
                 Appointment.deposit_waived_reason,
+                Appointment.unit_id,
                 Patient.channel.label("patient_channel"),
                 Patient.name.label("patient_name"),
             )
@@ -893,9 +922,27 @@ async def list_events(
         for reminder in reminder_rows:
             reminders_by_appointment.setdefault(reminder.appointment_id, []).append(reminder)
 
+    # TASK-083: at most ONE tenant-scoped query for the page's units - the appointment's unit,
+    # else the one a secretarIA event recorded. A unit id of another clinic never resolves.
+    unit_ids = {row.unit_id for row in booked.values() if row.unit_id} | {
+        UUID(str(e["unit_id"])) for e in events if e.get("unit_id")
+    }
+    units: dict[UUID, tuple[str, str | None]] = {}
+    if unit_ids:
+        unit_rows = await session.execute(
+            select(Unit.id, Unit.name, Unit.address).where(
+                Unit.tenant_id == tenant.id, Unit.id.in_(unit_ids)
+            )
+        )
+        units = {uid: (name, address) for uid, name, address in unit_rows.all()}
+
     reads: list[CalendarEventRead] = []
     for e in events:
         row = booked.get(e["id"])
+        unit_id = (row.unit_id if row is not None else None) or (
+            UUID(str(e["unit_id"])) if e.get("unit_id") else None
+        )
+        unit = units.get(unit_id) if unit_id is not None else None
         plan = (
             plans.resolve(row.insurance_plan_id, row.insurance_professional_plan_id)
             if row is not None
@@ -936,6 +983,9 @@ async def list_events(
                 phone=row.phone if row is not None else None,
                 patient_channel=row.patient_channel if row is not None else None,
                 calendar_backend=e.get("calendar_backend"),
+                unit_id=str(unit_id) if unit is not None else None,
+                unit_name=unit[0] if unit is not None else None,
+                unit_address=(unit[1] or None) if unit is not None else None,
             )
         )
     return reads
@@ -1003,11 +1053,17 @@ async def create_appointment(
 ) -> AppointmentWriteRead:
     # Spec §5.A / owner 2026-10-09: decided before Google is touched.
     professional_id = await _creation_professional(session, tenant, viewer, body.professional_id)
+    unit = await _creation_unit(session, tenant, professional_id, body.unit_id)
     await _refuse_if_slot_is_held(session, tenant, body.start, body.end)
     # Owner's decision 2026-10-19: on the doctor's own agenda, the one his patients'
     # availability reads - on the clinic's, the slot stayed free for them (double
-    # booking). No doctor: the clinic's agenda, as before.
-    cal = await _calendar_for_professional(session, tenant, professional_id)
+    # booking). No doctor: the clinic's agenda, as before. TASK-083: through the unit's
+    # agenda when one was chosen (its id on a secretarIA event, its location on Google).
+    cal = scoped_calendar(
+        await _calendar_for_professional(session, tenant, professional_id),
+        unit,
+        with_hours=False,
+    )
     # TASK-083 spec §7.4: a plain (permissive) write as always; the doctor's time at another
     # clinic only flags the answer. Read before Google is touched.
     conflicts_other_agenda = await overlaps_other_agenda(cal, body.start, body.end)
@@ -1051,6 +1107,7 @@ async def create_appointment(
         end_at=body.end,
         phone=phone,
         status=AppointmentStatus.SCHEDULED,
+        unit_id=unit.id if unit is not None else None,
     )
     session.add(appt)
     await session.commit()
