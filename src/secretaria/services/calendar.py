@@ -1427,3 +1427,21 @@ class CalendarService:
         calendar = await asyncio.to_thread(_insert)
         logger.info("calendar_secondary_created", calendar_id=calendar.get("id"), summary=summary)
         return calendar
+
+
+# --------------------------------------------------------------------------
+# TASK-083 spec §7.4: the staff's view of a shared person's agenda
+# --------------------------------------------------------------------------
+
+
+def own_agenda_view(calendar: Any) -> Any:
+    """`calendar.own_agenda_view()` for a real agenda; anything else (a test double) as is."""
+    return calendar.own_agenda_view() if isinstance(calendar, CalendarService) else calendar
+
+
+async def overlaps_other_agenda(calendar: Any, start: datetime, end: datetime) -> bool:
+    """Whether [start, end) overlaps the doctor's busy time at ANOTHER clinic sharing his
+    agenda - the hub's warning, never a refusal. False (and no read) without one."""
+    if not isinstance(calendar, CalendarService):
+        return False
+    return await calendar.overlaps_shared_busy(start, end)

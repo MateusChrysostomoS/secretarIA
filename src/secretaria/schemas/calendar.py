@@ -352,6 +352,18 @@ class AppointmentRead(BaseModel):
     deposit_outcome: str | None = None
 
 
+class AppointmentWriteRead(AppointmentRead):
+    """POST /appointments and POST /appointments/{id}/reschedule (TASK-083 spec §7.4).
+
+    `conflicts_other_agenda` is true when the new window overlaps the doctor's busy time at
+    ANOTHER clinic that shares his agenda (one person, one place at a time). The hub warns, it
+    never refuses: the consultation was written. Only this yes/no crosses clinics - never the
+    other clinic, patient or service. False without a shared agenda. Additive.
+    """
+
+    conflicts_other_agenda: bool = False
+
+
 # The four answers of services/tenant_config.py::calendar_credential_health.
 CalendarCredentialStatusWire = Literal["disconnected", "ok", "reconnect_required", "unavailable"]
 
@@ -454,6 +466,8 @@ class AppointmentEditRead(AppointmentActionRead):
     clinic actions keep `AppointmentActionRead`'s keys."""
 
     service_change: AppointmentServiceChangeRead | None = None
+    # TASK-083 spec §7.4: see AppointmentWriteRead.conflicts_other_agenda.
+    conflicts_other_agenda: bool = False
 
 
 class AppointmentCancelRead(AppointmentActionRead):

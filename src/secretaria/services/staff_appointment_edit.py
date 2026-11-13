@@ -78,6 +78,8 @@ from secretaria.services.calendar import (
     CalendarUnavailableError,
     GoogleTokenRevokedError,
     build_event_description,
+    overlaps_other_agenda,
+    own_agenda_view,
 )
 from secretaria.services.patient_context import as_utc
 from secretaria.services.payments import service_change
@@ -186,6 +188,9 @@ class StaffEditOutcome:
     notice_id: str | None = None
     notice_version: str | None = None
     service_change: ServiceChangeOutcome | None = None
+    # TASK-083 spec §7.4: the new window overlaps the doctor's time at another clinic sharing
+    # his agenda. A warning for the hub's answer; the edit was applied all the same.
+    conflicts_other_agenda: bool = False
 
 
 # `request_service_change` refused (`ServiceChangeResult.reason`): what the clinic reads.
@@ -264,6 +269,7 @@ class _Moved:
     old_event_id: str
     old_calendar: Any
     new_calendar: Any
+    conflicts_other_agenda: bool = False
 
 
 def normalize_phone(raw: str | None) -> str | None:
@@ -473,8 +479,12 @@ def _owner_id(before: _Before) -> UUID | None:
 
 
 async def _ensure_free(calendar, start: datetime, end: datetime, ignore_event_id) -> None:
+    """The clinic's OWN agenda must be free (TASK-083 spec §7.4: the doctor's time at another
+    clinic sharing his agenda only warns - `overlaps_other_agenda` - and never refuses here)."""
     try:
-        free = await calendar.is_slot_free(start, end, ignore_event_id=ignore_event_id)
+        free = await own_agenda_view(calendar).is_slot_free(
+            start, end, ignore_event_id=ignore_event_id
+        )
     except GoogleTokenRevokedError as exc:
         raise _calendar_reconnect() from exc
     except CalendarUnavailableError as exc:
@@ -508,6 +518,9 @@ async def _move_event(
     window_changed = (target.start_at, check_end) != (before.start_at, before.end_at)
     unavailable = _calendar_unavailable()
     reconnect = _calendar_reconnect()
+    conflicts = False
+    if window_changed or calendar_changed:
+        conflicts = await overlaps_other_agenda(new_calendar, target.start_at, check_end)
     if (window_changed or calendar_changed) and not request.allow_overlap:
         await _ensure_free(
             new_calendar,
@@ -531,6 +544,7 @@ async def _move_event(
                 old_event_id=before.event_id,
                 old_calendar=old_calendar,
                 new_calendar=new_calendar,
+                conflicts_other_agenda=conflicts,
             )
         await old_calendar.update_event_details(
             before.event_id, target.start_at, target.end_at, summary, description
@@ -542,6 +556,7 @@ async def _move_event(
             old_event_id=before.event_id,
             old_calendar=old_calendar,
             new_calendar=new_calendar,
+            conflicts_other_agenda=conflicts,
         )
     except StaffEditError:
         raise
@@ -671,6 +686,7 @@ async def apply_staff_edit(
 
     needs_google = bool(before.event_id) and any(c.label != LABEL_PHONE for c in now_changes)
     moved = None
+    conflicts_other_agenda = False
     if needs_google:
         moved = await _move_event(
             appointment_id,
@@ -681,11 +697,14 @@ async def apply_staff_edit(
             patient_name,
             check_end=widest_end,
         )
+        conflicts_other_agenda = moved.conflicts_other_agenda
     elif deposit is not None and before.event_id and window_grows and not request.allow_overlap:
         # Only the service changes: its longer window must fit BEFORE any Pix is charged.
-        await _ensure_free(
-            await calendar_for(_owner_id(before)), target.start_at, target.end_at, before.event_id
+        owner_calendar = await calendar_for(_owner_id(before))
+        conflicts_other_agenda = await overlaps_other_agenda(
+            owner_calendar, target.start_at, target.end_at
         )
+        await _ensure_free(owner_calendar, target.start_at, target.end_at, before.event_id)
 
     money: service_change.ServiceChangeResult | None = None
     synced_on = None  # the agenda the service change was written on (for the undo)
@@ -775,7 +794,8 @@ async def apply_staff_edit(
                     session,
                     tenant,
                     locked,
-                    synced_on,
+                    # The clinic's own agenda only: the other clinic warns, never refuses.
+                    own_agenda_view(synced_on),
                     patient_name=patient_name,
                     window_grows=window_grows and not request.allow_overlap,
                 )
@@ -862,6 +882,7 @@ async def apply_staff_edit(
         notice_id=notice_id,
         notice_version=notice_version,
         service_change=outcome_change,
+        conflicts_other_agenda=conflicts_other_agenda,
     )
 
 

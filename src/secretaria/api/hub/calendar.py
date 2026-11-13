@@ -71,6 +71,7 @@ from secretaria.schemas.calendar import (
     AppointmentReschedule,
     AppointmentServiceChangeRead,
     AppointmentStatusUpdate,
+    AppointmentWriteRead,
     AwaitingPaymentRead,
     BlockCreate,
     CalendarDepositRead,
@@ -113,6 +114,7 @@ from secretaria.services.calendar import (
     CalendarService,
     GoogleTokenRevokedError,
     is_event_not_found,
+    overlaps_other_agenda,
 )
 from secretaria.services.insurance_catalog import AppointmentPlan, load_appointment_plans
 from secretaria.services.local_calendar import LocalCalendarService, list_unpushed_events
@@ -451,18 +453,26 @@ async def _update_if_held(calendar, event_id: str, start: datetime, end: datetim
 
 
 async def _move_owned_event(
-    session: AsyncSession, tenant: Tenant, appt: Appointment, start: datetime, end: datetime
+    session: AsyncSession,
+    tenant: Tenant,
+    appt: Appointment,
+    start: datetime,
+    end: datetime,
+    *,
+    owner=None,
 ) -> bool:
     """Move `appt`'s Google event to [start, end) where it really is (reschedule).
 
     Same order as `_delete_owned_event`. False when no agenda holds it: unlike a delete
     there is nothing to move, and booking a new event would be another operation than
-    the one asked for (a Google 404 here used to escape as a raw 500).
+    the one asked for (a Google 404 here used to escape as a raw 500). `owner`: the
+    owning agenda when the caller already resolved it (`_owning_calendar`).
     """
     event_id = appt.google_event_id
     if not event_id:
         return False
-    owner = await _owning_calendar(session, tenant, appt)
+    if owner is None:
+        owner = await _owning_calendar(session, tenant, appt)
     if await _update_if_held(owner, event_id, start, end):
         return True
     fallback = await _legacy_clinic_calendar(session, tenant, appt, owner)
@@ -982,13 +992,15 @@ async def list_awaiting_payment(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/appointments", response_model=AppointmentRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/appointments", response_model=AppointmentWriteRead, status_code=status.HTTP_201_CREATED
+)
 async def create_appointment(
     body: AppointmentCreate,
     tenant: Tenant = Depends(get_current_tenant),
     viewer: AgendaViewer = Depends(get_agenda_viewer),
     session: AsyncSession = Depends(get_session),
-) -> AppointmentRead:
+) -> AppointmentWriteRead:
     # Spec §5.A / owner 2026-10-09: decided before Google is touched.
     professional_id = await _creation_professional(session, tenant, viewer, body.professional_id)
     await _refuse_if_slot_is_held(session, tenant, body.start, body.end)
@@ -996,6 +1008,9 @@ async def create_appointment(
     # availability reads - on the clinic's, the slot stayed free for them (double
     # booking). No doctor: the clinic's agenda, as before.
     cal = await _calendar_for_professional(session, tenant, professional_id)
+    # TASK-083 spec §7.4: a plain (permissive) write as always; the doctor's time at another
+    # clinic only flags the answer. Read before Google is touched.
+    conflicts_other_agenda = await overlaps_other_agenda(cal, body.start, body.end)
     try:
         event = await cal.create_event(
             start=body.start,
@@ -1049,7 +1064,9 @@ async def create_appointment(
         appointment_id=str(appt.id),
         google_event_id=google_event_id,
     )
-    return _appointment_read(appt)
+    return AppointmentWriteRead(
+        **_appointment_read(appt).model_dump(), conflicts_other_agenda=conflicts_other_agenda
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1684,10 +1701,11 @@ async def edit_appointment(
         patient_notice=notice.code if notice is not None else None,
         whatsapp_link=notice.whatsapp_link if notice is not None else None,
         service_change=service_change_read,
+        conflicts_other_agenda=outcome.conflicts_other_agenda,
     )
 
 
-@router.post("/appointments/{appointment_id}/reschedule", response_model=AppointmentRead)
+@router.post("/appointments/{appointment_id}/reschedule", response_model=AppointmentWriteRead)
 async def reschedule_appointment(
     appointment_id: str,
     body: AppointmentReschedule,
@@ -1695,7 +1713,7 @@ async def reschedule_appointment(
     tenant: Tenant = Depends(get_current_tenant),
     viewer: AgendaViewer = Depends(get_agenda_viewer),
     session: AsyncSession = Depends(get_session),
-) -> AppointmentRead:
+) -> AppointmentWriteRead:
     appt = await _get_appointment(session, tenant, appointment_id, viewer)
     if appt.status == AppointmentStatus.CANCELLED:
         raise HTTPException(status.HTTP_409_CONFLICT, "Cannot reschedule a cancelled appointment")
@@ -1710,7 +1728,14 @@ async def reschedule_appointment(
     # The agenda that OWNS the event, legacy fallback included (`_move_owned_event`);
     # nothing in the row changes unless Google moved it.
     try:
-        moved = await _move_owned_event(session, tenant, appt, body.new_start, body.new_end)
+        owner = await _owning_calendar(session, tenant, appt)
+        # TASK-083 spec §7.4: warn about the doctor's other clinic, never block (read first).
+        conflicts_other_agenda = await overlaps_other_agenda(
+            owner, body.new_start, body.new_end
+        )
+        moved = await _move_owned_event(
+            session, tenant, appt, body.new_start, body.new_end, owner=owner
+        )
     except HTTPException:
         raise
     except GoogleTokenRevokedError as exc:
@@ -1781,7 +1806,10 @@ async def reschedule_appointment(
 
     logger.info("calendar_appointment_rescheduled", appointment_id=str(appt.id))
     deposit_status = await _deposit_status_value(session, appt.id)
-    return _appointment_read(appt, deposit_status=deposit_status)
+    return AppointmentWriteRead(
+        **_appointment_read(appt, deposit_status=deposit_status).model_dump(),
+        conflicts_other_agenda=conflicts_other_agenda,
+    )
 
 
 # ---------------------------------------------------------------------------
