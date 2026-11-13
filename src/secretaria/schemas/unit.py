@@ -29,3 +29,5 @@ class UnitRead(BaseModel):
     address: str | None
     is_active: bool
     created_at: datetime
+    # ACTIVE professionals linked to this unit through an active link (TASK-083). 0 = nobody.
+    professionals_count: int = 0

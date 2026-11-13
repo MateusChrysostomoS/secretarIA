@@ -28,13 +28,14 @@ so revoked staff access is refused immediately, as on main.
 
 from collections.abc import Callable
 from dataclasses import replace
+from uuid import UUID
 
 from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.database import get_session
-from secretaria.core.hub_roles import is_clinic_clinician, is_clinic_manager
+from secretaria.core.hub_roles import ROLE_DOCTOR, is_clinic_clinician, is_clinic_manager
 from secretaria.core.logging import get_logger
 from secretaria.core.subscription import SubscriptionClaim, verify_subscription_token
 from secretaria.models import Professional, Tenant
@@ -49,6 +50,7 @@ FORBIDDEN_ROLE = "forbidden_role"
 _MISSING_ROLE_MESSAGE = "Sua sessão não informa o seu papel na clínica. Entre novamente."
 _MANAGER_ONLY_MESSAGE = "Somente o gestor da clínica pode fazer isto."
 _CLINICIAN_ONLY_MESSAGE = "Somente médicos e gestores da clínica podem fazer isto."
+_MANAGER_OR_SELF_MESSAGE = "Somente o gestor da clínica ou o próprio profissional pode fazer isto."
 
 
 def _bearer_token(authorization: str | None) -> str | None:
@@ -144,6 +146,25 @@ def ensure_clinic_manager(claim: SubscriptionClaim) -> None:
 def ensure_clinic_clinician(claim: SubscriptionClaim) -> None:
     """Raise the 403 `require_clinic_clinician` would raise; no-op for a manager or doctor."""
     _enforce(claim, _is_clinician, _CLINICIAN_ONLY_MESSAGE)
+
+
+def ensure_clinic_manager_or_own_professional(
+    claim: SubscriptionClaim, professional_id: UUID
+) -> None:
+    """Raise a 403 unless the caller is a clinic manager or the doctor `professional_id` themself.
+
+    For a route that edits ONE professional's own arrangement (their units): the manager may edit
+    any professional of the clinic, a `doctor` only the Professional row their account is linked
+    to (`claim.professional_id`, from brain-api). A `secretary` never, whatever its flags say; a
+    token without a well-formed role fails closed with `role_claim_missing`.
+    """
+    if claim.role is None:
+        raise _refuse(ROLE_CLAIM_MISSING, _MISSING_ROLE_MESSAGE, claim)
+    if _is_manager(claim):
+        return
+    if claim.role == ROLE_DOCTOR and claim.professional_id == professional_id:
+        return
+    raise _refuse(FORBIDDEN_ROLE, _MANAGER_OR_SELF_MESSAGE, claim)
 
 
 async def require_clinic_manager(

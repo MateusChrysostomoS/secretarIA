@@ -30,6 +30,7 @@ from secretaria.models import Tenant
 from secretaria.models.unit import Unit
 from secretaria.schemas.unit import UnitCreate, UnitRead, UnitUpdate
 from secretaria.services.entitlements_client import get_entitlements, is_entitled
+from secretaria.services.professional_units import count_professionals_by_unit
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/tenants/me/units", tags=["hub-units"])
@@ -38,13 +39,14 @@ ADDON_KEY = "multi_unit"
 LIMIT_KEY = "units"
 
 
-def _read_model(unit: Unit) -> UnitRead:
+def _read_model(unit: Unit, professionals_count: int = 0) -> UnitRead:
     return UnitRead(
         id=str(unit.id),
         name=unit.name,
         address=unit.address,
         is_active=unit.is_active,
         created_at=unit.created_at,
+        professionals_count=professionals_count,
     )
 
 
@@ -99,7 +101,9 @@ async def list_units(
     rows = await session.scalars(
         select(Unit).where(Unit.tenant_id == tenant.id).order_by(Unit.name)
     )
-    return [_read_model(u) for u in rows]
+    units = list(rows)
+    counts = await count_professionals_by_unit(session, tenant.id)
+    return [_read_model(u, counts.get(u.id, 0)) for u in units]
 
 
 @router.post("", response_model=UnitRead, status_code=status.HTTP_201_CREATED)
@@ -148,4 +152,5 @@ async def update_unit(
     await session.commit()
     await session.refresh(unit)
     logger.info("hub_unit_updated", tenant_id=str(tenant.id), unit_id=str(unit.id))
-    return _read_model(unit)
+    counts = await count_professionals_by_unit(session, tenant.id, [unit.id])
+    return _read_model(unit, counts.get(unit.id, 0))

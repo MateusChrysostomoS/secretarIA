@@ -36,6 +36,7 @@ from secretaria.api.hub import (
     payment_accounts,
     payment_attention,
     payment_settings,
+    professional_units,
     professionals,
     release_offers,
     services,
@@ -153,6 +154,8 @@ def create_app() -> FastAPI:
     # in the routers themselves; see api/hub/professionals.py, api/hub/units.py).
     app.include_router(professionals.router)
     app.include_router(units.router)
+    # Units per professional (TASK-083): which units a doctor attends + hours per unit.
+    app.include_router(professional_units.router)
     # Shared per-person agenda (TASK-083): sync + "is this agenda shared" (counts only).
     app.include_router(agendas.router)
     # Per-conversation manual handover control for the dashboard (list +

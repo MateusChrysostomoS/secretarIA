@@ -146,7 +146,15 @@ async def test_list_shape_is_whitelisted(
     response = await client.get(ENDPOINT)
     assert response.status_code == 200
     row = response.json()[0]
-    assert set(row.keys()) == {"id", "name", "address", "is_active", "created_at"}
+    assert set(row.keys()) == {
+        "id",
+        "name",
+        "address",
+        "is_active",
+        "created_at",
+        "professionals_count",
+    }
+    assert row["professionals_count"] == 0
     assert row["name"] == "Unidade Centro"
     assert row["address"] == "Rua A, 1"
 
