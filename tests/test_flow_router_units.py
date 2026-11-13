@@ -552,10 +552,66 @@ def test_the_unit_row_prefix_carries_its_payload_on_both_channels():
     assert inbound_routing_text(title, row_id) == f"{title} ({row_id.split('|', 1)[1]})"
 
 
-def test_the_day_and_slot_lists_stay_within_ten_rows_with_the_unit_back_row():
-    """Same row budget as today: the unit back row REPLACES the service back row."""
-    assert len(LABEL_ANOTHER_UNIT) <= MAX_LIST_ROW_TITLE_CHARS
-    assert datetime(2099, 1, 5).weekday() == 0  # the fixtures' Monday
+class _FullAgenda(_Agenda):
+    """Every day free, a full day of slots: the lists hit their row budget."""
+
+    def with_unit(self, unit_id, location, *, business_hours=None):
+        return _FullAgenda(
+            business_hours if business_hours is not None else self.hours,
+            unit_id=unit_id,
+            location=location,
+            log=self.log,
+        )
+
+    async def list_available_days(self, start_day, days, slot_minutes=None):
+        self.log.day_hours.append(self.hours)
+        base = start_day.replace(hour=0, minute=0, second=0, microsecond=0)
+        return [base + timedelta(days=offset) for offset in range(1, days + 1)]
+
+    async def list_free_slots(self, day, slot_minutes=None, max_slots=6, **_kw):
+        self.log.slot_hours.append(self.hours)
+        start = day.replace(hour=8, minute=0, tzinfo=None)
+        return [
+            {
+                "start": (start + timedelta(minutes=30 * i)).isoformat(timespec="minutes"),
+                "label": (start + timedelta(minutes=30 * i)).strftime("%H:%M"),
+            }
+            for i in range(min(max_slots, 20))
+        ]
+
+
+async def test_the_day_and_slot_lists_with_the_unit_back_row_fit_ten_rows():
+    centro, sul = _units(2)
+    doctor = _doctor([centro, sul])
+    agenda = _FullAgenda()
+    days = await fr.route(
+        _conversation(flow_step=STEP_AWAITING_UNIT),
+        _tenant(),
+        agenda,
+        _unit_tap(sul),
+        professionals=[doctor],
+    )
+    [day_list] = [b for b in days.bubbles if isinstance(b, SlotsBubble)]
+    assert len(day_list.rows) <= 10
+    assert sum(1 for row in day_list.rows if row[0].startswith("day|")) == fr.DAY_PICKER_PAGE_SIZE
+    assert day_list.rows[-1][1] == LABEL_ANOTHER_UNIT
+
+    first_day = day_list.rows[0]
+    slots = await fr.route(
+        _conversation(flow_step=days.flow_step, flow_selected_unit_id=sul.id),
+        _tenant(),
+        agenda,
+        inbound_routing_text(first_day[1], first_day[0]),
+        professionals=[doctor],
+    )
+    [slot_list] = [b for b in slots.bubbles if isinstance(b, SlotsBubble)]
+    assert len(slot_list.rows) <= 10
+    assert sum(1 for row in slot_list.rows if row[0].startswith("slot|")) == (
+        fr.SLOT_PICKER_MAX_SLOTS
+    )
+    assert slot_list.rows[-1][1] == LABEL_ANOTHER_UNIT
+    assert agenda.log.slot_hours == [SUL_HOURS]
+
 
 
 # --------------------------------------------------------------------------

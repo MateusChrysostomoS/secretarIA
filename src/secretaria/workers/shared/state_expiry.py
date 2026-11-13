@@ -281,6 +281,8 @@ def _expire_stale_llm_state(
     # (TASK-032 R3) - the marker belongs to the booking that just expired.
     conversation.flow_replaces_appointment_id = None
     conversation.flow_edit_draft = None
+    # TASK-083: the chosen unit belongs to the same booking (never reused by a later one).
+    conversation.flow_selected_unit_id = None
     # `flow_selected_professional_id` / `flow_selected_insurance` are NOT
     # cleared here, unlike the "Não" answer which drops everything. They say WHO
     # the patient is dealing with, not where they were in a form, and the agent
@@ -332,6 +334,8 @@ def _expire_stale_attendee_step(
     conversation.flow_draft = None
     conversation.flow_replaces_appointment_id = None
     conversation.flow_edit_draft = None
+    # TASK-083: the chosen unit belongs to the same booking (never reused by a later one).
+    conversation.flow_selected_unit_id = None
     return True
 
 def _expire_stale_edit_state(
@@ -361,6 +365,8 @@ def _expire_stale_edit_state(
     conversation.flow_managing_appointment_id = None
     conversation.flow_attendee_name = None
     conversation.flow_edit_draft = None
+    # TASK-083: the chosen unit belongs to the same booking (never reused by a later one).
+    conversation.flow_selected_unit_id = None
     return True
 
 

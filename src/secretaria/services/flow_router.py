@@ -4146,15 +4146,12 @@ async def _ask_day(
     `prefix` explains why a supplied draft day was dropped; None renders as before.
     """
     professional = _booking_professional(conversation, professionals)
-    if professional is not None and not professional_business_hours(professional, tenant):
+    if professional is not None and professional_has_no_hours(professional, tenant):
         return _professional_config_incomplete(professional, PROFESSIONAL_GAP_HOURS)
     # TASK-083 spec §8: a professional who attends at units books at one of them - asked when
     # there are two or more, implied when there is one. No unit at all: today's picker.
     unit = None
     if flow_units.offered_units(professional):
-        if not flow_units.bookable_units(professional):
-            # Linked, but closed in every unit: nobody can book them (same gap as no hours).
-            return _professional_config_incomplete(professional, PROFESSIONAL_GAP_HOURS)
         unit = flow_units.effective_unit(conversation, professional)
         if unit is None:
             return _enter_unit_list(conversation, professional, prefix=prefix)
@@ -4176,6 +4173,18 @@ async def _ask_day(
 # --------------------------------------------------------------------------
 # The unit step (TASK-083 spec §8; helpers in services/flow_units.py)
 # --------------------------------------------------------------------------
+
+
+def professional_has_no_hours(professional: Any, tenant: Tenant) -> bool:
+    """The static "nobody can book this professional" hours check (FEAT 41).
+
+    Without unit links: the professional's own resolved hours, exactly as before. With links
+    (TASK-083): the units decide - a doctor whose own schedule is empty but whose units carry
+    hours is bookable, one linked only to closed units is not.
+    """
+    if flow_units.offered_units(professional):
+        return not flow_units.bookable_units(professional)
+    return not professional_business_hours(professional, tenant)
 
 
 def _unit_calendar(calendar: CalendarService | None, unit: Any | None) -> Any:
@@ -4474,6 +4483,11 @@ async def reoffer_taken_booking_slot(
     day picker (prefixed with the "just taken" line) to persist. The carries are applied
     here, as every public entry does.
     """
+    # TASK-083: the promotion hands in the agenda it WROTE with (the unit's id, the agenda's
+    # hours); the day picker that follows lists the chosen unit's own hours.
+    calendar = flow_units.scope(
+        calendar, conversation, _booking_professional(conversation, professionals)
+    )
     result = await _reoffer_taken_slot(
         conversation,
         tenant,
@@ -4481,7 +4495,7 @@ async def reoffer_taken_booking_slot(
         start,
         duration_minutes=duration_minutes,
         branch=BOOKING_DAY_BRANCH,
-        back_target=BACK_TARGET_SERVICE,
+        back_target=_booking_back_target(conversation, professionals),
         professionals=professionals,
     )
     return _carry_booking(conversation, result)

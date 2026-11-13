@@ -730,6 +730,9 @@ async def _route_inbound_turn(
             conversation.flow_step = None
             conversation.flow_selected_day = None
             conversation.flow_selected_slot = None
+            # TASK-083: the unit belongs to the refused booking (the Sim / Não card does not
+            # need it), so a later booking is asked for it again.
+            conversation.flow_selected_unit_id = None
             if info.timing == "after":
                 conversation.flow_selected_type = None
                 conversation.flow_selected_professional_id = None
@@ -833,6 +836,7 @@ async def _route_inbound_turn(
             conversation.flow_draft = None
             conversation.flow_replaces_appointment_id = None
             conversation.flow_edit_draft = None
+            conversation.flow_selected_unit_id = None
             return _ReplyContext(
                 channel=channel,
                 conversation_id=conversation.id,

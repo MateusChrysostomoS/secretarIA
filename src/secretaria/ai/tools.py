@@ -533,13 +533,22 @@ def _sole_professional_id() -> UUID | None:
     return getattr(config, "professional_id", None)
 
 
-async def _sole_professional_unit(tool_name: str) -> tuple[Any | None, dict | None]:
+# Said when the unit of a one-doctor clinic could not be read before a WRITE (TASK-083).
+UNIT_LOOKUP_FAILED_ERROR = (
+    "Não consegui confirmar a unidade de atendimento agora, então não marquei a consulta. "
+    "Tente de novo em instantes ou chame start_guided_booking para seguir pelos botões."
+)
+
+
+async def _sole_professional_unit(
+    tool_name: str, *, fail_closed: bool = False
+) -> tuple[Any | None, dict | None]:
     """The unit a base tool reads / books at on a one-doctor clinic (TASK-083 spec §8).
 
     (None, None) without a unit (no link: today's behaviour). The doctor's only unit when there
     is one. Two or more: a recoverable error - the base tools take no unit, so the model is sent
-    to the guided flow, which asks it. A failed read is "no unit" (logged): these tools must not
-    stop booking because a lookup failed.
+    to the guided flow, which asks it. A failed lookup (logged): a READ answers on the agenda's
+    own hours; a WRITE (`fail_closed=True`) refuses - never a booking without its unit.
     """
     tenant_id = _tenant_id_ctx.get()
     professional_id = _sole_professional_id()
@@ -552,7 +561,7 @@ async def _sole_professional_unit(tool_name: str) -> tuple[Any | None, dict | No
         unit, error = await resolve_tool_unit(tenant_id, owner)
     except Exception as exc:  # noqa: BLE001 - see the docstring
         logger.warning("agent_tool_unit_lookup_failed", tool=tool_name, error=type(exc).__name__)
-        return None, None
+        return (None, {"error": UNIT_LOOKUP_FAILED_ERROR}) if fail_closed else (None, None)
     if error is not None:
         error = {
             "error": f"{error['error']} Para marcar, chame start_guided_booking: o fluxo de "
@@ -873,6 +882,8 @@ async def _persist_appointment(
                         # unfinished "Marcar outra" ends here.
                         booked_conversation.flow_replaces_appointment_id = None
                         booked_conversation.flow_edit_draft = None
+                        # TASK-083: the unit was this booking's too.
+                        booked_conversation.flow_selected_unit_id = None
         logger.info("tool_appointment_persisted", event_id=event.get("id"))
     except Exception as exc:
         # The calendar event already exists; a missing DB row is recoverable
@@ -1233,7 +1244,7 @@ async def create_event(
     if error is not None:
         return error
     # TASK-083: the one-doctor clinic's unit (its id / location on the event, its hours).
-    unit, unit_error = await _sole_professional_unit("create_event")
+    unit, unit_error = await _sole_professional_unit("create_event", fail_closed=True)
     if unit_error is not None:
         return unit_error
 

@@ -160,6 +160,7 @@ def _clear_selection(conversation: Conversation) -> None:
     conversation.flow_selected_professional_id = None
     conversation.flow_selected_insurance = None
     conversation.flow_attendee_name = None
+    conversation.flow_selected_unit_id = None  # TASK-083: the unit of the booking that ended
 
 
 async def _other_open_deposit(

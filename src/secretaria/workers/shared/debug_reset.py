@@ -105,6 +105,7 @@ async def reset_conversation_for_debug(
     conversation.flow_selected_insurance = None
     conversation.flow_attendee_name = None
     conversation.flow_draft = None
+    conversation.flow_selected_unit_id = None
     conversation.flow_replaces_appointment_id = None
     conversation.flow_edit_draft = None
     conversation.reactivation_origin = None

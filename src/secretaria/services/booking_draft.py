@@ -48,7 +48,6 @@ from secretaria.services.service_catalog import normalize as normalize_service_n
 from secretaria.services.tenant_config import (
     active_appointment_types,
     professional_appointment_types,
-    professional_business_hours,
 )
 
 if TYPE_CHECKING:
@@ -796,7 +795,7 @@ async def _land_day(
     # The static "this doctor has no hours at all" check, before any calendar call - the
     # same one `_ask_day` makes for the button flow.
     owner = fr._booking_professional(state, professionals)
-    if owner is not None and not professional_business_hours(owner, tenant):
+    if owner is not None and fr.professional_has_no_hours(owner, tenant):
         return done(fr._professional_config_incomplete(owner, fr.PROFESSIONAL_GAP_HOURS), *base)
     # TASK-083 spec §8: a doctor who attends at units books at one. Two or more and none
     # chosen: the day picker's own choke point (`_ask_day`) asks it - never a day or a time
