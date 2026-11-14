@@ -46,7 +46,9 @@ recebia a página do WhatsApp (8 + "Ver mais serviços", sem busca). Teste:
    `core/whatsapp_limits.py::truncate_list_row_title`) e o toque chega como o título visível → o segundo agenda o
    primeiro (provado: "Avaliação para cirurgia refrativa" → "…de catarata"). Já existia no `main` dentro das 9 primeiras
    linhas; com as páginas, fica alcançável em qualquer posição. Portal não é afetado (nome inteiro + toque por id).
-   Decisão do dono (ver `TASK.md`).
+   **Decidido (TASK-084, 2026-11-14):** cada clínica tem seu ambiente (`tenants.operating_channel`, hoje todas
+   no Portal e o WhatsApp travado); o aviso "nomes que ficariam iguais no WhatsApp" aparece só para clínica no
+   WhatsApp; o conserto do toque fica na lista da liberação do WhatsApp — `CHECKPOINT_ambiente_secretaria.md` §4.
 2. Lacunas aceitas da revisão: troca do modo de convênio sem limite de 60; corrida de dois cadastros em 119 serviços;
    "ver mais" digitado gravado como o título da linha (N6).
 3. Deploy (não autorizado): **API + worker** do secretarIA → brain-api → Brain-Message-Frontend → secretarIA-frontend.

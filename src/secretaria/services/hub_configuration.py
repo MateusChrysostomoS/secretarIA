@@ -53,6 +53,7 @@ from secretaria.services.greeting_template import (
     greeting_preview_template,
     tenant_city,
 )
+from secretaria.services.operating_channel import available_operating_channels
 from secretaria.services.payments import settings as payment_settings
 from secretaria.services.service_catalog import entry_service_id, load_service_catalog
 
@@ -466,6 +467,8 @@ async def tenant_read_model(session: AsyncSession, tenant: Tenant) -> TenantConf
     return TenantConfigRead(
         clinic_name=tenant.clinic_name,
         contact_email=tenant.contact_email,
+        operating_channel=tenant.operating_channel,
+        available_operating_channels=available_operating_channels(),
         clinic_description=tenant.clinic_description,
         # Rendered SERVER-SIDE, by the same function the worker sends, so the
         # preview the clinic approves in the hub and the message the patient
