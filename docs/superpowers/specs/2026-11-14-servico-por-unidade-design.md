@@ -1,8 +1,8 @@
 # Serviço × médico × unidade no fluxo do paciente + /contexto (TASK-083, follow-up) — design
 
-Estado: **proposto, aguardando aprovação do dono.** Nada implementado. Repos: secretarIA (servidor, fluxo,
-e-mail) e Brain-Message-Frontend (Portal, tela /contexto). brain-api: nenhuma mudança prevista (confirmar).
-Trabalho continua nas branches locais `task/TASK-083-multi-unidades` (sem push, sem merge, sem deploy).
+Estado (2026-11-14): **implementado nas branches locais `task/TASK-083-multi-unidades`** (secretarIA e
+Brain-Message-Frontend) — **sem merge, sem push, sem deploy**. brain-api: nenhuma mudança. Estado, pendências e
+ordem de deploy: `docs/CHECKPOINT_agenda_multi_unidades.md`, seção "Serviço × médico × unidade".
 
 ## 1. Intenção
 

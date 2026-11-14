@@ -332,16 +332,44 @@ worker** juntos (`GET /build` com paridade `match`; o worker roda o fluxo e envi
 Nenhuma mudança em brain-api. Rollback: código antigo nos dois serviços, depois `alembic downgrade -1` (perde só as
 marcas de serviço × unidade; o paciente volta a ver todas as unidades do médico).
 
+**"Alterar Dados" (correção da revisão final, 2026-11-14).** A edição da consulta pelo paciente
+(`services/appointment_edit_flow.py`) também respeita a regra — antes dava para trocar o serviço/médico e cair numa
+unidade onde o serviço não é feito:
+- Trocar o **médico**: a unidade segue o novo médico **para o serviço da consulta**
+  (`flow_units.unit_after_doctor_change(..., service_id)`, filtrada como `units_for_service`); se o novo médico não faz o
+  serviço em nenhuma unidade aberta, a troca é recusada com aviso simples (`EDIT_DOCTOR_SERVICE_NO_UNIT`) e o médico
+  continua o mesmo.
+- Trocar o **serviço**: a edição não tem passo de escolher unidade, então se o serviço novo não é feito na unidade da
+  consulta a troca é **recusada** com aviso simples (`EDIT_SERVICE_NOT_AT_UNIT`) e o serviço antigo fica (variante
+  "recusar com aviso"; oferecer as unidades válidas exigiria um passo novo — decisão do dono se quiser). Depois de uma
+  troca de médico em que o médico não fazia o serviço, a unidade é recalculada para o serviço escolhido; sem unidade
+  válida, a troca de médico é desfeita com o aviso.
+- A proposta da IA dentro da edição (`apply_ai_edit`) segue a mesma regra.
+- Remarcar (mesmo médico, mesmo serviço, mesma unidade) **nunca** é recusado, mesmo que o serviço tenha deixado de ser
+  feito ali (§9.4) — `_is_original_booking`. Sem marcações/sem vínculos = comportamento de antes.
+- Peça comum: `flow_units.unit_refused`.
+
+**Também corrigido na revisão final:** caminho de rascunho da IA (`booking_draft._carry`) no caso 0 unidades não
+mantém mais o médico recusado selecionado na lista de médicos (teste do caminho da IA); o `GET` do hub só devolve
+`service_marks` dos serviços que o médico ainda oferece (o próximo salvamento apaga a marca velha).
+
+**Antes do merge com Mercado Pago:** a branch `task/TASK-074-mp-provider` (`feature/mercado-pago-connection`) tem head
+de migração `c4e8a1d6b3f9`, que também descende de `a7c3e9d1f5b2` (esta branch: `a7c3e9d1f5b2` → … → `b5d9e3f7a1c4` →
+`c6e1a9f4d2b7`). Juntar as duas dá **duas heads**: será preciso uma revisão Alembic de merge (`alembic merge`) antes
+do `upgrade head`.
+
 **Pendências deferidas (Minor, nenhuma bloqueia):**
-- O hub avisa mas **nenhum cliente envia** `service_id` na criação de consulta (campo `AppointmentCreate.service_id`
-  dormente; o caminho de edição não avisa) — depende de mudança futura no Portal.
+- **Aviso do hub dormente (follow-up aberto, decisão do dono):** o encaixe da equipe avisa
+  (`unit_booking.check_unit` com recusa `unit_service_not_offered`) só quando recebe `service_id`, e **nenhuma tela de
+  agenda do Portal envia** esse campo (`AppointmentCreate.service_id` dormente; o caminho de edição da equipe não avisa).
+  Fica sem efeito até o Portal mandar o `service_id`.
+- **Texto da confirmação sem endereço** (`flow_units.UNIT_CONFIRM_BODY_NO_ADDRESS`: a frase termina no nome da unidade
+  quando ela não tem endereço) **aguarda o OK do dono**.
 - Caminho de rascunho da IA (`booking_draft`): ao cair na lista de unidades / Sim-Não perde o dia/horário já
-  capturado; no caso 0 unidades a IA mantém o médico antigo selecionado na lista (sem teste do caminho da IA).
+  capturado.
 - `get_availability`/`list_free_slots` da IA não são limitados às unidades válidas (a escrita é bloqueada por
   `check_unit`); `create_event` sem guarda na leitura de `sole_professional_row`.
-- `GET` devolve marcas de serviço já não oferecido (o front descarta); texto sem endereço
-  (`UNIT_CONFIRM_BODY_NO_ADDRESS`) precisa do OK do dono; `reoffer`/`_booking_back_target` derivam a lista de serviços
-  de forma ligeiramente diferente de `_catalog_step`.
+- `reoffer`/`_booking_back_target` derivam a lista de serviços de forma ligeiramente diferente de `_catalog_step`.
 - E-mail à clínica parafraseia o motivo da spec §6.3; falha de SMTP prolongada custa até ~15 s por turno; import
   privado `_tenant_tz` de `deposit_lifecycle`.
 - Front: dica do último serviço sem `aria-describedby`/`aria-controls` no recolhível; "Locais de atendimento" ainda em
