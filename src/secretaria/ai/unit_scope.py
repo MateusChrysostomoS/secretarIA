@@ -20,12 +20,24 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from secretaria.services.unit_booking import UnitOption, unit_options_for, within_hours
+from secretaria.services.booking_scope import service_entry_name
+from secretaria.services.professional_service_units import allowed_unit_ids, read_marks
+from secretaria.services.service_catalog import entry_service_id
+from secretaria.services.unit_booking import (
+    UnitOption,
+    UnitRefused,
+    check_unit,
+    unit_options_for,
+    within_hours,
+)
 
 OUTSIDE_UNIT_HOURS_ERROR = (
     "Esse horário está fora do atendimento dessa unidade. Consulte os horários livres de novo "
     "e ofereça um deles."
 )
+
+
+SERVICE_NOT_AT_UNIT_ERROR = "Esse serviço não é feito nessa unidade."
 
 
 def _names(units: list) -> str:
@@ -101,6 +113,79 @@ async def resolve_tool_unit(
     )
 
 
+def service_id_of(catalog: list | None, service_name: str | None) -> UUID | None:
+    """The `service_id` of the catalog entry named `service_name` (its canonical spelling), or
+    None - no such entry, or an entry without one: unrestricted by definition (spec §9.11)."""
+    target = (service_name or "").strip().casefold()
+    if not target:
+        return None
+    for entry in catalog or []:
+        if str(service_entry_name(entry)).strip().casefold() == target:
+            return entry_service_id(entry)
+    return None
+
+
+async def valid_unit_options(
+    tenant_id: UUID, professional: Any | None, service_id: UUID | None
+) -> list[UnitOption]:
+    """The professional's bookable units where `service_id` is done (all of them when it is not
+    restricted, or no service is given). [] without a professional or links."""
+    options = await professional_unit_options(tenant_id, professional)
+    bookable = [unit for unit in options if unit.bookable]
+    if service_id is None or professional is None or not bookable:
+        return bookable
+    from secretaria.core.database import async_session_factory
+
+    async with async_session_factory() as session:
+        allowed = allowed_unit_ids(await read_marks(session, professional.id), service_id)
+    return bookable if allowed is None else [unit for unit in bookable if unit.id in allowed]
+
+
+async def service_unit_refusal(
+    tenant_id: UUID,
+    professional: Any | None,
+    unit: UnitOption | None,
+    catalog: list | None,
+    service_name: str | None,
+) -> dict | None:
+    """A tool-error when the chosen `unit` is not one where `service_name` is done, else None.
+
+    The AI / patient write rule (spec §6.1, §9.13) through the same `check_unit` every patient
+    write path uses. The error is plain and carries `valid_units` (names) so the model re-offers
+    only those. A service without `service_id` (or without marks) never refuses.
+    """
+    service_id = service_id_of(catalog, service_name)
+    if professional is None or unit is None or service_id is None:
+        return None
+    from secretaria.core.database import async_session_factory
+
+    async with async_session_factory() as session:
+        try:
+            await check_unit(session, tenant_id, professional, unit.id, service_id)
+        except UnitRefused as refused:
+            if refused.code != "unit_service_not_offered":
+                return {"error": refused.message}
+        else:
+            return None
+    # Refused: list where the service IS done.
+    return await _service_refusal_payload(tenant_id, professional, service_id, service_name)
+
+
+async def _service_refusal_payload(
+    tenant_id: UUID, professional: Any, service_id: UUID, service_name: str | None
+) -> dict:
+    valid = [unit.name for unit in await valid_unit_options(tenant_id, professional, service_id)]
+    head = f"{SERVICE_NOT_AT_UNIT_ERROR} O serviço '{service_name}'"
+    if valid:
+        error = f"{head} é feito em: {', '.join(valid)}. Ofereça só essas ao paciente."
+    else:
+        error = (
+            f"{head} não tem nenhuma unidade com atendimento agora. Não marque; avise o "
+            "paciente e ofereça outro serviço."
+        )
+    return {"error": error, "valid_units": valid}
+
+
 def outside_unit_hours(unit: UnitOption | None, start: datetime, end: datetime, tz) -> dict | None:
     """A tool-error when [start, end) is outside the unit's own hours, else None."""
     hours = getattr(unit, "business_hours", None) if unit is not None else None
@@ -127,8 +212,12 @@ async def sole_professional_row(tenant_id: UUID, professional_id: UUID | None) -
 
 __all__ = [
     "OUTSIDE_UNIT_HOURS_ERROR",
+    "SERVICE_NOT_AT_UNIT_ERROR",
     "outside_unit_hours",
     "professional_unit_options",
     "resolve_tool_unit",
+    "service_id_of",
+    "service_unit_refusal",
     "sole_professional_row",
+    "valid_unit_options",
 ]

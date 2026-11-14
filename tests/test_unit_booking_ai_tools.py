@@ -32,6 +32,7 @@ from secretaria.ai import (
 from secretaria.core import database as core_database  # noqa: E402
 from secretaria.core.database import Base  # noqa: E402
 from secretaria.models import Appointment, Professional, Tenant, Unit  # noqa: E402
+from secretaria.models.professional_service_unit import ProfessionalServiceUnit  # noqa: E402
 from secretaria.models.professional_unit import ProfessionalUnit  # noqa: E402
 from secretaria.plugins import (
     multi_professional as mp,  # noqa: E402
@@ -44,6 +45,7 @@ from secretaria.services import (
 from secretaria.services.booking_scope import BOOKING_TOPOLOGY_SOLE  # noqa: E402
 from secretaria.services.local_calendar import LocalCalendarService  # noqa: E402
 from secretaria.services.tenant_config import TenantRuntimeConfig  # noqa: E402
+from secretaria.services.unit_booking import UnitRefused, check_unit  # noqa: E402
 
 # 2026-07-10 is a Friday; 2026-07-13 a Monday.
 CENTRO_HOURS = {"friday": [{"start": "08:00", "end": "12:00"}]}
@@ -118,21 +120,24 @@ async def _seed(db, *, links: dict):
         return tenant, centro, sul, doctors
 
 
-def _config(tenant_id, professional_id=None) -> TenantRuntimeConfig:
+def _config(tenant_id, professional_id=None, appointment_types=None) -> TenantRuntimeConfig:
     return TenantRuntimeConfig(
         tenant_id=tenant_id, clinic_name="Clinic", language="pt-BR", timezone="UTC",
-        appointment_duration_min=30, appointment_types=[], business_hours={},
+        appointment_duration_min=30, appointment_types=appointment_types or [], business_hours={},
         google_calendar_id="primary", google_refresh_token=None,
         professional_id=professional_id,
     )
 
 
 @contextmanager
-def _context(tenant_id, *, calendar=None, sole=None):
+def _context(tenant_id, *, calendar=None, sole=None, appointment_types=None):
     tokens = [
         (ai_tools._tenant_id_ctx, ai_tools._tenant_id_ctx.set(tenant_id)),
         (ai_tools._calendar_ctx, ai_tools._calendar_ctx.set(calendar)),
-        (ai_tools._tenant_config_ctx, ai_tools._tenant_config_ctx.set(_config(tenant_id, sole))),
+        (
+            ai_tools._tenant_config_ctx,
+            ai_tools._tenant_config_ctx.set(_config(tenant_id, sole, appointment_types)),
+        ),
     ]
     if sole is not None:
         tokens.append(
@@ -325,3 +330,168 @@ async def test_get_availability_reads_each_unit_within_its_own_hours(db, monkeyp
         else:
             assert window["unit"] == "Zona Sul"
             assert weekday == 0 and "14:00" <= window["start"] and window["end"] <= "18:00"
+
+
+# --- TASK-083 follow-up T7: a service done only at some of the doctor's units ----------------
+
+
+async def _restrict(db, doctor, service_id, *units, entries=None):
+    """`doctor` does `service_id` only at `units`; `entries` (when given) is their catalog."""
+    async with db() as session:
+        for unit in units:
+            session.add(
+                ProfessionalServiceUnit(
+                    professional_id=doctor.id, service_id=service_id, unit_id=unit.id
+                )
+            )
+        if entries is not None:
+            row = await session.get(Professional, doctor.id)
+            row.appointment_types = entries
+        await session.commit()
+
+
+def _entry(name, service_id):
+    return {"name": name, "duration_min": 30, "service_id": str(service_id)}
+
+
+async def test_check_unit_refuses_service_not_offered_at_unit(db):
+    tenant, centro, sul, doctors = await _seed(db, links={"Dra. Ana": ["Centro", "Zona Sul"]})
+    doctor, limpeza, retorno = doctors["Dra. Ana"], uuid4(), uuid4()
+    await _restrict(db, doctor, limpeza, sul)
+    async with db() as session:
+        with pytest.raises(UnitRefused) as refused:
+            await check_unit(session, tenant.id, doctor, centro.id, service_id=limpeza)
+        assert (refused.value.code, refused.value.status_code) == (
+            "unit_service_not_offered",
+            422,
+        )
+        assert refused.value.message == "Esse serviço não é feito nessa unidade."
+        assert (await check_unit(session, tenant.id, doctor, sul.id, service_id=limpeza)).id == (
+            sul.id
+        )
+        # A service without marks is done at every unit of the doctor.
+        assert (await check_unit(session, tenant.id, doctor, centro.id, service_id=retorno)).id == (
+            centro.id
+        )
+
+
+async def test_check_unit_without_service_id_unchanged(db):
+    tenant, centro, sul, doctors = await _seed(
+        db, links={"Dra. Ana": ["Centro", "Zona Sul"], "Dr. Bruno": ["Centro"]}
+    )
+    ana = doctors["Dra. Ana"]
+    await _restrict(db, ana, uuid4(), sul)
+    async with db() as session:
+        # No service named: the marks are not consulted.
+        assert (await check_unit(session, tenant.id, ana, centro.id)).id == centro.id
+        assert (await check_unit(session, tenant.id, ana, centro.id, service_id=None)).id == (
+            centro.id
+        )
+        # Today's refusal still wins: Zona Sul is not one of Dr. Bruno's units.
+        with pytest.raises(UnitRefused) as refused:
+            await check_unit(session, tenant.id, doctors["Dr. Bruno"], sul.id, service_id=uuid4())
+        assert refused.value.code == "unit_not_linked"
+        # No professional: nothing to restrict.
+        assert (await check_unit(session, tenant.id, None, sul.id, service_id=uuid4())).id == (
+            sul.id
+        )
+
+
+async def test_ai_list_units_only_valid_for_service(db):
+    tenant, _centro, sul, doctors = await _seed(db, links={"Dra. Ana": ["Centro", "Zona Sul"]})
+    ana, limpeza, retorno = doctors["Dra. Ana"], uuid4(), uuid4()
+    entries = [_entry("Limpeza", limpeza), _entry("Retorno", retorno)]
+    await _restrict(db, ana, limpeza, sul, entries=entries)
+    with _context(tenant.id, sole=ana.id, appointment_types=entries):
+        restricted = await mu.list_units.ainvoke({"service_name": "limpeza"})
+        free_service = await mu.list_units.ainvoke({"service_name": "Retorno"})
+        no_service = await mu.list_units.ainvoke({})
+    assert [u["name"] for u in restricted["units"]] == ["Zona Sul"]
+    assert sorted(u["name"] for u in free_service["units"]) == ["Centro", "Zona Sul"]
+    assert sorted(u["name"] for u in no_service["units"]) == ["Centro", "Zona Sul"]
+
+
+async def test_ai_create_event_at_invalid_unit_returns_clear_error_and_valid_units(db):
+    tenant, _centro, sul, doctors = await _seed(db, links={"Dra. Ana": ["Centro", "Zona Sul"]})
+    ana, limpeza = doctors["Dra. Ana"], uuid4()
+    entries = [_entry("Limpeza", limpeza)]
+    await _restrict(db, ana, limpeza, sul, entries=entries)
+    agenda = _Agenda()
+    with _context(tenant.id, calendar=agenda, sole=ana.id, appointment_types=entries):
+        refused = await mu.create_event_at_unit.ainvoke(
+            {"unit_name": "Centro", "appointment_type": "Limpeza", **WINDOW}
+        )
+        # The valid unit books (Zona Sul is open on Mondays: 2026-07-13).
+        booked = await mu.create_event_at_unit.ainvoke(
+            {
+                "unit_name": "Zona Sul",
+                "appointment_type": "Limpeza",
+                "start": "2026-07-13T15:00:00",
+                "end": "2026-07-13T15:30:00",
+                "summary": "Consulta",
+            }
+        )
+    assert "Esse serviço não é feito nessa unidade" in refused["error"]
+    assert "Limpeza" in refused["error"] and "Zona Sul" in refused["error"]
+    assert refused["valid_units"] == ["Zona Sul"]
+    assert "id" in booked
+    [appointment] = await _appointments(db)
+    assert appointment.unit_id == sul.id
+    assert agenda.log["created"] == [(sul.id, "Zona Sul — Av. B, 20", SUL_HOURS)]
+
+
+async def test_professional_tool_refuses_a_unit_where_the_service_is_not_done(db, monkeypatch):
+    tenant, _centro, sul, doctors = await _seed(db, links={"Dra. Ana": ["Centro", "Zona Sul"]})
+    ana, limpeza = doctors["Dra. Ana"], uuid4()
+    await _restrict(db, ana, limpeza, sul, entries=[_entry("Limpeza", limpeza)])
+    agenda = _Agenda()
+
+    async def _calendar(tenant_id, professional):
+        return agenda
+
+    monkeypatch.setattr(mp, "_professional_calendar", _calendar)
+    with _context(tenant.id):
+        refused = await mp.create_event_for_professional.ainvoke(
+            {
+                "professional_name": "Dra. Ana",
+                "unit_name": "Centro",
+                "appointment_type": "Limpeza",
+                **WINDOW,
+            }
+        )
+    assert "Esse serviço não é feito nessa unidade" in refused["error"]
+    assert refused["valid_units"] == ["Zona Sul"]
+    assert await _appointments(db) == []
+    assert agenda.log["created"] == []
+
+
+async def test_the_base_create_event_refuses_when_the_only_unit_does_not_do_the_service(db):
+    """A one-unit doctor whose service is marked on ANOTHER (here closed) unit: nothing booked."""
+    tenant, centro, sul, doctors = await _seed(db, links={"Dra. Ana": ["Centro"]})
+    ana, limpeza = doctors["Dra. Ana"], uuid4()
+    entries = [_entry("Limpeza", limpeza)]
+    async with db() as session:
+        session.add(ProfessionalUnit(professional_id=ana.id, unit_id=sul.id, business_hours={}))
+        await session.commit()
+    await _restrict(db, ana, limpeza, sul, entries=entries)
+    agenda = _Agenda()
+    with _context(tenant.id, calendar=agenda, sole=ana.id, appointment_types=entries):
+        refused = await ai_tools.create_event.ainvoke({"appointment_type": "Limpeza", **WINDOW})
+    assert "Esse serviço não é feito nessa unidade" in refused["error"]
+    assert refused["valid_units"] == []
+    assert await _appointments(db) == []
+    assert centro.id != sul.id
+
+
+async def test_an_entry_without_service_id_is_unrestricted(db):
+    """Review focus 1: a doctor with marks for OTHER services books a service-id-less entry
+    at any of their units."""
+    tenant, _centro, sul, doctors = await _seed(db, links={"Dra. Ana": ["Centro", "Zona Sul"]})
+    ana = doctors["Dra. Ana"]
+    entries = [_entry("Limpeza", uuid4()), {"name": "Avaliação", "duration_min": 30}]
+    await _restrict(db, ana, uuid4(), sul, entries=entries)
+    with _context(tenant.id, calendar=_Agenda(), sole=ana.id, appointment_types=entries):
+        booked = await mu.create_event_at_unit.ainvoke(
+            {"unit_name": "Centro", "appointment_type": "Avaliação", **WINDOW}
+        )
+    assert "id" in booked

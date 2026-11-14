@@ -576,6 +576,33 @@ async def _sole_professional_unit(
     return unit, error
 
 
+async def _service_unit_refusal(
+    tool_name: str,
+    unit: Any | None,
+    professional: Any | None,
+    catalog: list,
+    canonical_type: str | None,
+) -> dict | None:
+    """The tool-error when the doctor does not do `canonical_type` at `unit` (TASK-083 T7).
+
+    A patient-side write rule (`check_unit` with the service); the error names the units where
+    the service IS done so the model re-offers only those. Nothing to check without a unit, a
+    doctor or a named service. A failed lookup refuses (never a booking on an unproven unit).
+    """
+    tenant_id = _tenant_id_ctx.get()
+    if tenant_id is None or unit is None or professional is None or not canonical_type:
+        return None
+    from secretaria.ai.unit_scope import service_unit_refusal
+
+    try:
+        return await service_unit_refusal(tenant_id, professional, unit, catalog, canonical_type)
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        logger.warning(
+            "agent_tool_service_unit_check_failed", tool=tool_name, error=type(exc).__name__
+        )
+        return {"error": UNIT_LOOKUP_FAILED_ERROR}
+
+
 async def _sole_professional_name() -> str | None:
     """The one-doctor clinic's professional's name for the event texts, or None.
 
@@ -1277,6 +1304,21 @@ async def create_event(
     unit, unit_error = await _sole_professional_unit("create_event", fail_closed=True)
     if unit_error is not None:
         return unit_error
+    if unit is not None:
+        # The service must be one the doctor does at this unit (spec §6.1, §9.13).
+        from secretaria.ai.unit_scope import sole_professional_row
+
+        tenant_id = _tenant_id_ctx.get()
+        owner = (
+            await sole_professional_row(tenant_id, _sole_professional_id())
+            if tenant_id is not None
+            else None
+        )
+        refused = await _service_unit_refusal(
+            "create_event", unit, owner, _effective_service_catalog(), canonical_type
+        )
+        if refused is not None:
+            return refused
 
     cal = scoped_calendar(_get_calendar(), unit)
     fallback_start, fallback_end = _localize_window(start, end, cal)

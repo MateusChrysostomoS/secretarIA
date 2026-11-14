@@ -127,7 +127,12 @@ from secretaria.services.tenant_config import (
     load_tenant_config,
     resolve_professional_calendar,
 )
-from secretaria.services.unit_booking import UnitRefused, check_unit, scoped_calendar
+from secretaria.services.unit_booking import (
+    UnitRefused,
+    check_unit,
+    scoped_calendar,
+    service_offered_at_unit,
+)
 from secretaria.workers.shared.appointment_edit_apply import AppliedEdit
 from secretaria.workers.shared.appointment_edit_notification import (
     enqueue_professional_edit_notification,
@@ -1054,6 +1059,14 @@ async def create_appointment(
     # Spec §5.A / owner 2026-10-09: decided before Google is touched.
     professional_id = await _creation_professional(session, tenant, viewer, body.professional_id)
     unit = await _creation_unit(session, tenant, professional_id, body.unit_id)
+    # TASK-083 spec §9.3: the staff's encaixe is never blocked for a service not done at the
+    # unit - the answer only flags it (the patient / AI paths refuse through `check_unit`).
+    unit_service_not_offered = (
+        unit is not None
+        and professional_id is not None
+        and body.service_id is not None
+        and not await service_offered_at_unit(session, professional_id, body.service_id, unit.id)
+    )
     await _refuse_if_slot_is_held(session, tenant, body.start, body.end)
     # Owner's decision 2026-10-19: on the doctor's own agenda, the one his patients'
     # availability reads - on the clinic's, the slot stayed free for them (double
@@ -1122,7 +1135,9 @@ async def create_appointment(
         google_event_id=google_event_id,
     )
     return AppointmentWriteRead(
-        **_appointment_read(appt).model_dump(), conflicts_other_agenda=conflicts_other_agenda
+        **_appointment_read(appt).model_dump(),
+        conflicts_other_agenda=conflicts_other_agenda,
+        unit_service_not_offered=unit_service_not_offered,
     )
 
 

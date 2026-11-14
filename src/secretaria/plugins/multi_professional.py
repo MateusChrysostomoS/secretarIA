@@ -60,6 +60,7 @@ from secretaria.ai.tools import (
     _localize_window,
     _match_by_name,
     _persist_appointment,
+    _service_unit_refusal,
     _tenant_config_ctx,
     _tenant_id_ctx,
     handback_message,
@@ -313,10 +314,9 @@ async def create_event_for_professional(
 
     # Proven against THIS professional's own catalog, before anything is
     # created: the resolved name is what the Pix deposit will price.
+    catalog = await _professional_services(tenant_id, professional)
     canonical_type, service_error = _canonical_appointment_type(
-        appointment_type,
-        "create_event_for_professional",
-        await _professional_services(tenant_id, professional),
+        appointment_type, "create_event_for_professional", catalog
     )
     if service_error is not None:
         return service_error
@@ -328,6 +328,12 @@ async def create_event_for_professional(
     if error is not None:
         return error
     unit_id: UUID | None = unit.id if unit is not None else None
+    # ... and the service must be one the doctor does at that unit (spec §6.1, §9.13).
+    refused = await _service_unit_refusal(
+        "create_event_for_professional", unit, professional, catalog, canonical_type
+    )
+    if refused is not None:
+        return refused
 
     cal = scoped_calendar(await _professional_calendar(tenant_id, professional), unit)
     fallback_start, fallback_end = _localize_window(start, end, cal)

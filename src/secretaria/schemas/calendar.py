@@ -212,6 +212,10 @@ class AppointmentCreate(BaseModel):
     # clinic, active, and - when the professional attends at units - one of theirs. Absent is
     # always accepted (an "encaixe" by the staff stays permissive): no unit is recorded.
     unit_id: UUID | None = None
+    # TASK-083 follow-up (spec §9.3): the doctor's catalog service this booking is for. Only
+    # used to FLAG (`AppointmentWriteRead.unit_service_not_offered`) a unit where the doctor
+    # does not do it - the staff is never blocked. Absent = no flag.
+    service_id: UUID | None = None
 
 
 class BlockCreate(BaseModel):
@@ -372,6 +376,9 @@ class AppointmentWriteRead(AppointmentRead):
     """
 
     conflicts_other_agenda: bool = False
+    # TASK-083 follow-up (spec §9.3): true only when the POST named a `service_id` and a `unit_id`
+    # and the doctor does that service at OTHER units only. The staff's write still happened.
+    unit_service_not_offered: bool = False
 
 
 # The four answers of services/tenant_config.py::calendar_credential_health.

@@ -31,7 +31,11 @@ from secretaria.models.professional import Professional
 from secretaria.models.professional_unit import ProfessionalUnit
 from secretaria.models.unit import Unit
 from secretaria.services import professional_units
-from secretaria.services.professional_service_units import read_marks_for
+from secretaria.services.professional_service_units import (
+    allowed_unit_ids,
+    read_marks,
+    read_marks_for,
+)
 from secretaria.services.tenant_config import professional_business_hours
 
 logger = get_logger(__name__)
@@ -303,8 +307,26 @@ class UnitRefused(Exception):
         self.status_code = status_code
 
 
+async def service_offered_at_unit(
+    session: AsyncSession, professional_id: UUID, service_id: UUID | None, unit_id: UUID
+) -> bool:
+    """Whether the professional does `service_id` at `unit_id` (TASK-083 follow-up).
+
+    No `service_id` (an entry without one is unrestricted by definition) or a service without
+    marks: every unit of the professional, so True. Otherwise only the marked units.
+    """
+    if service_id is None:
+        return True
+    allowed = allowed_unit_ids(await read_marks(session, professional_id), service_id)
+    return allowed is None or unit_id in allowed
+
+
 async def check_unit(
-    session: AsyncSession, tenant_id: UUID, professional: Any | None, unit_id: UUID
+    session: AsyncSession,
+    tenant_id: UUID,
+    professional: Any | None,
+    unit_id: UUID,
+    service_id: UUID | None = None,
 ) -> Unit:
     """The unit, when it may be written onto a booking of `professional` at this clinic.
 
@@ -312,6 +334,11 @@ async def check_unit(
     telling them apart would leak another clinic's rows), a deactivated unit, or - when the
     professional attends at units - one they do not attend at (422). A professional without any
     offered unit may be booked at any active unit of the clinic.
+
+    With `service_id` (the professional's catalog entry the booking is for), also refused when
+    the professional does that service only at OTHER units (422 `unit_service_not_offered`).
+    `service_id=None` is exactly the rule above. Callers that write for the PATIENT pass it; the
+    staff hub only flags the combination (`service_offered_at_unit`).
     """
     unit = await tenant_unit(session, tenant_id, unit_id)
     if unit is None:
@@ -323,6 +350,10 @@ async def check_unit(
         if offered and unit.id not in offered:
             raise UnitRefused(
                 "unit_not_linked", "Esse profissional não atende nessa unidade.", 422
+            )
+        if not await service_offered_at_unit(session, professional.id, service_id, unit.id):
+            raise UnitRefused(
+                "unit_service_not_offered", "Esse serviço não é feito nessa unidade.", 422
             )
     return unit
 
@@ -338,6 +369,7 @@ __all__ = [
     "event_unit_fields",
     "professional_name",
     "scoped_calendar",
+    "service_offered_at_unit",
     "tenant_unit",
     "unit_fields",
     "unit_line",

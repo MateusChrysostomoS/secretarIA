@@ -38,11 +38,13 @@ from secretaria.ai.tools import (
     _conversation_attendee_name,
     _conversation_insurance,
     _create_booking_event,
+    _effective_service_catalog,
     _get_calendar,
     _hand_back_if_slot_taken,
     _localize_window,
     _match_by_name,
     _persist_appointment,
+    _service_unit_refusal,
     _sole_professional_id,
     _tenant_id_ctx,
 )
@@ -50,7 +52,9 @@ from secretaria.ai.unit_scope import (
     outside_unit_hours,
     professional_unit_options,
     resolve_tool_unit,
+    service_id_of,
     sole_professional_row,
+    valid_unit_options,
 )
 from secretaria.core.logging import get_logger
 from secretaria.plugins.base import PluginSpec
@@ -107,16 +111,31 @@ async def _resolve_unit_or_error(
 
 
 @tool
-async def list_units() -> dict:
+async def list_units(service_name: str = "") -> dict:
     """Lista as unidades/locais ativos da clínica, com nome e endereço. Use
     para informar ao paciente onde a clínica atende, ou antes de perguntar em
     qual unidade ele prefere ser atendido.
+
+    Args:
+        service_name: Nome EXATO do serviço que o paciente quer marcar (opcional). Quando
+            informado, só vêm as unidades onde esse serviço é feito — ofereça só essas.
     """
     tenant_id = _tenant_id_ctx.get()
     if tenant_id is None:
         return {"units": []}
     # TASK-083: a clinic whose doctor attends at some of its units offers only those.
     owner = await sole_professional_row(tenant_id, _sole_professional_id())
+    if (service_name or "").strip():
+        # ... and, for a named service, only the units where the doctor does that service.
+        catalog = _effective_service_catalog()
+        canonical, error = _canonical_appointment_type(service_name, "list_units", catalog)
+        if error is not None:
+            return error
+        service_id = service_id_of(catalog, canonical)
+        if owner is not None and service_id is not None:
+            if await professional_unit_options(tenant_id, owner):
+                units = await valid_unit_options(tenant_id, owner, service_id)
+                return {"units": [{"name": u.name, "address": u.address} for u in units]}
     offered = [u for u in await professional_unit_options(tenant_id, owner) if u.bookable]
     units = offered or await _active_units(tenant_id)
     return {"units": [{"name": u.name, "address": u.address} for u in units]}
@@ -180,6 +199,12 @@ async def create_event_at_unit(
     )
     if service_error is not None:
         return service_error
+    # The service must be one the doctor does at this unit (spec §6.1, §9.13).
+    refused = await _service_unit_refusal(
+        "create_event_at_unit", unit, owner, _effective_service_catalog(), canonical_type
+    )
+    if refused is not None:
+        return refused
 
     cal = scoped_calendar(_get_calendar(), unit)
     fallback_start, fallback_end = _localize_window(start, end, cal)

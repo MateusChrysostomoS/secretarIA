@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 from httpx import AsyncClient
 
 from secretaria.models import Unit
+from secretaria.models.professional_service_unit import ProfessionalServiceUnit
 from secretaria.models.professional_unit import ProfessionalUnit
 from tests._local_agenda import seed_professional, seed_tenant, tomorrow_at
 from tests._reminder_fixtures import db  # noqa: F401
@@ -130,3 +131,46 @@ async def test_a_doctor_without_units_and_a_doctorless_booking_take_any_active_u
     assert (with_doctor.status_code, clinic.status_code) == (201, 201)
     items = await _list(client, start)
     assert {(i["unit_name"], i["unit_address"]) for i in items} == {("Zona Sul", None)}
+
+
+async def test_hub_calendar_create_invalid_combo_succeeds_with_warning_flag(
+    client: AsyncClient, db, acting
+):
+    """TASK-083 follow-up T7 (spec §9.3): the staff's encaixe is never blocked for a service
+    that is not done at the unit - it is written, and the answer flags it."""
+    tenant = await _clinic(db, acting)
+    doctor = await seed_professional(db, tenant, "Dra. Ana")
+    centro = await _unit(db, tenant)
+    sul = await _unit(db, tenant, "Zona Sul")
+    await _link(db, doctor, centro)
+    await _link(db, doctor, sul)
+    limpeza, retorno = uuid4(), uuid4()
+    async with db() as session:
+        session.add(
+            ProfessionalServiceUnit(professional_id=doctor.id, service_id=limpeza, unit_id=sul.id)
+        )
+        await session.commit()
+    start = tomorrow_at(9)
+
+    invalid = await _create(
+        client, start, professional_id=str(doctor.id), unit_id=str(centro.id),
+        service_id=str(limpeza),
+    )
+    assert invalid.status_code == 201, invalid.text
+    assert invalid.json()["unit_service_not_offered"] is True
+    assert (await _appointment(db, UUID(invalid.json()["id"]))).unit_id == centro.id
+
+    valid = await _create(
+        client, start + timedelta(hours=1), professional_id=str(doctor.id),
+        unit_id=str(sul.id), service_id=str(limpeza),
+    )
+    unrestricted = await _create(
+        client, start + timedelta(hours=2), professional_id=str(doctor.id),
+        unit_id=str(centro.id), service_id=str(retorno),
+    )
+    no_service = await _create(
+        client, start + timedelta(hours=3), professional_id=str(doctor.id), unit_id=str(centro.id)
+    )
+    for resp in (valid, unrestricted, no_service):
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["unit_service_not_offered"] is False
