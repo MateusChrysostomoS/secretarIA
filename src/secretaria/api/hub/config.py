@@ -9,6 +9,9 @@ PUT  /tenants/me/config        - update non-sensitive config; enforces the
 PUT  /tenants/me/configuration - TRANSACTIONAL save of the tenant config AND
                                  (optionally) one professional's config, in a
                                  single commit.
+PATCH /tenants/me/operating-channel - where the secretarIA serves the clinic's
+                                 patients (TASK-084); manager only, 409 for a
+                                 channel not released yet (WhatsApp today).
 
 WHY THE AGGREGATE ENDPOINT EXISTS
 ---------------------------------
@@ -34,7 +37,12 @@ import time
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from secretaria.api.hub.deps import ensure_clinic_manager, get_current_tenant, get_hub_claim
+from secretaria.api.hub.deps import (
+    ensure_clinic_manager,
+    get_current_tenant,
+    get_hub_claim,
+    require_clinic_manager,
+)
 from secretaria.core.catalog_limits import CatalogLimitExceeded
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
@@ -43,7 +51,13 @@ from secretaria.models import Tenant
 from secretaria.schemas.config import TenantConfigRead, TenantConfigUpdate
 from secretaria.schemas.contact_email import ContactEmailRead, ContactEmailUpdate
 from secretaria.schemas.hub_configuration import HubConfigurationRead, HubConfigurationUpdate
+from secretaria.schemas.operating_channel import OperatingChannelRead, OperatingChannelUpdate
 from secretaria.services import contact_email as contact_email_service, hub_configuration as hubcfg
+from secretaria.services.operating_channel import (
+    OperatingChannelUnavailable,
+    available_operating_channels,
+    set_operating_channel,
+)
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/tenants/me", tags=["hub-config"])
@@ -113,6 +127,48 @@ async def update_contact_email(
     stored = contact_email_service.set_contact_email(tenant, body.contact_email)
     await session.commit()
     return ContactEmailRead(contact_email=stored)
+
+
+# The copy the screen shows when a clinic asks for a channel that is not released yet.
+OPERATING_CHANNEL_UNAVAILABLE_MESSAGE = "Esta opção ainda não está disponível."
+
+
+@router.patch("/operating-channel", response_model=OperatingChannelRead)
+async def update_operating_channel(
+    body: OperatingChannelUpdate,
+    tenant: Tenant = Depends(require_clinic_manager),
+    session: AsyncSession = Depends(get_session),
+) -> OperatingChannelRead:
+    """Where the secretarIA serves this clinic's patients (TASK-084); the ONLY writer of it.
+
+    Manager only (a `manager`, or a `doctor` flagged owner/manager). A known channel that is
+    not released - WhatsApp today - is a 409 and nothing is written; the release switch is
+    services/operating_channel.py::RELEASED_OPERATING_CHANNELS. Restating the current channel
+    is a 200 that writes and logs nothing.
+    """
+    previous = tenant.operating_channel
+    try:
+        changed = set_operating_channel(tenant, body.operating_channel)
+    except OperatingChannelUnavailable:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "operating_channel_unavailable",
+                "message": OPERATING_CHANNEL_UNAVAILABLE_MESSAGE,
+            },
+        ) from None
+    if changed:
+        await session.commit()
+        logger.info(
+            "operating_channel_changed",
+            tenant_id=str(tenant.id),
+            previous=previous,
+            channel=tenant.operating_channel,
+        )
+    return OperatingChannelRead(
+        operating_channel=tenant.operating_channel,
+        available_operating_channels=available_operating_channels(),
+    )
 
 
 @router.put("/config", response_model=TenantConfigRead)
