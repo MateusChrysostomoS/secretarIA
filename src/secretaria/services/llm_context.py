@@ -21,8 +21,9 @@ from __future__ import annotations
 from datetime import datetime
 
 from secretaria.models import FlowState
-from secretaria.services import flow_router as fr
+from secretaria.services import flow_router as fr, flow_units
 from secretaria.services.attendee import ATTENDEE_SELF
+from secretaria.services.service_catalog import entry_service_id
 from secretaria.services.tenant_config import ClinicFeatures, PatientIdentityStatus
 
 _BOOKING = "do agendamento"
@@ -142,19 +143,72 @@ def _doctor_label(professional) -> str:
     return f"{professional.name} ({specialty})" if specialty else str(professional.name)
 
 
+_UNIT_GUIDANCE = (
+    "- Ofereça só as combinações acima; se o paciente quiser outra unidade, diga em quais "
+    "o serviço é feito com esse médico ou quais médicos fazem o serviço lá."
+)
+
+
+def _unit_label(unit) -> str:
+    address = str(getattr(unit, "address", None) or "").strip()
+    return f"{unit.name} ({address})" if address else str(unit.name)
+
+
+def _services_by_unit(professional, tenant) -> str | None:
+    """ "Sede (Rua A, 1): Consulta, Retorno | Centro (Av. B, 2): Retorno", or None.
+
+    None when the professional has no bookable unit (the clinic's text stays exactly today's
+    for them). Per unit only the services done THERE (`flow_units.units_for_service`: a service
+    without `service_id` or without marks is done at every unit of the doctor); a unit where
+    nothing is done is left out. Built from the roster snapshot - no query.
+    """
+    units = flow_units.bookable_units(professional)
+    if not units:
+        return None
+    entries = fr.professional_appointment_types(professional, tenant)
+    per_unit: dict = {unit.id: [] for unit in units}
+    for entry in entries:
+        name = entry.get("name")
+        if not name:
+            continue
+        for unit in flow_units.units_for_service(professional, entry_service_id(entry)):
+            per_unit[unit.id].append(str(name))
+    parts = [
+        f"{_unit_label(unit)}: {', '.join(per_unit[unit.id])}"
+        for unit in units
+        if per_unit[unit.id]
+    ]
+    return " | ".join(parts) or None
+
+
 def _topology_lines(tenant, professionals) -> list[str]:
     roster = list(professionals or [])
     if tenant is None or not hasattr(tenant, "appointment_types"):
         return []
+    has_units = False
     if len(roster) > 1:
         lines = ["- A clínica tem vários médicos. Especialidade e serviços de cada um:"]
         for professional in roster:
+            by_unit = _services_by_unit(professional, tenant)
+            if by_unit is not None:
+                has_units = True
+                lines.append(f"  - {_doctor_label(professional)}: {by_unit}")
+                continue
             names = _service_names(fr.professional_appointment_types(professional, tenant))
             lines.append(
                 f"  - {_doctor_label(professional)}: {names or 'sem serviços cadastrados'}"
             )
+        if has_units:
+            lines.append(_UNIT_GUIDANCE)
         return lines
     if len(roster) == 1:
+        by_unit = _services_by_unit(roster[0], tenant)
+        if by_unit is not None:
+            return [
+                f"- A clínica atende com um só médico: {_doctor_label(roster[0])}. "
+                f"Unidades e serviços: {by_unit}.",
+                _UNIT_GUIDANCE,
+            ]
         names = _service_names(fr.professional_appointment_types(roster[0], tenant))
         return [
             f"- A clínica atende com um só médico: {_doctor_label(roster[0])}. "
@@ -162,6 +216,22 @@ def _topology_lines(tenant, professionals) -> list[str]:
         ]
     names = _service_names(fr.active_appointment_types(tenant))
     return [f"- Serviços da clínica: {names}."] if names else []
+
+
+def _current_unit_name(current: dict, professionals) -> str | None:
+    """The name of the edit draft's unit, from the roster snapshot (no query), or None."""
+    unit_id = str(current.get("unit_id") or "")
+    if not unit_id:
+        return None
+    owner_id = str(current.get("professional_id") or "")
+    roster = list(professionals or [])
+    # The draft's doctor first (ids ride the JSON draft as strings), then anyone else.
+    roster.sort(key=lambda professional: str(professional.id) != owner_id)
+    for professional in roster:
+        for unit in flow_units.offered_units(professional):
+            if str(unit.id) == unit_id:
+                return str(unit.name)
+    return None
 
 
 def build_conversation_state(conversation, tenant, professionals) -> str | None:
@@ -205,6 +275,9 @@ def build_conversation_state(conversation, tenant, professionals) -> str | None:
     when = _slot_text(current.get("start_at") or getattr(conversation, "flow_selected_slot", None))
     if when:
         lines.append(f"- Horário já escolhido: {when}")
+    unit_name = _current_unit_name(current, professionals) if current else None
+    if unit_name:
+        lines.append(f"- Unidade atual da consulta: {unit_name}")
     plans = fr.insurance_plan_names(tenant) if tenant is not None else []
     if plans:
         lines.append(f"- Convênios cadastrados na clínica: {len(plans)} (valores omitidos).")

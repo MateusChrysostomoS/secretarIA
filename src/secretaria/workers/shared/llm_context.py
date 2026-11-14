@@ -132,6 +132,12 @@ def _should_inject_appointment_context(
         return False
     return flow_state is FlowState.LLM or delegated_to_llm
 
+def _appointment_unit_name(appointment: dict, unit_names: dict[str, str] | None) -> str | None:
+    """The unit name for one `future_appointments` dict (`unit_id` is a string), or None."""
+    unit_id = appointment.get("unit_id")
+    return unit_names.get(str(unit_id)) if unit_names and unit_id else None
+
+
 def _appointment_context_text(
     future_appointments: list[dict],
     tz_name: str | None,
@@ -140,6 +146,7 @@ def _appointment_context_text(
     *,
     with_refs: bool = False,
     service_guides: list[RuntimeServiceGuide] | None = None,
+    unit_names: dict[str, str] | None = None,
 ) -> str | None:
     """Render the per-turn "consultas marcadas" block for the LLM prompt.
 
@@ -174,6 +181,10 @@ def _appointment_context_text(
     `service_guides` (TenantRuntimeConfig.service_guides): the clinic-wide orientations from the
     canonical catalog. `appointment_types` misses a service that only the professionals' own lists
     offer (2+ active professionals), so the "Orientações" line falls back to the matching guide.
+
+    `unit_names` (TASK-083 follow-up A1) is unit id -> name, taken from the roster snapshot (no
+    query): an appointment with a `unit_id` found there names its unit after the doctor. Without
+    it - a clinic with no units - the text is exactly today's.
     """
     if not future_appointments:
         return None
@@ -198,6 +209,9 @@ def _appointment_context_text(
     nearest_line = f"Próxima consulta: {when} — {service_name}"
     if doctor:
         nearest_line += f" — {doctor}"
+    nearest_unit = _appointment_unit_name(nearest, unit_names)
+    if nearest_unit:
+        nearest_line += f" — {nearest_unit}"
     if matched and matched.price:
         nearest_line += f" — {matched.price}"
     nearest_line += ref(nearest)
@@ -223,6 +237,9 @@ def _appointment_context_text(
         appt_doctor = _appointment_doctor_name(appt, professional_names)
         if appt_doctor:
             line += f" — {appt_doctor}"
+        appt_unit = _appointment_unit_name(appt, unit_names)
+        if appt_unit:
+            line += f" — {appt_unit}"
         lines.append(line + ref(appt))
 
     return "\n".join(lines)

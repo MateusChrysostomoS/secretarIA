@@ -436,3 +436,22 @@ def test_appointment_context_text_inactive_owner_shows_no_name():
         [_appt(start, professional_id=str(uuid4()))], _TZ, {}, []
     )
     assert text == "Próxima consulta: 03/08 às 11:00 — Consulta Geral"
+
+
+def test_appointment_context_names_unit():
+    unit_id = str(uuid4())
+    start = datetime(2026, 8, 3, 14, 0, tzinfo=UTC)
+    later = datetime(2026, 8, 10, 14, 0, tzinfo=UTC)
+    first = {**_appt(start), "unit_id": unit_id}
+    second = {**_appt(later, appointment_type="Retorno"), "unit_id": unit_id}
+    names = {unit_id: "Unidade Centro"}
+    text = _appointment_context_text([first, second], _TZ, {}, [], unit_names=names)
+    assert "Próxima consulta: 03/08 às 11:00 — Consulta Geral — Unidade Centro" in text
+    assert "10/08 às 11:00 — Retorno — Unidade Centro" in text
+    # Without the names (or a unit) the text is today's, byte for byte.
+    assert _appointment_context_text([first, second], _TZ, {}, []) == _appointment_context_text(
+        [_appt(start), _appt(later, appointment_type="Retorno")], _TZ, {}, []
+    )
+    assert "Unidade Centro" not in _appointment_context_text(
+        [_appt(start)], _TZ, {}, [], unit_names=names
+    )

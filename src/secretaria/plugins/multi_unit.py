@@ -111,7 +111,7 @@ async def _resolve_unit_or_error(
 
 
 @tool
-async def list_units(service_name: str = "") -> dict:
+async def list_units(service_name: str = "", professional_name: str = "") -> dict:
     """Lista as unidades/locais ativos da clínica, com nome e endereço. Use
     para informar ao paciente onde a clínica atende, ou antes de perguntar em
     qual unidade ele prefere ser atendido.
@@ -119,15 +119,33 @@ async def list_units(service_name: str = "") -> dict:
     Args:
         service_name: Nome EXATO do serviço que o paciente quer marcar (opcional). Quando
             informado, só vêm as unidades onde esse serviço é feito — ofereça só essas.
+        professional_name: Nome do médico (opcional). Quando informado, só vêm as unidades
+            onde ELE atende (e, com service_name, onde ele faz esse serviço).
     """
     tenant_id = _tenant_id_ctx.get()
     if tenant_id is None:
         return {"units": []}
-    # TASK-083: a clinic whose doctor attends at some of its units offers only those.
-    owner = await sole_professional_row(tenant_id, _sole_professional_id())
+    catalog = None
+    if (professional_name or "").strip():
+        # A named doctor (follow-up A1): tenant-scoped lookup, the same one the
+        # professional-aware tools use; the doctor's OWN catalog names their services.
+        from secretaria.plugins.multi_professional import (
+            _active_professionals,
+            _professional_services,
+            _unknown_professional_error,
+        )
+
+        professionals = await _active_professionals(tenant_id)
+        owner = _match_by_name(professionals, professional_name)
+        if owner is None:
+            return _unknown_professional_error(professional_name, professionals)
+        catalog = await _professional_services(tenant_id, owner)
+    else:
+        # TASK-083: a clinic whose doctor attends at some of its units offers only those.
+        owner = await sole_professional_row(tenant_id, _sole_professional_id())
     if (service_name or "").strip():
         # ... and, for a named service, only the units where the doctor does that service.
-        catalog = _effective_service_catalog()
+        catalog = _effective_service_catalog() if catalog is None else catalog
         canonical, error = _canonical_appointment_type(service_name, "list_units", catalog)
         if error is not None:
             return error

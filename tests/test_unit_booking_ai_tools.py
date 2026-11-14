@@ -495,3 +495,35 @@ async def test_an_entry_without_service_id_is_unrestricted(db):
             {"unit_name": "Centro", "appointment_type": "Avaliação", **WINDOW}
         )
     assert "id" in booked
+
+
+async def test_list_units_by_professional_name(db):
+    tenant, _centro, sul, doctors = await _seed(
+        db, links={"Dra. Ana": ["Centro", "Zona Sul"], "Dr. Bruno": ["Zona Sul"]}
+    )
+    ana, limpeza, retorno = doctors["Dra. Ana"], uuid4(), uuid4()
+    entries = [_entry("Limpeza", limpeza), _entry("Retorno", retorno)]
+    await _restrict(db, ana, limpeza, sul, entries=entries)
+    # Two active doctors: no sole professional, the model names the doctor.
+    with _context(tenant.id):
+        of_ana = await mu.list_units.ainvoke({"professional_name": "dra. ana"})
+        of_bruno = await mu.list_units.ainvoke({"professional_name": "Dr. Bruno"})
+        filtered = await mu.list_units.ainvoke(
+            {"professional_name": "Dra. Ana", "service_name": "Limpeza"}
+        )
+        everyone = await mu.list_units.ainvoke({})
+    assert sorted(u["name"] for u in of_ana["units"]) == ["Centro", "Zona Sul"]
+    assert [u["name"] for u in of_bruno["units"]] == ["Zona Sul"]
+    assert [u["name"] for u in filtered["units"]] == ["Zona Sul"]
+    # No professional_name: today's behavior (every active unit of the clinic here).
+    assert sorted(u["name"] for u in everyone["units"]) == ["Centro", "Zona Sul"]
+
+
+async def test_list_units_unknown_professional_is_clear_error(db):
+    tenant, _centro, _sul, _doctors = await _seed(
+        db, links={"Dra. Ana": ["Centro"], "Dr. Bruno": ["Zona Sul"]}
+    )
+    with _context(tenant.id):
+        result = await mu.list_units.ainvoke({"professional_name": "Dr. Fantasma"})
+    assert "units" not in result
+    assert "Dra. Ana" in result["error"] and "Dr. Bruno" in result["error"]

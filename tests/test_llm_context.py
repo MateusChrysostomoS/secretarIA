@@ -281,3 +281,135 @@ def test_a_single_doctor_clinic_says_so_with_its_services():
 def test_a_clinic_without_professionals_lists_its_services():
     state = build_conversation_state(_conversation(), _tenant(), [])
     assert "Serviços da clínica: Primeira Consulta." in state
+
+
+# --- TASK-083 follow-up A1: the model knows doctor x service x unit ---------------------------
+
+from secretaria.services.unit_booking import UnitOption  # noqa: E402
+
+_OPEN = {"monday": [{"start": "08:00", "end": "12:00"}]}
+
+
+def _unit(name, address, hours=None):
+    return UnitOption(
+        id=uuid4(), name=name, address=address, business_hours=_OPEN if hours is None else hours
+    )
+
+
+def _doctor_at(name, services, units, *, specialty=None, restrict=None):
+    """A roster professional with `units` and `restrict` = {service name: [units]}."""
+    doctor = _professional(name, [])
+    doctor.specialty = specialty
+    entries = []
+    service_units = {}
+    for index, service in enumerate(services):
+        service_id = uuid4()
+        entries.append(
+            {
+                "name": service, "is_active": True, "duration_min": 30, "sort_order": index,
+                "service_id": str(service_id),
+            }
+        )
+        if restrict and service in restrict:
+            service_units[service_id] = frozenset(unit.id for unit in restrict[service])
+    doctor.appointment_types = entries
+    doctor.units = units
+    doctor.service_units = service_units
+    return doctor
+
+
+def test_topology_lists_units_and_services_per_doctor():
+    sede = _unit("Unidade Sede", "Rua das Flores, 100")
+    centro = _unit("Unidade Centro", "Av. Brasil, 50")
+    ana = _doctor_at(
+        "Dra. Ana", ["Consulta", "Retorno"], [sede, centro],
+        specialty="Oftalmologia", restrict={"Consulta": [sede]},
+    )
+    bruno = _doctor_at("Dr. Bruno", ["Retorno"], [centro])
+    text = build_conversation_state(_conversation(), _tenant(), [ana, bruno])
+    assert (
+        "  - Dra. Ana (Oftalmologia): Unidade Sede (Rua das Flores, 100): Consulta, Retorno"
+        " | Unidade Centro (Av. Brasil, 50): Retorno"
+    ) in text
+    assert "  - Dr. Bruno: Unidade Centro (Av. Brasil, 50): Retorno" in text
+    assert (
+        "- Ofereça só as combinações acima; se o paciente quiser outra unidade, diga em quais "
+        "o serviço é feito com esse médico ou quais médicos fazem o serviço lá."
+    ) in text
+
+
+def test_topology_service_without_marks_in_every_unit():
+    sede = _unit("Sede", "Rua A, 1")
+    centro = _unit("Centro", "Rua B, 2")
+    ana = _doctor_at("Dra. Ana", ["Consulta"], [sede, centro])
+    # An entry with no service_id at all is unrestricted as well.
+    ana.appointment_types.append(
+        {"name": "Avulso", "is_active": True, "duration_min": 30, "sort_order": 9}
+    )
+    other = _doctor_at("Dr. Bruno", ["Limpeza"], [sede])
+    text = build_conversation_state(_conversation(), _tenant(), [ana, other])
+    assert "Sede (Rua A, 1): Consulta, Avulso | Centro (Rua B, 2): Consulta, Avulso" in text
+
+
+def test_topology_ignores_a_unit_without_open_hours():
+    sede = _unit("Sede", "Rua A, 1")
+    closed = _unit("Fechada", "Rua C, 3", hours={})
+    ana = _doctor_at("Dra. Ana", ["Consulta"], [sede, closed])
+    other = _doctor_at("Dr. Bruno", ["Limpeza"], [sede])
+    text = build_conversation_state(_conversation(), _tenant(), [ana, other])
+    assert "Fechada" not in text
+
+
+def test_topology_without_units_is_unchanged():
+    a = _professional("Dra. Ana", ["Consulta Ortopédica"])
+    b = _professional("Dr. Beto", ["Limpeza", "Retorno"])
+    b.specialty = "Dentista"
+    multi = (
+        "- A clínica tem vários médicos. Especialidade e serviços de cada um:\n"
+        "  - Dra. Ana: Consulta Ortopédica\n"
+        "  - Dr. Beto (Dentista): Limpeza, Retorno"
+    )
+    assert multi in build_conversation_state(_conversation(), _tenant(), [a, b])
+    # Doctors whose unit list is present but empty / closed render exactly the same way.
+    a.units, a.service_units = [], {}
+    b.units, b.service_units = [_unit("Fechada", "X", hours={})], {}
+    text = build_conversation_state(_conversation(), _tenant(), [a, b])
+    assert multi in text
+    assert "Ofereça só as combinações" not in text
+    single = build_conversation_state(_conversation(), _tenant(), [a])
+    assert single.endswith(
+        "- A clínica atende com um só médico: Dra. Ana. Serviços: Consulta Ortopédica."
+    )
+
+
+def test_single_doctor_topology_with_units():
+    sede = _unit("Sede", "Rua A, 1")
+    centro = _unit("Centro", "Rua B, 2")
+    ana = _doctor_at(
+        "Dra. Ana", ["Consulta", "Retorno"], [sede, centro],
+        specialty="Oftalmologia", restrict={"Consulta": [sede]},
+    )
+    text = build_conversation_state(_conversation(), _tenant(), [ana])
+    assert (
+        "- A clínica atende com um só médico: Dra. Ana (Oftalmologia). "
+        "Unidades e serviços: Sede (Rua A, 1): Consulta, Retorno | Centro (Rua B, 2): Retorno."
+    ) in text
+    assert "Ofereça só as combinações acima" in text
+
+
+def test_edit_state_names_current_unit():
+    sede = _unit("Unidade Sede", "Rua A, 1")
+    centro = _unit("Unidade Centro", "Rua B, 2")
+    ana = _doctor_at("Dra. Ana", ["Consulta"], [sede, centro])
+    conv = _conversation(flow_state=FlowState.EDIT_BOOKING, flow_step=fr.STEP_EDIT_CONFIRM)
+    conv.flow_edit_draft = {
+        "current": {
+            "service": "Consulta", "professional_id": str(ana.id), "unit_id": str(centro.id),
+            "start_at": "2030-10-15T16:00",
+        }
+    }
+    text = build_conversation_state(conv, _tenant(), [ana])
+    assert "- Unidade atual da consulta: Unidade Centro" in text
+    # No unit on the draft: the line is absent (today's text).
+    conv.flow_edit_draft = {"current": {"service": "Consulta", "start_at": "2030-10-15T16:00"}}
+    assert "Unidade atual" not in build_conversation_state(conv, _tenant(), [ana])

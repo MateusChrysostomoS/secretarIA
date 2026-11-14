@@ -34,6 +34,7 @@ from secretaria.models import (
 )
 from secretaria.plugins.base import InboundContext
 from secretaria.plugins.registry import agent_tools_for, run_on_inbound
+from secretaria.services import flow_units
 from secretaria.services.appointment_edit import EditContext, asks_to_edit_appointment
 from secretaria.services.appointment_edit_flow import apply_ai_edit
 from secretaria.services.booking_hold import refresh_code_hold
@@ -1317,6 +1318,13 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             # TASK-030 P3: the "(ref ...)" manage_existing_appointment v2 takes.
             with_refs=ai_draft_v2_enabled(tenant),
             service_guides=tenant_config.service_guides if tenant_config is not None else None,
+            # TASK-083 follow-up A1: unit names come from the roster snapshot (no query).
+            unit_names={
+                str(unit.id): str(unit.name)
+                for p in (flow_professionals or [])
+                for unit in flow_units.offered_units(p)
+            }
+            or None,
         )
 
     # Every LLM turn is either a deliberate escape hatch ("Outro") or a gap in

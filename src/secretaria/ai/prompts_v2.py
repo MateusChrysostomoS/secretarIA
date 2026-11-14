@@ -219,7 +219,9 @@ def _format_tools_v2(names: frozenset[str]) -> str:
             "set_booking_draft(professional=...)."
         )
     if "list_units" in names:
-        lines.append("- list_units: para dizer quais unidades a clínica tem.")
+        lines.append(
+            "- list_units: unidades da clínica; filtra por professional_name e service_name."
+        )
     lines.append(
         "- show_main_menu: quando o paciente quer recomeçar, voltar ao início ou ver o "
         "menu. Nunca escreva um menu em texto."
