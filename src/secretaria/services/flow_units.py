@@ -30,6 +30,7 @@ from secretaria.core.whatsapp_limits import (
     truncate_plain,
 )
 from secretaria.services.professional_service_units import allowed_unit_ids
+from secretaria.services.service_catalog import entry_service_id
 from secretaria.services.unit_booking import scoped_calendar
 
 STEP_AWAITING_UNIT = "awaiting_unit"
@@ -274,6 +275,34 @@ def unit_refused(professional: Any | None, unit_id: UUID | None, service_id: UUI
     return not units_for_service(professional, service_id)
 
 
+def services_at_unit(professional: Any | None, entries: list[dict], unit_id: UUID | None) -> list:
+    """The professional's `entries` done at `unit_id` - a unit they can be booked at.
+
+    Same data rule as everywhere (follow-up E1): an entry without `service_id`, or a service
+    without marks, is done at every unit of the professional; a marked one only at its marks.
+    A unit the professional is not bookable at (no link, inactive, closed) has no services.
+    """
+    if unit_id is None or unit_id not in {unit.id for unit in bookable_units(professional)}:
+        return []
+    marks = service_units_of(professional)
+    out = []
+    for entry in entries:
+        allowed = allowed_unit_ids(marks, entry_service_id(entry))
+        if allowed is None or unit_id in allowed:
+            out.append(entry)
+    return out
+
+
+def units_with_services(professional: Any | None, entries: list[dict]) -> list:
+    """The professional's bookable units where at least one of `entries` is done - the units a
+    patient may pick for them without landing on an empty service list."""
+    return [
+        unit
+        for unit in bookable_units(professional)
+        if services_at_unit(professional, entries, unit.id)
+    ]
+
+
 def unit_rows(units: list) -> list[tuple[str, str, str | None]]:
     """One payload row per unit: the name as title, the address as description."""
     rows: list[tuple[str, str, str | None]] = []
@@ -337,6 +366,7 @@ __all__ = [
     "scope",
     "selected_unit_id",
     "service_units_of",
+    "services_at_unit",
     "union_hours",
     "unit_after_doctor_change",
     "unit_choice",
@@ -345,4 +375,5 @@ __all__ = [
     "unit_confirm_body",
     "unit_rows",
     "units_for_service",
+    "units_with_services",
 ]

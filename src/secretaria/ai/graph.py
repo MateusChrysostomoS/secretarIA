@@ -394,6 +394,13 @@ remarque ou inicie outro agendamento. Nenhum valor é apagado ao abrir uma lista
 Um médico ocupado exige horários DAQUELE médico, sem perder o horário atual.
 Nunca afirme que salvou: somente Confirmar no cartão final aplica as mudanças.
 """
+        if "list_units" in _turn_tool_names():
+            # Follow-up E1 (D5): only a clinic with units (the multi_unit plugin's
+            # `list_units`) - every other clinic's edit prompt stays byte for byte.
+            prompt += (
+                "Outra unidade: proponha unit com o nome exato da unidade; o sistema confere "
+                "se o serviço é feito lá e, se não for, mostra as unidades certas.\n"
+            )
     return prompt
 
 

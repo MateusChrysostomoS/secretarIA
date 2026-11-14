@@ -2272,12 +2272,15 @@ async def propose_appointment_edit(
     keep: list[str] | None = None,
     finish: bool = False,
     abandon: bool = False,
+    unit: str = "",
 ) -> dict:
     """Propose changes ONLY to the existing appointment's active editing draft.
 
     Unmentioned fields keep their current value. open_field opens doctor/service/date/
     time/insurance/patient/more without changing anything. professional/service/insurance
-    must name an actual catalog option. day is YYYY-MM-DD, time HH:MM. keep names fields
+    must name an actual catalog option. unit is the exact name of one of the clinic's units
+    (only when the clinic has units); the system checks the service is done there and, if
+    not, shows the units where it is. day is YYYY-MM-DD, time HH:MM. keep names fields
     the patient wants unchanged (same day/time/insurance); never reset them to original.
     attendee is self or other; other opens the existing name and authorization flow,
     never pass a patient's name here. finish shows the final change confirmation card;
@@ -2295,6 +2298,7 @@ async def propose_appointment_edit(
             "time": time,
             "insurance": insurance,
             "attendee": attendee,
+            "unit": unit,
             "keep": keep,
             "finish": finish,
             "abandon": abandon,

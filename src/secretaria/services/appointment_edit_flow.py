@@ -42,6 +42,7 @@ from secretaria.services.attendee import (
     authorization_body,
     parse_attendee_name,
 )
+from secretaria.services.booking_details import clinic_address_line
 from secretaria.services.calendar import (
     CalendarSlotTakenError,
     CalendarUnavailableError,
@@ -135,6 +136,36 @@ def _draft_unit(draft: ae.EditDraft, doctor) -> Any | None:
     if unit_id is None:
         return None
     return next((u for u in flow_units.offered_units(doctor) if u.id == unit_id), None)
+
+
+def _clinic_address(tenant) -> str | None:
+    """The clinic's address as one line. In production `Tenant.address` is the JSON dict
+    (`booking_details.clinic_address_line`); a plain string (older snapshots, tests) is used
+    as it is. Never `.strip()` on a dict (follow-up E1, D4)."""
+    raw = getattr(tenant, "address", None)
+    if isinstance(raw, str):
+        return raw.strip() or None
+    return clinic_address_line(raw)
+
+
+def _recap_place(draft: ae.EditDraft, doctor, tenant) -> tuple[str | None, str | None]:
+    """(unit name, address) for the confirmation text (D4): a booking at a unit shows that
+    unit and ITS address (none when the unit has none - never the clinic's, which may be
+    another building); without a unit, the clinic's address exactly as before."""
+    unit = _draft_unit(draft, doctor)
+    if unit is None:
+        return None, _clinic_address(tenant)
+    address = str(getattr(unit, "address", None) or "").strip() or None
+    return str(getattr(unit, "name", "") or "") or None, address
+
+
+def _stage_unit(draft: ae.EditDraft, doctor) -> Any | None:
+    """The unit a staged service list is drawn for (`stage.at_unit`), if the doctor can still
+    be booked there; else None (the list falls back to today's)."""
+    raw = draft.stage.get("at_unit")
+    if not raw:
+        return None
+    return next((u for u in flow_units.bookable_units(doctor) if str(u.id) == raw), None)
 
 
 def _service_id(tenant, professional, name: str | None) -> UUID | None:
@@ -314,11 +345,13 @@ def enter_edit_menu(
 def _confirm_result(draft: ae.EditDraft, tenant, professionals) -> fr.FlowRouterResult:
     """The ONE complete confirmation message: everything, what changed, three buttons."""
     doctor = _doctor(professionals, draft)
+    unit, address = _recap_place(draft, doctor, tenant)
     text = ae.build_edit_recap(
         draft,
         doctor=str(getattr(doctor, "name", "") or "") or None,
-        address=(getattr(tenant, "address", None) or "").strip() or None,
+        address=address,
         requirements=_requirements(tenant, professionals, draft),
+        unit=unit,
     )
     return _result(
         draft.with_stage(),
@@ -388,6 +421,11 @@ def _no_room(draft: ae.EditDraft, ctx: ae.EditContext) -> fr.FlowRouterResult:
     """The new window does not fit and the time may not move (Pix reschedule limit): the
     service goes back to what it was, with the one line that says why."""
     keep = {key: draft.original[key] for key in ("service", "start_at", "end_at")}
+    if "unit_id" in draft.original and (
+        draft.current["professional_id"] == draft.original["professional_id"]
+    ):
+        # Follow-up E1: a unit picked for that service goes back with it.
+        keep["unit_id"] = draft.original["unit_id"]
     menu = _menu_result(draft.with_changes(**keep).with_stage(), ctx)
     menu.bubbles.insert(0, TextBubble(body=ae.EDIT_SERVICE_NO_ROOM))
     return menu
@@ -498,23 +536,54 @@ async def _slot_step(conversation, tenant, body, draft, appt, professionals, ctx
 
 
 def _service_list(
-    draft: ae.EditDraft, tenant, professionals, ctx, *, after_doctor: bool = False
+    draft: ae.EditDraft,
+    tenant,
+    professionals,
+    ctx,
+    *,
+    after_doctor: bool = False,
+    at_unit: Any | None = None,
+    change_unit: bool = False,
 ) -> fr.FlowRouterResult:
-    """The services of the draft's doctor only (owner, 2026-10-07)."""
-    services = _services_of(tenant, _doctor(professionals, draft))
+    """The services of the draft's doctor only (owner, 2026-10-07).
+
+    Follow-up E1 (b): with `at_unit`, only those the doctor does at that unit, under
+    `EDIT_SERVICES_AT_UNIT_BODY`, and - with `change_unit` - the "Alterar unidade" row last (D1).
+    """
+    doctor = _doctor(professionals, draft)
+    services = _services_of(tenant, doctor)
+    body = ae.EDIT_SERVICE_BODY
+    stage = {"after_doctor": "1"} if after_doctor else {}
+    if at_unit is not None:
+        services = flow_units.services_at_unit(doctor, services, at_unit.id)
+        body = ae.EDIT_SERVICES_AT_UNIT_BODY.format(
+            medico=str(getattr(doctor, "name", "") or "").strip(),
+            unidade=str(getattr(at_unit, "name", "") or "").strip(),
+        )[:MAX_INTERACTIVE_BODY_CHARS]
+        stage["at_unit"] = str(at_unit.id)
+        if change_unit:
+            stage["change_unit"] = "1"
     if not services:
         menu = _menu_result(draft.with_stage(), ctx)
         menu.bubbles.insert(0, TextBubble(body=ae.EDIT_NO_SERVICES))
         return menu
-    rows = [
+    rows: list[tuple] = [
         (f"svc|{service.get('name', '')}", fr._service_row_title(service.get("name")))
         for service in services[: fr.MAX_CATALOG_OPTION_ROWS]
     ]
+    if at_unit is not None and change_unit:
+        rows.append(
+            (
+                ae.ROW_EDIT_CHANGE_UNIT,
+                ae.LABEL_EDIT_CHANGE_UNIT,
+                ae.LABEL_EDIT_CHANGE_UNIT_DESCRIPTION,
+            )
+        )
     return _result(
-        draft.with_stage(**({"after_doctor": "1"} if after_doctor else {})),
+        draft.with_stage(**stage),
         [
             SlotsBubble(
-                body=ae.EDIT_SERVICE_BODY,
+                body=body,
                 rows=rows,
                 button_label="Ver serviços",
                 section_title="Serviços",
@@ -524,28 +593,180 @@ def _service_list(
     )
 
 
+def _unit_list(draft: ae.EditDraft, units: list, body: str, **stage: str) -> fr.FlowRouterResult:
+    """The unit list of "Alterar Dados" (follow-up E1): one payload row per unit (name +
+    address), the booking flow's own rows (`flow_units.unit_rows`). Nothing is drafted yet."""
+    if len(units) > flow_units.MAX_UNIT_ROWS:
+        logger.warning("edit_unit_list_truncated", total=len(units), shown=flow_units.MAX_UNIT_ROWS)
+    return _result(
+        draft.with_stage(**stage),
+        [
+            SlotsBubble(
+                body=body[:MAX_INTERACTIVE_BODY_CHARS],
+                rows=flow_units.unit_rows(units),
+                button_label=flow_units.UNIT_LIST_BUTTON,
+                section_title=flow_units.UNIT_LIST_SECTION,
+            )
+        ],
+        fr.STEP_EDIT_UNIT,
+    )
+
+
+def _service_unit_list(
+    draft: ae.EditDraft,
+    tenant,
+    professionals,
+    ctx,
+    service_name: str | None,
+    *,
+    refuse_from: ae.EditDraft | None = None,
+    notice: str = ae.EDIT_SERVICE_NOT_AT_UNIT,
+) -> fr.FlowRouterResult:
+    """(a) The draft's doctor's bookable units where `service_name` is done - always a list,
+    even of one (D3). The service waits in `stage.pending_service` until a unit is picked. No
+    unit at all -> back to the menu with `notice`, `refuse_from` (default `draft`) unchanged."""
+    doctor = _doctor(professionals, draft)
+    service = fr._match_service(_services_of(tenant, doctor), service_name)
+    units = (
+        flow_units.units_for_service(doctor, entry_service_id(service))
+        if service is not None
+        else []
+    )
+    if not units:
+        return _refuse(refuse_from or draft, ctx, notice)
+    name = str(service.get("name"))
+    return _unit_list(
+        draft,
+        units,
+        ae.EDIT_UNIT_FOR_SERVICE_BODY.format(servico=name),
+        unit_purpose="service",
+        pending_service=name,
+    )
+
+
+def _doctor_units(tenant, doctor) -> list:
+    """The doctor's bookable units where they do at least one of their services."""
+    return flow_units.units_with_services(doctor, _services_of(tenant, doctor))
+
+
+def _doctor_unit_list(draft: ae.EditDraft, tenant, professionals, ctx) -> fr.FlowRouterResult:
+    """(b)/D2 "Em qual unidade...?" for the draft's (new) doctor; then their services there."""
+    doctor = _doctor(professionals, draft)
+    units = _doctor_units(tenant, doctor)
+    if not units:
+        return _menu_result(draft.with_stage(), ctx)
+    return _unit_list(
+        draft,
+        units,
+        ae.EDIT_DOCTOR_UNITS_BODY.format(medico=str(getattr(doctor, "name", "") or "").strip()),
+        unit_purpose="doctor",
+        after_doctor="1",
+    )
+
+
+def _unit_list_again(draft: ae.EditDraft, tenant, professionals, ctx) -> fr.FlowRouterResult:
+    """Redraw whichever unit list the draft's stage is on."""
+    if draft.stage.get("unit_purpose") == "service":
+        return _service_unit_list(
+            draft, tenant, professionals, ctx, draft.stage.get("pending_service")
+        )
+    return _doctor_unit_list(draft, tenant, professionals, ctx)
+
+
+async def _unit_step(conversation, tenant, body, draft, appt, professionals, ctx):
+    """A tap (or typed name) on the edit's unit list.
+
+    (a) `unit_purpose=service`: the staged service AND the unit are drafted together, then the
+    time is re-checked (the unit's hours may not hold it). (b) `unit_purpose=doctor`: the new
+    doctor's services at that unit. Talk, not a unit: one model turn on this same step.
+    """
+    doctor = _doctor(professionals, draft)
+    if draft.stage.get("unit_purpose") == "service":
+        service = fr._match_service(
+            _services_of(tenant, doctor), draft.stage.get("pending_service")
+        )
+        if service is None:
+            return _menu_result(draft.with_stage(), ctx)
+        units = flow_units.units_for_service(doctor, entry_service_id(service))
+        if not units:
+            return _refuse(draft, ctx, ae.EDIT_SERVICE_NOT_AT_UNIT)
+        unit = flow_units.match_unit(units, body)
+        if unit is None:
+            return fr._preserve(conversation, "delegate_llm")
+        logger.info("edit_unit_selected", purpose="service", unit_count=len(units))
+        minutes = fr._service_duration(service, tenant)
+        new = draft.with_changes(
+            service=str(service.get("name")),
+            end_at=_iso(draft.start + timedelta(minutes=minutes)),
+            unit_id=str(unit.id),
+        ).with_stage()
+        return await _after_slot_affecting_change(
+            conversation, tenant, new, appt, professionals, ctx
+        )
+    units = _doctor_units(tenant, doctor)
+    if not units:
+        return _menu_result(draft.with_stage(), ctx)
+    unit = flow_units.match_unit(units, body)
+    if unit is None:
+        return fr._preserve(conversation, "delegate_llm")
+    logger.info("edit_unit_selected", purpose="doctor", unit_count=len(units))
+    return _service_list(
+        draft.with_changes(unit_id=str(unit.id)),
+        tenant,
+        professionals,
+        ctx,
+        after_doctor=True,
+        at_unit=unit,
+        change_unit=len(units) > 1,
+    )
+
+
 async def _service_step(conversation, tenant, body, draft, appt, professionals, ctx):
     doctor = _doctor(professionals, draft)
-    service = fr._match_service(_services_of(tenant, doctor), body)
+    at_unit = _stage_unit(draft, doctor)
+    if (
+        at_unit is not None
+        and draft.stage.get("change_unit")
+        and fr._label_match(body, ae.LABEL_EDIT_CHANGE_UNIT)
+    ):
+        # (b) "Alterar unidade": every unit where this doctor does something, then services.
+        return _doctor_unit_list(draft.with_changes(unit_id=None), tenant, professionals, ctx)
+    services = _services_of(tenant, doctor)
+    if at_unit is not None:
+        services = flow_units.services_at_unit(doctor, services, at_unit.id)
+    service = fr._match_service(services, body)
     if service is None:
         return fr._preserve(conversation, "delegate_llm")
     minutes = fr._service_duration(service, tenant)
+    if at_unit is not None:
+        # (b) The new doctor, this service and the unit the list was drawn for, together.
+        new = draft.with_changes(
+            professional_id=str(doctor.id),
+            service=str(service.get("name")),
+            end_at=_iso(draft.start + timedelta(minutes=minutes)),
+            unit_id=str(at_unit.id),
+        ).with_stage()
+        return await _after_slot_affecting_change(
+            conversation, tenant, new, appt, professionals, ctx
+        )
     after_doctor = bool(draft.stage.get("after_doctor"))
     new = draft.with_changes(
         service=str(service.get("name")),
         end_at=_iso(draft.start + timedelta(minutes=minutes)),
     ).with_stage()
     # TASK-083 final review: never the service at a unit where it is not done. After a doctor
-    # change the unit was only derived (the doctor did not offer the old service): derive it
-    # again for THIS service. Otherwise the booking's unit stays and a service not done there
-    # is refused (the edit has no unit picker), keeping the old service.
+    # change on a booking without a unit, the unit is only derived: derive it again for THIS
+    # service. Otherwise the booking's unit stays, and a service not done there opens the
+    # units where it is (follow-up E1 (a)) - or keeps the old service when there is none.
     service_id = entry_service_id(service)
     if after_doctor and doctor is not None:
         new = _with_doctor(new, doctor, service_id)
     if _unit_refused(new, doctor, service_id):
         if after_doctor:
             return _refuse(_undo_doctor_change(draft), ctx, ae.EDIT_DOCTOR_SERVICE_NO_UNIT)
-        return _refuse(draft, ctx, ae.EDIT_SERVICE_NOT_AT_UNIT)
+        return _service_unit_list(
+            draft.with_stage(), tenant, professionals, ctx, str(service.get("name"))
+        )
     if after_doctor or minutes != draft.duration_minutes:
         # A different length (or a new doctor) may not fit the current time: check first.
         return await _after_slot_affecting_change(
@@ -632,20 +853,81 @@ async def _doctor_step(conversation, tenant, body, draft, appt, professionals, c
     professional = fr._match_professional(professionals or [], body)
     if professional is None:
         return fr._preserve(conversation, "delegate_llm")
-    service = fr._match_service(
-        professional_appointment_types(professional, tenant), draft.current["service"]
-    )
+    return await _doctor_choice(conversation, tenant, draft, professional, appt, professionals, ctx)
+
+
+async def _doctor_choice(conversation, tenant, draft, professional, appt, professionals, ctx):
+    """`professional` as the draft's new doctor (the guided tap or an AI proposal).
+
+    Today's rule when the booking has no unit, the doctor has none, or the doctor does the
+    current service at the booking's unit (or is the appointment's own doctor again). Else
+    follow-up E1 (b): their services AT that unit, with "Alterar unidade" when they do the
+    current service at another bookable unit; a doctor who does nothing there -> their units
+    (D2; one unit is implied); no bookable unit at all -> `EDIT_DOCTOR_SERVICE_NO_UNIT`.
+    """
+    entries = professional_appointment_types(professional, tenant)
+    service = fr._match_service(entries, draft.current["service"])
     service_id = entry_service_id(service) if service is not None else None
     new = _with_doctor(draft, professional, service_id)
-    if service is None:
-        # The new doctor does not offer the current service: theirs next, then the check.
-        return _service_list(new, tenant, professionals, ctx, after_doctor=True)
-    if _unit_refused(new, professional, service_id):
-        # The new doctor does this service at no bookable unit: the doctor stays as it was.
+    pre = _uuid(draft.current.get("unit_id"))
+    keeps = (
+        service is not None
+        and not _unit_refused(new, professional, service_id)
+        and (
+            new.current.get("unit_id") == str(pre)
+            or str(professional.id) == draft.original["professional_id"]
+        )
+    )
+    if pre is None or not flow_units.offered_units(professional) or keeps:
+        if service is None:
+            # The new doctor does not offer the current service: theirs next, then the check.
+            return _service_list(new, tenant, professionals, ctx, after_doctor=True)
+        if _unit_refused(new, professional, service_id):
+            # The new doctor does this service at no bookable unit: the doctor stays as it was.
+            return _refuse(draft, ctx, ae.EDIT_DOCTOR_SERVICE_NO_UNIT)
+        minutes = fr._service_duration(service, tenant)
+        new = new.with_changes(end_at=_iso(new.start + timedelta(minutes=minutes))).with_stage()
+        return await _after_slot_affecting_change(
+            conversation, tenant, new, appt, professionals, ctx
+        )
+    moved = draft.with_changes(professional_id=str(professional.id))
+    here = next((u for u in flow_units.bookable_units(professional) if u.id == pre), None)
+    if here is not None and flow_units.services_at_unit(professional, entries, pre):
+        elsewhere = service is not None and any(
+            unit.id != pre for unit in flow_units.units_for_service(professional, service_id)
+        )
+        return _service_list(
+            moved.with_changes(unit_id=str(pre)),
+            tenant,
+            professionals,
+            ctx,
+            after_doctor=True,
+            at_unit=here,
+            change_unit=elsewhere,
+        )
+    units = flow_units.units_with_services(professional, entries)
+    if not units:
         return _refuse(draft, ctx, ae.EDIT_DOCTOR_SERVICE_NO_UNIT)
-    minutes = fr._service_duration(service, tenant)
-    new = new.with_changes(end_at=_iso(new.start + timedelta(minutes=minutes))).with_stage()
-    return await _after_slot_affecting_change(conversation, tenant, new, appt, professionals, ctx)
+    if len(units) > 1:
+        return _doctor_unit_list(moved.with_changes(unit_id=None), tenant, professionals, ctx)
+    # One unit where this doctor works: no question about it (the unit is secondary).
+    only = units[0]
+    if service is not None and not flow_units.unit_refused(professional, only.id, service_id):
+        minutes = fr._service_duration(service, tenant)
+        new = moved.with_changes(
+            unit_id=str(only.id), end_at=_iso(moved.start + timedelta(minutes=minutes))
+        ).with_stage()
+        return await _after_slot_affecting_change(
+            conversation, tenant, new, appt, professionals, ctx
+        )
+    return _service_list(
+        moved.with_changes(unit_id=str(only.id)),
+        tenant,
+        professionals,
+        ctx,
+        after_doctor=True,
+        at_unit=only,
+    )
 
 
 # --- Convênio -------------------------------------------------------------------------
@@ -807,6 +1089,10 @@ async def _apply_confirm(
     service = fr._match_service(_services_of(tenant, doctor), draft.current["service"])
     if service is None:
         return _service_list(draft, tenant, professionals, ctx, after_doctor=True)
+    if _unit_refused(draft, doctor, entry_service_id(service)):
+        # Follow-up E1: a unit/service list left half-way (another menu entry tapped on it)
+        # never books a service at a unit where it is not done.
+        return _refuse(_undo_doctor_change(draft), ctx, ae.EDIT_SERVICE_NOT_AT_UNIT)
     event_id = str(appt.get("google_event_id") or "")
     try:
         new_cal = _calendar(ctx, draft, professionals)
@@ -832,7 +1118,13 @@ async def _apply_confirm(
         ).total_seconds()
         // 60
     )
-    window_changed = time_changed or doctor_changed or draft.duration_minutes != original_minutes
+    # Another unit has other hours: the kept time is checked there too (follow-up E1).
+    window_changed = (
+        time_changed
+        or doctor_changed
+        or "unidade" in changed
+        or draft.duration_minutes != original_minutes
+    )
     if window_changed:
         try:
             free = await new_cal.is_slot_free(
@@ -909,12 +1201,14 @@ async def _apply_confirm(
     if draft.current.get("unit_id") != draft.original.get("unit_id"):
         edit["unit_id"] = _uuid(draft.current.get("unit_id"))
     doctor = _doctor(professionals, draft)
+    unit, address = _recap_place(draft, doctor, tenant)
     recap = ae.build_edit_recap(
         draft,
         doctor=str(getattr(doctor, "name", "") or "") or None,
-        address=(getattr(tenant, "address", None) or "").strip() or None,
+        address=address,
         requirements=_requirements(tenant, professionals, draft),
         title=ae.EDIT_APPLIED,
+        unit=unit,
     )
     logger.info("appointment_edit_confirmed", changed=len(changed), doctor_changed=doctor_changed)
     return fr.FlowRouterResult(
@@ -1049,6 +1343,8 @@ async def edit_step(
         return await _service_step(conversation, tenant, body, draft, appt, professionals, ctx)
     if step == fr.STEP_EDIT_DOCTOR:
         return await _doctor_step(conversation, tenant, body, draft, appt, professionals, ctx)
+    if step == fr.STEP_EDIT_UNIT:
+        return await _unit_step(conversation, tenant, body, draft, appt, professionals, ctx)
     if step == fr.STEP_EDIT_INSURANCE:
         return _insurance_step(conversation, tenant, body, draft, professionals)
     if step == fr.STEP_EDIT_INSURANCE_OTHER:
@@ -1073,8 +1369,16 @@ async def redisplay_edit(conversation, tenant, appointments, professionals, ctx)
         result = _more_result(draft, ctx)
     elif step == fr.STEP_EDIT_SERVICE:
         result = _service_list(
-            draft, tenant, professionals, ctx, after_doctor=bool(draft.stage.get("after_doctor"))
+            draft,
+            tenant,
+            professionals,
+            ctx,
+            after_doctor=bool(draft.stage.get("after_doctor")),
+            at_unit=_stage_unit(draft, _doctor(professionals, draft)),
+            change_unit=bool(draft.stage.get("change_unit")),
         )
+    elif step == fr.STEP_EDIT_UNIT:
+        result = _unit_list_again(draft, tenant, professionals, ctx)
     elif step == fr.STEP_EDIT_DOCTOR:
         result = await _doctor_list(draft, tenant, appt, professionals, ctx)
     elif step in (fr.STEP_EDIT_INSURANCE, fr.STEP_EDIT_INSURANCE_OTHER):
@@ -1162,6 +1466,7 @@ async def apply_ai_edit(conversation, tenant, proposal, appointments, profession
         "time",
         "insurance",
         "attendee",
+        "unit",
         "keep",
         "finish",
         "abandon",
@@ -1198,6 +1503,32 @@ async def apply_ai_edit(conversation, tenant, proposal, appointments, profession
         return await unchanged()
     new = draft
     doctor = _doctor(professionals, draft)
+    # Follow-up E1 (D5): a unit NAME, checked against the doctor's bookable units where the
+    # service is done. "" (the tool's default) is no proposal.
+    unit_name = (proposal.get("unit") or "").strip()
+    if (
+        unit_name
+        and getattr(conversation, "flow_step", None) == fr.STEP_EDIT_UNIT
+        and not proposal.get("professional")
+        and not proposal.get("service")
+    ):
+        # A bare unit on the edit's unit list answers THAT list.
+        if draft.stage.get("unit_purpose") == "service":
+            proposal = {**proposal, "service": draft.stage.get("pending_service")}
+        else:
+            units = _doctor_units(tenant, doctor)
+            picked = flow_units.match_unit(units, unit_name)
+            if picked is None:
+                return await unchanged()
+            return _service_list(
+                draft.with_changes(unit_id=str(picked.id)),
+                tenant,
+                professionals,
+                ctx,
+                after_doctor=True,
+                at_unit=picked,
+                change_unit=len(units) > 1,
+            )
     if proposal.get("professional"):
         matches = [
             p
@@ -1214,7 +1545,9 @@ async def apply_ai_edit(conversation, tenant, proposal, appointments, profession
             return await unchanged()
         new = new.with_changes(service=str(service["name"]))
     service = fr._match_service(_services_of(tenant, doctor), new.current["service"])
-    if service is not None and (proposal.get("professional") or proposal.get("service")):
+    if service is not None and (
+        proposal.get("professional") or proposal.get("service") or unit_name
+    ):
         new = new.with_changes(
             end_at=_iso(new.start + timedelta(minutes=fr._service_duration(service, tenant)))
         )
@@ -1223,8 +1556,45 @@ async def apply_ai_edit(conversation, tenant, proposal, appointments, profession
         service_id = entry_service_id(service)
         if proposal.get("professional"):
             new = _with_doctor(new, doctor, service_id)
-        if _unit_refused(new, doctor, service_id):
-            return await unchanged()
+        # Follow-up E1 (D5): never a silent no-op - the guided step that settles the unit.
+        # A unit list starts from the draft (plus the proposed doctor), the service staged.
+        base = _with_doctor(draft, doctor, service_id) if proposal.get("professional") else draft
+        notice = (
+            ae.EDIT_DOCTOR_SERVICE_NO_UNIT
+            if proposal.get("professional")
+            else ae.EDIT_SERVICE_NOT_AT_UNIT
+        )
+        if unit_name:
+            if not flow_units.offered_units(doctor):
+                return await unchanged()
+            unit = flow_units.match_unit(
+                flow_units.units_for_service(doctor, service_id), unit_name
+            )
+            if unit is None:
+                return _service_unit_list(
+                    base.with_stage(),
+                    tenant,
+                    professionals,
+                    ctx,
+                    str(service["name"]),
+                    refuse_from=draft,
+                    notice=notice,
+                )
+            new = new.with_changes(unit_id=str(unit.id))
+        elif _unit_refused(new, doctor, service_id):
+            if proposal.get("professional") and not proposal.get("service"):
+                return await _doctor_choice(
+                    conversation, tenant, draft, doctor, appt, professionals, ctx
+                )
+            return _service_unit_list(
+                base.with_stage(),
+                tenant,
+                professionals,
+                ctx,
+                str(service["name"]),
+                refuse_from=draft,
+                notice=notice,
+            )
     if proposal.get("insurance"):
         insurance = fr._match_insurance_plan(tenant, proposal["insurance"])
         if insurance is None and fr._says_no_insurance(proposal["insurance"]):
@@ -1300,7 +1670,7 @@ async def apply_ai_edit(conversation, tenant, proposal, appointments, profession
     if service is None:
         return _service_list(new, tenant, professionals, ctx, after_doctor=True)
     if new.changed() or keep or proposal.get("finish") or proposal.get("abandon"):
-        if "médico" in new.changed() or "serviço" in new.changed():
+        if {"médico", "serviço", "unidade"}.intersection(new.changed()):
             return await _after_slot_affecting_change(
                 conversation, tenant, new, appt, professionals, ctx
             )

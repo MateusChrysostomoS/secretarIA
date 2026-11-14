@@ -151,6 +151,19 @@ EDIT_LIMIT_NOTICE = (
     "para mudar data ou horário fale com a clínica."
 )
 
+# Follow-up E1 (2026-11-14, owner): "Alterar Dados" picks the unit when the new service or the
+# new doctor needs one. Texts verbatim from the controller's decisions.
+EDIT_UNIT_FOR_SERVICE_BODY = "O serviço {servico} é feito nestas unidades. Em qual você prefere?"
+EDIT_SERVICES_AT_UNIT_BODY = (
+    "{medico} atende na unidade {unidade} com estes serviços. Qual você quer?"
+)
+EDIT_DOCTOR_UNITS_BODY = "Em qual unidade você prefere ser atendido por {medico}?"
+# The extra last row of that service list (D1): only when the doctor does the booking's service
+# at another bookable unit, or has another unit to look at.
+ROW_EDIT_CHANGE_UNIT = "edit|change_unit"
+LABEL_EDIT_CHANGE_UNIT = "Alterar unidade"
+LABEL_EDIT_CHANGE_UNIT_DESCRIPTION = "Ver serviços em outra unidade"
+
 EDIT_NO_SERVICES = "Esse médico não tem serviços disponíveis no momento."
 EDIT_SERVICE_BODY = "Qual serviço você quer para essa consulta?"
 EDIT_DOCTOR_BODY = (
@@ -241,7 +254,7 @@ class EditDraft:
         )
 
     def with_changes(self, **fields: str | None) -> EditDraft:
-        # `unit_id` (TASK-083) is optional: it follows a doctor change and is never in the diff.
+        # `unit_id` (TASK-083) is optional: only a booking with a unit carries it.
         unknown = set(fields) - set(_FIELDS) - {"unit_id"}
         if unknown:
             raise ValueError(f"unknown draft fields: {sorted(unknown)}")
@@ -265,6 +278,10 @@ class EditDraft:
             out.append("convênio")
         if cur["attendee_name"] != org["attendee_name"]:
             out.append("paciente")
+        # Follow-up E1 (D4): the unit is confirmed like any other change. A booking without a
+        # unit has no key on either side, so its diff is exactly as before.
+        if cur.get("unit_id") != org.get("unit_id"):
+            out.append("unidade")
         return out
 
     @property
@@ -326,6 +343,7 @@ def _recap_lines(
     requirements: list[str],
     include_extras: bool,
     title: str,
+    unit: str | None = None,
 ) -> str:
     start = draft.start
     cur = draft.current
@@ -333,6 +351,8 @@ def _recap_lines(
     lines.append(f"Serviço: {cur['service'] or 'Consulta'}")
     if doctor:
         lines.append(f"Médico: {doctor}")
+    if unit:
+        lines.append(f"Unidade: {unit}")
     lines.append(f"Data: {start.strftime('%d/%m/%Y')} ({_WEEKDAYS[start.weekday()]})")
     lines.append(f"Horário: {start.strftime('%H:%M')}")
     lines.append(f"Convênio: {cur['insurance'] or 'não informado'}")
@@ -353,13 +373,15 @@ def build_edit_recap(
     address: str | None,
     requirements: list[str],
     title: str = "Confira como vai ficar sua consulta:",
+    unit: str | None = None,
 ) -> str:
     """The ONE complete confirmation text: everything the patient needs to check.
 
-    Service, doctor, date (with weekday), time, convênio, patient, the clinic's address
-    and the service's orientations (when there are any), then what changed. When it would
-    pass the 1024-character card limit the address and the orientations are dropped first;
-    the facts the patient is confirming are never cut.
+    Service, doctor, the unit (follow-up E1: only for a booking with one), date (with
+    weekday), time, convênio, patient, the address (the unit's, else the clinic's) and the
+    service's orientations (when there are any), then what changed. When it would pass the
+    1024-character card limit the address and the orientations are dropped first; the facts
+    the patient is confirming are never cut.
     """
     text = _recap_lines(
         draft,
@@ -368,6 +390,7 @@ def build_edit_recap(
         requirements=requirements,
         include_extras=True,
         title=title,
+        unit=unit,
     )
     if len(text) <= MAX_INTERACTIVE_BODY_CHARS:
         return text
@@ -378,4 +401,5 @@ def build_edit_recap(
         requirements=requirements,
         include_extras=False,
         title=title,
+        unit=unit,
     )[:MAX_INTERACTIVE_BODY_CHARS]

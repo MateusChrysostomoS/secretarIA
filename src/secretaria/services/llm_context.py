@@ -81,6 +81,7 @@ _STEP_LABELS: dict[str, str] = {
     fr.STEP_EDIT_TIME_TOO: "a pergunta se quer mudar o horário também",
     fr.STEP_EDIT_SERVICE: "a escolha do novo serviço da consulta já marcada",
     fr.STEP_EDIT_DOCTOR: "a escolha do novo médico da consulta já marcada",
+    fr.STEP_EDIT_UNIT: "a escolha da unidade da consulta já marcada",
     fr.STEP_EDIT_INSURANCE: "a escolha do convênio da consulta já marcada",
     fr.STEP_EDIT_INSURANCE_OTHER: "o pedido de outro convênio da consulta já marcada",
     fr.STEP_EDIT_ATT_CHOICE: "a pergunta para quem será a consulta já marcada",

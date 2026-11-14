@@ -352,3 +352,48 @@ async def test_review_malformed_keep_members_redraw_instead_of_raising(keep):
     result = await ai(conversation(draft, fr.STEP_EDIT_DOCTOR), {"keep": keep}, context())
     assert result.flow_step == fr.STEP_EDIT_DOCTOR
     assert result.flow_edit_draft == draft.to_json()
+
+
+async def test_proposal_tool_carries_the_unit_name():
+    """Follow-up E1 (D5): the AI may name a unit; the router validates it."""
+    from secretaria.ai.tools import AppointmentEditRequested, _editing_ctx, propose_appointment_edit
+
+    token = _editing_ctx.set(True)
+    try:
+        with pytest.raises(AppointmentEditRequested) as requested:
+            await propose_appointment_edit.ainvoke({"service": "Exame", "unit": "Centro"})
+        assert requested.value.proposal["unit"] == "Centro"
+        with pytest.raises(AppointmentEditRequested) as bare:
+            await propose_appointment_edit.ainvoke({"service": "Exame"})
+        assert not bare.value.proposal["unit"]
+    finally:
+        _editing_ctx.reset(token)
+
+
+async def test_a_unit_proposal_in_a_clinic_without_units_changes_nothing():
+    draft = draft_for()
+    conv = conversation(draft, fr.STEP_EDIT_SERVICE)
+    result = await ai(conv, {"unit": "Centro"}, context())
+    assert result.action == "reply" and result.flow_step == fr.STEP_EDIT_SERVICE
+    assert result.flow_edit_draft == draft.to_json()
+    # The empty default the tool sends is no proposal at all.
+    result = await ai(conv, {"insurance": "Amil", "unit": ""}, context())
+    assert result.flow_step == fr.STEP_EDIT_CONFIRM
+    assert result.flow_edit_draft["current"]["insurance"] == "Amil"
+
+
+def test_editing_prompt_names_the_unit_only_when_the_clinic_has_units(monkeypatch):
+    from secretaria.ai.tools import _editing_ctx
+
+    monkeypatch.setattr(graph, "secretary_system_prompt", lambda config, **kw: "BASE")
+    token = _editing_ctx.set(True)
+    try:
+        monkeypatch.setattr(graph, "_turn_tool_names", lambda: frozenset({"list_professionals"}))
+        without = graph._turn_system_prompt(None)
+        monkeypatch.setattr(graph, "_turn_tool_names", lambda: frozenset({"list_units"}))
+        with_units = graph._turn_system_prompt(None)
+    finally:
+        _editing_ctx.reset(token)
+    assert "unit" not in without
+    assert with_units.startswith(without.rstrip("\n"))
+    assert "unit" in with_units[len(without.rstrip("\n")) :]

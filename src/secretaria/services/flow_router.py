@@ -410,6 +410,8 @@ STEP_EDIT_SLOT = "edit_slot"
 STEP_EDIT_TIME_TOO = "edit_time_too"
 STEP_EDIT_SERVICE = "edit_service"
 STEP_EDIT_DOCTOR = "edit_doctor"
+# Follow-up E1: the unit list of "Alterar Dados" (a new service or a new doctor needs it).
+STEP_EDIT_UNIT = "edit_unit"
 STEP_EDIT_INSURANCE = "edit_insurance"
 STEP_EDIT_INSURANCE_OTHER = "edit_insurance_other"
 STEP_EDIT_ATT_CHOICE = "edit_att_choice"

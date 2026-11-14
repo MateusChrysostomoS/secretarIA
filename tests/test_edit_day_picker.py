@@ -113,6 +113,6 @@ def test_an_ai_detour_inside_the_edit_keeps_the_draft():
 
 def test_every_edit_step_fits_the_flow_step_column():
     steps = [value for name, value in vars(fr).items() if name.startswith("STEP_EDIT_")]
-    assert len(steps) == 15
+    assert len(steps) == 16  # + STEP_EDIT_UNIT (follow-up E1)
     assert all(len(step) <= 32 for step in steps)
     assert SimpleNamespace(steps=steps).steps  # non-empty
