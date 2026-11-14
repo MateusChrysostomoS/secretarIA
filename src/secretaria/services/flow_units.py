@@ -7,6 +7,7 @@ them this module answers, for the booking in progress:
 * no unit at all (no link)         -> no step, the flow is exactly today's;
 * one bookable unit                -> no step, that unit is used (its hours, its address);
 * two or more bookable units       -> the patient picks one (`STEP_AWAITING_UNIT`);
+* the service done at one of 2+    -> Sim/Não on that unit (`STEP_AWAITING_UNIT_CONFIRM`);
 * links but every unit closed      -> nobody can book this professional (the hours gap).
 
 The step's rendering and its hooks live in services/flow_router.py (`_enter_unit_list`,
@@ -39,6 +40,18 @@ LABEL_ANOTHER_UNIT = decorate(EMOJI_BACK, "Outra unidade")
 UNIT_LIST_BODY = "Em qual unidade você prefere ser atendido(a)?"
 # The picked unit stopped being offered mid-booking and only one is left (final wave M1).
 UNIT_GONE_NOTICE = "A unidade escolhida não está mais disponível."
+# TASK-083 follow-up (spec §5.2-3, §9.1): the service is done at ONE of the doctor's two or more
+# bookable units - ask Sim/Não before opening its days. The unit is saved only on "Sim".
+STEP_AWAITING_UNIT_CONFIRM = "awaiting_unit_confirm"
+# The owner's text, verbatim. A unit without an address drops ", em {endereco}" (never "None").
+UNIT_CONFIRM_BODY = (
+    "O serviço {servico} feito por {medico} é feito apenas na unidade {unidade}, em {endereco}. "
+    "Você confirma essa unidade?"
+)
+UNIT_CONFIRM_BODY_NO_ADDRESS = (
+    "O serviço {servico} feito por {medico} é feito apenas na unidade {unidade}. "
+    "Você confirma essa unidade?"
+)
 UNIT_LIST_BUTTON = "Ver unidades"
 UNIT_LIST_SECTION = "Unidades"
 # `unit|<uuid>` is a payload row (schemas/webhook.py::_PAYLOAD_ROW_PREFIXES): the tap arrives
@@ -117,6 +130,24 @@ def unit_choice(professional: Any | None, service_id: UUID | None) -> UnitChoice
     if len(bookable_units(professional)) >= 2:
         return UnitChoice("confirm", units)
     return UnitChoice("implied", units)
+
+
+def unit_confirm_body(service_name: str, professional: Any | None, unit: Any) -> str:
+    """The Sim/Não question for `unit`, the only one of the doctor's units doing the service.
+
+    The unit's address is the one the unit list shows; without one the sentence ends at the
+    unit's name (`UNIT_CONFIRM_BODY_NO_ADDRESS`). A trailing period on the address is dropped so
+    the sentence never gets "..".
+    """
+    address = str(getattr(unit, "address", None) or "").strip().rstrip(".").strip()
+    values = {
+        "servico": str(service_name or "").strip(),
+        "medico": str(getattr(professional, "name", None) or "").strip(),
+        "unidade": str(getattr(unit, "name", None) or "").strip(),
+    }
+    if address:
+        return UNIT_CONFIRM_BODY.format(endereco=address, **values)
+    return UNIT_CONFIRM_BODY_NO_ADDRESS.format(**values)
 
 
 def find_unit(
@@ -267,6 +298,9 @@ __all__ = [
     "MAX_UNIT_ROWS",
     "ROW_UNIT_PREFIX",
     "STEP_AWAITING_UNIT",
+    "STEP_AWAITING_UNIT_CONFIRM",
+    "UNIT_CONFIRM_BODY",
+    "UNIT_CONFIRM_BODY_NO_ADDRESS",
     "UNIT_LIST_BODY",
     "UnitChoice",
     "appointment_calendar",
@@ -282,6 +316,7 @@ __all__ = [
     "unit_after_doctor_change",
     "unit_choice",
     "unit_choice_needed",
+    "unit_confirm_body",
     "unit_rows",
     "units_for_service",
 ]

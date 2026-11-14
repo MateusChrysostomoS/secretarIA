@@ -30,6 +30,8 @@ from secretaria.services.booking_hold import GateDecision  # noqa: E402
 from secretaria.services.flow_units import (  # noqa: E402
     LABEL_ANOTHER_UNIT,
     STEP_AWAITING_UNIT,
+    STEP_AWAITING_UNIT_CONFIRM,
+    UNIT_CONFIRM_BODY,
     UNIT_GONE_NOTICE,
 )
 from secretaria.services.unit_booking import UnitOption  # noqa: E402
@@ -1149,20 +1151,19 @@ async def test_back_row_unit_only_when_list():
     assert days.flow_step == fr.STEP_AWAITING_DAY
     assert _back_row(days)[1] == LABEL_ANOTHER_UNIT
 
-    # confirm (the filter leaves 1 of 2+): until T5, the one-row unit list; after the pick
-    # there is no real choice, so one step back is the service list.
+    # confirm (the filter leaves 1 of 2+): the Sim/Não step (T5); after "Sim" there is no
+    # real choice, so one step back is the service list.
     confirm = _marked_doctor([centro, sul, norte], {CONSULTA_ID: frozenset({sul.id})})
     asked = await fr.route(
         _conversation(), _svc_tenant(), _Agenda(), fr.LABEL_BOOK_SERVICE, professionals=[confirm]
     )
-    assert asked.flow_step == STEP_AWAITING_UNIT
-    assert _unit_row_ids(asked) == [f"unit|{sul.id}"]
+    assert asked.flow_step == STEP_AWAITING_UNIT_CONFIRM
     agenda = _Agenda()
     picked = await fr.route(
-        _conversation(flow_step=STEP_AWAITING_UNIT),
+        _conversation(flow_step=STEP_AWAITING_UNIT_CONFIRM),
         _svc_tenant(),
         agenda,
-        _unit_tap(sul),
+        fr.LABEL_YES,
         professionals=[confirm],
     )
     assert picked.flow_step == fr.STEP_AWAITING_DAY
@@ -1230,3 +1231,228 @@ async def test_the_booking_writes_at_the_picked_unit_of_the_service():
     )
     assert booked.appointment["unit_id"] == sul.id
     assert gate.decided[0]["unit_id"] == sul.id
+
+
+# --------------------------------------------------------------------------
+# The Sim/Não confirmation (follow-up T5, spec §5.2-3, §9.1, §9.8)
+# --------------------------------------------------------------------------
+
+SUL_CONFIRM_BODY = (
+    "O serviço Consulta feito por Dra. Ana é feito apenas na unidade Zona Sul, em Av. B, 20. "
+    "Você confirma essa unidade?"
+)
+
+
+def _confirm_doctor(name: str = "Dra. Ana"):
+    """Three bookable units, Consulta done only at Zona Sul: the filter leaves 1 of 3."""
+    centro, sul, norte = _three_units()
+    return _marked_doctor([centro, sul, norte], {CONSULTA_ID: frozenset({sul.id})}, name), sul
+
+
+def _confirm_bubble(result) -> fr.MenuBubble:
+    [bubble] = result.bubbles
+    assert isinstance(bubble, fr.MenuBubble)
+    return bubble
+
+
+async def test_confirm_message_exact_text_and_buttons():
+    assert UNIT_CONFIRM_BODY == (
+        "O serviço {servico} feito por {medico} é feito apenas na unidade {unidade}, "
+        "em {endereco}. Você confirma essa unidade?"
+    )
+    doctor, _sul = _confirm_doctor()
+    agenda = _Agenda()
+    result = await fr.route(
+        _conversation(), _svc_tenant(), agenda, fr.LABEL_BOOK_SERVICE, professionals=[doctor]
+    )
+    assert result.action == "reply"
+    assert result.flow_state is FlowState.SERVICE_CATALOG
+    assert result.flow_step == STEP_AWAITING_UNIT_CONFIRM
+    bubble = _confirm_bubble(result)
+    assert bubble.body == SUL_CONFIRM_BODY
+    assert bubble.labels == ["✅ Sim", "❌ Não"]
+    # The unit is NOT saved before "Sim"; no day was read; nobody is told anything.
+    assert result.flow_selected_unit_id is None
+    assert result.flow_selected_type == "Consulta"
+    assert agenda.log.day_hours == []
+    assert result.notify_no_unit is None
+    # A unit without an address: the sentence stays whole, never "None".
+    centro, sul, norte = _three_units()
+    bare = UnitOption(id=sul.id, name="Zona Sul", address=None, business_hours=SUL_HOURS)
+    no_address = _marked_doctor([centro, bare, norte], {CONSULTA_ID: frozenset({bare.id})})
+    plain = await fr.route(
+        _conversation(), _svc_tenant(), _Agenda(), fr.LABEL_BOOK_SERVICE, professionals=[no_address]
+    )
+    assert _confirm_bubble(plain).body == (
+        "O serviço Consulta feito por Dra. Ana é feito apenas na unidade Zona Sul. "
+        "Você confirma essa unidade?"
+    )
+
+
+async def test_yes_selects_unit_and_opens_day_picker():
+    doctor, sul = _confirm_doctor()
+    for answer in (fr.LABEL_YES, "sim"):
+        agenda = _Agenda()
+        result = await fr.route(
+            _conversation(flow_step=STEP_AWAITING_UNIT_CONFIRM),
+            _svc_tenant(),
+            agenda,
+            answer,
+            professionals=[doctor],
+        )
+        assert result.flow_step == fr.STEP_AWAITING_DAY
+        assert result.flow_selected_unit_id == sul.id
+        assert result.flow_selected_type == "Consulta"
+        assert agenda.log.day_hours == [SUL_HOURS]
+        # No real unit choice was made: one step back is the service list.
+        assert _back_row(result)[1] == fr.LABEL_ANOTHER_SERVICE
+    # The next turn (a day tap) keeps the unit and reads its hours.
+    slots = await fr.route(
+        _conversation(flow_step=fr.STEP_AWAITING_DAY, flow_selected_unit_id=sul.id),
+        _svc_tenant(),
+        agenda,
+        _day_tap(result),
+        professionals=[doctor],
+    )
+    assert slots.flow_step == fr.STEP_AWAITING_SLOT
+    assert slots.flow_selected_unit_id == sul.id
+    assert agenda.log.slot_hours == [SUL_HOURS]
+
+
+async def test_no_returns_to_doctor_list_without_email_effect():
+    ana, _sul = _confirm_doctor()
+    bruno = _marked_doctor([], {}, "Dr. Bruno")
+    carla = _zero_unit_doctor("Dra. Carla")  # offers Consulta, but no unit does it
+    agenda = _Agenda()
+    result = await fr.route(
+        _conversation(
+            flow_step=STEP_AWAITING_UNIT_CONFIRM,
+            flow_selected_professional_id=ana.id,
+            flow_selected_insurance="Particular",
+        ),
+        _svc_tenant(),
+        agenda,
+        fr.LABEL_NO,
+        professionals=[ana, bruno, carla],
+    )
+    assert result.action == "reply"
+    assert result.notify_no_unit is None  # no e-mail to the clinic
+    assert result.flow_step == fr.STEP_AWAITING_PROFESSIONAL
+    assert result.flow_selected_type == "Consulta"
+    assert result.flow_selected_professional_id is None
+    assert result.flow_selected_unit_id is None
+    assert result.flow_selected_insurance == "Particular"
+    [bubble] = result.bubbles
+    assert "Avisei a clínica" not in bubble.body
+    assert "Não consegui" not in bubble.body
+    assert [row[0] for row in bubble.rows if row[0].startswith("prof|")] == [f"prof|{bruno.id}"]
+    assert agenda.log.day_hours == []
+    # Typed "não" is the same answer.
+    typed = await fr.route(
+        _conversation(
+            flow_step=STEP_AWAITING_UNIT_CONFIRM, flow_selected_professional_id=ana.id
+        ),
+        _svc_tenant(),
+        _Agenda(),
+        "não",
+        professionals=[ana, bruno, carla],
+    )
+    assert typed.flow_step == fr.STEP_AWAITING_PROFESSIONAL
+    assert typed.notify_no_unit is None
+
+
+async def test_no_single_doctor_goes_to_service_list():
+    doctor, _sul = _confirm_doctor()
+    result = await fr.route(
+        _conversation(flow_step=STEP_AWAITING_UNIT_CONFIRM),
+        _svc_tenant(),
+        _Agenda(),
+        fr.LABEL_NO,
+        professionals=[doctor],
+    )
+    assert result.notify_no_unit is None
+    assert result.flow_step == fr.STEP_AWAITING_SERVICE
+    assert result.flow_selected_unit_id is None
+    [bubble] = result.bubbles
+    assert "Avisei a clínica" not in bubble.body
+    assert "Não consegui" not in bubble.body
+    # The service stays in the list; nothing is a dead end.
+    assert [row[0] for row in bubble.rows if row[0].startswith("svc|")] == [
+        "svc|Consulta",
+        "svc|Exame",
+    ]
+
+
+async def test_doctor_with_one_unit_skips_confirm():
+    _centro, sul, _norte = _three_units()
+    # One linked unit, the service restricted to it.
+    single = _marked_doctor([sul], {CONSULTA_ID: frozenset({sul.id})})
+    # Two linked units but one closed: only one bookable, so nothing was "reduced".
+    closed = UnitOption(id=uuid4(), name="Fechada", address="Rua Z, 1", business_hours={})
+    one_open = _marked_doctor([sul, closed], {CONSULTA_ID: frozenset({sul.id})})
+    for doctor in (single, one_open):
+        agenda = _Agenda()
+        result = await fr.route(
+            _conversation(), _svc_tenant(), agenda, fr.LABEL_BOOK_SERVICE, professionals=[doctor]
+        )
+        assert result.flow_step == fr.STEP_AWAITING_DAY
+        assert result.flow_selected_unit_id == sul.id
+        assert agenda.log.day_hours == [SUL_HOURS]
+
+
+async def test_free_text_on_confirm_step_delegates_once():
+    doctor, sul = _confirm_doctor()
+    talk = await fr.route(
+        _conversation(flow_step=STEP_AWAITING_UNIT_CONFIRM),
+        _svc_tenant(),
+        _Agenda(),
+        "essa unidade tem estacionamento?",
+        professionals=[doctor],
+    )
+    # One model turn on this same step: the step, the booking and the (unsaved) unit stay.
+    assert talk.action == "delegate_llm"
+    assert talk.flow_state is FlowState.SERVICE_CATALOG
+    assert talk.flow_step == STEP_AWAITING_UNIT_CONFIRM
+    assert talk.flow_selected_type == "Consulta"
+    assert talk.flow_selected_unit_id is None
+    assert talk.notify_no_unit is None
+    # The buttons keep working on the next turn.
+    yes = await fr.route(
+        _conversation(flow_step=talk.flow_step),
+        _svc_tenant(),
+        _Agenda(),
+        fr.LABEL_YES,
+        professionals=[doctor],
+    )
+    assert yes.flow_step == fr.STEP_AWAITING_DAY
+    assert yes.flow_selected_unit_id == sul.id
+
+
+async def test_confirm_survives_resume():
+    doctor, _sul = _confirm_doctor()
+    resumed = await fr.resume_bubbles(
+        _conversation(flow_step=STEP_AWAITING_UNIT_CONFIRM), _svc_tenant(), _Agenda(), [doctor]
+    )
+    assert resumed.action == "reply"
+    assert resumed.flow_step == STEP_AWAITING_UNIT_CONFIRM
+    assert resumed.flow_selected_unit_id is None
+    bubble = _confirm_bubble(resumed)
+    assert bubble.body == SUL_CONFIRM_BODY
+    assert bubble.labels == [fr.LABEL_YES, fr.LABEL_NO]
+
+
+async def test_a_day_step_without_the_confirmed_unit_asks_the_confirmation():
+    """The safety net: a later step with a `confirm` choice and no unit asks Sim/Não first;
+    a stale pick outside the service's filter is never used."""
+    doctor, _sul = _confirm_doctor()
+    centro = doctor.units[0]
+    result = await fr.route(
+        _conversation(flow_step=fr.STEP_AWAITING_DAY, flow_selected_unit_id=centro.id),
+        _svc_tenant(),
+        _Agenda(),
+        "segunda",
+        professionals=[doctor],
+    )
+    assert result.flow_step == STEP_AWAITING_UNIT_CONFIRM
+    assert result.flow_selected_unit_id is None
+    assert _confirm_bubble(result).body == SUL_CONFIRM_BODY

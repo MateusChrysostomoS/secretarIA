@@ -797,13 +797,17 @@ async def _land_day(
     owner = fr._booking_professional(state, professionals)
     if owner is not None and fr.professional_has_no_hours(owner, tenant):
         return done(fr._professional_config_incomplete(owner, fr.PROFESSIONAL_GAP_HOURS), *base)
-    # TASK-083 spec §8: a doctor who attends at units books at one. Two or more and none
-    # chosen: the day picker's own choke point (`_ask_day`) asks it - never a day or a time
-    # without the unit. One: that unit, silently. None at all: today's landing.
-    unit = flow_units.effective_unit(state, owner)
+    # TASK-083 spec §8 + follow-up §6.1: a doctor who attends at units books at one of those
+    # that do THIS service. Not decided yet (two or more, the Sim/Não on the only one, or none
+    # at all for the service): the day picker's own choke point (`_ask_day`) asks or says so -
+    # never a day or a time without the unit, never a unit outside the service's filter (a
+    # pick left from another service is ignored). Implied: that unit, silently. No unit link:
+    # today's landing.
+    service_id = fr._booking_service_id(state, tenant, services, owner)
+    unit = flow_units.effective_unit(state, owner, service_id)
     state.flow_selected_unit_id = unit.id if unit is not None else None
     if flow_units.offered_units(owner) and unit is None:
-        result = await fr._ask_day(state, tenant, None, None, professionals)
+        result = await fr._ask_day(state, tenant, None, services, professionals)
         return done(result, *base)
 
     details = _booking_details(
@@ -878,6 +882,7 @@ async def _land_day(
                 professionals=professionals,
                 details=details,
                 explicit_request=draft.has_capture_fields(),
+                unit=unit,
             )
             if express is not None:
                 return done(express, *names)
@@ -908,6 +913,7 @@ async def _express_confirmation(
     professionals: list,
     details: str | None = None,
     explicit_request: bool = False,
+    unit: Any | None = None,
 ) -> FlowRouterResult | None:
     """Straight to the confirmation card when every item is valid (spec §4.4) - or None.
 
@@ -926,6 +932,9 @@ async def _express_confirmation(
     `flow_selected_slot` is the naive ISO minute of `slot_start` in the agenda's timezone,
     the same instant the card prints (skill date-derived-ui-labels); the resolver's `_carry`
     fills type, professional, convênio and attendee.
+
+    `unit` is the one `_land_day` already settled for this service (TASK-083 follow-up): the
+    card names the same unit the landing used, never one recomputed without the service.
     """
     if not fr.ai_draft_v2_enabled(tenant) and not explicit_request:
         return None
@@ -938,7 +947,7 @@ async def _express_confirmation(
         state,
         start,
         professional=professional,
-        unit=flow_units.effective_unit(state, fr._booking_professional(state, professionals)),
+        unit=unit,
     )
     return FlowRouterResult(
         action="reply",

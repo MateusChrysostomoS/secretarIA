@@ -28,6 +28,11 @@ from secretaria.services.booking_draft import (  # noqa: E402
     resolve_booking_draft,
 )
 from secretaria.services.calendar import CalendarUnavailableError  # noqa: E402
+from secretaria.services.flow_units import (  # noqa: E402
+    STEP_AWAITING_UNIT,
+    STEP_AWAITING_UNIT_CONFIRM,
+)
+from secretaria.services.unit_booking import UnitOption  # noqa: E402
 
 TZ = ZoneInfo("America/Sao_Paulo")
 NOW = dt.datetime(2026, 10, 5, 9, 0, tzinfo=TZ)  # a Monday
@@ -734,3 +739,96 @@ async def test_a_short_service_keeps_a_day_with_only_late_free_slots_after_holds
     assert res.landing_step == fr.STEP_AWAITING_CONFIRMATION
     assert res.result.flow_selected_slot == "2026-10-08T17:00"
     assert picker.result.bubbles[0].rows[0][0] == "slot|2026-10-08T16:00"
+
+
+# --------------------------------------------------------------------------
+# Units filtered by the service (TASK-083 follow-up T5): the AI draft path asks the
+# same unit question the buttons ask, and never lands on a unit where the service is
+# not done.
+# --------------------------------------------------------------------------
+
+CONSULTA_SID = uuid4()
+THURSDAY = {"thursday": [{"start": "08:00", "end": "12:00"}]}
+
+
+def _unit_tenant():
+    return _tenant(
+        appointment_types=[
+            {
+                "name": "Consulta",
+                "duration_min": 30,
+                "is_active": True,
+                "sort_order": 0,
+                "service_id": str(CONSULTA_SID),
+            },
+            {"name": "Retorno", "duration_min": 20, "is_active": True, "sort_order": 1},
+        ]
+    )
+
+
+def _unit_doctor(*allowed: str):
+    """The sole doctor at Centro, Zona Sul and Norte; Consulta done only at `allowed`."""
+    units = {
+        name: UnitOption(id=uuid4(), name=name, address=address, business_hours=THURSDAY)
+        for name, address in (
+            ("Centro", "Rua A, 10"),
+            ("Zona Sul", "Av. B, 20"),
+            ("Norte", "Rua C, 30"),
+        )
+    }
+    doctor = _sole()
+    doctor.units = list(units.values())
+    doctor.service_units = {CONSULTA_SID: frozenset(units[name].id for name in allowed)}
+    return doctor, units
+
+
+async def test_the_ai_draft_asks_the_sim_nao_and_never_uses_a_unit_outside_the_filter():
+    doctor, units = _unit_doctor("Zona Sul")
+    res = await _resolve(
+        BookingDraft(service="Consulta", day=DAY, time=dt.time(10, 0)),
+        # A unit left over from earlier, where Consulta is not done.
+        conv=_conv(flow_selected_unit_id=units["Centro"].id),
+        tenant=_unit_tenant(),
+        pros=[doctor],
+    )
+    assert res.landing_step == STEP_AWAITING_UNIT_CONFIRM
+    assert res.result.flow_selected_unit_id is None  # saved only on "Sim"
+    [bubble] = res.result.bubbles
+    assert isinstance(bubble, fr.MenuBubble)
+    assert bubble.body == (
+        "O serviço Consulta feito por Dra. Única é feito apenas na unidade Zona Sul, "
+        "em Av. B, 20. Você confirma essa unidade?"
+    )
+    assert bubble.labels == [fr.LABEL_YES, fr.LABEL_NO]
+
+
+async def test_the_ai_draft_lists_only_the_units_of_the_service():
+    doctor, units = _unit_doctor("Zona Sul", "Norte")
+    res = await _resolve(
+        BookingDraft(service="Consulta", day=DAY, time=dt.time(10, 0)),
+        conv=_conv(flow_selected_unit_id=units["Centro"].id),
+        tenant=_unit_tenant(),
+        pros=[doctor],
+    )
+    assert res.landing_step == STEP_AWAITING_UNIT
+    assert res.result.flow_selected_unit_id is None
+    [bubble] = res.result.bubbles
+    assert [row[0] for row in bubble.rows if row[0].startswith("unit|")] == [
+        f"unit|{units['Zona Sul'].id}",
+        f"unit|{units['Norte'].id}",
+    ]
+
+
+async def test_the_ai_express_card_names_the_confirmed_unit_of_the_service():
+    doctor, units = _unit_doctor("Zona Sul")
+    res = await _resolve(
+        BookingDraft(service="Consulta", day=DAY, time=dt.time(10, 0)),
+        conv=_conv(flow_selected_unit_id=units["Zona Sul"].id),
+        tenant=_unit_tenant(),
+        pros=[doctor],
+    )
+    assert res.landing_step == fr.STEP_AWAITING_CONFIRMATION
+    assert res.result.flow_selected_unit_id == units["Zona Sul"].id
+    card = res.result.bubbles[-1]
+    assert "Zona Sul" in card.body
+    assert "Centro" not in card.body

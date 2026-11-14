@@ -3301,6 +3301,10 @@ async def _catalog_step(
         return await _handle_unit_step(
             conversation, tenant, calendar, body, services, professionals
         )
+    if step == flow_units.STEP_AWAITING_UNIT_CONFIRM:
+        return await _handle_unit_confirm_step(
+            conversation, tenant, calendar, body, services, professionals
+        )
     picked = flow_units.find_unit(
         booking_owner, flow_units.selected_unit_id(conversation), service_id
     )
@@ -4194,20 +4198,18 @@ async def _ask_day(
     entry = _booking_service_entry(conversation, tenant, services, professional)
     service_id = entry_service_id(entry) if entry is not None else None
     choice = flow_units.unit_choice(professional, service_id)
+    service_name = _service_entry_name(conversation, entry)
     unit = None
     if choice.kind == "none" and entry is not None and service_id is not None:
         return _enter_no_unit_for_service(
-            conversation,
-            tenant,
-            professionals,
-            professional,
-            str(entry.get("name") or conversation.flow_selected_type or ""),
-            service_id,
+            conversation, tenant, professionals, professional, service_name, service_id
         )
     if choice.kind != "free":
         unit = flow_units.effective_unit(conversation, professional, service_id)
         if unit is None:
-            return _enter_unit_choice(conversation, professional, choice, prefix=prefix)
+            return _enter_unit_choice(
+                conversation, professional, choice, service_name=service_name, prefix=prefix
+            )
     result = await enter_day_picker(
         conversation,
         tenant,
@@ -4313,16 +4315,60 @@ def _booking_unit(
     )
 
 
+def _service_entry_name(conversation: Any, entry: dict | None) -> str:
+    """The service's name as the patient sees it: the catalog entry's, else the stored one."""
+    name = entry.get("name") if entry is not None else None
+    return str(name or getattr(conversation, "flow_selected_type", None) or "")
+
+
 def _enter_unit_choice(
     conversation: Conversation,
     professional: Any,
     choice: flow_units.UnitChoice,
     *,
+    service_name: str | None = None,
     prefix: str | None = None,
 ) -> FlowRouterResult:
-    """Ask the unit for a `list` choice - and, until the Sim/Não step lands (TASK-083
-    follow-up T5, controller ruling R3), for a `confirm` one too, as a one-row list."""
-    return _enter_unit_list(conversation, professional, prefix=prefix, units=choice.units or None)
+    """Ask the unit: Sim/Não on the only one for a `confirm` choice, the list for a `list` one.
+
+    `choice.units` is passed as is: an empty list never widens to every bookable unit."""
+    if choice.kind == "confirm":
+        name = service_name or _service_entry_name(conversation, None)
+        return _enter_unit_confirm(
+            conversation, professional, choice.units[0], name, prefix=prefix
+        )
+    return _enter_unit_list(conversation, professional, prefix=prefix, units=choice.units)
+
+
+def _enter_unit_confirm(
+    conversation: Conversation,
+    professional: Any,
+    unit: Any,
+    service_name: str,
+    *,
+    prefix: str | None = None,
+) -> FlowRouterResult:
+    """"O serviço ... é feito apenas na unidade ...": the fixed ✅ Sim / ❌ Não card (spec §5.2).
+
+    Asked when the service is done at one of the doctor's two or more bookable units (§9.1).
+    Same buttons as the other fixed yes/no steps; the LLM only answers talk on this step
+    (`_handle_unit_confirm_step`). The unit is NOT saved here - only "Sim" stores it - and the
+    booking so far (service, doctor, convênio) rides along.
+    """
+    body = flow_units.unit_confirm_body(service_name, professional, unit)
+    if prefix:
+        body = f"{prefix} {body}"
+    fields = _day_branch_fields(conversation, BOOKING_DAY_BRANCH)
+    fields["flow_selected_unit_id"] = None
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[
+            MenuBubble(body=body[:MAX_INTERACTIVE_BODY_CHARS], labels=[LABEL_YES, LABEL_NO])
+        ],
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=flow_units.STEP_AWAITING_UNIT_CONFIRM,
+        **fields,
+    )
 
 
 def _no_unit_alternatives(
@@ -4375,20 +4421,48 @@ def _enter_no_unit_for_service(
         "flow_no_unit_for_service",
         conversation_id=str(getattr(conversation, "id", None)),
     )
-    notify = (professional.id, service_id, service_name)
-    notice = _no_unit_message(service_name, professional)
+    result = _another_doctor_or_service(
+        conversation,
+        tenant,
+        professionals,
+        professional,
+        service_name,
+        notice=_no_unit_message(service_name, professional),
+    )
+    result.notify_no_unit = (professional.id, service_id, service_name)
+    return result
+
+
+def _another_doctor_or_service(
+    conversation: Conversation,
+    tenant: Tenant,
+    professionals: list | None,
+    professional: Any,
+    service_name: str,
+    *,
+    notice: str | None,
+) -> FlowRouterResult:
+    """Where "0 unidades" and the "❌ Não" to the unit confirmation lead (spec §9.8).
+
+    * other doctors really do the service -> the doctor list, only them, with the service kept;
+    * nobody else -> this doctor's service list, the service still in it.
+
+    `notice` (the "0 unidades" text) heads the card; None ("❌ Não") leaves each list's own
+    question. The doctor's choice and the unit are dropped; convênio and pra-quem ride on.
+    Nothing here tells the clinic: that is the "0 unidades" caller's `notify_no_unit`.
+    """
     alternatives = _no_unit_alternatives(tenant, professionals, professional, service_name)
     if alternatives:
         result = _enter_professional_list(
             tenant, alternatives, insurance=_selected_insurance(conversation)
         )
-        [bubble] = result.bubbles
-        question = f"{notice} Vamos escolher outro médico?"
-        plan = _selected_plan(tenant, _selected_insurance(conversation))
-        bubble.body = _professional_list_body(question, plan)[:MAX_LIST_BODY_CHARS]
+        if notice:
+            [bubble] = result.bubbles
+            question = f"{notice} Vamos escolher outro médico?"
+            plan = _selected_plan(tenant, _selected_insurance(conversation))
+            bubble.body = _professional_list_body(question, plan)[:MAX_LIST_BODY_CHARS]
         result.flow_selected_type = conversation.flow_selected_type
         result.flow_selected_insurance = _selected_insurance(conversation)
-        result.notify_no_unit = notify
         return result
     services = professional_appointment_types(professional, tenant)
     return FlowRouterResult(
@@ -4398,7 +4472,6 @@ def _enter_no_unit_for_service(
         flow_step=STEP_AWAITING_SERVICE,
         flow_selected_professional_id=_selected_professional_id(conversation),
         flow_selected_insurance=_selected_insurance(conversation),
-        notify_no_unit=notify,
     )
 
 
@@ -4474,6 +4547,73 @@ async def _handle_unit_step(
         "flow_unit_selected",
         conversation_id=str(getattr(conversation, "id", None)),
         unit_count=len(units),
+    )
+    state = _DayPickerState(
+        id=getattr(conversation, "id", None),
+        flow_selected_type=conversation.flow_selected_type,
+        flow_selected_professional_id=_selected_professional_id(conversation),
+        flow_selected_insurance=_selected_insurance(conversation),
+        flow_attendee_name=_attendee_name(conversation),
+        flow_selected_unit_id=unit.id,
+    )
+    return await enter_day_picker(
+        state,
+        tenant,
+        _unit_calendar(calendar, unit),
+        duration_minutes=_booking_duration(conversation, tenant, services),
+        branch=BOOKING_DAY_BRANCH,
+        back_target=_back_target_for(choice),
+        professionals=professionals,
+    )
+
+
+async def _handle_unit_confirm_step(
+    conversation: Conversation,
+    tenant: Tenant,
+    calendar: CalendarService | None,
+    body: str,
+    services: list[dict],
+    professionals: list | None,
+) -> FlowRouterResult:
+    """The answer to `_enter_unit_confirm`'s card (spec §5.2-3, §9.8).
+
+    * "❌ Não" -> the doctors who do the service, else the service list - no notice, nothing
+      sent to the clinic (`_another_doctor_or_service`);
+    * the choice went away (a unit or a mark changed meanwhile) -> `_ask_day` decides again;
+    * "✅ Sim" -> the unit is saved and its day picker opens (back row: the service list);
+    * anything else -> one model turn on this same step (the buttons stay tappable).
+    """
+    owner = _booking_professional(conversation, professionals)
+    entry = _booking_service_entry(conversation, tenant, services, owner)
+    service_id = entry_service_id(entry) if entry is not None else None
+    if owner is not None and _label_match(body, LABEL_NO):
+        logger.info(
+            "flow_unit_confirm_answered",
+            accepted=False,
+            conversation_id=str(getattr(conversation, "id", None)),
+        )
+        return _another_doctor_or_service(
+            conversation,
+            tenant,
+            professionals,
+            owner,
+            _service_entry_name(conversation, entry),
+            notice=None,
+        )
+    choice = flow_units.unit_choice(owner, service_id)
+    if choice.kind != "confirm":
+        return await _ask_day(conversation, tenant, calendar, services, professionals)
+    if not _label_match(body, LABEL_YES):
+        logger.info(
+            "flow_unit_confirm_free_text_to_llm",
+            conversation_id=str(getattr(conversation, "id", None)),
+        )
+        return _preserve(conversation, "delegate_llm")
+    [unit] = choice.units
+    logger.info(
+        "flow_unit_confirm_answered",
+        accepted=True,
+        conversation_id=str(getattr(conversation, "id", None)),
     )
     state = _DayPickerState(
         id=getattr(conversation, "id", None),
@@ -5930,7 +6070,8 @@ async def _resume_bubbles(
     calendar = _unit_calendar(
         calendar, _booking_unit(conversation, tenant, services, booking_owner)
     )
-    if step == flow_units.STEP_AWAITING_UNIT:
+    if step in (flow_units.STEP_AWAITING_UNIT, flow_units.STEP_AWAITING_UNIT_CONFIRM):
+        # The unit list, or the Sim/Não on the only unit, again - whichever fits now.
         choice = _booking_unit_choice(conversation, tenant, services, booking_owner)
         if choice.kind in ("list", "confirm"):
             return _enter_unit_choice(conversation, booking_owner, choice)
