@@ -63,6 +63,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.api.hub.deps import get_current_tenant
+from secretaria.core.catalog_limits import CatalogLimitExceeded
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
 from secretaria.models import Tenant
@@ -281,6 +282,11 @@ async def update_professional_config(
                 "service_ids": exc.service_ids,
             },
         ) from None
+
+    try:
+        hubcfg.check_service_limits(tenant, None, professional, data)
+    except CatalogLimitExceeded as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.detail()) from None
 
     hubcfg.apply_professional_config(professional, data)
 

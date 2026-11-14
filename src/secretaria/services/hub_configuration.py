@@ -38,6 +38,11 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core import extra_reminder
+from secretaria.core.catalog_limits import (
+    SERVICES_PER_PROFESSIONAL,
+    check_growth,
+    entry_count,
+)
 from secretaria.models import Tenant
 from secretaria.models.professional import Professional
 from secretaria.schemas.config import TenantConfigRead
@@ -199,6 +204,44 @@ async def check_appointment_type_service_ids(
     unknown = sorted({sid for sid in wanted if sid not in known})
     if unknown:
         raise UnknownServiceIds(unknown)
+
+
+def check_service_limits(
+    tenant: Tenant,
+    tenant_data: dict | None,
+    professional: Professional | None = None,
+    professional_data: dict | None = None,
+) -> None:
+    """The 40-services-per-doctor limit on an `appointment_types` save (TASK-082 S4).
+
+    "No growth past the limit" (core/catalog_limits.py): judged against what is
+    stored, so a list already above 40 can be edited or shortened, never grown. The
+    clinic-level legacy list is what a doctor without their own list offers, so it
+    is held to the same number. A doctor going back to inheritance (`null`) is not
+    counted - the inherited list is the clinic's, judged on its own save. A doctor
+    who inherits is measured against the clinic list they offer today.
+
+    Raises `CatalogLimitExceeded`. Reads only, before any mutation.
+    """
+    new_tenant_types = (tenant_data or {}).get("appointment_types")
+    if new_tenant_types is not None:
+        check_growth(
+            limit=SERVICES_PER_PROFESSIONAL,
+            before=entry_count(tenant.appointment_types),
+            after=entry_count(new_tenant_types),
+        )
+    new_types = (professional_data or {}).get("appointment_types")
+    if professional is not None and new_types is not None:
+        current = (
+            professional.appointment_types
+            if professional.appointment_types is not None
+            else tenant.appointment_types
+        )
+        check_growth(
+            limit=SERVICES_PER_PROFESSIONAL,
+            before=entry_count(current),
+            after=entry_count(new_types),
+        )
 
 
 # ---------------------------------------------------------------------------

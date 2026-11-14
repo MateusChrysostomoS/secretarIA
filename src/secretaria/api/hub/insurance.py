@@ -27,6 +27,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.api.hub.deps import get_current_tenant
+from secretaria.core.catalog_limits import (
+    INSURANCE_PLANS_PER_CLINIC,
+    CatalogLimitExceeded,
+    check_growth,
+)
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
 from secretaria.models.insurance import INSURANCE_MODES
@@ -55,6 +60,7 @@ from secretaria.services.insurance_catalog import (
     list_catalog,
     list_professional_plans,
     list_tenant_plans,
+    load_tenant_insurance,
     professional_accepted_tenant_plan_ids,
     set_professional_clinic_plans,
     set_professional_independent_plans,
@@ -107,6 +113,28 @@ async def _tenant_plans(session: AsyncSession, tenant: Tenant) -> list[TenantIns
         )
         for plan, entry in await list_tenant_plans(session, tenant.id)
     ]
+
+
+async def _visible_plan_count(session: AsyncSession, tenant_id: UUID) -> int:
+    """How many convênios the patient's list shows - mode-aware (TASK-082 S4).
+
+    The same read the conversation uses (`load_tenant_insurance`): the clinic's plans
+    in `shared`/`clinic_with_exceptions`, the union of the active doctors' own plans
+    in `independent`. Counting only `tenant_insurance_plans` would leave
+    `independent` unlimited.
+    """
+    return len((await load_tenant_insurance(session, tenant_id)).plans)
+
+
+async def _refuse_growth(session: AsyncSession, tenant_id: UUID, before: int) -> None:
+    """After a convênio mutation (not committed): 422 + rollback when the patient's list
+    grew past INSURANCE_PLANS_PER_CLINIC ("no growth past the limit", core/catalog_limits)."""
+    after = await _visible_plan_count(session, tenant_id)
+    try:
+        check_growth(limit=INSURANCE_PLANS_PER_CLINIC, before=before, after=after)
+    except CatalogLimitExceeded as exc:
+        await session.rollback()
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.detail()) from None
 
 
 async def _professional(
@@ -201,6 +229,8 @@ async def put_tenant_insurance_plans(
     Removing a plan removes it from every doctor.
     """
     ids = _parse_ids([plan.catalog_id for plan in body.plans])
+    tenant_id = tenant.id
+    before = await _visible_plan_count(session, tenant_id)
     try:
         await set_tenant_plans(
             session,
@@ -214,6 +244,7 @@ async def put_tenant_insurance_plans(
             "Um ou mais convênios não existem no catálogo. Recarregue a página.",
             exc.catalog_ids,
         ) from None
+    await _refuse_growth(session, tenant_id, before)
     await session.commit()
     plans = await _tenant_plans(session, tenant)
     logger.info(
@@ -242,6 +273,8 @@ async def post_tenant_insurance_plan_custom(
             "Só é possível cadastrar um convênio 'Outro' da clínica nos modos "
             "compartilhado ou clínica-com-exceção. Escolha um modo primeiro."
         )
+    tenant_id = tenant.id
+    before = await _visible_plan_count(session, tenant_id)
     plan = await create_tenant_custom_plan(
         session,
         tenant,
@@ -249,6 +282,7 @@ async def post_tenant_insurance_plan_custom(
         custom_payment_note=body.custom_payment_note,
         charge_deposit=body.charge_deposit,
     )
+    await _refuse_growth(session, tenant_id, before)
     await session.commit()
     return TenantInsurancePlanRead(
         id=str(plan.id),
@@ -404,8 +438,14 @@ async def put_professional_insurance_plans(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_session),
 ) -> ProfessionalInsurancePlansRead:
-    """Replace this doctor's plans. Body field required matches the tenant's mode."""
+    """Replace this doctor's plans. Body field required matches the tenant's mode.
+
+    In `independent` mode the doctor's picks ARE the patient's list (their union), so
+    the save is held to the clinic's 60 (TASK-082 S4); in `clinic_with_exceptions` a
+    doctor only picks among the clinic's plans and the list cannot grow.
+    """
     professional = await _professional(session, tenant, professional_id)
+    tenant_id = tenant.id
     mode = tenant.insurance_mode
     if mode in (None, "shared"):
         raise _mode_not_applicable(
@@ -457,6 +497,7 @@ async def put_professional_insurance_plans(
                 "message": "Envie `catalog_ids` (não `plan_ids`) neste modo.",
             },
         )
+    before = await _visible_plan_count(session, tenant_id)
     try:
         await set_professional_independent_plans(session, professional, body.catalog_ids)
     except UnknownCatalogIds as exc:
@@ -466,6 +507,7 @@ async def put_professional_insurance_plans(
             "Um ou mais convênios não existem no catálogo. Recarregue a página.",
             exc.catalog_ids,
         ) from None
+    await _refuse_growth(session, tenant_id, before)
     await session.commit()
     logger.info(
         "hub_professional_insurance_plans_updated",
@@ -499,6 +541,8 @@ async def post_professional_insurance_plan_custom(
         raise _mode_not_applicable(
             "Convênio 'Outro' por profissional só existe no modo independente."
         )
+    tenant_id = tenant.id
+    before = await _visible_plan_count(session, tenant_id)
     plan = await create_professional_custom_plan(
         session,
         professional,
@@ -506,6 +550,7 @@ async def post_professional_insurance_plan_custom(
         custom_payment_note=body.custom_payment_note,
         charge_deposit=body.charge_deposit,
     )
+    await _refuse_growth(session, tenant_id, before)
     await session.commit()
     return TenantInsurancePlanRead(
         id=str(plan.id),

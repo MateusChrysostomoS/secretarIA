@@ -35,6 +35,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.api.hub.deps import ensure_clinic_manager, get_current_tenant, get_hub_claim
+from secretaria.core.catalog_limits import CatalogLimitExceeded
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
 from secretaria.core.subscription import SubscriptionClaim
@@ -159,6 +160,11 @@ async def update_config(
         ) from None
 
     try:
+        hubcfg.check_service_limits(tenant, data)
+    except CatalogLimitExceeded as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.detail()) from None
+
+    try:
         await hubcfg.apply_tenant_config(session, tenant, data)
     except hubcfg.ActivationBlocked as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, exc.reason) from None
@@ -269,6 +275,18 @@ async def update_configuration(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"code": exc.code, "message": exc.message},
         ) from None
+
+    # --- 1d. Catalogue size (TASK-082 S4): a read, before any mutation ------
+    try:
+        hubcfg.check_service_limits(tenant, tenant_data, professional, professional_data)
+    except CatalogLimitExceeded as exc:
+        logger.info(
+            "hub_configuration_rejected",
+            tenant_id=tenant_id,
+            reason=exc.detail()["code"],
+            stage="validate",
+        )
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.detail()) from None
 
     # --- 2. Mutate both scopes, then commit exactly once -------------------
     try:
