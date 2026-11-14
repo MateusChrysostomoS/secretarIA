@@ -107,7 +107,11 @@ from secretaria.services.payments.deposit_lifecycle import BEFORE_BLOCKED_TEXT
 from secretaria.services.payments.failure_reason import coerce as coerce_failure_reason
 from secretaria.services.pending_identity import BOOKING_SLOT_TAKEN_MESSAGE
 from secretaria.services.sensitive_claim_guard import unbacked_claim
-from secretaria.services.service_catalog import normalize, professionals_offering
+from secretaria.services.service_catalog import (
+    entry_service_id,
+    normalize,
+    professionals_offering,
+)
 from secretaria.services.tenant_config import (
     active_appointment_types,
     professional_appointment_types,
@@ -808,6 +812,11 @@ class FlowRouterResult:
     #  "insurance", "attendee_name", "start_at", "end_at", "time_changed": bool,
     #  "doctor_changed": bool}. Never persisted on the conversation.
     appointment_edit: dict | None = None
+    # TASK-083 follow-up (spec §6.3): the patient reached a (doctor, service) that no bookable
+    # unit does - `(professional_id, service_id, service name)`. The caller tells the clinic
+    # (debounced e-mail, no patient data); the patient's own reply is in `bubbles`. Never
+    # persisted on the conversation.
+    notify_no_unit: tuple[UUID, UUID, str] | None = None
 
 
 @dataclass
@@ -3280,29 +3289,36 @@ async def _catalog_step(
     # TASK-083 spec §8: from the unit on, every read and write is the chosen unit's.
     booking_owner = _booking_professional(conversation, professionals)
     unscoped_calendar = calendar
-    calendar = flow_units.scope(calendar, conversation, booking_owner)
-    back_target = _booking_back_target(conversation, professionals)
+    # Follow-up §6.1: only the units that do the booking's service count, everywhere below.
+    service_id = _booking_service_id(conversation, tenant, services, booking_owner)
+    unit_choice = flow_units.unit_choice(booking_owner, service_id)
+    calendar = _unit_calendar(
+        calendar, flow_units.effective_unit(conversation, booking_owner, service_id)
+    )
+    back_target = _back_target_for(unit_choice)
 
     if step == flow_units.STEP_AWAITING_UNIT:
         return await _handle_unit_step(
             conversation, tenant, calendar, body, services, professionals
         )
-    picked_gone = (
-        flow_units.selected_unit_id(conversation) is not None
-        and flow_units.find_unit(booking_owner, flow_units.selected_unit_id(conversation)) is None
+    picked = flow_units.find_unit(
+        booking_owner, flow_units.selected_unit_id(conversation), service_id
     )
+    picked_gone = flow_units.selected_unit_id(conversation) is not None and picked is None
+    if step in UNIT_KEEP_STEPS and unit_choice.kind in ("list", "confirm") and picked is None:
+        # Never a day, time or booking without the unit (a link added mid-booking, a unit
+        # deactivated, a hand-back that skipped the question, a unit picked for another
+        # service): ask it first.
+        return _enter_unit_choice(conversation, booking_owner, unit_choice)
     if (
         step in UNIT_KEEP_STEPS
-        and flow_units.unit_choice_needed(booking_owner)
-        and flow_units.find_unit(booking_owner, flow_units.selected_unit_id(conversation)) is None
+        and (picked_gone or unit_choice.kind == "none")
+        and flow_units.bookable_units(booking_owner)
     ):
-        # Never a day, time or booking without the unit (a link added mid-booking, a unit
-        # deactivated, a hand-back that skipped the question): ask it first.
-        return _enter_unit_list(conversation, booking_owner)
-    if step in UNIT_KEEP_STEPS and picked_gone and flow_units.bookable_units(booking_owner):
         # Final wave M1: the picked unit is gone and ONE is left. Its day and time were chosen
         # within the gone unit's hours, so never carry them over silently: the days again,
-        # within the unit left (`_ask_day` records it as the pick).
+        # within the unit left (`_ask_day` records it as the pick). No unit left for the
+        # service: `_ask_day` says so ("0 unidades").
         return await _ask_day(
             conversation,
             tenant,
@@ -3417,7 +3433,7 @@ async def _catalog_step(
             conversation,
             body,
             professional=_recap_professional(conversation, tenant, professionals),
-            unit=flow_units.effective_unit(conversation, booking_owner),
+            unit=flow_units.effective_unit(conversation, booking_owner, service_id),
         )
 
     if step == STEP_AWAITING_CONFIRMATION:
@@ -3923,8 +3939,9 @@ def _handle_day_back(
     """
     if target == BACK_TARGET_UNIT:
         owner = _booking_professional(conversation, professionals)
-        if flow_units.unit_choice_needed(owner):
-            return _enter_unit_list(conversation, owner)
+        choice = _booking_unit_choice(conversation, tenant, services, owner)
+        if choice.kind == "list":
+            return _enter_unit_list(conversation, owner, units=choice.units)
         target = BACK_TARGET_SERVICE
     if target == BACK_TARGET_PROFESSIONAL and _is_multi_professional(professionals):
         result = _enter_professional_list(
@@ -4171,20 +4188,33 @@ async def _ask_day(
     professional = _booking_professional(conversation, professionals)
     if professional is not None and professional_has_no_hours(professional, tenant):
         return _professional_config_incomplete(professional, PROFESSIONAL_GAP_HOURS)
-    # TASK-083 spec §8: a professional who attends at units books at one of them - asked when
-    # there are two or more, implied when there is one. No unit at all: today's picker.
+    # TASK-083 spec §8 + follow-up §6.1: a professional who attends at units books at one of
+    # those that do THIS service - asked when there are two or more, implied when there is one,
+    # the "0 unidades" notice when there is none. No unit at all: today's picker.
+    entry = _booking_service_entry(conversation, tenant, services, professional)
+    service_id = entry_service_id(entry) if entry is not None else None
+    choice = flow_units.unit_choice(professional, service_id)
     unit = None
-    if flow_units.offered_units(professional):
-        unit = flow_units.effective_unit(conversation, professional)
+    if choice.kind == "none" and entry is not None and service_id is not None:
+        return _enter_no_unit_for_service(
+            conversation,
+            tenant,
+            professionals,
+            professional,
+            str(entry.get("name") or conversation.flow_selected_type or ""),
+            service_id,
+        )
+    if choice.kind != "free":
+        unit = flow_units.effective_unit(conversation, professional, service_id)
         if unit is None:
-            return _enter_unit_list(conversation, professional, prefix=prefix)
+            return _enter_unit_choice(conversation, professional, choice, prefix=prefix)
     result = await enter_day_picker(
         conversation,
         tenant,
         _unit_calendar(calendar, unit),
         duration_minutes=_booking_duration(conversation, tenant, services),
         branch=BOOKING_DAY_BRANCH,
-        back_target=_booking_back_target(conversation, professionals),
+        back_target=_back_target_for(choice),
         professionals=professionals,
         prefix=prefix,
     )
@@ -4215,23 +4245,179 @@ def _unit_calendar(calendar: CalendarService | None, unit: Any | None) -> Any:
     return flow_units.scoped_calendar(calendar, unit)
 
 
-def _booking_back_target(conversation: Conversation, professionals: list | None) -> str:
+def _booking_service_entry(
+    conversation: Any, tenant: Tenant, services: list[dict] | None, professional: Any | None
+) -> dict | None:
+    """The professional's own catalog entry for the service being booked, or None.
+
+    The SAME entry the flow already used (spec §9.11): `flow_selected_type` resolved through
+    `_match_service` over the booking's service list - `services` when the caller has it, else
+    the professional's (or, with nobody, the clinic's) - never a loose name comparison.
+    """
+    if not getattr(conversation, "flow_selected_type", None):
+        return None
+    if services is None:
+        services = (
+            professional_appointment_types(professional, tenant)
+            if professional is not None
+            else active_appointment_types(tenant)
+        )
+    return _match_service(services, conversation.flow_selected_type)
+
+
+def _booking_service_id(
+    conversation: Any, tenant: Tenant, services: list[dict] | None, professional: Any | None
+) -> UUID | None:
+    """The canonical id of the service being booked, for the unit filter (`flow_units`).
+
+    None - no unit restriction at all - when nothing matches or the entry carries no
+    `service_id`: an entry without `service_id` is unrestricted by definition (spec §9.6/§9.11).
+    """
+    entry = _booking_service_entry(conversation, tenant, services, professional)
+    return entry_service_id(entry) if entry is not None else None
+
+
+def _booking_unit_choice(
+    conversation: Any, tenant: Tenant, services: list[dict] | None, professional: Any | None
+) -> flow_units.UnitChoice:
+    """`flow_units.unit_choice` for the booking in progress (its doctor and its service)."""
+    return flow_units.unit_choice(
+        professional, _booking_service_id(conversation, tenant, services, professional)
+    )
+
+
+def _back_target_for(choice: flow_units.UnitChoice) -> str:
+    """The unit list is one step back only when the patient had a real list to pick from;
+    otherwise (no units, one implied, a single confirmed one) it is the service list."""
+    return BACK_TARGET_UNIT if choice.kind == "list" else BACK_TARGET_SERVICE
+
+
+def _booking_back_target(
+    conversation: Any,
+    tenant: Tenant,
+    services: list[dict] | None,
+    professionals: list | None,
+) -> str:
     """Where the booking day/slot pickers' back row goes: the unit list when the patient had
-    one to choose from, else the service list (today's)."""
+    one to choose from (for THIS service), else the service list (today's)."""
     owner = _booking_professional(conversation, professionals)
-    return BACK_TARGET_UNIT if flow_units.unit_choice_needed(owner) else BACK_TARGET_SERVICE
+    return _back_target_for(_booking_unit_choice(conversation, tenant, services, owner))
+
+
+def _booking_unit(
+    conversation: Any, tenant: Tenant, services: list[dict] | None, owner: Any | None
+) -> Any | None:
+    """The unit this booking happens at, within the units that do its service."""
+    return flow_units.effective_unit(
+        conversation, owner, _booking_service_id(conversation, tenant, services, owner)
+    )
+
+
+def _enter_unit_choice(
+    conversation: Conversation,
+    professional: Any,
+    choice: flow_units.UnitChoice,
+    *,
+    prefix: str | None = None,
+) -> FlowRouterResult:
+    """Ask the unit for a `list` choice - and, until the Sim/Não step lands (TASK-083
+    follow-up T5, controller ruling R3), for a `confirm` one too, as a one-row list."""
+    return _enter_unit_list(conversation, professional, prefix=prefix, units=choice.units or None)
+
+
+def _no_unit_alternatives(
+    tenant: Tenant, professionals: list | None, professional: Any, service_name: str
+) -> list:
+    """The OTHER doctors who really do `service_name`: they offer it and some bookable unit of
+    theirs does it (or they attend without units). Never `professional` itself - offering it
+    again would only repeat the same notice."""
+    alternatives = []
+    for other in _professionals_offering(tenant, professionals or [], service_name):
+        if getattr(other, "id", None) == getattr(professional, "id", None):
+            continue
+        entry = _match_service(professional_appointment_types(other, tenant), service_name)
+        other_service_id = entry_service_id(entry) if entry is not None else None
+        if flow_units.unit_choice(other, other_service_id).kind == "none":
+            continue
+        if professional_has_no_hours(other, tenant):
+            continue
+        alternatives.append(other)
+    return alternatives
+
+
+def _no_unit_message(service_name: str, professional: Any) -> str:
+    name = str(getattr(professional, "name", "") or "").strip()
+    who = f" com {name}" if name else ""
+    return f"Não consegui seguir com {service_name}{who} agora. Avisei a clínica."
+
+
+def _enter_no_unit_for_service(
+    conversation: Conversation,
+    tenant: Tenant,
+    professionals: list | None,
+    professional: Any,
+    service_name: str,
+    service_id: UUID,
+) -> FlowRouterResult:
+    """"0 unidades" (spec §6.1/§6.3, §9.8): no bookable unit of `professional` does the service.
+
+    The patient hears it in plain words, the clinic is told (`notify_no_unit`, sent by the
+    worker), and the booking goes on - never a dead end, never a loop:
+
+    * other doctors really do the service -> the doctor list, only them, with the service kept
+      (a tap goes straight to its card with that doctor, like the service-first branch);
+    * nobody else (one doctor, or only this one does it, whatever was picked first) -> the
+      service list of this doctor, the service still in it (§9.9: never hidden).
+
+    The doctor's own choice and the unit are dropped either way; convênio and pra-quem ride on.
+    """
+    logger.info(
+        "flow_no_unit_for_service",
+        conversation_id=str(getattr(conversation, "id", None)),
+    )
+    notify = (professional.id, service_id, service_name)
+    notice = _no_unit_message(service_name, professional)
+    alternatives = _no_unit_alternatives(tenant, professionals, professional, service_name)
+    if alternatives:
+        result = _enter_professional_list(
+            tenant, alternatives, insurance=_selected_insurance(conversation)
+        )
+        [bubble] = result.bubbles
+        question = f"{notice} Vamos escolher outro médico?"
+        plan = _selected_plan(tenant, _selected_insurance(conversation))
+        bubble.body = _professional_list_body(question, plan)[:MAX_LIST_BODY_CHARS]
+        result.flow_selected_type = conversation.flow_selected_type
+        result.flow_selected_insurance = _selected_insurance(conversation)
+        result.notify_no_unit = notify
+        return result
+    services = professional_appointment_types(professional, tenant)
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[_service_list_bubble(tenant, services, header=notice)],
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=STEP_AWAITING_SERVICE,
+        flow_selected_professional_id=_selected_professional_id(conversation),
+        flow_selected_insurance=_selected_insurance(conversation),
+        notify_no_unit=notify,
+    )
 
 
 def _enter_unit_list(
-    conversation: Conversation, professional: Any, *, prefix: str | None = None
+    conversation: Conversation,
+    professional: Any,
+    *,
+    prefix: str | None = None,
+    units: list | None = None,
 ) -> FlowRouterResult:
     """"Em qual unidade?": one fixed row per bookable unit (name + address), then the back row.
 
     Same shape as the doctor and convênio lists: payload rows (`unit|<uuid>`), WhatsApp's row
     limits applied by `flow_units.unit_rows`, the LLM only for talk on this step. The booking so
-    far rides along; the unit itself is cleared (it is what is being asked).
+    far rides along; the unit itself is cleared (it is what is being asked). `units` narrows the
+    rows to those that do the booking's service; None lists every bookable unit (today's).
     """
-    units = flow_units.bookable_units(professional)
+    if units is None:
+        units = flow_units.bookable_units(professional)
     if len(units) > flow_units.MAX_UNIT_ROWS:
         logger.warning(
             "flow_unit_list_truncated", total=len(units), shown=flow_units.MAX_UNIT_ROWS
@@ -4265,13 +4451,17 @@ async def _handle_unit_step(
     services: list[dict],
     professionals: list | None,
 ) -> FlowRouterResult:
-    """A tap (or typed name) on the unit list: that unit's day picker, back row to the units."""
+    """A tap (or typed name) on the unit list: that unit's day picker, back row to the units.
+
+    Only the units that do the booking's service are accepted (follow-up §6.1)."""
     owner = _booking_professional(conversation, professionals)
-    units = flow_units.bookable_units(owner)
+    choice = _booking_unit_choice(conversation, tenant, services, owner)
+    units = choice.units
     if _is_day_back(body, BACK_TARGET_SERVICE):
         return _handle_day_back(conversation, tenant, services, professionals, BACK_TARGET_SERVICE)
-    if len(units) < 2:
-        # The choice went away (a unit deactivated, a link removed): continue without asking.
+    if choice.kind not in ("list", "confirm"):
+        # The choice went away (a unit deactivated, a link removed, the service now done in
+        # one unit or none): continue without asking - `_ask_day` decides what is left.
         return await _ask_day(conversation, tenant, calendar, services, professionals)
     unit = flow_units.match_unit(units, body)
     if unit is None:
@@ -4299,7 +4489,7 @@ async def _handle_unit_step(
         _unit_calendar(calendar, unit),
         duration_minutes=_booking_duration(conversation, tenant, services),
         branch=BOOKING_DAY_BRANCH,
-        back_target=BACK_TARGET_UNIT,
+        back_target=_back_target_for(choice),
         professionals=professionals,
     )
 
@@ -4414,7 +4604,7 @@ async def _relist_stored_day(
         target,
         duration_minutes=duration,
         branch=BOOKING_DAY_BRANCH,
-        back_target=_booking_back_target(conversation, professionals),
+        back_target=_booking_back_target(conversation, tenant, services, professionals),
         professionals=professionals,
     )
 
@@ -4508,8 +4698,11 @@ async def reoffer_taken_booking_slot(
     """
     # TASK-083: the promotion hands in the agenda it WROTE with (the unit's id, the agenda's
     # hours); the day picker that follows lists the chosen unit's own hours.
-    calendar = flow_units.scope(
-        calendar, conversation, _booking_professional(conversation, professionals)
+    calendar = _unit_calendar(
+        calendar,
+        _booking_unit(
+            conversation, tenant, None, _booking_professional(conversation, professionals)
+        ),
     )
     result = await _reoffer_taken_slot(
         conversation,
@@ -4518,7 +4711,7 @@ async def reoffer_taken_booking_slot(
         start,
         duration_minutes=duration_minutes,
         branch=BOOKING_DAY_BRANCH,
-        back_target=_booking_back_target(conversation, professionals),
+        back_target=_booking_back_target(conversation, tenant, None, professionals),
         professionals=professionals,
     )
     return _carry_booking(conversation, result)
@@ -4646,7 +4839,7 @@ async def _handle_confirmation(
     booking_owner = _booking_professional(conversation, professionals)
     # TASK-083 spec §8: where the visit happens. The write goes through the unit's agenda (its
     # id on a local event, its location on a Google event) and the hold / row record it.
-    unit = flow_units.effective_unit(conversation, booking_owner)
+    unit = _booking_unit(conversation, tenant, services, booking_owner)
     calendar = _unit_calendar(calendar, unit)
     unit_kwargs: dict = {"unit_id": unit.id} if unit is not None else {}
     floor = booking_notice_floor(booking_owner, _notice_now(calendar.tzinfo))
@@ -5734,10 +5927,13 @@ async def _resume_bubbles(
     )
     # TASK-083: the chosen unit's agenda; the unit list again when it was being asked.
     booking_owner = _booking_professional(conversation, professionals)
-    calendar = flow_units.scope(calendar, conversation, booking_owner)
+    calendar = _unit_calendar(
+        calendar, _booking_unit(conversation, tenant, services, booking_owner)
+    )
     if step == flow_units.STEP_AWAITING_UNIT:
-        if flow_units.unit_choice_needed(booking_owner):
-            return _enter_unit_list(conversation, booking_owner)
+        choice = _booking_unit_choice(conversation, tenant, services, booking_owner)
+        if choice.kind in ("list", "confirm"):
+            return _enter_unit_choice(conversation, booking_owner, choice)
         return await _ask_day(conversation, tenant, calendar, services, professionals)
 
     if step == STEP_AWAITING_PROFESSIONAL:
@@ -5815,7 +6011,7 @@ async def _resume_bubbles(
         recap = _confirmation_recap(
             conversation,
             professional=_recap_professional(conversation, tenant, professionals),
-            unit=flow_units.effective_unit(conversation, booking_owner),
+            unit=_booking_unit(conversation, tenant, services, booking_owner),
         )
         if recap is None:
             # Lost the slot somehow: re-ask the day.

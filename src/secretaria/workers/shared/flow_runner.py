@@ -788,8 +788,29 @@ async def _apply_flow_result(
                 result.bubbles[-1].body = f"{result.bubbles[-1].body}\n\n{notice}"
             await _offer_manage_on_main_menu(reply, result.bubbles)
             await _dispatch_bubbles(reply, result.bubbles, tenant=tenant, waba_token=waba_token)
+        if result.notify_no_unit is not None:
+            await _notify_no_unit_for_service(reply, result.notify_no_unit, tenant=tenant)
         return True
     return False  # delegate_llm
+
+
+async def _notify_no_unit_for_service(
+    reply: _ReplyContext, notify: tuple, *, tenant: Tenant | None
+) -> None:
+    """The "0 unidades" effect (TASK-083 follow-up spec §6.3): the patient was already told, in
+    this turn's bubbles; this is where the clinic is told.
+
+    Only the seam for now - the debounced e-mail itself is task T6. Ids only in the log (no
+    patient data, channel or phone); never raises, so the patient's flow cannot break here.
+    """
+    professional_id, service_id, _service_name = notify
+    logger.info(
+        "worker_no_unit_for_service",
+        conversation_id=str(reply.conversation_id),
+        tenant_id=str(getattr(tenant, "id", None)),
+        professional_id=str(professional_id),
+        service_id=str(service_id),
+    )
 
 
 async def _offer_manage_on_main_menu(reply: _ReplyContext, bubbles: list) -> None:

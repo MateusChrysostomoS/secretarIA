@@ -852,3 +852,381 @@ def test_the_union_of_unit_hours_merges_overlapping_windows_per_day():
         "monday": [{"start": "08:00", "end": "14:00"}, {"start": "16:00", "end": "18:00"}],
         "friday": [{"start": "09:00", "end": "10:00"}],
     }
+
+
+# --------------------------------------------------------------------------
+# Service x doctor x unit (TASK-083 follow-up T4): the unit list is filtered by the service
+# --------------------------------------------------------------------------
+
+CONSULTA_ID = uuid4()
+EXAME_ID = uuid4()
+NORTE_HOURS = {"wednesday": [{"start": "08:00", "end": "12:00"}]}
+
+
+def _svc_tenant(*, with_ids: bool = True):
+    tenant = _tenant()
+    consulta = {"name": "Consulta", "duration_min": 30, "is_active": True, "sort_order": 0}
+    exame = {"name": "Exame", "duration_min": 30, "is_active": True, "sort_order": 1}
+    if with_ids:
+        consulta["service_id"] = str(CONSULTA_ID)
+        exame["service_id"] = str(EXAME_ID)
+    tenant.appointment_types = [consulta, exame]
+    return tenant
+
+
+def _three_units() -> list[UnitOption]:
+    centro, sul = _units(2)
+    norte = UnitOption(id=uuid4(), name="Norte", address="Rua C, 30", business_hours=NORTE_HOURS)
+    return [centro, sul, norte]
+
+
+def _marked_doctor(units: list, marks: dict, name: str = "Dra. Ana"):
+    doctor = _doctor(units)
+    doctor.name = name
+    doctor.service_units = marks
+    return doctor
+
+
+def _unit_row_ids(result) -> list[str]:
+    [bubble] = [b for b in result.bubbles if isinstance(b, SlotsBubble)]
+    return [row[0] for row in bubble.rows if row[0].startswith("unit|")]
+
+
+async def test_unit_list_shows_only_units_of_service():
+    centro, sul, norte = _three_units()
+    doctor = _marked_doctor(
+        [centro, sul, norte], {CONSULTA_ID: frozenset({centro.id, norte.id})}
+    )
+    result = await fr.route(
+        _conversation(), _svc_tenant(), _Agenda(), fr.LABEL_BOOK_SERVICE, professionals=[doctor]
+    )
+    assert result.flow_step == STEP_AWAITING_UNIT
+    assert _unit_row_ids(result) == [f"unit|{centro.id}", f"unit|{norte.id}"]
+    assert _back_row(result)[1] == fr.LABEL_ANOTHER_SERVICE
+    assert result.notify_no_unit is None
+    # A tap on a unit outside the filter is not accepted as the pick.
+    tapped = await fr.route(
+        _conversation(flow_step=STEP_AWAITING_UNIT),
+        _svc_tenant(),
+        _Agenda(),
+        _unit_tap(sul),
+        professionals=[doctor],
+    )
+    assert tapped.flow_selected_unit_id != sul.id
+
+
+async def test_service_without_marks_lists_all_units():
+    centro, sul, norte = _three_units()
+    # Marks exist, but only for another service: Consulta is done at every unit.
+    doctor = _marked_doctor([centro, sul, norte], {EXAME_ID: frozenset({sul.id})})
+    result = await fr.route(
+        _conversation(), _svc_tenant(), _Agenda(), fr.LABEL_BOOK_SERVICE, professionals=[doctor]
+    )
+    assert result.flow_step == STEP_AWAITING_UNIT
+    assert _unit_row_ids(result) == [f"unit|{u.id}" for u in (centro, sul, norte)]
+
+
+def _zero_unit_doctor(name: str = "Dra. Ana"):
+    """Consulta is restricted to a unit that is closed: no bookable unit does it."""
+    centro, sul = _units(2)
+    closed = UnitOption(id=uuid4(), name="Fechada", address=None, business_hours={})
+    return _marked_doctor([centro, sul, closed], {CONSULTA_ID: frozenset({closed.id})}, name)
+
+
+async def test_zero_units_sets_notify_no_unit_and_returns_to_doctor_list():
+    ana = _zero_unit_doctor()
+    bruno = _marked_doctor([], {}, "Dr. Bruno")
+    carla = _zero_unit_doctor("Dra. Carla")  # does Consulta, but nowhere either
+    agenda = _Agenda()
+    result = await fr.route(
+        _conversation(flow_selected_professional_id=ana.id, flow_selected_insurance="Particular"),
+        _svc_tenant(),
+        agenda,
+        fr.LABEL_BOOK_SERVICE,
+        professionals=[ana, bruno, carla],
+    )
+    assert result.action == "reply"
+    assert result.notify_no_unit == (ana.id, CONSULTA_ID, "Consulta")
+    assert result.flow_state is FlowState.SERVICE_CATALOG
+    assert result.flow_step == fr.STEP_AWAITING_PROFESSIONAL
+    # The service rides along (a doctor tap goes straight to its card); the doctor and the
+    # unit do not; the convênio answer is kept.
+    assert result.flow_selected_type == "Consulta"
+    assert result.flow_selected_professional_id is None
+    assert result.flow_selected_unit_id is None
+    assert result.flow_selected_insurance == "Particular"
+    [bubble] = result.bubbles
+    assert bubble.body.startswith(
+        "Não consegui seguir com Consulta com Dra. Ana agora. Avisei a clínica. "
+        "Vamos escolher outro médico?"
+    )
+    prof_rows = [row[0] for row in bubble.rows if row[0].startswith("prof|")]
+    assert prof_rows == [f"prof|{bruno.id}"]  # only who really does it; never Ana again
+    assert agenda.log.day_hours == []
+    # No dead end: the other doctor's tap opens the service card with that doctor.
+    picked = await fr.route(
+        _conversation(
+            flow_step=fr.STEP_AWAITING_PROFESSIONAL,
+            flow_selected_type=result.flow_selected_type,
+        ),
+        _svc_tenant(),
+        _Agenda(),
+        inbound_routing_text("Dr. Bruno", f"prof|{bruno.id}"),
+        professionals=[ana, bruno, carla],
+    )
+    assert picked.flow_step == fr.STEP_AWAITING_SERVICE_CONFIRM
+    assert picked.flow_selected_professional_id == bruno.id
+    assert picked.notify_no_unit is None
+
+
+async def test_zero_units_single_doctor_clinic_returns_to_service_list():
+    ana = _zero_unit_doctor()
+    result = await fr.route(
+        _conversation(), _svc_tenant(), _Agenda(), fr.LABEL_BOOK_SERVICE, professionals=[ana]
+    )
+    assert result.notify_no_unit == (ana.id, CONSULTA_ID, "Consulta")
+    assert result.flow_step == fr.STEP_AWAITING_SERVICE
+    assert result.flow_selected_unit_id is None
+    [bubble] = result.bubbles
+    assert bubble.body.startswith(
+        "Não consegui seguir com Consulta com Dra. Ana agora. Avisei a clínica."
+    )
+    assert "Vamos escolher outro médico?" not in bubble.body
+    # The service is NOT hidden from the list (spec §9.9).
+    assert [row[0] for row in bubble.rows if row[0].startswith("svc|")] == [
+        "svc|Consulta",
+        "svc|Exame",
+    ]
+    # Another service of the same doctor books normally.
+    exame = await fr.route(
+        _conversation(flow_selected_type="Exame"),
+        _svc_tenant(),
+        _Agenda(),
+        fr.LABEL_BOOK_SERVICE,
+        professionals=[ana],
+    )
+    assert exame.flow_step == STEP_AWAITING_UNIT
+    assert exame.notify_no_unit is None
+
+
+async def test_zero_units_when_only_that_doctor_does_the_service_goes_to_service_list():
+    """Two doctors, but the other one does not offer the service (the same holds when the
+    service was picked first and nobody else does it): no doctor list, the service list."""
+    ana = _zero_unit_doctor()
+    bruno = _marked_doctor([], {}, "Dr. Bruno")
+    bruno.appointment_types = [
+        {"name": "Exame", "duration_min": 30, "is_active": True, "service_id": str(EXAME_ID)}
+    ]
+    result = await fr.route(
+        _conversation(flow_selected_professional_id=ana.id),
+        _svc_tenant(),
+        _Agenda(),
+        fr.LABEL_BOOK_SERVICE,
+        professionals=[ana, bruno],
+    )
+    assert result.notify_no_unit == (ana.id, CONSULTA_ID, "Consulta")
+    assert result.flow_step == fr.STEP_AWAITING_SERVICE
+    assert result.flow_selected_professional_id == ana.id
+    assert [row[0] for row in result.bubbles[0].rows if row[0].startswith("svc|")] == [
+        "svc|Consulta",
+        "svc|Exame",
+    ]
+
+
+async def test_service_picked_first_then_doctor_filters_units():
+    centro, sul, norte = _three_units()
+    ana = _marked_doctor([centro, sul, norte], {CONSULTA_ID: frozenset({sul.id, norte.id})})
+    bruno = _marked_doctor([], {}, "Dr. Bruno")
+    card = await fr.route(
+        _conversation(
+            flow_step=fr.STEP_AWAITING_SERVICE_PROFESSIONAL, flow_selected_type="Consulta"
+        ),
+        _svc_tenant(),
+        _Agenda(),
+        inbound_routing_text("Dra. Ana", f"prof|{ana.id}"),
+        professionals=[ana, bruno],
+    )
+    assert card.flow_step == fr.STEP_AWAITING_SERVICE_CONFIRM
+    assert card.flow_selected_professional_id == ana.id
+    units = await fr.route(
+        _conversation(flow_selected_professional_id=ana.id),
+        _svc_tenant(),
+        _Agenda(),
+        fr.LABEL_BOOK_SERVICE,
+        professionals=[ana, bruno],
+    )
+    assert units.flow_step == STEP_AWAITING_UNIT
+    assert _unit_row_ids(units) == [f"unit|{sul.id}", f"unit|{norte.id}"]
+
+
+async def test_no_service_id_entry_is_unrestricted():
+    centro, sul, norte = _three_units()
+    # A mark keyed by a service the entry cannot point at (the entry has no service_id).
+    doctor = _marked_doctor([centro, sul, norte], {CONSULTA_ID: frozenset({centro.id})})
+    result = await fr.route(
+        _conversation(),
+        _svc_tenant(with_ids=False),
+        _Agenda(),
+        fr.LABEL_BOOK_SERVICE,
+        professionals=[doctor],
+    )
+    assert result.flow_step == STEP_AWAITING_UNIT
+    assert _unit_row_ids(result) == [f"unit|{u.id}" for u in (centro, sul, norte)]
+    assert result.notify_no_unit is None
+
+
+async def test_change_service_clears_unit_and_refilters():
+    centro, sul, norte = _three_units()
+    doctor = _marked_doctor(
+        [centro, sul, norte],
+        {CONSULTA_ID: frozenset({centro.id, norte.id}), EXAME_ID: frozenset({sul.id, norte.id})},
+    )
+    # Back from the unit list to the services: the unit is dropped.
+    back = await fr.route(
+        _conversation(flow_step=STEP_AWAITING_UNIT, flow_selected_unit_id=centro.id),
+        _svc_tenant(),
+        _Agenda(),
+        inbound_routing_text(fr.LABEL_ANOTHER_SERVICE, "dayback|service"),
+        professionals=[doctor],
+    )
+    assert back.flow_step == fr.STEP_AWAITING_SERVICE
+    assert back.flow_selected_unit_id is None
+    # A unit left over from the other service (Centro, Consulta-only) never leaks into Exame:
+    # Exame's own list is asked, without Centro.
+    exame = await fr.route(
+        _conversation(flow_selected_type="Exame", flow_selected_unit_id=centro.id),
+        _svc_tenant(),
+        _Agenda(),
+        fr.LABEL_BOOK_SERVICE,
+        professionals=[doctor],
+    )
+    assert exame.flow_step == STEP_AWAITING_UNIT
+    assert exame.flow_selected_unit_id is None
+    assert _unit_row_ids(exame) == [f"unit|{sul.id}", f"unit|{norte.id}"]
+    # The same leftover at the day step is asked again rather than booked at Centro.
+    day = await fr.route(
+        _conversation(
+            flow_step=fr.STEP_AWAITING_DAY,
+            flow_selected_type="Exame",
+            flow_selected_unit_id=centro.id,
+        ),
+        _svc_tenant(),
+        _Agenda(),
+        "segunda",
+        professionals=[doctor],
+    )
+    assert day.flow_step == STEP_AWAITING_UNIT
+    assert _unit_row_ids(day) == [f"unit|{sul.id}", f"unit|{norte.id}"]
+
+
+async def test_change_doctor_clears_unit_and_refilters():
+    centro, sul, norte = _three_units()
+    ana = _marked_doctor([centro, sul], {})
+    bruno = _marked_doctor([centro, sul, norte], {CONSULTA_ID: frozenset({sul.id, norte.id})})
+    result = await fr.route(
+        _conversation(flow_selected_professional_id=bruno.id, flow_selected_unit_id=centro.id),
+        _svc_tenant(),
+        _Agenda(),
+        fr.LABEL_BOOK_SERVICE,
+        professionals=[ana, bruno],
+    )
+    assert result.flow_step == STEP_AWAITING_UNIT
+    assert result.flow_selected_unit_id is None
+    assert _unit_row_ids(result) == [f"unit|{sul.id}", f"unit|{norte.id}"]
+
+
+async def test_back_row_unit_only_when_list():
+    centro, sul, norte = _three_units()
+    # list (2 filtered units): the day picker's back row goes to the units.
+    listed = _marked_doctor([centro, sul, norte], {CONSULTA_ID: frozenset({sul.id, norte.id})})
+    days = await fr.route(
+        _conversation(flow_step=STEP_AWAITING_UNIT),
+        _svc_tenant(),
+        _Agenda(),
+        _unit_tap(sul),
+        professionals=[listed],
+    )
+    assert days.flow_step == fr.STEP_AWAITING_DAY
+    assert _back_row(days)[1] == LABEL_ANOTHER_UNIT
+
+    # confirm (the filter leaves 1 of 2+): until T5, the one-row unit list; after the pick
+    # there is no real choice, so one step back is the service list.
+    confirm = _marked_doctor([centro, sul, norte], {CONSULTA_ID: frozenset({sul.id})})
+    asked = await fr.route(
+        _conversation(), _svc_tenant(), _Agenda(), fr.LABEL_BOOK_SERVICE, professionals=[confirm]
+    )
+    assert asked.flow_step == STEP_AWAITING_UNIT
+    assert _unit_row_ids(asked) == [f"unit|{sul.id}"]
+    agenda = _Agenda()
+    picked = await fr.route(
+        _conversation(flow_step=STEP_AWAITING_UNIT),
+        _svc_tenant(),
+        agenda,
+        _unit_tap(sul),
+        professionals=[confirm],
+    )
+    assert picked.flow_step == fr.STEP_AWAITING_DAY
+    assert picked.flow_selected_unit_id == sul.id
+    assert agenda.log.day_hours == [SUL_HOURS]
+    assert _back_row(picked)[1] == fr.LABEL_ANOTHER_SERVICE
+    slots = await fr.route(
+        _conversation(flow_step=fr.STEP_AWAITING_DAY, flow_selected_unit_id=sul.id),
+        _svc_tenant(),
+        agenda,
+        _day_tap(picked),
+        professionals=[confirm],
+    )
+    assert slots.flow_step == fr.STEP_AWAITING_SLOT
+    assert slots.flow_selected_unit_id == sul.id
+    assert _back_row(slots)[1] == fr.LABEL_ANOTHER_SERVICE
+    # A stale "Outra unidade" tap with no real choice falls back to the service list.
+    back = await fr.route(
+        _conversation(flow_step=fr.STEP_AWAITING_DAY, flow_selected_unit_id=sul.id),
+        _svc_tenant(),
+        _Agenda(),
+        inbound_routing_text(LABEL_ANOTHER_UNIT, "dayback|unit"),
+        professionals=[confirm],
+    )
+    assert back.flow_step == fr.STEP_AWAITING_SERVICE
+
+    # implied (the doctor has one unit): no question, back row to the services.
+    implied = _marked_doctor([sul], {CONSULTA_ID: frozenset({sul.id})})
+    direct = await fr.route(
+        _conversation(), _svc_tenant(), _Agenda(), fr.LABEL_BOOK_SERVICE, professionals=[implied]
+    )
+    assert direct.flow_step == fr.STEP_AWAITING_DAY
+    assert direct.flow_selected_unit_id == sul.id
+    assert _back_row(direct)[1] == fr.LABEL_ANOTHER_SERVICE
+
+
+async def test_resume_on_the_unit_step_lists_only_the_services_units():
+    centro, sul, norte = _three_units()
+    doctor = _marked_doctor([centro, sul, norte], {CONSULTA_ID: frozenset({sul.id, norte.id})})
+    resumed = await fr.resume_bubbles(
+        _conversation(flow_step=STEP_AWAITING_UNIT), _svc_tenant(), _Agenda(), [doctor]
+    )
+    assert resumed.flow_step == STEP_AWAITING_UNIT
+    assert _unit_row_ids(resumed) == [f"unit|{sul.id}", f"unit|{norte.id}"]
+
+
+async def test_the_booking_writes_at_the_picked_unit_of_the_service():
+    centro, sul, norte = _three_units()
+    doctor = _marked_doctor([centro, sul, norte], {CONSULTA_ID: frozenset({sul.id, norte.id})})
+    agenda = _Agenda()
+    gate = _Gate(armed=False)
+    booked = await fr.route(
+        _conversation(
+            flow_step=fr.STEP_AWAITING_CONFIRMATION,
+            flow_selected_day="2099-01-06",
+            flow_selected_slot="2099-01-06T09:00",
+            flow_selected_unit_id=sul.id,
+        ),
+        _svc_tenant(),
+        agenda,
+        fr.LABEL_CONFIRM,
+        patient_name="Maria",
+        professionals=[doctor],
+        gate=gate,
+    )
+    assert booked.appointment["unit_id"] == sul.id
+    assert gate.decided[0]["unit_id"] == sul.id
