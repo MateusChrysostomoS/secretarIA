@@ -13,6 +13,10 @@ against the `multi_unit` addon and `limits["units"]`:
   - Creating/activating an ACTIVE unit beyond `limits["units"]` is rejected
     with 409 {"detail": "unit_limit_reached"}.
   - A failed entitlement fetch (None) fails CLOSED: 503, never silently allowed.
+  - A unit always has an address: create without a (non-blank) address, or a PATCH that
+    sends a blank/null address, is rejected with 422
+    {"detail": {"code": "unit_address_required", "message": ...}}. A PATCH that omits
+    `address` is untouched (legacy units without one stay editable).
   - Renaming, changing the address, or DEACTIVATING never touch
     entitlements/limits at all.
 """
@@ -37,6 +41,17 @@ router = APIRouter(prefix="/tenants/me/units", tags=["hub-units"])
 
 ADDON_KEY = "multi_unit"
 LIMIT_KEY = "units"
+
+
+def _require_address(raw: str | None) -> str:
+    """A unit always has an address: strip it and refuse blank/missing (422, structured)."""
+    address = (raw or "").strip()
+    if not address:
+        raise HTTPException(
+            422,
+            {"code": "unit_address_required", "message": "Informe o endereço da unidade."},
+        )
+    return address
 
 
 def _read_model(unit: Unit, professionals_count: int = 0) -> UnitRead:
@@ -112,13 +127,14 @@ async def create_unit(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_session),
 ) -> UnitRead:
+    address = _require_address(body.address)
     if body.is_active:
         await _require_entitled_within_limit(session, tenant)
 
     unit = Unit(
         tenant_id=tenant.id,
         name=body.name,
-        address=body.address,
+        address=address,
         is_active=body.is_active,
     )
     session.add(unit)
@@ -137,6 +153,10 @@ async def update_unit(
 ) -> UnitRead:
     unit = await _get_unit(session, tenant, unit_id)
     data = body.model_dump(exclude_unset=True)
+    # Sending `address` (even blank/null) must carry a real one; omitting it leaves a legacy
+    # unit without address editable (name/is_active only).
+    if "address" in data:
+        data["address"] = _require_address(data["address"])
 
     activating = data.get("is_active") is True and not unit.is_active
     if activating:
