@@ -13,6 +13,7 @@ from secretaria.models import (
     ConsentEvent,
     Conversation,
     Patient,
+    Professional,
     RebookingDecline,
     Tenant,
 )
@@ -53,6 +54,7 @@ from secretaria.services.handoff_notification import notify_human_handoff
 from secretaria.services.insurance_catalog import (
     resolve_booking_plan_ids,
 )
+from secretaria.services.no_unit_notice import send_no_unit_notice
 from secretaria.services.patient_context import (
     has_upcoming_appointment,
 )
@@ -789,28 +791,53 @@ async def _apply_flow_result(
             await _offer_manage_on_main_menu(reply, result.bubbles)
             await _dispatch_bubbles(reply, result.bubbles, tenant=tenant, waba_token=waba_token)
         if result.notify_no_unit is not None:
-            await _notify_no_unit_for_service(reply, result.notify_no_unit, tenant=tenant)
+            await _notify_no_unit_for_service(
+                reply, result.notify_no_unit, tenant=tenant, redis=redis
+            )
         return True
     return False  # delegate_llm
 
 
 async def _notify_no_unit_for_service(
-    reply: _ReplyContext, notify: tuple, *, tenant: Tenant | None
+    reply: _ReplyContext, notify: tuple, *, tenant: Tenant | None, redis=None
 ) -> None:
     """The "0 unidades" effect (TASK-083 follow-up spec §6.3): the patient was already told, in
-    this turn's bubbles; this is where the clinic is told.
+    this turn's bubbles; this is where the clinic is told, by the debounced e-mail of
+    `no_unit_notice` (one per clinic/doctor/service per local day).
 
-    Only the seam for now - the debounced e-mail itself is task T6. Ids only in the log (no
-    patient data, channel or phone); never raises, so the patient's flow cannot break here.
+    Fired even when this turn's write did not persist: the e-mail is about the clinic's setup, not
+    about the patient's turn, and the daily limit makes a repeat harmless. The doctor's name is
+    read from the clinic's own roster (tenant-scoped), never from the conversation. Ids only in
+    the logs (no patient data, channel or phone); never raises, so the patient's flow cannot
+    break here.
     """
-    professional_id, service_id, _service_name = notify
-    logger.info(
-        "worker_no_unit_for_service",
-        conversation_id=str(reply.conversation_id),
-        tenant_id=str(getattr(tenant, "id", None)),
-        professional_id=str(professional_id),
-        service_id=str(service_id),
-    )
+    professional_id, service_id, service_name = notify
+    try:
+        if tenant is None:
+            return
+        async with async_session_factory() as session:
+            name = await session.scalar(
+                select(Professional.name).where(
+                    Professional.id == professional_id, Professional.tenant_id == tenant.id
+                )
+            )
+        await send_no_unit_notice(
+            tenant,
+            professional_id,
+            (name or "").strip(),
+            service_id,
+            service_name,
+            redis=redis,
+        )
+    except Exception as exc:  # noqa: BLE001 - the clinic's e-mail never breaks the patient's turn
+        logger.warning(
+            "worker_no_unit_notice_failed",
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(getattr(tenant, "id", None)),
+            professional_id=str(professional_id),
+            service_id=str(service_id),
+            error_type=type(exc).__name__,
+        )
 
 
 async def _offer_manage_on_main_menu(reply: _ReplyContext, bubbles: list) -> None:

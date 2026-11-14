@@ -278,14 +278,23 @@ async def _doctor_address(tenant_id: UUID, professional_id: UUID | None) -> str 
     return ((emails or {}).get(str(professional_id)) or "").strip() or None
 
 
-async def _within_cap(redis, key: str) -> bool:
-    """INCR the recipient's counter; True while it is still within the daily cap."""
+async def within_daily_cap(redis, key: str, cap: int) -> bool:
+    """INCR a daily counter (48 h TTL); True while the count is still within `cap`.
+
+    Shared by every "at most N e-mails a day" notice (this module's 3 per recipient, and
+    `no_unit_notice`'s 1 per clinic/doctor/service): one atomic `INCR`, so concurrent callers can
+    never both be told they are within a cap of 1."""
     count = await redis.incr(key)
     try:
         await redis.expire(key, _COUNTER_TTL_SECONDS)
     except Exception:  # noqa: BLE001 - the count itself is what matters
         logger.warning("deposit_failure_counter_expire_failed")
-    return int(count) <= DAILY_EMAIL_CAP
+    return int(count) <= cap
+
+
+async def _within_cap(redis, key: str) -> bool:
+    """INCR the recipient's counter; True while it is still within the daily cap."""
+    return await within_daily_cap(redis, key, DAILY_EMAIL_CAP)
 
 
 _LINK_LABELS = {

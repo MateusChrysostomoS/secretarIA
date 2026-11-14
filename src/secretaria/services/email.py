@@ -248,6 +248,49 @@ async def send_deposit_unavailable_alert(
     return True
 
 
+NO_UNIT_SUBJECT = "Um serviço está sem unidade de atendimento"
+
+
+async def send_no_unit_alert(
+    to_email: str,
+    clinic_name: str,
+    *,
+    professional_name: str,
+    service_name: str,
+    link: str,
+) -> bool:
+    """Email the clinic that a doctor + service has NO unit where it can be booked, so a patient
+    could not go on with it (TASK-083, spec §6.3).
+
+    Same channel as `send_deposit_unavailable_alert`: SMTP only, NEVER raises, True only when the
+    message was handed to the SMTP server. The body names the service and the doctor and links to
+    where it is fixed (`link`, the doctor's page in /contexto); it never carries anything about
+    the patient (name, phone, channel). The one-per-day limit is enforced by the caller,
+    `no_unit_notice`.
+    """
+    settings = get_settings()
+    if not settings.SMTP_HOST:
+        return False
+    who = (professional_name or "").strip()
+    with_who = f" com {who}" if who else ""
+    body = (
+        f"Olá,\n\nUm paciente tentou agendar {service_name.strip()}{with_who}, mas esse serviço "
+        "não está liberado em nenhuma unidade de atendimento aberta. Avisamos o paciente e "
+        "sugerimos outra opção.\n\n"
+        "O que fazer: marque, no cadastro do médico, a unidade em que o serviço é feito "
+        f"(e confira se ela está ativa e com horário).\nAbrir o cadastro: {link}\n\n"
+        "Para não lotar sua caixa, avisamos no máximo 1 vez por dia para cada serviço.\n\n"
+        "— Equipe SecretarIA"
+    )
+    try:
+        await asyncio.to_thread(_send_sync, to_email, NO_UNIT_SUBJECT, body)
+    except Exception as exc:
+        logger.warning("no_unit_email_failed", error_type=type(exc).__name__)
+        return False
+    logger.info("no_unit_email_sent", clinic=clinic_name)
+    return True
+
+
 async def send_cancellation_escalation_alert(
     to_email: str, clinic_name: str, whatsapp_link: str | None
 ) -> None:
