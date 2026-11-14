@@ -94,17 +94,18 @@ class _Agenda:
         return {"id": event_id}
 
 
-def _doctor(name, units, *, hours=None):
+def _doctor(name, units, *, hours=None, types=None, service_units=None):
     return SimpleNamespace(
         id=uuid4(),
         name=name,
         specialty=None,
         about=None,
         context_doctor_message=None,
-        appointment_types=None,
+        appointment_types=types,
         business_hours=hours,
         min_booking_notice_hours=None,
         units=list(units),
+        service_units=service_units or {},
     )
 
 
@@ -451,3 +452,236 @@ def test_the_draft_carries_the_unit_only_for_a_booking_with_one():
     assert "unit_id" not in without.original
     assert UUID(with_unit.with_changes(unit_id=str(SUL.id)).current["unit_id"]) == SUL.id
     assert with_unit.with_changes(unit_id=str(SUL.id)).changed() == []
+
+
+# --- Service x unit (final review, finding 1): no path books a service where it isn't done --
+
+CONSULTA_ID = uuid4()
+EXAME_ID = uuid4()
+FECHADA = UnitOption(id=uuid4(), name="Fechada", address=None, business_hours={})
+
+
+def _types(*names):
+    ids = {"Consulta": CONSULTA_ID, "Exame": EXAME_ID}
+    return [
+        {"name": name, "duration_min": 40, "is_active": True, "service_id": str(ids[name])}
+        for name in names
+    ]
+
+
+async def test_changing_the_service_to_one_not_done_at_the_unit_refuses_and_keeps_the_old():
+    doctor = _doctor(
+        "Dra. Ana",
+        [CENTRO, SUL],
+        types=_types("Consulta", "Exame"),
+        service_units={EXAME_ID: frozenset({SUL.id})},
+    )
+    appt = _appt(doctor)
+    result = await _step(
+        fr.STEP_EDIT_SERVICE, "Exame", appt=appt, doctors=[doctor], calendars={doctor.id: _Agenda()}
+    )
+    assert result.flow_step == fr.STEP_EDIT_MENU
+    assert result.bubbles[0].body == ae.EDIT_SERVICE_NOT_AT_UNIT
+    draft = _draft(result)
+    assert draft.current["service"] == "Consulta"
+    assert draft.current["unit_id"] == str(CENTRO.id)
+
+
+async def test_changing_the_service_to_one_done_at_the_unit_goes_on():
+    doctor = _doctor(
+        "Dra. Ana",
+        [CENTRO, SUL],
+        types=_types("Consulta", "Exame"),
+        service_units={EXAME_ID: frozenset({CENTRO.id})},
+    )
+    appt = _appt(doctor)
+    result = await _step(
+        fr.STEP_EDIT_SERVICE, "Exame", appt=appt, doctors=[doctor], calendars={doctor.id: _Agenda()}
+    )
+    assert result.flow_step == fr.STEP_EDIT_CONFIRM
+    draft = _draft(result)
+    assert draft.current["service"] == "Exame"
+    assert draft.current["unit_id"] == str(CENTRO.id)
+
+
+async def test_without_marks_a_service_change_is_todays():
+    doctor = _doctor("Dra. Ana", [CENTRO, SUL], types=_types("Consulta", "Exame"))
+    appt = _appt(doctor)
+    result = await _step(
+        fr.STEP_EDIT_SERVICE, "Exame", appt=appt, doctors=[doctor], calendars={doctor.id: _Agenda()}
+    )
+    assert result.flow_step == fr.STEP_EDIT_CONFIRM
+    assert _draft(result).current["service"] == "Exame"
+
+
+async def test_a_new_doctor_moves_the_booking_to_the_unit_where_the_service_is_done():
+    """The new doctor attends CENTRO too, but does the service only at NORTE."""
+    new = _doctor(
+        "Dr. Beto",
+        [NORTE, CENTRO],
+        types=_types("Consulta"),
+        service_units={CONSULTA_ID: frozenset({NORTE.id})},
+    )
+    result, *_ = await _change_doctor(new)
+    assert result.flow_step == fr.STEP_EDIT_CONFIRM
+    assert _draft(result).current["unit_id"] == str(NORTE.id)
+
+
+async def test_a_new_doctor_who_does_the_service_at_no_open_unit_is_refused():
+    new = _doctor(
+        "Dr. Beto",
+        [NORTE, FECHADA],
+        types=_types("Consulta"),
+        service_units={CONSULTA_ID: frozenset({FECHADA.id})},
+    )
+    result, appt, *_ = await _change_doctor(new)
+    assert result.flow_step == fr.STEP_EDIT_MENU
+    assert result.bubbles[0].body == ae.EDIT_DOCTOR_SERVICE_NO_UNIT
+    draft = _draft(result)
+    assert draft.current["professional_id"] == appt["professional_id"]
+    assert draft.current["unit_id"] == str(CENTRO.id)
+
+
+async def test_a_service_picked_after_a_doctor_change_takes_the_unit_where_it_is_done():
+    old = _doctor("Dra. Ana", [CENTRO, SUL])
+    new = _doctor(
+        "Dr. Beto",
+        [NORTE, SUL],
+        types=_types("Exame"),
+        service_units={EXAME_ID: frozenset({SUL.id})},
+    )
+    appt = _appt(old)
+    calendars = {old.id: _Agenda(), new.id: _Agenda()}
+    listed = await _step(
+        fr.STEP_EDIT_DOCTOR, _tap(new), appt=appt, doctors=[old, new], calendars=calendars
+    )
+    assert listed.flow_step == fr.STEP_EDIT_SERVICE
+    assert _draft(listed).current["unit_id"] is None  # two units, nobody chose yet
+
+    picked = await _step(
+        fr.STEP_EDIT_SERVICE,
+        "Exame",
+        appt=appt,
+        doctors=[old, new],
+        calendars=calendars,
+        draft=_draft(listed),
+    )
+    assert _draft(picked).current["service"] == "Exame"
+    assert _draft(picked).current["unit_id"] == str(SUL.id)
+
+
+async def test_a_service_after_a_doctor_change_done_at_no_open_unit_undoes_the_change():
+    old = _doctor("Dra. Ana", [CENTRO, SUL])
+    new = _doctor(
+        "Dr. Beto",
+        [NORTE, FECHADA],
+        types=_types("Exame"),
+        service_units={EXAME_ID: frozenset({FECHADA.id})},
+    )
+    appt = _appt(old)
+    calendars = {old.id: _Agenda(), new.id: _Agenda()}
+    listed = await _step(
+        fr.STEP_EDIT_DOCTOR, _tap(new), appt=appt, doctors=[old, new], calendars=calendars
+    )
+    picked = await _step(
+        fr.STEP_EDIT_SERVICE,
+        "Exame",
+        appt=appt,
+        doctors=[old, new],
+        calendars=calendars,
+        draft=_draft(listed),
+    )
+    assert picked.flow_step == fr.STEP_EDIT_MENU
+    assert picked.bubbles[0].body == ae.EDIT_DOCTOR_SERVICE_NO_UNIT
+    draft = _draft(picked)
+    assert draft.current["professional_id"] == str(old.id)
+    assert draft.current["service"] == "Consulta"
+    assert draft.current["unit_id"] == str(CENTRO.id)
+    assert draft.changed() == []
+
+
+async def test_a_reschedule_keeps_the_unit_even_if_the_service_is_no_longer_done_there():
+    """Spec §9.4: an existing appointment is not invalidated - same service, same doctor,
+    new date at its own unit (CENTRO), although the service is now restricted to SUL."""
+    doctor = _doctor(
+        "Dra. Ana",
+        [CENTRO, SUL],
+        types=_types("Consulta"),
+        service_units={CONSULTA_ID: frozenset({SUL.id})},
+    )
+    agenda = _Agenda()
+    appt = _appt(doctor)
+    draft = ae.EditDraft.from_appointment(appt, TZ).with_stage(
+        mode="date",
+        target_day="2030-10-22",  # the next Tuesday
+    )
+    moved = await _step(
+        fr.STEP_EDIT_TIME_TOO,
+        ae.LABEL_TIME_TOO_NO,
+        appt=appt,
+        doctors=[doctor],
+        calendars={doctor.id: agenda},
+        draft=draft,
+    )
+    assert moved.flow_step == fr.STEP_EDIT_CONFIRM
+    assert agenda.log.checked_hours == [TUESDAY]
+    assert _draft(moved).current["unit_id"] == str(CENTRO.id)
+
+    # Picking the same service again is not a change: still at CENTRO, no refusal.
+    same = await _step(
+        fr.STEP_EDIT_SERVICE,
+        "Consulta",
+        appt=appt,
+        doctors=[doctor],
+        calendars={doctor.id: agenda},
+        draft=_draft(moved),
+    )
+    assert same.flow_step == fr.STEP_EDIT_CONFIRM
+
+    confirmed = await _step(
+        fr.STEP_EDIT_CONFIRM,
+        fr.LABEL_CONFIRM,
+        appt=appt,
+        doctors=[doctor],
+        calendars={doctor.id: agenda},
+        draft=_draft(same),
+    )
+    assert confirmed.appointment_edit is not None
+    assert "unit_id" not in confirmed.appointment_edit
+
+
+async def _ai(proposal, *, appt, doctors):
+    from secretaria.services import appointment_edit_flow as ef
+
+    draft = ae.EditDraft.from_appointment(appt, TZ)
+    ctx = ae.EditContext(calendars={str(d.id): _Agenda() for d in doctors})
+    return await ef.apply_ai_edit(
+        conversation(draft, fr.STEP_EDIT_MENU), tenant(), proposal, [appt], doctors, ctx
+    )
+
+
+async def test_an_ai_service_change_to_a_unit_where_it_is_not_done_is_not_drafted():
+    doctor = _doctor(
+        "Dra. Ana",
+        [CENTRO, SUL],
+        types=_types("Consulta", "Exame"),
+        service_units={EXAME_ID: frozenset({SUL.id})},
+    )
+    appt = _appt(doctor)
+    result = await _ai({"service": "Exame"}, appt=appt, doctors=[doctor])
+    assert _draft(result).current["service"] == "Consulta"
+    assert _draft(result).current["unit_id"] == str(CENTRO.id)
+
+
+async def test_an_ai_doctor_change_takes_the_unit_where_the_service_is_done():
+    old = _doctor("Dra. Ana", [CENTRO, SUL])
+    new = _doctor(
+        "Dr. Beto",
+        [NORTE, CENTRO],
+        types=_types("Consulta"),
+        service_units={CONSULTA_ID: frozenset({NORTE.id})},
+    )
+    appt = _appt(old)
+    result = await _ai({"professional": "Dr. Beto"}, appt=appt, doctors=[old, new])
+    assert _draft(result).current["professional_id"] == str(new.id)
+    assert _draft(result).current["unit_id"] == str(NORTE.id)

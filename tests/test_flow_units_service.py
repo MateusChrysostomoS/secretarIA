@@ -188,3 +188,36 @@ async def test_attach_unit_options_sets_service_units_one_query(db):
     assert len(snapshots[0].units) == 2
     assert fu.unit_choice(snapshots[0], limpeza.id).kind == "confirm"
     assert fu.unit_choice(snapshots[1], limpeza.id).kind == "list"
+
+
+# --- Final review (finding 1): the unit that follows a doctor change respects the service ----
+
+
+def test_unit_after_doctor_change_skips_a_kept_unit_where_the_service_is_not_done():
+    a, b = _unit("A"), _unit("B")
+    service = uuid4()
+    doctor = _doctor([a, b], {service: frozenset({b.id})})
+    assert fu.unit_after_doctor_change(doctor, a.id, None, service) == b.id
+    # Without the service (or an entry without service_id) it is today's rule: A is kept.
+    assert fu.unit_after_doctor_change(doctor, a.id, None) == a.id
+    assert fu.unit_after_doctor_change(doctor, a.id, None, None) == a.id
+
+
+def test_unit_after_doctor_change_with_no_open_unit_for_the_service_is_none():
+    a, closed = _unit("A"), _unit("Fechada", hours={})
+    service = uuid4()
+    doctor = _doctor([a, closed], {service: frozenset({closed.id})})
+    assert fu.unit_after_doctor_change(doctor, None, None, service) is None
+
+
+def test_unit_refused_only_for_a_restricted_service():
+    a, b, closed = _unit("A"), _unit("B"), _unit("Fechada", hours={})
+    service, other = uuid4(), uuid4()
+    doctor = _doctor([a, b, closed], {service: frozenset({b.id}), other: frozenset({closed.id})})
+    assert fu.unit_refused(doctor, a.id, service) is True
+    assert fu.unit_refused(doctor, b.id, service) is False
+    assert fu.unit_refused(doctor, None, service) is False  # B is open
+    assert fu.unit_refused(doctor, None, other) is True  # "0 unidades"
+    assert fu.unit_refused(doctor, a.id, uuid4()) is False  # no marks
+    assert fu.unit_refused(doctor, a.id, None) is False  # entry without service_id
+    assert fu.unit_refused(_doctor([]), None, service) is False  # no links

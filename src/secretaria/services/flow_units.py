@@ -234,19 +234,44 @@ def appointment_calendar(calendar: Any, unit_id: UUID | None, owner: Any | None)
 
 
 def unit_after_doctor_change(
-    professional: Any | None, current_unit_id: UUID | None, original_unit_id: UUID | None
+    professional: Any | None,
+    current_unit_id: UUID | None,
+    original_unit_id: UUID | None,
+    service_id: UUID | None = None,
 ) -> UUID | None:
     """The unit a booking keeps when its doctor changes to `professional`.
 
-    The current (then the original) unit if the new doctor attends it (an active link); else the
-    new doctor's only bookable unit; else none - with several units nobody chose one.
+    The current (then the original) unit if the new doctor attends it (an active link) AND does
+    `service_id` there; else the new doctor's only bookable unit for the service
+    (`units_for_service`); else none - with several units nobody chose one, with zero the caller
+    refuses (`unit_refused`). `service_id=None` (an entry without one) is no filter.
     """
-    offered = {unit.id for unit in offered_units(professional)}
+    allowed = allowed_unit_ids(service_units_of(professional), service_id)
+    offered = {
+        unit.id
+        for unit in offered_units(professional)
+        if allowed is None or unit.id in allowed
+    }
     for candidate in (current_unit_id, original_unit_id):
         if candidate is not None and candidate in offered:
             return candidate
-    units = bookable_units(professional)
+    units = units_for_service(professional, service_id)
     return units[0].id if len(units) == 1 else None
+
+
+def unit_refused(professional: Any | None, unit_id: UUID | None, service_id: UUID | None) -> bool:
+    """Whether a booking of `service_id` with `professional` at `unit_id` must be refused.
+
+    Only a restricted service is ever refused (no marks, no links or an entry without
+    `service_id` is today's behaviour): at a unit outside its set, or - with no unit on the
+    booking - when no bookable unit of the doctor does it (the "0 unidades" case).
+    """
+    allowed = allowed_unit_ids(service_units_of(professional), service_id)
+    if allowed is None:
+        return False
+    if unit_id is not None:
+        return unit_id not in allowed
+    return not units_for_service(professional, service_id)
 
 
 def unit_rows(units: list) -> list[tuple[str, str, str | None]]:
@@ -315,6 +340,7 @@ __all__ = [
     "union_hours",
     "unit_after_doctor_change",
     "unit_choice",
+    "unit_refused",
     "unit_choice_needed",
     "unit_confirm_body",
     "unit_rows",

@@ -137,6 +137,15 @@ EDIT_SERVICE_NO_ROOM = (
     "Esse serviço não cabe no horário atual da sua consulta e o limite de remarcações já foi "
     "atingido. Para trocar, fale com a clínica."
 )
+# TASK-083 final review (finding 1): a service is restricted to some of the doctor's units
+# (`professional_service_units`) - "Alterar Dados" never books it where it is not done.
+EDIT_SERVICE_NOT_AT_UNIT = (
+    "Esse serviço não é feito na unidade da sua consulta. Para trocar, fale com a clínica."
+)
+EDIT_DOCTOR_SERVICE_NO_UNIT = (
+    "Esse médico não faz esse serviço em nenhuma unidade disponível no momento. "
+    "Para trocar, fale com a clínica."
+)
 EDIT_LIMIT_NOTICE = (
     "O limite de remarcações dessa consulta foi atingido; "
     "para mudar data ou horário fale com a clínica."

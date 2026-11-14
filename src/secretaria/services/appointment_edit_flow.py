@@ -51,6 +51,7 @@ from secretaria.services.local_calendar import (
     create_event_exclusive,
     update_event_details_exclusive,
 )
+from secretaria.services.service_catalog import entry_service_id
 from secretaria.services.tenant_config import professional_appointment_types
 from secretaria.services.unit_booking import event_unit_fields
 
@@ -136,22 +137,82 @@ def _draft_unit(draft: ae.EditDraft, doctor) -> Any | None:
     return next((u for u in flow_units.offered_units(doctor) if u.id == unit_id), None)
 
 
-def _with_doctor(draft: ae.EditDraft, professional) -> ae.EditDraft:
+def _service_id(tenant, professional, name: str | None) -> UUID | None:
+    """The canonical id of `name` in `professional`'s own entries (spec §9.11), or None - no
+    unit restriction - when they do not offer it or the entry carries no `service_id`."""
+    if professional is None:
+        return None
+    entry = fr._match_service(professional_appointment_types(professional, tenant), name)
+    return entry_service_id(entry) if entry is not None else None
+
+
+def _with_doctor(
+    draft: ae.EditDraft, professional, service_id: UUID | None = None
+) -> ae.EditDraft:
     """The draft with `professional` as its doctor AND the unit that follows: back to the
-    original doctor -> the original unit; else `flow_units.unit_after_doctor_change`. A draft
-    that never had a unit and gets none stays byte-identical (no `unit_id` key)."""
+    original doctor -> the original unit (unless a NEW service is not done there); else
+    `flow_units.unit_after_doctor_change` for the draft's service (`service_id`, TASK-083 final
+    review). A draft that never had a unit and gets none stays byte-identical (no `unit_id`)."""
     new = draft.with_changes(professional_id=str(professional.id))
-    if str(professional.id) == draft.original["professional_id"]:
-        unit = _uuid(draft.original.get("unit_id"))
+    original_unit = _uuid(draft.original.get("unit_id"))
+    if str(professional.id) == draft.original["professional_id"] and (
+        draft.current["service"] == draft.original["service"]
+        or not flow_units.unit_refused(professional, original_unit, service_id)
+    ):
+        unit = original_unit
     else:
         unit = flow_units.unit_after_doctor_change(
             professional,
             _uuid(draft.current.get("unit_id")),
-            _uuid(draft.original.get("unit_id")),
+            original_unit,
+            service_id,
         )
     if unit is None and "unit_id" not in draft.current:
         return new
     return new.with_changes(unit_id=str(unit) if unit is not None else None)
+
+
+def _is_original_booking(draft: ae.EditDraft) -> bool:
+    """Same doctor, same service, same unit as the appointment: a pure reschedule. Spec §9.4 -
+    an existing appointment is never invalidated, even if its service left that unit since."""
+    cur, org = draft.current, draft.original
+    return (
+        cur["professional_id"] == org["professional_id"]
+        and cur["service"] == org["service"]
+        and cur.get("unit_id") == org.get("unit_id")
+    )
+
+
+def _unit_refused(draft: ae.EditDraft, doctor, service_id: UUID | None) -> bool:
+    """The draft would book its service at a unit where the doctor does not do it (spec §2
+    anti-objective). No marks / no links / an entry without `service_id` -> never."""
+    if _is_original_booking(draft):
+        return False
+    return flow_units.unit_refused(doctor, _uuid(draft.current.get("unit_id")), service_id)
+
+
+def _refuse(draft: ae.EditDraft, ctx: ae.EditContext, notice: str) -> fr.FlowRouterResult:
+    """Back to the edit menu with `draft` as it was, behind the one line that says why."""
+    menu = _menu_result(draft.with_stage(), ctx)
+    menu.bubbles.insert(0, TextBubble(body=notice))
+    return menu
+
+
+def _undo_doctor_change(draft: ae.EditDraft) -> ae.EditDraft:
+    """The draft with the appointment's own doctor, service and unit again (the length follows
+    the original service; the start the patient picked stays)."""
+    org = draft.original
+    length = datetime.fromisoformat(str(org["end_at"])) - datetime.fromisoformat(
+        str(org["start_at"])
+    )
+    undone = draft.with_changes(
+        professional_id=org["professional_id"],
+        service=org["service"],
+        end_at=_iso(draft.start + length),
+    )
+    if "unit_id" in draft.current or "unit_id" in org:
+        undone = undone.with_changes(unit_id=org.get("unit_id"))
+    return undone
 
 
 def _services_of(tenant, professional) -> list[dict]:
@@ -464,7 +525,8 @@ def _service_list(
 
 
 async def _service_step(conversation, tenant, body, draft, appt, professionals, ctx):
-    service = fr._match_service(_services_of(tenant, _doctor(professionals, draft)), body)
+    doctor = _doctor(professionals, draft)
+    service = fr._match_service(_services_of(tenant, doctor), body)
     if service is None:
         return fr._preserve(conversation, "delegate_llm")
     minutes = fr._service_duration(service, tenant)
@@ -473,6 +535,17 @@ async def _service_step(conversation, tenant, body, draft, appt, professionals, 
         service=str(service.get("name")),
         end_at=_iso(draft.start + timedelta(minutes=minutes)),
     ).with_stage()
+    # TASK-083 final review: never the service at a unit where it is not done. After a doctor
+    # change the unit was only derived (the doctor did not offer the old service): derive it
+    # again for THIS service. Otherwise the booking's unit stays and a service not done there
+    # is refused (the edit has no unit picker), keeping the old service.
+    service_id = entry_service_id(service)
+    if after_doctor and doctor is not None:
+        new = _with_doctor(new, doctor, service_id)
+    if _unit_refused(new, doctor, service_id):
+        if after_doctor:
+            return _refuse(_undo_doctor_change(draft), ctx, ae.EDIT_DOCTOR_SERVICE_NO_UNIT)
+        return _refuse(draft, ctx, ae.EDIT_SERVICE_NOT_AT_UNIT)
     if after_doctor or minutes != draft.duration_minutes:
         # A different length (or a new doctor) may not fit the current time: check first.
         return await _after_slot_affecting_change(
@@ -517,7 +590,9 @@ async def _doctor_list(draft, tenant, appt, professionals, ctx) -> fr.FlowRouter
         same = ctx.same_calendar(calendar_pid, draft.original_calendar_professional_id)
         ignore = own_event if same else None
         # Marked within the unit the booking would have with THIS doctor (TASK-083).
-        candidate = _with_doctor(draft, professional)
+        candidate = _with_doctor(
+            draft, professional, _service_id(tenant, professional, draft.current["service"])
+        )
         calendar = flow_units.appointment_calendar(
             ctx.calendar_for(calendar_pid),
             _uuid(candidate.current.get("unit_id")),
@@ -557,13 +632,17 @@ async def _doctor_step(conversation, tenant, body, draft, appt, professionals, c
     professional = fr._match_professional(professionals or [], body)
     if professional is None:
         return fr._preserve(conversation, "delegate_llm")
-    new = _with_doctor(draft, professional)
     service = fr._match_service(
-        professional_appointment_types(professional, tenant), new.current["service"]
+        professional_appointment_types(professional, tenant), draft.current["service"]
     )
+    service_id = entry_service_id(service) if service is not None else None
+    new = _with_doctor(draft, professional, service_id)
     if service is None:
         # The new doctor does not offer the current service: theirs next, then the check.
         return _service_list(new, tenant, professionals, ctx, after_doctor=True)
+    if _unit_refused(new, professional, service_id):
+        # The new doctor does this service at no bookable unit: the doctor stays as it was.
+        return _refuse(draft, ctx, ae.EDIT_DOCTOR_SERVICE_NO_UNIT)
     minutes = fr._service_duration(service, tenant)
     new = new.with_changes(end_at=_iso(new.start + timedelta(minutes=minutes))).with_stage()
     return await _after_slot_affecting_change(conversation, tenant, new, appt, professionals, ctx)
@@ -1139,6 +1218,13 @@ async def apply_ai_edit(conversation, tenant, proposal, appointments, profession
         new = new.with_changes(
             end_at=_iso(new.start + timedelta(minutes=fr._service_duration(service, tenant)))
         )
+        # TASK-083 final review: the unit follows the doctor FOR this service, and a service
+        # is never drafted at a unit where it is not done (same rule as the guided steps).
+        service_id = entry_service_id(service)
+        if proposal.get("professional"):
+            new = _with_doctor(new, doctor, service_id)
+        if _unit_refused(new, doctor, service_id):
+            return await unchanged()
     if proposal.get("insurance"):
         insurance = fr._match_insurance_plan(tenant, proposal["insurance"])
         if insurance is None and fr._says_no_insurance(proposal["insurance"]):
