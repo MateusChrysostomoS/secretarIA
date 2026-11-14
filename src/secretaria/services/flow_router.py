@@ -2949,7 +2949,12 @@ def _enter_professional_services(professional: Any, tenant: Tenant) -> FlowRoute
     return FlowRouterResult(
         action="reply",
         bubbles=[
-            _service_list_bubble(tenant, services, header=_professional_card_header(professional))
+            _service_list_bubble(
+                tenant,
+                services,
+                header=_professional_card_header(professional),
+                scope=service_scope(professional.id),
+            )
         ],
         flow_state=FlowState.SERVICE_CATALOG,
         flow_step=STEP_AWAITING_SERVICE,
