@@ -3,9 +3,9 @@
     "repository":  "secretarIA",
     "repository_path":  "C:\\TECH\\BRAIN\\secretarIA",
     "branch":  "main",
-    "commit":  "e352978e716ea3f54b5d3666168cdabaed915dd8",
-    "generated_at":  "2026-10-28T02:06:15.7448848Z",
+    "commit":  "567c94ff0c60a2d0267324e1eeef822319030744",
+    "generated_at":  "2026-11-14T16:32:47.5532178Z",
     "graphify_version":  "0.9.5",
     "graph_schema":  "networkx-node-link (unversioned upstream)",
-    "graph_sha256":  "24945709805dc778e9e23b1e6a1a39c3d2a83b0f1895d2a3557b5832fa39eb63"
+    "graph_sha256":  "074554141e05b0100f89bba0f768788900235d374b23811fb7127c960ca9339a"
 }
