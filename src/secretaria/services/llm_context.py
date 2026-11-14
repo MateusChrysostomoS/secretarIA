@@ -143,10 +143,14 @@ def _doctor_label(professional) -> str:
     return f"{professional.name} ({specialty})" if specialty else str(professional.name)
 
 
+# First in the topology on purpose: `prompts_v2._bounded_state` cuts the block at a line
+# boundary when it is too long, so what must survive comes before the (long) roster.
 _UNIT_GUIDANCE = (
-    "- Ofereça só as combinações acima; se o paciente quiser outra unidade, diga em quais "
-    "o serviço é feito com esse médico ou quais médicos fazem o serviço lá."
+    "- Ofereça só as combinações médico × unidade × serviço listadas a seguir; se o paciente "
+    "quiser outra unidade, diga em quais o serviço é feito com esse médico ou quais médicos "
+    "fazem o serviço lá."
 )
+_NO_OPEN_UNIT_SERVICE = "sem serviço em unidade aberta no momento"
 
 
 def _unit_label(unit) -> str:
@@ -154,13 +158,25 @@ def _unit_label(unit) -> str:
     return f"{unit.name} ({address})" if address else str(unit.name)
 
 
+def _units_line(roster) -> str | None:
+    """ "- Unidades: Sede (Rua A, 1) | Centro (Av. B, 2)": every bookable unit of the roster,
+    each address ONCE (the doctors' lines then carry only unit names), or None without any."""
+    seen: dict = {}
+    for professional in roster:
+        for unit in flow_units.bookable_units(professional):
+            seen.setdefault(unit.id, _unit_label(unit))
+    return "- Unidades: " + " | ".join(seen.values()) if seen else None
+
+
 def _services_by_unit(professional, tenant) -> str | None:
-    """ "Sede (Rua A, 1): Consulta, Retorno | Centro (Av. B, 2): Retorno", or None.
+    """ "Sede: Consulta, Retorno | Centro: Retorno", or None.
 
     None when the professional has no bookable unit (the clinic's text stays exactly today's
     for them). Per unit only the services done THERE (`flow_units.units_for_service`: a service
     without `service_id` or without marks is done at every unit of the doctor); a unit where
-    nothing is done is left out. Built from the roster snapshot - no query.
+    nothing is done is left out; a doctor whose services are all restricted to closed units has
+    no service to offer now (never the plain service list, which would imply they are bookable).
+    Built from the roster snapshot - no query.
     """
     units = flow_units.bookable_units(professional)
     if not units:
@@ -173,41 +189,34 @@ def _services_by_unit(professional, tenant) -> str | None:
             continue
         for unit in flow_units.units_for_service(professional, entry_service_id(entry)):
             per_unit[unit.id].append(str(name))
-    parts = [
-        f"{_unit_label(unit)}: {', '.join(per_unit[unit.id])}"
-        for unit in units
-        if per_unit[unit.id]
-    ]
-    return " | ".join(parts) or None
+    parts = [f"{unit.name}: {', '.join(per_unit[unit.id])}" for unit in units if per_unit[unit.id]]
+    return " | ".join(parts) or _NO_OPEN_UNIT_SERVICE
 
 
 def _topology_lines(tenant, professionals) -> list[str]:
     roster = list(professionals or [])
     if tenant is None or not hasattr(tenant, "appointment_types"):
         return []
-    has_units = False
+    units_line = _units_line(roster) if len(roster) >= 1 else None
+    preamble = [_UNIT_GUIDANCE, units_line] if units_line is not None else []
     if len(roster) > 1:
         lines = ["- A clínica tem vários médicos. Especialidade e serviços de cada um:"]
         for professional in roster:
             by_unit = _services_by_unit(professional, tenant)
             if by_unit is not None:
-                has_units = True
                 lines.append(f"  - {_doctor_label(professional)}: {by_unit}")
                 continue
             names = _service_names(fr.professional_appointment_types(professional, tenant))
             lines.append(
                 f"  - {_doctor_label(professional)}: {names or 'sem serviços cadastrados'}"
             )
-        if has_units:
-            lines.append(_UNIT_GUIDANCE)
-        return lines
+        return preamble + lines
     if len(roster) == 1:
         by_unit = _services_by_unit(roster[0], tenant)
         if by_unit is not None:
-            return [
+            return preamble + [
                 f"- A clínica atende com um só médico: {_doctor_label(roster[0])}. "
-                f"Unidades e serviços: {by_unit}.",
-                _UNIT_GUIDANCE,
+                f"Unidades e serviços: {by_unit}."
             ]
         names = _service_names(fr.professional_appointment_types(roster[0], tenant))
         return [

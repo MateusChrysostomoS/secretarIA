@@ -328,14 +328,21 @@ def test_topology_lists_units_and_services_per_doctor():
     bruno = _doctor_at("Dr. Bruno", ["Retorno"], [centro])
     text = build_conversation_state(_conversation(), _tenant(), [ana, bruno])
     assert (
-        "  - Dra. Ana (Oftalmologia): Unidade Sede (Rua das Flores, 100): Consulta, Retorno"
-        " | Unidade Centro (Av. Brasil, 50): Retorno"
+        "- Unidades: Unidade Sede (Rua das Flores, 100) | Unidade Centro (Av. Brasil, 50)"
     ) in text
-    assert "  - Dr. Bruno: Unidade Centro (Av. Brasil, 50): Retorno" in text
     assert (
-        "- Ofereça só as combinações acima; se o paciente quiser outra unidade, diga em quais "
-        "o serviço é feito com esse médico ou quais médicos fazem o serviço lá."
+        "  - Dra. Ana (Oftalmologia): Unidade Sede: Consulta, Retorno | Unidade Centro: Retorno"
     ) in text
+    assert "  - Dr. Bruno: Unidade Centro: Retorno" in text
+    # Each address once, never repeated in the doctors' lines.
+    assert text.count("Rua das Flores, 100") == 1 and text.count("Av. Brasil, 50") == 1
+    assert (
+        "- Ofereça só as combinações médico × unidade × serviço listadas a seguir; se o "
+        "paciente quiser outra unidade, diga em quais o serviço é feito com esse médico ou "
+        "quais médicos fazem o serviço lá."
+    ) in text
+    # The guidance and the units come BEFORE the roster (the bounded state cuts from the end).
+    assert text.index("Ofereça só") < text.index("- Unidades:") < text.index("vários médicos")
 
 
 def test_topology_service_without_marks_in_every_unit():
@@ -348,7 +355,7 @@ def test_topology_service_without_marks_in_every_unit():
     )
     other = _doctor_at("Dr. Bruno", ["Limpeza"], [sede])
     text = build_conversation_state(_conversation(), _tenant(), [ana, other])
-    assert "Sede (Rua A, 1): Consulta, Avulso | Centro (Rua B, 2): Consulta, Avulso" in text
+    assert "Sede: Consulta, Avulso | Centro: Consulta, Avulso" in text
 
 
 def test_topology_ignores_a_unit_without_open_hours():
@@ -392,9 +399,10 @@ def test_single_doctor_topology_with_units():
     text = build_conversation_state(_conversation(), _tenant(), [ana])
     assert (
         "- A clínica atende com um só médico: Dra. Ana (Oftalmologia). "
-        "Unidades e serviços: Sede (Rua A, 1): Consulta, Retorno | Centro (Rua B, 2): Retorno."
+        "Unidades e serviços: Sede: Consulta, Retorno | Centro: Retorno."
     ) in text
-    assert "Ofereça só as combinações acima" in text
+    assert "- Unidades: Sede (Rua A, 1) | Centro (Rua B, 2)" in text
+    assert "Ofereça só as combinações" in text
 
 
 def test_edit_state_names_current_unit():
@@ -413,3 +421,40 @@ def test_edit_state_names_current_unit():
     # No unit on the draft: the line is absent (today's text).
     conv.flow_edit_draft = {"current": {"service": "Consulta", "start_at": "2030-10-15T16:00"}}
     assert "Unidade atual" not in build_conversation_state(conv, _tenant(), [ana])
+
+
+def test_a_doctor_with_every_service_on_closed_units_has_none_to_offer():
+    sede = _unit("Sede", "Rua A, 1")
+    closed = _unit("Fechada", "Rua C, 3", hours={})
+    # Consulta is restricted to the closed unit: nothing is bookable for her right now.
+    ana = _doctor_at("Dra. Ana", ["Consulta"], [sede, closed], restrict={"Consulta": [closed]})
+    bruno = _doctor_at("Dr. Bruno", ["Retorno"], [sede])
+    text = build_conversation_state(_conversation(), _tenant(), [ana, bruno])
+    assert "  - Dra. Ana: sem serviço em unidade aberta no momento" in text
+    assert "Dra. Ana: Consulta" not in text
+    assert "Fechada" not in text
+    single = build_conversation_state(_conversation(), _tenant(), [ana])
+    assert "Unidades e serviços: sem serviço em unidade aberta no momento." in single
+
+
+def test_the_unit_guidance_survives_the_bounded_state_on_a_large_clinic():
+    from secretaria.ai.prompts_v2 import STATE_MAX_CHARS, _bounded_state
+
+    units = [
+        _unit(f"Unidade {n}", f"Rua Muito Longa Numero {n}, {n}00 - Bairro Distante")
+        for n in range(3)
+    ]
+    doctors = [
+        _doctor_at(
+            f"Dr. Fulano de Tal Numero {n}",
+            [f"Serviço com nome comprido {m}" for m in range(8)],
+            units,
+            specialty="Oftalmologia Geral",
+        )
+        for n in range(15)
+    ]
+    text = build_conversation_state(_conversation(), _tenant(), doctors)
+    assert len(text) > STATE_MAX_CHARS  # the synthetic roster really overflows
+    bounded = _bounded_state(text)
+    assert "Ofereça só as combinações médico × unidade × serviço" in bounded
+    assert "- Unidades: " in bounded
