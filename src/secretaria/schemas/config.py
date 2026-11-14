@@ -19,6 +19,7 @@ from secretaria.core.whatsapp_limits import (
     MAX_INTERACTIVE_BODY_CHARS,
 )
 from secretaria.schemas.clinic_facts import ClinicFacts
+from secretaria.schemas.operating_channel import OperatingChannel
 
 # Convention: lowercase English weekday names, Monday-first.
 WEEKDAYS: tuple[str, ...] = (
@@ -368,6 +369,13 @@ class TenantConfigRead(BaseModel):
     # Read-only here: the clinic's operational e-mail (payment/booking/handoff alerts). The only
     # writer is PATCH /tenants/me/contact-email, so a config save can never clobber it.
     contact_email: str | None = None
+    # TASK-084, read-only here: where the secretarIA serves this clinic's patients, and the
+    # channels it may choose right now (released ones only, fixed order). The only writer is
+    # PATCH /tenants/me/operating-channel; a config save never touches it.
+    operating_channel: OperatingChannel = "brain_message"
+    available_operating_channels: list[OperatingChannel] = Field(
+        default_factory=lambda: ["brain_message"]
+    )
     # The clinic's own slot in the greeting frame, plus everything the hub UI
     # needs to show the clinic exactly what its patients will receive WITHOUT
     # re-typing the frame in TypeScript. `greeting_preview_template` is the
