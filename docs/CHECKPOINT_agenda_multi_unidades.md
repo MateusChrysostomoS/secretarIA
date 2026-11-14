@@ -2,7 +2,9 @@
 
 Estado (2026-11-13): **pronto e validado, só LOCAL. Commitado na branch `task/TASK-083-multi-unidades`
 (worktree `BRAIN-worktrees/TASK-083/secretarIA`); NÃO foi para `main`, NÃO houve push, NÃO foi deployado.**
-Deploy e push só a pedido do dono. Registro central: `../tasks/TASK-083/TASK.md` (raiz de BRAIN). Pares:
+Deploy e push só a pedido do dono.
+**Follow-up 2026-11-14 (serviço × médico × unidade, e-mail à clínica, botão "Sincronizar agenda" removido): ver a seção
+"Serviço × médico × unidade" abaixo — também só LOCAL; migração nova `c6e1a9f4d2b7`.** Registro central: `../tasks/TASK-083/TASK.md` (raiz de BRAIN). Pares:
 `brain-api` (1 rota interna, `docs/CHECKPOINT_agenda_multi_unidades.md` de lá) e `Brain-Message-Frontend`
 (telas, `docs/CHECKPOINT_agenda_multi_unidades.md` de lá). Spec (autoridade):
 `docs/superpowers/specs/2026-11-12-multi-unidades-agenda-compartilhada-design.md`; plano:
@@ -198,7 +200,9 @@ código antigo não as conhece — limpe `status = 'google_lease'` se ficar inc�
 
 ## Como reconciliar / operar
 
-- Hub: botão "Sincronizar agenda" (gestor) = `POST /tenants/me/agendas/sync`.
+- Hub: `POST /tenants/me/agendas/sync` (gestor) continua no servidor, mas **o botão "Sincronizar agenda" saiu do Portal**
+  (2026-11-14, ver "Serviço × médico × unidade"): uso só de suporte/ops (chamada direta); no dia a dia a ligação é
+  automática (vínculo + cron de 15 min).
 - Script: `uv run python scripts/reconcile_agendas.py [--dry-run]` — todos os tenants com profissionais, idempotente,
   um tenant com falha é registrado e pulado; imprime só contagens e ids de tenant (nenhum nome/conta/paciente).
 - Cron: ver acima; log `agenda_reconcile_cron_tick` (contagens) e `agenda_sync_done` por tenant (`linked`, `shared`,
@@ -270,6 +274,79 @@ rodam depois de suítes de plugin no mesmo processo (`ANTHROPIC_API_KEY` ausente
 vermelho no HEAD (não rodar `ruff format .`); `alembic check` acusa drift em tabelas antigas (`booking_holds`,
 `processed_asaas_events`, `professional_insurance_plans`, `tenant_credentials`).
 
+## Serviço × médico × unidade (follow-up 2026-11-14)
+
+Estado: **LOCAL** (commits na branch `task/TASK-083-multi-unidades`; fora de `main`, sem push, sem deploy). Spec:
+`docs/superpowers/specs/2026-11-14-servico-por-unidade-design.md` (as "decisões minhas" 1–14 da §9 são requisitos);
+plano: `docs/superpowers/plans/2026-11-14-servico-por-unidade.md`. Registro e prova:
+`../tasks/TASK-083/results/servico-por-unidade.md` (capturas em `../tasks/TASK-083/evidencias/servico-por-unidade/`).
+
+**O que mudou para o paciente.** Depois de escolher serviço e médico, o paciente só vê as unidades onde **aquela
+combinação médico + serviço** é feita (WhatsApp e Portal usam o mesmo roteador; as ferramentas da IA e todo caminho de
+escrita iniciado pelo paciente respeitam a regra):
+
+- 2+ unidades permitidas: a lista de hoje, só com as permitidas.
+- Médico que atende em 2+ unidades e o filtro deixa **1**: passo de confirmação com os botões fixos `✅ Sim` / `❌ Não`
+  e o texto exato "O serviço {serviço} feito por {médico} é feito apenas na unidade {unidade}, em {endereço}. Você
+  confirma essa unidade?". Sim → dias daquela unidade (`flow_selected_unit_id`); Não → lista de médicos **que fazem o
+  serviço** (sem o médico recusado; clínica de um médico só, ou só um faz o serviço → lista de serviços).
+- Médico com 1 unidade só, ou sem nenhuma marcação: fluxo de antes, byte a byte (sem pergunta).
+- 0 unidades válidas (marcada(s) fechada(s)/desativada(s)): o serviço **não** some da lista (a clínica precisa ver o
+  problema); o paciente recebe "Não consegui seguir com {serviço} com {médico} agora. Avisei a clínica." e volta à lista
+  de médicos/serviços; a clínica recebe e-mail (abaixo).
+
+**Dados.** Tabela `professional_service_units(professional_id, service_id, unit_id, created_at; PK das três; FK CASCADE)`,
+migração **`c6e1a9f4d2b7`** (aditiva; `down_revision = b5d9e3f7a1c4`). Regra: sem linhas para (profissional, serviço) =
+vale em todas as unidades do médico; com linhas = só nelas (∩ unidades reserváveis); "nenhuma" nunca é gravado; entrada
+de serviço sem `service_id` = sem restrição e não aparece para marcar. Domínio em `services/professional_service_units.py`
+(`read_marks_for`, `allowed_unit_ids`, `apply_marks`); escolha de unidade em `services/flow_units.py`
+(`unit_choice`/`UnitChoice`, `units_for_service`); passo Sim/Não em `services/flow_router.py`.
+
+**Hub (mesmas permissões de `professional_units`).** `GET/PUT /tenants/me/professionals/{pid}/units` agora leva
+`services` (catálogo ativo com `service_id`) e `service_marks` (só os serviços restritos). O `PUT` é **uma chamada
+atômica**: `links` + horários + `service_marks` (o estado desejado completo) numa transação; `service_marks: null` =
+só vínculos (marcas intactas). Erros: **422** `service_without_unit` (desvincular a única unidade de um serviço
+restrito; olha os VÍNCULOS, não o horário), 422 `unit_not_linked` (unidade da mesma clínica não vinculada ao médico),
+**404** para unidade de outra clínica (igual a inexistente), 409 em `PUT`s simultâneos do mesmo profissional.
+O encaixe da equipe no hub **só avisa**, não bloqueia; remarcar mantém a unidade da consulta.
+
+**E-mail à clínica (0 unidades).** `services/no_unit_notice.py` + `services/email.py::send_no_unit_alert`: destino
+`Tenant.contact_email`; link `{BRAIN_MESSAGE_PUBLIC_URL sem barra final}/contexto/?prof=<professional_id>`; no máximo
+**1 por dia** por (clínica, médico, serviço) (contador Redis `no_unit_mail:...`, dia local da clínica, TTL 48 h,
+compartilha `within_daily_cap` com o aviso de falha do sinal); sem dado de paciente, canal ou telefone. Sem e-mail
+configurado, Redis fora ou SMTP falhando ⇒ só log sem PII (e o dia é liberado em falha de envio); o fluxo do paciente
+nunca quebra. Precisa de `SMTP_HOST` etc. na **API e no worker** (o efeito roda no worker).
+
+**Portal (`Brain-Message-Frontend`, `/contexto`).** Seção "Locais de atendimento" → **"Unidades"** (botão recolhível
+**"Unidades ▾"**, recolhido por padrão, resumo "N unidades"); dentro de cada unidade ligada, sempre visível: horário
+(geral/próprio) e **"Serviços feitos aqui"** (uma caixa por serviço ativo com `service_id`; todas marcadas = nada
+gravado); não deixa desmarcar tudo (dica: desligue o serviço em "Serviços oferecidos"); salvar = **"Salvar unidades"**.
+**Saiu o botão "Sincronizar agenda"** (e `onSync`/`api.sync`/estado/textos/testes); ficou o selo "Agenda
+compartilhada". A rota `POST /tenants/me/agendas/sync` do servidor **permanece** (suporte/ops, sem UI) — quem liga as
+agendas é o vínculo do profissional (`try_link_professional`) + o cron de 15 min do **worker**; por isso o worker é
+obrigatório no deploy.
+
+**ORDEM DE DEPLOY deste follow-up** (informativa; não deployado): **(1)** migração `c6e1a9f4d2b7` (`alembic upgrade head`
+da imagem nova, com os serviços ainda no código antigo; é inerte para o código antigo) → **(2)** secretarIA **API E
+worker** juntos (`GET /build` com paridade `match`; o worker roda o fluxo e envia o e-mail) → **(3)** Brain-Message-Frontend.
+Nenhuma mudança em brain-api. Rollback: código antigo nos dois serviços, depois `alembic downgrade -1` (perde só as
+marcas de serviço × unidade; o paciente volta a ver todas as unidades do médico).
+
+**Pendências deferidas (Minor, nenhuma bloqueia):**
+- O hub avisa mas **nenhum cliente envia** `service_id` na criação de consulta (campo `AppointmentCreate.service_id`
+  dormente; o caminho de edição não avisa) — depende de mudança futura no Portal.
+- Caminho de rascunho da IA (`booking_draft`): ao cair na lista de unidades / Sim-Não perde o dia/horário já
+  capturado; no caso 0 unidades a IA mantém o médico antigo selecionado na lista (sem teste do caminho da IA).
+- `get_availability`/`list_free_slots` da IA não são limitados às unidades válidas (a escrita é bloqueada por
+  `check_unit`); `create_event` sem guarda na leitura de `sole_professional_row`.
+- `GET` devolve marcas de serviço já não oferecido (o front descarta); texto sem endereço
+  (`UNIT_CONFIRM_BODY_NO_ADDRESS`) precisa do OK do dono; `reoffer`/`_booking_back_target` derivam a lista de serviços
+  de forma ligeiramente diferente de `_catalog_step`.
+- E-mail à clínica parafraseia o motivo da spec §6.3; falha de SMTP prolongada custa até ~15 s por turno; import
+  privado `_tenant_tz` de `deposit_lifecycle`.
+- Front: dica do último serviço sem `aria-describedby`/`aria-controls` no recolhível; "Locais de atendimento" ainda em
+  comentários de 5 arquivos fora de escopo.
+
 ## Testes
 
 Arquivos novos (SQLite em memória, `BOT_ALLOWLIST_WA_IDS=""`): `test_agenda_characterization` (fixa o
@@ -293,6 +370,14 @@ comportamento sem agenda), `test_agenda_models`, `test_migration_multi_unit_agen
   clínicas na mesma agenda, backends local, Google falso e misto, nos modos `in_process` e `cross_process`: exatamente
   1 vencedor por janela; linking concorrente = 1 linha `Agenda`; controles negativos (sem os locks aparece mais de um
   vencedor) são permanentes.
+- **Follow-up serviço × unidade (HEAD `a914c71`, 2026-11-14; `../tasks/TASK-083/results/servico-por-unidade.md`):**
+  suíte secretarIA completa em lotes **8162 passed, 100 skipped, 1 xfailed, 3 failed** — as 3 falhas são idênticas no
+  baseline `c9e05f8` (2× `test_service_change_agenda` UTC; `test_get_availability_tool` ordem-dependente, sem
+  `ANTHROPIC_API_KEY`), 0 regressões; ruff limpo nos `.py` tocados; frontend 235 arquivos / 3531 testes, tsc e build
+  verdes. Navegador real (agent-browser) + coletor SMTP local: /contexto (marcar, salvar, recarregar, última unidade
+  bloqueada, desvincular recusado), chat do Portal (Sim/Não com o texto exato, lista de 2 unidades, 0 unidades ⇒ aviso
+  + exatamente 1 e-mail por dia) — 13/13 verificações PASS; capturas em
+  `../tasks/TASK-083/evidencias/servico-por-unidade/`.
 - **E2E real** (`../tasks/TASK-083/results/validacao-e2e.md`, harness local descartável, 31+ capturas em
   `../tasks/TASK-083/evidencias/`): API 22/22, navegador 13/15 → as 2 falhas (UX baixa: listas de Unidades/Locais
   desatualizadas entre si; editor de horário próprio cortado em 375 px) foram corrigidas no frontend e reverificadas
