@@ -579,3 +579,5 @@ TASK-034: Portal visit discard on account promotion; local validation and deploy
 `docs/TESTES_REAIS_p4_posdeploy_2026-10-07.md` — TASK-030: código P4 comprovado em API/worker, Portal cartões/desistência PASS; ai_draft_v2=false, disponibilidade natural/remarcação textual ainda limitadas; P5 antes de ativar, WhatsApp real pendente.
 
 TASK-042: descarte de visita vazia (`POST /internal/brain-message/visits/discard`) e espera de código de conta conhecida que não cai mais no LGPD: `docs/CHECKPOINT_retencao_visitas_portal.md`. Local, não deployado.
+
+TASK-082: listas longas — Portal com rolagem + busca (ponteiro do cartão, rota de opções, toque em linha carregada depois), WhatsApp com páginas de 8 + "Ver mais", limites no cadastro; mesclado no `main` local, sem deploy (API + worker primeiro): `docs/CHECKPOINT_listas_paginadas.md`.
