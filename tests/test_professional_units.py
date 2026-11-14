@@ -174,7 +174,7 @@ async def test_get_lists_every_active_unit_with_linked_flag(client, world):
     response = await client.get(_url(w["doctor"]), headers=HEADERS)
     assert response.status_code == 200, response.text
     body = response.json()
-    assert set(body) == {"units"}
+    assert set(body) == {"units", "services", "service_marks"}  # T2: marks ride along
     rows = _by_unit(body)
     assert set(rows) == {str(w["centro"].id), str(w["norte"].id), str(w["sul"].id)}
     centro = rows[str(w["centro"].id)]

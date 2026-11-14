@@ -49,12 +49,49 @@ class ProfessionalUnitLink(BaseModel):
         }
 
 
+class ServiceUnitMark(BaseModel):
+    """A service restricted to these units (TASK-083 follow-up): done ONLY there.
+
+    A service without a mark is done at every unit of the professional. A mark always lists at
+    least one unit: "none" is never stored. Used both in the PUT body and in the GET answer.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    service_id: str = Field(min_length=1, max_length=64)
+    unit_ids: list[str] = Field(min_length=1, max_length=100)
+
+    @field_validator("service_id")
+    @classmethod
+    def _canonical_service_id(cls, value: str) -> str:
+        try:
+            return str(UUID(value))
+        except ValueError:
+            raise ValueError("service_id must be a UUID") from None
+
+
 class ProfessionalUnitsUpdate(BaseModel):
-    """PUT body: the whole wanted set (empty list = no links)."""
+    """PUT body: the whole wanted set (empty list = no links).
+
+    `service_marks` is the COMPLETE wanted restriction state: a service absent from it is done at
+    every unit; `null`/omitted leaves the stored marks alone (links-only save).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     links: list[ProfessionalUnitLink] = Field(max_length=100)
+    service_marks: list[ServiceUnitMark] | None = Field(default=None, max_length=500)
+
+    @field_validator("service_marks")
+    @classmethod
+    def _no_duplicate_services(
+        cls, value: list[ServiceUnitMark] | None
+    ) -> list[ServiceUnitMark] | None:
+        if value is not None:
+            ids = [mark.service_id for mark in value]
+            if len(ids) != len(set(ids)):
+                raise ValueError("a service can appear only once in service_marks")
+        return value
 
     @field_validator("links")
     @classmethod
@@ -77,5 +114,16 @@ class ProfessionalUnitRead(BaseModel):
     business_hours: dict | None
 
 
+class ProfessionalServiceRead(BaseModel):
+    """A service of the professional's active catalog (the ones a mark can be put on)."""
+
+    service_id: str
+    name: str
+
+
 class ProfessionalUnitsRead(BaseModel):
     units: list[ProfessionalUnitRead]
+    # The professional's active catalog services that have a `service_id` ...
+    services: list[ProfessionalServiceRead] = []
+    # ... and, of those, the RESTRICTED ones with their units (the rest mean "every unit").
+    service_marks: list[ServiceUnitMark] = []
