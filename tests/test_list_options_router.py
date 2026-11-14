@@ -107,6 +107,23 @@ def test_doctor_service_list_points_at_that_doctors_catalogue() -> None:
     _assert_rebuilds(bubble, tenant, doctors)
 
 
+def test_the_doctor_tap_turn_sends_that_doctors_list_with_its_pointer() -> None:
+    """S7 browser find: the REAL entry after a doctor tap (also the LLM hand-back,
+    `select_professional_and_continue`) must carry the pointer, or the Portal gets
+    the WhatsApp page (8 + "Ver mais serviços", no search) for every multi-doctor clinic."""
+    tenant, doctors = _tenant(), _doctors(2)
+    result = fr._enter_professional_services(doctors[0], tenant)
+    [bubble] = result.bubbles
+    assert bubble.source is not None
+    assert bubble.source.kind == "service"
+    assert bubble.source.scope == {"list": "doctor", "professional_id": str(doctors[0].id)}
+    assert bubble.source.pinned == [fr.SERVICE_HELP_ROW]
+    _assert_rebuilds(bubble, tenant, doctors)
+    # The doctor's presentation still heads the card; WhatsApp rows unchanged.
+    assert bubble.body.endswith("Qual serviço você gostaria de agendar?")
+    _whatsapp_titles_still_cut(bubble)
+
+
 def test_a_service_list_without_a_scope_stays_a_plain_list() -> None:
     bubble = fr._service_list_bubble(_tenant(), _services(3))
     assert bubble.source is None

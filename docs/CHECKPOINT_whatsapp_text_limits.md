@@ -407,9 +407,13 @@ pré-existentes** (as mesmas 2 de `test_service_change_agenda`, que falham tamb�
 6. **`ServiceCard` não foi visto rodando.** O caminho está coberto por teste e o
    `HelpTip` tem precedente idêntico em `AvailabilitySection`, mas ninguém olhou
    o card com o "?" na tela — precisa de um hub com backend de verdade.
-7. **§6 (TASK-082 S4) commitado só localmente.** Toca `flow_router.py` e
+7. **§6 (TASK-082 S4) mesclado no `main` local (S7, 2026-11-14), sem push.** Toca `flow_router.py` e
    `appointment_edit_flow.py` (worker) e as rotas do hub (API) → deploy dos **dois**
-   serviços. Não testado num número de WhatsApp real.
+   serviços. Não testado num número de WhatsApp real. Visão geral: `CHECKPOINT_listas_paginadas.md`.
+8. **Corte de 24 pode igualar dois nomes** que só diferem depois do 23º caractere ("Avaliação para cirurgia…"
+   ×2): o toque do WhatsApp chega como o título visível e o segundo agenda o primeiro. Já valia dentro das 9
+   linhas do `main`; com a paginação (§6) vale em qualquer página. Aberto — decisão do dono
+   (`CHECKPOINT_listas_paginadas.md` Pendências 1).
 
 Padrão generalizado na skill `third-party-text-limits`
 (`TECH/.claude/skills/third-party-text-limits/SKILL.md`).
