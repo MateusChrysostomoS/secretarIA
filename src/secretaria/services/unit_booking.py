@@ -31,6 +31,7 @@ from secretaria.models.professional import Professional
 from secretaria.models.professional_unit import ProfessionalUnit
 from secretaria.models.unit import Unit
 from secretaria.services import professional_units
+from secretaria.services.professional_service_units import read_marks_for
 from secretaria.services.tenant_config import professional_business_hours
 
 logger = get_logger(__name__)
@@ -228,11 +229,16 @@ async def attach_unit_options(
 
     `professional_rows` are the ORM rows (their hours resolve the NULL links); `snapshots` the
     router-shaped copies (workers/shared/greeting.py::_flow_professionals) that travel into the
-    pure router. A snapshot without units gets `[]`: the flow is then exactly today's.
+    pure router. A snapshot without units gets `[]`: the flow is then exactly today's. Each also
+    gets `service_units` (`{service_id: unit ids}`, `{}` when nothing is restricted), read for the
+    whole roster in ONE query (services/professional_service_units.py::read_marks_for).
     """
-    options = await unit_options_for(session, tenant, list(professional_rows))
+    rows = list(professional_rows)
+    options = await unit_options_for(session, tenant, rows)
+    marks = await read_marks_for(session, [row.id for row in rows])
     for snapshot in snapshots:
         snapshot.units = options.get(snapshot.id, [])
+        snapshot.service_units = marks.get(snapshot.id, {})
 
 
 def scoped_calendar(calendar: Any, unit: Any | None, *, with_hours: bool = True) -> Any:

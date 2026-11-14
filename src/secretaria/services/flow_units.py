@@ -16,7 +16,8 @@ The step's rendering and its hooks live in services/flow_router.py (`_enter_unit
 from __future__ import annotations
 
 import re
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 from uuid import UUID
 
 from secretaria.core.whatsapp_limits import (
@@ -27,6 +28,7 @@ from secretaria.core.whatsapp_limits import (
     truncate_list_row_title,
     truncate_plain,
 )
+from secretaria.services.professional_service_units import allowed_unit_ids
 from secretaria.services.unit_booking import scoped_calendar
 
 STEP_AWAITING_UNIT = "awaiting_unit"
@@ -60,15 +62,71 @@ def bookable_units(professional: Any | None) -> list:
     return [unit for unit in offered_units(professional) if getattr(unit, "business_hours", None)]
 
 
-def unit_choice_needed(professional: Any | None) -> bool:
-    """Two or more bookable units: the patient has to pick one."""
-    return len(bookable_units(professional)) > 1
+def service_units_of(professional: Any | None) -> dict[UUID, frozenset[UUID]]:
+    """The professional's restricted services `{service_id: unit ids}` (getattr: older snapshots
+    predate the field). A service absent from it is done at every unit they attend."""
+    if professional is None:
+        return {}
+    return getattr(professional, "service_units", None) or {}
 
 
-def find_unit(professional: Any | None, unit_id: UUID | None) -> Any | None:
+def units_for_service(professional: Any | None, service_id: UUID | None) -> list:
+    """The bookable units where `service_id` is done: bookable AND allowed for the service.
+
+    `service_id=None` (no service picked yet, or an entry without one) is no filter: exactly
+    `bookable_units`. A restriction whose units are all closed/inactive yields [] - never "all".
+    """
+    bookable = bookable_units(professional)
+    allowed = allowed_unit_ids(service_units_of(professional), service_id)
+    if allowed is None:
+        return bookable
+    return [unit for unit in bookable if unit.id in allowed]
+
+
+def unit_choice_needed(professional: Any | None, service_id: UUID | None = None) -> bool:
+    """Two or more bookable units (for the service, when given): the patient has to pick one."""
+    return len(units_for_service(professional, service_id)) > 1
+
+
+@dataclass(frozen=True)
+class UnitChoice:
+    """What the booking flow does about the unit for (professional, service).
+
+    * `free`    - the professional has no unit link: no step, today's flow;
+    * `none`    - links, but no bookable unit does this service: the "0 unidades" case;
+    * `implied` - one unit and the doctor attends at no other bookable one: used silently;
+    * `confirm` - the service is restricted to one of two or more bookable units: ask Sim/Não;
+    * `list`    - two or more units: the patient picks.
+
+    `units` are the `UnitOption`s on offer ([] for `free` and `none`).
+    """
+
+    kind: Literal["free", "none", "implied", "confirm", "list"]
+    units: list
+
+
+def unit_choice(professional: Any | None, service_id: UUID | None) -> UnitChoice:
+    """Pure decision for the unit step (no I/O); see `UnitChoice` for the kinds."""
+    if not offered_units(professional):
+        return UnitChoice("free", [])
+    units = units_for_service(professional, service_id)
+    if not units:
+        return UnitChoice("none", [])
+    if len(units) > 1:
+        return UnitChoice("list", units)
+    if len(bookable_units(professional)) >= 2:
+        return UnitChoice("confirm", units)
+    return UnitChoice("implied", units)
+
+
+def find_unit(
+    professional: Any | None, unit_id: UUID | None, service_id: UUID | None = None
+) -> Any | None:
     if unit_id is None:
         return None
-    return next((unit for unit in bookable_units(professional) if unit.id == unit_id), None)
+    return next(
+        (unit for unit in units_for_service(professional, service_id) if unit.id == unit_id), None
+    )
 
 
 def selected_unit_id(conversation: Any) -> UUID | None:
@@ -76,16 +134,23 @@ def selected_unit_id(conversation: Any) -> UUID | None:
     return getattr(conversation, "flow_selected_unit_id", None)
 
 
-def effective_unit(conversation: Any, professional: Any | None) -> Any | None:
-    """The unit this booking happens at: the one picked, else the only bookable one, else None.
+def effective_unit(
+    conversation: Any, professional: Any | None, service_id: UUID | None = None
+) -> Any | None:
+    """The unit this booking happens at: the one picked, else the only one on offer, else None.
 
-    A pick that is no longer bookable (unit deactivated, link removed) is ignored.
+    With `service_id`, only units where the service is done count: a pick outside that filter is
+    ignored, and the "only one" is the single filtered unit when the choice is `implied` (a
+    `confirm` is not decided until the patient says yes, which stores it as the pick). A pick that
+    is no longer bookable (unit deactivated, link removed) is ignored.
     """
-    picked = find_unit(professional, selected_unit_id(conversation))
+    picked = find_unit(professional, selected_unit_id(conversation), service_id)
     if picked is not None:
         return picked
-    units = bookable_units(professional)
-    return units[0] if len(units) == 1 else None
+    choice = unit_choice(professional, service_id)
+    if choice.kind == "implied":
+        return choice.units[0]
+    return None
 
 
 def scope(calendar: Any, conversation: Any, professional: Any | None) -> Any:
@@ -203,6 +268,7 @@ __all__ = [
     "ROW_UNIT_PREFIX",
     "STEP_AWAITING_UNIT",
     "UNIT_LIST_BODY",
+    "UnitChoice",
     "appointment_calendar",
     "bookable_units",
     "effective_unit",
@@ -211,8 +277,11 @@ __all__ = [
     "offered_units",
     "scope",
     "selected_unit_id",
+    "service_units_of",
     "union_hours",
     "unit_after_doctor_change",
+    "unit_choice",
     "unit_choice_needed",
     "unit_rows",
+    "units_for_service",
 ]
