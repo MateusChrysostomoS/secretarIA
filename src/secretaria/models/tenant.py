@@ -20,6 +20,14 @@ from sqlalchemy.orm import Mapped, mapped_column
 from secretaria.core.database import Base
 from secretaria.models.insurance import INSURANCE_MODES
 
+# Where the secretarIA serves this clinic's patients (TASK-084, owner 2026-11-14): the
+# Portal Brain chat or WhatsApp. Same strings as `Patient.channel`
+# (services/channel_sender.py::CHANNEL_*). Being a VALUE here does not make a channel
+# selectable: services/operating_channel.py::RELEASED_OPERATING_CHANNELS decides that.
+OPERATING_CHANNEL_PORTAL = "brain_message"
+OPERATING_CHANNEL_WHATSAPP = "whatsapp"
+OPERATING_CHANNELS: tuple[str, ...] = (OPERATING_CHANNEL_PORTAL, OPERATING_CHANNEL_WHATSAPP)
+
 
 class Tenant(Base):
     """A clinic using SecretarIA.
@@ -50,6 +58,12 @@ class Tenant(Base):
             + ", ".join(f"'{mode}'" for mode in INSURANCE_MODES)
             + ")",
             name="ck_tenants_insurance_mode",
+        ),
+        CheckConstraint(
+            "operating_channel IN ("
+            + ", ".join(f"'{channel}'" for channel in OPERATING_CHANNELS)
+            + ")",
+            name="ck_tenants_operating_channel",
         ),
     )
 
@@ -281,5 +295,13 @@ class Tenant(Base):
     # configuration (schemas/config.py).
     paid_notices_auto_approved: Mapped[bool] = mapped_column(
         Boolean, server_default=text("false"), default=False
+    )
+    # TASK-084: where the secretarIA serves this clinic's patients - OPERATING_CHANNEL_PORTAL
+    # (every clinic today) or OPERATING_CHANNEL_WHATSAPP. The ONLY writer is
+    # PATCH /tenants/me/operating-channel (config PUTs ignore it), and nothing on the
+    # message path reads it yet: conversations still go back through the channel they
+    # came in on. The /contexto screen reads it to decide which WhatsApp-only rules apply.
+    operating_channel: Mapped[str] = mapped_column(
+        String(16), server_default=OPERATING_CHANNEL_PORTAL, default=OPERATING_CHANNEL_PORTAL
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
