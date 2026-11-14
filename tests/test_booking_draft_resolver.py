@@ -832,3 +832,32 @@ async def test_the_ai_express_card_names_the_confirmed_unit_of_the_service():
     card = res.result.bubbles[-1]
     assert "Zona Sul" in card.body
     assert "Centro" not in card.body
+
+
+async def test_the_ai_draft_zero_units_lands_on_the_doctor_list_without_the_old_doctor():
+    """Final review (finding 2): "0 unidades" from the AI path goes to the list of the OTHER
+    doctors who do the service - the doctor it was refused for is not carried as selected."""
+
+    def _with_consulta(name):
+        doctor = _doctor(name, ["Consulta"])
+        doctor.appointment_types[0]["service_id"] = str(CONSULTA_SID)
+        return doctor
+
+    closed = UnitOption(id=uuid4(), name="Fechada", address=None, business_hours={})
+    open_unit = UnitOption(id=uuid4(), name="Centro", address="Rua A, 10", business_hours=THURSDAY)
+    ana, beto = _with_consulta("Dra. Ana"), _with_consulta("Dr. Beto")
+    ana.units = [open_unit, closed]
+    ana.service_units = {CONSULTA_SID: frozenset({closed.id})}
+    beto.units = []
+    beto.service_units = {}
+
+    res = await _resolve(
+        BookingDraft(service="Consulta", professional_id=ana.id, day=DAY, time=dt.time(10, 0)),
+        tenant=_unit_tenant(),
+        pros=[ana, beto],
+    )
+    assert res.landing_step == fr.STEP_AWAITING_PROFESSIONAL
+    assert res.result.notify_no_unit == (ana.id, CONSULTA_SID, "Consulta")
+    assert res.result.flow_selected_professional_id is None
+    assert res.result.flow_selected_unit_id is None
+    assert res.result.flow_selected_type == "Consulta"

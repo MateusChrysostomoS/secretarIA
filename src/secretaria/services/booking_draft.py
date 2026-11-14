@@ -474,7 +474,12 @@ def _carry(result: FlowRouterResult, state: Any) -> FlowRouterResult:
         return result
     if result.flow_selected_type is None:
         result.flow_selected_type = state.flow_selected_type
-    if result.flow_selected_professional_id is None:
+    if (
+        result.flow_selected_professional_id is None
+        and result.flow_step != fr.STEP_AWAITING_PROFESSIONAL
+    ):
+        # The doctor list asks for a doctor: never one pre-selected behind it (TASK-083 final
+        # review - "0 unidades" lands here with the refused doctor dropped on purpose).
         result.flow_selected_professional_id = state.flow_selected_professional_id
     if result.flow_attendee_name is None:
         result.flow_attendee_name = state.flow_attendee_name
