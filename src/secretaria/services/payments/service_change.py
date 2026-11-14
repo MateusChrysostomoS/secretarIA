@@ -414,6 +414,10 @@ def serialize_edit(edit: dict, appointment: Appointment, *, source: str) -> dict
     out["start_at"] = _iso(edit.get("start_at") or appointment.start_at)
     out["end_at"] = _iso(edit.get("end_at") or appointment.end_at)
     out["source"] = source
+    # TASK-083 follow-up E1: a unit picked with the new service travels with it. Absent key =
+    # the unit stays as it is (every edit without a unit, every payload stored before this).
+    if "unit_id" in edit:
+        out["unit_id"] = _str_or_none(edit.get("unit_id"))
     out["expected"] = {
         "start_at": _iso(appointment.start_at),
         # The event's window before the change: the agenda hook re-checks a window that grew.
@@ -434,6 +438,8 @@ def deserialize_edit(data: dict) -> dict:
     edit["old_professional_id"] = _uuid_or_none(data.get("old_professional_id"))
     edit["start_at"] = datetime.fromisoformat(data["start_at"])
     edit["end_at"] = datetime.fromisoformat(data["end_at"])
+    if "unit_id" in data:
+        edit["unit_id"] = _uuid_or_none(data.get("unit_id"))
     return edit
 
 
@@ -1079,6 +1085,9 @@ async def apply_paid_adjustment(
         "doctor_changed": False,
         "calendar_changed": False,
     }
+    # Follow-up E1: the unit picked for the new service (absent = unchanged, older payloads).
+    if "unit_id" in data:
+        edit["unit_id"] = _uuid_or_none(data.get("unit_id"))
     written = await _write(
         session, tenant, appointment, edit,
         source=data.get("source") or SOURCE_SYSTEM,

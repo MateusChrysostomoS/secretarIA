@@ -35,7 +35,7 @@ from secretaria.workers.shared.jobs import _claim_event, _release_event
 
 logger = get_logger(__name__)
 JOB_NAME = "send_professional_edit_notification"
-_FIELDS = ("data", "horário", "serviço", "médico", "convênio", "paciente")
+_FIELDS = ("data", "horário", "serviço", "médico", "unidade", "convênio", "paciente")
 
 
 async def enqueue_professional_edit_notification(redis, tenant_id, applied) -> None:
@@ -83,6 +83,8 @@ def _variables(tenant, patient, appointment, professional, unit, fields) -> dict
         "horário": start.strftime("%H:%M"),
         "serviço": service,
         "médico": professional.name,
+        # Follow-up E1: "Alterar Dados" may move the booking to another unit.
+        "unidade": unit.name if unit is not None else "sem unidade",
         "convênio": insurance,
         "paciente": attendee,
     }
@@ -91,6 +93,7 @@ def _variables(tenant, patient, appointment, professional, unit, fields) -> dict
         "horário": "Horário",
         "serviço": "Serviço",
         "médico": "Médico",
+        "unidade": "Unidade",
         "convênio": "Convênio",
         "paciente": "Paciente",
     }

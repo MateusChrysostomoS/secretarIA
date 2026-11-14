@@ -523,8 +523,10 @@ async def test_a_service_picked_after_a_doctor_change_takes_the_unit_where_it_is
     )
     assert listed.flow_step == fr.STEP_EDIT_SERVICE
     # Follow-up E1 (D2): he does not attend CENTRO; SUL is the only unit where he does anything,
-    # so his services are listed there.
-    assert _draft(listed).current["unit_id"] == str(SUL.id)
+    # so his services are listed there - the doctor and the unit staged, nothing drafted yet.
+    assert _draft(listed).stage["at_unit"] == str(SUL.id)
+    assert _draft(listed).stage["pending_doctor"] == str(new.id)
+    assert _draft(listed).current == _draft(listed).original
 
     picked = await _step(
         fr.STEP_EDIT_SERVICE,
@@ -784,8 +786,9 @@ async def test_new_doctor_without_service_at_unit_lists_his_services_there():
     assert _row_ids(result) == ["svc|Exame", "edit|change_unit"]
     assert _rows(result)[-1] == CHANGE_UNIT_ROW
     draft = _draft(result)
-    assert draft.current["professional_id"] == str(new.id)
-    assert draft.current["unit_id"] == str(CENTRO.id)
+    # Review fix: the new doctor waits in the stage - the draft is never half-applied.
+    assert draft.current == draft.original
+    assert draft.stage["pending_doctor"] == str(new.id)
     assert draft.stage["at_unit"] == str(CENTRO.id)
 
     picked = await _step(
@@ -852,8 +855,9 @@ async def test_change_unit_lists_doctor_units_then_services_at_chosen_unit():
     assert at_sul.bubbles[-1].body == ae.EDIT_SERVICES_AT_UNIT_BODY.format(
         medico="Dr. Beto", unidade="Zona Sul"
     )
-    # Another unit exists, so the row stays to go back to the unit list.
-    assert _row_ids(at_sul) == ["svc|Consulta", "svc|Exame", "edit|change_unit"]
+    # D1 strictly: he does Consulta only at SUL, the unit now selected -> no row.
+    assert _row_ids(at_sul) == ["svc|Consulta", "svc|Exame"]
+    assert _draft(at_sul).current == _draft(at_sul).original
 
     picked = await _step(
         fr.STEP_EDIT_SERVICE,
@@ -917,7 +921,7 @@ async def test_new_doctor_not_at_preselected_unit_goes_to_unit_list():
     result, *_ = await _change_doctor(alone)
     assert result.flow_step == fr.STEP_EDIT_SERVICE
     assert _row_ids(result) == ["svc|Exame"]
-    assert _draft(result).current["unit_id"] == str(OESTE.id)
+    assert _draft(result).stage["at_unit"] == str(OESTE.id)
 
 
 async def test_new_doctor_doing_service_at_unit_keeps_unit_as_today():
@@ -1137,3 +1141,227 @@ async def test_free_text_on_unit_step_delegates_once():
     assert again.flow_step == fr.STEP_EDIT_UNIT
     assert _row_ids(again) == _row_ids(listed)
     assert again.flow_edit_draft == listed.flow_edit_draft
+
+
+# --- Follow-up E1 review fixes ------------------------------------------------------------
+
+
+async def test_paid_sinal_service_change_hands_the_picked_unit_to_the_deferred_edit():
+    """CRITICAL 1 (router side): with a paid sinal the agenda waits for the worker, and the
+    edit it receives carries the unit picked with the new service."""
+    from secretaria.services import appointment_edit_flow as ef
+
+    doctor = _ana_with_exame_at(LESTE)
+    appt = _appt(doctor)
+    agenda = _Agenda()
+    ctx = ae.EditContext(calendars={str(doctor.id): agenda}, paid_deposit=True)
+
+    async def step(step, body, draft=None):
+        draft = draft or ae.EditDraft.from_appointment(appt, TZ)
+        return await ef.edit_step(
+            conversation(draft, step), tenant(), body, [appt], [doctor], ctx, "Maria"
+        )
+
+    listed = await step(fr.STEP_EDIT_SERVICE, "Exame")
+    assert listed.flow_step == fr.STEP_EDIT_UNIT
+    card = await step(fr.STEP_EDIT_UNIT, _unit_tap(LESTE), _draft(listed))
+    assert card.flow_step == fr.STEP_EDIT_CONFIRM
+    confirmed = await step(fr.STEP_EDIT_CONFIRM, fr.LABEL_CONFIRM, _draft(card))
+    edit = confirmed.appointment_edit
+    assert edit["calendar_deferred"] is True
+    assert edit["unit_id"] == LESTE.id
+    assert agenda.log.descriptions == []  # the worker writes the agenda after the money
+
+
+async def test_ai_doctor_alone_not_at_the_booking_unit_asks_his_unit():
+    """IMPORTANT 1, probe 1: Beto works only at NORTE/OESTE - the unit list, nothing drafted."""
+    old = _doctor("Dra. Ana", [CENTRO, SUL])
+    new = _doctor("Dr. Beto", [NORTE, OESTE])
+    result = await _ai({"professional": "Dr. Beto"}, appt=_appt(old), doctors=[old, new])
+    assert result.flow_step == fr.STEP_EDIT_UNIT
+    assert _row_ids(result) == [f"unit|{NORTE.id}", f"unit|{OESTE.id}"]
+    draft = _draft(result)
+    assert draft.current == draft.original
+    assert draft.stage["pending_doctor"] == str(new.id)
+
+
+async def test_ai_doctor_alone_doing_the_service_elsewhere_lists_his_services_at_the_unit():
+    """IMPORTANT 1, probe 2: Beto does Consulta only at SUL - his services at CENTRO first,
+    with "Alterar unidade"; never a silent move to SUL."""
+    old = _doctor("Dra. Ana", [CENTRO, SUL])
+    new = _beto([CENTRO, SUL], Consulta=[SUL])
+    result = await _ai({"professional": "Dr. Beto"}, appt=_appt(old), doctors=[old, new])
+    assert result.flow_step == fr.STEP_EDIT_SERVICE
+    assert _row_ids(result) == ["svc|Exame", "edit|change_unit"]
+    assert _draft(result).current == _draft(result).original
+
+
+async def test_ai_doctor_who_keeps_the_unit_still_drafts_the_rest_of_the_proposal():
+    old = _doctor("Dra. Ana", [CENTRO, SUL])
+    new = _beto([NORTE, CENTRO], Consulta=[CENTRO])
+    result = await _ai(
+        {"professional": "Dr. Beto", "insurance": "Amil"}, appt=_appt(old), doctors=[old, new]
+    )
+    assert result.flow_step == fr.STEP_EDIT_CONFIRM
+    draft = _draft(result)
+    assert draft.current["unit_id"] == str(CENTRO.id)
+    assert draft.changed() == ["médico", "convênio"]
+
+
+async def _open_doctor_unit_list():
+    old = _doctor("Dra. Ana", [CENTRO, SUL])
+    new = _doctor("Dr. Beto", [NORTE, OESTE])
+    appt = _appt(old)
+    calendars = {old.id: _Agenda(), new.id: _Agenda()}
+    listed = await _step(
+        fr.STEP_EDIT_DOCTOR, _tap(new), appt=appt, doctors=[old, new], calendars=calendars
+    )
+    assert listed.flow_step == fr.STEP_EDIT_UNIT
+    return listed, appt, [old, new], calendars
+
+
+async def test_finish_while_the_unit_list_is_open_never_confirms_a_half_choice():
+    from secretaria.services import appointment_edit_flow as ef
+
+    listed, appt, doctors, calendars = await _open_doctor_unit_list()
+    ctx = ae.EditContext(calendars={str(d.id): calendars[d.id] for d in doctors})
+    card = await ef.apply_ai_edit(
+        conversation(_draft(listed), fr.STEP_EDIT_UNIT),
+        tenant(),
+        {"finish": True},
+        [appt],
+        doctors,
+        ctx,
+    )
+    draft = _draft(card)
+    assert draft.current == draft.original  # the doctor was never drafted
+    confirmed = await _step(
+        fr.STEP_EDIT_CONFIRM,
+        fr.LABEL_CONFIRM,
+        appt=appt,
+        doctors=doctors,
+        calendars=calendars,
+        draft=draft,
+    )
+    assert confirmed.appointment_edit is None
+
+
+async def test_stale_menu_tap_while_the_unit_list_is_open_keeps_the_appointment():
+    listed, appt, doctors, calendars = await _open_doctor_unit_list()
+    later = await _step(
+        fr.STEP_EDIT_UNIT,
+        ae.LABEL_EDIT_MORE,
+        appt=appt,
+        doctors=doctors,
+        calendars=calendars,
+        draft=_draft(listed),
+    )
+    assert later.flow_step == fr.STEP_EDIT_MORE
+    draft = _draft(later)
+    assert draft.current == draft.original
+    assert "pending_doctor" not in draft.stage
+    card = await _step(
+        fr.STEP_EDIT_INSURANCE, "Amil", appt=appt, doctors=doctors, calendars=calendars,
+        draft=draft,
+    )
+    assert card.flow_step == fr.STEP_EDIT_CONFIRM
+    confirmed = await _step(
+        fr.STEP_EDIT_CONFIRM,
+        fr.LABEL_CONFIRM,
+        appt=appt,
+        doctors=doctors,
+        calendars=calendars,
+        draft=_draft(card),
+    )
+    edit = confirmed.appointment_edit
+    assert edit["professional_id"] == UUID(appt["professional_id"])
+    assert "unit_id" not in edit  # the unit stays as it is
+
+
+async def test_redisplay_on_the_doctor_unit_list_redraws_it():
+    from secretaria.services import appointment_edit_flow as ef
+
+    listed, appt, doctors, calendars = await _open_doctor_unit_list()
+    ctx = ae.EditContext(calendars={str(d.id): calendars[d.id] for d in doctors})
+    again = await ef.redisplay_edit(
+        conversation(_draft(listed), fr.STEP_EDIT_UNIT), tenant(), [appt], doctors, ctx
+    )
+    assert again.flow_step == fr.STEP_EDIT_UNIT
+    assert _row_ids(again) == _row_ids(listed)
+    assert again.bubbles[-1].body == listed.bubbles[-1].body
+
+
+async def test_the_card_refuses_a_half_placed_draft_with_the_right_notice():
+    """The pre-card check (and Confirmar's last line): a booking left without its unit, or a
+    service at a unit where it is not done, goes back to the appointment's own choice."""
+    old = _doctor("Dra. Ana", [CENTRO, SUL], types=_types("Consulta", "Exame"),
+                  service_units={EXAME_ID: frozenset({SUL.id})})
+    new = _doctor("Dr. Beto", [NORTE, OESTE])
+    appt = _appt(old)
+    calendars = {old.id: _Agenda(), new.id: _Agenda()}
+    base = ae.EditDraft.from_appointment(appt, TZ)
+
+    no_unit = base.with_changes(professional_id=str(new.id), unit_id=None)
+    card = await _step(
+        fr.STEP_EDIT_INSURANCE, "Amil", appt=appt, doctors=[old, new], calendars=calendars,
+        draft=no_unit,
+    )
+    assert card.flow_step == fr.STEP_EDIT_MENU
+    assert card.bubbles[0].body == ae.EDIT_UNIT_MISSING
+    assert _draft(card).current["professional_id"] == str(old.id)
+    assert _draft(card).current["unit_id"] == str(CENTRO.id)
+
+    mismatch = base.with_changes(service="Exame")
+    card = await _step(
+        fr.STEP_EDIT_INSURANCE, "Amil", appt=appt, doctors=[old, new], calendars=calendars,
+        draft=mismatch,
+    )
+    assert card.flow_step == fr.STEP_EDIT_MENU
+    assert card.bubbles[0].body == ae.EDIT_SERVICE_UNIT_MISMATCH
+    assert _draft(card).current["service"] == "Consulta"
+
+    confirmed = await _step(
+        fr.STEP_EDIT_CONFIRM, fr.LABEL_CONFIRM, appt=appt, doctors=[old, new],
+        calendars=calendars, draft=mismatch,
+    )
+    assert confirmed.appointment_edit is None
+    assert confirmed.bubbles[0].body == ae.EDIT_SERVICE_UNIT_MISMATCH
+
+
+async def test_change_unit_row_follows_the_booking_service_after_a_unit_pick():
+    """D1 strictly: after "Alterar unidade" the row shows again only if the doctor does the
+    booking's service at a unit other than the one now selected."""
+    new = _beto([CENTRO, SUL, LESTE], Consulta=[SUL, LESTE])
+    listed, appt, doctors, calendars = await _change_doctor(new)
+    assert _row_ids(listed)[-1] == "edit|change_unit"
+    units = await _step(
+        fr.STEP_EDIT_SERVICE, "Alterar unidade", appt=appt, doctors=doctors,
+        calendars=calendars, draft=_draft(listed),
+    )
+    at_leste = await _step(
+        fr.STEP_EDIT_UNIT, _unit_tap(LESTE), appt=appt, doctors=doctors, calendars=calendars,
+        draft=_draft(units),
+    )
+    # Consulta is also done at SUL: the row stays.
+    assert _row_ids(at_leste) == ["svc|Consulta", "svc|Exame", "edit|change_unit"]
+
+
+def test_the_doctor_email_lists_a_unit_change():
+    """MINOR: a unit-only change no longer mails an empty list of changes."""
+    from secretaria.workers.shared.appointment_edit_notification import _variables
+
+    clinic = SimpleNamespace(timezone="America/Sao_Paulo", clinic_name="Clínica Olhar")
+    row = SimpleNamespace(
+        start_at=START_UTC,
+        end_at=START_UTC + timedelta(minutes=40),
+        attendee_name=None,
+        insurance=None,
+        appointment_type="Consulta",
+        google_event_link=None,
+    )
+    doctor = SimpleNamespace(name="Dra. Ana")
+    values = _variables(clinic, None, row, doctor, LESTE, ["unidade"])
+    assert values["changes"] == "• Unidade: Leste"
+    assert _variables(clinic, None, row, doctor, None, ["médico"])["changes"] == (
+        "• Médico: Dra. Ana"
+    )

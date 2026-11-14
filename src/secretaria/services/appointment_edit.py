@@ -163,6 +163,16 @@ EDIT_DOCTOR_UNITS_BODY = "Em qual unidade você prefere ser atendido por {medico
 ROW_EDIT_CHANGE_UNIT = "edit|change_unit"
 LABEL_EDIT_CHANGE_UNIT = "Alterar unidade"
 LABEL_EDIT_CHANGE_UNIT_DESCRIPTION = "Ver serviços em outra unidade"
+# The card is never shown for a half-placed draft (follow-up E1 review): what was missing, and
+# that the appointment's own doctor, service and unit were kept.
+EDIT_UNIT_MISSING = (
+    "Faltou escolher a unidade, então mantive o médico, o serviço e a unidade da sua consulta. "
+    "Escolha de novo o que você quer mudar."
+)
+EDIT_SERVICE_UNIT_MISMATCH = (
+    "Esse serviço não é feito nessa unidade, então mantive o médico, o serviço e a unidade da "
+    "sua consulta. Escolha de novo o que você quer mudar."
+)
 
 EDIT_NO_SERVICES = "Esse médico não tem serviços disponíveis no momento."
 EDIT_SERVICE_BODY = "Qual serviço você quer para essa consulta?"

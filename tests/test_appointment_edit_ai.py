@@ -380,6 +380,11 @@ async def test_a_unit_proposal_in_a_clinic_without_units_changes_nothing():
     result = await ai(conv, {"insurance": "Amil", "unit": ""}, context())
     assert result.flow_step == fr.STEP_EDIT_CONFIRM
     assert result.flow_edit_draft["current"]["insurance"] == "Amil"
+    # Review fix: a unit name in a clinic without units is ignored, the rest still drafted.
+    result = await ai(conv, {"insurance": "Amil", "unit": "Centro"}, context())
+    assert result.flow_step == fr.STEP_EDIT_CONFIRM
+    assert result.flow_edit_draft["current"]["insurance"] == "Amil"
+    assert "unit_id" not in result.flow_edit_draft["current"]
 
 
 def test_editing_prompt_names_the_unit_only_when_the_clinic_has_units(monkeypatch):
