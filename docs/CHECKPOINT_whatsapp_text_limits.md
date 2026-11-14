@@ -412,8 +412,10 @@ pré-existentes** (as mesmas 2 de `test_service_change_agenda`, que falham tamb�
    serviços. Não testado num número de WhatsApp real. Visão geral: `CHECKPOINT_listas_paginadas.md`.
 8. **Corte de 24 pode igualar dois nomes** que só diferem depois do 23º caractere ("Avaliação para cirurgia…"
    ×2): o toque do WhatsApp chega como o título visível e o segundo agenda o primeiro. Já valia dentro das 9
-   linhas do `main`; com a paginação (§6) vale em qualquer página. Aberto — decisão do dono
-   (`CHECKPOINT_listas_paginadas.md` Pendências 1).
+   linhas do `main`; com a paginação (§6) vale em qualquer página. **Decidido em 2026-11-14 (TASK-084):** aviso
+   no Contexto só para clínica no WhatsApp (canal da clínica em `tenants.operating_channel`, WhatsApp ainda não
+   liberado); o conserto do toque (`svc|`/`ins|` pelo título) é o item 3 do checklist de liberação em
+   `CHECKPOINT_ambiente_secretaria.md` §4.
 
 Padrão generalizado na skill `third-party-text-limits`
 (`TECH/.claude/skills/third-party-text-limits/SKILL.md`).

@@ -1,5 +1,7 @@
 # SecretarIA
 
+TASK-084 (2026-11-14, branch local, sem push/deploy): ambiente da secretarIA por clínica (`tenants.operating_channel`: Portal Brain × WhatsApp; WhatsApp travado em `services/operating_channel.py::RELEASED_OPERATING_CHANNELS`), `PATCH /tenants/me/operating-channel` só gestor (409 até liberar); migração `b8d4f2a6c9e1` antes de API+worker; checklist da liberação do WhatsApp (inclui o toque `svc|`/`ins|` por título): [checkpoint](docs/CHECKPOINT_ambiente_secretaria.md).
+
 TASK-081 (2026-11-11): a ordem dos serviços na conversa do paciente é a do catálogo da clínica (`PUT /services/order`); sem migração; deploy pelo dono: [checkpoint](docs/CHECKPOINT_ordem_listas_paciente.md).
 
 Branch `feature/out-of-mvp` (Pix): TASK-050 trouxe a `main` e portou o Pix para os workers divididos; ver [checkpoint](docs/CHECKPOINT_task050_main_into_out_of_mvp.md).
