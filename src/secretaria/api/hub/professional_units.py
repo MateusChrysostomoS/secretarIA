@@ -96,12 +96,17 @@ async def _read(
             )
         )
     marks = await psu.read_marks(session, professional.id)
+    services = await _offered_services(session, tenant, professional)
+    # Only the services the doctor still offers (final review): a stale mark is not shown, and
+    # the next save - which sends the complete desired state - removes its row.
+    offered = {service.service_id for service in services}
     return ProfessionalUnitsRead(
         units=rows,
-        services=await _offered_services(session, tenant, professional),
+        services=services,
         service_marks=[
             ServiceUnitMark(service_id=str(service_id), unit_ids=sorted(str(u) for u in unit_ids))
             for service_id, unit_ids in sorted(marks.items(), key=lambda item: str(item[0]))
+            if str(service_id) in offered
         ],
     )
 

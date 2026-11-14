@@ -228,6 +228,25 @@ async def test_get_without_marks_has_empty_service_marks(client, world):
     assert len(body["services"]) == 2
 
 
+async def test_get_hides_marks_of_services_the_doctor_no_longer_offers(client, world):
+    """Final review (finding 3): a stale mark (the service left the doctor's catalog) is not
+    shown, and a PUT that does not send it succeeds and removes the stale row."""
+    w = world
+    await _seed_link(w, w["centro"])
+    await _seed_marks(w, w["limpeza"], w["centro"])
+    await _seed_marks(w, w["extracao"], w["centro"])  # in the catalog, NOT offered by the doctor
+    body = (await client.get(_url(w["doctor"]), headers=HEADERS)).json()
+    offered = {s["service_id"] for s in body["services"]}
+    assert str(w["extracao"].id) not in offered
+    assert _marks_by_service(body) == {str(w["limpeza"].id): {str(w["centro"].id)}}
+
+    response = await _put(
+        client, w["doctor"], [_link(w["centro"])], [_mark(w["limpeza"], w["centro"])]
+    )
+    assert response.status_code == 200, response.text
+    assert await _db_marks(w) == {str(w["limpeza"].id): {str(w["centro"].id)}}
+
+
 # ---------------------------------------------------------------- PUT
 
 
