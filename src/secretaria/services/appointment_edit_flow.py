@@ -21,11 +21,19 @@ from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from secretaria.ai.formatter import ButtonBubble, SlotsBubble, TextBubble
+from secretaria.ai.formatter import (
+    OPTION_PAGE_SIZE,
+    ButtonBubble,
+    OptionSource,
+    SlotsBubble,
+    TextBubble,
+)
 from secretaria.core.logging import get_logger
 from secretaria.core.whatsapp_limits import (
+    EMOJI_DOCTOR,
     MAX_INTERACTIVE_BODY_CHARS,
     MAX_LIST_ROW_DESCRIPTION_CHARS,
+    decorate,
     truncate_plain,
 )
 from secretaria.models import FlowState
@@ -607,6 +615,7 @@ def _service_list(
     *,
     after_doctor: bool = False,
     at_unit: Any | None = None,
+    page: int = 0,
 ) -> fr.FlowRouterResult:
     """The services of the draft's doctor only (owner, 2026-10-07).
 
@@ -614,6 +623,11 @@ def _service_list(
     that unit, under `EDIT_SERVICES_AT_UNIT_BODY`, and the "Alterar unidade" row last (D1) only
     when that doctor does the booking's service at another bookable unit. Nothing is drafted:
     the doctor stays in `stage.pending_doctor` until a service is picked.
+
+    Pages on WhatsApp like the booking's list (`fr.catalog_page`, TASK-082 S4); the
+    "Alterar unidade" row is a fixed row of every page (counted in `fixed_rows`, so a page
+    never passes WhatsApp's 10 rows) and a pinned row of the Portal card, whose pointer is
+    the doctor's services AT that unit (`list_options`, scope `doctor_unit`).
     """
     doctor = _flow_doctor(professionals, draft) if at_unit is not None else _doctor(
         professionals, draft
@@ -621,6 +635,7 @@ def _service_list(
     services = _services_of(tenant, doctor)
     body = ae.EDIT_SERVICE_BODY
     stage = {"after_doctor": "1"} if after_doctor else {}
+    scope = fr.service_scope(doctor.id if doctor is not None else None)
     change_unit = False
     if at_unit is not None:
         services = flow_units.services_at_unit(doctor, services, at_unit.id)
@@ -634,22 +649,33 @@ def _service_list(
         change_unit = _does_service_elsewhere(tenant, doctor, draft, at_unit.id)
         if change_unit:
             stage["change_unit"] = "1"
+        if doctor is not None:
+            scope = {
+                "list": "doctor_unit",
+                "professional_id": str(doctor.id),
+                "unit_id": str(at_unit.id),
+            }
     if not services:
         menu = _menu_result(draft.with_stage(), ctx)
         menu.bubbles.insert(0, TextBubble(body=ae.EDIT_NO_SERVICES))
         return menu
-    rows: list[tuple] = [
-        (f"svc|{service.get('name', '')}", fr._service_row_title(service.get("name")))
-        for service in services[: fr.MAX_CATALOG_OPTION_ROWS]
-    ]
-    if change_unit:
-        rows.append(
+    pinned: list[tuple] = (
+        [
             (
                 ae.ROW_EDIT_CHANGE_UNIT,
                 ae.LABEL_EDIT_CHANGE_UNIT,
                 ae.LABEL_EDIT_CHANGE_UNIT_DESCRIPTION,
             )
+        ]
+        if change_unit
+        else []
+    )
+    rows: list[tuple] = list(
+        fr.service_page_rows(
+            services, page, fixed_rows=len(pinned), event="edit_service_list_paged"
         )
+    )
+    rows.extend(pinned)
     return _result(
         draft.with_stage(**stage),
         [
@@ -658,6 +684,12 @@ def _service_list(
                 rows=rows,
                 button_label="Ver serviços",
                 section_title="Serviços",
+                source=OptionSource(
+                    kind="service",
+                    scope=scope,
+                    items=fr.portal_service_rows(services),
+                    pinned=pinned,
+                ),
             )
         ],
         fr.STEP_EDIT_SERVICE,
@@ -820,6 +852,14 @@ async def _service_step(conversation, tenant, body, draft, appt, professionals, 
         if listed.flow_step == fr.STEP_EDIT_UNIT:
             listed.bubbles.insert(0, TextBubble(body=flow_units.UNIT_GONE_NOTICE))
         return listed
+    after_doctor = bool(draft.stage.get("after_doctor"))
+    more = fr.catalog_more_page(body, fr.LABEL_MORE_SERVICES)
+    if more is not None:
+        # TASK-082 S4 paging; the services-at-unit list keeps its unit, staged doctor and
+        # "Alterar unidade" row on every page (TASK-083).
+        return _service_list(
+            draft, tenant, professionals, ctx, after_doctor=after_doctor, at_unit=at_unit, page=more
+        )
     if at_unit is not None:
         if draft.stage.get("change_unit") and fr._label_match(body, ae.LABEL_EDIT_CHANGE_UNIT):
             # (b) "Alterar unidade": every unit where this doctor does something, then services.
@@ -845,7 +885,6 @@ async def _service_step(conversation, tenant, body, draft, appt, professionals, 
     if service is None:
         return fr._preserve(conversation, "delegate_llm")
     minutes = fr._service_duration(service, tenant)
-    after_doctor = bool(draft.stage.get("after_doctor"))
     new = draft.with_changes(
         service=str(service.get("name")),
         end_at=_iso(draft.start + timedelta(minutes=minutes)),
@@ -892,12 +931,63 @@ async def _availability(
         return None
 
 
-async def _doctor_list(draft, tenant, appt, professionals, ctx) -> fr.FlowRouterResult:
-    """Every doctor, marked free (✅) or busy (❌) at the appointment's current day and time."""
+def _edit_doctor_description(
+    tenant, professional, plan: dict | None, availability: str | None = None
+) -> str | None:
+    """An "alterar consulta" doctor row's subtitle: free/busy (when known), plan, specialty."""
+    parts: list[str] = [availability] if availability else []
+    if plan is not None and fr._accepts_plan(tenant, professional, str(plan["id"])):
+        parts.append("aceita o convênio")
+    specialty = (getattr(professional, "specialty", None) or "").strip() or None
+    return (
+        truncate_plain(" · ".join(parts) or (specialty or ""), MAX_LIST_ROW_DESCRIPTION_CHARS)
+        or None
+    )
+
+
+def edit_professional_rows(
+    tenant, professionals, insurance: str | None, availability: dict[str, str] | None = None
+) -> list[tuple[str, str, str | None]]:
+    """Every doctor as a Portal row of the "alterar consulta" list (full "🥼 <name>").
+
+    `availability` (doctor id -> "✅ Livre 15/10 15:20") is known only for the doctors
+    the list checked live; the rest - and every row the options route serves - carry
+    the convênio mark and the specialty only (services/list_options.py).
+    """
+    plan = fr._selected_plan(tenant, insurance)
+    marks = availability or {}
+    return [
+        (
+            f"prof|{professional.id}",
+            decorate(EMOJI_DOCTOR, str(professional.name or "")),
+            _edit_doctor_description(tenant, professional, plan, marks.get(str(professional.id))),
+        )
+        for professional in professionals or []
+    ]
+
+
+async def _doctor_list(
+    draft,
+    tenant,
+    appt,
+    professionals,
+    ctx,
+    *,
+    page: int = 0,
+) -> fr.FlowRouterResult:
+    """Every doctor, marked free (✅) or busy (❌) at the appointment's current day and time.
+
+    The agenda is asked for the doctors on screen: the WhatsApp page shown, the Portal's
+    first page (`OPTION_PAGE_SIZE`); the Portal's later pages carry no free/busy mark.
+    WhatsApp pages (`page`) like the booking's doctor list (TASK-082 S4).
+    """
     plan = fr._selected_plan(tenant, draft.current["insurance"])
     when = draft.start.strftime("%d/%m %H:%M")
-    rows: list[tuple] = []
-    for professional in (professionals or [])[: fr.MAX_CATALOG_OPTION_ROWS]:
+    roster = list(professionals or [])
+    shown, more = fr.professional_page(roster, page, fixed_rows=0, event="edit_doctor_list_paged")
+    to_check = list(shown) + [p for p in roster[:OPTION_PAGE_SIZE] if p not in shown]
+    availability: dict[str, str] = {}
+    for professional in to_check:
         pid = str(professional.id)
         own_event = str(appt.get("google_event_id") or "") or None
         calendar_pid = (
@@ -916,21 +1006,21 @@ async def _doctor_list(draft, tenant, appt, professionals, ctx) -> fr.FlowRouter
             professional,
         )
         free = await _availability(calendar, draft.start, draft.end, ignore, pid)
-        parts: list[str] = []
         if free is not None:
-            parts.append(
+            availability[pid] = (
                 f"{ae.MARK_FREE if free else ae.MARK_BUSY} {'Livre' if free else 'Ocupado'} {when}"
             )
-        if plan is not None and fr._accepts_plan(tenant, professional, str(plan["id"])):
-            parts.append("aceita o convênio")
-        specialty = (getattr(professional, "specialty", None) or "").strip() or None
-        description = (
-            truncate_plain(" · ".join(parts) or (specialty or ""), MAX_LIST_ROW_DESCRIPTION_CHARS)
-            or None
+    rows: list[tuple] = [
+        (
+            f"prof|{professional.id}",
+            fr._professional_row_title(professional.name),
+            _edit_doctor_description(
+                tenant, professional, plan, availability.get(str(professional.id))
+            ),
         )
-        rows.append(
-            (f"prof|{professional.id}", fr._professional_row_title(professional.name), description)
-        )
+        for professional in shown
+    ]
+    rows.extend((row_id, title, None) for row_id, title in more)
     return _result(
         draft.with_stage(),
         [
@@ -939,6 +1029,13 @@ async def _doctor_list(draft, tenant, appt, professionals, ctx) -> fr.FlowRouter
                 rows=rows,
                 button_label="Ver médicos",
                 section_title="Médicos",
+                source=OptionSource(
+                    kind="professional",
+                    scope={"insurance": draft.current["insurance"], "edit": True},
+                    items=edit_professional_rows(
+                        tenant, roster, draft.current["insurance"], availability
+                    ),
+                ),
             )
         ],
         fr.STEP_EDIT_DOCTOR,
@@ -946,7 +1043,11 @@ async def _doctor_list(draft, tenant, appt, professionals, ctx) -> fr.FlowRouter
 
 
 async def _doctor_step(conversation, tenant, body, draft, appt, professionals, ctx):
-    professional = fr._match_professional(professionals or [], body)
+    roster = list(professionals or [])
+    more = fr.catalog_more_page(body, fr.LABEL_MORE_PROFESSIONALS)
+    if more is not None:
+        return await _doctor_list(draft, tenant, appt, roster, ctx, page=more)
+    professional = fr._match_professional(roster, body)
     if professional is None:
         return fr._preserve(conversation, "delegate_llm")
     return await _doctor_choice(conversation, tenant, draft, professional, appt, professionals, ctx)
@@ -1031,22 +1132,18 @@ def _insurance_list(
     Paged like the booking's list (`fr.insurance_page`): no plan is ever cut.
     """
     doctor = _doctor(professionals, draft)
-    rows: list[tuple] = []
-    shown, next_page = fr.insurance_page(fr._tenant_insurance_plans(tenant), page)
-    for plan in shown:
-        name = str(plan["name"])
-        description = None
-        if doctor is not None and plan.get("id"):
-            accepted = fr._accepts_plan(tenant, doctor, str(plan["id"]))
-            description = (
-                f"{ae.MARK_FREE} aceito pelo médico"
-                if accepted
-                else f"{ae.MARK_BUSY} não aceito pelo médico"
-            )
-        rows.append((f"ins|{name}", fr.truncate_list_row_title(name), description))
+    plans = fr._tenant_insurance_plans(tenant)
+    shown, next_page = fr.insurance_page(plans, page)
+    rows: list[tuple] = [
+        (
+            f"ins|{plan['name']}",
+            fr.truncate_list_row_title(str(plan["name"])),
+            _edit_plan_mark(tenant, plan, doctor),
+        )
+        for plan in shown
+    ]
     rows.extend((row_id, title, None) for row_id, title in fr.insurance_more_row(next_page))
-    rows.append(("ins|particular", fr.LABEL_INSURANCE_PARTICULAR, None))
-    rows.append(("ins|outro", fr.LABEL_INSURANCE_OTHER, None))
+    rows.extend(fr.INSURANCE_PINNED_ROWS)
     return _result(
         draft.with_stage(),
         [
@@ -1055,10 +1152,33 @@ def _insurance_list(
                 rows=rows,
                 button_label="Ver convênios",
                 section_title="Convênios",
+                source=OptionSource(
+                    kind="insurance",
+                    scope={"edit_doctor_id": str(doctor.id) if doctor is not None else None},
+                    items=edit_insurance_rows(tenant, plans, doctor),
+                    pinned=list(fr.INSURANCE_PINNED_ROWS),
+                ),
             )
         ],
         fr.STEP_EDIT_INSURANCE,
     )
+
+
+def _edit_plan_mark(tenant, plan: dict, doctor) -> str | None:
+    """Whether the appointment's CURRENT doctor takes `plan` (None without doctor or plan id)."""
+    if doctor is None or not plan.get("id"):
+        return None
+    if fr._accepts_plan(tenant, doctor, str(plan["id"])):
+        return f"{ae.MARK_FREE} aceito pelo médico"
+    return f"{ae.MARK_BUSY} não aceito pelo médico"
+
+
+def edit_insurance_rows(tenant, plans: list, doctor) -> list[tuple[str, str, str | None]]:
+    """Every plan as a Portal row of the "alterar consulta" list: full name + the doctor's mark."""
+    return [
+        (f"ins|{plan['name']}", str(plan["name"]), _edit_plan_mark(tenant, plan, doctor))
+        for plan in plans
+    ]
 
 
 def _insurance_step(conversation, tenant, body, draft, professionals, ctx):

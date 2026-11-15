@@ -1585,3 +1585,60 @@ async def test_no_bookable_unit_left_for_the_new_doctor_says_so():
     )
     assert result.flow_step == fr.STEP_EDIT_MENU
     assert result.bubbles[0].body == ae.EDIT_DOCTOR_SERVICE_NO_UNIT
+
+
+# --- Merge of main (TASK-082 paged lists) x TASK-083: the services-at-unit list pages -----
+
+
+async def test_services_at_unit_list_pages_and_keeps_change_unit_row_on_every_page():
+    """WhatsApp: 8 services + "Ver mais serviços" + "Alterar unidade" (10 rows, never more);
+    the next page keeps the unit, the staged doctor and the row. Portal: the pointer is the
+    doctor's services AT that unit, with "Alterar unidade" pinned."""
+    from secretaria.services import list_options
+
+    extra = [
+        {"name": f"Servico {n:02d}", "duration_min": 30, "is_active": True} for n in range(11)
+    ]
+    new = _doctor(
+        "Dr. Beto",
+        [CENTRO, SUL],
+        types=_types("Consulta") + extra,
+        service_units={CONSULTA_ID: frozenset({SUL.id})},
+    )
+    listed, appt, doctors, calendars = await _change_doctor(new)
+    assert listed.flow_step == fr.STEP_EDIT_SERVICE
+    ids = _row_ids(listed)
+    assert len(ids) == fr.MAX_LIST_ROWS
+    assert ids[:8] == [f"svc|Servico {n:02d}" for n in range(8)]
+    assert ids[8] == "svcmore|1" and ids[9] == "edit|change_unit"
+    assert "svc|Consulta" not in ids
+
+    bubble = listed.bubbles[-1]
+    assert bubble.source.scope == {
+        "list": "doctor_unit",
+        "professional_id": str(new.id),
+        "unit_id": str(CENTRO.id),
+    }
+    assert [row[0] for row in bubble.source.items] == [
+        f"svc|Servico {n:02d}" for n in range(11)
+    ]
+    assert bubble.source.pinned == [CHANGE_UNIT_ROW]
+    resolved = list_options.resolve("service", bubble.source.scope, tenant(), doctors)
+    assert [row[0] for row in resolved] == [row[0] for row in bubble.source.items]
+
+    page = await _step(
+        fr.STEP_EDIT_SERVICE,
+        f"{fr.LABEL_MORE_SERVICES} (1)",
+        appt=appt,
+        doctors=doctors,
+        calendars=calendars,
+        draft=_draft(listed),
+    )
+    assert page.flow_step == fr.STEP_EDIT_SERVICE
+    assert _row_ids(page) == [f"svc|Servico {n:02d}" for n in range(8, 11)] + [
+        "edit|change_unit"
+    ]
+    draft = _draft(page)
+    assert draft.stage["pending_doctor"] == str(new.id)
+    assert draft.stage["at_unit"] == str(CENTRO.id)
+    assert draft.current == draft.original

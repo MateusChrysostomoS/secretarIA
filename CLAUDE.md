@@ -1,5 +1,7 @@
 # SecretarIA
 
+TASK-084 (2026-11-14, branch local, sem push/deploy): ambiente da secretarIA por clínica (`tenants.operating_channel`: Portal Brain × WhatsApp; WhatsApp travado em `services/operating_channel.py::RELEASED_OPERATING_CHANNELS`), `PATCH /tenants/me/operating-channel` só gestor (409 até liberar); migração `b8d4f2a6c9e1` antes de API+worker; checklist da liberação do WhatsApp (inclui o toque `svc|`/`ins|` por título): [checkpoint](docs/CHECKPOINT_ambiente_secretaria.md).
+
 TASK-083 (2026-11-13, LOCAL, branch `task/TASK-083-multi-unidades`, sem push/deploy): multi-unidades por profissional + agenda compartilhada por pessoa entre clínicas (`services/agenda.py`, `agenda_linking.py`, passo `awaiting_unit`, rotas do hub de unidades/agenda; migrações `e4a8c2f6b1d9` → `b5d9e3f7a1c4` ANTES de API+worker; brain-api e `scripts/reconcile_agendas.py`): [checkpoint](docs/CHECKPOINT_agenda_multi_unidades.md).
 
 TASK-081 (2026-11-11): a ordem dos serviços na conversa do paciente é a do catálogo da clínica (`PUT /services/order`); sem migração; deploy pelo dono: [checkpoint](docs/CHECKPOINT_ordem_listas_paciente.md).
@@ -581,3 +583,5 @@ TASK-034: Portal visit discard on account promotion; local validation and deploy
 `docs/TESTES_REAIS_p4_posdeploy_2026-10-07.md` — TASK-030: código P4 comprovado em API/worker, Portal cartões/desistência PASS; ai_draft_v2=false, disponibilidade natural/remarcação textual ainda limitadas; P5 antes de ativar, WhatsApp real pendente.
 
 TASK-042: descarte de visita vazia (`POST /internal/brain-message/visits/discard`) e espera de código de conta conhecida que não cai mais no LGPD: `docs/CHECKPOINT_retencao_visitas_portal.md`. Local, não deployado.
+
+TASK-082: listas longas — Portal com rolagem + busca (ponteiro do cartão, rota de opções, toque em linha carregada depois), WhatsApp com páginas de 8 + "Ver mais", limites no cadastro; mesclado no `main` local, sem deploy (API + worker primeiro): `docs/CHECKPOINT_listas_paginadas.md`.

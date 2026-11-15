@@ -37,6 +37,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.api.hub.deps import get_current_tenant
+from secretaria.core.catalog_limits import (
+    SERVICES_PER_CLINIC,
+    SERVICES_PER_PROFESSIONAL,
+    CatalogLimitExceeded,
+    check_growth,
+    entry_count,
+)
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
 from secretaria.models import Professional, Tenant
@@ -146,6 +153,25 @@ def _similar_error(name: str, similar: list[str]) -> HTTPException:
     )
 
 
+def _limit_error(exc: CatalogLimitExceeded) -> HTTPException:
+    """422 `catalog_limit_exceeded` (TASK-082 S4, core/catalog_limits.py)."""
+    return HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.detail())
+
+
+def _active_count(catalog: Sequence[Service]) -> int:
+    """The services a patient can be offered: retired rows do not count."""
+    return sum(1 for row in catalog if row.is_active)
+
+
+def _check_clinic_growth(catalog: Sequence[Service]) -> None:
+    """One more ACTIVE service, under the clinic's 120 ("no growth past the limit")."""
+    active = _active_count(catalog)
+    try:
+        check_growth(limit=SERVICES_PER_CLINIC, before=active, after=active + 1)
+    except CatalogLimitExceeded as exc:
+        raise _limit_error(exc) from None
+
+
 @router.get("", response_model=list[ServiceRead])
 async def list_services(
     tenant: Tenant = Depends(get_current_tenant),
@@ -212,6 +238,10 @@ async def create_service(
         if similar:
             raise _similar_error(payload.name, similar)
 
+    # TASK-082 S4: the clinic's 120 (before anything is written).
+    if payload.is_active:
+        _check_clinic_growth(catalog)
+
     # A new service goes to the END of the clinic's order (TASK-081) unless the caller
     # placed it: with the old default 0 it jumped ahead of everything the clinic had ordered.
     sort_order = (
@@ -232,13 +262,30 @@ async def create_service(
     )
     session.add(service)
     if professional is not None and payload.offer is not None:
-        offer_to_professional(
+        # What the doctor offers now: their own list, or the clinic's they inherit.
+        offered_before = entry_count(
+            professional.appointment_types
+            if professional.appointment_types is not None
+            else tenant.appointment_types
+        )
+        offered = offer_to_professional(
             professional,
             tenant,
             service,
             duration_min=payload.offer.duration_min,
             price=(payload.offer.price or "").strip() or None,
         )
+        if offered:
+            try:
+                check_growth(
+                    limit=SERVICES_PER_PROFESSIONAL,
+                    before=offered_before,
+                    after=entry_count(professional.appointment_types),
+                )
+            except CatalogLimitExceeded as exc:
+                # Neither the service nor the offer: the transaction is all or nothing.
+                await session.rollback()
+                raise _limit_error(exc) from None
     await session.commit()
     await session.refresh(service)
     if professional is not None:
@@ -330,6 +377,10 @@ async def update_service(
                 raise _duplicate_error(clash)
         service.name = data["name"].strip()
         service.normalized_name = normalized
+
+    if data.get("is_active") is True and not service.is_active:
+        # Un-retiring adds a service the patient sees: the clinic's 120 (TASK-082 S4).
+        _check_clinic_growth(await load_service_catalog(session, tenant.id))
 
     for field in ("description", "long_description", "requirements", "is_active", "sort_order"):
         if field in data and data[field] is not None:

@@ -565,6 +565,11 @@ def minimal_event_payload(payload: dict) -> dict:
 #   insmore|<page>       -> "Ver mais convênios (1)"       convênio-list paging
 #   unit|<uuid>          -> "Centro (uuid)"                a unit row (TASK-083;
 #                           two units can share a 24-char truncated name)
+#   svcmore|<page>       -> "Ver mais serviços (1)"        service-list paging
+#   profmore|<page>      -> "Ver mais profissionais (1)"   doctor-list paging
+#                           (TASK-082 S4. The payload is the page only; a
+#                            trailing "|..." left by a card of the pre-F1
+#                            branch is ignored by the router, CONTRACT.md D10)
 #
 # The right-hand column is the ROUTING text (`inbound_routing_text`): what the
 # flow router and the agent's history read. It is never the stored message
@@ -587,6 +592,8 @@ _PAYLOAD_ROW_PREFIXES: tuple[str, ...] = (
     "dayback|",
     "insmore|",
     "unit|",
+    "svcmore|",
+    "profmore|",
 )
 
 

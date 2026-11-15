@@ -19,6 +19,7 @@ from secretaria.models import (
     Tenant,
 )
 from secretaria.schemas.webhook import decode_action_id
+from secretaria.services import list_options
 from secretaria.services.channel_sender import (
     CHANNEL_BRAIN_MESSAGE,
 )
@@ -35,6 +36,7 @@ from secretaria.workers.shared.context import (
 from secretaria.workers.shared.db import (
     _event_already_processed,
 )
+from secretaria.workers.shared.flow_simulation_input import load_simulation_inputs
 from secretaria.workers.turn_router import (
     _route_inbound_turn,
 )
@@ -98,6 +100,7 @@ async def _validated_brain_message_reply_id(
         )
     )
     offered: set[str] = set()
+    cards: list = []
     if conversation_id is not None:
         cards = (
             await session.scalars(
@@ -114,6 +117,8 @@ async def _validated_brain_message_reply_id(
         offered = offered_reply_ids(list(cards))
     if reply_id in offered:
         return reply_id
+    if await _offered_by_a_paged_card(session, tenant, list(cards), reply_id):
+        return reply_id
     logger.warning(
         "brain_message_reply_id_rejected",
         tenant_id=str(tenant.id),
@@ -123,6 +128,36 @@ async def _validated_brain_message_reply_id(
         offered_count=len(offered),
     )
     return None
+
+async def _offered_by_a_paged_card(
+    session: AsyncSession, tenant: Tenant, cards: list, reply_id: str
+) -> bool:
+    """Is `reply_id` a row of one of these cards' WHOLE lists (TASK-082, CONTRACT.md §d)?
+
+    A paged Portal card stores page 1 only; a row the patient scrolled or searched to
+    is on no stored `options`. It is honoured only when its prefix matches the card's
+    kind (`svc|`/`prof|`/`ins|`) AND the card's stored scope, re-resolved now from THIS
+    tenant's own catalogue (`services/list_options.py::contains`), still lists it - so
+    another clinic's doctor, a forged name, a row of another kind or one removed since
+    the card went out is still dropped. `cards` are this conversation's recent cards
+    only (the caller's window query).
+    """
+    kind = list_options.kind_for_reply_id(reply_id)
+    if kind is None:
+        return False
+    scopes = [
+        source["scope"]
+        for source in (list_options.stored_source(card) for card in cards)
+        if source is not None and source["kind"] == kind
+    ]
+    if not scopes:
+        return False
+    inputs = await load_simulation_inputs(session, tenant)
+    return any(
+        list_options.contains(kind, scope, inputs.tenant, inputs.professionals, reply_id)
+        for scope in scopes
+    )
+
 
 def _log_discarded_attachment(attachment: dict | None, reason: str) -> None:
     """Report a file whose turn this job dropped before writing its row.

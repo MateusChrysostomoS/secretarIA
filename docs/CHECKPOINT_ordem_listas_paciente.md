@@ -14,7 +14,9 @@ Clínica que nunca ordenou: os serviços passam a seguir o catálogo (`sort_orde
 
 ## Limite que a tela espelha
 
-Lista de serviços **de um médico** (`_service_list_bubble`): até `MAX_CATALOG_OPTION_ROWS` = 9 + "Não sei", sem página.
+~~Lista de serviços **de um médico** (`_service_list_bubble`): até `MAX_CATALOG_OPTION_ROWS` = 9 + "Não sei", sem página.~~
+Desde a TASK-082 nada é cortado: WhatsApp pagina (8 + "Ver mais serviços" + "Não sei"), Portal rola e busca —
+ver `CHECKPOINT_listas_paginadas.md`.
 
 ## Deploy
 

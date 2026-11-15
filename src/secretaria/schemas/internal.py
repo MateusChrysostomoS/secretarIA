@@ -232,6 +232,43 @@ class BrainMessageMessageList(BaseModel):
     accepts_typing: bool = False
 
 
+class BrainMessageOptionsQuery(BaseModel):
+    """`POST /internal/brain-message/messages/{message_id}/options` body (TASK-082).
+
+    A BODY, not a query string, on purpose: `q` is what the patient typed, and every
+    server and proxy on the way writes URLs to its access log. `tenant_id` and
+    `external_id` come from brain-api's session, never from the browser. `q` has no
+    length rule here (it is clamped to 60 by `services/list_options.py`, never refused),
+    so a validation error can never echo it back.
+    """
+
+    tenant_id: UUID
+    external_id: str = Field(min_length=1, max_length=64)
+    cursor: str | None = None
+    page_size: int = Field(default=10, ge=1, le=10)
+    q: str | None = None
+
+
+class BrainMessageOptionItem(BaseModel):
+    """One row of a paged Portal list: what the patient sees and taps (TASK-082)."""
+
+    id: str
+    title: str
+    description: str | None = None
+
+
+class BrainMessageOptionsPage(BaseModel):
+    """`GET /internal/brain-message/messages/{message_id}/options` response (TASK-082).
+
+    `items` never holds the card's pinned rows; `total` counts the matches for `q`
+    (the whole list without it); `next_cursor` is opaque, null on the last page.
+    """
+
+    items: list[BrainMessageOptionItem]
+    next_cursor: str | None = None
+    total: int
+
+
 class BrainMessageTyping(BaseModel):
     """The PATIENT is typing (a heartbeat). Scope is the session's; nothing else is accepted."""
 

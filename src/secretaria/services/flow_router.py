@@ -36,6 +36,7 @@ from secretaria.ai.formatter import (
     MAX_LIST_ROWS,
     Bubble,
     ButtonBubble,
+    OptionSource,
     SlotsBubble,
     TextBubble,
 )
@@ -50,6 +51,7 @@ from secretaria.core.whatsapp_limits import (
     EMOJI_SERVICE,
     MAX_INTERACTIVE_BODY_CHARS,
     MAX_LIST_ROW_DESCRIPTION_CHARS,
+    MAX_LIST_ROW_TITLE_CHARS,
     decorate,
     decorate_and_truncate,
     decorate_if_fits,
@@ -180,15 +182,28 @@ INSURANCE_SKIP_EMPTY_CATALOG = "empty_catalog"
 # case gets NO default, ever (SPEC §2).
 INSURANCE_SKIP_NO_MODE = "no_mode"
 
-# WhatsApp caps interactive lists at 10 rows. Professionals beyond the cap are
-# dropped (with a warning) — pagination is out of scope this round. Insurance
-# plans keep 2 slots for the fixed Particular/Outro rows. The professional and
-# service lists both reserve their LAST row for the fixed "Não sei"
-# scoped-help entry, so real options cap at 9 there — without the reserve,
-# send_list's silent [:10] would drop the help row exactly when the catalog is
-# fullest.
+# WhatsApp caps interactive lists at 10 rows. Insurance plans keep 2 slots for the
+# fixed Particular/Outro rows. The professional and service lists both reserve their
+# LAST row for the fixed "Não sei" scoped-help entry, so a list of up to 9 fits one
+# page there - without the reserve, send_list's silent [:10] would drop the help row
+# exactly when the catalog is fullest. Longer lists PAGE (TASK-082 S4, `catalog_page`);
+# nothing is dropped any more.
 MAX_PROFESSIONAL_ROWS = 10
 MAX_CATALOG_OPTION_ROWS = MAX_PROFESSIONAL_ROWS - 1
+# TASK-082 S4: services and doctors page on WhatsApp the way convênios do. A list that
+# fits keeps its single page; a longer one shows CATALOG_PAGE_SIZE items + "Ver mais ..."
+# + the list's fixed rows ("Não sei"), never more than MAX_LIST_ROWS. The page rides in
+# the tap - `svcmore|<page>` / `profmore|<page>`, registered in
+# schemas/webhook.py::_PAYLOAD_ROW_PREFIXES - so paging needs no conversation column.
+# WhatsApp only: a Portal card carries the whole list behind its `source` pointer and
+# pages it itself (S1). Typed text at a list is NOT searched (TASK-082 F1, CONTRACT.md
+# D8): an exact name is recognised as before, anything else goes to the model; a typed
+# "ver mais" on WhatsApp becomes the tap before routing (workers/whatsapp/typed_more.py).
+CATALOG_PAGE_SIZE = 8
+ROW_SERVICE_MORE_PREFIX = "svcmore|"
+ROW_PROFESSIONAL_MORE_PREFIX = "profmore|"
+LABEL_MORE_SERVICES = "Ver mais serviços"
+LABEL_MORE_PROFESSIONALS = "Ver mais profissionais"
 MAX_INSURANCE_PLAN_ROWS = 8
 # A clinic may accept any number of convênios: past MAX_INSURANCE_PLAN_ROWS the list
 # pages, INSURANCE_PAGE_SIZE plans + "Ver mais convênios" + Particular + Outro = 10 rows.
@@ -1722,8 +1737,78 @@ def _service_row_title(name: str | None) -> str:
     return decorate_if_fits(EMOJI_SERVICE, str(name or ""))
 
 
+# --------------------------------------------------------------------------
+# Portal rows of the catalogue lists (TASK-082). The router stays channel-neutral:
+# each list bubble carries BOTH the WhatsApp rows (cut, capped - unchanged) and an
+# `OptionSource` with the whole list as Portal rows; `workers/shared/bubbles.py`
+# picks one per channel. `services/list_options.py` rebuilds the same rows from a
+# card's stored scope, through these same helpers, for the options route and taps.
+# --------------------------------------------------------------------------
+
+# The fixed last row of the doctor-first service list (`svchelp|0`, "Não sei").
+SERVICE_HELP_ROW: tuple[str, str, str | None] = ("svchelp|0", LABEL_DONT_KNOW, None)
+PROFESSIONAL_HELP_ROW: tuple[str, str, str | None] = (
+    "profhelp|0",
+    LABEL_DONT_KNOW,
+    "Te ajudo a escolher",
+)
+
+
+def portal_service_title(name: str | None) -> str:
+    """A `svc|` row's Portal title: WhatsApp's emoji rule, never the 24-char cut."""
+    value = str(name or "").strip()
+    if len(EMOJI_SERVICE) + 1 + len(value) <= MAX_LIST_ROW_TITLE_CHARS:
+        return decorate(EMOJI_SERVICE, value)
+    return value
+
+
+def portal_service_rows(services: list[dict]) -> list[tuple[str, str, str | None]]:
+    """Every service as a Portal row, in the order given (the router's own order)."""
+    return [
+        (f"svc|{s.get('name', '')}", portal_service_title(s.get("name")), None) for s in services
+    ]
+
+
+def service_scope(professional_id: UUID | str | None) -> dict:
+    """The stored scope of a service list built from `professional_id`'s catalogue.
+
+    Mirrors how every router branch picks `services`: the selected doctor's own
+    `professional_appointment_types`, else the tenant's `active_appointment_types`.
+    """
+    if professional_id is None:
+        return {"list": "tenant"}
+    return {"list": "doctor", "professional_id": str(professional_id)}
+
+
+def _service_name(service: dict) -> str:
+    return str(service.get("name", ""))
+
+
+def service_page_rows(
+    services: list[dict], page: int, *, fixed_rows: int, event: str
+) -> list[tuple[str, str]]:
+    """One WhatsApp page of a `svc|` list, plus its "Ver mais serviços" row when needed.
+
+    Logs `event` (the old `*_truncated` name, kept for the dashboards) when the list
+    needs pages.
+    """
+    shown, next_page = catalog_page(services, page, fixed_rows=fixed_rows)
+    if len(shown) < len(services):
+        logger.info(event, total=len(services), shown=len(shown), page=page, paged=True)
+    rows: list[tuple[str, str]] = [
+        (f"svc|{_service_name(s)}", _service_row_title(s.get("name"))) for s in shown
+    ]
+    rows.extend(catalog_more_row(ROW_SERVICE_MORE_PREFIX, LABEL_MORE_SERVICES, next_page))
+    return rows
+
+
 def _service_list_bubble(
-    tenant: Tenant, services: list[dict], header: str | None = None
+    tenant: Tenant,
+    services: list[dict],
+    header: str | None = None,
+    *,
+    scope: dict | None = None,
+    page: int = 0,
 ) -> Bubble:
     """The tappable service list, optionally introduced by `header`.
 
@@ -1733,17 +1818,10 @@ def _service_list_bubble(
     right doctor and picks the service on one screen. Capped at the list
     body's own limit so a long hub-written `about` can never make the message
     unsendable.
+
+    `page` (TASK-082 S4): the WhatsApp page; the Portal pointer is the same on every page.
     """
-    if len(services) > MAX_CATALOG_OPTION_ROWS:
-        logger.warning(
-            "flow_service_list_truncated",
-            total=len(services),
-            shown=MAX_CATALOG_OPTION_ROWS,
-        )
-    rows: list[tuple[str, str]] = [
-        (f"svc|{s.get('name', '')}", _service_row_title(s.get("name")))
-        for s in services[:MAX_CATALOG_OPTION_ROWS]
-    ]
+    rows = service_page_rows(services, page, fixed_rows=1, event="flow_service_list_truncated")
     # Fixed last row: opens the scoped service-help node (STEP_SERVICE_HELP).
     # The id prefix is NOT "svc|" on purpose - extract_inbound_body echoes the
     # row TITLE for unknown prefixes, so the tap arrives as plain "Não sei".
@@ -1755,6 +1833,16 @@ def _service_list_bubble(
         rows=rows,
         button_label="Ver serviços",
         section_title="Serviços",
+        source=(
+            OptionSource(
+                kind="service",
+                scope=scope,
+                items=portal_service_rows(services),
+                pinned=[SERVICE_HELP_ROW],
+            )
+            if scope is not None
+            else None
+        ),
     )
 
 
@@ -2111,7 +2199,7 @@ async def _enter_menu_choice(
             )
         return FlowRouterResult(
             action="reply",
-            bubbles=[_service_list_bubble(tenant, services)],
+            bubbles=[_service_list_bubble(tenant, services, scope=service_scope(None))],
             flow_state=FlowState.SERVICE_CATALOG,
             flow_step=STEP_AWAITING_SERVICE,
         )
@@ -2363,7 +2451,7 @@ def _start_booking(
         )
     return FlowRouterResult(
         action="reply",
-        bubbles=[_service_list_bubble(tenant, services)],
+        bubbles=[_service_list_bubble(tenant, services, scope=service_scope(None))],
         flow_state=FlowState.SERVICE_CATALOG,
         flow_step=STEP_AWAITING_SERVICE,
     )
@@ -2490,15 +2578,8 @@ def _professional_rows(
     rows: list[tuple[str, str, str | None]] = []
     marked = 0
     for professional in professionals:
-        specialty = (getattr(professional, "specialty", None) or "").strip() or None
-        description = specialty
-        if plan is not None and _accepts_plan(tenant, professional, str(plan["id"])):
-            marked += 1
-            description = truncate_plain(
-                f"{INSURANCE_ACCEPTED_MARK} · {specialty}" if specialty
-                else INSURANCE_ACCEPTED_MARK,
-                MAX_LIST_ROW_DESCRIPTION_CHARS,
-            )
+        description, accepted = _professional_description(tenant, professional, plan)
+        marked += accepted
         rows.append(
             (f"prof|{professional.id}", _professional_row_title(professional.name), description)
         )
@@ -2508,39 +2589,103 @@ def _professional_rows(
     return rows, plan
 
 
+def _professional_description(
+    tenant: Tenant, professional: Any, plan: dict | None
+) -> tuple[str | None, bool]:
+    """A `prof|` row's description (specialty, marked when they take `plan`) + the mark."""
+    specialty = (getattr(professional, "specialty", None) or "").strip() or None
+    if plan is not None and _accepts_plan(tenant, professional, str(plan["id"])):
+        return (
+            truncate_plain(
+                f"{INSURANCE_ACCEPTED_MARK} · {specialty}" if specialty
+                else INSURANCE_ACCEPTED_MARK,
+                MAX_LIST_ROW_DESCRIPTION_CHARS,
+            ),
+            True,
+        )
+    return specialty, False
+
+
+def portal_professional_rows(
+    tenant: Tenant, professionals: list, insurance: str | None
+) -> list[tuple[str, str, str | None]]:
+    """Every doctor as a Portal row: full "🥼 <name>", the same description WhatsApp shows."""
+    plan = _selected_plan(tenant, insurance)
+    return [
+        (
+            f"prof|{professional.id}",
+            decorate(EMOJI_DOCTOR, str(professional.name or "")),
+            _professional_description(tenant, professional, plan)[0],
+        )
+        for professional in professionals
+    ]
+
+
+def professional_scope(insurance: str | None, pool: list | None = None) -> dict:
+    """The stored scope of a doctor list; `pool` narrows it to those doctors only."""
+    scope: dict = {"insurance": insurance}
+    if pool is not None:
+        scope["only_ids"] = [str(p.id) for p in pool]
+    return scope
+
+
 def _professional_list_body(question: str, plan: dict | None) -> str:
     if plan is None:
         return question
     return f"{question}\n\n{EMOJI_AFFIRMATIVE} = aceita {plan['name']}"
 
 
+def professional_page(
+    professionals: list, page: int, *, fixed_rows: int, event: str
+) -> tuple[list, list[tuple[str, str]]]:
+    """One WhatsApp page of a doctor list: (doctors shown, its "Ver mais" row or nothing).
+
+    Logs `event` (the old `*_truncated` name, kept for the dashboards) when the list
+    needs pages.
+    """
+    shown, next_page = catalog_page(professionals, page, fixed_rows=fixed_rows)
+    if len(shown) < len(professionals):
+        logger.info(event, total=len(professionals), shown=len(shown), page=page, paged=True)
+    more = catalog_more_row(ROW_PROFESSIONAL_MORE_PREFIX, LABEL_MORE_PROFESSIONALS, next_page)
+    return shown, more
+
+
 def _enter_professional_list(
-    tenant: Tenant, professionals: list, *, insurance: str | None = None
+    tenant: Tenant,
+    professionals: list,
+    *,
+    insurance: str | None = None,
+    pool: bool = False,
+    page: int = 0,
 ) -> FlowRouterResult:
     """Render the tappable doctor list ("Escolher médico").
 
     Each row carries the professional's specialty as the WhatsApp list-row
     description — the "apresentação dos médicos" made tappable — prefixed with
     INSURANCE_ACCEPTED_MARK when `insurance` names a plan that doctor takes
-    (`_professional_rows`: every doctor listed, never filtered). Real options
-    cap at MAX_CATALOG_OPTION_ROWS (the 10-row WhatsApp hard limit minus the
-    reserved "Não sei" scoped-help row appended last); beyond that we log and
-    truncate, pagination is explicitly out of scope.
+    (`_professional_rows`: every doctor listed, never filtered). Up to
+    MAX_CATALOG_OPTION_ROWS doctors fit one page with the reserved "Não sei"
+    scoped-help row appended last; a longer roster pages (`catalog_page`, TASK-082
+    S4: `page`). The Portal pointer is the whole roster on every page.
     """
-    if len(professionals) > MAX_CATALOG_OPTION_ROWS:
-        logger.warning(
-            "flow_professional_list_truncated",
-            total=len(professionals),
-            shown=MAX_CATALOG_OPTION_ROWS,
-        )
-    rows, plan = _professional_rows(
-        tenant, professionals[:MAX_CATALOG_OPTION_ROWS], insurance
+    shown, more = professional_page(
+        professionals, page, fixed_rows=1, event="flow_professional_list_truncated"
     )
+    rows, plan = _professional_rows(tenant, shown, insurance)
+    rows.extend((row_id, title, None) for row_id, title in more)
     # Fixed last row: opens the scoped professional-help node
     # (STEP_PROFESSIONAL_HELP). Not "prof|"-prefixed on purpose - the tap must
     # arrive as the plain "Não sei" title (see extract_inbound_body), never as
     # a pseudo-professional id.
     rows.append(("profhelp|0", LABEL_DONT_KNOW, "Te ajudo a escolher"))
+    # `pool`: a caller-chosen subset (rebooking's "Outro médico"), not the whole roster -
+    # the stored scope names those doctors so later pages never widen the list.
+    source = OptionSource(
+        kind="professional",
+        scope=professional_scope(insurance, professionals if pool else None),
+        items=portal_professional_rows(tenant, professionals, insurance),
+        pinned=[PROFESSIONAL_HELP_ROW],
+    )
     return FlowRouterResult(
         action="reply",
         bubbles=[
@@ -2551,6 +2696,7 @@ def _enter_professional_list(
                 rows=rows,
                 button_label="Ver profissionais",
                 section_title="Profissionais",
+                source=source,
             )
         ],
         flow_state=FlowState.SERVICE_CATALOG,
@@ -2604,7 +2750,12 @@ def _professionals_offering(
     ]
 
 
-def _enter_clinic_service_catalog(tenant: Tenant, professionals: list) -> FlowRouterResult:
+def _enter_clinic_service_catalog(
+    tenant: Tenant,
+    professionals: list,
+    *,
+    page: int = 0,
+) -> FlowRouterResult:
     """Render the clinic-wide service list ("Escolher serviço").
 
     Deliberately WITHOUT the "Não sei" scoped-help row the doctor-first list
@@ -2613,6 +2764,9 @@ def _enter_clinic_service_catalog(tenant: Tenant, professionals: list) -> FlowRo
     false here. Wiring help into this branch needs its own pair of steps and
     is out of this round's scope; the row is omitted rather than shipped
     pointing at the wrong re-entry.
+
+    Up to MAX_LIST_ROWS services fit one page; a longer catalogue pages (`page`,
+    TASK-082 S4).
     """
     services = _clinic_service_catalog(tenant, professionals)
     if not services:
@@ -2624,16 +2778,9 @@ def _enter_clinic_service_catalog(tenant: Tenant, professionals: list) -> FlowRo
             ],
             flow_state=FlowState.MENU,
         )
-    if len(services) > MAX_PROFESSIONAL_ROWS:
-        logger.warning(
-            "flow_clinic_service_list_truncated",
-            total=len(services),
-            shown=MAX_PROFESSIONAL_ROWS,
-        )
-    rows = [
-        (f"svc|{s.get('name', '')}", _service_row_title(s.get("name")))
-        for s in services[:MAX_PROFESSIONAL_ROWS]
-    ]
+    rows = service_page_rows(
+        services, page, fixed_rows=0, event="flow_clinic_service_list_truncated"
+    )
     return FlowRouterResult(
         action="reply",
         bubbles=[
@@ -2642,6 +2789,11 @@ def _enter_clinic_service_catalog(tenant: Tenant, professionals: list) -> FlowRo
                 rows=rows,
                 button_label="Ver serviços",
                 section_title="Serviços",
+                source=OptionSource(
+                    kind="service",
+                    scope={"list": "clinic"},
+                    items=portal_service_rows(services),
+                ),
             )
         ],
         flow_state=FlowState.SERVICE_CATALOG,
@@ -2650,7 +2802,12 @@ def _enter_clinic_service_catalog(tenant: Tenant, professionals: list) -> FlowRo
 
 
 def _enter_service_professional_list(
-    tenant: Tenant, professionals: list, service_name: str, *, insurance: str | None = None
+    tenant: Tenant,
+    professionals: list,
+    service_name: str,
+    *,
+    insurance: str | None = None,
+    page: int = 0,
 ) -> FlowRouterResult:
     """EVERY active doctor, with the service already stored - and marked.
 
@@ -2665,14 +2822,14 @@ def _enter_service_professional_list(
     The tap lands on STEP_AWAITING_SERVICE_PROFESSIONAL, which re-enters the
     normal flow at that service's own detail card — never back at the service
     list, which the patient has already answered.
+
+    Pages like every doctor list (`page`, TASK-082 S4).
     """
-    rows, plan = _professional_rows(tenant, professionals[:MAX_PROFESSIONAL_ROWS], insurance)
-    if len(professionals) > MAX_PROFESSIONAL_ROWS:
-        logger.warning(
-            "flow_service_professional_list_truncated",
-            total=len(professionals),
-            shown=MAX_PROFESSIONAL_ROWS,
-        )
+    shown, more = professional_page(
+        professionals, page, fixed_rows=0, event="flow_service_professional_list_truncated"
+    )
+    rows, plan = _professional_rows(tenant, shown, insurance)
+    rows.extend((row_id, title, None) for row_id, title in more)
     return FlowRouterResult(
         action="reply",
         bubbles=[
@@ -2681,6 +2838,11 @@ def _enter_service_professional_list(
                 rows=rows,
                 button_label="Ver profissionais",
                 section_title="Profissionais",
+                source=OptionSource(
+                    kind="professional",
+                    scope=professional_scope(insurance),
+                    items=portal_professional_rows(tenant, professionals, insurance),
+                ),
             )
         ],
         flow_state=FlowState.SERVICE_CATALOG,
@@ -2700,6 +2862,9 @@ def _handle_catalog_service(
     the filtered doctor list. None -> the catalog changed under us mid-flow;
     a fixed reply plus the menu, never the LLM.
     """
+    more = catalog_more_page(body, LABEL_MORE_SERVICES)
+    if more is not None:
+        return _enter_clinic_service_catalog(tenant, professionals, page=more)
     services = _clinic_service_catalog(tenant, professionals)
     service = _match_service(services, body)
     if service is None:
@@ -2729,15 +2894,31 @@ def _handle_catalog_service(
 
 
 def _handle_service_professional(
-    conversation: Conversation, tenant: Tenant, body: str, professionals: list
+    conversation: Conversation,
+    tenant: Tenant,
+    body: str,
+    professionals: list,
 ) -> FlowRouterResult:
     """Doctor tap inside the service-first branch: straight to the detail card.
 
     The service was already chosen (`flow_selected_type`), so this must NOT
     re-render that doctor's whole service list the way
     `_enter_professional_services` does — that would ask a question the
-    patient has already answered.
+    patient has already answered. A "Ver mais profissionais" tap pages the list
+    (TASK-082 S4); anything that names no doctor goes to the model, as before.
     """
+    more = catalog_more_page(body, LABEL_MORE_PROFESSIONALS)
+    if more is not None:
+        return _preserve_reply(
+            conversation,
+            _enter_service_professional_list(
+                tenant,
+                professionals or [],
+                conversation.flow_selected_type or "",
+                insurance=_selected_insurance(conversation),
+                page=more,
+            ).bubbles,
+        )
     professional = _match_professional(professionals or [], body)
     if professional is None:
         return _preserve(conversation, "delegate_llm")
@@ -2853,7 +3034,12 @@ def _enter_professional_services(professional: Any, tenant: Tenant) -> FlowRoute
     return FlowRouterResult(
         action="reply",
         bubbles=[
-            _service_list_bubble(tenant, services, header=_professional_card_header(professional))
+            _service_list_bubble(
+                tenant,
+                services,
+                header=_professional_card_header(professional),
+                scope=service_scope(professional.id),
+            )
         ],
         flow_state=FlowState.SERVICE_CATALOG,
         flow_step=STEP_AWAITING_SERVICE,
@@ -2953,22 +3139,94 @@ def insurance_page(plans: list, page: int) -> tuple[list, int | None]:
     )
 
 
-def insurance_more_row(next_page: int | None) -> list[tuple[str, str]]:
-    """The "Ver mais convênios" row for `next_page`, or nothing on the last page."""
+def catalog_page(items: list, page: int, *, fixed_rows: int) -> tuple[list, int | None]:
+    """The items one WhatsApp page of a service/doctor list shows, and the next cursor.
+
+    `fixed_rows` is how many rows the list always carries besides its items ("Não sei"
+    = 1). Up to `MAX_LIST_ROWS - fixed_rows` items fit one page - the list stays
+    exactly what it was before paging existed. Past that, every page shows
+    CATALOG_PAGE_SIZE items and keeps a row for "Ver mais ...". A cursor past the end
+    (or negative) restarts at the first page, like `insurance_page`.
+    """
+    capacity = MAX_LIST_ROWS - fixed_rows
+    if len(items) <= capacity:
+        return list(items), None
+    size = min(CATALOG_PAGE_SIZE, capacity - 1)
+    pages = -(-len(items) // size)
+    page = page if 0 <= page < pages else 0
+    start = page * size
+    return list(items[start : start + size]), (page + 1 if page + 1 < pages else None)
+
+
+def catalog_more_row(prefix: str, label: str, next_page: int | None) -> list[tuple[str, str]]:
+    """The "Ver mais ..." row for `next_page` (`<prefix><page>`), or nothing."""
     if next_page is None:
         return []
-    return [(f"{ROW_INSURANCE_MORE_PREFIX}{next_page}", LABEL_MORE_INSURANCES)]
+    return [(f"{prefix}{next_page}", label)]
+
+
+def _more_page(payload: str | None) -> int:
+    """The page of a "Ver mais ..." payload; anything after a second "|" is ignored.
+
+    A card built by the pre-F1 branch carried a search key there (`svcmore|1|cardio`,
+    CONTRACT.md D10): such a tap still pages, the key is dropped.
+    """
+    return _as_page((payload or "").partition("|")[0])
+
+
+def catalog_more_page(body: str | None, label: str) -> int | None:
+    """The page a "Ver mais serviços/profissionais" TAP asks for, or None.
+
+    Only the tap (title + its "(page)" payload) counts: a typed "Ver mais ..." with no
+    payload is not this control here, so typed text routes exactly as on `main` (where
+    the row did not exist). On WhatsApp a typed "ver mais" is turned into the tap of
+    the latest card's row before routing (workers/whatsapp/typed_more.py, D10).
+    """
+    payload = _row_payload(body)
+    if payload is None or not _control_match(body, label):
+        return None
+    return _more_page(payload)
+
+
+INSURANCE_PINNED_ROWS: tuple[tuple[str, str, str | None], ...] = (
+    ("ins|particular", LABEL_INSURANCE_PARTICULAR, None),
+    ("ins|outro", LABEL_INSURANCE_OTHER, None),
+)
+
+
+def portal_insurance_rows(plans: list) -> list[tuple[str, str, str | None]]:
+    """Every clinic plan as a Portal row: the full name + how payment works for it."""
+    return [
+        (
+            f"ins|{plan['name']}",
+            str(plan["name"]),
+            insurance_payment_description(plan.get("mechanism")),
+        )
+        for plan in plans
+    ]
+
+
+def insurance_more_row(next_page: int | None) -> list[tuple[str, str]]:
+    """The "Ver mais convênios" row for `next_page`, or nothing on the last page."""
+    return catalog_more_row(ROW_INSURANCE_MORE_PREFIX, LABEL_MORE_INSURANCES, next_page)
 
 
 def insurance_more_page(body: str | None) -> int | None:
-    """The page a "Ver mais convênios" tap asks for, or None when `body` is not that tap."""
+    """The page a "Ver mais convênios" tap asks for, or None when `body` is not that tap.
+
+    As on `main`: a typed "Ver mais convênios" (no payload) is the first page. A
+    pre-F1 card's trailing "|<key>" is ignored (`_more_page`).
+    """
     if not _control_match(body, LABEL_MORE_INSURANCES):
         return None
-    return _as_page(_row_payload(body))
+    return _more_page(_row_payload(body))
 
 
 def _enter_insurance(
-    tenant: Tenant, conversation: Conversation | None = None, *, page: int = 0
+    tenant: Tenant,
+    conversation: Conversation | None = None,
+    *,
+    page: int = 0,
 ) -> FlowRouterResult:
     """Render the convênio list: the clinic's plans + Particular + Outro.
 
@@ -2994,6 +3252,13 @@ def _enter_insurance(
     rows.extend(insurance_more_row(next_page))
     rows.append(("ins|particular", LABEL_INSURANCE_PARTICULAR))
     rows.append(("ins|outro", LABEL_INSURANCE_OTHER))
+    # The Portal pages the WHOLE catalogue itself (no "Ver mais convênios" row there).
+    source = OptionSource(
+        kind="insurance",
+        scope={},
+        items=portal_insurance_rows(plans),
+        pinned=list(INSURANCE_PINNED_ROWS),
+    )
     logger.info(
         "insurance_step_presented",
         conversation_id=str(getattr(conversation, "id", None)),
@@ -3010,6 +3275,7 @@ def _enter_insurance(
                 rows=rows,
                 button_label="Ver convênios",
                 section_title="Convênios",
+                source=source,
             )
         ],
         flow_state=FlowState.SERVICE_CATALOG,
@@ -3335,9 +3601,23 @@ async def _catalog_step(
         )
 
     if step == STEP_AWAITING_PROFESSIONAL:
+        roster = professionals or []
+        more = catalog_more_page(body, LABEL_MORE_PROFESSIONALS)
+        if more is not None:
+            # The whole roster, as the first page listed it (a rebooking pool's later
+            # pages list the roster too - the tap is matched against it anyway).
+            return _preserve_reply(
+                conversation,
+                _enter_professional_list(
+                    tenant,
+                    roster,
+                    insurance=_selected_insurance(conversation),
+                    page=more,
+                ).bubbles,
+            )
         if _label_match(body, LABEL_DONT_KNOW):
             return _enter_professional_help(conversation)
-        professional = _match_professional(professionals or [], body)
+        professional = _match_professional(roster, body)
         if professional is None:
             return _preserve(conversation, "delegate_llm")
         if conversation.flow_selected_type:
@@ -3346,7 +3626,7 @@ async def _catalog_step(
             # before continuing to the selected service's detail card.
             return _resume_parked_draft(
                 conversation,
-                _handle_service_professional(conversation, tenant, body, professionals or []),
+                _handle_service_professional(conversation, tenant, body, roster),
             )
         return _resume_parked_draft(
             conversation, _enter_professional_services(professional, tenant)
@@ -3362,6 +3642,13 @@ async def _catalog_step(
         return await _handle_professional_help(conversation, tenant, body, professionals or [])
 
     if step == STEP_AWAITING_SERVICE:
+        scope = service_scope(_selected_professional_id(conversation))
+        more = catalog_more_page(body, LABEL_MORE_SERVICES)
+        if more is not None:
+            return _preserve_reply(
+                conversation,
+                [_service_list_bubble(tenant, services, scope=scope, page=more)],
+            )
         if _label_match(body, LABEL_DONT_KNOW):
             return _enter_service_help(conversation)
         service = _match_service(services, body)
@@ -3395,7 +3682,13 @@ async def _catalog_step(
         if _norm(body) == _norm(LABEL_OTHER_SERVICE):
             return FlowRouterResult(
                 action="reply",
-                bubbles=[_service_list_bubble(tenant, services)],
+                bubbles=[
+                    _service_list_bubble(
+                        tenant,
+                        services,
+                        scope=service_scope(_selected_professional_id(conversation)),
+                    )
+                ],
                 flow_state=FlowState.SERVICE_CATALOG,
                 flow_step=STEP_AWAITING_SERVICE,
                 flow_selected_professional_id=_selected_professional_id(conversation),
@@ -3959,7 +4252,11 @@ def _handle_day_back(
     if target == BACK_TARGET_SERVICE and services:
         return FlowRouterResult(
             action="reply",
-            bubbles=[_service_list_bubble(tenant, services)],
+            bubbles=[
+                _service_list_bubble(
+                    tenant, services, scope=service_scope(_selected_professional_id(conversation))
+                )
+            ],
             flow_state=FlowState.SERVICE_CATALOG,
             flow_step=STEP_AWAITING_SERVICE,
             flow_selected_type=conversation.flow_selected_type,
@@ -4455,8 +4752,9 @@ def _another_doctor_or_service(
     """
     alternatives = _no_unit_alternatives(tenant, professionals, professional, service_name)
     if alternatives:
+        # `pool`: only these doctors on the Portal pointer too (TASK-082 x TASK-083).
         result = _enter_professional_list(
-            tenant, alternatives, insurance=_selected_insurance(conversation)
+            tenant, alternatives, insurance=_selected_insurance(conversation), pool=True
         )
         if notice:
             [bubble] = result.bubbles
@@ -4469,7 +4767,14 @@ def _another_doctor_or_service(
     services = professional_appointment_types(professional, tenant)
     return FlowRouterResult(
         action="reply",
-        bubbles=[_service_list_bubble(tenant, services, header=notice)],
+        bubbles=[
+            _service_list_bubble(
+                tenant,
+                services,
+                header=notice,
+                scope=service_scope(getattr(professional, "id", None)),
+            )
+        ],
         flow_state=FlowState.SERVICE_CATALOG,
         flow_step=STEP_AWAITING_SERVICE,
         flow_selected_professional_id=_selected_professional_id(conversation),
@@ -6118,14 +6423,27 @@ async def _resume_bubbles(
     if step == STEP_AWAITING_SERVICE:
         if not services:
             return _menu_fallback()
-        return _preserve_reply(conversation, [_service_list_bubble(tenant, services)])
+        return _preserve_reply(
+            conversation,
+            [
+                _service_list_bubble(
+                    tenant, services, scope=service_scope(_selected_professional_id(conversation))
+                )
+            ],
+        )
 
     if step == STEP_AWAITING_SERVICE_CONFIRM:
         service = _match_service(services, conversation.flow_selected_type)
         if service is None:
             return _preserve_reply(
                 conversation,
-                [_service_list_bubble(tenant, services)],
+                [
+                    _service_list_bubble(
+                        tenant,
+                        services,
+                        scope=service_scope(_selected_professional_id(conversation)),
+                    )
+                ],
                 step=STEP_AWAITING_SERVICE,
             )
         return _preserve_reply(
@@ -6325,7 +6643,7 @@ async def enter_rebooking(
         result.flow_selected_type = service_name
         return result
 
-    result = _enter_professional_list(tenant, pool)
+    result = _enter_professional_list(tenant, pool, pool=True)
     if prefix:
         result.bubbles.insert(0, TextBubble(body=prefix))
     # Keep the service so the doctor is the ONLY thing still to choose.

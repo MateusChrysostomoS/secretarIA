@@ -55,6 +55,7 @@ from secretaria.workers.whatsapp.rate_limit import (
 from secretaria.workers.whatsapp.remove_context import (
     _handle_remove_context_command,
 )
+from secretaria.workers.whatsapp.typed_more import typed_more_tap
 
 logger = get_logger(__name__)
 
@@ -333,6 +334,22 @@ async def _persist_inbound_message(
                     )
                 elif patient_name and not patient.name:
                     patient.name = patient_name
+
+                # A TYPED "ver mais" at a list is a tap on that list's "Ver mais" row
+                # (TASK-082 F1, CONTRACT.md D10): the latest card of THIS conversation
+                # names the row, and the turn goes on exactly as that tap - its title is
+                # what is stored, its id what is routed. Anything else: unchanged.
+                if interactive_reply_id is None:
+                    typed_tap = await typed_more_tap(
+                        session, tenant_id=tenant.id, patient_id=patient.id, text=body
+                    )
+                    if typed_tap is not None:
+                        interactive_reply_id, body = typed_tap
+                        logger.info(
+                            "whatsapp_typed_more_as_tap",
+                            tenant_id=str(tenant.id),
+                            row_prefix=interactive_reply_id.split("|", 1)[0],
+                        )
 
                 return await _route_inbound_turn(
                     session,

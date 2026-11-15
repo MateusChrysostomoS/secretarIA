@@ -318,6 +318,76 @@ Testes novos: `tests/test_emoji_decoration.py` (41 casos: o mapeamento pedido, o
 render↔match nas três formas, e a ponta a ponta) + 13 casos de aritmética do orçamento em
 `tests/test_whatsapp_limits.py`.
 
+## §6 — Quarta rodada (2026-11-13, TASK-082 S4 + correção F1): listas longas paginadas, limite no cadastro
+
+O teto de 10 linhas por lista **continua** (`MAX_LIST_ROWS`, 24 no título, 20 no botão — os
+mesmos helpers). O que muda é o que acontece quando o catálogo passa disso.
+
+### Paginação (fim do corte silencioso)
+
+- `flow_router.catalog_page(items, page, fixed_rows)`: lista que cabe em `10 - fixas` fica
+  **idêntica** à de antes (≤9 com "Não sei", ≤10 sem). Acima disso: **8 por página** +
+  "Ver mais serviços" / "Ver mais profissionais" + as fixas — nunca > 10. Cursor fora do
+  fim → página 0 (mesmo critério de `insurance_page`).
+- A página vai **no id da linha**: `svcmore|<pág>`, `profmore|<pág>`, `insmore|<pág>` — prefixos
+  em `_PAYLOAD_ROW_PREFIXES` (pinado em `tests/test_webhook_parsing.py`). Nenhuma coluna nova.
+  Um `|…` a mais (cartão montado pela S4 antes da F1) é ignorado ao ler (`flow_router._more_page`).
+- Vale para serviços, profissionais, catálogo da clínica, profissionais do serviço e as listas
+  do "alterar consulta" (`appointment_edit_flow`). "Não sei" fica em **toda** página.
+- Os eventos `flow_*_list_truncated` foram mantidos (agora `info`, com `page`, `paged=True`).
+- O Portal não muda: o cartão segue com o `source` da S1 (lista inteira), igual em toda página.
+
+### Texto digitado numa lista = igual ao `main` (correção F1, CONTRACT.md D8–D10)
+
+A busca digitada da S4 (`services/catalog_search.py`, "Encontrei estas opções", "Não encontrei
+nenhum…", lista filtrada, "Digite parte do nome para buscar.") **foi removida** por decisão do
+dono (2026-11-13, após a revisão S6: "sim"/"oi"/"ok" escolhiam médico sozinhos; "atendente"
+não chegava à IA; no Portal a busca virava cartão cortado com "Ver mais").
+
+- Nos dois canais, texto digitado numa lista volta a ser exatamente o do `main`: nome exato
+  ainda é reconhecido (`_match_service` / `_match_professional` / `_match_insurance_plan`);
+  qualquer outra coisa → `delegate_llm` (convênio: texto livre guardado, como antes). Só um
+  **toque** escolhe uma opção (D9). No cartão, só "Não sei" leva à IA.
+- "Ver mais serviços/profissionais" só conta como **toque** (título + `(pág)`); digitado sem a
+  página, não é esse controle (`catalog_more_page`). "Ver mais convênios" digitado continua
+  como no `main` (1ª página).
+- **WhatsApp, "ver mais" digitado (D10):** "ver mais" (qualquer caixa/acento, opcionalmente +
+  "serviços"/"profissionais"/"convênios") vira o toque na linha "Ver mais" do **último cartão
+  enviado nesta conversa** (tenant + paciente). Resolvido no caminho de entrada do WhatsApp,
+  antes do roteador (`workers/whatsapp/typed_more.py`, chamado em
+  `workers/whatsapp/inbound.py::_persist_inbound_message`); o roteador segue sem banco. Fica
+  gravado como o toque (título da linha + id). Sem essa linha no último cartão → nada muda.
+  Log `whatsapp_typed_more_as_tap` só com tenant + prefixo da linha. Portal: sem mudança.
+- A busca existe **só** na barra de busca da lista do Portal (`list_options.normalize_query`,
+  rota de opções — intocada).
+
+### Limite no cadastro (`core/catalog_limits.py`)
+
+40 serviços por profissional, 120 por clínica (ativos), 60 convênios (o que a lista do
+paciente mostra, por modo). Regra "não cresce além do limite": recusa só se o novo total
+> limite **e** > total salvo → 422 `{"code":"catalog_limit_exceeded","limit","count"}`.
+Clínica que já passou do limite continua editando/apagando. Rotas do hub de config,
+profissionais, serviços e convênios; leitura e dados existentes intocados; sem migração.
+
+**Lacunas conhecidas (revisão S6, achado 14):** trocar o modo de convênio
+(`PUT /tenants/me/insurance-mode`, compartilhado → independente) **não** é limitado pelos 60 —
+pode saltar acima do limite; e dois cadastros simultâneos com 119 serviços podem passar os dois
+(sem trava). Aceito por ora.
+
+### Validação da 4ª rodada
+
+`uv run python -m pytest` (com `BOT_ALLOWLIST_WA_IDS=""`, em 6 blocos por falta de memória)
+→ **7931 passando**, 35 pulados, 1 xfail, **2 falhas pré-existentes**
+(`test_service_change_agenda` ×2, já falhavam antes da tarefa). Testes novos:
+`tests/test_whatsapp_catalog_paging.py` (52) e `tests/test_catalog_limits.py` (22).
+`ruff check` limpo nos arquivos tocados; diferenças de `ruff format` restantes são do HEAD.
+
+Correção F1: mesma suíte, 6 blocos → **7976 passando**, 35 pulados, 1 xfail, **2 falhas
+pré-existentes** (as mesmas 2 de `test_service_change_agenda`, que falham também no `main`
+`ea505ca`). Testes: `tests/test_whatsapp_catalog_paging.py` (busca → comportamento do `main`),
+`tests/test_whatsapp_typed_more.py` (novo, "ver mais" digitado); os dois testes antigos de
+"blá blá" voltaram às asserções do `main`.
+
 ## Pendências
 
 1. **Commit + deploy dos dois serviços.** `flow_router.py`, `whatsapp.py` e
@@ -337,6 +407,15 @@ render↔match nas três formas, e a ponta a ponta) + 13 casos de aritmética do
 6. **`ServiceCard` não foi visto rodando.** O caminho está coberto por teste e o
    `HelpTip` tem precedente idêntico em `AvailabilitySection`, mas ninguém olhou
    o card com o "?" na tela — precisa de um hub com backend de verdade.
+7. **§6 (TASK-082 S4) mesclado no `main` local (S7, 2026-11-14), sem push.** Toca `flow_router.py` e
+   `appointment_edit_flow.py` (worker) e as rotas do hub (API) → deploy dos **dois**
+   serviços. Não testado num número de WhatsApp real. Visão geral: `CHECKPOINT_listas_paginadas.md`.
+8. **Corte de 24 pode igualar dois nomes** que só diferem depois do 23º caractere ("Avaliação para cirurgia…"
+   ×2): o toque do WhatsApp chega como o título visível e o segundo agenda o primeiro. Já valia dentro das 9
+   linhas do `main`; com a paginação (§6) vale em qualquer página. **Decidido em 2026-11-14 (TASK-084):** aviso
+   no Contexto só para clínica no WhatsApp (canal da clínica em `tenants.operating_channel`, WhatsApp ainda não
+   liberado); o conserto do toque (`svc|`/`ins|` pelo título) é o item 3 do checklist de liberação em
+   `CHECKPOINT_ambiente_secretaria.md` §4.
 
 Padrão generalizado na skill `third-party-text-limits`
 (`TECH/.claude/skills/third-party-text-limits/SKILL.md`).

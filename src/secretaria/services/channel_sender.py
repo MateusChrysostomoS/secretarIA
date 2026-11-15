@@ -82,7 +82,11 @@ from secretaria.core.logging import get_logger
 from secretaria.models import Conversation, Message, MessageDirection, MessageSender
 from secretaria.services import media_storage
 from secretaria.services.turn_safety_net import note_send
-from secretaria.services.whatsapp import interactive_buttons_record, interactive_list_record
+from secretaria.services.whatsapp import (
+    interactive_buttons_record,
+    interactive_list_record,
+    interactive_portal_list_record,
+)
 
 logger = get_logger(__name__)
 
@@ -116,6 +120,20 @@ def interactive_history_body(body: str, labels: list[str]) -> str:
     if not labels:
         return body
     return f"{body}\n(opções: {', '.join(labels)})"
+
+
+def paged_history_body(body: str, rows: list[tuple], source: dict) -> str:
+    """`interactive_history_body` for a Portal card that shows page 1 of a longer list.
+
+    Lists page 1, then "e mais N" when the list goes on, then the pinned rows - so the
+    agent's next turn, rebuilt from history, does not believe the list ended at ten.
+    """
+    pinned = set(source.get("pinned_ids") or [])
+    page = [row[1] for row in rows if row[0] not in pinned]
+    fixed = [row[1] for row in rows if row[0] in pinned]
+    hidden = int(source.get("total") or 0) - len(page)
+    more = [f"e mais {hidden}"] if hidden > 0 else []
+    return interactive_history_body(body, page + more + fixed)
 
 
 def sender_persists_outbound(sender) -> bool:
@@ -239,6 +257,11 @@ class BrainMessageSender:
     # The Portal draws a month calendar for a card carrying `calendar_days`; WhatsApp has only
     # the card's rows.
     SUPPORTS_CALENDAR = True
+
+    # The Portal pages a catalogue list (services, doctors, convênios) instead of cutting
+    # it: the card holds page 1 + a pointer the options route resolves (TASK-082).
+    # WhatsApp has no such attribute and keeps its own rows.
+    SUPPORTS_OPTION_SOURCE = True
 
     persists_outbound = True
 
@@ -377,7 +400,16 @@ class BrainMessageSender:
         section_title: str = "Opções",
         *,
         calendar_days: list[str] | None = None,
+        option_source: dict | None = None,
     ) -> dict:
+        if option_source is not None:
+            # A paged catalogue card: `rows` is already page 1 + the pinned rows.
+            return await self._record(
+                paged_history_body(body, rows, option_source),
+                interactive=interactive_portal_list_record(
+                    body, button_label, rows, section_title, source=option_source
+                ),
+            )
         return await self._record(
             interactive_history_body(body, [row[1] for row in rows]),
             interactive=interactive_list_record(
