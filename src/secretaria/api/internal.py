@@ -92,7 +92,10 @@ from secretaria.services.visit_merge import discard_empty_visit
 # The read-only loader of the snapshots `flow_router.route()` receives (the hub's
 # simulation route reuses it the same way): the options route must rebuild a card's
 # list from exactly what the router built it from.
-from secretaria.workers.shared.flow_simulation_input import load_simulation_inputs
+from secretaria.workers.shared.flow_simulation_input import (
+    attach_unit_options_for_scopes,
+    load_simulation_inputs,
+)
 
 logger = get_logger(__name__)
 
@@ -1095,6 +1098,8 @@ async def get_brain_message_options(
         )
     # The same snapshots the flow router built the card from (THIS tenant's only).
     inputs = await load_simulation_inputs(session, tenant)
+    # The services-at-unit list (TASK-083) needs the doctors' units and marks.
+    await attach_unit_options_for_scopes(session, tenant, inputs, [source["scope"]])
     await session.close()
     page = list_options.options_page(
         source["kind"],

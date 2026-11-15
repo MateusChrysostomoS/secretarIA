@@ -23,11 +23,13 @@ from secretaria.services.hub_configuration import (
     TENANT_SCALAR_FIELDS,
 )
 from secretaria.services.insurance_catalog import load_tenant_insurance
+from secretaria.services.list_options import needs_unit_options
 from secretaria.services.service_catalog import load_service_catalog, resolve_entries
 from secretaria.services.tenant_config import (
     list_active_professionals,
     professional_business_hours,
 )
+from secretaria.services.unit_booking import attach_unit_options
 from secretaria.workers.shared.flow_simulation import SimCalendar
 from secretaria.workers.shared.greeting import _flow_tenant_snapshot
 
@@ -117,3 +119,19 @@ async def load_simulation_inputs(
         )
 
     return SimulationInputs(snapshot, flow_professionals, calendar_for)
+
+
+async def attach_unit_options_for_scopes(
+    session: AsyncSession, tenant: Tenant, inputs: SimulationInputs, scopes: list
+) -> None:
+    """Give `inputs.professionals` their units and service x unit marks when a card's scope
+    needs them (`list_options.needs_unit_options`: the services-at-unit list, TASK-083).
+
+    `load_simulation_inputs` itself stays as it is, so the clinic-setup simulation shows what
+    it showed before; only the Portal's options route and tap check call this, with the stored
+    scopes of the cards they resolve. `attach_unit_options` reads THIS tenant's units only.
+    """
+    if not any(needs_unit_options(scope) for scope in scopes):
+        return
+    rows = await list_active_professionals(session, tenant.id)
+    await attach_unit_options(session, tenant, rows, inputs.professionals)

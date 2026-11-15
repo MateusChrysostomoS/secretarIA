@@ -151,6 +151,19 @@ def _uuid(value: Any) -> UUID | None:
         return None
 
 
+SCOPE_DOCTOR_UNIT = "doctor_unit"
+
+
+def needs_unit_options(scope: Any) -> bool:
+    """Does resolving `scope` need each doctor's units and service x unit marks?
+
+    Only the "Alterar dados" services-at-unit list (TASK-083) does. Its readers (the options
+    route, the Portal tap check) then attach them to the snapshots the same way the worker
+    does (`unit_booking.attach_unit_options`); every other card resolves exactly as before.
+    """
+    return isinstance(scope, dict) and scope.get("list") == SCOPE_DOCTOR_UNIT
+
+
 def _scoped_services(scope: dict, tenant: Any, professionals: list) -> list[dict] | None:
     """The service dicts a service card with `scope` listed (see `fr.service_scope`)."""
     which = scope.get("list")
@@ -165,7 +178,7 @@ def _scoped_services(scope: dict, tenant: Any, professionals: list) -> list[dict
         professional = fr._find_professional_by_id(professionals, professional_id)
         # A doctor deactivated since the card was sent offers nothing any more.
         return professional_appointment_types(professional, tenant) if professional else []
-    if which == "doctor_unit":
+    if which == SCOPE_DOCTOR_UNIT:
         # TASK-083: "Alterar dados" lists a doctor's services AT one unit (follow-up E1 (b)),
         # re-resolved now: a unit or a service mark removed since narrows it, never widens.
         professional_id = _uuid(scope.get("professional_id"))

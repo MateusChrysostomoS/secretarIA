@@ -368,3 +368,34 @@ async def test_doctor_scope_never_widens_to_another_doctor(client, db) -> None:
     assert every == [f"svc|Ana {i:02d}" for i in range(12)]
     search = (await _ask(client, message_id, tenant.id, q="bia")).json()
     assert search["items"] == [] and search["total"] == 0
+
+
+# --------------------------------------------------------------------------
+# TASK-083 merge review: the "Alterar dados" services-at-unit card (`doctor_unit`)
+# --------------------------------------------------------------------------
+
+
+async def test_a_doctor_unit_card_pages_and_searches_through_the_route(client, db) -> None:
+    """The route resolves the card with the doctors' units and marks: page 2 holds the rest
+    of the services done at Centro, search finds a page-1 one, Consulta (only at Zona Sul)
+    is never listed."""
+    from tests._doctor_unit_card import AT_UNIT, seed_doctor_units, send_doctor_unit_card
+
+    tenant, conversation = await _clinic(db, names=["Consulta"])
+    beto, centro, _sul = await seed_doctor_units(db, tenant.id)
+    message_id = await send_doctor_unit_card(db, tenant.id, conversation, beto, centro)
+    async with db() as session:
+        card = (await session.get(Message, UUID(message_id))).interactive
+    assert card["source"]["total"] == len(AT_UNIT)
+    assert "edit|change_unit" in card["source"]["pinned_ids"]
+
+    first = (await _ask(client, message_id, tenant.id)).json()
+    assert [i["id"] for i in first["items"]] == [f"svc|{n}" for n in AT_UNIT[:10]]
+    assert first["total"] == len(AT_UNIT)
+    second = (await _ask(client, message_id, tenant.id, cursor=first["next_cursor"])).json()
+    assert [i["id"] for i in second["items"]] == [f"svc|{n}" for n in AT_UNIT[10:]]
+    assert second["next_cursor"] is None
+
+    found = (await _ask(client, message_id, tenant.id, q="servico 03")).json()
+    assert [i["id"] for i in found["items"]] == ["svc|Serviço 03"]
+    assert (await _ask(client, message_id, tenant.id, q="consulta")).json()["total"] == 0

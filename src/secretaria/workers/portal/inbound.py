@@ -36,7 +36,10 @@ from secretaria.workers.shared.context import (
 from secretaria.workers.shared.db import (
     _event_already_processed,
 )
-from secretaria.workers.shared.flow_simulation_input import load_simulation_inputs
+from secretaria.workers.shared.flow_simulation_input import (
+    attach_unit_options_for_scopes,
+    load_simulation_inputs,
+)
 from secretaria.workers.turn_router import (
     _route_inbound_turn,
 )
@@ -153,6 +156,8 @@ async def _offered_by_a_paged_card(
     if not scopes:
         return False
     inputs = await load_simulation_inputs(session, tenant)
+    # The services-at-unit list (TASK-083) needs the doctors' units and marks.
+    await attach_unit_options_for_scopes(session, tenant, inputs, scopes)
     return any(
         list_options.contains(kind, scope, inputs.tenant, inputs.professionals, reply_id)
         for scope in scopes

@@ -234,3 +234,33 @@ def test_a_doctor_tap_resolves_by_id_against_the_whole_roster() -> None:
     last = roster[-1]
     assert fr._match_professional(roster, f"🥼 {last.name} ({last.id})") is last
     assert fr._match_professional(roster, f"🥼 {last.name}") is last
+
+
+# --------------------------------------------------------------------------
+# TASK-083 merge review: the "Alterar dados" services-at-unit card (`doctor_unit`)
+# --------------------------------------------------------------------------
+
+
+async def test_a_page_two_tap_on_a_doctor_unit_card_is_honoured(db, monkeypatch) -> None:
+    from tests._doctor_unit_card import AT_UNIT, seed_doctor_units, send_doctor_unit_card
+
+    tenant, _, conversation = await _seed(db)
+    beto, centro, _sul = await seed_doctor_units(db, tenant.id)
+    await send_doctor_unit_card(db, tenant.id, conversation, beto, centro, to=EXTERNAL_ID)
+    replies = _stop_at_the_reply_seam(monkeypatch)
+
+    last = AT_UNIT[-1]  # past the card's stored page 1
+    await _turn(tenant, last, f"svc|{last}")
+
+    assert len(replies) == 1
+    assert (await _inbound_row(db, conversation.id)).interactive_reply_id == f"svc|{last}"
+
+
+async def test_a_service_not_done_at_the_cards_unit_is_dropped(db, monkeypatch) -> None:
+    from tests._doctor_unit_card import seed_doctor_units, send_doctor_unit_card
+
+    tenant, _, conversation = await _seed(db)
+    beto, centro, _sul = await seed_doctor_units(db, tenant.id)
+    await send_doctor_unit_card(db, tenant.id, conversation, beto, centro, to=EXTERNAL_ID)
+    # Consulta is in Dr. Beto's catalogue but done only at Zona Sul: not on the Centro card.
+    await _assert_dropped(db, tenant, conversation, monkeypatch, "Consulta", "svc|Consulta")
