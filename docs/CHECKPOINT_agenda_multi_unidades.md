@@ -375,6 +375,39 @@ do `upgrade head`.
 - Front: dica do último serviço sem `aria-describedby`/`aria-controls` no recolhível; "Locais de atendimento" ainda em
   comentários de 5 arquivos fora de escopo.
 
+## Follow-up do dono (2026-11-14)
+
+Estado: **LOCAL** (branch `task/TASK-083-multi-unidades`, sem push/deploy). Plano:
+`docs/superpowers/plans/2026-11-14-servico-por-unidade-followup.md`.
+
+- **Endereço obrigatório.** Criar unidade sem endereço (vazio após `strip`) ou apagar o endereço de uma existente ⇒
+  HTTP 422 `{"code": "unit_address_required", "message": "Informe o endereço da unidade."}` (`api/hub/units.py`).
+  PATCH que não envia `address` continua valendo para unidade antiga sem endereço; no /contexto essas unidades aparecem
+  sinalizadas ("Falta o endereço…") até alguém preencher. O fluxo do paciente mantém o texto sem endereço só como defesa.
+- **"Alterar dados" com unidade** (`services/appointment_edit_flow.py`). (a) Serviço novo que não é feito na unidade
+  da consulta ⇒ lista das unidades do médico onde ele é feito (`STEP_EDIT_UNIT`, mesmo com uma só; nenhuma ⇒ aviso e
+  mantém o serviço). (b) Médico novo que não faz o serviço atual na unidade da consulta ⇒ os serviços dele **nessa**
+  unidade, com a linha extra "Alterar unidade" (`edit|change_unit`) só quando ele faz o serviço atual em outra unidade;
+  ela leva às unidades dele e depois aos serviços na unidade escolhida; médico que não atende ali ⇒ direto às unidades
+  dele. Nada é gravado no rascunho até a escolha terminar (`stage.pending_doctor` / `pending_service` / `at_unit`);
+  `_placement_problem` recusa no cartão uma combinação meio escolhida, um serviço fora da unidade ou uma unidade onde o
+  médico não atende. O resumo mostra a unidade e o endereço dela; "unidade" entra em `changed()`. Unidade da lista que
+  fechou entre um toque e outro ⇒ aviso e as unidades do médico de novo; sem unidade nenhuma ⇒
+  `EDIT_DOCTOR_SERVICE_NO_UNIT`.
+- **IA com as combinações.** O estado da conversa (`services/llm_context.py::build_conversation_state`) lista, por
+  médico, as unidades reserváveis e os serviços feitos em cada uma (só em clínica com unidades), a unidade atual da
+  consulta, o que está pendente na alteração e a unidade já escolhida numa marcação em andamento.
+  `propose_appointment_edit` aceita `unit`; `apply_ai_edit` usa a unidade escolhida na lista aberta e leva proposta
+  inválida aos mesmos passos (a)/(b). `list_units(professional_name=...)` dá só as unidades do médico (nenhuma ⇒
+  lista vazia com nota, nunca todas as da clínica).
+- **Sinal pago carrega a unidade.** `services/payments/service_change.py::serialize_edit` leva `unit_id` (e a unidade
+  da linha em `expected`); `apply_paid_adjustment` grava a unidade nova só se a consulta ainda está na unidade do
+  pedido (unidade trocada pela equipe nesse meio-tempo é mantida). Sinal pago no meio da edição volta médico, serviço,
+  convênio **e unidade** aos originais.
+- **E-mail ao médico** (`workers/shared/appointment_edit_notification.py`) lista "unidade" entre as mudanças.
+- **Deploy:** o **worker sai junto com (ou antes de) a API** — o e-mail ao médico agora aceita o campo "unidade", e um
+  worker antigo descarta (não envia) o e-mail de uma alteração que tenha esse campo. Sem migração nova neste follow-up.
+
 ## Testes
 
 Arquivos novos (SQLite em memória, `BOT_ALLOWLIST_WA_IDS=""`): `test_agenda_characterization` (fixa o

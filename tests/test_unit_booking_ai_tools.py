@@ -527,3 +527,15 @@ async def test_list_units_unknown_professional_is_clear_error(db):
         result = await mu.list_units.ainvoke({"professional_name": "Dr. Fantasma"})
     assert "units" not in result
     assert "Dra. Ana" in result["error"] and "Dr. Bruno" in result["error"]
+
+
+async def test_list_units_named_doctor_without_units_invents_none(db):
+    """Follow-up final review: a named doctor with no unit links never gets every unit of the
+    clinic - an empty list with a clear note instead."""
+    tenant, _centro, _sul, _doctors = await _seed(
+        db, links={"Dra. Ana": ["Centro"], "Dr. Caio": []}
+    )
+    with _context(tenant.id):
+        result = await mu.list_units.ainvoke({"professional_name": "Dr. Caio"})
+    assert result["units"] == []
+    assert "Dr. Caio" in result["note"]

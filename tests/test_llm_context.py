@@ -458,3 +458,55 @@ def test_the_unit_guidance_survives_the_bounded_state_on_a_large_clinic():
     bounded = _bounded_state(text)
     assert "Ofereça só as combinações médico × unidade × serviço" in bounded
     assert "- Unidades: " in bounded
+
+
+# --- Follow-up final review: what is pending in "Alterar dados" / the unit of a booking -------
+
+
+def test_edit_state_tells_the_pending_choice_and_the_listed_unit():
+    centro = _unit("Centro", "Rua A, 10")
+    sul = _unit("Zona Sul", "Av. B, 20")
+    ana = _doctor_at("Dra. Ana", ["Consulta"], [centro])
+    beto = _doctor_at("Dr. Beto", ["Consulta", "Exame"], [centro, sul])
+    conv = _conversation(flow_state=FlowState.EDIT_BOOKING, flow_step=fr.STEP_EDIT_SERVICE)
+    current = {
+        "service": "Consulta", "professional_id": str(ana.id), "unit_id": str(centro.id),
+        "start_at": "2030-10-15T16:00",
+    }
+    conv.flow_edit_draft = {
+        "current": current,
+        "stage": {"pending_doctor": str(beto.id), "at_unit": str(sul.id)},
+    }
+    text = build_conversation_state(conv, _tenant(), [ana, beto])
+    assert "- Escolha pendente na alteração (ainda não aplicada): novo médico Dr. Beto." in text
+    assert "- Unidade da lista aberta: Zona Sul" in text
+
+    conv.flow_edit_draft = {
+        "current": current,
+        "stage": {"pending_service": "Exame", "unit_purpose": "service"},
+    }
+    text = build_conversation_state(conv, _tenant(), [ana, beto])
+    assert (
+        "- Escolha pendente na alteração (ainda não aplicada): novo serviço Exame, "
+        "falta escolher a unidade." in text
+    )
+    assert "Unidade da lista aberta" not in text
+
+    # Nothing staged: neither line (today's text).
+    conv.flow_edit_draft = {"current": current, "stage": {}}
+    text = build_conversation_state(conv, _tenant(), [ana, beto])
+    assert "Escolha pendente" not in text and "lista aberta" not in text
+
+
+def test_booking_in_progress_names_the_unit_already_chosen():
+    centro = _unit("Centro", "Rua A, 10")
+    ana = _doctor_at("Dra. Ana", ["Consulta"], [centro])
+    conv = _conversation(
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=fr.STEP_AWAITING_DAY,
+        flow_selected_professional_id=ana.id,
+        flow_selected_unit_id=centro.id,
+    )
+    assert "- Unidade já escolhida: Centro" in build_conversation_state(conv, _tenant(), [ana])
+    conv.flow_selected_unit_id = None
+    assert "Unidade já escolhida" not in build_conversation_state(conv, _tenant(), [ana])

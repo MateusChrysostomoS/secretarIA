@@ -132,6 +132,7 @@ def _should_inject_appointment_context(
         return False
     return flow_state is FlowState.LLM or delegated_to_llm
 
+
 def _appointment_unit_name(appointment: dict, unit_names: dict[str, str] | None) -> str | None:
     """The unit name for one `future_appointments` dict (`unit_id` is a string), or None."""
     unit_id = appointment.get("unit_id")

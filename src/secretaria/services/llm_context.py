@@ -197,7 +197,7 @@ def _topology_lines(tenant, professionals) -> list[str]:
     roster = list(professionals or [])
     if tenant is None or not hasattr(tenant, "appointment_types"):
         return []
-    units_line = _units_line(roster) if len(roster) >= 1 else None
+    units_line = _units_line(roster)
     preamble = [_UNIT_GUIDANCE, units_line] if units_line is not None else []
     if len(roster) > 1:
         lines = ["- A clínica tem vários médicos. Especialidade e serviços de cada um:"]
@@ -243,12 +243,51 @@ def _current_unit_name(current: dict, professionals) -> str | None:
     return None
 
 
+def _professional_name(professionals, raw_id) -> str | None:
+    """The roster name of a professional id carried as a string (draft JSON), or None."""
+    for professional in professionals or []:
+        if str(professional.id) == str(raw_id or ""):
+            return str(professional.name)
+    return None
+
+
+def _edit_pending_lines(stage: dict, current: dict, professionals) -> list[str]:
+    """Follow-up final review: what "Alterar dados" holds but has NOT applied yet (a new doctor
+    and/or service waiting for a unit or a service choice) and the unit an open list is for.
+    Empty when nothing is staged - a clinic without units never stages any of it."""
+    lines: list[str] = []
+    parts: list[str] = []
+    doctor = _professional_name(professionals, stage.get("pending_doctor"))
+    if doctor:
+        parts.append(f"novo médico {doctor}")
+    service = stage.get("pending_service")
+    if service and not _is_internal_marker(service):
+        parts.append(f"novo serviço {service}")
+    if parts:
+        tail = ", falta escolher a unidade" if stage.get("unit_purpose") else ""
+        lines.append(
+            "- Escolha pendente na alteração (ainda não aplicada): "
+            + " e ".join(parts)
+            + tail
+            + "."
+        )
+    if stage.get("at_unit"):
+        owner = stage.get("pending_doctor") or current.get("professional_id")
+        listed = _current_unit_name(
+            {"unit_id": stage["at_unit"], "professional_id": owner}, professionals
+        )
+        if listed:
+            lines.append(f"- Unidade da lista aberta: {listed}")
+    return lines
+
+
 def build_conversation_state(conversation, tenant, professionals) -> str | None:
     """The state block, or None when there is no conversation snapshot."""
     if conversation is None:
         return None
     raw_edit = getattr(conversation, "flow_edit_draft", None)
     current = {}
+    stage = {}
     if (
         getattr(conversation, "flow_state", None) == FlowState.EDIT_BOOKING
         and isinstance(raw_edit, dict)
@@ -256,6 +295,8 @@ def build_conversation_state(conversation, tenant, professionals) -> str | None:
         candidate = raw_edit.get("current")
         if isinstance(candidate, dict):
             current = candidate
+            staged = raw_edit.get("stage")
+            stage = staged if isinstance(staged, dict) else {}
     lines = [
         "- Onde o paciente estava: "
         + _where(
@@ -287,6 +328,19 @@ def build_conversation_state(conversation, tenant, professionals) -> str | None:
     unit_name = _current_unit_name(current, professionals) if current else None
     if unit_name:
         lines.append(f"- Unidade atual da consulta: {unit_name}")
+    if current:
+        lines.extend(_edit_pending_lines(stage, current, professionals))
+    elif getattr(conversation, "flow_selected_unit_id", None):
+        # A booking in progress whose unit was already picked (follow-up final review).
+        chosen = _current_unit_name(
+            {
+                "unit_id": conversation.flow_selected_unit_id,
+                "professional_id": getattr(conversation, "flow_selected_professional_id", None),
+            },
+            professionals,
+        )
+        if chosen:
+            lines.append(f"- Unidade já escolhida: {chosen}")
     plans = fr.insurance_plan_names(tenant) if tenant is not None else []
     if plans:
         lines.append(f"- Convênios cadastrados na clínica: {len(plans)} (valores omitidos).")

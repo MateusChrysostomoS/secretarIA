@@ -155,6 +155,16 @@ async def list_units(service_name: str = "", professional_name: str = "") -> dic
                 units = await valid_unit_options(tenant_id, owner, service_id)
                 return {"units": [{"name": u.name, "address": u.address} for u in units]}
     offered = [u for u in await professional_unit_options(tenant_id, owner) if u.bookable]
+    if not offered and (professional_name or "").strip():
+        # Follow-up final review: a NAMED doctor without an open unit never gets every unit of
+        # the clinic (that would invent places where he does not attend).
+        return {
+            "units": [],
+            "note": (
+                f"{owner.name} não tem unidade aberta para agendamento; "
+                "não ofereça unidade com esse médico."
+            ),
+        }
     units = offered or await _active_units(tenant_id)
     return {"units": [{"name": u.name, "address": u.address} for u in units]}
 
