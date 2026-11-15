@@ -117,3 +117,34 @@ async def test_an_old_payload_without_a_unit_leaves_the_unit_unchanged(db, provi
     row = await base._appointment(db, seeded[2].id)
     assert row.appointment_type == "Avaliação"
     assert row.unit_id == old
+
+
+async def test_a_unit_moved_by_staff_while_the_pix_was_pending_is_kept(db, provider):
+    """Follow-up final review: the paid change writes the new unit only onto the row it was
+    asked for. Staff moved the booking to another unit meanwhile: the service still changes
+    (the money is untouched), the staff's unit stays - an edit made meanwhile is never undone."""
+    seeded, _old, new = await _seed_with_units(db)
+    created = await _request(db, seeded, "Avaliação", 60, unit_id=new)
+    assert created.kind == "awaiting_payment"
+    async with db() as session:
+        staff_unit = Unit(id=uuid4(), tenant_id=seeded[0].id, name="Norte", address="Rua N, 1")
+        session.add(staff_unit)
+        row = await session.get(Appointment, seeded[2].id)
+        row.unit_id = staff_unit.id
+        await session.commit()
+
+    hook._paid(provider, created)
+    processed = await hook._process(db, seeded[0])
+    assert processed.outcome == "adjustment_applied"
+    row = await base._appointment(db, seeded[2].id)
+    assert row.appointment_type == "Avaliação"
+    assert row.unit_id == staff_unit.id
+
+
+def test_the_request_remembers_the_rows_unit_only_when_the_edit_moves_it():
+    row = SimpleNamespace(**{**vars(_row()), "unit_id": uuid4()})
+    edit = {**base._edit(row, "Avaliação", 60), "unit_id": uuid4()}
+    data = service_change.serialize_edit(edit, row, source="flow")
+    assert data["expected"]["unit_id"] == str(row.unit_id)
+    plain = service_change.serialize_edit(base._edit(row, "Avaliação", 60), row, source="flow")
+    assert "unit_id" not in plain["expected"]

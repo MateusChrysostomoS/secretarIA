@@ -426,6 +426,9 @@ def serialize_edit(edit: dict, appointment: Appointment, *, source: str) -> dict
         "google_event_id": appointment.google_event_id,
         "professional_id": _str_or_none(appointment.professional_id),
     }
+    if "unit_id" in edit:
+        # Follow-up final review: the unit the row had, so a unit moved meanwhile is kept.
+        out["expected"]["unit_id"] = _str_or_none(getattr(appointment, "unit_id", None))
     return out
 
 
@@ -1086,7 +1089,12 @@ async def apply_paid_adjustment(
         "calendar_changed": False,
     }
     # Follow-up E1: the unit picked for the new service (absent = unchanged, older payloads).
-    if "unit_id" in data:
+    # Final review: only onto the unit the change was asked for - a unit staff moved the
+    # booking to meanwhile is kept (an edit made meanwhile is never undone).
+    if "unit_id" in data and (
+        "unit_id" not in expected
+        or _str_or_none(appointment.unit_id) == expected.get("unit_id")
+    ):
         edit["unit_id"] = _uuid_or_none(data.get("unit_id"))
     written = await _write(
         session, tenant, appointment, edit,

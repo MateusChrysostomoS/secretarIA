@@ -169,6 +169,10 @@ EDIT_UNIT_MISSING = (
     "Faltou escolher a unidade, então mantive o médico, o serviço e a unidade da sua consulta. "
     "Escolha de novo o que você quer mudar."
 )
+EDIT_DOCTOR_UNIT_MISMATCH = (
+    "Esse médico não atende nessa unidade, então mantive o médico, o serviço e a unidade da "
+    "sua consulta. Escolha de novo o que você quer mudar."
+)
 EDIT_SERVICE_UNIT_MISMATCH = (
     "Esse serviço não é feito nessa unidade, então mantive o médico, o serviço e a unidade da "
     "sua consulta. Escolha de novo o que você quer mudar."
