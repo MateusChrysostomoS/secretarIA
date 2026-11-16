@@ -103,6 +103,7 @@ CONSENT_EVENT_KIND = "terms_accepted"
 # nothing is worse than not advertising one.
 GREETING_FRAME = """\
 👋 Olá{patient_suffix}! Bem-vindo(a) {welcome_target}!
+
 Sou a SecretarIA, assistente virtual {identification}
 
 🤖 Importante: você conversa com um *assistente virtual automatizado*, que usa \
@@ -196,7 +197,34 @@ def _welcome_target(name: str) -> str:
     return f"{'ao' if _is_masculine(name) else 'à'} {name}"
 
 
-def _identification(name: str, description: str, city: str) -> str:
+_PARTICIPLE_STARTS = ("especializ", "focad", "voltad", "dedicad", "referenci")
+
+
+def _clinic_noun(name: str) -> str:
+    """"instituto" for "Instituto Gicovate", "clínica" for everything else."""
+    first = name.split(None, 1)[0] if name.strip() else ""
+    if _fold(first).rstrip(".") in _MASCULINE_FIRST_WORDS - {"dr", "doutor"}:
+        return first.lower()
+    return "clínica"
+
+
+def _professional_possessive(name: str) -> str:
+    """"da Dra. Ana" / "do Dr. João" / "de Ana Souza" (no title: neutral "de")."""
+    first = _fold(name).split(None, 1)[0].rstrip(".") if name.strip() else ""
+    if first in {"dra", "doutora"}:
+        return f"da {name}"
+    if first in {"dr", "doutor"}:
+        return f"do {name}"
+    return f"de {name}"
+
+
+def _identification(
+    name: str,
+    description: str,
+    city: str,
+    professional_name: str = "",
+    professional_specialty: str = "",
+) -> str:
     """The tail of "Sou a SecretarIA, assistente virtual <tail>".
 
     "do/da <nome>, <descrição>, em <cidade>" — description and city are each
@@ -207,9 +235,31 @@ def _identification(name: str, description: str, city: str) -> str:
     Horizonte."). `clinic_description_budget` measures with a one-character
     probe, which never names the city, so it stays the conservative (larger)
     cost.
+
+    A clinic with exactly ONE active professional (`professional_name` set)
+    introduces the assistant as that professional's — "da Dra. Ana, especialista
+    em saúde ocular" — instead of repeating the clinic name that the line
+    above already said. The specialty comes from the professional; without it
+    the clinic description fills the same slot.
     """
-    if name:
-        base = f"{'do' if _is_masculine(name) else 'da'} {name}"
+    if professional_name.strip():
+        base = _professional_possessive(professional_name.strip())
+        specialty = professional_specialty.strip()
+        if specialty:
+            description = f"especialista em {_lower_first(specialty)}"
+    elif name:
+        # The line above already said the clinic's name: refer to it by kind.
+        noun = _clinic_noun(name)
+        base = f"{'do' if _is_masculine(name) and noun != 'clínica' else 'da'} {noun}"
+        # "clínica especializada em ..." must not become "da clínica, clínica ...".
+        words = description.split(None, 2)
+        if words and _fold(words[0]) == _fold(noun):
+            if len(words) > 1 and _fold(words[1]).startswith(_PARTICIPLE_STARTS):
+                description = " ".join(words[1:])
+            else:
+                # The description does not read on without its noun: keep the
+                # name-based sentence instead of printing a mangled fragment.
+                base = f"{'do' if _is_masculine(name) else 'da'} {name}"
     else:
         base = "da nossa clínica"
     desc = _lower_first(description)
@@ -232,8 +282,13 @@ def render_greeting(
     clinic_description: str | None,
     patient_name: str | None = None,
     city: str | None = None,
+    sole_professional: tuple[str, str | None] | None = None,
 ) -> str:
     """Render the frame for one tenant. Pure; never raises on missing input.
+
+    `sole_professional` is `(name, specialty)` of the clinic's ONE active
+    professional, or None for any other roster; it swaps the clinic name in the
+    identification sentence for the professional (see `_identification`).
 
     An empty `clinic_description` collapses cleanly: the blank line that would
     surround it goes too, so a clinic that never filled the field still gets a
@@ -251,10 +306,16 @@ def render_greeting(
     name = (clinic_name or "").strip()
     description = (clinic_description or "").strip()
     patient = (patient_name or "").strip()
+    pro_name, pro_specialty = ("", "")
+    if sole_professional:
+        pro_name = (sole_professional[0] or "").strip()
+        pro_specialty = (sole_professional[1] or "").strip()
     rendered = GREETING_FRAME.format(
         welcome_target=_welcome_target(name),
         patient_suffix=f", {patient}" if patient else "",
-        identification=_identification(name, description, (city or "").strip()),
+        identification=_identification(
+            name, description, (city or "").strip(), pro_name, pro_specialty
+        ),
     )
     # Defensive: never leave trailing spaces at the end of a line.
     rendered = re.sub(r"[ \t]+\n", "\n", rendered)
@@ -278,7 +339,11 @@ _BUDGET_PROBE = "x"
 FRAME_FIXED_CHARS = len(render_greeting("", ""))
 
 
-def clinic_description_budget(clinic_name: str | None, city: str | None = None) -> int:
+def clinic_description_budget(
+    clinic_name: str | None,
+    city: str | None = None,
+    sole_professional: tuple[str, str | None] | None = None,
+) -> int:
     """How many characters of description still fit for THIS clinic.
 
     The greeting always ships with action buttons attached, so the whole
@@ -299,7 +364,9 @@ def clinic_description_budget(clinic_name: str | None, city: str | None = None) 
     outright. Subtracting the probe leaves the true cost of the frame
     INCLUDING the separators a real description reinstates.
     """
-    probe = render_greeting(clinic_name, _BUDGET_PROBE, city=city)
+    probe = render_greeting(
+        clinic_name, _BUDGET_PROBE, city=city, sole_professional=sole_professional
+    )
     frame_cost = len(probe) - len(_BUDGET_PROBE)
     return max(0, MAX_INTERACTIVE_BODY_CHARS - frame_cost)
 

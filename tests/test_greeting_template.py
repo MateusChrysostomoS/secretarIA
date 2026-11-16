@@ -77,7 +77,7 @@ def test_description_is_rendered_into_the_slot() -> None:
 
     # Comma after the name, first letter lower-cased to continue the sentence.
     assert (
-        "Sou a SecretarIA, assistente virtual da Clínica São Lucas, "
+        "Sou a SecretarIA, assistente virtual da clínica, "
         "oftalmologia e cirurgia refrativa.\n"
     ) in rendered
     assert rendered.index("oftalmologia e cirurgia") < rendered.index("🤖 Importante")
@@ -91,8 +91,8 @@ def test_city_closes_the_identification_sentence() -> None:
     )
 
     assert (
-        "Sou a SecretarIA, assistente virtual da Chrysostomo For Eyes, "
-        "clínica especializada em saúde ocular, cirurgia refrativa e catarata, "
+        "Sou a SecretarIA, assistente virtual da clínica, "
+        "especializada em saúde ocular, cirurgia refrativa e catarata, "
         "em Belo Horizonte.\n"
     ) in rendered
 
@@ -108,13 +108,49 @@ def test_city_goes_after_a_multi_sentence_description_and_the_period_stays_last(
 def test_city_without_description() -> None:
     rendered = render_greeting("Clinic", "", city="Recife")
 
-    assert "assistente virtual da Clinic, em Recife.\n" in rendered
+    assert "assistente virtual da clínica, em Recife.\n" in rendered
 
 
 @pytest.mark.parametrize("address", [None, {}, {"city": ""}, {"city": None}, "x", {"city": 3}])
 def test_tenant_city_ignores_missing_or_odd_values(address: object) -> None:
     assert tenant_city(address) == ""
-    assert "em " not in render_greeting("Clinic", "", city=tenant_city(address)).split("\n")[1]
+    assert "em " not in render_greeting("Clinic", "", city=tenant_city(address)).split("\n")[2]
+
+
+def test_blank_line_separates_welcome_from_identification() -> None:
+    rendered = render_greeting("Chrysostomo For Eyes", "Clínica de olhos.")
+
+    assert rendered.startswith(
+        "👋 Olá! Bem-vindo(a) à Chrysostomo For Eyes!\n\nSou a SecretarIA, assistente virtual"
+    )
+
+
+def test_sole_professional_replaces_the_repeated_clinic_name() -> None:
+    rendered = render_greeting(
+        "Chrysostomo For Eyes",
+        "Clínica especializada em saúde ocular.",
+        sole_professional=("Dra. Júlia Boticelli", "Saúde ocular"),
+    )
+
+    assert (
+        "Sou a SecretarIA, assistente virtual da Dra. Júlia Boticelli, "
+        "especialista em saúde ocular.\n"
+    ) in rendered
+    assert rendered.count("Chrysostomo For Eyes") == 1
+
+
+def test_sole_professional_article_and_fallbacks() -> None:
+    male = render_greeting("Clinic", "", sole_professional=("Dr. João Lima", "Oftalmologia"))
+    assert "assistente virtual do Dr. João Lima, especialista em oftalmologia.\n" in male
+
+    untitled = render_greeting("Clinic", "", sole_professional=("Ana Souza", None))
+    assert "assistente virtual de Ana Souza.\n" in untitled
+
+    # No specialty: the clinic description keeps filling the slot.
+    described = render_greeting(
+        "Clinic", "Atendimento particular.", city="Recife", sole_professional=("Dra. Ana", "")
+    )
+    assert "assistente virtual da Dra. Ana, atendimento particular, em Recife.\n" in described
 
 
 def test_tenant_city_reads_and_strips_the_address_city() -> None:
@@ -135,7 +171,7 @@ def test_first_letter_is_lowered_only_for_ordinary_words(
 ) -> None:
     rendered = render_greeting("Clinic", description)
 
-    assert f"da Clinic, {expected_start}.\n" in rendered
+    assert f", {expected_start}.\n" in rendered
 
 
 @pytest.mark.parametrize("city", ["", "Belo Horizonte", "São José dos Campos"])
@@ -152,7 +188,7 @@ def test_budget_stays_exact_with_a_city(clinic_name: str, city: str) -> None:
 def test_empty_description_leaves_no_trailing_space_on_the_identification_line() -> None:
     rendered = render_greeting("Clínica São Lucas", "")
 
-    assert "da Clínica São Lucas.\n" in rendered
+    assert "assistente virtual da clínica.\n" in rendered
     assert " \n" not in rendered
 
 
@@ -331,10 +367,10 @@ def test_preview_template_contains_exactly_one_placeholder() -> None:
 # pinned at HEAD 7ae484d, before
 # the `patient_name` slot existed). The no-name path must stay byte-for-byte
 # identical: WhatsApp always takes it, and its 1024-char budget is measured on it.
-_NO_NAME_GREETING_SHA256 = "697a88382729e9192d05fceccca6873700d5941803ed0b97f8a7affe8856c17b"
-_NO_NAME_GREETING_LEN = 783
-_PREVIEW_SHA256 = "36280800e15176441547e94644c05be52bc0e9d91ce4f8d34c89a58ec50fbdff"
-_GINECOAQUI_BUDGET = 239
+_NO_NAME_GREETING_SHA256 = "e09ae85985d94fe2c172ccf6a14055be49e87061807ecf381a77c73668d602fb"
+_NO_NAME_GREETING_LEN = 781
+_PREVIEW_SHA256 = "b24e9e4dfdb90863dac97ce2a2b4232e8ff229839a77e4e677daa765bbe1de91"
+_GINECOAQUI_BUDGET = 241
 
 
 def _sha256(text: str) -> str:
@@ -396,14 +432,14 @@ def test_masculine_clinic_name_takes_ao_and_do() -> None:
     rendered = render_greeting("Instituto Gicovate", "Cirurgia do aparelho digestivo.")
 
     assert rendered.startswith("👋 Olá! Bem-vindo(a) ao Instituto Gicovate!\n")
-    assert "assistente virtual do Instituto Gicovate, cirurgia do aparelho digestivo.\n" in rendered
+    assert "assistente virtual do instituto, cirurgia do aparelho digestivo.\n" in rendered
 
 
 def test_feminine_or_brand_name_keeps_a_and_da() -> None:
     rendered = render_greeting("Clínica Vignolli", "")
 
     assert rendered.startswith("👋 Olá! Bem-vindo(a) à Clínica Vignolli!\n")
-    assert "assistente virtual da Clínica Vignolli.\n" in rendered
+    assert "assistente virtual da clínica.\n" in rendered
 
 
 def test_city_already_in_description_is_not_repeated() -> None:
