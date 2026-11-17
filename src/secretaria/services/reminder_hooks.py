@@ -39,6 +39,7 @@ from secretaria.models import (
 )
 from secretaria.models.appointment_reminder import REMINDER_KINDS_UNPLANNED
 from secretaria.services import reminder_schedule
+from secretaria.services.payments.adjustment_suspension import visible_to_patient_clause
 
 logger = get_logger(__name__)
 
@@ -148,6 +149,9 @@ async def reconcile_missing_reminders(*, now: datetime, limit: int = RECONCILE_L
                         Appointment.patient_id.is_not(None),
                         Appointment.start_at > now,
                         ~current_version,
+                        # TASK-085 R: a SUSPENDED consultation is planned again when its change
+                        # ends (`followup_kept_old` / the paid change), not while it waits.
+                        visible_to_patient_clause(),
                     )
                     .order_by(Appointment.start_at)
                     .limit(limit)

@@ -24,7 +24,7 @@ from secretaria.services.channel_sender import (
     CHANNEL_BRAIN_MESSAGE,
 )
 from secretaria.services.flow_router import calendar_day_row_id
-from secretaria.services.payments.service_change import REFUND_ACTIONS
+from secretaria.services.payments.service_change import CHOICE_ACTIONS, REFUND_ACTIONS
 from secretaria.services.release_offer import RELEASE_OFFER_ACTIONS
 from secretaria.services.reminder_text import REMINDER_ROW_ACTIONS
 from secretaria.workers.orchestrator import (
@@ -296,10 +296,12 @@ async def _persist_brain_message_inbound(
                     decoded[0] in REMINDER_ROW_ACTIONS
                     or decoded[0] in RELEASE_OFFER_ACTIONS
                     or decoded[0] in REFUND_ACTIONS
+                    or decoded[0] in CHOICE_ACTIONS
                 ):
                     # TASK-052: the choices on a released PAID slot are ACTIONS on this channel
                     # too (the card was recorded with its options, so the id was validated above).
                     # 2026-10-26: so is the answer to "quer a diferença do sinal de volta?".
+                    # TASK-085 R: and the three choices after a change's Pix expired unpaid.
                     action_button = decoded
 
                 return await _route_inbound_turn(

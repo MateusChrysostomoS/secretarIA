@@ -15,7 +15,6 @@ WhatsApp and the Portal share the same worker (`flow_runner._apply_flow_result`)
 
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
-from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
@@ -57,6 +56,11 @@ from tests._reminders_v2 import (
 )
 from tests.payments_support import FakeProvider
 
+# TASK-085 R: a dearer change is `applied_awaiting_payment` ("after", D-R5) or `suspended`
+# ("before", D-R4) now - tests/test_sinal_trocas_s3b_*.py. The "nothing changes until paid" tests
+# below pin the LEGACY deferred mode (rows made before TASK-085 R, and the "before" fallback
+# without room for a useful Pix), through the opt-in `legacy_deferred_mode` fixture below.
+
 # Sinal of 30 % paid on R$ 10.000 cents (seed_paid_deposit). New sinal = price x 30 %.
 CATALOG = [
     {"name": "Consulta", "price": "R$ 200,00", "duration_min": 30, "is_active": True},
@@ -69,6 +73,16 @@ CATALOG = [
 @pytest.fixture(autouse=True)
 def _wire(monkeypatch, db):  # noqa: F811
     wire(monkeypatch, db)
+
+
+@pytest.fixture
+def legacy_deferred_mode(monkeypatch):
+    """TASK-085 R: pins ONE test to the legacy deferred mode (`mode` NULL: nothing written until
+    the Pix is paid) - rows made before TASK-085 R and the "before" fallback without room for a
+    useful Pix (contrato §1). Same patches as S1's autouse fixture in tests/test_service_change.py,
+    but opt-in: the other tests here run today's rules ("after" clinic, D-R5)."""
+    monkeypatch.setattr(service_change, "timing_is_before", lambda tenant: True)
+    monkeypatch.setattr(service_change, "suspend_pix_expiry", lambda *args, **kwargs: None)
 
 
 @pytest.fixture
@@ -170,6 +184,7 @@ def _texts() -> list[str]:
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("legacy_deferred_mode")
 async def test_dearer_service_sends_the_difference_pix_and_changes_nothing(db, provider):  # noqa: F811
     world = await _world(db)
     calendar = EditCalendar()
@@ -359,6 +374,7 @@ async def test_a_service_without_a_price_is_refused_with_one_line(db, provider):
     assert not any(text.startswith(ae.EDIT_APPLIED) for text in texts)
 
 
+@pytest.mark.usefixtures("legacy_deferred_mode")
 async def test_a_second_change_while_the_pix_is_open_is_refused(db, provider):  # noqa: F811
     world = await _world(db)
     await _confirm(world, _edit(world, "Avaliação", 30, EditCalendar()))
@@ -382,30 +398,25 @@ async def test_an_agenda_failure_rolls_the_whole_change_back(db, provider):  # n
     assert not any(text.startswith(ae.EDIT_APPLIED) for text in _texts())
 
 
-async def test_a_doctor_change_with_a_paid_sinal_is_still_refused(db, provider):  # noqa: F811
-    world = await _world(db)
-    edit = _edit(world, "Retorno", 20, EditCalendar())
-    edit["professional_id"] = uuid4()
-    edit["doctor_changed"] = True
-
-    await _confirm(world, edit)
-
-    row = await reload_appointment(db, world.appointment.id)
-    assert (row.appointment_type, row.professional_id) == ("Consulta", None)
-    assert await _adjustments(db) == []
+# TASK-085 R D-R3 (owner 2026-11-17): a doctor change with a paid sinal is no longer refused - it
+# goes through the money engine (tests/test_sinal_trocas_s3b_worker.py).
 
 
-async def test_a_router_written_paid_service_change_is_never_charged_twice(db, provider):  # noqa: F811
+async def test_a_router_written_paid_service_change_is_decided_once(db, provider):  # noqa: F811
     """A card confirmed before the sinal was paid already moved the agenda (no
-    `calendar_deferred`): the worker refuses it as before instead of guessing the money."""
+    `calendar_deferred`). TASK-085 R: the money still decides - ONCE - and the router's agenda
+    write stands when the change stands now (it used to be refused)."""
     world = await _world(db)
-    edit = _edit(world, "Retorno", 20, EditCalendar())
+    calendar = EditCalendar()
+    edit = _edit(world, "Retorno", 20, calendar)
     edit["calendar_deferred"] = False
 
     await _confirm(world, edit)
 
-    assert (await reload_appointment(db, world.appointment.id)).appointment_type == "Consulta"
-    assert await _adjustments(db) == []
+    assert (await reload_appointment(db, world.appointment.id)).appointment_type == "Retorno"
+    [adjustment] = await _adjustments(db)
+    assert adjustment.status == STATUS_ASKED
+    assert calendar.detail_updates == []  # the router's write stands; nothing written twice
 
 
 async def test_the_whole_turn_on_whatsapp_changes_the_service_and_asks(  # noqa: F811

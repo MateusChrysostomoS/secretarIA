@@ -42,6 +42,7 @@ from secretaria.models.appointment_reminder import (
     REMINDER_WARN_UNCONFIRMED,
 )
 from secretaria.services.email import send_confirmation_warning_alert
+from secretaria.services.payments.adjustment_suspension import visible_to_patient_clause
 
 logger = get_logger(__name__)
 
@@ -71,12 +72,15 @@ class WarningCandidate:
 
 
 def _appointment_conditions(now: datetime) -> list:
-    """The appointment must still need the warning: live, unconfirmed, upcoming."""
+    """The appointment must still need the warning: live, unconfirmed, upcoming - and not
+    SUSPENDED (TASK-085 R D-R4: a consultation waiting for the Pix of a change's difference got no
+    reminder, so "not confirmed" says nothing about it)."""
     return [
         Appointment.status.in_(LIVE_APPOINTMENT_STATUSES),
         Appointment.confirmation_count == 0,
         Appointment.start_at.is_not(None),
         Appointment.start_at > now,
+        visible_to_patient_clause(),
     ]
 
 

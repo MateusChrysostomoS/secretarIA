@@ -6,15 +6,26 @@ AFTER the commit, best-effort, like R3's `replacement._finish_replacement`: the 
 Google event of a doctor change is deleted on the agenda that owned it, and a failure is
 logged and never undoes the edit the patient just confirmed.
 
-2026-10-26 (troca de serviço com sinal pago): a SERVICE change on a paid sinal arrives with
-`calendar_deferred` (the router did not touch the agenda) and goes through
-`services/payments/service_change.request_service_change`: a dearer service creates the Pix of
-the difference and writes nothing; a cheaper/equal one is written there (row + ONE doctor
-notice) and the agenda follows here through `service_change.sync_agenda_event`. Doctor and
-convênio stay refused with a paid sinal.
+TASK-085 R (S3b, tasks/TASK-085/sinal-trocas/contrato.md): the money of an edit.
 
-TASK-085 (R3): a change of the UNIT only whose price there differs goes through the same engine
-(priced at the new unit); at the same price the edit is exactly what it always was.
+* PAID sinal and a MONEY field changes (service, unit, doctor, convênio - the one predicate
+  `service_change_policy.money_fields_changed`): `_apply_paid_change` hands the WHOLE target to
+  `service_change.request_paid_change`. It writes the row itself when the change stands now
+  (`applied_now`, `asked`, `applied_awaiting_payment`) and this module then moves the agenda -
+  on the new doctor's agenda when the calendar changes (created here, the old event deleted by
+  `_finish_edit` after the commit). `suspended` / `awaiting_payment` / `blocked` write nothing:
+  an agenda the router already wrote (`calendar_deferred` False) is put back in line with the
+  row in the same transaction. Works for a router that deferred the agenda and for one that
+  did not.
+* UNPAID sinal (AWAITING) and a money field changes (D-R6): the edit is written, the agenda
+  follows, and `deposit_lifecycle.requote_awaiting` runs as the LAST fallible step (contrato
+  §3.7). `payment_in_flight` / `void_failed` (or an exception) undo the edit (savepoint) and the
+  reply says why (`AppliedEdit.refusal`); `voided` asks `flow_runner` for
+  `recharge_after_edit` after the commit (`AppliedEdit.recharge`).
+* NO sinal on the consultation, the clinic charges one and a money field changes (OQ-10):
+  `recharge_after_edit(old_amount_cents=None)` after the commit decides whether one is due.
+* A SUSPENDED consultation (a change waiting for the Pix of its difference) is never edited by
+  the patient: `refusal` = `SUSPENDED_VISIT_TEXT`, nothing written.
 """
 
 from dataclasses import dataclass
@@ -29,9 +40,11 @@ from secretaria.models import (
     Appointment,
     Patient,
     PixDeposit,
+    PixDepositStatus,
     Tenant,
     is_live_status,
 )
+from secretaria.models.deposit_adjustment import DepositAdjustment
 from secretaria.services import reminder_hooks
 from secretaria.services.appointment_edit import appointment_email_version
 from secretaria.services.appointment_edit_write import (
@@ -40,9 +53,16 @@ from secretaria.services.appointment_edit_write import (
 )
 from secretaria.services.appointment_status import SOURCE_FLOW
 from secretaria.services.calendar import CalendarUnavailableError, build_event_description
+from secretaria.services.local_calendar import create_event_exclusive
 from secretaria.services.patient_context import as_utc
-from secretaria.services.payments import deposit_lifecycle, service_change
+from secretaria.services.payments import adjustment_suspension, deposit_lifecycle, service_change
 from secretaria.services.payments.service_change import ServiceChangeResult
+from secretaria.services.payments.service_change_policy import (
+    MONEY_FIELD_DOCTOR,
+    MONEY_FIELD_INSURANCE,
+    MoneyTerms,
+    money_fields_changed,
+)
 from secretaria.services.professional_edit_outbox import record_professional_edit
 from secretaria.services.tenant_config import list_active_professionals
 from secretaria.services.unit_booking import booking_unit_fields
@@ -53,6 +73,26 @@ from secretaria.workers.shared.llm_context import (
 )
 
 logger = get_logger(__name__)
+
+# What the engine wrote on the row NOW (the caller owns the agenda of these, contrato §3.6).
+_WRITES_NOW = ("applied_now", "asked", "applied_awaiting_payment")
+# Results that created a Pix of the difference in this transaction (voided if it rolls back).
+_CHARGED = ("applied_awaiting_payment", "suspended", "awaiting_payment")
+# The LEGACY deferred mode (`awaiting_payment`, mode NULL: a "before" clinic without room for a
+# useful Pix) applies only service / time / unit when paid (S1 `apply_paid_adjustment`): a change
+# of doctor, convênio or who the visit is for would be charged and never written - refused.
+LEGACY_NO_ROOM_TEXT = (
+    "Não dá para fazer essa troca tão perto da consulta. Sua consulta continua como estava. "
+    "Para mudar, fale com a clínica."
+)
+
+
+@dataclass(frozen=True)
+class RechargeAfterEdit:
+    """`deposit_lifecycle.recharge_after_edit` to run after the commit (TASK-085 R D-R6 / OQ-10).
+    `old_amount_cents` None = the consultation had no sinal."""
+
+    old_amount_cents: int | None
 
 
 @dataclass(frozen=True)
@@ -69,29 +109,39 @@ class AppliedEdit:
     # and the Portal patient (plugins/appointment_change_notifications.py).
     previous_start_at: datetime | None = None
     new_start_at: datetime | None = None
-    # 2026-10-26: a SERVICE change on a paid sinal - what the money decided
-    # (`service_change.request_service_change`); the reply follows it (flow_runner).
+    # 2026-10-26 / TASK-085 R: a money-field change on a paid sinal - what the money decided
+    # (`service_change.request_paid_change`); the reply follows it (flow_runner).
     service_change: ServiceChangeResult | None = None
+    # TASK-085 R: NOTHING was written (the edit was undone in this transaction); the reply is
+    # this one line and the agenda goes back to the committed row (flow_runner compensates).
+    refusal: str | None = None
+    # TASK-085 R D-R6 / OQ-10: the sinal to (re)charge once the edit is committed.
+    recharge: RechargeAfterEdit | None = None
 
 
 def _window(appointment) -> tuple[datetime, datetime]:
     return as_utc(appointment.start_at), as_utc(appointment.end_at or appointment.start_at)
 
 
-def _edit_window(edit: dict) -> tuple[datetime, datetime]:
-    """The window the router gave the event at Confirmar (the edit's own)."""
-    return as_utc(edit["start_at"]), as_utc(edit["end_at"] or edit["start_at"])
+def _calendar_changed(edit: dict) -> bool:
+    return bool(edit.get("calendar_changed", edit.get("doctor_changed")))
 
 
-async def _unit_moves_price(session, tenant, appointment, edit: dict) -> bool:
-    """TASK-085 R3: the edit moves the booking to another unit (the key is there only when the
-    unit changes) and the price there is not the one at the current unit. Same price -> False:
-    the edit goes the way it always did."""
-    if "unit_id" not in edit:
-        return False
-    return await service_change.unit_change_moves_price(
-        session, tenant=tenant, appointment=appointment, unit_id=edit["unit_id"]
-    )
+def _money_target(edit: dict) -> dict:
+    """The edit's money terms in `MoneyTerms.with_edit` keys (an empty service keeps the row's,
+    as `write_appointment_edit` does; `unit_id` only when the router moved the unit)."""
+    target = {key: edit[key] for key in ("professional_id", "insurance") if key in edit}
+    if edit.get("appointment_type"):
+        target["appointment_type"] = edit["appointment_type"]
+    if "unit_id" in edit:
+        target["unit_id"] = edit["unit_id"]
+    return target
+
+
+def money_changes(appointment, edit: dict) -> frozenset[str]:
+    """Which money fields (contrato §3.4) this edit changes on this row."""
+    terms = MoneyTerms.of_appointment(appointment)
+    return money_fields_changed(terms, terms.with_edit(_money_target(edit)))
 
 
 async def _sync_agenda(session, tenant, appointment, edit: dict, window_before) -> None:
@@ -110,31 +160,145 @@ async def _sync_agenda(session, tenant, appointment, edit: dict, window_before) 
     )
 
 
-async def _apply_paid_service_change(
-    session, *, tenant, current_tenant, appointment, edit: dict, window_before
-) -> AppliedEdit | None:
-    """A service change on a PAID sinal (2026-10-26): `request_service_change` decides and, when
-    the change stands now, writes the row and the doctor's ONE notice itself. Then the agenda.
+async def _create_on_new_agenda(session, tenant, appointment, edit: dict) -> None:
+    """A deferred change of agenda (another doctor) that stands now: the event is created on the
+    new agenda (exclusively on the secretarIA one; the router checked it free at Confirmar) and
+    the row re-pointed to it. The old event is deleted after the commit (`_finish_edit`); a
+    rollback removes only this new one (`compensate_appointment_edit` reads `edit`)."""
+    calendar = edit.get("calendar")
+    if calendar is None:
+        raise CalendarUnavailableError("edit_calendar_missing")
+    description = build_event_description(
+        service=appointment.appointment_type,
+        insurance=appointment.insurance,
+        attendee_name=appointment.attendee_name,
+        **await booking_unit_fields(
+            session, tenant.id, getattr(appointment, "unit_id", None), appointment.professional_id
+        ),
+    )
+    created = await create_event_exclusive(
+        calendar,
+        start=as_utc(appointment.start_at),
+        end=as_utc(appointment.end_at or appointment.start_at),
+        summary=service_change.agenda_summary(appointment, edit.get("patient_name")),
+        description=description,
+    )
+    new_event_id = str(created.get("id") or "").strip()
+    if not new_event_id:
+        raise CalendarUnavailableError("edit_event_without_id")
+    edit["google_event_id"] = new_event_id
+    edit["google_event_link"] = created.get("htmlLink")
+    appointment.google_event_id = new_event_id
+    appointment.google_event_link = created.get("htmlLink")
+    appointment.google_calendar_source = (
+        "professional" if appointment.professional_id is not None else "clinic"
+    )
 
-    `awaiting_payment` / `blocked` write nothing on the row or the agenda (the Pix of the
-    difference, or the refusal, goes in the reply); the webhook applies a paid difference later
-    and `service_change.update_agenda_after_payment` moves the agenda then.
-    """
+
+async def _write_agenda_now(session, tenant, appointment, edit: dict, window_before) -> None:
+    """The agenda of an edit the router DEFERRED, now that the row holds it."""
+    if _calendar_changed(edit):
+        await _create_on_new_agenda(session, tenant, appointment, edit)
+    else:
+        await _sync_agenda(session, tenant, appointment, edit, window_before)
+
+
+async def _restore_router_agenda(session, tenant, appointment, edit: dict) -> None:
+    """The router already wrote the agenda (`calendar_deferred` False) of a change that did NOT
+    stand now: its new event on another agenda is removed; the same event is put back exactly on
+    the row (plain write - the window is the row's own, still ours). Raises on a failure (the
+    transaction rolls back and `compensate_appointment_edit` tries again)."""
+    calendar = edit.get("calendar")
+    if calendar is None:
+        raise CalendarUnavailableError("edit_calendar_missing")
+    if _calendar_changed(edit):
+        new_event = edit.get("google_event_id")
+        if new_event and new_event != edit.get("old_google_event_id"):
+            await calendar.cancel_event(new_event)
+        edit["google_event_id"] = edit.get("old_google_event_id")
+        edit["google_event_link"] = None
+        return
+    await service_change.sync_agenda_event(
+        session,
+        tenant,
+        appointment,
+        calendar,
+        patient_name=edit.get("patient_name"),
+        window_changed=False,
+    )
+
+
+async def _void_unseen_charge(session, tenant, deposit, result: ServiceChangeResult) -> None:
+    """The edit rolls back after the engine created a Pix the patient never saw: void it
+    (best-effort; a charge we could not void has no adjustment row and was never shown, so
+    nobody pays it)."""
+    if result.kind not in _CHARGED or result.adjustment_id is None:
+        return
+    try:
+        adjustment = await session.get(DepositAdjustment, result.adjustment_id)
+        charge_id = adjustment.provider_charge_id if adjustment is not None else None
+        if charge_id:
+            await service_change._void_charge(
+                session, tenant, deposit, charge_id, {"tenant_id": str(tenant.id)}
+            )
+    except Exception as exc:  # noqa: BLE001 - the rollback goes on regardless
+        logger.warning("appointment_edit_charge_void_failed", error_type=type(exc).__name__)
+
+
+def _legacy_cannot_carry(appointment, edit: dict, changed: frozenset[str]) -> bool:
+    """Does this change hold a part the legacy deferred mode would never write?"""
+    return bool(changed & {MONEY_FIELD_DOCTOR, MONEY_FIELD_INSURANCE}) or (
+        "attendee_name" in edit
+        and (edit.get("attendee_name") or None) != (appointment.attendee_name or None)
+    )
+
+
+async def _apply_paid_change(
+    session, *, tenant, current_tenant, appointment, edit: dict, window_before, changed
+) -> AppliedEdit | None:
+    """A change of a MONEY field on a PAID sinal (2026-10-26; TASK-085 R D-R1..D-R5): the engine
+    decides with the WHOLE target and, when the change stands now, writes the row and the
+    doctor's ONE notice itself. Then the agenda (deferred) - or, when the change does not stand
+    now, the router's agenda back to the row (not deferred)."""
     deposit = await deposit_lifecycle.get_deposit_for_appointment(session, appointment.id)
     if deposit is None or deposit.tenant_id != current_tenant.id:
         return None
+    deferred = bool(edit.get("calendar_deferred"))
     previous_start = appointment.start_at
-    result = await service_change.request_service_change(
+    appointment_id = appointment.id
+    # A savepoint only when the legacy fallback could not carry the change (see below).
+    savepoint = (
+        await session.begin_nested() if _legacy_cannot_carry(appointment, edit, changed) else None
+    )
+    result = await service_change.request_paid_change(
         session,
         tenant=current_tenant,
         appointment=appointment,
         deposit=deposit,
-        new_service=edit["appointment_type"],
+        new_service=edit.get("appointment_type") or appointment.appointment_type,
         pending_edit=edit,
         now=datetime.now(UTC),
         source=SOURCE_FLOW,
     )
-    if result.kind in ("blocked", "awaiting_payment"):
+    if savepoint is not None:
+        if result.kind == "awaiting_payment":
+            # Too close to the visits for a suspension: never charge for a change that the
+            # payment would not write (S4 answers 409 `no_room` for the same case). The Pix the
+            # patient never saw is voided, the engine's writes undone; `flow_runner` puts the
+            # router's agenda back (refusal) and says why.
+            await _void_unseen_charge(session, current_tenant, deposit, result)
+            await savepoint.rollback()
+            logger.info("appointment_edit_legacy_no_room", tenant_id=str(current_tenant.id))
+            return _refused(appointment_id, LEGACY_NO_ROOM_TEXT)
+        await savepoint.commit()
+    if result.kind not in _WRITES_NOW:
+        # suspended / awaiting_payment (legacy) / blocked: the row and the old event stay.
+        if not deferred:
+            try:
+                await _restore_router_agenda(session, current_tenant, appointment, edit)
+            except BaseException:
+                await _void_unseen_charge(session, current_tenant, deposit, result)
+                raise
         return AppliedEdit(
             appointment_id=appointment.id,
             moved=False,
@@ -142,19 +306,25 @@ async def _apply_paid_service_change(
             old_professional_id=None,
             service_change=result,
         )
-    if edit["time_changed"]:
-        allowed, _count = await deposit_lifecycle.register_reschedule(
-            session, tenant=current_tenant, appointment=appointment
-        )
-        if not allowed:
-            return None
-    await _sync_agenda(session, current_tenant, appointment, edit, window_before)
     time_changed = bool(edit["time_changed"])
+    try:
+        if time_changed:
+            allowed, _count = await deposit_lifecycle.register_reschedule(
+                session, tenant=current_tenant, appointment=appointment
+            )
+            if not allowed:
+                await _void_unseen_charge(session, current_tenant, deposit, result)
+                return None
+        if deferred:
+            await _write_agenda_now(session, current_tenant, appointment, edit, window_before)
+    except BaseException:
+        await _void_unseen_charge(session, current_tenant, deposit, result)
+        raise
     return AppliedEdit(
         appointment_id=appointment.id,
         moved=time_changed
         and (reminder_hooks.enabled_for(tenant) or (appointment.confirmation_count or 0) > 0),
-        old_event_id=None,
+        old_event_id=edit.get("old_google_event_id") if _calendar_changed(edit) else None,
         old_professional_id=edit.get("old_professional_id"),
         old_google_calendar_source=edit.get("old_google_calendar_source"),
         notice_id=str(result.notice_id) if result.notice_id else None,
@@ -163,6 +333,16 @@ async def _apply_paid_service_change(
         previous_start_at=previous_start if time_changed else None,
         new_start_at=appointment.start_at if time_changed else None,
         service_change=result,
+    )
+
+
+def _refused(appointment_id: UUID, text: str) -> AppliedEdit:
+    return AppliedEdit(
+        appointment_id=appointment_id,
+        moved=False,
+        old_event_id=None,
+        old_professional_id=None,
+        refusal=text,
     )
 
 
@@ -204,8 +384,15 @@ async def apply_appointment_edit(
             or appointment.google_event_id != edit["old_google_event_id"]
         ):
             return None
+    # TASK-085 R (contrato §3.8): a consultation waiting for the Pix of a change's difference is
+    # never edited by the patient (an old card) - one line, nothing written.
+    if await adjustment_suspension.is_suspended(
+        session, tenant_id=tenant_id, appointment_id=appointment.id
+    ):
+        logger.info("appointment_edit_suspended_refused", tenant_id=str(tenant_id))
+        return _refused(appointment.id, adjustment_suspension.SUSPENDED_VISIT_TEXT)
     # Serialize the money counter too: a stale card cannot consume the same allowance twice.
-    await session.scalar(
+    deposit = await session.scalar(
         select(PixDeposit)
         .where(
             PixDeposit.appointment_id == appointment.id,
@@ -214,40 +401,30 @@ async def apply_appointment_edit(
         .with_for_update()
     )
     paid, blocked = await edit_guards(session, current_tenant, appointment)
-    service_changed = edit["appointment_type"] != appointment.appointment_type
-    doctor_or_plan_changed = (
-        edit["professional_id"] != appointment.professional_id
-        or edit["insurance"] != appointment.insurance
-    )
+    changed = money_changes(appointment, edit)
     deferred = bool(edit.get("calendar_deferred"))
     window_before = _window(appointment)
-    if (paid and doctor_or_plan_changed) or (blocked and edit["time_changed"]):
+    if blocked and edit["time_changed"]:
         return None
-    if paid and service_changed:
-        # 2026-10-26: the money decides (services/payments/service_change.py). Only a change
-        # whose agenda write the router deferred - a card confirmed before the sinal was paid
-        # already moved the agenda and is refused as before.
-        if not deferred:
-            return None
-        return await _apply_paid_service_change(
-            session, tenant=tenant, current_tenant=current_tenant, appointment=appointment,
-            edit=edit, window_before=window_before,
-        )
-    if paid and await _unit_moves_price(session, current_tenant, appointment, edit):
-        # TASK-085 R3: the SAME service at another unit with another price is a money decision
-        # too (same engine, priced at the new unit). Today's router already wrote the agenda of
-        # a unit change (it defers only a service change): the event goes back in line with the
-        # row first, so the money decides from exactly the state of a deferred change.
-        if not deferred:
-            await _sync_agenda(session, current_tenant, appointment, edit, _edit_window(edit))
-        return await _apply_paid_service_change(
+    if paid and changed:
+        # The money decides (services/payments/service_change.py), for every money field.
+        return await _apply_paid_change(
             session,
             tenant=tenant,
             current_tenant=current_tenant,
             appointment=appointment,
             edit=edit,
             window_before=window_before,
+            changed=changed,
         )
+    # D-R6: an AWAITING sinal whose amount may move - the edit runs in a savepoint so a refused
+    # re-quote undoes it alone (the flow state of the turn still commits).
+    requote = (
+        bool(changed) and deposit is not None and deposit.status == PixDepositStatus.AWAITING
+    )
+    old_amount_cents = deposit.amount_cents if requote else None
+    appointment_id = appointment.id
+    savepoint = await session.begin_nested() if requote else None
     if edit["time_changed"]:
         allowed, _count = await deposit_lifecycle.register_reschedule(
             session,
@@ -270,16 +447,41 @@ async def apply_appointment_edit(
         reminder_hooks.enabled_for(tenant) or (appointment.confirmation_count or 0) > 0
     )
     notice = await record_professional_edit(session, appointment, fields)
+    old_event_id = edit["old_google_event_id"] if _calendar_changed(edit) else None
     if deferred:
-        # The router left the agenda to us (the sinal stopped being paid since): same helper,
+        # The router left the agenda to us (the sinal stopped being paid since): same helpers,
         # inside this transaction - a refusal rolls the edit back (`flow_runner` compensates).
-        await _sync_agenda(session, current_tenant, appointment, edit, window_before)
+        await _write_agenda_now(session, current_tenant, appointment, edit, window_before)
+    recharge = None
+    if requote:
+        # Contrato §3.7: the LAST fallible step before the commit (a voided Pix cannot come back).
+        await session.flush()
+        try:
+            outcome = await deposit_lifecycle.requote_awaiting(
+                session,
+                tenant=current_tenant,
+                appointment=appointment,
+                deposit=deposit,
+                now=datetime.now(UTC),
+            )
+        except Exception as exc:  # noqa: BLE001 - an exception counts as void_failed (§3.7)
+            logger.warning("appointment_edit_requote_failed", error_type=type(exc).__name__)
+            outcome = "void_failed"
+        if outcome in ("payment_in_flight", "void_failed"):
+            # The rollback expires the row: only the id read before it is used from here on.
+            await savepoint.rollback()
+            logger.info("appointment_edit_requote_refused", outcome=outcome)
+            return _refused(appointment_id, deposit_lifecycle.requote_blocked_text(outcome))
+        await savepoint.commit()
+        if outcome == "voided":
+            recharge = RechargeAfterEdit(old_amount_cents=old_amount_cents)
+    elif changed and deposit is None and current_tenant.pix_deposit_enabled:
+        # OQ-10: no sinal yet; `recharge_after_edit` decides whether the edit made one due.
+        recharge = RechargeAfterEdit(old_amount_cents=None)
     return AppliedEdit(
         appointment_id=appointment.id,
         moved=moved,
-        old_event_id=edit["old_google_event_id"]
-        if edit.get("calendar_changed", edit["doctor_changed"])
-        else None,
+        old_event_id=old_event_id,
         old_professional_id=edit.get("old_professional_id"),
         old_google_calendar_source=edit.get("old_google_calendar_source"),
         notice_id=str(notice.id) if notice else None,
@@ -287,6 +489,7 @@ async def apply_appointment_edit(
         changed_fields=tuple(fields),
         previous_start_at=previous_start if edit["time_changed"] else None,
         new_start_at=appointment.start_at if edit["time_changed"] else None,
+        recharge=recharge,
     )
 
 

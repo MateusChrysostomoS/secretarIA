@@ -5,6 +5,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import select, update
 
+from secretaria.ai.formatter import TextBubble
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import (
@@ -658,6 +659,16 @@ async def _apply_flow_result(
             await compensate_appointment_edit(tenant, edit_patient_id, result.appointment_edit)
         await _handle_calendar_unavailable(reply, redis=redis, tenant=tenant, waba_token=waba_token)
         return True
+    if (
+        persisted
+        and applied_edit is not None
+        and applied_edit.refusal is not None
+        and result.appointment_edit is not None
+        and tenant is not None
+    ):
+        # TASK-085 R: the edit was undone inside the transaction (a suspended consultation, or an
+        # unpaid sinal that could not be re-quoted): the agenda goes back to the committed row.
+        await compensate_appointment_edit(tenant, edit_patient_id, result.appointment_edit)
     if booked_appointment is not None and persisted and tenant is not None:
         _log_booking_scope(booked_appointment, tenant.id, source=SOURCE_FLOW)
         await enqueue_post_booking_hooks(redis, tenant.id, booked_appointment.id, source="flow")
@@ -765,6 +776,15 @@ async def _apply_flow_result(
         result.action == "reply"
         and persisted
         and applied_edit is not None
+        and applied_edit.refusal is not None
+        and result.appointment_edit is not None
+    ):
+        # TASK-085 R: nothing changed - why, then the menu (never the "Pronto" recap).
+        result.bubbles = [TextBubble(body=applied_edit.refusal), *result.bubbles[1:]]
+    if (
+        result.action == "reply"
+        and persisted
+        and applied_edit is not None
         and applied_edit.service_change is not None
         and result.appointment_edit is not None
     ):
@@ -790,6 +810,21 @@ async def _apply_flow_result(
                 result.bubbles[-1].body = f"{result.bubbles[-1].body}\n\n{notice}"
             await _offer_manage_on_main_menu(reply, result.bubbles)
             await _dispatch_bubbles(reply, result.bubbles, tenant=tenant, waba_token=waba_token)
+        if (
+            persisted
+            and tenant is not None
+            and applied_edit is not None
+            and applied_edit.recharge is not None
+        ):
+            # TASK-085 R D-R6 / OQ-10 (contrato §3.7): after the commit and after the recap, the
+            # new sinal of the edited consultation (or the notice that the old Pix was voided).
+            await deposit_lifecycle.recharge_after_edit(
+                tenant_id=tenant.id,
+                appointment_id=applied_edit.appointment_id,
+                old_amount_cents=applied_edit.recharge.old_amount_cents,
+                waba_token=waba_token,
+                redis=redis,
+            )
         if result.notify_no_unit is not None:
             await _notify_no_unit_for_service(
                 reply, result.notify_no_unit, tenant=tenant, redis=redis
