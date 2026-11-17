@@ -22,10 +22,15 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from secretaria.core.logging import get_logger
 from secretaria.models.insurance import ProfessionalInsurancePlan
 from secretaria.models.insurance_acceptance_exception import InsuranceAcceptanceException
+from secretaria.models.tenant import Tenant
 from secretaria.services.flow_units import offered_units, units_for_service
-from secretaria.services.insurance_catalog import _independent_plan_id
+from secretaria.services.insurance_catalog import _independent_plan_id, resolve_booking_plan_ids
+from secretaria.services.service_catalog import entry_service_id
+
+logger = get_logger(__name__)
 
 # (service_id, unit_id | None, plan_id in the flow's id space) - all str.
 Key = tuple[str, str | None, str]
@@ -149,3 +154,154 @@ async def load_acceptance_exceptions(
             )
         return AcceptanceExceptions(by_professional={k: frozenset(v) for k, v in grouped.items()})
     return AcceptanceExceptions()
+
+
+# --- Shared by the T4 call sites (flow, edit, IA, hub, workers) ---------------------------------
+
+EMPTY = AcceptanceExceptions()
+
+
+def has_exceptions(exc: AcceptanceExceptions | None) -> bool:
+    """Whether the clinic has any refused cell at all (the cheap "matrix untouched" test)."""
+    return exc is not None and bool(exc.clinic or exc.by_professional)
+
+
+def snapshot_exceptions(tenant: Any) -> AcceptanceExceptions:
+    """The matrix carried by the router's tenant snapshot (`insurance_refused`), or EMPTY.
+
+    getattr on purpose: older/bare snapshots (tests, simulation inputs) simply have no matrix,
+    which means "accepts everything" - today's behaviour.
+    """
+    exc = getattr(tenant, "insurance_refused", None)
+    return exc if isinstance(exc, AcceptanceExceptions) else EMPTY
+
+
+def refuses_everywhere(
+    exc: AcceptanceExceptions, professional: Any | None, service_id: Any, plan_id: Any
+) -> bool:
+    """True only when the MATRIX is why this service cannot be booked with this plan.
+
+    The matrix only ever subtracts: with no refused cell this is always False (the
+    characterization guarantee - a clinic that never touched the matrix sees no change). A
+    doctor with no unit link asks the "no unit" slice; a doctor with units asks every unit the
+    service is bookable at (`units_for_service`, TASK-083 marks included). When there is no such
+    unit at all (every unit closed / service not done anywhere) it is NOT the matrix's doing and
+    the existing "no unit" path keeps handling it -> False.
+    """
+    if not has_exceptions(exc) or service_id is None or plan_id is None:
+        return False
+    pid = getattr(professional, "id", None)
+    if not offered_units(professional):
+        return not is_accepted(exc, pid, service_id, None, plan_id)
+    units = units_for_service(professional, _as_uuid(service_id))
+    if not units:
+        return False
+    return not any(is_accepted(exc, pid, service_id, unit.id, plan_id) for unit in units)
+
+
+def refuses_all_services(
+    exc: AcceptanceExceptions, professional: Any | None, services: list | None, plan_id: Any
+) -> bool:
+    """True when the doctor takes `plan_id` in NONE of `services` because of the matrix.
+
+    `services` are the doctor's resolved entries (`professional_appointment_types`). An entry
+    without `service_id` (legacy JSON) is outside the matrix and always accepts -> False. No
+    services at all -> False (nothing to judge; the existing "no services" path handles it).
+    """
+    if not has_exceptions(exc) or plan_id is None or not services:
+        return False
+    for entry in services:
+        service_id = entry_service_id(entry) if isinstance(entry, dict) else None
+        if service_id is None:
+            return False
+        if not refuses_everywhere(exc, professional, service_id, plan_id):
+            return False
+    return True
+
+
+async def booking_refused_by_ids(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    professional_id: UUID | None,
+    service_id: UUID | None,
+    unit_id: UUID | None,
+    tenant_plan_id: UUID | None,
+    professional_plan_id: UUID | None,
+) -> bool:
+    """Write-time guard straight from the database (fresh, never a stale snapshot).
+
+    True when the cell (service, unit, plan) is a stored exception for the tenant's CURRENT mode:
+    `shared` -> the clinic matrix row of `tenant_plan_id`; `independent` -> the doctor's row of
+    `professional_plan_id`. Unknown service or no plan (Particular, typed "Outro", legacy name)
+    -> False. Any other mode has no matrix -> False. Always scoped by `tenant_id`.
+    """
+    if service_id is None or (tenant_plan_id is None and professional_plan_id is None):
+        return False
+    mode = await session.scalar(select(Tenant.insurance_mode).where(Tenant.id == tenant_id))
+    unit_clause = (
+        InsuranceAcceptanceException.unit_id.is_(None)
+        if unit_id is None
+        else InsuranceAcceptanceException.unit_id == unit_id
+    )
+    if mode == "shared" and tenant_plan_id is not None:
+        scope = (
+            InsuranceAcceptanceException.professional_id.is_(None),
+            InsuranceAcceptanceException.tenant_plan_id == tenant_plan_id,
+        )
+    elif mode == "independent" and professional_plan_id is not None and professional_id:
+        scope = (
+            InsuranceAcceptanceException.professional_id == professional_id,
+            InsuranceAcceptanceException.professional_plan_id == professional_plan_id,
+        )
+    else:
+        return False
+    found = await session.scalar(
+        select(InsuranceAcceptanceException.id)
+        .where(
+            InsuranceAcceptanceException.tenant_id == tenant_id,
+            InsuranceAcceptanceException.service_id == service_id,
+            unit_clause,
+            *scope,
+        )
+        .limit(1)
+    )
+    return found is not None
+
+
+async def booking_refused(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    professional_id: UUID | None,
+    service_id: UUID | None,
+    unit_id: UUID | None,
+    insurance: str | None,
+) -> bool:
+    """`booking_refused_by_ids` from the convênio NAME a booking carries.
+
+    Resolves the name exactly like the appointment row will (`resolve_booking_plan_ids`), so the
+    guard and the stored plan can never disagree. Callers log refusals with ids only, never the
+    plan name (`log_refusal`).
+    """
+    if service_id is None or not insurance or not str(insurance).strip():
+        return False
+    tenant_plan_id, professional_plan_id = await resolve_booking_plan_ids(
+        session, tenant_id, insurance, professional_id
+    )
+    return await booking_refused_by_ids(
+        session,
+        tenant_id=tenant_id,
+        professional_id=professional_id,
+        service_id=service_id,
+        unit_id=unit_id,
+        tenant_plan_id=tenant_plan_id,
+        professional_plan_id=professional_plan_id,
+    )
+
+
+def log_refusal(event: str, **ids: Any) -> None:
+    """One structured log line for a matrix refusal - ids only (no plan/patient names, LGPD)."""
+    logger.info(
+        event, **{key: (None if value is None else str(value)) for key, value in ids.items()}
+    )

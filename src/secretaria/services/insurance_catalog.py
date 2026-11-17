@@ -30,6 +30,7 @@ import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import delete, select
@@ -243,6 +244,11 @@ class TenantInsurance:
 
     plans: list[dict] = field(default_factory=list)
     accepted_by: dict[str, frozenset[str]] = field(default_factory=dict)
+    # TASK-086: the clinic's acceptance matrix (services/insurance_acceptance.py::
+    # AcceptanceExceptions), already in the flow's plan-id space. None = no refused cell, which
+    # is also today's behaviour (accepts everything) - kept None when empty so a clinic that
+    # never touched the matrix produces exactly the same value as before.
+    refused: Any = None
 
 
 def catalog_match_keys(entry: InsuranceCatalog) -> set[str]:
@@ -465,8 +471,21 @@ async def load_tenant_insurance(session: AsyncSession, tenant_id: UUID) -> Tenan
     """
     mode = await session.scalar(select(Tenant.insurance_mode).where(Tenant.id == tenant_id))
     if mode == "independent":
-        return await _load_independent_insurance(session, tenant_id)
+        lists = await _load_independent_insurance(session, tenant_id)
+    else:
+        lists = await _load_clinic_insurance(session, tenant_id)
+    # TASK-086 (inventory A0): the matrix rides along in the same per-turn read, ONE query (E9).
+    # Imported here: insurance_acceptance imports this module.
+    from secretaria.services.insurance_acceptance import load_acceptance_exceptions
 
+    refused = await load_acceptance_exceptions(session, tenant_id, mode)
+    if not refused.clinic and not refused.by_professional:
+        return lists
+    return TenantInsurance(plans=lists.plans, accepted_by=lists.accepted_by, refused=refused)
+
+
+async def _load_clinic_insurance(session: AsyncSession, tenant_id: UUID) -> TenantInsurance:
+    """The non-`independent` lists of `load_tenant_insurance` (clinic plans + legacy names)."""
     plans = [
         {
             "id": str(plan.id),
