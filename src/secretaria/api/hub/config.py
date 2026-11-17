@@ -316,6 +316,19 @@ async def update_configuration(
             },
         ) from None
 
+    # --- 1b'. Per-unit price/duration (TASK-085): a read, before any mutation ------
+    if professional is not None and professional_data:
+        try:
+            await hubcfg.check_unit_terms(session, tenant, professional, professional_data)
+        except hubcfg.UnitTermsInvalid as exc:
+            logger.info(
+                "hub_configuration_rejected",
+                tenant_id=tenant_id,
+                reason=exc.code,
+                stage="validate",
+            )
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.detail()) from None
+
     # --- 1c. Payment settings (TASK-017): a read too (it may ask brain-api whether the
     # add-on is active), so it runs before the transaction mutates anything.
     try:
@@ -350,6 +363,7 @@ async def update_configuration(
             await hubcfg.apply_tenant_config(session, tenant, tenant_data)
         if professional is not None and professional_data:
             hubcfg.apply_professional_config(professional, professional_data)
+            await hubcfg.apply_unit_terms(session, tenant, professional, professional_data)
         await session.commit()
     except hubcfg.ActivationBlocked as exc:
         # The scalar fields of this patch are already assigned on the ORM

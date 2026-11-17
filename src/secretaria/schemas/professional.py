@@ -2,9 +2,61 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from secretaria.schemas.config import AppointmentType, TimeWindow, _validate_business_hours
+
+
+class UnitTermsItem(BaseModel):
+    """One price/duration exception of a service at ONE unit (TASK-085).
+
+    `price` / `duration_min` mirror the base entry (`AppointmentType`): free text up to 40 chars and
+    1..600 minutes. `null` (or a blank price) means "use the base value"; at least one of the two
+    must be set - the same rule as the table's CHECK, answered here as a plain 422.
+    """
+
+    unit_id: str = Field(min_length=1, max_length=64)
+    price: str | None = Field(default=None, max_length=40)
+    duration_min: int | None = Field(default=None, gt=0, le=600)
+
+    @field_validator("price", mode="before")
+    @classmethod
+    def _blank_price_is_none(cls, value):
+        if isinstance(value, str):
+            value = value.strip()
+            return value or None
+        return value
+
+    @model_validator(mode="after")
+    def _something_to_override(self) -> "UnitTermsItem":
+        if self.price is None and self.duration_min is None:
+            raise ValueError("a unit exception needs a price, a duration or both")
+        return self
+
+
+class ProfessionalAppointmentType(AppointmentType):
+    """A professional's service entry on the WRITE side: the base entry + its per-unit exceptions.
+
+    Kept apart from `AppointmentType` on purpose (that one is shared with the clinic-level save).
+    Neither extra field is ever stored in the entry's JSON (services/hub_unit_terms.py):
+
+      unit_terms     absent / null -> this service's exceptions stay as they are; a list REPLACES
+                     the set (`[]` erases it);
+      apply_to_all   rule A ("Todas as unidades"): the entry becomes the base AND every exception
+                     of this service is erased; it cannot travel with a non-empty `unit_terms`.
+    """
+
+    unit_terms: list[UnitTermsItem] | None = None
+    apply_to_all: bool = False
+
+    @model_validator(mode="after")
+    def _terms_are_coherent(self) -> "ProfessionalAppointmentType":
+        units = [item.unit_id for item in self.unit_terms or []]
+        if len(units) != len(set(units)):
+            raise ValueError("unit_terms repeats a unit")
+        if self.apply_to_all and units:
+            raise ValueError("apply_to_all cannot be combined with unit_terms")
+        return self
 
 
 class ProfessionalCreate(BaseModel):
@@ -69,7 +121,7 @@ class ProfessionalConfigUpdate(BaseModel):
     """
 
     business_hours: dict[str, list[TimeWindow]] | None = None
-    appointment_types: list[AppointmentType] | None = None
+    appointment_types: list[ProfessionalAppointmentType] | None = None
     specialty: str | None = Field(default=None, max_length=255)
     about: str | None = Field(default=None, max_length=4000)
     context_doctor_message: str | None = Field(default=None, max_length=4000)

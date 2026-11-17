@@ -288,7 +288,13 @@ async def update_professional_config(
     except CatalogLimitExceeded as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.detail()) from None
 
+    try:
+        await hubcfg.check_unit_terms(session, tenant, professional, data)
+    except hubcfg.UnitTermsInvalid as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.detail()) from None
+
     hubcfg.apply_professional_config(professional, data)
+    await hubcfg.apply_unit_terms(session, tenant, professional, data)
 
     await session.commit()
     await session.refresh(professional)

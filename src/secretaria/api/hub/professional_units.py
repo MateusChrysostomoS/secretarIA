@@ -28,6 +28,9 @@ unit id that is not this clinic's (like any unknown unit); 422 `{"code", "servic
 unit); nothing of the save is kept on any refusal. The GET answers `services` (the active catalog
 services the professional offers) and `service_marks` (restricted ones only).
 
+Price/duration exceptions (TASK-085, professional_service_unit_terms) follow the same save: those of
+a unit just unlinked, or outside a service's marks, are erased in the same transaction.
+
 Nothing here is ever taken from the client except the unit ids and their hours: no `agenda_id`,
 no link flags (extra fields are a 422). Without links nothing changes anywhere else.
 """
@@ -57,6 +60,7 @@ from secretaria.schemas.professional_unit import (
 )
 from secretaria.services import (
     hub_configuration as hubcfg,
+    hub_unit_terms as unit_terms_service,
     professional_service_units as psu,
     professional_units as pu,
     tenant_config as cfg,
@@ -221,6 +225,9 @@ async def put_professional_units(
         # "last unit of a restricted service" refusal looks at links only.
         linked_ids = set(await pu.links_by_unit(session, professional.id))
         await psu.apply_marks(session, tenant.id, professional, linked_ids, marks)
+        # TASK-085: a price/duration exception of a unit the doctor no longer attends (or of a
+        # service no longer done there) goes with it, in the same transaction.
+        await unit_terms_service.prune_after_units_save(session, tenant.id, professional)
         await session.commit()
     except psu.ServiceMarkError as error:
         await session.rollback()
