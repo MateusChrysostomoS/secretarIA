@@ -1325,6 +1325,8 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                 for unit in flow_units.offered_units(p)
             }
             or None,
+            # TASK-085 A13: the owner's per-unit price, from the same snapshot (no query).
+            professionals=flow_professionals,
         )
 
     # Every LLM turn is either a deliberate escape hatch ("Outro") or a gap in

@@ -60,6 +60,15 @@ def _format_business_hours(hours: dict) -> str:
     return "\n".join(lines) if lines else "Horários não configurados."
 
 
+# TASK-085 D3: what a text the model reads says in place of a price that differs between the
+# units of the professional - never a number, never a range ("de X a Y"). Shared with the
+# scoped-help options block (ai/scoped_help.py).
+PRICE_DEPENDS_ON_UNIT = (
+    "valor depende da unidade escolhida (só informe depois que o paciente escolher a unidade; "
+    "nunca uma faixa)"
+)
+
+
 def _format_appointment_types(types: list, default_duration: int) -> str:
     if not types:
         return f"- Consulta ({default_duration} minutos)"
@@ -67,6 +76,8 @@ def _format_appointment_types(types: list, default_duration: int) -> str:
     for t in types:
         dur = t.duration_min
         price = f" - {t.price}" if getattr(t, "price", None) else ""
+        if getattr(t, "price_hidden", False):
+            price = f" - {PRICE_DEPENDS_ON_UNIT}"
         desc = f" — {t.description}" if t.description else ""
         guide = (
             " (há orientações: use get_service_info)"

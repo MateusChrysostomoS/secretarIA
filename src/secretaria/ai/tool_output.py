@@ -92,6 +92,8 @@ V2_TOOL_OUTPUTS: Mapping[str, OutputAllowlist] = {
                 "descricao",
                 "descricao_completa",
                 "orientacoes",
+                # TASK-085 D3: the price differs between the units (no number is given).
+                "preco_depende_da_unidade",
                 "error",
             }
         )
