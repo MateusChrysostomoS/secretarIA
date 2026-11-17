@@ -123,3 +123,17 @@ async def handle_service_diff_tap(reply: _ReplyContext, action: str, adjustment_
         adjustment_id=str(adjustment_id),
         outcome=outcome,
     )
+
+
+async def handle_service_diff_choice(
+    reply: _ReplyContext, action: str, adjustment_id: UUID, redis=None
+) -> None:
+    """TASK-085 R (D-R4): a tap on "Manter a antiga" / "Reenviar o Pix" / "Cancelar ambas"
+    (`service_change.CHOICE_ACTIONS`). Frozen signature, implemented by S3b
+    (tasks/TASK-085/sinal-trocas/contrato.md): honoured only for the patient of that sinal, in
+    the tapping conversation's clinic (as `handle_service_diff_tap`); runs
+    `service_change.choose_after_expiry`, commits, then replies ONE message
+    (`choice_answer_text`, + the new Pix on "resent", the buttons again without "Reenviar" on
+    "no_window"), runs `followup_kept_old` on "kept_old" and cancels the old consultation as the
+    patient's own cancellation on "cancel_old"."""
+    raise NotImplementedError("TASK-085 R S3b")

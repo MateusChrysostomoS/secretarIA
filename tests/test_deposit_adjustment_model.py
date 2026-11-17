@@ -23,6 +23,7 @@ from secretaria.models.deposit_adjustment import (
     KIND_INCREASE,
     STATUS_APPLIED,
     STATUS_ASKED,
+    STATUS_AWAITING_CHOICE,
     STATUS_AWAITING_PAYMENT,
     STATUS_CANCELLED,
     STATUS_CANCELLED_VOID_PENDING,
@@ -30,6 +31,7 @@ from secretaria.models.deposit_adjustment import (
     STATUS_COLLECT_DUE,
     STATUS_EXPIRED,
     STATUS_KEPT_CREDIT,
+    STATUS_KEPT_OLD,
     STATUS_REFUND_REQUESTED,
 )
 from secretaria.models.payment_attention_item import ATTENTION_REASONS
@@ -98,6 +100,9 @@ def test_constants_match_the_spec():
         STATUS_CLINIC_KEPT,
         STATUS_COLLECT_DUE,
         STATUS_CANCELLED_VOID_PENDING,
+        # TASK-085 R (D-R4/D-R8): the choice after an expired difference Pix (no migration).
+        STATUS_AWAITING_CHOICE,
+        STATUS_KEPT_OLD,
     } == ADJUSTMENT_STATUSES
     # Follow-up B (2026-10-27): both fit the VARCHAR(24) column (no migration).
     assert (STATUS_COLLECT_DUE, STATUS_CANCELLED_VOID_PENDING) == (
@@ -230,5 +235,8 @@ def test_upgrade_creates_only_the_table_and_downgrade_drops_it():
 
 def test_the_model_matches_the_migration_columns():
     sql = _offline("up").lower()
+    # `mode` is added later, by c9e4a2f7b3d1 (TASK-085 R: tests/test_sinal_trocas_s0_migration.py).
+    later = {"mode"}
     for column in DepositAdjustment.__table__.columns:
-        assert column.name in sql, column.name
+        if column.name not in later:
+            assert column.name in sql, column.name

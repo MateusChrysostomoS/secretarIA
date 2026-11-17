@@ -149,7 +149,107 @@ def refund_question_buttons(adjustment_id: UUID) -> list[tuple[str, str]]:
         (f"{ACTION_REFUND_NO}|{adjustment_id}", LABEL_REFUND_NO),
     ]
 
-ResultKind = Literal["applied_now", "awaiting_payment", "asked", "blocked"]
+
+# --------------------------------------------------------------------------
+# TASK-085 R (D-R4/D-R7/D-R8): the choice after the Pix of a SUSPENDED change expired unpaid.
+# Frozen by S0 - tasks/TASK-085/sinal-trocas/contrato.md. Routed like the refund question: each
+# tap carries `<action>|<adjustment id>` (schemas/webhook.py `_ACTION_BUTTON_PREFIXES`), on both
+# channels, never through the LLM (workers/shared/service_change_actions.py
+# `handle_service_diff_choice` -> `choose_after_expiry`). Labels are the owner's (D-R7), <= 20
+# chars; the message body spells each option out (`choice_message_text`).
+# --------------------------------------------------------------------------
+
+ACTION_CHOICE_KEEP = "svcdiffkeep"
+ACTION_CHOICE_RESEND = "svcdiffresend"
+ACTION_CHOICE_BOTH = "svcdiffboth"
+CHOICE_ACTIONS = frozenset({ACTION_CHOICE_KEEP, ACTION_CHOICE_RESEND, ACTION_CHOICE_BOTH})
+LABEL_CHOICE_KEEP = "Manter a antiga"
+LABEL_CHOICE_RESEND = "Reenviar o Pix"
+LABEL_CHOICE_BOTH = "Cancelar ambas"
+# The `choice` argument of `choose_after_expiry`.
+CHOICE_KEEP = "keep"
+CHOICE_RESEND = "resend"
+CHOICE_BOTH = "both"
+Choice = Literal["keep", "resend", "both"]
+CHOICE_OF_ACTION: dict[str, str] = {
+    ACTION_CHOICE_KEEP: CHOICE_KEEP,
+    ACTION_CHOICE_RESEND: CHOICE_RESEND,
+    ACTION_CHOICE_BOTH: CHOICE_BOTH,
+}
+# D-R8: the patient has up to 24 h to choose, never later than 1 h before the OLD consultation;
+# no answer by then = "Manter a antiga".
+CHOICE_TTL = timedelta(hours=24)
+CHOICE_MIN_LEAD = timedelta(hours=1)
+# The hold of the new window outlives the deadline it serves (the Pix's `expires_at`, then the
+# choice's) by this much, so the sweep (every ~2 min) or a late webhook always finds it alive.
+DIFFERENCE_HOLD_GRACE = timedelta(minutes=15)
+
+
+def choice_buttons(adjustment_id: UUID, *, resend: bool = True) -> list[tuple[str, str]]:
+    """The (id, label) pairs of the choice for ONE adjustment, in the owner's order. `resend`
+    False leaves "Reenviar o Pix" out (the new slot is no longer free - mapa §9 OQ-4)."""
+    pairs = [(ACTION_CHOICE_KEEP, LABEL_CHOICE_KEEP)]
+    if resend:
+        pairs.append((ACTION_CHOICE_RESEND, LABEL_CHOICE_RESEND))
+    pairs.append((ACTION_CHOICE_BOTH, LABEL_CHOICE_BOTH))
+    return [(f"{action}|{adjustment_id}", label) for action, label in pairs]
+
+
+def choice_deadline(now: datetime, old_start: datetime) -> datetime | None:
+    """Until when the patient may choose (D-R8): `now + CHOICE_TTL`, capped at `old_start -
+    CHOICE_MIN_LEAD`. None = no room left for a choice (the old consultation is in an hour or
+    less): the old one stands at once (`kept_old`), nobody is asked."""
+    deadline = min(as_utc(now) + CHOICE_TTL, as_utc(old_start) - CHOICE_MIN_LEAD)
+    return deadline if deadline > as_utc(now) else None
+
+
+ChoiceKind = Literal[
+    "kept_old",  # keep: awaiting_choice -> kept_old; the new window's hold was released
+    "resent",  # resend: a NEW adjustment (awaiting_payment) with a new Pix took over
+    "cancel_old",  # both: awaiting_choice -> cancelled; the CALLER now cancels the old visit
+    "no_window",  # resend refused: the new slot is gone; nothing changed (offer keep/both only)
+    "resend_failed",  # resend refused: the provider did not create the Pix; nothing changed
+    "already_decided",  # not awaiting_choice any more (answered, deadline passed, released)
+    "not_found",  # no such adjustment in this clinic, or not a suspended change
+]
+
+
+@dataclass(frozen=True)
+class ChoiceOutcome:
+    """What `choose_after_expiry` did (contrato.md). Plain values, safe after the commit."""
+
+    kind: ChoiceKind
+    # "resent": the NEW adjustment; otherwise the tapped one (None for "not_found").
+    adjustment_id: UUID | None = None
+    # The OLD consultation ("cancel_old": the one the caller must cancel after the commit).
+    appointment_id: UUID | None = None
+    diff_cents: int = 0
+    # "resent" only: the new Pix and its deadline.
+    pix_copy_paste: str | None = None
+    expires_at: datetime | None = None
+    # The patient's names of the two consultations (`DepositAdjustment.old/new_service`).
+    old_service: str | None = None
+    new_service: str | None = None
+
+
+UnpaidOutcome = Literal[
+    "payment_in_flight",  # the provider says PAID: nothing changed - the paid path settles it
+    "void_failed",  # the charge could not be voided / its state read: nothing changed, retry
+    "choice_pending",  # suspend: -> awaiting_choice; send `choice_message_text` + buttons
+    "kept_old",  # suspend, no room for a choice: -> kept_old; send the kept notice
+    "collect_due",  # applied: -> collect_due + `service_diff_unpaid` item; notify the patient
+    "cancelled",  # the consultation is gone / not live: -> cancelled, hold released, no notice
+    "not_applicable",  # not awaiting_payment, or a legacy row (mode NULL): untouched
+]
+
+ResultKind = Literal[
+    "applied_now",
+    "awaiting_payment",
+    "applied_awaiting_payment",
+    "suspended",
+    "asked",
+    "blocked",
+]
 
 
 @dataclass(frozen=True)
@@ -159,15 +259,27 @@ class ServiceChangeResult:
     * `applied_now`      - the edit was written in the caller's transaction (no Pix, no question;
                            with `decision` `increase_collect` the Pix could not be created and
                            the clinic collects `diff_cents` - tell the patient);
-    * `awaiting_payment` - a difference Pix exists (`pix_copy_paste`, `expires_at`); NOTHING was
-                           written on the appointment;
+    * `awaiting_payment` - LEGACY (before TASK-085 R): a difference Pix exists, NOTHING was
+                           written. No new change returns it any more; callers treat it as
+                           `suspended`;
+    * `applied_awaiting_payment` - TASK-085 R D-R5 (a clinic that does not require the sinal to
+                           book): the edit WAS written now (`changed_fields`, `notice_id`) and a
+                           difference Pix exists (`pix_copy_paste`, `expires_at`,
+                           `adjustment_id`, mode `applied`);
+    * `suspended`        - TASK-085 R D-R4 (a clinic that books only after the sinal): a
+                           difference Pix exists, NOTHING was written, the old consultation is
+                           suspended (hidden from the patient, its slot kept) and the new window
+                           is held (mode `suspend`);
     * `asked`            - the edit was written and the patient must be asked about the refund
                            (`adjustment_id` goes to `answer_refund_question`);
     * `blocked`          - nothing was written; `reason` is machine-readable:
                            `price_unavailable`, `deposit_not_paid`, `adjustment_pending`,
                            `refund_question_pending`, `collect_pending` (the clinic still has
                            to collect the previous difference), `no_payment_account`,
-                           `charge_failed` (a permanent refusal at the provider).
+                           `charge_failed` (a permanent refusal at the provider); TASK-085 R:
+                           `choice_pending` (the patient still has to choose after an expired
+                           difference Pix) and `slot_taken` (a suspended change's new window is
+                           not free / cannot be held).
     """
 
     kind: ResultKind
@@ -946,6 +1058,12 @@ async def request_service_change(
         notice_id=written.notice_id,
         label=label,
     )
+
+
+# TASK-085 R: the name every caller uses from now on - a change of ANY money field (service, unit,
+# doctor, convênio) on a paid sinal goes through the same engine (D-R1/D-R3). Same function, same
+# signature (contrato.md); S1 teaches it the new fields and the two modes.
+request_paid_change = request_service_change
 
 
 async def _charge_difference(
@@ -1919,6 +2037,81 @@ async def notify_patient_adjustment_not_applied(
     await notify.deliver(session, tenant, patient, [notify.Text(body)])
 
 
+# --------------------------------------------------------------------------
+# TASK-085 R - frozen signatures, implemented by S1 (tasks/TASK-085/sinal-trocas/contrato.md)
+# --------------------------------------------------------------------------
+
+
+async def on_difference_unpaid(
+    session: AsyncSession,
+    *,
+    tenant: Tenant,
+    adjustment: DepositAdjustment,
+    now: datetime,
+) -> UnpaidOutcome:
+    """The Pix of a `mode` change (`suspend` / `applied`) is past `expires_at`, or the provider
+    said EXPIRED. Called by the webhook EXPIRED path and by the expiry sweep INSTEAD of today's
+    `awaiting_payment -> expired` for a row whose `mode` is not NULL. Never commits.
+
+    `get_charge` first (PAID -> "payment_in_flight", nothing changed), then the charge is voided
+    (failure -> "void_failed", nothing changed, the next tick retries). Then, under the lock order
+    appointment -> adjustment: `suspend` -> `awaiting_choice` (asked_at=now, expires_at =
+    `choice_deadline`, hold extended to it + `DIFFERENCE_HOLD_GRACE`) -> "choice_pending", or,
+    with no room for a choice, -> `kept_old` (hold released) -> "kept_old"; `applied` ->
+    `collect_due` + ONE `service_diff_unpaid` item -> "collect_due"; the consultation gone or
+    not live -> `cancelled` (hold released) -> "cancelled". The patient's message (the three
+    buttons, the kept notice, the collect notice) is sent by the caller AFTER the commit."""
+    raise NotImplementedError("TASK-085 R S1")
+
+
+async def choose_after_expiry(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    adjustment_id: UUID,
+    choice: Choice,
+    now: datetime,
+) -> ChoiceOutcome:
+    """The patient's answer to the three buttons (D-R4). Never commits; idempotent (a second tap
+    is "already_decided"). Scoped by `tenant_id` only - the caller checks the patient (the
+    sinal's `patient_id` against the tapping conversation's). Lock order: the appointment row
+    FOR UPDATE, then the adjustment. Valid only while `awaiting_choice` and `now <
+    expires_at`; outcomes in `ChoiceKind`:
+
+    * "keep" -> `kept_old`, hold released -> "kept_old" (caller: `followup_kept_old`);
+    * "resend" -> the new window must still be held or holdable (`_window_fits` excluding its
+      own hold); a NEW adjustment (same `pending_edit`, `diff_cents`, mode `suspend`, new charge,
+      `expires_at` = now + the clinic's Pix TTL) takes over, the old one -> `expired`, the hold
+      is handed over (`booking_hold.extend_difference_hold_in(..., to_adjustment_id=)`) ->
+      "resent" (caller sends `difference_pix_text`); no window -> "no_window"; the provider
+      fails -> "resend_failed" (both: nothing changed, the caller re-sends the buttons);
+    * "both" -> `cancelled`, hold released -> "cancel_old"; the CALLER then cancels the old
+      consultation as a patient cancellation (`workers/shared/actions._execute_appointment_cancel`
+      : the paid sinal's cancellation rules)."""
+    raise NotImplementedError("TASK-085 R S1")
+
+
+async def followup_kept_old(tenant_id: UUID, appointment_id: UUID) -> None:
+    """After the commit that moved a change to `kept_old` (a tap or silence): the old
+    consultation is visible again, so its reminders are re-planned
+    (`reminder_hooks.after_appointment_rescheduled`). Own session, best-effort, never raises."""
+    raise NotImplementedError("TASK-085 R S1")
+
+
+def choice_message_text(old_service: str, new_service: str, diff_cents: int) -> str:
+    """The body sent with the three buttons when the Pix of a suspended change expired: it
+    spells the options out (D-R7) - keep the OLD consultation, resend the Pix to make the change,
+    or cancel both - and says that no answer by the deadline keeps the old one (D-R8)."""
+    raise NotImplementedError("TASK-085 R S1")
+
+
+def choice_answer_text(outcome: ChoiceOutcome) -> str:
+    """The ONE reply to a tap on the choice, per `outcome.kind` (S3b sends it; on "resent" the
+    Pix text `difference_pix_text` follows in the same message, on "cancel_old" the cancellation
+    path sends its own notice)."""
+    raise NotImplementedError("TASK-085 R S1")
+
+
 # The agenda first, then the patient's ONE notice of the paid difference (Task 6).
 _DEFAULT_APPLIED_HOOKS: tuple[AdjustmentHook, ...] = (
     update_agenda_after_payment,
@@ -1961,7 +2154,31 @@ __all__ = [
     "refund_answer_text",
     "refund_question_buttons",
     "refund_question_text",
+    "request_paid_change",
     "request_service_change",
     "sync_agenda_event",
     "update_agenda_after_payment",
+    # TASK-085 R (S0 frozen surface)
+    "ACTION_CHOICE_BOTH",
+    "ACTION_CHOICE_KEEP",
+    "ACTION_CHOICE_RESEND",
+    "CHOICE_ACTIONS",
+    "CHOICE_BOTH",
+    "CHOICE_KEEP",
+    "CHOICE_MIN_LEAD",
+    "CHOICE_OF_ACTION",
+    "CHOICE_RESEND",
+    "CHOICE_TTL",
+    "DIFFERENCE_HOLD_GRACE",
+    "LABEL_CHOICE_BOTH",
+    "LABEL_CHOICE_KEEP",
+    "LABEL_CHOICE_RESEND",
+    "ChoiceOutcome",
+    "choice_answer_text",
+    "choice_buttons",
+    "choice_deadline",
+    "choice_message_text",
+    "choose_after_expiry",
+    "followup_kept_old",
+    "on_difference_unpaid",
 ]

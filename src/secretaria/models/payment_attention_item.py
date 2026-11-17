@@ -49,6 +49,10 @@ REASON_SERVICE_DIFF_AGENDA_PENDING = "service_diff_agenda_pending"
 # provider was down or erroring), so the dearer service stood at once without it: the clinic
 # collects the difference (`amount_cents`) itself. Money NOT received - never part of a refund.
 REASON_SERVICE_DIFF_COLLECT_DUE = "service_diff_collect_due"
+# TASK-085 R (D-R5): a clinic that does not require the sinal to book applied a change to a DEARER
+# service/unit/doctor/convênio at once and sent the Pix of the difference, which expired unpaid:
+# the clinic collects `amount_cents` itself. Money NOT received - never part of a refund.
+REASON_SERVICE_DIFF_UNPAID = "service_diff_unpaid"
 
 ATTENTION_REASONS = frozenset(
     {
@@ -66,6 +70,7 @@ ATTENTION_REASONS = frozenset(
         REASON_SERVICE_DIFF_REFUND_DUE,
         REASON_SERVICE_DIFF_AGENDA_PENDING,
         REASON_SERVICE_DIFF_COLLECT_DUE,
+        REASON_SERVICE_DIFF_UNPAID,
     }
 )
 

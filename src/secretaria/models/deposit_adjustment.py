@@ -17,8 +17,19 @@ Spec: docs/superpowers/specs/2026-10-26-troca-servico-diferenca-sinal-design.md.
     or did not answer in 24 h: the difference is only recorded as a discount on the visit);
     clinic_kept - too close to the visit or under the R$ 10 floor, nobody is asked.
 
+`mode` (TASK-085 R, migration c9e4a2f7b3d1; tasks/TASK-085/sinal-trocas/contrato.md) says how
+an `increase` waits for its Pix. NULL = a legacy row (created before TASK-085 R): today's
+semantics above, untouched. `suspend` (D-R4, a clinic that books only AFTER the sinal): nothing is
+written on the appointment, the patient no longer sees it (`adjustment_suspension`), the old slot
+stays (the row is live) and the new one is held by a `booking_holds` row of this adjustment.
+Unpaid at `expires_at` -> `awaiting_choice` (the three buttons) -> `kept_old` (Manter / silence) |
+`expired` (Reenviar: a NEW adjustment takes over) | `cancelled` (Cancelar ambas). `applied` (D-R5,
+a clinic that does not require the sinal to book): the change was written at once; unpaid ->
+`collect_due` with a `service_diff_unpaid` item.
+
 LGPD: ids, instants, service labels and amounts only - never a name, document or phone.
-`status` / `kind` are plain VARCHAR (no PG enum): a new state never needs an `ALTER TYPE`.
+`status` / `kind` / `mode` are plain VARCHAR (no PG enum): a new state never needs an
+`ALTER TYPE`.
 """
 
 import uuid
@@ -43,6 +54,19 @@ STATUS_CLINIC_KEPT = "clinic_kept"
 # Follow-up B (2026-10-27). Plain VARCHAR(24) values: no migration.
 STATUS_COLLECT_DUE = "collect_due"
 STATUS_CANCELLED_VOID_PENDING = "cancelled_void_pending"
+# TASK-085 R (D-R4/D-R8), only on `mode="suspend"` rows. Plain VARCHAR(24) values.
+# The difference Pix expired unpaid: the patient chooses (Manter / Reenviar / Cancelar ambas).
+STATUS_AWAITING_CHOICE = "awaiting_choice"
+# "Manter a antiga" (or no answer by the deadline): the old consultation stands as it was.
+STATUS_KEPT_OLD = "kept_old"
+
+# TASK-085 R: how an `increase` waits for its Pix (NULL = legacy row, today's semantics).
+MODE_SUSPEND = "suspend"
+MODE_APPLIED = "applied"
+ADJUSTMENT_MODES = frozenset({MODE_SUSPEND, MODE_APPLIED})
+# A `mode="suspend"` adjustment in one of these statuses SUSPENDS its appointment (hidden from the
+# patient, edits refused to the clinic except "Liberar horário" - D-R9). Order is stable.
+SUSPENDED_STATUSES: tuple[str, ...] = ("awaiting_payment", "awaiting_choice")
 
 ADJUSTMENT_STATUSES = frozenset(
     {
@@ -56,6 +80,8 @@ ADJUSTMENT_STATUSES = frozenset(
         STATUS_CLINIC_KEPT,
         STATUS_COLLECT_DUE,
         STATUS_CANCELLED_VOID_PENDING,
+        STATUS_AWAITING_CHOICE,
+        STATUS_KEPT_OLD,
     }
 )
 
@@ -76,6 +102,8 @@ class DepositAdjustment(Base):
     )
     kind: Mapped[str] = mapped_column(String(16))
     status: Mapped[str] = mapped_column(String(24))
+    # TASK-085 R: `suspend` | `applied` | NULL (legacy). See the module docstring.
+    mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
     old_service: Mapped[str] = mapped_column(String(120))
     new_service: Mapped[str] = mapped_column(String(120))
     # The edit applied when the Pix is paid (increase only): service, times, duration.

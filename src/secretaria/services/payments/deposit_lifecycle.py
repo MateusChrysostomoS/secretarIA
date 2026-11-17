@@ -22,6 +22,7 @@ import hmac
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Literal
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
@@ -609,6 +610,53 @@ async def maybe_create_deposit(
         deposit_id=str(deposit.id),
     )
     return deposit
+
+
+# --------------------------------------------------------------------------
+# TASK-085 R D-R6 - an UNPAID sinal re-quoted by an edit. Frozen signatures, implemented by S2
+# (tasks/TASK-085/sinal-trocas/contrato.md).
+# --------------------------------------------------------------------------
+
+RequoteOutcome = Literal["unchanged", "voided", "payment_in_flight", "void_failed"]
+
+
+async def requote_awaiting(
+    session: AsyncSession,
+    *,
+    tenant: Tenant,
+    appointment: Appointment,
+    deposit: PixDeposit,
+    now: datetime,
+) -> RequoteOutcome:
+    """Inside the edit's transaction, AFTER the edit was written (flushed) on `appointment`:
+    does the AWAITING sinal still match the consultation? Never commits.
+
+    The new amount is computed exactly like `maybe_create_deposit` (price at the unit x the
+    clinic's CURRENT percentage; 0 when the convênio charges no sinal or the amount is under the
+    provider's minimum). Same amount, or `deposit` not AWAITING -> "unchanged" (nothing touched).
+    Otherwise `get_charge` first: PAID -> "payment_in_flight"; the void fails (or the state cannot
+    be read) -> "void_failed" - in both cases the CALLER rolls the edit back and tells the patient
+    / the clinic (never an edit over a sinal that may be paid). Voided -> the old row is detached
+    (status EXPIRED, `resolved_at`, `appointment_id` None: a late payment of the old code is an
+    ORPHAN item) -> "voided": after the commit the caller runs `recharge_after_edit`."""
+    raise NotImplementedError("TASK-085 R S2")
+
+
+async def recharge_after_edit(
+    *,
+    tenant_id: UUID,
+    appointment_id: UUID,
+    old_amount_cents: int | None,
+    waba_token: str | None = None,
+    redis=None,
+) -> UUID | None:
+    """After the commit of an edit whose `requote_awaiting` answered "voided" (own session, the
+    `plugins/pix_deposit._post_booking` way): creates the new sinal for the edited consultation
+    and sends it opening with "O valor do sinal mudou com a alteração; o Pix anterior foi
+    cancelado (não pague aquele código)". A new amount of 0 creates nothing and only tells the
+    patient the previous Pix was cancelled. Returns the new deposit's id, or None. Best-effort:
+    never raises (the edit already stands)."""
+    raise NotImplementedError("TASK-085 R S2")
 
 
 # --------------------------------------------------------------------------

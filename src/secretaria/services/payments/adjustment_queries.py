@@ -23,6 +23,10 @@ small on purpose. Two concerns:
   closed (`cancelled`) so a late "Sim" cannot open a second item for money the cancellation
   already counts.
 
+TASK-085 R: which consultations a change on a sinal SUSPENDS (`suspended_clause`,
+`visible_to_patient_clause`, `is_suspended`) lives in `adjustment_suspension` (models-only imports,
+so the patient-facing queries can use it without an import cycle) and is re-exported here.
+
 Nothing here refunds money (decision D15) and nothing commits. LGPD: logs carry ids, a status
 and an error type only.
 """
@@ -58,6 +62,11 @@ from secretaria.models.payment_attention_item import (
 )
 from secretaria.services import tenant_config as cfg
 from secretaria.services.payments import attention, registry
+from secretaria.services.payments.adjustment_suspension import (
+    is_suspended,
+    suspended_clause,
+    visible_to_patient_clause,
+)
 from secretaria.services.payments.provider import PaymentStatus
 
 logger = get_logger(__name__)
@@ -356,6 +365,9 @@ __all__ = [
     "SETTLED_VOIDED",
     "held_cents_hint",
     "held_total_cents",
+    "is_suspended",
+    "suspended_clause",
+    "visible_to_patient_clause",
     "collect_item_key",
     "load_adjustment_totals",
     "open_collect_adjustments",

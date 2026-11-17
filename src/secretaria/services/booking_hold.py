@@ -91,7 +91,8 @@ class HeldSlot:
 
     id: UUID
     tenant_id: UUID
-    conversation_id: UUID
+    # None for the hold of a change waiting for the Pix of its difference (TASK-085 R).
+    conversation_id: UUID | None
     patient_id: UUID | None
     professional_id: UUID | None
     appointment_type: str | None
@@ -107,6 +108,8 @@ class HeldSlot:
     charge_id: UUID | None = None
     # TASK-083 spec §8: the unit the patient chose; the promotion writes it on the booking.
     unit_id: UUID | None = None
+    # TASK-085 R: the `deposit_adjustments` row whose NEW window this hold guards (D-R4).
+    adjustment_id: UUID | None = None
 
     @classmethod
     def of(cls, row: BookingHold) -> "HeldSlot":
@@ -125,6 +128,7 @@ class HeldSlot:
             phase=row.phase or "code",
             charge_id=row.charge_id,
             unit_id=row.unit_id,
+            adjustment_id=row.adjustment_id,
         )
 
 
@@ -173,6 +177,10 @@ async def held_windows(
     `exclude_conversation` is what lets a patient still see (and re-confirm)
     the very slot THEY are holding: their own reservation must not make their
     own choice disappear from the list.
+
+    TASK-085 R: NULL-safe. A hold with no conversation (the new window of a change waiting
+    for the Pix of its difference) is never "this conversation's", so the exclusion never
+    hides it - in SQL `conversation_id != X` is NULL, not TRUE, for such a row.
     """
     stmt = select(BookingHold.start_at, BookingHold.end_at).where(
         BookingHold.tenant_id == tenant_id,
@@ -185,7 +193,12 @@ async def held_windows(
         else BookingHold.professional_id.is_(None)
     )
     if exclude_conversation is not None:
-        stmt = stmt.where(BookingHold.conversation_id != exclude_conversation)
+        stmt = stmt.where(
+            or_(
+                BookingHold.conversation_id.is_(None),
+                BookingHold.conversation_id != exclude_conversation,
+            )
+        )
     async with async_session_factory() as session:
         rows = (await session.execute(stmt)).all()
     return [(_aware(start), _aware(end)) for start, end in rows]
@@ -519,6 +532,7 @@ async def live_hold_overlaps(
     *,
     professional_id: UUID | None | Literal["any"] = "any",
     exclude_charge_id: UUID | None = None,
+    exclude_adjustment_id: UUID | None = None,
 ) -> bool:
     """Is any live BLOCKING (payment-phase) hold of this clinic on [start_at, end_at)?
 
@@ -529,6 +543,9 @@ async def live_hold_overlaps(
     manual booking has no professional to compare with, so any live hold blocks it. A concrete
     id (or None for the tenant-level agenda) compares like `place_hold` does.
     `exclude_charge_id` is the promotion's own hold: it must not block its own payment.
+    `exclude_adjustment_id` (TASK-085 R) is the same for a change waiting for the Pix of its
+    difference: its own hold must not refuse its own application. A hold of no adjustment (a
+    conversation's) is never excluded by it.
     """
     stmt = select(BookingHold.start_at, BookingHold.end_at).where(
         BookingHold.tenant_id == tenant_id,
@@ -545,11 +562,177 @@ async def live_hold_overlaps(
         stmt = stmt.where(
             or_(BookingHold.charge_id.is_(None), BookingHold.charge_id != exclude_charge_id)
         )
+    if exclude_adjustment_id is not None:
+        stmt = stmt.where(
+            or_(
+                BookingHold.adjustment_id.is_(None),
+                BookingHold.adjustment_id != exclude_adjustment_id,
+            )
+        )
     rows = (await session.execute(stmt)).all()
     return any(
         overlaps(start_at, end_at, _aware(other_start), _aware(other_end))
         for other_start, other_end in rows
     )
+
+
+# ---------------------------------------------------------------------------
+# TASK-085 R (D-R4): the hold of the NEW window of a change waiting for its Pix
+# ---------------------------------------------------------------------------
+#
+# A clinic that books only AFTER the sinal keeps the old consultation (its row stays live, so
+# its slot stays taken) and guards the new window with a payment-phase row that belongs to the
+# `DepositAdjustment`, not to a conversation (`conversation_id` NULL, `adjustment_id` set,
+# `charge_id` NULL). It blocks every reader exactly like a Pix being paid (`BLOCKING_PHASE`).
+# Every function here works on the CALLER's session and never commits: the hold is written in
+# the same transaction as the adjustment it belongs to (tasks/TASK-085/sinal-trocas/contrato.md).
+
+
+async def serialize_agenda_in(session, tenant_id: UUID, professional_id: UUID | None) -> None:
+    """Take the agenda's transaction-scoped advisory lock (Postgres; a no-op elsewhere).
+
+    Public for the engine (TASK-085 R): it locks the NEW agenda BEFORE checking the window
+    (`service_change._window_fits`) and charging, so nobody else's hold can land on that window
+    before `place_difference_hold_in` writes its own. Re-entrant within one transaction. Take it
+    AFTER every row lock (appointment, deposit, adjustment) - never the other way round."""
+    await _serialize_agenda(session, tenant_id, professional_id)
+
+
+async def place_difference_hold_in(
+    session,
+    *,
+    tenant_id: UUID,
+    adjustment_id: UUID,
+    patient_id: UUID | None,
+    professional_id: UUID | None,
+    unit_id: UUID | None,
+    appointment_type: str | None,
+    insurance: str | None,
+    attendee_name: str | None,
+    start_at: datetime,
+    end_at: datetime,
+    expires_at: datetime,
+) -> HeldSlot | None:
+    """Hold [start_at, end_at) on ONE agenda for `adjustment_id` until `expires_at`. None = taken.
+
+    Serialises the agenda (`serialize_agenda_in`), replaces this adjustment's own previous hold
+    (never two), and refuses - writing nothing - when another live payment-phase hold of the
+    same agenda overlaps (a Pix being paid, or another change's new window). Code-phase rows
+    never conflict (TASK-072). It checks HOLDS only: the appointments, the Google agenda and a
+    shared doctor's other clinics are the engine's `_window_fits`, run under the same lock.
+    Flushes, never commits. The adjustment row must already be flushed (foreign key)."""
+    now = _now()
+    await _serialize_agenda(session, tenant_id, professional_id)
+    await session.execute(
+        delete(BookingHold)
+        .where(BookingHold.adjustment_id == adjustment_id)
+        .execution_options(synchronize_session=False)
+    )
+    agenda = (
+        BookingHold.professional_id == professional_id
+        if professional_id is not None
+        else BookingHold.professional_id.is_(None)
+    )
+    existing = (
+        await session.execute(
+            select(BookingHold.start_at, BookingHold.end_at).where(
+                BookingHold.tenant_id == tenant_id,
+                BookingHold.phase == BLOCKING_PHASE,
+                BookingHold.expires_at > now,
+                agenda,
+            )
+        )
+    ).all()
+    for other_start, other_end in existing:
+        if overlaps(start_at, end_at, _aware(other_start), _aware(other_end)):
+            logger.info(
+                "booking_hold_difference_conflict",
+                tenant_id=str(tenant_id),
+                adjustment_id=str(adjustment_id),
+            )
+            return None
+    row = BookingHold(
+        tenant_id=tenant_id,
+        conversation_id=None,
+        adjustment_id=adjustment_id,
+        patient_id=patient_id,
+        professional_id=professional_id,
+        unit_id=unit_id,
+        appointment_type=appointment_type,
+        insurance=insurance,
+        attendee_name=attendee_name,
+        start_at=start_at,
+        end_at=end_at,
+        expires_at=expires_at,
+        phase=BLOCKING_PHASE,
+        charge_id=None,
+    )
+    session.add(row)
+    await session.flush()
+    logger.info(
+        "booking_hold_difference_placed",
+        tenant_id=str(tenant_id),
+        adjustment_id=str(adjustment_id),
+        hold_id=str(row.id),
+    )
+    return HeldSlot.of(row)
+
+
+async def difference_hold_in(session, adjustment_id: UUID) -> HeldSlot | None:
+    """The LIVE hold of this adjustment (None when there is none, or its clock ran out)."""
+    row = await session.scalar(
+        select(BookingHold)
+        .where(BookingHold.adjustment_id == adjustment_id, BookingHold.expires_at > _now())
+        .order_by(BookingHold.created_at.desc())
+        .limit(1)
+        # The bulk UPDATE of `extend_difference_hold_in` bypasses the identity map: never hand
+        # back a stale instance this session loaded before.
+        .execution_options(populate_existing=True)
+    )
+    return HeldSlot.of(row) if row is not None else None
+
+
+async def extend_difference_hold_in(
+    session,
+    adjustment_id: UUID,
+    *,
+    expires_at: datetime,
+    to_adjustment_id: UUID | None = None,
+) -> HeldSlot | None:
+    """Move the LIVE hold of `adjustment_id` to `expires_at` - and, with `to_adjustment_id`, hand
+    it to that adjustment ("Reenviar o Pix": a new adjustment takes the change over) - in ONE
+    conditional UPDATE, so the window is never free in between.
+
+    None when the hold already expired or is gone: an expired hold is NEVER revived (somebody
+    may have booked the window since); the caller then re-checks the window and places a new
+    one (`place_difference_hold_in`) or tells the patient the new slot is gone. Flushes, never
+    commits."""
+    values: dict = {"expires_at": expires_at}
+    if to_adjustment_id is not None:
+        values["adjustment_id"] = to_adjustment_id
+    result = await session.execute(
+        update(BookingHold)
+        .where(BookingHold.adjustment_id == adjustment_id, BookingHold.expires_at > _now())
+        .values(**values)
+        .execution_options(synchronize_session=False)
+    )
+    if not result.rowcount:
+        return None
+    return await difference_hold_in(session, to_adjustment_id or adjustment_id)
+
+
+async def release_difference_hold_in(session, adjustment_id: UUID) -> int:
+    """Drop every hold of this adjustment (live or not); how many went. Idempotent (0 the second
+    time). Flushes nothing on its own and never commits - the caller's transaction decides."""
+    result = await session.execute(
+        delete(BookingHold)
+        .where(BookingHold.adjustment_id == adjustment_id)
+        .execution_options(synchronize_session=False)
+    )
+    dropped = int(result.rowcount or 0)
+    if dropped:
+        logger.info("booking_hold_difference_released", adjustment_id=str(adjustment_id))
+    return dropped
 
 
 async def live_payment_holds(

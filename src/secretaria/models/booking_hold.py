@@ -79,8 +79,19 @@ class BookingHold(Base):
     # hold with no conversation has nobody to promote it and nobody to tell,
     # so it is garbage, not history. At most one live hold per conversation
     # (`services/booking_hold.py::place_hold` replaces its own).
-    conversation_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    # TASK-085 R (migration c9e4a2f7b3d1): NULL for the hold of a CHANGE waiting for the Pix of
+    # its difference (D-R4) - that one is owned by `adjustment_id` below, never by a conversation
+    # (the patient may answer on another channel, or not at all). Every reader that compares
+    # this column must stay NULL-safe (`services/booking_hold.py::held_windows`).
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    # TASK-085 R: the `deposit_adjustments` row (mode `suspend`) whose NEW window this payment-phase
+    # hold guards while the old consultation keeps its own slot. CASCADE for the same reason as
+    # `conversation_id`: a difference hold without its adjustment has nobody to apply or release
+    # it. Only `services/booking_hold.py` writes it (`place_difference_hold_in` & co.).
+    adjustment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("deposit_adjustments.id", ondelete="CASCADE"), nullable=True, index=True
     )
     patient_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("patients.id", ondelete="SET NULL"), nullable=True, index=True
