@@ -8,7 +8,11 @@ off. Full contract: docs/CHECKPOINT_convenio_catalogo.md.
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from secretaria.models.insurance import INSURANCE_MECHANISMS, INSURANCE_MODES
+from secretaria.models.insurance import (
+    INSURANCE_MECHANISMS,
+    INSURANCE_MODES,
+    INSURANCE_MODES_SELECTABLE,
+)
 
 
 class InsuranceCatalogRead(BaseModel):
@@ -99,7 +103,7 @@ class InsuranceModeRead(BaseModel):
 class InsuranceModeUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    mode: str = Field(description=f"One of: {', '.join(INSURANCE_MODES)}")
+    mode: str = Field(description=f"One of: {', '.join(INSURANCE_MODES_SELECTABLE)}")
 
 
 class ProfessionalInsurancePlansRead(BaseModel):

@@ -110,6 +110,11 @@ INSURANCE_MECHANISMS: tuple[str, ...] = (
 # default, per the owner's explicit decision.
 INSURANCE_MODES: tuple[str, ...] = ("shared", "clinic_with_exceptions", "independent")
 
+# TASK-086 T5: the 3rd mode is retired. Its rows stay READABLE (CHECK + read code are
+# untouched, so characterization tests stay green) but nobody can CHOOSE it anymore;
+# migration e5a9c3b7d1f2 converted every tenant in it to `shared`.
+INSURANCE_MODES_SELECTABLE: tuple[str, ...] = ("shared", "independent")
+
 # Portable "exactly one of these columns is set" CHECK, written with CASE/SUM
 # instead of a boolean cast so it works unmodified on both Postgres (real
 # deployments/migrations) and SQLite (the test suite's `create_all` engine -

@@ -34,7 +34,7 @@ from secretaria.core.catalog_limits import (
 )
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
-from secretaria.models.insurance import INSURANCE_MODES
+from secretaria.models.insurance import INSURANCE_MODES_SELECTABLE
 from secretaria.models.professional import Professional
 from secretaria.models.tenant import Tenant
 from secretaria.schemas.insurance import (
@@ -169,12 +169,14 @@ async def put_insurance_mode(
     mode's own resolution rule. See docs/CHECKPOINT_convenio_catalogo.md for
     the cleanup this leaves as a documented, deliberate non-goal.
     """
-    if body.mode not in INSURANCE_MODES:
+    if body.mode not in INSURANCE_MODES_SELECTABLE:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={
                 "code": "invalid_insurance_mode",
-                "message": f"insurance_mode deve ser um de: {', '.join(INSURANCE_MODES)}.",
+                "message": (
+                    "insurance_mode deve ser um de: " + ", ".join(INSURANCE_MODES_SELECTABLE) + "."
+                ),
             },
         )
     tenant.insurance_mode = body.mode
