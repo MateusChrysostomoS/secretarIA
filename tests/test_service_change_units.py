@@ -18,6 +18,7 @@ NOW = base.NOW
 db = base.db
 provider = base.provider
 no_default_hooks = base.no_default_hooks
+legacy_deferred_mode = base.legacy_deferred_mode
 
 
 def _row():

@@ -56,6 +56,9 @@ from secretaria.services.pending_identity import RequestCodeOutcome, RequestCode
 from tests import test_service_change_webhook as hook
 from tests.payments_support import FakeProvider, make_sessionmaker
 
+# TASK-085 R: these tests pin the LEGACY deferred mode of the engine (mode NULL rows).
+from tests.test_service_change import legacy_deferred_mode  # noqa: E402, F401
+
 NOW = hook.NOW
 WEEK = {
     day: [{"start": "08:00", "end": "18:00"}]

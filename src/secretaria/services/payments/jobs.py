@@ -4,7 +4,9 @@
 * `expire_due_charges`     - `before` charges whose Pix window ended: ASK the provider first,
                              void, then mark expired. Never expires blind.
 * `expire_due_adjustments` - the service-change differences (unpaid Pix of a dearer service,
-                             unanswered "quer a diferença de volta?"), same rules.
+                             unanswered "quer a diferença de volta?"), same rules; TASK-085 R:
+                             a suspended change's patient choice that ran out keeps the old
+                             visit (D-R8), an applied change's unpaid Pix becomes "cobrar".
 * `reconcile_open_charges` - the safety net for a webhook that never arrived: polls the provider
                              for unpaid charges and injects a synthetic PAID event.
 * `requeue_stuck_events` / `requeue_stuck_fulfillments` - the two sweeps that make "durable
@@ -273,8 +275,11 @@ async def expire_due_adjustments(
 ) -> int:
     """The service-change sweep (`service_change.expire_adjustments`): a refund question
     unanswered for 24 h becomes credit; an unpaid difference Pix past its window is checked at
-    the provider, voided and expired (the old service stays); a difference cancelled while the
-    provider was down has its void retried until it succeeds. Run on every expiry tick."""
+    the provider, voided and expired (the old service stays) - TASK-085 R: a suspended change
+    goes to the patient's three buttons (`on_difference_unpaid`), an applied one to "cobrar a
+    diferença", and a choice unanswered by its deadline keeps the old visit (D-R8); a difference
+    cancelled while the provider was down has its void retried until it succeeds. Run on every
+    expiry tick."""
     from secretaria.services.payments import service_change
 
     return await service_change.expire_adjustments(

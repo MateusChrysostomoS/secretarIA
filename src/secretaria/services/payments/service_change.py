@@ -62,14 +62,18 @@ from secretaria.models import (
     Appointment,
     Patient,
     PixDeposit,
+    Professional,
     Tenant,
     is_live_status,
 )
 from secretaria.models.deposit_adjustment import (
     KIND_DECREASE,
     KIND_INCREASE,
+    MODE_APPLIED,
+    MODE_SUSPEND,
     STATUS_APPLIED,
     STATUS_ASKED,
+    STATUS_AWAITING_CHOICE,
     STATUS_AWAITING_PAYMENT,
     STATUS_CANCELLED,
     STATUS_CANCELLED_VOID_PENDING,
@@ -77,6 +81,7 @@ from secretaria.models.deposit_adjustment import (
     STATUS_COLLECT_DUE,
     STATUS_EXPIRED,
     STATUS_KEPT_CREDIT,
+    STATUS_KEPT_OLD,
     STATUS_REFUND_REQUESTED,
     DepositAdjustment,
 )
@@ -84,6 +89,7 @@ from secretaria.models.payment_attention_item import (
     REASON_SERVICE_DIFF_AGENDA_PENDING,
     REASON_SERVICE_DIFF_COLLECT_DUE,
     REASON_SERVICE_DIFF_REFUND_DUE,
+    REASON_SERVICE_DIFF_UNPAID,
 )
 from secretaria.models.pix_deposit import PixDepositStatus
 from secretaria.services import agenda, booking_hold, tenant_config as cfg, unit_booking
@@ -94,7 +100,11 @@ from secretaria.services.appointment_calendar_origin import (
 from secretaria.services.appointment_edit_write import write_appointment_edit
 from secretaria.services.appointment_status import SOURCE_HUB, SOURCE_SYSTEM
 from secretaria.services.calendar import CalendarSlotTakenError, build_event_description
-from secretaria.services.local_calendar import update_event_details_exclusive
+from secretaria.services.insurance_catalog import resolve_booking_plan_ids
+from secretaria.services.local_calendar import (
+    create_event_exclusive,
+    update_event_details_exclusive,
+)
 from secretaria.services.patient_context import as_utc
 from secretaria.services.payments import (
     accounts,
@@ -103,7 +113,9 @@ from secretaria.services.payments import (
     notify,
     registry,
 )
+from secretaria.services.payments.deposit_gate import timing_is_before
 from secretaria.services.payments.deposit_lifecycle import (
+    _insurance_charges_deposit,
     _resolve_service_and_price,
     _tenant_tz,
     register_reschedule,
@@ -359,6 +371,8 @@ class AdjustmentNotice:
     diff_cents: int
     # Only on a not-applied notice of an UNDERPAID difference: what actually arrived.
     paid_cents: int | None = None
+    # TASK-085 R: how the change waited for its Pix (None = legacy; "suspend"; "applied").
+    mode: str | None = None
 
 
 AdjustmentHook = Callable[[AsyncSession, Tenant, AdjustmentNotice], Awaitable[None]]
@@ -397,9 +411,15 @@ def difference_pix_text(
     ttl_minutes: int,
     *,
     source: str | None = None,
+    held_new_slot: bool = True,
 ) -> str:
-    """`source` = who asked for the change: `SOURCE_HUB` (the clinic's agenda edit) says so;
-    anything else keeps the patient's own wording."""
+    """The Pix of the difference of a change that waits for it (`suspended`, and the legacy
+    `awaiting_payment`). `source` = who asked for the change: `SOURCE_HUB` (the clinic's agenda
+    edit) says so; anything else keeps the patient's own wording.
+
+    TASK-085 R (D-R4): the current consultation stays kept and the NEW window is reserved until the
+    Pix. `held_new_slot=False` - the legacy deferred fallback (`awaiting_payment`, no hold: the
+    "before" clinic had no room for a useful Pix) - never promises a reserved slot."""
     value = format_brl(diff_cents)
     if source == SOURCE_HUB:
         head = (
@@ -413,10 +433,40 @@ def difference_pix_text(
         )
     lines = [head]
     lines.append("Sua consulta só muda depois que o pagamento for confirmado.")
+    if held_new_slot:
+        lines.append(
+            "Até lá, sua consulta atual fica guardada e o novo horário fica reservado para você."
+        )
     lines.append(
         f"O código vale por {ttl_minutes} minutos. Se não for pago, a consulta continua como está."
     )
     # ONE message: the code is its last lines (fenced - see `pix_message`), never a bubble apart.
+    lines.extend(pix_code_tail(copy_paste))
+    return "\n".join(lines)
+
+
+def difference_pix_applied_text(
+    new_service: str,
+    diff_cents: int,
+    copy_paste: str | None,
+    ttl_minutes: int,
+    *,
+    source: str | None = None,
+) -> str:
+    """TASK-085 R D-R5 (`applied_awaiting_payment`): the change is ALREADY made; the Pix of the
+    difference follows. Unpaid, the clinic settles the difference with the patient (never
+    undone)."""
+    value = format_brl(diff_cents)
+    if source == SOURCE_HUB:
+        head = f"A clínica alterou sua consulta para {new_service}."
+    else:
+        head = f"Pronto, sua consulta já foi alterada para {new_service}."
+    lines = [
+        head,
+        f"Falta pagar a diferença do sinal: {value} via Pix.",
+        f"O código vale por {ttl_minutes} minutos. Se não for pago, a clínica combina essa "
+        "diferença com você.",
+    ]
     lines.extend(pix_code_tail(copy_paste))
     return "\n".join(lines)
 
@@ -437,6 +487,33 @@ def adjustment_applied_text(new_service: str, diff_cents: int) -> str:
     )
 
 
+def adjustment_paid_after_applied_text(new_service: str, diff_cents: int) -> str:
+    """TASK-085 R D-R5: the Pix of a change that was ALREADY made arrived."""
+    return (
+        f"Recebemos o Pix da diferença ({format_brl(diff_cents)}). Obrigado! "
+        f"Sua consulta segue como {new_service}."
+    )
+
+
+def kept_old_notice_text(old_service: str) -> str:
+    """TASK-085 R D-R8: the change was not made (no answer in time, or no room left to ask, or
+    "Manter a antiga"): the old consultation stands and the new window was freed."""
+    return (
+        f"Mantivemos sua consulta como estava: {old_service}, no mesmo horário. "
+        "A troca não foi feita e o novo horário foi liberado."
+    )
+
+
+def unpaid_collect_text(new_service: str, diff_cents: int) -> str:
+    """TASK-085 R D-R5: the Pix of a change that was ALREADY made expired unpaid. The change
+    stands; the clinic settles the difference (never an automatic charge or refund)."""
+    return (
+        f"O Pix da diferença do sinal ({format_brl(diff_cents)}) venceu sem pagamento. "
+        f"Sua consulta continua como {new_service}; a clínica vai combinar essa diferença "
+        "com você."
+    )
+
+
 _KEPT_AS_IT_WAS = "Sua consulta continua como estava."
 _BLOCKED_TEXT = {
     "charge_failed": (
@@ -454,6 +531,15 @@ _BLOCKED_TEXT = {
     "collect_pending": (
         "A diferença do sinal da troca anterior ainda vai ser acertada com a clínica. "
         f"{_KEPT_AS_IT_WAS} Para trocar de novo, fale com a clínica."
+    ),
+    # TASK-085 R
+    "choice_pending": (
+        "O Pix da diferença da troca anterior venceu e ainda falta você escolher o que fazer. "
+        "Use os botões daquela mensagem antes de pedir outra troca."
+    ),
+    "slot_taken": (
+        "O novo horário não está mais disponível para guardar enquanto você paga a diferença. "
+        f"{_KEPT_AS_IT_WAS} Escolha outro horário, por favor."
     ),
 }
 _BLOCKED_DEFAULT = (
@@ -602,6 +688,8 @@ def serialize_edit(edit: dict, appointment: Appointment, *, source: str) -> dict
     if "unit_id" in edit:
         # Follow-up final review: the unit the row had, so a unit moved meanwhile is kept.
         out["expected"]["unit_id"] = _str_or_none(getattr(appointment, "unit_id", None))
+    # TASK-085 R: the convênio the row had (a `mode` change is applied only onto that same row).
+    out["expected"]["insurance"] = getattr(appointment, "insurance", None)
     return out
 
 
@@ -650,26 +738,46 @@ def _paid_window(
     return start, start + length, False
 
 
+# `_window_fits(professional_id=...)` default: the agenda the appointment is on.
+_SAME_AGENDA: Any = object()
+
+
 async def _window_fits(
     session: AsyncSession,
     tenant: Tenant,
     appointment: Appointment,
     start: datetime,
     end: datetime,
+    *,
+    professional_id: Any = _SAME_AGENDA,
+    exclude_adjustment_id: UUID | None = None,
 ) -> bool:
     """Does [start, end) still fit for this row? A window inside the row's own current one
-    always fits (max(old, new) length is what is checked). Otherwise no other live booking of
-    the same agenda (doctor, or the clinic's when there is none), no live hold and - TASK-083 -
-    nothing of the same doctor at another clinic sharing his agenda may overlap.
+    always fits on its OWN agenda (max(old, new) length is what is checked). Otherwise no other
+    live booking of the same agenda (doctor, or the clinic's when there is none), no live hold
+    and - TASK-083 - nothing of the same doctor at another clinic sharing his agenda may overlap.
+
+    TASK-085 R: `professional_id` - the agenda the change LANDS on (a change of doctor is checked
+    on the new doctor's agenda, where the row's own window counts for nothing);
+    `exclude_adjustment_id` - the change's own hold never refuses the change.
     Database only: the Google agenda is re-checked by `update_agenda_after_payment` after the
     commit (no network call while the webhook holds the row lock)."""
+    agenda_id = (
+        appointment.professional_id
+        if professional_id is _SAME_AGENDA
+        else _uuid_or_none(professional_id)
+    )
     current_start = as_utc(appointment.start_at)
     current_end = as_utc(appointment.end_at or appointment.start_at)
-    if start >= current_start and end <= current_end:
+    if (
+        agenda_id == appointment.professional_id
+        and start >= current_start
+        and end <= current_end
+    ):
         return True
     same_agenda = (
-        Appointment.professional_id == appointment.professional_id
-        if appointment.professional_id is not None
+        Appointment.professional_id == agenda_id
+        if agenda_id is not None
         else Appointment.professional_id.is_(None)
     )
     clash = await session.scalar(
@@ -687,12 +795,17 @@ async def _window_fits(
     if clash is not None:
         return False
     if await booking_hold.live_hold_overlaps(
-        session, tenant.id, start, end, professional_id=appointment.professional_id
+        session,
+        tenant.id,
+        start,
+        end,
+        professional_id=agenda_id,
+        exclude_adjustment_id=exclude_adjustment_id,
     ):
         return False
     # TASK-083 spec §7 item 5: the same doctor at ANOTHER clinic (a shared person's agenda) -
     # bare windows only; nothing without an agenda (no read at all for the clinic's agenda).
-    return not await agenda.shared_busy(session, appointment.professional_id, start, end)
+    return not await agenda.shared_busy(session, agenda_id, start, end)
 
 
 def _notice(adjustment: DepositAdjustment, patient_id: UUID | None) -> AdjustmentNotice:
@@ -705,6 +818,7 @@ def _notice(adjustment: DepositAdjustment, patient_id: UUID | None) -> Adjustmen
         old_service=adjustment.old_service,
         new_service=adjustment.new_service,
         diff_cents=adjustment.diff_cents,
+        mode=adjustment.mode,
     )
 
 
@@ -735,14 +849,17 @@ async def held_deposit_cents(session: AsyncSession, deposit: PixDeposit) -> int:
 async def open_adjustment(
     session: AsyncSession, *, tenant_id: UUID, deposit_id: UUID
 ) -> DepositAdjustment | None:
-    """The adjustment still waiting for something (an unpaid difference or an unanswered
-    question), or None. Tasks 6/7/8 read it (menu state, cancellation)."""
+    """The adjustment still waiting for something (an unpaid difference, an unanswered
+    question or - TASK-085 R - the patient's choice after an expired difference Pix), or None.
+    Tasks 6/7/8 read it (menu state, cancellation)."""
     return await session.scalar(
         select(DepositAdjustment)
         .where(
             DepositAdjustment.tenant_id == tenant_id,
             DepositAdjustment.deposit_id == deposit_id,
-            DepositAdjustment.status.in_((STATUS_AWAITING_PAYMENT, STATUS_ASKED)),
+            DepositAdjustment.status.in_(
+                (STATUS_AWAITING_PAYMENT, STATUS_ASKED, STATUS_AWAITING_CHOICE)
+            ),
         )
         .order_by(DepositAdjustment.created_at.desc())
         .limit(1)
@@ -859,28 +976,105 @@ def unit_change_label(service: str, unit_name: str | None) -> str:
     return f"{service} na Unidade {name}"
 
 
+# `preview_service_change(insurance=...)` default: the convênio the appointment has.
+INSURANCE_OF_APPOINTMENT: Any = object()
+
+LABEL_MAX = 120
+
+
+def _insurance_of_change(appointment: Appointment, pending_edit: dict) -> Any:
+    """The convênio a change lands on: `pending_edit["insurance"]` when the KEY is there (None =
+    particular), otherwise the appointment's own (`INSURANCE_OF_APPOINTMENT`)."""
+    if "insurance" in pending_edit:
+        return pending_edit["insurance"]
+    return INSURANCE_OF_APPOINTMENT
+
+
+def _same_text(a: str | None, b: str | None) -> bool:
+    return (a or "").strip().casefold() == (b or "").strip().casefold()
+
+
+async def _new_charges_deposit(
+    session: AsyncSession,
+    tenant: Tenant,
+    appointment: Appointment,
+    professional_id: UUID | None,
+    insurance: Any,
+) -> bool:
+    """Whether the consultation AFTER the change charges a sinal at all (TASK-085 R D-R3): False
+    only when its convênio is a plan flagged "no deposit" (`_insurance_charges_deposit`). Same
+    convênio with the same doctor reads the row's OWN plan ids (never re-matched); anything else
+    resolves the plans like a booking does (`resolve_booking_plan_ids`)."""
+    same_insurance = insurance is INSURANCE_OF_APPOINTMENT or _same_text(
+        insurance, appointment.insurance
+    )
+    if same_insurance and professional_id == appointment.professional_id:
+        return await _insurance_charges_deposit(session, tenant, appointment)
+    text = appointment.insurance if insurance is INSURANCE_OF_APPOINTMENT else insurance
+    plan_id, professional_plan_id = await resolve_booking_plan_ids(
+        session, tenant.id, text, professional_id
+    )
+    probe = SimpleNamespace(
+        insurance_plan_id=plan_id, insurance_professional_plan_id=professional_plan_id
+    )
+    return await _insurance_charges_deposit(session, tenant, probe)
+
+
+async def _doctor_name(session: AsyncSession, tenant: Tenant, professional_id) -> str | None:
+    if professional_id is None:
+        return None
+    row = await session.get(Professional, professional_id)
+    if row is None or row.tenant_id != tenant.id:
+        return None
+    return (row.name or "").strip() or None
+
+
 async def _change_labels(
     session: AsyncSession,
     tenant: Tenant,
     appointment: Appointment,
     new_service: str,
     unit_id: UUID | None,
+    professional_id: Any = UNIT_OF_APPOINTMENT,
+    insurance: Any = INSURANCE_OF_APPOINTMENT,
 ) -> tuple[str, str]:
     """(old, new) labels of a change, for the adjustment, the Pix and the patient's texts.
 
-    The service's names, as always; for a change of UNIT only (same service, another unit) the
-    names carry the place, so "trocar sua consulta para Consulta" reads "para Consulta na Unidade
-    Centro". Units are read tenant-scoped: an unknown one names nothing."""
+    The service's names, as always; for a change of UNIT only (same service, same doctor, another
+    unit) the names carry the place, so "trocar sua consulta para Consulta" reads "para Consulta
+    na Unidade Centro". TASK-085 R (OQ-13): a change of doctor adds " com {médico}" and a change
+    of convênio " pelo {convênio}" / " (particular)", in that order, on both sides; cut at 120.
+    Units and doctors are read tenant-scoped: an unknown one names nothing. `professional_id` left
+    out = the appointment's doctor."""
+    if professional_id is UNIT_OF_APPOINTMENT:
+        professional_id = appointment.professional_id
     old_service = appointment.appointment_type or ""
+    old_label, new_label = old_service, new_service
     current_unit = getattr(appointment, "unit_id", None)
-    if new_service != old_service or unit_id == current_unit:
-        return old_service, new_service
-    old_unit = await unit_booking.tenant_unit(session, tenant.id, current_unit)
-    new_unit = await unit_booking.tenant_unit(session, tenant.id, unit_id)
-    return (
-        unit_change_label(old_service, old_unit.name if old_unit is not None else None),
-        unit_change_label(new_service, new_unit.name if new_unit is not None else None),
-    )
+    doctor_moves = professional_id != appointment.professional_id
+    new_insurance = appointment.insurance if insurance is INSURANCE_OF_APPOINTMENT else insurance
+    insurance_moves = not _same_text(new_insurance, appointment.insurance)
+    if new_service == old_service and unit_id != current_unit and not doctor_moves:
+        old_unit = await unit_booking.tenant_unit(session, tenant.id, current_unit)
+        new_unit = await unit_booking.tenant_unit(session, tenant.id, unit_id)
+        old_label = unit_change_label(old_service, old_unit.name if old_unit is not None else None)
+        new_label = unit_change_label(new_service, new_unit.name if new_unit is not None else None)
+    if doctor_moves:
+        old_doctor = await _doctor_name(session, tenant, appointment.professional_id)
+        new_doctor = await _doctor_name(session, tenant, professional_id)
+        if old_doctor:
+            old_label = f"{old_label} com {old_doctor}"
+        if new_doctor:
+            new_label = f"{new_label} com {new_doctor}"
+    if insurance_moves:
+        old_label = f"{old_label}{_plan_suffix(appointment.insurance)}"
+        new_label = f"{new_label}{_plan_suffix(new_insurance)}"
+    return old_label[:LABEL_MAX], new_label[:LABEL_MAX]
+
+
+def _plan_suffix(name: str | None) -> str:
+    name = (name or "").strip()
+    return f" pelo {name}" if name else " (particular)"
 
 
 @dataclass(frozen=True)
@@ -927,20 +1121,25 @@ async def preview_service_change(
     start_at: datetime | None,
     now: datetime,
     unit_id: Any = UNIT_OF_APPOINTMENT,
+    insurance: Any = INSURANCE_OF_APPOINTMENT,
 ) -> ChangeDecision:
-    """The policy decision for a new service on this PAID sinal - what
-    `request_service_change` will do, computed the same way (price resolved like the sinal's,
-    what the clinic holds, the tenant's minimum days). Read-only: writes, charges and locks
-    nothing, so the confirmation card can show the difference before Confirmar.
+    """The policy decision for a change on this PAID sinal - what `request_paid_change` will do,
+    computed the same way (price resolved like the sinal's, what the clinic holds, the tenant's
+    minimum days). Read-only: writes, charges and locks nothing, so the confirmation card can show
+    the difference before Confirmar.
 
-    `unit_id` (TASK-085): the unit the change lands on - its own price when it has one. Left out,
-    the appointment's unit; None, no unit (the base)."""
+    `professional_id`: the doctor the change lands on (his own price). `unit_id` (TASK-085): the
+    unit - its own price when it has one; left out, the appointment's unit; None, no unit (the
+    base). `insurance` (TASK-085 R): the convênio text (None = particular); left out, the
+    appointment's. A convênio whose plan charges no sinal makes the new sinal 0."""
     unit_id = (
         getattr(appointment, "unit_id", None)
         if unit_id is UNIT_OF_APPOINTMENT
         else _uuid_or_none(unit_id)
     )
+    professional_id = _uuid_or_none(professional_id)
     price = await _price_cents(session, tenant, appointment, new_service, professional_id, unit_id)
+    charges = await _new_charges_deposit(session, tenant, appointment, professional_id, insurance)
     held = await held_deposit_cents(session, deposit)
     days_until = (
         (as_utc(start_at) - as_utc(now)).total_seconds() / 86400 if start_at is not None else 0.0
@@ -952,20 +1151,31 @@ async def preview_service_change(
         new_price_cents=price,
         days_until=days_until,
         min_days=DEFAULT_MIN_DAYS if min_days is None else min_days,
+        new_charges_deposit=charges,
     )
 
 
-def confirm_card_line_text(action: str, diff_cents: int, *, unit_only: bool = False) -> str | None:
-    """The line the confirmation card adds for a service change on a paid sinal (None when
-    there is nothing to say: no difference, or blocked - Confirmar then explains). Never
-    promises money back. `unit_only` (TASK-085 R3): only the unit changes, so it is the UNIT
-    that waits for the payment."""
+def confirm_card_line_text(
+    action: str, diff_cents: int, *, unit_only: bool = False, timing: str = "after"
+) -> str | None:
+    """The line the confirmation card adds for a change on a paid sinal (None when there is
+    nothing to say: no difference, or blocked - Confirmar then explains). Never promises money
+    back. `unit_only` (TASK-085 R3): only the unit changes, so it is the UNIT that waits for the
+    payment. `timing` (TASK-085 R, `deposit_gate.timing_is_before`): "before" - the change waits
+    for the Pix with the current consultation kept and the new time reserved (D-R4); "after" -
+    the change is made at once and the Pix of the difference follows (D-R5)."""
     value = format_brl(diff_cents)
     if action == "increase_charge":
-        what = "a unidade" if unit_only else "o serviço"
+        if timing == "before":
+            what = "a unidade" if unit_only else "o serviço"
+            return (
+                f"Diferença do sinal: {value}. Ao confirmar, enviamos o Pix dessa diferença; "
+                f"{what} só muda depois do pagamento. Até lá, sua consulta atual fica guardada "
+                "e o novo horário fica reservado para você."
+            )
         return (
-            f"Diferença do sinal: {value}. Ao confirmar, enviamos o Pix dessa diferença; "
-            f"{what} só muda depois do pagamento."
+            f"Diferença do sinal: {value}. Ao confirmar, a troca vale na hora e enviamos o Pix "
+            "dessa diferença."
         )
     if action == "increase_free":
         return f"Diferença do sinal: {value}, acertada na consulta."
@@ -982,6 +1192,17 @@ def confirm_card_line_text(action: str, diff_cents: int, *, unit_only: bool = Fa
     return None
 
 
+def _pending_window(appointment: Appointment, pending_edit: dict) -> tuple[datetime, datetime]:
+    """[start, end) of the change: the pending edit's own window, else the row's."""
+    start = pending_edit.get("start_at") or appointment.start_at
+    end = pending_edit.get("end_at") or appointment.end_at or start
+    if isinstance(start, str):
+        start = datetime.fromisoformat(start)
+    if isinstance(end, str):
+        end = datetime.fromisoformat(end)
+    return as_utc(start), as_utc(end)
+
+
 async def request_service_change(
     session: AsyncSession,
     *,
@@ -993,19 +1214,28 @@ async def request_service_change(
     now: datetime,
     source: str = SOURCE_SYSTEM,
 ) -> ServiceChangeResult:
-    """Decide and do the money side of a service change on a PAID sinal. Never commits.
+    """Decide and do the money side of a change on a PAID sinal. Never commits.
 
-    `pending_edit` is the R6 edit dict the caller would have written (`appointment_type`,
-    `professional_id`, `insurance`, `attendee_name`, `google_event_id`, `start_at`, `end_at`,
-    `time_changed`, `doctor_changed`, ...). The caller keeps its own guards (live row, the
-    reschedule limit when the time moves, the calendar) and must NOT write the edit itself:
-    this function writes it when the policy says the change stands now. `source` is the
-    status-log source of that write (`SOURCE_FLOW` / `SOURCE_HUB`).
+    `pending_edit` is the R6 edit dict the caller would have written - the WHOLE target
+    (`appointment_type`, `professional_id`, `unit_id`, `insurance`, `attendee_name`,
+    `google_event_id`, `start_at`, `end_at`, `time_changed`, `doctor_changed`, ...). The caller
+    keeps its own guards (live row, the reschedule limit when the time moves, the calendar) and
+    must NOT write the edit itself: this function writes it when the change stands now. `source`
+    is the status-log source of that write (`SOURCE_FLOW` / `SOURCE_HUB`).
 
-    TASK-085: the new price is the one of the unit the change lands on - `pending_edit["unit_id"]`
-    when that KEY is present (None = no unit), else the appointment's unit. A change of the UNIT
-    only (same service) runs here too when the price differs (R3); its texts then name the place
-    (`_change_labels`, `ServiceChangeResult.label`).
+    Priced at the doctor (`professional_id`), unit (`unit_id`: the KEY present = that value, even
+    None) and convênio (`insurance`: the KEY present = that value; a plan without sinal = new
+    sinal 0) of the change (TASK-085 / R D-R1/D-R3). TASK-085 R, a dearer change by >= R$ 10
+    (contrato.md §1):
+
+    * clinic "after" (D-R5) -> the edit is written NOW and a Pix of only the difference follows
+      (`applied_awaiting_payment`, mode `applied`);
+    * clinic "before" (D-R4) -> nothing written; the new window must be free on the agenda the
+      change lands on (else `blocked/slot_taken`, nothing charged), a Pix of the difference until
+      `suspend_pix_expiry` and the new window HELD for it (`suspended`, mode `suspend`); without
+      room for a useful Pix -> the legacy deferred mode (`awaiting_payment`, mode NULL);
+    * either: the provider down -> applied now, the clinic collects (`increase_collect`); a
+      permanent refusal -> `blocked/charge_failed`, nothing written.
     """
     if (
         deposit.tenant_id != tenant.id
@@ -1025,35 +1255,40 @@ async def request_service_change(
         return ServiceChangeResult(kind="blocked", reason="deposit_not_paid")
     pending = await open_adjustment(session, tenant_id=tenant.id, deposit_id=locked.id)
     if pending is not None:
-        reason = (
-            "adjustment_pending"
-            if pending.status == STATUS_AWAITING_PAYMENT
-            else "refund_question_pending"
-        )
+        reason = {
+            STATUS_AWAITING_PAYMENT: "adjustment_pending",
+            STATUS_AWAITING_CHOICE: "choice_pending",
+        }.get(pending.status, "refund_question_pending")
         return ServiceChangeResult(kind="blocked", reason=reason)
     # Follow-up review I3: a previous difference the clinic is still collecting (provider was
-    # down) blocks ANY further change - also back to the old service - until the clinic
-    # resolves that item: never a second charge, never a stale "cobrar" for a moot difference.
+    # down, or - TASK-085 R D-R5 - its Pix expired unpaid) blocks ANY further change - also back
+    # to the old service - until the clinic resolves that item: never a second charge, never a
+    # stale "cobrar" for a moot difference.
     if await adjustment_queries.open_collect_adjustments(
         session, tenant_id=tenant.id, deposit=locked
     ):
         return ServiceChangeResult(kind="blocked", reason="collect_pending")
 
     unit_id = _unit_of_change(appointment, pending_edit)
+    professional_id = _uuid_or_none(
+        pending_edit.get("professional_id", appointment.professional_id)
+    )
+    insurance = _insurance_of_change(appointment, pending_edit)
     decision = await preview_service_change(
         session,
         tenant=tenant,
         appointment=appointment,
         deposit=locked,
         new_service=new_service,
-        professional_id=pending_edit.get("professional_id", appointment.professional_id),
+        professional_id=professional_id,
         start_at=pending_edit.get("start_at") or appointment.start_at,
         now=now,
         unit_id=unit_id,
+        insurance=insurance,
     )
     log = {"tenant_id": str(tenant.id), "appointment_id": str(appointment.id)}
     old_service, new_label = await _change_labels(
-        session, tenant, appointment, new_service, unit_id
+        session, tenant, appointment, new_service, unit_id, professional_id, insurance
     )
     label = new_label if new_label != new_service else None
     if decision.action == "blocked":
@@ -1063,10 +1298,35 @@ async def request_service_change(
         )
 
     if decision.action == "increase_charge":
+        charge = {
+            "tenant": tenant, "appointment": appointment, "deposit": locked,
+            "old_service": old_service, "new_service": new_service,
+            "diff_cents": decision.diff_cents, "pending_edit": pending_edit, "now": now,
+            "source": source, "label": label,
+        }
+        if not timing_is_before(tenant):
+            return await _charge_difference(session, **charge, mode=MODE_APPLIED)
+        new_start, new_end = _pending_window(appointment, pending_edit)
+        expires = suspend_pix_expiry(
+            now, _pix_ttl_minutes(tenant), appointment.start_at, new_start
+        )
+        if expires is None:
+            # Contrato §1: no room for a minimally useful Pix before the visits - the legacy
+            # deferred mode (no hold, no suspension; unpaid = the old one stands, today's text).
+            logger.info("service_change_suspend_no_room", **log)
+            return await _charge_difference(session, **charge, mode=None)
+        # Lock order (contrato §4): deposit row (above) -> the NEW agenda -> the window check ->
+        # the charge -> the hold. Nobody else's hold can land on the window in between.
+        await booking_hold.serialize_agenda_in(session, tenant.id, professional_id)
+        if not await _window_fits(
+            session, tenant, appointment, new_start, new_end, professional_id=professional_id
+        ):
+            logger.info("service_change_blocked", reason="slot_taken", **log)
+            return ServiceChangeResult(
+                kind="blocked", reason="slot_taken", decision="increase_charge", label=label
+            )
         return await _charge_difference(
-            session, tenant=tenant, appointment=appointment, deposit=locked,
-            old_service=old_service, new_service=new_service, diff_cents=decision.diff_cents,
-            pending_edit=pending_edit, now=now, source=source, label=label,
+            session, **charge, mode=MODE_SUSPEND, expires_at=expires
         )
 
     # Every other action: the change stands now, written by the one edit writer.
@@ -1109,28 +1369,36 @@ async def request_service_change(
 
 # TASK-085 R: the name every caller uses from now on - a change of ANY money field (service, unit,
 # doctor, convênio) on a paid sinal goes through the same engine (D-R1/D-R3). Same function, same
-# signature (contrato.md); S1 teaches it the new fields and the two modes.
+# signature (contrato.md).
 request_paid_change = request_service_change
 
 
-async def _charge_difference(
+def _pix_ttl_minutes(tenant: Tenant) -> int:
+    return tenant.deposit_hold_ttl_minutes or DEFAULT_PIX_TTL_MINUTES
+
+
+@dataclass(frozen=True)
+class _Charged:
+    copy_paste: str
+    provider_charge_id: str
+
+
+async def _create_difference_charge(
     session: AsyncSession,
     *,
     tenant: Tenant,
-    appointment: Appointment,
     deposit: PixDeposit,
-    old_service: str,
-    new_service: str,
+    adjustment_id: UUID,
     diff_cents: int,
-    pending_edit: dict,
+    shown: str,
     now: datetime,
-    source: str,
-    label: str | None = None,
-) -> ServiceChangeResult:
-    """`new_service` is what is written once paid; `label` (TASK-085, a unit-only change) is
-    what the patient and the clinic read in its place - the Pix, the adjustment, the notices."""
-    log = {"tenant_id": str(tenant.id), "appointment_id": str(appointment.id)}
-    shown = label or new_service
+    expires_at: datetime,
+    log: dict,
+) -> _Charged | str:
+    """Create the Pix of ONLY the difference (`external_reference` = the adjustment id). Returns
+    the charge, or why not: `no_payment_account`, `charge_failed` (a permanent refusal, or a
+    charge without its code - voided), `outage` (the provider is unavailable: a retry may work).
+    Never writes an adjustment."""
     provider_name = deposit.provider
     provider = registry.find_provider(provider_name)
     account = await accounts.load_charge_account(
@@ -1139,13 +1407,7 @@ async def _charge_difference(
     patient = await session.get(Patient, deposit.patient_id) if deposit.patient_id else None
     if provider is None or account is None or patient is None or patient.tenant_id != tenant.id:
         logger.warning("service_change_no_payment_account", **log)
-        return ServiceChangeResult(
-            kind="blocked", reason="no_payment_account", decision="increase_charge", label=label
-        )
-
-    adjustment_id = uuid4()
-    ttl = tenant.deposit_hold_ttl_minutes or DEFAULT_PIX_TTL_MINUTES
-    expires_at = as_utc(now) + timedelta(minutes=ttl)
+        return "no_payment_account"
     customer_id = await accounts.get_customer_id(
         session, tenant_id=tenant.id, patient_id=patient.id, provider=provider_name
     )
@@ -1172,19 +1434,7 @@ async def _charge_difference(
             outage=outage,
             **log,
         )
-        if not outage:
-            # A refusal that will happen again (key, validation, unknown): never waived.
-            return ServiceChangeResult(
-                kind="blocked", reason="charge_failed", decision="increase_charge", label=label
-            )
-        # The provider is down: the clinic collects (follow-up B). The same id is kept - a
-        # timeout may come after the charge was created with it as the reference.
-        return await _apply_and_collect(
-            session, tenant=tenant, appointment=appointment, deposit=deposit,
-            old_service=old_service, new_service=new_service, diff_cents=diff_cents,
-            pending_edit=pending_edit, now=now, source=source, adjustment_id=adjustment_id,
-            label=label,
-        )
+        return "outage" if outage else "charge_failed"
     if not created.copy_paste:
         # The patient must SEE what they pay: a charge without its code is voided, not kept.
         try:
@@ -1192,10 +1442,7 @@ async def _charge_difference(
         except Exception as exc:  # noqa: BLE001
             logger.warning("service_change_void_failed", error_type=type(exc).__name__, **log)
         logger.warning("service_change_charge_without_code", **log)
-        return ServiceChangeResult(
-            kind="blocked", reason="charge_failed", decision="increase_charge", label=label
-        )
-
+        return "charge_failed"
     if created.provider_customer_id and created.provider_customer_id != customer_id:
         await accounts.remember_customer_id(
             session,
@@ -1204,12 +1451,79 @@ async def _charge_difference(
             provider=provider_name,
             provider_customer_id=created.provider_customer_id,
         )
+    return _Charged(copy_paste=created.copy_paste, provider_charge_id=created.provider_charge_id)
+
+
+async def _void_charge(
+    session: AsyncSession, tenant: Tenant, deposit: PixDeposit, charge_id: str, log: dict
+) -> bool:
+    """Best-effort void of a charge the patient never saw. True when voided."""
+    provider = registry.find_provider(deposit.provider)
+    account = await cfg.get_payment_account(session, tenant.id, deposit.provider)
+    if provider is None or account is None:
+        return False
+    try:
+        await provider.cancel_charge(account, charge_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("service_change_void_failed", error_type=type(exc).__name__, **log)
+        return False
+    return True
+
+
+async def _charge_difference(
+    session: AsyncSession,
+    *,
+    tenant: Tenant,
+    appointment: Appointment,
+    deposit: PixDeposit,
+    old_service: str,
+    new_service: str,
+    diff_cents: int,
+    pending_edit: dict,
+    now: datetime,
+    source: str,
+    label: str | None = None,
+    mode: str | None = None,
+    expires_at: datetime | None = None,
+) -> ServiceChangeResult:
+    """`new_service` is what is written; `label` (TASK-085: a unit/doctor/convênio change) is what
+    the patient and the clinic read in its place - the Pix, the adjustment, the notices.
+
+    `mode` (TASK-085 R): None = the legacy deferred mode (`awaiting_payment`: nothing written, no
+    hold); `suspend` = D-R4 (nothing written; the new window HELD until `expires_at` + grace -
+    the caller already checked it under the agenda lock); `applied` = D-R5 (the edit is written
+    NOW, after the charge exists - a refusal writes nothing)."""
+    log = {"tenant_id": str(tenant.id), "appointment_id": str(appointment.id)}
+    shown = label or new_service
+    adjustment_id = uuid4()
+    if expires_at is None:
+        expires_at = as_utc(now) + timedelta(minutes=_pix_ttl_minutes(tenant))
+    charged = await _create_difference_charge(
+        session, tenant=tenant, deposit=deposit, adjustment_id=adjustment_id,
+        diff_cents=diff_cents, shown=shown, now=now, expires_at=expires_at, log=log,
+    )
+    if charged == "outage":
+        # The provider is down: the clinic collects (follow-up B). The same id is kept - a
+        # timeout may come after the charge was created with it as the reference.
+        return await _apply_and_collect(
+            session, tenant=tenant, appointment=appointment, deposit=deposit,
+            old_service=old_service, new_service=new_service, diff_cents=diff_cents,
+            pending_edit=pending_edit, now=now, source=source, adjustment_id=adjustment_id,
+            label=label,
+        )
+    if isinstance(charged, str):
+        # A refusal that will happen again (key, validation, unknown): never waived.
+        return ServiceChangeResult(
+            kind="blocked", reason=charged, decision="increase_charge", label=label
+        )
+
     adjustment = DepositAdjustment(
         id=adjustment_id,
         tenant_id=tenant.id,
         deposit_id=deposit.id,
         appointment_id=appointment.id,
         kind=KIND_INCREASE,
+        mode=mode,
         status=STATUS_AWAITING_PAYMENT,
         old_service=old_service[:120],
         new_service=shown[:120],
@@ -1218,21 +1532,74 @@ async def _charge_difference(
             "appointment_type": new_service,
         },
         diff_cents=diff_cents,
-        provider_charge_id=created.provider_charge_id,
+        provider_charge_id=charged.provider_charge_id,
         expires_at=expires_at,
     )
     session.add(adjustment)
     await session.flush()
+    result = {
+        "diff_cents": diff_cents,
+        "pix_copy_paste": charged.copy_paste,
+        "adjustment_id": adjustment_id,
+        "expires_at": expires_at,
+        "decision": "increase_charge",
+        "label": label,
+    }
+
+    if mode == MODE_APPLIED:
+        edit = deserialize_edit(adjustment.pending_edit)
+        written = await _write(
+            session, tenant, appointment, edit, source=source,
+            key=f"service_change:{appointment.id}:{adjustment_id}",
+        )
+        logger.info(
+            "service_change_applied_awaiting_payment", adjustment_id=str(adjustment_id), **log
+        )
+        return ServiceChangeResult(
+            kind="applied_awaiting_payment",
+            changed_fields=written.fields,
+            notice_id=written.notice_id,
+            **result,
+        )
+
+    if mode == MODE_SUSPEND:
+        new_start, new_end = _pending_window(appointment, pending_edit)
+        data = adjustment.pending_edit
+        held = await booking_hold.place_difference_hold_in(
+            session,
+            tenant_id=tenant.id,
+            adjustment_id=adjustment_id,
+            patient_id=deposit.patient_id,
+            professional_id=_uuid_or_none(data.get("professional_id")),
+            unit_id=_unit_of_change(appointment, pending_edit),
+            appointment_type=new_service[:120],
+            insurance=data.get("insurance"),
+            attendee_name=data.get("attendee_name"),
+            start_at=new_start,
+            end_at=new_end,
+            expires_at=difference_hold_expiry(expires_at, new_start),
+        )
+        if held is None:
+            # Checked free under the same agenda lock, so this is a defence only: the Pix the
+            # patient never saw is voided and the change refused. A late payment of a charge we
+            # could not void is an ORPHAN item (the adjustment is no longer awaiting).
+            voided = await _void_charge(
+                session, tenant, deposit, charged.provider_charge_id, log
+            )
+            await move_adjustment(
+                session, adjustment, from_status=STATUS_AWAITING_PAYMENT,
+                to_status=STATUS_CANCELLED if voided else STATUS_CANCELLED_VOID_PENDING,
+                now=now,
+            )
+            logger.warning("service_change_blocked", reason="slot_taken", **log)
+            return ServiceChangeResult(
+                kind="blocked", reason="slot_taken", decision="increase_charge", label=label
+            )
+        logger.info("service_change_suspended", adjustment_id=str(adjustment_id), **log)
+        return ServiceChangeResult(kind="suspended", **result)
+
     logger.info("service_change_awaiting_payment", adjustment_id=str(adjustment_id), **log)
-    return ServiceChangeResult(
-        kind="awaiting_payment",
-        diff_cents=diff_cents,
-        pix_copy_paste=created.copy_paste,
-        adjustment_id=adjustment_id,
-        expires_at=expires_at,
-        decision="increase_charge",
-        label=label,
-    )
+    return ServiceChangeResult(kind="awaiting_payment", **result)
 
 
 def provider_unavailable(exc: BaseException) -> bool:
@@ -1344,6 +1711,9 @@ async def apply_paid_adjustment(
     data = adjustment.pending_edit
     expected = data.get("expected") or {}
     log = {"tenant_id": str(tenant.id), "adjustment_id": str(adjustment.id)}
+    if adjustment.mode is not None:
+        # TASK-085 R: a `mode` row carries the WHOLE edit (service, doctor, convênio, unit, time).
+        return await _apply_full_edit(session, tenant, adjustment, appointment, now=now)
     if (
         appointment is None
         or not is_live_status(appointment.status)
@@ -1416,6 +1786,102 @@ async def apply_paid_adjustment(
     return written.fields
 
 
+def _row_as_requested(appointment: Appointment, expected: dict) -> bool:
+    """TASK-085 R: the row is exactly the one the change was asked against (start, service,
+    doctor, event, and the unit / convênio when recorded). A suspended visit cannot be edited by
+    anybody (S3/S4 guards), so any difference means the change no longer applies."""
+    if _iso(appointment.start_at) != expected.get("start_at"):
+        return False
+    if appointment.appointment_type != expected.get("appointment_type"):
+        return False
+    if _str_or_none(appointment.professional_id) != expected.get("professional_id"):
+        return False
+    if "google_event_id" in expected and appointment.google_event_id != expected.get(
+        "google_event_id"
+    ):
+        return False
+    if "unit_id" in expected and _str_or_none(
+        getattr(appointment, "unit_id", None)
+    ) != expected.get("unit_id"):
+        return False
+    return "insurance" not in expected or _same_text(
+        appointment.insurance, expected.get("insurance")
+    )
+
+
+async def _apply_full_edit(
+    session: AsyncSession,
+    tenant: Tenant,
+    adjustment: DepositAdjustment,
+    appointment: Appointment | None,
+    *,
+    now: datetime,
+) -> tuple[str, ...] | None:
+    """TASK-085 R (`mode="suspend"`, D-R4): the Pix of the difference was paid - the WHOLE pending
+    edit is written now (service, doctor, convênio + its plans re-resolved, unit, time) onto the
+    row it was asked against, on the agenda of the doctor it lands on (`_window_fits` excluding
+    the change's own hold), and that hold is released. The Google event follows after the commit
+    (`update_agenda_after_payment`: a change of doctor creates it on the new agenda first), so the
+    row keeps its event id/link/source here. None = not applicable (nothing written; the caller
+    opens the ORPHAN item and releases the hold). An `applied` row never gets here: it was written
+    at the request."""
+    data = adjustment.pending_edit or {}
+    expected = data.get("expected") or {}
+    log = {"tenant_id": str(tenant.id), "adjustment_id": str(adjustment.id)}
+    if adjustment.mode != MODE_SUSPEND:
+        logger.warning("service_change_not_applicable", cause="mode", **log)
+        return None
+    if (
+        appointment is None
+        or not is_live_status(appointment.status)
+        or appointment.start_at is None
+        or as_utc(appointment.start_at) <= as_utc(now)
+        or not _row_as_requested(appointment, expected)
+    ):
+        logger.warning("service_change_not_applicable", cause="row", **log)
+        return None
+    try:
+        start, end = _pending_window(appointment, data)
+    except (TypeError, ValueError):
+        start = end = None
+    if (
+        start is None
+        or end <= start
+        or not await _window_fits(
+            session,
+            tenant,
+            appointment,
+            start,
+            end,
+            professional_id=data.get("professional_id"),
+            exclude_adjustment_id=adjustment.id,
+        )
+    ):
+        logger.warning("service_change_not_applicable", cause="window", **log)
+        return None
+    edit = deserialize_edit(data)
+    edit["start_at"], edit["end_at"] = start, end
+    edit["calendar_changed"] = False
+    edit["google_event_id"] = appointment.google_event_id
+    edit["google_event_link"] = appointment.google_event_link
+    written = await _write(
+        session, tenant, appointment, edit,
+        source=data.get("source") or SOURCE_SYSTEM,
+        key=f"service_change:{appointment.id}:{adjustment.id}",
+    )
+    if edit["time_changed"]:
+        # The time moves only now (the change waited for the Pix): it counts now. A limit
+        # reached meanwhile never undoes a paid change - logged, like flow_runner's race.
+        allowed, _count = await register_reschedule(
+            session, tenant=tenant, appointment=appointment
+        )
+        if not allowed:
+            logger.warning("service_change_reschedule_limit_race", **log)
+    await booking_hold.release_difference_hold_in(session, adjustment.id)
+    logger.info("service_change_paid_applied", mode=adjustment.mode, **log)
+    return written.fields
+
+
 async def _run_hooks(
     hooks: list[AdjustmentHook], session: AsyncSession, tenant: Tenant, notice: AdjustmentNotice
 ) -> None:
@@ -1485,8 +1951,15 @@ async def after_paid_move(
         or adjustment.appointment_id is None
     ):
         return
+    if adjustment.mode == MODE_APPLIED:
+        # TASK-085 R D-R5: the change was written (and followed up) at the request already.
+        return
+    # TASK-085 R D-R4: a suspended visit was hidden from the patient (and its reminders) until
+    # now - its reminders are re-planned even when the time did not move.
+    suspended = adjustment.mode == MODE_SUSPEND
     data = adjustment.pending_edit or {}
-    if not data.get("time_changed"):
+    moved = bool(data.get("time_changed"))
+    if not moved and not suspended:
         return
     appointment = await session.scalar(
         select(Appointment).where(
@@ -1495,19 +1968,25 @@ async def after_paid_move(
     )
     if appointment is None or not is_live_status(appointment.status):
         return
-    if _iso(appointment.start_at) != _iso(data.get("start_at")):
+    if moved and _iso(appointment.start_at) != _iso(data.get("start_at")):
         # A later reschedule won (`_paid_window`): THIS change did not move the time, so it
         # neither re-plans nor announces a move (the reschedule did its own).
-        return
+        if not suspended:
+            return
+        moved = False
     tenant_id, appointment_id, new_start = tenant.id, appointment.id, appointment.start_at
-    replan = reminder_hooks.enabled_for(tenant) or (appointment.confirmation_count or 0) > 0
+    replan = (
+        suspended
+        or reminder_hooks.enabled_for(tenant)
+        or (appointment.confirmation_count or 0) > 0
+    )
     previous_raw = (data.get("expected") or {}).get("start_at")
     previous_start = datetime.fromisoformat(previous_raw) if previous_raw else None
     # End this session's read transaction before the hook opens its own.
     await session.commit()
     if replan:
         await reminder_hooks.after_appointment_rescheduled(appointment_id)
-    if data.get("source") == SOURCE_FLOW:
+    if moved and data.get("source") == SOURCE_FLOW:
         await enqueue_appointment_change_notification(
             redis,
             tenant_id,
@@ -1681,23 +2160,61 @@ async def expire_adjustments(
     untouched = 0
     for adjustment_id in due:
         try:
-            tenant = await _expire_one(session, adjustment_id, now, enqueue)
+            expired = await _expire_one(session, adjustment_id, now, enqueue)
         except Exception as exc:  # noqa: BLE001 - one adjustment never stops the batch
             await session.rollback()
             logger.warning("service_change_expiry_failed", error_type=type(exc).__name__)
             untouched += 1
             continue
-        if tenant is None:
+        if expired is None:
             untouched += 1
             continue
         resolved += 1
-        await run_expired_hooks(session, tenant, adjustment_id)
+        tenant, outcome = expired
+        if outcome is None:
+            await run_expired_hooks(session, tenant, adjustment_id)
+        else:
+            await run_unpaid_followup(session, tenant, adjustment_id, outcome, now=now)
         await session.commit()
     # Rows left as they were (provider down, account disconnected, a paid one handed to the
     # webhook path) move the window on, so they never keep a healthy row out of the batch.
     _SWEEP_OFFSET = offset + untouched if len(due) == limit else 0
+    resolved += await _keep_old_after_silence(session, now=now, limit=limit)
     resolved += await _retry_pending_voids(session, now=now, enqueue=enqueue, limit=limit)
     return resolved
+
+
+async def _keep_old_after_silence(session: AsyncSession, *, now: datetime, limit: int) -> int:
+    """TASK-085 R D-R8: every `awaiting_choice` past its deadline -> `kept_old` (the old visit
+    stands, the new window is freed) and the patient is told once. Commits per row."""
+    overdue = list(
+        (
+            await session.scalars(
+                select(DepositAdjustment.id)
+                .where(
+                    DepositAdjustment.status == STATUS_AWAITING_CHOICE,
+                    DepositAdjustment.expires_at.is_not(None),
+                    DepositAdjustment.expires_at <= now,
+                )
+                .order_by(DepositAdjustment.expires_at, DepositAdjustment.id)
+                .limit(limit)
+            )
+        ).all()
+    )
+    done = 0
+    for adjustment_id in overdue:
+        try:
+            tenant = await keep_old_on_silence(session, adjustment_id, now=now)
+        except Exception as exc:  # noqa: BLE001 - one row never stops the batch
+            await session.rollback()
+            logger.warning("service_change_choice_silence_failed", error_type=type(exc).__name__)
+            continue
+        if tenant is None:
+            continue
+        done += 1
+        await run_unpaid_followup(session, tenant, adjustment_id, "kept_old", now=now)
+        await session.commit()
+    return done
 
 
 # Same rotating start as `_SWEEP_OFFSET`, for the differences whose void is still pending.
@@ -1835,7 +2352,10 @@ async def _retry_void_one(
 
 async def _expire_one(
     session: AsyncSession, adjustment_id: UUID, now: datetime, enqueue: EnqueueFn | None
-) -> Tenant | None:
+) -> tuple[Tenant, str | None] | None:
+    """One overdue unpaid difference. None = left as it was (the next tick retries). A legacy
+    row (`mode` NULL) -> `expired` and `(tenant, None)` (today's notice); a TASK-085 R row ->
+    `on_difference_unpaid` and `(tenant, outcome)` (its own notice, `run_unpaid_followup`)."""
     from secretaria.services.payments import jobs
 
     adjustment = await session.get(DepositAdjustment, adjustment_id)
@@ -1868,6 +2388,16 @@ async def _expire_one(
                 enqueue=enqueue,
             )
         return None
+    if adjustment.mode is not None:
+        outcome = await on_difference_unpaid(
+            session, tenant=tenant, adjustment=adjustment, now=now
+        )
+        if outcome in ("payment_in_flight", "void_failed", "not_applicable"):
+            await session.rollback()
+            return None
+        await session.commit()
+        logger.info("service_change_unpaid", outcome=outcome, **log)
+        return tenant, outcome
     try:
         await provider.cancel_charge(account, adjustment.provider_charge_id)
     except Exception as exc:  # noqa: BLE001 - not voided: retry next tick
@@ -1881,7 +2411,7 @@ async def _expire_one(
     if not won:
         return None
     logger.info("service_change_expired", **log)
-    return tenant
+    return tenant, None
 
 
 # --------------------------------------------------------------------------
@@ -1970,8 +2500,14 @@ async def update_agenda_after_payment(
     row (money first, committed). Now the agenda follows. When the new window no longer fits,
     or the agenda cannot be reached, ONE attention item tells the clinic to adjust the agenda
     (`service_diff_agenda_pending`): never two overlapping events, never the payment undone.
-    Sends nothing to the patient (the default notice does, once)."""
+    Sends nothing to the patient (the default notice does, once).
+
+    TASK-085 R: a `mode="applied"` change was written - and its agenda moved by its caller - at
+    the request: nothing to do. A `mode="suspend"` change of DOCTOR moves the event to the new
+    doctor's agenda (`_move_event_to_new_agenda`)."""
     if notice.kind != KIND_INCREASE or notice.appointment_id is None:
+        return
+    if notice.mode == MODE_APPLIED:
         return
     adjustment = await session.get(DepositAdjustment, notice.adjustment_id)
     appointment = await session.scalar(
@@ -1995,42 +2531,139 @@ async def update_agenda_after_payment(
     patient = (
         await session.get(Patient, appointment.patient_id) if appointment.patient_id else None
     )
+    patient_name = patient.name if patient is not None else None
     log = {"tenant_id": str(tenant.id), "adjustment_id": str(adjustment.id)}
+    agenda_moves = adjustment.mode == MODE_SUSPEND and _str_or_none(
+        appointment.professional_id
+    ) != expected.get("professional_id")
+    adjustment_id, appointment_id = adjustment.id, appointment.id
     try:
-        calendar = await calendar_for_appointment(session, tenant, appointment)
-        if calendar is None:
-            raise LookupError("no_calendar")
-        await sync_agenda_event(
-            session,
-            tenant,
-            appointment,
-            calendar,
-            patient_name=patient.name if patient is not None else None,
-            window_changed=window_changed,
-        )
+        if agenda_moves:
+            await _move_event_to_new_agenda(
+                session, tenant, appointment, expected, patient_name=patient_name, log=log
+            )
+        else:
+            calendar = await calendar_for_appointment(session, tenant, appointment)
+            if calendar is None:
+                raise LookupError("no_calendar")
+            await sync_agenda_event(
+                session,
+                tenant,
+                appointment,
+                calendar,
+                patient_name=patient_name,
+                window_changed=window_changed,
+            )
     except Exception as exc:  # noqa: BLE001 - the payment stands; the clinic fixes the agenda
         logger.warning(
             "service_change_agenda_not_updated", error_type=type(exc).__name__, **log
         )
-        deposit = await session.get(PixDeposit, adjustment.deposit_id)
-        await attention.open_attention_item(
-            session,
-            tenant_id=tenant.id,
-            reason=REASON_SERVICE_DIFF_AGENDA_PENDING,
-            dedupe_key=attention.attention_dedupe_key(
-                deposit.provider,
-                f"adjustment:{adjustment.id}",
-                REASON_SERVICE_DIFF_AGENDA_PENDING,
-            ),
-            deposit=deposit,
-            provider_charge_id=adjustment.provider_charge_id,
-            slot_start=appointment.start_at,
-            slot_end=appointment.end_at,
-            service_label=adjustment.new_service,
-        )
-        await session.commit()
+        await _open_agenda_item(session, tenant, adjustment_id, appointment_id)
         return
-    logger.info("service_change_agenda_updated", window_changed=window_changed, **log)
+    logger.info(
+        "service_change_agenda_updated", window_changed=window_changed, moved=agenda_moves, **log
+    )
+
+
+async def _open_agenda_item(
+    session: AsyncSession, tenant: Tenant, adjustment_id: UUID, appointment_id: UUID
+) -> None:
+    adjustment = await session.get(DepositAdjustment, adjustment_id)
+    appointment = await session.get(Appointment, appointment_id)
+    deposit = await session.get(PixDeposit, adjustment.deposit_id)
+    await attention.open_attention_item(
+        session,
+        tenant_id=tenant.id,
+        reason=REASON_SERVICE_DIFF_AGENDA_PENDING,
+        dedupe_key=attention.attention_dedupe_key(
+            deposit.provider,
+            f"adjustment:{adjustment.id}",
+            REASON_SERVICE_DIFF_AGENDA_PENDING,
+        ),
+        deposit=deposit,
+        provider_charge_id=adjustment.provider_charge_id,
+        slot_start=appointment.start_at if appointment is not None else None,
+        slot_end=appointment.end_at if appointment is not None else None,
+        service_label=adjustment.new_service,
+    )
+    await session.commit()
+
+
+async def _move_event_to_new_agenda(
+    session: AsyncSession,
+    tenant: Tenant,
+    appointment: Appointment,
+    expected: dict,
+    *,
+    patient_name: str | None,
+    log: dict,
+) -> None:
+    """TASK-085 R (D-R3/D-R4): a paid change of DOCTOR. The row already carries the new doctor
+    (`_apply_full_edit`) but still points at the OLD event. The event is created on the new
+    doctor's agenda (free there first; exclusively on the secretarIA agenda), the row re-pointed
+    and committed, and only THEN the old event is deleted on the agenda that owned it - so a
+    failure never leaves the consultation without an event. Raises on any failure before the
+    re-point (the caller opens `service_diff_agenda_pending`); a failure to delete the old event
+    opens the same item (the clinic removes it)."""
+    old_event_id = (appointment.google_event_id or "").strip()
+    old_owner = SimpleNamespace(
+        professional_id=_uuid_or_none(expected.get("professional_id")),
+        google_calendar_source=appointment.google_calendar_source,
+    )
+    new_source = "professional" if appointment.professional_id is not None else "clinic"
+    new_owner = SimpleNamespace(
+        professional_id=appointment.professional_id, google_calendar_source=new_source
+    )
+    new_calendar = await calendar_for_appointment(session, tenant, new_owner)
+    if new_calendar is None:
+        raise LookupError("no_new_calendar")
+    new_calendar = await unit_booking.calendar_at_unit(
+        session, new_calendar, tenant.id, getattr(appointment, "unit_id", None)
+    )
+    start = as_utc(appointment.start_at)
+    end = as_utc(appointment.end_at or appointment.start_at)
+    if not await new_calendar.is_slot_free(start, end):
+        raise CalendarSlotTakenError("service_change_new_agenda_taken")
+    description = build_event_description(
+        service=appointment.appointment_type,
+        insurance=appointment.insurance,
+        attendee_name=appointment.attendee_name,
+        **await unit_booking.booking_unit_fields(
+            session,
+            tenant.id,
+            getattr(appointment, "unit_id", None),
+            appointment.professional_id,
+        ),
+    )
+    created = await create_event_exclusive(
+        new_calendar,
+        start=start,
+        end=end,
+        summary=agenda_summary(appointment, patient_name),
+        description=description,
+    )
+    new_event_id = str(created.get("id") or "").strip()
+    if not new_event_id:
+        raise LookupError("no_event_id")
+    appointment_id = appointment.id
+    appointment.google_event_id = new_event_id
+    appointment.google_event_link = created.get("htmlLink")
+    appointment.google_calendar_source = new_source
+    await session.commit()
+    if not old_event_id:
+        return
+    try:
+        old_calendar = await calendar_for_appointment(session, tenant, old_owner)
+        if old_calendar is None:
+            raise LookupError("no_old_calendar")
+        await old_calendar.cancel_event(old_event_id)
+    except Exception as exc:  # noqa: BLE001 - the new event stands; the clinic removes the old
+        logger.warning(
+            "service_change_old_event_not_deleted", error_type=type(exc).__name__, **log
+        )
+        await _open_agenda_item(
+            session, tenant, UUID(log["adjustment_id"]), appointment_id
+        )
 
 
 # --------------------------------------------------------------------------
@@ -2065,10 +2698,12 @@ async def notify_patient_adjustment_applied(
     patient = await _patient_of(session, tenant, notice)
     if patient is None:
         return
-    await notify.deliver(
-        session, tenant, patient,
-        [notify.Text(adjustment_applied_text(notice.new_service, notice.diff_cents))],
-    )
+    if notice.mode == MODE_APPLIED:
+        # TASK-085 R D-R5: the change was made at the request; this only thanks the payment.
+        body = adjustment_paid_after_applied_text(notice.new_service, notice.diff_cents)
+    else:
+        body = adjustment_applied_text(notice.new_service, notice.diff_cents)
+    await notify.deliver(session, tenant, patient, [notify.Text(body)])
 
 
 async def notify_patient_adjustment_not_applied(
@@ -2087,6 +2722,71 @@ async def notify_patient_adjustment_not_applied(
 # --------------------------------------------------------------------------
 # TASK-085 R - frozen signatures, implemented by S1 (tasks/TASK-085/sinal-trocas/contrato.md)
 # --------------------------------------------------------------------------
+
+
+async def _lock_appointment_then(
+    session: AsyncSession, adjustment: DepositAdjustment
+) -> Appointment | None:
+    """Contrato §4 lock order: the APPOINTMENT row first (FOR UPDATE), then the adjustment is
+    re-read - what the transaction we queued behind decided."""
+    appointment = None
+    if adjustment.appointment_id is not None:
+        appointment = await session.scalar(
+            select(Appointment)
+            .where(
+                Appointment.id == adjustment.appointment_id,
+                Appointment.tenant_id == adjustment.tenant_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    await session.scalar(
+        select(DepositAdjustment)
+        .where(
+            DepositAdjustment.id == adjustment.id,
+            DepositAdjustment.tenant_id == adjustment.tenant_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    return appointment
+
+
+def _visit_upcoming(appointment: Appointment | None, now: datetime) -> bool:
+    return (
+        appointment is not None
+        and is_live_status(appointment.status)
+        and appointment.start_at is not None
+        and as_utc(appointment.start_at) > as_utc(now)
+    )
+
+
+def _new_start_of(adjustment: DepositAdjustment, appointment: Appointment) -> datetime:
+    return _pending_window(appointment, adjustment.pending_edit or {})[0]
+
+
+async def _to_awaiting_choice(
+    session: AsyncSession,
+    adjustment: DepositAdjustment,
+    *,
+    deadline: datetime,
+    now: datetime,
+) -> bool:
+    """Atomic `awaiting_payment -> awaiting_choice` (still open: `resolved_at` stays NULL)."""
+    claimed = await session.execute(
+        update(DepositAdjustment)
+        .where(
+            DepositAdjustment.id == adjustment.id,
+            DepositAdjustment.tenant_id == adjustment.tenant_id,
+            DepositAdjustment.status == STATUS_AWAITING_PAYMENT,
+        )
+        .values(status=STATUS_AWAITING_CHOICE, asked_at=now, expires_at=deadline)
+        .returning(DepositAdjustment.id)
+        .execution_options(synchronize_session=False)
+    )
+    won = claimed.scalar_one_or_none() is not None
+    await session.refresh(adjustment)
+    return won
 
 
 async def on_difference_unpaid(
@@ -2108,8 +2808,196 @@ async def on_difference_unpaid(
     with no room for a choice, -> `kept_old` (hold released) -> "kept_old"; `applied` ->
     `collect_due` + ONE `service_diff_unpaid` item -> "collect_due"; the consultation gone or
     not live -> `cancelled` (hold released) -> "cancelled". The patient's message (the three
-    buttons, the kept notice, the collect notice) is sent by the caller AFTER the commit."""
-    raise NotImplementedError("TASK-085 R S1")
+    buttons, the kept notice, the collect notice) is sent by the caller AFTER the commit
+    (`run_unpaid_followup`)."""
+    if (
+        adjustment.tenant_id != tenant.id
+        or adjustment.mode is None
+        or adjustment.status != STATUS_AWAITING_PAYMENT
+    ):
+        return "not_applicable"
+    log = {"tenant_id": str(tenant.id), "adjustment_id": str(adjustment.id)}
+    deposit = await session.get(PixDeposit, adjustment.deposit_id)
+    if deposit is None or deposit.tenant_id != tenant.id:
+        return "not_applicable"
+    charge_id = adjustment.provider_charge_id
+    if charge_id:
+        provider = registry.find_provider(deposit.provider)
+        account = await cfg.get_payment_account(session, tenant.id, deposit.provider)
+        if provider is None or account is None:
+            logger.warning("service_change_unpaid_no_account", **log)
+            return "void_failed"
+        try:
+            state = await provider.get_charge(account, charge_id)
+        except Exception as exc:  # noqa: BLE001 - cannot tell: never decide blind
+            logger.warning(
+                "service_change_unpaid_state_unknown", error_type=type(exc).__name__, **log
+            )
+            return "void_failed"
+        if state.status is PaymentStatus.PAID:
+            return "payment_in_flight"
+        try:
+            await provider.cancel_charge(account, charge_id)
+        except Exception as exc:  # noqa: BLE001 - not voided: retry next tick
+            gone = isinstance(exc, ProviderError) and exc.status_code == 404
+            if not gone:
+                logger.warning(
+                    "service_change_unpaid_void_failed", error_type=type(exc).__name__, **log
+                )
+                return "void_failed"
+
+    appointment = await _lock_appointment_then(session, adjustment)
+    if adjustment.status != STATUS_AWAITING_PAYMENT:
+        return "not_applicable"
+    if not _visit_upcoming(appointment, now):
+        if not await move_adjustment(
+            session, adjustment, from_status=STATUS_AWAITING_PAYMENT,
+            to_status=STATUS_CANCELLED, now=now,
+        ):
+            return "not_applicable"
+        await booking_hold.release_difference_hold_in(session, adjustment.id)
+        logger.info("service_change_unpaid_cancelled", **log)
+        return "cancelled"
+
+    if adjustment.mode == MODE_APPLIED:
+        if not await move_adjustment(
+            session, adjustment, from_status=STATUS_AWAITING_PAYMENT,
+            to_status=STATUS_COLLECT_DUE, now=now,
+        ):
+            return "not_applicable"
+        # Money still to RECEIVE: not linked to the sinal (like `_apply_and_collect`).
+        await attention.open_attention_item(
+            session,
+            tenant_id=tenant.id,
+            reason=REASON_SERVICE_DIFF_UNPAID,
+            dedupe_key=adjustment_queries.unpaid_item_key(deposit.provider, adjustment.id),
+            provider=deposit.provider,
+            patient_id=deposit.patient_id,
+            amount_cents=adjustment.diff_cents,
+            slot_start=appointment.start_at,
+            slot_end=appointment.end_at,
+            service_label=adjustment.new_service,
+        )
+        logger.info("service_change_unpaid_collect_due", **log)
+        return "collect_due"
+
+    deadline = choice_deadline(now, appointment.start_at, _new_start_of(adjustment, appointment))
+    if deadline is None:
+        if not await move_adjustment(
+            session, adjustment, from_status=STATUS_AWAITING_PAYMENT,
+            to_status=STATUS_KEPT_OLD, now=now,
+        ):
+            return "not_applicable"
+        await booking_hold.release_difference_hold_in(session, adjustment.id)
+        logger.info("service_change_unpaid_kept_old", **log)
+        return "kept_old"
+    if not await _to_awaiting_choice(session, adjustment, deadline=deadline, now=now):
+        return "not_applicable"
+    new_start = _new_start_of(adjustment, appointment)
+    await booking_hold.extend_difference_hold_in(
+        session, adjustment.id, expires_at=difference_hold_expiry(deadline, new_start)
+    )
+    logger.info("service_change_unpaid_choice_pending", **log)
+    return "choice_pending"
+
+
+async def run_unpaid_followup(
+    session: AsyncSession,
+    tenant: Tenant,
+    adjustment_id: UUID,
+    outcome: str,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """AFTER the commit that decided an unpaid difference (`on_difference_unpaid`, or the choice
+    deadline passing in silence): the patient's ONE message - the three buttons
+    ("choice_pending"; "Reenviar o Pix" only while the new window is held and a useful Pix still
+    fits), the kept notice ("kept_old", plus `followup_kept_old`) or the collect notice
+    ("collect_due"). Best-effort: a failure is logged, the money state stands."""
+    try:
+        adjustment = await session.get(DepositAdjustment, adjustment_id)
+        if adjustment is None or adjustment.tenant_id != tenant.id:
+            return
+        # The buttons say what was true when the choice opened (`asked_at`), not later.
+        if now is None:
+            now = as_utc(adjustment.asked_at) if adjustment.asked_at else datetime.now(UTC)
+        deposit = await session.get(PixDeposit, adjustment.deposit_id)
+        patient = await _patient_of(
+            session, tenant, _notice(adjustment, deposit.patient_id if deposit else None)
+        )
+        appointment_id = adjustment.appointment_id
+        message = None
+        if outcome == "choice_pending" and adjustment.status == STATUS_AWAITING_CHOICE:
+            appointment = (
+                await session.get(Appointment, appointment_id) if appointment_id else None
+            )
+            resend = False
+            if appointment is not None:
+                held = await booking_hold.difference_hold_in(session, adjustment.id)
+                resend = held is not None and resend_fits(
+                    now,
+                    _pix_ttl_minutes(tenant),
+                    appointment.start_at,
+                    _new_start_of(adjustment, appointment),
+                )
+            message = notify.Buttons(
+                choice_message_text(
+                    adjustment.old_service, adjustment.new_service, adjustment.diff_cents
+                ),
+                tuple(choice_buttons(adjustment.id, resend=resend)),
+            )
+        elif outcome == "kept_old":
+            message = notify.Text(kept_old_notice_text(adjustment.old_service))
+        elif outcome == "collect_due":
+            message = notify.Text(
+                unpaid_collect_text(adjustment.new_service, adjustment.diff_cents)
+            )
+        if message is not None and patient is not None:
+            await notify.deliver(session, tenant, patient, [message])
+    except Exception as exc:  # noqa: BLE001 - the decision stands; only the notice is lost
+        await session.rollback()
+        logger.warning("service_change_unpaid_notice_failed", error_type=type(exc).__name__)
+        return
+    if outcome == "kept_old" and appointment_id is not None:
+        await followup_kept_old(tenant.id, appointment_id)
+
+
+async def keep_old_on_silence(
+    session: AsyncSession, adjustment_id: UUID, *, now: datetime
+) -> Tenant | None:
+    """D-R8: an `awaiting_choice` whose deadline passed with no answer -> `kept_old`, the new
+    window's hold released. Commits (the sweep owns this transaction); returns the tenant when
+    THIS call decided it (the caller then runs `run_unpaid_followup(..., "kept_old")`)."""
+    adjustment = await session.get(DepositAdjustment, adjustment_id)
+    if adjustment is None or adjustment.status != STATUS_AWAITING_CHOICE:
+        return None
+    tenant = await session.get(Tenant, adjustment.tenant_id)
+    if tenant is None:
+        return None
+    await _lock_appointment_then(session, adjustment)
+    expires = adjustment.expires_at
+    if (
+        adjustment.status != STATUS_AWAITING_CHOICE
+        or expires is None
+        or as_utc(expires) > as_utc(now)
+    ):
+        await session.rollback()
+        return None
+    won = await move_adjustment(
+        session, adjustment, from_status=STATUS_AWAITING_CHOICE, to_status=STATUS_KEPT_OLD,
+        now=now,
+    )
+    if won:
+        await booking_hold.release_difference_hold_in(session, adjustment.id)
+    await session.commit()
+    if not won:
+        return None
+    logger.info(
+        "service_change_choice_silence_kept_old",
+        tenant_id=str(tenant.id),
+        adjustment_id=str(adjustment_id),
+    )
+    return tenant
 
 
 async def choose_after_expiry(
@@ -2138,28 +3026,210 @@ async def choose_after_expiry(
     * "both" -> `cancelled`, hold released -> "cancel_old"; the CALLER then cancels the old
       consultation as a patient cancellation (`workers/shared/actions._execute_appointment_cancel`
       : the paid sinal's cancellation rules)."""
-    raise NotImplementedError("TASK-085 R S1")
+    adjustment = await session.scalar(
+        select(DepositAdjustment).where(
+            DepositAdjustment.id == adjustment_id, DepositAdjustment.tenant_id == tenant_id
+        )
+    )
+    if adjustment is None or adjustment.mode != MODE_SUSPEND or adjustment.kind != KIND_INCREASE:
+        return ChoiceOutcome(kind="not_found")
+    appointment = await _lock_appointment_then(session, adjustment)
+    base = {
+        "adjustment_id": adjustment.id,
+        "appointment_id": adjustment.appointment_id,
+        "diff_cents": adjustment.diff_cents,
+        "old_service": adjustment.old_service,
+        "new_service": adjustment.new_service,
+    }
+    expires = adjustment.expires_at
+    if (
+        adjustment.status != STATUS_AWAITING_CHOICE
+        or expires is None
+        or as_utc(now) >= as_utc(expires)
+    ):
+        return ChoiceOutcome(kind="already_decided", **base)
+    log = {"tenant_id": str(tenant_id), "adjustment_id": str(adjustment.id)}
+
+    if choice == CHOICE_KEEP or choice == CHOICE_BOTH:
+        target = STATUS_KEPT_OLD if choice == CHOICE_KEEP else STATUS_CANCELLED
+        if not await move_adjustment(
+            session, adjustment, from_status=STATUS_AWAITING_CHOICE, to_status=target, now=now
+        ):
+            return ChoiceOutcome(kind="already_decided", **base)
+        await booking_hold.release_difference_hold_in(session, adjustment.id)
+        kind: ChoiceKind = "kept_old" if choice == CHOICE_KEEP else "cancel_old"
+        logger.info("service_change_choice", choice=choice, **log)
+        return ChoiceOutcome(kind=kind, **base)
+
+    if choice != CHOICE_RESEND or appointment is None or not _visit_upcoming(appointment, now):
+        return ChoiceOutcome(kind="already_decided", **base)
+    return await _resend(session, adjustment, appointment, now=now, base=base, log=log)
+
+
+async def _resend(
+    session: AsyncSession,
+    adjustment: DepositAdjustment,
+    appointment: Appointment,
+    *,
+    now: datetime,
+    base: dict,
+    log: dict,
+) -> ChoiceOutcome:
+    """"Reenviar o Pix": the SAME change (`pending_edit`, `diff_cents` - never re-priced) under a
+    NEW adjustment with a new Pix; the hold handed over; the old adjustment `expired` (a late
+    payment of its voided Pix is an ORPHAN item). Nothing changes on "no_window" /
+    "resend_failed"."""
+    tenant = await session.get(Tenant, adjustment.tenant_id)
+    deposit = await session.get(PixDeposit, adjustment.deposit_id)
+    if tenant is None or deposit is None or deposit.tenant_id != tenant.id:
+        return ChoiceOutcome(kind="resend_failed", **base)
+    data = adjustment.pending_edit or {}
+    new_start, new_end = _pending_window(appointment, data)
+    ttl = _pix_ttl_minutes(tenant)
+    if not resend_fits(now, ttl, appointment.start_at, new_start):
+        return ChoiceOutcome(kind="no_window", **base)
+    professional_id = _uuid_or_none(data.get("professional_id"))
+    held = await booking_hold.difference_hold_in(session, adjustment.id)
+    if held is None:
+        # The hold ran out: never revived blind - the window is re-checked under its agenda lock.
+        await booking_hold.serialize_agenda_in(session, tenant.id, professional_id)
+        if not await _window_fits(
+            session, tenant, appointment, new_start, new_end,
+            professional_id=professional_id, exclude_adjustment_id=adjustment.id,
+        ):
+            return ChoiceOutcome(kind="no_window", **base)
+    expires = suspend_pix_expiry(now, ttl, appointment.start_at, new_start)
+    if expires is None:  # pragma: no cover - `resend_fits` checked it
+        return ChoiceOutcome(kind="no_window", **base)
+    new_id = uuid4()
+    charged = await _create_difference_charge(
+        session, tenant=tenant, deposit=deposit, adjustment_id=new_id,
+        diff_cents=adjustment.diff_cents, shown=adjustment.new_service, now=now,
+        expires_at=expires, log=log,
+    )
+    if isinstance(charged, str):
+        return ChoiceOutcome(kind="resend_failed", **base)
+    new = DepositAdjustment(
+        id=new_id,
+        tenant_id=tenant.id,
+        deposit_id=deposit.id,
+        appointment_id=appointment.id,
+        kind=KIND_INCREASE,
+        mode=MODE_SUSPEND,
+        status=STATUS_AWAITING_PAYMENT,
+        old_service=adjustment.old_service,
+        new_service=adjustment.new_service,
+        pending_edit=dict(data),
+        diff_cents=adjustment.diff_cents,
+        provider_charge_id=charged.provider_charge_id,
+        expires_at=expires,
+    )
+    session.add(new)
+    await session.flush()
+    hold_until = difference_hold_expiry(expires, new_start)
+    moved = await booking_hold.extend_difference_hold_in(
+        session, adjustment.id, expires_at=hold_until, to_adjustment_id=new_id
+    )
+    if moved is None:
+        moved = await booking_hold.place_difference_hold_in(
+            session,
+            tenant_id=tenant.id,
+            adjustment_id=new_id,
+            patient_id=deposit.patient_id,
+            professional_id=professional_id,
+            unit_id=_uuid_or_none(data["unit_id"]) if "unit_id" in data
+            else getattr(appointment, "unit_id", None),
+            appointment_type=(data.get("appointment_type") or "")[:120] or None,
+            insurance=data.get("insurance"),
+            attendee_name=data.get("attendee_name"),
+            start_at=new_start,
+            end_at=new_end,
+            expires_at=hold_until,
+        )
+    if moved is None:
+        # Defence only (checked under the lock): undo the new row, void the unseen Pix.
+        await _void_charge(session, tenant, deposit, charged.provider_charge_id, log)
+        await session.delete(new)
+        await session.flush()
+        return ChoiceOutcome(kind="no_window", **base)
+    await booking_hold.release_difference_hold_in(session, adjustment.id)
+    if not await move_adjustment(
+        session, adjustment, from_status=STATUS_AWAITING_CHOICE, to_status=STATUS_EXPIRED,
+        now=now,
+    ):  # pragma: no cover - the row is locked
+        raise RuntimeError("choice moved under its own lock")
+    logger.info("service_change_choice_resent", new_adjustment_id=str(new_id), **log)
+    return ChoiceOutcome(
+        kind="resent",
+        adjustment_id=new_id,
+        appointment_id=appointment.id,
+        diff_cents=adjustment.diff_cents,
+        pix_copy_paste=charged.copy_paste,
+        expires_at=expires,
+        old_service=adjustment.old_service,
+        new_service=adjustment.new_service,
+    )
 
 
 async def followup_kept_old(tenant_id: UUID, appointment_id: UUID) -> None:
     """After the commit that moved a change to `kept_old` (a tap or silence): the old
     consultation is visible again, so its reminders are re-planned
     (`reminder_hooks.after_appointment_rescheduled`). Own session, best-effort, never raises."""
-    raise NotImplementedError("TASK-085 R S1")
+    from secretaria.services import reminder_hooks
+
+    try:
+        await reminder_hooks.after_appointment_rescheduled(appointment_id)
+    except Exception as exc:  # noqa: BLE001 - reminders are best-effort
+        logger.warning(
+            "service_change_kept_old_followup_failed",
+            tenant_id=str(tenant_id),
+            error_type=type(exc).__name__,
+        )
 
 
 def choice_message_text(old_service: str, new_service: str, diff_cents: int) -> str:
     """The body sent with the three buttons when the Pix of a suspended change expired: it
     spells the options out (D-R7) - keep the OLD consultation, resend the Pix to make the change,
     or cancel both - and says that no answer by the deadline keeps the old one (D-R8)."""
-    raise NotImplementedError("TASK-085 R S1")
+    return "\n".join(
+        [
+            f"O Pix da diferença do sinal ({format_brl(diff_cents)}) para trocar sua consulta "
+            f"para {new_service} venceu sem pagamento. O que você prefere?",
+            f"• {LABEL_CHOICE_KEEP}: manter a consulta antiga ({old_service}), no horário "
+            "de antes.",
+            f"• {LABEL_CHOICE_RESEND}: receber um novo Pix para fazer a troca (se o novo "
+            "horário ainda estiver disponível).",
+            f"• {LABEL_CHOICE_BOTH}: cancelar as duas, seguindo as regras de cancelamento do "
+            "sinal pago.",
+            "Se você não responder a tempo, vamos manter a consulta antiga.",
+        ]
+    )
 
 
 def choice_answer_text(outcome: ChoiceOutcome) -> str:
     """The ONE reply to a tap on the choice, per `outcome.kind` (S3b sends it; on "resent" the
     Pix text `difference_pix_text` follows in the same message, on "cancel_old" the cancellation
     path sends its own notice)."""
-    raise NotImplementedError("TASK-085 R S1")
+    old = outcome.old_service or "a consulta antiga"
+    new = outcome.new_service or "a nova consulta"
+    texts = {
+        "kept_old": kept_old_notice_text(old),
+        "resent": (
+            f"Certo! Enviamos um novo Pix da diferença ({format_brl(outcome.diff_cents)}) "
+            f"para trocar sua consulta para {new}."
+        ),
+        "cancel_old": "Certo! A troca foi desfeita e vamos cancelar sua consulta.",
+        "no_window": (
+            "O novo horário não está mais disponível, então não dá para reenviar o Pix. "
+            "Você pode manter a consulta antiga ou cancelar."
+        ),
+        "resend_failed": (
+            "Não foi possível gerar um novo Pix agora. Tente de novo em instantes ou escolha "
+            "outra opção."
+        ),
+        "already_decided": "Essa escolha já foi feita (ou o prazo para responder acabou).",
+    }
+    return texts.get(outcome.kind, "Não encontrei essa troca de consulta.")
 
 
 # The agenda first, then the patient's ONE notice of the paid difference (Task 6).

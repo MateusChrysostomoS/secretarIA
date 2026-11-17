@@ -36,6 +36,7 @@ pytestmark = pytest.mark.skipif(not PG_URL, reason="set PAYMENTS_TEST_PG_URL to 
 WORKERS = 8
 provider = base.provider
 no_default_hooks = base.no_default_hooks
+legacy_deferred_mode = base.legacy_deferred_mode
 
 
 @pytest_asyncio.fixture

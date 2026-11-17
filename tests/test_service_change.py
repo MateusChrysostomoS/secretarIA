@@ -87,6 +87,18 @@ def no_default_hooks(monkeypatch):
         monkeypatch.setattr(service_change, "_VOID_OFFSET", 0)
 
 
+@pytest.fixture(autouse=True)
+def legacy_deferred_mode(monkeypatch):
+    """TASK-085 R: a dearer change is now `applied_awaiting_payment` in an "after" clinic (D-R5)
+    and `suspended` in a "before" one (D-R4) - tests/test_sinal_trocas_s1_*.py. The tests of THIS
+    family pin the LEGACY deferred mode (`mode` NULL: nothing written until the Pix is paid, the
+    old service stands when it expires), which still runs for every row created before TASK-085 R
+    and for the "before" fallback without room for a useful Pix (contrato.md §1): the engine is
+    pinned to that fallback here. Modules reusing this family's fixtures import it too."""
+    monkeypatch.setattr(service_change, "timing_is_before", lambda tenant: True)
+    monkeypatch.setattr(service_change, "suspend_pix_expiry", lambda *args, **kwargs: None)
+
+
 async def _seed(
     session,
     *,

@@ -75,9 +75,14 @@ REASON_TEXT = {
         "não pôde ser gerado (o provedor de pagamento estava indisponível). A troca já valeu: "
         "cobrar {value} do paciente."
     ),
+    # TASK-085 R D-R5 (contrato.md §5): the change was applied at once; its Pix expired unpaid.
+    "service_diff_unpaid": (
+        "Troca para serviço mais caro feita; o Pix da diferença venceu sem pagamento: "
+        "cobrar {value} do paciente."
+    ),
 }
 # Reasons whose `{value}` is the item's own amount (money still to RECEIVE), not a refund.
-_AMOUNT_VALUE_REASONS = frozenset({"service_diff_collect_due"})
+_AMOUNT_VALUE_REASONS = frozenset({"service_diff_collect_due", "service_diff_unpaid"})
 
 # Resolving with "refunded in the provider's panel" closes the money story of the deposit only
 # for these reasons (the consultation is not booked and the deposit went back in full).
