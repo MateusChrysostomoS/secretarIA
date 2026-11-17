@@ -16,6 +16,7 @@ green ("ok") ONLY with proof - a real charge that worked - never because nothing
 """
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Literal
 from uuid import UUID
 
@@ -29,7 +30,7 @@ from secretaria.models.clinic_payment_account import (
     ACCOUNT_REVOKED,
     PROVIDER_ASAAS,
 )
-from secretaria.services import tenant_config as cfg
+from secretaria.services import flow_units, tenant_config as cfg
 from secretaria.services.payments import accounts, failure_reason
 from secretaria.services.payments.deposit_gate import timing_is_before
 from secretaria.services.payments.money import (
@@ -38,7 +39,9 @@ from secretaria.services.payments.money import (
     parse_brl_to_cents,
 )
 from secretaria.services.payments.onboarding import stored_onboarding
-from secretaria.services.service_catalog import load_service_catalog
+from secretaria.services.service_catalog import entry_service_id, load_service_catalog
+from secretaria.services.service_terms import terms_for_entry
+from secretaria.services.unit_booking import attach_unit_options
 
 Severity = Literal["blocker", "warning", "info"]
 Badge = Literal["ok", "failing", "untested"]
@@ -111,20 +114,43 @@ async def _active_professionals(session: AsyncSession, tenant_id: UUID) -> list[
     )
 
 
+def _unit_prices(view, entry: dict, label: str, percent: int) -> list[tuple[str, int | None]]:
+    """D8 (TASK-085): the deposit of every unit where this professional set an OWN price for the
+    service, labelled "Professional — Serviço (Unidade)". Only units the service can actually be
+    booked at count (the booking flow's rule, `flow_units.units_for_service`: an active link to
+    an active unit with open hours, where the service is done) - an exception nobody can book
+    never warns. A duration-only exception charges the base, already counted."""
+    terms = terms_for_entry(flow_units.service_unit_terms_of(view), entry)
+    if not terms:
+        return []
+    found: list[tuple[str, int | None]] = []
+    for unit in flow_units.units_for_service(view, entry_service_id(entry)):
+        row = terms.get(unit.id)
+        if row is None or not (row.price or "").strip():
+            continue
+        found.append((f"{label} ({unit.name})", _deposit_cents(row.price, percent)))
+    return found
+
+
 async def _service_prices(
     session: AsyncSession, tenant: Tenant, professionals: list[Professional]
 ) -> list[tuple[str, int | None]]:
     """(label, deposit cents or None) of every active service somebody can book: each active
     professional's own list (labelled "Professional — Serviço"), or the clinic's list when it
-    has no professional."""
+    has no professional. Plus, per professional, every bookable unit's own price (`_unit_prices`,
+    D8); the units, link marks and exceptions of the whole roster are read once
+    (`unit_booking.attach_unit_options`, tenant-scoped)."""
     catalog = await load_service_catalog(session, tenant.id)
     percent = tenant.pix_deposit_percent
     found: list[tuple[str, int | None]] = []
     if professionals:
-        for professional in professionals:
+        views = [SimpleNamespace(id=professional.id) for professional in professionals]
+        await attach_unit_options(session, tenant, professionals, views)
+        for professional, view in zip(professionals, views, strict=True):
             for entry in cfg.professional_appointment_types(professional, tenant, catalog):
                 label = f"{professional.name} — {entry.get('name') or 'Consulta'}"
                 found.append((label, _deposit_cents(entry.get("price"), percent)))
+                found.extend(_unit_prices(view, entry, label, percent))
     else:
         for entry in cfg.active_appointment_types(tenant, catalog):
             name = entry.get("name") or "Consulta"

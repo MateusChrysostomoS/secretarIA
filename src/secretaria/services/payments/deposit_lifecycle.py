@@ -66,6 +66,7 @@ from secretaria.services.payments.money import (
 from secretaria.services.payments.pix_message import pix_code_tail
 from secretaria.services.payments.provider import ChargeRequest, PaymentStatus, ProviderError
 from secretaria.services.service_catalog import load_service_catalog, service_by_name
+from secretaria.services.service_terms import resolve_entry_at_unit, resolve_terms
 from secretaria.services.tenant_config import load_tenant_config
 from secretaria.services.whatsapp import WhatsAppClient
 
@@ -247,6 +248,12 @@ async def _resolve_service_and_price(
     exactly as the booking surface canonicalised it. A `None` name means "no
     such active service"; a `None` price with a real name means the service
     exists but carries no readable price — two different skip reasons.
+
+    TASK-085: the price is the one of the booking's UNIT (`unit_id`, read with
+    `getattr` - the gate and the service change pass a `SimpleNamespace`): that
+    unit's own price for the owning professional when it has one, else the base
+    exactly as before (`_price_at_unit`). A professional of another clinic is never
+    the owner here: the clinic's own catalog answers instead.
     """
     if not appointment.appointment_type:
         return None, None
@@ -257,10 +264,12 @@ async def _resolve_service_and_price(
     # a tenant not backfilled yet -> the pre-catalog exact-name behaviour.
     services = await load_service_catalog(session, tenant.id)
     catalog = cfg.active_appointment_types(tenant, services)
+    owner_id: UUID | None = None
     if appointment.professional_id is not None:
         professional = await session.get(Professional, appointment.professional_id)
-        if professional is not None:
+        if professional is not None and professional.tenant_id == tenant.id:
             catalog = cfg.professional_appointment_types(professional, tenant, services)
+            owner_id = professional.id
     canonical = canonical_service_name(catalog, appointment.appointment_type)
     if canonical is None:
         # Historical rows keep whatever text was stored at booking time and are
@@ -273,9 +282,29 @@ async def _resolve_service_and_price(
         return None, None
     for entry in catalog:
         if entry.get("name") == canonical:
-            price = entry.get("price")
+            price = await _price_at_unit(
+                session, tenant.id, owner_id, entry, getattr(appointment, "unit_id", None)
+            )
             return canonical, (str(price) if price else None)
     return canonical, None
+
+
+async def _price_at_unit(
+    session: AsyncSession,
+    tenant_id: UUID,
+    professional_id: UUID | None,
+    entry: dict,
+    unit_id: UUID | None,
+):
+    """`entry`'s price at `unit_id` (TASK-085): the unit's OWN price when the professional set a
+    different one there (`service_terms`, tenant-scoped), otherwise the entry's raw `price`
+    untouched - so a clinic without exceptions reads byte for byte what it always did (a JSON
+    number, a zero, a blank). No unit, no owner or no `service_id`: the base, without a query."""
+    base = entry.get("price")
+    resolved = await resolve_entry_at_unit(session, tenant_id, professional_id, entry, unit_id)
+    if resolved.own and resolved.price != resolve_terms(entry, None, None).price:
+        return resolved.price
+    return base
 
 
 async def _price_text_for_appointment(

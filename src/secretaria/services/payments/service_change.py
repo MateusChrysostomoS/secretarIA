@@ -181,6 +181,9 @@ class ServiceChangeResult:
     # When the edit was written: what changed (R6 names, e.g. "serviço") and the doctor notice.
     changed_fields: tuple[str, ...] = ()
     notice_id: UUID | None = None
+    # TASK-085: the name the patient reads for the new consultation when it is NOT just the
+    # service's (a change of UNIT only: "Consulta na Unidade Centro"); None = the service name.
+    label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -622,18 +625,92 @@ async def move_adjustment(
 
 
 async def _price_cents(
-    session: AsyncSession, tenant: Tenant, appointment: Appointment, service: str, professional_id
+    session: AsyncSession,
+    tenant: Tenant,
+    appointment: Appointment,
+    service: str,
+    professional_id,
+    unit_id: UUID | None,
 ) -> int | None:
-    """The new service's price, resolved exactly like the sinal's (owner's own catalog first)."""
+    """The new service's price, resolved exactly like the sinal's (owner's own catalog first)
+    at `unit_id` (TASK-085: that unit's own price when it has one, else the base)."""
     probe = SimpleNamespace(
         appointment_type=service,
         professional_id=_uuid_or_none(professional_id) if professional_id is not None
         else appointment.professional_id,
+        unit_id=unit_id,
     )
     name, price = await _resolve_service_and_price(session, tenant, probe)
     if name is None:
         return None
     return parse_brl_to_cents(price)
+
+
+# `preview_service_change(unit_id=...)` default: the unit the appointment is at.
+UNIT_OF_APPOINTMENT: Any = object()
+
+
+def _unit_of_change(appointment: Appointment, pending_edit: dict) -> UUID | None:
+    """The unit a change lands on (TASK-085 contract): `pending_edit["unit_id"]` when the KEY is
+    there (None = no unit), otherwise the unit the appointment is at."""
+    if "unit_id" in pending_edit:
+        return _uuid_or_none(pending_edit["unit_id"])
+    return getattr(appointment, "unit_id", None)
+
+
+async def unit_change_moves_price(
+    session: AsyncSession, *, tenant: Tenant, appointment: Appointment, unit_id
+) -> bool:
+    """Whether moving `appointment` - same service, same doctor - to `unit_id` (a UUID or its
+    text; None = no unit) changes its price (TASK-085 R3). Compared in cents: two unreadable
+    prices are "the same" (no sinal can be computed on either, so nothing changes for the
+    money)."""
+    service = appointment.appointment_type
+    unit_id = _uuid_or_none(unit_id)
+    if not service or unit_id == getattr(appointment, "unit_id", None):
+        return False
+    professional_id = appointment.professional_id
+    before = await _price_cents(
+        session, tenant, appointment, service, professional_id, appointment.unit_id
+    )
+    after = await _price_cents(session, tenant, appointment, service, professional_id, unit_id)
+    return before != after
+
+
+def unit_change_label(service: str, unit_name: str | None) -> str:
+    """ "{serviço} na Unidade {unidade}" - the patient's name for a consultation that changes
+    PLACE only (the same spelling as the booking's confirmation line, TASK-085 A7). A unit
+    already called "Unidade ..." is not doubled; no unit is the service alone."""
+    name = (unit_name or "").strip()
+    if not name:
+        return service
+    if name.casefold().startswith("unidade"):
+        return f"{service} na {name}"
+    return f"{service} na Unidade {name}"
+
+
+async def _change_labels(
+    session: AsyncSession,
+    tenant: Tenant,
+    appointment: Appointment,
+    new_service: str,
+    unit_id: UUID | None,
+) -> tuple[str, str]:
+    """(old, new) labels of a change, for the adjustment, the Pix and the patient's texts.
+
+    The service's names, as always; for a change of UNIT only (same service, another unit) the
+    names carry the place, so "trocar sua consulta para Consulta" reads "para Consulta na Unidade
+    Centro". Units are read tenant-scoped: an unknown one names nothing."""
+    old_service = appointment.appointment_type or ""
+    current_unit = getattr(appointment, "unit_id", None)
+    if new_service != old_service or unit_id == current_unit:
+        return old_service, new_service
+    old_unit = await unit_booking.tenant_unit(session, tenant.id, current_unit)
+    new_unit = await unit_booking.tenant_unit(session, tenant.id, unit_id)
+    return (
+        unit_change_label(old_service, old_unit.name if old_unit is not None else None),
+        unit_change_label(new_service, new_unit.name if new_unit is not None else None),
+    )
 
 
 @dataclass(frozen=True)
@@ -679,12 +756,21 @@ async def preview_service_change(
     professional_id,
     start_at: datetime | None,
     now: datetime,
+    unit_id: Any = UNIT_OF_APPOINTMENT,
 ) -> ChangeDecision:
     """The policy decision for a new service on this PAID sinal - what
     `request_service_change` will do, computed the same way (price resolved like the sinal's,
     what the clinic holds, the tenant's minimum days). Read-only: writes, charges and locks
-    nothing, so the confirmation card can show the difference before Confirmar."""
-    price = await _price_cents(session, tenant, appointment, new_service, professional_id)
+    nothing, so the confirmation card can show the difference before Confirmar.
+
+    `unit_id` (TASK-085): the unit the change lands on - its own price when it has one. Left out,
+    the appointment's unit; None, no unit (the base)."""
+    unit_id = (
+        getattr(appointment, "unit_id", None)
+        if unit_id is UNIT_OF_APPOINTMENT
+        else _uuid_or_none(unit_id)
+    )
+    price = await _price_cents(session, tenant, appointment, new_service, professional_id, unit_id)
     held = await held_deposit_cents(session, deposit)
     days_until = (
         (as_utc(start_at) - as_utc(now)).total_seconds() / 86400 if start_at is not None else 0.0
@@ -699,15 +785,17 @@ async def preview_service_change(
     )
 
 
-def confirm_card_line_text(action: str, diff_cents: int) -> str | None:
+def confirm_card_line_text(action: str, diff_cents: int, *, unit_only: bool = False) -> str | None:
     """The line the confirmation card adds for a service change on a paid sinal (None when
     there is nothing to say: no difference, or blocked - Confirmar then explains). Never
-    promises money back."""
+    promises money back. `unit_only` (TASK-085 R3): only the unit changes, so it is the UNIT
+    that waits for the payment."""
     value = format_brl(diff_cents)
     if action == "increase_charge":
+        what = "a unidade" if unit_only else "o serviço"
         return (
             f"Diferença do sinal: {value}. Ao confirmar, enviamos o Pix dessa diferença; "
-            "o serviço só muda depois do pagamento."
+            f"{what} só muda depois do pagamento."
         )
     if action == "increase_free":
         return f"Diferença do sinal: {value}, acertada na consulta."
@@ -743,6 +831,11 @@ async def request_service_change(
     reschedule limit when the time moves, the calendar) and must NOT write the edit itself:
     this function writes it when the policy says the change stands now. `source` is the
     status-log source of that write (`SOURCE_FLOW` / `SOURCE_HUB`).
+
+    TASK-085: the new price is the one of the unit the change lands on - `pending_edit["unit_id"]`
+    when that KEY is present (None = no unit), else the appointment's unit. A change of the UNIT
+    only (same service) runs here too when the price differs (R3); its texts then name the place
+    (`_change_labels`, `ServiceChangeResult.label`).
     """
     if (
         deposit.tenant_id != tenant.id
@@ -776,6 +869,7 @@ async def request_service_change(
     ):
         return ServiceChangeResult(kind="blocked", reason="collect_pending")
 
+    unit_id = _unit_of_change(appointment, pending_edit)
     decision = await preview_service_change(
         session,
         tenant=tenant,
@@ -785,18 +879,22 @@ async def request_service_change(
         professional_id=pending_edit.get("professional_id", appointment.professional_id),
         start_at=pending_edit.get("start_at") or appointment.start_at,
         now=now,
+        unit_id=unit_id,
     )
     log = {"tenant_id": str(tenant.id), "appointment_id": str(appointment.id)}
     if decision.action == "blocked":
         logger.info("service_change_blocked", reason=decision.reason, **log)
         return ServiceChangeResult(kind="blocked", reason=decision.reason, decision="blocked")
 
-    old_service = appointment.appointment_type or ""
+    old_service, new_label = await _change_labels(
+        session, tenant, appointment, new_service, unit_id
+    )
+    label = new_label if new_label != new_service else None
     if decision.action == "increase_charge":
         return await _charge_difference(
             session, tenant=tenant, appointment=appointment, deposit=locked,
             old_service=old_service, new_service=new_service, diff_cents=decision.diff_cents,
-            pending_edit=pending_edit, now=now, source=source,
+            pending_edit=pending_edit, now=now, source=source, label=label,
         )
 
     # Every other action: the change stands now, written by the one edit writer.
@@ -811,7 +909,7 @@ async def request_service_change(
             kind=KIND_DECREASE,
             status=STATUS_ASKED if asks else STATUS_CLINIC_KEPT,
             old_service=old_service[:120],
-            new_service=new_service[:120],
+            new_service=(label or new_service)[:120],
             diff_cents=decision.diff_cents,
             asked_at=now if asks else None,
             resolved_at=None if asks else now,
@@ -833,6 +931,7 @@ async def request_service_change(
         decision=decision.action,
         changed_fields=written.fields,
         notice_id=written.notice_id,
+        label=label,
     )
 
 
@@ -848,8 +947,12 @@ async def _charge_difference(
     pending_edit: dict,
     now: datetime,
     source: str,
+    label: str | None = None,
 ) -> ServiceChangeResult:
+    """`new_service` is what is written once paid; `label` (TASK-085, a unit-only change) is
+    what the patient and the clinic read in its place - the Pix, the adjustment, the notices."""
     log = {"tenant_id": str(tenant.id), "appointment_id": str(appointment.id)}
+    shown = label or new_service
     provider_name = deposit.provider
     provider = registry.find_provider(provider_name)
     account = await accounts.load_charge_account(
@@ -868,7 +971,7 @@ async def _charge_difference(
     customer_id = await accounts.get_customer_id(
         session, tenant_id=tenant.id, patient_id=patient.id, provider=provider_name
     )
-    description = f"Diferença do sinal - {new_service} - {tenant.clinic_name}"
+    description = f"Diferença do sinal - {shown} - {tenant.clinic_name}"
     try:
         created = await provider.create_pix_charge(
             account,
@@ -902,6 +1005,7 @@ async def _charge_difference(
             session, tenant=tenant, appointment=appointment, deposit=deposit,
             old_service=old_service, new_service=new_service, diff_cents=diff_cents,
             pending_edit=pending_edit, now=now, source=source, adjustment_id=adjustment_id,
+            label=label,
         )
     if not created.copy_paste:
         # The patient must SEE what they pay: a charge without its code is voided, not kept.
@@ -930,7 +1034,7 @@ async def _charge_difference(
         kind=KIND_INCREASE,
         status=STATUS_AWAITING_PAYMENT,
         old_service=old_service[:120],
-        new_service=new_service[:120],
+        new_service=shown[:120],
         pending_edit={
             **serialize_edit(pending_edit, appointment, source=source),
             "appointment_type": new_service,
@@ -949,6 +1053,7 @@ async def _charge_difference(
         adjustment_id=adjustment_id,
         expires_at=expires_at,
         decision="increase_charge",
+        label=label,
     )
 
 
@@ -973,6 +1078,7 @@ async def _apply_and_collect(
     now: datetime,
     source: str,
     adjustment_id: UUID | None = None,
+    label: str | None = None,
 ) -> ServiceChangeResult:
     """Follow-up B (2026-10-27): the Pix of the difference could not be created because the
     provider was unavailable (`provider_unavailable`). The change stands NOW - the
@@ -982,7 +1088,9 @@ async def _apply_and_collect(
     `diff_cents` itself.
 
     The item is not linked to the sinal (`deposit_id` NULL): it is money still to RECEIVE, so it
-    must not stamp/flag the sinal or show the sinal's payment date. Never commits."""
+    must not stamp/flag the sinal or show the sinal's payment date. Never commits.
+    `label`: see `_charge_difference`."""
+    shown = label or new_service
     adjustment = DepositAdjustment(
         id=adjustment_id or uuid4(),
         tenant_id=tenant.id,
@@ -991,7 +1099,7 @@ async def _apply_and_collect(
         kind=KIND_INCREASE,
         status=STATUS_COLLECT_DUE,
         old_service=old_service[:120],
-        new_service=new_service[:120],
+        new_service=shown[:120],
         diff_cents=diff_cents,
         resolved_at=now,
     )
@@ -1013,7 +1121,7 @@ async def _apply_and_collect(
         amount_cents=diff_cents,
         slot_start=appointment.start_at,
         slot_end=appointment.end_at,
-        service_label=new_service,
+        service_label=shown,
     )
     logger.warning(
         "service_change_applied_collect_due",
@@ -1028,6 +1136,7 @@ async def _apply_and_collect(
         decision=DECISION_COLLECT,
         changed_fields=written.fields,
         notice_id=written.notice_id,
+        label=label,
     )
 
 

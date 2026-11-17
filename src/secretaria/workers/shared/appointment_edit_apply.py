@@ -12,6 +12,9 @@ logged and never undoes the edit the patient just confirmed.
 the difference and writes nothing; a cheaper/equal one is written there (row + ONE doctor
 notice) and the agenda follows here through `service_change.sync_agenda_event`. Doctor and
 convênio stay refused with a paid sinal.
+
+TASK-085 (R3): a change of the UNIT only whose price there differs goes through the same engine
+(priced at the new unit); at the same price the edit is exactly what it always was.
 """
 
 from dataclasses import dataclass
@@ -73,6 +76,22 @@ class AppliedEdit:
 
 def _window(appointment) -> tuple[datetime, datetime]:
     return as_utc(appointment.start_at), as_utc(appointment.end_at or appointment.start_at)
+
+
+def _edit_window(edit: dict) -> tuple[datetime, datetime]:
+    """The window the router gave the event at Confirmar (the edit's own)."""
+    return as_utc(edit["start_at"]), as_utc(edit["end_at"] or edit["start_at"])
+
+
+async def _unit_moves_price(session, tenant, appointment, edit: dict) -> bool:
+    """TASK-085 R3: the edit moves the booking to another unit (the key is there only when the
+    unit changes) and the price there is not the one at the current unit. Same price -> False:
+    the edit goes the way it always did."""
+    if "unit_id" not in edit:
+        return False
+    return await service_change.unit_change_moves_price(
+        session, tenant=tenant, appointment=appointment, unit_id=edit["unit_id"]
+    )
 
 
 async def _sync_agenda(session, tenant, appointment, edit: dict, window_before) -> None:
@@ -213,6 +232,21 @@ async def apply_appointment_edit(
         return await _apply_paid_service_change(
             session, tenant=tenant, current_tenant=current_tenant, appointment=appointment,
             edit=edit, window_before=window_before,
+        )
+    if paid and await _unit_moves_price(session, current_tenant, appointment, edit):
+        # TASK-085 R3: the SAME service at another unit with another price is a money decision
+        # too (same engine, priced at the new unit). Today's router already wrote the agenda of
+        # a unit change (it defers only a service change): the event goes back in line with the
+        # row first, so the money decides from exactly the state of a deferred change.
+        if not deferred:
+            await _sync_agenda(session, current_tenant, appointment, edit, _edit_window(edit))
+        return await _apply_paid_service_change(
+            session,
+            tenant=tenant,
+            current_tenant=current_tenant,
+            appointment=appointment,
+            edit=edit,
+            window_before=window_before,
         )
     if edit["time_changed"]:
         allowed, _count = await deposit_lifecycle.register_reschedule(

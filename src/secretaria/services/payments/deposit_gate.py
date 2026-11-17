@@ -141,15 +141,19 @@ async def quote_deposit(
     professional_id: UUID | None,
     insurance: str | None,
     redis=None,
+    unit_id: UUID | None = None,
 ) -> DepositQuote:
-    """Decide whether a booking of `appointment_type` needs a deposit before it exists."""
+    """Decide whether a booking of `appointment_type` needs a deposit before it exists.
+
+    `unit_id` (TASK-085): the unit the booking is at - the price is that unit's (the patient was
+    shown it, the sinal is computed on it). None = the professional's base, as before."""
     if not timing_is_before(tenant):
         return DepositQuote("no_deposit", REASON_TIMING_AFTER)
     if not tenant.pix_deposit_enabled:
         return DepositQuote("no_deposit", REASON_DISABLED)
 
     # A stand-in for the appointment that does not exist yet: the lifecycle helpers below read
-    # only these four attributes, so the gate and the `after` hook can never disagree.
+    # only these attributes, so the gate and the `after` hook can never disagree.
     plan_id, professional_plan_id = await resolve_booking_plan_ids(
         session, tenant.id, insurance, professional_id
     )
@@ -158,6 +162,7 @@ async def quote_deposit(
         professional_id=professional_id,
         insurance_plan_id=plan_id,
         insurance_professional_plan_id=professional_plan_id,
+        unit_id=unit_id,
     )
     if not await deposit_lifecycle._insurance_charges_deposit(session, tenant, booking):
         return DepositQuote("no_deposit", REASON_INSURANCE_NO_CHARGE)
