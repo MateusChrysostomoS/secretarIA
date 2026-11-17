@@ -258,14 +258,9 @@ def test_choice_outcome_shape():
     ],
 )
 async def test_the_s1_stubs_are_frozen(module, name, params):
+    # S1 implemented them (tests/test_sinal_trocas_s1_*.py): only the frozen signature is pinned.
     fn = getattr(module, name)
     assert _params(fn) == params
-    if inspect.iscoroutinefunction(fn):
-        with pytest.raises(NotImplementedError, match="TASK-085 R S1"):
-            await fn(**dict.fromkeys(params))
-    else:
-        with pytest.raises(NotImplementedError, match="TASK-085 R S1"):
-            fn(**dict.fromkeys(params))
 
 
 async def test_the_s2_signatures_are_frozen():

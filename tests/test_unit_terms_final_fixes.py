@@ -53,6 +53,9 @@ from tests._reminders_r3 import wire  # noqa: E402
 from tests._reminders_v2 import reload_appointment  # noqa: E402
 from tests.payments_support import FakeProvider  # noqa: E402
 
+# TASK-085 R: these tests pin the LEGACY deferred mode of the engine (mode NULL rows).
+from tests.test_service_change import legacy_deferred_mode  # noqa: E402, F401
+
 
 @pytest.fixture(autouse=True)
 def _wire(monkeypatch, db):  # noqa: F811

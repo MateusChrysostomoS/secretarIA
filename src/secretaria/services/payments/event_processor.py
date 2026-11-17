@@ -54,7 +54,7 @@ from secretaria.models.pix_deposit import (
     PixDeposit,
     PixDepositStatus,
 )
-from secretaria.services import tenant_config as cfg
+from secretaria.services import booking_hold, tenant_config as cfg
 from secretaria.services.appointment_status import SOURCE_SYSTEM, log_status_transition
 from secretaria.services.payments import alerts, attention, registry, service_change
 from secretaria.services.payments.provider import (
@@ -89,6 +89,13 @@ class EventResult:
     not_applied_adjustment_id: UUID | None = None
     # Follow-up C (2026-10-27): set when it was UNDERPAID - the notice quotes what arrived.
     not_applied_paid_cents: int | None = None
+    # TASK-085 R: a `mode` difference the provider said EXPIRED (`on_difference_unpaid`): the
+    # caller runs `service_change.run_unpaid_followup` (the three buttons / kept / collect notice).
+    unpaid_adjustment_id: UUID | None = None
+    unpaid_outcome: str | None = None
+    # TASK-085 R (fix round 1, M4): a SUSPENDED change ended without being applied - the old
+    # visit is visible again, so its reminders are re-planned after the commit.
+    replan_appointment_id: UUID | None = None
 
 
 def expected_reference(deposit: PixDeposit) -> str | None:
@@ -576,6 +583,10 @@ async def _on_adjustment_event(
             return EventResult("adjustment_expired_replay")
         if account is None:
             return EventResult("ignored_no_account")
+        if adjustment.mode is not None:
+            return await _on_mode_adjustment_expired(
+                session, tenant, account, provider, adjustment, deposit, event, now
+            )
         # Same rule as the sinal: an OVERDUE/DELETED is a hint; a paid charge is never expired.
         state = await provider.get_charge(account, event.provider_charge_id)
         if state.status is PaymentStatus.PAID:
@@ -610,6 +621,39 @@ async def _on_adjustment_event(
         )
         return EventResult("adjustment_refund_observed")
     return EventResult("ignored_other")
+
+
+async def _on_mode_adjustment_expired(
+    session: AsyncSession,
+    tenant: Tenant,
+    account: PaymentAccount,
+    provider: PaymentProvider,
+    adjustment: adj.DepositAdjustment,
+    deposit: PixDeposit,
+    event: NormalizedPaymentEvent,
+    now: datetime,
+) -> EventResult:
+    """TASK-085 R: the provider says a `mode` difference expired. Unlike a legacy row, its Pix
+    is voided HERE too (`on_difference_unpaid`): `suspend` -> the patient chooses (or the old
+    visit stands), `applied` -> the clinic collects. A charge the provider reports PAID is applied
+    instead; a void that failed changes nothing (the sweep retries)."""
+    outcome = await service_change.on_difference_unpaid(
+        session, tenant=tenant, adjustment=adjustment, now=now
+    )
+    if outcome == "payment_in_flight":
+        paid_event = replace(event, status=PaymentStatus.PAID)
+        return await _on_adjustment_paid(
+            session, tenant, account, provider, adjustment, deposit, paid_event, now
+        )
+    if outcome == "void_failed":
+        return EventResult("adjustment_void_failed")
+    if outcome == "not_applicable":
+        return EventResult("adjustment_expired_replay")
+    return EventResult(
+        f"adjustment_{outcome}",
+        unpaid_adjustment_id=adjustment.id,
+        unpaid_outcome=outcome,
+    )
 
 
 async def _on_adjustment_paid(
@@ -683,29 +727,43 @@ async def _on_adjustment_paid(
     if adjustment.status == adj.STATUS_APPLIED:
         return EventResult("adjustment_already_applied")
     if adjustment.status != adj.STATUS_AWAITING_PAYMENT:
+        # Also TASK-085 R `awaiting_choice`: its Pix was voided before the patient was asked, so
+        # a payment now is an ORPHAN item and the choice stays as it is (contrato §2.2).
         return await _adjustment_paid_late(session, tenant, event, item)
+    # TASK-085 R D-R5: an `applied` change already stands - a refused payment can only leave the
+    # difference for the clinic to collect (the item below says how much arrived), never undo it.
+    refused_to = (
+        adj.STATUS_COLLECT_DUE
+        if adjustment.mode == adj.MODE_APPLIED
+        else adj.STATUS_CANCELLED
+    )
     if state.external_reference != str(adjustment.id):
         await item(REASON_REFERENCE_MISMATCH)
         await service_change.move_adjustment(
             session, adjustment, from_status=adj.STATUS_AWAITING_PAYMENT,
-            to_status=adj.STATUS_CANCELLED, now=now,
+            to_status=refused_to, now=now,
         )
-        return EventResult("adjustment_reference_mismatch")
+        replan = await _end_difference_hold(session, adjustment)
+        return EventResult("adjustment_reference_mismatch", replan_appointment_id=replan)
     if paid < adjustment.diff_cents:
         await item(REASON_AMOUNT_UNDER)
         await service_change.move_adjustment(
             session, adjustment, from_status=adj.STATUS_AWAITING_PAYMENT,
-            to_status=adj.STATUS_CANCELLED, now=now,
+            to_status=refused_to, now=now,
         )
+        replan = await _end_difference_hold(session, adjustment)
         # Follow-up C: the patient is told the exact shortfall ONCE, after the commit (a later
         # event of this charge finds the adjustment no longer awaiting -> `_adjustment_paid_late`
-        # -> replay, no notice). No new Pix for the rest, no refund by us.
+        # -> replay, no notice). No new Pix for the rest, no refund by us. TASK-085 R (M3): for
+        # an `applied` change the line is neutral - the change stands, the clinic settles the
+        # rest (`service_change.notify_patient_adjustment_not_applied` reads the mode).
         # Minor 2: only with a REAL amount - never "Recebemos R$ 0,00"; else the item only.
         known = isinstance(state.paid_amount_cents, int) and state.paid_amount_cents > 0
         return EventResult(
             "adjustment_amount_under",
             not_applied_adjustment_id=adjustment.id if known else None,
             not_applied_paid_cents=paid if known else None,
+            replan_appointment_id=replan,
         )
 
     if not await service_change.move_adjustment(
@@ -717,19 +775,52 @@ async def _on_adjustment_paid(
             return EventResult("adjustment_already_applied")
         return await _adjustment_paid_late(session, tenant, event, item)
 
+    if adjustment.mode == adj.MODE_APPLIED:
+        # TASK-085 R D-R5: the change was written at the request - the payment only settles it.
+        # Fix round 1 (I1): unless the consultation is GONE (missing, or cancelled/released while
+        # the difference was being paid - the cancellation left the row to this webhook): then
+        # the money has no consultation, like the other modes. A visit that already happened
+        # (attended, no-show, past) keeps the payment.
+        if appointment is None or appointment.status == AppointmentStatus.CANCELLED:
+            await service_change.move_adjustment(
+                session, adjustment, from_status=adj.STATUS_APPLIED,
+                to_status=adj.STATUS_CANCELLED, now=now,
+            )
+            await item(REASON_ORPHAN_PAYMENT)
+            return EventResult(
+                "adjustment_not_applicable", not_applied_adjustment_id=adjustment.id
+            )
+        if paid > adjustment.diff_cents:
+            await item(REASON_AMOUNT_OVER)
+        return EventResult("adjustment_applied", applied_adjustment_id=adjustment.id)
     fields = await service_change.apply_paid_adjustment(session, tenant, adjustment, now=now)
     if fields is None:
         await service_change.move_adjustment(
             session, adjustment, from_status=adj.STATUS_APPLIED,
             to_status=adj.STATUS_CANCELLED, now=now,
         )
+        replan = await _end_difference_hold(session, adjustment)
         await item(REASON_ORPHAN_PAYMENT)
         return EventResult(
-            "adjustment_not_applicable", not_applied_adjustment_id=adjustment.id
+            "adjustment_not_applicable",
+            not_applied_adjustment_id=adjustment.id,
+            replan_appointment_id=replan,
         )
     if paid > adjustment.diff_cents:
         await item(REASON_AMOUNT_OVER)
     return EventResult("adjustment_applied", applied_adjustment_id=adjustment.id)
+
+
+async def _end_difference_hold(
+    session: AsyncSession, adjustment: adj.DepositAdjustment
+) -> UUID | None:
+    """TASK-085 R: a suspended change that will not be applied frees the new window it held and
+    names the consultation whose reminders are re-planned after the commit (M4); None for any
+    other mode."""
+    if adjustment.mode != adj.MODE_SUSPEND:
+        return None
+    await booking_hold.release_difference_hold_in(session, adjustment.id)
+    return adjustment.appointment_id
 
 
 async def _adjustment_paid_late(
@@ -807,6 +898,15 @@ async def run_post_commit(
             await service_change.run_expired_hooks(session, tenant, result.expired_adjustment_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning("payment_adjustment_notice_failed", error_type=type(exc).__name__)
+    if result.unpaid_adjustment_id is not None and result.unpaid_outcome is not None:
+        try:
+            await service_change.run_unpaid_followup(
+                session, tenant, result.unpaid_adjustment_id, result.unpaid_outcome
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("payment_adjustment_notice_failed", error_type=type(exc).__name__)
+    if result.replan_appointment_id is not None:
+        await service_change.followup_kept_old(tenant.id, result.replan_appointment_id)
     if result.alert_kind is not None:
         try:
             await alerts.send_payment_alert(redis, tenant, result.alert_kind)

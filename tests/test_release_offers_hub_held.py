@@ -17,6 +17,9 @@ from secretaria.models.deposit_adjustment import STATUS_REFUND_REQUESTED
 from tests import test_service_change as base, test_service_change_cancel as cancel
 from tests.test_release_offers_hub import _wire
 
+# TASK-085 R: these tests pin the LEGACY deferred mode of the engine (mode NULL rows).
+from tests.test_service_change import legacy_deferred_mode  # noqa: E402, F401
+
 db = base.db
 provider = base.provider
 no_default_hooks = base.no_default_hooks

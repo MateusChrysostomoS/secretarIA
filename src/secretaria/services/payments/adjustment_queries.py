@@ -45,8 +45,10 @@ from secretaria.models import PixDeposit, Tenant
 from secretaria.models.deposit_adjustment import (
     KIND_DECREASE,
     KIND_INCREASE,
+    MODE_SUSPEND,
     STATUS_APPLIED,
     STATUS_ASKED,
+    STATUS_AWAITING_CHOICE,
     STATUS_AWAITING_PAYMENT,
     STATUS_CANCELLED,
     STATUS_CANCELLED_VOID_PENDING,
@@ -58,9 +60,10 @@ from secretaria.models.payment_attention_item import (
     ATTENTION_OPEN,
     ATTENTION_RESOLVED,
     REASON_SERVICE_DIFF_COLLECT_DUE,
+    REASON_SERVICE_DIFF_UNPAID,
     PaymentAttentionItem,
 )
-from secretaria.services import tenant_config as cfg
+from secretaria.services import booking_hold, tenant_config as cfg
 from secretaria.services.payments import attention, registry
 from secretaria.services.payments.adjustment_suspension import (
     SUSPENDED_VISIT_TEXT,
@@ -86,6 +89,8 @@ SETTLED_CANCELLED_UNVOIDED = "cancelled_unvoided"
 SETTLED_PAYMENT_IN_FLIGHT = "payment_in_flight"  # the provider says PAID: left to the webhook
 SETTLED_QUESTION_CLOSED = "question_closed"  # an unanswered refund question: cancelled
 SETTLED_COLLECT_CLOSED = "collect_closed"  # a difference to collect: cancelled, item closed
+# TASK-085 R: the patient's choice after an expired difference Pix (that Pix was already voided)
+SETTLED_CHOICE_CLOSED = "choice_closed"
 
 # Follow-up review I3: how a cancellation closes a "cobrar a diferença" item (the clinic's
 # existing resolution fields; no refund is promised - that money was never received).
@@ -101,11 +106,26 @@ def collect_item_key(provider: str, adjustment_id: UUID) -> str:
     )
 
 
+def unpaid_item_key(provider: str, adjustment_id: UUID) -> str:
+    """TASK-085 R D-R5: the dedupe key of the ONE `service_diff_unpaid` item of a change that was
+    applied at once and whose difference Pix expired unpaid (also `collect_due`, no
+    `deposit_id`)."""
+    return attention.attention_dedupe_key(
+        provider, f"adjustment:{adjustment_id}", REASON_SERVICE_DIFF_UNPAID
+    )
+
+
+def _collect_keys(provider: str, adjustment_id: UUID) -> tuple[str, str]:
+    """Both reasons a `collect_due` adjustment's item may carry."""
+    return collect_item_key(provider, adjustment_id), unpaid_item_key(provider, adjustment_id)
+
+
 async def open_collect_adjustments(
     session: AsyncSession, *, tenant_id: UUID, deposit: PixDeposit
 ) -> list[UUID]:
     """The `collect_due` adjustments of this sinal whose collect item is still OPEN (the clinic
-    has not settled the difference yet). Tenant-scoped."""
+    has not settled the difference yet) - `service_diff_collect_due` (the provider was down) or,
+    TASK-085 R, `service_diff_unpaid` (the Pix of an applied change expired). Tenant-scoped."""
     ids = list(
         (
             await session.scalars(
@@ -119,7 +139,7 @@ async def open_collect_adjustments(
     )
     if not ids:
         return []
-    keys = {collect_item_key(deposit.provider, i): i for i in ids}
+    keys = {key: i for i in ids for key in _collect_keys(deposit.provider, i)}
     open_keys = (
         await session.scalars(
             select(PaymentAttentionItem.dedupe_key).where(
@@ -129,7 +149,7 @@ async def open_collect_adjustments(
             )
         )
     ).all()
-    return [keys[key] for key in open_keys]
+    return list(dict.fromkeys(keys[key] for key in open_keys))
 
 
 async def held_total_cents(session: AsyncSession, deposit: PixDeposit) -> int:
@@ -160,6 +180,10 @@ class AdjustmentTotals:
 
     held_delta_cents: int = 0
     pending_difference_cents: int | None = None
+    # TASK-085 R (S4): how the open change waits - "suspend" (D-R4: the visit is suspended; also
+    # while the patient chooses after its Pix expired) or "applied" (D-R5); None = none open, or
+    # a legacy deferred one (`mode` NULL).
+    pending_difference_mode: str | None = None
 
 
 async def load_adjustment_totals(
@@ -179,29 +203,42 @@ async def load_adjustment_totals(
             DepositAdjustment.status,
             DepositAdjustment.provider_charge_id,
             DepositAdjustment.diff_cents,
+            DepositAdjustment.mode,
         ).where(
             DepositAdjustment.tenant_id == tenant_id,
             DepositAdjustment.deposit_id.in_(ids),
             DepositAdjustment.status.in_(
-                (STATUS_APPLIED, STATUS_REFUND_REQUESTED, STATUS_AWAITING_PAYMENT)
+                (
+                    STATUS_APPLIED,
+                    STATUS_REFUND_REQUESTED,
+                    STATUS_AWAITING_PAYMENT,
+                    STATUS_AWAITING_CHOICE,
+                )
             ),
         )
     )
     delta: dict[UUID, int] = {}
     pending: dict[UUID, int] = {}
-    for deposit_id, kind, status, charge_id, diff in rows.all():
+    modes: dict[UUID, str] = {}
+    for deposit_id, kind, status, charge_id, diff, mode in rows.all():
         if kind == KIND_INCREASE and status == STATUS_APPLIED and charge_id is not None:
             delta[deposit_id] = delta.get(deposit_id, 0) + int(diff)
         elif kind == KIND_DECREASE and status == STATUS_REFUND_REQUESTED:
             delta[deposit_id] = delta.get(deposit_id, 0) - int(diff)
         elif status == STATUS_AWAITING_PAYMENT:
             pending[deposit_id] = pending.get(deposit_id, 0) + int(diff)
+            if mode is not None:
+                modes[deposit_id] = mode
+        elif status == STATUS_AWAITING_CHOICE and mode is not None:
+            # The Pix was voided (nothing is pending payment) but the visit is still suspended.
+            modes[deposit_id] = mode
     return {
         deposit_id: AdjustmentTotals(
             held_delta_cents=delta.get(deposit_id, 0),
             pending_difference_cents=pending.get(deposit_id),
+            pending_difference_mode=modes.get(deposit_id),
         )
-        for deposit_id in set(delta) | set(pending)
+        for deposit_id in set(delta) | set(pending) | set(modes)
     }
 
 
@@ -224,10 +261,16 @@ async def settle_open_adjustments(
     void failed (the payments sweep retries the void until it succeeds) - a payment that still
     lands then hits a non-awaiting adjustment, which is an ORPHAN item too.
     `close_questions` - each `asked` decrease moves to `cancelled`, and each `collect_due`
-    increase (the provider was down: the clinic was to collect the difference) moves to
-    `cancelled` with its still-open item closed (`COLLECT_CLOSED_NOTE`) - the consultation is
-    over, so the clinic is never told to collect for it. A release that may still be kept
-    (`close_questions=False`) leaves both open.
+    increase (the provider was down - or, TASK-085 R, the Pix of an applied change expired: the
+    clinic was to collect the difference) moves to `cancelled` with its still-open item closed
+    (`COLLECT_CLOSED_NOTE`) - the consultation is over, so the clinic is never told to collect for
+    it. A release that may still be kept (`close_questions=False`) leaves both open.
+
+    TASK-085 R: with `void_payments`, an `awaiting_choice` (the patient choosing after the Pix of a
+    suspended change expired - that Pix is already voided, the provider is not called) moves to
+    `cancelled`; and EVERY `mode="suspend"` change closed here has its new window's hold released
+    (`booking_hold.release_difference_hold_in`). This is the hook of every cancellation and of the
+    clinic's "Liberar horário" (D-R9) - nobody else releases that hold.
 
     Returns `{adjustment_id: outcome}`. Idempotent (a second call finds nothing open). Never
     commits, never refunds.
@@ -236,7 +279,7 @@ async def settle_open_adjustments(
 
     statuses: list[str] = []
     if void_payments:
-        statuses.append(STATUS_AWAITING_PAYMENT)
+        statuses.extend((STATUS_AWAITING_PAYMENT, STATUS_AWAITING_CHOICE))
     if close_questions:
         statuses.extend((STATUS_ASKED, STATUS_COLLECT_DUE))
     if not statuses:
@@ -265,8 +308,9 @@ async def settle_open_adjustments(
                     update(PaymentAttentionItem)
                     .where(
                         PaymentAttentionItem.tenant_id == tenant.id,
-                        PaymentAttentionItem.dedupe_key
-                        == collect_item_key(deposit.provider, adjustment.id),
+                        PaymentAttentionItem.dedupe_key.in_(
+                            _collect_keys(deposit.provider, adjustment.id)
+                        ),
                         PaymentAttentionItem.status == ATTENTION_OPEN,
                     )
                     .values(
@@ -289,6 +333,15 @@ async def settle_open_adjustments(
                 settled[str(adjustment.id)] = SETTLED_QUESTION_CLOSED
                 logger.info("service_change_question_closed_by_cancel", **log)
             continue
+        if adjustment.status == STATUS_AWAITING_CHOICE:
+            if await move_adjustment(
+                session, adjustment, from_status=STATUS_AWAITING_CHOICE,
+                to_status=STATUS_CANCELLED, now=now,
+            ):
+                await _release_hold(session, adjustment)
+                settled[str(adjustment.id)] = SETTLED_CHOICE_CLOSED
+                logger.info("service_change_choice_closed_by_cancel", **log)
+            continue
 
         state = await _void_difference(session, tenant, deposit, adjustment, log)
         if state == SETTLED_PAYMENT_IN_FLIGHT:
@@ -306,12 +359,19 @@ async def settle_open_adjustments(
             session, adjustment, from_status=STATUS_AWAITING_PAYMENT,
             to_status=target, now=now,
         ):
+            await _release_hold(session, adjustment)
             settled[str(adjustment.id)] = state
             voided_cents += int(adjustment.diff_cents or 0)
             logger.info("service_change_cancelled_by_cancel", outcome=state, **log)
     if void_payments:
         session.info[(_VOIDED_KEY, deposit.id)] = voided_cents
     return settled
+
+
+async def _release_hold(session: AsyncSession, adjustment: DepositAdjustment) -> None:
+    """TASK-085 R: a suspended change that closes frees the new window it was holding."""
+    if adjustment.mode == MODE_SUSPEND:
+        await booking_hold.release_difference_hold_in(session, adjustment.id)
 
 
 def voided_difference_hint(deposit: PixDeposit) -> int:
@@ -362,6 +422,7 @@ __all__ = [
     "SETTLED_COLLECT_CLOSED",
     "AdjustmentTotals",
     "SETTLED_CANCELLED_UNVOIDED",
+    "SETTLED_CHOICE_CLOSED",
     "SETTLED_PAYMENT_IN_FLIGHT",
     "SETTLED_QUESTION_CLOSED",
     "SETTLED_VOIDED",
@@ -373,6 +434,7 @@ __all__ = [
     "suspended_clause",
     "visible_to_patient_clause",
     "collect_item_key",
+    "unpaid_item_key",
     "load_adjustment_totals",
     "open_collect_adjustments",
     "settle_open_adjustments",

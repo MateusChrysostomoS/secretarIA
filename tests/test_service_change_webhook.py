@@ -49,6 +49,7 @@ _seed = base._seed
 db = base.db
 provider = base.provider
 no_default_hooks = base.no_default_hooks
+legacy_deferred_mode = base.legacy_deferred_mode
 
 
 async def _awaiting(db, provider, **seed_kw):
