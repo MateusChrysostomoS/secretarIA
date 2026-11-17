@@ -603,6 +603,126 @@ async def _service_unit_refusal(
         return {"error": UNIT_LOOKUP_FAILED_ERROR}
 
 
+# TASK-086 A14 (W5): the convênio matrix refuses this (doctor, service, unit, plan) cell.
+INSURANCE_NOT_ACCEPTED_ERROR = (
+    "A clínica não atende esse convênio para esse serviço nessa unidade, então não marquei a "
+    "consulta. Avise o paciente e ofereça outro serviço, outra unidade ou o atendimento "
+    "particular; para seguir pelos botões, chame start_guided_booking."
+)
+# Said when the convênio check itself could not run before a WRITE (fail-closed).
+INSURANCE_LOOKUP_FAILED_ERROR = (
+    "Não consegui confirmar se o convênio é aceito para esse serviço agora, então não marquei "
+    "a consulta. Tente de novo em instantes ou chame start_guided_booking para seguir pelos "
+    "botões."
+)
+
+
+async def _booking_service_id(
+    session: Any,
+    tenant_id: UUID,
+    professional_id: UUID | None,
+    catalog: list,
+    canonical_type: str,
+) -> UUID | None:
+    """The canonical `service_id` of `canonical_type` for this turn's booking, or None.
+
+    The turn's effective catalog (`TenantRuntimeConfig.appointment_types`) holds
+    `RuntimeAppointmentType` objects, which carry no `service_id`; only stored dict entries do.
+    So: the dict entries when the catalog has them (tests, direct callers), else the stored
+    entries of the sole doctor (or the clinic's, when there is no doctor / the doctor inherits)
+    resolved through the clinic's canonical catalog - the same entries the flow books from.
+    None = an entry without id (legacy JSON): outside the matrix.
+    """
+    from secretaria.ai.unit_scope import service_id_of
+    from secretaria.models import Professional, Tenant
+    from secretaria.services.service_catalog import load_service_catalog
+    from secretaria.services.tenant_config import (
+        active_appointment_types,
+        professional_appointment_types,
+    )
+
+    entries = [entry for entry in catalog if isinstance(entry, dict)]
+    if entries:
+        return service_id_of(entries, canonical_type)
+    tenant = await session.get(Tenant, tenant_id)
+    if tenant is None:
+        return None
+    owner = await session.get(Professional, professional_id) if professional_id else None
+    if owner is not None and owner.tenant_id != tenant_id:
+        owner = None
+    services = await load_service_catalog(session, tenant_id)
+    stored = (
+        professional_appointment_types(owner, tenant, services)
+        if owner is not None
+        else active_appointment_types(tenant, services)
+    )
+    return service_id_of(stored, canonical_type)
+
+
+async def _insurance_refusal(
+    tool_name: str, unit: Any | None, catalog: list, canonical_type: str | None
+) -> dict | None:
+    """The tool-error when the convênio matrix refuses this booking (TASK-086 A14), else None.
+
+    Same mould as `_service_unit_refusal`: reads THIS conversation's convênio and asks the
+    write-time guard (`insurance_acceptance.booking_refused`, fresh from the database) for the
+    one-doctor clinic's doctor, the canonical service id and the unit (None = the "no unit"
+    slice). Nothing to check without a conversation, a named service or a service id (a legacy
+    entry is outside the matrix); "Particular", a typed "Outro" and no answer are never refused
+    (the guard resolves no plan id for them). A failed read refuses - never a booking on an
+    unproven convênio. The log carries ids only, never the plan's or the patient's name.
+    """
+    tenant_id = _tenant_id_ctx.get()
+    conversation_id = _conversation_id_ctx.get()
+    if tenant_id is None or conversation_id is None or not canonical_type:
+        return None
+    professional_id = _sole_professional_id()
+    unit_id = getattr(unit, "id", None)
+    from secretaria.core.database import async_session_factory
+    from secretaria.models import Conversation
+    from secretaria.services import insurance_acceptance
+
+    try:
+        async with async_session_factory() as session:
+            conversation = await session.get(Conversation, conversation_id)
+            insurance = (
+                conversation.flow_selected_insurance
+                if conversation is not None and conversation.tenant_id == tenant_id
+                else None
+            )
+            if not insurance or not str(insurance).strip():
+                return None
+            service_id = await _booking_service_id(
+                session, tenant_id, professional_id, catalog, canonical_type
+            )
+            if service_id is None:
+                return None
+            refused = await insurance_acceptance.booking_refused(
+                session,
+                tenant_id=tenant_id,
+                professional_id=professional_id,
+                service_id=service_id,
+                unit_id=unit_id,
+                insurance=insurance,
+            )
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        logger.warning(
+            "agent_tool_insurance_check_failed", tool=tool_name, error=type(exc).__name__
+        )
+        return {"error": INSURANCE_LOOKUP_FAILED_ERROR}
+    if not refused:
+        return None
+    insurance_acceptance.log_refusal(
+        "agent_tool_insurance_refused",
+        tool=tool_name,
+        tenant_id=tenant_id,
+        professional_id=professional_id,
+        service_id=service_id,
+        unit_id=unit_id,
+    )
+    return {"error": INSURANCE_NOT_ACCEPTED_ERROR}
+
+
 async def _sole_professional_name() -> str | None:
     """The one-doctor clinic's professional's name for the event texts, or None.
 
@@ -1319,6 +1439,13 @@ async def create_event(
         )
         if refused is not None:
             return refused
+    # TASK-086 A14: the convênio must be accepted for this service at this unit (or, with no
+    # unit link, in the "no unit" slice) - before any calendar call.
+    refused = await _insurance_refusal(
+        "create_event", unit, _effective_service_catalog(), canonical_type
+    )
+    if refused is not None:
+        return refused
 
     cal = scoped_calendar(_get_calendar(), unit)
     fallback_start, fallback_end = _localize_window(start, end, cal)

@@ -44,6 +44,13 @@ from secretaria.services.booking_hold import BookingGate
 from secretaria.services.booking_scope import sole_active_professional
 from secretaria.services.calendar import CalendarUnavailableError
 from secretaria.services.flow_router import FlowRouterResult
+from secretaria.services.insurance_acceptance import (
+    has_exceptions,
+    is_accepted,
+    log_refusal,
+    refuses_everywhere,
+    snapshot_exceptions,
+)
 from secretaria.services.service_catalog import normalize as normalize_service_name
 from secretaria.services.tenant_config import (
     active_appointment_types,
@@ -247,6 +254,9 @@ FALLBACK_REASONS = (
 # patient who said "quinta" knows why they are being asked again.
 DRAFT_DAY_OUT_OF_WINDOW_PREFIX = "Não temos agenda aberta para esse dia."
 DRAFT_DAY_UNAVAILABLE_PREFIX = "Esse dia não tem horário livre."
+# TASK-086 A8: the line the convênio question opens with when the convênio matrix refuses the
+# draft's (doctor, service, unit) - the patient who named a plan knows why it is asked again.
+DRAFT_PLAN_NOT_ACCEPTED_PREFIX = "Esse convênio não é aceito para esse serviço."
 
 # The agenda for the professional the resolver settled on (None = the tenant-level agenda,
 # which on a single-professional clinic already carries that professional's credentials).
@@ -501,6 +511,51 @@ def _booking_services(checked: _Checked, tenant: Any, service_catalog: list | No
     return checked.clinic_catalog
 
 
+def _plan_refused(
+    checked: _Checked,
+    state: Any,
+    *,
+    tenant: Any,
+    professionals: list,
+    service_catalog: list | None,
+) -> bool:
+    """Whether the convênio matrix refuses the draft's service with its convênio (TASK-086 A8).
+
+    Pure, over the tenant snapshot's matrix (`insurance_refused`). Only when service, convênio
+    (a plan with an id: never Particular / a typed "Outro") and the booking's doctor are all
+    known. The unit is the one `_land_day` would settle on (`flow_units.effective_unit`): known
+    -> that unit (`is_accepted`); unknown -> every unit the service can be booked at, or the
+    "no unit" slice for a doctor without links (`refuses_everywhere`, which is False whenever
+    the reason is not the matrix). A clinic that never touched the matrix: always False.
+    """
+    exc = snapshot_exceptions(tenant)
+    if not has_exceptions(exc) or checked.service is None:
+        return False
+    plan = fr._selected_plan(tenant, state.flow_selected_insurance)
+    if plan is None:
+        return False
+    owner = fr._booking_professional(state, professionals)
+    services = _booking_services(checked, tenant, service_catalog)
+    service_id = fr._booking_service_id(state, tenant, services, owner)
+    if service_id is None:
+        return False
+    owner_id = getattr(owner, "id", None)
+    unit = flow_units.effective_unit(state, owner, service_id)
+    if unit is not None:
+        refused = not is_accepted(exc, owner_id, service_id, unit.id, plan["id"])
+    else:
+        refused = refuses_everywhere(exc, owner, service_id, plan["id"])
+    if refused:
+        log_refusal(
+            "booking_draft_insurance_refused",
+            conversation_id=getattr(state, "id", None),
+            professional_id=owner_id,
+            service_id=service_id,
+            unit_id=getattr(unit, "id", None),
+        )
+    return refused
+
+
 async def resolve_booking_draft(
     draft: BookingDraft,
     *,
@@ -667,6 +722,21 @@ async def _resolve(
             else fr._start_booking(tenant, professionals, insurance=checked.insurance)
         )
         return asked(result, FIELD_FOR_WHOM, FIELD_INSURANCE, FIELD_PROFESSIONAL)
+    # TASK-086 A8: service + doctor + convênio together and the matrix refuses them -> never
+    # the express card: the convênio question again (filtered by the known service in the
+    # flow), service and doctor kept. The flow's final guard covers whatever slips past here.
+    if _plan_refused(
+        checked,
+        state,
+        tenant=tenant,
+        professionals=professionals,
+        service_catalog=service_catalog,
+    ):
+        checked.insurance = None
+        state.flow_selected_insurance = None
+        result = fr._enter_insurance(tenant, state)
+        result.bubbles = [TextBubble(body=DRAFT_PLAN_NOT_ACCEPTED_PREFIX), *result.bubbles]
+        return asked(result, FIELD_FOR_WHOM, FIELD_PROFESSIONAL, FIELD_SERVICE)
     # 5-6. Dia e horário.
     return await _land_day(
         draft,
