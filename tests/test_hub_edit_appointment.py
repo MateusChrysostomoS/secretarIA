@@ -407,9 +407,14 @@ async def _adjustments(db):
         return list(await session.scalars(select(DepositAdjustment)))
 
 
-async def test_paid_dearer_service_answers_awaiting_payment_and_sends_the_pix(
+async def test_paid_dearer_service_answers_applied_awaiting_payment_and_sends_the_pix(
     client: AsyncClient, db, acting, provider
 ):
+    """TASK-085 R D-R5 (replaces "answers awaiting_payment": a clinic that books before the
+    sinal is paid): the change stands now - "A clínica alterou" card - and ONE more message with
+    the difference and the Pix code at its end. The code never reaches the hub's answer."""
+    from secretaria.services.payments import service_change
+
     pool = FakeArqPool()
     install_pool(pool)
     world = await _paid_world(db, acting)
@@ -418,11 +423,11 @@ async def test_paid_dearer_service_answers_awaiting_payment_and_sends_the_pix(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["appointment_type"] == "Consulta"  # changes only after the payment
+    assert body["appointment_type"] == "Avaliação"
     [adjustment] = await _adjustments(db)
     change = body["service_change"]
     assert change == {
-        "status": "awaiting_payment",
+        "status": "applied_awaiting_payment",
         "diff_cents": 5000,
         "old_service": "Consulta",
         "new_service": "Avaliação",
@@ -432,20 +437,18 @@ async def test_paid_dearer_service_answers_awaiting_payment_and_sends_the_pix(
     }
     assert change["expires_at"] is not None
     assert "000201pix" not in response.text  # the Pix code goes to the patient only
-    assert body["patient_notice"] == "whatsapp_sent"
-    texts = [item[2] for item in sent()]
-    assert len(texts) == 1  # ONE message: the explanation and the code together
-    assert "R$ 50,00" in texts[0] and "só muda depois" in texts[0] and "Avaliação" in texts[0]
-    # the clinic asked for it, not the patient: never "Para trocar sua consulta…"
-    assert texts[0].startswith("A clínica quer trocar o serviço da sua consulta para Avaliação.")
-    assert "Para trocar sua consulta" not in texts[0]
-    assert texts[0].rstrip().endswith("```000201pix```")  # the copia-e-cola, fenced, last
-    assert not any(text.startswith("A clínica alterou") for text in texts)
-    assert pool.calls == []  # no doctor e-mail while the difference is unpaid
-    assert FakeCalendar.get("tenant").updated == []
+    card, pix = sent()
+    assert card[0] == "buttons" and "• Serviço: Consulta → Avaliação" in card[2]
+    assert pix[2] == service_change.difference_pix_applied_text(
+        "Avaliação", 5000, "000201pix", 30, source="hub"
+    )
+    assert pix[2].startswith("A clínica alterou sua consulta para Avaliação.")
+    assert pix[2].rstrip().endswith("```000201pix```")  # the copia-e-cola, fenced, last
+    assert [call[0] for call in pool.calls] == ["send_professional_edit_notification"]
+    assert FakeCalendar.get("tenant").updated[-1][3] == "Avaliação - Maria"
 
 
-async def test_paid_dearer_service_and_a_new_time_tell_the_time_now_and_the_pix(
+async def test_paid_dearer_service_and_a_new_time_tell_both_and_the_pix(
     client: AsyncClient, db, acting, provider
 ):
     world = await _paid_world(db, acting)
@@ -454,10 +457,11 @@ async def test_paid_dearer_service_and_a_new_time_tell_the_time_now_and_the_pix(
     response = await _post(client, world.appointment.id, service="Avaliação", start_at=_iso(new))
 
     body = response.json()
-    assert response.status_code == 200 and body["service_change"]["status"] == "awaiting_payment"
-    assert body["appointment_type"] == "Consulta" and body["status"] == "rescheduled"
+    assert response.status_code == 200
+    assert body["service_change"]["status"] == "applied_awaiting_payment"
+    assert body["appointment_type"] == "Avaliação" and body["status"] == "rescheduled"
     card, pix = sent()
-    assert card[0] == "buttons" and "• Data:" in card[2] and "Serviço" not in card[2]
+    assert card[0] == "buttons" and "• Data:" in card[2] and "• Serviço:" in card[2]
     assert "R$ 50,00" in pix[2] and pix[2].rstrip().endswith("```000201pix```")
 
 
@@ -540,7 +544,7 @@ async def test_paid_dearer_service_outside_the_window_says_so_and_sends_no_code(
 
     body = response.json()
     assert response.status_code == 200
-    assert body["service_change"]["status"] == "awaiting_payment"
+    assert body["service_change"]["status"] == "applied_awaiting_payment"
     assert body["service_change"]["patient_notice"] == "whatsapp_outside_window"
     assert body["patient_notice"] == "whatsapp_outside_window"
     assert body["whatsapp_link"] == f"https://wa.me/{WA_ID}"
@@ -621,7 +625,8 @@ async def test_paid_service_change_outside_a_restricted_doctors_scope_is_404(
 
     view_as(AgendaViewer("own", world.appointment.professional_id))  # her own: as before
     own = await _post(client, world.appointment.id, service="Avaliação")
-    assert own.status_code == 200 and own.json()["service_change"]["status"] == "awaiting_payment"
+    assert own.status_code == 200
+    assert own.json()["service_change"]["status"] == "applied_awaiting_payment"
 
 
 async def test_cancelling_with_a_difference_pix_waiting_says_it_was_cancelled(
@@ -636,7 +641,7 @@ async def test_cancelling_with_a_difference_pix_waiting_says_it_was_cancelled(
     world = await _paid_world(db, acting)
     await set_appointment(db, world.appointment.id, phone=WA_ID)
     edited = await _post(client, world.appointment.id, service="Avaliação")
-    assert edited.json()["service_change"]["status"] == "awaiting_payment"
+    assert edited.json()["service_change"]["status"] == "applied_awaiting_payment"
 
     response = await client.post(
         f"{CALENDAR}/appointments/{world.appointment.id}/cancel", json={"confirm": True}

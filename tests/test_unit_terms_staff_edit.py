@@ -3,13 +3,11 @@
 * the new service's length is the doctor's own at the unit the booking keeps after this edit
   (the appointment's, or the one a doctor change keeps / clears - `_unit_kept`); no exception or
   no unit = today's base (characterization);
-* a PAID sinal: the money engine also runs when the edit moves the unit (a doctor change that
-  clears it) AND a unit's own price makes the booking's price change - never for a clinic
-  without unit prices (anti-objective) - and the deferred edit (`pending_edit`) always carries
-  the booking's `unit_id`, the key T4a's `service_change` resolves the new price at. Until T4a
-  lands the engine prices at the base, so these tests assert the ROUTING; the end-to-end money
-  assertion at a unit belongs to the merge. A doctor change that keeps the unit still does not
-  run the engine (R4, out of scope).
+* a PAID sinal: TASK-085 R (D-R1/D-R3) - a change of service, unit (a doctor change that clears
+  it), doctor or convênio ALWAYS goes through the money engine, which prices the target at its
+  doctor and unit and decides (the same price = nothing for the money); the pending edit always
+  carries the booking's `unit_id`. Replaces T4b's "only when a unit's own price moves it" and R4
+  ("a doctor change alone never re-prices").
 """
 
 # ruff: noqa: F811
@@ -159,13 +157,13 @@ async def test_a_time_or_doctor_move_keeps_the_booked_window(db):
 
 def _spy(monkeypatch) -> list[dict]:
     calls: list[dict] = []
-    real = sae.service_change.request_service_change
+    real = sae.service_change.request_paid_change
 
     async def _recording(session, **kwargs):
         calls.append(kwargs)
         return await real(session, **kwargs)
 
-    monkeypatch.setattr(sae.service_change, "request_service_change", _recording)
+    monkeypatch.setattr(sae.service_change, "request_paid_change", _recording)
     return calls
 
 
@@ -201,17 +199,21 @@ async def _paid_at_centro(db, *, centro_price: str | None = None, paid_cents: in
     return world, centro, bruno, carlos
 
 
-async def test_paid_unit_cleared_without_unit_prices_keeps_todays_behaviour(
+async def test_paid_unit_cleared_without_unit_prices_changes_nothing_for_money(
     db, provider, monkeypatch
 ):
-    """Anti-objective: no per-unit price -> a doctor change that clears the unit never reaches
-    the engine (exactly today's edit, no `service_change`)."""
+    """D-R1/D-R3: a doctor change that clears the unit asks the engine (with the unit cleared),
+    and without per-unit prices the price is the same: nothing for the money - exactly today's
+    edit, no `service_change`."""
     world, _centro, _bruno, carlos = await _paid_at_centro(db)
     calls = _spy(monkeypatch)
 
     outcome = await _edit(db, world, _req(professional_id=carlos))
 
-    assert calls == [] and outcome.service_change is None
+    [call] = calls
+    assert call["pending_edit"]["unit_id"] is None
+    assert call["pending_edit"]["professional_id"] == carlos
+    assert outcome.service_change is None
     assert [c.label for c in outcome.changes] == ["Médico"]
     row = await reload_appointment(db, world.appointment.id)
     assert (row.professional_id, row.unit_id) == (carlos, None)
@@ -249,16 +251,17 @@ async def test_paid_service_change_hands_the_bookings_unit_to_the_engine(db, pro
 
     [call] = calls
     assert call["pending_edit"]["unit_id"] == centro.id
-    assert outcome.service_change.status == "awaiting_payment"
+    assert outcome.service_change.status == "applied_awaiting_payment"  # D-R5
     [adjustment] = await _adjustments(db)
     assert adjustment.pending_edit["unit_id"] == str(centro.id)
 
 
-async def test_paid_doctor_change_keeping_the_unit_still_skips_the_engine(
+async def test_paid_doctor_change_keeping_the_unit_is_priced_at_the_new_doctor_there(
     db, provider, monkeypatch
 ):
-    """R4 (pre-existing, out of scope): a doctor change alone never re-prices the sinal - even
-    with a unit price, as long as the booking stays at that unit."""
+    """D-R3 (replaces R4 "a doctor change alone never re-prices"): Ana charges R$ 250,00 at
+    Centro (R$ 75,00 paid); Dr. Bruno, who also attends Centro, has no price of his own there -
+    his base R$ 200,00 (sinal R$ 60,00): R$ 15,00 cheaper, asked like any cheaper change (D-R2)."""
     world, centro, bruno, _carlos = await _paid_at_centro(
         db, centro_price="R$ 250,00", paid_cents=7500
     )
@@ -266,6 +269,12 @@ async def test_paid_doctor_change_keeping_the_unit_still_skips_the_engine(
 
     outcome = await _edit(db, world, _req(professional_id=bruno))
 
-    assert calls == [] and outcome.service_change is None
+    [call] = calls
+    assert (call["pending_edit"]["professional_id"], call["pending_edit"]["unit_id"]) == (
+        bruno,
+        centro.id,
+    )
+    assert (outcome.service_change.status, outcome.service_change.diff_cents) == ("asked", 1500)
     row = await reload_appointment(db, world.appointment.id)
     assert (row.professional_id, row.unit_id) == (bruno, centro.id)
+    assert provider.calls == []
