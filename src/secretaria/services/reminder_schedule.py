@@ -50,6 +50,7 @@ from secretaria.services.appointment_status import (
     SOURCE_HUB,
     log_status_transition,
 )
+from secretaria.services.payments import adjustment_suspension
 
 logger = get_logger(__name__)
 
@@ -587,6 +588,7 @@ async def pending_custom_reminders_need_replan(
             Appointment.status.in_(LIVE_APPOINTMENT_STATUSES),
             Appointment.patient_id.is_not(None),
             Appointment.start_at > now_utc,
+            adjustment_suspension.visible_to_patient_clause(),
         )
     )
     for stored_due, start in rows:
@@ -674,6 +676,7 @@ async def replan_custom_reminders(
                 Appointment.status.in_(LIVE_APPOINTMENT_STATUSES),
                 Appointment.patient_id.is_not(None),
                 Appointment.start_at > now_utc,
+                adjustment_suspension.visible_to_patient_clause(),
             )
             .with_for_update()
         )
