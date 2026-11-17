@@ -63,7 +63,9 @@ from secretaria.models.payment_attention_item import (
 from secretaria.services import tenant_config as cfg
 from secretaria.services.payments import attention, registry
 from secretaria.services.payments.adjustment_suspension import (
+    SUSPENDED_VISIT_TEXT,
     is_suspended,
+    open_suspension,
     suspended_clause,
     visible_to_patient_clause,
 )
@@ -365,7 +367,9 @@ __all__ = [
     "SETTLED_VOIDED",
     "held_cents_hint",
     "held_total_cents",
+    "SUSPENDED_VISIT_TEXT",
     "is_suspended",
+    "open_suspension",
     "suspended_clause",
     "visible_to_patient_clause",
     "collect_item_key",

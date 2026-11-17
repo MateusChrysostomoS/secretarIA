@@ -20,6 +20,7 @@ from uuid import UUID
 
 from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.sql.elements import ColumnElement
 
 from secretaria.models import Appointment
@@ -29,24 +30,39 @@ from secretaria.models.deposit_adjustment import (
     DepositAdjustment,
 )
 
+# Fix round 1 (Orchestrator ruling): what the patient reads when they try to confirm, reschedule or
+# edit a SUSPENDED consultation (an old reminder's button, the edit flow). Cancelling stays allowed
+# and behaves as "Cancelar ambas" (the normal cancellation settles the pending change).
+SUSPENDED_VISIT_TEXT = (
+    "Essa consulta está aguardando o Pix da diferença da troca que você pediu. "
+    "Use os botões da mensagem do Pix ou aguarde o prazo."
+)
 
-def suspended_clause() -> ColumnElement[bool]:
-    """TRUE for an `Appointment` row that is suspended. Correlated to `Appointment`: use it in a
-    query that selects from `appointments` (`select(Appointment).where(suspended_clause())`)."""
+
+def suspended_clause(
+    appointment_id: InstrumentedAttribute | ColumnElement = Appointment.id,
+    tenant_id: InstrumentedAttribute | ColumnElement = Appointment.tenant_id,
+) -> ColumnElement[bool]:
+    """TRUE for an appointment row that is suspended. Correlated to the given columns - by
+    default `Appointment.id` / `Appointment.tenant_id`; for an aliased appointments table pass the
+    alias's columns (`a = aliased(Appointment); suspended_clause(a.id, a.tenant_id)`)."""
     return exists(
         select(DepositAdjustment.id).where(
-            DepositAdjustment.appointment_id == Appointment.id,
-            DepositAdjustment.tenant_id == Appointment.tenant_id,
+            DepositAdjustment.appointment_id == appointment_id,
+            DepositAdjustment.tenant_id == tenant_id,
             DepositAdjustment.mode == MODE_SUSPEND,
             DepositAdjustment.status.in_(SUSPENDED_STATUSES),
         )
     )
 
 
-def visible_to_patient_clause() -> ColumnElement[bool]:
-    """TRUE for an `Appointment` row the patient may see/act on: NOT suspended. What S5 adds to
-    every patient-facing query of upcoming consultations and reminders."""
-    return ~suspended_clause()
+def visible_to_patient_clause(
+    appointment_id: InstrumentedAttribute | ColumnElement = Appointment.id,
+    tenant_id: InstrumentedAttribute | ColumnElement = Appointment.tenant_id,
+) -> ColumnElement[bool]:
+    """TRUE for an appointment row the patient may see/act on: NOT suspended. What S5 adds to
+    every patient-facing query of upcoming consultations and reminders (same alias rule)."""
+    return ~suspended_clause(appointment_id, tenant_id)
 
 
 async def is_suspended(session: AsyncSession, *, tenant_id: UUID, appointment_id: UUID) -> bool:
@@ -64,4 +80,28 @@ async def is_suspended(session: AsyncSession, *, tenant_id: UUID, appointment_id
     return found is not None
 
 
-__all__ = ["is_suspended", "suspended_clause", "visible_to_patient_clause"]
+async def open_suspension(
+    session: AsyncSession, *, tenant_id: UUID, appointment_id: UUID
+) -> DepositAdjustment | None:
+    """The change that suspends this clinic's appointment right now (newest first), or None.
+    For the patient paths that must refuse a mutation (S3a/S3b) and the texts that name it."""
+    return await session.scalar(
+        select(DepositAdjustment)
+        .where(
+            DepositAdjustment.tenant_id == tenant_id,
+            DepositAdjustment.appointment_id == appointment_id,
+            DepositAdjustment.mode == MODE_SUSPEND,
+            DepositAdjustment.status.in_(SUSPENDED_STATUSES),
+        )
+        .order_by(DepositAdjustment.created_at.desc())
+        .limit(1)
+    )
+
+
+__all__ = [
+    "SUSPENDED_VISIT_TEXT",
+    "is_suspended",
+    "open_suspension",
+    "suspended_clause",
+    "visible_to_patient_clause",
+]

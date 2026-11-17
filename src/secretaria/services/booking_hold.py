@@ -615,19 +615,16 @@ async def place_difference_hold_in(
 ) -> HeldSlot | None:
     """Hold [start_at, end_at) on ONE agenda for `adjustment_id` until `expires_at`. None = taken.
 
-    Serialises the agenda (`serialize_agenda_in`), replaces this adjustment's own previous hold
-    (never two), and refuses - writing nothing - when another live payment-phase hold of the
-    same agenda overlaps (a Pix being paid, or another change's new window). Code-phase rows
-    never conflict (TASK-072). It checks HOLDS only: the appointments, the Google agenda and a
-    shared doctor's other clinics are the engine's `_window_fits`, run under the same lock.
-    Flushes, never commits. The adjustment row must already be flushed (foreign key)."""
+    Serialises the agenda (`serialize_agenda_in`) and refuses - writing NOTHING, its own previous
+    hold left as it was - when another live payment-phase hold of the same agenda overlaps (a Pix
+    being paid, or another change's new window). Otherwise replaces this adjustment's own previous
+    hold (never two). Code-phase rows never conflict (TASK-072). It checks HOLDS only: the
+    appointments, the Google agenda and a shared doctor's other clinics are the engine's
+    `_window_fits`, run under the same lock. `expires_at` is capped at `start_at` (a hold never
+    outlives the start of the window it guards). Flushes, never commits. The adjustment row must
+    already be flushed (foreign key)."""
     now = _now()
     await _serialize_agenda(session, tenant_id, professional_id)
-    await session.execute(
-        delete(BookingHold)
-        .where(BookingHold.adjustment_id == adjustment_id)
-        .execution_options(synchronize_session=False)
-    )
     agenda = (
         BookingHold.professional_id == professional_id
         if professional_id is not None
@@ -640,6 +637,10 @@ async def place_difference_hold_in(
                 BookingHold.phase == BLOCKING_PHASE,
                 BookingHold.expires_at > now,
                 agenda,
+                or_(
+                    BookingHold.adjustment_id.is_(None),
+                    BookingHold.adjustment_id != adjustment_id,
+                ),
             )
         )
     ).all()
@@ -651,6 +652,12 @@ async def place_difference_hold_in(
                 adjustment_id=str(adjustment_id),
             )
             return None
+    await session.execute(
+        delete(BookingHold)
+        .where(BookingHold.adjustment_id == adjustment_id)
+        .execution_options(synchronize_session=False)
+    )
+    expires_at = min(_aware(expires_at), _aware(start_at))
     row = BookingHold(
         tenant_id=tenant_id,
         conversation_id=None,
@@ -705,14 +712,18 @@ async def extend_difference_hold_in(
 
     None when the hold already expired or is gone: an expired hold is NEVER revived (somebody
     may have booked the window since); the caller then re-checks the window and places a new
-    one (`place_difference_hold_in`) or tells the patient the new slot is gone. Flushes, never
-    commits."""
-    values: dict = {"expires_at": expires_at}
+    one (`place_difference_hold_in`) or tells the patient the new slot is gone. `expires_at` is
+    capped at the hold's own `start_at` (never outlives the new consultation's start). Flushes,
+    never commits."""
+    current = await difference_hold_in(session, adjustment_id)
+    if current is None:
+        return None
+    values: dict = {"expires_at": min(_aware(expires_at), current.start_at)}
     if to_adjustment_id is not None:
         values["adjustment_id"] = to_adjustment_id
     result = await session.execute(
         update(BookingHold)
-        .where(BookingHold.adjustment_id == adjustment_id, BookingHold.expires_at > _now())
+        .where(BookingHold.id == current.id, BookingHold.expires_at > _now())
         .values(**values)
         .execution_options(synchronize_session=False)
     )

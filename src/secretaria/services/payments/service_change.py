@@ -176,12 +176,20 @@ CHOICE_OF_ACTION: dict[str, str] = {
     ACTION_CHOICE_RESEND: CHOICE_RESEND,
     ACTION_CHOICE_BOTH: CHOICE_BOTH,
 }
-# D-R8: the patient has up to 24 h to choose, never later than 1 h before the OLD consultation;
-# no answer by then = "Manter a antiga".
+# D-R8: the patient has up to 24 h to choose; no answer by then = "Manter a antiga".
 CHOICE_TTL = timedelta(hours=24)
+# Fix round 1 (Orchestrator ruling): nothing of a suspended change - its Pix, the choice - may run
+# later than this before the EARLIER of the two consultations (old and new), minus the sweep's
+# margin (it runs every ~2 min), so the old visit is never lost close to its time.
 CHOICE_MIN_LEAD = timedelta(hours=1)
+SWEEP_MARGIN = timedelta(minutes=5)
+# The shortest Pix window worth suspending for (capped by the clinic's own TTL when that is
+# shorter): with less room the change is NOT suspended - it falls back to the legacy deferred
+# mode (mode NULL: the old visit stays valid and visible, the change happens only if paid).
+MIN_SUSPEND_PIX = timedelta(minutes=30)
 # The hold of the new window outlives the deadline it serves (the Pix's `expires_at`, then the
-# choice's) by this much, so the sweep (every ~2 min) or a late webhook always finds it alive.
+# choice's) by this much, so the sweep or a late webhook always finds it alive - but it never
+# outlives the NEW consultation's start (`difference_hold_expiry`).
 DIFFERENCE_HOLD_GRACE = timedelta(minutes=15)
 
 
@@ -195,12 +203,49 @@ def choice_buttons(adjustment_id: UUID, *, resend: bool = True) -> list[tuple[st
     return [(f"{action}|{adjustment_id}", label) for action, label in pairs]
 
 
-def choice_deadline(now: datetime, old_start: datetime) -> datetime | None:
-    """Until when the patient may choose (D-R8): `now + CHOICE_TTL`, capped at `old_start -
-    CHOICE_MIN_LEAD`. None = no room left for a choice (the old consultation is in an hour or
-    less): the old one stands at once (`kept_old`), nobody is asked."""
-    deadline = min(as_utc(now) + CHOICE_TTL, as_utc(old_start) - CHOICE_MIN_LEAD)
-    return deadline if deadline > as_utc(now) else None
+def suspend_cutoff(old_start: datetime, new_start: datetime) -> datetime:
+    """The latest instant anything of a suspended change may run until: `min(old_start,
+    new_start) - CHOICE_MIN_LEAD - SWEEP_MARGIN`."""
+    return min(as_utc(old_start), as_utc(new_start)) - CHOICE_MIN_LEAD - SWEEP_MARGIN
+
+
+def suspend_pix_expiry(
+    now: datetime, ttl_minutes: int, old_start: datetime, new_start: datetime
+) -> datetime | None:
+    """The `expires_at` of the difference Pix of a SUSPENDED change: `now + ttl`, capped at
+    `suspend_cutoff`. None = no room for a minimally useful Pix (less than `min(ttl,
+    MIN_SUSPEND_PIX)` left): do NOT suspend - the engine falls back to the legacy deferred mode
+    (and "Reenviar o Pix" answers `no_window`)."""
+    now = as_utc(now)
+    ttl = timedelta(minutes=ttl_minutes)
+    expiry = min(now + ttl, suspend_cutoff(old_start, new_start))
+    return expiry if expiry - now >= min(ttl, MIN_SUSPEND_PIX) else None
+
+
+def choice_deadline(now: datetime, old_start: datetime, new_start: datetime) -> datetime | None:
+    """Until when the patient may choose (D-R8): `now + CHOICE_TTL`, capped at `suspend_cutoff`
+    (the earlier of the two consultations - 1 h - the sweep margin). None = no room left: the old
+    consultation stands at once (`kept_old`), nobody is asked."""
+    now = as_utc(now)
+    deadline = min(now + CHOICE_TTL, suspend_cutoff(old_start, new_start))
+    return deadline if deadline > now else None
+
+
+def resend_fits(
+    now: datetime, ttl_minutes: int, old_start: datetime, new_start: datetime
+) -> bool:
+    """Whether "Reenviar o Pix" is still possible: the new consultation is at least
+    `CHOICE_MIN_LEAD` away AND a minimally useful Pix fits (`suspend_pix_expiry`). False ->
+    `no_window`, and the buttons are offered without "Reenviar o Pix"."""
+    if as_utc(new_start) - as_utc(now) < CHOICE_MIN_LEAD:
+        return False
+    return suspend_pix_expiry(now, ttl_minutes, old_start, new_start) is not None
+
+
+def difference_hold_expiry(deadline: datetime, new_start: datetime) -> datetime:
+    """The `expires_at` of the hold that serves `deadline` (a Pix's, or the choice's):
+    `deadline + DIFFERENCE_HOLD_GRACE`, never past the NEW consultation's start."""
+    return min(as_utc(deadline) + DIFFERENCE_HOLD_GRACE, as_utc(new_start))
 
 
 ChoiceKind = Literal[
@@ -259,9 +304,11 @@ class ServiceChangeResult:
     * `applied_now`      - the edit was written in the caller's transaction (no Pix, no question;
                            with `decision` `increase_collect` the Pix could not be created and
                            the clinic collects `diff_cents` - tell the patient);
-    * `awaiting_payment` - LEGACY (before TASK-085 R): a difference Pix exists, NOTHING was
-                           written. No new change returns it any more; callers treat it as
-                           `suspended`;
+    * `awaiting_payment` - the LEGACY deferred mode (mode NULL): a difference Pix exists, NOTHING
+                           was written, the old consultation stays valid AND visible; unpaid =
+                           the old one stands (today's texts). TASK-085 R returns it only as the
+                           "before" fallback when no minimally useful Pix fits before the visits
+                           (`suspend_pix_expiry` None) - callers keep today's handling for it;
     * `applied_awaiting_payment` - TASK-085 R D-R5 (a clinic that does not require the sinal to
                            book): the edit WAS written now (`changed_fields`, `notice_id`) and a
                            difference Pix exists (`pix_copy_paste`, `expires_at`,
@@ -2056,7 +2103,8 @@ async def on_difference_unpaid(
     `get_charge` first (PAID -> "payment_in_flight", nothing changed), then the charge is voided
     (failure -> "void_failed", nothing changed, the next tick retries). Then, under the lock order
     appointment -> adjustment: `suspend` -> `awaiting_choice` (asked_at=now, expires_at =
-    `choice_deadline`, hold extended to it + `DIFFERENCE_HOLD_GRACE`) -> "choice_pending", or,
+    `choice_deadline(now, old_start, new_start)`, hold extended to `difference_hold_expiry`)
+    -> "choice_pending" (buttons with "Reenviar" only when `resend_fits`), or,
     with no room for a choice, -> `kept_old` (hold released) -> "kept_old"; `applied` ->
     `collect_due` + ONE `service_diff_unpaid` item -> "collect_due"; the consultation gone or
     not live -> `cancelled` (hold released) -> "cancelled". The patient's message (the three
@@ -2079,10 +2127,12 @@ async def choose_after_expiry(
     expires_at`; outcomes in `ChoiceKind`:
 
     * "keep" -> `kept_old`, hold released -> "kept_old" (caller: `followup_kept_old`);
-    * "resend" -> the new window must still be held or holdable (`_window_fits` excluding its
-      own hold); a NEW adjustment (same `pending_edit`, `diff_cents`, mode `suspend`, new charge,
-      `expires_at` = now + the clinic's Pix TTL) takes over, the old one -> `expired`, the hold
-      is handed over (`booking_hold.extend_difference_hold_in(..., to_adjustment_id=)`) ->
+    * "resend" -> `resend_fits(now, ttl, old_start, new_start)` False -> "no_window"; else the
+      new window must still be held or holdable (`_window_fits` excluding its own hold); a NEW
+      adjustment (same `pending_edit`, `diff_cents`, mode `suspend`, new charge, `expires_at` =
+      `suspend_pix_expiry(...)`) takes over, the old one -> `expired`, the hold is handed over
+      (`booking_hold.extend_difference_hold_in(..., expires_at=difference_hold_expiry(...),
+      to_adjustment_id=)`) ->
       "resent" (caller sends `difference_pix_text`); no window -> "no_window"; the provider
       fails -> "resend_failed" (both: nothing changed, the caller re-sends the buttons);
     * "both" -> `cancelled`, hold released -> "cancel_old"; the CALLER then cancels the old
@@ -2177,6 +2227,12 @@ __all__ = [
     "choice_answer_text",
     "choice_buttons",
     "choice_deadline",
+    "difference_hold_expiry",
+    "resend_fits",
+    "suspend_cutoff",
+    "suspend_pix_expiry",
+    "MIN_SUSPEND_PIX",
+    "SWEEP_MARGIN",
     "choice_message_text",
     "choose_after_expiry",
     "followup_kept_old",

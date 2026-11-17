@@ -53,11 +53,17 @@ from secretaria.services.payments.service_change import (
     LABEL_CHOICE_BOTH,
     LABEL_CHOICE_KEEP,
     LABEL_CHOICE_RESEND,
+    MIN_SUSPEND_PIX,
+    SWEEP_MARGIN,
     ChoiceOutcome,
     ResultKind,
     ServiceChangeResult,
     choice_buttons,
     choice_deadline,
+    difference_hold_expiry,
+    resend_fits,
+    suspend_cutoff,
+    suspend_pix_expiry,
 )
 from tests.before_support import make_world
 from tests.payments_support import make_sessionmaker
@@ -154,23 +160,70 @@ def test_each_action_maps_to_one_choice():
 # --- the choice deadline (D-R8) --------------------------------------------------------------
 
 
-def test_the_choice_waits_24_hours_when_the_visit_is_far():
+def test_the_constants_of_the_window():
     assert CHOICE_TTL == timedelta(hours=24) and CHOICE_MIN_LEAD == timedelta(hours=1)
-    assert choice_deadline(NOW, NOW + timedelta(days=5)) == NOW + timedelta(hours=24)
-
-
-def test_the_choice_never_runs_past_one_hour_before_the_old_visit():
-    start = NOW + timedelta(hours=10)
-    assert choice_deadline(NOW, start) == start - timedelta(hours=1)
-
-
-@pytest.mark.parametrize("hours_ahead", [1, 0.5, -1])
-def test_no_room_for_a_choice_is_none(hours_ahead):
-    assert choice_deadline(NOW, NOW + timedelta(hours=hours_ahead)) is None
-
-
-def test_the_difference_hold_outlives_its_deadline_by_a_grace():
+    assert SWEEP_MARGIN == timedelta(minutes=5) and MIN_SUSPEND_PIX == timedelta(minutes=30)
     assert DIFFERENCE_HOLD_GRACE == timedelta(minutes=15)
+
+
+FAR = NOW + timedelta(days=5)
+
+
+def test_the_cutoff_is_before_the_earlier_of_the_two_visits():
+    """Fix round 1: the NEW visit counts too (moving a visit earlier must not let the choice
+    run past it)."""
+    old, new = NOW + timedelta(days=2), NOW + timedelta(hours=10)
+    expected = new - CHOICE_MIN_LEAD - SWEEP_MARGIN
+    assert suspend_cutoff(old, new) == expected == suspend_cutoff(new, old)
+
+
+def test_the_choice_waits_24_hours_when_both_visits_are_far():
+    assert choice_deadline(NOW, FAR, FAR + timedelta(days=1)) == NOW + timedelta(hours=24)
+
+
+def test_the_choice_never_runs_past_the_cutoff_of_either_visit():
+    near = NOW + timedelta(hours=10)
+    cutoff = near - timedelta(hours=1, minutes=5)
+    assert choice_deadline(NOW, near, FAR) == cutoff
+    assert choice_deadline(NOW, FAR, near) == cutoff
+
+
+@pytest.mark.parametrize("minutes_ahead", [65, 60, 30, -60])
+def test_no_room_for_a_choice_is_none(minutes_ahead):
+    near = NOW + timedelta(minutes=minutes_ahead)
+    assert choice_deadline(NOW, near, FAR) is None
+    assert choice_deadline(NOW, FAR, near) is None
+
+
+def test_the_suspended_pix_takes_the_clinic_ttl_when_there_is_room():
+    assert suspend_pix_expiry(NOW, 30, FAR, FAR) == NOW + timedelta(minutes=30)
+
+
+def test_the_suspended_pix_is_capped_at_the_cutoff():
+    near = NOW + timedelta(hours=2)  # cutoff = NOW + 55 min
+    assert suspend_pix_expiry(NOW, 120, near, FAR) == NOW + timedelta(minutes=55)
+
+
+def test_without_a_minimally_useful_pix_the_change_is_not_suspended():
+    """Less than min(ttl, 30 min) before the cutoff -> None -> the legacy deferred mode."""
+    near = NOW + timedelta(hours=1, minutes=34)  # cutoff = NOW + 29 min
+    assert suspend_pix_expiry(NOW, 30, near, FAR) is None
+    assert suspend_pix_expiry(NOW, 30, FAR, near) is None
+    # A clinic TTL shorter than the floor is its own floor.
+    assert suspend_pix_expiry(NOW, 10, near, FAR) == NOW + timedelta(minutes=10)
+
+
+def test_resend_needs_an_hour_before_the_new_visit_and_a_useful_pix():
+    assert resend_fits(NOW, 30, FAR, FAR)
+    assert not resend_fits(NOW, 30, FAR, NOW + timedelta(minutes=59))
+    assert not resend_fits(NOW, 30, NOW + timedelta(hours=1, minutes=34), FAR)
+
+
+def test_the_hold_never_outlives_the_new_visit():
+    deadline = NOW + timedelta(hours=3)
+    assert difference_hold_expiry(deadline, FAR) == deadline + DIFFERENCE_HOLD_GRACE
+    new_start = deadline + timedelta(minutes=5)
+    assert difference_hold_expiry(deadline, new_start) == new_start
 
 
 # --- the frozen signatures of what S1..S3b implement ----------------------------------------
@@ -359,6 +412,58 @@ async def test_the_clause_is_scoped_by_clinic(db):
         assert not await adjustment_queries.is_suspended(
             session, tenant_id=other.tenant_id, appointment_id=appointment.id
         )
+
+
+async def test_the_clause_works_on_an_aliased_appointments_table(db):
+    from sqlalchemy.orm import aliased
+
+    async with db() as session:
+        world = await make_world(session)
+    async with db() as session:
+        suspended = await _appointment_with(
+            session, world, mode=MODE_SUSPEND, status=STATUS_AWAITING_CHOICE
+        )
+        plain = await _appointment_with(session, world, mode=None, status=None)
+        await session.commit()
+    other = aliased(Appointment)
+    async with db() as session:
+        hidden = set(
+            await session.scalars(
+                select(other.id).where(
+                    adjustment_queries.suspended_clause(other.id, other.tenant_id)
+                )
+            )
+        )
+        shown = set(
+            await session.scalars(
+                select(other.id).where(
+                    adjustment_queries.visible_to_patient_clause(other.id, other.tenant_id)
+                )
+            )
+        )
+    assert hidden == {suspended.id} and shown == {plain.id}
+
+
+async def test_open_suspension_names_the_change_and_the_patient_text(db):
+    async with db() as session:
+        world = await make_world(session)
+    async with db() as session:
+        suspended = await _appointment_with(
+            session, world, mode=MODE_SUSPEND, status=STATUS_AWAITING_PAYMENT
+        )
+        plain = await _appointment_with(
+            session, world, mode=MODE_APPLIED, status=STATUS_AWAITING_PAYMENT
+        )
+        await session.commit()
+    async with db() as session:
+        found = await adjustment_queries.open_suspension(
+            session, tenant_id=world.tenant_id, appointment_id=suspended.id
+        )
+        none = await adjustment_queries.open_suspension(
+            session, tenant_id=world.tenant_id, appointment_id=plain.id
+        )
+    assert found is not None and found.mode == MODE_SUSPEND and none is None
+    assert "aguardando o Pix da diferença" in adjustment_queries.SUSPENDED_VISIT_TEXT
 
 
 def test_the_clause_lives_in_a_module_that_imports_only_models():

@@ -369,3 +369,51 @@ async def test_another_clinic_never_sees_the_hold(db):
         await session.commit()
         assert not await holds.live_hold_overlaps(session, other_world.tenant_id, START, END)
     assert await holds.held_windows(other_world.tenant_id, None) == []
+
+
+async def test_a_refused_re_place_keeps_the_change_own_previous_hold(db):
+    """Fix round 1: "None = nothing written" - the conflict is checked BEFORE the own previous
+    hold is replaced, so a refused move never leaves the change without its hold."""
+    world, adjustment = await _setup(db)
+    async with db() as session:
+        first = await _place(session, world, adjustment)
+        await session.commit()
+    elsewhere = START + timedelta(hours=8)
+    await holds.place_hold(
+        tenant_id=world.tenant_id,
+        conversation_id=world.conversation.id,
+        patient_id=world.patient.id,
+        professional_id=None,
+        appointment_type="Consulta",
+        insurance=None,
+        start_at=elsewhere,
+        end_at=elsewhere + timedelta(minutes=30),
+        phase="payment",
+        charge_id=uuid4(),
+    )
+    async with db() as session:
+        refused = await _place(
+            session, world, adjustment, start_at=elsewhere,
+            end_at=elsewhere + timedelta(minutes=60),
+        )
+        await session.commit()
+    async with db() as session:
+        kept = await holds.difference_hold_in(session, adjustment.id)
+
+    assert refused is None
+    assert kept is not None and kept.id == first.id and kept.start_at == START
+
+
+async def test_a_difference_hold_never_outlives_the_start_of_its_window(db):
+    world, adjustment = await _setup(db)
+    async with db() as session:
+        placed = await _place(session, world, adjustment, expires_at=START + timedelta(hours=2))
+        await session.commit()
+    async with db() as session:
+        extended = await holds.extend_difference_hold_in(
+            session, adjustment.id, expires_at=START + timedelta(days=1)
+        )
+        await session.commit()
+
+    assert placed.expires_at == START
+    assert extended is not None and extended.expires_at == START
