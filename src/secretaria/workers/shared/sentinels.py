@@ -418,7 +418,11 @@ async def _handle_select_professional(
             waba_token=waba_token,
         )
         return
-    result = _enter_professional_services(professional, ctx.tenant_snapshot)
+    result = _enter_professional_services(
+        professional,
+        ctx.tenant_snapshot,
+        insurance=ctx.conversation.flow_selected_insurance,
+    )
     # Built here, not by route(), so `_carry_booking` never saw it: keep the authorized
     # attendee and the convênio answer of the booking this hand-back continues - FRESH.
     # (An unanswered convênio is asked at "Sim, agendar".)
@@ -923,7 +927,9 @@ async def _legacy_booking_draft(
         # resolver), so the next list is the booking's own, never the question again.
         stored_type = canonical_service_name(fresh_services, stored_type)
         if professional is not None:
-            result = _enter_professional_services(professional, tenant_snapshot)
+            result = _enter_professional_services(
+                professional, tenant_snapshot, insurance=insurance
+            )
         else:
             result = _start_booking(tenant_snapshot, professional_rows, insurance=insurance)
         if result.action == "professional_config_incomplete":
@@ -961,7 +967,9 @@ async def _legacy_booking_draft(
             await _menu(hb.FALLBACK_MISSING_PROFESSIONAL)
             return
         if appointment_type is None:
-            result = _enter_professional_services(professional, tenant_snapshot)
+            result = _enter_professional_services(
+                professional, tenant_snapshot, insurance=insurance
+            )
             if result.flow_state == FlowState.SERVICE_CATALOG:
                 result.flow_selected_insurance = insurance
                 result.flow_attendee_name = attendee

@@ -835,7 +835,11 @@ def _service_list(
         at_unit.id if at_unit is not None else _uuid(draft.current.get("unit_id")),
     )
     if refused:
+        marked_unit = at_unit.id if at_unit is not None else _uuid(draft.current.get("unit_id"))
         scope = {**scope, "insurance": draft.current["insurance"], SCOPE_UNIT_MARKS: True}
+        if marked_unit is not None:
+            # The Portal's later pages mark at the same unit page 1 used (list_options).
+            scope.setdefault("unit_id", str(marked_unit))
     rows: list[tuple] = _mark_refused_services(
         fr.service_page_rows(
             services, page, fixed_rows=len(pinned), event="edit_service_list_paged"

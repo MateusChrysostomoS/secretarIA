@@ -23,7 +23,7 @@ import pytest  # noqa: E402
 from secretaria.ai.formatter import TextBubble  # noqa: E402
 from secretaria.services import booking_draft as bd, flow_router as fr  # noqa: E402
 from secretaria.services.booking_draft import BookingDraft, draft_from_record  # noqa: E402
-from secretaria.services.flow_units import STEP_AWAITING_UNIT  # noqa: E402
+from secretaria.services.flow_units import STEP_AWAITING_UNIT_CONFIRM  # noqa: E402
 from secretaria.services.insurance_acceptance import AcceptanceExceptions  # noqa: E402
 from secretaria.services.unit_booking import UnitOption  # noqa: E402
 from tests.test_booking_draft_resolver import (  # noqa: E402
@@ -198,11 +198,13 @@ async def test_unit_unknown_and_refused_everywhere_lands_on_the_convenio_step():
 
 
 async def test_unit_unknown_and_accepted_somewhere_asks_the_unit():
+    # Integrated with T4a's unit filter: Centro refuses the plan, so the only unit left is Sul
+    # and the flow asks to confirm it (the convênio-specific confirm card), never the convênio.
     centro, sul = _unit("Centro"), _unit("Sul")
     sole = _with_units(_sole(), centro, sul)
     refused = _shared((str(CONSULTA), str(centro.id), PLAN))
     res = await _resolve(FULL, tenant=_clinic(refused=refused), pros=[sole])
-    assert res.landing_step == STEP_AWAITING_UNIT
+    assert res.landing_step == STEP_AWAITING_UNIT_CONFIRM
 
 
 async def test_a_picked_unit_that_refuses_lands_on_the_convenio_step():

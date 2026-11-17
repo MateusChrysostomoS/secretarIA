@@ -214,6 +214,17 @@ def _service_refused(
     if not isinstance(insurance, str):
         return frozenset()
     which = scope.get("list")
+    unit_id = _uuid(scope.get("unit_id"))
+    if unit_id is not None and which in ("doctor", SCOPE_DOCTOR_UNIT):
+        # "Alterar consulta" (A12): the card marked the services at ITS unit (the booking's,
+        # or the one the services-at-unit list is about), so later pages must ask the same.
+        professional_id = _uuid(scope.get("professional_id"))
+        doctor = (
+            fr._find_professional_by_id(professionals, professional_id)
+            if professional_id is not None
+            else None
+        )
+        return frozenset(aef._refused_service_names(tenant, doctor, services, insurance, unit_id))
     professional = None
     if which == "doctor":
         professional_id = _uuid(scope.get("professional_id"))
@@ -256,7 +267,15 @@ def _resolve_named(
         if scope.get("edit") is True:
             # "Alterar consulta": past page 1 there is no live free/busy mark (that needs
             # the appointment's agenda); the convênio mark and the specialty stay.
-            rows = aef.edit_professional_rows(tenant, pool, insurance)
+            service = scope.get("service")
+            units = scope.get("units")
+            rows = aef.edit_professional_rows(
+                tenant,
+                pool,
+                insurance,
+                service=service if isinstance(service, str) else None,
+                units=units if isinstance(units, dict) else None,
+            )
         else:
             service = scope.get("service")
             rows = fr.portal_professional_rows(
@@ -270,7 +289,13 @@ def _resolve_named(
             doctor = (
                 fr._find_professional_by_id(roster, doctor_id) if doctor_id is not None else None
             )
-            rows = aef.edit_insurance_rows(tenant, plans, doctor)
+            rows = aef.edit_insurance_rows(
+                tenant,
+                plans,
+                doctor,
+                service_id=_uuid(scope.get("service_id")),
+                unit_id=_uuid(scope.get("unit_id")),
+            )
         else:
             service = scope.get("service")
             if isinstance(service, str):

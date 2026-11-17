@@ -706,7 +706,10 @@ async def _resolve(
     # 2. Convênio, when the clinic collects it.
     if fr._insurance_step_skip_reason(tenant) is None and checked.insurance is None:
         return asked(
-            fr._enter_insurance(tenant, state), FIELD_FOR_WHOM, FIELD_PROFESSIONAL, FIELD_SERVICE
+            fr._enter_insurance(tenant, state, professionals=professionals),
+            FIELD_FOR_WHOM,
+            FIELD_PROFESSIONAL,
+            FIELD_SERVICE,
         )
     # 3. Profissional (multi-doctor clinics; implicit otherwise).
     if (
@@ -717,7 +720,9 @@ async def _resolve(
     # 4. Serviço.
     if checked.service is None:
         result = (
-            fr._enter_professional_services(checked.professional, tenant)
+            fr._enter_professional_services(
+                checked.professional, tenant, insurance=checked.insurance
+            )
             if checked.multi
             else fr._start_booking(tenant, professionals, insurance=checked.insurance)
         )
@@ -734,7 +739,7 @@ async def _resolve(
     ):
         checked.insurance = None
         state.flow_selected_insurance = None
-        result = fr._enter_insurance(tenant, state)
+        result = fr._enter_insurance(tenant, state, professionals=professionals)
         result.bubbles = [TextBubble(body=DRAFT_PLAN_NOT_ACCEPTED_PREFIX), *result.bubbles]
         return asked(result, FIELD_FOR_WHOM, FIELD_PROFESSIONAL, FIELD_SERVICE)
     # 5-6. Dia e horário.

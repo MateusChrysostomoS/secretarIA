@@ -593,8 +593,23 @@ async def _service_unit_refusal(
     if tenant_id is None or unit is None or professional is None or not canonical_type:
         return None
     from secretaria.ai.unit_scope import service_unit_refusal
+    from secretaria.core.database import async_session_factory
 
     try:
+        # TASK-086 integration: the turn's catalog holds `RuntimeAppointmentType` objects with no
+        # `service_id` (and `entry_service_id` only reads dicts), so the unit check used to fail
+        # on every real turn and refuse as "lookup failed". Resolve the id from the stored
+        # entries (same helper as the convênio check) and hand the check a one-entry dict catalog.
+        if not any(isinstance(entry, dict) for entry in catalog):
+            async with async_session_factory() as session:
+                service_id = await _booking_service_id(
+                    session, tenant_id, getattr(professional, "id", None), catalog, canonical_type
+                )
+            catalog = (
+                [{"name": canonical_type, "service_id": str(service_id)}]
+                if service_id is not None
+                else []
+            )
         return await service_unit_refusal(tenant_id, professional, unit, catalog, canonical_type)
     except Exception as exc:  # noqa: BLE001 - see the docstring
         logger.warning(

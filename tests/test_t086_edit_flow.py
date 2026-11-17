@@ -489,3 +489,27 @@ async def test_matrix_marked_cards_carry_their_context_in_the_scope_and_round_tr
         unit_id=scope["unit_id"],
     )
     assert again == plans.bubbles[0].source.items
+
+
+async def test_portal_later_pages_resolve_the_same_marks_as_the_card():
+    """Integration (list_options, TASK-086): the Portal's pages/taps after page 1 re-resolve the
+    edit doctor and convênio lists through `list_options` with the card's scope - same marks."""
+    from secretaria.services import list_options
+
+    a, b = _doctor("Dr. A", [CENTRO]), _doctor("Dra. B", [SUL])
+    snapshot = _shared((SVC_C, SUL, P_UNIMED), (SVC_C, CENTRO, P_AMIL))
+    appt = _appt(a)
+
+    doctors = await _step(
+        snapshot, fr.STEP_EDIT_MENU, ae.LABEL_EDIT_DOCTOR, appt=appt, doctors=[a, b]
+    )
+    source = doctors.bubbles[0].source
+    rows = list_options.resolve(list_options.KIND_PROFESSIONAL, source.scope, snapshot, [a, b])
+    assert _descriptions(rows) == {f"prof|{a.id}": "aceita o convênio", f"prof|{b.id}": None}
+
+    plans = await _step(
+        snapshot, fr.STEP_EDIT_MORE, ae.LABEL_EDIT_INSURANCE, appt=appt, doctors=[a]
+    )
+    source = plans.bubbles[0].source
+    rows = list_options.resolve(list_options.KIND_INSURANCE, source.scope, snapshot, [a])
+    assert rows == source.items

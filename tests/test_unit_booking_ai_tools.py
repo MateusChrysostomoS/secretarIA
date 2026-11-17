@@ -539,3 +539,45 @@ async def test_list_units_named_doctor_without_units_invents_none(db):
         result = await mu.list_units.ainvoke({"professional_name": "Dr. Caio"})
     assert result["units"] == []
     assert "Dr. Caio" in result["note"]
+
+
+def _runtime(name):
+    """The shape the turn really carries (`TenantRuntimeConfig.appointment_types`): no ids."""
+    from secretaria.services.tenant_config import RuntimeAppointmentType
+
+    return RuntimeAppointmentType(name=name, description=None, duration_min=30)
+
+
+async def test_the_base_create_event_unit_check_works_with_the_real_runtime_catalog(db):
+    """TASK-086 integration: with the production catalog shape (objects, no `service_id`) the
+    unit check resolved nothing and refused EVERY booking as "lookup failed". It now resolves
+    the id from the doctor's stored entries: a service done at the only unit books."""
+    tenant, centro, _sul, doctors = await _seed(db, links={"Dra. Ana": ["Centro"]})
+    ana, limpeza = doctors["Dra. Ana"], uuid4()
+    await _restrict(db, ana, limpeza, centro, entries=[_entry("Limpeza", limpeza)])
+    agenda = _Agenda()
+    with _context(
+        tenant.id, calendar=agenda, sole=ana.id, appointment_types=[_runtime("Limpeza")]
+    ):
+        booked = await ai_tools.create_event.ainvoke({"appointment_type": "Limpeza", **WINDOW})
+    assert "id" in booked, booked
+    [appointment] = await _appointments(db)
+    assert appointment.unit_id == centro.id
+
+
+async def test_the_base_create_event_still_refuses_a_unit_without_the_service_at_runtime(db):
+    tenant, centro, sul, doctors = await _seed(db, links={"Dra. Ana": ["Centro"]})
+    ana, limpeza = doctors["Dra. Ana"], uuid4()
+    async with db() as session:
+        session.add(ProfessionalUnit(professional_id=ana.id, unit_id=sul.id, business_hours={}))
+        await session.commit()
+    await _restrict(db, ana, limpeza, sul, entries=[_entry("Limpeza", limpeza)])
+    agenda = _Agenda()
+    with _context(
+        tenant.id, calendar=agenda, sole=ana.id, appointment_types=[_runtime("Limpeza")]
+    ):
+        refused = await ai_tools.create_event.ainvoke({"appointment_type": "Limpeza", **WINDOW})
+    assert "Esse serviço não é feito nessa unidade" in refused["error"]
+    assert await _appointments(db) == []
+    assert agenda.log["created"] == []
+    assert centro.id != sul.id
