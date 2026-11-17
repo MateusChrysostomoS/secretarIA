@@ -506,6 +506,15 @@ def _format_patient_identity(config: TenantRuntimeConfig, *, name_tool: bool = T
     )
 
 
+# TASK-086 A16: convênio acceptance is per (professional, service, unit) - the matrix lives in the
+# flow, never in the prompt (no plan names, no cells: PII and size). One sentence, only when the
+# clinic has convênios.
+INSURANCE_ACCEPTANCE_VARIES = (
+    "A aceitação de um convênio pode variar por profissional, serviço e unidade: nunca garanta "
+    "que um convênio vale para um serviço; quem confere é o fluxo."
+)
+
+
 def _format_clinic_features(config: TenantRuntimeConfig) -> str:
     """The "RECURSOS DESTA CLÍNICA" block: what is ON / OFF here, and the ban on the OFF ones."""
     features = config.clinic_features
@@ -531,6 +540,7 @@ def _format_clinic_features(config: TenantRuntimeConfig) -> str:
         'nunca fale de sinal, Pix, pagamento antecipado nem "aguardando pagamento"). Sobre '
         "convênio, só confirme os cadastrados; se perguntarem por outro, diga que não consta "
         "e ofereça a recepção."
+        + (f" {INSURANCE_ACCEPTANCE_VARIES}" if features.insurance_plan_count else "")
     )
 
 
