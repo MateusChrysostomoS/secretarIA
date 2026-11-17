@@ -124,8 +124,9 @@ async def test_a_paid_draft_that_changes_the_doctor_goes_to_the_worker():
         fr.STEP_EDIT_CONFIRM,
         fr.LABEL_CONFIRM,
         draft=draft,
-        ctx=context(calendars={str(DOCTOR_A): calendar, str(DOCTOR_B): calendar},
-                    paid_deposit=True),
+        ctx=context(
+            calendars={str(DOCTOR_A): calendar, str(DOCTOR_B): calendar}, paid_deposit=True
+        ),
     )
 
     assert result.appointment_edit["calendar_deferred"] is True

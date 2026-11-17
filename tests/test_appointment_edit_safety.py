@@ -146,7 +146,7 @@ async def test_a_concurrently_changed_appointment_is_not_overwritten():
 
 
 @pytest.mark.parametrize("change", ["insurance", "professional_id", "service", "start_at"])
-async def test_new_pix_restrictions_block_confirmation_of_a_parked_draft(change):
+async def test_a_parked_draft_under_new_pix_guards_defers_money_and_blocks_time(change):
     appt = appointment()
     values = {
         "insurance": "Amil",

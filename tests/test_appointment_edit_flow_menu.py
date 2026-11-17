@@ -79,9 +79,10 @@ def test_a_paid_deposit_offers_every_field_with_the_notice():
         ae.LABEL_EDIT_DOCTOR,
         ae.LABEL_EDIT_MORE,
     ]
-    assert ae.EDIT_PIX_NOTICE in result.bubbles[0].body
-    assert "médico ou convênio" in ae.EDIT_PIX_NOTICE
-    assert "diferença" in ae.EDIT_PIX_NOTICE
+    assert result.bubbles[0].body == f"{ae.EDIT_MENU_BODY}\n\n{ae.EDIT_PIX_NOTICE}"
+    assert "fale com a clínica" not in ae.EDIT_PIX_NOTICE  # nothing is refused any more
+    for field in ("serviço", "unidade", "médico", "convênio", "diferença"):
+        assert field in ae.EDIT_PIX_NOTICE
 
 
 def test_a_paid_deposit_at_the_reschedule_limit_still_offers_the_service():

@@ -74,7 +74,7 @@ async def test_legacy_book_another_edits_the_existing_booking_instead(db, calend
     ).status == AppointmentStatus.SCHEDULED
 
 
-async def test_legacy_book_another_with_paid_deposit_hides_price_changes(db, calendar):  # noqa: F811
+async def test_legacy_book_another_with_paid_deposit_offers_every_field(db, calendar):  # noqa: F811
     world = await seed_world(db, start_at=_future(hours=5))
     await seed_paid_deposit(db, world)
     rid = await add_reminder(db, world, kind="hour")

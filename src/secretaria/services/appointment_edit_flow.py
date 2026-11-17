@@ -507,11 +507,18 @@ async def _after_slot_affecting_change(
 
 def _no_room(draft: ae.EditDraft, ctx: ae.EditContext) -> fr.FlowRouterResult:
     """The new window does not fit and the time may not move (Pix reschedule limit): the
-    service goes back to what it was, with the one line that says why."""
+    service goes back to what it was, with the one line that says why.
+
+    TASK-085 R fix round 1: a NEW doctor (offered at the limit since D-R3) busy at that time
+    goes back too - doctor, service, unit and time are the appointment's own again, behind a
+    doctor line - so Confirmar never loops on a doctor who cannot take the consultation."""
+    if draft.current["professional_id"] != draft.original["professional_id"]:
+        undone = _undo_doctor_change(draft).with_changes(
+            start_at=draft.original["start_at"], end_at=draft.original["end_at"]
+        )
+        return _refuse(undone, ctx, ae.EDIT_DOCTOR_NO_ROOM)
     keep = {key: draft.original[key] for key in ("service", "start_at", "end_at")}
-    if "unit_id" in draft.original and (
-        draft.current["professional_id"] == draft.original["professional_id"]
-    ):
+    if "unit_id" in draft.original:
         # Follow-up E1: a unit picked for that service goes back with it.
         keep["unit_id"] = draft.original["unit_id"]
     menu = _menu_result(draft.with_changes(**keep).with_stage(), ctx)

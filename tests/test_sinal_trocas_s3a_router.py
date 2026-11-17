@@ -48,6 +48,7 @@ from tests._edit_flow_support import (  # noqa: E402
 )
 from tests.test_appointment_edit_units import (  # noqa: E402
     CENTRO,
+    NORTE,
     SUL,
     _Agenda,
     _appt,
@@ -286,6 +287,86 @@ async def test_a_paid_unit_change_is_deferred_even_at_the_same_doctor():
     assert edit is not None and edit["calendar_deferred"] is True
     assert edit["unit_id"] == SUL.id
     assert agenda.log.created == [] and agenda.log.descriptions == []
+
+
+async def test_a_paid_doctor_and_unit_change_is_deferred_with_the_new_unit():
+    """Fix round 1: a new doctor AND his unit, window free there -> deferred, the edit carries
+    the new unit (the worker prices and writes it), nothing written on any agenda."""
+    ana = _doctor("Dra. Ana", [CENTRO], types=_types("Consulta"))
+    beto = _doctor("Dr. Beto", [NORTE], types=_types("Consulta"))
+    agendas = {ana.id: _Agenda(), beto.id: _Agenda()}
+    appt = _appt(ana)
+    draft = ae.EditDraft.from_appointment(appt, TZ).with_changes(
+        professional_id=str(beto.id), unit_id=str(NORTE.id)
+    )
+    ctx = ae.EditContext(
+        calendars={str(d.id): agendas[d.id] for d in (ana, beto)}, paid_deposit=True
+    )
+    result = await edit_step(
+        conversation(draft, fr.STEP_EDIT_CONFIRM),
+        tenant(),
+        fr.LABEL_CONFIRM,
+        [appt],
+        [ana, beto],
+        ctx,
+        "Maria",
+    )
+    edit = result.appointment_edit
+    assert edit is not None and edit["calendar_deferred"] is True
+    assert edit["professional_id"] == beto.id and edit["unit_id"] == NORTE.id
+    assert agendas[beto.id].log.checked_hours  # the new doctor's window was checked
+    assert agendas[beto.id].log.created == [] and agendas[ana.id].log.created == []
+
+
+# --- Fix round 1: at the reschedule limit a busy new doctor goes back, in plain words -----
+
+
+def _limit_ctx(*, free_b: bool):
+    _old, new, cals = _two_agendas(free_b=free_b)
+    return new, context(calendars=cals, paid_deposit=True, reschedule_blocked=True)
+
+
+async def test_at_the_limit_a_busy_new_doctor_goes_back_with_a_doctor_line():
+    new, ctx = _limit_ctx(free_b=False)
+    doctor_b = professionals()[1]
+    tap = f"{fr._professional_row_title(doctor_b.name)} ({doctor_b.id})"
+    result = await _step(fr.STEP_EDIT_DOCTOR, tap, ctx=ctx)
+
+    assert result.flow_step == fr.STEP_EDIT_MENU
+    assert result.bubbles[0].body == ae.EDIT_DOCTOR_NO_ROOM
+    assert ae.EDIT_SERVICE_NO_ROOM not in [getattr(b, "body", None) for b in result.bubbles]
+    back = _draft(result)
+    assert back.current["professional_id"] == str(DOCTOR_A)
+    assert back.changed() == []
+    assert new.created == [] and new.detail_updates == []
+
+
+async def test_at_the_limit_confirming_a_parked_busy_doctor_never_loops():
+    """A doctor drafted before the limit was reached: Confirmar finds him busy -> the doctor
+    line and the appointment's own doctor again; a second Confirmar says nothing changed."""
+    new, ctx = _limit_ctx(free_b=False)
+    draft = draft_for().with_changes(professional_id=str(DOCTOR_B), end_at="2030-10-15T15:50")
+    first = await _confirm(draft, ctx=ctx)
+    assert first.appointment_edit is None
+    assert first.bubbles[0].body == ae.EDIT_DOCTOR_NO_ROOM
+    back = _draft(first)
+    assert back.changed() == []
+    assert back.current["end_at"] == draft.original["end_at"]
+    again = await _confirm(back, ctx=ctx)
+    assert again.bubbles[0].body == ae.EDIT_NOTHING_CHANGED
+    assert new.created == [] and new.detail_updates == []
+
+
+def test_the_doctor_line_is_plain_and_offers_a_way_out():
+    assert "outro médico" in ae.EDIT_DOCTOR_NO_ROOM and "clínica" in ae.EDIT_DOCTOR_NO_ROOM
+
+
+async def test_at_the_limit_a_free_new_doctor_is_still_deferred():
+    new, ctx = _limit_ctx(free_b=True)
+    draft = draft_for().with_changes(professional_id=str(DOCTOR_B), end_at="2030-10-15T15:50")
+    result = await _confirm(draft, ctx=ctx)
+    assert result.appointment_edit["calendar_deferred"] is True
+    assert new.created == []
 
 
 # --- D-R3: the AI may draft the doctor and the convênio with a paid sinal -----------------
