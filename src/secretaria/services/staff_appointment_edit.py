@@ -82,10 +82,12 @@ from secretaria.services.calendar import (
     overlaps_other_agenda,
     own_agenda_view,
 )
+from secretaria.services.insurance_acceptance import booking_refused, log_refusal
 from secretaria.services.patient_context import as_utc
 from secretaria.services.payments import service_change
 from secretaria.services.professional_edit_outbox import record_professional_edit
 from secretaria.services.service_catalog import (
+    entry_service_id,
     load_service_catalog,
     normalize as normalize_service_name,
 )
@@ -193,6 +195,9 @@ class StaffEditOutcome:
     # TASK-083 spec §7.4: the new window overlaps the doctor's time at another clinic sharing
     # his agenda. A warning for the hub's answer; the edit was applied all the same.
     conflicts_other_agenda: bool = False
+    # TASK-086 E7: the convênio, service or doctor changed and the FINAL (service, unit, plan)
+    # is a refused cell of the acceptance matrix. A warning only - the edit stands.
+    insurance_not_accepted: bool = False
 
 
 # `request_service_change` refused (`ServiceChangeResult.reason`): what the clinic reads.
@@ -813,6 +818,7 @@ async def apply_staff_edit(
             )
             if kept is None:
                 edit["unit_id"] = None
+        final_unit_id = edit["unit_id"] if "unit_id" in edit else locked.unit_id
         fields = await write_appointment_edit(
             session,
             locked,
@@ -936,6 +942,9 @@ async def apply_staff_edit(
         )
         if money.kind == "awaiting_payment":
             told = now_changes  # the service did not change yet
+    insurance_not_accepted = await _insurance_not_accepted(
+        session, tenant, appointment_id, before, target, final_unit_id
+    )
     logger.info(
         "hub_appointment_edited",
         appointment_id=str(appointment_id),
@@ -953,7 +962,65 @@ async def apply_staff_edit(
         notice_version=notice_version,
         service_change=outcome_change,
         conflicts_other_agenda=conflicts_other_agenda,
+        insurance_not_accepted=insurance_not_accepted,
     )
+
+
+async def _insurance_not_accepted(
+    session: AsyncSession,
+    tenant: Tenant,
+    appointment_id: UUID,
+    before: _Before,
+    target: _Target,
+    unit_id: UUID | None,
+) -> bool:
+    """TASK-086 E7: the hub's warning, read AFTER the commit (the edit already stands).
+
+    Asked only when what the matrix judges changed - the convênio, the service or the doctor
+    (a doctor change is also what can move the unit) - never on a time/attendee/phone-only edit
+    (R14: acceptance does not depend on the time). The cell is the FINAL one: the target's
+    doctor, service (also when a paid sinal makes it wait for the difference Pix) and convênio,
+    at the unit the row kept. The same database guard the patient's booking uses
+    (`insurance_acceptance.booking_refused`): fresh, tenant-scoped, mode-aware; Particular, a
+    typed "Outro", an unlinked service -> never refused. A failed read never fails the edit:
+    it answers False and logs the error type.
+    """
+    if (
+        _clean(before.insurance) == _clean(target.insurance)
+        and normalize_service_name(before.service) == normalize_service_name(target.service)
+        and before.professional_id == target.professional_id
+        and before.unit_id == unit_id
+    ):
+        return False
+    try:
+        offered = await _offered_service(session, tenant, target.professional_id, target.service)
+        service_id = entry_service_id(offered) if offered is not None else None
+        refused = await booking_refused(
+            session,
+            tenant_id=tenant.id,
+            professional_id=target.professional_id,
+            service_id=service_id,
+            unit_id=unit_id,
+            insurance=target.insurance,
+        )
+    except Exception as exc:  # noqa: BLE001 - a warning must never fail a committed edit
+        await session.rollback()
+        logger.warning(
+            "hub_edit_insurance_check_failed",
+            appointment_id=str(appointment_id),
+            error_type=type(exc).__name__,
+        )
+        return False
+    if refused:
+        log_refusal(
+            "hub_edit_insurance_not_accepted",
+            tenant_id=tenant.id,
+            appointment_id=appointment_id,
+            professional_id=target.professional_id,
+            service_id=service_id,
+            unit_id=unit_id,
+        )
+    return refused
 
 
 async def _paid_deposit(
