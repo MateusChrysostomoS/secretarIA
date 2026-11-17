@@ -485,6 +485,9 @@ class AppointmentEditRead(AppointmentActionRead):
     service_change: AppointmentServiceChangeRead | None = None
     # TASK-083 spec §7.4: see AppointmentWriteRead.conflicts_other_agenda.
     conflicts_other_agenda: bool = False
+    # TASK-086 E7: the convênio, service or doctor changed and the final (service, unit,
+    # convênio) is one the clinic marked as not accepted. A warning: the edit was saved.
+    insurance_not_accepted: bool = False
 
 
 class AppointmentCancelRead(AppointmentActionRead):

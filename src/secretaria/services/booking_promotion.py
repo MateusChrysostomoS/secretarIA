@@ -45,9 +45,20 @@ from secretaria.services.calendar import (
     build_patient_calendar_link,
     build_patient_link_details,
 )
+from secretaria.services.insurance_acceptance import booking_refused_by_ids, log_refusal
 from secretaria.services.insurance_catalog import resolve_booking_plan_ids
 from secretaria.services.local_calendar import LocalCalendarService, create_event_exclusive
-from secretaria.services.tenant_config import load_tenant_config, resolve_professional_calendar
+from secretaria.services.service_catalog import (
+    entry_service_id,
+    load_service_catalog,
+    normalize as normalize_service_name,
+)
+from secretaria.services.tenant_config import (
+    active_appointment_types,
+    load_tenant_config,
+    professional_appointment_types,
+    resolve_professional_calendar,
+)
 
 logger = get_logger(__name__)
 
@@ -166,6 +177,39 @@ async def slot_conflict(
     return None
 
 
+async def booking_service_id(
+    session: AsyncSession,
+    tenant_id: UUID,
+    professional_id: UUID | None,
+    service_name: str | None,
+) -> UUID | None:
+    """The catalog service a booking's service NAME points at, as this doctor offers it.
+
+    TASK-086: a booking (hold, Pix snapshot) carries the service by name; the acceptance matrix
+    is keyed by the catalog service id. Resolved the way the flow and the hub edit see it - the
+    doctor's own entries (`professional_appointment_types`, catalog-resolved), else the clinic's
+    - so an unlinked legacy entry, an unknown name or another clinic's doctor answers None
+    ("outside the matrix": never refused). Tenant-scoped reads only.
+    """
+    if not service_name or not str(service_name).strip():
+        return None
+    tenant = await session.get(Tenant, tenant_id)
+    if tenant is None:
+        return None
+    owner = await session.get(Professional, professional_id) if professional_id else None
+    if owner is not None and owner.tenant_id != tenant_id:
+        return None
+    catalog = await load_service_catalog(session, tenant_id)
+    offered = (
+        professional_appointment_types(owner, tenant, catalog or None)
+        if owner is not None
+        else active_appointment_types(tenant, catalog or None)
+    )
+    key = normalize_service_name(service_name)
+    entry = next((e for e in offered if normalize_service_name(e.get("name")) == key), None)
+    return entry_service_id(entry) if entry is not None else None
+
+
 @dataclass(frozen=True)
 class Promotion:
     appointment: Appointment
@@ -272,7 +316,43 @@ async def promote(
         return Promotion(existing, created=False)
     await session.commit()
     await session.refresh(deposit)
+    await _log_if_no_longer_accepted(session, tenant.id, appointment, snapshot)
     return Promotion(appointment, created=True)
+
+
+async def _log_if_no_longer_accepted(
+    session: AsyncSession, tenant_id: UUID, appointment: Appointment, snapshot: BookingSnapshot
+) -> None:
+    """TASK-086 A20: the paid booking stands even when the clinic stopped accepting its
+    convênio for this (service, unit) while the Pix was being paid - refusing would mean a
+    refund, and the flow's guard already ran before the Pix was asked. Only logged (ids only),
+    AFTER the commit, so this read can never undo or fail the paid booking."""
+    try:
+        service_id = await booking_service_id(
+            session, tenant_id, snapshot.professional_id, snapshot.appointment_type
+        )
+        refused = await booking_refused_by_ids(
+            session,
+            tenant_id=tenant_id,
+            professional_id=snapshot.professional_id,
+            service_id=service_id,
+            unit_id=appointment.unit_id,
+            tenant_plan_id=appointment.insurance_plan_id,
+            professional_plan_id=appointment.insurance_professional_plan_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - a log line must never touch a paid booking
+        await session.rollback()
+        logger.warning("booking_promotion_insurance_check_failed", error_type=type(exc).__name__)
+        return
+    if refused:
+        log_refusal(
+            "booking_promotion_insurance_no_longer_accepted",
+            tenant_id=tenant_id,
+            appointment_id=appointment.id,
+            professional_id=snapshot.professional_id,
+            service_id=service_id,
+            unit_id=appointment.unit_id,
+        )
 
 
 def confirmation_text(
@@ -341,6 +421,7 @@ def confirmation_text(
 
 __all__ = [
     "BookingSnapshot",
+    "booking_service_id",
     "Promotion",
     "calendar_for_booking",
     "confirmation_text",

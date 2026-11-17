@@ -1774,6 +1774,7 @@ async def edit_appointment(
         whatsapp_link=notice.whatsapp_link if notice is not None else None,
         service_change=service_change_read,
         conflicts_other_agenda=outcome.conflicts_other_agenda,
+        insurance_not_accepted=outcome.insurance_not_accepted,
     )
 
 
