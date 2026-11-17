@@ -87,8 +87,8 @@ EDIT_MORE_BODY = _EDIT_MORE_INTRO + "\n".join(_EDIT_MORE_LINES.values())
 
 
 def edit_menu_body(labels: list[str], *, insurance: bool = True) -> str:
-    """The menu text for exactly these buttons; `insurance=False` (paid sinal) drops the
-    convênio from the "Outro" bullet."""
+    """The menu text for exactly these buttons; `insurance=False` drops the convênio from the
+    "Outro" bullet (no caller hides it since TASK-085 R D-R3 - a paid sinal offers it too)."""
     lines = [
         _EDIT_MENU_MORE_NO_INSURANCE
         if label == LABEL_EDIT_MORE and not insurance
@@ -127,11 +127,12 @@ EDIT_KEPT = "Tudo bem, mantive sua consulta como estava."
 EDIT_APPLIED = "Pronto! Sua consulta foi atualizada. ✅"
 EDIT_NOTHING_CHANGED = "Você ainda não mudou nada. O que você quer alterar?"
 EDIT_STALE = "Essa consulta não está mais ativa."
-# 2026-10-26: the service may change with a paid sinal - the difference of the sinal is settled
-# (services/payments/service_change.py); the doctor and the convênio still may not.
+# TASK-085 R (D-R1/D-R3, 2026-11-17): with a paid sinal every field may change; a change of the
+# service, the unit, the doctor or the convênio may move the sinal and the difference is settled
+# (services/payments/service_change.py, decided by the worker at Confirmar).
 EDIT_PIX_NOTICE = (
-    "Como essa consulta tem sinal pago, para mudar médico ou convênio fale com a clínica. "
-    "Se trocar o serviço, acertamos a diferença do sinal."
+    "Como essa consulta tem sinal pago, trocar serviço, unidade, médico ou convênio pode "
+    "mudar o sinal: acertamos a diferença."
 )
 EDIT_SERVICE_NO_ROOM = (
     "Esse serviço não cabe no horário atual da sua consulta e o limite de remarcações já foi "
@@ -326,15 +327,21 @@ class EditContext:
     """What the worker hands the router for an edit turn (the router does no I/O).
 
     `calendars` maps a professional id (str) or "tenant" to that agenda's CalendarService
-    (None when it could not be built). `paid_deposit` hides doctor/convênio and makes a
-    service change a money decision taken by the worker at Confirmar (the difference of the
-    sinal, services/payments/service_change.py); `reschedule_blocked` hides date/time (the
-    Pix reschedule limit was reached).
+    (None when it could not be built). `paid_deposit` adds the sinal notice to the menu and
+    makes every change of a money field (service, unit, doctor, convênio -
+    `service_change_policy.money_fields_changed`) a money decision taken by the worker at
+    Confirmar (`calendar_deferred`; the difference of the sinal,
+    services/payments/service_change.py) - TASK-085 R D-R1/D-R3: nothing is hidden for it any
+    more. `reschedule_blocked` hides date/time (the Pix reschedule limit was reached).
+    `suspended` (TASK-085 R, contrato §3.8): the consultation waits for the Pix of the
+    difference of a change the patient asked for (`adjustment_suspension.is_suspended`) - the
+    edit is refused with `SUSPENDED_VISIT_TEXT` and nothing changes. The worker fills it.
     """
 
     calendars: dict[str, Any] = field(default_factory=dict)
     paid_deposit: bool = False
     reschedule_blocked: bool = False
+    suspended: bool = False
 
     def calendar_for(self, professional_id: str | None) -> Any | None:
         return self.calendars.get(professional_id or "tenant")

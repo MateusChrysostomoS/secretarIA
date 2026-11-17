@@ -67,14 +67,16 @@ def test_the_menu_has_five_buttons_and_the_alterar_dados_description():
     assert result.bubbles[0].body.startswith("*Alterar Dados*")
 
 
-def test_a_paid_deposit_offers_the_service_but_hides_doctor_and_insurance():
+def test_a_paid_deposit_offers_every_field_with_the_notice():
     """2026-10-26: the service may change with a paid sinal (the difference is settled by
-    services/payments/service_change.py); the doctor and the convênio still may not."""
+    services/payments/service_change.py). TASK-085 R D-R3 (owner, 2026-11-17): the doctor and
+    the convênio too - nothing is hidden; the notice says the sinal may change."""
     result = enter_edit_menu(tenant(), appointment(), ae.EditContext(paid_deposit=True))
     assert _labels(result) == [
         ae.LABEL_EDIT_DATE,
         ae.LABEL_EDIT_TIME,
         ae.LABEL_EDIT_SERVICE,
+        ae.LABEL_EDIT_DOCTOR,
         ae.LABEL_EDIT_MORE,
     ]
     assert ae.EDIT_PIX_NOTICE in result.bubbles[0].body
@@ -85,7 +87,8 @@ def test_a_paid_deposit_offers_the_service_but_hides_doctor_and_insurance():
 def test_a_paid_deposit_at_the_reschedule_limit_still_offers_the_service():
     ctx = ae.EditContext(paid_deposit=True, reschedule_blocked=True)
     result = enter_edit_menu(tenant(), appointment(), ctx)
-    assert _labels(result) == [ae.LABEL_EDIT_SERVICE, ae.LABEL_EDIT_MORE]
+    # TASK-085 R D-R3: the doctor is offered with a paid sinal too.
+    assert _labels(result) == [ae.LABEL_EDIT_SERVICE, ae.LABEL_EDIT_DOCTOR, ae.LABEL_EDIT_MORE]
 
 
 def test_the_menu_text_lists_only_the_options_it_offers():
@@ -94,12 +97,10 @@ def test_the_menu_text_lists_only_the_options_it_offers():
     plain = enter_edit_menu(tenant(), appointment(), ae.EditContext()).bubbles[0].body
     assert plain == ae.EDIT_MENU_BODY
 
+    # TASK-085 R D-R3: a paid sinal offers every button, so the text is the plain one + notice.
     paid = enter_edit_menu(tenant(), appointment(), ae.EditContext(paid_deposit=True))
     body = paid.bubbles[0].body
-    assert "• *Mudar médico*" not in body
-    assert "• *Mudar serviço*" in body and "• *Mudar data*" in body
-    assert "• *Outro*: mudar o paciente." in body  # the convênio is hidden too
-    assert ae.EDIT_PIX_NOTICE in body
+    assert body == f"{ae.EDIT_MENU_BODY}\n\n{ae.EDIT_PIX_NOTICE}"
 
     blocked = enter_edit_menu(tenant(), appointment(), ae.EditContext(reschedule_blocked=True))
     body = blocked.bubbles[0].body
@@ -107,10 +108,10 @@ def test_the_menu_text_lists_only_the_options_it_offers():
     assert "• *Mudar médico*" in body and ae.EDIT_LIMIT_NOTICE in body
 
 
-async def test_the_second_menu_text_drops_the_insurance_with_a_paid_deposit():
+async def test_the_second_menu_text_keeps_the_insurance_with_a_paid_deposit():
+    """TASK-085 R D-R3: the convênio may change with a paid sinal (it used to be dropped)."""
     more = await _step(fr.STEP_EDIT_MENU, ae.LABEL_EDIT_MORE, ctx=context(paid_deposit=True))
-    assert "Mudar convênio" not in more.bubbles[0].body
-    assert "• *Mudar paciente*" in more.bubbles[0].body
+    assert more.bubbles[0].body == ae.EDIT_MORE_BODY
 
     plain = await _step(fr.STEP_EDIT_MENU, ae.LABEL_EDIT_MORE)
     assert plain.bubbles[0].body == ae.EDIT_MORE_BODY
@@ -132,15 +133,17 @@ async def test_with_a_paid_deposit_the_service_entry_works_inside_another_picker
     assert result.flow_step == fr.STEP_EDIT_SERVICE
 
 
-async def test_with_a_paid_deposit_the_doctor_typed_by_hand_is_not_honoured():
+async def test_with_a_paid_deposit_mudar_medico_is_honoured():
+    """TASK-085 R D-R3: it used to fall to the AI (hidden); now it opens the doctor list."""
     result = await _step(fr.STEP_EDIT_MENU, ae.LABEL_EDIT_DOCTOR, ctx=context(paid_deposit=True))
-    assert result.action == "delegate_llm"
+    assert result.action == "reply" and result.flow_step == fr.STEP_EDIT_DOCTOR
 
 
-async def test_a_paid_deposit_also_hides_the_insurance_in_the_second_menu():
+async def test_a_paid_deposit_offers_the_insurance_in_the_second_menu():
+    """TASK-085 R D-R3 (it used to be hidden)."""
     ctx = context(paid_deposit=True)
     more = await _step(fr.STEP_EDIT_MENU, ae.LABEL_EDIT_MORE, ctx=ctx)
-    assert _labels(more) == [ae.LABEL_EDIT_PATIENT, ae.LABEL_EDIT_BACK]
+    assert _labels(more) == [ae.LABEL_EDIT_INSURANCE, ae.LABEL_EDIT_PATIENT, ae.LABEL_EDIT_BACK]
 
 
 def test_a_reached_reschedule_limit_hides_date_and_time():
