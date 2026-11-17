@@ -975,7 +975,7 @@ async def _charge_difference(
     if provider is None or account is None or patient is None or patient.tenant_id != tenant.id:
         logger.warning("service_change_no_payment_account", **log)
         return ServiceChangeResult(
-            kind="blocked", reason="no_payment_account", decision="increase_charge"
+            kind="blocked", reason="no_payment_account", decision="increase_charge", label=label
         )
 
     adjustment_id = uuid4()
@@ -1010,7 +1010,7 @@ async def _charge_difference(
         if not outage:
             # A refusal that will happen again (key, validation, unknown): never waived.
             return ServiceChangeResult(
-                kind="blocked", reason="charge_failed", decision="increase_charge"
+                kind="blocked", reason="charge_failed", decision="increase_charge", label=label
             )
         # The provider is down: the clinic collects (follow-up B). The same id is kept - a
         # timeout may come after the charge was created with it as the reference.
@@ -1028,7 +1028,7 @@ async def _charge_difference(
             logger.warning("service_change_void_failed", error_type=type(exc).__name__, **log)
         logger.warning("service_change_charge_without_code", **log)
         return ServiceChangeResult(
-            kind="blocked", reason="charge_failed", decision="increase_charge"
+            kind="blocked", reason="charge_failed", decision="increase_charge", label=label
         )
 
     if created.provider_customer_id and created.provider_customer_id != customer_id:
@@ -1213,11 +1213,19 @@ async def apply_paid_adjustment(
     # Follow-up E1: the unit picked for the new service (absent = unchanged, older payloads).
     # Final review: only onto the unit the change was asked for - a unit staff moved the
     # booking to meanwhile is kept (an edit made meanwhile is never undone).
-    if "unit_id" in data and (
-        "unit_id" not in expected
-        or _str_or_none(appointment.unit_id) == expected.get("unit_id")
-    ):
-        edit["unit_id"] = _uuid_or_none(data.get("unit_id"))
+    if "unit_id" in data:
+        unit_as_asked = "unit_id" not in expected or _str_or_none(
+            appointment.unit_id
+        ) == expected.get("unit_id")
+        if unit_as_asked:
+            edit["unit_id"] = _uuid_or_none(data.get("unit_id"))
+        elif edit["appointment_type"] == appointment.appointment_type and _str_or_none(
+            appointment.unit_id
+        ) != _str_or_none(data.get("unit_id")):
+            # TASK-085 final review: a change of the UNIT only whose unit moved meanwhile has
+            # nothing left to apply - never "Sua consulta agora é ... na Unidade X".
+            logger.warning("service_change_not_applicable", cause="unit", **log)
+            return None
     written = await _write(
         session, tenant, appointment, edit,
         source=data.get("source") or SOURCE_SYSTEM,

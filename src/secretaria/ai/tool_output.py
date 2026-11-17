@@ -64,12 +64,16 @@ V2_TOOL_OUTPUTS: Mapping[str, OutputAllowlist] = {
                 "day_from",
                 "day_to",
                 "professional",
+                # TASK-085: the unit's NAME (a clinic label, never patient data) - a one-unit
+                # doctor's at the top, each window's when there are several (D7: per-unit
+                # durations make windows of different sizes per unit).
+                "unit",
                 "clamped",
                 "note",
                 "error",
             }
         ),
-        records={"windows": frozenset({"day", "start", "end"})},
+        records={"windows": frozenset({"day", "start", "end", "unit"})},
     ),
     "list_patient_appointments": OutputAllowlist(
         frozenset({"appointments", "count", "nota", "error"}),

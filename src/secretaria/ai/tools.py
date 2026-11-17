@@ -581,7 +581,7 @@ async def _service_unit_refusal(
     tool_name: str,
     unit: Any | None,
     professional: Any | None,
-    catalog: list,
+    catalog: list | None,
     canonical_type: str | None,
 ) -> dict | None:
     """The tool-error when the doctor does not do `canonical_type` at `unit` (TASK-083 T7).
@@ -589,13 +589,17 @@ async def _service_unit_refusal(
     A patient-side write rule (`check_unit` with the service); the error names the units where
     the service IS done so the model re-offers only those. Nothing to check without a unit, a
     doctor or a named service. A failed lookup refuses (never a booking on an unproven unit).
+    `catalog` None (TASK-085 final review): the doctor's own stored catalog is read - the turn's
+    effective one is `RuntimeAppointmentType` objects, which carry no `service_id`.
     """
     tenant_id = _tenant_id_ctx.get()
     if tenant_id is None or unit is None or professional is None or not canonical_type:
         return None
-    from secretaria.ai.unit_scope import service_unit_refusal
+    from secretaria.ai.unit_scope import owner_service_catalog, service_unit_refusal
 
     try:
+        if catalog is None:
+            catalog = await owner_service_catalog(tenant_id, professional)
         return await service_unit_refusal(tenant_id, professional, unit, catalog, canonical_type)
     except Exception as exc:  # noqa: BLE001 - see the docstring
         logger.warning(
@@ -1315,9 +1319,7 @@ async def create_event(
             if tenant_id is not None
             else None
         )
-        refused = await _service_unit_refusal(
-            "create_event", unit, owner, _effective_service_catalog(), canonical_type
-        )
+        refused = await _service_unit_refusal("create_event", unit, owner, None, canonical_type)
         if refused is not None:
             return refused
 
