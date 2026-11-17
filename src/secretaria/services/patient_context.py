@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
 from secretaria.models import LIVE_APPOINTMENT_STATUSES, Appointment, AppointmentStatus, Message
+from secretaria.services.payments import adjustment_suspension
 
 logger = get_logger(__name__)
 
@@ -91,6 +92,9 @@ async def load_upcoming_appointments(
             Appointment.tenant_id == tenant_id,
             Appointment.status.in_(UPCOMING_STATUSES),
             Appointment.start_at >= now,
+            # TASK-085 R: a consultation waiting for the Pix of a change's difference is the
+            # clinic's business, not the patient's (lists, AI context, greeting).
+            adjustment_suspension.visible_to_patient_clause(),
         )
         .order_by(Appointment.start_at)
     )
@@ -134,6 +138,7 @@ async def has_upcoming_appointment(
             Appointment.tenant_id == tenant_id,
             Appointment.status.in_(UPCOMING_STATUSES),
             Appointment.start_at >= now,
+            adjustment_suspension.visible_to_patient_clause(),  # TASK-085 R
         )
         .limit(1)
     )

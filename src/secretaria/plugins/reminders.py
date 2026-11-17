@@ -68,7 +68,7 @@ from secretaria.models import (
 from secretaria.plugins.base import PluginSpec
 from secretaria.plugins.registry import register
 from secretaria.services.entitlements_client import EntitlementSummary, get_entitlements
-from secretaria.services.payments import deposit_lifecycle
+from secretaria.services.payments import adjustment_suspension, deposit_lifecycle
 from secretaria.services.tenant_config import get_waba_token
 from secretaria.services.usage_events import emit_usage_event
 from secretaria.services.whatsapp import WhatsAppClient
@@ -328,6 +328,8 @@ async def _process_lead_window(
                     Appointment.start_at.is_not(None),
                     Appointment.start_at > window_start,
                     Appointment.start_at <= window_end,
+                    # TASK-085 R: no reminder for a consultation suspended by a change.
+                    adjustment_suspension.visible_to_patient_clause(),
                     # TASK-032 R2: a clinic on the new engine
                     # (workers/reminder_engine.py) is reminded there, never twice.
                     Tenant.reminders_v2_enabled.is_not(True),
