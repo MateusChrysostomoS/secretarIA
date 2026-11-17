@@ -31,6 +31,7 @@ from secretaria.models.insurance import (
     ProfessionalInsurancePlan,
     TenantInsurancePlan,
 )
+from secretaria.models.insurance_acceptance_exception import InsuranceAcceptanceException
 from secretaria.models.message import Message, MessageDirection, MessageSender
 from secretaria.models.patient import Patient
 from secretaria.models.patient_payment_customer import PatientPaymentCustomer
@@ -73,6 +74,7 @@ __all__ = [
     "ConversationPiiTokenMap",
     "FlowState",
     "HandoverState",
+    "InsuranceAcceptanceException",
     "InsuranceCatalog",
     "InsuranceCatalogUnmatched",
     "Message",
