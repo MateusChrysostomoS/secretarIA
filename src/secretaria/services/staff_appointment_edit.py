@@ -84,10 +84,16 @@ from secretaria.services.calendar import (
 )
 from secretaria.services.patient_context import as_utc
 from secretaria.services.payments import service_change
+from secretaria.services.payments.money import parse_brl_to_cents
 from secretaria.services.professional_edit_outbox import record_professional_edit
 from secretaria.services.service_catalog import (
     load_service_catalog,
     normalize as normalize_service_name,
+)
+from secretaria.services.service_terms import (
+    ResolvedTerms,
+    resolve_entry_at_unit,
+    resolve_terms,
 )
 from secretaria.services.tenant_config import (
     active_appointment_types,
@@ -249,6 +255,9 @@ class _Target:
     insurance: str | None
     attendee_name: str | None
     phone: str | None
+    # TASK-085: the unit the booking has after this edit (`_unit_kept`): where the new
+    # service's length (and, through the money engine, its price) is read.
+    unit_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -368,6 +377,15 @@ async def _resolve_target(
                 422, "unknown_professional", "Este profissional não pertence a esta clínica."
             )
         professional_id = professional.id
+    # TASK-083 final wave I3 / TASK-085: the unit the booking keeps (a doctor change keeps it
+    # only where the new doctor attends; no query otherwise).
+    unit_id = await _unit_kept(
+        session,
+        tenant.id,
+        getattr(appointment, "unit_id", None),
+        professional_id,
+        doctor_changed=professional_id != appointment.professional_id,
+    )
     service = appointment.appointment_type
     if "service" in fields or professional_id != appointment.professional_id:
         wanted = _clean(request.service) if "service" in fields else appointment.appointment_type
@@ -378,7 +396,14 @@ async def _resolve_target(
             )
         service = str(match.get("name"))
         if normalize_service_name(service) != normalize_service_name(appointment.appointment_type):
-            minutes = int(match.get("duration_min") or tenant.appointment_duration_min or 30)
+            # D6: only a NEW service changes the booked length - the doctor's own at the unit
+            # the booking keeps (TASK-085 D2/D7), else the service's base exactly as before.
+            own = await resolve_entry_at_unit(session, tenant.id, professional_id, match, unit_id)
+            minutes = (
+                own.duration_min
+                if own.own and own.duration_min is not None
+                else int(match.get("duration_min") or tenant.appointment_duration_min or 30)
+            )
             duration = timedelta(minutes=minutes)
     if "start_at" in fields:
         start = as_utc(request.start_at)
@@ -406,6 +431,7 @@ async def _resolve_target(
             else appointment.attendee_name
         ),
         phone=phone,
+        unit_id=unit_id,
     )
 
 
@@ -692,10 +718,22 @@ async def apply_staff_edit(
     phone_before = appointment.phone
 
     # A PAID sinal and a new service: everything else is applied now; the service (and its
-    # window) is the money engine's to write - now, or when the difference is paid.
+    # window) is the money engine's to write - now, or when the difference is paid. TASK-085
+    # (SPEC §7): the price is per unit, so a new UNIT (a doctor change that clears it) goes
+    # through the engine too - only when a unit's own price makes the booking's price change
+    # (`_unit_reprices`); otherwise (every clinic without exceptions) exactly as before.
     deposit = None
-    if normalize_service_name(target.service) != normalize_service_name(before.service):
+    service_changed = normalize_service_name(target.service) != normalize_service_name(
+        before.service
+    )
+    if service_changed or target.unit_id != before.unit_id:
         deposit = await _paid_deposit(session, tenant_id, appointment_id)
+        if (
+            deposit is not None
+            and not service_changed
+            and not await _unit_reprices(session, tenant, before, target)
+        ):
+            deposit = None
     now_target = target
     now_changes = changes
     if deposit is not None:
@@ -970,11 +1008,46 @@ async def _paid_deposit(
     return deposit
 
 
+def _own_price(entry: dict, resolved: ResolvedTerms) -> bool:
+    """`resolved` carries a unit's OWN price (not the doctor's base for `entry`)."""
+    return resolved.own and resolved.price != resolve_terms(entry, None, None).price
+
+
+async def _unit_reprices(
+    session: AsyncSession, tenant: Tenant, before: _Before, target: _Target
+) -> bool:
+    """Whether the booking's new unit changes its price through a per-unit price (TASK-085).
+
+    The service's price for the old doctor at the old unit against the new doctor's at the new
+    unit (`resolve_entry_at_unit`, tenant-scoped): True only when they are both money, differ,
+    and at least one is a unit's own price. Bases on both sides is a doctor change alone - never
+    re-priced here (R4, as before) - and an unpriceable side keeps the edit as it was.
+    """
+    old_entry = await _offered_service(session, tenant, before.professional_id, before.service)
+    new_entry = await _offered_service(session, tenant, target.professional_id, target.service)
+    if old_entry is None or new_entry is None:
+        return False
+    old = await resolve_entry_at_unit(
+        session, tenant.id, before.professional_id, old_entry, before.unit_id
+    )
+    new = await resolve_entry_at_unit(
+        session, tenant.id, target.professional_id, new_entry, target.unit_id
+    )
+    if not (_own_price(old_entry, old) or _own_price(new_entry, new)):
+        return False
+    old_cents, new_cents = parse_brl_to_cents(old.price), parse_brl_to_cents(new.price)
+    return old_cents is not None and new_cents is not None and old_cents != new_cents
+
+
 def _pending_service_edit(row: Appointment, target: _Target) -> dict:
     """The R6 edit the money engine writes (now, or when the difference is paid): the rest
     of the clinic's edit is already on `row`, so only the service and its window change.
     `time_changed` stays False - the clinic moved the time now, and a clinic move never
-    counts against the patient's reschedule allowance (not even at payment)."""
+    counts against the patient's reschedule allowance (not even at payment).
+
+    `unit_id` (TASK-085) is the booking's unit after this edit - `row`'s, already written (kept,
+    or cleared by a doctor change): the engine prices the new service THERE (the key present,
+    even when None, is the contract), and a payment applied later writes the same unit back."""
     return {
         "appointment_type": target.service,
         "professional_id": row.professional_id,
@@ -987,6 +1060,7 @@ def _pending_service_edit(row: Appointment, target: _Target) -> dict:
         "time_changed": False,
         "doctor_changed": False,
         "calendar_changed": False,
+        "unit_id": getattr(row, "unit_id", None),
     }
 
 
