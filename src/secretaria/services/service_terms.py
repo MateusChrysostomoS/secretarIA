@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.models.professional_service_unit_terms import ProfessionalServiceUnitTerms
 from secretaria.services.payments.money import parse_brl_to_cents
+from secretaria.services.service_catalog import entry_service_id
 
 
 @dataclass(frozen=True)
@@ -145,3 +146,37 @@ async def load_terms(
 ) -> TermsByService:
     """`load_terms_for` for one professional."""
     return (await load_terms_for(session, tenant_id, [professional_id]))[professional_id]
+
+
+def terms_for_entry(
+    terms: Mapping[UUID, Mapping[UUID, UnitTerms]] | None, entry: Mapping
+) -> Mapping[UUID, UnitTerms] | None:
+    """The `{unit_id: UnitTerms}` of `entry`'s service out of ONE professional's TermsByService.
+
+    None when `terms` is empty/None or the entry has no (valid) service_id.
+    """
+    if not terms:
+        return None
+    service_id = entry_service_id(entry)
+    if service_id is None:
+        return None
+    return terms.get(service_id)
+
+
+async def resolve_entry_at_unit(
+    session: AsyncSession,
+    tenant_id: UUID,
+    professional_id: UUID | None,
+    entry: Mapping,
+    unit_id: UUID | None,
+) -> ResolvedTerms:
+    """For DB readers that know the unit (a booked appointment, a hold, an edit draft).
+
+    The BASE (`resolve_terms(entry, None, None)`) WITHOUT any query when `unit_id` or
+    `professional_id` is None or the entry has no service_id; otherwise that professional's rows
+    are loaded tenant-scoped and resolved (another tenant's professional has none = base).
+    """
+    if unit_id is None or professional_id is None or entry_service_id(entry) is None:
+        return resolve_terms(entry, None, None)
+    terms = await load_terms(session, tenant_id, professional_id)
+    return resolve_terms(entry, terms_for_entry(terms, entry), unit_id)

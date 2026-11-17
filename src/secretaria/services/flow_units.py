@@ -17,6 +17,7 @@ The step's rendering and its hooks live in services/flow_router.py (`_enter_unit
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 from uuid import UUID
@@ -31,6 +32,13 @@ from secretaria.core.whatsapp_limits import (
 )
 from secretaria.services.professional_service_units import allowed_unit_ids
 from secretaria.services.service_catalog import entry_service_id
+from secretaria.services.service_terms import (
+    ResolvedTerms,
+    TermsByService,
+    price_differs_across_units,
+    resolve_terms,
+    terms_for_entry,
+)
 from secretaria.services.unit_booking import scoped_calendar
 
 STEP_AWAITING_UNIT = "awaiting_unit"
@@ -95,6 +103,57 @@ def units_for_service(professional: Any | None, service_id: UUID | None) -> list
     if allowed is None:
         return bookable
     return [unit for unit in bookable if unit.id in allowed]
+
+
+def service_unit_terms_of(professional: Any | None) -> TermsByService:
+    """The professional's per-unit price/duration exceptions (getattr: older snapshots predate
+    the field)."""
+    if professional is None:
+        return {}
+    return getattr(professional, "service_unit_terms", None) or {}
+
+
+def terms_at(professional: Any | None, entry: Mapping, unit_id: UUID | None) -> ResolvedTerms:
+    """`entry`'s effective price/duration for this professional at `unit_id` (None = base)."""
+    terms = terms_for_entry(service_unit_terms_of(professional), entry)
+    return resolve_terms(entry, terms, unit_id)
+
+
+@dataclass(frozen=True)
+class ShownTerms:
+    """What a text may show about a service's price/duration (D3/D7)."""
+
+    price: str | None  # None = nothing to show (no price set, or hidden by D3)
+    duration_min: int | None
+    price_hidden: bool  # True ONLY when D3 hid a price (differs across 2+ units, unit unknown)
+    unit_id: UUID | None  # the unit the values were resolved at (given, or the only one)
+
+
+def shown_terms(
+    professional: Any | None, entry: Mapping, unit_id: UUID | None = None
+) -> ShownTerms:
+    """D3/D7/R2 in one place, for every text that shows a service's price/duration.
+
+    Unit given: resolved there. Else one bookable unit for the service: resolved there. Else none:
+    the base. Else (2+): the price is hidden when it differs across them (never a range), or the
+    one shared price is shown; the duration is the BASE either way (no unit known yet).
+    """
+    if unit_id is not None:
+        resolved = terms_at(professional, entry, unit_id)
+        return ShownTerms(resolved.price, resolved.duration_min, False, unit_id)
+    units = units_for_service(professional, entry_service_id(entry))
+    if len(units) == 1:
+        only = units[0].id
+        resolved = terms_at(professional, entry, only)
+        return ShownTerms(resolved.price, resolved.duration_min, False, only)
+    base = resolve_terms(entry, None, None)
+    if not units:
+        return ShownTerms(base.price, base.duration_min, False, None)
+    terms = terms_for_entry(service_unit_terms_of(professional), entry)
+    if price_differs_across_units(entry, terms, [unit.id for unit in units]):
+        return ShownTerms(None, base.duration_min, True, None)
+    first = resolve_terms(entry, terms, units[0].id)
+    return ShownTerms(first.price, base.duration_min, False, None)
 
 
 def unit_choice_needed(professional: Any | None, service_id: UUID | None = None) -> bool:
@@ -249,9 +308,7 @@ def unit_after_doctor_change(
     """
     allowed = allowed_unit_ids(service_units_of(professional), service_id)
     offered = {
-        unit.id
-        for unit in offered_units(professional)
-        if allowed is None or unit.id in allowed
+        unit.id for unit in offered_units(professional) if allowed is None or unit.id in allowed
     }
     for candidate in (current_unit_id, original_unit_id):
         if candidate is not None and candidate in offered:

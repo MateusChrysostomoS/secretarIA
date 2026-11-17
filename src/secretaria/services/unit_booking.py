@@ -20,6 +20,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -36,6 +37,7 @@ from secretaria.services.professional_service_units import (
     read_marks,
     read_marks_for,
 )
+from secretaria.services.service_terms import load_terms_for
 from secretaria.services.tenant_config import professional_business_hours
 
 logger = get_logger(__name__)
@@ -72,7 +74,7 @@ def _clean(value: Any) -> str:
 
 
 def unit_location(name: Any, address: Any) -> str | None:
-    """"<name> — <address>", the name alone without an address, None without a name either."""
+    """ "<name> — <address>", the name alone without an address, None without a name either."""
     name_text, address_text = _clean(name), _clean(address)
     if not name_text:
         return address_text or None
@@ -235,14 +237,34 @@ async def attach_unit_options(
     router-shaped copies (workers/shared/greeting.py::_flow_professionals) that travel into the
     pure router. A snapshot without units gets `[]`: the flow is then exactly today's. Each also
     gets `service_units` (`{service_id: unit ids}`, `{}` when nothing is restricted), read for the
-    whole roster in ONE query (services/professional_service_units.py::read_marks_for).
+    whole roster in ONE query (services/professional_service_units.py::read_marks_for), and
+    `service_unit_terms` (`{service_id: {unit_id: UnitTerms}}`, `{}` when none): the per-unit
+    price/duration exceptions (TASK-085), also ONE query, tenant-scoped
+    (services/service_terms.py::load_terms_for).
     """
     rows = list(professional_rows)
     options = await unit_options_for(session, tenant, rows)
     marks = await read_marks_for(session, [row.id for row in rows])
+    terms = await load_terms_for(session, tenant.id, [row.id for row in rows])
     for snapshot in snapshots:
         snapshot.units = options.get(snapshot.id, [])
         snapshot.service_units = marks.get(snapshot.id, {})
+        snapshot.service_unit_terms = terms.get(snapshot.id, {})
+
+
+async def professional_terms_view(
+    session: AsyncSession, tenant: Any, professional: Any
+) -> SimpleNamespace:
+    """A router-shaped snapshot of ONE professional for DB readers that need the D3 rule
+    (flow_units.shown_terms): id, name, units, service_units, service_unit_terms - filled by
+    `attach_unit_options`. `professional` is the ORM row (its hours resolve NULL links)."""
+    view = SimpleNamespace(
+        id=professional.id,
+        name=professional.name,
+        business_hours=getattr(professional, "business_hours", None),
+    )
+    await attach_unit_options(session, tenant, [professional], [view])
+    return view
 
 
 def scoped_calendar(calendar: Any, unit: Any | None, *, with_hours: bool = True) -> Any:
@@ -348,9 +370,7 @@ async def check_unit(
     if professional is not None:
         offered = await professional_units.available_unit_ids(session, professional)
         if offered and unit.id not in offered:
-            raise UnitRefused(
-                "unit_not_linked", "Esse profissional não atende nessa unidade.", 422
-            )
+            raise UnitRefused("unit_not_linked", "Esse profissional não atende nessa unidade.", 422)
         if not await service_offered_at_unit(session, professional.id, service_id, unit.id):
             raise UnitRefused(
                 "unit_service_not_offered", "Esse serviço não é feito nessa unidade.", 422
@@ -368,6 +388,7 @@ __all__ = [
     "confirmation_unit_lines",
     "event_unit_fields",
     "professional_name",
+    "professional_terms_view",
     "scoped_calendar",
     "service_offered_at_unit",
     "tenant_unit",
