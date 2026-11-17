@@ -128,6 +128,10 @@ async def resume_after_booking(
             collect_payer_data=True,
             redis=redis,
             conversation_id=conversation_id,
+            # The consultation exists: this question is only ever armed for one (the `after`
+            # hook, or an edit that re-charged it - TASK-085 R, which also happens in a `before`
+            # clinic). The "already charged" guard still stops a second Pix.
+            existing_consultation=True,
         )
         await session.commit()
     except payer_data.PayerDataNeeded as need:

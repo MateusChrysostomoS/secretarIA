@@ -268,7 +268,8 @@ async def test_the_s1_stubs_are_frozen(module, name, params):
             fn(**dict.fromkeys(params))
 
 
-async def test_the_s2_stubs_are_frozen():
+async def test_the_s2_signatures_are_frozen():
+    # S2 implemented them (tests/test_sinal_trocas_s2_requote.py): only the signatures stay pinned.
     from secretaria.services.payments import deposit_lifecycle
 
     requote = deposit_lifecycle.requote_awaiting
@@ -277,10 +278,6 @@ async def test_the_s2_stubs_are_frozen():
     assert _params(recharge) == [
         "tenant_id", "appointment_id", "old_amount_cents", "waba_token", "redis",
     ]
-    with pytest.raises(NotImplementedError, match="TASK-085 R S2"):
-        await requote(None, tenant=None, appointment=None, deposit=None, now=None)
-    with pytest.raises(NotImplementedError, match="TASK-085 R S2"):
-        await recharge(tenant_id=None, appointment_id=None, old_amount_cents=None)
 
 
 async def test_the_s3b_stub_is_frozen():
