@@ -37,6 +37,7 @@ from secretaria.services.appointment_edit_write import (
 )
 from secretaria.services.appointment_status import SOURCE_FLOW
 from secretaria.services.calendar import CalendarUnavailableError, build_event_description
+from secretaria.services.insurance_acceptance import booking_refused, log_refusal
 from secretaria.services.patient_context import as_utc
 from secretaria.services.payments import deposit_lifecycle, service_change
 from secretaria.services.payments.service_change import ServiceChangeResult
@@ -147,6 +148,39 @@ async def _apply_paid_service_change(
     )
 
 
+async def _insurance_refused_now(session, tenant_id, appointment, edit: dict) -> bool:
+    """TASK-086 A18: the edit's final (doctor, service, unit, convênio) is a cell the clinic's
+    matrix refuses NOW - read from the database inside the caller's row lock, so a refusal
+    saved between the card and "Confirmar" still wins. Only when one of the four changed: a
+    pure reschedule never is (the appointment itself is never questioned)."""
+    unit_id = edit["unit_id"] if "unit_id" in edit else appointment.unit_id
+    if (
+        edit["appointment_type"] == appointment.appointment_type
+        and edit["professional_id"] == appointment.professional_id
+        and edit["insurance"] == appointment.insurance
+        and unit_id == appointment.unit_id
+    ):
+        return False
+    refused = await booking_refused(
+        session,
+        tenant_id=tenant_id,
+        professional_id=edit["professional_id"],
+        service_id=edit.get("service_id"),
+        unit_id=unit_id,
+        insurance=edit["insurance"],
+    )
+    if refused:
+        log_refusal(
+            "appointment_edit_insurance_refused",
+            tenant_id=tenant_id,
+            appointment_id=appointment.id,
+            professional_id=edit["professional_id"],
+            service_id=edit.get("service_id"),
+            unit_id=unit_id,
+        )
+    return refused
+
+
 async def apply_appointment_edit(
     session,
     *,
@@ -203,6 +237,9 @@ async def apply_appointment_edit(
     deferred = bool(edit.get("calendar_deferred"))
     window_before = _window(appointment)
     if (paid and doctor_or_plan_changed) or (blocked and edit["time_changed"]):
+        return None
+    # TASK-086 A18 (W8/W9): the convênio matrix, fresh, before any write or money decision.
+    if await _insurance_refused_now(session, tenant_id, appointment, edit):
         return None
     if paid and service_changed:
         # 2026-10-26: the money decides (services/payments/service_change.py). Only a change
