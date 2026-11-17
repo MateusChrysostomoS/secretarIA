@@ -27,6 +27,7 @@ from secretaria.models import (
     Professional,
     Tenant,
 )
+from secretaria.services import flow_units
 from secretaria.services.appointment_calendar_origin import (
     CalendarOriginUnresolved,
     calendar_professional_id,
@@ -46,6 +47,7 @@ from secretaria.services.manage_request import appointment_ref
 from secretaria.services.patient_context import (
     PatientOpeningState,
 )
+from secretaria.services.service_terms import terms_for_entry
 from secretaria.services.tenant_config import (
     RuntimeAppointmentType,
     RuntimeServiceGuide,
@@ -55,6 +57,7 @@ from secretaria.services.tenant_config import (
 from secretaria.workers.shared.greeting import (
     _appointment_doctor_name,
     _format_appointment_when,
+    _unit_uuid,
 )
 
 logger = get_logger(__name__)
@@ -139,6 +142,44 @@ def _appointment_unit_name(appointment: dict, unit_names: dict[str, str] | None)
     return unit_names.get(str(unit_id)) if unit_names and unit_id else None
 
 
+def _same_service(name: object, service_name: str) -> bool:
+    return str(name or "").strip().casefold() == service_name.strip().casefold()
+
+
+def _nearest_price(
+    nearest: dict, service_name: str, matched: RuntimeAppointmentType | None, professionals
+) -> str | None:
+    """The "Próxima consulta" price (TASK-085 A13, D6/R11: re-read at the booking's unit).
+
+    Today's price - the runtime list's entry - unless the booking's OWNER (on the roster
+    snapshot, `service_unit_terms` attached by the worker) has a per-unit value for the
+    service: then the owner's entry resolved at the booking's unit (no unit = the base, D7).
+    With rows but no way to tell which entry applies (an inherited list, R9, or the service
+    gone from the owner's list) nothing is shown - never a possibly wrong price.
+    """
+    price = matched.price if matched else None
+    owner_id = nearest.get("professional_id")
+    owner = next((p for p in professionals or [] if owner_id and str(p.id) == str(owner_id)), None)
+    terms = flow_units.service_unit_terms_of(owner)
+    if not terms:
+        return price
+    entry = next(
+        (
+            e
+            for e in getattr(owner, "appointment_types", None) or []
+            if isinstance(e, dict)
+            and e.get("is_active", True)
+            and _same_service(e.get("name"), service_name)
+        ),
+        None,
+    )
+    if entry is None:
+        return None
+    if not terms_for_entry(terms, entry):
+        return price
+    return flow_units.terms_at(owner, entry, _unit_uuid(nearest.get("unit_id"))).price
+
+
 def _appointment_context_text(
     future_appointments: list[dict],
     tz_name: str | None,
@@ -148,6 +189,7 @@ def _appointment_context_text(
     with_refs: bool = False,
     service_guides: list[RuntimeServiceGuide] | None = None,
     unit_names: dict[str, str] | None = None,
+    professionals: list | None = None,
 ) -> str | None:
     """Render the per-turn "consultas marcadas" block for the LLM prompt.
 
@@ -186,6 +228,10 @@ def _appointment_context_text(
     `unit_names` (TASK-083 follow-up A1) is unit id -> name, taken from the roster snapshot (no
     query): an appointment with a `unit_id` found there names its unit after the doctor. Without
     it - a clinic with no units - the text is exactly today's.
+
+    `professionals` (TASK-085 A13) is the same roster snapshot: the nearest booking's price is
+    its owner's at the booking's unit when the owner has per-unit values (`_nearest_price`).
+    Without it, or without such values, the price is exactly today's.
     """
     if not future_appointments:
         return None
@@ -213,8 +259,9 @@ def _appointment_context_text(
     nearest_unit = _appointment_unit_name(nearest, unit_names)
     if nearest_unit:
         nearest_line += f" — {nearest_unit}"
-    if matched and matched.price:
-        nearest_line += f" — {matched.price}"
+    price = _nearest_price(nearest, service_name, matched, professionals)
+    if price:
+        nearest_line += f" — {price}"
     nearest_line += ref(nearest)
 
     lines = [nearest_line]

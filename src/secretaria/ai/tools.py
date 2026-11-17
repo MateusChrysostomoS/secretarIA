@@ -33,6 +33,7 @@ from secretaria.services.booking_scope import (
     BOOKING_TOPOLOGY_SOLE,
     BOOKING_TOPOLOGY_UNKNOWN,
     canonical_service_name,
+    service_entry_name,
     service_names,
 )
 from secretaria.services.calendar import (
@@ -2100,7 +2101,7 @@ class HumanHandoffOfferRequested(Exception):
 
 
 @tool
-async def get_service_info(service_name: str) -> dict:
+async def get_service_info(service_name: str, unit_name: str = "") -> dict:
     """Consulta as orientações de UM serviço da clínica: o que o paciente precisa saber antes
     (jejum, exames, documentos, preparo), a descrição completa, a duração e o preço.
 
@@ -2108,8 +2109,14 @@ async def get_service_info(service_name: str) -> dict:
     ou o que inclui. Ferramenta SOMENTE-LEITURA: não agenda nada. Se duracao_min ou preco vierem
     vazios, não invente: diga que não tem essa informação e chame offer_human_handoff.
 
+    Se vier preco_depende_da_unidade=true, o valor muda conforme a unidade: NÃO diga nenhum
+    valor nem uma faixa ("de X a Y"); diga que o valor depende da unidade e, depois que o
+    paciente escolher a unidade, chame de novo com unit_name para dizer o valor daquela unidade.
+
     Args:
         service_name: Nome do serviço como aparece na lista de serviços da clínica.
+        unit_name: Opcional. A unidade que o paciente JÁ escolheu (nome, ex.: 'Centro'): a
+            duração e o preço devolvidos passam a ser os dessa unidade. Vazio = sem unidade.
     """
     asked = service_name or ""
     catalog = _effective_service_catalog()
@@ -2117,7 +2124,7 @@ async def get_service_info(service_name: str) -> dict:
     # tenant's list, or the one professional's), while the orientations are clinic-wide.
     match = _lookup_service(catalog, asked)
     if match is not None:
-        return {
+        result = {
             "servico": match.name,
             "duracao_min": match.duration_min,
             "preco": match.price,
@@ -2125,6 +2132,20 @@ async def get_service_info(service_name: str) -> dict:
             "descricao_completa": getattr(match, "long_description", None),
             "orientacoes": list(getattr(match, "requirements", None) or []),
         }
+        if (unit_name or "").strip():
+            at_unit, error = await _service_terms_at_unit(match.name, unit_name)
+            if error is not None:
+                return error
+            if at_unit is not None:
+                # TASK-085 D3: the unit is chosen, so its own value may be said.
+                result["preco"] = at_unit.price
+                if at_unit.duration_min is not None:
+                    result["duracao_min"] = at_unit.duration_min
+                return result
+        if getattr(match, "price_hidden", False):
+            # The price differs between the units (`preco` is already None): say so, no number.
+            result["preco_depende_da_unidade"] = True
+        return result
     guides = _service_guides()
     guide = _lookup_service(guides, asked)
     if guide is None:
@@ -2149,6 +2170,51 @@ async def get_service_info(service_name: str) -> dict:
         "descricao_completa": guide.long_description,
         "orientacoes": list(guide.requirements or []),
     }
+
+
+async def _service_terms_at_unit(service: str, unit_name: str) -> tuple[Any, dict | None]:
+    """`service`'s price/duration at the named unit for the one-doctor clinic (TASK-085 B4).
+
+    (ResolvedTerms, None); (None, a tool error) for a unit the doctor does not attend at - the
+    same rule and message as the booking tools (`ai/unit_scope.resolve_tool_unit`); (None, None)
+    when there is nothing to resolve against: no single professional on this turn (a clinic
+    with 2+ reads the tenant's list, where no per-unit value applies), the entry is gone, or the
+    read failed (logged with the error type only) - the caller then answers without the unit,
+    keeping a hidden price hidden. Every read is scoped to this turn's tenant.
+    """
+    tenant_id = _tenant_id_ctx.get()
+    professional_id = _sole_professional_id()
+    if tenant_id is None or professional_id is None:
+        return None, None
+    from secretaria.ai.unit_scope import resolve_tool_unit, sole_professional_row
+    from secretaria.core.database import async_session_factory
+    from secretaria.models import Tenant
+    from secretaria.services.service_catalog import load_service_catalog
+    from secretaria.services.service_terms import resolve_entry_at_unit
+    from secretaria.services.tenant_config import professional_appointment_types
+
+    try:
+        owner = await sole_professional_row(tenant_id, professional_id)
+        if owner is None:
+            return None, None
+        unit, error = await resolve_tool_unit(tenant_id, owner, unit_name)
+        if error is not None or unit is None:
+            return None, error
+        async with async_session_factory() as session:
+            tenant = await session.get(Tenant, tenant_id)
+            if tenant is None:
+                return None, None
+            entries = professional_appointment_types(
+                owner, tenant, await load_service_catalog(session, tenant_id)
+            )
+            canonical = canonical_service_name(entries, service)
+            entry = next((e for e in entries if service_entry_name(e) == canonical), None)
+            if entry is None:
+                return None, None
+            return await resolve_entry_at_unit(session, tenant_id, owner.id, entry, unit.id), None
+    except Exception as exc:  # noqa: BLE001 - a read tool: answer without the unit
+        logger.warning("agent_service_info_unit_failed", error_type=type(exc).__name__)
+        return None, None
 
 
 _NAME_NOT_SAVED_ERROR = (
