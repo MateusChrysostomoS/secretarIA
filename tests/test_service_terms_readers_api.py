@@ -236,3 +236,9 @@ def test_snapshot_without_field_and_entry_without_service_id_are_base():
     doc = _doc([a, b], {SID: {a.id: UnitTerms("R$ 250,00", None)}})
     no_sid = {"price": "R$ 200,00", "duration_min": 30}
     assert fu.shown_terms(doc, no_sid) == fu.ShownTerms("R$ 200,00", 30, False, None)
+
+
+def test_rule3_restriction_leaving_no_unit_does_not_leak_an_exception():
+    a = _unit("A")
+    doc = _doc([a], {SID: {a.id: UnitTerms("R$ 999,00", 99)}}, marks={SID: frozenset({uuid4()})})
+    assert fu.shown_terms(doc, ENTRY) == fu.ShownTerms("R$ 200,00", 30, False, None)
