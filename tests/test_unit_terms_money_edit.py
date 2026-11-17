@@ -364,7 +364,24 @@ async def test_a_unit_without_a_readable_price_keeps_the_consultation(db, provid
     row = await reload_appointment(db, world.appointment.id)
     assert row.unit_id == world.sede
     assert await _adjustments(db) == [] and await _notices(db) == 0
-    assert service_change.blocked_text("price_unavailable") in _texts()
+    unit_text = service_change.blocked_text("price_unavailable", unit_only=True)
+    assert unit_text in _texts()
+    assert "nessa unidade" in unit_text and "novo serviço" not in unit_text
+
+
+def test_the_service_change_refusals_keep_todays_words():
+    for reason in (None, "price_unavailable", "charge_failed", "adjustment_pending"):
+        assert service_change.blocked_text(reason) == service_change.blocked_text(
+            reason, unit_only=False
+        )
+    assert service_change.blocked_text("price_unavailable") == (
+        "Não foi possível calcular o sinal do novo serviço. Sua consulta continua como estava. "
+        "Para trocar, fale com a clínica."
+    )
+    # A unit-only change keeps the specific refusals (they are not about the price).
+    assert service_change.blocked_text(
+        "adjustment_pending", unit_only=True
+    ) == service_change.blocked_text("adjustment_pending")
 
 
 def test_the_reply_names_the_place_of_a_unit_only_change():

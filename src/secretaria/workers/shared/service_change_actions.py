@@ -44,10 +44,12 @@ def service_change_bubbles(
     """The reply of a confirmed paid service change. `bubbles` is the router's: the "Pronto"
     recap first, then the returning-patient menu. A change of the unit only (TASK-085) is named
     by the engine's `outcome.label` ("Consulta na Unidade Centro"), not by the bare service."""
-    new_service = outcome.label or new_service
+    label = getattr(outcome, "label", None)
+    new_service = label or new_service
     recap, rest = (bubbles[0], list(bubbles[1:])) if bubbles else (None, [])
     if outcome.kind == "blocked":
-        return [TextBubble(body=service_change.blocked_text(outcome.reason)), *rest]
+        text = service_change.blocked_text(outcome.reason, unit_only=label is not None)
+        return [TextBubble(body=text), *rest]
     if outcome.kind == "awaiting_payment":
         ttl = (
             getattr(tenant, "deposit_hold_ttl_minutes", None)

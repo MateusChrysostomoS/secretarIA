@@ -303,8 +303,19 @@ _BLOCKED_DEFAULT = (
 )
 
 
-def blocked_text(reason: str | None) -> str:
-    """What the patient reads when `request_service_change` was `blocked` (nothing changed)."""
+# TASK-085: the same refusal for a change of the UNIT only (the new unit's price is unreadable).
+_BLOCKED_UNIT_PRICE = (
+    f"Não foi possível calcular o sinal da consulta nessa unidade. {_KEPT_AS_IT_WAS} "
+    "Para trocar de unidade, fale com a clínica."
+)
+
+
+def blocked_text(reason: str | None, *, unit_only: bool = False) -> str:
+    """What the patient reads when `request_service_change` was `blocked` (nothing changed).
+    `unit_only` (TASK-085): the change was of the unit only (`ServiceChangeResult.label` set), so
+    an unreadable price is the UNIT's, not a "novo serviço"'s."""
+    if unit_only and (reason or "") not in _BLOCKED_TEXT:
+        return _BLOCKED_UNIT_PRICE
     return _BLOCKED_TEXT.get(reason or "", _BLOCKED_DEFAULT)
 
 
@@ -882,14 +893,16 @@ async def request_service_change(
         unit_id=unit_id,
     )
     log = {"tenant_id": str(tenant.id), "appointment_id": str(appointment.id)}
-    if decision.action == "blocked":
-        logger.info("service_change_blocked", reason=decision.reason, **log)
-        return ServiceChangeResult(kind="blocked", reason=decision.reason, decision="blocked")
-
     old_service, new_label = await _change_labels(
         session, tenant, appointment, new_service, unit_id
     )
     label = new_label if new_label != new_service else None
+    if decision.action == "blocked":
+        logger.info("service_change_blocked", reason=decision.reason, **log)
+        return ServiceChangeResult(
+            kind="blocked", reason=decision.reason, decision="blocked", label=label
+        )
+
     if decision.action == "increase_charge":
         return await _charge_difference(
             session, tenant=tenant, appointment=appointment, deposit=locked,

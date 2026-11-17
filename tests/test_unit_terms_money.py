@@ -702,6 +702,15 @@ async def test_a4_a_unit_price_below_the_floor_is_named_with_its_unit(db):
     assert found["amount_below_minimum"] == ("Dra. Ana — Consulta (Centro): sinal de R$ 3,00",)
 
 
+async def test_a4_a_unit_price_equal_to_a_low_base_is_not_warned_twice(db):
+    """Base R$ 10 (sinal R$ 3) and Centro's own "R$ 10" (same cents): one line, the base's."""
+    world = await _seed(
+        db, timing="before", consulta_price="R$ 10,00", terms=(("consulta", "centro", "10", None),)
+    )
+    found = await _readiness_names(db, world)
+    assert found["amount_below_minimum"] == ("Dra. Ana — Consulta: sinal de R$ 3,00",)
+
+
 async def test_a4_base_fine_and_unit_fine_raise_no_warning(db):
     world = await _seed(db, timing="before", terms=CENTRO_250)
     found = await _readiness_names(db, world)

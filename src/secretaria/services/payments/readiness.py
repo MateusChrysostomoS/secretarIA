@@ -119,14 +119,18 @@ def _unit_prices(view, entry: dict, label: str, percent: int) -> list[tuple[str,
     service, labelled "Professional — Serviço (Unidade)". Only units the service can actually be
     booked at count (the booking flow's rule, `flow_units.units_for_service`: an active link to
     an active unit with open hours, where the service is done) - an exception nobody can book
-    never warns. A duration-only exception charges the base, already counted."""
+    never warns. A duration-only exception, or an own price equal to the base (in cents),
+    charges what the base line already counts - no second warning for it."""
     terms = terms_for_entry(flow_units.service_unit_terms_of(view), entry)
     if not terms:
         return []
+    base = parse_brl_to_cents(str(entry.get("price")) if entry.get("price") else None)
     found: list[tuple[str, int | None]] = []
     for unit in flow_units.units_for_service(view, entry_service_id(entry)):
         row = terms.get(unit.id)
         if row is None or not (row.price or "").strip():
+            continue
+        if base is not None and parse_brl_to_cents(row.price) == base:
             continue
         found.append((f"{label} ({unit.name})", _deposit_cents(row.price, percent)))
     return found
