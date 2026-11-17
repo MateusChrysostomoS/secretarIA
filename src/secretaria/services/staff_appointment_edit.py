@@ -91,7 +91,12 @@ from secretaria.services.calendar import (
     own_agenda_view,
 )
 from secretaria.services.patient_context import as_utc
-from secretaria.services.payments import adjustment_suspension, deposit_lifecycle, service_change
+from secretaria.services.payments import (
+    adjustment_queries,
+    adjustment_suspension,
+    deposit_lifecycle,
+    service_change,
+)
 from secretaria.services.payments.service_change_policy import MoneyTerms, money_fields_changed
 from secretaria.services.professional_edit_outbox import record_professional_edit
 from secretaria.services.service_catalog import (
@@ -232,8 +237,8 @@ DEFER_LEGACY = "legacy"  # contrato §1: no room for a useful Pix before the vis
 # D-R9 (contrato §3.9): every mutation of a SUSPENDED consultation by the hub.
 APPOINTMENT_SUSPENDED = "appointment_suspended"
 APPOINTMENT_SUSPENDED_MESSAGE = (
-    "Esta consulta aguarda o Pix da diferença de uma troca pedida pelo paciente. "
-    "Enquanto isso, só é possível liberar o horário."
+    "Essa consulta aguarda o Pix da diferença de uma troca; enquanto isso, só é possível "
+    "liberar o horário."
 )
 
 # `request_service_change` refused (`ServiceChangeResult.reason`): what the clinic reads.
@@ -917,22 +922,26 @@ async def apply_staff_edit(
                 raise StaffEditError(
                     status_code, SERVICE_CHANGE_BLOCKED, message, reason=money.reason
                 )
-            if money.kind in WAITING_KINDS:
-                if deferral is None:
-                    # Decided "now" a moment ago and "wait" under the lock (the clinic's timing
-                    # or prices changed in between): Google already moved - never commit that.
-                    logger.warning(
-                        "hub_edit_money_decision_moved",
-                        appointment_id=str(appointment_id),
-                        kind=money.kind,
-                    )
-                    raise _sinal_changed()
-            else:
+            if _decision_moved(deferral, money):
+                # Decided a moment ago, and the engine - under the lock - answered with the other
+                # shape AND a Pix (the clinic's timing or prices changed in between): "now" that
+                # turned into "wait" (Google already moved), or "wait" that turned into
+                # `applied_awaiting_payment` (the agenda would have to move AFTER the Pix). Never
+                # commit either: the Pix the patient never saw is voided, then everything undone.
+                logger.warning(
+                    "hub_edit_money_decision_moved",
+                    appointment_id=str(appointment_id),
+                    kind=money.kind,
+                )
+                await _void_unseen_pix(session, tenant, paid, now, appointment_id)
+                raise _sinal_changed()
+            if money.kind not in WAITING_KINDS:
                 fields = list(money.changed_fields)
                 if deferral is not None:
-                    # Decided "wait" and the engine wrote it now (the provider was down: the
-                    # clinic collects; or a decision that moved): the agenda follows now - no
-                    # Pix exists, so a refusal here still undoes everything.
+                    # Decided "wait" and the engine wrote it now WITHOUT a Pix (`applied_now`:
+                    # the provider was down and the clinic collects, or a cheaper/smaller change
+                    # after a price moved; `asked`): the agenda follows now - no Pix exists (the
+                    # Pix kind was refused above), so a refusal here still undoes everything.
                     moved = await _move_event(
                         appointment_id,
                         before,
@@ -1067,6 +1076,34 @@ async def apply_staff_edit(
 def suspended_error() -> StaffEditError:
     """D-R9 (contrato §3.9): the clinic may only free a suspended consultation's slot."""
     return StaffEditError(409, APPOINTMENT_SUSPENDED, APPOINTMENT_SUSPENDED_MESSAGE)
+
+
+def _decision_moved(
+    deferral: str | None, money: service_change.ServiceChangeResult
+) -> bool:
+    """The engine's answer does not have the shape `_deferral` predicted, and a Pix exists."""
+    if deferral is None:
+        return money.kind in WAITING_KINDS
+    return money.kind == "applied_awaiting_payment"
+
+
+async def _void_unseen_pix(
+    session: AsyncSession, tenant: Tenant, deposit: PixDeposit, now: datetime, appointment_id
+) -> None:
+    """Void, at the provider, the difference Pix the engine just created in THIS transaction
+    (about to be rolled back, never sent to the patient): `settle_open_adjustments` voids every
+    open difference of the sinal - only this one can be open (the engine refuses a change while
+    another is). Best-effort: a failure is logged; a late payment of it is an orphan charge."""
+    try:
+        await adjustment_queries.settle_open_adjustments(
+            session, tenant=tenant, deposit=deposit, now=now, close_questions=False
+        )
+    except Exception as exc:  # noqa: BLE001 - the edit is refused either way
+        logger.warning(
+            "hub_edit_unseen_pix_not_voided",
+            appointment_id=str(appointment_id),
+            error_type=type(exc).__name__,
+        )
 
 
 def _sinal_changed() -> StaffEditError:

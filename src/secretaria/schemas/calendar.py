@@ -204,7 +204,8 @@ class CalendarEventRead(BaseModel):
     unit_name: str | None = None
     unit_address: str | None = None
     # TASK-085 R D-R9 (contrato §3.9), additive: the consultation waits for the Pix of the
-    # difference of a change the patient asked for (`deposit.pending_difference_mode` "suspend").
+    # difference of a change - the patient's or the clinic's (`deposit.pending_difference_mode`
+    # "suspend").
     # Editar/Remarcar, Cancelar, falta, compareceu and every other change answer 409
     # `appointment_suspended`; only "Liberar horário" works. None for an event with no local
     # Appointment (like the other appointment keys).

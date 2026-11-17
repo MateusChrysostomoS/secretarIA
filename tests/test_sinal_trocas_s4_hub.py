@@ -48,8 +48,8 @@ from tests.test_hub_edit_appointment import (  # noqa: F401
 )
 
 SUSPENDED_MESSAGE = (
-    "Esta consulta aguarda o Pix da diferença de uma troca pedida pelo paciente. "
-    "Enquanto isso, só é possível liberar o horário."
+    "Essa consulta aguarda o Pix da diferença de uma troca; enquanto isso, só é possível "
+    "liberar o horário."
 )
 
 
@@ -408,3 +408,34 @@ async def test_no_recharge_without_a_money_change(
     assert sent()[0][1] == WA_ID
 
 
+
+
+async def test_a_failing_notice_never_skips_the_new_sinal(
+    client: AsyncClient, db, acting, provider, monkeypatch
+):
+    """Fix round 1: the old Pix was voided at the commit; a notice that raises afterwards must
+    not leave the patient without the new one (`recharge_after_edit` runs in a `finally`)."""
+    from secretaria.services import clinic_action_notice
+
+    calls = _record_recharge(monkeypatch)
+
+    async def broken(*args, **kwargs):
+        raise RuntimeError("notice down")
+
+    monkeypatch.setattr(clinic_action_notice, "notify_staff_edit", broken)
+    world = await _paid_world(db, acting)
+    async with db() as session:
+        deposit = await session.scalar(select(PixDeposit))
+        deposit.status = PixDepositStatus.AWAITING
+        deposit.amount_cents = 6000
+        deposit.provider = "asaas"
+        deposit.provider_charge_id = "pay_old"
+        deposit.deposit_timing = "after"
+        await session.commit()
+
+    with pytest.raises(RuntimeError):
+        await _post(client, world.appointment.id, service="Avaliação")
+
+    [(_tenant, appointment_id, old_cents, _sent)] = calls
+    assert (appointment_id, old_cents) == (world.appointment.id, 6000)
+    assert (await reload_appointment(db, world.appointment.id)).appointment_type == "Avaliação"

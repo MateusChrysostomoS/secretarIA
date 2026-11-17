@@ -562,8 +562,66 @@ def test_the_suspended_answer_is_the_contracts():
     err = sae.suspended_error()
     assert (err.status_code, err.code) == (409, "appointment_suspended")
     assert err.message == (
-        "Esta consulta aguarda o Pix da diferença de uma troca pedida pelo paciente. "
-        "Enquanto isso, só é possível liberar o horário."
+        "Essa consulta aguarda o Pix da diferença de uma troca; enquanto isso, só é possível "
+        "liberar o horário."
     )
 
 
+
+
+# --------------------------------------------------------------------------
+# fix round 1: the engine answered with another shape than predicted AND a Pix
+# --------------------------------------------------------------------------
+
+
+def _timing_sequence(monkeypatch, *answers: bool) -> None:
+    """`timing_is_before` answers `answers` in turn (the prediction reads it first, the engine
+    under the lock second): the clinic switched its timing in the middle of the edit."""
+    queue = list(answers)
+
+    def timing(tenant) -> bool:
+        return queue.pop(0) if len(queue) > 1 else queue[0]
+
+    monkeypatch.setattr(service_change, "timing_is_before", timing)
+
+
+async def test_predicted_wait_but_applied_with_a_pix_is_refused_and_the_pix_voided(
+    db, provider, monkeypatch
+):
+    """Predicted "wait" (before) and the engine wrote it now WITH a Pix (after): the agenda would
+    have to move after a Pix exists - refused, the unseen Pix voided, nothing of the edit kept."""
+    world = await _paid_world(db)
+    _timing_sequence(monkeypatch, True, False)
+    new = world.start_at + timedelta(days=1)
+
+    with pytest.raises(StaffEditError) as err:
+        await _edit(db, world, _req(service="Avaliação", start_at=new))
+
+    assert (err.value.status_code, err.value.extra["reason"]) == (409, "deposit_not_paid")
+    assert provider.called("create_pix_charge") == 1 and provider.called("cancel_charge") == 1
+    calendar = FakeCalendar.get("tenant")
+    assert calendar.updated == [] and calendar.created == []  # Google never moved
+    row = await reload_appointment(db, world.appointment.id)
+    assert (_utc(row.start_at), row.appointment_type) == (world.start_at, "Consulta")
+    assert await _adjustments(db) == [] and await _holds(db) == []
+    assert await _notices(db, world.appointment.id) == []
+
+
+async def test_predicted_now_but_suspended_is_refused_the_pix_voided_and_google_put_back(
+    db, provider, monkeypatch
+):
+    world = await _paid_world(db)
+    _timing_sequence(monkeypatch, False, True)
+    new = world.start_at + timedelta(days=1)
+
+    with pytest.raises(StaffEditError) as err:
+        await _edit(db, world, _req(service="Avaliação", start_at=new))
+
+    assert err.value.extra["reason"] == "deposit_not_paid"
+    assert provider.called("cancel_charge") == 1
+    moved, restored = FakeCalendar.get("tenant").updated
+    assert moved[1] == new and restored[1] == world.start_at
+    row = await reload_appointment(db, world.appointment.id)
+    assert (_utc(row.start_at), row.appointment_type) == (world.start_at, "Consulta")
+    assert await _adjustments(db) == [] and await _holds(db) == []
+    assert not await _suspended(db, world)
