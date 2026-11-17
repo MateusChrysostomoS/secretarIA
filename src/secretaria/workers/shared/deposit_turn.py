@@ -423,6 +423,8 @@ async def _payment_after_code(
                 professional_id=held.professional_id,
                 insurance=held.insurance,
                 redis=redis,
+                # TASK-085: the price (and so the sinal) of the unit the patient chose.
+                unit_id=getattr(held, "unit_id", None),
             )
 
     try:

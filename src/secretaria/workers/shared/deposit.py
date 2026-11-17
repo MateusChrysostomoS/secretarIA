@@ -166,11 +166,18 @@ async def _with_service_difference(result: FlowRouterResult, tenant: Tenant) -> 
     is PAID gets one more line: the difference of the sinal (to pay by Pix, or above the new
     value), from the same decision `service_change.request_service_change` takes at Confirmar
     (browser proof 2026-10-26). Read-only and best-effort: any doubt leaves the card as it was
-    (Confirmar still shows the value with the Pix)."""
+    (Confirmar still shows the value with the Pix).
+
+    TASK-085: the new price is the one of the draft's unit; a change of the UNIT only gets the
+    line too when the price there differs (R3) - at the same price the card stays as it was."""
     draft = result.flow_edit_draft if isinstance(result.flow_edit_draft, dict) else {}
     current, original = draft.get("current") or {}, draft.get("original") or {}
     new_service = current.get("service")
-    if not new_service or new_service == original.get("service"):
+    if not new_service:
+        return result
+    service_changed = new_service != original.get("service")
+    unit_changed = "unit_id" in current and current.get("unit_id") != original.get("unit_id")
+    if not service_changed and not unit_changed:
         return result
     card = next(
         (b for b in result.bubbles if isinstance(b, MenuBubble) and LABEL_CONFIRM in b.labels),
@@ -187,6 +194,16 @@ async def _with_service_difference(result: FlowRouterResult, tenant: Tenant) -> 
             appointment = await session.get(Appointment, appointment_id)
             if appointment is None or appointment.tenant_id != tenant.id:
                 return result
+            # The unit the change lands on: the draft's (a key only on a booking with a unit).
+            unit = {"unit_id": current.get("unit_id")} if "unit_id" in current else {}
+            if not service_changed:
+                # The unit only (`unit_changed`, so the key is there): a line only when the
+                # price at the new unit is another one.
+                moves = await service_change.unit_change_moves_price(
+                    session, tenant=tenant, appointment=appointment, unit_id=unit["unit_id"]
+                )
+                if not moves:
+                    return result
             start = current.get("start_at")
             start_at = (
                 datetime.fromisoformat(start).replace(tzinfo=_tenant_tz(tenant))
@@ -202,6 +219,7 @@ async def _with_service_difference(result: FlowRouterResult, tenant: Tenant) -> 
                 professional_id=current.get("professional_id") or appointment.professional_id,
                 start_at=start_at,
                 now=datetime.now(UTC),
+                **unit,
             )
     except Exception as exc:  # noqa: BLE001 - the card goes out as it was
         logger.warning(
@@ -210,7 +228,9 @@ async def _with_service_difference(result: FlowRouterResult, tenant: Tenant) -> 
             error_type=type(exc).__name__,
         )
         return result
-    line = service_change.confirm_card_line_text(decision.action, decision.diff_cents)
+    line = service_change.confirm_card_line_text(
+        decision.action, decision.diff_cents, unit_only=not service_changed
+    )
     body = f"{card.body.rstrip()}\n\n{line}" if line else card.body
     if line and len(body) <= MAX_INTERACTIVE_BODY_CHARS:
         card.body = body

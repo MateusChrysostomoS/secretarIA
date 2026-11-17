@@ -715,6 +715,7 @@ class BookingGate:
             appointment_type=appointment_type,
             professional_id=professional_id,
             insurance=insurance,
+            unit_id=unit_id,
         )
         # (code, reason, stage) of a deposit that is dropped for a technical reason (ruling R6):
         # the booking then takes the NORMAL no-deposit path below and the clinic is told.
@@ -856,12 +857,14 @@ class BookingGate:
         appointment_type: str | None,
         professional_id: UUID | None,
         insurance: str | None,
+        unit_id: UUID | None = None,
     ):
         """The deposit decision for this booking, or None when the clinic is not on `before`.
 
         FAIL-OPEN until the clinic is known to be on `before` (the gate has always failed open:
         an outage must not stop an `after` clinic's agenda), FAIL-CLOSED afterwards: once a
         deposit may be due, a failure to decide is a `blocked`, never a free booking.
+        `unit_id` (TASK-085): the hold's unit, so the sinal is on that unit's price.
         """
         # TASK-052 (owner 2026-10-12): the confirmation of a "Remarcar" asks the payment provider
         # whether the released slot's PAID deposit may be reused - before any session is open.
@@ -904,6 +907,7 @@ class BookingGate:
                     professional_id=professional_id,
                     insurance=insurance,
                     redis=self._redis,
+                    unit_id=unit_id,
                 )
 
         try:
