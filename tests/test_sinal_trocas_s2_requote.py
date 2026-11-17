@@ -28,6 +28,7 @@ from secretaria.models import (
 from secretaria.models.insurance import TenantInsurancePlan
 from secretaria.models.payment_attention_item import (
     REASON_ORPHAN_PAYMENT,
+    REASON_SERVICE_DIFF_COLLECT_DUE,
     PaymentAttentionItem,
 )
 from secretaria.models.pix_deposit import (
@@ -271,6 +272,25 @@ async def test_a_paid_charge_blocks_the_edit_and_is_never_voided(db, provider):
     assert provider.called("cancel_charge") == 0
 
 
+async def test_a_row_paid_between_the_callers_read_and_the_call_blocks_the_edit(db, provider):
+    """Fix round 1: the caller read the deposit AWAITING; the webhook paid it before the lock.
+    Never "unchanged" (the edit would commit over a sinal paid at the old amount)."""
+    async with db() as session:
+        tenant, _p, appointment, deposit = await _seed(session)
+        assert deposit.status is PixDepositStatus.AWAITING  # the caller's (stale) read
+        async with db() as webhook:
+            row = await webhook.get(PixDeposit, deposit.id)
+            row.status = PixDepositStatus.PAID
+            await webhook.commit()
+        outcome = await _edit_and_requote(
+            session, tenant, appointment, deposit, appointment_type="Exame"
+        )
+        assert outcome == "payment_in_flight"
+        assert deposit.status is PixDepositStatus.PAID
+        assert deposit.appointment_id == appointment.id
+    assert provider.calls == []
+
+
 @pytest.mark.parametrize("failure", ["read", "cancel", "no_account"])
 async def test_a_failed_read_or_void_blocks_the_edit(db, provider, failure):
     if failure == "read":
@@ -431,14 +451,61 @@ async def test_a_new_amount_of_zero_only_tells_the_patient(db, provider, monkeyp
     assert "não pede sinal" in _Whatsapp.sent[0][1]
 
 
-async def test_a_provider_failure_still_tells_the_patient_the_old_pix_is_gone(db, provider):
-    tenant, _p, appointment, old = await _voided(db, provider)
+CLINIC_WILL_CALL = deposit_lifecycle.REQUOTE_CLINIC_WILL_CALL_TEXT
+
+
+async def _items(db):
+    async with db() as session:
+        return (await session.scalars(select(PaymentAttentionItem))).all()
+
+
+async def test_a_provider_failure_opens_an_item_and_tells_the_patient_the_next_step(
+    db, provider
+):
+    """Fix round 1 (ruling): the old Pix is dead and the new one was refused - the clinic gets an
+    item to collect the new sinal and the patient is told the clinic will get in touch."""
+    tenant, patient, appointment, old = await _voided(db, provider)
     provider.create_error = ProviderError("create_failed", status_code=500)
     created = await deposit_lifecycle.recharge_after_edit(
         tenant_id=tenant.id, appointment_id=appointment.id, old_amount_cents=old.amount_cents
     )
     assert created is None
-    assert [body for _to, body in _Whatsapp.sent] == [OPENING + "."]
+    assert [body for _to, body in _Whatsapp.sent] == [f"{OPENING}. {CLINIC_WILL_CALL}"]
+    items = await _items(db)
+    assert len(items) == 1
+    item = items[0]
+    assert item.reason == REASON_SERVICE_DIFF_COLLECT_DUE and item.tenant_id == tenant.id
+    assert item.amount_cents == 9000 and item.patient_id == patient.id
+    assert item.deposit_id is None and item.service_label == "Exame"
+    # A retry of the same edit never opens a second item.
+    await deposit_lifecycle.recharge_after_edit(
+        tenant_id=tenant.id, appointment_id=appointment.id, old_amount_cents=old.amount_cents
+    )
+    assert len(await _items(db)) == 1
+
+
+async def test_a_payer_question_that_cannot_be_asked_opens_the_item_too(db, provider):
+    tenant, _p, appointment, old = await _voided(db, provider)
+    provider.create_error = ProviderError("payer_document_required", status_code=400)
+    # No Redis and no conversation: the question cannot go out.
+    created = await deposit_lifecycle.recharge_after_edit(
+        tenant_id=tenant.id, appointment_id=appointment.id, old_amount_cents=old.amount_cents
+    )
+    assert created is None
+    assert [body for _to, body in _Whatsapp.sent] == [OPENING + ".", CLINIC_WILL_CALL]
+    assert [i.reason for i in await _items(db)] == [REASON_SERVICE_DIFF_COLLECT_DUE]
+
+
+async def test_a_sinal_made_due_that_the_provider_refuses_stays_silent(db, provider):
+    """Characterization (OQ-10, nothing was voided): like a booking's own Pix, a refusal is
+    only logged - no item, no message."""
+    async with db() as session:
+        tenant, _p, appointment, _d = await _seed(session, deposit_amount=None)
+    provider.create_error = ProviderError("create_failed", status_code=500)
+    created = await deposit_lifecycle.recharge_after_edit(
+        tenant_id=tenant.id, appointment_id=appointment.id, old_amount_cents=None
+    )
+    assert created is None and _Whatsapp.sent == [] and await _items(db) == []
 
 
 async def test_recharge_is_idempotent(db, provider):
@@ -571,6 +638,7 @@ def test_the_card_line_and_the_blocked_texts():
     paid = deposit_lifecycle.requote_blocked_text("payment_in_flight")
     failed = deposit_lifecycle.requote_blocked_text("void_failed")
     assert "não foi feita" in paid and "não foi feita" in failed and paid != failed
+    assert "a clínica vai falar com você sobre o sinal" in CLINIC_WILL_CALL
 
 
 async def test_the_agenda_view_carries_the_pending_difference_mode(db, monkeypatch):

@@ -40,6 +40,7 @@ from secretaria.models.insurance import ProfessionalInsurancePlan, TenantInsuran
 from secretaria.models.payment_attention_item import (
     REASON_PAID_THEN_CANCELLED,
     REASON_REFUND_DUE_POLICY,
+    REASON_SERVICE_DIFF_COLLECT_DUE,
     PaymentAttentionItem,
 )
 from secretaria.models.pix_deposit import (
@@ -619,11 +620,9 @@ async def maybe_create_deposit(
     await session.flush()
 
     try:
-        # `opening` only when there is one: the booking path keeps calling the seam exactly as
-        # before (tests replace `_send_deposit_request` with positional-only recorders).
         await _send_deposit_request(
             session, tenant, appointment, patient, amount_cents, copy_paste, waba_token,
-            **({"opening": opening} if opening else {}),
+            opening=opening,
         )
     except Exception as exc:
         logger.warning(
@@ -657,6 +656,10 @@ REQUOTE_OPENING_TEXT = (
 REQUOTE_NO_SINAL_TEXT = "Com a alteração, esta consulta não pede sinal."
 # OQ-10: there was no sinal and the edit made one due (e.g. a convênio without sinal -> particular).
 NEWLY_REQUIRED_OPENING_TEXT = "Com a alteração da sua consulta, ela passou a pedir um sinal."
+# The old Pix was voided and the new one could not be created: never a message without a next step.
+REQUOTE_CLINIC_WILL_CALL_TEXT = (
+    "Não consegui gerar o novo Pix agora; a clínica vai falar com você sobre o sinal."
+)
 
 
 async def requote_amount_cents(session: AsyncSession, *, tenant: Tenant, appointment) -> int:
@@ -716,6 +719,16 @@ async def requote_awaiting(
     Voided -> the old row is detached (status EXPIRED, `resolved_at`, `appointment_id` None: a
     late payment of the old code is an ORPHAN item) -> "voided": after the commit the caller runs
     `recharge_after_edit`. Lock order: the caller holds the consultation; this locks the deposit.
+    A row the caller saw AWAITING that is PAID under the lock (the webhook won meanwhile) ->
+    "payment_in_flight": the edit never commits over a sinal paid at the old amount.
+
+    Caller obligations (contract section 3.7):
+    - call it as the LAST fallible step before the commit: once it answers "voided" the
+      provider's charge is already cancelled and cannot be restored, so a rollback after it would
+      leave the consultation pointing at a dead charge (whose EXPIRED webhook would then cancel
+      the visit). Anything that can still fail (agenda, other writes) goes BEFORE this call;
+    - treat an EXCEPTION raised here (payment account or price lookups, the database) exactly
+      like "void_failed": roll the edit back and tell the patient / the clinic.
     """
     if (
         deposit.tenant_id != tenant.id
@@ -729,7 +742,13 @@ async def requote_awaiting(
         )
         return "unchanged"
     # Re-read under the row lock (Postgres; a no-op on SQLite): a webhook may have moved it.
+    seen = deposit.status
     await session.refresh(deposit, with_for_update=True)
+    if seen is PixDepositStatus.AWAITING and deposit.status is PixDepositStatus.PAID:
+        logger.info(
+            "pix_requote_payment_in_flight", tenant_id=str(tenant.id), deposit_id=str(deposit.id)
+        )
+        return "payment_in_flight"
     if deposit.status is not PixDepositStatus.AWAITING:
         return "unchanged"
     if deposit.deposit_timing == DEPOSIT_TIMING_BEFORE:
@@ -913,6 +932,49 @@ async def recharge_after_edit(
         return None
 
 
+async def _recharge_failed(
+    session: AsyncSession,
+    tenant: Tenant,
+    patient: Patient,
+    appointment: Appointment,
+    new_cents: int,
+) -> None:
+    """The old Pix was voided and the new one was NOT created (the provider refused it, or the
+    payer-data question could not be asked): ONE attention item tells the clinic to collect the
+    new sinal itself. Reuses `service_diff_collect_due` (the "a troca já valeu: cobrar {valor} do
+    paciente" item, amount = the new sinal): no reason fits better, and a dedicated reason needs
+    the model + the attention view, which are outside this slice (recorded for a follow-up). One
+    item per edit: the key carries the consultation and its `updated_at` (a retry of the same
+    edit dedupes, a later edit that fails again opens its own). Never raises."""
+    provider = tenant.payment_provider or PROVIDER_ASAAS
+    stamp = appointment.updated_at
+    reference = f"requote:{appointment.id}:{int(stamp.timestamp()) if stamp else 0}"
+    try:
+        # A savepoint: a failed insert must not poison the session the patient's notice uses.
+        async with session.begin_nested():
+            await attention.open_attention_item(
+                session,
+                tenant_id=tenant.id,
+                reason=REASON_SERVICE_DIFF_COLLECT_DUE,
+                dedupe_key=attention.attention_dedupe_key(
+                    provider, reference, REASON_SERVICE_DIFF_COLLECT_DUE
+                ),
+                provider=provider,
+                patient_id=patient.id,
+                amount_cents=new_cents,
+                slot_start=appointment.start_at,
+                slot_end=appointment.end_at,
+                service_label=appointment.appointment_type,
+            )
+    except Exception as exc:  # noqa: BLE001 - the patient is still told; logged for the clinic
+        logger.warning(
+            "pix_requote_attention_failed",
+            error_type=type(exc).__name__,
+            tenant_id=str(tenant.id),
+            appointment_id=str(appointment.id),
+        )
+
+
 async def _recharge(
     session: AsyncSession,
     *,
@@ -940,7 +1002,8 @@ async def _recharge(
         return None
 
     voided = old_amount_cents is not None
-    if await requote_amount_cents(session, tenant=tenant, appointment=appointment) <= 0:
+    new_cents = await requote_amount_cents(session, tenant=tenant, appointment=appointment)
+    if new_cents <= 0:
         if voided:
             await _tell_patient(
                 session, tenant, patient, f"{REQUOTE_OPENING_TEXT} {REQUOTE_NO_SINAL_TEXT}",
@@ -969,7 +1032,7 @@ async def _recharge(
 
         if voided:
             await _tell_patient(session, tenant, patient, REQUOTE_OPENING_TEXT, waba_token)
-        await payer_data_after.ask_after_booking(
+        asked = await payer_data_after.ask_after_booking(
             session,
             tenant=tenant,
             patient=patient,
@@ -981,6 +1044,11 @@ async def _recharge(
             conversation_id=conversation_id,
             whatsapp_cls=WhatsAppClient,
         )
+        if not asked and voided:
+            # The question could not go out: the Pix is skipped, as on any `after` booking - but
+            # the old one is already dead, so the clinic takes it from here.
+            await _recharge_failed(session, tenant, patient, appointment, new_cents)
+            await _tell_patient(session, tenant, patient, REQUOTE_CLINIC_WILL_CALL_TEXT, waba_token)
         await session.commit()
         return None
     if deposit is None:
@@ -991,7 +1059,11 @@ async def _recharge(
             had_sinal=voided,
         )
         if voided:
-            await _tell_patient(session, tenant, patient, REQUOTE_OPENING_TEXT, waba_token)
+            await _recharge_failed(session, tenant, patient, appointment, new_cents)
+            await _tell_patient(
+                session, tenant, patient,
+                f"{REQUOTE_OPENING_TEXT} {REQUOTE_CLINIC_WILL_CALL_TEXT}", waba_token,
+            )
         await session.commit()
         return None
     await session.commit()

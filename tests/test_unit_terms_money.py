@@ -272,7 +272,7 @@ async def test_without_exceptions_a_raw_base_price_is_read_exactly_as_today(db):
 async def _after_sinal(db, world, appointment, monkeypatch, provider) -> int | None:
     sent: list[int] = []
 
-    async def no_send(session, tenant, appointment, patient, amount_cents, *args):
+    async def no_send(session, tenant, appointment, patient, amount_cents, *args, **kw):
         sent.append(amount_cents)
 
     monkeypatch.setattr(deposit_lifecycle, "_send_deposit_request", no_send)
