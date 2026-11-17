@@ -43,6 +43,7 @@ from secretaria.models.insurance import (
     ProfessionalInsurancePlan,
     TenantInsurancePlan,
 )
+from secretaria.models.insurance_acceptance_exception import InsuranceAcceptanceException
 from secretaria.models.professional import Professional
 from secretaria.models.tenant import Tenant
 from secretaria.services.service_catalog import normalize
@@ -614,6 +615,12 @@ async def _drop_tenant_plans(
         )
     )
     if tenant_plan_ids:
+        # The clinic matrix of a dropped plan goes with it (SQLite does not cascade).
+        await session.execute(
+            delete(InsuranceAcceptanceException).where(
+                InsuranceAcceptanceException.tenant_plan_id.in_(tenant_plan_ids)
+            )
+        )
         await session.execute(
             delete(ProfessionalInsurancePlan).where(
                 ProfessionalInsurancePlan.tenant_plan_id.in_(tenant_plan_ids)
@@ -883,20 +890,37 @@ async def set_professional_independent_plans(
     unknown = [str(catalog_id) for catalog_id in wanted if catalog_id not in known]
     if unknown:
         raise UnknownCatalogIds(unknown)
-    await session.execute(
-        delete(ProfessionalInsurancePlan).where(
-            ProfessionalInsurancePlan.professional_id == professional.id,
-            ProfessionalInsurancePlan.catalog_id.is_not(None),
-        )
-    )
-    for catalog_id in wanted:
-        session.add(
-            ProfessionalInsurancePlan(
-                professional_id=professional.id,
-                tenant_id=professional.tenant_id,
-                catalog_id=catalog_id,
+    # A DIFF, not delete-and-recreate (TASK-086): the acceptance matrix hangs off these rows, so a
+    # kept pick must keep its row (and its exceptions). A dropped pick takes its exceptions with
+    # it - explicitly, because SQLite (the test DB) does not cascade.
+    current = {
+        row.catalog_id: row
+        for row in await session.scalars(
+            select(ProfessionalInsurancePlan).where(
+                ProfessionalInsurancePlan.professional_id == professional.id,
+                ProfessionalInsurancePlan.catalog_id.is_not(None),
             )
         )
+    }
+    dropped = [row.id for catalog_id, row in current.items() if catalog_id not in wanted]
+    if dropped:
+        await session.execute(
+            delete(InsuranceAcceptanceException).where(
+                InsuranceAcceptanceException.professional_plan_id.in_(dropped)
+            )
+        )
+        await session.execute(
+            delete(ProfessionalInsurancePlan).where(ProfessionalInsurancePlan.id.in_(dropped))
+        )
+    for catalog_id in wanted:
+        if catalog_id not in current:
+            session.add(
+                ProfessionalInsurancePlan(
+                    professional_id=professional.id,
+                    tenant_id=professional.tenant_id,
+                    catalog_id=catalog_id,
+                )
+            )
     await session.flush()
     return sorted(str(catalog_id) for catalog_id in wanted)
 
