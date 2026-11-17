@@ -41,6 +41,7 @@ from secretaria.ai.tools import (
     _effective_service_catalog,
     _get_calendar,
     _hand_back_if_slot_taken,
+    _insurance_refusal,
     _localize_window,
     _match_by_name,
     _persist_appointment,
@@ -230,6 +231,16 @@ async def create_event_at_unit(
     # The service must be one the doctor does at this unit (spec §6.1, §9.13).
     refused = await _service_unit_refusal(
         "create_event_at_unit", unit, owner, _effective_service_catalog(), canonical_type
+    )
+    if refused is not None:
+        return refused
+    # TASK-086 A14 (review): the convênio matrix at this unit, before any calendar call.
+    refused = await _insurance_refusal(
+        "create_event_at_unit",
+        unit,
+        _effective_service_catalog(),
+        canonical_type,
+        professional_id=getattr(owner, "id", None),
     )
     if refused is not None:
         return refused

@@ -481,7 +481,40 @@ async def load_tenant_insurance(session: AsyncSession, tenant_id: UUID) -> Tenan
     refused = await load_acceptance_exceptions(session, tenant_id, mode)
     if not refused.clinic and not refused.by_professional:
         return lists
+    if mode == "independent":
+        refused = _alias_same_named_plans(refused, lists.plans)
     return TenantInsurance(plans=lists.plans, accepted_by=lists.accepted_by, refused=refused)
+
+
+def _alias_same_named_plans(refused: Any, plans: list[dict]) -> Any:
+    """`independent` mode: each doctor's refused cells also under every SAME-NAMED plan id.
+
+    Two doctors may each add an "Outro" with the same name ("GEAP"); those rows are never
+    deduplicated, so the patient's answer resolves (`match_plan`, first match) to ONE of the
+    ids - possibly the other doctor's. A doctor's own set is keyed by their own row id, so the
+    lookup would miss and the guard would let a refused cell through. Copying each refused cell
+    to the other ids that carry the same name, inside that doctor's OWN set, makes the lookup
+    land whichever id the name resolved to. Per-doctor sets keep it from leaking to others.
+    """
+    ids_by_name: dict[str, set[str]] = {}
+    name_of: dict[str, str] = {}
+    for plan in plans:
+        plan_id = plan.get("id")
+        if plan_id is None:
+            continue
+        key = normalize(str(plan.get("name") or ""))
+        name_of[str(plan_id)] = key
+        ids_by_name.setdefault(key, set()).add(str(plan_id))
+    if all(len(ids) < 2 for ids in ids_by_name.values()):
+        return refused
+    by_professional = {}
+    for professional_id, cells in refused.by_professional.items():
+        expanded = set(cells)
+        for service_id, unit_id, plan_id in cells:
+            for alias in ids_by_name.get(name_of.get(plan_id, ""), ()):
+                expanded.add((service_id, unit_id, alias))
+        by_professional[professional_id] = frozenset(expanded)
+    return type(refused)(clinic=refused.clinic, by_professional=by_professional)
 
 
 async def _load_clinic_insurance(session: AsyncSession, tenant_id: UUID) -> TenantInsurance:
