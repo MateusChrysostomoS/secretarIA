@@ -529,3 +529,36 @@ async def test_a_legacy_row_expires_like_today(db, provider, sent, monkeypatch):
     assert (await _adjustment(db, legacy.id)).status == STATUS_EXPIRED
     assert seen == [legacy.id]
     assert sent == []
+
+
+async def test_an_applied_pix_expiring_after_the_visit_started_is_still_collected(
+    db, provider, sent
+):
+    """I2: the patient checked in (the visit started, attended) before the Pix of an applied
+    change expired: the change stood, so the clinic is told to collect - never `cancelled`."""
+    seeded, created, _new = await _requested(
+        db, timing="after", days_ahead=20 / (24 * 60), new_offset=timedelta(0)
+    )
+    assert created.kind == "applied_awaiting_payment"
+    async with db() as session:
+        row = await session.get(Appointment, seeded[2].id)
+        row.status = AppointmentStatus.ATTENDED
+        await session.commit()
+    assert await _sweep(db, NOW + timedelta(minutes=31)) == 1
+    adjustment = await _adjustment(db, created.adjustment_id)
+    assert adjustment.status == STATUS_COLLECT_DUE
+    [item] = await _all(db, PaymentAttentionItem)
+    assert (item.reason, item.amount_cents) == (REASON_SERVICE_DIFF_UNPAID, 3000)
+
+
+async def test_an_applied_pix_of_a_cancelled_visit_expires_cancelled(db, provider, sent):
+    """I2: only a GONE visit (missing / cancelled) ends an applied change `cancelled`."""
+    seeded, created, _new = await _requested(db, timing="after", new_offset=timedelta(0))
+    async with db() as session:
+        row = await session.get(Appointment, seeded[2].id)
+        row.status = AppointmentStatus.CANCELLED
+        await session.commit()
+    assert await _sweep(db, NOW + timedelta(minutes=31)) == 1
+    assert (await _adjustment(db, created.adjustment_id)).status == STATUS_CANCELLED
+    assert await _all(db, PaymentAttentionItem) == []
+    assert sent == []

@@ -60,6 +60,7 @@ from secretaria.core.logging import get_logger
 from secretaria.models import (
     LIVE_APPOINTMENT_STATUSES,
     Appointment,
+    AppointmentStatus,
     Patient,
     PixDeposit,
     Professional,
@@ -411,15 +412,16 @@ def difference_pix_text(
     ttl_minutes: int,
     *,
     source: str | None = None,
-    held_new_slot: bool = True,
+    held_new_slot: bool = False,
 ) -> str:
     """The Pix of the difference of a change that waits for it (`suspended`, and the legacy
     `awaiting_payment`). `source` = who asked for the change: `SOURCE_HUB` (the clinic's agenda
     edit) says so; anything else keeps the patient's own wording.
 
-    TASK-085 R (D-R4): the current consultation stays kept and the NEW window is reserved until the
-    Pix. `held_new_slot=False` - the legacy deferred fallback (`awaiting_payment`, no hold: the
-    "before" clinic had no room for a useful Pix) - never promises a reserved slot."""
+    TASK-085 R: `held_new_slot=True` ONLY for a `suspended` change (D-R4): both times stay
+    reserved until the deadline and, unpaid, the patient is asked what to do. The default (False:
+    the legacy deferred mode `awaiting_payment`, no hold) never promises a reserved slot and keeps
+    today's "se não for pago, a consulta continua como está"."""
     value = format_brl(diff_cents)
     if source == SOURCE_HUB:
         head = (
@@ -435,11 +437,18 @@ def difference_pix_text(
     lines.append("Sua consulta só muda depois que o pagamento for confirmado.")
     if held_new_slot:
         lines.append(
-            "Até lá, sua consulta atual fica guardada e o novo horário fica reservado para você."
+            "Até lá, sua consulta atual e o novo horário ficam reservados para você até o fim do "
+            "prazo."
         )
-    lines.append(
-        f"O código vale por {ttl_minutes} minutos. Se não for pago, a consulta continua como está."
-    )
+        lines.append(
+            f"O código vale por {ttl_minutes} minutos. Se não for pago a tempo, perguntamos o "
+            "que você prefere fazer."
+        )
+    else:
+        lines.append(
+            f"O código vale por {ttl_minutes} minutos. Se não for pago, a consulta continua "
+            "como está."
+        )
     # ONE message: the code is its last lines (fenced - see `pix_message`), never a bubble apart.
     lines.extend(pix_code_tail(copy_paste))
     return "\n".join(lines)
@@ -484,6 +493,25 @@ def adjustment_applied_text(new_service: str, diff_cents: int) -> str:
     return (
         f"Recebemos o Pix da diferença ({format_brl(diff_cents)}). "
         f"Sua consulta agora é {new_service}."
+    )
+
+
+def applied_underpaid_text(diff_cents: int, paid_cents: int) -> str:
+    """TASK-085 R (fix round 1, M3): the Pix of a change that was ALREADY made arrived SHORT.
+    Neutral: the change stands; the clinic settles the rest (no new Pix, nothing refunded)."""
+    missing = max(diff_cents - paid_cents, 0)
+    return (
+        f"Recebemos {format_brl(paid_cents)} no Pix da diferença do sinal; faltam "
+        f"{format_brl(missing)}. A clínica combina o restante com você."
+    )
+
+
+def applied_orphan_text(diff_cents: int) -> str:
+    """TASK-085 R (fix round 1, I1): the Pix of an applied change arrived after its consultation
+    was cancelled. Neutral, never promises a refund (the clinic decides, through its item)."""
+    return (
+        f"Recebemos o Pix da diferença ({format_brl(diff_cents)}), mas sua consulta já tinha "
+        "sido cancelada. A clínica vai entrar em contato com você."
     )
 
 
@@ -1844,6 +1872,10 @@ async def _apply_full_edit(
         start, end = _pending_window(appointment, data)
     except (TypeError, ValueError):
         start = end = None
+    # Contrato §4: appointment -> adjustment (the caller) -> the NEW agenda, then the window check.
+    await booking_hold.serialize_agenda_in(
+        session, tenant.id, _uuid_or_none(data.get("professional_id"))
+    )
     if (
         start is None
         or end <= start
@@ -2712,7 +2744,15 @@ async def notify_patient_adjustment_not_applied(
     patient = await _patient_of(session, tenant, notice)
     if patient is None:
         return
-    if notice.paid_cents is not None and notice.paid_cents < notice.diff_cents:
+    underpaid = notice.paid_cents is not None and notice.paid_cents < notice.diff_cents
+    if notice.mode == MODE_APPLIED:
+        # TASK-085 R D-R5: the change already stood - never "a troca não foi feita".
+        body = (
+            applied_underpaid_text(notice.diff_cents, notice.paid_cents)
+            if underpaid
+            else applied_orphan_text(notice.diff_cents)
+        )
+    elif underpaid:
         body = adjustment_underpaid_text(notice.new_service, notice.diff_cents, notice.paid_cents)
     else:
         body = adjustment_not_applied_text(notice.new_service, notice.diff_cents)
@@ -2849,7 +2889,14 @@ async def on_difference_unpaid(
     appointment = await _lock_appointment_then(session, adjustment)
     if adjustment.status != STATUS_AWAITING_PAYMENT:
         return "not_applicable"
-    if not _visit_upcoming(appointment, now):
+    # Fix round 1 (I2): an `applied` change is only "cancelled" when its consultation is GONE
+    # (missing or cancelled); one that already happened (attended, no-show, started) stood, so
+    # the clinic is told to collect the difference (D-R5).
+    applied_gone = adjustment.mode == MODE_APPLIED and (
+        appointment is None or appointment.status == AppointmentStatus.CANCELLED
+    )
+    suspend_gone = adjustment.mode == MODE_SUSPEND and not _visit_upcoming(appointment, now)
+    if applied_gone or suspend_gone:
         if not await move_adjustment(
             session, adjustment, from_status=STATUS_AWAITING_PAYMENT,
             to_status=STATUS_CANCELLED, now=now,
@@ -2926,6 +2973,7 @@ async def run_unpaid_followup(
             session, tenant, _notice(adjustment, deposit.patient_id if deposit else None)
         )
         appointment_id = adjustment.appointment_id
+        mode = adjustment.mode
         message = None
         if outcome == "choice_pending" and adjustment.status == STATUS_AWAITING_CHOICE:
             appointment = (
@@ -2958,7 +3006,11 @@ async def run_unpaid_followup(
         await session.rollback()
         logger.warning("service_change_unpaid_notice_failed", error_type=type(exc).__name__)
         return
-    if outcome == "kept_old" and appointment_id is not None:
+    # The old visit is no longer suspended: re-plan its reminders (fix round 1, M4 - also when a
+    # suspended change ended `cancelled`).
+    if appointment_id is not None and (
+        outcome == "kept_old" or (outcome == "cancelled" and mode == MODE_SUSPEND)
+    ):
         await followup_kept_old(tenant.id, appointment_id)
 
 

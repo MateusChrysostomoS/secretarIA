@@ -306,3 +306,113 @@ async def test_a_doctor_change_whose_new_agenda_fails_opens_the_agenda_item(
     [item] = await _all(db, PaymentAttentionItem)
     assert item.reason == REASON_SERVICE_DIFF_AGENDA_PENDING
     assert (await _row(db, seeded[2].id)).google_event_id == "evt-1"
+
+
+# --------------------------------------------------------------------------
+# fix round 1
+# --------------------------------------------------------------------------
+
+
+async def test_an_applied_change_paid_after_its_visit_was_cancelled_is_an_orphan(
+    db, provider, sent
+):
+    """I1: an "after" clinic cancels the visit while the difference is being paid. The cancel's
+    settle finds the charge PAID and leaves it to the webhook, which must not record a payment
+    for a consultation that no longer exists."""
+    from secretaria.services.payments import adjustment_queries
+
+    seeded = await _seed(db, timing="after")
+    created = await _request(db, seeded, "Avaliação")
+    assert created.kind == "applied_awaiting_payment"
+    _paid(provider, created.adjustment_id)
+    async with db() as session:
+        row = await session.get(Appointment, seeded[2].id)
+        row.status = AppointmentStatus.CANCELLED
+        tenant = await session.get(Tenant, seeded[0].id)
+        deposit = await session.get(PixDeposit, seeded[3].id)
+        settled = await adjustment_queries.settle_open_adjustments(
+            session, tenant=tenant, deposit=deposit, now=NOW + timedelta(minutes=4)
+        )
+        await session.commit()
+    assert settled == {str(created.adjustment_id): "payment_in_flight"}
+
+    result = await _pay(db, seeded, created.adjustment_id)
+
+    assert result.outcome == "adjustment_not_applicable"
+    async with db() as session:
+        adjustment = await session.get(DepositAdjustment, created.adjustment_id)
+        deposit = await session.get(PixDeposit, seeded[3].id)
+        assert adjustment.status == STATUS_CANCELLED
+        assert await service_change.held_deposit_cents(session, deposit) == 6000
+    [item] = await _all(db, PaymentAttentionItem)
+    assert item.reason == REASON_ORPHAN_PAYMENT
+    [[message]] = sent
+    assert "cancelada" in message.body and "R$ 30,00" in message.body
+
+
+async def test_an_applied_change_paid_after_the_visit_happened_keeps_the_payment(
+    db, provider, sent
+):
+    """I1: a visit that already happened (attended) keeps the paid difference."""
+    seeded = await _seed(db, timing="after")
+    created = await _request(db, seeded, "Avaliação")
+    async with db() as session:
+        row = await session.get(Appointment, seeded[2].id)
+        row.status = AppointmentStatus.ATTENDED
+        await session.commit()
+    _paid(provider, created.adjustment_id)
+    result = await _pay(db, seeded, created.adjustment_id)
+    assert result.outcome == "adjustment_applied"
+    async with db() as session:
+        adjustment = await session.get(DepositAdjustment, created.adjustment_id)
+    assert adjustment.status == STATUS_APPLIED
+    assert await _all(db, PaymentAttentionItem) == []
+
+
+async def test_an_underpaid_applied_change_is_collected_and_the_patient_told_neutrally(
+    db, provider, sent
+):
+    """M3: the change stands; the patient reads what arrived and that the clinic settles the
+    rest - never "a troca não foi feita"."""
+    from secretaria.models.deposit_adjustment import STATUS_COLLECT_DUE
+
+    seeded = await _seed(db, timing="after")
+    created = await _request(db, seeded, "Avaliação")
+    _paid(provider, created.adjustment_id, amount=2000)
+    result = await _pay(db, seeded, created.adjustment_id)
+    assert result.outcome == "adjustment_amount_under"
+    async with db() as session:
+        adjustment = await session.get(DepositAdjustment, created.adjustment_id)
+    assert adjustment.status == STATUS_COLLECT_DUE
+    assert (await _row(db, seeded[2].id)).appointment_type == "Avaliação"
+    [[message]] = sent
+    assert "R$ 20,00" in message.body and "R$ 10,00" in message.body
+    assert "combina o restante" in message.body and "não foi feita" not in message.body
+
+
+@pytest.mark.parametrize("ending", ["underpaid", "not_applicable"])
+async def test_a_suspended_change_that_ends_unapplied_replans_the_old_visit(
+    db, provider, sent, replans, ending
+):
+    """M4: the old visit is visible again - its reminders are re-planned once."""
+    seeded = await _seed(db, timing="before")
+    new_start = seeded[2].start_at + timedelta(days=1)
+    created = await _request(
+        db, seeded, "Avaliação", start_at=new_start, end_at=new_start + timedelta(minutes=60),
+        time_changed=True,
+    )
+    if ending == "not_applicable":
+        async with db() as session:
+            session.add(
+                Appointment(
+                    id=uuid4(), tenant_id=seeded[0].id, patient_id=seeded[1].id,
+                    google_event_id="evt-r", appointment_type="Consulta", start_at=new_start,
+                    end_at=new_start + timedelta(minutes=30),
+                    status=AppointmentStatus.SCHEDULED,
+                )
+            )
+            await session.commit()
+    _paid(provider, created.adjustment_id, amount=2000 if ending == "underpaid" else 3000)
+    await _pay(db, seeded, created.adjustment_id)
+    assert replans == [seeded[2].id]
+    assert await _all(db, BookingHold) == []

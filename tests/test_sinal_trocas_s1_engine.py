@@ -458,14 +458,17 @@ def test_the_card_line_depends_on_the_timing():
 
 
 def test_the_suspension_pix_says_both_slots_are_kept():
-    text = service_change.difference_pix_text("Avaliação", 3000, "000201pix", 30)
-    assert "R$ 30,00" in text and "só muda" in text
-    assert "guardad" in text and "reservad" in text
-    assert text.rstrip().endswith("```000201pix```")
-    legacy = service_change.difference_pix_text(
-        "Avaliação", 3000, "000201pix", 30, held_new_slot=False
+    text = service_change.difference_pix_text(
+        "Avaliação", 3000, "000201pix", 30, held_new_slot=True
     )
+    assert "R$ 30,00" in text and "só muda" in text
+    assert "reservados" in text and "fim do prazo" in text and "perguntamos" in text
+    assert "continua como está" not in text  # unpaid, the patient is ASKED (D-R4)
+    assert text.rstrip().endswith("```000201pix```")
+    # Fix round 1 (M5): the default never promises a reserved slot (the legacy fallback).
+    legacy = service_change.difference_pix_text("Avaliação", 3000, "000201pix", 30)
     assert "reservad" not in legacy and "só muda" in legacy
+    assert "continua como está" in legacy
 
 
 def test_the_applied_pix_says_the_change_already_happened():
@@ -508,3 +511,26 @@ def test_kept_collect_and_blocked_texts():
     assert service_change.blocked_text("slot_taken", unit_only=True) == service_change.blocked_text(
         "slot_taken"
     )
+
+
+async def test_after_with_the_provider_down_applies_now_and_the_clinic_collects(db, provider):
+    """Fix round 1: the provider down in an "after" clinic is today's `increase_collect` - the
+    change stands, no Pix, ONE `service_diff_collect_due` item; no `mode` row is born."""
+    from secretaria.models import PaymentAttentionItem
+    from secretaria.models.deposit_adjustment import STATUS_COLLECT_DUE
+    from secretaria.models.payment_attention_item import REASON_SERVICE_DIFF_COLLECT_DUE
+    from secretaria.services.payments.provider import ProviderError
+
+    provider.create_error = ProviderError("down", status_code=503, retryable=True)
+    seeded = await _seed(db, timing="after")
+    result = await _request(db, seeded, "Avaliação", minutes=60)
+
+    assert (result.kind, result.decision) == ("applied_now", service_change.DECISION_COLLECT)
+    assert result.pix_copy_paste is None
+    [adjustment] = await _adjustments(db)
+    assert (adjustment.status, adjustment.mode) == (STATUS_COLLECT_DUE, None)
+    assert (await _row(db, seeded[2].id)).appointment_type == "Avaliação"
+    async with db() as session:
+        [item] = (await session.scalars(select(PaymentAttentionItem))).all()
+    assert (item.reason, item.amount_cents) == (REASON_SERVICE_DIFF_COLLECT_DUE, 3000)
+    assert await _holds(db) == []
