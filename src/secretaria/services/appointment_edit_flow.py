@@ -260,6 +260,12 @@ def _services_of(tenant, professional) -> list[dict]:
     return fr.active_appointment_types(tenant)
 
 
+def _minutes_at(service: dict, tenant, doctor, unit_id) -> int:
+    """`service`'s length for `doctor` at the draft's unit (`unit_id`: a UUID or the draft's
+    str) - TASK-085 D2/D7: the unit's own duration when it has one, else today's base."""
+    return fr._service_duration_at(service, tenant, doctor, _uuid(unit_id))
+
+
 def _requirements(tenant, professionals, draft: ae.EditDraft) -> list[str]:
     service = fr._match_service(
         _services_of(tenant, _doctor(professionals, draft)), draft.current["service"]
@@ -820,7 +826,7 @@ async def _unit_step(conversation, tenant, body, draft, appt, professionals, ctx
         if unit is None:
             return fr._preserve(conversation, "delegate_llm")
         logger.info("edit_unit_selected", purpose="service", unit_count=len(units))
-        minutes = fr._service_duration(service, tenant)
+        minutes = _minutes_at(service, tenant, doctor, unit.id)
         changes = {
             "service": str(service.get("name")),
             "end_at": _iso(draft.start + timedelta(minutes=minutes)),
@@ -869,7 +875,7 @@ async def _service_step(conversation, tenant, body, draft, appt, professionals, 
         )
         if service is None:
             return fr._preserve(conversation, "delegate_llm")
-        minutes = fr._service_duration(service, tenant)
+        minutes = _minutes_at(service, tenant, staged, at_unit.id)
         # (b) The new doctor, this service and the unit the list was drawn for, together.
         new = draft.with_changes(
             professional_id=str(staged.id),
@@ -884,11 +890,7 @@ async def _service_step(conversation, tenant, body, draft, appt, professionals, 
     service = fr._match_service(_services_of(tenant, doctor), body)
     if service is None:
         return fr._preserve(conversation, "delegate_llm")
-    minutes = fr._service_duration(service, tenant)
-    new = draft.with_changes(
-        service=str(service.get("name")),
-        end_at=_iso(draft.start + timedelta(minutes=minutes)),
-    ).with_stage()
+    new = draft.with_changes(service=str(service.get("name"))).with_stage()
     # TASK-083 final review: never the service at a unit where it is not done. After a doctor
     # change on a booking without a unit, the unit is only derived: derive it again for THIS
     # service. Otherwise the booking's unit stays, and a service not done there opens the
@@ -896,6 +898,9 @@ async def _service_step(conversation, tenant, body, draft, appt, professionals, 
     service_id = entry_service_id(service)
     if after_doctor and doctor is not None:
         new = _with_doctor(new, doctor, service_id)
+    # TASK-085: the length at the unit the draft ends up with (settled just above).
+    minutes = _minutes_at(service, tenant, doctor, new.current.get("unit_id"))
+    new = new.with_changes(end_at=_iso(draft.start + timedelta(minutes=minutes)))
     if _unit_refused(new, doctor, service_id):
         if after_doctor:
             return _refuse(_undo_doctor_change(draft), ctx, ae.EDIT_DOCTOR_SERVICE_NO_UNIT)
@@ -1090,7 +1095,7 @@ async def _doctor_choice(
         if _unit_refused(new, professional, service_id):
             # The new doctor does this service at no bookable unit: the doctor stays as it was.
             return _refuse(draft, ctx, ae.EDIT_DOCTOR_SERVICE_NO_UNIT)
-        minutes = fr._service_duration(service, tenant)
+        minutes = _minutes_at(service, tenant, professional, new.current.get("unit_id"))
         new = new.with_changes(end_at=_iso(new.start + timedelta(minutes=minutes))).with_stage()
         return await _after_slot_affecting_change(
             conversation, tenant, new, appt, professionals, ctx
@@ -1109,7 +1114,7 @@ async def _doctor_choice(
     # One unit where this doctor works: no question about it (the unit is secondary).
     only = units[0]
     if service is not None and not flow_units.unit_refused(professional, only.id, service_id):
-        minutes = fr._service_duration(service, tenant)
+        minutes = _minutes_at(service, tenant, professional, only.id)
         new = draft.with_changes(
             professional_id=str(professional.id),
             unit_id=str(only.id),
@@ -1795,9 +1800,6 @@ async def apply_ai_edit(conversation, tenant, proposal, appointments, profession
         new = new.with_changes(service=str(service["name"]))
     service = fr._match_service(_services_of(tenant, doctor), new.current["service"])
     if service is not None and (proposes_doctor or proposal.get("service") or unit_name):
-        new = new.with_changes(
-            end_at=_iso(new.start + timedelta(minutes=fr._service_duration(service, tenant)))
-        )
         # TASK-083 final review: the unit follows the doctor FOR this service, and a service
         # is never drafted at a unit where it is not done (same rule as the guided steps).
         service_id = entry_service_id(service)
@@ -1832,6 +1834,9 @@ async def apply_ai_edit(conversation, tenant, proposal, appointments, profession
             new = new.with_changes(unit_id=str(staged_unit.id))
         elif _unit_refused(new, doctor, service_id) or _placement_problem(new, tenant, doctor):
             return unit_list
+        # TASK-085: the length at the unit settled above (the new unit's own, else the base).
+        minutes = _minutes_at(service, tenant, doctor, new.current.get("unit_id"))
+        new = new.with_changes(end_at=_iso(new.start + timedelta(minutes=minutes)))
     if proposal.get("insurance"):
         insurance = fr._match_insurance_plan(tenant, proposal["insurance"])
         if insurance is None and fr._says_no_insurance(proposal["insurance"]):
