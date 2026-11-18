@@ -21,12 +21,13 @@ Design:
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -2085,7 +2086,13 @@ async def _route(
 
     if state == FlowState.MANAGE_BOOKING:
         return await _manage_step(
-            conversation, tenant, calendar, inbound_body, upcoming_appointments or [], professionals
+            conversation,
+            tenant,
+            calendar,
+            inbound_body,
+            upcoming_appointments or [],
+            professionals,
+            patient_name=patient_name,
         )
 
     if state == FlowState.EDIT_BOOKING:
@@ -6065,6 +6072,8 @@ async def _manage_step(
     body: str,
     appointments: list[dict],
     professionals: list | None = None,
+    *,
+    patient_name: str | None = None,
 ) -> FlowRouterResult:
     step = conversation.flow_step
     if step in (*_MANAGE_DAY_STEPS, STEP_MANAGE_SLOT, STEP_MANAGE_CONFIRM):
@@ -6151,7 +6160,13 @@ async def _manage_step(
 
     if step == STEP_MANAGE_CONFIRM:
         return await _manage_reschedule(
-            conversation, tenant, calendar, body, appointments, professionals
+            conversation,
+            tenant,
+            calendar,
+            body,
+            appointments,
+            professionals,
+            patient_name=patient_name,
         )
 
     # Unknown step -> let the LLM recover, keep state.
@@ -6265,6 +6280,8 @@ async def _manage_reschedule(
     body: str,
     appointments: list[dict],
     professionals: list | None = None,
+    *,
+    patient_name: str | None = None,
 ) -> FlowRouterResult:
     # PROMPT 4 hook: when the payment lifecycle lands, carry the existing
     # deposit onto the new slot (no refund, no re-charge), subject to
@@ -6289,6 +6306,23 @@ async def _manage_reschedule(
         start = start.replace(tzinfo=calendar.tzinfo)
     duration = _appt_duration_minutes(appt, tenant)
     end = start + timedelta(minutes=duration)
+
+    rebook = _rebook_ids(appt)
+    if rebook is not None:
+        # TASK-085 R (D-R11): "Outro horário" - the consultation's event already left the
+        # agenda; a NEW event is created instead of moving it.
+        return await _manage_rebook(
+            conversation,
+            tenant,
+            calendar,
+            appt,
+            start,
+            end,
+            duration=duration,
+            rebook=rebook,
+            professionals=professionals,
+            patient_name=patient_name,
+        )
 
     # Same last read as the booking "Confirmar" (`_handle_confirmation`), on the
     # appointment's OWN agenda - the one the patch below goes to. The event
@@ -6362,6 +6396,259 @@ async def _manage_reschedule(
             "google_event_id": event_id,
             "start_at": start,
             "end_at": end,
+        },
+    )
+
+
+# --------------------------------------------------------------------------
+# TASK-085 R (D-R11, mapa-u §1.5): "Outro horário" - the old consultation of an abandoned change
+# (its event already OFF the agenda) gets a new day and time through this same reschedule flow.
+# --------------------------------------------------------------------------
+
+# The one line when the old event's removal could not be confirmed (the agenda did not answer):
+# nothing was created; the confirmation card follows so "Confirmar" can be tapped again.
+REBOOK_RETRY_TEXT = "Não consegui agora, tente de novo em instantes."
+
+
+# UA3 review I1: how many ids one window may use (the plain one + numbered salts).
+REBOOK_ID_TRIES = 4
+
+
+def patient_rebook_event_id(
+    adjustment_id: UUID, *, calendar, start: datetime, end: datetime, salt: int = 0
+) -> str:
+    """The id of the event "Outro horário" creates for `adjustment_id` at [start, end).
+
+    The hub's scheme (UH fix round 1, `api/hub/calendar.py::_hub_rebook_event_id`): UA1's
+    `old_slot.rebook_event_id(source="patient")` (`difmove<hex>`, `loc_` on the secretarIA agenda)
+    + 16 hex digits of sha256("<change>|<UTC start>|<UTC end>"); `salt` > 0 appends "|<n>" to the
+    hashed text (a spent id of the same window). Only 0-9a-f are added: Google's base32hex holds;
+    at most 58 characters."""
+    first, last = (as_utc(value).astimezone(UTC).isoformat() for value in (start, end))
+    window = f"{first}|{last}"
+    text = f"{adjustment_id}|{window}" + (f"|{salt}" if salt else "")
+    digest = hashlib.sha256(text.encode()).hexdigest()[:16]
+    from secretaria.services.payments import old_slot  # lazy: a heavy module, one branch only
+
+    return old_slot.rebook_event_id(adjustment_id, calendar=calendar, source="patient") + digest
+
+
+async def _rebook_id_spent(calendar, event_id: str) -> bool:
+    """Whether `event_id` was created and then DELETED on this agenda (it reads `cancelled`).
+    False when the agenda cannot say (the caller reports its own failure)."""
+    try:
+        existing = await calendar.get_event(event_id)
+    except Exception as exc:  # noqa: BLE001 - cannot tell
+        logger.warning("flow_rebook_event_unreadable", error_type=type(exc).__name__)
+        return False
+    return bool(existing) and str(existing.get("status") or "") == "cancelled"
+
+
+def _event_instant(value: Any) -> datetime | None:
+    if isinstance(value, dict):
+        value = value.get("dateTime")
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return as_utc(value) if isinstance(value, datetime) else None
+
+
+def _event_in_window(event: dict, start: datetime, end: datetime) -> bool:
+    """False only when the agenda's answer SAYS another window (Google `{"dateTime": ...}`, an
+    ISO string or a datetime); an answer without a window cannot be checked and stands."""
+    got_start, got_end = _event_instant(event.get("start")), _event_instant(event.get("end"))
+    if got_start is None or got_end is None:
+        return True
+    return (got_start, got_end) == (as_utc(start), as_utc(end))
+
+
+def _rebook_ids(appt: dict) -> tuple[UUID, UUID] | None:
+    """(clinic id, change id) of a consultation listed for "Outro horário"
+    (`patient_context.load_upcoming_appointments(rebooking_id=)`), else None."""
+    try:
+        adjustment_id = appt.get("rebook_adjustment_id")
+        tenant_id = appt.get("rebook_tenant_id")
+        if not adjustment_id or not tenant_id:
+            return None
+        return UUID(str(tenant_id)), UUID(str(adjustment_id))
+    except (TypeError, ValueError):
+        return None
+
+
+async def _ensure_rebook_old_event_gone(tenant_id: UUID, adjustment_id: UUID) -> bool:
+    """`old_slot.ensure_old_event_gone` on a session of its own (clean by construction: it
+    commits). The ONE database step of this router, and only on the rebook branch: the old
+    consultation's event must be off the agenda BEFORE its new one is created (UA1 fix round 1,
+    I1). Never raises: False = "try again"."""
+    from secretaria.core import database
+    from secretaria.services.payments import old_slot
+
+    try:
+        async with database.async_session_factory() as session:
+            return await old_slot.ensure_old_event_gone(
+                session, tenant_id=tenant_id, adjustment_id=adjustment_id
+            )
+    except Exception as exc:  # noqa: BLE001 - the patient is asked to try again
+        logger.warning("flow_rebook_ensure_failed", error_type=type(exc).__name__)
+        return False
+
+
+def _rebook_event_texts(
+    appt: dict, professionals: list | None, patient_name: str | None
+) -> tuple[str, str]:
+    """The new event's title and description, as every event of a consultation reads
+    (`service_change.agenda_summary` + `build_event_description` with the unit's lines)."""
+    service = str(appt.get("appointment_type") or "Consulta")
+    attendee = appt.get("attendee_name")
+    owner = unit = None
+    try:
+        if appt.get("professional_id"):
+            owner = _find_professional_by_id(professionals, UUID(str(appt["professional_id"])))
+        if appt.get("unit_id"):
+            unit = flow_units.find_unit(owner, UUID(str(appt["unit_id"])))
+    except (TypeError, ValueError):
+        owner = unit = None
+    description = build_event_description(
+        service=service,
+        insurance=appt.get("insurance"),
+        attendee_name=attendee,
+        **event_unit_fields(unit, owner),
+    )
+    return f"{service} - {attendee or patient_name or 'Paciente'}", description
+
+
+def _manage_confirm_unavailable(conversation: Conversation) -> FlowRouterResult:
+    """The confirmation card's agenda answered with an outage: a person takes over and the
+    conversation stays on the card (`_manage_reschedule`'s shape)."""
+    return FlowRouterResult(
+        action="calendar_unavailable",
+        flow_state=FlowState.MANAGE_BOOKING,
+        flow_step=STEP_MANAGE_CONFIRM,
+        flow_managing_appointment_id=_selected_managing_appointment_id(conversation),
+        flow_selected_day=conversation.flow_selected_day,
+        flow_selected_slot=conversation.flow_selected_slot,
+    )
+
+
+async def _manage_rebook(
+    conversation: Conversation,
+    tenant: Tenant,
+    calendar: CalendarService,
+    appt: dict,
+    start: datetime,
+    end: datetime,
+    *,
+    duration: int,
+    rebook: tuple[UUID, UUID],
+    professionals: list | None,
+    patient_name: str | None,
+) -> FlowRouterResult:
+    """"Confirmar" of "Outro horário" (mapa-u §1.5, UA1's order). 1) the old event is gone
+    (`_ensure_rebook_old_event_gone`; False -> one line + the card again, nothing created);
+    2) the new window is free on the consultation's own agenda (`slot_taken_at_confirm`, nothing
+    ignored - the consultation has no event there now); 3) the event is created OUTSIDE any
+    transaction under the id of THIS window (`patient_rebook_event_id`; a spent id is retried
+    with a numbered salt, at most REBOOK_ID_TRIES; exclusively on the secretarIA agenda); an
+    answer at another window is never bound nor deleted (retry text + the card). The row is
+    written by `flow_runner` with `old_slot.finish_rebook` in one transaction
+    (`appointment_reschedule["rebook"]`); a change decided meanwhile there discards this event.
+    Same service, doctor, unit and convênio."""
+    tenant_id, adjustment_id = rebook
+    managing_id = _selected_managing_appointment_id(conversation)
+    conversation_id = getattr(conversation, "id", None)
+    if not await _ensure_rebook_old_event_gone(tenant_id, adjustment_id):
+        retry = _manage_confirm_result(managing_id, appt, start, conversation.flow_selected_day)
+        retry.bubbles = [TextBubble(body=REBOOK_RETRY_TEXT), *retry.bubbles]
+        return retry
+
+    async def _reoffer() -> FlowRouterResult:
+        return await _reoffer_taken_slot(
+            conversation,
+            tenant,
+            calendar,
+            start,
+            duration_minutes=duration,
+            branch=MANAGE_DAY_BRANCH,
+            back_target=None,
+            professionals=professionals,
+        )
+
+    if await slot_taken_at_confirm(
+        calendar, start, end, source="flow_rebook", conversation_id=conversation_id
+    ):
+        return await _reoffer()
+    summary, description = _rebook_event_texts(appt, professionals, patient_name)
+    event = None
+    for salt in range(REBOOK_ID_TRIES):
+        # UA3 review I1: the id belongs to THIS window (a double tap is idempotent; another window
+        # is a fresh id); a SPENT id (created and deleted by an attempt that did not stand -
+        # agendas never re-use one) is retried with a numbered salt.
+        event_id = patient_rebook_event_id(
+            adjustment_id, calendar=calendar, start=start, end=end, salt=salt
+        )
+        try:
+            event = await create_event_exclusive(
+                calendar,
+                start=start,
+                end=end,
+                summary=summary,
+                description=description,
+                event_id=event_id,
+            )
+        except CalendarSlotTakenError:
+            return await _reoffer()
+        except Exception as exc:
+            # Google refuses a deleted id ("event id is taken"): only a confirmed-dead id is
+            # retried; anything else is a real outage.
+            if await _rebook_id_spent(calendar, event_id):
+                event = None
+                continue
+            if not isinstance(exc, CalendarUnavailableError):
+                logger.warning("flow_rebook_create_failed", error_type=type(exc).__name__)
+            return _manage_confirm_unavailable(conversation)
+        if str(event.get("status") or "") == "cancelled":
+            # The secretarIA agenda hands the deleted row back: spent as well.
+            event = None
+            continue
+        break
+    if event is None:
+        # Every id we may use for this window is spent: a person takes over.
+        logger.error("flow_rebook_event_ids_spent", adjustment_id=str(adjustment_id))
+        return _manage_confirm_unavailable(conversation)
+    if not _event_in_window(event, start, end):
+        # An event under our id at ANOTHER window (never ours to bind here, never ours to
+        # delete - it may be a twin's): nothing is written; the patient tries again.
+        logger.warning("flow_rebook_event_other_window", adjustment_id=str(adjustment_id))
+        retry = _manage_confirm_result(managing_id, appt, start, conversation.flow_selected_day)
+        retry.bubbles = [TextBubble(body=REBOOK_RETRY_TEXT), *retry.bubbles]
+        return retry
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[
+            TextBubble(
+                body=(
+                    "Pronto! Sua consulta foi remarcada. ✅\n\n"
+                    f"{start.strftime('%d/%m/%Y às %H:%M')}"
+                )
+            )
+        ],
+        flow_state=FlowState.IDLE,
+        flow_step=None,
+        appointment_reschedule={
+            # The row is still found by the event it had (its id is never cleared).
+            "google_event_id": str(appt.get("google_event_id") or ""),
+            "start_at": start,
+            "end_at": end,
+            "rebook": {
+                "adjustment_id": adjustment_id,
+                "event_id": str(event.get("id") or event_id),
+                "event_link": event.get("htmlLink"),
+                # For `flow_runner`'s compensation (the event is discarded when the row is not
+                # written), as `appointment_edit["calendar"]`.
+                "calendar": calendar,
+            },
         },
     )
 

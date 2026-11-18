@@ -26,7 +26,12 @@ from secretaria.services.flow_router import (
     MenuBubble,
 )
 from secretaria.services.insurance_catalog import resolve_booking_plan_ids
-from secretaria.services.payments import adjustment_queries, deposit_lifecycle, service_change
+from secretaria.services.payments import (
+    adjustment_queries,
+    deposit_lifecycle,
+    old_slot,
+    service_change,
+)
 from secretaria.services.payments.deposit_lifecycle import _tenant_tz
 from secretaria.services.payments.money import format_brl
 from secretaria.services.payments.service_change_policy import (
@@ -268,7 +273,7 @@ async def _with_service_difference(result: FlowRouterResult, tenant: Tenant) -> 
     explains).
 
     * PAID sinal: the difference of the sinal (to pay by Pix - "after": the change is made at
-      once; "before": it waits for the Pix with both times reserved -, or above the new value),
+      once; "before": it waits for the Pix, the new time reserved -, or above the new value),
       from the same decision `service_change.request_paid_change` takes at Confirmar (browser
       proof 2026-10-26; TASK-085 R: every money field, the clinic's timing). A change that does
       not move the price (`no_change`) adds nothing.
@@ -403,6 +408,12 @@ async def _apply_deposit_awareness(
             if warning is None:
                 return result
         else:  # any reschedule render: day picker, slot list or the confirmation card
+            if await old_slot.rebookable(
+                session, tenant_id=tenant.id, appointment_id=appointment_id
+            ):
+                # TASK-085 R (D-R11, mapa-u §7.6): "Outro horário" of an abandoned change is
+                # neither limited nor counted - no warning, no block.
+                return result
             if not _at_reschedule_limit(deposit, tenant):
                 # Still allowed: the first render (the day picker) tells the patient how many
                 # reschedules are left and what happens after the last one.

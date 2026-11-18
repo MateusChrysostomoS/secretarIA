@@ -16,7 +16,8 @@ TASK-085 R (S3b, tasks/TASK-085/sinal-trocas/contrato.md): the money of an edit.
   `_finish_edit` after the commit). `suspended` / `awaiting_payment` / `blocked` write nothing:
   an agenda the router already wrote (`calendar_deferred` False) is put back in line with the
   row in the same transaction. Works for a router that deferred the agenda and for one that
-  did not.
+  did not. 3rd round (D-R10): after the commit of a `suspended` change the old consultation's
+  event leaves the agenda (`AppliedEdit.vacate_adjustment_id` -> `old_slot.vacate_old_slot`).
 * UNPAID sinal (AWAITING) and a money field changes (D-R6): the edit is written, the agenda
   follows, and `deposit_lifecycle.requote_awaiting` runs as the LAST fallible step (contrato
   §3.7). `payment_in_flight` / `void_failed` (or an exception) undo the edit (savepoint) and the
@@ -54,7 +55,12 @@ from secretaria.services.appointment_status import SOURCE_FLOW
 from secretaria.services.calendar import CalendarUnavailableError, build_event_description
 from secretaria.services.local_calendar import create_event_exclusive
 from secretaria.services.patient_context import as_utc
-from secretaria.services.payments import adjustment_suspension, deposit_lifecycle, service_change
+from secretaria.services.payments import (
+    adjustment_suspension,
+    deposit_lifecycle,
+    old_slot,
+    service_change,
+)
 from secretaria.services.payments.service_change import ServiceChangeResult
 from secretaria.services.payments.service_change_policy import (
     MONEY_FIELD_DOCTOR,
@@ -118,6 +124,9 @@ class AppliedEdit:
     refusal: str | None = None
     # TASK-085 R D-R6 / OQ-10: the sinal to (re)charge once the edit is committed.
     recharge: RechargeAfterEdit | None = None
+    # TASK-085 R D-R10 (mapa-u §1.4): a `suspended` change - the OLD consultation's event leaves
+    # the agenda after the commit (`_finish_edit` -> `old_slot.vacate_old_slot`).
+    vacate_adjustment_id: UUID | None = None
 
 
 def _window(appointment) -> tuple[datetime, datetime]:
@@ -372,6 +381,11 @@ async def _apply_paid_change(
             old_event_id=None,
             old_professional_id=None,
             service_change=result,
+            # D-R10: only a suspended change frees the old slot (the legacy deferred mode and a
+            # blocked change keep the old consultation on the agenda).
+            vacate_adjustment_id=(
+                result.adjustment_id if result.kind == "suspended" else None
+            ),
         )
     time_changed = bool(edit["time_changed"])
     try:
@@ -609,8 +623,29 @@ async def compensate_appointment_edit(tenant, patient_id, edit: dict) -> None:
         )
 
 
+async def _vacate_old_slot(tenant, applied: AppliedEdit) -> None:
+    """TASK-085 R D-R10: a suspended change - the OLD consultation's event leaves the doctor's
+    agenda now that the change committed (`old_slot.vacate_old_slot`: own session, never raises;
+    a failure stays `releasing` and the engine's sweep retries). Never raises."""
+    if applied.vacate_adjustment_id is None:
+        return
+    try:
+        outcome = await old_slot.vacate_old_slot(tenant.id, applied.vacate_adjustment_id)
+    except Exception as exc:  # noqa: BLE001 - defence only: vacate_old_slot never raises
+        logger.warning("appointment_edit_vacate_failed", error_type=type(exc).__name__)
+        return
+    logger.info(
+        "appointment_edit_old_slot_vacated",
+        tenant_id=str(tenant.id),
+        adjustment_id=str(applied.vacate_adjustment_id),
+        outcome=outcome,
+    )
+
+
 async def _finish_edit(tenant, applied: AppliedEdit) -> None:
-    """Delete the old Google event of a doctor change on its own agenda. Never raises."""
+    """Delete the old Google event of a doctor change on its own agenda; a suspended change's
+    old event leaves the agenda (`_vacate_old_slot`). Never raises."""
+    await _vacate_old_slot(tenant, applied)
     if not applied.old_event_id:
         return
     try:
