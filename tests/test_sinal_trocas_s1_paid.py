@@ -29,6 +29,7 @@ from secretaria.models import (
 from secretaria.models.deposit_adjustment import (
     STATUS_APPLIED,
     STATUS_CANCELLED,
+    STATUS_KEPT_OLD,
     DepositAdjustment,
 )
 from secretaria.models.insurance import TenantInsurancePlan
@@ -183,9 +184,13 @@ async def test_a_paid_suspended_change_whose_window_was_taken_is_an_orphan(db, p
     result = await _pay(db, seeded, created.adjustment_id)
 
     assert result.outcome == "adjustment_not_applicable"
+    # UA2 (mapa-u §7 item 9): the change goes to `restoring` and, after the commit, the old visit
+    # is brought back (its event never left in this test: only the transition) -> `kept_old`.
+    assert result.restore_adjustment_id == created.adjustment_id
     async with db() as session:
         adjustment = await session.get(DepositAdjustment, created.adjustment_id)
-    assert adjustment.status == STATUS_CANCELLED
+    assert adjustment.status == STATUS_KEPT_OLD
+    assert sent[-1][0].body == service_change.kept_old_notice_text("Consulta")
     [item] = await _all(db, PaymentAttentionItem)
     assert item.reason == REASON_ORPHAN_PAYMENT
     assert (await _row(db, seeded[2].id)).appointment_type == "Consulta"

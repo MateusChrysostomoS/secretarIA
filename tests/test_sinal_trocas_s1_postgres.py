@@ -1,7 +1,8 @@
 """TASK-085 R / S1 - concurrency proofs on Postgres (what SQLite cannot show).
 
 * a paid SUSPENDED change applied by many webhook workers is written once and frees its hold once;
-* the patient's tap ("Manter a antiga") racing the silence sweep at the deadline: exactly one wins;
+* the patient's tap ("Manter a antiga", UA2: `old_slot.restore_old_slot(trigger="tap")`) racing the
+  silence sweep at the deadline: exactly one wins;
 * a cancellation (appointment row first, then `settle_open_adjustments`) racing the paid webhook
   of a suspended change never deadlocks and never applies the change onto a cancelled visit.
 
@@ -30,7 +31,7 @@ from secretaria.models.deposit_adjustment import (
 )
 from secretaria.models.professional_edit_notice import ProfessionalEditNotice
 from secretaria.services import booking_hold
-from secretaria.services.payments import adjustment_queries, notify, service_change
+from secretaria.services.payments import adjustment_queries, notify, old_slot, service_change
 from tests import test_service_change as base, test_service_change_postgres as pg
 from tests.test_sinal_trocas_s1_unpaid import CLOCK, _webhook
 
@@ -133,13 +134,12 @@ async def test_a_tap_and_the_silence_sweep_at_the_deadline_decide_once(maker, pr
     CLOCK["now"] = tap_at
 
     async def tap():
+        # UA2 (mapa-u §4.4): "Manter a antiga" is `old_slot.restore_old_slot(trigger="tap")`.
         async with maker() as session:
-            outcome = await service_change.choose_after_expiry(
+            return await old_slot.restore_old_slot(
                 session, tenant_id=seeded[0].id, adjustment_id=created.adjustment_id,
-                choice="keep", now=tap_at,
+                now=tap_at, trigger="tap",
             )
-            await session.commit()
-            return outcome.kind
 
     async def sweep():
         async with maker() as session:
@@ -151,7 +151,7 @@ async def test_a_tap_and_the_silence_sweep_at_the_deadline_decide_once(maker, pr
         adjustment = await session.get(DepositAdjustment, created.adjustment_id)
     assert adjustment.status == STATUS_KEPT_OLD
     # Exactly one of them decided it.
-    assert (kinds[0] == "kept_old") != (kinds[1] == 1)
+    assert (kinds[0] == "restored") != (kinds[1] == 1)
 
 
 async def test_a_cancellation_racing_the_paid_webhook_of_a_suspended_change(maker, provider):

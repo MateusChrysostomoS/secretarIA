@@ -155,10 +155,12 @@ def test_a_tampered_choice_id_is_not_an_action():
 
 def test_each_action_maps_to_one_choice():
     assert (CHOICE_KEEP, CHOICE_RESEND, CHOICE_BOTH) == ("keep", "resend", "both")
+    # UA2 (mapa-u §4.4): "Outro horário" is the fourth action.
     assert CHOICE_OF_ACTION == {
         ACTION_CHOICE_KEEP: CHOICE_KEEP,
         ACTION_CHOICE_RESEND: CHOICE_RESEND,
         ACTION_CHOICE_BOTH: CHOICE_BOTH,
+        service_change.ACTION_CHOICE_OTHER: service_change.CHOICE_OTHER,
     }
 
 
@@ -258,7 +260,12 @@ def test_choice_outcome_shape():
             ["session", "tenant_id", "adjustment_id", "choice", "now"],
         ),
         (service_change, "followup_kept_old", ["tenant_id", "appointment_id"]),
-        (service_change, "choice_message_text", ["old_service", "new_service", "diff_cents"]),
+        # UA2 (mapa-u §4.4): + `old_slot_free` (and `resend`, keyword-only, default True).
+        (
+            service_change,
+            "choice_message_text",
+            ["old_service", "new_service", "diff_cents", "old_slot_free", "resend"],
+        ),
         (service_change, "choice_answer_text", ["outcome"]),
     ],
 )

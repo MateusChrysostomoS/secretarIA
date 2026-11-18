@@ -3,10 +3,14 @@
 Contract: tasks/TASK-085/sinal-trocas/contrato.md §2.2 / §3.6. Pinned here:
 
 * `on_difference_unpaid` (the sweep and the webhook EXPIRED): provider first (paid -> nothing;
-  void failed -> nothing), then `suspend` -> `awaiting_choice` + the three buttons (or `kept_old`
-  without room), `applied` -> `collect_due` + ONE `service_diff_unpaid` item + a notice;
-* silence until the choice deadline -> `kept_old` (D-R8), the new window freed;
-* `choose_after_expiry`: keep / resend / both, idempotent, scoped by clinic;
+  void failed -> nothing), then `suspend` -> `awaiting_choice` + the three buttons (or, UA2:
+  `restoring` without room - the old visit is brought back after the commit), `applied` ->
+  `collect_due` + ONE `service_diff_unpaid` item + a notice;
+* silence until the choice deadline -> the old visit is brought back (D-R8/D-R11), the new
+  window freed (UA2: `old_slot.restore_old_slot`; the event never left in these tests, so it is
+  only the transition - tests/test_sinal_trocas_ua2_*.py cover the agenda);
+* `choose_after_expiry`: resend / both, idempotent, scoped by clinic; UA2: "keep" no longer
+  decides there (the caller runs `old_slot.restore_old_slot(trigger="tap")`);
 * `settle_open_adjustments` closes a choice and frees the hold (cancellation, D-R9 "liberar");
 * legacy rows (`mode` NULL) keep today's expiry.
 """
@@ -183,8 +187,19 @@ async def test_an_expired_suspended_pix_is_voided_and_the_patient_chooses(
 
 
 async def test_without_room_for_a_choice_the_old_visit_stands_at_once(
-    db, provider, sent, followups
+    db, provider, sent, followups, monkeypatch
 ):
+    """UA2: no room for a choice -> `restoring` (committed), then the old visit is brought back
+    after the commit (`restore_old_slot(trigger="no_room")`; its event never left here)."""
+    decided: list = []
+    real = service_change.on_difference_unpaid
+
+    async def spy(session, **kw):
+        outcome = await real(session, **kw)
+        decided.append(outcome)
+        return outcome
+
+    monkeypatch.setattr(service_change, "on_difference_unpaid", spy)
     # The visit in 2 h: the Pix runs until +30 min; at +56 min the cutoff (+55) has passed.
     _seeded, created, _new = await _requested(
         db, days_ahead=2 / 24, new_offset=timedelta(minutes=30)
@@ -192,11 +207,13 @@ async def test_without_room_for_a_choice_the_old_visit_stands_at_once(
     assert created.kind == "suspended"
     assert await _sweep(db, NOW + timedelta(minutes=56)) == 1
 
+    assert decided == ["restoring"]
     adjustment = await _adjustment(db, created.adjustment_id)
     assert adjustment.status == STATUS_KEPT_OLD
     assert await _all(db, BookingHold) == []
     [(_p, [message])] = sent
-    assert isinstance(message, notify.Text) and "Mantivemos" in message.body
+    assert isinstance(message, notify.Text)
+    assert message.body == service_change.kept_old_notice_text("Consulta")
     assert followups == [adjustment.appointment_id]
 
 
@@ -293,7 +310,7 @@ async def _webhook(db, tenant_id, status, *, event_id="evt_diff_x", at=None, amo
         await session.commit()
         result = await event_processor.process_payment_event_row(session, row.id, now=at)
         tenant = await session.get(Tenant, tenant_id)
-        await event_processor.run_post_commit(session, tenant, result)
+        await event_processor.run_post_commit(session, tenant, result, now=at)
     return result
 
 
@@ -346,7 +363,7 @@ async def test_silence_until_the_deadline_keeps_the_old_visit(db, provider, sent
     assert adjustment.status == STATUS_KEPT_OLD and adjustment.resolved_at is not None
     assert await _all(db, BookingHold) == []
     [(_p, [message])] = sent
-    assert "Mantivemos" in message.body
+    assert message.body == service_change.kept_old_notice_text("Consulta")
     assert followups == [adjustment.appointment_id]
     assert await _sweep(db, deadline + timedelta(minutes=5)) == 0
 
@@ -374,15 +391,28 @@ async def _choose(db, tenant_id, adjustment_id, choice, *, at=None):
 
 
 async def test_keep_closes_the_choice_and_frees_the_new_window(db, provider, sent):
+    """UA2 (mapa-u §4.4): "keep" is decided by `old_slot.restore_old_slot(trigger="tap")`;
+    `choose_after_expiry(choice="keep")` decides nothing any more."""
+    from secretaria.services.payments import old_slot
+
     seeded, created, _new = await _choice_ready(db)
     outcome = await _choose(db, seeded[0].id, created.adjustment_id, "keep")
-    assert outcome.kind == "kept_old"
+    assert outcome.kind == "already_decided"
     assert (outcome.adjustment_id, outcome.appointment_id) == (created.adjustment_id, seeded[2].id)
     assert (outcome.old_service, outcome.new_service) == ("Consulta", "Avaliação")
+    assert (await _adjustment(db, created.adjustment_id)).status == STATUS_AWAITING_CHOICE
+
+    async def tap():
+        async with db() as session:
+            return await old_slot.restore_old_slot(
+                session, tenant_id=seeded[0].id, adjustment_id=created.adjustment_id,
+                now=NOW + timedelta(hours=1), trigger="tap",
+            )
+
+    assert await tap() == "restored"
     assert (await _adjustment(db, created.adjustment_id)).status == STATUS_KEPT_OLD
     assert await _all(db, BookingHold) == []
-    again = await _choose(db, seeded[0].id, created.adjustment_id, "keep")
-    assert again.kind == "already_decided"
+    assert await tap() == "already_decided"
 
 
 async def test_both_closes_the_choice_and_hands_the_old_visit_to_the_caller(db, provider, sent):
@@ -467,11 +497,23 @@ async def test_a_choice_of_another_clinic_or_after_the_deadline_changes_nothing(
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("stage", ["awaiting_payment", "awaiting_choice"])
+@pytest.mark.parametrize(
+    "stage", ["awaiting_payment", "awaiting_choice", "restoring", "old_slot_lost"]
+)
 async def test_settling_closes_a_suspended_change_and_frees_its_hold(db, provider, stage):
     seeded, created, _new = await _requested(db)
-    if stage == "awaiting_choice":
+    if stage != "awaiting_payment":
         await _sweep(db, NOW + timedelta(minutes=31))
+    if stage in ("restoring", "old_slot_lost"):  # UA2: the 3rd round's open states close too
+        from sqlalchemy import update
+
+        async with db() as session:
+            await session.execute(
+                update(DepositAdjustment)
+                .where(DepositAdjustment.id == created.adjustment_id)
+                .values(status=stage)
+            )
+            await session.commit()
     calls_before = provider.called("cancel_charge")
     async with db() as session:
         tenant = await session.get(Tenant, seeded[0].id)
