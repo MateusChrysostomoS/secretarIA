@@ -520,8 +520,13 @@ async def test_awaiting_payment_lists_only_live_payable_reservations_without_pii
         "kind",
         "appointment_id",
         "change_summary",
+        # UH2 (UF review I3): the patient facts of a "rebook" row - always null on a booking.
+        "patient_name",
+        "attendee_name",
+        "patient_channel",
     }
     assert (row["kind"], row["appointment_id"], row["change_summary"]) == ("booking", None, None)
+    assert (row["patient_name"], row["attendee_name"], row["patient_channel"]) == (None, None, None)
     text = str(body)
     assert "pay_secret" not in text and "Maria" not in text and "6000" not in text
 
