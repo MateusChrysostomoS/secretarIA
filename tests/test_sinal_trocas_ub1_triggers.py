@@ -196,8 +196,8 @@ async def test_enqueue_sweep_never_raises():
 async def test_the_job_parses_its_arguments_and_hands_the_worker_redis(monkeypatch):
     seen: dict = {}
 
-    async def _service(tenant_id, *, changed_at, now, redis):
-        seen.update(tenant_id=tenant_id, changed_at=changed_at, now=now, redis=redis)
+    async def _service(tenant_id, *, changed_at, now, redis, after=None):
+        seen.update(tenant_id=tenant_id, changed_at=changed_at, now=now, redis=redis, after=after)
         return 2
 
     monkeypatch.setattr(price_change, "sweep_price_changes", _service)
@@ -212,6 +212,29 @@ async def test_the_job_parses_its_arguments_and_hands_the_worker_redis(monkeypat
     assert result == {"sent": 2}
     assert seen["tenant_id"] == tenant_id and seen["changed_at"] == changed_at
     assert seen["redis"] is redis and seen["now"].tzinfo is not None
+    assert seen["after"] is None
+
+
+async def test_the_resume_job_hands_its_cursor_to_the_service(monkeypatch):
+    seen: dict = {}
+
+    async def _service(tenant_id, *, changed_at, now, redis, after=None):
+        seen["after"] = after
+        return 0
+
+    monkeypatch.setattr(price_change, "sweep_price_changes", _service)
+    appointment_id = uuid4()
+    start = datetime(2026, 11, 30, 13, 0, tzinfo=UTC)
+    cursor = price_change.format_cursor(appointment_id, start)
+    result = await price_change_job.sweep_price_changes(
+        {}, str(uuid4()), datetime.now(UTC).isoformat(), cursor
+    )
+    assert result == {"sent": 0}
+    assert seen["after"] == (appointment_id, start)
+    bad = await price_change_job.sweep_price_changes(
+        {}, str(uuid4()), datetime.now(UTC).isoformat(), "not-a-cursor"
+    )
+    assert bad == {"sent": 0, "error": "bad_arguments"}
 
 
 @pytest.mark.parametrize(

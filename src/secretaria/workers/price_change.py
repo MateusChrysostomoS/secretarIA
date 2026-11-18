@@ -28,20 +28,25 @@ logger = get_logger(__name__)
 JOB_TIMEOUT = timedelta(minutes=30)
 
 
-async def sweep_price_changes(ctx: dict, tenant_id: str, changed_at: str) -> dict:
+async def sweep_price_changes(
+    ctx: dict, tenant_id: str, changed_at: str, after: str | None = None
+) -> dict:
     """One clinic's sweep. `tenant_id` is the clinic's uuid as text, `changed_at` the ISO instant
     of the edit (timezone-aware). Returns counts for arq's job log (e.g. {"sent": n}); never
-    raises for one consultation's error (the service logs and goes on). Bad arguments (not a
-    uuid, not an instant, no timezone) -> {"sent": 0, "error": "bad_arguments"}, never a retry."""
+    raises for one consultation's error (the service logs and goes on). `after` (fix round 2):
+    the cursor a "resume" follow-up carries (`price_change.format_cursor`), so it goes on from
+    where the previous run stopped. Bad arguments (not a uuid, not an instant, no timezone, not a
+    cursor) -> {"sent": 0, "error": "bad_arguments"}, never a retry."""
     try:
         clinic = UUID(tenant_id)
         changed = datetime.fromisoformat(changed_at)
         if changed.tzinfo is None:
             raise ValueError("changed_at must be timezone-aware")
+        cursor = price_change.parse_cursor(after) if after is not None else None
     except (TypeError, ValueError):
         logger.warning("price_change_sweep_bad_arguments")
         return {"sent": 0, "error": "bad_arguments"}
     sent = await price_change.sweep_price_changes(
-        clinic, changed_at=changed, now=datetime.now(UTC), redis=ctx.get("redis")
+        clinic, changed_at=changed, now=datetime.now(UTC), redis=ctx.get("redis"), after=cursor
     )
     return {"sent": sent}

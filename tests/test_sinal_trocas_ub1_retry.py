@@ -24,8 +24,10 @@ from sqlalchemy import select
 from secretaria.models import Appointment, Tenant
 from secretaria.models.appointment_reminder import AppointmentReminder
 from secretaria.models.deposit_adjustment import (
+    KIND_DECREASE,
     KIND_INCREASE,
     MODE_SUSPEND,
+    STATUS_KEPT_CREDIT,
     STATUS_OLD_SLOT_LOST,
     STATUS_RESTORING,
     DepositAdjustment,
@@ -89,6 +91,8 @@ async def test_a_sweep_that_lost_the_race_never_mails_again(db, mail, redis, mon
             row.answer = "opened"
             await session.commit()
         mail["sent"].clear()
+    # A later price edit (fix round 2, R1: only an edit NEWER than the answer re-arms it).
+    edited_at = NOW + timedelta(minutes=1) if answered else CHANGED_AT
 
     b_read, a_done = asyncio.Event(), asyncio.Event()
     real = price_change._patient_email
@@ -102,11 +106,15 @@ async def test_a_sweep_that_lost_the_race_never_mails_again(db, mail, redis, mon
     monkeypatch.setattr(price_change, "_patient_email", _email)
 
     async def sweep_b():
-        return await price_change._notify_one(tenant.id, appointment.id, now=NOW, redis=redis)
+        return await price_change._notify_one(
+            tenant.id, appointment.id, changed_at=edited_at, now=NOW, redis=redis
+        )
 
     async def sweep_a():
         await b_read.wait()
-        outcome = await price_change._notify_one(tenant.id, appointment.id, now=NOW, redis=redis)
+        outcome = await price_change._notify_one(
+            tenant.id, appointment.id, changed_at=edited_at, now=NOW, redis=redis
+        )
         a_done.set()
         return outcome
 
@@ -148,7 +156,9 @@ async def test_a_row_lost_to_a_competing_insert_is_not_counted_as_sent(
         return EmailOutcome.SENT
 
     monkeypatch.setattr(price_change, "send_transactional_email_result", _send_and_lose)
-    outcome = await price_change._notify_one(tenant.id, appointment.id, now=NOW, redis=redis)
+    outcome = await price_change._notify_one(
+        tenant.id, appointment.id, changed_at=CHANGED_AT, now=NOW, redis=redis
+    )
     assert outcome == "row_lost"
 
 
@@ -209,12 +219,13 @@ async def test_a_capped_notice_is_swept_again_on_the_clinics_next_day(db, mail, 
 
     [(name, args, kwargs)] = _jobs(pool)
     assert args == (str(tenant.id), CHANGED_AT.isoformat())
-    # NOW = 18/11 09:00 in São Paulo -> 19/11 00:05 local = 03:05 UTC.
-    assert kwargs["_defer_until"] == datetime(2026, 11, 19, 3, 5, tzinfo=UTC)
+    # NOW = 18/11 09:00 in São Paulo -> 19/11 08:00 local = 11:00 UTC (fix round 2, m6: not
+    # just after midnight).
+    assert kwargs["_defer_until"] == datetime(2026, 11, 19, 11, 0, tzinfo=UTC)
     assert kwargs["_job_id"] == f"pricechg:{tenant.id}:nextday:20261119"
     assert kwargs["_job_id"] != price_change.sweep_job_id(tenant.id, CHANGED_AT)
 
-    next_day = datetime(2026, 11, 19, 3, 5, tzinfo=UTC)
+    next_day = datetime(2026, 11, 19, 11, 0, tzinfo=UTC)
     assert await sweep(tenant.id, pool, now=next_day) == 1
     assert {row.appointment_id for row in await notices(db)} == {v.id for v in visits}
     assert len(_jobs(pool)) == 1  # nothing left: no further follow-up
@@ -297,7 +308,13 @@ async def test_a_sweep_out_of_time_resumes_in_a_follow_up_job(db, mail, pool, mo
     assert await sweep(tenant.id, pool) == 1  # at least one consultation per run
 
     [(_name, args, kwargs)] = _jobs(pool)
-    assert args == (str(tenant.id), CHANGED_AT.isoformat())
+    [first] = [row.appointment_id for row in await notices(db)]
+    # Fix round 2 (m5): the resume job carries the cursor of the last consultation processed.
+    assert args == (
+        str(tenant.id),
+        CHANGED_AT.isoformat(),
+        price_change.format_cursor(first, START),
+    )
     assert kwargs["_job_id"].startswith(f"pricechg:{tenant.id}:resume:")
     assert kwargs["_defer_until"] == NOW + price_change.SWEEP_DEFER
 
@@ -350,3 +367,103 @@ async def test_a_suspended_consultation_is_left_out_by_the_visibility_clause(
 
     assert await sweep(tenant.id, redis) == 0
     assert mail["sent"] == [] and await items(db) == []
+
+
+# ------------------------------------------------------------------ fix round 2
+
+
+async def test_a_follow_up_never_rearms_a_notice_answered_after_the_edit(db, mail, pool):
+    """R1 (reviewer probe 2): the first sweep mails A and fails for B (a retry is queued); A
+    answers ("Não, abater"); the retry - same `changed_at`, no new edit - must not mail A again.
+    A genuinely later edit (changed_at after the answer) still re-arms A's notice."""
+    async with db() as session:
+        tenant = await seed_tenant(session)
+        _p, acted, acted_dep = await seed_visit(session, tenant, email="acted@example.test")
+        await seed_visit(
+            session, tenant, email="fail@example.test", start=START + timedelta(days=1)
+        )
+        await session.commit()
+    await reprice(db, tenant.id, "R$ 160,00")  # R$ 48 vs R$ 60 paid: a drop of R$ 12
+
+    async def _send(to, template, variables):
+        mail["sent"].append((to, template, dict(variables)))
+        return EmailOutcome.SEND_FAILED if to == "fail@example.test" else EmailOutcome.SENT
+
+    original = price_change.send_transactional_email_result
+    price_change.send_transactional_email_result = _send
+    try:
+        assert await sweep(tenant.id, pool) == 1
+        assert [j[2]["_job_id"].split(":")[2] for j in _jobs(pool)] == ["retry"]
+        [row] = await notices(db, acted.id)
+        async with db() as session:  # A opens the link and answers (what UB2 records)
+            stored = await session.get(AppointmentReminder, row.id)
+            stored.answered_at = NOW + timedelta(minutes=5)
+            stored.answer = "opened"
+            session.add(
+                DepositAdjustment(
+                    id=uuid4(),
+                    tenant_id=tenant.id,
+                    deposit_id=acted_dep.id,
+                    appointment_id=acted.id,
+                    kind=KIND_DECREASE,
+                    status=STATUS_KEPT_CREDIT,
+                    old_service="Consulta",
+                    new_service="Consulta",
+                    diff_cents=1200,
+                )
+            )
+            await session.commit()
+
+        await sweep(tenant.id, pool, now=NOW + timedelta(minutes=30))  # the retry follow-up
+        assert len([m for m in mail["sent"] if m[0] == "acted@example.test"]) == 1
+
+        later_edit = NOW + timedelta(hours=1)  # a real new price edit after the answer
+        await sweep(tenant.id, pool, now=later_edit, changed_at=later_edit)
+        assert len([m for m in mail["sent"] if m[0] == "acted@example.test"]) == 2
+    finally:
+        price_change.send_transactional_email_result = original
+
+
+async def test_resume_goes_on_from_where_the_last_run_stopped(db, mail, pool, monkeypatch):
+    """m5 (reviewer probe 2): with every send failing and a budget for one consultation per run,
+    the resume chain still reaches every consultation instead of restarting at page one."""
+    monkeypatch.setattr(price_change, "_SWEEP_BUDGET", timedelta(0))
+    mail["outcome"] = EmailOutcome.SEND_FAILED
+    async with db() as session:
+        tenant = await seed_tenant(session)
+        for n in range(3):
+            await seed_visit(
+                session, tenant, email=f"p{n}@example.test", start=START + timedelta(hours=n)
+            )
+        await session.commit()
+    await reprice(db, tenant.id, "R$ 240,00")
+
+    await sweep(tenant.id, pool)
+    for step in range(1, 3):
+        resume = [j for j in pool.jobs if ":resume:" in j[2]["_job_id"]][-1]
+        _name, args, _kwargs = resume
+        assert args[:2] == (str(tenant.id), CHANGED_AT.isoformat()) and len(args) == 3
+        await price_change.sweep_price_changes(
+            tenant.id,
+            changed_at=CHANGED_AT,
+            now=NOW + timedelta(minutes=step),
+            redis=pool,
+            after=price_change.parse_cursor(args[2]),
+        )
+
+    assert sorted({to for to, _t, _v in mail["sent"]}) == [
+        "p0@example.test",
+        "p1@example.test",
+        "p2@example.test",
+    ]
+
+
+async def test_the_resume_cursor_round_trips():
+    appointment_id = uuid4()
+    start = datetime(2026, 11, 30, 13, 0, tzinfo=UTC)
+    text = price_change.format_cursor(appointment_id, start)
+    assert price_change.parse_cursor(text) == (appointment_id, start)
+    assert price_change.format_cursor(appointment_id, start.replace(tzinfo=None)) == text
+    for bad in ("", "x|y", f"{start.isoformat()}", f"ontem|{appointment_id}"):
+        with pytest.raises(ValueError):
+            price_change.parse_cursor(bad)

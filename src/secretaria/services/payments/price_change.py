@@ -171,13 +171,14 @@ _NO_LINK_LINE = "Entre no portal da clínica e abra a conversa."
 _DEFAULT_TZ = "America/Sao_Paulo"
 
 # Fix round 1 (review I3): a notice that was capped, not sent, or hit an error is tried again by a
-# follow-up sweep of the clinic - capped: at `_NEXT_DAY_AT` of the clinic's next local day (the
-# cap is per local day); otherwise `_RETRY_AFTER` later - at most `PRICE_NOTICE_MAX_ATTEMPTS`
-# times per consultation version (a capped one counts once per local day). Then the clinic gets
-# the item `price_change_no_email` ("fale com ele"), so nobody silently misses a price change.
+# follow-up sweep of the clinic - capped: at `_NEXT_DAY_AT` (08:00) of the clinic's next local
+# day (the cap is per local day); otherwise `_RETRY_AFTER` later - at most
+# `PRICE_NOTICE_MAX_ATTEMPTS` times per consultation version (a capped one counts once per local
+# day). Then the clinic gets the item `price_change_no_email` ("fale com ele"), so nobody
+# silently misses a price change.
 PRICE_NOTICE_MAX_ATTEMPTS = 3
 _RETRY_AFTER = timedelta(minutes=30)
-_NEXT_DAY_AT = time(0, 5)
+_NEXT_DAY_AT = time(8, 0)  # fix round 2 (m6): not just after midnight
 _TRIES_TTL_SECONDS = 14 * 24 * 3600
 # Review m2: a sweep stops itself after this long and resumes in a follow-up job (the arq timeout
 # of the job, `workers/price_change.JOB_TIMEOUT`, sits above it). Measured on the monotonic clock.
@@ -196,13 +197,35 @@ def _zone(tenant: Tenant) -> ZoneInfo:
         return ZoneInfo(_DEFAULT_TZ)
 
 
+def format_cursor(appointment_id: UUID, start_at: datetime) -> str:
+    """The resume job's cursor (fix round 2, m5): `<start ISO, UTC>|<appointment id>` - the keyset
+    position (start, id) of the last consultation a run processed. Ids and an instant only."""
+    return f"{_as_utc(start_at).isoformat()}|{appointment_id}"
+
+
+def parse_cursor(text: str) -> tuple[UUID, datetime]:
+    """`format_cursor` back to `(appointment id, start)`; anything else is a ValueError."""
+    start_text, sep, id_text = (text or "").partition("|")
+    if not sep:
+        raise ValueError("not a price sweep cursor")
+    start = datetime.fromisoformat(start_text)
+    if start.tzinfo is None:
+        raise ValueError("cursor start must be timezone-aware")
+    return UUID(id_text), start
+
+
 def _version(start_at: datetime) -> int:
     """The consultation version a notice/attempt/item belongs to: its start (epoch seconds)."""
     return int(_as_utc(start_at).timestamp())
 
 
 async def sweep_price_changes(
-    tenant_id: UUID, *, changed_at: datetime, now: datetime, redis
+    tenant_id: UUID,
+    *,
+    changed_at: datetime,
+    now: datetime,
+    redis,
+    after: tuple[UUID, datetime] | None = None,
 ) -> int:
     """One clinic's sweep (mapa-u §2.2); returns how many notices were sent. Always scoped to the
     clinic, paginated; one consultation's error does not stop the batch.
@@ -225,13 +248,18 @@ async def sweep_price_changes(
     Fix round 1: capped / not sent / error -> a follow-up sweep is enqueued on `redis` (the
     worker's ArqRedis) under its own job id, bounded by `PRICE_NOTICE_MAX_ATTEMPTS` per
     consultation version, then the clinic item; a sweep past `_SWEEP_BUDGET` stops and resumes in
-    a follow-up job. Never raises."""
+    a follow-up job that carries the cursor (`after`, fix round 2) so it goes on from there.
+
+    Fix round 2 (R1): an ANSWERED notice is re-armed only when the price edit is newer than the
+    answer (`answered_at < changed_at`); the follow-ups keep the first edit's `changed_at`, so they
+    never re-notify a patient who answered after that edit. Never raises."""
     log = {"tenant_id": str(tenant_id)}
     counts: dict[str, int] = {}
     retry_soon = next_day = resume = False
     zone = ZoneInfo(_DEFAULT_TZ)
     deadline = monotonic() + _SWEEP_BUDGET.total_seconds()
     processed = 0
+    last_done: tuple[UUID, datetime] | None = None
     try:
         async with async_session_factory() as session:
             tenant = await session.get(Tenant, tenant_id)
@@ -242,7 +270,6 @@ async def sweep_price_changes(
             logger.info("price_change_sweep_skipped", reason="no_sinal", **log)
             return 0
         local_day = _as_utc(now).astimezone(zone).strftime("%Y%m%d")
-        after: tuple[UUID, datetime] | None = None
         while not resume:
             async with async_session_factory() as session:
                 page = await _candidate_page(
@@ -253,8 +280,11 @@ async def sweep_price_changes(
                     resume = True  # out of time: a follow-up job goes on from here
                     break
                 processed += 1
+                last_done = (appointment_id, start)
                 try:
-                    outcome = await _notify_one(tenant_id, appointment_id, now=now, redis=redis)
+                    outcome = await _notify_one(
+                        tenant_id, appointment_id, changed_at=changed_at, now=now, redis=redis
+                    )
                 except Exception as exc:  # noqa: BLE001 - one consultation never stops the batch
                     outcome = "error"
                     logger.warning(
@@ -290,7 +320,7 @@ async def sweep_price_changes(
         changed_at,
         now=now,
         zone=zone,
-        resume=resume,
+        resume=last_done if resume else None,
         retry_soon=retry_soon,
         next_day=next_day,
     )
@@ -305,26 +335,28 @@ async def _follow_ups(
     *,
     now: datetime,
     zone: ZoneInfo,
-    resume: bool,
+    resume: tuple[UUID, datetime] | None,
     retry_soon: bool,
     next_day: bool,
 ) -> None:
     """Enqueue the follow-up sweeps this run needs, each under its own job id (never the hub's
     `sweep_job_id`, so a later price edit is not refused as a duplicate): `resume` (out of time)
-    right away, `retry` (~30 min) for failures, `nextday` (00:05 local) for capped notices. The
-    job keeps the first edit's `changed_at`, so the same consultations qualify."""
+    right away from the cursor of the last consultation processed, `retry` (~30 min) for
+    failures, `nextday` (08:00 local) for capped notices. The job keeps the first edit's
+    `changed_at`, so the same consultations qualify and none answered after it is re-armed."""
     now = _as_utc(now)
-    plans: list[tuple[str, datetime]] = []
-    if resume:
-        plans.append((f"resume:{int(now.timestamp()) // 60}", now + SWEEP_DEFER))
+    plans: list[tuple[str, datetime, tuple[str, ...]]] = []
+    if resume is not None:
+        cursor = format_cursor(*resume)
+        plans.append((f"resume:{int(now.timestamp()) // 60}", now + SWEEP_DEFER, (cursor,)))
     if retry_soon:
         run_at = now + _RETRY_AFTER
         bucket = int(run_at.timestamp()) // int(_RETRY_AFTER.total_seconds())
-        plans.append((f"retry:{bucket}", run_at))
+        plans.append((f"retry:{bucket}", run_at, ()))
     if next_day:
         tomorrow = now.astimezone(zone).date() + timedelta(days=1)
         run_at = datetime.combine(tomorrow, _NEXT_DAY_AT, tzinfo=zone).astimezone(UTC)
-        plans.append((f"nextday:{tomorrow.strftime('%Y%m%d')}", run_at))
+        plans.append((f"nextday:{tomorrow.strftime('%Y%m%d')}", run_at, ()))
     if not plans:
         return
     enqueue = getattr(redis, "enqueue_job", None)
@@ -333,13 +365,14 @@ async def _follow_ups(
             "price_change_follow_up_not_enqueued", reason="no_pool", tenant_id=str(tenant_id)
         )
         return
-    for suffix, run_at in plans:
+    for suffix, run_at, extra in plans:
         job_id = f"pricechg:{tenant_id}:{suffix}"
         try:
             await enqueue(
                 SWEEP_JOB,
                 str(tenant_id),
                 changed_at.isoformat(),
+                *extra,
                 _job_id=job_id,
                 _defer_until=run_at,
             )
@@ -453,9 +486,13 @@ class _Notice:
     rearm_id: UUID | None
 
 
-async def _notify_one(tenant_id: UUID, appointment_id: UUID, *, now: datetime, redis) -> str:
+async def _notify_one(
+    tenant_id: UUID, appointment_id: UUID, *, changed_at: datetime, now: datetime, redis
+) -> str:
     async with async_session_factory() as session:
-        notice = await _read_notice(session, tenant_id, appointment_id, now=now)
+        notice = await _read_notice(
+            session, tenant_id, appointment_id, changed_at=changed_at, now=now
+        )
         if isinstance(notice, str):
             return notice
         if not notice.portal:
@@ -482,7 +519,7 @@ async def _notify_one(tenant_id: UUID, appointment_id: UUID, *, now: datetime, r
         # Review I1: what was read before the claim may be stale (another sweep may have mailed
         # and committed meanwhile) - decide again under the claim, which is held until the row
         # is committed.
-        current = await _recheck_under_claim(notice)
+        current = await _recheck_under_claim(notice, changed_at=changed_at)
         if isinstance(current, str):
             return current
         return await _mail_and_record(current, email, now=now, redis=redis)
@@ -493,7 +530,21 @@ async def _notify_one(tenant_id: UUID, appointment_id: UUID, *, now: datetime, r
             logger.warning("price_change_claim_release_failed", tenant_id=str(tenant_id))
 
 
-async def _recheck_under_claim(notice: _Notice) -> _Notice | str:
+def _settled(row: AppointmentReminder | None, changed_at: datetime) -> str | None:
+    """Why an existing notice row stops this one: "pending" (not opened yet - one pending notice
+    is enough, the amount is computed when opened) or "answered" (opened AFTER the edit this sweep
+    is for - fix round 2, R1: only an edit newer than the answer re-arms it). None = go on (no row,
+    or a row answered before this edit -> re-arm it)."""
+    if row is None:
+        return None
+    if row.answered_at is None:
+        return "pending"
+    if _as_utc(row.answered_at) >= _as_utc(changed_at):
+        return "answered"
+    return None
+
+
+async def _recheck_under_claim(notice: _Notice, *, changed_at: datetime) -> _Notice | str:
     """A short read under the claim: the consultation still at the same version, and its notice
     row as it is NOW (pending -> "pending"; answered -> re-arm that row; none -> a new one)."""
     async with async_session_factory() as session:
@@ -511,13 +562,19 @@ async def _recheck_under_claim(notice: _Notice) -> _Notice | str:
         ):
             return "skipped"
         current = await _current_notice(session, appointment)
-    if current is not None and current.answered_at is None:
-        return "pending"
+    stop = _settled(current, changed_at)
+    if stop is not None:
+        return stop
     return replace(notice, rearm_id=current.id if current is not None else None)
 
 
 async def _read_notice(
-    session: AsyncSession, tenant_id: UUID, appointment_id: UUID, *, now: datetime
+    session: AsyncSession,
+    tenant_id: UUID,
+    appointment_id: UUID,
+    *,
+    changed_at: datetime,
+    now: datetime,
 ) -> _Notice | str:
     tenant = await session.get(Tenant, tenant_id)
     appointment = await session.scalar(
@@ -540,8 +597,9 @@ async def _read_notice(
     ):
         return "unneeded"
     current = await _current_notice(session, appointment)
-    if current is not None and current.answered_at is None:
-        return "pending"  # one pending notice is enough: the amount is computed when opened
+    stop = _settled(current, changed_at)
+    if stop is not None:
+        return stop
     return _Notice(
         tenant_id=tenant_id,
         appointment_id=appointment.id,
@@ -894,8 +952,10 @@ __all__ = [
     "PriceOpening",
     "PriceOpeningKind",
     "enqueue_sweep",
+    "format_cursor",
     "mail_cap_key",
     "open_price_notice",
+    "parse_cursor",
     "price_notice_needed",
     "price_opening_messages",
     "sweep_job_id",

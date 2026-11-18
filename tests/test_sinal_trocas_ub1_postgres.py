@@ -157,11 +157,15 @@ async def test_a_sweep_that_read_before_the_other_committed_does_not_mail_again(
     monkeypatch.setattr(price_change, "_patient_email", _email)
 
     async def sweep_b():
-        return await price_change._notify_one(tenant.id, appointment.id, now=NOW, redis=redis)
+        return await price_change._notify_one(
+            tenant.id, appointment.id, changed_at=CHANGED_AT, now=NOW, redis=redis
+        )
 
     async def sweep_a():
         await b_read.wait()
-        outcome = await price_change._notify_one(tenant.id, appointment.id, now=NOW, redis=redis)
+        outcome = await price_change._notify_one(
+            tenant.id, appointment.id, changed_at=CHANGED_AT, now=NOW, redis=redis
+        )
         a_done.set()
         return outcome
 
