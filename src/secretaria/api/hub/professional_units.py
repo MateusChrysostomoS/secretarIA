@@ -35,10 +35,11 @@ Nothing here is ever taken from the client except the unit ids and their hours: 
 no link flags (extra fields are a 422). Without links nothing changes anywhere else.
 """
 
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -50,7 +51,7 @@ from secretaria.api.hub.units import ADDON_KEY, LIMIT_KEY
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
 from secretaria.core.subscription import SubscriptionClaim
-from secretaria.models import Professional, Tenant, Unit
+from secretaria.models import Professional, ProfessionalServiceUnitTerms, Tenant, Unit
 from secretaria.schemas.professional_unit import (
     ProfessionalServiceRead,
     ProfessionalUnitRead,
@@ -66,6 +67,7 @@ from secretaria.services import (
     tenant_config as cfg,
 )
 from secretaria.services.entitlements_client import get_entitlements, is_entitled
+from secretaria.services.payments import price_change
 from secretaria.services.service_catalog import entry_service_id, load_service_catalog
 
 logger = get_logger(__name__)
@@ -188,6 +190,22 @@ async def get_professional_units(
     return await _read(session, tenant, professional)
 
 
+async def _unit_terms_count(session: AsyncSession, tenant_id: UUID, professional_id: UUID) -> int:
+    """How many price/duration exceptions the professional has (TASK-085) - read before and after
+    the prune so the price sweep runs only when one was actually erased."""
+    return int(
+        await session.scalar(
+            select(func.count())
+            .select_from(ProfessionalServiceUnitTerms)
+            .where(
+                ProfessionalServiceUnitTerms.tenant_id == tenant_id,
+                ProfessionalServiceUnitTerms.professional_id == professional_id,
+            )
+        )
+        or 0
+    )
+
+
 @router.put("/{professional_id}/units", response_model=ProfessionalUnitsRead)
 async def put_professional_units(
     professional_id: str,
@@ -227,7 +245,9 @@ async def put_professional_units(
         await psu.apply_marks(session, tenant.id, professional, linked_ids, marks)
         # TASK-085: a price/duration exception of a unit the doctor no longer attends (or of a
         # service no longer done there) goes with it, in the same transaction.
+        terms_before = await _unit_terms_count(session, tenant.id, professional.id)
         await unit_terms_service.prune_after_units_save(session, tenant.id, professional)
+        pruned = await _unit_terms_count(session, tenant.id, professional.id) < terms_before
         await session.commit()
     except psu.ServiceMarkError as error:
         await session.rollback()
@@ -249,4 +269,10 @@ async def put_professional_units(
         professional_id=str(professional.id),
         linked=len(targets),
     )
+    # TASK-085 R (D-R14): an erased price exception puts the base price back on that unit - after
+    # the commit, schedule the price sweep of a clinic with sinal. Never raises.
+    if pruned and tenant.pix_deposit_enabled:
+        await price_change.enqueue_sweep(
+            getattr(request.app.state, "arq_pool", None), tenant.id, changed_at=datetime.now(UTC)
+        )
     return await _read(session, tenant, professional)

@@ -48,6 +48,7 @@ from secretaria.workers.payments_tasks import (
     process_asaas_event,
     process_payment_event,
 )
+from secretaria.workers.price_change import sweep_price_changes
 from secretaria.workers.reminder_engine import (
     process_appointment_reminders,
     reconcile_appointment_reminders,
@@ -193,6 +194,10 @@ class WorkerSettings:
         # Context sources (TASK-026): fetch/read the clinic's material, propose, erase the input.
         # Enqueued by POST /tenants/me/context-sources[/file]; see workers/shared/context_ingestion.
         ingest_context_source,
+        # TASK-085 R (D-R14): the clinic changed a price - e-mail the patients whose sinal it
+        # changes. Enqueued after the commit of a hub price save, one job per clinic per 5-minute
+        # window. See workers/price_change.py and services/payments/price_change.py.
+        sweep_price_changes,
     ]
     # Sweep stale human-handover conversations back to the bot every 15 min;
     # sweep upcoming appointments for due lead-window reminders every 5 min
