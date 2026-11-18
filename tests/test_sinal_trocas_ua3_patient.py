@@ -105,14 +105,16 @@ class Agenda:
         self.fail_read = False
         self.fail_create: Exception | None = None
         self.on_create = None  # async hook run inside create_event (races)
-        self.dead_ids: set[str] = set()
+        # Google (default) refuses a deleted id ("event id is taken"); the secretarIA agenda
+        # (`local_style`) hands the cancelled row back.
+        self.local_style = False
 
-    def add(self, event_id: str, start: datetime, end: datetime) -> None:
+    def add(self, event_id: str, start: datetime, end: datetime, status: str = "confirmed") -> None:
         self.events[event_id] = {
             "id": event_id,
             "start": _utc(start),
             "end": _utc(end),
-            "status": "confirmed",
+            "status": status,
         }
 
     def live(self) -> dict[str, dict]:
@@ -171,10 +173,14 @@ class Agenda:
         if self.on_create is not None:
             await self.on_create()
         event_id = event_id or f"evt-{uuid4().hex[:8]}"
-        if event_id in self.dead_ids:
-            return {"id": event_id, "status": "cancelled"}
-        if event_id in self.events:
-            return {**self.events[event_id], "htmlLink": f"https://cal/{event_id}"}
+        existing = self.events.get(event_id)
+        if existing is not None and existing["status"] == "cancelled":
+            if self.local_style:
+                return dict(existing)
+            # services/calendar.py::CalendarService.create_event on a 409 whose event is cancelled.
+            raise CalendarUnavailableError("event id is taken")
+        if existing is not None:  # Google's 409 read as success: the existing event
+            return {**existing, "htmlLink": f"https://cal/{event_id}"}
         self.add(event_id, start, end)
         self.created.append(
             {
@@ -1014,3 +1020,140 @@ async def test_a_forged_portal_other_time_does_nothing(db, agenda, ua2):  # noqa
 def test_other_time_id_fits_whatsapp():
     assert len(f"{OTHER}|{uuid4()}") <= 256
     assert len(LABEL_OTHER) <= 20
+
+
+# --------------------------------------------------------------------------------------------
+# Fix round 1 (reviews/UA3-review.md): I2 the AI, M1 a lost slot after its time, M2 the discard
+# --------------------------------------------------------------------------------------------
+
+
+async def test_the_ai_never_sees_the_consultation_being_moved(db, agenda, ua2, monkeypatch):  # noqa: F811
+    """I2 (reviewer probe): free text at the confirmation card goes to the AI; the vacated
+    consultation (its old slot often someone else's now) is never in its appointment context."""
+    from tests._reminders_r3 import turn
+    from tests.test_sinal_trocas_ua3_rebook import wa_rebook_to_first_slot
+
+    world, adjustment_id = await ua3_world(db)
+    await wa_rebook_to_first_slot(db, world, adjustment_id)
+    seen: dict = {}
+
+    async def _agent(message, *args, **kwargs):
+        seen["context"] = kwargs.get("appointment_context")
+        return "Resposta da IA."
+
+    monkeypatch.setattr(workers_ns, "run_agent", _agent)
+
+    await turn(db, world, "pode ser mais cedo?")
+
+    assert "context" in seen  # the AI did answer this turn
+    assert not seen["context"]
+
+
+async def test_the_ai_still_sees_the_other_consultations(db, agenda, ua2, monkeypatch):  # noqa: F811
+    """Characterization: only the marked row is dropped - a visible consultation still reaches
+    the AI on the same delegated turn."""
+    from tests._reminders_r3 import turn
+    from tests.test_sinal_trocas_ua3_rebook import wa_rebook_to_first_slot
+
+    world, adjustment_id = await ua3_world(db)
+    async with db() as session:
+        start = datetime.now(UTC) + timedelta(days=6)
+        session.add(
+            Appointment(
+                id=uuid4(),
+                tenant_id=world.tenant.id,
+                patient_id=world.patient.id,
+                conversation_id=world.conversation.id,
+                google_event_id="evt-other",
+                appointment_type="Retorno",
+                start_at=start,
+                end_at=start + timedelta(minutes=30),
+                status=AppointmentStatus.SCHEDULED,
+            )
+        )
+        await session.commit()
+    await wa_rebook_to_first_slot(db, world, adjustment_id)
+    seen: dict = {}
+
+    async def _agent(message, *args, **kwargs):
+        seen["context"] = kwargs.get("appointment_context")
+        return "Resposta da IA."
+
+    monkeypatch.setattr(workers_ns, "run_agent", _agent)
+
+    await turn(db, world, "pode ser mais cedo?")
+
+    assert "Retorno" in (seen.get("context") or "")
+    assert "Consulta" not in seen["context"]
+
+
+async def _move_old_start_to_the_past(db, world) -> None:  # noqa: F811
+    async with db() as session:
+        past = datetime.now(UTC) - timedelta(minutes=30)
+        await session.execute(
+            update(Appointment)
+            .where(Appointment.id == world.appointment.id)
+            .values(start_at=past, end_at=past + timedelta(minutes=30))
+        )
+        await session.commit()
+
+
+async def test_a_lost_slot_is_rebookable_after_its_old_time(db, agenda, ua2):  # noqa: F811
+    """M1 (mapa-u §7.4): "Outro horário" of an `old_slot_lost` change is valid until the clinic
+    resolves it - even once the old time has passed."""
+    world, adjustment_id = await ua3_world(db, status=STATUS_OLD_SLOT_LOST)
+    await _move_old_start_to_the_past(db, world)
+    [row] = await _upcoming(db, world, world.appointment.id)
+    assert row["rebook_adjustment_id"] == str(adjustment_id)
+
+    await tasks._handle_action_button(reply_of(world), OTHER, str(adjustment_id))
+
+    assert _day_picker(wa_messages())
+    conversation = await get_conversation(db, world)
+    assert conversation.flow_state == FlowState.MANAGE_BOOKING
+    assert conversation.flow_managing_appointment_id == world.appointment.id
+
+
+async def test_a_lost_slot_past_its_old_time_rebooks_end_to_end(db, agenda, ua2):  # noqa: F811
+    from tests.test_sinal_trocas_ua3_rebook import wa_confirm, wa_rebook_to_first_slot
+
+    world, adjustment_id = await ua3_world(db, status=STATUS_OLD_SLOT_LOST)
+    await _move_old_start_to_the_past(db, world)
+
+    new_start = await wa_rebook_to_first_slot(db, world, adjustment_id)
+    await wa_confirm(db, world)
+
+    assert (await adjustment_of(db, adjustment_id)).status == "rebooked"
+    row = await reload_appointment(db, world.appointment.id)
+    assert row.start_at.replace(tzinfo=None) == new_start.replace(tzinfo=None)
+
+
+async def test_a_choice_past_the_old_time_keeps_its_deadline(db, agenda, ua2):  # noqa: F811
+    """`awaiting_choice` keeps its own deadline: past the old time it is never rebookable."""
+    world, _adjustment_id = await ua3_world(db, status=STATUS_AWAITING_CHOICE)
+    await _move_old_start_to_the_past(db, world)
+    assert await _upcoming(db, world, world.appointment.id) == []
+
+
+async def test_an_unverified_discard_keeps_the_event(monkeypatch):
+    """M2: when the "does the row point at it?" read fails, the event is KEPT (it may be the one a
+    twin turn committed) - a leftover is the safe failure."""
+    from secretaria.workers.shared import flow_runner
+
+    class _BrokenSession:
+        async def __aenter__(self):
+            raise RuntimeError("database down")
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr(flow_runner, "async_session_factory", lambda: _BrokenSession())
+    cal = Agenda()
+    cal.add("difmovex", datetime.now(UTC), datetime.now(UTC) + timedelta(minutes=30))
+
+    await flow_runner._discard_rebook_event(
+        SimpleNamespace(id=uuid4()),
+        {"event_id": "difmovex", "calendar": cal, "adjustment_id": uuid4()},
+    )
+
+    assert cal.cancelled == [] and "difmovex" in cal.live()

@@ -171,11 +171,19 @@ async def _deposit(db) -> PixDeposit:  # noqa: F811
         return await session.scalar(select(PixDeposit))
 
 
-def _assert_rebooked(row, adjustment, agenda, new_start, adjustment_id):  # noqa: F811
-    event_id = old_slot.rebook_event_id(adjustment_id, calendar=agenda, source="patient")
-    assert event_id.startswith("difmove")
-    [created] = agenda.created
-    assert created["id"] == event_id
+def _move_id(adjustment_id, calendar, start, salt=0) -> str:
+    return fr.patient_rebook_event_id(
+        adjustment_id, calendar=calendar, start=start, end=start + timedelta(minutes=30), salt=salt
+    )
+
+
+def _assert_rebooked(row, adjustment, agenda, new_start, adjustment_id, salt=0):  # noqa: F811
+    event_id = _move_id(adjustment_id, agenda, new_start, salt)
+    assert event_id.startswith(
+        old_slot.rebook_event_id(adjustment_id, calendar=agenda, source="patient")
+    )
+    created = agenda.created[-1]
+    assert created["id"] == event_id and event_id in agenda.live()
     assert created["start"] == new_start and created["end"] == new_start + timedelta(minutes=30)
     assert created["summary"] == "Consulta - Maria"
     assert row.google_event_id == event_id
@@ -423,19 +431,201 @@ async def test_a_failed_write_discards_the_event_and_hands_over(
     assert not any(text.startswith("Pronto! Sua consulta foi remarcada.") for text in texts)
 
 
-async def test_a_dead_event_id_is_never_pointed_at(db, agenda, ua2, spies):  # noqa: F811
-    """An earlier attempt's event was discarded and Google never frees its id: a person takes
-    over; nothing is written."""
+async def test_a_spent_id_of_the_window_is_retried_with_a_salt(db, agenda, ua2, spies):  # noqa: F811
+    """UA3 review I1: an earlier attempt at THIS window created and deleted its event (Google
+    never frees the id: "event id is taken"); the next id of the window is used."""
     world, adjustment_id = await ua3_world(db)
-    agenda.dead_ids.add(old_slot.rebook_event_id(adjustment_id, calendar=agenda, source="patient"))
+    new_start = await wa_rebook_to_first_slot(db, world, adjustment_id)
+    agenda.add(
+        _move_id(adjustment_id, agenda, new_start),
+        new_start,
+        new_start + timedelta(minutes=30),
+        status="cancelled",
+    )
+
+    await wa_confirm(db, world)
+
+    row = await reload_appointment(db, world.appointment.id)
+    adjustment = await adjustment_of(db, adjustment_id)
+    _assert_rebooked(row, adjustment, agenda, new_start, adjustment_id, salt=1)
+
+
+async def test_the_secretaria_agenda_spent_row_is_retried_too(db, agenda, ua2, spies):  # noqa: F811
+    """The own agenda hands the deleted row back (`status="cancelled"`) instead of raising."""
+    world, adjustment_id = await ua3_world(db)
+    agenda.local_style = True
+    new_start = await wa_rebook_to_first_slot(db, world, adjustment_id)
+    for salt in (0, 1):
+        agenda.add(
+            _move_id(adjustment_id, agenda, new_start, salt),
+            new_start,
+            new_start + timedelta(minutes=30),
+            status="cancelled",
+        )
+
+    await wa_confirm(db, world)
+
+    adjustment = await adjustment_of(db, adjustment_id)
+    row = await reload_appointment(db, world.appointment.id)
+    _assert_rebooked(row, adjustment, agenda, new_start, adjustment_id, salt=2)
+
+
+async def test_every_id_of_the_window_spent_hands_over(db, agenda, ua2, spies):  # noqa: F811
+    """Bounded: after REBOOK_ID_TRIES dead ids a person takes over; nothing is written."""
+    world, adjustment_id = await ua3_world(db)
+    new_start = await wa_rebook_to_first_slot(db, world, adjustment_id)
+    for salt in range(fr.REBOOK_ID_TRIES):
+        agenda.add(
+            _move_id(adjustment_id, agenda, new_start, salt),
+            new_start,
+            new_start + timedelta(minutes=30),
+            status="cancelled",
+        )
+
+    await wa_confirm(db, world)
+
+    row = await reload_appointment(db, world.appointment.id)
+    assert row.google_event_id == "evt-old" and agenda.created == []
+    assert (await adjustment_of(db, adjustment_id)).status == STATUS_AWAITING_CHOICE
+    assert CALENDAR_UNAVAILABLE_MESSAGE in [item[2] for item in wa_messages()]
+
+
+def _fail_first_write(monkeypatch) -> None:
+    real = old_slot.finish_rebook
+    calls = {"n": 0}
+
+    async def _once(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("database blip")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(old_slot, "finish_rebook", _once)
+
+
+async def test_the_same_card_after_a_compensated_failure_rebooks(
+    db,  # noqa: F811
+    agenda,  # noqa: F811
+    ua2,  # noqa: F811
+    spies,
+    monkeypatch,
+):
+    """Reviewer probe (I1): the write failed and its event was deleted; once the bot has the
+    conversation back, Confirmar on the SAME card (same window) must not dead-end on the spent
+    id."""
+    from secretaria.models import HandoverState
+    from tests._reminders_r3 import set_conversation
+
+    world, adjustment_id = await ua3_world(db)
+    new_start = await wa_rebook_to_first_slot(db, world, adjustment_id)
+    _fail_first_write(monkeypatch)
+    await wa_confirm(db, world)  # compensated: the event is gone, a person is told
+    assert _move_id(adjustment_id, agenda, new_start) in agenda.cancelled
+    assert (await adjustment_of(db, adjustment_id)).status == STATUS_AWAITING_CHOICE
+    await set_conversation(db, world, handover_state=HandoverState.BOT_ACTIVE)
+    assert (await get_conversation(db, world)).flow_step == fr.STEP_MANAGE_CONFIRM
+
+    await wa_confirm(db, world)
+
+    row = await reload_appointment(db, world.appointment.id)
+    adjustment = await adjustment_of(db, adjustment_id)
+    _assert_rebooked(row, adjustment, agenda, new_start, adjustment_id, salt=1)
+
+
+async def test_other_time_again_after_the_handover_is_released_rebooks(
+    db,  # noqa: F811
+    agenda,  # noqa: F811
+    ua2,  # noqa: F811
+    spies,
+    monkeypatch,
+):
+    """Reviewer probe (I1): handed over after a compensated failure, given back to the bot, the
+    patient taps "Outro horário" again and picks the same time: it stands."""
+    from secretaria.models import HandoverState
+    from tests._reminders_r3 import set_conversation
+
+    world, adjustment_id = await ua3_world(db)
     await wa_rebook_to_first_slot(db, world, adjustment_id)
+    _fail_first_write(monkeypatch)
+    await wa_confirm(db, world)
+    await set_conversation(db, world, handover_state=HandoverState.BOT_ACTIVE)
+
+    new_start = await wa_rebook_to_first_slot(db, world, adjustment_id)
+    await wa_confirm(db, world)
+
+    row = await reload_appointment(db, world.appointment.id)
+    adjustment = await adjustment_of(db, adjustment_id)
+    _assert_rebooked(row, adjustment, agenda, new_start, adjustment_id, salt=1)
+
+
+async def test_a_leftover_event_at_one_window_never_binds_another(db, agenda, ua2, spies):  # noqa: F811
+    """Reviewer probe (I1): a `difmove` left live at W (a crash between create and commit) and a
+    confirm at W' - the row moves to a NEW event at W', never the one at W."""
+    world, adjustment_id = await ua3_world(db)
+    new_start = await wa_rebook_to_first_slot(db, world, adjustment_id)
+    leftover_at = new_start + timedelta(hours=1)  # W
+    leftover = _move_id(adjustment_id, agenda, leftover_at)
+    agenda.add(leftover, leftover_at, leftover_at + timedelta(minutes=30))
+
+    await wa_confirm(db, world)  # W' = new_start
+
+    row = await reload_appointment(db, world.appointment.id)
+    adjustment = await adjustment_of(db, adjustment_id)
+    _assert_rebooked(row, adjustment, agenda, new_start, adjustment_id)
+    assert row.google_event_id != leftover
+
+
+async def test_an_answer_at_another_window_is_never_bound_nor_deleted(
+    db,  # noqa: F811
+    agenda,  # noqa: F811
+    ua2,  # noqa: F811
+    spies,
+):
+    """Belt: the agenda answers OUR id with another window (somebody's - a twin's?): nothing
+    written, nothing deleted, the patient is asked to try again."""
+    world, adjustment_id = await ua3_world(db)
+    new_start = await wa_rebook_to_first_slot(db, world, adjustment_id)
+    elsewhere = new_start + timedelta(days=1)
+    wanted = _move_id(adjustment_id, agenda, new_start)
+    agenda.add(wanted, elsewhere, elsewhere + timedelta(minutes=30))
 
     await wa_confirm(db, world)
 
     row = await reload_appointment(db, world.appointment.id)
     assert row.google_event_id == "evt-old"
+    assert wanted in agenda.live() and agenda.cancelled == []
     assert (await adjustment_of(db, adjustment_id)).status == STATUS_AWAITING_CHOICE
-    assert CALENDAR_UNAVAILABLE_MESSAGE in [item[2] for item in wa_messages()]
+    text, card = wa_messages()[-2:]
+    assert text[2] == fr.REBOOK_RETRY_TEXT and card[2].startswith("Remarcar para:")
+    assert (await get_conversation(db, world)).flow_step == fr.STEP_MANAGE_CONFIRM
+
+
+def test_the_patient_rebook_id_follows_the_hub_scheme():
+    """Same shape as the hub's (`difhub` + 16 hex of the window): prefix kept, `loc_` on the own
+    agenda, one window per id, base32hex only, <= 64 chars."""
+    from secretaria.services.local_calendar import LocalCalendarService
+
+    adjustment_id = uuid4()
+    start = datetime(2030, 10, 20, 13, 0, tzinfo=UTC)
+    end = start + timedelta(minutes=30)
+    google = fr.patient_rebook_event_id(adjustment_id, calendar=None, start=start, end=end)
+    assert google.startswith(f"difmove{adjustment_id.hex}") and len(google) == 7 + 32 + 16
+    assert set(google) <= set("0123456789abcdefghijklmnopqrstuv")
+    # The same instant on another clock is the same id; another window or salt is another id.
+    local_clock = start.astimezone(fr.ZoneInfo("America/Sao_Paulo"))
+    assert google == fr.patient_rebook_event_id(
+        adjustment_id, calendar=None, start=local_clock, end=end
+    )
+    assert google != fr.patient_rebook_event_id(
+        adjustment_id, calendar=None, start=start + timedelta(minutes=30), end=end
+    )
+    assert google != fr.patient_rebook_event_id(
+        adjustment_id, calendar=None, start=start, end=end, salt=1
+    )
+    local = fr.patient_rebook_event_id(
+        adjustment_id, calendar=object.__new__(LocalCalendarService), start=start, end=end
+    )
+    assert local == f"loc_{google}" and len(local) <= 64
 
 
 async def test_the_agenda_down_at_the_create_hands_over(db, agenda, ua2, spies):  # noqa: F811
@@ -580,7 +770,10 @@ async def test_router_rebook_creates_the_new_event_under_its_own_id(monkeypatch)
         patient_name="Maria",
     )
     assert seen == [(tenant_id, adjustment_id)]
-    event_id = old_slot.rebook_event_id(adjustment_id, calendar=cal, source="patient")
+    start = datetime(2030, 10, 20, 10, 0, tzinfo=fr.ZoneInfo("America/Sao_Paulo"))
+    event_id = fr.patient_rebook_event_id(
+        adjustment_id, calendar=cal, start=start, end=start + timedelta(minutes=30)
+    )
     [created] = cal.created
     assert created["id"] == event_id and cal.updated == []
     assert created["summary"] == "Consulta - Maria"

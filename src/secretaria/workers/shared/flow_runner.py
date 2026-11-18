@@ -888,7 +888,8 @@ async def _discard_rebook_event(tenant: Tenant | None, rebook: dict) -> None:
     """TASK-085 R (D-R11): the event "Outro horário" created for a move that was NOT written (the
     change was decided meanwhile, or the transaction failed) is deleted
     (`old_slot.discard_event`, never raises) - unless the consultation points at it: a twin
-    turn with the same deterministic id won. Its own read; never raises."""
+    turn with the same deterministic id won. Its own read; never raises. When that read fails the
+    event is KEPT (logged): it may be the twin's."""
     event_id = str(rebook.get("event_id") or "")
     calendar = rebook.get("calendar")
     if not event_id or calendar is None:
@@ -904,8 +905,16 @@ async def _discard_rebook_event(tenant: Tenant | None, rebook: dict) -> None:
                 )
             if current is not None:
                 return
-    except Exception as exc:  # noqa: BLE001 - cannot tell: the event is ours and unused
-        logger.warning("worker_rebook_discard_check_failed", error_type=type(exc).__name__)
+    except Exception as exc:  # noqa: BLE001 - cannot tell: keep it (UA3 review M2)
+        # A twin turn may have committed the row onto THIS event: deleting it would leave a live
+        # consultation without an event. A leftover is the safe failure (mapa-u §6 risk 2) and,
+        # with the window-derived id, never blocks the patient's next try.
+        logger.warning(
+            "worker_rebook_discard_skipped_unverified",
+            adjustment_id=str(rebook.get("adjustment_id")),
+            error_type=type(exc).__name__,
+        )
+        return
     logger.info(
         "worker_rebook_event_discarded",
         tenant_id=str(getattr(tenant, "id", None)),

@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from enum import Enum
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.config import get_settings
@@ -23,6 +23,7 @@ from secretaria.models import LIVE_APPOINTMENT_STATUSES, Appointment, Appointmen
 from secretaria.models.deposit_adjustment import (
     MODE_SUSPEND,
     REBOOKABLE_STATUSES,
+    STATUS_OLD_SLOT_LOST,
     DepositAdjustment,
 )
 from secretaria.services.payments import adjustment_suspension
@@ -80,8 +81,9 @@ async def _rebooking_row(
     session: AsyncSession, tenant_id, patient_id, rebooking_id: UUID, now: datetime
 ) -> tuple[Appointment, UUID] | None:
     """TASK-085 R (D-R11, mapa-u §1.5): the patient's consultation `rebooking_id` while it is being
-    moved by "Outro horário" - LIVE, upcoming, this clinic and patient, with a `mode="suspend"`
-    change in REBOOKABLE_STATUSES (newest first) - and that change's id. None otherwise."""
+    moved by "Outro horário" - LIVE, this clinic and patient, with a `mode="suspend"` change in
+    REBOOKABLE_STATUSES (newest first) - and that change's id. None otherwise. Upcoming, except
+    under `old_slot_lost` (valid until the clinic resolves it, mapa-u §7.4)."""
     found = (
         await session.execute(
             select(Appointment, DepositAdjustment.id)
@@ -95,7 +97,13 @@ async def _rebooking_row(
                 Appointment.patient_id == patient_id,
                 Appointment.tenant_id == tenant_id,
                 Appointment.status.in_(UPCOMING_STATUSES),
-                Appointment.start_at >= now,
+                # UA3 review M1 (mapa-u §7.4): an `old_slot_lost` change is rebookable "until the
+                # clinic resolves it" - even once the old time has passed (the NEW slot is future);
+                # `awaiting_choice` keeps its own deadline (before the old visit).
+                or_(
+                    Appointment.start_at >= now,
+                    DepositAdjustment.status == STATUS_OLD_SLOT_LOST,
+                ),
                 DepositAdjustment.mode == MODE_SUSPEND,
                 DepositAdjustment.status.in_(REBOOKABLE_STATUSES),
             )
