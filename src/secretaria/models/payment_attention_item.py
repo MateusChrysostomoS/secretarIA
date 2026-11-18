@@ -61,6 +61,14 @@ REASON_UNSEEN_CHARGE_TO_VOID = "unseen_charge_to_void"
 # the new one could not be created (the provider refused it, or the payer-data question could not
 # go out): the clinic collects the new sinal itself. `amount_cents` = the new sinal.
 REASON_SINAL_REQUOTE_FAILED = "sinal_requote_failed"
+# TASK-085 R, 3rd round (D-R11): the patient did not pay the difference of a change and the old
+# consultation's slot was taken while it was out of the agenda; nobody chose a new slot. The clinic
+# reschedules (or cancels) it; the paid sinal (`amount_cents`) stays with the consultation.
+REASON_SERVICE_DIFF_REBOOK_DUE = "service_diff_rebook_due"
+# TASK-085 R, 3rd round (D-R14): the clinic changed a price, this patient's sinal needs an
+# adjustment, and there is no e-mail to tell them (a WhatsApp patient, or none on file): the
+# clinic talks to the patient. Nothing is charged or returned automatically.
+REASON_PRICE_CHANGE_NO_EMAIL = "price_change_no_email"
 
 ATTENTION_REASONS = frozenset(
     {
@@ -81,6 +89,8 @@ ATTENTION_REASONS = frozenset(
         REASON_SERVICE_DIFF_UNPAID,
         REASON_UNSEEN_CHARGE_TO_VOID,
         REASON_SINAL_REQUOTE_FAILED,
+        REASON_SERVICE_DIFF_REBOOK_DUE,
+        REASON_PRICE_CHANGE_NO_EMAIL,
     }
 )
 
