@@ -13,7 +13,9 @@ two fields on purpose: there is nothing else to leak.
 ## What counts as busy (the sibling's side)
 
 * appointments in a LIVE status (`SCHEDULED`/`CONFIRMED`/`RESCHEDULED`; cancelled, attended and
-  no-show do not block);
+  no-show do not block) that occupy their slot - TASK-085 R (D-R10): a consultation SUSPENDED by a
+  change waiting for the Pix of its difference has its event off the agenda, so its row does not
+  count either (`adjustment_suspension.occupies_slot_clause`);
 * local `calendar_events` that are confirmed, busy and not handed over to Google - the same
   predicate `local_calendar._counts_as_busy` applies (not imported: services/local_calendar.py
   will import THIS module, and the two must not form a cycle);
@@ -56,6 +58,7 @@ from secretaria.models import (
 )
 from secretaria.models.calendar_event import EVENT_STATUS_CONFIRMED, EVENT_STATUS_GOOGLE_LEASE
 from secretaria.services.booking_hold import BLOCKING_PHASE
+from secretaria.services.payments.adjustment_suspension import occupies_slot_clause
 
 # How long a Google exclusive write's lease (models/calendar_event.py::EVENT_STATUS_GOOGLE_LEASE)
 # counts as the sibling's busy time. It only has to bridge the gap between the Google write and
@@ -172,6 +175,7 @@ async def shared_busy(
             Appointment.end_at.is_not(None),
             Appointment.start_at < end,
             Appointment.end_at > start,
+            occupies_slot_clause(),
         )
     )
     windows.update((_aware(s), _aware(e)) for s, e in appointments.all())
