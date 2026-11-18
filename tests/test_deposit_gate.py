@@ -1,9 +1,10 @@
 """`quote_deposit` - the decision the `before` flow makes before it reserves a slot
 (spec sections 5.3 and 7, the first six of the nine `maybe_create_deposit` silent paths).
 
-One test per row of the table in the plan: feature off / convenio without deposit / service
-without a readable price / zero amount are LEGITIMATE `no_deposit` (the booking commits as
-before); no patient / no credential / unknown provider are BLOCKED (the booking is never made
+One test per row of the table in the plan: feature off / service without a readable price /
+zero amount are LEGITIMATE `no_deposit` (the booking commits as before; "convenio without
+deposit" was retired by TASK-085 R D-R12 - a convenio never exempts the sinal); no patient / no
+credential / unknown provider are BLOCKED (the booking is never made
 without its deposit). Since 2026-10-28 the deposit is a core SecretarIA capability: the gate
 never asks brain-api about the old `pix_deposit` add-on (docs/CHECKPOINT_sinal_padrao.md).
 """
@@ -122,7 +123,9 @@ async def test_the_deposit_no_longer_depends_on_the_old_addon(db, entitlement):
     assert quote.outcome == "required"
 
 
-async def test_path_2_a_plan_that_does_not_charge_a_deposit_books_normally(db, entitlement):
+async def test_path_2_a_legacy_no_deposit_plan_now_requires_the_deposit(db, entitlement):
+    # TASK-085 R D-R12 (owner, 2026-11-18): a convenio never exempts the sinal; the old flag is
+    # ignored.
     async with db() as session:
         tenant, patient = await _seed(session)
         plan = TenantInsurancePlan(
@@ -131,7 +134,7 @@ async def test_path_2_a_plan_that_does_not_charge_a_deposit_books_normally(db, e
         session.add(plan)
         await session.commit()
         quote = await _quote(session, tenant, patient, insurance="Unimed")
-    assert (quote.outcome, quote.reason) == ("no_deposit", "insurance_no_charge")
+    assert (quote.outcome, quote.amount_cents) == ("required", 6000)
 
 
 async def test_path_5_a_service_without_a_readable_price_books_normally(db, entitlement):

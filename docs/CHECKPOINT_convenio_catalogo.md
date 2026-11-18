@@ -1,5 +1,16 @@
 # CHECKPOINT — Catálogo canônico de convênios + aceitação por profissional + convênio primeiro no fluxo
 
+> **Atualização 2026-11-18 — TASK-085 R U1 (decisão D-R12 do dono): convênio não isenta sinal.**
+> O item 4 da §1 (flag `charge_deposit` por clínica e por plano) foi **aposentado**: com o sinal ligado,
+> toda consulta paga o sinal, com qualquer convênio. As colunas `charge_deposit` ficam (sem migração),
+> mas nada lê nem escreve: saiu `deposit_lifecycle._insurance_charges_deposit` / skip `insurance_no_charge`,
+> o `PATCH /tenants/me/insurance-plans/{plan_id}`, o campo nas respostas do hub e da agenda
+> (`insurance_plan` = `{id, name}`); um Portal antigo que ainda envia o campo não leva 422 (ignorado).
+> Também saiu o texto de pagamento sob cada convênio na lista do paciente (`insurance_payment_copy.py`
+> removido) e, no `insurance-overview`, o `payment_text`/`deposit` por plano (`plans: [{name, clinic_note}]`).
+> Relatório: `tasks/TASK-085/sinal-trocas/results/U1-implementer.md`.
+
+
 TASK-006, parte 1/2 (secretarIA backend). Parte 2 = `secretarIA-frontend`
 (`z_prompts/PROMPT_CONVENIO_CATALOGO_ACEITACAO_2_SECRETARIA_FRONTEND.md`), que consome o contrato
 da seção 4. Estado: **BUILT, commit local na branch `task/TASK-006-secretaria` (worktree

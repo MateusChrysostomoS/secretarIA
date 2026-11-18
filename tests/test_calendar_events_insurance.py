@@ -75,7 +75,7 @@ LEGACY_EVENT_KEYS = {"id", "summary", "start", "end", "appointment_id"}
 
 
 # ---------------------------------------------------------------------------
-# Schema — additive; plan never wider than {id, name, charge_deposit},
+# Schema — additive; plan never wider than {id, name} (TASK-085 R D-R12 dropped the flag),
 # deposit never wider than {status, amount_cents}
 # ---------------------------------------------------------------------------
 
@@ -121,10 +121,11 @@ def test_a_legacy_event_gains_three_null_fields_and_loses_nothing():
     assert dumped["status"] is None and dumped["reminders"] is None
 
 
-def test_the_plan_wire_carries_exactly_three_keys():
+def test_the_plan_wire_carries_exactly_two_keys():
     """custom_payment_note / mechanism / note must never be widened into this
-    shape by accident: the agenda shows a name and a flag, nothing else."""
-    assert set(CalendarInsurancePlanRead.model_fields) == {"id", "name", "charge_deposit"}
+    shape by accident: the agenda shows a name, nothing else (no sinal flag since
+    TASK-085 R D-R12 - a convênio never exempts the sinal)."""
+    assert set(CalendarInsurancePlanRead.model_fields) == {"id", "name"}
 
 
 def test_the_deposit_wire_carries_exactly_three_keys():
@@ -310,7 +311,7 @@ async def _deposit(
 # ---------------------------------------------------------------------------
 
 
-async def test_a_catalog_backed_clinic_plan_resolves_to_its_catalog_name_and_flag(db, tenant):
+async def test_a_catalog_backed_clinic_plan_resolves_to_its_catalog_name(db, tenant):
     keeps = await _tenant_plan(db, tenant.id, catalog_id=UNIMED, charge_deposit=True)
     waives = await _tenant_plan(db, tenant.id, catalog_id=AMIL, charge_deposit=False)
 
@@ -319,8 +320,8 @@ async def test_a_catalog_backed_clinic_plan_resolves_to_its_catalog_name_and_fla
             session, tenant.id, tenant_plan_ids=[keeps, waives], professional_plan_ids=[]
         )
 
-    assert lookup.resolve(keeps, None) == AppointmentPlan(keeps, "Unimed", True)
-    assert lookup.resolve(waives, None) == AppointmentPlan(waives, "Amil", False)
+    assert lookup.resolve(keeps, None) == AppointmentPlan(keeps, "Unimed")
+    assert lookup.resolve(waives, None) == AppointmentPlan(waives, "Amil")
 
 
 async def test_a_clinic_outro_resolves_to_its_custom_name(db, tenant):
@@ -332,7 +333,7 @@ async def test_a_clinic_outro_resolves_to_its_custom_name(db, tenant):
         )
 
     resolved = lookup.resolve(plan, None)
-    assert resolved == AppointmentPlan(plan, "Cabesp", True)
+    assert resolved == AppointmentPlan(plan, "Cabesp")
     assert not hasattr(resolved, "custom_payment_note")
 
 
@@ -348,8 +349,8 @@ async def test_an_independent_doctors_rows_resolve_for_catalog_and_outro(db, ten
             professional_plan_ids=[from_catalog, own_outro],
         )
 
-    assert lookup.resolve(None, from_catalog) == AppointmentPlan(from_catalog, "Unimed", False)
-    assert lookup.resolve(None, own_outro) == AppointmentPlan(own_outro, "Geap", True)
+    assert lookup.resolve(None, from_catalog) == AppointmentPlan(from_catalog, "Unimed")
+    assert lookup.resolve(None, own_outro) == AppointmentPlan(own_outro, "Geap")
 
 
 async def test_another_clinics_plan_ids_never_resolve(db, tenant, other_tenant):
@@ -387,8 +388,8 @@ async def test_a_doctor_row_that_points_at_a_clinic_row_has_no_name_of_its_own(d
 def test_the_professional_row_wins_and_never_falls_back_to_the_clinic_row():
     """Same precedence as deposit_lifecycle._insurance_charges_deposit."""
     clinic_id, doctor_id = uuid4(), uuid4()
-    clinic_plan = AppointmentPlan(clinic_id, "Clinic Unimed", True)
-    doctor_plan = AppointmentPlan(doctor_id, "Doctor Amil", False)
+    clinic_plan = AppointmentPlan(clinic_id, "Clinic Unimed")
+    doctor_plan = AppointmentPlan(doctor_id, "Doctor Amil")
 
     both = AppointmentPlanLookup(
         tenant={clinic_id: clinic_plan}, professional={doctor_id: doctor_plan}
@@ -608,7 +609,7 @@ async def _events(client: AsyncClient):
     )
 
 
-async def test_the_clinic_path_carries_label_plan_name_and_flag(client: AsyncClient, db, tenant):
+async def test_the_clinic_path_carries_label_and_plan_name(client: AsyncClient, db, tenant):
     await _connect_calendar(db, tenant)
     plan = await _tenant_plan(db, tenant.id, catalog_id=UNIMED, charge_deposit=False)
     await _appointment(db, tenant.id, "evt-1", insurance="Unimed", plan_id=plan)
@@ -619,11 +620,8 @@ async def test_the_clinic_path_carries_label_plan_name_and_flag(client: AsyncCli
     assert resp.status_code == 200
     body = resp.json()[0]
     assert body["insurance"] == "Unimed"
-    assert body["insurance_plan"] == {
-        "id": str(plan),
-        "name": "Unimed",
-        "charge_deposit": False,
-    }
+    # A legacy "no sinal" row: the flag no longer leaves the server (D-R12).
+    assert body["insurance_plan"] == {"id": str(plan), "name": "Unimed"}
 
 
 async def test_the_independent_path_resolves_through_the_professional_row(
@@ -637,11 +635,7 @@ async def test_the_independent_path_resolves_through_the_professional_row(
     body = (await _events(client)).json()[0]
 
     assert body["insurance"] == "Amil"
-    assert body["insurance_plan"] == {
-        "id": str(doctor_plan),
-        "name": "Amil",
-        "charge_deposit": True,
-    }
+    assert body["insurance_plan"] == {"id": str(doctor_plan), "name": "Amil"}
 
 
 async def test_a_clinic_outro_shows_its_name_and_never_its_payment_note(
@@ -658,7 +652,7 @@ async def test_a_clinic_outro_shows_its_name_and_never_its_payment_note(
 
     body = resp.json()[0]
     assert body["insurance_plan"]["name"] == "Cabesp"
-    assert set(body["insurance_plan"]) == {"id", "name", "charge_deposit"}
+    assert set(body["insurance_plan"]) == {"id", "name"}
     assert "NOTA-INTERNA-NAO-VAZAR" not in resp.text
 
 

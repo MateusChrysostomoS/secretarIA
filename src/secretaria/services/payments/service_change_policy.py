@@ -18,10 +18,9 @@ no session: the caller measures `days_until` and passes the tenant's `min_days`
   visit).
 - price unreadable / zero, or nothing was really paid -> `blocked` (nothing is saved).
 
-TASK-085 R (D-R3): `new_charges_deposit=False` - the consultation AFTER the change charges no sinal
-at all (a convênio flagged "no deposit"): the new deposit is 0, so the change is cheaper by the
-whole held amount and follows the cheaper rows above (`decrease_ask` / `decrease_keep`); its price
-is then irrelevant and never blocks. Also here, pure: `money_fields_changed`, THE predicate "did a
+TASK-085 R D-R12 (owner, 2026-11-18) revoked D-R3's "a convênio without sinal = new sinal 0": a
+convênio never exempts the sinal, so the new deposit is always new price x percentage paid. Also
+here, pure: `money_fields_changed`, THE predicate "did a
 field that moves the sinal change?" (service, unit, doctor, convênio - D-R1/D-R3), shared by the
 patient's edit (`appointment_edit_flow`, `appointment_edit_apply`) and the clinic's
 (`staff_appointment_edit`). Contract: tasks/TASK-085/sinal-trocas/contrato.md.
@@ -63,20 +62,18 @@ def decide_service_change(
     new_price_cents: int | None,
     days_until: float,
     min_days: int,
-    new_charges_deposit: bool = True,
 ) -> ChangeDecision:
-    if paid_deposit_cents <= 0 or (
-        new_charges_deposit
-        and (new_price_cents is None or new_price_cents <= 0 or percent_applied <= 0)
+    if (
+        paid_deposit_cents <= 0
+        or new_price_cents is None
+        or new_price_cents <= 0
+        or percent_applied <= 0
     ):
         return ChangeDecision(action="blocked", diff_cents=0, reason="price_unavailable")
 
-    if new_charges_deposit:
-        # Integer half-up rounding: Python's round() is banker's (50.5 -> 50), which would make
-        # the cent depend on parity.
-        new_deposit_cents = (new_price_cents * percent_applied + 50) // 100
-    else:
-        new_deposit_cents = 0
+    # Integer half-up rounding: Python's round() is banker's (50.5 -> 50), which would make the
+    # cent depend on parity.
+    new_deposit_cents = (new_price_cents * percent_applied + 50) // 100
     delta = new_deposit_cents - paid_deposit_cents
 
     if delta == 0:

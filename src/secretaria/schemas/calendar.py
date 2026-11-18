@@ -14,17 +14,15 @@ from secretaria.models.appointment import AppointmentStatus
 class CalendarInsurancePlanRead(BaseModel):
     """The convênio plan an appointment resolved to, as the agenda shows it.
 
-    Deliberately three fields. `id` is the ROW the booking pointed at: a
+    Deliberately two fields. `id` is the ROW the booking pointed at: a
     `tenant_insurance_plans.id` (shared / clinic_with_exceptions modes) or, in
-    `independent` mode, a `professional_insurance_plans.id`. `charge_deposit` is
-    that row's own flag - a clinic policy for the plan, NOT proof that a Pix
-    deposit was charged (that also needs the Pix add-on, a readable price and an
-    Asaas key). The clinic's payment note and the catalog metadata stay out.
+    `independent` mode, a `professional_insurance_plans.id`. No sinal flag
+    (TASK-085 R D-R12: a convênio never exempts the sinal). The clinic's payment
+    note and the catalog metadata stay out.
     """
 
     id: str
     name: str
-    charge_deposit: bool
 
 
 class AwaitingPaymentRead(BaseModel):

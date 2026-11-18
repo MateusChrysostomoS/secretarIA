@@ -1,5 +1,6 @@
-"""TASK-085 R S0 - the pure pieces of the rule: a new booking that charges NO sinal (D-R3, a
-convênio flagged "no deposit"), and the ONE predicate "did a money field change?" (service, unit,
+"""TASK-085 R S0 - the pure pieces of the rule: the new sinal is always new price x percentage
+paid (TASK-085 R D-R12 revoked D-R3's "a convênio flagged no deposit = new sinal 0": a convênio
+never exempts the sinal), and the ONE predicate "did a money field change?" (service, unit,
 doctor, convênio - D-R1/D-R3) shared by the patient's and the clinic's edit paths."""
 
 from types import SimpleNamespace
@@ -20,50 +21,29 @@ from secretaria.services.payments.service_change_policy import (
 )
 
 
-def _decide(*, paid=6_000, price=20_000, percent=30, days=10.0, min_days=2, charges=True):
+def _decide(*, paid=6_000, price=20_000, percent=30, days=10.0, min_days=2):
     return decide_service_change(
         paid_deposit_cents=paid,
         percent_applied=percent,
         new_price_cents=price,
         days_until=days,
         min_days=min_days,
-        new_charges_deposit=charges,
     )
 
 
-# --- new_charges_deposit ---------------------------------------------------------------
+# --- the new sinal is always price x percentage (D-R12) -----------------------------------
 
 
-def test_by_default_the_new_booking_charges_a_sinal_as_today():
+def test_the_new_booking_always_charges_a_sinal():
     assert _decide(price=30_000) == ChangeDecision(action="increase_charge", diff_cents=3_000)
     assert _decide(price=20_000) == ChangeDecision(action="no_change", diff_cents=0)
 
 
-def test_a_new_booking_without_sinal_is_cheaper_by_everything_held_and_asks_far_ahead():
-    assert _decide(charges=False) == ChangeDecision(action="decrease_ask", diff_cents=6_000)
-
-
-def test_a_new_booking_without_sinal_close_to_the_visit_keeps_the_money():
-    assert _decide(charges=False, days=1.0) == ChangeDecision(
-        action="decrease_keep", diff_cents=6_000
-    )
-
-
-def test_a_new_booking_without_sinal_under_the_floor_keeps_the_money():
-    assert _decide(charges=False, paid=900) == ChangeDecision(
-        action="decrease_keep", diff_cents=900
-    )
-
-
 @pytest.mark.parametrize("price", [None, 0])
-def test_without_a_new_sinal_the_price_does_not_matter(price):
-    """A convênio without sinal: no new deposit is computed, so an unreadable price is no
-    reason to block the change."""
-    assert _decide(charges=False, price=price).action == "decrease_ask"
-
-
-def test_nothing_really_paid_is_still_blocked_without_a_new_sinal():
-    decision = _decide(charges=False, paid=0)
+def test_an_unreadable_new_price_blocks_the_change(price):
+    """No "convênio without sinal" escape any more (D-R12): without a readable price there is
+    no new sinal to compare, so the change is blocked as before D-R3."""
+    decision = _decide(price=price)
     assert decision == ChangeDecision(action="blocked", diff_cents=0, reason="price_unavailable")
 
 

@@ -36,7 +36,6 @@ class TenantInsurancePlanRead(BaseModel):
     name: str
     is_custom: bool
     custom_payment_note: str | None = None
-    charge_deposit: bool
     # Position the clinic chose in the patient's list (0 = first); None = not placed,
     # follows the placed ones alphabetically. The list itself comes back in this order.
     sort_order: int | None = None
@@ -46,8 +45,9 @@ class TenantInsurancePlanIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     catalog_id: str
-    # Default = today's behaviour: the tenant's pix_deposit_* policy applies.
-    charge_deposit: bool = True
+    # TASK-085 R D-R12: accepted and IGNORED - an older Portal still sends it; a convênio never
+    # exempts the sinal any more. Never stored, never returned.
+    charge_deposit: bool | None = None
 
 
 class TenantInsurancePlansUpdate(BaseModel):
@@ -69,7 +69,9 @@ class TenantInsurancePlanCustomCreate(BaseModel):
 
     custom_name: str = Field(min_length=1, max_length=120)
     custom_payment_note: str = Field(min_length=1, max_length=2000)
-    charge_deposit: bool = True
+    # TASK-085 R D-R12: accepted and IGNORED - an older Portal still sends it; a convênio never
+    # exempts the sinal any more. Never stored, never returned.
+    charge_deposit: bool | None = None
 
 
 class TenantInsurancePlanOrderUpdate(BaseModel):
@@ -82,14 +84,6 @@ class TenantInsurancePlanOrderUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     plan_ids: list[str] = Field(default_factory=list, max_length=100)
-
-
-class TenantInsurancePlanDepositUpdate(BaseModel):
-    """PATCH /tenants/me/insurance-plans/{plan_id} - toggle the Pix-deposit flag."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    charge_deposit: bool
 
 
 class InsuranceModeRead(BaseModel):
@@ -146,7 +140,9 @@ class ProfessionalInsuranceCustomCreate(BaseModel):
 
     custom_name: str = Field(min_length=1, max_length=120)
     custom_payment_note: str = Field(min_length=1, max_length=2000)
-    charge_deposit: bool = True
+    # TASK-085 R D-R12: accepted and IGNORED - an older Portal still sends it; a convênio never
+    # exempts the sinal any more. Never stored, never returned.
+    charge_deposit: bool | None = None
 
 
 # ---------------------------------------------------------------------------

@@ -344,7 +344,9 @@ async def test_a_visit_suspended_while_the_clinic_edits_wins_under_the_row_lock(
 # --------------------------------------------------------------------------
 
 
-async def test_after_convenio_without_sinal_is_the_whole_sinal_cheaper(db, provider):
+async def test_after_a_legacy_no_sinal_convenio_does_not_move_the_sinal(db, provider):
+    """TASK-085 R D-R12 revoked D-R3's "convênio sem sinal = sinal novo 0": the clinic switching
+    the consultation to a plan saved as "não cobra sinal" changes the convênio, not the sinal."""
     world = await _paid_world(db)
     async with db() as session:
         session.add(
@@ -357,7 +359,10 @@ async def test_after_convenio_without_sinal_is_the_whole_sinal_cheaper(db, provi
     outcome = await _edit(db, world, _req(insurance="Unimed"))
 
     change = outcome.service_change
-    assert (change.status, change.diff_cents) == ("asked", 10000)
+    # The fixture holds R$ 100 for a R$ 200 x 30% consultation, so ANY re-pricing of it gives
+    # back R$ 40; the convênio's legacy "no sinal" flag adds nothing (it used to make the whole
+    # R$ 100 the difference).
+    assert (change.status, change.diff_cents) == ("asked", 4000)
     assert change.new_service == "Consulta pelo Unimed"
     row = await reload_appointment(db, world.appointment.id)
     assert row.insurance == "Unimed" and row.insurance_plan_id is not None

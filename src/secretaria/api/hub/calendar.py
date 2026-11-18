@@ -576,9 +576,7 @@ def _insurance_label(value: str | None) -> str | None:
 def _insurance_plan_read(plan: AppointmentPlan | None) -> CalendarInsurancePlanRead | None:
     if plan is None:
         return None
-    return CalendarInsurancePlanRead(
-        id=str(plan.id), name=plan.name, charge_deposit=plan.charge_deposit
-    )
+    return CalendarInsurancePlanRead(id=str(plan.id), name=plan.name)
 
 
 def _deposit_read(
