@@ -216,6 +216,34 @@ async def _refuse_if_suspended(
     )
 
 
+async def _refuse_stale_rebook(
+    session: AsyncSession, tenant: Tenant, appt: Appointment, wanted: UUID | None
+) -> None:
+    """TASK-085 R UH2 (UF review I2): the clinic acted from a GET /awaiting-payment "rebook" row
+    (`rebook_adjustment_id` = that row's `id`). Unless that change is STILL this consultation's
+    `old_slot_lost` one (tenant- and consultation-scoped `open_suspension`), the intent is stale -
+    the patient rebooked, the visit was cancelled or the change moved on - and nothing may run:
+    409 `appointment_changed`, before the agenda, the money or the patient are touched. The
+    locked step each route already has re-checks the same change (`finish_rebook` on it; the
+    cancel's `_recheck_rebook_due_cancel`). None = no rebook intent: today's behaviour."""
+    if wanted is None:
+        return
+    change = await adjustment_queries.open_suspension(
+        session, tenant_id=tenant.id, appointment_id=appt.id
+    )
+    if (
+        appt.status in LIVE_APPOINTMENT_STATUSES
+        and change is not None
+        and change.id == wanted
+        and change.status == STATUS_OLD_SLOT_LOST
+    ):
+        return
+    logger.info(
+        "hub_rebook_intent_stale", appointment_id=str(appt.id), adjustment_id=str(wanted)
+    )
+    raise HTTPException(status.HTTP_409_CONFLICT, _detail(*_REBOOK_CHANGED))
+
+
 def _appointment_read(
     appt: Appointment,
     *,
@@ -1145,13 +1173,24 @@ async def list_awaiting_payment(
     # window, still live, of a doctor the viewer sees.
     lost_rows = (
         await session.execute(
-            select(DepositAdjustment.id, DepositAdjustment.pending_edit, Appointment)
+            select(
+                DepositAdjustment.id,
+                DepositAdjustment.pending_edit,
+                Appointment,
+                # UH2 (UF review I3): the same patient facts as GET /events, tenant-scoped join.
+                Patient.channel.label("patient_channel"),
+                Patient.name.label("patient_name"),
+            )
             .join(
                 Appointment,
                 and_(
                     Appointment.id == DepositAdjustment.appointment_id,
                     Appointment.tenant_id == tenant.id,
                 ),
+            )
+            .outerjoin(
+                Patient,
+                and_(Patient.id == Appointment.patient_id, Patient.tenant_id == tenant.id),
             )
             .where(
                 DepositAdjustment.tenant_id == tenant.id,
@@ -1206,6 +1245,9 @@ async def list_awaiting_payment(
                 kind="rebook",
                 appointment_id=str(visit.id),
                 change_summary=summaries.get(row.id),
+                patient_name=row.patient_name,
+                attendee_name=visit.attendee_name,
+                patient_channel=row.patient_channel,
             )
         )
     return reads
@@ -1454,6 +1496,7 @@ async def cancel_appointment(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "confirm must be true")
 
     appt = await _get_appointment(session, tenant, appointment_id, viewer)
+    await _refuse_stale_rebook(session, tenant, appt, body.rebook_adjustment_id)  # UH2
     if appt.status == AppointmentStatus.CANCELLED:
         raise HTTPException(status.HTTP_409_CONFLICT, "Appointment already cancelled")
     # TASK-085 R D-R11: a consultation whose old slot was taken while the patient did not pay
@@ -2337,6 +2380,7 @@ async def reschedule_appointment(
     session: AsyncSession = Depends(get_session),
 ) -> AppointmentWriteRead:
     appt = await _get_appointment(session, tenant, appointment_id, viewer)
+    await _refuse_stale_rebook(session, tenant, appt, body.rebook_adjustment_id)  # UH2
     if appt.status == AppointmentStatus.CANCELLED:
         raise HTTPException(status.HTTP_409_CONFLICT, "Cannot reschedule a cancelled appointment")
     # TASK-085 R D-R11: the old slot of a suspended consultation was taken (`old_slot_lost`) - the

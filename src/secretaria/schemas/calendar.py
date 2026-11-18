@@ -51,6 +51,13 @@ class AwaitingPaymentRead(BaseModel):
     # What the change would do, in plain Portuguese ("Consulta → Avaliação; 10:00 → 11:30"), for
     # "difference" and "rebook"; None when nothing can be said (and always for "booking").
     change_summary: str | None = None
+    # TASK-085 R UH2 (UF review I3), "rebook" only - None on every other kind: who the
+    # consultation is for and on which channel, the SAME fields and source as GET /events
+    # (`Patient.name`, `Appointment.attendee_name`, `Patient.channel` - "whatsapp" |
+    # "brain_message"), so the clinic's cancel card says honestly how the patient is told.
+    patient_name: str | None = None
+    attendee_name: str | None = None
+    patient_channel: str | None = None
 
 
 class CalendarDepositRead(BaseModel):
@@ -288,6 +295,10 @@ class AppointmentCancel(BaseModel):
     # a client that does not know about the cost cannot incur it. Ignored
     # inside the window, where the notice is free.
     notify_outside_window: bool = False
+    # TASK-085 R UH2 (UF review I2): the `id` of the GET /awaiting-payment "rebook" row this
+    # cancel was asked from. Present -> 409 `appointment_changed` unless that change is still
+    # this consultation's `old_slot_lost`. Absent -> today's behaviour.
+    rebook_adjustment_id: UUID | None = None
 
 
 class CancelPreviewRead(BaseModel):
@@ -315,6 +326,8 @@ class AppointmentReschedule(BaseModel):
     new_start: datetime
     new_end: datetime
     custom_message: str | None = Field(default=None, max_length=4000)
+    # TASK-085 R UH2 (UF review I2): as on AppointmentCancel - the "rebook" row's change.
+    rebook_adjustment_id: UUID | None = None
 
 
 _EDITABLE = ("start_at", "service", "professional_id", "insurance", "attendee_name", "phone")

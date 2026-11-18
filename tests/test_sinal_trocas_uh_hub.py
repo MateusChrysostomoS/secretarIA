@@ -1006,8 +1006,10 @@ async def test_a_visit_whose_old_slot_was_taken_is_listed_for_the_clinic(
     start = datetime.fromisoformat(row["start"].replace("Z", "+00:00"))
     expires = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
     assert _naive(start) == _naive(world.start_at) == _naive(expires)
+    # UH2 (UF review I3, Orchestrator 2026-11-18): the rebook row now names the patient and the
+    # channel (the same facts staff see on GET /events); still nothing of the money.
     text = str(body)
-    assert "Maria" not in text and "000201pix" not in text and "pay_diff" not in text
+    assert "000201pix" not in text and "pay_diff" not in text
 
 
 async def test_the_rebook_row_leaves_once_the_clinic_acts(
