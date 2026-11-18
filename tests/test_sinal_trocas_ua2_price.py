@@ -20,7 +20,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from secretaria.models import (
     Appointment,
@@ -118,10 +118,10 @@ async def _row(db, seeded) -> Appointment:
         return await session.get(Appointment, seeded[2].id)
 
 
-async def _answer(db, seeded, adjustment_id, accept):
+async def _answer(db, seeded, adjustment_id, accept, *, at=NOW):
     async with db() as session:
         outcome = await service_change.answer_refund_question(
-            session, tenant_id=seeded[0].id, adjustment_id=adjustment_id, accept=accept, now=NOW
+            session, tenant_id=seeded[0].id, adjustment_id=adjustment_id, accept=accept, now=at
         )
         await session.commit()
     return outcome
@@ -288,11 +288,15 @@ async def test_an_abated_drop_then_a_further_drop_adds_only_the_new_part(db, pro
     assert (await _requote(db, seeded)).decision == "no_change"
 
     await _price(db, seeded, "R$ 50,00")  # sinal R$ 15: R$ 15 more than already abated
-    second = await _requote(db, seeded)
+    # Fix round 2: each step at its own instant (SQLite's `created_at` has 1 s resolution).
+    second = await _requote(db, seeded, now=NOW + timedelta(minutes=1))
 
     assert (second.decision, second.diff_cents) == ("decrease_keep", 1500)
     last = (await _adjustments(db))[-1]
     assert last.pending_edit["new_sinal_cents"] == 1500
+    # Both abatements stand: the same price again tells nothing new.
+    again = await _requote(db, seeded, now=NOW + timedelta(minutes=2))
+    assert (again.kind, again.decision) == ("applied_now", "no_change")
 
 
 async def test_after_an_abated_drop_a_rise_back_charges_nothing(db, provider):
@@ -474,11 +478,35 @@ async def test_an_abatement_still_outstanding_is_netted_after_a_refund(db, provi
     first = await _requote(db, seeded)
     assert await _answer(db, seeded, first.adjustment_id, False) == "kept_credit"
     await _price(db, seeded, "R$ 50,00")  # sinal R$ 15: R$ 15 beyond the abated R$ 30
-    second = await _requote(db, seeded)
+    # Fix round 2: each step at its own instant (SQLite's `created_at` has 1 s resolution).
+    later = NOW + timedelta(minutes=1)
+    second = await _requote(db, seeded, now=later)
     assert (second.decision, second.diff_cents) == ("decrease_ask", 1500)
-    assert await _answer(db, seeded, second.adjustment_id, True) == "refund_requested"
-    again = await _requote(db, seeded)
+    assert await _answer(db, seeded, second.adjustment_id, True, at=later) == "refund_requested"
+    again = await _requote(db, seeded, now=NOW + timedelta(minutes=2))
     assert (again.kind, again.decision) == ("applied_now", "no_change")
+
+
+async def test_the_replay_is_deterministic_when_every_instant_ties(db, provider):
+    """Fix round 2 (re-review R1): an abatement and a refund settled at the SAME instant (and
+    born in the same second) replay abatement-first, never in the order of their random ids."""
+    seeded = await _seed(db)
+    await _price(db, seeded, "R$ 100,00")
+    first = await _requote(db, seeded)
+    assert await _answer(db, seeded, first.adjustment_id, False) == "kept_credit"
+    await _price(db, seeded, "R$ 50,00")
+    second = await _requote(db, seeded)
+    assert await _answer(db, seeded, second.adjustment_id, True) == "refund_requested"
+    async with db() as session:  # the very same instants for both rows
+        await session.execute(
+            update(DepositAdjustment)
+            .where(DepositAdjustment.deposit_id == seeded[3].id)
+            .values(resolved_at=NOW, created_at=NOW)
+        )
+        await session.commit()
+    for _ in range(5):
+        again = await _requote(db, seeded)
+        assert (again.kind, again.decision) == ("applied_now", "no_change")
 
 
 # --------------------------------------------------------------------------

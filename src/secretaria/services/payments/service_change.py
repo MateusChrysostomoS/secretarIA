@@ -1521,9 +1521,39 @@ def _recorded_sinal(pending_edit: dict | None) -> int | None:
     return value
 
 
+# Fix round 2 (re-review R1): within the SAME instant, what moves money first. A paid rise
+# (or a difference to collect) re-bases what is held; an abatement is told before a refund asked
+# on top of it (a refund is always asked about a drop BEYOND what was already abated).
+_REPLAY_RANK = {
+    (KIND_INCREASE, STATUS_APPLIED): 0,
+    (KIND_INCREASE, STATUS_COLLECT_DUE): 0,
+    (KIND_DECREASE, STATUS_CLINIC_KEPT): 1,
+    (KIND_DECREASE, STATUS_KEPT_CREDIT): 1,
+    (KIND_DECREASE, STATUS_REFUND_REQUESTED): 2,
+}
+_NEVER = datetime.min.replace(tzinfo=UTC)
+
+
+def _replay_key(row) -> tuple:
+    """The replay order of `_sinal_of_record`, deterministic (never the row's random id): when
+    the money moved (`resolved_at`, unsettled rows last - they are skipped anyway), then when
+    the row was born (`created_at`), then `_REPLAY_RANK`, then the sinal a price change recorded,
+    highest first (drops chain downwards). Rows still tied after that have the same effect on
+    the replay, whatever their order."""
+    kind, status, _diff, _charge, pending_edit, resolved_at, created_at = row
+    recorded = _recorded_sinal(pending_edit)
+    return (
+        resolved_at is None,
+        as_utc(resolved_at) if resolved_at is not None else _NEVER,
+        as_utc(created_at) if created_at is not None else _NEVER,
+        _REPLAY_RANK.get((kind, status), 3),
+        -(recorded if recorded is not None else 0),
+    )
+
+
 async def _sinal_of_record(session: AsyncSession, deposit: PixDeposit) -> int:
     """Fix round 1 (review I1): the sinal the patient was last TOLD this consultation costs,
-    replaying the sinal's settled adjustments in the order they took effect (`resolved_at`;
+    replaying the sinal's settled adjustments in the order they took effect (`_replay_key`;
     what the clinic holds starts at
     `amount_cents`, and so does the sinal of record):
 
@@ -1548,23 +1578,18 @@ async def _sinal_of_record(session: AsyncSession, deposit: PixDeposit) -> int:
                 DepositAdjustment.diff_cents,
                 DepositAdjustment.provider_charge_id,
                 DepositAdjustment.pending_edit,
-            )
-            .where(
-                DepositAdjustment.tenant_id == deposit.tenant_id,
-                DepositAdjustment.deposit_id == deposit.id,
-            )
-            # In the order the money moved: every settled state stamps `resolved_at` when it
-            # took effect (paid, answered, kept); `created_at` only breaks ties.
-            .order_by(
-                DepositAdjustment.resolved_at.is_(None),
                 DepositAdjustment.resolved_at,
                 DepositAdjustment.created_at,
-                DepositAdjustment.id,
+            ).where(
+                DepositAdjustment.tenant_id == deposit.tenant_id,
+                DepositAdjustment.deposit_id == deposit.id,
             )
         )
     ).all()
     held = record = int(deposit.amount_cents or 0)
-    for kind, status, diff, charge_id, pending_edit in rows:
+    for kind, status, diff, charge_id, pending_edit, _resolved, _created in sorted(
+        rows, key=_replay_key
+    ):
         diff = int(diff or 0)
         recorded = _recorded_sinal(pending_edit)
         if kind == KIND_INCREASE:
