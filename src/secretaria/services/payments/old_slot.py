@@ -21,19 +21,70 @@ other id) - the `release_keep.keep_event_id` / `booking_promotion.event_id_for` 
 id is a 409 that `create_event(event_id=)` reads as success, which is why no two paths may
 share a prefix.
 
-U0 (contract slice) froze the surface below; UA1 implements it. Until then the bodies raise
-NotImplementedError, except the pure id builders. LGPD: ids, instants and outcomes in logs only.
+Rules every function here keeps (the `release_keep.accept_keep` pattern):
+
+* no database transaction is open while an agenda answers (`_end_read` before every agenda call:
+  Google answers in seconds or times out, and an open transaction there is an "idle in
+  transaction" connection);
+* lock order consultation -> adjustment (contrato.md §4), and every state change is a GUARDED
+  UPDATE (`... WHERE status/old_slot = what was read RETURNING id`): exactly one caller wins;
+* an event created and then not kept (the claim was lost) is deleted again (`discard_event`) -
+  unless a twin call with the SAME deterministic id won, whose event it is;
+* on the secretarIA's own agenda (and a person's agenda shared by two clinics) the create is
+  exclusive (`create_event_exclusive`); on a plain Google agenda it is check-then-create, the
+  same guarantee as every booking there.
+
+U0 froze the surface; UA1 implemented it. LGPD: ids, instants and outcomes in logs only.
 """
 
-from datetime import datetime, timedelta
-from typing import Literal
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from typing import Any, Literal
 from uuid import UUID
 
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from secretaria.models import Appointment, Tenant
-from secretaria.models.deposit_adjustment import DepositAdjustment
-from secretaria.services.local_calendar import LocalCalendarService
+from secretaria.core.database import async_session_factory
+from secretaria.core.logging import get_logger
+from secretaria.models import Appointment, Patient, PixDeposit, Tenant
+from secretaria.models.appointment import LIVE_APPOINTMENT_STATUSES, is_live_status
+from secretaria.models.deposit_adjustment import (
+    MODE_SUSPEND,
+    OLD_SLOT_REBOOKED,
+    OLD_SLOT_RELEASED,
+    OLD_SLOT_RELEASING,
+    OLD_SLOT_REPLACED,
+    OLD_SLOT_RESTORED,
+    REBOOKABLE_STATUSES,
+    RESTORABLE_STATUSES,
+    STATUS_AWAITING_CHOICE,
+    STATUS_AWAITING_PAYMENT,
+    STATUS_KEPT_OLD,
+    STATUS_OLD_SLOT_LOST,
+    STATUS_REBOOKED,
+    STATUS_RESTORING,
+    SUSPENDED_STATUSES,
+    DepositAdjustment,
+)
+from secretaria.models.payment_attention_item import (
+    ATTENTION_OPEN,
+    ATTENTION_RESOLVED,
+    REASON_SERVICE_DIFF_REBOOK_DUE,
+    PaymentAttentionItem,
+)
+from secretaria.models.pix_deposit import FULFILLMENT_NEEDS_ATTENTION, FULFILLMENT_RESOLVED
+from secretaria.services import agenda, booking_hold, unit_booking
+from secretaria.services.calendar import (
+    CalendarSlotTakenError,
+    CalendarUnavailableError,
+    build_event_description,
+)
+from secretaria.services.local_calendar import LocalCalendarService, create_event_exclusive
+from secretaria.services.payments import attention
+from secretaria.services.payments.adjustment_suspension import occupies_slot_clause
+
+logger = get_logger(__name__)
 
 # A `releasing` claim older than this is retried by `retry_vacates` (the payments sweep, ~2 min).
 RETRY_AFTER = timedelta(minutes=2)
@@ -46,7 +97,16 @@ RestoreOutcome = Literal[
 # apply the change (paid late / short / wrong reference / not applicable).
 RestoreTrigger = Literal["tap", "silence", "no_room", "not_applied"]
 
-_UA1 = "TASK-085 R UA1"
+# The change is still open and its old event may be CLAIMED (`old_slot` NULL -> releasing). A
+# claim already made is finished in any suspended status (SUSPENDED_STATUSES): a change that went
+# on to `restoring` / `old_slot_lost` still must not leave the old event on the agenda.
+VACATE_STATUSES: tuple[str, ...] = (STATUS_AWAITING_PAYMENT, STATUS_AWAITING_CHOICE)
+# `finish_rebook` closes the clinic's item with this note (the hub shows it in the history).
+REBOOK_CLOSED_BY = "Sistema"
+REBOOK_CLOSED_NOTE = {
+    "patient": "O paciente escolheu outro horário para a consulta.",
+    "hub": "A clínica remarcou a consulta.",
+}
 
 # One prefix per path (mapa-u §6 risk 4). All inside base32hex (a-v).
 _PREFIX_RESTORE = "difkeep"
@@ -83,26 +143,541 @@ def rebook_event_id(
     return _event_id(prefix, adjustment_id, calendar)
 
 
+def rebook_item_key(provider: str, adjustment_id: UUID) -> str:
+    """The dedupe key of the ONE `service_diff_rebook_due` item of a change (how it is found
+    again: one sinal may have more than one change)."""
+    return attention.attention_dedupe_key(
+        provider, f"adjustment:{adjustment_id}", REASON_SERVICE_DIFF_REBOOK_DUE
+    )
+
+
+# --------------------------------------------------------------------------
+# helpers
+# --------------------------------------------------------------------------
+
+
+def _now() -> datetime:
+    """The wall clock (a seam: the tests pin it)."""
+    return datetime.now(UTC)
+
+
+def _utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _uuid_or_none(value: Any) -> UUID | None:
+    if value is None or isinstance(value, UUID):
+        return value
+    try:
+        return UUID(str(value))
+    except ValueError:
+        return None
+
+
+def _log(adjustment_id: UUID, tenant_id: UUID | None = None) -> dict:
+    out = {"adjustment_id": str(adjustment_id)}
+    if tenant_id is not None:
+        out["tenant_id"] = str(tenant_id)
+    return out
+
+
+async def _end_read(session: AsyncSession) -> None:
+    """End a READ-ONLY transaction before an agenda call (`release_keep._end_read`). With
+    pending writes the transaction is left as it is (the caller owns it)."""
+    if session.in_transaction() and not (session.new or session.dirty or session.deleted):
+        await session.commit()
+
+
+async def _calendar_of(
+    session: AsyncSession, tenant: Tenant, owner: Any, unit_id: UUID | None
+) -> Any | None:
+    """The agenda that owns `owner`'s event (`service_change.calendar_for_appointment`: the
+    doctor's own, else the clinic's), scoped to the unit (id and location of a new event).
+    None when it cannot be built. Lazy import: `service_change` imports this module."""
+    from secretaria.services.payments import service_change
+
+    try:
+        calendar = await service_change.calendar_for_appointment(session, tenant, owner)
+        if calendar is None:
+            return None
+        return await unit_booking.calendar_at_unit(session, calendar, tenant.id, unit_id)
+    except Exception as exc:  # noqa: BLE001 - no agenda: the caller retries or tells the clinic
+        logger.warning("old_slot_calendar_failed", error_type=type(exc).__name__)
+        return None
+
+
+def _window(appointment: Appointment) -> tuple[datetime, datetime]:
+    start = _utc(appointment.start_at)
+    return start, _utc(appointment.end_at or appointment.start_at)
+
+
+def _upcoming(appointment: Appointment | None, now: datetime) -> bool:
+    return (
+        appointment is not None
+        and is_live_status(appointment.status)
+        and appointment.start_at is not None
+        and _utc(appointment.start_at) > _utc(now)
+    )
+
+
+async def _event_texts(
+    session: AsyncSession, tenant: Tenant, appointment: Appointment, patient_name: str | None
+) -> tuple[str, str]:
+    """The event's title and description, as every change of a consultation writes them
+    (`service_change.agenda_summary` / `build_event_description` + the unit's lines)."""
+    from secretaria.services.payments import service_change
+
+    description = build_event_description(
+        service=appointment.appointment_type,
+        insurance=appointment.insurance,
+        attendee_name=appointment.attendee_name,
+        **await unit_booking.booking_unit_fields(
+            session, tenant.id, appointment.unit_id, appointment.professional_id
+        ),
+    )
+    return service_change.agenda_summary(appointment, patient_name), description
+
+
+async def _patient_name(session: AsyncSession, appointment: Appointment) -> str | None:
+    if appointment.patient_id is None:
+        return None
+    patient = await session.get(Patient, appointment.patient_id)
+    if patient is None or patient.tenant_id != appointment.tenant_id:
+        return None
+    return patient.name
+
+
+async def _locked(
+    session: AsyncSession, tenant_id: UUID, adjustment_id: UUID
+) -> tuple[Appointment | None, DepositAdjustment | None]:
+    """Lock order consultation -> adjustment (FOR UPDATE; a no-op on SQLite), both re-read."""
+    adjustment = await session.scalar(
+        select(DepositAdjustment)
+        .where(DepositAdjustment.id == adjustment_id, DepositAdjustment.tenant_id == tenant_id)
+        .execution_options(populate_existing=True)
+    )
+    if adjustment is None:
+        return None, None
+    appointment = None
+    if adjustment.appointment_id is not None:
+        appointment = await session.scalar(
+            select(Appointment)
+            .where(
+                Appointment.id == adjustment.appointment_id,
+                Appointment.tenant_id == tenant_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    adjustment = await session.scalar(
+        select(DepositAdjustment)
+        .where(DepositAdjustment.id == adjustment_id, DepositAdjustment.tenant_id == tenant_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    return appointment, adjustment
+
+
+# --------------------------------------------------------------------------
+# leaving the agenda
+# --------------------------------------------------------------------------
+
+
+async def _claim(
+    session: AsyncSession,
+    tenant_id: UUID,
+    adjustment_id: UUID,
+    *,
+    now: datetime,
+    statuses: tuple[str, ...] = VACATE_STATUSES,
+) -> bool:
+    """tx1: `old_slot` NULL -> `releasing` for an open suspended change (status in `statuses`)
+    of a live consultation. Commits (from here the old event belongs to this mechanism); rolls
+    back when not won."""
+    appointment, adjustment = await _locked(session, tenant_id, adjustment_id)
+    if (
+        adjustment is None
+        or adjustment.mode != MODE_SUSPEND
+        or adjustment.status not in statuses
+        or adjustment.old_slot is not None
+        or appointment is None
+        or not is_live_status(appointment.status)
+    ):
+        await session.rollback()
+        return False
+    claimed = await session.execute(
+        update(DepositAdjustment)
+        .where(
+            DepositAdjustment.id == adjustment_id,
+            DepositAdjustment.tenant_id == tenant_id,
+            DepositAdjustment.mode == MODE_SUSPEND,
+            DepositAdjustment.status.in_(statuses),
+            DepositAdjustment.old_slot.is_(None),
+        )
+        .values(old_slot=OLD_SLOT_RELEASING, old_slot_at=now)
+        .returning(DepositAdjustment.id)
+        .execution_options(synchronize_session=False)
+    )
+    if claimed.scalar_one_or_none() is None:
+        await session.rollback()
+        return False
+    await session.commit()
+    logger.info("old_slot_claimed", **_log(adjustment_id, tenant_id))
+    return True
+
+
+def _old_event_of(appointment: Appointment) -> tuple[str, SimpleNamespace, UUID | None]:
+    """The OLD event of a still-suspended consultation: its id, the owner of its agenda and its
+    unit. Read under the consultation -> change lock while the change is suspended, the row is
+    exactly what it was when the change was asked (nothing writes it until the change is paid,
+    and the payment moves the change out of the suspension in the same transaction)."""
+    owner = SimpleNamespace(
+        professional_id=appointment.professional_id,
+        google_calendar_source=appointment.google_calendar_source,
+    )
+    return (appointment.google_event_id or "").strip(), owner, appointment.unit_id
+
+
+async def _release_claimed(
+    session: AsyncSession, adjustment_id: UUID, *, now: datetime
+) -> Literal["released", "releasing", "not_applicable"]:
+    """Delete the old event of a `releasing` change, then the guarded `releasing -> released`.
+    Commits. "releasing" = try again later; "not_applicable" = the change left the suspension
+    (paid / restored / cancelled) and its own path owns the old event now.
+
+    Fix round 1 (I3): the change and the consultation are read in ONE locked read (consultation
+    -> change), the old event's id and agenda are taken from that snapshot, the locks are
+    released before the agenda call, and the final UPDATE is guarded by the status too - a
+    payment that commits in between can never make this delete on (or record a release for) the
+    NEW doctor's agenda."""
+    tenant_id = await session.scalar(
+        select(DepositAdjustment.tenant_id).where(DepositAdjustment.id == adjustment_id)
+    )
+    if tenant_id is None:
+        await session.rollback()
+        return "not_applicable"
+    appointment, adjustment = await _locked(session, tenant_id, adjustment_id)
+    if (
+        adjustment is None
+        or adjustment.mode != MODE_SUSPEND
+        or adjustment.old_slot != OLD_SLOT_RELEASING
+        or adjustment.status not in SUSPENDED_STATUSES
+        or appointment is None
+    ):
+        await session.rollback()
+        return "not_applicable"
+    event_id, owner, unit_id = _old_event_of(appointment)
+    await session.commit()  # the locks go before any agenda work
+    log = _log(adjustment_id, tenant_id)
+    if event_id:
+        tenant = await session.get(Tenant, tenant_id)
+        calendar = (
+            await _calendar_of(session, tenant, owner, unit_id) if tenant is not None else None
+        )
+        if calendar is None:
+            await session.rollback()
+            logger.warning("old_slot_vacate_no_calendar", **log)
+            return "releasing"
+        await _end_read(session)
+        try:
+            await calendar.cancel_event(event_id)  # False / 404 = already gone: fine
+        except Exception as exc:  # noqa: BLE001 - the slot stays taken (safe); retried
+            logger.warning("old_slot_vacate_failed", error_type=type(exc).__name__, **log)
+            return "releasing"
+    done = await session.execute(
+        update(DepositAdjustment)
+        .where(
+            DepositAdjustment.id == adjustment_id,
+            DepositAdjustment.mode == MODE_SUSPEND,
+            DepositAdjustment.old_slot == OLD_SLOT_RELEASING,
+            DepositAdjustment.status.in_(SUSPENDED_STATUSES),
+        )
+        .values(old_slot=OLD_SLOT_RELEASED, old_slot_at=now)
+        .returning(DepositAdjustment.id)
+        .execution_options(synchronize_session=False)
+    )
+    released = done.scalar_one_or_none() is not None
+    await session.commit()
+    logger.info("old_slot_released", moved=released, **log)
+    return "released" if released else "not_applicable"
+
+
+async def ensure_old_event_gone(
+    session: AsyncSession, *, tenant_id: UUID, adjustment_id: UUID
+) -> bool:
+    """Fix round 1 (I1): make sure the OLD consultation's event is off the agenda before the
+    consultation is moved to a new slot ("Outro horário" / the hub's reschedule). COMMITS; never
+    raises; no transaction open while the agenda answers.
+
+    A suspended change (`mode="suspend"`, status in SUSPENDED_STATUSES) of this clinic:
+    `released` -> True at once; `releasing` -> the delete is finished; NULL (the post-commit
+    vacate never ran) -> claimed and deleted. True = `old_slot` is `released` now (the only
+    state `finish_rebook` accepts); False = the agenda failed (try again in a moment) or the
+    change is not a suspended one any more (another clinic, decided, restored, paid).
+
+    Fix round 2 (M3): on True, a `difkeep` restore event left by a restore that failed after
+    creating it (M1 keeps it for the retry) is deleted too - best effort, never when the row
+    points at it - so it never outlives a change closed by "Outro horário" / the hub."""
+    gone = await _ensure_released(session, tenant_id=tenant_id, adjustment_id=adjustment_id)
+    if gone:
+        await _discard_restore_event_in(session, tenant_id, adjustment_id)
+    return gone
+
+
+async def _ensure_released(
+    session: AsyncSession, *, tenant_id: UUID, adjustment_id: UUID
+) -> bool:
+    log = _log(adjustment_id, tenant_id)
+    try:
+        for _attempt in range(3):
+            adjustment = await session.scalar(
+                select(DepositAdjustment)
+                .where(
+                    DepositAdjustment.id == adjustment_id,
+                    DepositAdjustment.tenant_id == tenant_id,
+                )
+                .execution_options(populate_existing=True)
+            )
+            await session.commit()  # end the read (objects stay loaded)
+            if (
+                adjustment is None
+                or adjustment.mode != MODE_SUSPEND
+                or adjustment.status not in SUSPENDED_STATUSES
+            ):
+                return False
+            if adjustment.old_slot == OLD_SLOT_RELEASED:
+                return True
+            if adjustment.old_slot is None:
+                await _claim(
+                    session, tenant_id, adjustment_id, now=_now(), statuses=SUSPENDED_STATUSES
+                )
+                continue  # re-read: claimed now, or somebody else moved it
+            if adjustment.old_slot != OLD_SLOT_RELEASING:
+                return False
+            outcome = await _release_claimed(session, adjustment_id, now=_now())
+            if outcome != "not_applicable":
+                return outcome == "released"
+        return False
+    except Exception as exc:  # noqa: BLE001 - never raises: the caller says "try again"
+        try:
+            await session.rollback()
+        except Exception:  # noqa: BLE001, S110 - the session is unusable anyway
+            pass
+        logger.warning("old_slot_ensure_failed", error_type=type(exc).__name__, **log)
+        return False
+
+
+async def _discard_restore_event_in(
+    session: AsyncSession, tenant_id: UUID, adjustment_id: UUID
+) -> None:
+    """Delete this change's `difkeep` restore event if it is live on the agenda and the
+    consultation does not point at it. The agenda is the consultation's OLD one (the change's
+    `expected` doctor when recorded, the row's otherwise). Ends its reads before every agenda
+    call; never raises."""
+    log = _log(adjustment_id, tenant_id)
+    try:
+        adjustment = await session.scalar(
+            select(DepositAdjustment).where(
+                DepositAdjustment.id == adjustment_id,
+                DepositAdjustment.tenant_id == tenant_id,
+                DepositAdjustment.mode == MODE_SUSPEND,
+            )
+        )
+        if adjustment is None or adjustment.appointment_id is None:
+            await session.rollback()
+            return
+        appointment = await session.scalar(
+            select(Appointment)
+            .where(
+                Appointment.id == adjustment.appointment_id,
+                Appointment.tenant_id == tenant_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+        tenant = await session.get(Tenant, tenant_id)
+        if appointment is None or tenant is None:
+            await session.rollback()
+            return
+        expected = (adjustment.pending_edit or {}).get("expected") or {}
+        owner = SimpleNamespace(
+            professional_id=(
+                _uuid_or_none(expected.get("professional_id"))
+                if "professional_id" in expected
+                else appointment.professional_id
+            ),
+            google_calendar_source=appointment.google_calendar_source,
+        )
+        row_event = (appointment.google_event_id or "").strip()
+        calendar = await _calendar_of(session, tenant, owner, appointment.unit_id)
+        await _end_read(session)
+        if calendar is None:
+            logger.warning("old_slot_restore_event_no_calendar", **log)
+            return
+        own = restore_event_id(adjustment_id, calendar=calendar)
+        if row_event == own:
+            return  # the restore won: it is the consultation's event
+        try:
+            event = await calendar.get_event(own)
+        except Exception as exc:  # noqa: BLE001 - cannot tell: try the idempotent delete
+            logger.warning(
+                "old_slot_restore_event_unreadable", error_type=type(exc).__name__, **log
+            )
+            event = {"id": own}
+        if not event or str(event.get("status") or "") == "cancelled":
+            return
+        logger.info("old_slot_restore_event_discarded", **log)
+        await discard_event(calendar, own)
+    except Exception as exc:  # noqa: BLE001 - best effort; never raises
+        try:
+            await session.rollback()
+        except Exception:  # noqa: BLE001, S110 - the session is unusable anyway
+            pass
+        logger.warning(
+            "old_slot_restore_event_discard_failed", error_type=type(exc).__name__, **log
+        )
+
+
+async def discard_restore_event(tenant_id: UUID, adjustment_id: UUID) -> None:
+    """Fix round 2 (M3): delete this change's `difkeep` restore event if one is live on the
+    agenda and the consultation does not point at it. A restore that failed AFTER creating the
+    event keeps it for its retry (M1); a change then closed another way would leave it behind.
+    UA2 calls this after the commit that closes a suspended change other than through
+    `kept_old` - "Cancelar ambas" / any cancellation (`settle_open_adjustments`) and "Reenviar o
+    Pix" (`_resend`, for the OLD change, before the new one may restore). "Outro horário" / the
+    hub's reschedule are covered by `ensure_old_event_gone`.
+
+    Own session; never raises; no transaction open while the agenda answers. Scoped by clinic:
+    another clinic's id finds nothing. Idempotent (no live event = no delete)."""
+    try:
+        async with async_session_factory() as session:
+            await _discard_restore_event_in(session, tenant_id, adjustment_id)
+    except Exception as exc:  # noqa: BLE001 - best effort; never raises
+        logger.warning(
+            "old_slot_restore_event_discard_failed",
+            error_type=type(exc).__name__,
+            **_log(adjustment_id, tenant_id),
+        )
+
+
 async def vacate_old_slot(
     tenant_id: UUID, adjustment_id: UUID
 ) -> Literal["released", "releasing", "not_applicable"]:
     """Take the old consultation's event OFF the agenda, after the change's commit (mapa-u §1.4).
 
     Own session; never raises. tx1 locks consultation -> adjustment; only `mode="suspend"`,
-    status in (`awaiting_payment`, `awaiting_choice`) and `old_slot IS NULL` -> `old_slot =
-    'releasing'`, `old_slot_at = now`, commit (from here the old event belongs to this mechanism).
-    Network: `cancel_event(row.google_event_id)` on the consultation's calendar (False/404 = already
-    gone). tx2: guarded `releasing -> released`. A failure leaves `releasing` (the slot stays taken
-    - safe) for `retry_vacates`. `appointments.google_event_id` is NOT changed.
-    "not_applicable" = nothing to do (another mode/state, or already claimed)."""
-    raise NotImplementedError(_UA1)
+    status in (`awaiting_payment`, `awaiting_choice`), a LIVE consultation and `old_slot IS NULL`
+    -> `old_slot = 'releasing'`, `old_slot_at = now`, commit (from here the old event belongs to
+    this mechanism). Network: `cancel_event(row.google_event_id)` on the consultation's calendar
+    (False/404 = already gone). tx2: guarded `releasing -> released`. A failure leaves
+    `releasing` (the slot stays taken - safe) for `retry_vacates`. `appointments.google_event_id`
+    is NOT changed. "not_applicable" = nothing to do (another mode/state, already claimed, or the
+    database failed before the claim - `retry_vacates` claims those later)."""
+    claimed = False
+    try:
+        async with async_session_factory() as session:
+            now = _now()
+            claimed = await _claim(session, tenant_id, adjustment_id, now=now)
+            if not claimed:
+                return "not_applicable"
+            # "not_applicable" here: the change moved on meanwhile (paid / restored / cancelled)
+            # and its own path owns the old event now.
+            return await _release_claimed(session, adjustment_id, now=now)
+    except Exception as exc:  # noqa: BLE001 - best-effort after the commit; the sweep retries
+        logger.warning(
+            "old_slot_vacate_error",
+            error_type=type(exc).__name__,
+            **_log(adjustment_id, tenant_id),
+        )
+        return "releasing" if claimed else "not_applicable"
 
 
 async def retry_vacates(session: AsyncSession, *, now: datetime, limit: int = 50) -> int:
     """Retry the deletions left `releasing`: `old_slot='releasing'`, status in
-    (`awaiting_payment`, `awaiting_choice`), `old_slot_at <= now - RETRY_AFTER`. Commits per row;
+    SUSPENDED_STATUSES (a change that went on to `restoring`/`old_slot_lost` included),
+    `old_slot_at <= now - RETRY_AFTER`. Also claims an
+    open suspended change still at `old_slot` NULL older than RETRY_AFTER (the post-commit call
+    is best-effort: a worker may die right after the commit). Commits per row; never raises;
     returns how many reached `released`. Run by `service_change.expire_adjustments`."""
-    raise NotImplementedError(_UA1)
+    now = _utc(now)
+    cutoff = now - RETRY_AFTER
+    try:
+        rows = (
+            await session.execute(
+                select(DepositAdjustment.id, DepositAdjustment.tenant_id)
+                .where(
+                    DepositAdjustment.mode == MODE_SUSPEND,
+                    or_(
+                        and_(
+                            DepositAdjustment.status.in_(SUSPENDED_STATUSES),
+                            DepositAdjustment.old_slot == OLD_SLOT_RELEASING,
+                            or_(
+                                DepositAdjustment.old_slot_at.is_(None),
+                                DepositAdjustment.old_slot_at <= cutoff,
+                            ),
+                        ),
+                        and_(
+                            DepositAdjustment.status.in_(VACATE_STATUSES),
+                            DepositAdjustment.old_slot.is_(None),
+                            DepositAdjustment.created_at <= cutoff,
+                        ),
+                    ),
+                )
+                .order_by(DepositAdjustment.created_at)
+                .limit(limit)
+            )
+        ).all()
+        await session.rollback()
+    except Exception as exc:  # noqa: BLE001 - the next tick tries again
+        await session.rollback()
+        logger.warning("old_slot_retry_query_failed", error_type=type(exc).__name__)
+        return 0
+    released = 0
+    for adjustment_id, tenant_id in rows:
+        try:
+            await _claim(session, tenant_id, adjustment_id, now=now)
+            if await _release_claimed(session, adjustment_id, now=now) == "released":
+                released += 1
+        except Exception as exc:  # noqa: BLE001 - one row never stops the batch
+            await session.rollback()
+            logger.warning(
+                "old_slot_retry_failed",
+                error_type=type(exc).__name__,
+                **_log(adjustment_id, tenant_id),
+            )
+    if released:
+        logger.info("old_slot_retry_released", count=released)
+    return released
+
+
+# --------------------------------------------------------------------------
+# is the old slot still free?
+# --------------------------------------------------------------------------
+
+
+async def _other_consultation_occupies(
+    session: AsyncSession, appointment: Appointment, start: datetime, end: datetime
+) -> bool:
+    """Another LIVE consultation of the same agenda (the doctor's, or the clinic's without one)
+    that occupies its slot (`occupies_slot_clause`) overlaps [start, end)."""
+    same_agenda = (
+        Appointment.professional_id == appointment.professional_id
+        if appointment.professional_id is not None
+        else Appointment.professional_id.is_(None)
+    )
+    found = await session.scalar(
+        select(Appointment.id)
+        .where(
+            Appointment.tenant_id == appointment.tenant_id,
+            Appointment.id != appointment.id,
+            Appointment.status.in_(LIVE_APPOINTMENT_STATUSES),
+            Appointment.start_at < end,
+            Appointment.end_at > start,
+            same_agenda,
+            occupies_slot_clause(),
+        )
+        .limit(1)
+    )
+    return found is not None
 
 
 async def old_slot_free(
@@ -113,11 +688,259 @@ async def old_slot_free(
     adjustment: DepositAdjustment,
 ) -> bool | None:
     """Whether the old consultation's slot is still free to put it back. Read-only; None = the
-    agenda could not be read. Checks: the agenda (ignoring `restore_event_id`), payment holds
-    (`exclude_adjustment_id=adjustment.id`), other consultations that occupy
-    (`occupies_slot_clause`, same agenda, without this row) and `agenda.shared_busy`. Never holds
-    a transaction open while reading the agenda."""
-    raise NotImplementedError(_UA1)
+    agenda could not be read. Checks: the agenda (ignoring `restore_event_id` and the old event
+    itself - still there while `releasing`), payment holds (`exclude_adjustment_id=adjustment.id`),
+    other consultations that occupy (`occupies_slot_clause`, same agenda, without this row) and
+    `agenda.shared_busy`. Never holds a transaction open while reading the agenda - provided
+    the caller's session has no pending writes (a dirty transaction is left as it is, and then
+    stays open across the agenda read): call it with a clean session."""
+    if appointment.start_at is None:
+        return False
+    start, end = _window(appointment)
+    tenant_id, professional_id = tenant.id, appointment.professional_id
+    adjustment_id = adjustment.id
+    calendar = await _calendar_of(session, tenant, appointment, appointment.unit_id)
+    if calendar is None:
+        return None
+    ignored = {restore_event_id(adjustment_id, calendar=calendar)}
+    old_event = (appointment.google_event_id or "").strip()
+    if old_event:
+        ignored.add(old_event)
+    await _end_read(session)
+    try:
+        events = await calendar.check_availability(start, end)
+    except Exception as exc:  # noqa: BLE001 - unreadable agenda: the caller decides
+        logger.warning(
+            "old_slot_free_unreadable",
+            error_type=type(exc).__name__,
+            **_log(adjustment_id, tenant_id),
+        )
+        return None
+    # A sibling clinic's bare window has no id: it is somebody else's (the release_keep rule).
+    if any(str(event.get("id")) not in ignored for event in events):
+        return False
+    if await booking_hold.live_hold_overlaps(
+        session,
+        tenant_id,
+        start,
+        end,
+        professional_id=professional_id,
+        exclude_adjustment_id=adjustment_id,
+    ):
+        return False
+    if await _other_consultation_occupies(session, appointment, start, end):
+        return False
+    # TASK-083: the same doctor busy then at another clinic sharing his agenda (windows only).
+    return not await agenda.shared_busy(session, professional_id, start, end)
+
+
+# --------------------------------------------------------------------------
+# coming back
+# --------------------------------------------------------------------------
+
+
+def _restorable(adjustment: DepositAdjustment, trigger: str, now: datetime) -> bool:
+    if adjustment.mode != MODE_SUSPEND:
+        return False
+    if trigger == "tap":
+        return (
+            adjustment.status == STATUS_AWAITING_CHOICE
+            and adjustment.expires_at is not None
+            and _utc(now) < _utc(adjustment.expires_at)
+        )
+    return adjustment.status in RESTORABLE_STATUSES
+
+
+# Internal: `old_slot` changed under us while the change is still restorable (start over once).
+_MOVED = "moved"
+
+
+async def _transition(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    adjustment_id: UUID,
+    trigger: str,
+    now: datetime,
+    expect_old_slot: str | None,
+    event: tuple[str, str | None] | None,
+) -> str:
+    """Under the locks: still restorable and `old_slot` as expected -> `kept_old` (+ `restored`
+    and the row re-pointed when an event was created), the new hold released, commit."""
+    appointment, adjustment = await _locked(session, tenant_id, adjustment_id)
+    if adjustment is None or not _restorable(adjustment, trigger, now):
+        await session.rollback()
+        return "already_decided"
+    if not _upcoming(appointment, now):
+        await session.rollback()
+        return "not_applicable"
+    if adjustment.old_slot != expect_old_slot:
+        await session.rollback()
+        return _MOVED
+    values: dict = {"status": STATUS_KEPT_OLD, "resolved_at": now}
+    if event is not None:
+        values.update(old_slot=OLD_SLOT_RESTORED, old_slot_at=now)
+    same_old_slot = (
+        DepositAdjustment.old_slot.is_(None)
+        if expect_old_slot is None
+        else DepositAdjustment.old_slot == expect_old_slot
+    )
+    claimed = await session.execute(
+        update(DepositAdjustment)
+        .where(
+            DepositAdjustment.id == adjustment_id,
+            DepositAdjustment.tenant_id == tenant_id,
+            DepositAdjustment.status == adjustment.status,
+            same_old_slot,
+        )
+        .values(**values)
+        .returning(DepositAdjustment.id)
+        .execution_options(synchronize_session=False)
+    )
+    if claimed.scalar_one_or_none() is None:
+        await session.rollback()
+        return "already_decided"
+    if event is not None:
+        appointment.google_event_id, appointment.google_event_link = event
+    await booking_hold.release_difference_hold_in(session, adjustment_id)
+    await session.commit()
+    return "restored"
+
+
+async def _discard_unless_kept(
+    session: AsyncSession, calendar: Any, tenant_id: UUID, appointment_id: UUID, event_id: str
+) -> None:
+    """The event created was not kept: delete it - unless a twin call with the same
+    deterministic id won and the consultation now points at it. Rolls the session back first
+    (whatever was pending is not ours to keep); never raises."""
+    try:
+        await session.rollback()
+        current = await session.scalar(
+            select(Appointment.google_event_id).where(
+                Appointment.id == appointment_id, Appointment.tenant_id == tenant_id
+            )
+        )
+        await session.rollback()
+    except Exception as exc:  # noqa: BLE001 - cannot tell: the event is ours, delete it
+        logger.warning("old_slot_discard_check_failed", error_type=type(exc).__name__)
+        current = None
+    if current == event_id:
+        return
+    logger.info("old_slot_event_not_kept", appointment_id=str(appointment_id))
+    await discard_event(calendar, event_id)
+
+
+async def _restore_once(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    adjustment_id: UUID,
+    now: datetime,
+    trigger: str,
+) -> str:
+    log = _log(adjustment_id, tenant_id)
+    # Fix round 1 (I3): the change and the consultation in ONE locked read (consultation ->
+    # change); the old event's id and agenda come from this snapshot; the locks are released
+    # before any agenda work.
+    appointment, adjustment = await _locked(session, tenant_id, adjustment_id)
+    if adjustment is None or adjustment.mode != MODE_SUSPEND:
+        await session.rollback()
+        return "not_applicable"
+    if not _restorable(adjustment, trigger, now):
+        await session.rollback()
+        return "already_decided"
+    if not _upcoming(appointment, now):
+        await session.rollback()
+        return "not_applicable"
+    state = adjustment.old_slot
+    old_event, old_owner, unit_id = _old_event_of(appointment)
+    appointment_id = appointment.id
+    await session.commit()  # nothing written: let the locks go (objects stay loaded)
+    if state is None:
+        # The event never left the agenda: only the transition.
+        return await _transition(
+            session, tenant_id=tenant_id, adjustment_id=adjustment_id, trigger=trigger, now=now,
+            expect_old_slot=None, event=None,
+        )
+    if state not in (OLD_SLOT_RELEASING, OLD_SLOT_RELEASED):
+        return "already_decided"
+
+    tenant = await session.get(Tenant, tenant_id)
+    if tenant is None:
+        return "not_applicable"
+    calendar = await _calendar_of(session, tenant, old_owner, unit_id)
+    if calendar is None:
+        return "calendar_unavailable"
+    own = restore_event_id(adjustment_id, calendar=calendar)
+    start, end = _window(appointment)
+    summary, description = await _event_texts(
+        session, tenant, appointment, await _patient_name(session, appointment)
+    )
+
+    if state == OLD_SLOT_RELEASING:
+        # Never the "still there" shortcut: a vacate may be deleting the old event right now.
+        # Delete it here (idempotent) and put a NEW event back, as for a released one.
+        if old_event and old_event != own:
+            await _end_read(session)
+            try:
+                await calendar.cancel_event(old_event)
+            except Exception as exc:  # noqa: BLE001 - nothing changed; the caller retries
+                logger.warning(
+                    "old_slot_restore_delete_failed", error_type=type(exc).__name__, **log
+                )
+                return "calendar_unavailable"
+        await session.execute(
+            update(DepositAdjustment)
+            .where(
+                DepositAdjustment.id == adjustment_id,
+                DepositAdjustment.mode == MODE_SUSPEND,
+                DepositAdjustment.old_slot == OLD_SLOT_RELEASING,
+                DepositAdjustment.status.in_(SUSPENDED_STATUSES),
+            )
+            .values(old_slot=OLD_SLOT_RELEASED, old_slot_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
+        await session.refresh(adjustment)
+        if adjustment.old_slot != OLD_SLOT_RELEASED:
+            return _MOVED
+
+    free = await old_slot_free(
+        session, tenant=tenant, appointment=appointment, adjustment=adjustment
+    )
+    if free is None:
+        return "calendar_unavailable"
+    if not free:
+        logger.info("old_slot_restore_taken", **log)
+        return "slot_taken"
+    await _end_read(session)
+    try:
+        created = await create_event_exclusive(
+            calendar, start=start, end=end, summary=summary, description=description, event_id=own
+        )
+    except CalendarSlotTakenError:
+        logger.info("old_slot_restore_taken_at_write", **log)
+        return "slot_taken"
+    except Exception as exc:  # noqa: BLE001 - nothing changed; the caller retries
+        logger.warning("old_slot_restore_create_failed", error_type=type(exc).__name__, **log)
+        return "calendar_unavailable"
+    if str(created.get("status") or "") == "cancelled":
+        # A dead event under our id: never point a consultation at it.
+        logger.error("old_slot_restore_event_dead", **log)
+        return "calendar_unavailable"
+    event_id = str(created.get("id") or own)
+    # Fix round 1 (M1): an ERROR in the transition (a database blip) keeps the event - the next
+    # attempt re-creates the same deterministic id, gets this live event back and re-points the
+    # row. Only a definitive answer (decided elsewhere / not applicable) deletes it.
+    outcome = await _transition(
+        session, tenant_id=tenant_id, adjustment_id=adjustment_id, trigger=trigger, now=now,
+        expect_old_slot=OLD_SLOT_RELEASED, event=(event_id, created.get("htmlLink")),
+    )
+    if outcome == "restored":
+        logger.info("old_slot_restored", trigger=trigger, **log)
+        return outcome
+    await _discard_unless_kept(session, calendar, tenant_id, appointment_id, event_id)
+    return "already_decided" if outcome == _MOVED else outcome
 
 
 async def restore_old_slot(
@@ -134,29 +957,125 @@ async def restore_old_slot(
     in RESTORABLE_STATUSES. Free -> create `restore_event_id` (`create_event_exclusive`, outside a
     transaction), then lock consultation -> adjustment, still restorable -> `kept_old`,
     `old_slot='restored'`, the row re-pointed, the new hold released, commit; lost the race ->
-    delete the created event. `old_slot` NULL -> only the transition (the event never left);
-    `releasing` with the old event still alive -> only the transition.
-    "slot_taken" / "calendar_unavailable": NOTHING changes (the caller decides `old_slot_lost` /
-    `restoring`). A consultation no longer live or already started -> "not_applicable"; decided
-    by someone else -> "already_decided"."""
-    raise NotImplementedError(_UA1)
+    delete the created event (unless a twin call with the same id won). `old_slot` NULL -> only
+    the transition (the event never left). `releasing` -> the old event is deleted first
+    (idempotent; a vacate may be deleting it right now) and `released`, then as released.
+    "slot_taken" / "calendar_unavailable": nothing about the change moves (the caller decides
+    `old_slot_lost` / `restoring`). A consultation no longer live or already started ->
+    "not_applicable"; decided by someone else -> "already_decided". Any unexpected error ->
+    "calendar_unavailable" (rolled back)."""
+    now = _utc(now)
+    try:
+        for _attempt in range(2):
+            outcome = await _restore_once(
+                session, tenant_id=tenant_id, adjustment_id=adjustment_id, now=now,
+                trigger=trigger,
+            )
+            if outcome != _MOVED:
+                return outcome  # type: ignore[return-value]
+        return "already_decided"
+    except Exception as exc:  # noqa: BLE001 - never raises: the caller retries next tick
+        try:
+            await session.rollback()
+        except Exception:  # noqa: BLE001, S110 - the session is unusable anyway
+            pass
+        logger.warning(
+            "old_slot_restore_failed",
+            error_type=type(exc).__name__,
+            trigger=trigger,
+            **_log(adjustment_id, tenant_id),
+        )
+        return "calendar_unavailable"
+
+
+# --------------------------------------------------------------------------
+# the old slot was lost / the change ended without applying
+# --------------------------------------------------------------------------
 
 
 async def mark_old_slot_lost(
     session: AsyncSession, *, tenant: Tenant, adjustment: DepositAdjustment, now: datetime
 ) -> bool:
-    """RESTORABLE -> `old_slot_lost` (guarded); releases the new hold; opens the attention item
-    `service_diff_rebook_due` (dedupe `attention_dedupe_key(provider, f"adjustment:{id}", reason)`,
-    value = the paid sinal, slot = the old one). Never commits. False = already decided."""
-    raise NotImplementedError(_UA1)
+    """RESTORABLE -> `old_slot_lost` (guarded; still open: `resolved_at` stays NULL); releases
+    the new hold; opens the attention item `service_diff_rebook_due` (dedupe
+    `attention_dedupe_key(provider, f"adjustment:{id}", reason)`, value = the paid sinal, slot =
+    the old one). Never commits. False = already decided."""
+    from secretaria.services.payments.service_change import held_deposit_cents
+
+    if adjustment.tenant_id != tenant.id:
+        return False
+    claimed = await session.execute(
+        update(DepositAdjustment)
+        .where(
+            DepositAdjustment.id == adjustment.id,
+            DepositAdjustment.tenant_id == tenant.id,
+            DepositAdjustment.mode == MODE_SUSPEND,
+            DepositAdjustment.status.in_(RESTORABLE_STATUSES),
+        )
+        .values(status=STATUS_OLD_SLOT_LOST)
+        .returning(DepositAdjustment.id)
+        .execution_options(synchronize_session=False)
+    )
+    won = claimed.scalar_one_or_none() is not None
+    await session.refresh(adjustment)
+    if not won:
+        return False
+    await booking_hold.release_difference_hold_in(session, adjustment.id)
+    deposit = await session.get(PixDeposit, adjustment.deposit_id)
+    appointment = (
+        await session.get(Appointment, adjustment.appointment_id)
+        if adjustment.appointment_id is not None
+        else None
+    )
+    if deposit is not None and deposit.tenant_id == tenant.id:
+        await attention.open_attention_item(
+            session,
+            tenant_id=tenant.id,
+            reason=REASON_SERVICE_DIFF_REBOOK_DUE,
+            dedupe_key=rebook_item_key(deposit.provider, adjustment.id),
+            deposit=deposit,
+            amount_cents=int(await held_deposit_cents(session, deposit)),
+            slot_start=appointment.start_at if appointment is not None else None,
+            slot_end=appointment.end_at if appointment is not None else None,
+            service_label=adjustment.old_service,
+        )
+    await session.flush()
+    logger.info("old_slot_lost", **_log(adjustment.id, tenant.id))
+    return True
 
 
 async def to_restoring(
     session: AsyncSession, *, adjustment: DepositAdjustment, from_status: str, now: datetime
 ) -> bool:
     """Guarded `from_status -> restoring` (the agenda was unreachable / the change ended without
-    applying). Never commits. False = the row was no longer in `from_status`."""
-    raise NotImplementedError(_UA1)
+    applying); the new hold released (no "Reenviar" from here). `from_status` must be
+    `awaiting_payment` or `awaiting_choice`; still open (`resolved_at` stays NULL). Never
+    commits. False = the row was no longer in `from_status`."""
+    if from_status not in VACATE_STATUSES:
+        return False
+    claimed = await session.execute(
+        update(DepositAdjustment)
+        .where(
+            DepositAdjustment.id == adjustment.id,
+            DepositAdjustment.tenant_id == adjustment.tenant_id,
+            DepositAdjustment.mode == MODE_SUSPEND,
+            DepositAdjustment.status == from_status,
+        )
+        .values(status=STATUS_RESTORING)
+        .returning(DepositAdjustment.id)
+        .execution_options(synchronize_session=False)
+    )
+    won = claimed.scalar_one_or_none() is not None
+    await session.refresh(adjustment)
+    if won:
+        await booking_hold.release_difference_hold_in(session, adjustment.id)
+        logger.info("old_slot_restoring", from_status=from_status, **_log(adjustment.id))
+    return won
+
+
+# --------------------------------------------------------------------------
+# "Outro horário" / the hub's reschedule
+# --------------------------------------------------------------------------
 
 
 async def rebookable(
@@ -164,7 +1083,17 @@ async def rebookable(
 ) -> DepositAdjustment | None:
     """The change whose old consultation may be moved to a new slot now (status in
     REBOOKABLE_STATUSES, `mode="suspend"`, this clinic), newest first; None otherwise."""
-    raise NotImplementedError(_UA1)
+    return await session.scalar(
+        select(DepositAdjustment)
+        .where(
+            DepositAdjustment.tenant_id == tenant_id,
+            DepositAdjustment.appointment_id == appointment_id,
+            DepositAdjustment.mode == MODE_SUSPEND,
+            DepositAdjustment.status.in_(REBOOKABLE_STATUSES),
+        )
+        .order_by(DepositAdjustment.created_at.desc())
+        .limit(1)
+    )
 
 
 async def finish_rebook(
@@ -178,11 +1107,87 @@ async def finish_rebook(
     now: datetime,
     source: Literal["patient", "hub"],
 ) -> bool:
-    """Close a rebook in the caller's transaction: guarded UPDATE REBOOKABLE -> `rebooked`
-    (`resolved_at`), `old_slot='rebooked'`; writes `google_event_id`/link on the row (the caller
-    writes start/end/status as in any reschedule); releases the hold; closes the rebook item.
-    Never commits. False = already decided (the caller rolls back and discards the event)."""
-    raise NotImplementedError(_UA1)
+    """Close a rebook in the caller's transaction: locks the consultation, then the guarded
+    UPDATE REBOOKABLE and `old_slot='released'` -> `rebooked` (`resolved_at`),
+    `old_slot='rebooked'` (fix round 1: the old event must be gone - the caller runs
+    `ensure_old_event_gone` BEFORE creating the new event); writes `google_event_id`/link on
+    the row (the caller writes start/end/status as in any reschedule); releases the hold;
+    closes the rebook item
+    (`resolution_action="rebooked"`; the sinal leaves "needs attention" when nothing else is
+    open). Never commits. False = already decided (the caller rolls back and discards the
+    event)."""
+    if appointment.tenant_id != tenant_id or source not in REBOOK_CLOSED_NOTE:
+        return False
+    # Fix round 1 (M2): lock order consultation -> change, whatever the caller flushed already.
+    await session.execute(
+        select(Appointment.id)
+        .where(Appointment.id == appointment.id, Appointment.tenant_id == tenant_id)
+        .with_for_update()
+    )
+    claimed = await session.execute(
+        update(DepositAdjustment)
+        .where(
+            DepositAdjustment.id == adjustment_id,
+            DepositAdjustment.tenant_id == tenant_id,
+            DepositAdjustment.appointment_id == appointment.id,
+            DepositAdjustment.mode == MODE_SUSPEND,
+            DepositAdjustment.status.in_(REBOOKABLE_STATUSES),
+            # Fix round 1 (I1): only once the old event is gone (`ensure_old_event_gone`).
+            DepositAdjustment.old_slot == OLD_SLOT_RELEASED,
+        )
+        .values(
+            status=STATUS_REBOOKED,
+            resolved_at=now,
+            old_slot=OLD_SLOT_REBOOKED,
+            old_slot_at=now,
+        )
+        .returning(DepositAdjustment.deposit_id)
+        .execution_options(synchronize_session=False)
+    )
+    deposit_id = claimed.scalar_one_or_none()
+    if deposit_id is None:
+        return False
+    appointment.google_event_id = event_id
+    appointment.google_event_link = event_link
+    await booking_hold.release_difference_hold_in(session, adjustment_id)
+    deposit = await session.get(PixDeposit, deposit_id)
+    if deposit is not None and deposit.tenant_id == tenant_id:
+        await session.execute(
+            update(PaymentAttentionItem)
+            .where(
+                PaymentAttentionItem.tenant_id == tenant_id,
+                PaymentAttentionItem.dedupe_key
+                == rebook_item_key(deposit.provider, adjustment_id),
+                PaymentAttentionItem.status == ATTENTION_OPEN,
+            )
+            .values(
+                status=ATTENTION_RESOLVED,
+                resolved_at=now,
+                resolution_action="rebooked",
+                resolution_note=REBOOK_CLOSED_NOTE[source],
+                resolved_by_name=REBOOK_CLOSED_BY,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        still_open = await session.scalar(
+            select(func.count())
+            .select_from(PaymentAttentionItem)
+            .where(
+                PaymentAttentionItem.tenant_id == tenant_id,
+                PaymentAttentionItem.deposit_id == deposit.id,
+                PaymentAttentionItem.status == ATTENTION_OPEN,
+            )
+        )
+        if not still_open and deposit.fulfillment_status == FULFILLMENT_NEEDS_ATTENTION:
+            deposit.fulfillment_status = FULFILLMENT_RESOLVED
+    await session.flush()
+    logger.info("old_slot_rebooked", source=source, **_log(adjustment_id, tenant_id))
+    return True
+
+
+# --------------------------------------------------------------------------
+# paid after the old event left
+# --------------------------------------------------------------------------
 
 
 async def place_new_event_after_payment(
@@ -195,28 +1200,173 @@ async def place_new_event_after_payment(
 ) -> None:
     """The difference was paid after the old event left the agenda (`old_slot` releasing or
     released): delete the old event if still `releasing` (idempotent), create `paid_event_id` on
-    the new doctor's/unit's agenda, re-point `google_event_id`/link/`calendar_source`,
-    `old_slot='replaced'`, commit. COMMITS; raises on failure (the caller opens
-    `service_diff_agenda_pending`)."""
-    raise NotImplementedError(_UA1)
+    the new doctor's/unit's agenda (free there first; exclusive on the secretarIA's agenda),
+    re-point `google_event_id`/link/`calendar_source`, `old_slot='replaced'`, commit. COMMITS;
+    raises on failure (the caller opens `service_diff_agenda_pending`). Already `replaced` ->
+    nothing (a repeated hook).
+
+    Fix round 1 (I2): a consultation that is not live (before or after the create) gets NO
+    event and this returns without raising (nothing to put on the agenda); any failure after the
+    create deletes the created event before raising."""
+    state = adjustment.old_slot
+    if state == OLD_SLOT_REPLACED:
+        return
+    if state not in (OLD_SLOT_RELEASING, OLD_SLOT_RELEASED):
+        raise ValueError("old_slot_not_vacated")
+    tenant_id, adjustment_id, appointment_id = tenant.id, adjustment.id, appointment.id
+    if not is_live_status(appointment.status):
+        # Fix round 1 (I2): a consultation cancelled meanwhile gets no event at all.
+        logger.info("old_slot_paid_consultation_gone", **_log(adjustment_id, tenant_id))
+        return
+    expected = (adjustment.pending_edit or {}).get("expected") or {}
+    old_professional = (
+        _uuid_or_none(expected.get("professional_id"))
+        if "professional_id" in expected
+        else appointment.professional_id
+    )
+    old_owner = SimpleNamespace(
+        professional_id=old_professional,
+        google_calendar_source=appointment.google_calendar_source,
+    )
+    new_source = "professional" if appointment.professional_id is not None else "clinic"
+    new_owner = SimpleNamespace(
+        professional_id=appointment.professional_id, google_calendar_source=new_source
+    )
+    new_calendar = await _calendar_of(session, tenant, new_owner, appointment.unit_id)
+    if new_calendar is None:
+        raise LookupError("no_new_calendar")
+    own = paid_event_id(adjustment_id, calendar=new_calendar)
+    start, end = _window(appointment)
+    summary, description = await _event_texts(session, tenant, appointment, patient_name)
+    old_event = (appointment.google_event_id or "").strip()
+
+    if state == OLD_SLOT_RELEASING and old_event and old_event != own:
+        old_calendar = await _calendar_of(session, tenant, old_owner, None)
+        if old_calendar is None:
+            raise LookupError("no_old_calendar")
+        await _end_read(session)
+        await old_calendar.cancel_event(old_event)  # raises -> the clinic fixes the agenda
+        await session.execute(
+            update(DepositAdjustment)
+            .where(
+                DepositAdjustment.id == adjustment_id,
+                DepositAdjustment.old_slot == OLD_SLOT_RELEASING,
+            )
+            .values(old_slot=OLD_SLOT_RELEASED, old_slot_at=_now())
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
+
+    await _end_read(session)
+    events = await new_calendar.check_availability(start, end)
+    if any(str(event.get("id")) != own for event in events):
+        raise CalendarSlotTakenError("old_slot_paid_window_taken")
+    created = await create_event_exclusive(
+        new_calendar, start=start, end=end, summary=summary, description=description, event_id=own
+    )
+    if str(created.get("status") or "") == "cancelled":
+        raise CalendarUnavailableError("event id is taken")
+    new_event = str(created.get("id") or own)
+    try:
+        placed = await _point_row_at_paid_event(
+            session,
+            tenant_id=tenant_id,
+            adjustment=adjustment,
+            appointment_id=appointment_id,
+            event=(new_event, created.get("htmlLink")),
+            source=new_source,
+        )
+    except BaseException:
+        # Fix round 1 (I2): lost claim, missing row, commit failure - never leave the created
+        # event behind (unless a twin hook made the row point at it).
+        await _discard_unless_kept(session, new_calendar, tenant_id, appointment_id, new_event)
+        raise
+    if placed == "gone":
+        await _discard_unless_kept(session, new_calendar, tenant_id, appointment_id, new_event)
+        logger.info("old_slot_paid_consultation_gone", **_log(adjustment_id, tenant_id))
+        return
+    if placed == "placed":
+        logger.info("old_slot_replaced", **_log(adjustment_id, tenant_id))
+
+
+async def _point_row_at_paid_event(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    adjustment: DepositAdjustment,
+    appointment_id: UUID,
+    event: tuple[str, str | None],
+    source: str,
+) -> Literal["placed", "twin", "gone"]:
+    """Under the consultation -> change locks: a LIVE consultation and a change still
+    `releasing`/`released` -> re-point the row, `old_slot='replaced'`, commit ("placed"). A
+    consultation no longer live -> "gone" (rolled back). Already `replaced` by a twin hook ->
+    "twin". Anything else raises (the caller discards the event)."""
+    row = await session.scalar(
+        select(Appointment)
+        .where(Appointment.id == appointment_id, Appointment.tenant_id == tenant_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if row is None or not is_live_status(row.status):
+        await session.rollback()
+        return "gone"
+    claimed = await session.execute(
+        update(DepositAdjustment)
+        .where(
+            DepositAdjustment.id == adjustment.id,
+            DepositAdjustment.tenant_id == tenant_id,
+            DepositAdjustment.old_slot.in_((OLD_SLOT_RELEASING, OLD_SLOT_RELEASED)),
+        )
+        .values(old_slot=OLD_SLOT_REPLACED, old_slot_at=_now())
+        .returning(DepositAdjustment.id)
+        .execution_options(synchronize_session=False)
+    )
+    if claimed.scalar_one_or_none() is None:
+        await session.rollback()
+        await session.refresh(adjustment)
+        current = await session.scalar(
+            select(Appointment.google_event_id).where(
+                Appointment.id == appointment_id, Appointment.tenant_id == tenant_id
+            )
+        )
+        if adjustment.old_slot == OLD_SLOT_REPLACED and current == event[0]:
+            return "twin"  # a repeated hook already placed it (same deterministic id)
+        raise RuntimeError("old_slot_moved")
+    row.google_event_id, row.google_event_link = event
+    row.google_calendar_source = source
+    await session.commit()
+    await session.refresh(adjustment)
+    return "placed"
 
 
 async def discard_event(calendar, event_id: str) -> None:
     """Compensation: delete an event this module created and could not keep. Never raises."""
-    raise NotImplementedError(_UA1)
+    if calendar is None or not (event_id or "").strip():
+        return
+    try:
+        await calendar.cancel_event(event_id)
+    except Exception as exc:  # noqa: BLE001 - logged; the event is ours and empty
+        logger.error("old_slot_orphan_event", error_type=type(exc).__name__)
 
 
 __all__ = [
+    "REBOOK_CLOSED_BY",
+    "REBOOK_CLOSED_NOTE",
     "RETRY_AFTER",
+    "VACATE_STATUSES",
     "RestoreOutcome",
     "RestoreTrigger",
     "discard_event",
+    "discard_restore_event",
+    "ensure_old_event_gone",
     "finish_rebook",
     "mark_old_slot_lost",
     "old_slot_free",
     "paid_event_id",
     "place_new_event_after_payment",
     "rebook_event_id",
+    "rebook_item_key",
     "rebookable",
     "restore_event_id",
     "restore_old_slot",

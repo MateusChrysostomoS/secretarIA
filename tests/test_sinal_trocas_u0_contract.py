@@ -450,13 +450,14 @@ def test_old_slot_keyword_only_parameters():
         assert all(kind is inspect.Parameter.POSITIONAL_OR_KEYWORD for kind in kinds)
 
 
-async def test_the_old_slot_stubs_raise_until_ua1_lands():
-    with pytest.raises(NotImplementedError):
-        await old_slot.vacate_old_slot(uuid4(), uuid4())
-    with pytest.raises(NotImplementedError):
-        await old_slot.restore_old_slot(
-            None, tenant_id=uuid4(), adjustment_id=uuid4(), now=datetime.now(UTC), trigger="tap"
-        )
+async def test_the_old_slot_functions_landed_and_never_raise():
+    """UA1 implemented the stubs (tests/test_sinal_trocas_ua1_old_slot.py pins the behaviour):
+    "never raises" holds even for a session that cannot be used at all."""
+    outcome = await old_slot.restore_old_slot(
+        None, tenant_id=uuid4(), adjustment_id=uuid4(), now=datetime.now(UTC), trigger="tap"
+    )
+    assert outcome == "calendar_unavailable"
+    assert await old_slot.discard_event(None, "difkeepx") is None
 
 
 # --- price change (mapa-u §2 / §4.5) ----------------------------------------------------------

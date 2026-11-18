@@ -43,6 +43,7 @@ from secretaria.services import (
     release_offer,
 )
 from secretaria.services.local_calendar import LocalCalendarService, create_event_exclusive
+from secretaria.services.payments.adjustment_suspension import occupies_slot_clause
 
 logger = get_logger(__name__)
 
@@ -77,6 +78,10 @@ def _utc(value: datetime) -> datetime:
 async def _consultation_overlaps(
     session: AsyncSession, released: Appointment, start: datetime, end: datetime
 ) -> bool:
+    """Another LIVE consultation of the same agenda takes [start, end) - or the same doctor is
+    busy then at another clinic sharing his agenda. TASK-085 R (D-R10): a consultation SUSPENDED
+    by a change waiting for the Pix of its difference is off the agenda and does not count
+    (`occupies_slot_clause`)."""
     same_professional = (
         Appointment.professional_id == released.professional_id
         if released.professional_id is not None
@@ -91,6 +96,7 @@ async def _consultation_overlaps(
             Appointment.start_at < end,
             Appointment.end_at > start,
             same_professional,
+            occupies_slot_clause(),
         )
         .limit(1)
     )
