@@ -5,8 +5,9 @@ Spec: docs/superpowers/specs/2026-10-07-lembretes-alterar-dados-design.md.
 `FlowState.EDIT_BOOKING` + `Conversation.flow_edit_draft`. Every step builds a NEW
 `EditDraft` and returns it on the result; nothing touches the real appointment until the
 final Confirmar (`_apply_confirm`, added with the apply step). Like the rest of the
-router this is pure: calendars, the Pix guards and the appointment snapshot arrive as
-arguments (`EditContext`, `appointments`, `professionals`), never read here.
+router this is pure: calendars, the Pix guards (paid sinal, reschedule limit and - TASK-085 R -
+a suspended consultation) and the appointment snapshot arrive as arguments (`EditContext`,
+`appointments`, `professionals`), never read here.
 
 This module sits beside `flow_router` and uses its private helpers on purpose - the day
 and slot pickers, the label matching and the service/doctor/convênio matching exist
@@ -60,6 +61,8 @@ from secretaria.services.local_calendar import (
     create_event_exclusive,
     update_event_details_exclusive,
 )
+from secretaria.services.payments.adjustment_suspension import SUSPENDED_VISIT_TEXT
+from secretaria.services.payments.service_change_policy import MoneyTerms, money_fields_changed
 from secretaria.services.service_catalog import entry_service_id
 from secretaria.services.tenant_config import professional_appointment_types
 from secretaria.services.unit_booking import event_unit_fields
@@ -315,17 +318,14 @@ def _menu_labels(ctx: ae.EditContext) -> list[str]:
     labels: list[str] = []
     if not ctx.reschedule_blocked:
         labels += [ae.LABEL_EDIT_DATE, ae.LABEL_EDIT_TIME]
-    # A paid sinal keeps the service (the worker settles the difference at Confirmar) and
-    # hides the doctor (2026-10-26).
-    labels.append(ae.LABEL_EDIT_SERVICE)
-    if not ctx.paid_deposit:
-        labels.append(ae.LABEL_EDIT_DOCTOR)
-    labels.append(ae.LABEL_EDIT_MORE)
+    # TASK-085 R D-R3: a paid sinal no longer hides the doctor (nor the convênio): the worker
+    # settles the difference of every money change at Confirmar.
+    labels += [ae.LABEL_EDIT_SERVICE, ae.LABEL_EDIT_DOCTOR, ae.LABEL_EDIT_MORE]
     return labels
 
 
 def _menu_result(draft: ae.EditDraft, ctx: ae.EditContext) -> fr.FlowRouterResult:
-    body = ae.edit_menu_body(_menu_labels(ctx), insurance=not ctx.paid_deposit)
+    body = ae.edit_menu_body(_menu_labels(ctx))
     if ctx.paid_deposit:
         body = f"{body}\n\n{ae.EDIT_PIX_NOTICE}"
     if ctx.reschedule_blocked:
@@ -338,10 +338,21 @@ def _menu_result(draft: ae.EditDraft, ctx: ae.EditContext) -> fr.FlowRouterResul
 
 
 def _more_result(draft: ae.EditDraft, ctx: ae.EditContext) -> fr.FlowRouterResult:
-    labels = [] if ctx.paid_deposit else [ae.LABEL_EDIT_INSURANCE]
-    labels += [ae.LABEL_EDIT_PATIENT, ae.LABEL_EDIT_BACK]
+    labels = [ae.LABEL_EDIT_INSURANCE, ae.LABEL_EDIT_PATIENT, ae.LABEL_EDIT_BACK]
     body = ae.edit_more_body(labels)
     return _result(draft, [fr.MenuBubble(body=body, labels=labels)], fr.STEP_EDIT_MORE)
+
+
+def _suspended_refusal() -> fr.FlowRouterResult:
+    """TASK-085 R (contrato §3.8): the consultation waits for the Pix of the difference of a
+    change the patient asked for - it is not edited. ONE message; the edit (draft) is dropped
+    and nothing else changes (the money and the agenda are the engine's until the Pix or the
+    choice decides)."""
+    return fr.FlowRouterResult(
+        action="reply",
+        bubbles=[TextBubble(body=SUSPENDED_VISIT_TEXT)],
+        flow_state=FlowState.IDLE,
+    )
 
 
 def enter_edit_menu(
@@ -351,9 +362,30 @@ def enter_edit_menu(
     *,
     draft: ae.EditDraft | None = None,
 ) -> fr.FlowRouterResult:
-    """The entry from the reminder's "Alterar Dados": a fresh draft + the 5-option menu."""
+    """The entry from the reminder's "Alterar Dados": a fresh draft + the 5-option menu.
+
+    A suspended consultation (`ctx.suspended`) is refused with one message instead."""
+    ctx = ctx or ae.EditContext()
+    if ctx.suspended:
+        return _suspended_refusal()
     draft = draft or ae.EditDraft.from_appointment(appt, _tz(tenant))
-    return _menu_result(draft, ctx or ae.EditContext())
+    return _menu_result(draft, ctx)
+
+
+def _money_fields_changed(draft: ae.EditDraft) -> frozenset[str]:
+    """Which of the four money fields (service, unit, doctor, convênio) the draft changes -
+    the SAME predicate the worker and the staff use (`service_change_policy`, contrato §3.4).
+    The unit only counts on a booking with one (only such a draft carries the key)."""
+
+    def terms(values: dict) -> MoneyTerms:
+        return MoneyTerms(
+            service=values.get("service"),
+            professional_id=values.get("professional_id"),
+            unit_id=values.get("unit_id"),
+            insurance=values.get("insurance"),
+        )
+
+    return money_fields_changed(terms(draft.original), terms(draft.current))
 
 
 def _placement_problem(draft: ae.EditDraft, tenant, doctor) -> str | None:
@@ -368,8 +400,8 @@ def _placement_problem(draft: ae.EditDraft, tenant, doctor) -> str | None:
         and flow_units.bookable_units(doctor)
     ):
         return ae.EDIT_UNIT_MISSING
-    # Follow-up final review: a unit the doctor does not attend at (e.g. the new doctor's unit
-    # left behind when a paid sinal put the original doctor back). Only when the doctor or the
+    # Follow-up final review: a unit the doctor does not attend at (e.g. a new doctor's unit
+    # left behind when the original doctor came back). Only when the doctor or the
     # unit changed - the appointment's own unit is never questioned (§9.4).
     unit_id = _uuid(draft.current.get("unit_id"))
     offered = {unit.id for unit in flow_units.offered_units(doctor)}
@@ -475,11 +507,18 @@ async def _after_slot_affecting_change(
 
 def _no_room(draft: ae.EditDraft, ctx: ae.EditContext) -> fr.FlowRouterResult:
     """The new window does not fit and the time may not move (Pix reschedule limit): the
-    service goes back to what it was, with the one line that says why."""
+    service goes back to what it was, with the one line that says why.
+
+    TASK-085 R fix round 1: a NEW doctor (offered at the limit since D-R3) busy at that time
+    goes back too - doctor, service, unit and time are the appointment's own again, behind a
+    doctor line - so Confirmar never loops on a doctor who cannot take the consultation."""
+    if draft.current["professional_id"] != draft.original["professional_id"]:
+        undone = _undo_doctor_change(draft).with_changes(
+            start_at=draft.original["start_at"], end_at=draft.original["end_at"]
+        )
+        return _refuse(undone, ctx, ae.EDIT_DOCTOR_NO_ROOM)
     keep = {key: draft.original[key] for key in ("service", "start_at", "end_at")}
-    if "unit_id" in draft.original and (
-        draft.current["professional_id"] == draft.original["professional_id"]
-    ):
+    if "unit_id" in draft.original:
         # Follow-up E1: a unit picked for that service goes back with it.
         keep["unit_id"] = draft.original["unit_id"]
     menu = _menu_result(draft.with_changes(**keep).with_stage(), ctx)
@@ -1294,8 +1333,9 @@ async def _apply_confirm(
     event (same doctor) or creates it on the new doctor's agenda (the old one is deleted by
     the worker AFTER the database commit - `workers/shared/appointment_edit_apply.py`). The
     row itself is updated by the worker; this returns `appointment_edit` and never persists.
-    Exception: a service change on a PAID sinal is only checked here (`calendar_deferred`) -
-    the worker decides the money first and writes the agenda only if the change stands now.
+    Exception: a change of a money field (service, unit, doctor, convênio) on a PAID sinal is
+    only checked here (`calendar_deferred`) - the worker decides the money first and writes the
+    agenda only if the change stands now (TASK-085 R D-R1/D-R3).
     """
     changed = draft.changed()
     if not changed:
@@ -1365,11 +1405,13 @@ async def _apply_confirm(
         # TASK-083 follow-up: the booking's CURRENT unit keeps its lines after "Alterar Dados".
         **event_unit_fields(_draft_unit(draft, doctor), doctor),
     )
-    # A SERVICE change on a paid sinal is a money decision (2026-10-26): a dearer service waits
-    # for the Pix of the difference and must not reach the agenda before it is paid. The window
-    # was checked above; the worker writes the agenda only when the change stands now
-    # (`workers/shared/appointment_edit_apply.py` -> `service_change.sync_agenda_event`).
-    deferred = bool(ctx.paid_deposit and "serviço" in changed)
+    # A change of a MONEY field on a paid sinal is a money decision (2026-10-26 for the service;
+    # TASK-085 R D-R1/D-R3 for the unit, the doctor and the convênio): a dearer change may wait
+    # for the Pix of the difference and must not reach the agenda before the engine decides. The
+    # window was checked above (on the new doctor's / unit's agenda); the worker writes the agenda
+    # - the new doctor's included - only when the change stands now
+    # (`workers/shared/appointment_edit_apply.py`). Date/time/patient alone are today's edit.
+    deferred = bool(ctx.paid_deposit and _money_fields_changed(draft))
     # When the window moves, exclusive on the secretarIA agenda: the free check above and
     # the write are one atomic step there (plain on Google). An edit that keeps the window
     # (convênio, who it is for) is never refused for an overlap the clinic itself made.
@@ -1456,6 +1498,10 @@ async def edit_step(
     the card every patient gets on entering the conversation, reminders on or off.
     """
     draft = ae.EditDraft.from_json(getattr(conversation, "flow_edit_draft", None))
+    # TASK-085 R (contrato §3.8): first, so the patient reads why even though the suspended
+    # consultation is hidden from the list the worker hands in (S5).
+    if ctx is not None and ctx.suspended:
+        return _suspended_refusal()
     appt = fr._find_appt_by_id(appointments, fr._managing_appt_id_str(conversation))
     if draft is None or appt is None or ctx is None or str(appt.get("id")) != draft.appointment_id:
         return _leave(tenant, professionals, TextBubble(body=ae.EDIT_STALE))
@@ -1471,36 +1517,14 @@ async def edit_step(
     step = conversation.flow_step
     match = fr._label_match
 
-    # A paid sinal still allows the SERVICE (2026-10-26: Confirmar hands the difference of the
-    # sinal to the worker), never the doctor or the convênio.
-    paid_steps = (
-        fr.STEP_EDIT_DOCTOR,
-        fr.STEP_EDIT_INSURANCE,
-        fr.STEP_EDIT_INSURANCE_OTHER,
-    )
+    # TASK-085 R D-R3: a paid sinal no longer restricts any field (Confirmar hands every money
+    # change to the worker). Only the Pix reschedule limit still keeps date and time.
     time_steps = (*fr._EDIT_DAY_STEPS, fr.STEP_EDIT_TIME_TOO, fr.STEP_EDIT_SLOT)
-    restricted = set()
-    if ctx.paid_deposit:
-        restricted.update(("médico", "convênio"))
-    if ctx.reschedule_blocked:
-        restricted.update(("data", "horário"))
-    if (
-        restricted.intersection(draft.changed())
-        or (ctx.paid_deposit and step in paid_steps)
-        or (ctx.reschedule_blocked and step in time_steps)
+    if ctx.reschedule_blocked and (
+        {"data", "horário"}.intersection(draft.changed()) or step in time_steps
     ):
-        # A deposit can be paid or its limit reached after this card was sent.
-        fields = {}
-        if ctx.paid_deposit:
-            fields.update(
-                {key: draft.original[key] for key in ("service", "professional_id", "insurance")}
-            )
-            # The unit goes back with the doctor and the service (follow-up final review): a
-            # new doctor's unit never stays behind with the original doctor.
-            if "unit_id" in draft.current or "unit_id" in draft.original:
-                fields["unit_id"] = draft.original.get("unit_id")
-        if ctx.reschedule_blocked or ctx.paid_deposit:
-            fields.update({key: draft.original[key] for key in ("start_at", "end_at")})
+        # The limit can be reached after this card was sent: the time goes back, the rest stays.
+        fields = {key: draft.original[key] for key in ("start_at", "end_at")}
         return _menu_result(draft.with_changes(**fields).with_stage(), ctx)
 
     # An offered menu entry remains a valid change of intention inside ANY picker.
@@ -1511,12 +1535,12 @@ async def edit_step(
             return await _slots_for(conversation, tenant, draft, draft.start, professionals, ctx)
         if match(body, ae.LABEL_EDIT_SERVICE):
             return _service_list(draft, tenant, professionals, ctx)
-        if match(body, ae.LABEL_EDIT_DOCTOR) and not ctx.paid_deposit:
+        if match(body, ae.LABEL_EDIT_DOCTOR):
             return await _doctor_list(draft, tenant, appt, professionals, ctx)
         if match(body, ae.LABEL_EDIT_MORE):
             # A staged choice (a unit list's doctor/service) is dropped, never carried along.
             return _more_result(draft.with_stage(), ctx)
-        if match(body, ae.LABEL_EDIT_INSURANCE) and not ctx.paid_deposit:
+        if match(body, ae.LABEL_EDIT_INSURANCE):
             return _insurance_list(draft, tenant, professionals)
         if match(body, ae.LABEL_EDIT_PATIENT):
             return _attendee_question_result(draft)
@@ -1528,14 +1552,14 @@ async def edit_step(
             return await _slots_for(conversation, tenant, draft, draft.start, professionals, ctx)
         if match(body, ae.LABEL_EDIT_SERVICE):
             return _service_list(draft.with_stage(), tenant, professionals, ctx)
-        if match(body, ae.LABEL_EDIT_DOCTOR) and not ctx.paid_deposit:
+        if match(body, ae.LABEL_EDIT_DOCTOR):
             return await _doctor_list(draft, tenant, appt, professionals, ctx)
         if match(body, ae.LABEL_EDIT_MORE):
             return _more_result(draft.with_stage(), ctx)
         return fr._preserve(conversation, "delegate_llm")
 
     if step == fr.STEP_EDIT_MORE:
-        if match(body, ae.LABEL_EDIT_INSURANCE) and not ctx.paid_deposit:
+        if match(body, ae.LABEL_EDIT_INSURANCE):
             return _insurance_list(draft, tenant, professionals)
         if match(body, ae.LABEL_EDIT_PATIENT):
             return _attendee_question_result(draft)
@@ -1585,6 +1609,8 @@ async def redisplay_edit(conversation, tenant, appointments, professionals, ctx)
     if draft is None:
         return fr._preserve(conversation, "reply")
     ctx = ctx or ae.EditContext()
+    if ctx.suspended:
+        return _suspended_refusal()
     appt = fr._find_appt_by_id(appointments, draft.appointment_id) or {}
     step = conversation.flow_step
     if step == fr.STEP_EDIT_MENU:
@@ -1671,6 +1697,8 @@ async def apply_ai_edit(conversation, tenant, proposal, appointments, profession
     async def unchanged():
         return await redisplay_edit(conversation, tenant, appointments, professionals, ctx)
 
+    if ctx is not None and ctx.suspended:
+        return _suspended_refusal()
     draft = ae.EditDraft.from_json(getattr(conversation, "flow_edit_draft", None))
     appt = fr._find_appt_by_id(appointments, fr._managing_appt_id_str(conversation))
     if draft is None or ctx is None or appt is None or str(appt.get("id")) != draft.appointment_id:
@@ -1718,10 +1746,8 @@ async def apply_ai_edit(conversation, tenant, proposal, appointments, profession
     }
     if any(proposal.get(keep_keys[field]) for field in keep):
         return await unchanged()
-    # A paid sinal: the service may only be DRAFTED (Confirmar settles the difference in the
-    # worker); the doctor and the convênio never.
-    if ctx.paid_deposit and any(proposal.get(k) for k in ("professional", "insurance")):
-        return await unchanged()
+    # A paid sinal: the AI only DRAFTS (the patient still confirms, and Confirmar hands every
+    # money change to the worker - TASK-085 R D-R3: the doctor and the convênio too).
     if ctx.reschedule_blocked and any(proposal.get(k) for k in ("day", "time")):
         return await unchanged()
     new = draft
@@ -1893,7 +1919,6 @@ async def apply_ai_edit(conversation, tenant, proposal, appointments, profession
     if opened:
         if (
             opened not in fields
-            or (ctx.paid_deposit and opened in {"doctor", "insurance"})
             or (ctx.reschedule_blocked and opened in {"date", "time"})
         ):
             return await unchanged()

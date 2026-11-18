@@ -165,13 +165,11 @@ async def test_i5_busy_new_doctor_keeps_original_time_and_uses_new_calendar():
     assert result.bubbles[0].body == ae.EDIT_RESLOT_NOTICE
 
 
+# TASK-085 R D-R3: a paid sinal no longer blocks the doctor/convênio for the AI (it only drafts;
+# tests/test_sinal_trocas_s3a_router.py) - only the reschedule limit is a guard here now.
 @pytest.mark.parametrize(
     "payload,guard",
     [
-        ({"professional": "Dra. Ana Lima"}, "paid_deposit"),
-        ({"insurance": "Amil"}, "paid_deposit"),
-        ({"open_field": "doctor"}, "paid_deposit"),
-        ({"open_field": "insurance"}, "paid_deposit"),
         ({"day": "2030-10-16"}, "reschedule_blocked"),
         ({"time": "09:00"}, "reschedule_blocked"),
     ],

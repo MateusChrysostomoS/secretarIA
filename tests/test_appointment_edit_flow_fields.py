@@ -114,16 +114,24 @@ async def test_a_paid_draft_that_only_changes_the_service_is_kept():
     assert _draft_of(result).current["service"] == "Retorno"
 
 
-async def test_a_paid_draft_that_changes_the_doctor_is_still_reverted():
+async def test_a_paid_draft_that_changes_the_doctor_goes_to_the_worker():
+    """TASK-085 R D-R3: it used to be thrown back; now Confirmar hands the doctor change to the
+    worker (the money decides) without writing the agenda."""
     draft = draft_for().with_changes(professional_id=str(DOCTOR_B))
+    calendar = EditCalendar()
 
     result = await _step(
-        fr.STEP_EDIT_CONFIRM, fr.LABEL_CONFIRM, draft=draft, ctx=context(paid_deposit=True)
+        fr.STEP_EDIT_CONFIRM,
+        fr.LABEL_CONFIRM,
+        draft=draft,
+        ctx=context(
+            calendars={str(DOCTOR_A): calendar, str(DOCTOR_B): calendar}, paid_deposit=True
+        ),
     )
 
-    assert result.flow_step == fr.STEP_EDIT_MENU
-    assert result.appointment_edit is None
-    assert _draft_of(result).changed() == []
+    assert result.appointment_edit["calendar_deferred"] is True
+    assert result.appointment_edit["professional_id"] == DOCTOR_B
+    assert calendar.created == [] and calendar.detail_updates == []
 
 
 async def test_at_the_limit_a_longer_service_that_does_not_fit_says_to_call_the_clinic():

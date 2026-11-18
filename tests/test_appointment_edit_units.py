@@ -1471,10 +1471,11 @@ def _paid_ctx(doctors, calendars):
     )
 
 
-async def test_a_sinal_paid_mid_edit_puts_the_unit_back_with_the_doctor():
+async def test_a_sinal_paid_mid_edit_keeps_the_doctor_with_his_unit():
     """IMPORTANT 2 (reviewer probe): a doctor change already drafted at Zona Sul, then the
-    sinal is paid. The reset restores Dra. Ana AND her Centro; Confirmar never writes Zona Sul
-    with a doctor who only attends Centro."""
+    sinal is paid. Before TASK-085 R the reset restored Dra. Ana AND her Centro; since D-R3 the
+    doctor change stays - Dr. Beto WITH his Zona Sul (never Zona Sul with Dra. Ana, who only
+    attends Centro) - and Confirmar checks Zona Sul's hours and writes nothing on any agenda."""
     from secretaria.services.attendee import LABEL_ATTENDEE_SELF
 
     ana = _doctor("Dra. Ana", [CENTRO], types=_types("Consulta"))
@@ -1493,15 +1494,17 @@ async def test_a_sinal_paid_mid_edit_puts_the_unit_back_with_the_doctor():
         )
 
     menu = await step(fr.STEP_EDIT_MENU, "Outro", drafted)
-    reset = _draft(menu)
-    assert reset.current["professional_id"] == str(ana.id)
-    assert reset.current["unit_id"] == str(CENTRO.id)
-    assert reset.changed() == []
-    more = await step(fr.STEP_EDIT_MORE, ae.LABEL_EDIT_PATIENT, reset)
+    kept = _draft(menu)
+    assert kept.current["professional_id"] == str(beto.id)
+    assert kept.current["unit_id"] == str(SUL.id)
+    more = await step(fr.STEP_EDIT_MORE, ae.LABEL_EDIT_PATIENT, kept)
     card = await step(more.flow_step, LABEL_ATTENDEE_SELF, _draft(more))
     confirmed = await step(fr.STEP_EDIT_CONFIRM, fr.LABEL_CONFIRM, _draft(card))
-    edit = confirmed.appointment_edit or {}
-    assert edit.get("unit_id") in (None, CENTRO.id)
+    # Tuesday is not a Zona Sul day: back to day/time, nothing confirmed, nothing written.
+    assert confirmed.appointment_edit is None
+    assert confirmed.flow_step in fr._EDIT_DAY_STEPS
+    assert THURSDAY in calendars[beto.id].log.checked_hours
+    assert calendars[beto.id].log.created == [] and calendars[ana.id].log.created == []
 
 
 async def test_the_card_refuses_a_unit_the_doctor_does_not_attend():
