@@ -19,10 +19,12 @@ from secretaria.models import (
     HandoverState,
     Message,
     MessageDirection,
+    MessageSender,
     Patient,
     Tenant,
     is_live_status,
 )
+from secretaria.models.appointment_reminder import REMINDER_KIND_PRICE_CHANGE
 from secretaria.schemas.internal import ConversationEntryContext
 from secretaria.services import reminder_hooks
 from secretaria.services.channel_sender import (
@@ -53,6 +55,7 @@ from secretaria.workers.shared.jobs import (
 from secretaria.workers.shared.opening import (
     _send_context_opening,
 )
+from secretaria.workers.shared.price_change_opening import send_price_change_opening
 from secretaria.workers.shared.text import (
     _as_utc,
 )
@@ -314,6 +317,9 @@ class _EntryDecision:
     last_message_id: UUID | None
     appointment_id: UUID | None = None
     source: str = "portal_entry"
+    # TASK-085 R UB2 (D-R14): the link is a `price_change` notice - the first message is the
+    # price action (`send_price_change_opening`), not the consultation's card.
+    price_change_reminder_id: UUID | None = None
 
 
 async def _latest_message(session, conversation_id: UUID):
@@ -325,6 +331,22 @@ async def _latest_message(session, conversation_id: UUID):
             .limit(1)
         )
     ).first()
+
+
+async def _price_notice_already_shown(session, answered_at: datetime | None, latest) -> bool:
+    """TASK-085 R UB2 fix round 1: the price notice was answered and the conversation's LAST
+    message is a bot message written at or after that answer (stamps compared to the second:
+    the database's own clock may drop the fraction)."""
+    if answered_at is None or latest is None:
+        return False
+    message = await session.get(Message, latest.id)
+    if (
+        message is None
+        or message.direction != MessageDirection.OUTBOUND
+        or message.sender != MessageSender.BOT
+    ):
+        return False
+    return _as_utc(latest.created_at) >= _as_utc(answered_at).replace(microsecond=0)
 
 
 async def _brain_message_entry_decision(
@@ -350,6 +372,13 @@ async def _brain_message_entry_decision(
         clinic's reactivation gap -> silence: never cut a booking in half.
 
     Otherwise the context-aware opening goes out (`workers/shared/opening.py`).
+
+    TASK-085 R UB2 (D-R14, mapa-u §2.3, §7.17): a link to a `price_change` notice
+    (the clinic changed the price; the patient was e-mailed) is explicit even with
+    reminders v2 switched off, and its first message is the price action
+    (`price_change_reminder_id`). A link to a row that does not exist at all in
+    this clinic (a broken link: the e-mail went out but its row was never written)
+    is treated as an ordinary entry - the usual opening, under the usual rules.
     """
     now = now or datetime.now(UTC)
     settings = get_settings()
@@ -361,7 +390,25 @@ async def _brain_message_entry_decision(
         tenant = await session.get(Tenant, tenant_id)
         if tenant is None:
             return None
-        explicit = explicit and reminder_hooks.enabled_for(tenant)
+        price_link = False
+        link_answered_at = None
+        if explicit and entry_context.reminder_id is not None:
+            link = (
+                await session.execute(
+                    select(AppointmentReminder.kind, AppointmentReminder.answered_at).where(
+                        AppointmentReminder.id == entry_context.reminder_id,
+                        AppointmentReminder.tenant_id == tenant_id,
+                    )
+                )
+            ).first()
+            link_kind = link.kind if link is not None else None
+            link_answered_at = link.answered_at if link is not None else None
+            if link_kind is None:
+                # A broken link: no such row in this clinic -> an ordinary entry.
+                logger.info("brain_message_enter_broken_link", tenant_id=str(tenant_id))
+                explicit = False
+            price_link = link_kind == REMINDER_KIND_PRICE_CHANGE
+        explicit = explicit and (price_link or reminder_hooks.enabled_for(tenant))
         patient = await session.scalar(
             select(Patient).where(
                 Patient.tenant_id == tenant_id,
@@ -436,13 +483,29 @@ async def _brain_message_entry_decision(
             ):
                 # TASK-085 R (D-R4): the reminder's consultation waits for the Pix of a change's
                 # difference and is hidden from the patient - the ordinary opening goes out
-                # (it never shows a suspended consultation), never that consultation's card.
+                # (it never shows a suspended consultation), never that consultation's card
+                # (UB2: nor a price action on it).
                 logger.info(
                     "brain_message_enter_suspended_reminder",
                     conversation_id=str(conversation.id),
                 )
                 appointment_id = None
-        if explicit and latest is not None:
+                price_link = False
+            elif price_link:
+                # UB2: the price action replaces the card; `open_price_notice` re-checks the
+                # row (owner, version, suspension) under the consultation lock.
+                appointment_id = None
+                if await _price_notice_already_shown(session, link_answered_at, latest):
+                    # Fix round 1 (review M1): a reload / tab switch still carries
+                    # `lembrete=`; the notice was answered and the bot spoke last, after it -
+                    # nothing new to say (a new patient message or a re-armed notice speaks).
+                    logger.info(
+                        "brain_message_enter_silent",
+                        reason="price_notice_already_shown",
+                        conversation_id=str(conversation.id),
+                    )
+                    return None
+        if explicit and latest is not None and not price_link:
             message = await session.get(Message, latest.id)
             # Keep the current visible card on reload. If it has fallen out
             # of the latest page/tap window, present a new one once.
@@ -503,6 +566,7 @@ async def _brain_message_entry_decision(
             last_message_id=latest_id,
             appointment_id=appointment_id,
             source=entry_context.source if explicit else "portal_entry",
+            price_change_reminder_id=entry_context.reminder_id if price_link else None,
         )
 
 
@@ -560,15 +624,37 @@ async def process_brain_message_enter(
         return (latest.id if latest is not None else None) == decision.last_message_id
 
     try:
-        rendered = await _send_context_opening(
-            decision.reply,
-            decision.tenant,
-            external_id,
-            redis=ctx.get("redis"),
-            source=decision.source,
-            still_current=_still_current,
-            **({"appointment_id": decision.appointment_id} if decision.appointment_id else {}),
-        )
+        rendered = None
+        if decision.price_change_reminder_id is not None:
+            # TASK-085 R UB2: the first message is the price action. Asked right before: once
+            # the notice is opened the money is decided and its message must go out.
+            if await _still_current():
+                rendered = await send_price_change_opening(
+                    decision.reply,
+                    decision.tenant,
+                    reminder_id=decision.price_change_reminder_id,
+                    redis=ctx.get("redis"),
+                )
+                if rendered is False:
+                    # Not (or no longer) a price action for this patient: the usual opening.
+                    rendered = await _send_context_opening(
+                        decision.reply,
+                        decision.tenant,
+                        external_id,
+                        redis=ctx.get("redis"),
+                        source=decision.source,
+                        still_current=_still_current,
+                    )
+        else:
+            rendered = await _send_context_opening(
+                decision.reply,
+                decision.tenant,
+                external_id,
+                redis=ctx.get("redis"),
+                source=decision.source,
+                still_current=_still_current,
+                **({"appointment_id": decision.appointment_id} if decision.appointment_id else {}),
+            )
     except Exception:
         # Same key on the next entry (nothing new was written): leaving it
         # claimed would silence this conversation until the patient types.

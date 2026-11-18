@@ -282,8 +282,9 @@ async def test_the_s2_signatures_are_frozen():
     requote = deposit_lifecycle.requote_awaiting
     assert _params(requote) == ["session", "tenant", "appointment", "deposit", "now"]
     recharge = deposit_lifecycle.recharge_after_edit
+    # TASK-085 R UB2 (mapa-u §4.5): `reason` ("edit" by default, "price_change" for D-R14).
     assert _params(recharge) == [
-        "tenant_id", "appointment_id", "old_amount_cents", "waba_token", "redis",
+        "tenant_id", "appointment_id", "old_amount_cents", "waba_token", "redis", "reason",
     ]
 
 

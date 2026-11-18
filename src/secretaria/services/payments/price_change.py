@@ -20,8 +20,9 @@ time. A WhatsApp patient or one without an e-mail gets no message: the clinic ge
 `price_change_no_email`. Only price edits trigger it (the sinal percentage does not).
 
 U0 (contract slice) froze the surface below; UB1 implemented the sweep (`enqueue_sweep`,
-`sweep_price_changes`, `price_notice_needed`); UB2 implements the opening (`open_price_notice`,
-`price_opening_messages`, still NotImplementedError until then).
+`sweep_price_changes`, `price_notice_needed`); UB2 implemented the opening (`open_price_notice`,
+`price_opening_messages`) and moved `price_notice_needed` to `service_change.preview_price_requote`
+(the opening's own arithmetic).
 LGPD: ids and counts in logs only; the e-mail address is never logged nor used as a key.
 """
 
@@ -40,7 +41,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
-from secretaria.models import LIVE_APPOINTMENT_STATUSES, Appointment, Patient, PixDeposit, Tenant
+from secretaria.models import (
+    LIVE_APPOINTMENT_STATUSES,
+    Appointment,
+    Patient,
+    PixDeposit,
+    Tenant,
+    is_live_status,
+)
 from secretaria.models.appointment_reminder import (
     REMINDER_CHANNEL_EMAIL,
     REMINDER_KIND_PRICE_CHANGE,
@@ -48,6 +56,8 @@ from secretaria.models.appointment_reminder import (
     AppointmentReminder,
 )
 from secretaria.models.deposit_adjustment import (
+    KIND_INCREASE,
+    MODE_APPLIED,
     STATUS_ASKED,
     STATUS_AWAITING_CHOICE,
     STATUS_AWAITING_PAYMENT,
@@ -55,19 +65,33 @@ from secretaria.models.deposit_adjustment import (
     STATUS_COLLECT_DUE,
     DepositAdjustment,
 )
-from secretaria.models.payment_attention_item import REASON_PRICE_CHANGE_NO_EMAIL
+from secretaria.models.payment_attention_item import (
+    REASON_PRICE_CHANGE_NO_EMAIL,
+    REASON_SERVICE_DIFF_UNPAID,
+)
 from secretaria.models.pix_deposit import PixDepositStatus
 from secretaria.services import reminder_delivery
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.email import EmailOutcome, send_transactional_email_result
-from secretaria.services.payments import accounts, attention, notify, service_change
-from secretaria.services.payments.adjustment_suspension import visible_to_patient_clause
+from secretaria.services.payments import (
+    accounts,
+    adjustment_queries,
+    attention,
+    notify,
+    service_change,
+)
+from secretaria.services.payments.adjustment_suspension import (
+    is_suspended,
+    visible_to_patient_clause,
+)
 from secretaria.services.payments.deposit_failure_notice import within_daily_cap
 from secretaria.services.payments.deposit_lifecycle import (
     _resolve_service_and_price,
     requote_amount_cents,
+    requote_awaiting,
 )
-from secretaria.services.payments.money import parse_brl_to_cents
+from secretaria.services.payments.money import format_brl, parse_brl_to_cents
+from secretaria.services.payments.pix_message import pix_code_tail
 from secretaria.services.payments.service_change_policy import MIN_DIFFERENCE_CENTS
 from secretaria.services.reminder_text import portal_conversation_link
 
@@ -87,8 +111,6 @@ EMAIL_TEMPLATE = "price_change_patient"
 SWEEP_JOB = "sweep_price_changes"
 SWEEP_DEFER = timedelta(seconds=60)
 SWEEP_BUCKET = timedelta(minutes=5)
-
-_UB2 = "TASK-085 R UB2"
 
 
 def sweep_job_id(tenant_id: UUID, changed_at: datetime) -> str:
@@ -840,11 +862,14 @@ async def price_notice_needed(
     now: datetime,
 ) -> bool:
     """Whether the price in force changes this consultation's sinal enough to tell the patient.
-    Read-only. PAID -> `service_change.preview_service_change` on the row itself: True on
-    `increase_charge` (>= R$ 10, with a connected payment account), `decrease_ask`, and
-    `decrease_keep` with a difference >= R$ 10; False on `increase_free` / `no_change` /
-    `blocked`. AWAITING -> `deposit_lifecycle.requote_amount_cents(...) != deposit.amount_cents`,
-    but only with a readable price (no price / service off = no notice, like `blocked`).
+    Read-only. PAID -> `service_change.preview_price_requote` on the row itself (the SAME
+    arithmetic the opening's `price_requote` uses - UB2: a drop already settled as an abatement,
+    and still outstanding, is netted out, so a later price edit never e-mails the patient about a
+    difference already told): True on `increase_charge` (>= R$ 10, with a connected payment
+    account), `decrease_ask`, and `decrease_keep` with a difference >= R$ 10; False on
+    `increase_free` / `no_change` / `blocked`. AWAITING ->
+    `deposit_lifecycle.requote_amount_cents(...) != deposit.amount_cents`, but only with a
+    readable price (no price / service off = no notice, like `blocked`).
     A clinic without sinal, or rows that do not belong together, -> False."""
     if (
         not tenant.pix_deposit_enabled
@@ -855,15 +880,8 @@ async def price_notice_needed(
     ):
         return False
     if deposit.status == PixDepositStatus.PAID:
-        decision = await service_change.preview_service_change(
-            session,
-            tenant=tenant,
-            appointment=appointment,
-            deposit=deposit,
-            new_service=appointment.appointment_type,
-            professional_id=appointment.professional_id,
-            start_at=appointment.start_at,
-            now=now,
+        decision = await service_change.preview_price_requote(
+            session, tenant=tenant, appointment=appointment, deposit=deposit, now=now
         )
         if decision.action == "increase_charge":
             account = await accounts.load_charge_account(
@@ -897,17 +915,29 @@ PriceOpeningKind = Literal[
     "refund_question",  # drop + paid: "quer a diferença de volta?" (svcdiffyes|/svcdiffno|)
     "abated",  # drop + paid, under the limits: discounted on the day
     "requoted",  # not paid yet: the old Pix voided, a new one with the new amount
-    "unchanged",  # the price is back to what was paid: nothing changes
-    "pending",  # opened twice: an adjustment is already open - never a second charge
-    "too_close",  # starts within CHOICE_MIN_LEAD: settled on the day
-    "retry",  # the provider could not void/create right now: try again
-    "not_found",  # not this patient's / clinic's row, or the consultation is gone/suspended
+    "unchanged",  # nothing changes (back to what was paid, a small rise, no readable price)
+    "pending",  # opened twice / something already open: never a second charge
+    "too_close",  # settled on the day: starts within CHOICE_MIN_LEAD, the clinic already
+    # collects a difference (`collect_due`), or no payment account to charge with
+    "retry",  # the provider could not void/create right now, or a payment is in flight
+    "not_found",  # not this patient's / clinic's row, a broken link, an older version of the
+    # consultation, or the consultation is suspended -> the usual opening
+    "closed",  # UB2: the consultation is no longer live (cancelled) or already started
+    # UB2 fix round 1:
+    "already_abated",  # a drop already covered by an abatement told before: nothing changes
+    "sinal_on_day",  # sinal NOT paid: within CHOICE_MIN_LEAD, or the old Pix could not be
+    # voided - the sinal stays as it is and the clinic settles the value at the visit
 ]
 
 
 @dataclass(frozen=True)
 class PriceOpening:
-    """What `open_price_notice` decided; `price_opening_messages` turns it into text/buttons."""
+    """What `open_price_notice` decided; `price_opening_messages` turns it into text/buttons.
+
+    UB2 (contract delta): `service` and `start_at` (the consultation's service name and start,
+    for "O valor da sua consulta (Consulta, 30/11 às 10:00) subiu") were added, both optional.
+    `old_amount_cents` is the voided sinal of a "requoted" opening (the caller hands it to
+    `deposit_lifecycle.recharge_after_edit(reason="price_change")` after the commit)."""
 
     kind: PriceOpeningKind
     appointment_id: UUID | None = None
@@ -916,6 +946,23 @@ class PriceOpening:
     pix_copy_paste: str | None = None
     expires_at: datetime | None = None
     old_amount_cents: int | None = None
+    service: str | None = None
+    start_at: datetime | None = None
+
+
+# `appointment_reminders.answer` of a price notice once opened (mapa-u §2.1).
+ANSWER_OPENED = "opened"
+# The PAID refusals of `service_change.price_requote` that leave the notice UNANSWERED, so the
+# patient can open the link again later: a transient failure, or something else about this sinal
+# still waiting (the patient's answer to it comes first).
+# Fix round 1 (review M4): only a provider OUTAGE retries; a permanent refusal is final.
+_RETRY_REASONS = frozenset({"outage", "deposit_not_paid"})
+_PENDING_REASONS = frozenset({"adjustment_pending", "refund_question_pending", "choice_pending"})
+# The refusals that are final for this notice: the difference is settled on the day. The clinic
+# already collects one (`collect_pending`: its item exists); a PERMANENT refusal of the Pix of
+# the difference (`charge_failed`, `no_payment_account`) hands the difference to the clinic.
+_ON_THE_DAY_REASONS = frozenset({"collect_pending"})
+_HANDED_TO_CLINIC_REASONS = frozenset({"charge_failed", "no_payment_account"})
 
 
 async def open_price_notice(
@@ -926,22 +973,444 @@ async def open_price_notice(
     patient_id: UUID,
     now: datetime,
 ) -> PriceOpening:
-    """The patient opened the e-mail's link (mapa-u §2.3). COMMITS. Checks the row belongs to this
-    clinic and patient, marks it answered (`answered_at`, `answer="opened"`), locks the deposit and
-    decides WITH THE PRICE OF NOW: PAID -> `service_change.price_requote`; AWAITING ->
-    `deposit_lifecycle.requote_awaiting` (voided -> after commit `recharge_after_edit(...,
-    reason="price_change")`); an adjustment already open -> "pending"; start within
-    `CHOICE_MIN_LEAD` -> "too_close"."""
-    raise NotImplementedError(_UB2)
+    """The patient opened the e-mail's link (mapa-u §2.3). COMMITS (or rolls back when nothing
+    was decided). Decides WITH THE PRICE OF NOW, never the e-mail's.
+
+    * The row must be this clinic's `price_change` row, of a consultation of THIS patient, still
+      active (`invalidated_at` NULL) and of the consultation's current start (its version); the
+      consultation must not be suspended. Otherwise (a broken link included) -> "not_found" and
+      the caller sends the usual opening. Nothing is written.
+    * Lock order consultation -> notice row -> deposit (-> adjustment), like every money path.
+    * Opened before (`answered_at` set, or a concurrent opening won the guarded claim) ->
+      "pending", pointing at the earlier message: NEVER a second charge.
+    * The consultation cancelled or already started -> "closed" ("nada muda").
+    * Starts within `service_change.CHOICE_MIN_LEAD` -> "too_close" (PAID: the difference is
+      settled on the day) / "sinal_on_day" (not paid yet: the sinal is settled at the visit).
+    * PAID -> `service_change.price_requote`: Pix of only the difference (`mode="applied"`) ->
+      "pix"; the refund question -> "refund_question"; abated -> "abated"; a small rise / back to
+      the price paid -> "unchanged"; a drop already abated -> "already_abated". A difference the
+      clinic already collects (`collect_due`) -> "too_close"; a PERMANENT refusal of the Pix
+      (`charge_failed`, `no_payment_account`) -> "too_close" + `collect_due` + a
+      `service_diff_unpaid` item for the clinic; an unreadable price -> "unchanged".
+    * AWAITING -> `deposit_lifecycle.requote_awaiting` (only with a readable price - a service
+      switched off is not a price change, UB1 review I2): "voided" -> "requoted" (the caller
+      runs `recharge_after_edit(..., reason="price_change")` after this commit); same amount ->
+      "unchanged"; "void_failed" -> "sinal_on_day" (+ a clinic item when the sinal went up).
+    * A provider OUTAGE, a payment in flight, and another open adjustment of the sinal ->
+      "retry" / "pending" WITHOUT answering the notice (rolled back): the same link works again
+      later.
+
+    A decided opening marks the row answered (`answered_at=now`, `answer="opened"`). Logs: ids
+    and kinds only."""
+    log = {"tenant_id": str(tenant.id), "reminder_id": str(reminder_id)}
+    row = await session.scalar(
+        select(AppointmentReminder).where(
+            AppointmentReminder.id == reminder_id,
+            AppointmentReminder.tenant_id == tenant.id,
+            AppointmentReminder.kind == REMINDER_KIND_PRICE_CHANGE,
+        )
+    )
+    if row is None:
+        return await _not_found(session, "no_row", log)
+    appointment = await session.scalar(
+        select(Appointment)
+        .where(
+            Appointment.id == row.appointment_id,
+            Appointment.tenant_id == tenant.id,
+            Appointment.patient_id == patient_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if appointment is None:
+        return await _not_found(session, "not_this_patient", log)
+    log["appointment_id"] = str(appointment.id)
+    if (
+        row.invalidated_at is not None
+        or appointment.start_at is None
+        or _as_utc(row.appointment_start_at) != _as_utc(appointment.start_at)
+    ):
+        return await _not_found(session, "older_version", log)
+    if await is_suspended(session, tenant_id=tenant.id, appointment_id=appointment.id):
+        return await _not_found(session, "suspended", log)
+
+    base = {
+        "appointment_id": appointment.id,
+        "service": appointment.appointment_type or None,
+        "start_at": _as_utc(appointment.start_at),
+    }
+    deposit = await session.scalar(
+        select(PixDeposit).where(
+            PixDeposit.tenant_id == tenant.id, PixDeposit.appointment_id == appointment.id
+        )
+    )
+    if row.answered_at is not None or not await _claim_notice(session, row, now=now):
+        return await _settle(
+            session, await _pending(session, tenant, deposit, base), log, commit=False
+        )
+    if not is_live_status(appointment.status) or _as_utc(appointment.start_at) <= _as_utc(now):
+        return await _settle(session, PriceOpening(kind="closed", **base), log)
+    if (
+        deposit is None
+        or not tenant.pix_deposit_enabled
+        or deposit.status not in (PixDepositStatus.PAID, PixDepositStatus.AWAITING)
+    ):
+        return await _settle(session, PriceOpening(kind="unchanged", **base), log)
+    if _as_utc(appointment.start_at) - _as_utc(now) < service_change.CHOICE_MIN_LEAD:
+        # Fix round 1 (review M5): an UNPAID sinal has no "difference" - the sinal is settled.
+        close = "too_close" if deposit.status == PixDepositStatus.PAID else "sinal_on_day"
+        return await _settle(session, PriceOpening(kind=close, **base), log)
+    if deposit.status == PixDepositStatus.PAID:
+        return await _open_paid(session, tenant, appointment, deposit, base, log, now=now)
+    return await _open_awaiting(session, tenant, appointment, deposit, base, log, now=now)
+
+
+async def _not_found(session: AsyncSession, why: str, log: dict) -> PriceOpening:
+    await session.rollback()
+    logger.info("price_change_opening_not_found", why=why, **log)
+    return PriceOpening(kind="not_found")
+
+
+async def _claim_notice(session: AsyncSession, row: AppointmentReminder, *, now: datetime) -> bool:
+    """Guarded `answered_at IS NULL -> now`: of two concurrent openings exactly one decides
+    (the consultation lock already serializes them on Postgres; this is the belt)."""
+    claimed = await session.execute(
+        update(AppointmentReminder)
+        .where(
+            AppointmentReminder.id == row.id,
+            AppointmentReminder.tenant_id == row.tenant_id,
+            AppointmentReminder.answered_at.is_(None),
+        )
+        .values(answered_at=now, answer=ANSWER_OPENED)
+        .returning(AppointmentReminder.id)
+        .execution_options(synchronize_session=False)
+    )
+    return claimed.scalar_one_or_none() is not None
+
+
+async def _settle(
+    session: AsyncSession, opening: PriceOpening, log: dict, *, commit: bool = True
+) -> PriceOpening:
+    """Commit the decided opening (the claimed notice + whatever the money path wrote), or roll
+    back an undecided one (the notice stays unanswered: the link works again)."""
+    if commit:
+        await session.commit()
+    else:
+        await session.rollback()
+    logger.info("price_change_opened", kind=opening.kind, **log)
+    return opening
+
+
+async def _pending(
+    session: AsyncSession, tenant: Tenant, deposit: PixDeposit | None, base: dict
+) -> PriceOpening:
+    """What is already open for this sinal, so "pending" can point at it: a Pix of a difference
+    (with its deadline) or a question still waiting; nothing -> the plain "já enviado" text."""
+    if deposit is not None:
+        open_one = await service_change.open_adjustment(
+            session, tenant_id=tenant.id, deposit_id=deposit.id
+        )
+        if open_one is not None:
+            return PriceOpening(
+                kind="pending",
+                adjustment_id=open_one.id,
+                diff_cents=int(open_one.diff_cents or 0),
+                expires_at=(
+                    _as_utc(open_one.expires_at)
+                    if open_one.status == STATUS_AWAITING_PAYMENT and open_one.expires_at
+                    else None
+                ),
+                **base,
+            )
+    return PriceOpening(kind="pending", **base)
+
+
+async def _open_paid(
+    session: AsyncSession,
+    tenant: Tenant,
+    appointment: Appointment,
+    deposit: PixDeposit,
+    base: dict,
+    log: dict,
+    *,
+    now: datetime,
+) -> PriceOpening:
+    result = await service_change.price_requote(
+        session, tenant=tenant, appointment=appointment, deposit=deposit, now=now
+    )
+    if result.kind == "applied_awaiting_payment":
+        opening = PriceOpening(
+            kind="pix",
+            adjustment_id=result.adjustment_id,
+            diff_cents=result.diff_cents,
+            pix_copy_paste=result.pix_copy_paste,
+            expires_at=result.expires_at,
+            **base,
+        )
+        return await _settle(session, opening, log)
+    if result.kind == "asked":
+        opening = PriceOpening(
+            kind="refund_question",
+            adjustment_id=result.adjustment_id,
+            diff_cents=result.diff_cents,
+            **base,
+        )
+        return await _settle(session, opening, log)
+    if result.kind == "applied_now":
+        if result.decision == "decrease_keep":
+            opening = PriceOpening(
+                kind="abated",
+                adjustment_id=result.adjustment_id,
+                diff_cents=result.diff_cents,
+                **base,
+            )
+        elif result.reason == "already_abated":  # fix round 1 (review M5): not "voltou"
+            opening = PriceOpening(kind="already_abated", diff_cents=0, **base)
+        else:  # increase_free / no_change
+            opening = PriceOpening(kind="unchanged", diff_cents=result.diff_cents, **base)
+        return await _settle(session, opening, log)
+    reason = result.reason or ""
+    log["reason"] = reason
+    if reason in _RETRY_REASONS:
+        return await _settle(session, PriceOpening(kind="retry", **base), log, commit=False)
+    if reason in _PENDING_REASONS:
+        pending = await _pending(session, tenant, deposit, base)
+        return await _settle(session, pending, log, commit=False)
+    if reason == "appointment_not_live":
+        return await _settle(session, PriceOpening(kind="closed", **base), log)
+    if reason in _ON_THE_DAY_REASONS:
+        return await _settle(session, PriceOpening(kind="too_close", **base), log)
+    if reason in _HANDED_TO_CLINIC_REASONS:
+        await _collect_paid_difference(
+            session, tenant, appointment, deposit, int(result.diff_cents or 0), now=now
+        )
+        opening = PriceOpening(kind="too_close", diff_cents=result.diff_cents, **base)
+        return await _settle(session, opening, log)
+    # `price_unavailable` (or anything new): nothing to charge or return now.
+    return await _settle(session, PriceOpening(kind="unchanged", **base), log)
+
+
+async def _open_awaiting(
+    session: AsyncSession,
+    tenant: Tenant,
+    appointment: Appointment,
+    deposit: PixDeposit,
+    base: dict,
+    log: dict,
+    *,
+    now: datetime,
+) -> PriceOpening:
+    # UB1 review I2: an unreadable price (service off / gone / no price) reads as a sinal of 0 -
+    # never void a sinal because the clinic stopped OFFERING the service.
+    _name, price_text = await _resolve_service_and_price(session, tenant, appointment)
+    price_cents = parse_brl_to_cents(price_text)
+    if price_cents is None or price_cents <= 0:
+        return await _settle(session, PriceOpening(kind="unchanged", **base), log)
+    old_amount = int(deposit.amount_cents or 0)
+    # Last fallible step before the commit (`requote_awaiting`'s contract): nothing else is
+    # written after it but the commit itself.
+    outcome = await requote_awaiting(
+        session, tenant=tenant, appointment=appointment, deposit=deposit, now=now
+    )
+    log["outcome"] = outcome
+    if outcome == "voided":
+        opening = PriceOpening(kind="requoted", old_amount_cents=old_amount, **base)
+        return await _settle(session, opening, log)
+    if outcome == "unchanged":
+        # Fix round 1 (review M5): "voltou ao de antes" only when the sinal under the lock is
+        # still the unpaid one and the amount truly did not move; otherwise it left AWAITING
+        # meanwhile (expired, paid) and nothing is claimed about the price.
+        same = deposit.status == PixDepositStatus.AWAITING
+        opening = PriceOpening(kind="unchanged", diff_cents=0 if same else None, **base)
+        return await _settle(session, opening, log)
+    if outcome == "void_failed":
+        # Fix round 1 (review M4): the old Pix could not be voided (no account, provider) - it
+        # stays valid; the notice is closed and the clinic settles the value at the visit.
+        await _collect_unpaid_difference(session, tenant, appointment, deposit, old_amount)
+        return await _settle(session, PriceOpening(kind="sinal_on_day", **base), log)
+    # "payment_in_flight": decided as PAID on the next opening.
+    return await _settle(session, PriceOpening(kind="retry", **base), log, commit=False)
+
+
+async def _collect_paid_difference(
+    session: AsyncSession,
+    tenant: Tenant,
+    appointment: Appointment,
+    deposit: PixDeposit,
+    diff_cents: int,
+    *,
+    now: datetime,
+) -> None:
+    """Fix round 1 (review M4): the Pix of the difference was refused for good (or there is no
+    payment account). Recorded exactly like an unpaid price rise (`collect_due`, mode
+    `applied`, the price change's `pending_edit`), so the sinal's arithmetic and every later
+    opening see it (`collect_pending`), plus ONE `service_diff_unpaid` item ("cobrar {valor}")
+    under `adjustment_queries.unpaid_item_key` - the key a cancellation closes. Never commits."""
+    if diff_cents <= 0:
+        return
+    held = await service_change.held_deposit_cents(session, deposit)
+    service = (appointment.appointment_type or service_change.DEFAULT_SERVICE_LABEL)[:120]
+    adjustment = DepositAdjustment(
+        id=uuid4(),
+        tenant_id=tenant.id,
+        deposit_id=deposit.id,
+        appointment_id=appointment.id,
+        kind=KIND_INCREASE,
+        mode=MODE_APPLIED,
+        status=STATUS_COLLECT_DUE,
+        old_service=service,
+        new_service=service,
+        pending_edit=service_change._price_change_edit(  # noqa: SLF001 - one shape, one place
+            appointment, held, held + diff_cents
+        ),
+        diff_cents=diff_cents,
+        resolved_at=now,
+    )
+    session.add(adjustment)
+    await session.flush()
+    await attention.open_attention_item(
+        session,
+        tenant_id=tenant.id,
+        reason=REASON_SERVICE_DIFF_UNPAID,
+        dedupe_key=adjustment_queries.unpaid_item_key(deposit.provider, adjustment.id),
+        provider=deposit.provider,
+        patient_id=deposit.patient_id,
+        amount_cents=diff_cents,
+        slot_start=appointment.start_at,
+        slot_end=appointment.end_at,
+        service_label=service,
+    )
+
+
+async def _collect_unpaid_difference(
+    session: AsyncSession,
+    tenant: Tenant,
+    appointment: Appointment,
+    deposit: PixDeposit,
+    old_amount: int,
+) -> None:
+    """Fix round 1 (review M4): the UNPAID sinal could not be re-quoted (its old Pix stays). When
+    the new sinal is HIGHER, the clinic gets ONE `service_diff_unpaid` item for the difference
+    (dedupe per price move: `price_awaiting:{consulta}:{antigo}:{novo}`); a lower one needs no
+    item (the visit's remaining price already accounts for the larger sinal). Never commits."""
+    new_amount = await requote_amount_cents(session, tenant=tenant, appointment=appointment)
+    if new_amount <= old_amount:
+        return
+    provider = deposit.provider or tenant.payment_provider or "asaas"
+    reference = f"price_awaiting:{appointment.id}:{old_amount}:{new_amount}"
+    await attention.open_attention_item(
+        session,
+        tenant_id=tenant.id,
+        reason=REASON_SERVICE_DIFF_UNPAID,
+        dedupe_key=attention.attention_dedupe_key(provider, reference, REASON_SERVICE_DIFF_UNPAID),
+        provider=provider,
+        patient_id=appointment.patient_id,
+        amount_cents=new_amount - old_amount,
+        slot_start=appointment.start_at,
+        slot_end=appointment.end_at,
+        service_label=appointment.appointment_type,
+    )
+
+
+def _when(start_at: datetime | None, zone: ZoneInfo) -> str | None:
+    if start_at is None:
+        return None
+    return _as_utc(start_at).astimezone(zone).strftime("%d/%m às %H:%M")
+
+
+def _hhmm(value: datetime | None, zone: ZoneInfo) -> str | None:
+    return _as_utc(value).astimezone(zone).strftime("%H:%M") if value is not None else None
+
+
+PRICE_CLOSED_TEXT = "Essa consulta já foi cancelada ou já aconteceu, então nada muda no sinal."
+PRICE_TOO_CLOSE_TEXT = "A diferença do sinal será acertada no dia da consulta."
+PRICE_RETRY_TEXT = (
+    "Não consegui atualizar o sinal da sua consulta agora. Abra o link do e-mail de novo "
+    "em alguns minutos."
+)
+PRICE_BACK_TEXT = "O valor da sua consulta voltou ao de antes; nada muda no seu sinal."
+PRICE_SMALL_TEXT = "O valor da sua consulta mudou pouco; nada muda no seu sinal."
+PRICE_NOTHING_TEXT = "Nada muda no seu sinal por enquanto. Se tiver dúvida, fale com a clínica."
+PRICE_SENT_BEFORE_TEXT = "O que muda no seu sinal já foi enviado acima, nesta conversa."
+# Fix round 1 (review M5).
+PRICE_ALREADY_ABATED_TEXT = (
+    "A redução no valor da sua consulta já está descontada do seu sinal; nada muda."
+)
+PRICE_SINAL_ON_DAY_TEXT = (
+    "O sinal da sua consulta fica como está; a clínica acerta o valor no dia da consulta."
+)
+PRICE_ANSWER_ABOVE_TEXT = (
+    "Antes, responda a mensagem acima sobre a diferença do sinal desta consulta."
+)
 
 
 def price_opening_messages(opening: PriceOpening, *, tenant: Tenant) -> list[notify.Outgoing]:
     """The first message(s) of the conversation for `opening` (texts in mapa-u §4.6), delivered
-    after the commit by `notify.deliver` on the patient's channel. Pure."""
-    raise NotImplementedError(_UB2)
+    after the commit by `notify.deliver` on the patient's channel. Pure.
+
+    "requoted" and "not_found" have NO message here: the new sinal's own Pix message
+    (`recharge_after_edit(reason="price_change")`, opening with "O valor da sua consulta mudou e
+    o sinal também...") is the first message, and "not_found" falls back to the usual opening."""
+    zone = _zone(tenant)
+    kind = opening.kind
+    value = format_brl(opening.diff_cents or 0)
+    service = opening.service or service_change.DEFAULT_SERVICE_LABEL
+    if kind == "pix":
+        when = _when(opening.start_at, zone)
+        about = f"{service}, {when}" if when else service
+        until = _hhmm(opening.expires_at, zone)
+        lines = [
+            f"O valor da sua consulta ({about}) subiu. Falta pagar a diferença do sinal: {value}.",
+            f"Use o Pix abaixo até {until}." if until else "Use o Pix abaixo.",
+            "Se não pagar, sua consulta continua marcada e a clínica combina a diferença com você.",
+        ]
+        lines.extend(pix_code_tail(opening.pix_copy_paste))
+        return [notify.Text("\n".join(lines))]
+    if kind == "refund_question":
+        body = (
+            f"O valor da sua consulta ({service}) baixou e o sinal que você pagou ficou {value} "
+            "maior. Quer essa diferença de volta?"
+        )
+        return [
+            notify.Buttons(
+                body, tuple(service_change.refund_question_buttons(opening.adjustment_id))
+            )
+        ]
+    if kind == "abated":
+        return [
+            notify.Text(
+                "O valor da sua consulta baixou. A diferença de "
+                f"{value} do sinal será descontada no dia da consulta."
+            )
+        ]
+    if kind == "unchanged":
+        if opening.diff_cents is None:
+            return [notify.Text(PRICE_NOTHING_TEXT)]
+        return [notify.Text(PRICE_SMALL_TEXT if opening.diff_cents else PRICE_BACK_TEXT)]
+    if kind == "pending":
+        if opening.adjustment_id is None:
+            return [notify.Text(PRICE_SENT_BEFORE_TEXT)]
+        until = _hhmm(opening.expires_at, zone)
+        if until is not None:
+            return [
+                notify.Text(f"O Pix da diferença já está na mensagem acima e vale até {until}.")
+            ]
+        return [notify.Text(PRICE_ANSWER_ABOVE_TEXT)]
+    if kind == "too_close":
+        return [notify.Text(PRICE_TOO_CLOSE_TEXT)]
+    if kind == "retry":
+        return [notify.Text(PRICE_RETRY_TEXT)]
+    if kind == "closed":
+        return [notify.Text(PRICE_CLOSED_TEXT)]
+    if kind == "already_abated":
+        return [notify.Text(PRICE_ALREADY_ABATED_TEXT)]
+    if kind == "sinal_on_day":
+        return [notify.Text(PRICE_SINAL_ON_DAY_TEXT)]
+    return []  # "requoted" (the new Pix speaks), "not_found" (the usual opening)
 
 
 __all__ = [
+    "ANSWER_OPENED",
     "EMAIL_TEMPLATE",
     "PRICE_MAIL_DAILY_CAP",
     "PRICE_NOTICE_MAX_ATTEMPTS",

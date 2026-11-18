@@ -522,6 +522,9 @@ def test_the_price_opening_shape():
         "too_close",
         "retry",
         "not_found",
+        "closed",  # UB2: the consultation is no longer live (contract delta)
+        "already_abated",  # UB2 fix round 1: a drop already abated
+        "sinal_on_day",  # UB2 fix round 1: an unpaid sinal settled at the visit
     }
     opening = price_change.PriceOpening(kind="not_found")
     assert (
@@ -531,7 +534,9 @@ def test_the_price_opening_shape():
         opening.pix_copy_paste,
         opening.expires_at,
         opening.old_amount_cents,
-    ) == (None, None, None, None, None, None)
+        opening.service,  # UB2 (contract delta): for the opening's text
+        opening.start_at,
+    ) == (None, None, None, None, None, None, None, None)
     with pytest.raises(AttributeError):  # frozen
         opening.kind = "pix"  # type: ignore[misc]
 
@@ -592,18 +597,15 @@ def test_price_change_keyword_only_parameters():
     )
 
 
-async def test_the_price_change_stubs_raise_until_ub2_lands():
-    # UB1 landed (the sweep and its job: tests/test_sinal_trocas_ub1_*); the opening is UB2's.
-    now = datetime.now(UTC)
-    with pytest.raises(NotImplementedError):
-        await price_change.open_price_notice(
-            None, tenant=None, reminder_id=uuid4(), patient_id=uuid4(), now=now
-        )
-    with pytest.raises(NotImplementedError):
-        opening = price_change.PriceOpening(kind="not_found")
-        price_change.price_opening_messages(opening, tenant=None)
-    with pytest.raises(NotImplementedError):
-        await price_change_opening.send_price_change_opening(None, None, reminder_id=uuid4())
+def test_no_price_change_stub_is_left():
+    # UB1 landed the sweep (tests/test_sinal_trocas_ub1_*) and UB2 the opening
+    # (tests/test_sinal_trocas_ub2_*): no frozen function still raises NotImplementedError.
+    for module, name in (
+        (price_change, "open_price_notice"),
+        (price_change, "price_opening_messages"),
+        (price_change_opening, "send_price_change_opening"),
+    ):
+        assert "NotImplementedError" not in inspect.getsource(getattr(module, name))
 
 
 # --- the new modules import alone (a cycle only shows for some import orders) -----------------
