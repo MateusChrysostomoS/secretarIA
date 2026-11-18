@@ -622,4 +622,5 @@ def test_the_deposit_wire_carries_the_held_total_and_the_pending_difference():
         "needs_attention": False,
         "held_cents": 9000,
         "pending_difference_cents": 3000,
+        "pending_difference_mode": None,  # TASK-085 R: none / a legacy row
     }

@@ -138,10 +138,8 @@ ALLOWLIST: dict[tuple[str, str], str] = {
     ("services/staff_appointment_edit.py", "_resolve_target"): (
         "D6: resolve_entry_at_unit's own duration, else the service base as before"
     ),
-    ("services/staff_appointment_edit.py", "_own_price"): "reads ResolvedTerms vs the base price",
-    ("services/staff_appointment_edit.py", "_unit_reprices"): (
-        "compares ResolvedTerms of resolve_entry_at_unit (old unit vs new unit)"
-    ),
+    # TASK-085 R (D-R1): `_own_price` / `_unit_reprices` are gone - every money change goes
+    # through the engine, which prices the unit itself (service_change._price_cents).
     ("services/tenant_config.py", "_runtime_appointment_type"): (
         "load_tenant_config bottleneck: base, then entry_shown_terms (D3) overrides"
     ),

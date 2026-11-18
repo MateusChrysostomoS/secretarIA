@@ -42,6 +42,12 @@ class AwaitingPaymentRead(BaseModel):
     service: str | None = None
     expires_at: datetime
     professional_id: str | None = None
+    # TASK-085 R (contrato §3.9), additive: "booking" - a new booking a patient is paying the sinal
+    # for (no appointment yet); "difference" - the NEW window of a change waiting for the Pix of
+    # its difference (D-R4), held for `appointment_id`, the consultation it would replace (which
+    # stays on the agenda, suspended). A consumer that does not know the key ignores it.
+    kind: Literal["booking", "difference"] = "booking"
+    appointment_id: str | None = None
 
 
 class CalendarDepositRead(BaseModel):
@@ -70,6 +76,12 @@ class CalendarDepositRead(BaseModel):
     # none. Amounts only - never the Pix code or the charge id.
     held_cents: int | None = None
     pending_difference_cents: int | None = None
+    # TASK-085 R (contrato §3.9), additive: how the open change of this sinal waits - "suspend"
+    # (D-R4: the consultation is SUSPENDED until the Pix of the difference is paid or the patient
+    # chooses; the clinic may only free the slot), "applied" (D-R5: the change already stands and
+    # the Pix of the difference is open); null = none open (or a legacy one). A consumer must
+    # treat an unknown value as "suspend" (fail closed).
+    pending_difference_mode: Literal["suspend", "applied"] | None = None
 
 
 class CalendarReminderRead(BaseModel):
@@ -191,6 +203,13 @@ class CalendarEventRead(BaseModel):
     unit_id: str | None = None
     unit_name: str | None = None
     unit_address: str | None = None
+    # TASK-085 R D-R9 (contrato §3.9), additive: the consultation waits for the Pix of the
+    # difference of a change - the patient's or the clinic's (`deposit.pending_difference_mode`
+    # "suspend").
+    # Editar/Remarcar, Cancelar, falta, compareceu and every other change answer 409
+    # `appointment_suspended`; only "Liberar horário" works. None for an event with no local
+    # Appointment (like the other appointment keys).
+    suspended: bool | None = None
 
 
 class AppointmentCreate(BaseModel):
@@ -439,23 +458,35 @@ class AppointmentRelease(BaseModel):
 
 
 class AppointmentServiceChangeRead(BaseModel):
-    """A new service on an appointment whose Pix sinal is PAID (plan 2026-10-26 Task 7).
+    """A change of a money field (service, unit, doctor, convênio) on an appointment whose Pix
+    sinal is PAID (plan 2026-10-26 Task 7; TASK-085 R).
 
     `status`:
-    * `awaiting_payment` - the patient was sent a Pix of only the difference
-      (`diff_cents`, valid until `expires_at`); the appointment keeps `old_service` (and
-      its agenda slot) until that Pix is paid;
+    * `suspended` (TASK-085 R D-R4, a clinic that books only after the sinal) - the patient was
+      sent a Pix of only the difference (`diff_cents`, valid until `expires_at`); NOTHING of the
+      change was written: the appointment keeps its current terms and slot, is suspended (only
+      "Liberar horário" works) and the new window is held until the Pix is paid or the patient
+      chooses;
+    * `applied_awaiting_payment` (TASK-085 R D-R5) - the change was written NOW and the patient
+      was sent the Pix of only the difference; unpaid, the clinic gets an item to collect it;
+    * `awaiting_payment` - the legacy deferred mode: the patient was sent a Pix of only the
+      difference; the appointment keeps `old_service` (and its agenda slot) until that Pix is
+      paid, without suspension;
     * `asked` - the service changed now and the patient was asked whether they want the
       difference (`diff_cents`) back; a "yes" opens a payment-attention item for the clinic;
     * `applied_now` - the service changed now; nothing to pay or ask (or, 2026-10-27, the Pix
       of the difference could not be created: the patient is told the difference is settled
       with the clinic and a `service_diff_collect_due` attention item is opened).
-    `patient_notice` is the delivery code of THAT message (same vocabulary as the
-    appointment's `patient_notice`; null for `applied_now` unless the difference is to be
-    collected). Never carries the Pix code.
+    `new_service` is how the new consultation is named (the service, plus " com {médico}" /
+    " pelo {convênio}" / " na Unidade X" when those change). `patient_notice` is the delivery
+    code of THAT message (same vocabulary as the appointment's `patient_notice`; null for
+    `applied_now` unless the difference is to be collected). Never carries the Pix code. A
+    consumer must treat an unknown `status` as "nothing changed yet" (fail closed).
     """
 
-    status: Literal["awaiting_payment", "asked", "applied_now"]
+    status: Literal[
+        "awaiting_payment", "applied_awaiting_payment", "suspended", "asked", "applied_now"
+    ]
     diff_cents: int
     old_service: str
     new_service: str
@@ -479,8 +510,9 @@ class AppointmentActionRead(AppointmentRead):
 
 class AppointmentEditRead(AppointmentActionRead):
     """POST /appointments/{id}/edit: the action read plus `service_change`, set (non-null)
-    only when a new service met a PAID sinal (plan 2026-10-26 Task 7). Additive: the other
-    clinic actions keep `AppointmentActionRead`'s keys."""
+    only when a change of a money field met a PAID sinal and the sinal moved (plan 2026-10-26
+    Task 7; TASK-085 R). Additive: the other clinic actions keep `AppointmentActionRead`'s
+    keys."""
 
     service_change: AppointmentServiceChangeRead | None = None
     # TASK-083 spec §7.4: see AppointmentWriteRead.conflicts_other_agenda.

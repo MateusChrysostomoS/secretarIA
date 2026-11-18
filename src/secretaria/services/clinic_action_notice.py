@@ -19,6 +19,7 @@ These functions commit (the card's row must exist before the patient can tap it)
 never raise. Logs carry ids and codes only.
 """
 
+import math
 from collections.abc import Sequence
 from datetime import datetime
 
@@ -378,37 +379,54 @@ async def notify_service_change(
     allow_paid: bool,
     now: datetime,
 ) -> NoticeResult | None:
-    """The money message of a clinic's service change, with the engine's own copy:
+    """The money message of a clinic's change on a paid sinal, with the engine's own copy:
 
-    * `awaiting_payment` -> the difference and "só muda depois que o pagamento for
-      confirmado" and the Pix copia-e-cola at the end of the SAME message (fenced, see
-      `payments/pix_message`; one message, never a second one with the bare code);
+    * `suspended` (TASK-085 R D-R4) -> the difference, "só muda depois que o pagamento for
+      confirmado", both times kept until the deadline and - unpaid - the patient is asked what to
+      do; the Pix copia-e-cola at the end of the SAME message (fenced, see `payments/pix_message`;
+      one message, never a second one with the bare code);
+    * `awaiting_payment` (the legacy deferred mode) -> the same without the reserved times
+      ("se não for pago, a consulta continua como está");
+    * `applied_awaiting_payment` (TASK-085 R D-R5) -> "a clínica alterou sua consulta para X;
+      falta pagar a diferença" + the code (the change already stands);
     * `asked` -> "quer a diferença de volta?" with the two fixed ACTION buttons
       (`svcdiffyes|<adjustment>` / `svcdiffno|<adjustment>`, routed on both channels);
     * `applied_now` -> nothing (the "A clínica alterou" card already says it): None - except
       when the Pix of the difference could not be created (`DECISION_COLLECT`, follow-up B):
       then "a diferença será acertada diretamente com a clínica".
-    Never promises an automatic refund. Never raises (send_clinic_notice)."""
+    The code's validity is the minutes left until `expires_at` (a suspended Pix may end before
+    the clinic's TTL - it never outlives the visits' cutoff). Never promises an automatic
+    refund. Never raises (send_clinic_notice)."""
     key = f"svcdiff:{change.adjustment_id}"
-    if change.status == "awaiting_payment":
-        ttl = tenant.deposit_hold_ttl_minutes or service_change.DEFAULT_PIX_TTL_MINUTES
-        result = await send_clinic_notice(
+    if change.status in ("suspended", "awaiting_payment", "applied_awaiting_payment"):
+        minutes = _pix_minutes(tenant, change.expires_at, now)
+        if change.status == "applied_awaiting_payment":
+            body = service_change.difference_pix_applied_text(
+                change.new_service,
+                change.diff_cents,
+                change.pix_copy_paste,
+                minutes,
+                source=SOURCE_HUB,
+            )
+        else:
+            body = service_change.difference_pix_text(
+                change.new_service,
+                change.diff_cents,
+                change.pix_copy_paste,
+                minutes,
+                source=SOURCE_HUB,
+                held_new_slot=change.status == "suspended",
+            )
+        return await send_clinic_notice(
             session,
             tenant,
             appointment,
             patient,
-            body=service_change.difference_pix_text(
-                change.new_service,
-                change.diff_cents,
-                change.pix_copy_paste,
-                ttl,
-                source=SOURCE_HUB,
-            ),
+            body=body,
             allow_paid=allow_paid,
             usage_key=key,
             now=now,
         )
-        return result
     if (
         change.status == "applied_now"
         and change.decision == service_change.DECISION_COLLECT
@@ -439,3 +457,13 @@ async def notify_service_change(
             now=now,
         )
     return None
+
+
+def _pix_minutes(tenant: Tenant, expires_at: datetime | None, now: datetime) -> int:
+    """How long the Pix of the difference is valid, in whole minutes (the clinic's TTL at most;
+    at least 1)."""
+    ttl = tenant.deposit_hold_ttl_minutes or service_change.DEFAULT_PIX_TTL_MINUTES
+    if expires_at is None:
+        return ttl
+    left = (as_utc(expires_at) - as_utc(now)).total_seconds() / 60
+    return max(1, min(ttl, math.ceil(left)))

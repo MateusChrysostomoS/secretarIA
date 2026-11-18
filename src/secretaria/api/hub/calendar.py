@@ -56,6 +56,11 @@ from secretaria.models import (
     Unit,
 )
 from secretaria.models.appointment import LIVE_APPOINTMENT_STATUSES
+from secretaria.models.deposit_adjustment import (
+    MODE_SUSPEND,
+    SUSPENDED_STATUSES,
+    DepositAdjustment,
+)
 from secretaria.models.patient import Patient
 from secretaria.models.pix_deposit import PixDepositStatus
 from secretaria.schemas.calendar import (
@@ -168,6 +173,24 @@ async def _refuse_if_slot_is_held(
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail={"code": "slot_held_awaiting_payment", "message": SLOT_HELD_MESSAGE},
+        )
+
+
+async def _refuse_if_suspended(session: AsyncSession, tenant: Tenant, appt: Appointment) -> None:
+    """TASK-085 R D-R9 (contrato §3.9): a consultation waiting for the Pix of the difference of a
+    change (the patient's or the clinic's) is SUSPENDED - the clinic may only free its slot
+    ("Liberar horário", POST /release, which closes the pending change). Every other change of
+    it is 409 `appointment_suspended`, raised before Google, the money or the patient are
+    touched."""
+    if await adjustment_queries.is_suspended(
+        session, tenant_id=tenant.id, appointment_id=appt.id
+    ):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=_detail(
+                staff_appointment_edit.APPOINTMENT_SUSPENDED,
+                staff_appointment_edit.APPOINTMENT_SUSPENDED_MESSAGE,
+            ),
         )
 
 
@@ -565,7 +588,14 @@ def _deposit_read(
         needs_attention=view.needs_attention,
         held_cents=view.held_cents,
         pending_difference_cents=view.pending_difference_cents,
+        pending_difference_mode=_difference_mode(view),
     )
+
+
+def _difference_mode(view: deposit_lifecycle.AppointmentDepositView | None) -> str | None:
+    """TASK-085 R: the open change's `mode` as the wire knows it ("suspend" / "applied")."""
+    mode = getattr(view, "pending_difference_mode", None) if view is not None else None
+    return mode if mode in ("suspend", "applied") else None
 
 
 def _reminder_read(reminder: AppointmentReminder) -> CalendarReminderRead:
@@ -991,6 +1021,9 @@ async def list_events(
                 unit_id=str(unit_id) if unit is not None else None,
                 unit_name=unit[0] if unit is not None else None,
                 unit_address=(unit[1] or None) if unit is not None else None,
+                suspended=(_difference_mode(deposits.get(row.id)) == "suspend")
+                if row is not None
+                else None,
             )
         )
     return reads
@@ -1028,18 +1061,42 @@ async def list_awaiting_payment(
                 )
             )
         )
-    return [
-        AwaitingPaymentRead(
-            id=str(hold.id),
-            start=hold.start_at,
-            end=hold.end_at,
-            service=hold.appointment_type,
-            expires_at=hold.expires_at,
-            professional_id=str(hold.professional_id) if hold.professional_id else None,
+    # TASK-085 R (contrato §3.9): the NEW window of a change waiting for the Pix of its
+    # difference (D-R4) - held while its change is open (awaiting the Pix, or the patient
+    # choosing after it expired). ONE tenant-scoped query for the page.
+    adjustment_ids = [hold.adjustment_id for hold in holds if hold.adjustment_id is not None]
+    differences: dict[UUID, UUID | None] = {}
+    if adjustment_ids:
+        rows = await session.execute(
+            select(DepositAdjustment.id, DepositAdjustment.appointment_id).where(
+                DepositAdjustment.tenant_id == tenant.id,
+                DepositAdjustment.id.in_(adjustment_ids),
+                DepositAdjustment.mode == MODE_SUSPEND,
+                DepositAdjustment.status.in_(SUSPENDED_STATUSES),
+            )
         )
-        for hold in holds
-        if hold.charge_id in live
-    ]
+        differences = {adjustment_id: appointment_id for adjustment_id, appointment_id in rows}
+    reads: list[AwaitingPaymentRead] = []
+    for hold in holds:
+        if hold.charge_id is not None and hold.charge_id in live:
+            kind, appointment_id = "booking", None
+        elif hold.adjustment_id is not None and hold.adjustment_id in differences:
+            kind, appointment_id = "difference", differences[hold.adjustment_id]
+        else:
+            continue
+        reads.append(
+            AwaitingPaymentRead(
+                id=str(hold.id),
+                start=hold.start_at,
+                end=hold.end_at,
+                service=hold.appointment_type,
+                expires_at=hold.expires_at,
+                professional_id=str(hold.professional_id) if hold.professional_id else None,
+                kind=kind,
+                appointment_id=str(appointment_id) if appointment_id is not None else None,
+            )
+        )
+    return reads
 
 
 # ---------------------------------------------------------------------------
@@ -1245,6 +1302,7 @@ async def cancel_appointment(
     appt = await _get_appointment(session, tenant, appointment_id, viewer)
     if appt.status == AppointmentStatus.CANCELLED:
         raise HTTPException(status.HTTP_409_CONFLICT, "Appointment already cancelled")
+    await _refuse_if_suspended(session, tenant, appt)
 
     # The agenda that OWNS the event (it was always the clinic's, so a doctor's
     # consultation "cancelled" while its event kept the slot booked), legacy fallback
@@ -1667,10 +1725,16 @@ async def edit_appointment(
     same rule as /reschedule), the doctor e-mail is enqueued (the outbox cron recovers
     a lost enqueue) and the patient gets "A clínica alterou ..." with the three buttons.
 
-    A new service on a PAID sinal (plan 2026-10-26 Task 7) also answers `service_change`
-    and sends the patient either the Pix of the difference (the service changes only when
-    it is paid; nothing about it in "A clínica alterou") or the refund question with its
-    two fixed buttons; a refused change is 409/422/502 `service_change_blocked`.
+    A change of a money field (service, unit, doctor, convênio) on a PAID sinal (plan
+    2026-10-26 Task 7; TASK-085 R) also answers `service_change` and sends the patient ONE
+    money message: the Pix of the difference of a change that waits for it (`suspended`,
+    nothing in "A clínica alterou"), of a change that already stands
+    (`applied_awaiting_payment`), or the refund question with its two fixed buttons; a
+    refused change is 409/422/502 `service_change_blocked`. An UNPAID sinal whose amount the
+    edit changed was voided before the commit and the new one goes after the patient notice
+    (`recharge_after_edit`; also the sinal an edit made due, OQ-10); a Pix being paid or that
+    cannot be voided refuses the edit (409/502 `sinal_requote_blocked`). A SUSPENDED visit is
+    409 `appointment_suspended` (D-R9: only POST /release).
     """
     appt = await _get_appointment(session, tenant, appointment_id, viewer)
     if (
@@ -1707,58 +1771,75 @@ async def edit_appointment(
     except staff_appointment_edit.StaffEditError as exc:
         raise HTTPException(exc.status_code, _detail(exc.code, exc.message, **exc.extra)) from None
 
-    await session.refresh(appt)
-    if outcome.time_changed and (
-        reminder_hooks.enabled_for(tenant) or (appt.confirmation_count or 0) > 0
-    ):
-        await reminder_hooks.after_appointment_rescheduled(appt.id)
-        await session.refresh(appt)
-    if outcome.notice_id is not None:
-        await enqueue_professional_edit_notification(
-            getattr(request.app.state, "arq_pool", None),
-            tenant.id,
-            AppliedEdit(
-                appointment_id=appt.id,
-                moved=outcome.time_changed,
-                old_event_id=None,
-                old_professional_id=None,
-                notice_id=outcome.notice_id,
-                notice_version=outcome.notice_version,
-                changed_fields=outcome.changed_fields,
-            ),
-        )
-    patient = await _patient_of(session, tenant, appt)
-    allow_paid = staff_patient_message.paid_notice_authorised(tenant, body.notify_outside_window)
     notice = None
-    if outcome.changes:  # empty only when the one change waits for the difference Pix
-        notice = await clinic_action_notice.notify_staff_edit(
-            session,
-            tenant,
-            appt,
-            patient,
-            changes=outcome.changes,
-            allow_paid=allow_paid,
-            now=datetime.now(UTC),
-        )
     service_change_read = None
-    if outcome.service_change is not None:
-        # Plan 2026-10-26 Task 7: the Pix of the difference, or "quer a diferença de volta?".
-        money_notice = await clinic_action_notice.notify_service_change(
-            session, tenant, appt, patient, outcome.service_change,
-            allow_paid=allow_paid, now=datetime.now(UTC),
+    # Plain ids: the `finally` below must not touch an ORM row a failed step left expired.
+    edited_tenant_id, edited_appointment_id = tenant.id, appt.id
+    try:
+        await session.refresh(appt)
+        if outcome.time_changed and (
+            reminder_hooks.enabled_for(tenant) or (appt.confirmation_count or 0) > 0
+        ):
+            await reminder_hooks.after_appointment_rescheduled(appt.id)
+            await session.refresh(appt)
+        if outcome.notice_id is not None:
+            await enqueue_professional_edit_notification(
+                getattr(request.app.state, "arq_pool", None),
+                tenant.id,
+                AppliedEdit(
+                    appointment_id=appt.id,
+                    moved=outcome.time_changed,
+                    old_event_id=None,
+                    old_professional_id=None,
+                    notice_id=outcome.notice_id,
+                    notice_version=outcome.notice_version,
+                    changed_fields=outcome.changed_fields,
+                ),
+            )
+        patient = await _patient_of(session, tenant, appt)
+        allow_paid = staff_patient_message.paid_notice_authorised(
+            tenant, body.notify_outside_window
         )
-        change = outcome.service_change
-        service_change_read = AppointmentServiceChangeRead(
-            status=change.status,
-            diff_cents=change.diff_cents,
-            old_service=change.old_service,
-            new_service=change.new_service,
-            adjustment_id=str(change.adjustment_id) if change.adjustment_id else None,
-            expires_at=change.expires_at,
-            patient_notice=money_notice.code if money_notice is not None else None,
-        )
-        if notice is None:
-            notice = money_notice
+        if outcome.changes:  # empty only when the one change waits for the difference Pix
+            notice = await clinic_action_notice.notify_staff_edit(
+                session,
+                tenant,
+                appt,
+                patient,
+                changes=outcome.changes,
+                allow_paid=allow_paid,
+                now=datetime.now(UTC),
+            )
+        if outcome.service_change is not None:
+            # Plan 2026-10-26 Task 7: the Pix of the difference, or "quer a diferença de volta?".
+            money_notice = await clinic_action_notice.notify_service_change(
+                session, tenant, appt, patient, outcome.service_change,
+                allow_paid=allow_paid, now=datetime.now(UTC),
+            )
+            change = outcome.service_change
+            service_change_read = AppointmentServiceChangeRead(
+                status=change.status,
+                diff_cents=change.diff_cents,
+                old_service=change.old_service,
+                new_service=change.new_service,
+                adjustment_id=str(change.adjustment_id) if change.adjustment_id else None,
+                expires_at=change.expires_at,
+                patient_notice=money_notice.code if money_notice is not None else None,
+            )
+            if notice is None:
+                notice = money_notice
+    finally:
+        if outcome.sinal_recharge is not None:
+            # TASK-085 R (contrato §3.7): after the commit and after "A clínica alterou", the
+            # new sinal (D-R6: the open Pix was voided; OQ-10: the edit made one due). In a
+            # `finally`: a notice or hook that fails above must never leave the patient with the
+            # old Pix voided and no new one. Own session, never raises; amount 0 = only the "Pix
+            # anterior cancelado" notice.
+            await deposit_lifecycle.recharge_after_edit(
+                tenant_id=edited_tenant_id,
+                appointment_id=edited_appointment_id,
+                old_amount_cents=outcome.sinal_recharge.old_amount_cents,
+            )
     await session.refresh(appt)
     logger.info(
         "calendar_appointment_edited",
@@ -1789,6 +1870,7 @@ async def reschedule_appointment(
     appt = await _get_appointment(session, tenant, appointment_id, viewer)
     if appt.status == AppointmentStatus.CANCELLED:
         raise HTTPException(status.HTTP_409_CONFLICT, "Cannot reschedule a cancelled appointment")
+    await _refuse_if_suspended(session, tenant, appt)
 
     await _refuse_if_slot_is_held(
         session,
@@ -1917,6 +1999,8 @@ async def update_appointment_status(
         )
     if appt is None or not viewer.sees(appt.professional_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Appointment not found")
+    # D-R9: checked under the row lock (no falta / compareceu / cancelar / confirmar on it).
+    await _refuse_if_suspended(session, tenant, appt)
     now = datetime.now(UTC)
     try:
         applies = staff_transition(appt.status, body.status, start_at=appt.start_at, now=now)

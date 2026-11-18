@@ -507,57 +507,76 @@ async def _adjustments(db):
         return list(await session.scalars(select(DepositAdjustment)))
 
 
-async def test_paid_dearer_service_waits_for_the_difference_pix_and_changes_nothing(
+async def test_paid_dearer_service_in_an_after_clinic_changes_now_and_charges_the_difference(
     db, provider
 ):
+    """TASK-085 R D-R5 (replaces "waits for the Pix and changes nothing", the owner's rule of
+    2026-10-26 for a clinic that books before the sinal is paid): the change stands NOW - the
+    agenda moves first, the engine writes the row and ONE doctor notice - and the Pix of only the
+    difference follows (`applied_awaiting_payment`, mode `applied`)."""
     world = await _paid_world(db)
 
     outcome = await _edit(db, world, _req(service="Avaliação"))
 
     change = outcome.service_change
-    assert (change.status, change.diff_cents) == ("awaiting_payment", 5000)
+    assert (change.status, change.diff_cents) == ("applied_awaiting_payment", 5000)
     assert (change.old_service, change.new_service) == ("Consulta", "Avaliação")
     assert change.pix_copy_paste == "000201pix" and change.expires_at is not None
-    assert outcome.changes == ()  # the service did not change yet: nothing else to tell
+    assert [(c.label, c.before, c.after) for c in outcome.changes] == [
+        ("Serviço", "Consulta", "Avaliação")
+    ]
     row = await reload_appointment(db, world.appointment.id)
-    assert row.appointment_type == "Consulta"
-    assert _utc(row.end_at) - _utc(row.start_at) == timedelta(minutes=30)
+    assert row.appointment_type == "Avaliação"
+    assert _utc(row.end_at) - _utc(row.start_at) == timedelta(minutes=50)
     calendar = FakeCalendar.get("tenant")
-    assert calendar.updated == [] and calendar.created == []
-    # the longer window was checked before charging
     assert calendar.checked == [
         (world.start_at, world.start_at + timedelta(minutes=50), "evt-1")
     ]
+    [moved] = calendar.updated
+    assert moved[:4] == (
+        "evt-1",
+        world.start_at,
+        world.start_at + timedelta(minutes=50),
+        "Avaliação - Maria",
+    )
     [adjustment] = await _adjustments(db)
-    assert (adjustment.status, adjustment.diff_cents) == ("awaiting_payment", 5000)
-    assert adjustment.pending_edit["appointment_type"] == "Avaliação"
+    assert (adjustment.status, adjustment.mode, adjustment.diff_cents) == (
+        "awaiting_payment",
+        "applied",
+        5000,
+    )
     assert adjustment.pending_edit["source"] == "hub"
-    assert outcome.notice_id is None and await _notices(db, world.appointment.id) == []
+    [notice] = await _notices(db, world.appointment.id)  # exactly ONE doctor notice
+    assert "serviço" in notice.changed_fields and outcome.notice_id == str(notice.id)
 
 
-async def test_paid_dearer_service_with_a_new_time_moves_the_time_now_and_the_service_on_payment(
+async def test_paid_dearer_service_with_a_new_time_in_a_before_clinic_waits_for_the_pix(
     db, provider
 ):
-    from secretaria.models import PixDeposit
+    """TASK-085 R D-R4 (replaces "moves the time now and the service on payment"): in a clinic
+    that books only after the sinal, the WHOLE change - service AND time - waits for the Pix of
+    the difference; the visit is suspended, the new window held; nothing of the agenda moves.
+    Paid -> the pending edit applies the time and the service onto the untouched row."""
     from secretaria.models.deposit_adjustment import STATUS_APPLIED, STATUS_AWAITING_PAYMENT
     from secretaria.services.payments import service_change
 
     world = await _paid_world(db)
+    await set_tenant(db, world.tenant.id, deposit_timing="before")
     new = world.start_at + timedelta(days=1)
 
     outcome = await _edit(db, world, _req(service="Avaliação", start_at=new))
 
-    assert outcome.service_change.status == "awaiting_payment"
-    assert _labels(outcome) == ["Data"]  # the time moved now; the service waits
-    [moved] = FakeCalendar.get("tenant").updated
-    assert moved[:4] == ("evt-1", new, new + timedelta(minutes=30), "Consulta - Maria")
+    assert outcome.service_change.status == "suspended"
+    assert outcome.changes == () and outcome.time_changed is False
+    calendar = FakeCalendar.get("tenant")
+    assert calendar.updated == [] and calendar.created == []
+    assert calendar.checked == [(new, new + timedelta(minutes=50), "evt-1")]
     row = await reload_appointment(db, world.appointment.id)
-    assert (_utc(row.start_at), row.appointment_type) == (new, "Consulta")
-    [notice] = await _notices(db, world.appointment.id)
-    assert notice.changed_fields == ["data"] and outcome.notice_id == str(notice.id)
+    assert (_utc(row.start_at), row.appointment_type) == (world.start_at, "Consulta")
+    assert outcome.notice_id is None and await _notices(db, world.appointment.id) == []
 
-    # The Pix is paid: the pending edit applies onto the row the clinic left.
     [adjustment] = await _adjustments(db)
+    assert adjustment.mode == "suspend"
     async with db() as session:
         tenant = await session.get(Tenant, world.tenant.id)
         adjustment = await session.merge(adjustment)
@@ -573,11 +592,8 @@ async def test_paid_dearer_service_with_a_new_time_moves_the_time_now_and_the_se
         await session.commit()
     assert fields is not None and "serviço" in fields
     row = await reload_appointment(db, world.appointment.id)
-    assert row.appointment_type == "Avaliação"
+    assert (_utc(row.start_at), row.appointment_type) == (new, "Avaliação")
     assert _utc(row.end_at) == new + timedelta(minutes=50)
-    async with db() as session:
-        deposit = await session.scalar(select(PixDeposit))
-    assert deposit.reschedule_count == 0  # a clinic move never counts
 
 
 async def test_paid_cheaper_service_applies_now_syncs_the_agenda_and_asks(db, provider):
@@ -725,7 +741,8 @@ async def test_a_second_paid_change_while_a_difference_is_unpaid_is_409(db, prov
 
     assert (err.value.status_code, err.value.extra["reason"]) == (409, "adjustment_pending")
     assert "aguardando pagamento" in err.value.message
-    assert (await reload_appointment(db, world.appointment.id)).appointment_type == "Consulta"
+    # TASK-085 R D-R5: the first (dearer) change already stands; only its Pix is open.
+    assert (await reload_appointment(db, world.appointment.id)).appointment_type == "Avaliação"
     assert len(await _adjustments(db)) == 1
 
 
@@ -769,51 +786,59 @@ async def _edit_guarded(db, world, request, guarded: list):
         )
 
 
-async def test_paid_dearer_shorter_service_with_a_new_time_checks_the_old_longer_window(
-    db, provider
-):
-    """Until the Pix is paid the row keeps the OLD (longer) service at the new time: its tail
-    must be free too - never a double booking in [new+50, new+60)."""
+async def test_paid_dearer_shorter_service_with_a_new_time_checks_its_own_window(db, provider):
+    """TASK-085 R D-R5 (replaces "checks the old longer window"): the change is written NOW, so
+    the window checked - by the hold gate and on the agenda, before any Pix - is the NEW one."""
     world = await _dearer_but_shorter(db)
     new = world.start_at + timedelta(days=1)
     calendar = FakeCalendar.get("tenant")
-    _busy_between(calendar, new + timedelta(minutes=55), new + timedelta(minutes=90))
+    _busy_between(calendar, new + timedelta(minutes=45), new + timedelta(minutes=90))
     guarded: list = []
 
     with pytest.raises(StaffEditError) as err:
         await _edit_guarded(db, world, _req(service="Avaliação", start_at=new), guarded)
 
     assert (err.value.status_code, err.value.code) == (409, "slot_unavailable")
-    assert guarded == [(new, new + timedelta(minutes=60))]  # the hold gate saw the whole window
+    assert guarded == [(new, new + timedelta(minutes=50))]
     assert calendar.updated == [] and calendar.created == []
     assert provider.called("create_pix_charge") == 0 and await _adjustments(db) == []
     row = await reload_appointment(db, world.appointment.id)
     assert (_utc(row.start_at), row.appointment_type) == (world.start_at, "Consulta")
 
 
-async def test_paid_dearer_shorter_service_with_a_new_time_and_a_free_tail_waits_for_the_pix(
+async def test_paid_dearer_shorter_service_with_a_new_time_and_a_free_window_changes_now(
     db, provider
 ):
     world = await _dearer_but_shorter(db)
     new = world.start_at + timedelta(days=1)
     calendar = FakeCalendar.get("tenant")
-    _busy_between(calendar, new + timedelta(minutes=60), new + timedelta(minutes=90))
+    _busy_between(calendar, new + timedelta(minutes=50), new + timedelta(minutes=90))
     guarded: list = []
 
     outcome = await _edit_guarded(db, world, _req(service="Avaliação", start_at=new), guarded)
 
-    assert outcome.service_change.status == "awaiting_payment"
-    assert guarded == [(new, new + timedelta(minutes=60))]
-    assert calendar.checked == [(new, new + timedelta(minutes=60), "evt-1")]
+    assert outcome.service_change.status == "applied_awaiting_payment"
+    assert guarded == [(new, new + timedelta(minutes=50))]
+    assert calendar.checked == [(new, new + timedelta(minutes=50), "evt-1")]
     [moved] = calendar.updated
-    assert moved[1:3] == (new, new + timedelta(minutes=60))
+    assert moved[1:3] == (new, new + timedelta(minutes=50))
     row = await reload_appointment(db, world.appointment.id)
-    assert (_utc(row.start_at), _utc(row.end_at)) == (new, new + timedelta(minutes=60))
-    assert row.appointment_type == "Consulta"
+    assert (_utc(row.start_at), _utc(row.end_at)) == (new, new + timedelta(minutes=50))
+    assert row.appointment_type == "Avaliação"
 
 
-async def test_paid_sinal_without_a_service_change_keeps_todays_behaviour(db, provider):
+async def test_paid_doctor_and_convenio_change_without_a_new_price_changes_nothing_for_money(
+    db, provider
+):
+    """TASK-085 R D-R3 (replaces "without a service change keeps today's behaviour"): doctor and
+    convênio are money fields now - the engine is consulted - but the same price leaves the
+    sinal alone (`no_change`: no `service_change`, no adjustment, no provider call)."""
+    from secretaria.models import PixDeposit
+
     world = await _paid_world(db, professional_name="Dra. Ana")
+    async with db() as session:
+        (await session.scalar(select(PixDeposit))).amount_cents = 6000  # 30 % of R$ 200,00
+        await session.commit()
     new_pro = await add_professional(db, world.tenant.id, "Dr. Bruno")
 
     outcome = await _edit(db, world, _req(professional_id=new_pro, insurance="Unimed"))

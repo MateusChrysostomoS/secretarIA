@@ -99,6 +99,8 @@ NEW_EVENT_KEYS = {"status", "confirmation_count", "display_state", "attention", 
     "unit_id",
     "unit_name",
     "unit_address",
+    # TASK-085 R D-R9: the consultation waits for the Pix of a change's difference.
+    "suspended",
 }
 
 
@@ -133,9 +135,11 @@ def test_the_deposit_wire_carries_exactly_three_keys():
     snapshot or the payer)."""
     # Plan 2026-10-26 (troca de serviço com sinal pago) added two more AMOUNTS, both defaulted
     # to null: what the clinic holds after paid service differences and a difference Pix still
-    # waiting - never a charge id or a Pix code.
+    # waiting - never a charge id or a Pix code. TASK-085 R: how that difference waits
+    # ("suspend" / "applied"), defaulted to null.
     assert set(CalendarDepositRead.model_fields) == {
-        "status", "amount_cents", "needs_attention", "held_cents", "pending_difference_cents"
+        "status", "amount_cents", "needs_attention", "held_cents", "pending_difference_cents",
+        "pending_difference_mode",
     }
     read = CalendarDepositRead(status="confirmado_pago", amount_cents=1)
     assert read.needs_attention is False
@@ -815,6 +819,7 @@ async def test_the_deposit_carries_its_real_status_value_and_amount(
         "needs_attention": False,  # fulfillment_status is not "needs_attention"
         "held_cents": None,  # no service change on this sinal
         "pending_difference_cents": None,
+        "pending_difference_mode": None,
     }
 
 
@@ -832,7 +837,8 @@ async def test_a_paid_deposit_says_nothing_about_the_appointment_and_leaks_no_pa
 
     body = resp.json()[0]
     assert set(body["deposit"]) == {
-        "status", "amount_cents", "needs_attention", "held_cents", "pending_difference_cents"
+        "status", "amount_cents", "needs_attention", "held_cents", "pending_difference_cents",
+        "pending_difference_mode",
     }
     assert body["status"] == "scheduled"
     assert body["confirmation_count"] == 0
