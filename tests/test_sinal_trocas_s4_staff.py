@@ -344,8 +344,17 @@ async def test_a_visit_suspended_while_the_clinic_edits_wins_under_the_row_lock(
 # --------------------------------------------------------------------------
 
 
-async def test_after_convenio_without_sinal_is_the_whole_sinal_cheaper(db, provider):
-    world = await _paid_world(db)
+async def _held_cents(db, world, cents: int) -> None:
+    """Reseed the paid sinal (the shared `_paid_world` holds R$ 100)."""
+    async with db() as session:
+        deposit = await session.scalar(
+            select(PixDeposit).where(PixDeposit.appointment_id == world.appointment.id)
+        )
+        deposit.amount_cents = cents
+        await session.commit()
+
+
+async def _legacy_no_sinal_unimed(db, world) -> None:
     async with db() as session:
         session.add(
             TenantInsurancePlan(
@@ -354,14 +363,39 @@ async def test_after_convenio_without_sinal_is_the_whole_sinal_cheaper(db, provi
         )
         await session.commit()
 
+
+async def test_after_a_legacy_no_sinal_convenio_does_not_move_the_sinal(db, provider):
+    """TASK-085 R D-R12 revoked D-R3's "convênio sem sinal = sinal novo 0": the clinic switching
+    the consultation to a plan saved as "não cobra sinal" changes the convênio, not the sinal.
+    The paid sinal matches the price (R$ 200 x 30% = R$ 60): nothing to charge, ask or record."""
+    world = await _paid_world(db)
+    await _held_cents(db, world, 6000)
+    await _legacy_no_sinal_unimed(db, world)
+
     outcome = await _edit(db, world, _req(insurance="Unimed"))
 
     change = outcome.service_change
-    assert (change.status, change.diff_cents) == ("asked", 10000)
-    assert change.new_service == "Consulta pelo Unimed"
+    assert change is None, change  # no_change: the edit reports no sinal change at all
+    assert provider.called("create_pix_charge") == 0
+    assert await _adjustments(db) == []
     row = await reload_appointment(db, world.appointment.id)
     assert row.insurance == "Unimed" and row.insurance_plan_id is not None
     assert [c.label for c in outcome.changes] == ["Convênio"]
+
+
+async def test_after_a_convenio_edit_over_a_drifted_price_offers_the_drift_back(db, provider):
+    """M1 (accepted, D-R13): convênio stays a money field, so a convênio-only edit re-prices the
+    consultation. When the clinic's price drifted since the sinal was paid (held R$ 100, price
+    now R$ 200 x 30% = R$ 60), the edit offers the R$ 40 drift back - the convênio itself adds
+    nothing (its legacy "no sinal" flag used to make the whole R$ 100 the difference)."""
+    world = await _paid_world(db)
+    await _legacy_no_sinal_unimed(db, world)
+
+    outcome = await _edit(db, world, _req(insurance="Unimed"))
+
+    change = outcome.service_change
+    assert (change.status, change.diff_cents) == ("asked", 4000)
+    assert change.new_service == "Consulta pelo Unimed"
 
 
 async def test_after_dearer_service_with_a_new_doctor_moves_to_his_agenda_now(db, provider):

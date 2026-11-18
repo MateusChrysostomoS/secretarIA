@@ -309,7 +309,9 @@ async def test_a_failed_read_or_void_blocks_the_edit(db, provider, failure):
         assert deposit.appointment_id == appointment.id
 
 
-async def test_a_convenio_without_sinal_voids_to_zero(db, provider):
+async def test_a_legacy_no_sinal_convenio_leaves_the_unpaid_pix_alone(db, provider):
+    """TASK-085 R D-R12: a convênio never exempts the sinal, so moving to a plan saved as "não
+    cobra sinal" keeps the same amount - nothing is voided, the provider is never called."""
     async with db() as session:
         tenant, _p, appointment, deposit = await _seed(session)
         plan = TenantInsurancePlan(tenant_id=tenant.id, custom_name="Plano X", charge_deposit=False)
@@ -318,7 +320,9 @@ async def test_a_convenio_without_sinal_voids_to_zero(db, provider):
         outcome = await _edit_and_requote(
             session, tenant, appointment, deposit, insurance="Plano X", insurance_plan_id=plan.id
         )
-    assert outcome == "voided"
+        assert deposit.status is PixDepositStatus.AWAITING
+    assert outcome == "unchanged"
+    assert provider.calls == []
 
 
 async def test_the_new_amount_uses_the_clinics_current_percentage(db, provider):

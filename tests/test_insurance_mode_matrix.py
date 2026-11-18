@@ -186,7 +186,7 @@ async def test_mode_none_skips_regardless_of_catalog(db):
             business_hours=_HOURS,
         )
         solo = await _professional(session, tenant, "Dra. Única")
-        await set_tenant_plans(session, tenant, [(UNIMED, True)])
+        await set_tenant_plans(session, tenant, [UNIMED])
         await session.commit()
         insurance = await load_tenant_insurance(session, tenant.id)
         assert _insurance_step_skip_reason(tenant) == INSURANCE_SKIP_NO_MODE
@@ -210,7 +210,7 @@ async def test_mode_shared_marks_every_active_professional_no_rows_needed(db):
         )
         ana = await _professional(session, tenant, "Dra. Ana")
         bruno = await _professional(session, tenant, "Dr. Bruno")
-        await set_tenant_plans(session, tenant, [(UNIMED, True)])
+        await set_tenant_plans(session, tenant, [UNIMED])
         await session.commit()
         assert await _count(session, ProfessionalInsurancePlan) == 0
         insurance = await load_tenant_insurance(session, tenant.id)
@@ -248,7 +248,7 @@ async def test_mode_clinic_with_exceptions_inherit_all_default(db):
         )
         never_customized = await _professional(session, tenant, "Dr. Nunca Mexeu")
         explicitly_none = await _professional(session, tenant, "Dra. Recusou Tudo")
-        await set_tenant_plans(session, tenant, [(UNIMED, True)])
+        await set_tenant_plans(session, tenant, [UNIMED])
         unimed_plan_id = await _plan_id(session, tenant.id, UNIMED)
         await set_professional_clinic_plans(session, explicitly_none, [])
         await session.commit()
@@ -289,7 +289,7 @@ async def test_mode_independent_union_of_doctors_no_clinic_inheritance(db):
         ana = await _professional(session, tenant, "Dra. Ana")
         bruno = await _professional(session, tenant, "Dr. Bruno")
         # A clinic-level plan that NO mode-independent doctor ever reads.
-        await set_tenant_plans(session, tenant, [(UNIMED, True)])
+        await set_tenant_plans(session, tenant, [UNIMED])
         session.add(
             ProfessionalInsurancePlan(professional_id=ana.id, tenant_id=tenant.id, catalog_id=AMIL)
         )
@@ -342,7 +342,7 @@ async def test_enter_guided_booking_skips_when_mode_is_none(db):
             business_hours=_HOURS,
         )
         solo = await _professional(session, tenant, "Dra. Única")
-        await set_tenant_plans(session, tenant, [(UNIMED, True)])
+        await set_tenant_plans(session, tenant, [UNIMED])
         await session.commit()
         insurance = await load_tenant_insurance(session, tenant.id)
 
@@ -508,9 +508,9 @@ async def test_professional_custom_plan_independent_mode(db):
 
 
 async def test_custom_plan_payment_note_appears_in_confirmation_and_deposit_ask():
-    """§4.3: the payment note shows at confirmation and, if `charge_deposit`,
-    again with the Pix ask. Pure text-composition check, no DB needed for the
-    confirmation half; deposit-ask half checked separately below (needs DB)."""
+    """§4.3: the payment note shows at confirmation and again with the Pix ask. Pure
+    text-composition check, no DB needed for the confirmation half; deposit-ask half checked
+    separately below (needs DB)."""
     text = deposit_lifecycle._deposit_request_text(
         tenant=type("T", (), {"clinic_name": "Clinica"})(),
         appointment=type("A", (), {"appointment_type": "Consulta"})(),
@@ -522,7 +522,13 @@ async def test_custom_plan_payment_note_appears_in_confirmation_and_deposit_ask(
     assert "Pagamento via reembolso" in text
 
 
-async def test_custom_plan_deposit_guard_respects_charge_deposit_flag(db):
+async def test_custom_plan_never_exempts_the_deposit(db, monkeypatch):
+    """TASK-085 R D-R12: a custom plan whose legacy flag says "não cobra sinal" is charged like
+    any other booking - it goes past where it used to stop, up to the next guard (no account)."""
+    reasons: list[str] = []
+    monkeypatch.setattr(
+        deposit_lifecycle, "_log_deposit_skip", lambda _t, _a, reason: reasons.append(reason)
+    )
     async with db() as session:
         tenant = await _tenant(
             session,
@@ -534,8 +540,9 @@ async def test_custom_plan_deposit_guard_respects_charge_deposit_flag(db):
             ],
         )
         plan = await create_tenant_custom_plan(
-            session, tenant, custom_name="Outro", custom_payment_note="Nota.", charge_deposit=False
+            session, tenant, custom_name="Outro", custom_payment_note="Nota."
         )
+        plan.charge_deposit = False  # a row saved while the option existed
         patient = Patient(id=uuid4(), tenant_id=tenant.id, wa_id="5511999999999", name="Maria")
         session.add(patient)
         await session.flush()
@@ -558,6 +565,7 @@ async def test_custom_plan_deposit_guard_respects_charge_deposit_flag(db):
         )
         assert deposit is None
         assert await _count(session, PixDeposit) == 0
+    assert reasons == [deposit_lifecycle.DEPOSIT_SKIP_NO_API_KEY]
 
 
 async def test_resolve_booking_plan_ids_independent_mode_uses_professional_row(db):

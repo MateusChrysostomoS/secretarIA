@@ -372,7 +372,9 @@ async def test_before_a_doctor_change_is_checked_on_the_new_doctors_agenda(db, p
     assert provider.called("create_pix_charge") == 0
 
 
-async def test_a_convenio_without_sinal_means_a_new_sinal_of_zero(db, provider):
+async def test_a_legacy_no_sinal_convenio_no_longer_moves_the_sinal(db, provider):
+    """TASK-085 R D-R12 revoked D-R3's "convênio sem sinal = sinal novo 0": switching to a
+    convênio saved as "não cobra sinal" is just a change of convênio - same price, same sinal."""
     seeded = await _seed(db, timing="before")
     async with db() as session:
         session.add(
@@ -382,9 +384,9 @@ async def test_a_convenio_without_sinal_means_a_new_sinal_of_zero(db, provider):
         )
         await session.commit()
     result = await _request(db, seeded, "Consulta", insurance="Unimed")
-    # Cheaper by everything held (R$ 60), far ahead -> asked.
-    assert (result.kind, result.diff_cents) == ("asked", 6000)
+    assert (result.kind, result.decision, result.diff_cents) == ("applied_now", "no_change", 0)
     assert result.label == "Consulta pelo Unimed"
+    assert provider.called("create_pix_charge") == 0
     row = await _row(db, seeded[2].id)
     assert row.insurance == "Unimed" and row.insurance_plan_id is not None
 
@@ -412,7 +414,7 @@ async def test_preview_takes_the_convenio_and_the_doctor(db, provider):
         dearer = await service_change.preview_service_change(
             session, professional_id=bruno, **common
         )
-        no_sinal = await service_change.preview_service_change(
+        legacy_no_sinal = await service_change.preview_service_change(
             session, professional_id=ana, insurance="Unimed", **common
         )
         particular = await service_change.preview_service_change(
@@ -420,7 +422,8 @@ async def test_preview_takes_the_convenio_and_the_doctor(db, provider):
         )
     assert same.action == "no_change"
     assert (dearer.action, dearer.diff_cents) == ("increase_charge", 3000)
-    assert (no_sinal.action, no_sinal.diff_cents) == ("decrease_ask", 6000)
+    # D-R12: the convênio's legacy "no sinal" flag is ignored.
+    assert legacy_no_sinal.action == "no_change"
     assert particular.action == "no_change"
 
 
