@@ -437,10 +437,16 @@ async def _handle_action_button(
                 ),
                 "insurance": appointment.insurance,
                 "attendee_name": appointment.attendee_name,
-                # U7: the same optional key the patient's list carries
+                # U7: the same optional keys the patient's list carries
                 # (`patient_context.load_upcoming_appointments`), so the next turn's stale
                 # check (`EditDraft.from_appointment`) sees the same draft on a booking with a
-                # unit - without it every "Alterar Dados" there answered "não está mais ativa".
+                # unit or a recorded agenda origin (a paid change re-points it) - without them
+                # every "Alterar Dados" there answered "não está mais ativa".
+                **(
+                    {"google_calendar_source": appointment.google_calendar_source}
+                    if appointment.google_calendar_source is not None
+                    else {}
+                ),
                 **(
                     {"unit_id": str(appointment.unit_id)}
                     if appointment.unit_id is not None

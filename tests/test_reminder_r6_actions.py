@@ -174,7 +174,8 @@ async def test_new_ids_are_checked_against_the_patient_and_the_version(db):  # n
     assert (await get_conversation(db, world)).flow_state == FlowState.IDLE
 
 
-async def test_alterar_dados_on_a_booking_with_a_unit_keeps_the_draft_current(db):  # noqa: F811
+@pytest.mark.parametrize("source", [None, "professional"])
+async def test_alterar_dados_on_a_booking_with_a_unit_keeps_the_draft_current(db, source):  # noqa: F811
     """U7 (found in the TASK-085 browser proof): the card's "Alterar Dados" built the draft
     from a view WITHOUT the booking's `unit_id`, while every later turn compares it with the
     patient's list (`EditDraft.from_appointment`, which carries it since TASK-083) - so the
@@ -191,6 +192,7 @@ async def test_alterar_dados_on_a_booking_with_a_unit_keeps_the_draft_current(db
         await session.flush()
         row = await session.get(Appointment, world.appointment.id)
         row.unit_id = unit.id
+        row.google_calendar_source = source  # a paid change re-points the agenda origin
         await session.commit()
     rid = await add_reminder(db, world)
 
@@ -199,6 +201,15 @@ async def test_alterar_dados_on_a_booking_with_a_unit_keeps_the_draft_current(db
     conversation = await get_conversation(db, world)
     draft = ae.EditDraft.from_json(conversation.flow_edit_draft)
     assert draft.original.get("unit_id") == str(unit.id)
+    # The invariant every later turn checks: the draft equals the one built from the list.
+    from zoneinfo import ZoneInfo
+
+    from secretaria.services.patient_context import load_upcoming_appointments
+
+    async with db() as session:
+        [listed] = await load_upcoming_appointments(session, world.tenant.id, world.patient.id)
+    latest = ae.EditDraft.from_appointment(listed, ZoneInfo("America/Sao_Paulo"))
+    assert latest.original == draft.original
 
     await turn(db, world, "Mudar serviço")
 
