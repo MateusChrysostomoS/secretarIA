@@ -665,7 +665,12 @@ async def _booking_service_id(
 
 
 async def _insurance_refusal(
-    tool_name: str, unit: Any | None, catalog: list, canonical_type: str | None
+    tool_name: str,
+    unit: Any | None,
+    catalog: list,
+    canonical_type: str | None,
+    *,
+    professional_id: UUID | None = None,
 ) -> dict | None:
     """The tool-error when the convênio matrix refuses this booking (TASK-086 A14), else None.
 
@@ -681,7 +686,10 @@ async def _insurance_refusal(
     conversation_id = _conversation_id_ctx.get()
     if tenant_id is None or conversation_id is None or not canonical_type:
         return None
-    professional_id = _sole_professional_id()
+    # `professional_id`: the booking's doctor when the tool names one (multi-doctor clinic);
+    # else the one-doctor clinic's own.
+    if professional_id is None:
+        professional_id = _sole_professional_id()
     unit_id = getattr(unit, "id", None)
     from secretaria.core.database import async_session_factory
     from secretaria.models import Conversation

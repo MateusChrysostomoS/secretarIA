@@ -57,6 +57,7 @@ from secretaria.ai.tools import (
     _conversation_insurance,
     _create_booking_event,
     _hand_back_if_slot_taken,
+    _insurance_refusal,
     _localize_window,
     _match_by_name,
     _persist_appointment,
@@ -331,6 +332,16 @@ async def create_event_for_professional(
     # ... and the service must be one the doctor does at that unit (spec §6.1, §9.13).
     refused = await _service_unit_refusal(
         "create_event_for_professional", unit, professional, catalog, canonical_type
+    )
+    if refused is not None:
+        return refused
+    # TASK-086 A14 (review): the convênio matrix of THIS doctor, before any calendar call.
+    refused = await _insurance_refusal(
+        "create_event_for_professional",
+        unit,
+        catalog,
+        canonical_type,
+        professional_id=professional.id,
     )
     if refused is not None:
         return refused
