@@ -13,7 +13,8 @@ sweep (`service_change.expire_adjustments`, S1), the provider's webhook
     agenda moved) / cancel both; silence -> kept_old.
 (b) "after" clinic, dearer: applied now + Pix; unpaid -> the clinic's collect item.
 (c) an UNPAID sinal + a change (patient and staff): old Pix voided, a new one sent.
-(d) the clinic on a visit the PATIENT suspended: 409 everywhere, "Liberar horário" settles it.
+(d) the clinic on a visit the PATIENT suspended: 409 everywhere, "Liberar horário" included
+    (D-R10: the visit left the agenda; the clinic has nothing to do).
 (e) a clinic without sinal: nothing of the money changes.
 """
 
@@ -81,8 +82,8 @@ from tests.test_sinal_trocas_s4_hub import _events
 SUSPENDED_409 = {
     "code": "appointment_suspended",
     "message": (
-        "Essa consulta aguarda o Pix da diferença de uma troca; enquanto isso, só é possível "
-        "liberar o horário."
+        "Essa consulta saiu da agenda enquanto o paciente paga a diferença de uma troca; não há "
+        "o que fazer agora."
     ),
 }
 
@@ -541,13 +542,15 @@ async def test_a_staff_change_on_an_unpaid_sinal_replaces_its_pix(
 
 
 # --------------------------------------------------------------------------------------------
-# (d) the clinic on a visit the PATIENT suspended (D-R9)
+# (d) the clinic on a visit the PATIENT suspended (D-R10, replaces D-R9)
 # --------------------------------------------------------------------------------------------
 
 
-async def test_the_clinic_can_only_release_a_visit_the_patient_suspended(
+async def test_the_clinic_has_nothing_to_do_on_a_visit_the_patient_suspended(
     client: AsyncClient, db, acting, charges, monkeypatch
 ):
+    """D-R10: the visit left the agenda while the patient pays - edit, reschedule, cancel AND
+    "Liberar horário" are 409; the change, its Pix and its held window stay as they were."""
     world, adjustment, _bruno, _new = await _suspended_by_the_patient(
         db, acting, monkeypatch, client
     )
@@ -561,24 +564,21 @@ async def test_the_clinic_can_only_release_a_visit_the_patient_suspended(
         await client.post(
             f"{CALENDAR}/appointments/{world.appointment.id}/cancel", json={"confirm": True}
         ),
+        await client.post(
+            f"{CALENDAR}/appointments/{world.appointment.id}/release",
+            json={"acknowledge_retention": True},
+        ),
     ):
         assert response.status_code == 409, response.text
         assert response.json()["detail"] == SUSPENDED_409
+
     assert charges.called("cancel_charge") == 0
-
-    response = await client.post(
-        f"{CALENDAR}/appointments/{world.appointment.id}/release",
-        json={"acknowledge_retention": True},
-    )
-
-    assert response.status_code == 200, response.text
     [current] = await _adjustments(db)
-    assert current.status == STATUS_CANCELLED
-    assert ("cancel_charge", "pay_diff_1") in charges.calls  # the difference Pix is voided
-    assert await _rows(db, BookingHold) == []  # the new window is free again
-    assert not await _suspended(db, world)
+    assert current.status == STATUS_AWAITING_PAYMENT
+    assert len(await _rows(db, BookingHold)) == 1  # the new window stays held
+    assert await _suspended(db, world)
     assert (await reload_appointment(db, world.appointment.id)).status == (
-        AppointmentStatus.CANCELLED
+        AppointmentStatus.SCHEDULED
     )
 
 

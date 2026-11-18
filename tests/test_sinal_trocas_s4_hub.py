@@ -4,13 +4,15 @@ Contract: tasks/TASK-085/sinal-trocas/contrato.md §3.9. The paid world of
 tests/test_hub_edit_appointment.py (R$ 100,00 at 30 % on Consulta; Avaliação R$ 50,00 dearer). What
 is pinned here:
 
-* D-R9: a SUSPENDED visit (a "before" clinic, a dearer change waiting for the Pix) answers 409
-  `appointment_suspended` to edit, reschedule, cancel and every status change (falta, compareceu,
-  confirmar, cancelar) - nothing touched; "Liberar horário" works and closes the pending change
-  (Pix voided, new window freed, visit no longer suspended);
-* the edit's answer and the patient's ONE money message for `suspended`;
+* D-R10 (3rd round, replaces D-R9): a SUSPENDED visit (a "before" clinic, a dearer change waiting
+  for the Pix) left the agenda - it answers 409 `appointment_suspended` to edit, reschedule, cancel,
+  "Liberar horário" and every status change (falta, compareceu, confirmar, cancelar) - nothing
+  touched (the `old_slot_lost` exception is pinned in tests/test_sinal_trocas_uh_hub.py);
+* the edit's answer and the patient's ONE money message for `suspended`; the OLD event is deleted
+  right after the commit (`old_slot.vacate_old_slot`);
 * `GET /awaiting-payment` lists the held NEW window of a suspended change (`kind: "difference"`,
-  `appointment_id`); `GET /events` says `suspended` / `deposit.pending_difference_mode`;
+  `appointment_id`, `change_summary`); `GET /events` says `suspended` /
+  `deposit.pending_difference_mode` while the old event is still there;
 * D-R6 / OQ-10: the new sinal is sent after the commit (`recharge_after_edit`), never before.
 """
 
@@ -26,7 +28,12 @@ from secretaria.api.hub import calendar as hub_calendar
 from secretaria.models import AppointmentStatus, BookingHold, PixDeposit
 from secretaria.models.deposit_adjustment import DepositAdjustment
 from secretaria.models.pix_deposit import PixDepositStatus
-from secretaria.services.payments import adjustment_suspension, deposit_lifecycle, service_change
+from secretaria.services.payments import (
+    adjustment_suspension,
+    deposit_lifecycle,
+    old_slot,
+    service_change,
+)
 from tests._r7_support import (  # noqa: F401
     CALENDAR,
     FakeArqPool,
@@ -48,9 +55,22 @@ from tests.test_hub_edit_appointment import (  # noqa: F401
 )
 
 SUSPENDED_MESSAGE = (
-    "Essa consulta aguarda o Pix da diferença de uma troca; enquanto isso, só é possível "
-    "liberar o horário."
+    "Essa consulta saiu da agenda enquanto o paciente paga a diferença de uma troca; não há o "
+    "que fazer agora."
 )
+
+
+@pytest.fixture(autouse=True)
+def _old_slot_reaches_the_test_agenda(monkeypatch, db):
+    """TASK-085 R D-R10: `old_slot.vacate_old_slot` (run by the edit route after the commit) opens
+    its own session on the test DB and finds the consultation's agenda where the hub does."""
+    monkeypatch.setattr(old_slot, "async_session_factory", db)
+
+    async def _calendar(session, tenant, appointment):
+        pid = getattr(appointment, "professional_id", None)
+        return FakeCalendar.get(str(pid) if pid else "tenant")
+
+    monkeypatch.setattr(service_change, "calendar_for_appointment", _calendar)
 
 
 async def _adjustments(db) -> list[DepositAdjustment]:
@@ -116,18 +136,20 @@ async def test_a_before_dearer_edit_answers_suspended_and_sends_one_pix_message(
     assert message[2] == service_change.difference_pix_text(
         "Avaliação", 5000, "000201pix", 30, source="hub", held_new_slot=True
     )
-    assert "ficam reservados" in message[2]
     assert message[2].rstrip().endswith("```000201pix```")
     assert pool.calls == []  # no doctor e-mail: nothing of his agenda changed
     assert FakeCalendar.get("tenant").updated == []
+    # D-R10: after the commit the OLD event leaves the agenda (its slot is free for others).
+    assert FakeCalendar.get("tenant").cancelled == ["evt-1"]
+    assert adjustment.old_slot == "released"
 
 
 # --------------------------------------------------------------------------
-# D-R9
+# D-R10 (replaces D-R9): nothing for the clinic to do on a suspended visit
 # --------------------------------------------------------------------------
 
 
-async def test_a_suspended_visit_refuses_edit_reschedule_and_cancel(
+async def test_a_suspended_visit_refuses_edit_reschedule_cancel_and_release(
     client: AsyncClient, db, acting, provider
 ):
     world = await _suspended_world(db, acting, client)
@@ -144,6 +166,12 @@ async def test_a_suspended_visit_refuses_edit_reschedule_and_cancel(
     _assert_suspended_409(
         await client.post(
             f"{CALENDAR}/appointments/{world.appointment.id}/cancel", json={"confirm": True}
+        )
+    )
+    _assert_suspended_409(
+        await client.post(
+            f"{CALENDAR}/appointments/{world.appointment.id}/release",
+            json={"acknowledge_retention": True},
         )
     )
 
@@ -172,9 +200,12 @@ async def test_a_suspended_visit_refuses_every_status_change(
     assert adjustment.status == "awaiting_payment"
 
 
-async def test_liberar_horario_frees_a_suspended_visit_and_closes_the_change(
+async def test_liberar_horario_no_longer_ends_a_suspended_change(
     client: AsyncClient, db, acting, provider, monkeypatch
 ):
+    """D-R10 (replaces D-R9's "Liberar horário settles it"): the visit is out of the agenda - there
+    is nothing to free; the change, its Pix and its held window stay as they were."""
+
     async def no_secretary(tenant_id):
         return None
 
@@ -186,16 +217,18 @@ async def test_liberar_horario_frees_a_suspended_visit_and_closes_the_change(
         json={"acknowledge_retention": True},
     )
 
-    assert response.status_code == 200, response.text
+    _assert_suspended_409(response)
     row = await reload_appointment(db, world.appointment.id)
-    assert row.status == AppointmentStatus.CANCELLED
-    assert FakeCalendar.get("tenant").cancelled == ["evt-1"]
+    assert row.status == AppointmentStatus.SCHEDULED
+    assert FakeCalendar.instances == {} or all(
+        not cal.cancelled for cal in FakeCalendar.instances.values()
+    )
     [adjustment] = await _adjustments(db)
-    assert adjustment.status == "cancelled"
-    assert provider.called("cancel_charge") == 1  # the Pix of the difference is voided
-    assert await _holds(db) == []  # the new window is free again
+    assert adjustment.status == "awaiting_payment"
+    assert provider.called("cancel_charge") == 0
+    assert len(await _holds(db)) == 1  # the new window stays held
     async with db() as session:
-        assert not await adjustment_suspension.is_suspended(
+        assert await adjustment_suspension.is_suspended(
             session, tenant_id=world.tenant.id, appointment_id=world.appointment.id
         )
 
@@ -240,6 +273,7 @@ async def test_awaiting_payment_lists_the_held_window_of_a_suspended_change(
     assert row["id"] == str(hold.id)
     assert (row["kind"], row["appointment_id"]) == ("difference", str(world.appointment.id))
     assert row["service"] == "Avaliação"
+    assert row["change_summary"] == "Consulta → Avaliação"  # mapa-u §1.6
     start = datetime.fromisoformat(row["start"].replace("Z", "+00:00"))
     assert start.replace(tzinfo=None) == world.start_at.replace(tzinfo=None)  # SQLite: naive
     text = str(body)
@@ -283,6 +317,8 @@ async def _events(client, world, monkeypatch):
 async def test_the_agenda_says_a_visit_is_suspended(
     client: AsyncClient, db, acting, provider, monkeypatch
 ):
+    """While its old event is still on the agenda (before the vacate's delete lands, or a delete
+    that failed and waits for the retry) the visit says it is suspended."""
     world = await _suspended_world(db, acting, client)
 
     event = await _events(client, world, monkeypatch)

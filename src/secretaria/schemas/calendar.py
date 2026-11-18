@@ -37,18 +37,24 @@ class AwaitingPaymentRead(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    id: str  # the hold's id: opaque, only good for a list key
+    id: str  # the hold's id (the change's for "rebook"): opaque, only good for a list key
     start: datetime
     end: datetime
     service: str | None = None
     expires_at: datetime
     professional_id: str | None = None
-    # TASK-085 R (contrato §3.9), additive: "booking" - a new booking a patient is paying the sinal
-    # for (no appointment yet); "difference" - the NEW window of a change waiting for the Pix of
-    # its difference (D-R4), held for `appointment_id`, the consultation it would replace (which
-    # stays on the agenda, suspended). A consumer that does not know the key ignores it.
-    kind: Literal["booking", "difference"] = "booking"
+    # TASK-085 R (contrato §3.9; mapa-u §1.6/§4.5), additive: "booking" - a new booking a patient
+    # is paying the sinal for (no appointment yet); "difference" - the NEW window of a change
+    # waiting for the Pix of its difference, held for `appointment_id`, the consultation it would
+    # replace (D-R10: that one left the agenda meanwhile - this row is where the clinic sees it);
+    # "rebook" (D-R11) - not a hold: the OLD window of `appointment_id`, whose slot was taken
+    # while the patient did not pay; the clinic reschedules or cancels it with the patient
+    # (`expires_at` = its start). A consumer that does not know a kind drops the row.
+    kind: Literal["booking", "difference", "rebook"] = "booking"
     appointment_id: str | None = None
+    # What the change would do, in plain Portuguese ("Consulta → Avaliação; 10:00 → 11:30"), for
+    # "difference" and "rebook"; None when nothing can be said (and always for "booking").
+    change_summary: str | None = None
 
 
 class CalendarDepositRead(BaseModel):

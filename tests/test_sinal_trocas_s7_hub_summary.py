@@ -176,6 +176,15 @@ async def test_a_suspended_visit_says_what_the_change_would_do(
         times = f"{old_local:%d/%m %H:%M} → {new_local:%d/%m %H:%M}"
     assert event["suspended"] is True
     assert event["pending_change_summary"] == f"Consulta → Avaliação; {times}"
+    # D-R10: once its old event left the agenda the visit is read from the "aguardando" list -
+    # with the same summary (mapa-u §1.6).
+    window = {
+        "start": (world.start_at - timedelta(days=1)).isoformat(),
+        "end": (world.start_at + timedelta(days=3)).isoformat(),
+    }
+    [row] = (await client.get(f"{CALENDAR}/awaiting-payment", params=window)).json()
+    assert (row["kind"], row["appointment_id"]) == ("difference", str(world.appointment.id))
+    assert row["change_summary"] == event["pending_change_summary"]
 
 
 async def test_an_applied_change_waiting_for_its_pix_says_it_too(
