@@ -1201,6 +1201,7 @@ def _insurance_list(
                     scope={"edit_doctor_id": str(doctor.id) if doctor is not None else None},
                     items=edit_insurance_rows(tenant, plans, doctor),
                     pinned=list(fr.INSURANCE_PINNED_ROWS),
+                    has_clinic_notes=fr.insurance_plans_have_clinic_notes(plans),
                 ),
             )
         ],

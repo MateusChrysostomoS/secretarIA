@@ -6,6 +6,8 @@ pagamento" card through brain-api. What is worth pinning, and the failure each t
 - nothing internal leaks: no catalog note, no doctor, no row id;
 - TASK-085 R D-R12 (owner, 2026-11-18): no per-plan payment text and no per-plan deposit - a
   convenio never exempts the sinal, which is the clinic's one rule (`deposit`);
+- TASK-085 R U1b: only the convenios WITH the clinic's own note are listed (the sheet exists to
+  show those notes; the Portal offers it only when one exists);
 - one clinic never sees another's list; the route needs the internal key.
 """
 
@@ -93,20 +95,17 @@ async def _tenant(db, **fields) -> Tenant:
 
 
 async def _shared_clinic(db, *, deposit: bool = True) -> Tenant:
-    """Shared mode: Unimed (charges) + the clinic's own "GEAP" (no deposit, with a note)."""
+    """Shared mode: Unimed (catalog, no note) + the clinic's own "GEAP" (with a note)."""
     tenant = await _tenant(
         db, insurance_mode="shared", pix_deposit_enabled=deposit, pix_deposit_percent=30
     )
     async with db() as session:
-        session.add(
-            TenantInsurancePlan(tenant_id=tenant.id, catalog_id=UNIMED, charge_deposit=True)
-        )
+        session.add(TenantInsurancePlan(tenant_id=tenant.id, catalog_id=UNIMED))
         session.add(
             TenantInsurancePlan(
                 tenant_id=tenant.id,
                 custom_name="GEAP",
                 custom_payment_note="Pagamento na recepção.",
-                charge_deposit=False,
             )
         )
         await session.commit()
@@ -117,27 +116,20 @@ async def _get(client, tenant_id) -> httpx.Response:
     return await client.get(PATH, params={"tenant_id": str(tenant_id)}, headers=KEY)
 
 
-def _row(professional, tenant, catalog_id, charge) -> ProfessionalInsurancePlan:
+def _row(professional, tenant, catalog_id) -> ProfessionalInsurancePlan:
     return ProfessionalInsurancePlan(
-        professional_id=professional.id,
-        tenant_id=tenant.id,
-        catalog_id=catalog_id,
-        charge_deposit=charge,
+        professional_id=professional.id, tenant_id=tenant.id, catalog_id=catalog_id
     )
 
 
-async def test_the_patient_sees_each_convenio_its_own_note_and_the_clinics_one_sinal(
-    client, db
-):
+async def test_the_patient_sees_the_convenios_with_a_clinic_note_and_the_one_sinal(client, db):
     tenant = await _shared_clinic(db)
     resp = await _get(client, tenant.id)
     assert resp.status_code == 200, resp.text
+    # Unimed has no clinic note: it is only a name, already in the convenio list (U1b).
     assert resp.json() == {
         "deposit": {"enabled": True, "percent": 30},
-        "plans": [
-            {"name": "GEAP", "clinic_note": "Pagamento na recepção."},
-            {"name": "Unimed", "clinic_note": None},
-        ],
+        "plans": [{"name": "GEAP", "clinic_note": "Pagamento na recepção."}],
     }
     assert "Varia por plano" not in resp.text and "Pagamento: confirme" not in resp.text
 
@@ -164,7 +156,7 @@ async def test_with_the_deposit_off_the_clinic_rule_says_off_and_no_percent(clie
     tenant = await _shared_clinic(db, deposit=False)
     body = (await _get(client, tenant.id)).json()
     assert body["deposit"] == {"enabled": False, "percent": None}
-    assert [plan["name"] for plan in body["plans"]] == ["GEAP", "Unimed"]
+    assert [plan["name"] for plan in body["plans"]] == ["GEAP"]
 
 
 async def test_independent_mode_unites_active_doctors_and_never_names_them(
@@ -181,26 +173,37 @@ async def test_independent_mode_unites_active_doctors_and_never_names_them(
         await session.flush()
         session.add_all(
             [
-                _row(ana, tenant, UNIMED, True),
-                _row(beto, tenant, UNIMED, False),
-                _row(beto, tenant, AMIL, False),
-                _row(gone, tenant, AMIL, True),
+                _row(ana, tenant, UNIMED),
+                _row(beto, tenant, UNIMED),
+                _row(beto, tenant, AMIL),
+                _row(gone, tenant, AMIL),
+                ProfessionalInsurancePlan(
+                    professional_id=beto.id,
+                    tenant_id=tenant.id,
+                    custom_name="Plano do Consultorio",
+                    custom_payment_note="Reembolso pelo plano.",
+                ),
+                ProfessionalInsurancePlan(
+                    professional_id=gone.id,
+                    tenant_id=tenant.id,
+                    custom_name="Plano Inativo",
+                    custom_payment_note="Nao deve aparecer.",
+                ),
             ]
         )
         await session.commit()
     resp = await _get(client, tenant.id)
     body = resp.json()
     assert body["deposit"] == {"enabled": True, "percent": 40}
-    # The doctors' legacy flags no longer say anything (D-R12): one row per convenio, no "varies".
+    # Only an ACTIVE doctor's own "Outro" carries a note; catalog rows have none (U1b).
     assert body["plans"] == [
-        {"name": "Amil", "clinic_note": None},
-        {"name": "Unimed", "clinic_note": None},
+        {"name": "Plano do Consultorio", "clinic_note": "Reembolso pelo plano."}
     ]
-    assert "Sigilo" not in resp.text
+    assert "Sigilo" not in resp.text and "Plano Inativo" not in resp.text
 
 
-async def test_a_legacy_name_without_a_row_is_shown(client, db):
-    """A free-text convenio from before the catalog is listed like any other."""
+async def test_a_legacy_name_without_a_row_has_no_note_so_it_is_not_listed(client, db):
+    """A free-text convenio from before the catalog never carries a clinic note (U1b)."""
     tenant = await _tenant(
         db,
         insurance_mode="shared",
@@ -209,14 +212,18 @@ async def test_a_legacy_name_without_a_row_is_shown(client, db):
         insurances=["Plano Antigo Sintetico"],
     )
     body = (await _get(client, tenant.id)).json()
-    assert body["plans"] == [{"name": "Plano Antigo Sintetico", "clinic_note": None}]
+    assert body["plans"] == []
 
 
 async def test_one_clinic_never_sees_another_clinics_list(client, db):
     mine = await _shared_clinic(db)
     other = await _tenant(db, insurance_mode="shared", pix_deposit_enabled=True)
     async with db() as session:
-        session.add(TenantInsurancePlan(tenant_id=other.id, custom_name="Plano Vizinho"))
+        session.add(
+            TenantInsurancePlan(
+                tenant_id=other.id, custom_name="Plano Vizinho", custom_payment_note="Nota."
+            )
+        )
         await session.commit()
     names = [p["name"] for p in (await _get(client, mine.id)).json()["plans"]]
     assert "Plano Vizinho" not in names

@@ -3233,6 +3233,17 @@ INSURANCE_PINNED_ROWS: tuple[tuple[str, str, str | None], ...] = (
 )
 
 
+def insurance_plans_have_clinic_notes(plans: list) -> bool:
+    """Does any of these plans carry the clinic's own note (TASK-085 R U1b)?
+
+    The clinic's "Outro" plans and, in `independent` mode, a doctor's own "Outro" carry
+    `note`; catalog plans and legacy names never do. One non-blank note is enough for the
+    Portal to offer "Ver regras de pagamento dos convênios" (owner, 2026-11-18) - the same
+    plans `patient_insurance_overview` then lists.
+    """
+    return any(isinstance(plan.get("note"), str) and plan["note"].strip() for plan in plans)
+
+
 def portal_insurance_rows(plans: list) -> list[tuple[str, str, str | None]]:
     """Every clinic plan as a Portal row: the full name, no description (TASK-085 R D-R12: the
     per-plan payment text was removed - owner: "TIRE ISSO")."""
@@ -3286,6 +3297,7 @@ def _enter_insurance(
         scope={},
         items=portal_insurance_rows(plans),
         pinned=list(INSURANCE_PINNED_ROWS),
+        has_clinic_notes=insurance_plans_have_clinic_notes(plans),
     )
     logger.info(
         "insurance_step_presented",

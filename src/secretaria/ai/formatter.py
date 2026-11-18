@@ -86,6 +86,9 @@ class OptionSource:
     pointer `services/list_options.py::resolve` rebuilds the list from (never sent to a
     browser); `items` is the WHOLE ordered list as Portal rows (full titles, no cap);
     `pinned` are the fixed rows ("Não sei", "Particular", "Outro") drawn after it.
+    `has_clinic_notes` (convênio lists only, TASK-085 R U1b): whether any listed plan carries
+    the clinic's own note - the Portal shows "Ver regras de pagamento dos convênios" only
+    then; None on every other kind.
     WhatsApp ignores all of this and sends `SlotsBubble.rows`, exactly as before.
     """
 
@@ -93,6 +96,7 @@ class OptionSource:
     scope: dict
     items: list[tuple] = field(default_factory=list)
     pinned: list[tuple] = field(default_factory=list)
+    has_clinic_notes: bool | None = None
 
 
 @dataclass

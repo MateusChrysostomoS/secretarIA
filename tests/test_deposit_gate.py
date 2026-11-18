@@ -18,6 +18,7 @@ from secretaria.models import Patient, Tenant
 from secretaria.models.insurance import TenantInsurancePlan
 from secretaria.services import tenant_config as cfg
 from secretaria.services.payments import accounts, deposit_gate
+from tests._legacy_insurance_flag import set_legacy_flag
 from tests.payments_support import FakeProvider, make_sessionmaker
 
 
@@ -128,10 +129,10 @@ async def test_path_2_a_legacy_no_deposit_plan_now_requires_the_deposit(db, enti
     # ignored.
     async with db() as session:
         tenant, patient = await _seed(session)
-        plan = TenantInsurancePlan(
-            id=uuid4(), tenant_id=tenant.id, custom_name="Unimed", charge_deposit=False
-        )
+        plan = TenantInsurancePlan(id=uuid4(), tenant_id=tenant.id, custom_name="Unimed")
         session.add(plan)
+        await session.flush()
+        await set_legacy_flag(session, "tenant_insurance_plans", plan.id, False)
         await session.commit()
         quote = await _quote(session, tenant, patient, insurance="Unimed")
     assert (quote.outcome, quote.amount_cents) == ("required", 6000)

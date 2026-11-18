@@ -57,6 +57,7 @@ from secretaria.services.insurance_catalog import (  # noqa: E402
     sync_legacy_insurances,
 )
 from secretaria.services.payments import deposit_lifecycle  # noqa: E402
+from tests._legacy_insurance_flag import legacy_flags, set_legacy_flag  # noqa: E402
 
 UNIMED = catalog_id_for_slug("unimed")
 AMIL = catalog_id_for_slug("amil")
@@ -307,8 +308,8 @@ async def test_http_clinic_put_removing_plan_cascades_to_doctor(client: AsyncCli
     assert len(body) == 1
     assert body[0]["catalog_id"] == str(AMIL)
     assert body[0]["name"] == "Amil"
-    # TASK-085 R D-R12: an older Portal's "false" is accepted and ignored; reads always say true.
-    assert body[0]["charge_deposit"] is True
+    # TASK-085 R D-R12/U1b: an older Portal's flag is accepted and ignored; reads never carry it.
+    assert "charge_deposit" not in body[0]
     assert body[0]["is_custom"] is False
     got = await client.get(f"/tenants/me/professionals/{ana.id}/insurance-plans")
     # Ana had customized down to Unimed alone, which just got removed - she
@@ -340,7 +341,6 @@ async def test_legacy_sync_matches_catalog_and_keeps_unknown_verbatim(db):
         ).all()
         # Only Unimed became a plan row; nothing for "Plano Inexistente".
         assert [plan.catalog_id for plan in plans] == [UNIMED]
-        assert plans[0].charge_deposit is True
         unimed_plan_id = str(plans[0].id)
         # Granted to every ACTIVE doctor, not to the inactive one.
         assert await professional_plan_ids(session, ana.id) == [unimed_plan_id]
@@ -360,15 +360,10 @@ async def test_legacy_sync_keeps_existing_plan_settings(db):
         bruno = await _professional(session, tenant, "Dr. Bruno")
         await set_tenant_plans(session, tenant, [UNIMED])
         unimed_plan_id = await _plan_id(session, tenant.id, UNIMED)
-        (await session.get(TenantInsurancePlan, UUID(unimed_plan_id))).charge_deposit = False
+        await set_legacy_flag(session, "tenant_insurance_plans", UUID(unimed_plan_id), False)
         await set_professional_clinic_plans(session, ana, [unimed_plan_id])
         await sync_legacy_insurances(session, tenant, ["Unimed"])
-        charge = await session.scalar(
-            select(TenantInsurancePlan.charge_deposit).where(
-                TenantInsurancePlan.tenant_id == tenant.id
-            )
-        )
-        assert charge is False
+        assert await legacy_flags(session, "tenant_insurance_plans") == [False]
         assert await professional_plan_ids(session, ana.id) == [unimed_plan_id]
         # Not newly added -> not force-granted to Bruno.
         assert await professional_plan_ids(session, bruno.id) == []
@@ -488,8 +483,9 @@ async def _seed_booking(
     if charge_deposit is not None:
         await set_tenant_plans(session, tenant, [plan_id])
         tenant_plan_id = await _plan_id(session, tenant.id, plan_id)
-        row = await session.get(TenantInsurancePlan, UUID(tenant_plan_id))
-        row.charge_deposit = charge_deposit
+        await set_legacy_flag(
+            session, "tenant_insurance_plans", UUID(tenant_plan_id), charge_deposit
+        )
     elif with_plan_id:
         # "a plan id the clinic no longer accepts": no `tenant_insurance_plans`
         # row exists at all, so any random id (never a real row) reproduces

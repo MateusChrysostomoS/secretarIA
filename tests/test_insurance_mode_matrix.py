@@ -82,6 +82,7 @@ from secretaria.services.insurance_catalog import (  # noqa: E402
     set_tenant_plans,
 )
 from secretaria.services.payments import deposit_lifecycle  # noqa: E402
+from tests._legacy_insurance_flag import set_legacy_flag  # noqa: E402
 
 UNIMED = catalog_id_for_slug("unimed")
 AMIL = catalog_id_for_slug("amil")
@@ -403,7 +404,6 @@ async def test_reconciliation_resolves_legacy_unmatched_when_catalog_grows(db):
             )
         )
         assert plan is not None
-        assert plan.charge_deposit is True
 
 
 async def test_reconciliation_idempotent_record_unmatched(db):
@@ -542,7 +542,9 @@ async def test_custom_plan_never_exempts_the_deposit(db, monkeypatch):
         plan = await create_tenant_custom_plan(
             session, tenant, custom_name="Outro", custom_payment_note="Nota."
         )
-        plan.charge_deposit = False  # a row saved while the option existed
+        await session.flush()
+        # A row saved while the option existed.
+        await set_legacy_flag(session, "tenant_insurance_plans", plan.id, False)
         patient = Patient(id=uuid4(), tenant_id=tenant.id, wa_id="5511999999999", name="Maria")
         session.add(patient)
         await session.flush()

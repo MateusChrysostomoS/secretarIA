@@ -637,9 +637,7 @@ async def set_tenant_plans(
     and are never wiped by this replace, since the frontend has no way to
     enumerate them by catalog id in the first place.
 
-    A plan kept keeps its row untouched (and its doctors). TASK-085 R D-R12: the
-    old per-plan `charge_deposit` is no longer written - a convênio never exempts
-    the sinal, so the column stays only as an ignored legacy value. A plan removed
+    A plan kept keeps its row untouched (and its doctors). A plan removed
     disappears from every doctor too. A plan added is
     accepted by NO doctor yet - the hub asks each doctor explicitly (decision
     2: a doctor's plans are chosen, not inherited - except the TASK-008 default
@@ -734,8 +732,8 @@ async def sync_legacy_insurances(
     the rest are kept verbatim in `Tenant.insurances` and logged as a count.
     Because this path has no per-doctor control, a plan ADDED here is granted
     to every active doctor - exactly what "the clinic accepts X" meant before
-    per-doctor acceptance existed. Plans already enabled keep their
-    `charge_deposit` and doctors. No commit.
+    per-doctor acceptance existed. Plans already enabled keep their row and
+    doctors. No commit.
     """
     entries = [{"id": entry.id, "name": entry.name} for entry in await list_catalog(session)]
     matched_ids: list[UUID] = []
@@ -962,8 +960,7 @@ async def reconcile_unmatched_insurances(
     extends the aliases of) a catalog entry. For each unresolved
     `insurance_catalog_unmatched` row whose normalized text is now one of
     `catalog_match_keys(catalog_entry)`: creates a `tenant_insurance_plans` row
-    for that tenant (idempotent - skipped if one already exists,
-    `charge_deposit=True` default) and stamps `resolved_at` +
+    for that tenant (idempotent - skipped if one already exists) and stamps `resolved_at` +
     `resolved_insurance_catalog_id`. Returns the count resolved. No commit.
     """
     keys = catalog_match_keys(catalog_entry)
