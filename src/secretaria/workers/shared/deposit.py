@@ -184,6 +184,8 @@ def _draft_target(current: dict, appointment: Appointment) -> dict:
     }
     if "unit_id" in current:
         target["unit_id"] = current.get("unit_id")
+    if "attendee_name" in current:
+        target["attendee_name"] = current.get("attendee_name")
     return target
 
 
@@ -212,25 +214,26 @@ async def _paid_card_line(
         insurance=target["insurance"],
         **unit,
     )
+    # Lazy: appointment_edit_apply imports this package's support module.
+    from secretaria.workers.shared import appointment_edit_apply as apply
+
     before = service_change.timing_is_before(tenant)
+    no_room = (
+        before
+        and decision.action == "increase_charge"
+        and apply.legacy_without_room(tenant, appointment, start_at, now)
+    )
+    if no_room and apply.legacy_cannot_carry(appointment, target, changed):
+        # The legacy deferred mode never writes doctor / convênio / who: Confirmar refuses it
+        # (`LEGACY_NO_ROOM_TEXT`) - the card says so instead of a Pix of the difference.
+        return apply.LEGACY_NO_ROOM_CARD_TEXT
     line = service_change.confirm_card_line_text(
         decision.action,
         decision.diff_cents,
         unit_only=changed == frozenset({MONEY_FIELD_UNIT}),
         timing="before" if before else "after",
     )
-    if (
-        line
-        and before
-        and decision.action == "increase_charge"
-        and service_change.suspend_pix_expiry(
-            now,
-            tenant.deposit_hold_ttl_minutes or service_change.DEFAULT_PIX_TTL_MINUTES,
-            appointment.start_at,
-            start_at,
-        )
-        is None
-    ):
+    if line and no_room:
         # No room for a suspension before the visits (contrato §1): the legacy deferred mode
         # reserves nothing - the card must not promise it.
         line = line.split(_RESERVED_SENTENCE, 1)[0]

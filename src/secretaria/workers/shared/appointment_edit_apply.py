@@ -85,6 +85,10 @@ LEGACY_NO_ROOM_TEXT = (
     "Não dá para fazer essa troca tão perto da consulta. Sua consulta continua como estava. "
     "Para mudar, fale com a clínica."
 )
+# The confirmation card's line for the same case (shown before Confirmar, no Pix promised).
+LEGACY_NO_ROOM_CARD_TEXT = (
+    "Essa troca não pode ser feita tão perto da consulta. Para mudar, fale com a clínica."
+)
 
 
 @dataclass(frozen=True)
@@ -245,12 +249,59 @@ async def _void_unseen_charge(session, tenant, deposit, result: ServiceChangeRes
         logger.warning("appointment_edit_charge_void_failed", error_type=type(exc).__name__)
 
 
-def _legacy_cannot_carry(appointment, edit: dict, changed: frozenset[str]) -> bool:
-    """Does this change hold a part the legacy deferred mode would never write?"""
+def legacy_cannot_carry(appointment, edit: dict, changed: frozenset[str]) -> bool:
+    """Does this change hold a part the legacy deferred mode would never write (doctor,
+    convênio, who the visit is for)? `edit` needs `attendee_name` only when it may change."""
     return bool(changed & {MONEY_FIELD_DOCTOR, MONEY_FIELD_INSURANCE}) or (
         "attendee_name" in edit
         and (edit.get("attendee_name") or None) != (appointment.attendee_name or None)
     )
+
+
+def legacy_without_room(tenant, appointment, new_start, now: datetime) -> bool:
+    """A dearer change on this clinic would fall into the LEGACY deferred mode: a "before"
+    clinic with no room left for a minimally useful Pix before the visits (contrato §1, the
+    engine's own `suspend_pix_expiry` rule)."""
+    if not service_change.timing_is_before(tenant):
+        return False
+    ttl = tenant.deposit_hold_ttl_minutes or service_change.DEFAULT_PIX_TTL_MINUTES
+    return (
+        service_change.suspend_pix_expiry(
+            now, ttl, appointment.start_at, new_start or appointment.start_at
+        )
+        is None
+    )
+
+
+async def _legacy_refused(
+    session, tenant, appointment, deposit, edit: dict, changed: frozenset[str]
+) -> bool:
+    """Decided BEFORE the engine (no Pix is ever created for it): the change is dearer, would
+    fall into the legacy deferred mode and holds a part that mode never writes. S4 answers 409
+    `no_room` for the same case on the staff side."""
+    if not legacy_cannot_carry(appointment, edit, changed):
+        return False
+    now = datetime.now(UTC)
+    new_start = edit.get("start_at") or appointment.start_at
+    if not legacy_without_room(tenant, appointment, new_start, now):
+        return False
+    target = {}
+    if "unit_id" in edit:
+        target["unit_id"] = edit["unit_id"]
+    if "insurance" in edit:
+        target["insurance"] = edit["insurance"]
+    decision = await service_change.preview_service_change(
+        session,
+        tenant=tenant,
+        appointment=appointment,
+        deposit=deposit,
+        new_service=edit.get("appointment_type") or appointment.appointment_type,
+        professional_id=edit.get("professional_id", appointment.professional_id),
+        start_at=new_start,
+        now=now,
+        **target,
+    )
+    return decision.action == "increase_charge"
 
 
 async def _apply_paid_change(
@@ -265,11 +316,11 @@ async def _apply_paid_change(
         return None
     deferred = bool(edit.get("calendar_deferred"))
     previous_start = appointment.start_at
-    appointment_id = appointment.id
-    # A savepoint only when the legacy fallback could not carry the change (see below).
-    savepoint = (
-        await session.begin_nested() if _legacy_cannot_carry(appointment, edit, changed) else None
-    )
+    if await _legacy_refused(session, current_tenant, appointment, deposit, edit, changed):
+        # Never charge for a change the payment would not write: refused before any Pix;
+        # `flow_runner` puts the router's agenda back (refusal) and says why.
+        logger.info("appointment_edit_legacy_no_room", tenant_id=str(current_tenant.id))
+        return _refused(appointment.id, LEGACY_NO_ROOM_TEXT)
     result = await service_change.request_paid_change(
         session,
         tenant=current_tenant,
@@ -280,23 +331,12 @@ async def _apply_paid_change(
         now=datetime.now(UTC),
         source=SOURCE_FLOW,
     )
-    if savepoint is not None:
-        if result.kind == "awaiting_payment":
-            # Too close to the visits for a suspension: never charge for a change that the
-            # payment would not write (S4 answers 409 `no_room` for the same case). The Pix the
-            # patient never saw is voided, the engine's writes undone; `flow_runner` puts the
-            # router's agenda back (refusal) and says why.
-            await _void_unseen_charge(session, current_tenant, deposit, result)
-            await savepoint.rollback()
-            logger.info("appointment_edit_legacy_no_room", tenant_id=str(current_tenant.id))
-            return _refused(appointment_id, LEGACY_NO_ROOM_TEXT)
-        await savepoint.commit()
     if result.kind not in _WRITES_NOW:
         # suspended / awaiting_payment (legacy) / blocked: the row and the old event stay.
         if not deferred:
             try:
                 await _restore_router_agenda(session, current_tenant, appointment, edit)
-            except BaseException:
+            except Exception:
                 await _void_unseen_charge(session, current_tenant, deposit, result)
                 raise
         return AppliedEdit(
@@ -317,7 +357,7 @@ async def _apply_paid_change(
                 return None
         if deferred:
             await _write_agenda_now(session, current_tenant, appointment, edit, window_before)
-    except BaseException:
+    except Exception:
         await _void_unseen_charge(session, current_tenant, deposit, result)
         raise
     return AppliedEdit(

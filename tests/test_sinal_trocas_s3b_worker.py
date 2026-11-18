@@ -36,6 +36,7 @@ from secretaria.models.deposit_adjustment import (
 )
 from secretaria.models.professional_edit_notice import ProfessionalEditNotice
 from secretaria.services import appointment_edit as ae, flow_router as fr
+from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.payments import (
     adjustment_suspension,
     deposit_lifecycle,
@@ -44,15 +45,20 @@ from secretaria.services.payments import (
 )
 from secretaria.services.payments.provider import ChargeState, CreatedCharge, PaymentStatus
 from secretaria.workers import tasks
+from secretaria.workers.orchestrator import _send_bot_reply
+from secretaria.workers.portal.inbound import _persist_brain_message_inbound
 from secretaria.workers.shared import (
     appointment_edit_apply as apply_module,
     deposit as deposit_module,
+    flow_runner,
 )
+from secretaria.workers.shared.handover import CALENDAR_UNAVAILABLE_MESSAGE
+from secretaria.workers.shared.sender import _reply_sender
 from secretaria.workers.shared.service_change_actions import service_change_bubbles
 from tests._edit_flow_support import EditCalendar
 from tests._reminder_fixtures import db  # noqa: F401
 from tests._reminders_r3 import sent, wire
-from tests._reminders_v2 import WA_ID, add_reminder, reload_appointment
+from tests._reminders_v2 import WA_ID, add_reminder, outbound_messages, reload_appointment
 from tests.payments_support import FakeProvider
 from tests.test_appointment_edit_paid_service import _edit, _world
 
@@ -816,7 +822,7 @@ async def test_the_legacy_fallback_refuses_what_the_payment_would_not_write(
     row = await reload_appointment(db, world.appointment.id)
     assert (row.appointment_type, row.insurance, row.attendee_name) == ("Consulta", None, None)
     assert await _rows(db, DepositAdjustment) == []
-    assert ("cancel_charge", "pay_diff_1") in provider.calls  # the unseen Pix is voided
+    assert provider.calls == []  # decided BEFORE the engine: no Pix is ever created
     texts = _texts()
     assert texts[0] == apply_module.LEGACY_NO_ROOM_TEXT
     assert not any(text.startswith(ae.EDIT_APPLIED) for text in texts)
@@ -843,3 +849,198 @@ async def test_outside_the_legacy_fallback_a_convenio_change_is_suspended(db, pr
 
     [adjustment] = await _rows(db, DepositAdjustment)
     assert (adjustment.mode, adjustment.pending_edit["insurance"]) == (MODE_SUSPEND, "Unimed")
+
+
+async def test_the_card_says_a_legacy_change_it_cannot_carry_is_not_possible(
+    db,  # noqa: F811
+    provider,
+    monkeypatch,
+):
+    world = await _world(db)
+    await _set_tenant(db, world, deposit_timing="before")
+    monkeypatch.setattr(service_change, "suspend_pix_expiry", lambda *a, **k: None)
+
+    line = await _card_line(world, service="Avaliação", insurance="Unimed")
+
+    assert line == apply_module.LEGACY_NO_ROOM_CARD_TEXT
+    assert "Pix" not in line and provider.calls == []
+    # A service change alone still shows the legacy line (the payment does write it).
+    legacy = await _card_line(world, service="Avaliação")
+    assert legacy.startswith(f"{DIFF_TEXT}: R$ 50,00.") and "reservado" not in legacy
+
+
+# --------------------------------------------------------------------------------------------
+# A failure AFTER the engine wrote an "after" change and created its Pix (review M1): the whole
+# edit rolls back, the Pix nobody saw is voided, the agenda is compensated, the patient is told
+# --------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("failure", ["agenda_same", "agenda_new_doctor", "reschedule_race"])
+async def test_a_failure_after_an_applied_awaiting_change_voids_its_pix(
+    db,  # noqa: F811
+    provider,
+    monkeypatch,
+    failure,
+):
+    world = await _world(db)
+    compensated: list[dict] = []
+    real_compensate = flow_runner.compensate_appointment_edit
+
+    async def _compensate(tenant, patient_id, edit):
+        compensated.append(edit)
+        await real_compensate(tenant, patient_id, edit)
+
+    monkeypatch.setattr(flow_runner, "compensate_appointment_edit", _compensate)
+    calendar = EditCalendar(fail_update=failure != "reschedule_race")
+    edit = _edit(world, "Avaliação", 30, calendar)
+    if failure == "agenda_new_doctor":
+        doctor = await _second_doctor(db, world)
+        edit.update(professional_id=doctor, doctor_changed=True, calendar_changed=True)
+    if failure == "reschedule_race":
+        edit.update(
+            time_changed=True,
+            start_at=world.start_at + timedelta(hours=2),
+            end_at=world.start_at + timedelta(hours=2, minutes=30),
+        )
+
+        async def _limit_reached(session, *, tenant, appointment):
+            return False, 99
+
+        monkeypatch.setattr(deposit_lifecycle, "register_reschedule", _limit_reached)
+
+    await _confirm(world, edit)
+
+    assert ("cancel_charge", "pay_diff_1") in provider.calls
+    assert await _rows(db, DepositAdjustment) == []
+    row = await reload_appointment(db, world.appointment.id)
+    assert (row.appointment_type, row.professional_id, row.google_event_id) == (
+        "Consulta",
+        None,
+        "evt-old",
+    )
+    assert row.start_at.replace(tzinfo=None) == world.start_at.replace(tzinfo=None)
+    assert await _count(db, ProfessionalEditNotice) == 0
+    assert compensated == [edit]
+    assert _texts() == [CALENDAR_UNAVAILABLE_MESSAGE]
+
+
+# --------------------------------------------------------------------------------------------
+# The Portal: a choice tap is an ACTION only when its id was on a card of THIS conversation
+# --------------------------------------------------------------------------------------------
+
+
+async def _portal_world(db):  # noqa: F811
+    world = await _world(db, channel=CHANNEL_BRAIN_MESSAGE)
+    adjustment_id = await _suspend(db, world, status=STATUS_AWAITING_CHOICE)
+    return world, adjustment_id
+
+
+async def _portal_card(world, adjustment_id, *, resend=True):
+    """The choice card as S1's follow-up records it on the Portal."""
+    reply = tasks._ReplyContext(
+        conversation_id=world.conversation.id,
+        patient_ref=world.patient.external_id,
+        inbound_body="",
+        channel=CHANNEL_BRAIN_MESSAGE,
+    )
+    client = _reply_sender(reply, world.tenant, None)
+    await client.send_buttons(
+        world.patient.external_id,
+        service_change.choice_message_text("Consulta", "Avaliação", 5000),
+        service_change.choice_buttons(adjustment_id, resend=resend),
+    )
+
+
+async def _portal_tap(world, action, target_id):
+    label = {
+        service_change.ACTION_CHOICE_KEEP: service_change.LABEL_CHOICE_KEEP,
+        service_change.ACTION_CHOICE_RESEND: service_change.LABEL_CHOICE_RESEND,
+        service_change.ACTION_CHOICE_BOTH: service_change.LABEL_CHOICE_BOTH,
+    }[action]
+    reply = await _persist_brain_message_inbound(
+        tenant_id=world.tenant.id,
+        external_id=world.patient.external_id,
+        text=label,
+        interactive_reply_id=f"{action}|{target_id}",
+    )
+    await _send_bot_reply(reply)
+    return reply
+
+
+async def _adjustment_status(db, adjustment_id):  # noqa: F811
+    async with db() as session:
+        return (await session.get(DepositAdjustment, adjustment_id)).status
+
+
+async def test_a_portal_keep_tap_on_the_card_is_the_action(db, provider):  # noqa: F811
+    world, adjustment_id = await _portal_world(db)
+    await _portal_card(world, adjustment_id)
+
+    reply = await _portal_tap(world, service_change.ACTION_CHOICE_KEEP, adjustment_id)
+
+    assert reply.action_button == (service_change.ACTION_CHOICE_KEEP, str(adjustment_id))
+    assert await _adjustment_status(db, adjustment_id) == STATUS_KEPT_OLD
+    bodies = [m.body for m in await outbound_messages(db, world.conversation.id)]
+    assert bodies[-1] == service_change.kept_old_notice_text("Consulta")
+
+
+async def test_a_portal_both_tap_cancels_the_old_consultation(db, provider):  # noqa: F811
+    world, adjustment_id = await _portal_world(db)
+    await _portal_card(world, adjustment_id)
+
+    await _portal_tap(world, service_change.ACTION_CHOICE_BOTH, adjustment_id)
+
+    assert await _adjustment_status(db, adjustment_id) == STATUS_CANCELLED
+    row = await reload_appointment(db, world.appointment.id)
+    assert row.status == AppointmentStatus.CANCELLED
+
+
+async def test_a_portal_resend_without_window_records_the_buttons_again(
+    db,  # noqa: F811
+    provider,
+    monkeypatch,
+):
+    world, adjustment_id = await _portal_world(db)
+    await _portal_card(world, adjustment_id)
+    real_choose = service_change.choose_after_expiry
+
+    async def _no_window(session, **kwargs):
+        if kwargs["choice"] == service_change.CHOICE_RESEND:
+            return service_change.ChoiceOutcome(kind="no_window", adjustment_id=adjustment_id)
+        return await real_choose(session, **kwargs)
+
+    monkeypatch.setattr(service_change, "choose_after_expiry", _no_window)
+
+    await _portal_tap(world, service_change.ACTION_CHOICE_RESEND, adjustment_id)
+
+    cards = [m for m in await outbound_messages(db, world.conversation.id) if m.interactive]
+    assert [o["id"] for o in cards[-1].interactive["options"]] == [
+        button_id
+        for button_id, _label in service_change.choice_buttons(adjustment_id, resend=False)
+    ]
+    assert await _adjustment_status(db, adjustment_id) == STATUS_AWAITING_CHOICE
+    # A tap on the RE-SENT card validates too.
+    reply = await _portal_tap(world, service_change.ACTION_CHOICE_KEEP, adjustment_id)
+    assert reply.action_button == (service_change.ACTION_CHOICE_KEEP, str(adjustment_id))
+    assert await _adjustment_status(db, adjustment_id) == STATUS_KEPT_OLD
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        service_change.ACTION_CHOICE_KEEP,
+        service_change.ACTION_CHOICE_RESEND,
+        service_change.ACTION_CHOICE_BOTH,
+    ],
+)
+async def test_a_forged_portal_choice_id_does_nothing(db, provider, action):  # noqa: F811
+    """No card of this conversation offered that id: it is never an action."""
+    world, adjustment_id = await _portal_world(db)
+
+    reply = await _portal_tap(world, action, adjustment_id)
+
+    assert reply is None or reply.action_button is None
+    assert await _adjustment_status(db, adjustment_id) == STATUS_AWAITING_CHOICE
+    row = await reload_appointment(db, world.appointment.id)
+    assert row.status == AppointmentStatus.SCHEDULED
+    assert provider.calls == []
