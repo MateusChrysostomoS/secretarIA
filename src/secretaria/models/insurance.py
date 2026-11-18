@@ -30,13 +30,10 @@ Three tables, three levels:
   `aliases` are extra normalized strings (TASK-008) that also count as a match
   for this entry - the admin catalog endpoint accepts them so an operator can
   register "GEAP Saúde" as an alias of the "GEAP" row without another entry.
-- `tenant_insurance_plans` - which catalog entries THIS clinic accepts, plus
-  the clinic's own `charge_deposit` flag per plan (decision 2026-09-25: the
-  same operator can be direct billing in one clinic and reimbursement in
-  another, so the Pix-deposit behaviour is per clinic AND per plan, never
-  global and never inferred from the operator's name). TASK-085 R D-R12
-  (2026-11-18) RETIRED that flag: a convênio never exempts the sinal; the column
-  stays, unread and no longer written. TASK-008: `catalog_id`
+- `tenant_insurance_plans` - which catalog entries THIS clinic accepts.
+  TASK-085 R D-R12/U1b (owner, 2026-11-18): a convênio never exempts the sinal,
+  so the old per-plan "não cobra sinal" option is deleted (see LEGACY COLUMNS
+  below). TASK-008: `catalog_id`
   is now nullable - a row with `custom_name`/`custom_payment_note` instead is
   the clinic's own "Outro" convênio, exactly one of the two must be set.
 - `professional_insurance_plans` - what ONE doctor accepts. TASK-008 gives it
@@ -72,6 +69,16 @@ Three tables, three levels:
 `Tenant.insurances` (the legacy strings) is kept for one deploy cycle; see
 services/insurance_catalog.py::sync_legacy_insurances for how the two stay in
 step until the hub frontend reads only from here.
+
+LEGACY COLUMNS (TASK-085 R U1b, 2026-11-18). The `charge_deposit` column of both
+`tenant_insurance_plans` and `professional_insurance_plans` held the old per-plan
+"não cobra sinal" option, which the owner deleted (a convênio never exempts the sinal). They
+are deliberately NOT mapped here: no code reads or writes them. They stay in the
+database for one more release because the API build running before the deploy
+still reads them; both are `NOT NULL DEFAULT true` (migrations c9f4e2a7b815,
+d4f8a2c6e913), so an insert by this code, which never names them, gets `true`.
+Follow-up: drop both columns with a migration in a later release (an Alembic
+autogenerate already proposes that drop - leave it out of unrelated migrations).
 """
 
 import uuid
@@ -161,8 +168,8 @@ class InsuranceCatalog(Base):
 class TenantInsurancePlan(Base):
     """A convênio this clinic accepts: a catalog entry, or the clinic's own "Outro".
 
-    `charge_deposit` is a retired legacy column (TASK-085 R D-R12): nothing reads
-    it and nothing writes it any more - a convênio never exempts the sinal.
+    The table still has one LEGACY COLUMN this model does not map (see the module's
+    LEGACY COLUMNS note).
     """
 
     __tablename__ = "tenant_insurance_plans"
@@ -187,10 +194,6 @@ class TenantInsurancePlan(Base):
     # patient at booking confirmation, and again with the Pix-deposit ask
     # (services/payments/deposit_lifecycle.py).
     custom_payment_note: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # RETIRED (TASK-085 R D-R12, 2026-11-18): it used to waive the Pix deposit for
-    # this plan. A convênio never exempts the sinal any more; the column is kept
-    # (no migration), never read and never written - new rows get the default.
-    charge_deposit: Mapped[bool] = mapped_column(Boolean, server_default=text("true"), default=True)
     # The clinic's chosen position in the patient's convênio list (0 = first). NULL =
     # never placed: such plans follow every placed one, alphabetically. Set only by
     # `insurance_catalog.set_tenant_plan_order` (Instituto Gicovate, 2026-11-09).
@@ -237,10 +240,6 @@ class ProfessionalInsurancePlan(Base):
     # mode independent: this doctor's OWN "Outro" convênio.
     custom_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     custom_payment_note: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # RETIRED (TASK-085 R D-R12, 2026-11-18): it used to waive the Pix deposit in
-    # `independent` mode. A convênio never exempts the sinal any more; the column
-    # is kept (no migration), never read and never written.
-    charge_deposit: Mapped[bool] = mapped_column(Boolean, server_default=text("true"), default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

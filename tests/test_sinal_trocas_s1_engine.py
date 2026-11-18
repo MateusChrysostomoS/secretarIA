@@ -45,6 +45,7 @@ from secretaria.services import booking_hold
 from secretaria.services.payments import adjustment_suspension, service_change
 from secretaria.services.payments.service_change import ChoiceOutcome
 from tests import test_service_change as base
+from tests._legacy_insurance_flag import set_legacy_flag
 
 NOW = base.NOW
 db = base.db
@@ -377,11 +378,10 @@ async def test_a_legacy_no_sinal_convenio_no_longer_moves_the_sinal(db, provider
     convênio saved as "não cobra sinal" is just a change of convênio - same price, same sinal."""
     seeded = await _seed(db, timing="before")
     async with db() as session:
-        session.add(
-            TenantInsurancePlan(
-                id=uuid4(), tenant_id=seeded[0].id, custom_name="Unimed", charge_deposit=False
-            )
-        )
+        plan = TenantInsurancePlan(id=uuid4(), tenant_id=seeded[0].id, custom_name="Unimed")
+        session.add(plan)
+        await session.flush()
+        await set_legacy_flag(session, "tenant_insurance_plans", plan.id, False)
         await session.commit()
     result = await _request(db, seeded, "Consulta", insurance="Unimed")
     assert (result.kind, result.decision, result.diff_cents) == ("applied_now", "no_change", 0)
@@ -395,11 +395,10 @@ async def test_preview_takes_the_convenio_and_the_doctor(db, provider):
     seeded = await _seed(db, timing="after")
     ana, bruno = await _doctors(db, seeded)
     async with db() as session:
-        session.add(
-            TenantInsurancePlan(
-                id=uuid4(), tenant_id=seeded[0].id, custom_name="Unimed", charge_deposit=False
-            )
-        )
+        plan = TenantInsurancePlan(id=uuid4(), tenant_id=seeded[0].id, custom_name="Unimed")
+        session.add(plan)
+        await session.flush()
+        await set_legacy_flag(session, "tenant_insurance_plans", plan.id, False)
         await session.commit()
         tenant = await session.get(Tenant, seeded[0].id)
         appointment = await session.get(Appointment, seeded[2].id)

@@ -83,6 +83,17 @@ class InteractiveSourceRead(BaseModel):
     total: int
     pinned_ids: list[str] = []
     next_cursor: str | None = None
+    # Convênio cards only (TASK-085 R U1b): does any listed plan carry the clinic's own note?
+    # The Portal shows "Ver regras de pagamento dos convênios" only when true. ABSENT on every
+    # other card and on a convênio card stored before the flag existed.
+    has_clinic_notes: bool | None = None
+
+    @model_serializer(mode="wrap")
+    def _flag_only_when_known(self, handler: Any) -> dict:
+        data = handler(self)
+        if data.get("has_clinic_notes") is None:
+            data.pop("has_clinic_notes", None)
+        return data
 
 
 class InteractiveRead(BaseModel):

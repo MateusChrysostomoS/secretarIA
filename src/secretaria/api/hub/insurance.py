@@ -5,7 +5,6 @@ GET     /tenants/me/insurance-catalog                        - global catalog.
 GET     /tenants/me/insurance-plans                          - the clinic's plans.
 PUT     /tenants/me/insurance-plans                          - replace the catalog-backed subset.
 POST    /tenants/me/insurance-plans/custom                   - the clinic's "Outro".
-PATCH   /tenants/me/insurance-plans/{plan_id}                - old sinal toggle, a no-op (compat).
 GET     /tenants/me/professionals/{id}/insurance-plans       - doctor's picker.
 PUT     /tenants/me/professionals/{id}/insurance-plans       - replace doctor's (shape by mode).
 POST    /tenants/me/professionals/{id}/insurance-plans/custom - doctor's own "Outro"
@@ -14,13 +13,11 @@ POST    /tenants/me/professionals/{id}/insurance-plans/custom - doctor's own "Ou
 Product decisions (models/insurance.py, TASK-006 + TASK-008): the catalog is
 GLOBAL; `Tenant.insurance_mode` (nullable, no default) picks one of three
 acceptance topologies and gates every per-doctor section below until chosen.
-TASK-085 R D-R12 (owner, 2026-11-18): a convênio never exempts the sinal - the
-old per-line "não cobra sinal" is retired: the column stays, unread and never
-written. TASK-085 D-R12 compat - remove after secretarIA-frontend /configuracao
-drops the switch: for one release every plan read says `charge_deposit: true`
-(the truth) and the old PATCH toggle is a tenant-scoped no-op, so an older screen
-shows ON and a click snaps back; an older client that SENDS the flag is not
-refused (ignored).
+TASK-085 R D-R12/U1b (owner, 2026-11-18): a convênio never exempts the sinal - the
+old per-line "não cobra sinal" option is DELETED: no read carries it, the toggle
+route is gone, and an older client that still SENDS the flag is not refused (the
+input schemas ignore it). The two legacy columns stay in the database, unmapped,
+until a later release drops them.
 
 Never entitlement-gated: like the service catalog and every config save
 (api/hub/services.py, api/hub/config.py), this is core wiring, not an addon.
@@ -51,7 +48,6 @@ from secretaria.schemas.insurance import (
     ProfessionalInsurancePlansRead,
     ProfessionalInsurancePlansUpdate,
     TenantInsurancePlanCustomCreate,
-    TenantInsurancePlanDepositUpdate,
     TenantInsurancePlanOrderUpdate,
     TenantInsurancePlanRead,
     TenantInsurancePlansUpdate,
@@ -316,32 +312,6 @@ async def put_tenant_insurance_plan_order(
         placed_count=sum(1 for plan in plans if plan.sort_order is not None),
     )
     return plans
-
-
-@router.patch("/insurance-plans/{plan_id}", response_model=TenantInsurancePlanRead)
-async def patch_tenant_insurance_plan(
-    plan_id: str,
-    body: TenantInsurancePlanDepositUpdate,
-    tenant: Tenant = Depends(get_current_tenant),
-    session: AsyncSession = Depends(get_session),
-) -> TenantInsurancePlanRead:
-    """The old "Cobrar sinal (Pix)" toggle - a NO-OP (TASK-085 R D-R12: a convênio never
-    exempts the sinal). TASK-085 D-R12 compat - remove after secretarIA-frontend /configuracao
-    drops the switch.
-
-    Tenant-scoped exactly as before: an id that is not one of THIS clinic's plans (unknown,
-    another clinic's, not a UUID) is 404. Otherwise 200 with the row, which says
-    `charge_deposit: true`; `body.charge_deposit` is ignored and nothing is written.
-    """
-    del body  # ignored on purpose
-    try:
-        plan_uuid = UUID(plan_id)
-    except ValueError:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Plan not found") from None
-    plan = next((p for p in await _tenant_plans(session, tenant) if p.id == str(plan_uuid)), None)
-    if plan is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Plan not found")
-    return plan
 
 
 # ---------------------------------------------------------------------------

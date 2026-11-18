@@ -54,6 +54,7 @@ from secretaria.services.payments.provider import (
     PaymentStatus,
     ProviderError,
 )
+from tests._legacy_insurance_flag import set_legacy_flag
 from tests.payments_support import FakeProvider, FakeRedis, make_event, make_sessionmaker
 
 NOW = datetime(2026, 11, 17, 12, 0, tzinfo=UTC)
@@ -314,9 +315,10 @@ async def test_a_legacy_no_sinal_convenio_leaves_the_unpaid_pix_alone(db, provid
     cobra sinal" keeps the same amount - nothing is voided, the provider is never called."""
     async with db() as session:
         tenant, _p, appointment, deposit = await _seed(session)
-        plan = TenantInsurancePlan(tenant_id=tenant.id, custom_name="Plano X", charge_deposit=False)
+        plan = TenantInsurancePlan(tenant_id=tenant.id, custom_name="Plano X")
         session.add(plan)
         await session.flush()
+        await set_legacy_flag(session, "tenant_insurance_plans", plan.id, False)
         outcome = await _edit_and_requote(
             session, tenant, appointment, deposit, insurance="Plano X", insurance_plan_id=plan.id
         )

@@ -65,6 +65,7 @@ from secretaria.services.payments.deposit_lifecycle import (  # noqa: E402
     load_deposit_views,
 )
 from secretaria.services.tenant_config import set_google_refresh_token  # noqa: E402
+from tests._legacy_insurance_flag import set_legacy_flag  # noqa: E402
 
 CALENDAR = "/tenants/me/calendar"
 UNIMED = catalog_id_for_slug("unimed")
@@ -121,11 +122,11 @@ def test_a_legacy_event_gains_three_null_fields_and_loses_nothing():
     assert dumped["status"] is None and dumped["reminders"] is None
 
 
-def test_the_plan_wire_carries_exactly_three_keys():
+def test_the_plan_wire_carries_exactly_two_keys():
     """custom_payment_note / mechanism / note must never be widened into this
-    shape by accident: the agenda shows a name; `charge_deposit` is a constant true kept
-    for one release (TASK-085 D-R12 compat - a convênio never exempts the sinal)."""
-    assert set(CalendarInsurancePlanRead.model_fields) == {"id", "name", "charge_deposit"}
+    shape by accident: the agenda shows a name. No sinal flag (TASK-085 R D-R12/U1b: a
+    convênio never exempts the sinal)."""
+    assert set(CalendarInsurancePlanRead.model_fields) == {"id", "name"}
 
 
 def test_the_deposit_wire_carries_exactly_three_keys():
@@ -220,7 +221,7 @@ async def _tenant_plan(
     catalog_id: UUID | None = None,
     custom_name: str | None = None,
     note: str | None = None,
-    charge_deposit: bool = True,
+    legacy_no_sinal: bool = False,
 ) -> UUID:
     async with db() as session:
         plan = TenantInsurancePlan(
@@ -229,9 +230,11 @@ async def _tenant_plan(
             catalog_id=catalog_id,
             custom_name=custom_name,
             custom_payment_note=note,
-            charge_deposit=charge_deposit,
         )
         session.add(plan)
+        await session.flush()
+        if legacy_no_sinal:
+            await set_legacy_flag(session, "tenant_insurance_plans", plan.id, False)
         await session.commit()
         return plan.id
 
@@ -244,7 +247,7 @@ async def _professional_plan(
     custom_name: str | None = None,
     note: str | None = None,
     tenant_plan_id: UUID | None = None,
-    charge_deposit: bool = True,
+    legacy_no_sinal: bool = False,
 ) -> UUID:
     async with db() as session:
         professional = Professional(id=uuid4(), tenant_id=tenant_id, name="Dra. Ana")
@@ -258,9 +261,11 @@ async def _professional_plan(
             catalog_id=catalog_id,
             custom_name=custom_name,
             custom_payment_note=note,
-            charge_deposit=charge_deposit,
         )
         session.add(plan)
+        await session.flush()
+        if legacy_no_sinal:
+            await set_legacy_flag(session, "professional_insurance_plans", plan.id, False)
         await session.commit()
         return plan.id
 
@@ -312,8 +317,8 @@ async def _deposit(
 
 
 async def test_a_catalog_backed_clinic_plan_resolves_to_its_catalog_name(db, tenant):
-    keeps = await _tenant_plan(db, tenant.id, catalog_id=UNIMED, charge_deposit=True)
-    waives = await _tenant_plan(db, tenant.id, catalog_id=AMIL, charge_deposit=False)
+    keeps = await _tenant_plan(db, tenant.id, catalog_id=UNIMED)
+    waives = await _tenant_plan(db, tenant.id, catalog_id=AMIL, legacy_no_sinal=True)
 
     async with db() as session:
         lookup = await load_appointment_plans(
@@ -338,7 +343,7 @@ async def test_a_clinic_outro_resolves_to_its_custom_name(db, tenant):
 
 
 async def test_an_independent_doctors_rows_resolve_for_catalog_and_outro(db, tenant):
-    from_catalog = await _professional_plan(db, tenant.id, catalog_id=UNIMED, charge_deposit=False)
+    from_catalog = await _professional_plan(db, tenant.id, catalog_id=UNIMED, legacy_no_sinal=True)
     own_outro = await _professional_plan(db, tenant.id, custom_name="Geap")
 
     async with db() as session:
@@ -611,7 +616,7 @@ async def _events(client: AsyncClient):
 
 async def test_the_clinic_path_carries_label_and_plan_name(client: AsyncClient, db, tenant):
     await _connect_calendar(db, tenant)
-    plan = await _tenant_plan(db, tenant.id, catalog_id=UNIMED, charge_deposit=False)
+    plan = await _tenant_plan(db, tenant.id, catalog_id=UNIMED, legacy_no_sinal=True)
     await _appointment(db, tenant.id, "evt-1", insurance="Unimed", plan_id=plan)
     _FakeCalendarService.next_events = [_wire_event("evt-1")]
 
@@ -620,26 +625,22 @@ async def test_the_clinic_path_carries_label_and_plan_name(client: AsyncClient, 
     assert resp.status_code == 200
     body = resp.json()[0]
     assert body["insurance"] == "Unimed"
-    # A legacy "no sinal" row still reads true: a convênio never exempts the sinal (D-R12).
-    assert body["insurance_plan"] == {"id": str(plan), "name": "Unimed", "charge_deposit": True}
+    # A legacy "no sinal" row reads like any other: no flag on the wire (D-R12/U1b).
+    assert body["insurance_plan"] == {"id": str(plan), "name": "Unimed"}
 
 
 async def test_the_independent_path_resolves_through_the_professional_row(
     client: AsyncClient, db, tenant
 ):
     await _connect_calendar(db, tenant)
-    doctor_plan = await _professional_plan(db, tenant.id, catalog_id=AMIL, charge_deposit=True)
+    doctor_plan = await _professional_plan(db, tenant.id, catalog_id=AMIL)
     await _appointment(db, tenant.id, "evt-1", insurance="Amil", professional_plan_id=doctor_plan)
     _FakeCalendarService.next_events = [_wire_event("evt-1")]
 
     body = (await _events(client)).json()[0]
 
     assert body["insurance"] == "Amil"
-    assert body["insurance_plan"] == {
-        "id": str(doctor_plan),
-        "name": "Amil",
-        "charge_deposit": True,
-    }
+    assert body["insurance_plan"] == {"id": str(doctor_plan), "name": "Amil"}
 
 
 async def test_a_clinic_outro_shows_its_name_and_never_its_payment_note(
@@ -656,7 +657,7 @@ async def test_a_clinic_outro_shows_its_name_and_never_its_payment_note(
 
     body = resp.json()[0]
     assert body["insurance_plan"]["name"] == "Cabesp"
-    assert set(body["insurance_plan"]) == {"id", "name", "charge_deposit"}
+    assert set(body["insurance_plan"]) == {"id", "name"}
     assert "NOTA-INTERNA-NAO-VAZAR" not in resp.text
 
 

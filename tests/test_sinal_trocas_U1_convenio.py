@@ -14,9 +14,11 @@ What each block catches:
 - the paid-sinal change engine's pure rule no longer has a "new booking without sinal" input;
 - the patient's convênio overview carries no per-plan payment text and no per-plan deposit;
 - the convênio rows are title-only on both channels;
-- the hub: no toggle route, no flag in what it returns, an older Portal that still sends the flag
-  is not refused (ignored);
-- the agenda's plan carries no flag.
+- the hub: no flag in what it returns, an older Portal that still sends the flag is not refused
+  (ignored), and a legacy value already stored is left alone.
+U1b removed the one-release compat and unmapped the legacy columns: a legacy "no sinal" row is now
+planted with SQL on the production-shaped column (tests/_legacy_insurance_flag.py); the hub's
+"no flag anywhere" contract is pinned in test_sinal_trocas_U1b_option_gone.py.
 """
 
 import importlib.util
@@ -38,7 +40,6 @@ from uuid import uuid4  # noqa: E402
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
 from httpx import AsyncClient  # noqa: E402
-from sqlalchemy import select  # noqa: E402
 
 from secretaria.api.hub.deps import get_current_tenant  # noqa: E402
 from secretaria.core.database import get_session  # noqa: E402
@@ -65,6 +66,7 @@ from secretaria.services.payments import accounts, deposit_gate, deposit_lifecyc
 from secretaria.services.payments.service_change_policy import (  # noqa: E402
     decide_service_change,
 )
+from tests._legacy_insurance_flag import legacy_flags, set_legacy_flag  # noqa: E402
 from tests.payments_support import FakeProvider, make_sessionmaker  # noqa: E402
 
 UNIMED = catalog_id_for_slug("unimed")
@@ -137,10 +139,10 @@ async def _clinic(session, *, sinal=True, timing="before", mode="shared", accoun
 
 async def _legacy_no_sinal_plan(session, tenant, name="Unimed") -> TenantInsurancePlan:
     """A clinic row saved while the "não cobra sinal" option still existed."""
-    plan = TenantInsurancePlan(
-        id=uuid4(), tenant_id=tenant.id, custom_name=name, charge_deposit=False
-    )
+    plan = TenantInsurancePlan(id=uuid4(), tenant_id=tenant.id, custom_name=name)
     session.add(plan)
+    await session.flush()
+    await set_legacy_flag(session, "tenant_insurance_plans", plan.id, False)
     await session.commit()
     return plan
 
@@ -216,7 +218,8 @@ async def test_no_sinal_clinic_the_overview_still_says_no_sinal(db):
         await _legacy_no_sinal_plan(session, tenant, name="GEAP")
         overview = await patient_insurance_overview(session, tenant.id)
     assert overview["deposit"] == {"enabled": False, "percent": None}
-    assert [plan["name"] for plan in overview["plans"]] == ["GEAP"]
+    # U1b: a plan without a clinic note is not listed on the patient's sheet.
+    assert overview["plans"] == []
 
 
 # --------------------------------------------------------------------------
@@ -238,14 +241,12 @@ async def test_before_gate_charges_a_legacy_no_sinal_doctor_plan_in_independent_
         doctor = Professional(id=uuid4(), tenant_id=tenant.id, name="Dra. Ana", is_active=True)
         session.add(doctor)
         await session.flush()
-        session.add(
-            ProfessionalInsurancePlan(
-                professional_id=doctor.id,
-                tenant_id=tenant.id,
-                catalog_id=AMIL,
-                charge_deposit=False,
-            )
+        plan = ProfessionalInsurancePlan(
+            professional_id=doctor.id, tenant_id=tenant.id, catalog_id=AMIL
         )
+        session.add(plan)
+        await session.flush()
+        await set_legacy_flag(session, "professional_insurance_plans", plan.id, False)
         await session.commit()
         quote = await _quote(session, tenant, patient, "Amil", professional_id=doctor.id)
     assert (quote.outcome, quote.amount_cents) == ("required", 6000)
@@ -301,21 +302,17 @@ async def test_overview_has_no_per_plan_payment_text_or_deposit(db):
     async with db() as session:
         tenant, _patient = await _clinic(session)
         session.add(TenantInsurancePlan(tenant_id=tenant.id, catalog_id=UNIMED))
-        session.add(
-            TenantInsurancePlan(
-                tenant_id=tenant.id,
-                custom_name="GEAP",
-                custom_payment_note="Pagamento na recepção.",
-                charge_deposit=False,
-            )
+        geap = TenantInsurancePlan(
+            tenant_id=tenant.id, custom_name="GEAP", custom_payment_note="Pagamento na recepção."
         )
+        session.add(geap)
+        await session.flush()
+        await set_legacy_flag(session, "tenant_insurance_plans", geap.id, False)
         await session.commit()
         overview = await patient_insurance_overview(session, tenant.id)
     assert overview["deposit"] == {"enabled": True, "percent": 30}
-    assert overview["plans"] == [
-        {"name": "GEAP", "clinic_note": "Pagamento na recepção."},
-        {"name": "Unimed", "clinic_note": None},
-    ]
+    # U1b: only the plans with a clinic note are listed (Unimed has none).
+    assert overview["plans"] == [{"name": "GEAP", "clinic_note": "Pagamento na recepção."}]
 
 
 async def test_overview_route_returns_the_slim_shape(db, client):
@@ -339,10 +336,8 @@ async def test_overview_route_returns_the_slim_shape(db, client):
     finally:
         app.dependency_overrides.pop(get_session, None)
     assert response.status_code == 200, response.text
-    assert response.json() == {
-        "deposit": {"enabled": True, "percent": 30},
-        "plans": [{"name": "Unimed", "clinic_note": None}],
-    }
+    # U1b: Unimed carries no clinic note, so the sheet lists no plan - only the sinal rule.
+    assert response.json() == {"deposit": {"enabled": True, "percent": 30}, "plans": []}
 
 
 def test_the_portal_rows_carry_no_description():
@@ -376,11 +371,9 @@ def test_the_payment_copy_module_is_gone():
 
 
 # --------------------------------------------------------------------------
-# The hub - one-release compat (fix round 1, review I2): every plan read says
-# `charge_deposit: true` (the truth: every convênio pays the sinal) whatever the legacy row holds,
-# and the old PATCH toggle is a tenant-scoped no-op, so an older screen (secretarIA-frontend
-# /configuracao, a not-yet-redeployed Portal) shows ON and a click snaps back instead of erroring.
-# TASK-085 D-R12 compat - remove after secretarIA-frontend /configuracao drops the switch.
+# The hub: an older Portal's flag is ignored and a stored legacy value is never rewritten
+# (U1b removed the one-release compat; the "no flag in any read" contract and the gone toggle
+# route are pinned in test_sinal_trocas_U1b_option_gone.py)
 # --------------------------------------------------------------------------
 
 
@@ -409,12 +402,15 @@ async def hub(db):
     app.dependency_overrides.pop(get_current_tenant, None)
 
 
-async def test_hub_plans_always_say_the_sinal_is_charged_and_an_old_flag_is_ignored(
+async def test_hub_ignores_an_old_flag_and_never_rewrites_a_legacy_value(
     client: AsyncClient, hub, db
 ):
     async with db() as session:
         # A row saved while the "não cobra sinal" option existed.
-        session.add(TenantInsurancePlan(tenant_id=hub, catalog_id=AMIL, charge_deposit=False))
+        amil = TenantInsurancePlan(tenant_id=hub, catalog_id=AMIL)
+        session.add(amil)
+        await session.flush()
+        await set_legacy_flag(session, "tenant_insurance_plans", amil.id, False)
         await session.commit()
     saved = await client.put(
         "/tenants/me/insurance-plans",
@@ -426,7 +422,6 @@ async def test_hub_plans_always_say_the_sinal_is_charged_and_an_old_flag_is_igno
         },
     )
     assert saved.status_code == 200, saved.text
-    assert [plan["charge_deposit"] for plan in saved.json()] == [True, True]
     custom = await client.post(
         "/tenants/me/insurance-plans/custom",
         json={
@@ -436,78 +431,10 @@ async def test_hub_plans_always_say_the_sinal_is_charged_and_an_old_flag_is_igno
         },
     )
     assert custom.status_code == 201, custom.text
-    assert custom.json()["charge_deposit"] is True
     listed = await client.get("/tenants/me/insurance-plans")
-    assert [plan["charge_deposit"] for plan in listed.json()] == [True, True, True]
+    assert all("charge_deposit" not in plan for plan in listed.json())
     async with db() as session:
-        stored = sorted(
-            (
-                await session.scalars(
-                    select(TenantInsurancePlan.charge_deposit).where(
-                        TenantInsurancePlan.tenant_id == hub
-                    )
-                )
-            ).all()
-        )
-    # The old screen's "no" was never written; the legacy False is kept but never read.
+        stored = await legacy_flags(session, "tenant_insurance_plans")
+    # The old screen's "no" was never written; the new rows got the column's default; the
+    # legacy False is kept but never read.
     assert stored == [False, True, True]
-
-
-async def test_hub_professional_plans_always_say_the_sinal_is_charged(
-    client: AsyncClient, hub, db
-):
-    async with db() as session:
-        tenant = await session.get(Tenant, hub)
-        tenant.insurance_mode = "independent"
-        doctor = Professional(id=uuid4(), tenant_id=hub, name="Dra. Ana", is_active=True)
-        session.add(doctor)
-        await session.flush()
-        session.add(
-            ProfessionalInsurancePlan(
-                professional_id=doctor.id,
-                tenant_id=hub,
-                custom_name="Plano da Ana",
-                custom_payment_note="Nota.",
-                charge_deposit=False,
-            )
-        )
-        await session.commit()
-    got = await client.get(f"/tenants/me/professionals/{doctor.id}/insurance-plans")
-    assert got.status_code == 200, got.text
-    selectable = got.json()["selectable"]
-    assert any(plan["name"] == "Plano da Ana" for plan in selectable)
-    assert {plan["charge_deposit"] for plan in selectable} == {True}
-
-
-async def test_hub_toggle_is_a_tenant_scoped_no_op(client: AsyncClient, hub, db):
-    async with db() as session:
-        mine = TenantInsurancePlan(tenant_id=hub, catalog_id=UNIMED, charge_deposit=False)
-        other_clinic, _p = await _clinic(session)
-        foreign = TenantInsurancePlan(tenant_id=other_clinic.id, catalog_id=UNIMED)
-        session.add_all([mine, foreign])
-        await session.commit()
-
-    response = await client.patch(
-        f"/tenants/me/insurance-plans/{mine.id}", json={"charge_deposit": False}
-    )
-    assert response.status_code == 200, response.text
-    assert response.json()["id"] == str(mine.id)
-    assert response.json()["charge_deposit"] is True
-
-    for bad in (str(foreign.id), str(uuid4()), "not-a-uuid"):
-        refused = await client.patch(
-            f"/tenants/me/insurance-plans/{bad}", json={"charge_deposit": True}
-        )
-        assert refused.status_code == 404, (bad, refused.text)
-
-    async with db() as session:
-        # Nothing written: the body's value is ignored, the legacy value stays as it was.
-        assert (await session.get(TenantInsurancePlan, mine.id)).charge_deposit is False
-        assert (await session.get(TenantInsurancePlan, foreign.id)).charge_deposit is True
-
-
-def test_the_agenda_plan_always_says_the_sinal_is_charged():
-    from secretaria.schemas.calendar import CalendarInsurancePlanRead
-
-    assert set(CalendarInsurancePlanRead.model_fields) == {"id", "name", "charge_deposit"}
-    assert CalendarInsurancePlanRead(id="p", name="Unimed").charge_deposit is True

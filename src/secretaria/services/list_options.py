@@ -319,9 +319,13 @@ def first_page_rows(source: OptionSource) -> list[tuple]:
 
 
 def card_source(source: OptionSource) -> dict:
-    """The pointer stored beside page 1 in `Message.interactive["source"]`."""
+    """The pointer stored beside page 1 in `Message.interactive["source"]`.
+
+    A convênio card also says whether any of its plans carries a clinic note
+    (`has_clinic_notes`, TASK-085 R U1b); every other card's pointer is unchanged.
+    """
     total = len(source.items)
-    return {
+    pointer = {
         "v": SOURCE_VERSION,
         "kind": source.kind,
         "scope": dict(source.scope),
@@ -329,6 +333,9 @@ def card_source(source: OptionSource) -> dict:
         "total": total,
         "next_cursor": encode_cursor(PAGE_SIZE) if total > PAGE_SIZE else None,
     }
+    if source.has_clinic_notes is not None:
+        pointer["has_clinic_notes"] = bool(source.has_clinic_notes)
+    return pointer
 
 
 def stored_source(card: Any) -> dict | None:

@@ -32,6 +32,7 @@ from secretaria.services import staff_appointment_edit as sae
 from secretaria.services.payments import adjustment_suspension, deposit_lifecycle, service_change
 from secretaria.services.payments.provider import ChargeState, PaymentStatus, ProviderError
 from secretaria.services.staff_appointment_edit import StaffEditError
+from tests._legacy_insurance_flag import set_legacy_flag
 from tests._r7_support import FakeCalendar, add_professional, set_appointment, set_tenant
 from tests._reminder_fixtures import db  # noqa: F401
 from tests._reminders_v2 import reload_appointment
@@ -356,11 +357,10 @@ async def _held_cents(db, world, cents: int) -> None:
 
 async def _legacy_no_sinal_unimed(db, world) -> None:
     async with db() as session:
-        session.add(
-            TenantInsurancePlan(
-                id=uuid4(), tenant_id=world.tenant.id, custom_name="Unimed", charge_deposit=False
-            )
-        )
+        plan = TenantInsurancePlan(id=uuid4(), tenant_id=world.tenant.id, custom_name="Unimed")
+        session.add(plan)
+        await session.flush()
+        await set_legacy_flag(session, "tenant_insurance_plans", plan.id, False)
         await session.commit()
 
 

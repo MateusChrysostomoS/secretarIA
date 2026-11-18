@@ -1,5 +1,22 @@
 # CHECKPOINT — Catálogo canônico de convênios + aceitação por profissional + convênio primeiro no fluxo
 
+> **Atualização 2026-11-18 (4ª rodada) — TASK-085 R U1b: a opção "não cobra sinal" foi APAGADA.**
+> Substitui o "compat por 1 release" da nota de U1 abaixo. Saíram: a rota `PATCH
+> /tenants/me/insurance-plans/{plan_id}`, o schema `TenantInsurancePlanDepositUpdate`, o
+> `charge_deposit` de toda leitura (hub e agenda: o plano da agenda é `{id, name}`) e o mapeamento ORM das
+> duas colunas. As entradas que um Portal antigo ainda manda com o campo (`TenantInsurancePlanIn` e os dois
+> `*CustomCreate`) passaram a `extra="ignore"` — todos os campos delas são obrigatórios, então erro de
+> digitação continua 422; o invólucro `TenantInsurancePlansUpdate` segue `forbid`. **Banco:** as colunas
+> `tenant_insurance_plans.charge_deposit` e `professional_insurance_plans.charge_deposit` FICAM nesta release
+> (o código antigo que roda entre a migração e o deploy ainda as lê), `NOT NULL DEFAULT true` desde
+> c9f4e2a7b815/d4f8a2c6e913 — sem migração nova. **Pendência:** dropar as duas colunas numa release
+> futura. **Overview do paciente:** `insurance-overview` agora lista só os convênios COM observação da
+> clínica (`plans` pode vir vazio); o cartão de convênios do Portal leva `source.has_clinic_notes`
+> (`flow_router.insurance_plans_have_clinic_notes`, no agendamento e no "alterar consulta") para o Portal
+> só mostrar "Ver regras de pagamento dos convênios" quando existe ao menos uma. WhatsApp sem mudança.
+> Ordem de deploy: secretarIA-frontend (sem o interruptor) e Brain-Message-Frontend ANTES; depois API +
+> worker da secretarIA. Relatório: `tasks/TASK-085/sinal-trocas/results/U1b-implementer.md`.
+
 > **Atualização 2026-11-18 — TASK-085 R U1 (decisão D-R12 do dono): convênio não isenta sinal.**
 > O item 4 da §1 (flag `charge_deposit` por clínica e por plano) foi **aposentado**: com o sinal ligado,
 > toda consulta paga o sinal, com qualquer convênio. As colunas `charge_deposit` ficam (sem migração),
