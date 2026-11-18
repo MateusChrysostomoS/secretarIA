@@ -364,6 +364,9 @@ def _flow_tenant_snapshot(
         insurances=tenant.insurances,
         insurance_plans=insurance.plans if insurance is not None else None,
         insurance_accepted_by=insurance.accepted_by if insurance is not None else {},
+        # TASK-086 (inventory A0b): the acceptance matrix, read by
+        # services/insurance_acceptance.py::snapshot_exceptions. None = accepts everything.
+        insurance_refused=insurance.refused if insurance is not None else None,
     )
 
 def _format_appointment_when(start_at: datetime, tz_name: str | None) -> str:

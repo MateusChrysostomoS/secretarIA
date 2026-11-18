@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from secretaria.core.whatsapp_limits import (
@@ -41,6 +41,9 @@ from secretaria.services.service_terms import (
 )
 from secretaria.services.unit_booking import scoped_calendar
 
+if TYPE_CHECKING:
+    from secretaria.services.insurance_acceptance import AcceptanceExceptions
+
 STEP_AWAITING_UNIT = "awaiting_unit"
 # The day/slot pickers' back row when the professional has a unit to choose: one step back is
 # the unit list, not the service list. "⬅️ Outra unidade" is 19 characters (<= 24).
@@ -60,6 +63,17 @@ UNIT_CONFIRM_BODY = (
 UNIT_CONFIRM_BODY_NO_ADDRESS = (
     "O serviço {servico} feito por {medico} é feito apenas na unidade {unidade}. "
     "Você confirma essa unidade?"
+)
+# TASK-086 (inventory A5/R5): the same Sim/Não when it is the CONVÊNIO that leaves one unit
+# (the service itself is done at two or more) - never "o serviço é feito apenas", which would
+# blame the clinic's unit setup for a convênio rule.
+UNIT_CONFIRM_PLAN_BODY = (
+    "Pelo convênio {convenio}, o serviço {servico} com {medico} é atendido apenas na unidade "
+    "{unidade}, em {endereco}. Você confirma essa unidade?"
+)
+UNIT_CONFIRM_PLAN_BODY_NO_ADDRESS = (
+    "Pelo convênio {convenio}, o serviço {servico} com {medico} é atendido apenas na unidade "
+    "{unidade}. Você confirma essa unidade?"
 )
 UNIT_LIST_BUTTON = "Ver unidades"
 UNIT_LIST_SECTION = "Unidades"
@@ -92,17 +106,57 @@ def service_units_of(professional: Any | None) -> dict[UUID, frozenset[UUID]]:
     return getattr(professional, "service_units", None) or {}
 
 
-def units_for_service(professional: Any | None, service_id: UUID | None) -> list:
+def _plan_filter_active(
+    service_id: UUID | None, plan_id: Any, refused: AcceptanceExceptions | None
+) -> bool:
+    """Whether the convênio matrix (TASK-086) can narrow anything for this question.
+
+    Needs a service, a plan with an id and at least one refused cell; otherwise every helper
+    below answers exactly what it answered before the matrix existed (no kwargs = today's)."""
+    if service_id is None or plan_id is None or refused is None:
+        return False
+    return bool(refused.clinic or refused.by_professional)
+
+
+def _accepted_at(
+    professional: Any | None,
+    service_id: UUID | None,
+    unit_id: UUID | None,
+    plan_id: Any,
+    refused: AcceptanceExceptions | None,
+) -> bool:
+    if not _plan_filter_active(service_id, plan_id, refused):
+        return True
+    # Imported here: services/insurance_acceptance.py builds on this module.
+    from secretaria.services.insurance_acceptance import is_accepted
+
+    return is_accepted(refused, getattr(professional, "id", None), service_id, unit_id, plan_id)
+
+
+def units_for_service(
+    professional: Any | None,
+    service_id: UUID | None,
+    *,
+    plan_id: Any = None,
+    refused: AcceptanceExceptions | None = None,
+) -> list:
     """The bookable units where `service_id` is done: bookable AND allowed for the service.
 
     `service_id=None` (no service picked yet, or an entry without one) is no filter: exactly
     `bookable_units`. A restriction whose units are all closed/inactive yields [] - never "all".
+
+    TASK-086 (the single unit x convênio filter): with `plan_id` and the clinic's `refused`
+    matrix, only the units where that convênio is accepted for the service remain. Without them
+    (or with an empty matrix) nothing changes.
     """
     bookable = bookable_units(professional)
     allowed = allowed_unit_ids(service_units_of(professional), service_id)
-    if allowed is None:
-        return bookable
-    return [unit for unit in bookable if unit.id in allowed]
+    units = bookable if allowed is None else [unit for unit in bookable if unit.id in allowed]
+    if not _plan_filter_active(service_id, plan_id, refused):
+        return units
+    return [
+        unit for unit in units if _accepted_at(professional, service_id, unit.id, plan_id, refused)
+    ]
 
 
 def service_unit_terms_of(professional: Any | None) -> TermsByService:
@@ -172,32 +226,56 @@ class UnitChoice:
     * `list`    - two or more units: the patient picks.
 
     `units` are the `UnitOption`s on offer ([] for `free` and `none`).
+
+    `by_plan` (TASK-086): the convênio matrix, not the clinic's unit setup, is why the choice is
+    what it is - `none` because the convênio is refused at every unit doing the service (or, for
+    a doctor without units, in the "no unit" slice), or `confirm`/`list` because the convênio
+    narrowed the units the service itself is done at. A `by_plan` `none` must never alert the
+    clinic about a missing unit (inventory R4) and a `by_plan` `confirm` names the convênio (R5).
     """
 
     kind: Literal["free", "none", "implied", "confirm", "list"]
     units: list
+    by_plan: bool = False
 
 
-def unit_choice(professional: Any | None, service_id: UUID | None) -> UnitChoice:
-    """Pure decision for the unit step (no I/O); see `UnitChoice` for the kinds."""
+def unit_choice(
+    professional: Any | None,
+    service_id: UUID | None,
+    *,
+    plan_id: Any = None,
+    refused: AcceptanceExceptions | None = None,
+) -> UnitChoice:
+    """Pure decision for the unit step (no I/O); see `UnitChoice` for the kinds.
+
+    `plan_id`/`refused` (TASK-086): the conversation's convênio and the clinic's matrix; left
+    out (or an empty matrix), the decision is exactly today's."""
     if not offered_units(professional):
+        if not _accepted_at(professional, service_id, None, plan_id, refused):
+            return UnitChoice("none", [], by_plan=True)
         return UnitChoice("free", [])
     units = units_for_service(professional, service_id)
     if not units:
         return UnitChoice("none", [])
-    if len(units) > 1:
-        return UnitChoice("list", units)
+    accepted = units_for_service(professional, service_id, plan_id=plan_id, refused=refused)
+    if not accepted:
+        return UnitChoice("none", [], by_plan=True)
+    if len(accepted) > 1:
+        return UnitChoice("list", accepted, by_plan=len(accepted) < len(units))
     if len(bookable_units(professional)) >= 2:
-        return UnitChoice("confirm", units)
-    return UnitChoice("implied", units)
+        return UnitChoice("confirm", accepted, by_plan=len(units) > 1)
+    return UnitChoice("implied", accepted)
 
 
-def unit_confirm_body(service_name: str, professional: Any | None, unit: Any) -> str:
+def unit_confirm_body(
+    service_name: str, professional: Any | None, unit: Any, *, convenio: str | None = None
+) -> str:
     """The Sim/Não question for `unit`, the only one of the doctor's units doing the service.
 
     The unit's address is the one the unit list shows; without one the sentence ends at the
     unit's name (`UNIT_CONFIRM_BODY_NO_ADDRESS`). A trailing period on the address is dropped so
-    the sentence never gets "..".
+    the sentence never gets "..". `convenio` (TASK-086): the convênio is what leaves this one
+    unit, and the sentence says so (`UNIT_CONFIRM_PLAN_BODY`).
     """
     address = str(getattr(unit, "address", None) or "").strip().rstrip(".").strip()
     values = {
@@ -205,19 +283,28 @@ def unit_confirm_body(service_name: str, professional: Any | None, unit: Any) ->
         "medico": str(getattr(professional, "name", None) or "").strip(),
         "unidade": str(getattr(unit, "name", None) or "").strip(),
     }
+    plan = str(convenio or "").strip()
+    if plan:
+        if address:
+            return UNIT_CONFIRM_PLAN_BODY.format(convenio=plan, endereco=address, **values)
+        return UNIT_CONFIRM_PLAN_BODY_NO_ADDRESS.format(convenio=plan, **values)
     if address:
         return UNIT_CONFIRM_BODY.format(endereco=address, **values)
     return UNIT_CONFIRM_BODY_NO_ADDRESS.format(**values)
 
 
 def find_unit(
-    professional: Any | None, unit_id: UUID | None, service_id: UUID | None = None
+    professional: Any | None,
+    unit_id: UUID | None,
+    service_id: UUID | None = None,
+    *,
+    plan_id: Any = None,
+    refused: AcceptanceExceptions | None = None,
 ) -> Any | None:
     if unit_id is None:
         return None
-    return next(
-        (unit for unit in units_for_service(professional, service_id) if unit.id == unit_id), None
-    )
+    units = units_for_service(professional, service_id, plan_id=plan_id, refused=refused)
+    return next((unit for unit in units if unit.id == unit_id), None)
 
 
 def selected_unit_id(conversation: Any) -> UUID | None:
@@ -226,19 +313,26 @@ def selected_unit_id(conversation: Any) -> UUID | None:
 
 
 def effective_unit(
-    conversation: Any, professional: Any | None, service_id: UUID | None = None
+    conversation: Any,
+    professional: Any | None,
+    service_id: UUID | None = None,
+    *,
+    plan_id: Any = None,
+    refused: AcceptanceExceptions | None = None,
 ) -> Any | None:
     """The unit this booking happens at: the one picked, else the only one on offer, else None.
 
     With `service_id`, only units where the service is done count: a pick outside that filter is
     ignored, and the "only one" is the single filtered unit when the choice is `implied` (a
     `confirm` is not decided until the patient says yes, which stores it as the pick). A pick that
-    is no longer bookable (unit deactivated, link removed) is ignored.
+    is no longer bookable (unit deactivated, link removed) is ignored. `plan_id`/`refused`
+    (TASK-086): a unit where the convênio is refused counts as not doing the service.
     """
-    picked = find_unit(professional, selected_unit_id(conversation), service_id)
+    plan = {"plan_id": plan_id, "refused": refused}
+    picked = find_unit(professional, selected_unit_id(conversation), service_id, **plan)
     if picked is not None:
         return picked
-    choice = unit_choice(professional, service_id)
+    choice = unit_choice(professional, service_id, **plan)
     if choice.kind == "implied":
         return choice.units[0]
     return None
@@ -412,6 +506,8 @@ __all__ = [
     "STEP_AWAITING_UNIT_CONFIRM",
     "UNIT_CONFIRM_BODY",
     "UNIT_CONFIRM_BODY_NO_ADDRESS",
+    "UNIT_CONFIRM_PLAN_BODY",
+    "UNIT_CONFIRM_PLAN_BODY_NO_ADDRESS",
     "UNIT_LIST_BODY",
     "UnitChoice",
     "appointment_calendar",

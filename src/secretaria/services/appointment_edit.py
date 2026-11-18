@@ -178,6 +178,24 @@ EDIT_SERVICE_UNIT_MISMATCH = (
     "sua consulta. Escolha de novo o que você quer mudar."
 )
 
+# TASK-086 (convênio acceptance matrix, inventory A11/A12): a change of doctor, service, unit or
+# convênio whose result the clinic does not accept for that convênio. The card refuses it and
+# the appointment's own doctor, service, unit and convênio come back (a pure reschedule is never
+# refused). Plain words for the patient - no "matriz"/"exceção".
+EDIT_INSURANCE_NOT_ACCEPTED = (
+    "Esse convênio não é aceito para esse médico e serviço nessa unidade, então mantive o "
+    "médico, o serviço, a unidade e o convênio da sua consulta. Escolha de novo o que você "
+    "quer mudar."
+)
+# A unit list (or a service picked at the booking's unit) where no unit takes the convênio.
+EDIT_INSURANCE_NOT_AT_UNITS = (
+    "Esse médico não atende o convênio da sua consulta para essa escolha em nenhuma unidade "
+    "disponível. Para trocar, fale com a clínica."
+)
+# The description of a service row the doctor does not take the booking's convênio for (the
+# booking flow's own words for a doctor/service that does not take it: a mark, not a filter).
+EDIT_ROW_INSURANCE_REFUSED = "não atende este convênio"
+
 EDIT_NO_SERVICES = "Esse médico não tem serviços disponíveis no momento."
 EDIT_SERVICE_BODY = "Qual serviço você quer para essa consulta?"
 EDIT_DOCTOR_BODY = (

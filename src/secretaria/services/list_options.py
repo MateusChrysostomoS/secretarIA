@@ -154,14 +154,23 @@ def _uuid(value: Any) -> UUID | None:
 SCOPE_DOCTOR_UNIT = "doctor_unit"
 
 
+# TASK-086: the router writes this key on a card whose rows depend on the convênio matrix
+# (doctor marks, "não atende este convênio" service rows, the convênio list of a known
+# service) - all of which read each doctor's units.
+SCOPE_UNIT_MARKS = "unit_marks"
+
+
 def needs_unit_options(scope: Any) -> bool:
     """Does resolving `scope` need each doctor's units and service x unit marks?
 
-    Only the "Alterar dados" services-at-unit list (TASK-083) does. Its readers (the options
-    route, the Portal tap check) then attach them to the snapshots the same way the worker
-    does (`unit_booking.attach_unit_options`); every other card resolves exactly as before.
+    The "Alterar dados" services-at-unit list (TASK-083) does, and so does any card the
+    convênio matrix marked (TASK-086, `SCOPE_UNIT_MARKS`). Its readers (the options route, the
+    Portal tap check) then attach them to the snapshots the same way the worker does
+    (`unit_booking.attach_unit_options`); every other card resolves exactly as before.
     """
-    return isinstance(scope, dict) and scope.get("list") == SCOPE_DOCTOR_UNIT
+    if not isinstance(scope, dict):
+        return False
+    return scope.get("list") == SCOPE_DOCTOR_UNIT or scope.get(SCOPE_UNIT_MARKS) is True
 
 
 def _scoped_services(scope: dict, tenant: Any, professionals: list) -> list[dict] | None:
@@ -194,6 +203,38 @@ def _scoped_services(scope: dict, tenant: Any, professionals: list) -> list[dict
     return None
 
 
+def _service_refused(
+    scope: dict, tenant: Any, professionals: list, services: list[dict]
+) -> frozenset[str]:
+    """The service names a matrix-marked card showed as "não atende este convênio" (TASK-086).
+
+    Same doctor the router used (`fr._booking_professional`): the card's own doctor, or the
+    clinic's only one on a single-doctor list. No convênio in the scope: no marks (today's)."""
+    insurance = scope.get("insurance")
+    if not isinstance(insurance, str):
+        return frozenset()
+    which = scope.get("list")
+    unit_id = _uuid(scope.get("unit_id"))
+    if unit_id is not None and which in ("doctor", SCOPE_DOCTOR_UNIT):
+        # "Alterar consulta" (A12): the card marked the services at ITS unit (the booking's,
+        # or the one the services-at-unit list is about), so later pages must ask the same.
+        professional_id = _uuid(scope.get("professional_id"))
+        doctor = (
+            fr._find_professional_by_id(professionals, professional_id)
+            if professional_id is not None
+            else None
+        )
+        return frozenset(aef._refused_service_names(tenant, doctor, services, insurance, unit_id))
+    professional = None
+    if which == "doctor":
+        professional_id = _uuid(scope.get("professional_id"))
+        if professional_id is not None:
+            professional = fr._find_professional_by_id(professionals, professional_id)
+    elif which == "tenant" and len(professionals) == 1:
+        professional = professionals[0]
+    return fr.service_refused_names(tenant, professional, services, insurance)
+
+
 def _scoped_professionals(scope: dict, professionals: list) -> list | None:
     """The roster a doctor card listed; `only_ids` (a pool) keeps the card's own order."""
     only = scope.get("only_ids")
@@ -216,7 +257,7 @@ def _resolve_named(
         services = _scoped_services(scope, tenant, roster)
         if services is None:
             return []
-        rows = fr.portal_service_rows(services)
+        rows = fr.portal_service_rows(services, _service_refused(scope, tenant, roster, services))
         return [(row, str(s.get("name", ""))) for row, s in zip(rows, services, strict=True)]
     if kind == KIND_PROFESSIONAL:
         insurance = scope.get("insurance")
@@ -226,9 +267,20 @@ def _resolve_named(
         if scope.get("edit") is True:
             # "Alterar consulta": past page 1 there is no live free/busy mark (that needs
             # the appointment's agenda); the convênio mark and the specialty stay.
-            rows = aef.edit_professional_rows(tenant, pool, insurance)
+            service = scope.get("service")
+            units = scope.get("units")
+            rows = aef.edit_professional_rows(
+                tenant,
+                pool,
+                insurance,
+                service=service if isinstance(service, str) else None,
+                units=units if isinstance(units, dict) else None,
+            )
         else:
-            rows = fr.portal_professional_rows(tenant, pool, insurance)
+            service = scope.get("service")
+            rows = fr.portal_professional_rows(
+                tenant, pool, insurance, service_name=service if isinstance(service, str) else None
+            )
         return [(row, str(p.name or "")) for row, p in zip(rows, pool, strict=True)]
     if kind == KIND_INSURANCE:
         plans = fr._tenant_insurance_plans(tenant)
@@ -237,8 +289,21 @@ def _resolve_named(
             doctor = (
                 fr._find_professional_by_id(roster, doctor_id) if doctor_id is not None else None
             )
-            rows = aef.edit_insurance_rows(tenant, plans, doctor)
+            rows = aef.edit_insurance_rows(
+                tenant,
+                plans,
+                doctor,
+                service_id=_uuid(scope.get("service_id")),
+                unit_id=_uuid(scope.get("unit_id")),
+            )
         else:
+            service = scope.get("service")
+            if isinstance(service, str):
+                # TASK-086 (A3): the convênio list of a known service lists only the plans
+                # accepted for it somewhere - re-filtered now, like the router's page 1.
+                plans = fr.insurance_plans_for_service(
+                    tenant, plans, roster, service, _uuid(scope.get("professional_id"))
+                )
             rows = fr.portal_insurance_rows(plans)
         return [(row, str(plan["name"])) for row, plan in zip(rows, plans, strict=True)]
     return []

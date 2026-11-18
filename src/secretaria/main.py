@@ -32,6 +32,7 @@ from secretaria.api.hub import (
     context_sources,
     conversations,
     insurance,
+    insurance_acceptance,
     oauth,
     payment_accounts,
     payment_attention,
@@ -143,6 +144,8 @@ def create_app() -> FastAPI:
     # The convênio catalog (global) + the clinic's plans + each doctor's plans;
     # same core-wiring rule as the service catalog (see api/hub/insurance.py).
     app.include_router(insurance.router)
+    # The acceptance matrix (convênio x service x unit exceptions, TASK-086); same rule.
+    app.include_router(insurance_acceptance.router)
     # Payment provider connection (the clinic pastes its Asaas key ONCE; write-only, rate
     # limited, never echoed - see api/hub/payment_accounts.py). Core wiring, not add-on gated:
     # cancelling the Pix add-on must never lock a clinic out of disconnecting its key.

@@ -46,6 +46,7 @@ from secretaria.services.booking_hold import (
     live_hold_overlaps,
     release_in as release_hold_in,
 )
+from secretaria.services.booking_promotion import booking_service_id
 from secretaria.services.booking_scope import resolve_booking_owner_id
 from secretaria.services.calendar import (
     CalendarSlotTakenError,
@@ -59,9 +60,11 @@ from secretaria.services.flow_router import (
     WHEN_FORMAT,
     FlowRouterResult,
     booking_gate_scope,
+    enter_guided_booking,
     reoffer_taken_booking_slot,
 )
 from secretaria.services.handoff_notification import notify_human_handoff
+from secretaria.services.insurance_acceptance import booking_refused, log_refusal
 from secretaria.services.insurance_catalog import (
     resolve_booking_plan_ids,
 )
@@ -183,6 +186,26 @@ class SlotTakenAtPromotion:
     """
 
     reoffer: FlowRouterResult
+
+
+@dataclass(frozen=True)
+class InsuranceRefusedAtPromotion(SlotTakenAtPromotion):
+    """TASK-086 A19: the code was good, but the clinic stopped accepting the patient's convênio
+    for this (service, unit) while it was typed. A `SlotTakenAtPromotion` on purpose: every
+    caller already says "account active" and then persists `reoffer` - here the convênio
+    question again (service and doctor kept), prefixed with
+    `INSURANCE_REFUSED_AT_CONFIRM_MESSAGE` - so no caller had to change."""
+
+
+# TASK-086 A19: what the patient reads when the convênio stopped being accepted between
+# "Confirmar" and the code. Plain words: nothing was booked, and the next step.
+INSURANCE_REFUSED_AT_CONFIRM_MESSAGE = (
+    "Não consegui confirmar o horário: a clínica não está atendendo mais esse convênio "
+    "nesta consulta. Vamos escolher o convênio de novo."
+)
+_INSURANCE_REFUSED_NO_REOFFER_MESSAGE = (
+    f"{INSURANCE_REFUSED_AT_CONFIRM_MESSAGE}\n\nDigite *menu* para começar outro agendamento."
+)
 
 # Said only when the conversation cannot be re-read to rebuild the slot list (it was
 # there a moment ago): the same fact, and the one thing the patient can do about it.
@@ -319,6 +342,12 @@ async def _promote_booking_hold(
         else:
             await _release_hold(held.id)
         return _PROMOTE_FAILED_MESSAGE
+
+    if await _held_insurance_refused(reply, tenant, held):
+        # TASK-086 A19: the clinic stopped taking this convênio here while the code was typed.
+        # Released like a taken slot; the patient chooses the convênio again.
+        await _release_hold(held.id)
+        return await _insurance_refused_reoffer(reply, tenant, held, calendar)
 
     if await _held_slot_unavailable(reply, tenant, held, calendar):
         # Released, unlike the no-calendar case above: there is nothing left to
@@ -600,6 +629,90 @@ async def _held_slot_unavailable(
         conversation_id=reply.conversation_id,
         tenant_id=tenant.id,
     )
+
+
+async def _held_insurance_refused(reply: _ReplyContext, tenant: Tenant, held: HeldSlot) -> bool:
+    """TASK-086 A19: is the held (doctor, service, unit, convênio) a refused cell NOW?
+
+    Read fresh from the database (`insurance_acceptance.booking_refused`, the same guard and
+    the same name -> plan resolution the appointment row uses), because the hold can outlive a
+    matrix change by up to `HOLD_TTL_MINUTES`. Particular, a typed "Outro", no convênio or a
+    service outside the catalog are never refused. Fail-open like the slot re-check: a failed
+    read books as before (logged with the error type only).
+    """
+    if not held.insurance:
+        return False
+    try:
+        async with async_session_factory() as session:
+            service_id = await booking_service_id(
+                session, tenant.id, held.professional_id, held.appointment_type
+            )
+            refused = await booking_refused(
+                session,
+                tenant_id=tenant.id,
+                professional_id=held.professional_id,
+                service_id=service_id,
+                unit_id=held.unit_id,
+                insurance=held.insurance,
+            )
+    except Exception as exc:  # noqa: BLE001 - fail-open, like `slot_taken_at_confirm`
+        logger.warning(
+            "booking_hold_insurance_check_failed",
+            error_type=type(exc).__name__,
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(tenant.id),
+        )
+        return False
+    if refused:
+        log_refusal(
+            "booking_hold_insurance_refused",
+            tenant_id=tenant.id,
+            conversation_id=reply.conversation_id,
+            professional_id=held.professional_id,
+            service_id=service_id,
+            unit_id=held.unit_id,
+        )
+    return refused
+
+
+async def _insurance_refused_reoffer(
+    reply: _ReplyContext, tenant: Tenant, held: HeldSlot, calendar
+) -> InsuranceRefusedAtPromotion | str:
+    """The convênio question again, for the doctor, service and attendee the hold carried.
+
+    Built through the flow's public entry for "service already chosen"
+    (`flow_router.enter_guided_booking` with no convênio), which asks the convênio when the
+    clinic collects it - the same step and carries a booking with a known service gets. The
+    unit and the time are NOT kept: the unit list that follows is filtered by the new
+    convênio, and the day comes after it. The doctor rides along only when the roster would
+    not imply it (as `_slot_taken_reoffer`), and a "Marcar outra" marker is kept so the next
+    booking still replaces the original. No conversation to rebuild from -> the plain line.
+    """
+    ctx = await _load_draft_context(reply, tenant)
+    if ctx is None:
+        return _INSURANCE_REFUSED_NO_REOFFER_MESSAGE
+    async with async_session_factory() as session:
+        replaces = await session.scalar(
+            select(Conversation.flow_replaces_appointment_id).where(
+                Conversation.id == reply.conversation_id
+            )
+        )
+    implied = resolve_booking_owner_id(ctx.professionals, None)
+    with booking_gate_scope(_turn_booking_gate(reply, tenant)):
+        result = await enter_guided_booking(
+            ctx.tenant_snapshot,
+            calendar,
+            held.appointment_type,
+            conversation_id=reply.conversation_id,
+            professional_id=None if held.professional_id == implied else held.professional_id,
+            insurance=None,
+            professionals=ctx.professionals,
+            attendee_name=held.attendee_name or ATTENDEE_SELF,
+        )
+    if replaces is not None and result.appointment is None:
+        result.flow_replaces_appointment_id = replaces
+    result.bubbles = [TextBubble(body=INSURANCE_REFUSED_AT_CONFIRM_MESSAGE), *result.bubbles]
+    return InsuranceRefusedAtPromotion(reoffer=result)
 
 
 async def _release_hold(hold_id) -> None:

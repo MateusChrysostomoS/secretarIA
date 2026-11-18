@@ -57,6 +57,13 @@ from secretaria.services.calendar import (
     CalendarUnavailableError,
     build_event_description,
 )
+from secretaria.services.insurance_acceptance import (
+    has_exceptions,
+    is_accepted,
+    refuses_all_services,
+    refuses_everywhere,
+    snapshot_exceptions,
+)
 from secretaria.services.local_calendar import (
     create_event_exclusive,
     update_event_details_exclusive,
@@ -233,6 +240,140 @@ def _unit_refused(draft: ae.EditDraft, doctor, service_id: UUID | None) -> bool:
     return flow_units.unit_refused(doctor, _uuid(draft.current.get("unit_id")), service_id)
 
 
+# --- Convênio acceptance per service x unit (TASK-086, inventory A9-A12) ---------------------
+#
+# The matrix (`tenant.insurance_refused`) only ever SUBTRACTS from the list rule
+# (`fr._accepts_plan`, unchanged): with no refused cell every helper below answers exactly what
+# the edit flow answered before. Particular, a typed "Outro" and a legacy name have no plan id
+# and are never refused.
+
+
+# The scope key that makes the Portal's options route attach each doctor's units before it
+# re-resolves a matrix-marked card (same literal as `list_options.SCOPE_UNIT_MARKS`, TASK-086
+# T4a; not imported - list_options imports this module).
+SCOPE_UNIT_MARKS = "unit_marks"
+
+
+def _plan_id(tenant, insurance: str | None) -> str | None:
+    """The flow-space id of the clinic plan `insurance` names, or None (nothing to refuse)."""
+    plan = fr._selected_plan(tenant, insurance)
+    return str(plan["id"]) if plan is not None else None
+
+
+def _matrix_takes(tenant, doctor, service_id, unit_id, plan_id) -> bool:
+    """Whether the matrix lets `doctor` take `plan_id` for `service_id` at `unit_id`.
+
+    `unit_id=None` asks "anywhere the service is booked with this doctor" (no unit decided yet;
+    for a doctor without units that is the "no unit" slice). Unknown doctor, service or plan,
+    or a clinic that never refused a cell -> True.
+    """
+    exc = snapshot_exceptions(tenant)
+    if not has_exceptions(exc) or doctor is None or service_id is None or plan_id is None:
+        return True
+    if unit_id is None:
+        return not refuses_everywhere(exc, doctor, service_id, plan_id)
+    return is_accepted(exc, doctor.id, service_id, unit_id, plan_id)
+
+
+def _doctor_takes(tenant, professional, plan: dict, service: str | None, unit_id) -> bool:
+    """A9: the doctor row's "aceita o convênio" - the list rule AND the matrix for the draft's
+    service at the unit the booking would have with them (`unit_id`; None = not decided). A
+    doctor who does not do that service (or no service given: the Portal's later pages) is
+    marked when he takes the plan for at least one of his services."""
+    plan_id = str(plan["id"])
+    if not fr._accepts_plan(tenant, professional, plan_id):
+        return False
+    exc = snapshot_exceptions(tenant)
+    if not has_exceptions(exc):
+        return True
+    entries = _services_of(tenant, professional)
+    entry = fr._match_service(entries, service) if service else None
+    if entry is None:
+        return not refuses_all_services(exc, professional, entries, plan_id)
+    return _matrix_takes(tenant, professional, entry_service_id(entry), _uuid(unit_id), plan_id)
+
+
+def _insurance_refused(draft: ae.EditDraft, tenant, doctor) -> bool:
+    """A11: the draft changed the doctor, service, unit or convênio into a cell the matrix
+    refuses. A pure reschedule (same doctor, service, unit and convênio) is never refused - the
+    appointment itself is never questioned, like spec §9.4 of TASK-083."""
+    cur, org = draft.current, draft.original
+    if _is_original_booking(draft) and cur["insurance"] == org["insurance"]:
+        return False
+    if doctor is None:
+        return False
+    return not _matrix_takes(
+        tenant,
+        doctor,
+        _service_id(tenant, doctor, cur["service"]),
+        _uuid(cur.get("unit_id")),
+        _plan_id(tenant, cur["insurance"]),
+    )
+
+
+def _units_taking_plan(tenant, doctor, units: list, service_id, insurance: str | None) -> list:
+    """A12: `units` (the service's units) where the matrix lets `doctor` take the convênio."""
+    plan_id = _plan_id(tenant, insurance)
+    return [u for u in units if _matrix_takes(tenant, doctor, service_id, u.id, plan_id)]
+
+
+def _doctor_units_taking_plan(tenant, doctor, units: list, insurance: str | None) -> list:
+    """A12: `units` where `doctor` takes the convênio for at least one service done there."""
+    plan_id = _plan_id(tenant, insurance)
+    if plan_id is None or not has_exceptions(snapshot_exceptions(tenant)):
+        return list(units)
+    entries = _services_of(tenant, doctor)
+    return [
+        unit
+        for unit in units
+        if any(
+            _matrix_takes(tenant, doctor, entry_service_id(entry), unit.id, plan_id)
+            for entry in flow_units.services_at_unit(doctor, entries, unit.id)
+        )
+    ]
+
+
+def _mark_refused_services(rows: list, services: list, refused: set[str]) -> list:
+    """`rows` (2- or 3-tuples, `svc|<name>` ids) with "não atende este convênio" on the
+    services in `refused`; every other row exactly as it was."""
+    if not refused:
+        return list(rows)
+    ids = {f"svc|{s.get('name', '')}" for s in services if str(s.get("name", "")) in refused}
+    return [
+        (row[0], row[1], ae.EDIT_ROW_INSURANCE_REFUSED) if row[0] in ids else row for row in rows
+    ]
+
+
+def _refused_service_names(
+    tenant, doctor, services: list, insurance: str | None, unit_id
+) -> set[str]:
+    """A12: the names among `services` the doctor does not take the convênio for - at
+    `unit_id` when the service is done there, else at any unit where it is."""
+    plan_id = _plan_id(tenant, insurance)
+    if doctor is None or plan_id is None or not has_exceptions(snapshot_exceptions(tenant)):
+        return set()
+    refused: set[str] = set()
+    for entry in services:
+        service_id = entry_service_id(entry)
+        here = unit_id
+        if here is not None and here not in {
+            u.id for u in flow_units.units_for_service(doctor, service_id)
+        }:
+            here = None
+        if not _matrix_takes(tenant, doctor, service_id, here, plan_id):
+            refused.add(str(entry.get("name", "")))
+    return refused
+
+
+def _undo_placement(draft: ae.EditDraft, problem: str) -> ae.EditDraft:
+    """The draft a refused card falls back to: the appointment's doctor/service/unit, and for a
+    convênio refusal also its convênio (else the menu would keep a convênio it cannot have)."""
+    undone = _undo_doctor_change(draft)
+    if problem == ae.EDIT_INSURANCE_NOT_ACCEPTED:
+        undone = undone.with_changes(insurance=draft.original["insurance"])
+    return undone
+
+
 def _refuse(draft: ae.EditDraft, ctx: ae.EditContext, notice: str) -> fr.FlowRouterResult:
     """Back to the edit menu with `draft` as it was, behind the one line that says why."""
     menu = _menu_result(draft.with_stage(), ctx)
@@ -389,6 +530,18 @@ def _money_fields_changed(draft: ae.EditDraft) -> frozenset[str]:
 
 
 def _placement_problem(draft: ae.EditDraft, tenant, doctor) -> str | None:
+    """Why the draft's doctor/service/unit/convênio cannot be booked as they are, or None.
+
+    The unit problems (follow-up E1 review), then TASK-086 A11: a changed doctor, service, unit
+    or convênio the clinic does not accept for that convênio (`_insurance_refused`). A pure
+    reschedule is never a problem (§9.4)."""
+    problem = _unit_problem(draft, tenant, doctor)
+    if problem is None and _insurance_refused(draft, tenant, doctor):
+        return ae.EDIT_INSURANCE_NOT_ACCEPTED
+    return problem
+
+
+def _unit_problem(draft: ae.EditDraft, tenant, doctor) -> str | None:
     """Why the draft's doctor/service/unit cannot be booked as they are (follow-up E1 review),
     or None: a booking that had a unit left without one while the doctor has units to pick,
     or a service at a unit where it is not done. A pure reschedule is never a problem (§9.4)."""
@@ -432,7 +585,9 @@ def _confirm_result(
     doctor = _doctor(professionals, draft)
     problem = _placement_problem(draft, tenant, doctor) if check else None
     if problem is not None:
-        return _refuse(_undo_doctor_change(draft), ctx, problem)
+        if problem == ae.EDIT_INSURANCE_NOT_ACCEPTED:
+            logger.info("appointment_edit_insurance_not_accepted", stage="card")
+        return _refuse(_undo_placement(draft, problem), ctx, problem)
     unit, address = _recap_place(draft, doctor, tenant)
     text = ae.build_edit_recap(
         draft,
@@ -715,10 +870,27 @@ def _service_list(
         if change_unit
         else []
     )
-    rows: list[tuple] = list(
+    # TASK-086 A12: a service the doctor does not take the booking's convênio for (at this
+    # unit / the booking's unit) says so; still listed (a mark, not a filter - the card refuses).
+    refused = _refused_service_names(
+        tenant,
+        doctor,
+        services,
+        draft.current["insurance"],
+        at_unit.id if at_unit is not None else _uuid(draft.current.get("unit_id")),
+    )
+    if refused:
+        marked_unit = at_unit.id if at_unit is not None else _uuid(draft.current.get("unit_id"))
+        scope = {**scope, "insurance": draft.current["insurance"], SCOPE_UNIT_MARKS: True}
+        if marked_unit is not None:
+            # The Portal's later pages mark at the same unit page 1 used (list_options).
+            scope.setdefault("unit_id", str(marked_unit))
+    rows: list[tuple] = _mark_refused_services(
         fr.service_page_rows(
             services, page, fixed_rows=len(pinned), event="edit_service_list_paged"
-        )
+        ),
+        services,
+        refused,
     )
     rows.extend(pinned)
     return _result(
@@ -732,7 +904,9 @@ def _service_list(
                 source=OptionSource(
                     kind="service",
                     scope=scope,
-                    items=fr.portal_service_rows(services),
+                    items=_mark_refused_services(
+                        fr.portal_service_rows(services), services, refused
+                    ),
                     pinned=pinned,
                 ),
             )
@@ -792,6 +966,12 @@ def _service_unit_list(
     )
     if not units:
         return _refuse(refuse_from or draft, ctx, notice)
+    # TASK-086 A12: only the units where the doctor takes the booking's convênio for it.
+    units = _units_taking_plan(
+        tenant, doctor, units, entry_service_id(service), draft.current["insurance"]
+    )
+    if not units:
+        return _refuse(refuse_from or draft, ctx, ae.EDIT_INSURANCE_NOT_AT_UNITS)
     name = str(service.get("name"))
     return _unit_list(
         draft,
@@ -823,6 +1003,10 @@ def _doctor_unit_list(
     if not units:
         # Follow-up final review: never back to the menu without saying why.
         return _refuse(draft, ctx, ae.EDIT_DOCTOR_SERVICE_NO_UNIT)
+    # TASK-086 A12: only units where the doctor takes the booking's convênio for something.
+    units = _doctor_units_taking_plan(tenant, doctor, units, draft.current["insurance"])
+    if not units:
+        return _refuse(draft, ctx, ae.EDIT_INSURANCE_NOT_AT_UNITS)
     return _unit_list(
         draft,
         units,
@@ -861,6 +1045,12 @@ async def _unit_step(conversation, tenant, body, draft, appt, professionals, ctx
         units = flow_units.units_for_service(doctor, entry_service_id(service))
         if not units:
             return _refuse(draft, ctx, ae.EDIT_SERVICE_NOT_AT_UNIT)
+        # TASK-086 A12: the same units the list showed (a typed refused unit never matches).
+        units = _units_taking_plan(
+            tenant, doctor, units, entry_service_id(service), draft.current["insurance"]
+        )
+        if not units:
+            return _refuse(draft, ctx, ae.EDIT_INSURANCE_NOT_AT_UNITS)
         unit = flow_units.match_unit(units, body)
         if unit is None:
             return fr._preserve(conversation, "delegate_llm")
@@ -880,6 +1070,9 @@ async def _unit_step(conversation, tenant, body, draft, appt, professionals, ctx
     units = _doctor_units(tenant, doctor)
     if not units:
         return _refuse(draft, ctx, ae.EDIT_DOCTOR_SERVICE_NO_UNIT)
+    units = _doctor_units_taking_plan(tenant, doctor, units, draft.current["insurance"])
+    if not units:
+        return _refuse(draft, ctx, ae.EDIT_INSURANCE_NOT_AT_UNITS)
     unit = flow_units.match_unit(units, body)
     if unit is None:
         return fr._preserve(conversation, "delegate_llm")
@@ -946,6 +1139,12 @@ async def _service_step(conversation, tenant, body, draft, appt, professionals, 
         return _service_unit_list(
             draft.with_stage(), tenant, professionals, ctx, str(service.get("name"))
         )
+    if not after_doctor and new.current.get("unit_id") and _insurance_refused(new, tenant, doctor):
+        # TASK-086 A12: not with this convênio at the booking's unit -> the units where the
+        # doctor does take it for this service (or, at none, the plain notice; draft kept).
+        return _service_unit_list(
+            draft.with_stage(), tenant, professionals, ctx, str(service.get("name"))
+        )
     if after_doctor or minutes != draft.duration_minutes:
         # A different length (or a new doctor) may not fit the current time: check first.
         return await _after_slot_affecting_change(
@@ -976,11 +1175,20 @@ async def _availability(
 
 
 def _edit_doctor_description(
-    tenant, professional, plan: dict | None, availability: str | None = None
+    tenant,
+    professional,
+    plan: dict | None,
+    availability: str | None = None,
+    *,
+    service: str | None = None,
+    unit_id: str | None = None,
 ) -> str | None:
-    """An "alterar consulta" doctor row's subtitle: free/busy (when known), plan, specialty."""
+    """An "alterar consulta" doctor row's subtitle: free/busy (when known), plan, specialty.
+
+    TASK-086 A9: "aceita o convênio" also asks the matrix for the draft's `service` at the
+    `unit_id` the booking would have with this doctor (`_doctor_takes`)."""
     parts: list[str] = [availability] if availability else []
-    if plan is not None and fr._accepts_plan(tenant, professional, str(plan["id"])):
+    if plan is not None and _doctor_takes(tenant, professional, plan, service, unit_id):
         parts.append("aceita o convênio")
     specialty = (getattr(professional, "specialty", None) or "").strip() or None
     return (
@@ -990,21 +1198,40 @@ def _edit_doctor_description(
 
 
 def edit_professional_rows(
-    tenant, professionals, insurance: str | None, availability: dict[str, str] | None = None
+    tenant,
+    professionals,
+    insurance: str | None,
+    availability: dict[str, str] | None = None,
+    *,
+    service: str | None = None,
+    units: dict[str, str | None] | None = None,
 ) -> list[tuple[str, str, str | None]]:
     """Every doctor as a Portal row of the "alterar consulta" list (full "🥼 <name>").
 
     `availability` (doctor id -> "✅ Livre 15/10 15:20") is known only for the doctors
     the list checked live; the rest - and every row the options route serves - carry
     the convênio mark and the specialty only (services/list_options.py).
+
+    TASK-086 A9: `service` (the draft's) and `units` (doctor id -> the unit the booking would
+    have with them) refine "aceita o convênio" by the acceptance matrix. The card's scope
+    carries both (only when the clinic has a refused cell); without them a doctor is marked
+    when he takes the plan for at least one of his services.
     """
     plan = fr._selected_plan(tenant, insurance)
     marks = availability or {}
+    placed = units or {}
     return [
         (
             f"prof|{professional.id}",
             decorate(EMOJI_DOCTOR, str(professional.name or "")),
-            _edit_doctor_description(tenant, professional, plan, marks.get(str(professional.id))),
+            _edit_doctor_description(
+                tenant,
+                professional,
+                plan,
+                marks.get(str(professional.id)),
+                service=service,
+                unit_id=placed.get(str(professional.id)),
+            ),
         )
         for professional in professionals or []
     ]
@@ -1054,12 +1281,31 @@ async def _doctor_list(
             availability[pid] = (
                 f"{ae.MARK_FREE if free else ae.MARK_BUSY} {'Livre' if free else 'Ocupado'} {when}"
             )
+    # TASK-086 A9: the unit the booking would have with each doctor, for the convênio mark.
+    # Only computed (and only carried in the scope) when the clinic refused some cell, so a
+    # clinic that never touched the matrix gets the very same card as before.
+    service = draft.current["service"]
+    scope: dict[str, Any] = {"insurance": draft.current["insurance"], "edit": True}
+    placed: dict[str, str | None] = {}
+    if plan is not None and has_exceptions(snapshot_exceptions(tenant)):
+        placed = {
+            str(p.id): _with_doctor(
+                draft, p, _service_id(tenant, p, service)
+            ).current.get("unit_id")
+            for p in roster
+        }
+        scope.update({"service": service, "units": placed, SCOPE_UNIT_MARKS: True})
     rows: list[tuple] = [
         (
             f"prof|{professional.id}",
             fr._professional_row_title(professional.name),
             _edit_doctor_description(
-                tenant, professional, plan, availability.get(str(professional.id))
+                tenant,
+                professional,
+                plan,
+                availability.get(str(professional.id)),
+                service=service,
+                unit_id=placed.get(str(professional.id)),
             ),
         )
         for professional in shown
@@ -1075,9 +1321,14 @@ async def _doctor_list(
                 section_title="Médicos",
                 source=OptionSource(
                     kind="professional",
-                    scope={"insurance": draft.current["insurance"], "edit": True},
+                    scope=scope,
                     items=edit_professional_rows(
-                        tenant, roster, draft.current["insurance"], availability
+                        tenant,
+                        roster,
+                        draft.current["insurance"],
+                        availability,
+                        service=service,
+                        units=placed,
                     ),
                 ),
             )
@@ -1178,11 +1429,24 @@ def _insurance_list(
     doctor = _doctor(professionals, draft)
     plans = fr._tenant_insurance_plans(tenant)
     shown, next_page = fr.insurance_page(plans, page)
+    # TASK-086 A10: the mark is for the draft's service at the draft's unit.
+    service_id = _service_id(tenant, doctor, draft.current["service"])
+    unit_id = _uuid(draft.current.get("unit_id"))
+    scope: dict[str, Any] = {"edit_doctor_id": str(doctor.id) if doctor is not None else None}
+    if has_exceptions(snapshot_exceptions(tenant)):
+        # Only with a refused cell, so the card stays byte-identical without the matrix.
+        scope.update(
+            {
+                "service_id": str(service_id) if service_id is not None else None,
+                "unit_id": str(unit_id) if unit_id is not None else None,
+                SCOPE_UNIT_MARKS: True,
+            }
+        )
     rows: list[tuple] = [
         (
             f"ins|{plan['name']}",
             fr.truncate_list_row_title(str(plan["name"])),
-            _edit_plan_mark(tenant, plan, doctor),
+            _edit_plan_mark(tenant, plan, doctor, service_id=service_id, unit_id=unit_id),
         )
         for plan in shown
     ]
@@ -1198,8 +1462,10 @@ def _insurance_list(
                 section_title="Convênios",
                 source=OptionSource(
                     kind="insurance",
-                    scope={"edit_doctor_id": str(doctor.id) if doctor is not None else None},
-                    items=edit_insurance_rows(tenant, plans, doctor),
+                    scope=scope,
+                    items=edit_insurance_rows(
+                        tenant, plans, doctor, service_id=service_id, unit_id=unit_id
+                    ),
                     pinned=list(fr.INSURANCE_PINNED_ROWS),
                     has_clinic_notes=fr.insurance_plans_have_clinic_notes(plans),
                 ),
@@ -1209,19 +1475,36 @@ def _insurance_list(
     )
 
 
-def _edit_plan_mark(tenant, plan: dict, doctor) -> str | None:
-    """Whether the appointment's CURRENT doctor takes `plan` (None without doctor or plan id)."""
+def _edit_plan_mark(
+    tenant, plan: dict, doctor, *, service_id: Any = None, unit_id: Any = None
+) -> str | None:
+    """Whether the appointment's CURRENT doctor takes `plan` (None without doctor or plan id).
+
+    TASK-086 A10: for the draft's `service_id` at its `unit_id` the matrix may refuse it too
+    (no service known -> the list rule alone, as before). A mark, never a filter."""
     if doctor is None or not plan.get("id"):
         return None
-    if fr._accepts_plan(tenant, doctor, str(plan["id"])):
+    plan_id = str(plan["id"])
+    if fr._accepts_plan(tenant, doctor, plan_id) and _matrix_takes(
+        tenant, doctor, service_id, _uuid(unit_id), plan_id
+    ):
         return f"{ae.MARK_FREE} aceito pelo médico"
     return f"{ae.MARK_BUSY} não aceito pelo médico"
 
 
-def edit_insurance_rows(tenant, plans: list, doctor) -> list[tuple[str, str, str | None]]:
-    """Every plan as a Portal row of the "alterar consulta" list: full name + the doctor's mark."""
+def edit_insurance_rows(
+    tenant, plans: list, doctor, *, service_id: Any = None, unit_id: Any = None
+) -> list[tuple[str, str, str | None]]:
+    """Every plan as a Portal row of the "alterar consulta" list: full name + the doctor's mark.
+
+    `service_id`/`unit_id` (TASK-086 A10): the draft's, carried by the card's scope when the
+    clinic has a refused cell; without them the mark is the list rule alone."""
     return [
-        (f"ins|{plan['name']}", str(plan["name"]), _edit_plan_mark(tenant, plan, doctor))
+        (
+            f"ins|{plan['name']}",
+            str(plan["name"]),
+            _edit_plan_mark(tenant, plan, doctor, service_id=service_id, unit_id=unit_id),
+        )
         for plan in plans
     ]
 
@@ -1351,8 +1634,11 @@ async def _apply_confirm(
         return _service_list(draft, tenant, professionals, ctx, after_doctor=True)
     problem = _placement_problem(draft, tenant, doctor)
     if problem is not None:
-        # Follow-up E1: the last line of defence - the card already refuses such a draft.
-        return _refuse(_undo_doctor_change(draft), ctx, problem)
+        # Follow-up E1: the last line of defence - the card already refuses such a draft (and
+        # TASK-086: the matrix may have changed between the card and this Confirmar).
+        if problem == ae.EDIT_INSURANCE_NOT_ACCEPTED:
+            logger.info("appointment_edit_insurance_not_accepted", stage="confirm")
+        return _refuse(_undo_placement(draft, problem), ctx, problem)
     event_id = str(appt.get("google_event_id") or "")
     try:
         new_cal = _calendar(ctx, draft, professionals)
@@ -1457,6 +1743,9 @@ async def _apply_confirm(
         "calendar": new_cal,
         "patient_name": patient_name,
         "calendar_deferred": deferred,
+        # TASK-086 A18: the canonical service the worker re-checks the convênio matrix for,
+        # inside the row lock (never serialized into a paid difference's `pending_edit`).
+        "service_id": entry_service_id(service),
     }
     # TASK-083: a doctor change that moved the booking's unit writes the new one on the row
     # (`appointment_edit_write`); without that the key is absent and the unit stays as it is.
@@ -1859,7 +2148,9 @@ async def apply_ai_edit(conversation, tenant, proposal, appointments, profession
             if flow_units.unit_refused(doctor, staged_unit.id, service_id):
                 return unit_list
             new = new.with_changes(unit_id=str(staged_unit.id))
-        elif _unit_refused(new, doctor, service_id) or _placement_problem(new, tenant, doctor):
+        # Unit problems only: a convênio the matrix refuses is refused by the card below
+        # (`_confirm_result`, TASK-086 A11), with its own words - never a unit-list notice.
+        elif _unit_refused(new, doctor, service_id) or _unit_problem(new, tenant, doctor):
             return unit_list
         # TASK-085: the length at the unit settled above (the new unit's own, else the base).
         minutes = _minutes_at(service, tenant, doctor, new.current.get("unit_id"))

@@ -49,6 +49,10 @@ _STEP_LABELS: dict[str, str] = {
     fr.STEP_SERVICE_HELP_FINAL: f"a ajuda para escolher o serviço {_BOOKING}",
     fr.STEP_AWAITING_SERVICE_CONFIRM: f"o detalhe do serviço escolhido {_BOOKING}",
     fr.STEP_AWAITING_INSURANCE: f"a pergunta de convênio {_BOOKING}",
+    # TASK-086 A5: the matrix leaves the service with no place for the patient's convênio.
+    fr.STEP_AWAITING_PLAN_REFUSED: (
+        f"o aviso de que o convênio não é atendido nesse serviço e as opções de seguir {_BOOKING}"
+    ),
     # Dia, horário, confirmação.
     fr.STEP_AWAITING_DAY: f"a escolha do dia {_BOOKING}",
     fr.STEP_AWAITING_DAY_RETRY: f"a escolha do dia {_BOOKING}",
