@@ -11,13 +11,21 @@ Registered in `workers/arq_worker.py::WorkerSettings.functions` (the function na
 name: `price_change.SWEEP_JOB`). Layering: workers -> services. Logs: ids and counts only.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from secretaria.core.logging import get_logger
 from secretaria.services.payments import price_change
 
 logger = get_logger(__name__)
+
+# The arq timeout of this job (registered with `arq.worker.func(..., timeout=JOB_TIMEOUT)`; arq's
+# default is 300 s and a timed-out job is NOT retried). A large clinic's sweep costs a brain-api
+# lookup plus an SMTP send per consultation that needs a notice (~1-2 s each, up to the SMTP 15 s
+# timeout on a bad one): the sweep stops itself at `price_change._SWEEP_BUDGET` (25 min, room for
+# ~750+ e-mails) and enqueues a "resume" follow-up, so this only has to cover the budget plus ONE
+# slow consultation and the final enqueue - 30 min does, with margin.
+JOB_TIMEOUT = timedelta(minutes=30)
 
 
 async def sweep_price_changes(ctx: dict, tenant_id: str, changed_at: str) -> dict:

@@ -5,7 +5,7 @@ Start the worker with:
 """
 
 import httpx
-from arq import cron
+from arq import cron, func
 from arq.connections import RedisSettings
 
 from secretaria.config import get_settings
@@ -48,7 +48,7 @@ from secretaria.workers.payments_tasks import (
     process_asaas_event,
     process_payment_event,
 )
-from secretaria.workers.price_change import sweep_price_changes
+from secretaria.workers.price_change import JOB_TIMEOUT as PRICE_SWEEP_TIMEOUT, sweep_price_changes
 from secretaria.workers.reminder_engine import (
     process_appointment_reminders,
     reconcile_appointment_reminders,
@@ -196,8 +196,9 @@ class WorkerSettings:
         ingest_context_source,
         # TASK-085 R (D-R14): the clinic changed a price - e-mail the patients whose sinal it
         # changes. Enqueued after the commit of a hub price save, one job per clinic per 5-minute
-        # window. See workers/price_change.py and services/payments/price_change.py.
-        sweep_price_changes,
+        # window (+ its own follow-ups). Explicit timeout: see workers/price_change.JOB_TIMEOUT.
+        # See workers/price_change.py and services/payments/price_change.py.
+        func(sweep_price_changes, timeout=PRICE_SWEEP_TIMEOUT),
     ]
     # Sweep stale human-handover conversations back to the bot every 15 min;
     # sweep upcoming appointments for due lead-window reminders every 5 min

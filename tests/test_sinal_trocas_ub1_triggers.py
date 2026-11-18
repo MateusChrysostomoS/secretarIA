@@ -233,9 +233,18 @@ async def test_the_job_refuses_bad_arguments_quietly(monkeypatch, tenant_id, cha
     }
 
 
-def test_the_job_is_registered_under_its_name():
+def test_the_job_is_registered_under_its_name_with_a_timeout_above_the_sweep_budget():
     assert price_change.SWEEP_JOB in arq_worker.registered_function_names()
-    assert price_change_job.sweep_price_changes in arq_worker.WorkerSettings.functions
+    [job] = [
+        f
+        for f in arq_worker.WorkerSettings.functions
+        if getattr(f, "name", None) == price_change.SWEEP_JOB
+    ]
+    assert job.coroutine is price_change_job.sweep_price_changes
+    # arq's default (300 s) would kill a large clinic's sweep with no retry; the sweep stops
+    # itself at `_SWEEP_BUDGET` and resumes in a follow-up job, well inside the job timeout.
+    assert job.timeout_s == price_change_job.JOB_TIMEOUT.total_seconds()
+    assert price_change._SWEEP_BUDGET + timedelta(minutes=4) <= price_change_job.JOB_TIMEOUT
 
 
 # ------------------------------------------------------------------ hub triggers

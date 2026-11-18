@@ -26,8 +26,9 @@ LGPD: ids and counts in logs only; the e-mail address is never logged nor used a
 """
 
 import hashlib
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, time, timedelta
+from time import monotonic
 from types import SimpleNamespace
 from typing import Literal
 from uuid import UUID, uuid4
@@ -52,7 +53,6 @@ from secretaria.models.deposit_adjustment import (
     STATUS_AWAITING_PAYMENT,
     STATUS_CANCELLED_VOID_PENDING,
     STATUS_COLLECT_DUE,
-    SUSPENDED_STATUSES,
     DepositAdjustment,
 )
 from secretaria.models.payment_attention_item import REASON_PRICE_CHANGE_NO_EMAIL
@@ -63,7 +63,11 @@ from secretaria.services.email import EmailOutcome, send_transactional_email_res
 from secretaria.services.payments import accounts, attention, notify, service_change
 from secretaria.services.payments.adjustment_suspension import visible_to_patient_clause
 from secretaria.services.payments.deposit_failure_notice import within_daily_cap
-from secretaria.services.payments.deposit_lifecycle import requote_amount_cents
+from secretaria.services.payments.deposit_lifecycle import (
+    _resolve_service_and_price,
+    requote_amount_cents,
+)
+from secretaria.services.payments.money import parse_brl_to_cents
 from secretaria.services.payments.service_change_policy import MIN_DIFFERENCE_CENTS
 from secretaria.services.reminder_text import portal_conversation_link
 
@@ -148,27 +152,37 @@ async def enqueue_sweep(arq_pool, tenant_id: UUID, *, changed_at: datetime) -> N
 # Consultations per page of the sweep (keyset on start, id).
 _PAGE_SIZE = 200
 # An adjustment in one of these keeps the consultation out of the sweep: something is already
-# waiting for the patient or the clinic (an unpaid difference, a question, a choice, a suspended
-# change), a difference the clinic will COLLECT at the visit (a new notice would charge it a
-# second time - anti-goal "cobrança em dobro"), or a cancelled change whose Pix void is pending.
-# The next price edit picks the consultation up once that is settled (mapa-u §7 item 21).
-_BLOCKING_ADJUSTMENT_STATUSES: tuple[str, ...] = tuple(
-    dict.fromkeys(
-        (
-            STATUS_AWAITING_PAYMENT,
-            STATUS_ASKED,
-            STATUS_AWAITING_CHOICE,
-            STATUS_COLLECT_DUE,
-            STATUS_CANCELLED_VOID_PENDING,
-            *SUSPENDED_STATUSES,
-        )
-    )
+# waiting for the patient or the clinic (an unpaid difference, a question, a choice), a difference
+# the clinic will COLLECT at the visit (a new notice would charge it a second time - anti-goal
+# "cobrança em dobro"), or a cancelled change whose Pix void is pending. A SUSPENDED consultation
+# (`restoring`, `old_slot_lost`, ...) is left out by `visible_to_patient_clause` itself. The next
+# price edit picks the consultation up once that is settled (mapa-u §7 item 21).
+_BLOCKING_ADJUSTMENT_STATUSES: tuple[str, ...] = (
+    STATUS_AWAITING_PAYMENT,
+    STATUS_ASKED,
+    STATUS_AWAITING_CHOICE,
+    STATUS_COLLECT_DUE,
+    STATUS_CANCELLED_VOID_PENDING,
 )
-# Redis claim of one consultation while its notice is being sent: two sweeps of the same clinic
-# overlapping (two windows) never e-mail the same consultation twice.
+# Redis claim of one consultation while its notice is being sent (held until its row committed):
+# two sweeps of the same clinic overlapping (two windows) never e-mail the same consultation twice.
 _CLAIM_TTL_SECONDS = 600
 _NO_LINK_LINE = "Entre no portal da clínica e abra a conversa."
 _DEFAULT_TZ = "America/Sao_Paulo"
+
+# Fix round 1 (review I3): a notice that was capped, not sent, or hit an error is tried again by a
+# follow-up sweep of the clinic - capped: at `_NEXT_DAY_AT` of the clinic's next local day (the
+# cap is per local day); otherwise `_RETRY_AFTER` later - at most `PRICE_NOTICE_MAX_ATTEMPTS`
+# times per consultation version (a capped one counts once per local day). Then the clinic gets
+# the item `price_change_no_email` ("fale com ele"), so nobody silently misses a price change.
+PRICE_NOTICE_MAX_ATTEMPTS = 3
+_RETRY_AFTER = timedelta(minutes=30)
+_NEXT_DAY_AT = time(0, 5)
+_TRIES_TTL_SECONDS = 14 * 24 * 3600
+# Review m2: a sweep stops itself after this long and resumes in a follow-up job (the arq timeout
+# of the job, `workers/price_change.JOB_TIMEOUT`, sits above it). Measured on the monotonic clock.
+_SWEEP_BUDGET = timedelta(minutes=25)
+_RETRY_OUTCOMES = frozenset({"capped", "mail_failed", "error"})
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -180,6 +194,11 @@ def _zone(tenant: Tenant) -> ZoneInfo:
         return ZoneInfo(tenant.timezone or _DEFAULT_TZ)
     except (ZoneInfoNotFoundError, ValueError):
         return ZoneInfo(_DEFAULT_TZ)
+
+
+def _version(start_at: datetime) -> int:
+    """The consultation version a notice/attempt/item belongs to: its start (epoch seconds)."""
+    return int(_as_utc(start_at).timestamp())
 
 
 async def sweep_price_changes(
@@ -195,28 +214,45 @@ async def sweep_price_changes(
     `price_change` row -> nothing; answered -> re-armed (`answered_at=NULL`, `sent_at=now`) and
     sent again; none -> created. Portal patient with an e-mail -> `EMAIL_TEMPLATE` with the link,
     within `mail_cap_key` / `PRICE_MAIL_DAILY_CAP` (over the cap or not sent -> the row is NOT
-    created/re-armed). Otherwise -> item `price_change_no_email` (dedupe per consultation).
+    created/re-armed). Otherwise -> item `price_change_no_email` (dedupe per consultation
+    version).
 
     The e-mail goes out BEFORE its row is written (the row id is chosen first and travels in the
     link): a crash in between leaves a dead link (the opening falls back to the common one) and
     the next sweep sends a working one - never a pending row whose e-mail was never sent, which
-    would silence the patient for good. Never raises."""
+    would silence the patient for good.
+
+    Fix round 1: capped / not sent / error -> a follow-up sweep is enqueued on `redis` (the
+    worker's ArqRedis) under its own job id, bounded by `PRICE_NOTICE_MAX_ATTEMPTS` per
+    consultation version, then the clinic item; a sweep past `_SWEEP_BUDGET` stops and resumes in
+    a follow-up job. Never raises."""
     log = {"tenant_id": str(tenant_id)}
     counts: dict[str, int] = {}
+    retry_soon = next_day = resume = False
+    zone = ZoneInfo(_DEFAULT_TZ)
+    deadline = monotonic() + _SWEEP_BUDGET.total_seconds()
+    processed = 0
     try:
         async with async_session_factory() as session:
             tenant = await session.get(Tenant, tenant_id)
             enabled = tenant is not None and bool(tenant.pix_deposit_enabled)
+            if tenant is not None:
+                zone = _zone(tenant)
         if not enabled:
             logger.info("price_change_sweep_skipped", reason="no_sinal", **log)
             return 0
+        local_day = _as_utc(now).astimezone(zone).strftime("%Y%m%d")
         after: tuple[UUID, datetime] | None = None
-        while True:
+        while not resume:
             async with async_session_factory() as session:
                 page = await _candidate_page(
                     session, tenant_id=tenant_id, changed_at=changed_at, now=now, after=after
                 )
-            for appointment_id, _start in page:
+            for appointment_id, start in page:
+                if processed and monotonic() >= deadline:
+                    resume = True  # out of time: a follow-up job goes on from here
+                    break
+                processed += 1
                 try:
                     outcome = await _notify_one(tenant_id, appointment_id, now=now, redis=redis)
                 except Exception as exc:  # noqa: BLE001 - one consultation never stops the batch
@@ -227,14 +263,129 @@ async def sweep_price_changes(
                         error_type=type(exc).__name__,
                         **log,
                     )
+                if outcome in _RETRY_OUTCOMES and redis is not None:
+                    if await _attempts_exhausted(
+                        redis,
+                        tenant_id,
+                        appointment_id,
+                        start,
+                        local_day=local_day,
+                        capped=outcome == "capped",
+                    ):
+                        await _open_mail_failed_item(tenant_id, appointment_id)
+                        outcome = "item_mail_failed"
+                    elif outcome == "capped":
+                        next_day = True
+                    else:
+                        retry_soon = True
                 counts[outcome] = counts.get(outcome, 0) + 1
             if len(page) < _PAGE_SIZE:
                 break
             after = page[-1]
     except Exception as exc:  # noqa: BLE001 - a job: log and let the next edit sweep again
         logger.warning("price_change_sweep_failed", error_type=type(exc).__name__, **log)
+    await _follow_ups(
+        redis,
+        tenant_id,
+        changed_at,
+        now=now,
+        zone=zone,
+        resume=resume,
+        retry_soon=retry_soon,
+        next_day=next_day,
+    )
     logger.info("price_change_sweep_done", **counts, **log)
     return counts.get("sent", 0)
+
+
+async def _follow_ups(
+    redis,
+    tenant_id: UUID,
+    changed_at: datetime,
+    *,
+    now: datetime,
+    zone: ZoneInfo,
+    resume: bool,
+    retry_soon: bool,
+    next_day: bool,
+) -> None:
+    """Enqueue the follow-up sweeps this run needs, each under its own job id (never the hub's
+    `sweep_job_id`, so a later price edit is not refused as a duplicate): `resume` (out of time)
+    right away, `retry` (~30 min) for failures, `nextday` (00:05 local) for capped notices. The
+    job keeps the first edit's `changed_at`, so the same consultations qualify."""
+    now = _as_utc(now)
+    plans: list[tuple[str, datetime]] = []
+    if resume:
+        plans.append((f"resume:{int(now.timestamp()) // 60}", now + SWEEP_DEFER))
+    if retry_soon:
+        run_at = now + _RETRY_AFTER
+        bucket = int(run_at.timestamp()) // int(_RETRY_AFTER.total_seconds())
+        plans.append((f"retry:{bucket}", run_at))
+    if next_day:
+        tomorrow = now.astimezone(zone).date() + timedelta(days=1)
+        run_at = datetime.combine(tomorrow, _NEXT_DAY_AT, tzinfo=zone).astimezone(UTC)
+        plans.append((f"nextday:{tomorrow.strftime('%Y%m%d')}", run_at))
+    if not plans:
+        return
+    enqueue = getattr(redis, "enqueue_job", None)
+    if enqueue is None:
+        logger.warning(
+            "price_change_follow_up_not_enqueued", reason="no_pool", tenant_id=str(tenant_id)
+        )
+        return
+    for suffix, run_at in plans:
+        job_id = f"pricechg:{tenant_id}:{suffix}"
+        try:
+            await enqueue(
+                SWEEP_JOB,
+                str(tenant_id),
+                changed_at.isoformat(),
+                _job_id=job_id,
+                _defer_until=run_at,
+            )
+        except Exception as exc:  # noqa: BLE001 - logged; the next price edit sweeps again
+            logger.warning(
+                "price_change_follow_up_not_enqueued",
+                reason="enqueue_failed",
+                error_type=type(exc).__name__,
+                tenant_id=str(tenant_id),
+            )
+            continue
+        logger.info("price_change_follow_up_enqueued", job_id=job_id, tenant_id=str(tenant_id))
+
+
+def _tries_key(tenant_id: UUID, appointment_id: UUID, start: datetime) -> str:
+    return f"price_change_tries:{tenant_id}:{appointment_id}:{_version(start)}"
+
+
+async def _attempts_exhausted(
+    redis,
+    tenant_id: UUID,
+    appointment_id: UUID,
+    start: datetime,
+    *,
+    local_day: str,
+    capped: bool,
+) -> bool:
+    """Count one failed attempt of this consultation version; True once it reached
+    `PRICE_NOTICE_MAX_ATTEMPTS`. A capped notice counts at most once per local day (a 30-minute
+    retry the same day must not burn its attempts). Redis down -> False (logged)."""
+    key = _tries_key(tenant_id, appointment_id, start)
+    try:
+        if capped:
+            mark = f"price_change_capday:{tenant_id}:{appointment_id}:{_version(start)}:{local_day}"
+            if not await redis.set(mark, "1", ex=2 * 24 * 3600, nx=True):
+                return False
+        count = await redis.incr(key)
+        await redis.expire(key, _TRIES_TTL_SECONDS)
+    except Exception as exc:  # noqa: BLE001 - no counter: the follow-up still runs
+        logger.warning(
+            "price_change_attempt_count_failed",
+            error_type=type(exc).__name__,
+            tenant_id=str(tenant_id),
+        )
+        return False
+    return int(count) >= PRICE_NOTICE_MAX_ATTEMPTS
 
 
 async def _candidate_page(
@@ -328,12 +479,41 @@ async def _notify_one(tenant_id: UUID, appointment_id: UUID, *, now: datetime, r
     if not await redis.set(claim, "1", ex=_CLAIM_TTL_SECONDS, nx=True):
         return "busy"
     try:
-        return await _mail_and_record(notice, email, now=now, redis=redis)
+        # Review I1: what was read before the claim may be stale (another sweep may have mailed
+        # and committed meanwhile) - decide again under the claim, which is held until the row
+        # is committed.
+        current = await _recheck_under_claim(notice)
+        if isinstance(current, str):
+            return current
+        return await _mail_and_record(current, email, now=now, redis=redis)
     finally:
         try:
             await redis.delete(claim)
         except Exception:  # noqa: BLE001 - the claim expires on its own
             logger.warning("price_change_claim_release_failed", tenant_id=str(tenant_id))
+
+
+async def _recheck_under_claim(notice: _Notice) -> _Notice | str:
+    """A short read under the claim: the consultation still at the same version, and its notice
+    row as it is NOW (pending -> "pending"; answered -> re-arm that row; none -> a new one)."""
+    async with async_session_factory() as session:
+        appointment = await session.scalar(
+            select(Appointment).where(
+                Appointment.id == notice.appointment_id,
+                Appointment.tenant_id == notice.tenant_id,
+            )
+        )
+        if (
+            appointment is None
+            or appointment.status not in LIVE_APPOINTMENT_STATUSES
+            or appointment.start_at is None
+            or _as_utc(appointment.start_at) != notice.start_at
+        ):
+            return "skipped"
+        current = await _current_notice(session, appointment)
+    if current is not None and current.answered_at is None:
+        return "pending"
+    return replace(notice, rearm_id=current.id if current is not None else None)
 
 
 async def _read_notice(
@@ -416,7 +596,7 @@ async def _mail_and_record(notice: _Notice, email: str, *, now: datetime, redis)
         within = await within_daily_cap(
             redis, mail_cap_key(notice.tenant_id, email, local_day), PRICE_MAIL_DAILY_CAP
         )
-    except Exception as exc:  # noqa: BLE001 - no counter, no e-mail (the next sweep tries)
+    except Exception as exc:  # noqa: BLE001 - no counter, no e-mail (the follow-up tries)
         logger.warning(
             "price_change_mail_skipped",
             reason="no_counter",
@@ -481,9 +661,15 @@ async def _mail_and_record(notice: _Notice, email: str, *, now: datetime, redis)
                 )
             await session.commit()
         except IntegrityError:
-            # Another row of this consultation-version won meanwhile; its own e-mail stands.
+            # Another row of this consultation-version won meanwhile (only possible outside the
+            # claim, e.g. Redis was flushed): its own e-mail stands; this one is not "sent".
             await session.rollback()
             logger.warning("price_change_notice_row_lost", **log)
+            return "row_lost"
+    try:
+        await redis.delete(_tries_key(notice.tenant_id, notice.appointment_id, notice.start_at))
+    except Exception:  # noqa: BLE001 - the counter expires on its own
+        logger.warning("price_change_attempt_reset_failed", **log)
     logger.info(
         "price_change_notice_sent",
         rearmed=notice.rearm_id is not None,
@@ -493,24 +679,98 @@ async def _mail_and_record(notice: _Notice, email: str, *, now: datetime, redis)
     return "sent"
 
 
-async def _open_no_email_item(session: AsyncSession, notice: _Notice) -> None:
-    """The clinic item `price_change_no_email`, once per consultation (the dedupe key carries the
-    consultation id; a replayed sweep never duplicates it). Not linked to the deposit (nothing is
-    wrong with the money itself). Commits."""
+async def _open_item(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    appointment_id: UUID,
+    patient_id: UUID | None,
+    provider: str,
+    start_at: datetime,
+    end_at: datetime | None,
+    service: str | None,
+    reference: str,
+) -> None:
+    """The clinic item `price_change_no_email` for one consultation VERSION (`reference` carries
+    the consultation id and its start; a replayed sweep never duplicates it, a rescheduled
+    consultation gets its own). Not linked to the deposit (nothing is wrong with the money
+    itself). Commits."""
     await attention.open_attention_item(
         session,
-        tenant_id=notice.tenant_id,
+        tenant_id=tenant_id,
         reason=REASON_PRICE_CHANGE_NO_EMAIL,
         dedupe_key=attention.attention_dedupe_key(
-            notice.provider, f"price_change:{notice.appointment_id}", REASON_PRICE_CHANGE_NO_EMAIL
+            provider,
+            f"{reference}:{appointment_id}:{_version(start_at)}",
+            REASON_PRICE_CHANGE_NO_EMAIL,
         ),
-        provider=notice.provider,
-        patient_id=notice.patient_id,
-        slot_start=notice.start_at,
-        slot_end=notice.end_at,
-        service_label=notice.service or None,
+        provider=provider,
+        patient_id=patient_id,
+        slot_start=start_at,
+        slot_end=end_at,
+        service_label=service or None,
     )
     await session.commit()
+
+
+async def _open_no_email_item(session: AsyncSession, notice: _Notice) -> None:
+    """WhatsApp patient or no e-mail on file: the clinic tells the patient itself."""
+    await _open_item(
+        session,
+        tenant_id=notice.tenant_id,
+        appointment_id=notice.appointment_id,
+        patient_id=notice.patient_id,
+        provider=notice.provider,
+        start_at=notice.start_at,
+        end_at=notice.end_at,
+        service=notice.service,
+        reference="price_change",
+    )
+
+
+async def _open_mail_failed_item(tenant_id: UUID, appointment_id: UUID) -> None:
+    """`PRICE_NOTICE_MAX_ATTEMPTS` attempts failed (capped / not sent / error): the clinic gets
+    the same reason `price_change_no_email` - the patient could not be told by e-mail - under its
+    own reference `price_change_mail` (the item has no free-text field; the key tells the two
+    cases apart). Reads only the consultation, its deposit's provider and the patient id - never
+    `price_notice_needed`, which may be what failed. Never raises."""
+    try:
+        async with async_session_factory() as session:
+            appointment = await session.scalar(
+                select(Appointment).where(
+                    Appointment.id == appointment_id, Appointment.tenant_id == tenant_id
+                )
+            )
+            if appointment is None or appointment.start_at is None:
+                return
+            provider = await session.scalar(
+                select(PixDeposit.provider).where(
+                    PixDeposit.tenant_id == tenant_id, PixDeposit.appointment_id == appointment_id
+                )
+            )
+            await _open_item(
+                session,
+                tenant_id=tenant_id,
+                appointment_id=appointment_id,
+                patient_id=appointment.patient_id,
+                provider=provider or "asaas",
+                start_at=_as_utc(appointment.start_at),
+                end_at=_as_utc(appointment.end_at) if appointment.end_at else None,
+                service=appointment.appointment_type,
+                reference="price_change_mail",
+            )
+        logger.info(
+            "price_change_mail_handed_to_clinic",
+            tenant_id=str(tenant_id),
+            appointment_id=str(appointment_id),
+        )
+    except Exception as exc:  # noqa: BLE001 - logged; the clinic item is best effort
+        logger.warning(
+            "price_change_mail_item_failed",
+            error_type=type(exc).__name__,
+            tenant_id=str(tenant_id),
+            appointment_id=str(appointment_id),
+        )
 
 
 async def price_notice_needed(
@@ -525,7 +785,8 @@ async def price_notice_needed(
     Read-only. PAID -> `service_change.preview_service_change` on the row itself: True on
     `increase_charge` (>= R$ 10, with a connected payment account), `decrease_ask`, and
     `decrease_keep` with a difference >= R$ 10; False on `increase_free` / `no_change` /
-    `blocked`. AWAITING -> `deposit_lifecycle.requote_amount_cents(...) != deposit.amount_cents`.
+    `blocked`. AWAITING -> `deposit_lifecycle.requote_amount_cents(...) != deposit.amount_cents`,
+    but only with a readable price (no price / service off = no notice, like `blocked`).
     A clinic without sinal, or rows that do not belong together, -> False."""
     if (
         not tenant.pix_deposit_enabled
@@ -560,6 +821,14 @@ async def price_notice_needed(
             return decision.diff_cents >= MIN_DIFFERENCE_CENTS
         return False
     if deposit.status == PixDepositStatus.AWAITING:
+        # Fix round 1 (review I2): a service switched off, gone, or without a readable price is
+        # NOT a price change - `requote_amount_cents` would read it as 0 and the notice would void
+        # the sinal of a booking the clinic only stopped OFFERING. Same silence as PAID's
+        # `blocked`. A real price whose new sinal is under the provider minimum still counts.
+        _name, price_text = await _resolve_service_and_price(session, tenant, appointment)
+        price_cents = parse_brl_to_cents(price_text)
+        if price_cents is None or price_cents <= 0:
+            return False
         amount = await requote_amount_cents(session, tenant=tenant, appointment=appointment)
         return amount != int(deposit.amount_cents or 0)
     return False
@@ -617,6 +886,7 @@ def price_opening_messages(opening: PriceOpening, *, tenant: Tenant) -> list[not
 __all__ = [
     "EMAIL_TEMPLATE",
     "PRICE_MAIL_DAILY_CAP",
+    "PRICE_NOTICE_MAX_ATTEMPTS",
     "PRICE_NOTICE_MIN_LEAD",
     "SWEEP_BUCKET",
     "SWEEP_DEFER",

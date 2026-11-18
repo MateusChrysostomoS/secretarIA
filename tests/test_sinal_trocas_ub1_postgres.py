@@ -132,3 +132,38 @@ async def test_two_overlapping_sweeps_email_each_patient_once(pg, mail):
         )
         == 0
     )
+
+
+async def test_a_sweep_that_read_before_the_other_committed_does_not_mail_again(
+    pg, mail, monkeypatch
+):
+    """Review I1 on Postgres: sweep B reads "no notice", then waits on brain-api while sweep A
+    mails, commits the row and releases the claim; B takes the free claim, re-reads and stops."""
+    async with pg() as session:
+        tenant = await seed_tenant(session)
+        _p, appointment, _d = await seed_visit(session, tenant)
+        await session.commit()
+    await reprice(pg, tenant.id, "R$ 240,00")
+    redis = FakeRedis()
+    b_read, a_done = asyncio.Event(), asyncio.Event()
+    real = price_change._patient_email
+
+    async def _email(notice):
+        if not b_read.is_set():
+            b_read.set()
+            await a_done.wait()
+        return await real(notice)
+
+    monkeypatch.setattr(price_change, "_patient_email", _email)
+
+    async def sweep_b():
+        return await price_change._notify_one(tenant.id, appointment.id, now=NOW, redis=redis)
+
+    async def sweep_a():
+        await b_read.wait()
+        outcome = await price_change._notify_one(tenant.id, appointment.id, now=NOW, redis=redis)
+        a_done.set()
+        return outcome
+
+    assert await asyncio.gather(sweep_b(), sweep_a()) == ["pending", "sent"]
+    assert len(mail) == 1 and await _rows(pg) == 1
