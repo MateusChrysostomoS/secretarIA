@@ -16,7 +16,7 @@ consent / identity still open keep their silence; another clinic is never affect
 
 from datetime import UTC, datetime, timedelta
 
-from secretaria.models import HandoverState, Patient
+from secretaria.models import FlowState, HandoverState, Patient
 from secretaria.models.appointment_reminder import (
     REMINDER_CHANNEL_EMAIL,
     REMINDER_KIND_PRICE_CHANGE,
@@ -175,20 +175,50 @@ async def test_an_ordinary_entry_with_a_pending_notice_opens_with_the_price(port
     assert await answered_at(portal, rid) is not None
 
 
-async def test_an_ordinary_entry_with_a_pending_notice_ignores_the_quiet_window(
+async def test_inside_the_quiet_window_the_ordinary_entry_is_silent_and_the_link_acts(
     portal,  # noqa: F811
     provider,  # noqa: F811
 ):
-    """Same rule as the explicit link: the price notice speaks even right after activity."""
+    """Orchestrator follow-up: an ordinary entry keeps the ordinary guards - a refresh mid-chat
+    never brings the price message. The link (which ignores the quiet window) acts, once."""
     world, _deposit = await seed(portal)  # last message a minute ago
     rid = await add_notice(portal, world)
     await reprice(portal, world, "R$ 300,00")
 
     await enter_plain(world)
 
+    assert await bodies(portal, world) == [] and provider.calls == []
+    assert await answered_at(portal, rid) is None
+
+    await enter_link(world, rid)
+    await enter_plain(world)
+
     [body] = await bodies(portal, world)
     assert body.startswith(PRICE_PIX)
+    assert provider.called("create_pix_charge") == 1
     assert await answered_at(portal, rid) is not None
+
+
+async def test_a_flow_in_progress_keeps_the_ordinary_entry_silent(portal, provider):  # noqa: F811
+    """Mid-booking (past the quiet window, inside the reactivation gap): the ordinary entry stays
+    silent even with a pending notice - never cut a booking in half. The link still acts."""
+    world, _deposit = await seed(
+        portal, v2=True, last_inbound_at=datetime.now(UTC) - timedelta(hours=2)
+    )
+    rid = await add_notice(portal, world)
+    await reprice(portal, world, "R$ 300,00")
+    await set_conversation(portal, world, flow_state=FlowState.SERVICE_CATALOG)
+
+    await enter_plain(world)
+
+    assert await bodies(portal, world) == [] and provider.calls == []
+    assert await answered_at(portal, rid) is None
+
+    await enter_link(world, rid)
+
+    [body] = await bodies(portal, world)
+    assert body.startswith(PRICE_PIX)
+    assert provider.called("create_pix_charge") == 1
 
 
 async def test_the_most_recent_pending_notice_wins(portal, provider):  # noqa: F811

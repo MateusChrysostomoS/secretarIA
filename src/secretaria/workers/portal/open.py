@@ -473,26 +473,6 @@ async def _brain_message_entry_decision(
             return None
         reminder_id = entry_context.reminder_id if explicit else None
         source = entry_context.source if explicit else "portal_entry"
-        if not explicit:
-            # TASK-085 R A1 (D-R14): the e-mail's link fires TWO entries (the account opening,
-            # without context, and the Portal's `/enter` with the link) in no guaranteed order.
-            # An ordinary entry of a patient with a PENDING price notice IS that notice's entry -
-            # same decision and the SAME ledger key as the link: whichever comes first sends the
-            # price action, the other one is deduplicated. The silences below still apply.
-            pending = await _pending_price_notice(
-                session, tenant_id=tenant_id, patient_id=patient.id, now=now
-            )
-            if pending is not None:
-                logger.info(
-                    "brain_message_enter_pending_price_notice",
-                    tenant_id=str(tenant_id),
-                    conversation_id=str(conversation.id),
-                    reminder_id=str(pending),
-                )
-                explicit = True
-                price_link = True
-                reminder_id = pending
-                source = "reminder_link"
         latest = await _latest_message(session, conversation.id)
         if latest is None and not explicit:
             return None
@@ -524,6 +504,30 @@ async def _brain_message_entry_decision(
                 reason=reason,
             )
             return None
+        # TASK-085 R A1 (D-R14): the e-mail's link fires TWO entries (the account opening,
+        # without context, and the Portal's `/enter` with the link) in no guaranteed order.
+        # An ORDINARY entry that passed every ordinary guard above (quiet window, flow in
+        # progress, human, consent/identity - Orchestrator follow-up: only WHAT it sends changes)
+        # of a patient with a PENDING price notice sends that notice's price action instead of
+        # the usual card, under the link's own ledger key: whichever entry comes first speaks,
+        # the other one is deduplicated. Inside the quiet window it stays silent and the link
+        # entry (which ignores the quiet window) acts alone.
+        ordinary_price = False
+        if not explicit:
+            pending = await _pending_price_notice(
+                session, tenant_id=tenant_id, patient_id=patient.id, now=now
+            )
+            if pending is not None:
+                logger.info(
+                    "brain_message_enter_pending_price_notice",
+                    tenant_id=str(tenant_id),
+                    conversation_id=str(conversation.id),
+                    reminder_id=str(pending),
+                )
+                ordinary_price = True
+                price_link = True
+                reminder_id = pending
+                source = "reminder_link"
         appointment_id = None
         if explicit:
             # The opaque row is only context. Ownership is checked using the
@@ -627,7 +631,7 @@ async def _brain_message_entry_decision(
             tenant=tenant,
             ledger_key=(
                 f"reminder_entry:{conversation.id}:{reminder_id or 'clinic'}:{latest_id}"
-                if explicit
+                if explicit or ordinary_price
                 else _enter_ledger_key(conversation.id, latest_id)
             ),
             last_message_id=latest_id,
