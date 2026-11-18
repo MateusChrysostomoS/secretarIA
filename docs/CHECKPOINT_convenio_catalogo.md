@@ -4,8 +4,11 @@
 > O item 4 da §1 (flag `charge_deposit` por clínica e por plano) foi **aposentado**: com o sinal ligado,
 > toda consulta paga o sinal, com qualquer convênio. As colunas `charge_deposit` ficam (sem migração),
 > mas nada lê nem escreve: saiu `deposit_lifecycle._insurance_charges_deposit` / skip `insurance_no_charge`,
-> o `PATCH /tenants/me/insurance-plans/{plan_id}`, o campo nas respostas do hub e da agenda
-> (`insurance_plan` = `{id, name}`); um Portal antigo que ainda envia o campo não leva 422 (ignorado).
+> e o efeito do `PATCH /tenants/me/insurance-plans/{plan_id}`. **Compat por 1 release** (remover quando o
+> `/configuracao` do secretarIA-frontend perder o interruptor): toda leitura de plano (hub e agenda) devolve
+> `charge_deposit: true` constante, e o PATCH é um no-op por clínica (404 para id alheio/desconhecido; 200
+> com a linha, corpo ignorado). Um cliente antigo que ainda envia o campo não leva 422 (ignorado).
+> Ordem de deploy: Brain-Message-Frontend e secretarIA-frontend ANTES; depois API + worker da secretarIA.
 > Também saiu o texto de pagamento sob cada convênio na lista do paciente (`insurance_payment_copy.py`
 > removido) e, no `insurance-overview`, o `payment_text`/`deposit` por plano (`plans: [{name, clinic_note}]`).
 > Relatório: `tasks/TASK-085/sinal-trocas/results/U1-implementer.md`.
