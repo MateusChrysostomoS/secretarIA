@@ -28,7 +28,7 @@ from secretaria.models import (
 from secretaria.models.insurance import TenantInsurancePlan
 from secretaria.models.payment_attention_item import (
     REASON_ORPHAN_PAYMENT,
-    REASON_SERVICE_DIFF_COLLECT_DUE,
+    REASON_SINAL_REQUOTE_FAILED,
     PaymentAttentionItem,
 )
 from secretaria.models.pix_deposit import (
@@ -474,7 +474,7 @@ async def test_a_provider_failure_opens_an_item_and_tells_the_patient_the_next_s
     items = await _items(db)
     assert len(items) == 1
     item = items[0]
-    assert item.reason == REASON_SERVICE_DIFF_COLLECT_DUE and item.tenant_id == tenant.id
+    assert item.reason == REASON_SINAL_REQUOTE_FAILED and item.tenant_id == tenant.id
     assert item.amount_cents == 9000 and item.patient_id == patient.id
     assert item.deposit_id is None and item.service_label == "Exame"
     # A retry of the same edit never opens a second item.
@@ -493,7 +493,7 @@ async def test_a_payer_question_that_cannot_be_asked_opens_the_item_too(db, prov
     )
     assert created is None
     assert [body for _to, body in _Whatsapp.sent] == [OPENING + ".", CLINIC_WILL_CALL]
-    assert [i.reason for i in await _items(db)] == [REASON_SERVICE_DIFF_COLLECT_DUE]
+    assert [i.reason for i in await _items(db)] == [REASON_SINAL_REQUOTE_FAILED]
 
 
 async def test_a_sinal_made_due_that_the_provider_refuses_stays_silent(db, provider):

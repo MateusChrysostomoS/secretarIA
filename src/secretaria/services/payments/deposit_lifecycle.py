@@ -40,7 +40,7 @@ from secretaria.models.insurance import ProfessionalInsurancePlan, TenantInsuran
 from secretaria.models.payment_attention_item import (
     REASON_PAID_THEN_CANCELLED,
     REASON_REFUND_DUE_POLICY,
-    REASON_SERVICE_DIFF_COLLECT_DUE,
+    REASON_SINAL_REQUOTE_FAILED,
     PaymentAttentionItem,
 )
 from secretaria.models.pix_deposit import (
@@ -181,6 +181,9 @@ class AppointmentDepositView:
     # none, or a legacy row), as `adjustment_queries.AdjustmentTotals` reports it (S1). Read with
     # `getattr` so the view never depends on the order the slices merge in.
     pending_difference_mode: str | None = None
+    # TASK-085 R (S7a): that change's `pending_edit` - server-side only, never on the wire as
+    # such (the hub renders `service_change.pending_change_summaries` from it).
+    pending_edit: dict | None = None
 
 
 async def load_deposit_views(
@@ -231,6 +234,7 @@ async def load_deposit_views(
             else None,
             pending_difference_cents=total.pending_difference_cents if total else None,
             pending_difference_mode=getattr(total, "pending_difference_mode", None),
+            pending_edit=getattr(total, "pending_edit", None),
         )
     return views
 
@@ -941,11 +945,10 @@ async def _recharge_failed(
 ) -> None:
     """The old Pix was voided and the new one was NOT created (the provider refused it, or the
     payer-data question could not be asked): ONE attention item tells the clinic to collect the
-    new sinal itself. Reuses `service_diff_collect_due` (the "a troca já valeu: cobrar {valor} do
-    paciente" item, amount = the new sinal): no reason fits better, and a dedicated reason needs
-    the model + the attention view, which are outside this slice (recorded for a follow-up). One
-    item per edit: the key carries the consultation and its `updated_at` (a retry of the same
-    edit dedupes, a later edit that fails again opens its own). Never raises."""
+    new sinal itself - its own reason `sinal_requote_failed` (TASK-085 R S7a; S2 had reused
+    `service_diff_collect_due`, whose sentence speaks of a dearer service), amount = the new
+    sinal. One item per edit: the key carries the consultation and its `updated_at` (a retry of
+    the same edit dedupes, a later edit that fails again opens its own). Never raises."""
     provider = tenant.payment_provider or PROVIDER_ASAAS
     stamp = appointment.updated_at
     reference = f"requote:{appointment.id}:{int(stamp.timestamp()) if stamp else 0}"
@@ -955,9 +958,9 @@ async def _recharge_failed(
             await attention.open_attention_item(
                 session,
                 tenant_id=tenant.id,
-                reason=REASON_SERVICE_DIFF_COLLECT_DUE,
+                reason=REASON_SINAL_REQUOTE_FAILED,
                 dedupe_key=attention.attention_dedupe_key(
-                    provider, reference, REASON_SERVICE_DIFF_COLLECT_DUE
+                    provider, reference, REASON_SINAL_REQUOTE_FAILED
                 ),
                 provider=provider,
                 patient_id=patient.id,

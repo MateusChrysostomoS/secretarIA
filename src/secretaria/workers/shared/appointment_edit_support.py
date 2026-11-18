@@ -6,7 +6,6 @@ and the Pix guards of the appointment being edited. Built once per edit turn
 reminder tap that OPENS the edit (`workers/shared/actions.py`).
 """
 
-from dataclasses import fields
 from typing import Any
 from uuid import UUID
 
@@ -22,21 +21,10 @@ from secretaria.services.tenant_config import resolve_professional_calendar
 
 logger = get_logger(__name__)
 
-# TASK-085 R (contrato §3.8): the router's `EditContext.suspended` (S3a) - the edit of a
-# consultation waiting for the Pix of a change's difference is refused with
-# `SUSPENDED_VISIT_TEXT`. Set only when the router knows the field (the slices merge in waves).
-_CONTEXT_HAS_SUSPENDED = "suspended" in {f.name for f in fields(EditContext)}
-
-
-def make_edit_context(*, suspended: bool = False, **kwargs) -> EditContext:
-    """An `EditContext` with the suspension flag the worker computed."""
-    if _CONTEXT_HAS_SUSPENDED:
-        kwargs["suspended"] = suspended
-    return EditContext(**kwargs)
-
-
 async def visit_suspended(session, tenant: Tenant, appointment: Appointment) -> bool:
-    """Is this consultation suspended by a change waiting for its Pix (S0's guard)?"""
+    """Is this consultation suspended by a change waiting for its Pix (S0's guard)? Every entry
+    that builds an `EditContext` sets `suspended` from it (TASK-085 R, contrato §3.8): the router
+    then refuses the edit with `SUSPENDED_VISIT_TEXT`."""
     return (
         await adjustment_suspension.open_suspension(
             session, tenant_id=tenant.id, appointment_id=appointment.id
@@ -90,7 +78,7 @@ async def build_edit_context(
         if appointment is not None and appointment.tenant_id == tenant.id:
             paid, blocked = await edit_guards(session, tenant, appointment)
             suspended = await visit_suspended(session, tenant, appointment)
-    return make_edit_context(
+    return EditContext(
         calendars=calendars, paid_deposit=paid, reschedule_blocked=blocked, suspended=suspended
     )
 
@@ -111,5 +99,5 @@ async def typed_edit_entry(session, tenant: Tenant, patient_id) -> FlowRouterRes
     return enter_edit_menu(
         tenant,
         upcoming[0],
-        make_edit_context(paid_deposit=paid, reschedule_blocked=blocked, suspended=suspended),
+        EditContext(paid_deposit=paid, reschedule_blocked=blocked, suspended=suspended),
     )

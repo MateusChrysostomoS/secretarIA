@@ -80,9 +80,29 @@ REASON_TEXT = {
         "Troca para serviço mais caro feita; o Pix da diferença venceu sem pagamento: "
         "cobrar {value} do paciente."
     ),
+    # TASK-085 R (S7a): an undone edit left a Pix of the difference nobody saw at the provider.
+    "unseen_charge_to_void": (
+        "Uma alteração de consulta foi desfeita, mas o Pix da diferença criado para ela não pôde "
+        "ser cancelado no provedor de pagamento (o paciente não recebeu o código): cancele essa "
+        "cobrança de {value} no painel do provedor."
+    ),
+    # TASK-085 R (S7a, D-R6): the sinal was not paid yet, its amount changed with an edit, the old
+    # Pix was cancelled and the new one could not be created.
+    "sinal_requote_failed": (
+        "O valor do sinal mudou com uma alteração da consulta e o Pix antigo foi cancelado, mas "
+        "o novo Pix não pôde ser gerado: cobrar o sinal de {value} do paciente."
+    ),
 }
-# Reasons whose `{value}` is the item's own amount (money still to RECEIVE), not a refund.
-_AMOUNT_VALUE_REASONS = frozenset({"service_diff_collect_due", "service_diff_unpaid"})
+# Reasons whose `{value}` is the item's own amount (money still to RECEIVE or to cancel), not a
+# refund.
+_AMOUNT_VALUE_REASONS = frozenset(
+    {
+        "service_diff_collect_due",
+        "service_diff_unpaid",
+        "unseen_charge_to_void",
+        "sinal_requote_failed",
+    }
+)
 
 # Resolving with "refunded in the provider's panel" closes the money story of the deposit only
 # for these reasons (the consultation is not booked and the deposit went back in full).

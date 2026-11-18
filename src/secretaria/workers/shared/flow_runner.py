@@ -68,6 +68,7 @@ from secretaria.workers.shared.appointment_edit_apply import (
     _row_draft,
     apply_appointment_edit,
     compensate_appointment_edit,
+    record_unvoided_charge,
 )
 from secretaria.workers.shared.appointment_edit_notification import (
     enqueue_professional_edit_notification,
@@ -655,6 +656,9 @@ async def _apply_flow_result(
     # to the DB (never on a persist failure) and `tenant` is loaded (always
     # true here — the flow engine only runs once `tenant` is resolved).
     if result.appointment_edit is not None and not persisted:
+        # TASK-085 R (S7a): a Pix of the difference the rolled-back edit created and the provider
+        # refused to void becomes the clinic's item now that the transaction is gone.
+        await record_unvoided_charge(result.appointment_edit)
         if tenant is not None:
             await compensate_appointment_edit(tenant, edit_patient_id, result.appointment_edit)
         await _handle_calendar_unavailable(reply, redis=redis, tenant=tenant, waba_token=waba_token)

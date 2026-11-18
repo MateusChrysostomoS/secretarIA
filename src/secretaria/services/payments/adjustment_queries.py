@@ -184,6 +184,9 @@ class AdjustmentTotals:
     # while the patient chooses after its Pix expired) or "applied" (D-R5); None = none open, or
     # a legacy deferred one (`mode` NULL).
     pending_difference_mode: str | None = None
+    # TASK-085 R (S7a): the `pending_edit` of that open `mode` change (server-side only: the hub
+    # turns it into `pending_change_summary`); None with `pending_difference_mode` None.
+    pending_edit: dict | None = None
 
 
 async def load_adjustment_totals(
@@ -204,6 +207,7 @@ async def load_adjustment_totals(
             DepositAdjustment.provider_charge_id,
             DepositAdjustment.diff_cents,
             DepositAdjustment.mode,
+            DepositAdjustment.pending_edit,
         ).where(
             DepositAdjustment.tenant_id == tenant_id,
             DepositAdjustment.deposit_id.in_(ids),
@@ -220,7 +224,8 @@ async def load_adjustment_totals(
     delta: dict[UUID, int] = {}
     pending: dict[UUID, int] = {}
     modes: dict[UUID, str] = {}
-    for deposit_id, kind, status, charge_id, diff, mode in rows.all():
+    edits: dict[UUID, dict] = {}
+    for deposit_id, kind, status, charge_id, diff, mode, pending_edit in rows.all():
         if kind == KIND_INCREASE and status == STATUS_APPLIED and charge_id is not None:
             delta[deposit_id] = delta.get(deposit_id, 0) + int(diff)
         elif kind == KIND_DECREASE and status == STATUS_REFUND_REQUESTED:
@@ -229,14 +234,17 @@ async def load_adjustment_totals(
             pending[deposit_id] = pending.get(deposit_id, 0) + int(diff)
             if mode is not None:
                 modes[deposit_id] = mode
+                edits[deposit_id] = pending_edit
         elif status == STATUS_AWAITING_CHOICE and mode is not None:
             # The Pix was voided (nothing is pending payment) but the visit is still suspended.
             modes[deposit_id] = mode
+            edits[deposit_id] = pending_edit
     return {
         deposit_id: AdjustmentTotals(
             held_delta_cents=delta.get(deposit_id, 0),
             pending_difference_cents=pending.get(deposit_id),
             pending_difference_mode=modes.get(deposit_id),
+            pending_edit=edits.get(deposit_id) if deposit_id in modes else None,
         )
         for deposit_id in set(delta) | set(pending) | set(modes)
     }

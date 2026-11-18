@@ -210,6 +210,15 @@ class CalendarEventRead(BaseModel):
     # `appointment_suspended`; only "Liberar horário" works. None for an event with no local
     # Appointment (like the other appointment keys).
     suspended: bool | None = None
+    # TASK-085 R (S7a, contrato §3.9), additive: what the open change on this sinal would change,
+    # in plain Portuguese for the clinic - only the fields that change, in this order, separated
+    # by "; ": "Consulta → Retorno; Dra. Ana → Dr. Bruno; Unidade Centro → Unidade Leste;
+    # Particular → Unimed; 10:00 → 11:30" (the dates too, "26/11 10:00 → 27/11 11:30", when the
+    # day changes; clinic's timezone). Set while the visit is suspended (`suspended`, D-R4 - also
+    # while the patient chooses after its Pix expired) or the change already stands and waits for
+    # its Pix (`deposit.pending_difference_mode == "applied"`, D-R5); null otherwise. Display text
+    # only - never parse it.
+    pending_change_summary: str | None = None
 
 
 class AppointmentCreate(BaseModel):

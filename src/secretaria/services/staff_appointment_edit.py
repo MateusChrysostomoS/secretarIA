@@ -92,7 +92,6 @@ from secretaria.services.calendar import (
 )
 from secretaria.services.patient_context import as_utc
 from secretaria.services.payments import (
-    adjustment_queries,
     adjustment_suspension,
     deposit_lifecycle,
     service_change,
@@ -866,6 +865,7 @@ async def apply_staff_edit(
     old_sinal_cents = awaiting.amount_cents if awaiting is not None else None
     fields: list[str] = []
     told = now_changes
+    unseen: service_change.UnseenCharge | None = None
     try:
         locked = await session.scalar(
             select(Appointment)
@@ -915,6 +915,10 @@ async def apply_staff_edit(
                 now=now,
                 source=SOURCE_HUB,
             )
+            # Read now: the adjustment row disappears with a rollback (S7a).
+            unseen = await service_change.unseen_charge_of(
+                session, tenant=tenant, deposit=paid, result=money
+            )
             if money.kind == "blocked":
                 status_code, message = _BLOCKED.get(
                     money.reason or "", _BLOCKED["price_unavailable"]
@@ -933,8 +937,7 @@ async def apply_staff_edit(
                     appointment_id=str(appointment_id),
                     kind=money.kind,
                 )
-                await _void_unseen_pix(session, tenant, paid, now, appointment_id)
-                raise _sinal_changed()
+                raise _sinal_changed()  # the except below voids the unseen Pix
             if money.kind not in WAITING_KINDS:
                 fields = list(money.changed_fields)
                 if deferral is not None:
@@ -996,6 +999,7 @@ async def apply_staff_edit(
         await session.commit()
     except Exception:
         await session.rollback()
+        await _void_unseen_after_rollback(session, tenant_id, unseen)
         # Restore the winner's committed details, never the losing edit's stale view.
         committed = await session.scalar(
             select(Appointment)
@@ -1087,21 +1091,28 @@ def _decision_moved(
     return money.kind == "applied_awaiting_payment"
 
 
-async def _void_unseen_pix(
-    session: AsyncSession, tenant: Tenant, deposit: PixDeposit, now: datetime, appointment_id
+async def _void_unseen_after_rollback(
+    session: AsyncSession, tenant_id: UUID, unseen: service_change.UnseenCharge | None
 ) -> None:
-    """Void, at the provider, the difference Pix the engine just created in THIS transaction
-    (about to be rolled back, never sent to the patient): `settle_open_adjustments` voids every
-    open difference of the sinal - only this one can be open (the engine refuses a change while
-    another is). Best-effort: a failure is logged; a late payment of it is an orphan charge."""
+    """TASK-085 R (S7a): the edit rolled back after the engine created the Pix of its difference
+    (never sent: the hub tells the patient only after the commit). Void it at the provider
+    (`service_change.void_unseen_charge`, provider only); a refused void becomes ONE clinic item
+    (`unseen_charge_to_void`), committed on its own now that the edit's transaction is gone.
+    Never raises: the clinic's answer is the edit's own error."""
+    if unseen is None:
+        return
     try:
-        await adjustment_queries.settle_open_adjustments(
-            session, tenant=tenant, deposit=deposit, now=now, close_questions=False
+        outcome = await service_change.void_unseen_charge(
+            session, tenant_id=tenant_id, charge=unseen
         )
-    except Exception as exc:  # noqa: BLE001 - the edit is refused either way
-        logger.warning(
+        if outcome == "failed":
+            await service_change.open_unvoided_charge_item(session, unseen)
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001 - logged; the provider's own expiry still applies
+        await session.rollback()
+        logger.error(
             "hub_edit_unseen_pix_not_voided",
-            appointment_id=str(appointment_id),
+            tenant_id=str(tenant_id),
             error_type=type(exc).__name__,
         )
 

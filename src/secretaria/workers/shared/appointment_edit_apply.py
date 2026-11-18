@@ -44,7 +44,6 @@ from secretaria.models import (
     Tenant,
     is_live_status,
 )
-from secretaria.models.deposit_adjustment import DepositAdjustment
 from secretaria.services import reminder_hooks
 from secretaria.services.appointment_edit import appointment_email_version
 from secretaria.services.appointment_edit_write import (
@@ -76,8 +75,6 @@ logger = get_logger(__name__)
 
 # What the engine wrote on the row NOW (the caller owns the agenda of these, contrato §3.6).
 _WRITES_NOW = ("applied_now", "asked", "applied_awaiting_payment")
-# Results that created a Pix of the difference in this transaction (voided if it rolls back).
-_CHARGED = ("applied_awaiting_payment", "suspended", "awaiting_payment")
 # The LEGACY deferred mode (`awaiting_payment`, mode NULL: a "before" clinic without room for a
 # useful Pix) applies only service / time / unit when paid (S1 `apply_paid_adjustment`): a change
 # of doctor, convênio or who the visit is for would be charged and never written - refused.
@@ -232,21 +229,51 @@ async def _restore_router_agenda(session, tenant, appointment, edit: dict) -> No
     )
 
 
-async def _void_unseen_charge(session, tenant, deposit, result: ServiceChangeResult) -> None:
-    """The edit rolls back after the engine created a Pix the patient never saw: void it
-    (best-effort; a charge we could not void has no adjustment row and was never shown, so
-    nobody pays it)."""
-    if result.kind not in _CHARGED or result.adjustment_id is None:
-        return
+# TASK-085 R (S7a): the edit dict carries, past the rollback, a Pix of the difference the provider
+# refused to void (`service_change.UnseenCharge`); `flow_runner` hands it to
+# `record_unvoided_charge` once the transaction is gone.
+UNVOIDED_CHARGE_KEY = "_unvoided_charge"
+
+
+async def _void_unseen_charge(
+    session, tenant, deposit, result: ServiceChangeResult, edit: dict
+) -> None:
+    """The edit rolls back after the engine created a Pix the patient never saw: void it at the
+    provider (`service_change.void_unseen_charge`, no session write). A refused void is kept on
+    `edit` so the clinic gets ONE `unseen_charge_to_void` item after the rollback
+    (`record_unvoided_charge`) - the charge may still be payable. Never raises."""
     try:
-        adjustment = await session.get(DepositAdjustment, result.adjustment_id)
-        charge_id = adjustment.provider_charge_id if adjustment is not None else None
-        if charge_id:
-            await service_change._void_charge(
-                session, tenant, deposit, charge_id, {"tenant_id": str(tenant.id)}
-            )
+        charge = await service_change.unseen_charge_of(
+            session, tenant=tenant, deposit=deposit, result=result
+        )
+        if charge is None:
+            return
+        outcome = await service_change.void_unseen_charge(
+            session, tenant_id=tenant.id, charge=charge
+        )
     except Exception as exc:  # noqa: BLE001 - the rollback goes on regardless
         logger.warning("appointment_edit_charge_void_failed", error_type=type(exc).__name__)
+        return
+    if outcome == "failed":
+        edit[UNVOIDED_CHARGE_KEY] = charge
+
+
+async def record_unvoided_charge(edit: dict | None) -> None:
+    """AFTER the rollback of an edit (`flow_runner`): the clinic's item for the Pix of the
+    difference `_void_unseen_charge` could not void. Its own session; never raises."""
+    charge = (edit or {}).get(UNVOIDED_CHARGE_KEY)
+    if charge is None:
+        return
+    try:
+        async with async_session_factory() as session:
+            await service_change.open_unvoided_charge_item(session, charge)
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001 - logged; the provider's own expiry still applies
+        logger.error(
+            "appointment_edit_unvoided_charge_item_failed",
+            tenant_id=str(charge.tenant_id),
+            error_type=type(exc).__name__,
+        )
 
 
 def legacy_cannot_carry(appointment, edit: dict, changed: frozenset[str]) -> bool:
@@ -337,7 +364,7 @@ async def _apply_paid_change(
             try:
                 await _restore_router_agenda(session, current_tenant, appointment, edit)
             except Exception:
-                await _void_unseen_charge(session, current_tenant, deposit, result)
+                await _void_unseen_charge(session, current_tenant, deposit, result, edit)
                 raise
         return AppliedEdit(
             appointment_id=appointment.id,
@@ -353,12 +380,12 @@ async def _apply_paid_change(
                 session, tenant=current_tenant, appointment=appointment
             )
             if not allowed:
-                await _void_unseen_charge(session, current_tenant, deposit, result)
+                await _void_unseen_charge(session, current_tenant, deposit, result, edit)
                 return None
         if deferred:
             await _write_agenda_now(session, current_tenant, appointment, edit, window_before)
     except Exception:
-        await _void_unseen_charge(session, current_tenant, deposit, result)
+        await _void_unseen_charge(session, current_tenant, deposit, result, edit)
         raise
     return AppliedEdit(
         appointment_id=appointment.id,

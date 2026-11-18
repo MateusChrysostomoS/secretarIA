@@ -27,7 +27,7 @@ from secretaria.services.appointment_calendar_origin import (
     CalendarOriginUnresolved,
     calendar_professional_id,
 )
-from secretaria.services.appointment_edit import EditDraft
+from secretaria.services.appointment_edit import EditContext, EditDraft
 from secretaria.services.appointment_edit_flow import enter_edit_menu
 from secretaria.services.appointment_status import (
     SOURCE_BUTTON,
@@ -61,7 +61,6 @@ from secretaria.services.tenant_config import (
 )
 from secretaria.workers.shared.appointment_edit_support import (
     edit_guards,
-    make_edit_context,
     visit_suspended,
 )
 from secretaria.workers.shared.context import (
@@ -445,7 +444,7 @@ async def _handle_action_button(
                 enter_edit_menu(
                     tenant,
                     appt_view,
-                    make_edit_context(
+                    EditContext(
                         paid_deposit=paid,
                         reschedule_blocked=blocked,
                         suspended=await visit_suspended(session, tenant, appointment),

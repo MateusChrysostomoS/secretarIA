@@ -146,10 +146,6 @@ def _hours_until_start(appointment: Appointment, now: datetime) -> float | None:
         return None
     return (_as_utc(appointment.start_at) - now).total_seconds() / 3600
 
-# The sentence of the "before" card line that promises both times reserved (D-R4); dropped when
-# the change falls back to the legacy deferred mode (no room for a suspension, contrato §1).
-_RESERVED_SENTENCE = " Até lá,"
-
 
 async def _send_reschedule_limit_buttons(
     client: WhatsAppClient, to: str | None, appointment_id, count: int, limit: int
@@ -227,17 +223,15 @@ async def _paid_card_line(
         # The legacy deferred mode never writes doctor / convênio / who: Confirmar refuses it
         # (`LEGACY_NO_ROOM_TEXT`) - the card says so instead of a Pix of the difference.
         return apply.LEGACY_NO_ROOM_CARD_TEXT
-    line = service_change.confirm_card_line_text(
+    # No room for a suspension before the visits (contrato §1): the legacy deferred mode
+    # reserves nothing - the card must not promise it (`reserved=False`).
+    return service_change.confirm_card_line_text(
         decision.action,
         decision.diff_cents,
         unit_only=changed == frozenset({MONEY_FIELD_UNIT}),
         timing="before" if before else "after",
+        reserved=not no_room,
     )
-    if line and no_room:
-        # No room for a suspension before the visits (contrato §1): the legacy deferred mode
-        # reserves nothing - the card must not promise it.
-        line = line.split(_RESERVED_SENTENCE, 1)[0]
-    return line
 
 
 async def _requote_card_line(

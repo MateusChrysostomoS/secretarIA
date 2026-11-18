@@ -76,6 +76,10 @@ def test_every_reason_of_the_spec_is_known():
         "service_diff_collect_due",
         # TASK-085 R (D-R5): the Pix of a change already applied expired unpaid.
         "service_diff_unpaid",
+        # TASK-085 R (S7a): an undone edit's Pix the provider would not void; the new sinal Pix
+        # refused after the old one was voided (D-R6).
+        "unseen_charge_to_void",
+        "sinal_requote_failed",
     }
     assert all(len(reason) <= 32 for reason in ATTENTION_REASONS)  # VARCHAR(32)
 

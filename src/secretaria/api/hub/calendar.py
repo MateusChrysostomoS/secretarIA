@@ -125,7 +125,12 @@ from secretaria.services.calendar import (
 from secretaria.services.insurance_catalog import AppointmentPlan, load_appointment_plans
 from secretaria.services.local_calendar import LocalCalendarService, list_unpushed_events
 from secretaria.services.patient_context import as_utc
-from secretaria.services.payments import adjustment_queries, deposit_lifecycle, failure_reason
+from secretaria.services.payments import (
+    adjustment_queries,
+    deposit_lifecycle,
+    failure_reason,
+    service_change,
+)
 from secretaria.services.tenant_config import (
     TenantRuntimeConfig,
     list_active_professionals,
@@ -971,6 +976,18 @@ async def list_events(
         )
         units = {uid: (name, address) for uid, name, address in unit_rows.all()}
 
+    # TASK-085 R (S7a): what each open change on a sinal would change - names of THIS clinic
+    # only, at most two more tenant-scoped queries for the whole page.
+    summaries = await service_change.pending_change_summaries(
+        session,
+        tenant,
+        {
+            appointment_id: view.pending_edit
+            for appointment_id, view in deposits.items()
+            if _difference_mode(view) is not None and view.pending_edit
+        },
+    )
+
     reads: list[CalendarEventRead] = []
     for e in events:
         row = booked.get(e["id"])
@@ -1024,6 +1041,7 @@ async def list_events(
                 suspended=(_difference_mode(deposits.get(row.id)) == "suspend")
                 if row is not None
                 else None,
+                pending_change_summary=summaries.get(row.id) if row is not None else None,
             )
         )
     return reads

@@ -53,6 +53,14 @@ REASON_SERVICE_DIFF_COLLECT_DUE = "service_diff_collect_due"
 # service/unit/doctor/convênio at once and sent the Pix of the difference, which expired unpaid:
 # the clinic collects `amount_cents` itself. Money NOT received - never part of a refund.
 REASON_SERVICE_DIFF_UNPAID = "service_diff_unpaid"
+# TASK-085 R (S7a): an edit was undone after the engine created the Pix of its difference (never
+# sent to the patient) and that charge could not be voided at the provider: the clinic cancels it
+# in the provider's panel. `amount_cents` = the charge. Money NOT received.
+REASON_UNSEEN_CHARGE_TO_VOID = "unseen_charge_to_void"
+# TASK-085 R (S7a, D-R6): an edit changed the amount of an UNPAID sinal, the old Pix was voided and
+# the new one could not be created (the provider refused it, or the payer-data question could not
+# go out): the clinic collects the new sinal itself. `amount_cents` = the new sinal.
+REASON_SINAL_REQUOTE_FAILED = "sinal_requote_failed"
 
 ATTENTION_REASONS = frozenset(
     {
@@ -71,6 +79,8 @@ ATTENTION_REASONS = frozenset(
         REASON_SERVICE_DIFF_AGENDA_PENDING,
         REASON_SERVICE_DIFF_COLLECT_DUE,
         REASON_SERVICE_DIFF_UNPAID,
+        REASON_UNSEEN_CHARGE_TO_VOID,
+        REASON_SINAL_REQUOTE_FAILED,
     }
 )
 
