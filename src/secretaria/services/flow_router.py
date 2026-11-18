@@ -102,7 +102,6 @@ from secretaria.services.calendar import (
     build_patient_link_details,
 )
 from secretaria.services.insurance_catalog import match_plan
-from secretaria.services.insurance_payment_copy import insurance_payment_description
 from secretaria.services.local_calendar import create_event_exclusive, update_event_exclusive
 from secretaria.services.patient_context import as_utc
 from secretaria.services.payments import payer_data
@@ -3228,15 +3227,9 @@ INSURANCE_PINNED_ROWS: tuple[tuple[str, str, str | None], ...] = (
 
 
 def portal_insurance_rows(plans: list) -> list[tuple[str, str, str | None]]:
-    """Every clinic plan as a Portal row: the full name + how payment works for it."""
-    return [
-        (
-            f"ins|{plan['name']}",
-            str(plan["name"]),
-            insurance_payment_description(plan.get("mechanism")),
-        )
-        for plan in plans
-    ]
+    """Every clinic plan as a Portal row: the full name, no description (TASK-085 R D-R12: the
+    per-plan payment text was removed - owner: "TIRE ISSO")."""
+    return [(f"ins|{plan['name']}", str(plan["name"]), None) for plan in plans]
 
 
 def insurance_more_row(next_page: int | None) -> list[tuple[str, str]]:
@@ -3272,15 +3265,10 @@ def _enter_insurance(
     """
     plans = _tenant_insurance_plans(tenant)
     shown, next_page = insurance_page(plans, page)
-    # The row description says how payment works for the plan (the catalog mechanism): public,
-    # fixed copy - never the clinic's own note, never anything that decides the deposit.
+    # Title only (TASK-085 R D-R12): the per-plan payment text under each convênio was removed
+    # (owner: "TIRE ISSO"); the clinic's own note is still never shown before the choice.
     rows: list[tuple] = [
-        (
-            f"ins|{plan['name']}",
-            truncate_list_row_title(str(plan["name"])),
-            insurance_payment_description(plan.get("mechanism")),
-        )
-        for plan in shown
+        (f"ins|{plan['name']}", truncate_list_row_title(str(plan["name"]))) for plan in shown
     ]
     rows.extend(insurance_more_row(next_page))
     rows.append(("ins|particular", LABEL_INSURANCE_PARTICULAR))

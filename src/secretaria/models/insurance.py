@@ -34,7 +34,9 @@ Three tables, three levels:
   the clinic's own `charge_deposit` flag per plan (decision 2026-09-25: the
   same operator can be direct billing in one clinic and reimbursement in
   another, so the Pix-deposit behaviour is per clinic AND per plan, never
-  global and never inferred from the operator's name). TASK-008: `catalog_id`
+  global and never inferred from the operator's name). TASK-085 R D-R12
+  (2026-11-18) RETIRED that flag: a convênio never exempts the sinal; the column
+  stays, unread and no longer written. TASK-008: `catalog_id`
   is now nullable - a row with `custom_name`/`custom_payment_note` instead is
   the clinic's own "Outro" convênio, exactly one of the two must be set.
 - `professional_insurance_plans` - what ONE doctor accepts. TASK-008 gives it
@@ -159,8 +161,8 @@ class InsuranceCatalog(Base):
 class TenantInsurancePlan(Base):
     """A convênio this clinic accepts: a catalog entry, or the clinic's own "Outro".
 
-    `charge_deposit` works identically for both shapes (TASK-008 §3.3): it is a
-    property of THIS CLINIC'S line, not of the catalog operator.
+    `charge_deposit` is a retired legacy column (TASK-085 R D-R12): nothing reads
+    it and nothing writes it any more - a convênio never exempts the sinal.
     """
 
     __tablename__ = "tenant_insurance_plans"
@@ -182,13 +184,12 @@ class TenantInsurancePlan(Base):
     # (catalog_id, custom_name) is set - see the CHECK constraint above.
     custom_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     # How the clinic says payment works for this custom convênio. Shown to the
-    # patient at booking confirmation, and again with the Pix-deposit ask when
-    # charge_deposit is true (services/payments/deposit_lifecycle.py).
+    # patient at booking confirmation, and again with the Pix-deposit ask
+    # (services/payments/deposit_lifecycle.py).
     custom_payment_note: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # False = a booking under this plan never gets a Pix deposit, whatever the
-    # tenant's pix_deposit_* policy says (services/payments/deposit_lifecycle.py,
-    # DEPOSIT_SKIP_INSURANCE_NO_CHARGE). Default True = today's behaviour: the
-    # convênio changes nothing until the clinic unticks it for this plan.
+    # RETIRED (TASK-085 R D-R12, 2026-11-18): it used to waive the Pix deposit for
+    # this plan. A convênio never exempts the sinal any more; the column is kept
+    # (no migration), never read and never written - new rows get the default.
     charge_deposit: Mapped[bool] = mapped_column(Boolean, server_default=text("true"), default=True)
     # The clinic's chosen position in the patient's convênio list (0 = first). NULL =
     # never placed: such plans follow every placed one, alphabetically. Set only by
@@ -236,11 +237,9 @@ class ProfessionalInsurancePlan(Base):
     # mode independent: this doctor's OWN "Outro" convênio.
     custom_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     custom_payment_note: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Meaningful only for the two `independent`-mode shapes (catalog_id /
-    # custom_name): there is no clinic-level charge_deposit to inherit for a
-    # plan the clinic itself never enabled. Ignored for tenant_plan_id rows,
-    # which read the CLINIC's own charge_deposit instead (single source of
-    # truth for modes shared/clinic_with_exceptions).
+    # RETIRED (TASK-085 R D-R12, 2026-11-18): it used to waive the Pix deposit in
+    # `independent` mode. A convênio never exempts the sinal any more; the column
+    # is kept (no migration), never read and never written.
     charge_deposit: Mapped[bool] = mapped_column(Boolean, server_default=text("true"), default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

@@ -6,6 +6,8 @@ silently ignored would leave a clinic charging deposits it meant to switch
 off. Full contract: docs/CHECKPOINT_convenio_catalogo.md.
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from secretaria.models.insurance import INSURANCE_MECHANISMS, INSURANCE_MODES
@@ -36,7 +38,10 @@ class TenantInsurancePlanRead(BaseModel):
     name: str
     is_custom: bool
     custom_payment_note: str | None = None
-    charge_deposit: bool
+    # TASK-085 D-R12 compat - remove after secretarIA-frontend /configuracao drops the switch.
+    # Always true - the truth since D-R12 (a convênio never exempts the sinal) - whatever the
+    # legacy column holds, so an older screen shows its "Cobrar sinal" switch ON.
+    charge_deposit: Literal[True] = True
     # Position the clinic chose in the patient's list (0 = first); None = not placed,
     # follows the placed ones alphabetically. The list itself comes back in this order.
     sort_order: int | None = None
@@ -46,8 +51,9 @@ class TenantInsurancePlanIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     catalog_id: str
-    # Default = today's behaviour: the tenant's pix_deposit_* policy applies.
-    charge_deposit: bool = True
+    # TASK-085 R D-R12: accepted and IGNORED - an older Portal still sends it; a convênio never
+    # exempts the sinal any more. Never stored, never returned.
+    charge_deposit: bool | None = None
 
 
 class TenantInsurancePlansUpdate(BaseModel):
@@ -69,7 +75,9 @@ class TenantInsurancePlanCustomCreate(BaseModel):
 
     custom_name: str = Field(min_length=1, max_length=120)
     custom_payment_note: str = Field(min_length=1, max_length=2000)
-    charge_deposit: bool = True
+    # TASK-085 R D-R12: accepted and IGNORED - an older Portal still sends it; a convênio never
+    # exempts the sinal any more. Never stored, never returned.
+    charge_deposit: bool | None = None
 
 
 class TenantInsurancePlanOrderUpdate(BaseModel):
@@ -85,7 +93,10 @@ class TenantInsurancePlanOrderUpdate(BaseModel):
 
 
 class TenantInsurancePlanDepositUpdate(BaseModel):
-    """PATCH /tenants/me/insurance-plans/{plan_id} - toggle the Pix-deposit flag."""
+    """PATCH /tenants/me/insurance-plans/{plan_id} - the old toggle's body, IGNORED.
+
+    TASK-085 D-R12 compat - remove after secretarIA-frontend /configuracao drops the switch.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -146,7 +157,9 @@ class ProfessionalInsuranceCustomCreate(BaseModel):
 
     custom_name: str = Field(min_length=1, max_length=120)
     custom_payment_note: str = Field(min_length=1, max_length=2000)
-    charge_deposit: bool = True
+    # TASK-085 R D-R12: accepted and IGNORED - an older Portal still sends it; a convênio never
+    # exempts the sinal any more. Never stored, never returned.
+    charge_deposit: bool | None = None
 
 
 # ---------------------------------------------------------------------------

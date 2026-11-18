@@ -3,9 +3,9 @@
 `quote_deposit` is the decision the flow makes BEFORE it reserves a slot. It answers one of
 three things and never touches the provider:
 
-* `no_deposit`  - the feature is off for this booking (timing `after`, deposits switched off, plan
-                  or service that carries no deposit). The booking commits exactly as it always
-                  did.
+* `no_deposit`  - the feature is off for this booking (timing `after`, deposits switched off, a
+                  service that carries no deposit; never the convênio - D-R12). The booking
+                  commits exactly as it always did.
 * `required`    - a deposit is due; carries the amount, the provider and the hold TTL.
 * `blocked`     - a deposit IS due but the system cannot ask for it (no patient, no usable
                   credential, provider unknown). The booking is NOT made: "never confirm without
@@ -19,7 +19,7 @@ Those are the first six of the nine silent `None` paths of `maybe_create_deposit
 when the charge is actually created and are decided in `booking_charge.py`.
 
 The function is a pure decision over rows: no I/O against a PSP, no
-message, no state change. It reuses `deposit_lifecycle`'s own price and convenio resolution so
+message, no state change. It reuses `deposit_lifecycle`'s own price resolution so
 the amount the gate quotes is byte for byte the one `maybe_create_deposit` computes for `after`.
 """
 
@@ -36,7 +36,6 @@ from secretaria.core.logging import get_logger
 from secretaria.models import Tenant
 from secretaria.models.clinic_payment_account import PROVIDER_ASAAS
 from secretaria.models.pix_deposit import DEPOSIT_TIMING_BEFORE
-from secretaria.services.insurance_catalog import resolve_booking_plan_ids
 from secretaria.services.payments import accounts, deposit_lifecycle, registry
 from secretaria.services.payments.money import ASAAS_MIN_PIX_CENTS, parse_brl_to_cents
 
@@ -51,7 +50,6 @@ HOLD_TTL_DEFAULT_MINUTES = 30
 # Reasons. `no_deposit` reasons keep the vocabulary of `deposit_lifecycle.DEPOSIT_SKIP_*`.
 REASON_TIMING_AFTER = "timing_after"
 REASON_DISABLED = "disabled"
-REASON_INSURANCE_NO_CHARGE = "insurance_no_charge"
 REASON_NO_SERVICE = "no_service"
 REASON_UNPARSEABLE_PRICE = "unparseable_price"
 REASON_ZERO_AMOUNT = "zero_amount"
@@ -154,18 +152,13 @@ async def quote_deposit(
 
     # A stand-in for the appointment that does not exist yet: the lifecycle helpers below read
     # only these attributes, so the gate and the `after` hook can never disagree.
-    plan_id, professional_plan_id = await resolve_booking_plan_ids(
-        session, tenant.id, insurance, professional_id
-    )
+    # `insurance` no longer moves the sinal (TASK-085 R D-R12: a convênio never exempts it); the
+    # parameter stays so the callers keep one signature.
     booking = SimpleNamespace(
         appointment_type=appointment_type,
         professional_id=professional_id,
-        insurance_plan_id=plan_id,
-        insurance_professional_plan_id=professional_plan_id,
         unit_id=unit_id,
     )
-    if not await deposit_lifecycle._insurance_charges_deposit(session, tenant, booking):
-        return DepositQuote("no_deposit", REASON_INSURANCE_NO_CHARGE)
 
     service_name, price_text = await deposit_lifecycle._resolve_service_and_price(
         session, tenant, booking

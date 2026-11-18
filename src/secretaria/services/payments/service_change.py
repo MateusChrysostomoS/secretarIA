@@ -103,7 +103,6 @@ from secretaria.services.appointment_calendar_origin import (
 from secretaria.services.appointment_edit_write import write_appointment_edit
 from secretaria.services.appointment_status import SOURCE_HUB, SOURCE_SYSTEM
 from secretaria.services.calendar import CalendarSlotTakenError, build_event_description
-from secretaria.services.insurance_catalog import resolve_booking_plan_ids
 from secretaria.services.local_calendar import (
     create_event_exclusive,
     update_event_details_exclusive,
@@ -118,7 +117,6 @@ from secretaria.services.payments import (
 )
 from secretaria.services.payments.deposit_gate import timing_is_before
 from secretaria.services.payments.deposit_lifecycle import (
-    _insurance_charges_deposit,
     _resolve_service_and_price,
     _tenant_tz,
     register_reschedule,
@@ -1024,32 +1022,6 @@ def _same_text(a: str | None, b: str | None) -> bool:
     return (a or "").strip().casefold() == (b or "").strip().casefold()
 
 
-async def _new_charges_deposit(
-    session: AsyncSession,
-    tenant: Tenant,
-    appointment: Appointment,
-    professional_id: UUID | None,
-    insurance: Any,
-) -> bool:
-    """Whether the consultation AFTER the change charges a sinal at all (TASK-085 R D-R3): False
-    only when its convênio is a plan flagged "no deposit" (`_insurance_charges_deposit`). Same
-    convênio with the same doctor reads the row's OWN plan ids (never re-matched); anything else
-    resolves the plans like a booking does (`resolve_booking_plan_ids`)."""
-    same_insurance = insurance is INSURANCE_OF_APPOINTMENT or _same_text(
-        insurance, appointment.insurance
-    )
-    if same_insurance and professional_id == appointment.professional_id:
-        return await _insurance_charges_deposit(session, tenant, appointment)
-    text = appointment.insurance if insurance is INSURANCE_OF_APPOINTMENT else insurance
-    plan_id, professional_plan_id = await resolve_booking_plan_ids(
-        session, tenant.id, text, professional_id
-    )
-    probe = SimpleNamespace(
-        insurance_plan_id=plan_id, insurance_professional_plan_id=professional_plan_id
-    )
-    return await _insurance_charges_deposit(session, tenant, probe)
-
-
 async def _doctor_name(session: AsyncSession, tenant: Tenant, professional_id) -> str | None:
     if professional_id is None:
         return None
@@ -1161,7 +1133,8 @@ async def preview_service_change(
     `professional_id`: the doctor the change lands on (his own price). `unit_id` (TASK-085): the
     unit - its own price when it has one; left out, the appointment's unit; None, no unit (the
     base). `insurance` (TASK-085 R): the convênio text (None = particular); left out, the
-    appointment's. A convênio whose plan charges no sinal makes the new sinal 0."""
+    appointment's. Accepted for the callers' one signature; it never moves the sinal (D-R12: a
+    convênio never exempts it)."""
     unit_id = (
         getattr(appointment, "unit_id", None)
         if unit_id is UNIT_OF_APPOINTMENT
@@ -1169,7 +1142,6 @@ async def preview_service_change(
     )
     professional_id = _uuid_or_none(professional_id)
     price = await _price_cents(session, tenant, appointment, new_service, professional_id, unit_id)
-    charges = await _new_charges_deposit(session, tenant, appointment, professional_id, insurance)
     held = await held_deposit_cents(session, deposit)
     days_until = (
         (as_utc(start_at) - as_utc(now)).total_seconds() / 86400 if start_at is not None else 0.0
@@ -1181,7 +1153,6 @@ async def preview_service_change(
         new_price_cents=price,
         days_until=days_until,
         min_days=DEFAULT_MIN_DAYS if min_days is None else min_days,
-        new_charges_deposit=charges,
     )
 
 
@@ -1266,9 +1237,9 @@ async def request_service_change(
     is the status-log source of that write (`SOURCE_FLOW` / `SOURCE_HUB`).
 
     Priced at the doctor (`professional_id`), unit (`unit_id`: the KEY present = that value, even
-    None) and convênio (`insurance`: the KEY present = that value; a plan without sinal = new
-    sinal 0) of the change (TASK-085 / R D-R1/D-R3). TASK-085 R, a dearer change by >= R$ 10
-    (contrato.md §1):
+    None) and convênio (`insurance`: the KEY present = that value; it names the change but never
+    moves the sinal - D-R12) of the change (TASK-085 / R D-R1/D-R3). TASK-085 R, a dearer
+    change by >= R$ 10 (contrato.md §1):
 
     * clinic "after" (D-R5) -> the edit is written NOW and a Pix of only the difference follows
       (`applied_awaiting_payment`, mode `applied`);
