@@ -911,9 +911,14 @@ async def test_finishing_a_rebook_closes_the_change_and_its_item(db, provider, c
 
 async def test_a_rebook_is_decided_once(db, provider, cal):
     world = await _change(db, status=STATUS_AWAITING_CHOICE)
+    async with db() as session:  # fix round 1 (I1): the callers' first step
+        assert await old_slot.ensure_old_event_gone(
+            session, tenant_id=world.tenant_id, adjustment_id=world.adjustment_id
+        ) is True
     assert await _finish(db, world) is True
     assert await _finish(db, world, source="hub") is False
     assert (await _row(db, world)).google_event_id == "difmovenew"
+    assert cal.events["evt-1"]["status"] == "cancelled"  # the old event is gone for good
 
 
 async def test_a_rebook_of_another_clinic_is_refused(db, provider, cal):
@@ -1203,3 +1208,381 @@ async def test_shared_agenda_a_suspended_visit_at_the_other_clinic_does_not(db, 
 
     assert await _free(db, world) is True
     assert await _restore(db, world) == "restored"
+
+
+# --------------------------------------------------------------------------
+# Fix round 1 (reviews/UA1-review.md) - the reviewer's probes as real tests
+# --------------------------------------------------------------------------
+
+
+async def _ensure(db, world, tenant_id=None):
+    async with db() as session:
+        return await old_slot.ensure_old_event_gone(
+            session, tenant_id=tenant_id or world.tenant_id, adjustment_id=world.adjustment_id
+        )
+
+
+async def test_i1_a_rebook_is_refused_while_the_old_event_may_still_be_there(db, provider, cal):
+    """I1: `finish_rebook` only from `old_slot='released'` - a rebook with the old event still on
+    the agenda (NULL: the vacate never ran) would leave it there forever."""
+    world = await _change(db, status=STATUS_AWAITING_CHOICE)
+
+    assert await _finish(db, world) is False
+
+    assert cal.events["evt-1"]["status"] == "confirmed"
+    adjustment = await _adj(db, world)
+    assert (adjustment.status, adjustment.old_slot) == (STATUS_AWAITING_CHOICE, None)
+    assert (await _row(db, world)).google_event_id == "evt-1"
+
+
+async def test_i1_ensure_old_event_gone_claims_and_deletes_a_never_vacated_event(
+    db, provider, cal
+):
+    world = await _change(db, status=STATUS_AWAITING_CHOICE)
+
+    assert await _ensure(db, world) is True
+
+    assert cal.events["evt-1"]["status"] == "cancelled"
+    assert (await _adj(db, world)).old_slot == OLD_SLOT_RELEASED
+    assert await _finish(db, world) is True
+    async with db() as session:
+        assert await old_slot.retry_vacates(session, now=NOW + timedelta(days=2)) == 0
+    assert cal.cancelled == ["evt-1"]
+
+
+async def test_i1_a_lost_slot_still_releasing_is_finished_before_the_hub_rebooks(
+    db, provider, cal
+):
+    world = await _change(db, status=STATUS_AWAITING_CHOICE, old_slot_state=OLD_SLOT_RELEASING)
+    assert await _lose(db, world) is True
+    assert await _finish(db, world, source="hub") is False  # still releasing: refused
+
+    assert await _ensure(db, world) is True
+    assert await _finish(db, world, source="hub") is True
+
+    assert cal.events["evt-1"]["status"] == "cancelled"
+    adjustment = await _adj(db, world)
+    assert (adjustment.status, adjustment.old_slot) == (STATUS_REBOOKED, OLD_SLOT_REBOOKED)
+
+
+async def test_i1_ensure_with_the_agenda_down_is_false_and_changes_nothing_else(
+    db, provider, cal
+):
+    world = await _change(db, status=STATUS_OLD_SLOT_LOST, old_slot_state=OLD_SLOT_RELEASING)
+    cal.fail_cancel = True
+
+    assert await _ensure(db, world) is False
+
+    adjustment = await _adj(db, world)
+    assert (adjustment.status, adjustment.old_slot) == (STATUS_OLD_SLOT_LOST, OLD_SLOT_RELEASING)
+    assert await _finish(db, world, source="hub") is False
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"status": STATUS_KEPT_OLD, "old_slot_state": OLD_SLOT_RESTORED},
+        {"status": STATUS_APPLIED, "old_slot_state": OLD_SLOT_REPLACED},
+        {"status": STATUS_REBOOKED, "old_slot_state": OLD_SLOT_REBOOKED},
+        {"mode": "legacy", "status": STATUS_AWAITING_CHOICE},
+    ],
+)
+async def test_i1_ensure_never_touches_a_change_that_is_over(db, provider, cal, kw):
+    world = await _change(db, **kw)
+    assert await _ensure(db, world) is False
+    assert cal.cancelled == []
+
+
+async def test_i1_ensure_of_another_clinic_is_false(db, provider, cal):
+    world = await _change(db, status=STATUS_AWAITING_CHOICE)
+    assert await _ensure(db, world, tenant_id=uuid4()) is False
+    assert cal.cancelled == [] and (await _adj(db, world)).old_slot is None
+
+
+async def test_i1_ensure_on_a_released_change_is_true_without_agenda_calls(db, provider, cal):
+    world = await _change(db, status=STATUS_AWAITING_CHOICE, old_slot_state=OLD_SLOT_RELEASED)
+    cal.fail_cancel = True
+    assert await _ensure(db, world) is True
+
+
+async def test_m2_finish_rebook_locks_the_consultation_before_the_change(db, provider, cal):
+    """M2: lock order consultation -> adjustment, whatever the caller flushed before."""
+    from sqlalchemy import event
+
+    world = await _change(db, status=STATUS_AWAITING_CHOICE, old_slot_state=OLD_SLOT_RELEASED)
+    engine = db.kw["bind"].sync_engine
+    statements: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement.lstrip().split("\n")[0].upper())
+
+    async with db() as session:
+        row = await session.get(Appointment, world.appointment_id)
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            assert await old_slot.finish_rebook(
+                session, tenant_id=world.tenant_id, adjustment_id=world.adjustment_id,
+                appointment=row, event_id="difmovenew", event_link=None,
+                now=NOW + timedelta(days=1), source="patient",
+            ) is True
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+        await session.commit()
+    first = next(s for s in statements if "APPOINTMENTS" in s or "DEPOSIT_ADJUSTMENTS" in s)
+    assert first.startswith("SELECT") and "APPOINTMENTS" in first
+
+
+async def _place(db, world, *, row_status=None):
+    async with db() as session:
+        tenant = await session.get(Tenant, world.tenant_id)
+        row = await session.get(Appointment, world.appointment_id)
+        adjustment = await session.get(DepositAdjustment, world.adjustment_id)
+        row.appointment_type = "Avaliação"
+        row.start_at, row.end_at = world.new_start, world.new_start + timedelta(minutes=60)
+        if row_status is not None:
+            row.status = row_status
+        await session.execute(
+            update(DepositAdjustment)
+            .where(DepositAdjustment.id == world.adjustment_id)
+            .values(status=STATUS_APPLIED)
+        )
+        await session.commit()
+        await session.refresh(adjustment)
+        await old_slot.place_new_event_after_payment(
+            session, tenant=tenant, appointment=row, adjustment=adjustment, patient_name="M"
+        )
+
+
+async def _cancel_row(db, world):
+    async with db() as other:
+        await other.execute(
+            update(Appointment)
+            .where(Appointment.id == world.appointment_id)
+            .values(status=AppointmentStatus.CANCELLED)
+        )
+        await other.commit()
+
+
+async def test_i2_a_consultation_cancelled_while_the_event_is_created_keeps_no_event(
+    db, provider, cal
+):
+    world = await _change(db, old_slot_state=OLD_SLOT_RELEASED)
+    cal.events.pop("evt-1")
+
+    async def cancel_meanwhile():
+        await _cancel_row(db, world)
+
+    cal.on_create = cancel_meanwhile
+
+    await _place(db, world)  # nothing to place: no error for the caller
+
+    own = old_slot.paid_event_id(world.adjustment_id, calendar=cal)
+    row = await _row(db, world)
+    assert row.status == AppointmentStatus.CANCELLED and row.google_event_id != own
+    assert cal.events[own]["status"] == "cancelled"
+    assert [e for e in cal.events.values() if e["status"] == "confirmed"] == []
+
+
+async def test_i2_a_consultation_already_cancelled_gets_no_event_at_all(db, provider, cal):
+    world = await _change(db, old_slot_state=OLD_SLOT_RELEASED)
+    cal.events.pop("evt-1")
+
+    await _place(db, world, row_status=AppointmentStatus.CANCELLED)
+
+    assert cal.created == []
+
+
+async def test_i2_a_lost_claim_after_the_create_discards_the_event_and_raises(db, provider, cal):
+    world = await _change(db, old_slot_state=OLD_SLOT_RELEASED)
+    cal.events.pop("evt-1")
+
+    async def moved_meanwhile():
+        async with db() as other:
+            await other.execute(
+                update(DepositAdjustment)
+                .where(DepositAdjustment.id == world.adjustment_id)
+                .values(old_slot=OLD_SLOT_RESTORED)
+            )
+            await other.commit()
+
+    cal.on_create = moved_meanwhile
+
+    with pytest.raises(RuntimeError):
+        await _place(db, world)
+
+    own = old_slot.paid_event_id(world.adjustment_id, calendar=cal)
+    assert cal.events[own]["status"] == "cancelled"
+    assert (await _row(db, world)).google_event_id == "evt-1"
+
+
+async def test_i2_a_twin_hook_that_placed_the_same_event_keeps_it(db, provider, cal):
+    world = await _change(db, old_slot_state=OLD_SLOT_RELEASED)
+    cal.events.pop("evt-1")
+    own = old_slot.paid_event_id(world.adjustment_id, calendar=cal)
+
+    async def twin_placed():
+        async with db() as other:
+            await other.execute(
+                update(DepositAdjustment)
+                .where(DepositAdjustment.id == world.adjustment_id)
+                .values(old_slot=OLD_SLOT_REPLACED)
+            )
+            await other.execute(
+                update(Appointment)
+                .where(Appointment.id == world.appointment_id)
+                .values(google_event_id=own)
+            )
+            await other.commit()
+
+    cal.on_create = twin_placed
+
+    await _place(db, world)
+
+    assert cal.events[own]["status"] == "confirmed"
+    assert (await _row(db, world)).google_event_id == own
+
+
+async def test_i2_a_failing_commit_discards_the_created_event(db, provider, cal, monkeypatch):
+    world = await _change(db, old_slot_state=OLD_SLOT_RELEASED)
+    cal.events.pop("evt-1")
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    real_commit = AsyncSession.commit
+    armed = {"on": False}
+
+    async def commit(self):
+        if armed["on"]:
+            armed["on"] = False
+            raise ConnectionError("db blip")
+        return await real_commit(self)
+
+    async def arm():
+        armed["on"] = True
+
+    cal.on_create = arm
+    monkeypatch.setattr(AsyncSession, "commit", commit)
+
+    with pytest.raises(ConnectionError):
+        await _place(db, world)
+
+    own = old_slot.paid_event_id(world.adjustment_id, calendar=cal)
+    assert cal.events[own]["status"] == "cancelled"
+    assert (await _adj(db, world)).old_slot == OLD_SLOT_RELEASED
+
+
+async def test_i3_the_old_event_is_deleted_on_its_own_agenda_even_if_paid_meanwhile(
+    db, provider, monkeypatch
+):
+    """I3: the payment (a change of DOCTOR) commits between the vacate's reads. The old event is
+    deleted on the OLD doctor's agenda (read under the lock), never looked up on the new one."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    world = await _change(db)
+    clinic, doctor_cal = _Calendar(), _Calendar()
+    clinic.add("evt-1")
+    async with db() as session:
+        doctor = Professional(id=uuid4(), tenant_id=world.tenant_id, name="Dr. B", is_active=True)
+        session.add(doctor)
+        await session.commit()
+        doctor_id = doctor.id
+
+    async def resolve(session, tenant, owner):
+        return doctor_cal if owner.professional_id == doctor_id else clinic
+
+    monkeypatch.setattr(service_change, "calendar_for_appointment", resolve)
+    original_get = AsyncSession.get
+    fired = {"done": False}
+
+    async def get(self, entity, ident, **kw):
+        if entity is Tenant and not fired["done"]:
+            current = await original_get(self, DepositAdjustment, world.adjustment_id)
+            if current is not None and current.old_slot == OLD_SLOT_RELEASING:
+                fired["done"] = True
+                async with db() as pay:
+                    await pay.execute(
+                        update(DepositAdjustment)
+                        .where(DepositAdjustment.id == world.adjustment_id)
+                        .values(status=STATUS_APPLIED)
+                    )
+                    await pay.execute(
+                        update(Appointment)
+                        .where(Appointment.id == world.appointment_id)
+                        .values(professional_id=doctor_id)
+                    )
+                    await pay.commit()
+        return await original_get(self, entity, ident, **kw)
+
+    monkeypatch.setattr(AsyncSession, "get", get)
+    await old_slot.vacate_old_slot(world.tenant_id, world.adjustment_id)
+    monkeypatch.setattr(AsyncSession, "get", original_get)
+    assert fired["done"]
+    async with db() as session:
+        tenant = await session.get(Tenant, world.tenant_id)
+        row = await session.get(Appointment, world.appointment_id)
+        adjustment = await session.get(DepositAdjustment, world.adjustment_id)
+        await old_slot.place_new_event_after_payment(
+            session, tenant=tenant, appointment=row, adjustment=adjustment, patient_name="M"
+        )
+
+    assert clinic.events["evt-1"]["status"] == "cancelled"
+    assert "evt-1" not in doctor_cal.cancelled
+    own = old_slot.paid_event_id(world.adjustment_id, calendar=doctor_cal)
+    assert [c["id"] for c in doctor_cal.created] == [own]
+    assert (await _adj(db, world)).old_slot == OLD_SLOT_REPLACED
+
+
+async def test_i3_the_release_is_not_recorded_once_the_change_left_the_suspension(
+    db, provider, cal
+):
+    """The final `releasing -> released` is guarded by the status too: a change paid meanwhile
+    keeps `releasing`, so the paid path still owns (and deletes) the old event."""
+    world = await _change(db)
+
+    async def paid_meanwhile():
+        async with db() as other:
+            await other.execute(
+                update(DepositAdjustment)
+                .where(DepositAdjustment.id == world.adjustment_id)
+                .values(status=STATUS_APPLIED)
+            )
+            await other.commit()
+
+    original = cal.cancel_event
+
+    async def cancel_then_pay(event_id):
+        result = await original(event_id)
+        await paid_meanwhile()
+        return result
+
+    cal.cancel_event = cancel_then_pay
+
+    assert await old_slot.vacate_old_slot(world.tenant_id, world.adjustment_id) == (
+        "not_applicable"
+    )
+    assert (await _adj(db, world)).old_slot == OLD_SLOT_RELEASING
+
+
+async def test_m1_a_transient_error_after_the_restore_event_is_created_is_recovered(
+    db, provider, cal, monkeypatch
+):
+    """M1: a DB blip in the transition keeps the created event; the next attempt adopts the
+    same deterministic id (never a dead one) and the old consultation comes back."""
+    world = await _change(db, status=STATUS_RESTORING, old_slot_state=OLD_SLOT_RELEASED)
+    cal.events.pop("evt-1")
+    real = booking_hold.release_difference_hold_in
+    calls = {"n": 0}
+
+    async def flaky(session, adjustment_id):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("db blip")
+        return await real(session, adjustment_id)
+
+    monkeypatch.setattr(booking_hold, "release_difference_hold_in", flaky)
+    outcomes = [await _restore(db, world, trigger="no_room") for _ in range(2)]
+
+    assert outcomes == ["calendar_unavailable", "restored"]
+    own = old_slot.restore_event_id(world.adjustment_id, calendar=cal)
+    assert cal.events[own]["status"] == "confirmed" and own not in cal.cancelled
+    assert (await _row(db, world)).google_event_id == own
+    assert len(cal.created) == 1

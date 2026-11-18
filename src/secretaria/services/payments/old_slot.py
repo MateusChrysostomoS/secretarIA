@@ -284,15 +284,21 @@ async def _locked(
 
 
 async def _claim(
-    session: AsyncSession, tenant_id: UUID, adjustment_id: UUID, *, now: datetime
+    session: AsyncSession,
+    tenant_id: UUID,
+    adjustment_id: UUID,
+    *,
+    now: datetime,
+    statuses: tuple[str, ...] = VACATE_STATUSES,
 ) -> bool:
-    """tx1: `old_slot` NULL -> `releasing` for an open suspended change of a live consultation.
-    Commits (from here the old event belongs to this mechanism); rolls back when not won."""
+    """tx1: `old_slot` NULL -> `releasing` for an open suspended change (status in `statuses`)
+    of a live consultation. Commits (from here the old event belongs to this mechanism); rolls
+    back when not won."""
     appointment, adjustment = await _locked(session, tenant_id, adjustment_id)
     if (
         adjustment is None
         or adjustment.mode != MODE_SUSPEND
-        or adjustment.status not in VACATE_STATUSES
+        or adjustment.status not in statuses
         or adjustment.old_slot is not None
         or appointment is None
         or not is_live_status(appointment.status)
@@ -305,7 +311,7 @@ async def _claim(
             DepositAdjustment.id == adjustment_id,
             DepositAdjustment.tenant_id == tenant_id,
             DepositAdjustment.mode == MODE_SUSPEND,
-            DepositAdjustment.status.in_(VACATE_STATUSES),
+            DepositAdjustment.status.in_(statuses),
             DepositAdjustment.old_slot.is_(None),
         )
         .values(old_slot=OLD_SLOT_RELEASING, old_slot_at=now)
@@ -320,39 +326,54 @@ async def _claim(
     return True
 
 
+def _old_event_of(appointment: Appointment) -> tuple[str, SimpleNamespace, UUID | None]:
+    """The OLD event of a still-suspended consultation: its id, the owner of its agenda and its
+    unit. Read under the consultation -> change lock while the change is suspended, the row is
+    exactly what it was when the change was asked (nothing writes it until the change is paid,
+    and the payment moves the change out of the suspension in the same transaction)."""
+    owner = SimpleNamespace(
+        professional_id=appointment.professional_id,
+        google_calendar_source=appointment.google_calendar_source,
+    )
+    return (appointment.google_event_id or "").strip(), owner, appointment.unit_id
+
+
 async def _release_claimed(
     session: AsyncSession, adjustment_id: UUID, *, now: datetime
 ) -> Literal["released", "releasing", "not_applicable"]:
-    """Delete the old event of a `releasing` change (no transaction open meanwhile), then the
-    guarded `releasing -> released`. Commits. "releasing" = try again later."""
-    adjustment = await session.scalar(
-        select(DepositAdjustment)
-        .where(DepositAdjustment.id == adjustment_id)
-        .execution_options(populate_existing=True)
+    """Delete the old event of a `releasing` change, then the guarded `releasing -> released`.
+    Commits. "releasing" = try again later; "not_applicable" = the change left the suspension
+    (paid / restored / cancelled) and its own path owns the old event now.
+
+    Fix round 1 (I3): the change and the consultation are read in ONE locked read (consultation
+    -> change), the old event's id and agenda are taken from that snapshot, the locks are
+    released before the agenda call, and the final UPDATE is guarded by the status too - a
+    payment that commits in between can never make this delete on (or record a release for) the
+    NEW doctor's agenda."""
+    tenant_id = await session.scalar(
+        select(DepositAdjustment.tenant_id).where(DepositAdjustment.id == adjustment_id)
     )
+    if tenant_id is None:
+        await session.rollback()
+        return "not_applicable"
+    appointment, adjustment = await _locked(session, tenant_id, adjustment_id)
     if (
         adjustment is None
         or adjustment.mode != MODE_SUSPEND
         or adjustment.old_slot != OLD_SLOT_RELEASING
         or adjustment.status not in SUSPENDED_STATUSES
-        or adjustment.appointment_id is None
+        or appointment is None
     ):
         await session.rollback()
         return "not_applicable"
-    tenant_id = adjustment.tenant_id
+    event_id, owner, unit_id = _old_event_of(appointment)
+    await session.commit()  # the locks go before any agenda work
     log = _log(adjustment_id, tenant_id)
-    tenant = await session.get(Tenant, tenant_id)
-    appointment = await session.scalar(
-        select(Appointment)
-        .where(Appointment.id == adjustment.appointment_id, Appointment.tenant_id == tenant_id)
-        .execution_options(populate_existing=True)
-    )
-    if tenant is None or appointment is None:
-        await session.rollback()
-        return "releasing"
-    event_id = (appointment.google_event_id or "").strip()
     if event_id:
-        calendar = await _calendar_of(session, tenant, appointment, appointment.unit_id)
+        tenant = await session.get(Tenant, tenant_id)
+        calendar = (
+            await _calendar_of(session, tenant, owner, unit_id) if tenant is not None else None
+        )
         if calendar is None:
             await session.rollback()
             logger.warning("old_slot_vacate_no_calendar", **log)
@@ -367,7 +388,9 @@ async def _release_claimed(
         update(DepositAdjustment)
         .where(
             DepositAdjustment.id == adjustment_id,
+            DepositAdjustment.mode == MODE_SUSPEND,
             DepositAdjustment.old_slot == OLD_SLOT_RELEASING,
+            DepositAdjustment.status.in_(SUSPENDED_STATUSES),
         )
         .values(old_slot=OLD_SLOT_RELEASED, old_slot_at=now)
         .returning(DepositAdjustment.id)
@@ -377,6 +400,58 @@ async def _release_claimed(
     await session.commit()
     logger.info("old_slot_released", moved=released, **log)
     return "released" if released else "not_applicable"
+
+
+async def ensure_old_event_gone(
+    session: AsyncSession, *, tenant_id: UUID, adjustment_id: UUID
+) -> bool:
+    """Fix round 1 (I1): make sure the OLD consultation's event is off the agenda before the
+    consultation is moved to a new slot ("Outro horário" / the hub's reschedule). COMMITS; never
+    raises; no transaction open while the agenda answers.
+
+    A suspended change (`mode="suspend"`, status in SUSPENDED_STATUSES) of this clinic:
+    `released` -> True at once; `releasing` -> the delete is finished; NULL (the post-commit
+    vacate never ran) -> claimed and deleted. True = `old_slot` is `released` now (the only
+    state `finish_rebook` accepts); False = the agenda failed (try again in a moment) or the
+    change is not a suspended one any more (another clinic, decided, restored, paid)."""
+    log = _log(adjustment_id, tenant_id)
+    try:
+        for _attempt in range(3):
+            adjustment = await session.scalar(
+                select(DepositAdjustment)
+                .where(
+                    DepositAdjustment.id == adjustment_id,
+                    DepositAdjustment.tenant_id == tenant_id,
+                )
+                .execution_options(populate_existing=True)
+            )
+            await session.commit()  # end the read (objects stay loaded)
+            if (
+                adjustment is None
+                or adjustment.mode != MODE_SUSPEND
+                or adjustment.status not in SUSPENDED_STATUSES
+            ):
+                return False
+            if adjustment.old_slot == OLD_SLOT_RELEASED:
+                return True
+            if adjustment.old_slot is None:
+                await _claim(
+                    session, tenant_id, adjustment_id, now=_now(), statuses=SUSPENDED_STATUSES
+                )
+                continue  # re-read: claimed now, or somebody else moved it
+            if adjustment.old_slot != OLD_SLOT_RELEASING:
+                return False
+            outcome = await _release_claimed(session, adjustment_id, now=_now())
+            if outcome != "not_applicable":
+                return outcome == "released"
+        return False
+    except Exception as exc:  # noqa: BLE001 - never raises: the caller says "try again"
+        try:
+            await session.rollback()
+        except Exception:  # noqa: BLE001, S110 - the session is unusable anyway
+            pass
+        logger.warning("old_slot_ensure_failed", error_type=type(exc).__name__, **log)
+        return False
 
 
 async def vacate_old_slot(
@@ -511,7 +586,9 @@ async def old_slot_free(
     agenda could not be read. Checks: the agenda (ignoring `restore_event_id` and the old event
     itself - still there while `releasing`), payment holds (`exclude_adjustment_id=adjustment.id`),
     other consultations that occupy (`occupies_slot_clause`, same agenda, without this row) and
-    `agenda.shared_busy`. Never holds a transaction open while reading the agenda."""
+    `agenda.shared_busy`. Never holds a transaction open while reading the agenda - provided
+    the caller's session has no pending writes (a dirty transaction is left as it is, and then
+    stays open across the agenda read): call it with a clean session."""
     if appointment.start_at is None:
         return False
     start, end = _window(appointment)
@@ -626,28 +703,25 @@ async def _transition(
 
 
 async def _discard_unless_kept(
-    session: AsyncSession, calendar: Any, tenant_id: UUID, adjustment_id: UUID, event_id: str
+    session: AsyncSession, calendar: Any, tenant_id: UUID, appointment_id: UUID, event_id: str
 ) -> None:
-    """Lost the claim: delete the event created - unless a twin call with the same
-    deterministic id won and the consultation now points at it."""
-    await session.rollback()
-    adjustment = await session.scalar(
-        select(DepositAdjustment)
-        .where(DepositAdjustment.id == adjustment_id, DepositAdjustment.tenant_id == tenant_id)
-        .execution_options(populate_existing=True)
-    )
-    kept = False
-    if adjustment is not None and adjustment.appointment_id is not None:
+    """The event created was not kept: delete it - unless a twin call with the same
+    deterministic id won and the consultation now points at it. Rolls the session back first
+    (whatever was pending is not ours to keep); never raises."""
+    try:
+        await session.rollback()
         current = await session.scalar(
             select(Appointment.google_event_id).where(
-                Appointment.id == adjustment.appointment_id, Appointment.tenant_id == tenant_id
+                Appointment.id == appointment_id, Appointment.tenant_id == tenant_id
             )
         )
-        kept = current == event_id
-    await session.rollback()
-    if kept:
+        await session.rollback()
+    except Exception as exc:  # noqa: BLE001 - cannot tell: the event is ours, delete it
+        logger.warning("old_slot_discard_check_failed", error_type=type(exc).__name__)
+        current = None
+    if current == event_id:
         return
-    logger.info("old_slot_restore_lost_race", **_log(adjustment_id, tenant_id))
+    logger.info("old_slot_event_not_kept", appointment_id=str(appointment_id))
     await discard_event(calendar, event_id)
 
 
@@ -660,28 +734,23 @@ async def _restore_once(
     trigger: str,
 ) -> str:
     log = _log(adjustment_id, tenant_id)
-    adjustment = await session.scalar(
-        select(DepositAdjustment)
-        .where(DepositAdjustment.id == adjustment_id, DepositAdjustment.tenant_id == tenant_id)
-        .execution_options(populate_existing=True)
-    )
+    # Fix round 1 (I3): the change and the consultation in ONE locked read (consultation ->
+    # change); the old event's id and agenda come from this snapshot; the locks are released
+    # before any agenda work.
+    appointment, adjustment = await _locked(session, tenant_id, adjustment_id)
     if adjustment is None or adjustment.mode != MODE_SUSPEND:
+        await session.rollback()
         return "not_applicable"
     if not _restorable(adjustment, trigger, now):
+        await session.rollback()
         return "already_decided"
-    appointment = None
-    if adjustment.appointment_id is not None:
-        appointment = await session.scalar(
-            select(Appointment)
-            .where(
-                Appointment.id == adjustment.appointment_id,
-                Appointment.tenant_id == tenant_id,
-            )
-            .execution_options(populate_existing=True)
-        )
     if not _upcoming(appointment, now):
+        await session.rollback()
         return "not_applicable"
     state = adjustment.old_slot
+    old_event, old_owner, unit_id = _old_event_of(appointment)
+    appointment_id = appointment.id
+    await session.commit()  # nothing written: let the locks go (objects stay loaded)
     if state is None:
         # The event never left the agenda: only the transition.
         return await _transition(
@@ -694,7 +763,7 @@ async def _restore_once(
     tenant = await session.get(Tenant, tenant_id)
     if tenant is None:
         return "not_applicable"
-    calendar = await _calendar_of(session, tenant, appointment, appointment.unit_id)
+    calendar = await _calendar_of(session, tenant, old_owner, unit_id)
     if calendar is None:
         return "calendar_unavailable"
     own = restore_event_id(adjustment_id, calendar=calendar)
@@ -702,7 +771,6 @@ async def _restore_once(
     summary, description = await _event_texts(
         session, tenant, appointment, await _patient_name(session, appointment)
     )
-    old_event = (appointment.google_event_id or "").strip()
 
     if state == OLD_SLOT_RELEASING:
         # Never the "still there" shortcut: a vacate may be deleting the old event right now.
@@ -720,7 +788,9 @@ async def _restore_once(
             update(DepositAdjustment)
             .where(
                 DepositAdjustment.id == adjustment_id,
+                DepositAdjustment.mode == MODE_SUSPEND,
                 DepositAdjustment.old_slot == OLD_SLOT_RELEASING,
+                DepositAdjustment.status.in_(SUSPENDED_STATUSES),
             )
             .values(old_slot=OLD_SLOT_RELEASED, old_slot_at=now)
             .execution_options(synchronize_session=False)
@@ -754,18 +824,17 @@ async def _restore_once(
         logger.error("old_slot_restore_event_dead", **log)
         return "calendar_unavailable"
     event_id = str(created.get("id") or own)
-    try:
-        outcome = await _transition(
-            session, tenant_id=tenant_id, adjustment_id=adjustment_id, trigger=trigger, now=now,
-            expect_old_slot=OLD_SLOT_RELEASED, event=(event_id, created.get("htmlLink")),
-        )
-    except Exception:
-        await _discard_unless_kept(session, calendar, tenant_id, adjustment_id, event_id)
-        raise
+    # Fix round 1 (M1): an ERROR in the transition (a database blip) keeps the event - the next
+    # attempt re-creates the same deterministic id, gets this live event back and re-points the
+    # row. Only a definitive answer (decided elsewhere / not applicable) deletes it.
+    outcome = await _transition(
+        session, tenant_id=tenant_id, adjustment_id=adjustment_id, trigger=trigger, now=now,
+        expect_old_slot=OLD_SLOT_RELEASED, event=(event_id, created.get("htmlLink")),
+    )
     if outcome == "restored":
         logger.info("old_slot_restored", trigger=trigger, **log)
         return outcome
-    await _discard_unless_kept(session, calendar, tenant_id, adjustment_id, event_id)
+    await _discard_unless_kept(session, calendar, tenant_id, appointment_id, event_id)
     return "already_decided" if outcome == _MOVED else outcome
 
 
@@ -933,14 +1002,23 @@ async def finish_rebook(
     now: datetime,
     source: Literal["patient", "hub"],
 ) -> bool:
-    """Close a rebook in the caller's transaction: guarded UPDATE REBOOKABLE -> `rebooked`
-    (`resolved_at`), `old_slot='rebooked'`; writes `google_event_id`/link on the row (the caller
-    writes start/end/status as in any reschedule); releases the hold; closes the rebook item
+    """Close a rebook in the caller's transaction: locks the consultation, then the guarded
+    UPDATE REBOOKABLE and `old_slot='released'` -> `rebooked` (`resolved_at`),
+    `old_slot='rebooked'` (fix round 1: the old event must be gone - the caller runs
+    `ensure_old_event_gone` BEFORE creating the new event); writes `google_event_id`/link on
+    the row (the caller writes start/end/status as in any reschedule); releases the hold;
+    closes the rebook item
     (`resolution_action="rebooked"`; the sinal leaves "needs attention" when nothing else is
     open). Never commits. False = already decided (the caller rolls back and discards the
     event)."""
     if appointment.tenant_id != tenant_id or source not in REBOOK_CLOSED_NOTE:
         return False
+    # Fix round 1 (M2): lock order consultation -> change, whatever the caller flushed already.
+    await session.execute(
+        select(Appointment.id)
+        .where(Appointment.id == appointment.id, Appointment.tenant_id == tenant_id)
+        .with_for_update()
+    )
     claimed = await session.execute(
         update(DepositAdjustment)
         .where(
@@ -949,6 +1027,8 @@ async def finish_rebook(
             DepositAdjustment.appointment_id == appointment.id,
             DepositAdjustment.mode == MODE_SUSPEND,
             DepositAdjustment.status.in_(REBOOKABLE_STATUSES),
+            # Fix round 1 (I1): only once the old event is gone (`ensure_old_event_gone`).
+            DepositAdjustment.old_slot == OLD_SLOT_RELEASED,
         )
         .values(
             status=STATUS_REBOOKED,
@@ -1018,13 +1098,21 @@ async def place_new_event_after_payment(
     the new doctor's/unit's agenda (free there first; exclusive on the secretarIA's agenda),
     re-point `google_event_id`/link/`calendar_source`, `old_slot='replaced'`, commit. COMMITS;
     raises on failure (the caller opens `service_diff_agenda_pending`). Already `replaced` ->
-    nothing (a repeated hook)."""
+    nothing (a repeated hook).
+
+    Fix round 1 (I2): a consultation that is not live (before or after the create) gets NO
+    event and this returns without raising (nothing to put on the agenda); any failure after the
+    create deletes the created event before raising."""
     state = adjustment.old_slot
     if state == OLD_SLOT_REPLACED:
         return
     if state not in (OLD_SLOT_RELEASING, OLD_SLOT_RELEASED):
         raise ValueError("old_slot_not_vacated")
     tenant_id, adjustment_id, appointment_id = tenant.id, adjustment.id, appointment.id
+    if not is_live_status(appointment.status):
+        # Fix round 1 (I2): a consultation cancelled meanwhile gets no event at all.
+        logger.info("old_slot_paid_consultation_gone", **_log(adjustment_id, tenant_id))
+        return
     expected = (adjustment.pending_edit or {}).get("expected") or {}
     old_professional = (
         _uuid_or_none(expected.get("professional_id"))
@@ -1074,17 +1162,54 @@ async def place_new_event_after_payment(
     if str(created.get("status") or "") == "cancelled":
         raise CalendarUnavailableError("event id is taken")
     new_event = str(created.get("id") or own)
+    try:
+        placed = await _point_row_at_paid_event(
+            session,
+            tenant_id=tenant_id,
+            adjustment=adjustment,
+            appointment_id=appointment_id,
+            event=(new_event, created.get("htmlLink")),
+            source=new_source,
+        )
+    except BaseException:
+        # Fix round 1 (I2): lost claim, missing row, commit failure - never leave the created
+        # event behind (unless a twin hook made the row point at it).
+        await _discard_unless_kept(session, new_calendar, tenant_id, appointment_id, new_event)
+        raise
+    if placed == "gone":
+        await _discard_unless_kept(session, new_calendar, tenant_id, appointment_id, new_event)
+        logger.info("old_slot_paid_consultation_gone", **_log(adjustment_id, tenant_id))
+        return
+    if placed == "placed":
+        logger.info("old_slot_replaced", **_log(adjustment_id, tenant_id))
 
+
+async def _point_row_at_paid_event(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    adjustment: DepositAdjustment,
+    appointment_id: UUID,
+    event: tuple[str, str | None],
+    source: str,
+) -> Literal["placed", "twin", "gone"]:
+    """Under the consultation -> change locks: a LIVE consultation and a change still
+    `releasing`/`released` -> re-point the row, `old_slot='replaced'`, commit ("placed"). A
+    consultation no longer live -> "gone" (rolled back). Already `replaced` by a twin hook ->
+    "twin". Anything else raises (the caller discards the event)."""
     row = await session.scalar(
         select(Appointment)
         .where(Appointment.id == appointment_id, Appointment.tenant_id == tenant_id)
         .with_for_update()
         .execution_options(populate_existing=True)
     )
+    if row is None or not is_live_status(row.status):
+        await session.rollback()
+        return "gone"
     claimed = await session.execute(
         update(DepositAdjustment)
         .where(
-            DepositAdjustment.id == adjustment_id,
+            DepositAdjustment.id == adjustment.id,
             DepositAdjustment.tenant_id == tenant_id,
             DepositAdjustment.old_slot.in_((OLD_SLOT_RELEASING, OLD_SLOT_RELEASED)),
         )
@@ -1092,18 +1217,22 @@ async def place_new_event_after_payment(
         .returning(DepositAdjustment.id)
         .execution_options(synchronize_session=False)
     )
-    if row is None or claimed.scalar_one_or_none() is None:
+    if claimed.scalar_one_or_none() is None:
         await session.rollback()
         await session.refresh(adjustment)
-        if adjustment.old_slot == OLD_SLOT_REPLACED:
-            return  # a repeated hook already placed it (same deterministic id)
+        current = await session.scalar(
+            select(Appointment.google_event_id).where(
+                Appointment.id == appointment_id, Appointment.tenant_id == tenant_id
+            )
+        )
+        if adjustment.old_slot == OLD_SLOT_REPLACED and current == event[0]:
+            return "twin"  # a repeated hook already placed it (same deterministic id)
         raise RuntimeError("old_slot_moved")
-    row.google_event_id = new_event
-    row.google_event_link = created.get("htmlLink")
-    row.google_calendar_source = new_source
+    row.google_event_id, row.google_event_link = event
+    row.google_calendar_source = source
     await session.commit()
     await session.refresh(adjustment)
-    logger.info("old_slot_replaced", **_log(adjustment_id, tenant_id))
+    return "placed"
 
 
 async def discard_event(calendar, event_id: str) -> None:
@@ -1124,6 +1253,7 @@ __all__ = [
     "RestoreOutcome",
     "RestoreTrigger",
     "discard_event",
+    "ensure_old_event_gone",
     "finish_rebook",
     "mark_old_slot_lost",
     "old_slot_free",

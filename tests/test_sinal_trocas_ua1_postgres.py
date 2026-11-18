@@ -14,11 +14,12 @@ each test creates and drops its own database).
 
 import asyncio
 from datetime import timedelta
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import delete, select, update
 
-from secretaria.models import Appointment, Tenant
+from secretaria.models import Appointment, Professional, Tenant
 from secretaria.models.calendar_event import CalendarEvent
 from secretaria.models.deposit_adjustment import (
     OLD_SLOT_RELEASED,
@@ -258,3 +259,148 @@ async def test_paid_while_the_old_event_leaves_ends_with_one_event_on_the_new_wi
             assert adjustment.old_slot is None and vacated == "not_applicable"
             assert row.google_event_id == old_id
     assert seen == {"placed", "moved"}
+
+
+async def test_paid_change_of_doctor_while_the_old_event_leaves_two_agendas(
+    maker, provider, monkeypatch
+):
+    """Fix round 1 (I3): the change moves the consultation to ANOTHER doctor. The old event lives
+    on the clinic's agenda, the new one on the doctor's. Whatever the interleaving of the vacate
+    and the payment, the old event is deleted on ITS agenda and exactly one live event remains,
+    on the doctor's agenda, with the row pointing at it."""
+    seeded, adjustment_id, clinic, old_id, (start, end), new_start = await _world(
+        maker, provider, monkeypatch
+    )
+    tenant_id, appointment_id = seeded[0].id, seeded[2].id
+    new_end = new_start + timedelta(minutes=60)
+    async with maker() as session:
+        doctor = Professional(id=uuid4(), tenant_id=tenant_id, name="Dr. B", is_active=True)
+        session.add(doctor)
+        await session.commit()
+        doctor_id = doctor.id
+    doctor_agenda = local_agenda(tenant_id, doctor_id)
+
+    async def resolve(session, tenant, owner):
+        return doctor_agenda if owner.professional_id == doctor_id else clinic
+
+    monkeypatch.setattr(service_change, "calendar_for_appointment", resolve)
+
+    async def pay():
+        """The webhook writes the new doctor, service and window (row first, then the change);
+        the agenda follows after the commit - `place_new_event_after_payment` when the old event
+        left, else today's move to the new doctor's agenda (create there, re-point, delete)."""
+        async with maker() as session:
+            row = await session.scalar(
+                select(Appointment).where(Appointment.id == appointment_id).with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            won = await session.execute(
+                update(DepositAdjustment)
+                .where(
+                    DepositAdjustment.id == adjustment_id,
+                    DepositAdjustment.status == STATUS_AWAITING_PAYMENT,
+                )
+                .values(status=STATUS_APPLIED, resolved_at=NOW)
+                .returning(DepositAdjustment.id)
+            )
+            assert won.scalar_one_or_none() is not None
+            row.appointment_type = "Avaliação"
+            row.professional_id = doctor_id
+            row.start_at, row.end_at = new_start, new_end
+            await session.commit()
+            adjustment = await session.get(
+                DepositAdjustment, adjustment_id, populate_existing=True
+            )
+            if adjustment.old_slot in (OLD_SLOT_RELEASING, OLD_SLOT_RELEASED):
+                tenant = await session.get(Tenant, tenant_id)
+                await old_slot.place_new_event_after_payment(
+                    session, tenant=tenant, appointment=row, adjustment=adjustment,
+                    patient_name="Maria",
+                )
+                return "placed"
+            created = await doctor_agenda.create_event(
+                new_start, new_end, "Avaliação - Maria", exclusive=True
+            )
+            row.google_event_id = created["id"]
+            row.google_calendar_source = "professional"
+            await session.commit()
+            await clinic.cancel_event(old_id)
+            return "moved"
+
+    async def vacate():
+        return await old_slot.vacate_old_slot(tenant_id, adjustment_id)
+
+    seen = set()
+    for round_ in range(ROUNDS):
+        async with maker() as session:
+            await session.execute(
+                update(DepositAdjustment)
+                .where(DepositAdjustment.id == adjustment_id)
+                .values(status=STATUS_AWAITING_PAYMENT, old_slot=None, old_slot_at=None,
+                        resolved_at=None)
+            )
+            await session.execute(
+                update(Appointment)
+                .where(Appointment.id == appointment_id)
+                .values(google_event_id=old_id, appointment_type="Consulta", start_at=start,
+                        end_at=end, professional_id=None, google_calendar_source=None)
+            )
+            await session.execute(delete(CalendarEvent).where(CalendarEvent.id != old_id))
+            await session.execute(
+                update(CalendarEvent)
+                .where(CalendarEvent.id == old_id)
+                .values(status="confirmed", start_at=start, end_at=end)
+            )
+            await session.commit()
+
+        if round_ == 0:
+            vacated = await vacate()
+            paid = await pay()
+        elif round_ == 1:
+            paid = await pay()
+            vacated = await vacate()
+        elif round_ == 2:
+            # Deterministic: the whole payment (and its agenda hook) lands INSIDE the vacate,
+            # after it claimed the old event and before it looks the agenda up.
+            vacated, paid = await _paid_inside_the_vacate(monkeypatch, vacate, pay)
+        elif round_ % 2:
+            vacated, paid = await asyncio.gather(vacate(), pay())
+        else:
+            paid, vacated = await asyncio.gather(pay(), vacate())
+        seen.add(paid)
+
+        live = await _confirmed(maker, tenant_id)
+        async with maker() as session:
+            row = await session.get(Appointment, appointment_id)
+        assert [e.id for e in live] == [row.google_event_id], (round_, paid, vacated)
+        assert live[0].professional_id == doctor_id, (round_, paid, vacated)
+        assert live[0].start_at == new_start
+        async with maker() as session:
+            old = await session.get(CalendarEvent, old_id)
+        assert old.status == "cancelled" and old.professional_id is None
+        if paid == "placed":
+            assert (await _adjustment(maker, adjustment_id)).old_slot == OLD_SLOT_REPLACED
+    assert seen == {"placed", "moved"}
+
+
+async def _paid_inside_the_vacate(monkeypatch, vacate, pay):
+    """Run `vacate()`; the first time it asks for the clinic (`session.get(Tenant)`, after its
+    claim) the whole `pay()` runs to the end first."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    original_get = AsyncSession.get
+    state = {"armed": True, "paid": None}
+
+    async def get(self, entity, ident, **kw):
+        if entity is Tenant and state["armed"]:
+            state["armed"] = False
+            state["paid"] = await pay()
+        return await original_get(self, entity, ident, **kw)
+
+    monkeypatch.setattr(AsyncSession, "get", get)
+    try:
+        vacated = await vacate()
+    finally:
+        monkeypatch.setattr(AsyncSession, "get", original_get)
+    assert state["paid"] is not None
+    return vacated, state["paid"]
