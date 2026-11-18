@@ -43,7 +43,7 @@ from secretaria.models.pix_deposit import PixDepositStatus
 from secretaria.models.professional_edit_notice import ProfessionalEditNotice
 from secretaria.services import booking_hold
 from secretaria.services.payments import notify, service_change
-from secretaria.services.payments.provider import ProviderError
+from secretaria.services.payments.provider import PaymentStatus, ProviderError
 from tests import test_service_change as base
 
 NOW = base.NOW
@@ -78,14 +78,14 @@ async def _seed(db, *, timing="after", days_ahead: float = 5, **kw):
     return seeded
 
 
-async def _price(db, seeded, price: str | None):
-    """The clinic edits the price of Consulta (None = no price)."""
+async def _price(db, seeded, price: str | None, service: str = "Consulta"):
+    """The clinic edits the price of `service` (None = no price); the rest as seeded."""
     async with db() as session:
         tenant = await session.get(Tenant, seeded[0].id)
         catalog = []
         for entry in base.CATALOG:
             entry = dict(entry)
-            if entry["name"] == "Consulta":
+            if entry["name"] == service:
                 if price is None:
                     entry.pop("price", None)
                 else:
@@ -392,3 +392,114 @@ async def test_rows_of_another_clinic_are_a_programming_error(db, provider):
                 now=NOW,
             )
     assert await _adjustments(db) == []
+
+
+# --------------------------------------------------------------------------
+# fix round 1 (review I1): an abatement used up by a PAID rise is never netted again
+# --------------------------------------------------------------------------
+
+
+async def _pay(db, seeded, provider, adjustment_id, amount):
+    """The Pix of the difference is paid, through the provider's webhook."""
+    from tests.test_sinal_trocas_ua2_engine import _paid, _webhook
+
+    _paid(provider, adjustment_id, amount)
+    result = await _webhook(
+        db, seeded[0].id, PaymentStatus.PAID, at=NOW + timedelta(minutes=5),
+        event_id=f"evt_{adjustment_id.hex[:8]}",
+    )
+    assert result.outcome == "adjustment_applied"
+
+
+async def test_a_drop_after_an_abated_drop_and_a_paid_rise_asks_the_full_difference(
+    db, provider
+):
+    """Review I1, sequence 1: drop (kept) -> paid rise -> drop: the patient holds R$ 120 for a
+    sinal of R$ 90 and is asked about the R$ 30."""
+    seeded = await _seed(db)
+    await _price(db, seeded, "R$ 100,00")  # sinal R$ 30
+    asked = await _requote(db, seeded)
+    assert await _answer(db, seeded, asked.adjustment_id, False) == "kept_credit"
+    await _price(db, seeded, "R$ 400,00")  # sinal R$ 120: R$ 60 more than held
+    rise = await _requote(db, seeded)
+    assert (rise.decision, rise.diff_cents) == ("increase_charge", 6000)
+    await _pay(db, seeded, provider, rise.adjustment_id, 6000)
+
+    await _price(db, seeded, "R$ 300,00")  # sinal R$ 90; R$ 120 held
+    again = await _requote(db, seeded)
+
+    assert (again.kind, again.decision, again.diff_cents) == ("asked", "decrease_ask", 3000)
+    last = (await _adjustments(db))[-1]
+    assert (last.kind, last.status, last.diff_cents) == (KIND_DECREASE, STATUS_ASKED, 3000)
+    assert last.pending_edit["new_sinal_cents"] == 9000
+    assert await _answer(db, seeded, again.adjustment_id, True) == "refund_requested"
+
+
+async def test_a_price_drop_after_a_cheaper_then_dearer_paid_service_change_asks(db, provider):
+    """Review I1, sequence 2: service cheaper (kept) -> service dearer (paid) -> the clinic lowers
+    the dearer one's price: the R$ 30 now over the sinal are asked about."""
+    seeded = await _seed(db)
+
+    async def change(service, minutes):
+        async with db() as session:
+            tenant = await session.get(Tenant, seeded[0].id)
+            row = await session.get(Appointment, seeded[2].id)
+            deposit = await session.get(PixDeposit, seeded[3].id)
+            result = await service_change.request_paid_change(
+                session, tenant=tenant, appointment=row, deposit=deposit, new_service=service,
+                pending_edit=base._edit(row, service, minutes), now=NOW,
+            )
+            await session.commit()
+        return result
+
+    cheaper = await change("Retorno", 20)  # sinal R$ 30
+    assert (cheaper.kind, cheaper.diff_cents) == ("asked", 3000)
+    assert await _answer(db, seeded, cheaper.adjustment_id, False) == "kept_credit"
+    dearer = await change("Avaliação", 60)  # sinal R$ 90 vs R$ 60 held
+    assert (dearer.kind, dearer.diff_cents) == ("applied_awaiting_payment", 3000)
+    await _pay(db, seeded, provider, dearer.adjustment_id, 3000)
+    assert (await _row(db, seeded)).appointment_type == "Avaliação"
+
+    await _price(db, seeded, "R$ 200,00", service="Avaliação")  # sinal R$ 60; R$ 90 held
+    result = await _requote(db, seeded)
+
+    assert (result.kind, result.decision, result.diff_cents) == ("asked", "decrease_ask", 3000)
+
+
+async def test_an_abatement_still_outstanding_is_netted_after_a_refund(db, provider):
+    """The replay keeps an abatement nothing used up: a drop kept (R$ 30), a further drop asked
+    back (R$ 15 beyond it), then the same price again -> nothing new."""
+    seeded = await _seed(db)
+    await _price(db, seeded, "R$ 100,00")
+    first = await _requote(db, seeded)
+    assert await _answer(db, seeded, first.adjustment_id, False) == "kept_credit"
+    await _price(db, seeded, "R$ 50,00")  # sinal R$ 15: R$ 15 beyond the abated R$ 30
+    second = await _requote(db, seeded)
+    assert (second.decision, second.diff_cents) == ("decrease_ask", 1500)
+    assert await _answer(db, seeded, second.adjustment_id, True) == "refund_requested"
+    again = await _requote(db, seeded)
+    assert (again.kind, again.decision) == ("applied_now", "no_change")
+
+
+# --------------------------------------------------------------------------
+# fix round 1 (review M2): only a live consultation still ahead
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("state", ["cancelled", "started"])
+async def test_a_consultation_gone_or_started_is_never_charged(db, provider, state):
+    from secretaria.models import AppointmentStatus
+
+    seeded = await _seed(db)
+    await _price(db, seeded, "R$ 300,00")
+    now = NOW
+    if state == "cancelled":
+        async with db() as session:
+            row = await session.get(Appointment, seeded[2].id)
+            row.status = AppointmentStatus.CANCELLED
+            await session.commit()
+    else:
+        now = seeded[2].start_at + timedelta(minutes=5)
+    result = await _requote(db, seeded, now=now)
+    assert (result.kind, result.reason) == ("blocked", "appointment_not_live")
+    assert provider.calls == [] and await _adjustments(db) == []

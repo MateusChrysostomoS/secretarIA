@@ -893,3 +893,151 @@ async def test_nothing_changes_for_a_legacy_row_or_another_mode(db, provider, ca
     assert (after.status, after.old_slot) == (before.status, None)
     assert cal.cancelled == [] and cal.created == []
     assert (await _adj(db, created.adjustment_id)).status == STATUS_AWAITING_PAYMENT
+
+
+# --------------------------------------------------------------------------
+# fix round 1 (review M1): savepoints, and a crash right after the commit
+# --------------------------------------------------------------------------
+
+
+async def _leftover(db, cal):
+    """A suspended change waiting for the patient's choice, with the restore event a failed
+    restore left behind (UA1 M1)."""
+    seeded, created, _new = await _vacated(db)
+    await _sweep(db, PIX_EXPIRED)
+    leftover = old_slot.restore_event_id(created.adjustment_id, calendar=cal)
+    cal.add(leftover)
+    _CAL[:] = [cal]
+    return seeded, created, leftover
+
+
+_CAL: list = []
+
+
+def _difkeeps(_session):
+    return [e for e in _CAL[-1].events.values() if "difkeep" in e["id"]]
+
+
+async def _settle_with_savepoint(db, seeded, *, savepoint: str, outer: str):
+    async with db() as session:
+        tenant = await session.get(Tenant, seeded[0].id)
+        deposit = await session.get(PixDeposit, seeded[3].id)
+        await adjustment_queries.settle_open_adjustments(
+            session, tenant=tenant, deposit=deposit, now=PIX_EXPIRED + timedelta(hours=1)
+        )
+        if savepoint == "released":
+            async with session.begin_nested():
+                await session.execute(select(1))
+        else:
+            with pytest.raises(RuntimeError):
+                async with session.begin_nested():
+                    raise RuntimeError("rolled back to the savepoint")
+        await adjustment_queries.drain_restore_discards()
+        # Nothing is deleted while the outer transaction is open.
+        assert all(event["status"] == "confirmed" for event in _difkeeps(session))
+        if outer == "commit":
+            await session.commit()
+        else:
+            await session.rollback()
+    await adjustment_queries.drain_restore_discards()
+
+
+async def test_a_released_savepoint_never_discards_before_the_outer_commit(
+    db, provider, cal, sent
+):
+    seeded, created, leftover = await _leftover(db, cal)
+    await _settle_with_savepoint(db, seeded, savepoint="released", outer="rollback")
+
+    # The savepoint's "commit" spawned nothing; the outer rollback dropped the request.
+    assert cal.events[leftover]["status"] == "confirmed"
+    assert (await _adj(db, created.adjustment_id)).status == STATUS_AWAITING_CHOICE
+
+
+async def test_a_rolled_back_savepoint_keeps_the_request_for_the_outer_commit(
+    db, provider, cal, sent
+):
+    seeded, created, leftover = await _leftover(db, cal)
+    await _settle_with_savepoint(db, seeded, savepoint="rolled_back", outer="commit")
+    assert (await _adj(db, created.adjustment_id)).status == STATUS_CANCELLED
+    assert cal.events[leftover]["status"] == "cancelled"
+
+
+@pytest.mark.parametrize("closed_by", ["both", "resend", "cancellation"])
+async def test_the_sweep_discards_a_restore_event_the_post_commit_task_lost(
+    db, provider, cal, sent, monkeypatch, closed_by
+):
+    """The process dies right after the commit (the post-commit task never runs): the next
+    sweep deletes the leftover restore event - once."""
+    seeded, created, leftover = await _leftover(db, cal)
+    monkeypatch.setattr(
+        adjustment_queries, "discard_restore_after_commit", lambda *args, **kwargs: None
+    )
+    if closed_by == "cancellation":
+        async with db() as session:
+            tenant = await session.get(Tenant, seeded[0].id)
+            deposit = await session.get(PixDeposit, seeded[3].id)
+            await adjustment_queries.settle_open_adjustments(
+                session, tenant=tenant, deposit=deposit, now=PIX_EXPIRED + timedelta(hours=1)
+            )
+            await session.commit()
+    else:
+        if closed_by == "resend":
+            provider.created_charge = provider.created_charge.__class__(
+                provider_charge_id="pay_diff_2", copy_paste="000201pix2"
+            )
+        outcome = await _choose(db, seeded[0].id, created.adjustment_id, closed_by)
+        assert outcome.kind == ("cancel_old" if closed_by == "both" else "resent")
+    assert cal.events[leftover]["status"] == "confirmed"  # the fast path was lost
+
+    reads: list = []
+    real_get = cal.get_event
+
+    async def counting_get(event_id):
+        reads.append(event_id)
+        return await real_get(event_id)
+
+    cal.get_event = counting_get
+    await _sweep(db, PIX_EXPIRED + timedelta(hours=2))
+    assert cal.events[leftover]["status"] == "cancelled"
+    assert reads == [leftover]
+    await _sweep(db, PIX_EXPIRED + timedelta(hours=3))
+    assert reads == [leftover]  # checked once per change
+
+
+async def test_the_sweep_never_touches_a_restored_visit(db, provider, cal, sent, replans):
+    seeded, created, _new = await _vacated(db)
+    await _sweep(db, PIX_EXPIRED)
+    await _sweep(db, DEADLINE + timedelta(minutes=1))  # silence -> back with `difkeep`
+    restored = old_slot.restore_event_id(created.adjustment_id, calendar=cal)
+    await _sweep(db, DEADLINE + timedelta(minutes=5))
+    assert cal.events[restored]["status"] == "confirmed"
+    assert (await _row(db, seeded[2].id)).google_event_id == restored
+
+
+# --------------------------------------------------------------------------
+# fix round 1 (review M3, M4)
+# --------------------------------------------------------------------------
+
+
+async def test_other_time_of_a_lost_slot_still_works_after_the_old_start(db, provider, cal, sent):
+    """mapa-u §7 item 4: the slot may be lost less than an hour before the old visit; "Outro
+    horário" holds until the clinic resolves it."""
+    seeded, created, _new = await _vacated(db)
+    await _sweep(db, PIX_EXPIRED)
+    await _set(db, created.adjustment_id, status=STATUS_OLD_SLOT_LOST)
+    late = OLD_START + timedelta(hours=1)
+    outcome = await _choose(db, seeded[0].id, created.adjustment_id, "other", at=late)
+    assert outcome.kind == "rebook"
+    async with db() as session:
+        row = await session.get(Appointment, seeded[2].id)
+        row.status = AppointmentStatus.CANCELLED
+        await session.commit()
+    gone = await _choose(db, seeded[0].id, created.adjustment_id, "other", at=late)
+    assert gone.kind == "already_decided"
+
+
+def test_the_no_window_reply_never_offers_the_old_visit():
+    from secretaria.services.payments.service_change import ChoiceOutcome
+
+    text = service_change.choice_answer_text(ChoiceOutcome(kind="no_window"))
+    assert "manter" not in text.lower() and "Escolha uma das outras opções" in text

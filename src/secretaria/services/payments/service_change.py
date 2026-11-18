@@ -63,7 +63,7 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core.logging import get_logger
@@ -1281,7 +1281,8 @@ def confirm_card_line_text(
     nothing to say: no difference, or blocked - Confirmar then explains). Never promises money
     back. `unit_only` (TASK-085 R3): only the unit changes, so it is the UNIT that waits for the
     payment. `timing` (TASK-085 R, `deposit_gate.timing_is_before`): "before" - the change waits
-    for the Pix with the current consultation kept and the new time reserved (D-R4); "after" -
+    for the Pix while the current consultation leaves the agenda and the new time is reserved
+    (D-R4/D-R10); "after" -
     the change is made at once and the Pix of the difference follows (D-R5). `reserved` (S7a):
     False = a "before" change that falls into the legacy deferred mode (no room for a suspension
     before the visits, contrato §1) - nothing is reserved, so the line never promises it."""
@@ -1512,20 +1513,81 @@ SOURCE_PRICE_CHANGE = "price_change"
 _KEPT_DECREASE_STATUSES = (STATUS_CLINIC_KEPT, STATUS_KEPT_CREDIT)
 
 
-async def _kept_decrease_cents(session: AsyncSession, deposit: PixDeposit) -> int:
-    """The decreases of this sinal already settled as an abatement on the day (`clinic_kept`,
-    `kept_credit`). They stay in `held_deposit_cents` (the clinic keeps that money), so a new
-    price drop must not tell (and abate) them a second time. A decrease asked back
-    (`refund_requested`) is already OUT of `held_deposit_cents`."""
-    total = await session.scalar(
-        select(func.coalesce(func.sum(DepositAdjustment.diff_cents), 0)).where(
-            DepositAdjustment.tenant_id == deposit.tenant_id,
-            DepositAdjustment.deposit_id == deposit.id,
-            DepositAdjustment.kind == KIND_DECREASE,
-            DepositAdjustment.status.in_(_KEPT_DECREASE_STATUSES),
+def _recorded_sinal(pending_edit: dict | None) -> int | None:
+    """The sinal a price-change adjustment recorded (`new_sinal_cents`); None for any other."""
+    value = (pending_edit or {}).get("new_sinal_cents")
+    if not is_price_change(pending_edit) or isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+async def _sinal_of_record(session: AsyncSession, deposit: PixDeposit) -> int:
+    """Fix round 1 (review I1): the sinal the patient was last TOLD this consultation costs,
+    replaying the sinal's settled adjustments in the order they took effect (`resolved_at`;
+    what the clinic holds starts at
+    `amount_cents`, and so does the sinal of record):
+
+    * a PAID increase (`applied`, with a charge): held += diff; the sinal of record = held (the
+      rise was measured against what was held, so every earlier abatement is used up);
+    * a decrease asked back (`refund_requested`): held -= diff; the sinal of record = the new one;
+    * a decrease kept as an abatement (`clinic_kept` / `kept_credit`): held unchanged; the sinal of
+      record = the new one - the abatement still OUTSTANDING is `held - record`;
+    * a difference to collect (`collect_due`): the sinal of record = held + diff.
+
+    "The new one" is `pending_edit["new_sinal_cents"]` for a price change (its `diff_cents` is
+    the part beyond what was already abated) and `held -/+ diff` for an edit (its `diff_cents` is
+    measured against what was held). Anything else (open, cancelled, expired) never moved money.
+    Residual: a change that leaves NO adjustment (`increase_free`, `no_change` - a sinal moved by
+    less than R$ 10, or back to exactly what was held) also uses up an abatement but is not seen
+    here; the abatement then still counts until a paid rise or a refund."""
+    rows = (
+        await session.execute(
+            select(
+                DepositAdjustment.kind,
+                DepositAdjustment.status,
+                DepositAdjustment.diff_cents,
+                DepositAdjustment.provider_charge_id,
+                DepositAdjustment.pending_edit,
+            )
+            .where(
+                DepositAdjustment.tenant_id == deposit.tenant_id,
+                DepositAdjustment.deposit_id == deposit.id,
+            )
+            # In the order the money moved: every settled state stamps `resolved_at` when it
+            # took effect (paid, answered, kept); `created_at` only breaks ties.
+            .order_by(
+                DepositAdjustment.resolved_at.is_(None),
+                DepositAdjustment.resolved_at,
+                DepositAdjustment.created_at,
+                DepositAdjustment.id,
+            )
         )
-    )
-    return int(total or 0)
+    ).all()
+    held = record = int(deposit.amount_cents or 0)
+    for kind, status, diff, charge_id, pending_edit in rows:
+        diff = int(diff or 0)
+        recorded = _recorded_sinal(pending_edit)
+        if kind == KIND_INCREASE:
+            if status == STATUS_APPLIED and charge_id is not None:
+                held += diff
+                record = held
+            elif status == STATUS_COLLECT_DUE:
+                record = recorded if recorded is not None else held + diff
+        elif kind == KIND_DECREASE:
+            if status == STATUS_REFUND_REQUESTED:
+                held -= diff
+                record = recorded if recorded is not None else held
+            elif status in _KEPT_DECREASE_STATUSES:
+                record = recorded if recorded is not None else held - diff
+    return record
+
+
+async def _outstanding_abatement_cents(session: AsyncSession, deposit: PixDeposit) -> int:
+    """What of the sinal held is already promised as an abatement on the day and still stands
+    (`held_deposit_cents - _sinal_of_record`, never negative). A new drop must not tell, abate
+    or ask back that part again; a paid rise or a refund consumes it."""
+    held = await held_deposit_cents(session, deposit)
+    return max(0, held - await _sinal_of_record(session, deposit))
 
 
 async def preview_price_requote(
@@ -1538,10 +1600,11 @@ async def preview_price_requote(
 ) -> ChangeDecision:
     """D-R14, read-only: what the price IN FORCE does to this consultation's PAID sinal - the
     `preview_service_change` of the row itself (its service, doctor, unit), with one netting:
-    a drop is measured against what the clinic holds MINUS the decreases already settled as an
-    abatement (`clinic_kept` / `kept_credit`), so the same difference is never told, abated or
-    asked back twice (a `refund_requested` is already out of what is held). A rise is measured
-    against what is held (a promised abatement never makes the patient pay more). The sweep's
+    a drop is measured against what the clinic holds MINUS the abatement already promised and
+    still outstanding (`_outstanding_abatement_cents`; fix round 1: a paid rise or a refund since
+    then uses it up), so the same difference is never told, abated or asked back twice (a
+    `refund_requested` is already out of what is held). A rise is measured against what is held
+    (a promised abatement never makes the patient pay more). The sweep's
     `price_change.price_notice_needed` should use this too (UB2)."""
     if not appointment.appointment_type:
         return ChangeDecision(action="blocked", diff_cents=0, reason="price_unavailable")
@@ -1557,7 +1620,7 @@ async def preview_price_requote(
     )
     if decision.action not in ("decrease_ask", "decrease_keep"):
         return decision
-    left = decision.diff_cents - await _kept_decrease_cents(session, deposit)
+    left = decision.diff_cents - await _outstanding_abatement_cents(session, deposit)
     if left <= 0:
         return ChangeDecision(action="no_change", diff_cents=0)
     days_until = (as_utc(appointment.start_at) - as_utc(now)).total_seconds() / 86400
@@ -1604,11 +1667,13 @@ async def price_requote(
     """D-R14 (mapa-u §2.3, §4.4): the patient opened the price-change link - decide WITH THE PRICE
     OF NOW on a PAID sinal. Never commits; never writes the consultation (nothing of it changes).
 
-    The deposit is locked (every change of a sinal is serialized). Refused (`blocked`): not PAID
-    (`deposit_not_paid`), an adjustment still open (`adjustment_pending` /
-    `refund_question_pending` / `choice_pending`), a difference the clinic collects on the day
-    (ANY `collect_due` of this sinal, open item or not: `collect_pending` - what was paid does not
-    count it, so a new figure would ask for it again), an unreadable price (`price_unavailable`).
+    The consultation, then the deposit, are locked (every change of a sinal is serialized).
+    Refused (`blocked`, nothing charged or recorded): the consultation no longer live or already
+    started (`appointment_not_live`, fix round 1), not PAID (`deposit_not_paid`), an adjustment
+    still open (`adjustment_pending` / `refund_question_pending` / `choice_pending`), a
+    difference the clinic collects on the day (ANY `collect_due` of this sinal, open item or
+    not: `collect_pending` - what was paid does not count it, so a new figure would ask for it
+    again), an unreadable price (`price_unavailable`).
     Otherwise `preview_price_requote`:
 
     * `increase_charge` -> a Pix of ONLY the difference, `mode="applied"` in ANY timing (the
@@ -1629,6 +1694,17 @@ async def price_requote(
         or deposit.appointment_id != appointment.id
     ):
         raise ValueError("deposit, appointment and tenant do not match")
+    # Fix round 1 (review M2): lock order appointment -> deposit (-> adjustment), like every
+    # cancellation; a consultation no longer live or already started is never charged.
+    row = await session.scalar(
+        select(Appointment)
+        .where(Appointment.id == appointment.id, Appointment.tenant_id == tenant.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if not _visit_upcoming(row, now):
+        return ServiceChangeResult(kind="blocked", reason="appointment_not_live")
+    appointment = row
     locked = await session.scalar(
         select(PixDeposit)
         .where(PixDeposit.id == deposit.id, PixDeposit.tenant_id == tenant.id)
@@ -1711,7 +1787,7 @@ async def price_requote(
 
     if decision.action in ("decrease_ask", "decrease_keep"):
         asks = decision.action == "decrease_ask"
-        credited = await _kept_decrease_cents(session, locked)
+        credited = await _outstanding_abatement_cents(session, locked)
         adjustment = DepositAdjustment(
             id=uuid4(),
             tenant_id=tenant.id,
@@ -2633,7 +2709,8 @@ async def expire_adjustments(
     TASK-085 R 3rd round: first `old_slot.retry_vacates` (old events still to leave the agenda);
     an `awaiting_choice` past its deadline -> `keep_old_on_silence` (the old consultation is
     brought back, or `old_slot_lost` / `restoring`); every `restoring` is tried again
-    (`_retry_restoring`)."""
+    (`_retry_restoring`); a change closed without its old consultation coming back has its
+    leftover restore event discarded once (`_discard_left_restore_events`, fix round 1)."""
     resolved = 0
     # 3rd round (UA1 contract): the old events whose deletion is still pending (or never ran -
     # the post-commit `vacate_old_slot` is best-effort) leave the agenda first. Never raises;
@@ -2706,6 +2783,7 @@ async def expire_adjustments(
     _SWEEP_OFFSET = offset + untouched if len(due) == limit else 0
     resolved += await _keep_old_after_silence(session, now=now, limit=limit)
     resolved += await _retry_restoring(session, now=now, limit=limit)
+    await _discard_left_restore_events(session, now=now, limit=limit)
     resolved += await _retry_pending_voids(session, now=now, enqueue=enqueue, limit=limit)
     return resolved
 
@@ -2738,6 +2816,74 @@ async def _keep_old_after_silence(session: AsyncSession, *, now: datetime, limit
         if state is not None:
             done += 1
     return done
+
+
+# Fix round 1 (review M1): how long after a suspended change closed the sweep still checks that
+# its restore event is gone (the post-commit fast path may have died with its process).
+LEFT_RESTORE_EVENT_WINDOW = timedelta(days=7)
+# The closed states a restore event must not outlive (`kept_old` keeps it - it IS the
+# consultation's event; `rebooked` went through `old_slot.ensure_old_event_gone`).
+_CLOSED_WITHOUT_RESTORE = (STATUS_CANCELLED, STATUS_EXPIRED)
+
+
+async def _discard_left_restore_events(
+    session: AsyncSession, *, now: datetime, limit: int
+) -> int:
+    """Fix round 1 (review M1): every suspended change closed without bringing the old
+    consultation back ("Cancelar ambas", a cancellation, "Reenviar o Pix") whose old event had left
+    the agenda (`old_slot='released'`) gets `old_slot.discard_restore_event` ONCE from the sweep
+    - so a `difkeep` left by a failed restore never outlives its change even when the post-commit
+    task (`adjustment_queries.discard_restore_after_commit`) died with its process. Done once per
+    change: `old_slot_at` is then set to the change's `resolved_at` (the candidates are those with
+    `old_slot_at` before it). Idempotent (the helper reads before deleting); never raises.
+    Returns how many were checked."""
+    try:
+        rows = (
+            await session.execute(
+                select(DepositAdjustment.id, DepositAdjustment.tenant_id)
+                .where(
+                    DepositAdjustment.mode == MODE_SUSPEND,
+                    DepositAdjustment.status.in_(_CLOSED_WITHOUT_RESTORE),
+                    DepositAdjustment.old_slot == OLD_SLOT_RELEASED,
+                    DepositAdjustment.resolved_at.is_not(None),
+                    DepositAdjustment.resolved_at >= now - LEFT_RESTORE_EVENT_WINDOW,
+                    or_(
+                        DepositAdjustment.old_slot_at.is_(None),
+                        DepositAdjustment.old_slot_at < DepositAdjustment.resolved_at,
+                    ),
+                )
+                .order_by(DepositAdjustment.resolved_at, DepositAdjustment.id)
+                .limit(limit)
+            )
+        ).all()
+        await session.commit()
+    except Exception as exc:  # noqa: BLE001 - the next tick tries again
+        await session.rollback()
+        logger.warning("service_change_left_restore_query_failed", error_type=type(exc).__name__)
+        return 0
+    checked = 0
+    for adjustment_id, tenant_id in rows:
+        await old_slot.discard_restore_event(tenant_id, adjustment_id)  # never raises
+        try:
+            await session.execute(
+                update(DepositAdjustment)
+                .where(
+                    DepositAdjustment.id == adjustment_id,
+                    DepositAdjustment.tenant_id == tenant_id,
+                    DepositAdjustment.status.in_(_CLOSED_WITHOUT_RESTORE),
+                    DepositAdjustment.old_slot == OLD_SLOT_RELEASED,
+                )
+                .values(old_slot_at=DepositAdjustment.resolved_at)
+                .execution_options(synchronize_session=False)
+            )
+            await session.commit()
+            checked += 1
+        except Exception as exc:  # noqa: BLE001 - checked again on the next tick
+            await session.rollback()
+            logger.warning(
+                "service_change_left_restore_mark_failed", error_type=type(exc).__name__
+            )
+    return checked
 
 
 async def _retry_restoring(session: AsyncSession, *, now: datetime, limit: int) -> int:
@@ -3875,7 +4021,15 @@ async def choose_after_expiry(
     if choice == CHOICE_OTHER:
         if not (choosing or lost) or adjustment.status not in REBOOKABLE_STATUSES:
             return ChoiceOutcome(kind="already_decided", **base)
-        if appointment is None or not _visit_upcoming(appointment, now):
+        # Fix round 1 (review M3, mapa-u §7 item 4): a lost slot stays rebookable until the clinic
+        # resolves it - even past the old start (it may be lost less than an hour before); a
+        # choice still needs its visit ahead.
+        alive = (
+            appointment is not None and is_live_status(appointment.status)
+            if lost
+            else _visit_upcoming(appointment, now)
+        )
+        if not alive:
             return ChoiceOutcome(kind="already_decided", **base)
         # The change is abandoned: the new window is nobody's any more ("Reenviar o Pix" is
         # gone with it). The status stays - `finish_rebook` closes it at the new time.
@@ -4104,9 +4258,10 @@ def choice_answer_text(outcome: ChoiceOutcome) -> str:
             f"para trocar sua consulta para {new}."
         ),
         "cancel_old": "Certo! A troca foi desfeita e vamos cancelar sua consulta.",
+        # Fix round 1 (review M4): neutral - with the old slot taken, "manter" is not offered.
         "no_window": (
             "O novo horário não está mais disponível, então não dá para reenviar o Pix. "
-            "Você pode manter a consulta antiga ou cancelar."
+            "Escolha uma das outras opções."
         ),
         "resend_failed": (
             "Não foi possível gerar um novo Pix agora. Tente de novo em instantes ou escolha "

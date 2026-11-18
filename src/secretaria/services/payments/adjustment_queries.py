@@ -436,7 +436,12 @@ def discard_restore_after_commit(
     agenda (`old_slot='released'`) can have one. A rollback drops the request. Never raises.
 
     Why after the commit: before it, the change is still restorable - deleting its restore
-    event then would make every later restore of the same deterministic id fail."""
+    event then would make every later restore of the same deterministic id fail.
+
+    Fix round 1 (review M1): a SAVEPOINT released / rolled back inside the transaction neither
+    fires nor drops it. This is the fast path only: a process that dies right after the commit
+    loses the task, and the payments sweep picks the change up
+    (`service_change._discard_left_restore_events`)."""
     if adjustment.mode != MODE_SUSPEND or adjustment.old_slot != OLD_SLOT_RELEASED:
         return
     try:
@@ -452,6 +457,10 @@ def discard_restore_after_commit(
 
 
 def _spawn_discards(sync_session) -> None:
+    # Fix round 1 (review M1): SQLAlchemy also dispatches `after_commit` when a SAVEPOINT is
+    # released - only the ROOT transaction's commit counts.
+    if sync_session.in_nested_transaction():
+        return
     pending = sync_session.info.pop(_DISCARD_KEY, None)
     if not pending:
         return
@@ -467,6 +476,9 @@ def _spawn_discards(sync_session) -> None:
 
 
 def _drop_discards(sync_session) -> None:
+    # A SAVEPOINT rolled back leaves the outer transaction (and its request) alive.
+    if sync_session.in_nested_transaction():
+        return
     sync_session.info.pop(_DISCARD_KEY, None)
 
 
