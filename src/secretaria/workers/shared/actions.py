@@ -437,6 +437,15 @@ async def _handle_action_button(
                 ),
                 "insurance": appointment.insurance,
                 "attendee_name": appointment.attendee_name,
+                # U7: the same optional key the patient's list carries
+                # (`patient_context.load_upcoming_appointments`), so the next turn's stale
+                # check (`EditDraft.from_appointment`) sees the same draft on a booking with a
+                # unit - without it every "Alterar Dados" there answered "não está mais ativa".
+                **(
+                    {"unit_id": str(appointment.unit_id)}
+                    if appointment.unit_id is not None
+                    else {}
+                ),
             }
             edit_handoff = (
                 tenant,

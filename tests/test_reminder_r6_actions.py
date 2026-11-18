@@ -172,3 +172,35 @@ async def test_new_ids_are_checked_against_the_patient_and_the_version(db):  # n
         await reload_appointment(db, world.appointment.id)
     ).status == AppointmentStatus.SCHEDULED
     assert (await get_conversation(db, world)).flow_state == FlowState.IDLE
+
+
+async def test_alterar_dados_on_a_booking_with_a_unit_keeps_the_draft_current(db):  # noqa: F811
+    """U7 (found in the TASK-085 browser proof): the card's "Alterar Dados" built the draft
+    from a view WITHOUT the booking's `unit_id`, while every later turn compares it with the
+    patient's list (`EditDraft.from_appointment`, which carries it since TASK-083) - so the
+    first choice ("Mudar serviço") always answered "Essa consulta não está mais ativa."."""
+    from secretaria.models import Appointment
+    from secretaria.models.unit import Unit
+    from secretaria.services import appointment_edit as ae
+    from tests._reminders_r3 import turn
+
+    world = await seed_world(db, start_at=_future(), professional_name="Dra. Ana")
+    async with db() as session:
+        unit = Unit(id=uuid4(), tenant_id=world.tenant.id, name="Sede", is_active=True)
+        session.add(unit)
+        await session.flush()
+        row = await session.get(Appointment, world.appointment.id)
+        row.unit_id = unit.id
+        await session.commit()
+    rid = await add_reminder(db, world)
+
+    await _tap(world, "remedit", rid)
+
+    conversation = await get_conversation(db, world)
+    draft = ae.EditDraft.from_json(conversation.flow_edit_draft)
+    assert draft.original.get("unit_id") == str(unit.id)
+
+    await turn(db, world, "Mudar serviço")
+
+    assert ae.EDIT_STALE not in [item[2] for item in sent()]
+    assert (await get_conversation(db, world)).flow_state == FlowState.EDIT_BOOKING
