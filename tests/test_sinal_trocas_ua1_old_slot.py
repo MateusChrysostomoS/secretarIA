@@ -1586,3 +1586,165 @@ async def test_m1_a_transient_error_after_the_restore_event_is_created_is_recove
     assert cal.events[own]["status"] == "confirmed" and own not in cal.cancelled
     assert (await _row(db, world)).google_event_id == own
     assert len(cal.created) == 1
+
+
+# --------------------------------------------------------------------------
+# Fix round 2 (re-review M3) - a restore event kept by M1 never outlives its change
+# --------------------------------------------------------------------------
+
+
+async def _kept_restore_event(db, cal, monkeypatch, world):
+    """A tap whose transition hits a database blip: the `difkeep` event stays (M1) while the
+    change is still `awaiting_choice`."""
+    real = booking_hold.release_difference_hold_in
+    calls = {"n": 0}
+
+    async def flaky(session, adjustment_id):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("db blip")
+        return await real(session, adjustment_id)
+
+    monkeypatch.setattr(booking_hold, "release_difference_hold_in", flaky)
+    assert await _restore(db, world, trigger="tap") == "calendar_unavailable"
+    own = old_slot.restore_event_id(world.adjustment_id, calendar=cal)
+    assert cal.events[own]["status"] == "confirmed"
+    return own
+
+
+async def test_m3_outro_horario_after_a_kept_restore_event_deletes_it(
+    db, provider, cal, monkeypatch
+):
+    """The reviewer's probe: tap (blip) -> "Outro horário" -> ensure -> rebook. The `difkeep`
+    kept for the retry must not stay on the agenda once the consultation moved elsewhere."""
+    world = await _change(
+        db, status=STATUS_AWAITING_CHOICE, old_slot_state=OLD_SLOT_RELEASED,
+        expires_at=NOW + timedelta(days=2),
+    )
+    cal.events.pop("evt-1")
+    own = await _kept_restore_event(db, cal, monkeypatch, world)
+
+    assert await _ensure(db, world) is True
+    assert await _finish(db, world) is True
+
+    assert cal.events[own]["status"] == "cancelled"
+    assert (await _row(db, world)).google_event_id == "difmovenew"
+    assert [e["id"] for e in cal.events.values() if e["status"] == "confirmed"] == []
+
+
+async def test_m3_ensure_never_deletes_a_restore_event_the_row_points_at(db, provider, cal):
+    """Defence: a consultation already pointing at its `difkeep` keeps it (never `released`
+    then, but the rule holds whatever the state)."""
+    world = await _change(db, status=STATUS_AWAITING_CHOICE, old_slot_state=OLD_SLOT_RELEASED)
+    own = old_slot.restore_event_id(world.adjustment_id, calendar=cal)
+    cal.add(own)
+    async with db() as session:
+        await session.execute(
+            update(Appointment)
+            .where(Appointment.id == world.appointment_id)
+            .values(google_event_id=own)
+        )
+        await session.commit()
+
+    assert await _ensure(db, world) is True
+    assert cal.events[own]["status"] == "confirmed"
+
+
+async def test_m3_discard_restore_event_deletes_a_kept_one(db, provider, cal, monkeypatch):
+    """UA2's cancel ("Cancelar ambas") and resend ("Reenviar o Pix") paths call it."""
+    world = await _change(
+        db, status=STATUS_AWAITING_CHOICE, old_slot_state=OLD_SLOT_RELEASED,
+        expires_at=NOW + timedelta(days=2),
+    )
+    cal.events.pop("evt-1")
+    own = await _kept_restore_event(db, cal, monkeypatch, world)
+
+    assert await old_slot.discard_restore_event(world.tenant_id, world.adjustment_id) is None
+
+    assert cal.events[own]["status"] == "cancelled"
+    adjustment = await _adj(db, world)
+    assert (adjustment.status, adjustment.old_slot) == (STATUS_AWAITING_CHOICE, OLD_SLOT_RELEASED)
+
+
+async def test_m3_discard_restore_event_keeps_the_event_of_a_restored_visit(db, provider, cal):
+    world = await _change(db, status=STATUS_AWAITING_CHOICE, old_slot_state=OLD_SLOT_RELEASED)
+    cal.events.pop("evt-1")
+    assert await _restore(db, world) == "restored"
+    own = old_slot.restore_event_id(world.adjustment_id, calendar=cal)
+
+    await old_slot.discard_restore_event(world.tenant_id, world.adjustment_id)
+
+    assert cal.events[own]["status"] == "confirmed" and own not in cal.cancelled
+
+
+async def test_m3_discard_restore_event_without_one_calls_no_delete(db, provider, cal):
+    world = await _change(db, status=STATUS_AWAITING_CHOICE, old_slot_state=OLD_SLOT_RELEASED)
+    await old_slot.discard_restore_event(world.tenant_id, world.adjustment_id)
+    await old_slot.discard_restore_event(uuid4(), world.adjustment_id)  # another clinic
+    await old_slot.discard_restore_event(world.tenant_id, uuid4())  # unknown change
+    assert cal.cancelled == []
+
+
+async def test_m3_discard_restore_event_of_another_clinic_never_deletes(db, provider, cal):
+    world = await _change(db, status=STATUS_AWAITING_CHOICE, old_slot_state=OLD_SLOT_RELEASED)
+    own = old_slot.restore_event_id(world.adjustment_id, calendar=cal)
+    cal.add(own)
+    await old_slot.discard_restore_event(uuid4(), world.adjustment_id)
+    assert cal.events[own]["status"] == "confirmed"
+
+
+async def test_m3_discard_restore_event_never_raises(db, provider, cal, monkeypatch):
+    world = await _change(db, status=STATUS_AWAITING_CHOICE, old_slot_state=OLD_SLOT_RELEASED)
+
+    def broken():
+        raise RuntimeError("database down")
+
+    monkeypatch.setattr(old_slot, "async_session_factory", broken)
+    assert await old_slot.discard_restore_event(world.tenant_id, world.adjustment_id) is None
+
+    monkeypatch.setattr(old_slot, "async_session_factory", db)
+    own = old_slot.restore_event_id(world.adjustment_id, calendar=cal)
+    cal.add(own)
+    cal.fail_cancel = True
+    assert await old_slot.discard_restore_event(world.tenant_id, world.adjustment_id) is None
+
+
+async def test_m3_discard_restore_event_holds_no_transaction_during_agenda_calls(
+    db, provider, cal, monkeypatch
+):
+    world = await _change(db, status=STATUS_AWAITING_CHOICE, old_slot_state=OLD_SLOT_RELEASED)
+    own = old_slot.restore_event_id(world.adjustment_id, calendar=cal)
+    cal.add(own)
+    sessions: list = []
+    seen: list = []
+
+    def factory():
+        session = db()
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(old_slot, "async_session_factory", factory)
+    cal.probe = lambda what: seen.append((what, sessions[-1].in_transaction()))
+    original_get = cal.get_event
+
+    async def get_event(event_id):
+        seen.append(("get", sessions[-1].in_transaction()))
+        return await original_get(event_id)
+
+    cal.get_event = get_event
+
+    await old_slot.discard_restore_event(world.tenant_id, world.adjustment_id)
+
+    assert seen == [("get", False), ("cancel", False)]
+    assert cal.events[own]["status"] == "cancelled"
+
+
+async def test_m3_own_agenda_discard_restore_event(db, provider, monkeypatch):
+    world = await _change(db, status=STATUS_AWAITING_CHOICE, old_slot_state=OLD_SLOT_RELEASED)
+    local, _old_id = await _on_local_agenda(db, monkeypatch, world)
+    own = old_slot.restore_event_id(world.adjustment_id, calendar=local)
+    await local.create_event(OLD_START, OLD_END, "Consulta - Maria", event_id=own)
+
+    await old_slot.discard_restore_event(world.tenant_id, world.adjustment_id)
+
+    assert (await _local_event(db, own)).status == "cancelled"

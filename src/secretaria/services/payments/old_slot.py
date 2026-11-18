@@ -413,7 +413,20 @@ async def ensure_old_event_gone(
     `released` -> True at once; `releasing` -> the delete is finished; NULL (the post-commit
     vacate never ran) -> claimed and deleted. True = `old_slot` is `released` now (the only
     state `finish_rebook` accepts); False = the agenda failed (try again in a moment) or the
-    change is not a suspended one any more (another clinic, decided, restored, paid)."""
+    change is not a suspended one any more (another clinic, decided, restored, paid).
+
+    Fix round 2 (M3): on True, a `difkeep` restore event left by a restore that failed after
+    creating it (M1 keeps it for the retry) is deleted too - best effort, never when the row
+    points at it - so it never outlives a change closed by "Outro horário" / the hub."""
+    gone = await _ensure_released(session, tenant_id=tenant_id, adjustment_id=adjustment_id)
+    if gone:
+        await _discard_restore_event_in(session, tenant_id, adjustment_id)
+    return gone
+
+
+async def _ensure_released(
+    session: AsyncSession, *, tenant_id: UUID, adjustment_id: UUID
+) -> bool:
     log = _log(adjustment_id, tenant_id)
     try:
         for _attempt in range(3):
@@ -452,6 +465,98 @@ async def ensure_old_event_gone(
             pass
         logger.warning("old_slot_ensure_failed", error_type=type(exc).__name__, **log)
         return False
+
+
+async def _discard_restore_event_in(
+    session: AsyncSession, tenant_id: UUID, adjustment_id: UUID
+) -> None:
+    """Delete this change's `difkeep` restore event if it is live on the agenda and the
+    consultation does not point at it. The agenda is the consultation's OLD one (the change's
+    `expected` doctor when recorded, the row's otherwise). Ends its reads before every agenda
+    call; never raises."""
+    log = _log(adjustment_id, tenant_id)
+    try:
+        adjustment = await session.scalar(
+            select(DepositAdjustment).where(
+                DepositAdjustment.id == adjustment_id,
+                DepositAdjustment.tenant_id == tenant_id,
+                DepositAdjustment.mode == MODE_SUSPEND,
+            )
+        )
+        if adjustment is None or adjustment.appointment_id is None:
+            await session.rollback()
+            return
+        appointment = await session.scalar(
+            select(Appointment)
+            .where(
+                Appointment.id == adjustment.appointment_id,
+                Appointment.tenant_id == tenant_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+        tenant = await session.get(Tenant, tenant_id)
+        if appointment is None or tenant is None:
+            await session.rollback()
+            return
+        expected = (adjustment.pending_edit or {}).get("expected") or {}
+        owner = SimpleNamespace(
+            professional_id=(
+                _uuid_or_none(expected.get("professional_id"))
+                if "professional_id" in expected
+                else appointment.professional_id
+            ),
+            google_calendar_source=appointment.google_calendar_source,
+        )
+        row_event = (appointment.google_event_id or "").strip()
+        calendar = await _calendar_of(session, tenant, owner, appointment.unit_id)
+        await _end_read(session)
+        if calendar is None:
+            logger.warning("old_slot_restore_event_no_calendar", **log)
+            return
+        own = restore_event_id(adjustment_id, calendar=calendar)
+        if row_event == own:
+            return  # the restore won: it is the consultation's event
+        try:
+            event = await calendar.get_event(own)
+        except Exception as exc:  # noqa: BLE001 - cannot tell: try the idempotent delete
+            logger.warning(
+                "old_slot_restore_event_unreadable", error_type=type(exc).__name__, **log
+            )
+            event = {"id": own}
+        if not event or str(event.get("status") or "") == "cancelled":
+            return
+        logger.info("old_slot_restore_event_discarded", **log)
+        await discard_event(calendar, own)
+    except Exception as exc:  # noqa: BLE001 - best effort; never raises
+        try:
+            await session.rollback()
+        except Exception:  # noqa: BLE001, S110 - the session is unusable anyway
+            pass
+        logger.warning(
+            "old_slot_restore_event_discard_failed", error_type=type(exc).__name__, **log
+        )
+
+
+async def discard_restore_event(tenant_id: UUID, adjustment_id: UUID) -> None:
+    """Fix round 2 (M3): delete this change's `difkeep` restore event if one is live on the
+    agenda and the consultation does not point at it. A restore that failed AFTER creating the
+    event keeps it for its retry (M1); a change then closed another way would leave it behind.
+    UA2 calls this after the commit that closes a suspended change other than through
+    `kept_old` - "Cancelar ambas" / any cancellation (`settle_open_adjustments`) and "Reenviar o
+    Pix" (`_resend`, for the OLD change, before the new one may restore). "Outro horário" / the
+    hub's reschedule are covered by `ensure_old_event_gone`.
+
+    Own session; never raises; no transaction open while the agenda answers. Scoped by clinic:
+    another clinic's id finds nothing. Idempotent (no live event = no delete)."""
+    try:
+        async with async_session_factory() as session:
+            await _discard_restore_event_in(session, tenant_id, adjustment_id)
+    except Exception as exc:  # noqa: BLE001 - best effort; never raises
+        logger.warning(
+            "old_slot_restore_event_discard_failed",
+            error_type=type(exc).__name__,
+            **_log(adjustment_id, tenant_id),
+        )
 
 
 async def vacate_old_slot(
@@ -1253,6 +1358,7 @@ __all__ = [
     "RestoreOutcome",
     "RestoreTrigger",
     "discard_event",
+    "discard_restore_event",
     "ensure_old_event_gone",
     "finish_rebook",
     "mark_old_slot_lost",
