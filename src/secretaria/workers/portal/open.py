@@ -349,6 +349,52 @@ async def _price_notice_already_shown(session, answered_at: datetime | None, lat
     return _as_utc(latest.created_at) >= _as_utc(answered_at).replace(microsecond=0)
 
 
+async def _pending_price_notice(
+    session, *, tenant_id: UUID, patient_id: UUID, now: datetime
+) -> UUID | None:
+    """TASK-085 R A1 (D-R14): the patient's most recent `price_change` notice the explicit link
+    would still ACT on, or None.
+
+    Same criterion as `price_change.open_price_notice` for "neither `not_found` nor `pending`":
+    this clinic's row, of a consultation of THIS patient in this clinic, unanswered
+    (`answered_at` NULL), active (`invalidated_at` NULL) and of the consultation's current start
+    (its version), the consultation live, still ahead and not suspended. An answered or closed
+    notice never takes over the ordinary entry (that one keeps today's opening)."""
+    rows = (
+        await session.execute(
+            select(AppointmentReminder.id, AppointmentReminder.appointment_start_at, Appointment)
+            .join(Appointment, Appointment.id == AppointmentReminder.appointment_id)
+            .where(
+                AppointmentReminder.tenant_id == tenant_id,
+                AppointmentReminder.kind == REMINDER_KIND_PRICE_CHANGE,
+                AppointmentReminder.answered_at.is_(None),
+                AppointmentReminder.invalidated_at.is_(None),
+                Appointment.tenant_id == tenant_id,
+                Appointment.patient_id == patient_id,
+            )
+            .order_by(
+                AppointmentReminder.sent_at.desc(),
+                AppointmentReminder.created_at.desc(),
+                AppointmentReminder.id.desc(),
+            )
+        )
+    ).all()
+    for reminder_id, version, appointment in rows:
+        if (
+            appointment.start_at is None
+            or not is_live_status(appointment.status)
+            or _as_utc(appointment.start_at) <= now
+            or _as_utc(version) != _as_utc(appointment.start_at)
+        ):
+            continue
+        if await adjustment_suspension.is_suspended(
+            session, tenant_id=tenant_id, appointment_id=appointment.id
+        ):
+            continue
+        return reminder_id
+    return None
+
+
 async def _brain_message_entry_decision(
     tenant_id: UUID,
     external_id: str,
@@ -425,6 +471,28 @@ async def _brain_message_entry_decision(
         )
         if conversation is None:
             return None
+        reminder_id = entry_context.reminder_id if explicit else None
+        source = entry_context.source if explicit else "portal_entry"
+        if not explicit:
+            # TASK-085 R A1 (D-R14): the e-mail's link fires TWO entries (the account opening,
+            # without context, and the Portal's `/enter` with the link) in no guaranteed order.
+            # An ordinary entry of a patient with a PENDING price notice IS that notice's entry -
+            # same decision and the SAME ledger key as the link: whichever comes first sends the
+            # price action, the other one is deduplicated. The silences below still apply.
+            pending = await _pending_price_notice(
+                session, tenant_id=tenant_id, patient_id=patient.id, now=now
+            )
+            if pending is not None:
+                logger.info(
+                    "brain_message_enter_pending_price_notice",
+                    tenant_id=str(tenant_id),
+                    conversation_id=str(conversation.id),
+                    reminder_id=str(pending),
+                )
+                explicit = True
+                price_link = True
+                reminder_id = pending
+                source = "reminder_link"
         latest = await _latest_message(session, conversation.id)
         if latest is None and not explicit:
             return None
@@ -457,14 +525,14 @@ async def _brain_message_entry_decision(
             )
             return None
         appointment_id = None
-        if explicit and entry_context.source == "reminder_link":
+        if explicit:
             # The opaque row is only context. Ownership is checked using the
             # patient resolved from the authenticated gateway identity.
             appointment = await session.scalar(
                 select(Appointment)
                 .join(AppointmentReminder, AppointmentReminder.appointment_id == Appointment.id)
                 .where(
-                    AppointmentReminder.id == entry_context.reminder_id,
+                    AppointmentReminder.id == reminder_id,
                     AppointmentReminder.tenant_id == tenant_id,
                     Appointment.tenant_id == tenant_id,
                     Appointment.patient_id == patient.id,
@@ -558,15 +626,14 @@ async def _brain_message_entry_decision(
             ),
             tenant=tenant,
             ledger_key=(
-                f"reminder_entry:{conversation.id}:"
-                f"{entry_context.reminder_id or 'clinic'}:{latest_id}"
+                f"reminder_entry:{conversation.id}:{reminder_id or 'clinic'}:{latest_id}"
                 if explicit
                 else _enter_ledger_key(conversation.id, latest_id)
             ),
             last_message_id=latest_id,
             appointment_id=appointment_id,
-            source=entry_context.source if explicit else "portal_entry",
-            price_change_reminder_id=entry_context.reminder_id if price_link else None,
+            source=source,
+            price_change_reminder_id=reminder_id if price_link else None,
         )
 
 
