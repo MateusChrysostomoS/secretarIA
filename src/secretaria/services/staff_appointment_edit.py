@@ -38,7 +38,10 @@ a MONEY field - service, unit (a doctor change that clears it), doctor or convê
   - WAITING for the Pix (a clinic that books only after the sinal, "before", and a dearer change:
     `suspended`, D-R4 - or the legacy `awaiting_payment` without room for a useful Pix): only
     the contact phone is written now; nothing of the agenda moves (the target window is checked
-    free first); the visit is suspended until the Pix is paid or the patient chooses;
+    free first); the visit is suspended until the Pix is paid or the patient chooses. D-R10
+    (TASK-085 R, 3rd round): right after the commit the hub route takes the OLD event off the
+    agenda (`old_slot.vacate_old_slot`) - the old slot is free for other patients while the
+    patient pays; only the new window stays held;
   - `blocked` -> a 4xx/502 `service_change_blocked` and NOTHING of the edit stands.
   Which of the two is known before Google (`_deferral`, the engine's own read-only reckoning).
 * AWAITING (not paid yet, D-R6) -> the edit is written as without a sinal and, as the LAST
@@ -47,8 +50,10 @@ a MONEY field - service, unit (a doctor change that clears it), doctor or convê
   or that cannot be voided undoes the whole edit (409/502 `sinal_requote_blocked`).
 * none -> after the commit the route may charge the sinal the edit made due (OQ-10).
 
-A SUSPENDED consultation (D-R9) cannot be edited at all: 409 `appointment_suspended` (the clinic
-may only "Liberar horário").
+A SUSPENDED consultation cannot be edited at all: 409 `appointment_suspended` (D-R10: it is out
+of the agenda while the patient pays - there is nothing for the clinic to do; when its old slot was
+taken meanwhile, `old_slot_lost`, the clinic may only reschedule or cancel it, through the hub's
+POST /reschedule and /cancel).
 """
 
 import re
@@ -72,6 +77,7 @@ from secretaria.models import (
     Tenant,
     is_live_status,
 )
+from secretaria.models.deposit_adjustment import STATUS_OLD_SLOT_LOST
 from secretaria.models.pix_deposit import PixDepositStatus
 from secretaria.services import professional_units
 from secretaria.services.appointment_calendar_origin import (
@@ -233,11 +239,18 @@ NO_MONEY_CHANGE = "no_change"
 DEFER_SUSPEND = "suspend"  # D-R4: suspended visit + held new window
 DEFER_LEGACY = "legacy"  # contrato §1: no room for a useful Pix before the visits
 
-# D-R9 (contrato §3.9): every mutation of a SUSPENDED consultation by the hub.
+# TASK-085 R D-R10 (mapa-u §1.6/§4.6): every mutation of a SUSPENDED consultation by the hub - it
+# left the agenda while the patient pays the difference of a change; nothing for the clinic to do.
 APPOINTMENT_SUSPENDED = "appointment_suspended"
 APPOINTMENT_SUSPENDED_MESSAGE = (
-    "Essa consulta aguarda o Pix da diferença de uma troca; enquanto isso, só é possível "
-    "liberar o horário."
+    "Essa consulta saiu da agenda enquanto o paciente paga a diferença de uma troca; não há o "
+    "que fazer agora."
+)
+# D-R11: the same code when the old slot was taken meanwhile (`old_slot_lost`) - the clinic may
+# only reschedule or cancel it (POST /reschedule, /cancel); edit, status and release say so.
+APPOINTMENT_REBOOK_DUE_MESSAGE = (
+    "O horário antigo desta consulta foi ocupado enquanto o paciente pagava a diferença de uma "
+    "troca: remarque com o paciente ou cancele a consulta."
 )
 
 # `request_service_change` refused (`ServiceChangeResult.reason`): what the clinic reads.
@@ -764,10 +777,9 @@ async def apply_staff_edit(
             "Esta consulta já foi cancelada ou encerrada.",
             status=appointment.status.value,
         )
-    if await adjustment_suspension.is_suspended(
-        session, tenant_id=tenant_id, appointment_id=appointment_id
-    ):
-        raise suspended_error()
+    refused = await suspension_error(session, tenant_id=tenant_id, appointment_id=appointment_id)
+    if refused is not None:
+        raise refused
     target = await _resolve_target(session, tenant, appointment, request, now)
     before = _Before(
         start_at=as_utc(appointment.start_at),
@@ -896,11 +908,12 @@ async def apply_staff_edit(
                 "appointment_changed",
                 "A consulta foi alterada por outra pessoa. Recarregue e tente de novo.",
             )
-        # D-R9 under the row lock: a patient's change that suspended it meanwhile wins.
-        if await adjustment_suspension.is_suspended(
+        # Under the row lock: a patient's change that suspended it meanwhile wins.
+        refused = await suspension_error(
             session, tenant_id=tenant_id, appointment_id=appointment_id
-        ):
-            raise suspended_error()
+        )
+        if refused is not None:
+            raise refused
         notice = None
         if paid is not None:
             # The engine writes the WHOLE target itself when the change stands now (and records
@@ -1077,9 +1090,25 @@ async def apply_staff_edit(
     )
 
 
-def suspended_error() -> StaffEditError:
-    """D-R9 (contrato §3.9): the clinic may only free a suspended consultation's slot."""
-    return StaffEditError(409, APPOINTMENT_SUSPENDED, APPOINTMENT_SUSPENDED_MESSAGE)
+def suspended_error(*, rebook_due: bool = False) -> StaffEditError:
+    """409 `appointment_suspended` (D-R10): the consultation is out of the agenda while the patient
+    pays the difference of a change. `rebook_due` (D-R11, `old_slot_lost`): its old slot was taken
+    meanwhile - the message says the clinic may only reschedule or cancel it."""
+    message = APPOINTMENT_REBOOK_DUE_MESSAGE if rebook_due else APPOINTMENT_SUSPENDED_MESSAGE
+    return StaffEditError(409, APPOINTMENT_SUSPENDED, message)
+
+
+async def suspension_error(
+    session: AsyncSession, *, tenant_id: UUID, appointment_id: UUID
+) -> StaffEditError | None:
+    """The 409 for this clinic's consultation when it is suspended right now, else None. One
+    tenant-scoped read (`adjustment_suspension.open_suspension`)."""
+    change = await adjustment_suspension.open_suspension(
+        session, tenant_id=tenant_id, appointment_id=appointment_id
+    )
+    if change is None:
+        return None
+    return suspended_error(rebook_due=change.status == STATUS_OLD_SLOT_LOST)
 
 
 def _decision_moved(

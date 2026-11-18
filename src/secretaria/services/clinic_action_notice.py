@@ -381,10 +381,13 @@ async def notify_service_change(
 ) -> NoticeResult | None:
     """The money message of a clinic's change on a paid sinal, with the engine's own copy:
 
-    * `suspended` (TASK-085 R D-R4) -> the difference, "só muda depois que o pagamento for
-      confirmado", both times kept until the deadline and - unpaid - the patient is asked what to
-      do; the Pix copia-e-cola at the end of the SAME message (fenced, see `payments/pix_message`;
-      one message, never a second one with the bare code);
+    * `suspended` (TASK-085 R D-R4/D-R10) -> the difference, "só muda depois que o pagamento for
+      confirmado"; the current consultation leaves the agenda meanwhile and only the NEW time
+      stays reserved until the deadline (never "os dois horários reservados": the old slot is
+      free for other patients); unpaid, the patient chooses what to do. The engine's own copy
+      (`service_change.difference_pix_text(held_new_slot=True)`, mapa-u §4.6); the Pix
+      copia-e-cola at the end of the SAME message (fenced, see `payments/pix_message`; one
+      message, never a second one with the bare code);
     * `awaiting_payment` (the legacy deferred mode) -> the same without the reserved times
       ("se não for pago, a consulta continua como está");
     * `applied_awaiting_payment` (TASK-085 R D-R5) -> "a clínica alterou sua consulta para X;

@@ -291,7 +291,7 @@ async def test_a_suspended_visit_cannot_be_edited_at_all(db, provider):
         with pytest.raises(StaffEditError) as err:
             await _edit(db, world, request)
         assert (err.value.status_code, err.value.code) == (409, "appointment_suspended")
-        assert "só é possível liberar o horário" in err.value.message
+        assert "saiu da agenda" in err.value.message  # D-R10 (was D-R9's "liberar")
 
     assert provider.calls == calls_before
     row = await reload_appointment(db, world.appointment.id)
@@ -593,11 +593,19 @@ async def test_the_staff_edit_stays_inside_its_clinic(db, provider):
 
 
 def test_the_suspended_answer_is_the_contracts():
+    """TASK-085 R D-R10/D-R11 (mapa-u §4.6): the visit left the agenda; when its old slot was taken
+    (`old_slot_lost`) the same code says the clinic may reschedule or cancel."""
     err = sae.suspended_error()
     assert (err.status_code, err.code) == (409, "appointment_suspended")
     assert err.message == (
-        "Essa consulta aguarda o Pix da diferença de uma troca; enquanto isso, só é possível "
-        "liberar o horário."
+        "Essa consulta saiu da agenda enquanto o paciente paga a diferença de uma troca; não há o "
+        "que fazer agora."
+    )
+    lost = sae.suspended_error(rebook_due=True)
+    assert (lost.status_code, lost.code) == (409, "appointment_suspended")
+    assert lost.message == (
+        "O horário antigo desta consulta foi ocupado enquanto o paciente pagava a diferença de "
+        "uma troca: remarque com o paciente ou cancele a consulta."
     )
 
 

@@ -508,11 +508,20 @@ async def test_awaiting_payment_lists_only_live_payable_reservations_without_pii
     body = (await client.get("/tenants/me/calendar/awaiting-payment", params=_window())).json()
     (row,) = body
     assert row["id"] == str(hold_id) and row["service"] == "Consulta"
-    # TASK-085 R: `kind` ("booking" here) and `appointment_id` (null: no consultation yet).
+    # TASK-085 R: `kind` ("booking" here) and `appointment_id` (null: no consultation yet); 3rd
+    # round (UH): `change_summary` (null: no change).
     assert set(row) == {
-        "id", "start", "end", "service", "expires_at", "professional_id", "kind", "appointment_id"
+        "id",
+        "start",
+        "end",
+        "service",
+        "expires_at",
+        "professional_id",
+        "kind",
+        "appointment_id",
+        "change_summary",
     }
-    assert (row["kind"], row["appointment_id"]) == ("booking", None)
+    assert (row["kind"], row["appointment_id"], row["change_summary"]) == ("booking", None, None)
     text = str(body)
     assert "pay_secret" not in text and "Maria" not in text and "6000" not in text
 
