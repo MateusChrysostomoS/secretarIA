@@ -7,23 +7,44 @@ different ledger keys (`brain_message_enter:...` vs `reminder_entry:...`). Past 
 window the ordinary one sent the usual card (sometimes of ANOTHER consultation) before or next to
 the price message.
 
-The fix (secretarIA only): an ordinary entry of a patient with a PENDING `price_change` notice
-(this clinic, this patient, unanswered, its consultation still live and in the future) becomes
-that notice's entry - same decision and the SAME ledger key as the explicit one. Whichever arrives
-first sends the price; the other is deduplicated by the ledger, in any order. Human in control,
-consent / identity still open keep their silence; another clinic is never affected.
+The fix (secretarIA only): an ordinary entry keeps EVERY ordinary guard (quiet window, flow in
+progress, human, consent / identity); when they all pass and the patient has exactly ONE PENDING
+`price_change` notice (this clinic, this patient, unanswered, its consultation live, ahead, not
+suspended, of its current start), it sends that notice's price action instead of the card, under
+the link's own ledger key. On the same conversation state the ledger deduplicates the two entries;
+in sequence, the later link entry is silenced by UB2's `_price_notice_already_shown` (or the later
+ordinary entry by the quiet window). With SEVERAL pending notices the ordinary entry stays silent
+(it cannot know which e-mail was clicked) and the link speaks alone (review M1). A clinic without
+the sinal is never looked up (L3). Another clinic is never affected.
 """
 
 from datetime import UTC, datetime, timedelta
 
-from secretaria.models import FlowState, HandoverState, Patient
+from sqlalchemy import select
+
+from secretaria.models import (
+    Appointment,
+    AppointmentStatus,
+    FlowState,
+    HandoverState,
+    Patient,
+    PixDeposit,
+    Tenant,
+)
 from secretaria.models.appointment_reminder import (
     REMINDER_CHANNEL_EMAIL,
     REMINDER_KIND_PRICE_CHANGE,
     REMINDER_STATUS_SENT,
     AppointmentReminder,
 )
+from secretaria.models.deposit_adjustment import (
+    KIND_INCREASE,
+    MODE_SUSPEND,
+    STATUS_AWAITING_PAYMENT,
+    DepositAdjustment,
+)
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
+from secretaria.services.payments import price_change
 from secretaria.workers.portal import open as open_mod
 from secretaria.workers.portal.open import process_brain_message_enter
 from tests._reminder_fixtures import db  # noqa: F401
@@ -105,7 +126,8 @@ async def test_both_entries_decide_the_same_ledger_key(portal, provider):  # noq
     assert plain is not None and link is not None
     assert plain.ledger_key == link.ledger_key
     assert plain.price_change_reminder_id == link.price_change_reminder_id == rid
-    assert plain.source == link.source == "reminder_link"
+    # Review L1: the ordinary entry keeps its own source (the fallback card resets to MENU).
+    assert plain.source == "portal_entry" and link.source == "reminder_link"
     assert plain.appointment_id is None
 
 
@@ -221,36 +243,162 @@ async def test_a_flow_in_progress_keeps_the_ordinary_entry_silent(portal, provid
     assert provider.called("create_pix_charge") == 1
 
 
-async def test_the_most_recent_pending_notice_wins(portal, provider):  # noqa: F811
-    """Two consultations, each with a pending notice: the entry takes the most recently sent."""
-    world, older = await quiet_world(portal)
-    async with portal() as session:
-        row = await session.get(AppointmentReminder, older)
-        row.sent_at = datetime.now(UTC) - timedelta(days=2)
-        await session.commit()
+async def _second_notice(portal, world, *, sent_at):  # noqa: F811
+    """A second consultation (no sinal) of the same patient with its own pending notice."""
     second = await add_appointment(portal, world, start_at=datetime.now(UTC) + timedelta(days=8))
     async with portal() as session:
-        newer = AppointmentReminder(
+        row = AppointmentReminder(
             tenant_id=world.tenant.id,
             appointment_id=second.id,
             patient_id=world.patient.id,
             kind=REMINDER_KIND_PRICE_CHANGE,
             appointment_start_at=second.start_at,
-            due_at=datetime.now(UTC),
+            due_at=sent_at,
             status=REMINDER_STATUS_SENT,
             channel=REMINDER_CHANNEL_EMAIL,
             with_prompt=False,
-            sent_at=datetime.now(UTC),
+            sent_at=sent_at,
         )
-        session.add(newer)
+        session.add(row)
         await session.commit()
-        newer_id = newer.id
+        return row.id
 
+
+async def test_with_two_pending_notices_only_the_clicked_link_speaks(portal, provider):  # noqa: F811
+    """Review M1 (the reviewer's probe): two notices pending, the ordinary entry arrives first,
+    then the link to the notice an ordinary pick would NOT have chosen (the older one). The
+    ordinary entry stays silent - no price, no card - and exactly one price message goes out,
+    the clicked notice's."""
+    world, clicked = await quiet_world(portal)
+    async with portal() as session:
+        row = await session.get(AppointmentReminder, clicked)
+        row.sent_at = datetime.now(UTC) - timedelta(days=2)
+        await session.commit()
+    other = await _second_notice(portal, world, sent_at=datetime.now(UTC))
+
+    await enter_plain(world)
+
+    assert await bodies(portal, world) == [] and provider.calls == []
+
+    await enter_link(world, clicked)
+
+    [body] = await bodies(portal, world)
+    assert body.startswith(PRICE_PIX) and "COPYDIFF" in body
+    assert provider.called("create_pix_charge") == 1
+    assert await answered_at(portal, clicked) is not None
+    assert await answered_at(portal, other) is None
+
+
+async def test_with_two_pending_notices_the_ordinary_decision_is_silence(portal, provider):  # noqa: F811
+    world, _rid = await quiet_world(portal)
+    await _second_notice(portal, world, sent_at=datetime.now(UTC))
+
+    assert (
+        await open_mod._brain_message_entry_decision(world.tenant.id, world.patient.external_id)
+        is None
+    )
+
+
+async def _assert_no_takeover(portal, world, rid) -> None:  # noqa: F811
     decision = await open_mod._brain_message_entry_decision(
         world.tenant.id, world.patient.external_id
     )
+    if decision is not None:
+        assert decision.price_change_reminder_id is None
+        assert decision.ledger_key.startswith("brain_message_enter:")
+    await enter_plain(world)
+    sent = await bodies(portal, world)
+    assert not any(body.startswith("O valor da sua consulta") for body in sent)
+    assert price_change.PRICE_CLOSED_TEXT not in sent
+    assert await answered_at(portal, rid) is None
 
-    assert decision is not None and decision.price_change_reminder_id == newer_id
+
+async def test_a_cancelled_consultation_notice_does_not_take_over(portal, provider):  # noqa: F811
+    """Review L2."""
+    world, rid = await quiet_world(portal)
+    async with portal() as session:
+        (await session.get(Appointment, world.appointment.id)).status = AppointmentStatus.CANCELLED
+        await session.commit()
+
+    await _assert_no_takeover(portal, world, rid)
+    assert provider.calls == []
+
+
+async def test_a_started_consultation_notice_does_not_take_over(portal, provider):  # noqa: F811
+    """Review L2: the consultation (and its notice's version) already started."""
+    world, rid = await quiet_world(portal)
+    started = datetime.now(UTC) - timedelta(minutes=10)
+    async with portal() as session:
+        appointment = await session.get(Appointment, world.appointment.id)
+        appointment.start_at = started
+        appointment.end_at = started + timedelta(minutes=30)
+        (await session.get(AppointmentReminder, rid)).appointment_start_at = started
+        await session.commit()
+
+    await _assert_no_takeover(portal, world, rid)
+    assert provider.calls == []
+
+
+async def test_a_suspended_consultation_notice_does_not_take_over(portal, provider):  # noqa: F811
+    """Review L2: the consultation waits for the Pix of a change's difference (D-R4)."""
+    world, rid = await quiet_world(portal)
+    async with portal() as session:
+        deposit_id = await session.scalar(
+            select(PixDeposit.id).where(PixDeposit.appointment_id == world.appointment.id)
+        )
+        session.add(
+            DepositAdjustment(
+                tenant_id=world.tenant.id,
+                deposit_id=deposit_id,
+                appointment_id=world.appointment.id,
+                kind=KIND_INCREASE,
+                mode=MODE_SUSPEND,
+                status=STATUS_AWAITING_PAYMENT,
+                old_service="Consulta",
+                new_service="Exame",
+                diff_cents=3000,
+                expires_at=datetime.now(UTC) + timedelta(minutes=30),
+            )
+        )
+        await session.commit()
+
+    await _assert_no_takeover(portal, world, rid)
+    assert provider.calls == []
+
+
+async def test_a_notice_of_a_moved_consultation_does_not_take_over(portal, provider):  # noqa: F811
+    """Review L2: the consultation's start changed and the notice was not (yet) invalidated -
+    it belongs to an older version."""
+    world, rid = await quiet_world(portal)
+    moved = world.start_at + timedelta(days=1)
+    async with portal() as session:
+        appointment = await session.get(Appointment, world.appointment.id)
+        appointment.start_at = moved
+        appointment.end_at = moved + timedelta(minutes=30)
+        await session.commit()
+
+    await _assert_no_takeover(portal, world, rid)
+    assert provider.calls == []
+
+
+async def test_a_clinic_without_the_sinal_is_not_looked_up(portal, provider, monkeypatch):  # noqa: F811
+    """Review L3: the clinic switched the sinal off with a notice still pending - the ordinary
+    entry keeps today's opening and never even looks for notices."""
+    world, rid = await quiet_world(portal)
+    async with portal() as session:
+        (await session.get(Tenant, world.tenant.id)).pix_deposit_enabled = False
+        await session.commit()
+
+    async def _never(*args, **kwargs):
+        raise AssertionError("pending notices looked up for a clinic without the sinal")
+
+    monkeypatch.setattr(open_mod, "_pending_price_notices", _never)
+
+    await enter_plain(world)
+
+    [body] = await bodies(portal, world)
+    assert body.startswith("LEMBRE-SE:")
+    assert await answered_at(portal, rid) is None
 
 
 async def test_an_answered_notice_leaves_the_ordinary_opening(portal, provider):  # noqa: F811

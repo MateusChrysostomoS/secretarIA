@@ -349,11 +349,11 @@ async def _price_notice_already_shown(session, answered_at: datetime | None, lat
     return _as_utc(latest.created_at) >= _as_utc(answered_at).replace(microsecond=0)
 
 
-async def _pending_price_notice(
+async def _pending_price_notices(
     session, *, tenant_id: UUID, patient_id: UUID, now: datetime
-) -> UUID | None:
-    """TASK-085 R A1 (D-R14): the patient's most recent `price_change` notice the explicit link
-    would still ACT on, or None.
+) -> list[UUID]:
+    """TASK-085 R A1 (D-R14): the patient's `price_change` notices the explicit link would still
+    ACT on (at most two are read: the caller only needs "none / exactly one / several").
 
     Same criterion as `price_change.open_price_notice` for "neither `not_found` nor `pending`":
     this clinic's row, of a consultation of THIS patient in this clinic, unanswered
@@ -372,13 +372,10 @@ async def _pending_price_notice(
                 Appointment.tenant_id == tenant_id,
                 Appointment.patient_id == patient_id,
             )
-            .order_by(
-                AppointmentReminder.sent_at.desc(),
-                AppointmentReminder.created_at.desc(),
-                AppointmentReminder.id.desc(),
-            )
+            .order_by(AppointmentReminder.sent_at.desc(), AppointmentReminder.id.desc())
         )
     ).all()
+    found: list[UUID] = []
     for reminder_id, version, appointment in rows:
         if (
             appointment.start_at is None
@@ -391,8 +388,10 @@ async def _pending_price_notice(
             session, tenant_id=tenant_id, appointment_id=appointment.id
         ):
             continue
-        return reminder_id
-    return None
+        found.append(reminder_id)
+        if len(found) > 1:
+            break
+    return found
 
 
 async def _brain_message_entry_decision(
@@ -512,22 +511,33 @@ async def _brain_message_entry_decision(
         # the usual card, under the link's own ledger key: whichever entry comes first speaks,
         # the other one is deduplicated. Inside the quiet window it stays silent and the link
         # entry (which ignores the quiet window) acts alone.
+        # Round 3 (review A1 M1/L1/L3): with SEVERAL pending notices the ordinary entry cannot
+        # know which e-mail was clicked - it stays silent (no card either) and the link entry is
+        # the only one that speaks. `source` stays `portal_entry` (the fallback card keeps the
+        # ordinary MENU reset and log label). A clinic without the sinal is never looked up.
         ordinary_price = False
-        if not explicit:
-            pending = await _pending_price_notice(
+        if not explicit and tenant.pix_deposit_enabled:
+            pending = await _pending_price_notices(
                 session, tenant_id=tenant_id, patient_id=patient.id, now=now
             )
-            if pending is not None:
+            if len(pending) > 1:
+                logger.info(
+                    "brain_message_enter_silent",
+                    tenant_id=str(tenant_id),
+                    conversation_id=str(conversation.id),
+                    reason="several_price_notices_pending",
+                )
+                return None
+            if pending:
                 logger.info(
                     "brain_message_enter_pending_price_notice",
                     tenant_id=str(tenant_id),
                     conversation_id=str(conversation.id),
-                    reminder_id=str(pending),
+                    reminder_id=str(pending[0]),
                 )
                 ordinary_price = True
                 price_link = True
-                reminder_id = pending
-                source = "reminder_link"
+                reminder_id = pending[0]
         appointment_id = None
         if explicit:
             # The opaque row is only context. Ownership is checked using the
