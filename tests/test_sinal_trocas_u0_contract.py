@@ -523,6 +523,8 @@ def test_the_price_opening_shape():
         "retry",
         "not_found",
         "closed",  # UB2: the consultation is no longer live (contract delta)
+        "already_abated",  # UB2 fix round 1: a drop already abated
+        "sinal_on_day",  # UB2 fix round 1: an unpaid sinal settled at the visit
     }
     opening = price_change.PriceOpening(kind="not_found")
     assert (

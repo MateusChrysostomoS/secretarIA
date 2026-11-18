@@ -18,6 +18,9 @@ from secretaria.models import (
     Appointment,
     AppointmentStatus,
     HandoverState,
+    Message,
+    MessageDirection,
+    MessageSender,
     PixDeposit,
     PixDepositStatus,
     Tenant,
@@ -188,16 +191,36 @@ async def test_the_link_opens_with_the_pix_of_the_difference_even_with_reminders
     assert provider.called("create_pix_charge") == 1
 
 
-async def test_opening_the_link_again_points_at_the_pix_above(portal, provider):
+async def test_reloads_stay_silent_and_a_later_visit_points_at_the_pix_above(portal, provider):
+    """Fix round 1 (review M1): the URL keeps `lembrete=` - every reload / tab switch re-sends
+    the entry. Answered notice + the bot spoke last, after it -> silence. Once the patient
+    wrote something, opening the link again points at the Pix above (never a 2nd charge)."""
     world, _deposit = await seed(portal)
     rid = await add_notice(portal, world)
     await reprice(portal, world, "R$ 300,00")
     await enter(world, rid)
 
-    await enter(world, rid)  # a reload / the e-mail link clicked again
+    await enter(world, rid)  # F5
+    await enter(world, rid)  # tab switch secretarIA <-> PreCheck
 
-    first, second = await bodies(portal, world)
-    assert second.startswith("O Pix da diferença já está na mensagem acima e vale até ")
+    assert len(await bodies(portal, world)) == 1
+    async with portal() as session:
+        session.add(
+            Message(
+                conversation_id=world.conversation.id,
+                direction=MessageDirection.INBOUND,
+                sender=MessageSender.PATIENT,
+                body="oi",
+                created_at=datetime.now(UTC) + timedelta(seconds=2),
+            )
+        )
+        await session.commit()
+
+    await enter(world, rid)  # the e-mail link clicked again, later
+
+    sent = await bodies(portal, world)
+    assert len(sent) == 2
+    assert sent[-1].startswith("O Pix da diferença já está na mensagem acima e vale até ")
     assert provider.called("create_pix_charge") == 1
 
 

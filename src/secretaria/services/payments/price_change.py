@@ -56,6 +56,8 @@ from secretaria.models.appointment_reminder import (
     AppointmentReminder,
 )
 from secretaria.models.deposit_adjustment import (
+    KIND_INCREASE,
+    MODE_APPLIED,
     STATUS_ASKED,
     STATUS_AWAITING_CHOICE,
     STATUS_AWAITING_PAYMENT,
@@ -63,12 +65,21 @@ from secretaria.models.deposit_adjustment import (
     STATUS_COLLECT_DUE,
     DepositAdjustment,
 )
-from secretaria.models.payment_attention_item import REASON_PRICE_CHANGE_NO_EMAIL
+from secretaria.models.payment_attention_item import (
+    REASON_PRICE_CHANGE_NO_EMAIL,
+    REASON_SERVICE_DIFF_UNPAID,
+)
 from secretaria.models.pix_deposit import PixDepositStatus
 from secretaria.services import reminder_delivery
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.email import EmailOutcome, send_transactional_email_result
-from secretaria.services.payments import accounts, attention, notify, service_change
+from secretaria.services.payments import (
+    accounts,
+    adjustment_queries,
+    attention,
+    notify,
+    service_change,
+)
 from secretaria.services.payments.adjustment_suspension import (
     is_suspended,
     visible_to_patient_clause,
@@ -912,6 +923,10 @@ PriceOpeningKind = Literal[
     "not_found",  # not this patient's / clinic's row, a broken link, an older version of the
     # consultation, or the consultation is suspended -> the usual opening
     "closed",  # UB2: the consultation is no longer live (cancelled) or already started
+    # UB2 fix round 1:
+    "already_abated",  # a drop already covered by an abatement told before: nothing changes
+    "sinal_on_day",  # sinal NOT paid: within CHOICE_MIN_LEAD, or the old Pix could not be
+    # voided - the sinal stays as it is and the clinic settles the value at the visit
 ]
 
 
@@ -940,10 +955,14 @@ ANSWER_OPENED = "opened"
 # The PAID refusals of `service_change.price_requote` that leave the notice UNANSWERED, so the
 # patient can open the link again later: a transient failure, or something else about this sinal
 # still waiting (the patient's answer to it comes first).
-_RETRY_REASONS = frozenset({"charge_failed", "deposit_not_paid"})
+# Fix round 1 (review M4): only a provider OUTAGE retries; a permanent refusal is final.
+_RETRY_REASONS = frozenset({"outage", "deposit_not_paid"})
 _PENDING_REASONS = frozenset({"adjustment_pending", "refund_question_pending", "choice_pending"})
-# The refusals that are final for this notice: the difference is settled on the day.
-_ON_THE_DAY_REASONS = frozenset({"collect_pending", "no_payment_account"})
+# The refusals that are final for this notice: the difference is settled on the day. The clinic
+# already collects one (`collect_pending`: its item exists); a PERMANENT refusal of the Pix of
+# the difference (`charge_failed`, `no_payment_account`) hands the difference to the clinic.
+_ON_THE_DAY_REASONS = frozenset({"collect_pending"})
+_HANDED_TO_CLINIC_REASONS = frozenset({"charge_failed", "no_payment_account"})
 
 
 async def open_price_notice(
@@ -965,18 +984,21 @@ async def open_price_notice(
     * Opened before (`answered_at` set, or a concurrent opening won the guarded claim) ->
       "pending", pointing at the earlier message: NEVER a second charge.
     * The consultation cancelled or already started -> "closed" ("nada muda").
-    * Starts within `service_change.CHOICE_MIN_LEAD` -> "too_close" (settled on the day).
+    * Starts within `service_change.CHOICE_MIN_LEAD` -> "too_close" (PAID: the difference is
+      settled on the day) / "sinal_on_day" (not paid yet: the sinal is settled at the visit).
     * PAID -> `service_change.price_requote`: Pix of only the difference (`mode="applied"`) ->
       "pix"; the refund question -> "refund_question"; abated -> "abated"; a small rise / back to
-      the price paid -> "unchanged". A difference the clinic already collects (`collect_due`) or
-      no payment account -> "too_close"; an unreadable price -> "unchanged".
+      the price paid -> "unchanged"; a drop already abated -> "already_abated". A difference the
+      clinic already collects (`collect_due`) -> "too_close"; a PERMANENT refusal of the Pix
+      (`charge_failed`, `no_payment_account`) -> "too_close" + `collect_due` + a
+      `service_diff_unpaid` item for the clinic; an unreadable price -> "unchanged".
     * AWAITING -> `deposit_lifecycle.requote_awaiting` (only with a readable price - a service
       switched off is not a price change, UB1 review I2): "voided" -> "requoted" (the caller
       runs `recharge_after_edit(..., reason="price_change")` after this commit); same amount ->
-      "unchanged".
-    * Transient failures (the provider down or refusing, a payment in flight) and another open
-      adjustment of the sinal -> "retry" / "pending" WITHOUT answering the notice (rolled back):
-      the same link works again later.
+      "unchanged"; "void_failed" -> "sinal_on_day" (+ a clinic item when the sinal went up).
+    * A provider OUTAGE, a payment in flight, and another open adjustment of the sinal ->
+      "retry" / "pending" WITHOUT answering the notice (rolled back): the same link works again
+      later.
 
     A decided opening marks the row answered (`answered_at=now`, `answer="opened"`). Logs: ids
     and kinds only."""
@@ -1035,7 +1057,9 @@ async def open_price_notice(
     ):
         return await _settle(session, PriceOpening(kind="unchanged", **base), log)
     if _as_utc(appointment.start_at) - _as_utc(now) < service_change.CHOICE_MIN_LEAD:
-        return await _settle(session, PriceOpening(kind="too_close", **base), log)
+        # Fix round 1 (review M5): an UNPAID sinal has no "difference" - the sinal is settled.
+        close = "too_close" if deposit.status == PixDepositStatus.PAID else "sinal_on_day"
+        return await _settle(session, PriceOpening(kind=close, **base), log)
     if deposit.status == PixDepositStatus.PAID:
         return await _open_paid(session, tenant, appointment, deposit, base, log, now=now)
     return await _open_awaiting(session, tenant, appointment, deposit, base, log, now=now)
@@ -1140,6 +1164,8 @@ async def _open_paid(
                 diff_cents=result.diff_cents,
                 **base,
             )
+        elif result.reason == "already_abated":  # fix round 1 (review M5): not "voltou"
+            opening = PriceOpening(kind="already_abated", diff_cents=0, **base)
         else:  # increase_free / no_change
             opening = PriceOpening(kind="unchanged", diff_cents=result.diff_cents, **base)
         return await _settle(session, opening, log)
@@ -1154,6 +1180,12 @@ async def _open_paid(
         return await _settle(session, PriceOpening(kind="closed", **base), log)
     if reason in _ON_THE_DAY_REASONS:
         return await _settle(session, PriceOpening(kind="too_close", **base), log)
+    if reason in _HANDED_TO_CLINIC_REASONS:
+        await _collect_paid_difference(
+            session, tenant, appointment, deposit, int(result.diff_cents or 0), now=now
+        )
+        opening = PriceOpening(kind="too_close", diff_cents=result.diff_cents, **base)
+        return await _settle(session, opening, log)
     # `price_unavailable` (or anything new): nothing to charge or return now.
     return await _settle(session, PriceOpening(kind="unchanged", **base), log)
 
@@ -1185,9 +1217,99 @@ async def _open_awaiting(
         opening = PriceOpening(kind="requoted", old_amount_cents=old_amount, **base)
         return await _settle(session, opening, log)
     if outcome == "unchanged":
-        return await _settle(session, PriceOpening(kind="unchanged", diff_cents=0, **base), log)
-    # "payment_in_flight" (decided as PAID on the next opening) / "void_failed".
+        # Fix round 1 (review M5): "voltou ao de antes" only when the sinal under the lock is
+        # still the unpaid one and the amount truly did not move; otherwise it left AWAITING
+        # meanwhile (expired, paid) and nothing is claimed about the price.
+        same = deposit.status == PixDepositStatus.AWAITING
+        opening = PriceOpening(kind="unchanged", diff_cents=0 if same else None, **base)
+        return await _settle(session, opening, log)
+    if outcome == "void_failed":
+        # Fix round 1 (review M4): the old Pix could not be voided (no account, provider) - it
+        # stays valid; the notice is closed and the clinic settles the value at the visit.
+        await _collect_unpaid_difference(session, tenant, appointment, deposit, old_amount)
+        return await _settle(session, PriceOpening(kind="sinal_on_day", **base), log)
+    # "payment_in_flight": decided as PAID on the next opening.
     return await _settle(session, PriceOpening(kind="retry", **base), log, commit=False)
+
+
+async def _collect_paid_difference(
+    session: AsyncSession,
+    tenant: Tenant,
+    appointment: Appointment,
+    deposit: PixDeposit,
+    diff_cents: int,
+    *,
+    now: datetime,
+) -> None:
+    """Fix round 1 (review M4): the Pix of the difference was refused for good (or there is no
+    payment account). Recorded exactly like an unpaid price rise (`collect_due`, mode
+    `applied`, the price change's `pending_edit`), so the sinal's arithmetic and every later
+    opening see it (`collect_pending`), plus ONE `service_diff_unpaid` item ("cobrar {valor}")
+    under `adjustment_queries.unpaid_item_key` - the key a cancellation closes. Never commits."""
+    if diff_cents <= 0:
+        return
+    held = await service_change.held_deposit_cents(session, deposit)
+    service = (appointment.appointment_type or service_change.DEFAULT_SERVICE_LABEL)[:120]
+    adjustment = DepositAdjustment(
+        id=uuid4(),
+        tenant_id=tenant.id,
+        deposit_id=deposit.id,
+        appointment_id=appointment.id,
+        kind=KIND_INCREASE,
+        mode=MODE_APPLIED,
+        status=STATUS_COLLECT_DUE,
+        old_service=service,
+        new_service=service,
+        pending_edit=service_change._price_change_edit(  # noqa: SLF001 - one shape, one place
+            appointment, held, held + diff_cents
+        ),
+        diff_cents=diff_cents,
+        resolved_at=now,
+    )
+    session.add(adjustment)
+    await session.flush()
+    await attention.open_attention_item(
+        session,
+        tenant_id=tenant.id,
+        reason=REASON_SERVICE_DIFF_UNPAID,
+        dedupe_key=adjustment_queries.unpaid_item_key(deposit.provider, adjustment.id),
+        provider=deposit.provider,
+        patient_id=deposit.patient_id,
+        amount_cents=diff_cents,
+        slot_start=appointment.start_at,
+        slot_end=appointment.end_at,
+        service_label=service,
+    )
+
+
+async def _collect_unpaid_difference(
+    session: AsyncSession,
+    tenant: Tenant,
+    appointment: Appointment,
+    deposit: PixDeposit,
+    old_amount: int,
+) -> None:
+    """Fix round 1 (review M4): the UNPAID sinal could not be re-quoted (its old Pix stays). When
+    the new sinal is HIGHER, the clinic gets ONE `service_diff_unpaid` item for the difference
+    (dedupe per price move: `price_awaiting:{consulta}:{antigo}:{novo}`); a lower one needs no
+    item (the visit's remaining price already accounts for the larger sinal). Never commits."""
+    new_amount = await requote_amount_cents(session, tenant=tenant, appointment=appointment)
+    if new_amount <= old_amount:
+        return
+    provider = deposit.provider or tenant.payment_provider or "asaas"
+    reference = f"price_awaiting:{appointment.id}:{old_amount}:{new_amount}"
+    await attention.open_attention_item(
+        session,
+        tenant_id=tenant.id,
+        reason=REASON_SERVICE_DIFF_UNPAID,
+        dedupe_key=attention.attention_dedupe_key(provider, reference, REASON_SERVICE_DIFF_UNPAID),
+        provider=provider,
+        patient_id=appointment.patient_id,
+        amount_cents=new_amount - old_amount,
+        slot_start=appointment.start_at,
+        slot_end=appointment.end_at,
+        service_label=appointment.appointment_type,
+    )
 
 
 def _when(start_at: datetime | None, zone: ZoneInfo) -> str | None:
@@ -1210,6 +1332,13 @@ PRICE_BACK_TEXT = "O valor da sua consulta voltou ao de antes; nada muda no seu 
 PRICE_SMALL_TEXT = "O valor da sua consulta mudou pouco; nada muda no seu sinal."
 PRICE_NOTHING_TEXT = "Nada muda no seu sinal por enquanto. Se tiver dúvida, fale com a clínica."
 PRICE_SENT_BEFORE_TEXT = "O que muda no seu sinal já foi enviado acima, nesta conversa."
+# Fix round 1 (review M5).
+PRICE_ALREADY_ABATED_TEXT = (
+    "A redução no valor da sua consulta já está descontada do seu sinal; nada muda."
+)
+PRICE_SINAL_ON_DAY_TEXT = (
+    "O sinal da sua consulta fica como está; a clínica acerta o valor no dia da consulta."
+)
 PRICE_ANSWER_ABOVE_TEXT = (
     "Antes, responda a mensagem acima sobre a diferença do sinal desta consulta."
 )
@@ -1273,6 +1402,10 @@ def price_opening_messages(opening: PriceOpening, *, tenant: Tenant) -> list[not
         return [notify.Text(PRICE_RETRY_TEXT)]
     if kind == "closed":
         return [notify.Text(PRICE_CLOSED_TEXT)]
+    if kind == "already_abated":
+        return [notify.Text(PRICE_ALREADY_ABATED_TEXT)]
+    if kind == "sinal_on_day":
+        return [notify.Text(PRICE_SINAL_ON_DAY_TEXT)]
     return []  # "requoted" (the new Pix speaks), "not_found" (the usual opening)
 
 

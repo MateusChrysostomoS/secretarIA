@@ -49,7 +49,10 @@ from secretaria.models.deposit_adjustment import (
     STATUS_COLLECT_DUE,
     DepositAdjustment,
 )
-from secretaria.models.payment_attention_item import REASON_SINAL_REQUOTE_FAILED
+from secretaria.models.payment_attention_item import (
+    REASON_SERVICE_DIFF_UNPAID,
+    REASON_SINAL_REQUOTE_FAILED,
+)
 from secretaria.models.pix_deposit import PixDepositStatus
 from secretaria.services.payments import (
     deposit_lifecycle,
@@ -248,7 +251,7 @@ async def test_the_provider_down_answers_retry_and_leaves_the_link_working(db, p
     tenant, patient, appointment, _deposit = await seed(db)
     rid = await add_notice(db, appointment)
     await reprice(db, tenant.id, "R$ 300,00")
-    provider.create_error = ProviderError("create_failed", status_code=500)
+    provider.create_error = ProviderError("create_failed", status_code=503, retryable=True)
 
     opening = await open_(db, tenant.id, rid, patient.id)
 
@@ -307,6 +310,44 @@ async def test_no_payment_account_settles_the_rise_on_the_day(db, provider):
     opening = await open_(db, tenant.id, rid, patient.id)
 
     assert opening.kind == "too_close" and provider.calls == []
+    await _assert_handed_to_clinic(db, rid, appointment)
+
+
+async def _assert_handed_to_clinic(db, rid, appointment):
+    """Fix round 1 (review M4): a permanent refusal closes the notice, records the difference
+    the clinic collects (`collect_due`) and opens ONE `service_diff_unpaid` item for it."""
+    assert (await notice(db, rid)).answered_at is not None
+    [adjustment] = await adjustments(db)
+    assert (adjustment.kind, adjustment.mode, adjustment.status, adjustment.diff_cents) == (
+        KIND_INCREASE,
+        MODE_APPLIED,
+        STATUS_COLLECT_DUE,
+        3000,
+    )
+    assert service_change.is_price_change(adjustment.pending_edit)
+    assert adjustment.pending_edit["new_sinal_cents"] == 9000
+    async with db() as session:
+        items = list(await session.scalars(select(PaymentAttentionItem)))
+    assert [(i.reason, i.amount_cents, i.slot_start is not None) for i in items] == [
+        (REASON_SERVICE_DIFF_UNPAID, 3000, True)
+    ]
+
+
+async def test_a_permanent_refusal_closes_the_notice_and_tells_the_clinic(db, provider):
+    tenant, patient, appointment, _deposit = await seed(db)
+    rid = await add_notice(db, appointment)
+    await reprice(db, tenant.id, "R$ 300,00")
+    provider.create_error = ProviderError("invalid_customer", status_code=400)
+
+    opening = await open_(db, tenant.id, rid, patient.id)
+
+    assert (opening.kind, opening.diff_cents) == ("too_close", 3000)
+    assert texts(opening, tenant) == [price_change.PRICE_TOO_CLOSE_TEXT]
+    await _assert_handed_to_clinic(db, rid, appointment)
+    # Opening again never charges nor opens a second item; a later price edit is refused
+    # while the clinic collects (`collect_pending`).
+    again = await open_(db, tenant.id, rid, patient.id)
+    assert again.kind == "pending" and provider.called("create_pix_charge") == 1
 
 
 # ------------------------------------------------------------------ a drop, sinal paid
@@ -367,8 +408,11 @@ async def test_a_rearmed_notice_never_abates_the_same_difference_twice(db, provi
 
     opening = await open_(db, tenant.id, rid, patient.id, now=NOW + timedelta(minutes=5))
 
-    assert (opening.kind, opening.diff_cents) == ("unchanged", 0)
-    assert texts(opening, tenant) == [price_change.PRICE_BACK_TEXT]
+    # Fix round 1 (review M5): the price did not "go back" - the drop was already abated.
+    assert opening.kind == "already_abated"
+    assert texts(opening, tenant) == [
+        "A redução no valor da sua consulta já está descontada do seu sinal; nada muda."
+    ]
     assert len(await adjustments(db)) == 1
 
 
@@ -736,3 +780,132 @@ async def test_the_sweep_does_not_mail_about_an_abatement_already_told(db, provi
     assert needed is False
     async with db() as session:
         assert await session.scalar(select(func.count()).select_from(DepositAdjustment)) == 1
+
+
+# ------------------------------------------------------------------ fix round 1 (review M3-M5)
+
+
+async def test_an_unpaid_sinal_within_an_hour_is_settled_at_the_visit(db, provider):
+    tenant, patient, appointment, deposit = await seed(db, awaiting=True)
+    rid = await add_notice(db, appointment)
+    await reprice(db, tenant.id, "R$ 300,00")
+
+    opening = await open_(db, tenant.id, rid, patient.id, now=START - timedelta(minutes=50))
+
+    assert opening.kind == "sinal_on_day"
+    [body] = texts(opening, tenant)
+    assert body == (
+        "O sinal da sua consulta fica como está; a clínica acerta o valor no dia da consulta."
+    )
+    assert "diferença" not in body
+    assert provider.calls == []
+
+
+async def test_an_unpaid_sinal_that_cannot_be_voided_is_closed_and_handed_to_the_clinic(
+    db, provider
+):
+    tenant, patient, appointment, deposit = await seed(db, awaiting=True)
+    rid = await add_notice(db, appointment)
+    await reprice(db, tenant.id, "R$ 300,00")  # R$ 60 -> R$ 90
+    provider.cancel_error = ProviderError("cannot_cancel", status_code=400)
+
+    opening = await open_(db, tenant.id, rid, patient.id)
+
+    assert opening.kind == "sinal_on_day"
+    assert (await notice(db, rid)).answered_at is not None
+    async with db() as session:
+        old = await session.get(PixDeposit, deposit.id)
+        items = list(await session.scalars(select(PaymentAttentionItem)))
+    assert (old.status, old.appointment_id) == (PixDepositStatus.AWAITING, appointment.id)
+    assert [(i.reason, i.amount_cents) for i in items] == [(REASON_SERVICE_DIFF_UNPAID, 3000)]
+    # Opening again: never a second item.
+    assert (await open_(db, tenant.id, rid, patient.id)).kind == "pending"
+    async with db() as session:
+        assert await session.scalar(select(func.count()).select_from(PaymentAttentionItem)) == 1
+
+
+async def test_an_unpaid_drop_that_cannot_be_voided_needs_no_item(db, provider):
+    tenant, patient, appointment, _deposit = await seed(db, awaiting=True)
+    rid = await add_notice(db, appointment)
+    await reprice(db, tenant.id, "R$ 100,00")
+    provider.cancel_error = ProviderError("cannot_cancel", status_code=400)
+
+    assert (await open_(db, tenant.id, rid, patient.id)).kind == "sinal_on_day"
+    async with db() as session:
+        assert await session.scalar(select(func.count()).select_from(PaymentAttentionItem)) == 0
+
+
+async def test_a_sinal_that_left_awaiting_under_the_lock_never_says_back_to_before(
+    db, provider, monkeypatch
+):
+    tenant, patient, appointment, _deposit = await seed(db, awaiting=True)
+    rid = await add_notice(db, appointment)
+    await reprice(db, tenant.id, "R$ 300,00")
+
+    async def _expired_meanwhile(session, *, tenant, appointment, deposit, now):
+        deposit.status = PixDepositStatus.EXPIRED
+        return "unchanged"
+
+    monkeypatch.setattr(price_change, "requote_awaiting", _expired_meanwhile)
+
+    opening = await open_(db, tenant.id, rid, patient.id)
+
+    assert (opening.kind, opening.diff_cents) == ("unchanged", None)
+    assert texts(opening, tenant) == [price_change.PRICE_NOTHING_TEXT]
+
+
+async def test_a_recharge_that_raises_still_tells_the_patient_and_the_clinic(
+    db, provider, monkeypatch
+):
+    tenant, patient, appointment, _deposit = await seed(db, awaiting=True)
+    rid = await add_notice(db, appointment)
+    await reprice(db, tenant.id, "R$ 300,00")
+    assert (await open_(db, tenant.id, rid, patient.id)).kind == "requoted"
+    sent: list = []
+
+    async def fake_deliver(session, tenant_, patient_, messages, **kw):
+        sent.extend(m.body for m in messages)
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(notify, "deliver", fake_deliver)
+    monkeypatch.setattr(deposit_lifecycle, "_recharge", _boom)
+
+    created = await deposit_lifecycle.recharge_after_edit(
+        tenant_id=tenant.id,
+        appointment_id=appointment.id,
+        old_amount_cents=6000,
+        reason="price_change",
+    )
+
+    assert created is None
+    assert sent == [
+        f"{deposit_lifecycle.PRICE_REQUOTE_OPENING_TEXT} "
+        f"{deposit_lifecycle.REQUOTE_CLINIC_WILL_CALL_TEXT}"
+    ]
+    async with db() as session:
+        items = list(await session.scalars(select(PaymentAttentionItem)))
+    assert [(i.reason, i.amount_cents) for i in items] == [(REASON_SINAL_REQUOTE_FAILED, 9000)]
+
+
+async def test_an_edit_recharge_that_raises_keeps_todays_behaviour(db, provider, monkeypatch):
+    """Characterization: the edit path (`reason="edit"`) is untouched by the fallback."""
+    tenant, patient, appointment, _deposit = await seed(db, awaiting=True)
+    sent: list = []
+
+    async def fake_deliver(session, tenant_, patient_, messages, **kw):
+        sent.extend(m.body for m in messages)
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(notify, "deliver", fake_deliver)
+    monkeypatch.setattr(deposit_lifecycle, "_recharge", _boom)
+    assert (
+        await deposit_lifecycle.recharge_after_edit(
+            tenant_id=tenant.id, appointment_id=appointment.id, old_amount_cents=6000
+        )
+        is None
+    )
+    assert sent == []

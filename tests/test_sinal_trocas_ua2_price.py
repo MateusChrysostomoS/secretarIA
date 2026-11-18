@@ -208,7 +208,8 @@ async def test_the_clinic_reads_what_the_price_change_does(db, provider):
 @pytest.mark.parametrize(
     ("failure", "reason"),
     [
-        (ProviderError("down", status_code=503, retryable=True), "charge_failed"),
+        # UB2 fix round 1: an outage is told apart from a permanent refusal.
+        (ProviderError("down", status_code=503, retryable=True), "outage"),
         (ProviderError("bad", status_code=400, retryable=False), "charge_failed"),
     ],
 )

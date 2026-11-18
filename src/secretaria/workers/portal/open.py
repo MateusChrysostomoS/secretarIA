@@ -19,6 +19,7 @@ from secretaria.models import (
     HandoverState,
     Message,
     MessageDirection,
+    MessageSender,
     Patient,
     Tenant,
     is_live_status,
@@ -332,6 +333,22 @@ async def _latest_message(session, conversation_id: UUID):
     ).first()
 
 
+async def _price_notice_already_shown(session, answered_at: datetime | None, latest) -> bool:
+    """TASK-085 R UB2 fix round 1: the price notice was answered and the conversation's LAST
+    message is a bot message written at or after that answer (stamps compared to the second:
+    the database's own clock may drop the fraction)."""
+    if answered_at is None or latest is None:
+        return False
+    message = await session.get(Message, latest.id)
+    if (
+        message is None
+        or message.direction != MessageDirection.OUTBOUND
+        or message.sender != MessageSender.BOT
+    ):
+        return False
+    return _as_utc(latest.created_at) >= _as_utc(answered_at).replace(microsecond=0)
+
+
 async def _brain_message_entry_decision(
     tenant_id: UUID,
     external_id: str,
@@ -374,13 +391,18 @@ async def _brain_message_entry_decision(
         if tenant is None:
             return None
         price_link = False
+        link_answered_at = None
         if explicit and entry_context.reminder_id is not None:
-            link_kind = await session.scalar(
-                select(AppointmentReminder.kind).where(
-                    AppointmentReminder.id == entry_context.reminder_id,
-                    AppointmentReminder.tenant_id == tenant_id,
+            link = (
+                await session.execute(
+                    select(AppointmentReminder.kind, AppointmentReminder.answered_at).where(
+                        AppointmentReminder.id == entry_context.reminder_id,
+                        AppointmentReminder.tenant_id == tenant_id,
+                    )
                 )
-            )
+            ).first()
+            link_kind = link.kind if link is not None else None
+            link_answered_at = link.answered_at if link is not None else None
             if link_kind is None:
                 # A broken link: no such row in this clinic -> an ordinary entry.
                 logger.info("brain_message_enter_broken_link", tenant_id=str(tenant_id))
@@ -473,6 +495,16 @@ async def _brain_message_entry_decision(
                 # UB2: the price action replaces the card; `open_price_notice` re-checks the
                 # row (owner, version, suspension) under the consultation lock.
                 appointment_id = None
+                if await _price_notice_already_shown(session, link_answered_at, latest):
+                    # Fix round 1 (review M1): a reload / tab switch still carries
+                    # `lembrete=`; the notice was answered and the bot spoke last, after it -
+                    # nothing new to say (a new patient message or a re-armed notice speaks).
+                    logger.info(
+                        "brain_message_enter_silent",
+                        reason="price_notice_already_shown",
+                        conversation_id=str(conversation.id),
+                    )
+                    return None
         if explicit and latest is not None and not price_link:
             message = await session.get(Message, latest.id)
             # Keep the current visible card on reload. If it has fallen out

@@ -908,7 +908,73 @@ async def recharge_after_edit(
             tenant_id=str(tenant_id),
             appointment_id=str(appointment_id),
         )
+        if reason == "price_change" and old_amount_cents is not None:
+            await _recharge_crashed(
+                tenant_id=tenant_id,
+                appointment_id=appointment_id,
+                old_amount_cents=old_amount_cents,
+                waba_token=waba_token,
+            )
         return None
+
+
+async def _recharge_crashed(
+    *,
+    tenant_id: UUID,
+    appointment_id: UUID,
+    old_amount_cents: int,
+    waba_token: str | None,
+) -> None:
+    """TASK-085 R UB2 fix round 1 (review M3): the price-change re-quote already voided the old
+    Pix and the recharge itself RAISED - the patient must never be left in silence with a dead
+    code. Fresh session: unless a new sinal exists after all, ONE `sinal_requote_failed` item
+    (the S2 path's own) and the short "Pix anterior cancelado ... a clínica vai falar com você"
+    line. Never raises."""
+    try:
+        async with async_session_factory() as session:
+            tenant = await session.get(Tenant, tenant_id)
+            appointment = await session.scalar(
+                select(Appointment).where(
+                    Appointment.id == appointment_id, Appointment.tenant_id == tenant_id
+                )
+            )
+            if tenant is None or appointment is None or appointment.patient_id is None:
+                return
+            patient = await session.get(Patient, appointment.patient_id)
+            if patient is None or patient.tenant_id != tenant.id:
+                return
+            if await get_deposit_for_appointment(session, appointment.id) is not None:
+                return  # the new sinal exists: its own message went out
+            try:
+                new_cents = await requote_amount_cents(
+                    session, tenant=tenant, appointment=appointment
+                )
+            except Exception:  # noqa: BLE001 - the item still goes out, without an amount
+                new_cents = 0
+            await _recharge_failed(
+                session,
+                tenant,
+                patient,
+                appointment,
+                new_cents,
+                reason="price_change",
+                old_amount_cents=old_amount_cents,
+            )
+            await _tell_patient(
+                session,
+                tenant,
+                patient,
+                f"{PRICE_REQUOTE_OPENING_TEXT} {REQUOTE_CLINIC_WILL_CALL_TEXT}",
+                waba_token,
+            )
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001 - logged; nothing else left to try
+        logger.warning(
+            "pix_requote_recharge_fallback_failed",
+            error_type=type(exc).__name__,
+            tenant_id=str(tenant_id),
+            appointment_id=str(appointment_id),
+        )
 
 
 async def _recharge_failed(

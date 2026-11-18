@@ -1647,7 +1647,9 @@ async def preview_price_requote(
         return decision
     left = decision.diff_cents - await _outstanding_abatement_cents(session, deposit)
     if left <= 0:
-        return ChangeDecision(action="no_change", diff_cents=0)
+        # UB2 fix round 1: the drop is already covered by an abatement told before - the price
+        # did not "go back"; `reason` lets the opening say so.
+        return ChangeDecision(action="no_change", diff_cents=0, reason="already_abated")
     days_until = (as_utc(appointment.start_at) - as_utc(now)).total_seconds() / 86400
     min_days = tenant.pix_difference_refund_min_days
     asks = left >= MIN_DIFFERENCE_CENTS and days_until >= (
@@ -1703,13 +1705,15 @@ async def price_requote(
 
     * `increase_charge` -> a Pix of ONLY the difference, `mode="applied"` in ANY timing (the
       consultation stays as it is; unpaid -> `collect_due` + `service_diff_unpaid` +
-      `price_unpaid_text`) -> "applied_awaiting_payment". The provider down or refusing ->
-      `blocked/charge_failed`, no account -> `blocked/no_payment_account` (nothing recorded: the
-      opening says "tente de novo");
+      `price_unpaid_text`) -> "applied_awaiting_payment". The provider DOWN -> `blocked/outage`
+      (a retry may work); a PERMANENT refusal -> `blocked/charge_failed`; no account ->
+      `blocked/no_payment_account` (nothing recorded; UB2 fix round 1: the two refusals carry
+      `diff_cents` so the opening can hand the difference to the clinic);
     * `decrease_ask` -> an `asked` decrease (the refund question, `svcdiffyes|`/`svcdiffno|`) ->
       "asked";
     * `decrease_keep` -> a `clinic_kept` decrease ("abatida na consulta") -> "applied_now";
-    * `increase_free` / `no_change` -> "applied_now", no adjustment.
+    * `increase_free` / `no_change` -> "applied_now", no adjustment (`reason="already_abated"`
+      when a drop is fully covered by an abatement already told - UB2 fix round 1).
 
     Every adjustment carries `pending_edit = {"source": "price_change", "old_sinal_cents",
     "new_sinal_cents", "expected"}` and names the service on both sides."""
@@ -1775,10 +1779,16 @@ async def price_requote(
             log=log,
         )
         if isinstance(charged, str):
-            reason = "no_payment_account" if charged == "no_payment_account" else "charge_failed"
+            # UB2 fix round 1: `outage` (a retry may work) is kept apart from a PERMANENT refusal
+            # (`charge_failed`, `no_payment_account`); the refusals carry the difference so the
+            # caller can hand it to the clinic.
+            reason = charged if charged in ("no_payment_account", "outage") else "charge_failed"
             logger.info("price_requote_blocked", reason=reason, **log)
             return ServiceChangeResult(
-                kind="blocked", reason=reason, decision="increase_charge"
+                kind="blocked",
+                reason=reason,
+                decision="increase_charge",
+                diff_cents=decision.diff_cents,
             )
         session.add(
             DepositAdjustment(
@@ -1841,7 +1851,10 @@ async def price_requote(
 
     logger.info("price_requote_unchanged", decision=decision.action, **log)
     return ServiceChangeResult(
-        kind="applied_now", diff_cents=decision.diff_cents, decision=decision.action
+        kind="applied_now",
+        diff_cents=decision.diff_cents,
+        decision=decision.action,
+        reason=decision.reason,  # UB2 fix round 1: "already_abated" on a netted drop
     )
 
 
