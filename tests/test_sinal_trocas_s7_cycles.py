@@ -40,6 +40,9 @@ from secretaria.models import (
 from secretaria.models.deposit_adjustment import (
     MODE_APPLIED,
     MODE_SUSPEND,
+    OLD_SLOT_RELEASED,
+    OLD_SLOT_REPLACED,
+    OLD_SLOT_RESTORED,
     STATUS_AWAITING_CHOICE,
     STATUS_AWAITING_PAYMENT,
     STATUS_CANCELLED,
@@ -57,6 +60,7 @@ from secretaria.services.payments import (
     deposit_lifecycle,
     event_processor,
     notify,
+    old_slot,
     service_change,
 )
 from secretaria.services.payments.provider import ChargeState, CreatedCharge, PaymentStatus
@@ -75,7 +79,6 @@ from tests._reminder_fixtures import db  # noqa: F401
 from tests._reminders_v2 import WA_ID, FakeWhatsAppClient, reload_appointment
 from tests.payments_support import make_event
 from tests.test_hub_edit_appointment import _iso, _paid_world, _post, _world, provider  # noqa: F401
-from tests.test_sinal_trocas_s1_paid import FakeCalendar as AgendaDouble
 from tests.test_sinal_trocas_s4_hub import _events
 
 SUSPENDED_409 = {
@@ -332,6 +335,22 @@ async def _suspended_by_the_patient(db, acting, monkeypatch, client):
     return world, adjustment, bruno, new_start
 
 
+def _wire_agendas(monkeypatch, world, bruno):
+    """UA2 (D-R10): the agendas the old event leaves and comes back to - the clinic's (the old
+    consultation, `evt-1`) and Dr. Bruno's - as the UA1 Google double (ids kept; a re-sent id
+    answers the same event)."""
+    from tests.test_sinal_trocas_ua1_old_slot import _Calendar
+
+    clinic, doctor = _Calendar(), _Calendar()
+    clinic.add("evt-1", world.start_at, world.start_at + timedelta(minutes=30))
+
+    async def _agenda(session, tenant, appointment):
+        return doctor if appointment.professional_id == bruno else clinic
+
+    monkeypatch.setattr(service_change, "calendar_for_appointment", _agenda)
+    return clinic, doctor
+
+
 async def _expired(db, world, adjustment, engine_messages):
     """The sweep after the Pix's deadline: voided, the patient gets the three buttons."""
     engine_messages.clear()
@@ -348,9 +367,12 @@ async def _expired(db, world, adjustment, engine_messages):
 async def test_a_before_change_kept_by_the_patient(
     client: AsyncClient, db, acting, charges, monkeypatch, engine_messages
 ):
-    world, adjustment, _bruno, _new = await _suspended_by_the_patient(
+    world, adjustment, bruno, _new = await _suspended_by_the_patient(
         db, acting, monkeypatch, client
     )
+    # UA2: the old event leaves the agenda (the sweep) and the tap brings it back; the tap
+    # itself is the patient's worker (UA3: `old_slot.restore_old_slot(trigger="tap")`).
+    _wire_agendas(monkeypatch, world, bruno)
     await _expired(db, world, adjustment, engine_messages)
 
     await _tap(world, "svcdiffkeep", adjustment.id)
@@ -371,13 +393,11 @@ async def test_a_before_change_resent_and_paid_moves_the_visit_to_the_new_doctor
     world, adjustment, bruno, new_start = await _suspended_by_the_patient(
         db, acting, monkeypatch, client
     )
+    # UA2: the sweep takes the old event off the clinic's agenda (`retry_vacates`, standing in
+    # for the post-commit vacate of the patient's path) before the Pix expires.
+    clinic_agenda, bruno_agenda = _wire_agendas(monkeypatch, world, bruno)
     await _expired(db, world, adjustment, engine_messages)
-    clinic_agenda, bruno_agenda = AgendaDouble("clinic"), AgendaDouble("bruno")
-
-    async def _agenda(session, tenant, appointment):
-        return bruno_agenda if appointment.professional_id == bruno else clinic_agenda
-
-    monkeypatch.setattr(service_change, "calendar_for_appointment", _agenda)
+    assert clinic_agenda.cancelled == ["evt-1"]
 
     await _tap(world, "svcdiffresend", adjustment.id)
 
@@ -387,6 +407,7 @@ async def test_a_before_change_resent_and_paid_moves_the_visit_to_the_new_doctor
         STATUS_AWAITING_PAYMENT,
         MODE_SUSPEND,
     )
+    assert resent.old_slot == OLD_SLOT_RELEASED  # UA2: the new change owns the vacated slot
     assert resent.provider_charge_id == "pay_diff_2"
     assert sent()[-1][2].rstrip().endswith("```000201second```")
     [hold] = await _rows(db, BookingHold)
@@ -400,8 +421,11 @@ async def test_a_before_change_resent_and_paid_moves_the_visit_to_the_new_doctor
     row = await reload_appointment(db, world.appointment.id)
     assert (row.appointment_type, row.professional_id) == ("Avaliação", bruno)
     assert _utc(row.start_at) == _utc(new_start)
-    assert row.google_event_id == "bruno-new"  # created on the new doctor's agenda ...
-    assert len(bruno_agenda.created) == 1 and clinic_agenda.cancelled == ["evt-1"]  # ... old gone
+    # UA2 (D-R10): a NEW event on the new doctor's agenda; the old one left at the suspension.
+    assert row.google_event_id == old_slot.paid_event_id(resent.id, calendar=bruno_agenda)
+    assert len(bruno_agenda.created) == 1 and clinic_agenda.cancelled == ["evt-1"]
+    async with db() as session:
+        assert (await session.get(DepositAdjustment, resent.id)).old_slot == OLD_SLOT_REPLACED
     assert await _rows(db, BookingHold) == []
     assert not await _suspended(db, world)
     async with db() as session:
@@ -433,21 +457,28 @@ async def test_a_before_change_cancel_both_cancels_the_old_visit(
 async def test_a_before_change_without_an_answer_keeps_the_old_visit(
     client: AsyncClient, db, acting, charges, monkeypatch, engine_messages
 ):
-    world, adjustment, _bruno, _new = await _suspended_by_the_patient(
+    world, adjustment, bruno, _new = await _suspended_by_the_patient(
         db, acting, monkeypatch, client
     )
+    clinic_agenda, _doctor_agenda = _wire_agendas(monkeypatch, world, bruno)
     current = await _expired(db, world, adjustment, engine_messages)
+    assert clinic_agenda.cancelled == ["evt-1"]  # UA2: the old event left (the sweep's retry)
     engine_messages.clear()
 
     await _sweep(db, _utc(current.expires_at) + timedelta(minutes=1))
 
     [kept] = await _adjustments(db)
     assert kept.status == STATUS_KEPT_OLD
+    assert kept.old_slot == OLD_SLOT_RESTORED
     assert await _rows(db, BookingHold) == []
     [[notice]] = engine_messages
     assert notice.body == service_change.kept_old_notice_text("Consulta")
     row = await reload_appointment(db, world.appointment.id)
     assert (row.appointment_type, row.status) == ("Consulta", AppointmentStatus.SCHEDULED)
+    # UA2 (D-R8/D-R11): the old visit came back under a NEW event id, on its old slot.
+    restored = old_slot.restore_event_id(kept.id, calendar=clinic_agenda)
+    assert row.google_event_id == restored
+    assert [event["id"] for event in clinic_agenda.created] == [restored]
     assert not await _suspended(db, world)
 
 

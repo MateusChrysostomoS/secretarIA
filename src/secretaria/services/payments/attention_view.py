@@ -76,9 +76,23 @@ REASON_TEXT = {
         "cobrar {value} do paciente."
     ),
     # TASK-085 R D-R5 (contrato.md §5): the change was applied at once; its Pix expired unpaid.
+    # 3rd round (mapa-u §4.6): also a price raised by the clinic (D-R14).
     "service_diff_unpaid": (
-        "Troca para serviço mais caro feita; o Pix da diferença venceu sem pagamento: "
-        "cobrar {value} do paciente."
+        "A consulta ficou mais cara (troca ou novo preço) e o Pix da diferença venceu sem "
+        "pagamento: cobrar {value} do paciente."
+    ),
+    # TASK-085 R 3rd round (D-R11): the old slot of a suspended change was taken; the paid sinal
+    # (the item's amount) still counts.
+    "service_diff_rebook_due": (
+        "O paciente não pagou a diferença de uma troca e o horário da consulta antiga foi "
+        "ocupado. O sinal pago ({value}) continua valendo: remarque a consulta com o paciente "
+        "ou cancele."
+    ),
+    # TASK-085 R 3rd round (D-R14): no e-mail to tell the patient, or the e-mail could not be
+    # sent (UB1: 3 failed attempts reuse this reason).
+    "price_change_no_email": (
+        "O preço da consulta mudou e o sinal deste paciente precisa de ajuste, mas não foi "
+        "possível avisá-lo por e-mail (sem e-mail cadastrado ou o envio falhou): fale com ele."
     ),
     # TASK-085 R (S7a): an undone edit left a Pix of the difference nobody saw at the provider.
     "unseen_charge_to_void": (
@@ -99,6 +113,7 @@ _AMOUNT_VALUE_REASONS = frozenset(
     {
         "service_diff_collect_due",
         "service_diff_unpaid",
+        "service_diff_rebook_due",
         "unseen_charge_to_void",
         "sinal_requote_failed",
     }

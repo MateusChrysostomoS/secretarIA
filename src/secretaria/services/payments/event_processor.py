@@ -96,6 +96,10 @@ class EventResult:
     # TASK-085 R (fix round 1, M4): a SUSPENDED change ended without being applied - the old
     # visit is visible again, so its reminders are re-planned after the commit.
     replan_appointment_id: UUID | None = None
+    # TASK-085 R 3rd round (D-R10/D-R11): a SUSPENDED change refused / not applicable while its
+    # old consultation is still ahead went to `restoring` - after the commit the old consultation
+    # is brought back (`service_change.restore_and_tell(trigger="not_applied")`, its own notice).
+    restore_adjustment_id: UUID | None = None
 
 
 def expected_reference(deposit: PixDeposit) -> str | None:
@@ -739,19 +743,37 @@ async def _on_adjustment_paid(
     )
     if state.external_reference != str(adjustment.id):
         await item(REASON_REFERENCE_MISMATCH)
-        await service_change.move_adjustment(
-            session, adjustment, from_status=adj.STATUS_AWAITING_PAYMENT,
-            to_status=refused_to, now=now,
+        restore = None
+        if adjustment.mode == adj.MODE_SUSPEND:
+            replan, restore = await _end_unapplied_suspend(
+                session, adjustment, appointment, from_status=adj.STATUS_AWAITING_PAYMENT,
+                now=now,
+            )
+        else:
+            await service_change.move_adjustment(
+                session, adjustment, from_status=adj.STATUS_AWAITING_PAYMENT,
+                to_status=refused_to, now=now,
+            )
+            replan = await _end_difference_hold(session, adjustment)
+        return EventResult(
+            "adjustment_reference_mismatch",
+            replan_appointment_id=replan,
+            restore_adjustment_id=restore,
         )
-        replan = await _end_difference_hold(session, adjustment)
-        return EventResult("adjustment_reference_mismatch", replan_appointment_id=replan)
     if paid < adjustment.diff_cents:
         await item(REASON_AMOUNT_UNDER)
-        await service_change.move_adjustment(
-            session, adjustment, from_status=adj.STATUS_AWAITING_PAYMENT,
-            to_status=refused_to, now=now,
-        )
-        replan = await _end_difference_hold(session, adjustment)
+        restore = None
+        if adjustment.mode == adj.MODE_SUSPEND:
+            replan, restore = await _end_unapplied_suspend(
+                session, adjustment, appointment, from_status=adj.STATUS_AWAITING_PAYMENT,
+                now=now,
+            )
+        else:
+            await service_change.move_adjustment(
+                session, adjustment, from_status=adj.STATUS_AWAITING_PAYMENT,
+                to_status=refused_to, now=now,
+            )
+            replan = await _end_difference_hold(session, adjustment)
         # Follow-up C: the patient is told the exact shortfall ONCE, after the commit (a later
         # event of this charge finds the adjustment no longer awaiting -> `_adjustment_paid_late`
         # -> replay, no notice). No new Pix for the rest, no refund by us. TASK-085 R (M3): for
@@ -764,6 +786,7 @@ async def _on_adjustment_paid(
             not_applied_adjustment_id=adjustment.id if known else None,
             not_applied_paid_cents=paid if known else None,
             replan_appointment_id=replan,
+            restore_adjustment_id=restore,
         )
 
     if not await service_change.move_adjustment(
@@ -795,16 +818,23 @@ async def _on_adjustment_paid(
         return EventResult("adjustment_applied", applied_adjustment_id=adjustment.id)
     fields = await service_change.apply_paid_adjustment(session, tenant, adjustment, now=now)
     if fields is None:
-        await service_change.move_adjustment(
-            session, adjustment, from_status=adj.STATUS_APPLIED,
-            to_status=adj.STATUS_CANCELLED, now=now,
-        )
-        replan = await _end_difference_hold(session, adjustment)
+        restore = None
+        if adjustment.mode == adj.MODE_SUSPEND:
+            replan, restore = await _end_unapplied_suspend(
+                session, adjustment, appointment, from_status=adj.STATUS_APPLIED, now=now
+            )
+        else:
+            await service_change.move_adjustment(
+                session, adjustment, from_status=adj.STATUS_APPLIED,
+                to_status=adj.STATUS_CANCELLED, now=now,
+            )
+            replan = await _end_difference_hold(session, adjustment)
         await item(REASON_ORPHAN_PAYMENT)
         return EventResult(
             "adjustment_not_applicable",
             not_applied_adjustment_id=adjustment.id,
             replan_appointment_id=replan,
+            restore_adjustment_id=restore,
         )
     if paid > adjustment.diff_cents:
         await item(REASON_AMOUNT_OVER)
@@ -821,6 +851,31 @@ async def _end_difference_hold(
         return None
     await booking_hold.release_difference_hold_in(session, adjustment.id)
     return adjustment.appointment_id
+
+
+async def _end_unapplied_suspend(
+    session: AsyncSession,
+    adjustment: adj.DepositAdjustment,
+    appointment: Appointment | None,
+    *,
+    from_status: str,
+    now: datetime,
+) -> tuple[UUID | None, UUID | None]:
+    """TASK-085 R 3rd round (D-R10/D-R11, mapa-u §1.2 and §7 item 9): a paid `suspend` change
+    that will not be applied (wrong reference, paid short, the change no longer fits). Its old
+    consultation left the agenda while the Pix waited, so - when it is still ahead - the change
+    goes to `restoring` (still open, the new window's hold released) and the old consultation is
+    brought back after the commit: returns `(None, adjustment.id)`
+    (`EventResult.restore_adjustment_id`). A consultation gone or already started has nothing to
+    bring back: `cancelled` as before and `(appointment_id, None)` (the re-plan of M4)."""
+    if service_change.visit_upcoming(appointment, now) and await (
+        service_change.reopen_as_restoring(session, adjustment, from_status=from_status)
+    ):
+        return None, adjustment.id
+    await service_change.move_adjustment(
+        session, adjustment, from_status=from_status, to_status=adj.STATUS_CANCELLED, now=now
+    )
+    return await _end_difference_hold(session, adjustment), None
 
 
 async def _adjustment_paid_late(
@@ -856,10 +911,13 @@ async def run_post_commit(
     *,
     redis=None,
     enqueue: Callable[[str, str], Awaitable[None]] | None = None,
+    now: datetime | None = None,
 ) -> None:
     """Everything an event asks for AFTER its transaction committed: patient notices, the
     clinic alert, the hand-off to fulfillment. Each step is best-effort and isolated - a
-    failure here never undoes the money state and never blocks a sibling step."""
+    failure here never undoes the money state and never blocks a sibling step. `now` (TASK-085
+    R 3rd round): the instant the steps that decide something use (bringing an old consultation
+    back, the choice's buttons); None = the wall clock."""
     from secretaria.services.payments import deposit_lifecycle
 
     if result.notify_paid_deposit_id is not None:
@@ -901,10 +959,22 @@ async def run_post_commit(
     if result.unpaid_adjustment_id is not None and result.unpaid_outcome is not None:
         try:
             await service_change.run_unpaid_followup(
-                session, tenant, result.unpaid_adjustment_id, result.unpaid_outcome
+                session, tenant, result.unpaid_adjustment_id, result.unpaid_outcome, now=now
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("payment_adjustment_notice_failed", error_type=type(exc).__name__)
+    if result.restore_adjustment_id is not None:
+        # After the neutral "não foi possível concluir a troca" above: bring the old one back.
+        try:
+            await service_change.restore_and_tell(
+                session,
+                tenant,
+                result.restore_adjustment_id,
+                trigger="not_applied",
+                now=now or datetime.now(UTC),
+            )
+        except Exception as exc:  # noqa: BLE001 - `restoring` stays; the sweep retries
+            logger.warning("payment_adjustment_restore_failed", error_type=type(exc).__name__)
     if result.replan_appointment_id is not None:
         await service_change.followup_kept_old(tenant.id, result.replan_appointment_id)
     if result.alert_kind is not None:

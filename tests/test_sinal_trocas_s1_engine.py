@@ -15,7 +15,7 @@ tests/test_service_change.py (sinal of 30 %: Consulta R$ 200 -> R$ 60 paid; Aval
 * the patient's texts (D-R7 labels are S0's).
 """
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -450,7 +450,8 @@ def test_the_card_line_depends_on_the_timing():
     before = service_change.confirm_card_line_text("increase_charge", 3000, timing="before")
     after = service_change.confirm_card_line_text("increase_charge", 3000, timing="after")
     assert "R$ 30,00" in before and "R$ 30,00" in after
-    assert "guardad" in before and "reservad" in before
+    # UA2 (D-R10): the current consultation LEAVES the agenda; only the new time is reserved.
+    assert "sai da agenda" in before and "reservad" in before and "guardad" not in before
     assert "só muda depois do pagamento" in before
     assert "na hora" in after and "só muda" not in after
     assert service_change.confirm_card_line_text("increase_charge", 3000) == after
@@ -460,13 +461,23 @@ def test_the_card_line_depends_on_the_timing():
     assert "a unidade só muda" in unit
 
 
-def test_the_suspension_pix_says_both_slots_are_kept():
+def test_the_suspension_pix_says_the_old_visit_leaves_the_agenda():
+    """UA2 (D-R10, mapa-u §4.6): the old consultation leaves the agenda; only the new time is
+    reserved - until the Pix's deadline in the clinic's zone when given."""
     text = service_change.difference_pix_text(
         "Avaliação", 3000, "000201pix", 30, held_new_slot=True
     )
     assert "R$ 30,00" in text and "só muda" in text
-    assert "reservados" in text and "fim do prazo" in text and "perguntamos" in text
+    assert "sai da agenda" in text and "fica reservado até o fim do prazo do Pix" in text
+    assert "reservados" not in text  # never "os dois horários reservados"
+    for option in ("voltar para a consulta antiga", "outro horário", "reenviar o Pix", "cancelar"):
+        assert option in text
     assert "continua como está" not in text  # unpaid, the patient is ASKED (D-R4)
+    timed = service_change.difference_pix_text(
+        "Avaliação", 3000, "000201pix", 30, held_new_slot=True,
+        expires_at=datetime(2026, 10, 26, 17, 30, tzinfo=UTC), tz="America/Sao_Paulo",
+    )
+    assert "fica reservado até 14:30." in timed
     assert text.rstrip().endswith("```000201pix```")
     # Fix round 1 (M5): the default never promises a reserved slot (the legacy fallback).
     legacy = service_change.difference_pix_text("Avaliação", 3000, "000201pix", 30)
@@ -489,13 +500,20 @@ def test_the_choice_message_spells_the_three_options_out():
     assert "R$ 30,00" in text and "Consulta" in text and "Avaliação" in text
     for label in ("Manter a antiga", "Reenviar o Pix", "Cancelar ambas"):
         assert label in text
-    assert "manter" in text.lower() and "não responder" in text.lower()
+    # UA2 (D-R8/D-R11, mapa-u §4.6): no answer -> we TRY to bring the old one back.
+    assert "não responder a tempo, tentamos voltar para a consulta antiga" in text
+    taken = service_change.choice_message_text("Consulta", "Avaliação", 3000, old_slot_free=False)
+    assert "Manter a antiga" not in taken and "Outro horário" in taken
+    assert "O sinal pago continua valendo" in taken
+    assert "a clínica vai falar com você para remarcar" in taken
+    no_resend = service_change.choice_message_text("Consulta", "Avaliação", 3000, resend=False)
+    assert "Reenviar o Pix" not in no_resend
 
 
 @pytest.mark.parametrize(
     "kind",
     ["kept_old", "resent", "cancel_old", "no_window", "resend_failed", "already_decided",
-     "not_found"],
+     "not_found", "rebook", "slot_taken", "restore_failed"],
 )
 def test_every_choice_outcome_has_one_answer(kind):
     text = service_change.choice_answer_text(
@@ -506,7 +524,7 @@ def test_every_choice_outcome_has_one_answer(kind):
 
 def test_kept_collect_and_blocked_texts():
     kept = service_change.kept_old_notice_text("Consulta")
-    assert "Consulta" in kept and "Mantivemos" in kept
+    assert kept == "Pronto! Sua consulta antiga voltou para a agenda, como era: Consulta."
     collect = service_change.unpaid_collect_text("Avaliação", 3000)
     assert "R$ 30,00" in collect and "Avaliação" in collect
     assert "Pix" in service_change.blocked_text("choice_pending")
