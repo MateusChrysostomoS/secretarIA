@@ -40,7 +40,8 @@ from secretaria.models import (
 from secretaria.models.deposit_adjustment import DepositAdjustment
 from secretaria.services import reminder_hooks
 from secretaria.services.agenda_visibility import AgendaViewer
-from secretaria.services.calendar import GoogleTokenRevokedError
+from secretaria.services.calendar import CalendarUnavailableError, GoogleTokenRevokedError
+from secretaria.services.local_calendar import LocalCalendarService
 from secretaria.services.payments import old_slot, service_change
 from tests._agenda_viewer import view_as
 from tests._r7_support import (  # noqa: F401
@@ -90,8 +91,11 @@ REBOOK_DUE = {
 def agenda(monkeypatch, db) -> list[tuple]:
     """`old_slot` opens its own sessions (vacate, discard) on the test DB and finds the
     consultation's agenda where the hub finds it (`FakeCalendar`, one per label). The double
-    learns idempotent ids (`event_id=`), `get_event`, and canned answers per id. Returns every
-    agenda write, in order: (label, "create"|"cancel", event id)."""
+    learns ids chosen by the caller EXACTLY as the Google adapter treats them
+    (`CalendarService.create_event`): an id already live is handed back (idempotent), an id
+    deleted before raises `CalendarUnavailableError("event id is taken")`; `get_event` answers
+    what it holds (cancelled ones too). Returns every agenda write, in order:
+    (label, "create"|"cancel", event id)."""
     calls: list[tuple] = []
     monkeypatch.setattr(old_slot, "async_session_factory", db)
 
@@ -106,13 +110,24 @@ def agenda(monkeypatch, db) -> list[tuple]:
         event_id=None,
     ):
         self._gate()
+        events = self.__dict__.setdefault("events", {})
+        if event_id is not None and event_id in events:
+            existing = events[event_id]
+            if existing["status"] == "cancelled":
+                raise CalendarUnavailableError("event id is taken")
+            calls.append((self.label, "create", event_id))
+            return dict(existing)
         self.created.append((start, end, summary, description))
         eid = event_id or f"evt-new-{self.label}-{len(self.created)}"
         calls.append((self.label, "create", eid))
-        answer = getattr(self, "answers", {}).get(eid)
-        if answer is not None:
-            return answer
-        return {"id": eid, "htmlLink": f"https://calendar.example/{eid}"}
+        events[eid] = {
+            "id": eid,
+            "status": "confirmed",
+            "htmlLink": f"https://calendar.example/{eid}",
+            "start": {"dateTime": start.isoformat()},
+            "end": {"dateTime": end.isoformat()},
+        }
+        return dict(events[eid])
 
     async def cancel_event(self, event_id):
         self._gate()
@@ -120,9 +135,13 @@ def agenda(monkeypatch, db) -> list[tuple]:
             raise RuntimeError("google down")
         self.cancelled.append(event_id)
         calls.append((self.label, "cancel", event_id))
+        events = self.__dict__.setdefault("events", {})
+        if event_id in events:
+            events[event_id]["status"] = "cancelled"
 
     async def get_event(self, event_id):
-        return None
+        found = self.__dict__.get("events", {}).get(event_id)
+        return dict(found) if found is not None else None
 
     monkeypatch.setattr(FakeCalendar, "create_event", create_event)
     monkeypatch.setattr(FakeCalendar, "cancel_event", cancel_event)
@@ -196,6 +215,20 @@ async def _reschedule(client, world, body: dict):
 
 def _naive(value):
     return value.replace(tzinfo=None) if value is not None else None
+
+
+def _parse(text: str) -> datetime:
+    return datetime.fromisoformat(text.replace("Z", "+00:00"))
+
+
+def _hub_id(adjustment, body: dict, calendar=None) -> str:
+    """The `difhub` id of a rebook of `adjustment` at the body's window (review I1)."""
+    return hub_calendar._hub_rebook_event_id(
+        adjustment.id,
+        calendar=calendar if calendar is not None else FakeCalendar.get("tenant"),
+        start=_parse(body["new_start"]),
+        end=_parse(body["new_end"]),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -432,7 +465,8 @@ async def test_the_clinic_books_a_visit_whose_old_slot_was_taken_on_a_new_slot(
     response = await _reschedule(client, world, body)
 
     assert response.status_code == 200, response.text
-    expected_id = f"difhub{adjustment.id.hex}"
+    expected_id = _hub_id(adjustment, body)
+    assert expected_id.startswith(f"difhub{adjustment.id.hex}")
     assert agenda == [("tenant", "create", expected_id)]  # nothing to move: created anew
     [created] = FakeCalendar.get("tenant").created
     assert created[2] == "Consulta - Maria"
@@ -468,7 +502,8 @@ async def test_after_the_rebook_the_visit_is_an_ordinary_one(
 ):
     world = await _lost_world(db, acting, client)
     adjustment = await _adjustment(db)
-    assert (await _reschedule(client, world, _reschedule_body(world))).status_code == 200
+    body = _reschedule_body(world)
+    assert (await _reschedule(client, world, body)).status_code == 200
     agenda.clear()
 
     again = await _reschedule(client, world, _reschedule_body(world, days=3))
@@ -476,7 +511,7 @@ async def test_after_the_rebook_the_visit_is_an_ordinary_one(
     assert again.status_code == 200, again.text
     assert agenda == []  # moved with update_event, as any visit
     row = await reload_appointment(db, world.appointment.id)
-    assert row.google_event_id == f"difhub{adjustment.id.hex}"
+    assert row.google_event_id == _hub_id(adjustment, body)
 
 
 async def test_the_old_event_is_gone_before_the_new_one_is_created(
@@ -491,12 +526,13 @@ async def test_the_old_event_is_gone_before_the_new_one_is_created(
         await session.commit()
     adjustment = await _adjustment(db)
     agenda.clear()
+    body = _reschedule_body(world)
 
-    response = await _reschedule(client, world, _reschedule_body(world))
+    response = await _reschedule(client, world, body)
 
     assert response.status_code == 200, response.text
     assert agenda[0] == ("tenant", "cancel", "evt-1")
-    assert agenda[-1] == ("tenant", "create", f"difhub{adjustment.id.hex}")
+    assert agenda[-1] == ("tenant", "create", _hub_id(adjustment, body))
     assert (await _adjustment(db)).status == "rebooked"
 
 
@@ -564,12 +600,13 @@ async def test_a_change_decided_meanwhile_rolls_back_and_deletes_the_new_event(
 
     monkeypatch.setattr(old_slot, "finish_rebook", _lost_race)
     agenda.clear()
+    body = _reschedule_body(world)
 
-    response = await _reschedule(client, world, _reschedule_body(world))
+    response = await _reschedule(client, world, body)
 
     assert response.status_code == 409, response.text
     assert response.json()["detail"]["code"] == "appointment_changed"
-    eid = f"difhub{adjustment.id.hex}"
+    eid = _hub_id(adjustment, body)
     assert agenda == [("tenant", "create", eid), ("tenant", "cancel", eid)]
     row = await reload_appointment(db, world.appointment.id)
     assert row.google_event_id == "evt-1" and row.status == AppointmentStatus.SCHEDULED
@@ -584,7 +621,8 @@ async def test_a_twin_that_won_with_the_same_event_keeps_it(
     event - the loser never deletes it."""
     world = await _lost_world(db, acting, client)
     adjustment = await _adjustment(db)
-    eid = f"difhub{adjustment.id.hex}"
+    body = _reschedule_body(world)
+    eid = _hub_id(adjustment, body)
 
     async def _twin_won(session, **kwargs):
         await set_appointment(db, world.appointment.id, google_event_id=eid)
@@ -593,7 +631,7 @@ async def test_a_twin_that_won_with_the_same_event_keeps_it(
     monkeypatch.setattr(old_slot, "finish_rebook", _twin_won)
     agenda.clear()
 
-    response = await _reschedule(client, world, _reschedule_body(world))
+    response = await _reschedule(client, world, body)
 
     assert response.status_code == 409, response.text
     assert ("tenant", "cancel", eid) not in agenda
@@ -610,58 +648,152 @@ async def test_a_database_error_after_the_create_deletes_the_new_event(
 
     monkeypatch.setattr(old_slot, "finish_rebook", _boom)
     agenda.clear()
+    body = _reschedule_body(world)
 
-    response = await _reschedule(client, world, _reschedule_body(world))
+    response = await _reschedule(client, world, body)
 
     assert response.status_code == 503, response.text
     assert "tente de novo" in response.json()["detail"]["message"]
-    eid = f"difhub{adjustment.id.hex}"
+    eid = _hub_id(adjustment, body)
     assert agenda == [("tenant", "create", eid), ("tenant", "cancel", eid)]
     assert (await reload_appointment(db, world.appointment.id)).google_event_id == "evt-1"
     assert (await _adjustment(db)).status == "old_slot_lost"
 
 
-async def test_a_spent_event_id_falls_back_to_a_plain_create(
-    client: AsyncClient, db, acting, provider, agenda, replans
+def test_the_hub_rebook_id_is_one_per_window():
+    """Review I1: UA1's `difhub` id + 16 hex digits of the window - the same window is the same id
+    (a double click is idempotent), another window is another id; base32hex only; `loc_` on the
+    own agenda; short enough for Google and for `calendar_events.id` (64)."""
+    import re
+
+    adjustment_id = uuid4()
+    a = datetime(2026, 12, 1, 13, 0, tzinfo=UTC)
+    b = a + timedelta(hours=1)
+    google = FakeCalendar("tenant")
+    own = LocalCalendarService.__new__(LocalCalendarService)
+
+    def make(calendar, start, end=None):
+        return hub_calendar._hub_rebook_event_id(
+            adjustment_id, calendar=calendar, start=start, end=end or start + timedelta(minutes=30)
+        )
+
+    first = make(google, a)
+    assert first == make(google, a.astimezone(hub_calendar.ZoneInfo("America/Sao_Paulo")))
+    assert first != make(google, b) and first != make(google, a, a + timedelta(minutes=40))
+    assert first.startswith(f"difhub{adjustment_id.hex}")
+    assert re.fullmatch(r"difhub[0-9a-v]+", first) and len(first) <= 64
+    local = make(own, a)
+    assert re.fullmatch(r"loc_difhub[0-9a-v]+", local) and len(local) <= 64
+
+
+async def test_a_retry_after_a_compensated_failure_books_the_visit(
+    client: AsyncClient, db, acting, provider, agenda, replans, monkeypatch
 ):
-    """An earlier attempt created and deleted the deterministic id (an agenda never re-uses
-    one): the agenda answers it `cancelled`, so a plain create - as any hub booking."""
+    """Review I1 (the reviewer's probe): an attempt created the event, the write failed and the
+    event was deleted - Google never re-issues that id ("event id is taken"). The clinic tries
+    the SAME window again: the spent id is detected and a plain create books the visit."""
     world = await _lost_world(db, acting, client)
     adjustment = await _adjustment(db)
-    eid = f"difhub{adjustment.id.hex}"
-    FakeCalendar.get("tenant").answers = {eid: {"id": eid, "status": "cancelled"}}
+    body = _reschedule_body(world)
+    eid = _hub_id(adjustment, body)
+    real_finish = old_slot.finish_rebook
+
+    async def _boom(session, **kwargs):
+        raise RuntimeError("db blip")
+
+    monkeypatch.setattr(old_slot, "finish_rebook", _boom)
+    assert (await _reschedule(client, world, body)).status_code == 503
+    assert ("tenant", "cancel", eid) in agenda
+    monkeypatch.setattr(old_slot, "finish_rebook", real_finish)
     agenda.clear()
 
-    response = await _reschedule(client, world, _reschedule_body(world))
+    response = await _reschedule(client, world, body)
 
     assert response.status_code == 200, response.text
-    assert [c[2] for c in agenda] == [eid, "evt-new-tenant-2"]
-    assert (await reload_appointment(db, world.appointment.id)).google_event_id == (
-        "evt-new-tenant-2"
-    )
+    [(_, _, fresh)] = agenda  # the refused id is not a write; one plain create
+    assert fresh != eid and fresh.startswith("evt-new-tenant")
+    row = await reload_appointment(db, world.appointment.id)
+    assert row.google_event_id == fresh and row.status == AppointmentStatus.RESCHEDULED
+    assert (await _adjustment(db)).status == "rebooked"
 
 
-async def test_the_same_id_at_another_time_is_a_twin_in_flight(
+async def test_an_orphan_left_by_a_dead_attempt_never_blocks_another_window(
     client: AsyncClient, db, acting, provider, agenda, replans
 ):
+    """Review I1: a process died after creating the event at window A (never written on the
+    row). The clinic now books window B: another id, booked; the orphan is not the visit's."""
     world = await _lost_world(db, acting, client)
     adjustment = await _adjustment(db)
-    eid = f"difhub{adjustment.id.hex}"
-    other = world.start_at + timedelta(days=5)
-    FakeCalendar.get("tenant").answers = {
-        eid: {
-            "id": eid,
-            "start": {"dateTime": other.isoformat()},
-            "end": {"dateTime": (other + timedelta(minutes=30)).isoformat()},
-        }
+    first, other = _reschedule_body(world, days=2), _reschedule_body(world, days=4)
+    calendar = FakeCalendar.get("tenant")
+    orphan = _hub_id(adjustment, first)
+    await calendar.create_event(  # the dead attempt's event
+        _parse(first["new_start"]), _parse(first["new_end"]), "Consulta - Maria",
+        event_id=orphan,
+    )
+    agenda.clear()
+
+    response = await _reschedule(client, world, other)
+
+    assert response.status_code == 200, response.text
+    booked = _hub_id(adjustment, other)
+    assert booked != orphan and agenda == [("tenant", "create", booked)]
+    row = await reload_appointment(db, world.appointment.id)
+    assert row.google_event_id == booked
+    assert _naive(row.start_at) == _naive(_parse(other["new_start"]))
+    assert (await _adjustment(db)).status == "rebooked"
+
+
+async def test_a_double_click_on_the_same_window_books_once(
+    client: AsyncClient, db, acting, provider, agenda, replans
+):
+    """The same window is the same id: if the first request's event already exists, the second
+    gets it back (no second event); after the first committed, the visit is an ordinary one."""
+    world = await _lost_world(db, acting, client)
+    adjustment = await _adjustment(db)
+    body = _reschedule_body(world)
+    eid = _hub_id(adjustment, body)
+    calendar = FakeCalendar.get("tenant")
+    await calendar.create_event(  # the twin request's event, its transaction not yet in
+        _parse(body["new_start"]), _parse(body["new_end"]), "Consulta - Maria", event_id=eid
+    )
+    agenda.clear()
+
+    response = await _reschedule(client, world, body)
+
+    assert response.status_code == 200, response.text
+    assert len(calendar.created) == 1  # handed back, never created twice
+    assert (await reload_appointment(db, world.appointment.id)).google_event_id == eid
+
+
+async def test_a_window_without_an_offset_is_read_on_the_clinics_clock(
+    client: AsyncClient, db, acting, provider, agenda, replans
+):
+    """Review M3: like every agenda read, a naive time is the clinic's (São Paulo, UTC-3): the
+    event, the row and the id all use the same instant."""
+    world = await _lost_world(db, acting, client)
+    adjustment = await _adjustment(db)
+    local = (world.start_at + timedelta(days=2)).astimezone(
+        hub_calendar.ZoneInfo("America/Sao_Paulo")
+    )
+    naive = {
+        "new_start": local.replace(tzinfo=None).isoformat(),
+        "new_end": (local + timedelta(minutes=30)).replace(tzinfo=None).isoformat(),
+    }
+    aware = {
+        "new_start": local.astimezone(UTC).isoformat(),
+        "new_end": (local + timedelta(minutes=30)).astimezone(UTC).isoformat(),
     }
     agenda.clear()
 
-    response = await _reschedule(client, world, _reschedule_body(world))
+    response = await _reschedule(client, world, naive)
 
-    assert response.status_code == 409, response.text
-    assert ("tenant", "cancel", eid) not in agenda  # never deleted: it may be the twin's
-    assert (await _adjustment(db)).status == "old_slot_lost"
+    assert response.status_code == 200, response.text
+    [(start, end, _summary, _description)] = FakeCalendar.get("tenant").created
+    assert start == local.astimezone(UTC) and end == local.astimezone(UTC) + timedelta(minutes=30)
+    row = await reload_appointment(db, world.appointment.id)
+    assert _naive(row.start_at) == _naive(local.astimezone(UTC))
+    assert row.google_event_id == _hub_id(adjustment, aware)
 
 
 async def test_a_window_somebody_pays_for_is_refused_after_the_old_event_left(
@@ -752,6 +884,58 @@ async def test_the_clinic_cancels_a_visit_whose_old_slot_was_taken(
     assert response.json()["deposit_outcome"] is not None
 
 
+async def test_a_patient_rebook_during_the_cancel_wins(
+    client: AsyncClient, db, acting, provider, agenda, monkeypatch
+):
+    """Review M1: the patient's "Outro horário" commits while the hub deletes the old event - the
+    row now points at the patient's NEW event. Under the row lock the cancel sees it: 409,
+    nothing cancelled, the patient's event untouched."""
+    world = await _lost_world(db, acting, client)
+    adjustment = await _adjustment(db)
+    moved_to = world.start_at + timedelta(days=3)
+    patient_event = f"difmove{adjustment.id.hex}"
+    discarded: list = []
+
+    async def _discard(tenant_id, adjustment_id):
+        discarded.append(adjustment_id)
+
+    monkeypatch.setattr(old_slot, "discard_restore_event", _discard)
+    calendar = FakeCalendar.get("tenant")
+    plain_cancel = FakeCalendar.cancel_event
+
+    async def cancel_while_the_patient_rebooks(self, event_id):
+        await plain_cancel(self, event_id)
+        if event_id == "evt-1":  # the patient's rebook commits right now (UA3's finish_rebook)
+            async with db() as session:
+                row = (await session.scalars(select(DepositAdjustment))).one()
+                row.status, row.old_slot = "rebooked", "rebooked"
+                await session.commit()
+            await set_appointment(
+                db,
+                world.appointment.id,
+                google_event_id=patient_event,
+                start_at=moved_to,
+                end_at=moved_to + timedelta(minutes=30),
+                status=AppointmentStatus.RESCHEDULED,
+            )
+
+    monkeypatch.setattr(FakeCalendar, "cancel_event", cancel_while_the_patient_rebooks)
+    agenda.clear()
+
+    response = await client.post(
+        f"{CALENDAR}/appointments/{world.appointment.id}/cancel", json={"confirm": True}
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "appointment_changed"
+    row = await reload_appointment(db, world.appointment.id)
+    assert row.status == AppointmentStatus.RESCHEDULED and row.google_event_id == patient_event
+    assert patient_event not in calendar.cancelled
+    assert (await _adjustment(db)).status == "rebooked"
+    assert discarded == []
+    assert (await _deposit(db)).status.value == "confirmado_pago"
+
+
 async def test_a_plain_cancel_never_looks_for_a_restore_event(
     client: AsyncClient, db, acting, provider, monkeypatch
 ):
@@ -786,6 +970,23 @@ async def test_the_held_window_of_a_suspended_change_says_what_it_would_do(
     assert row["kind"] == "difference"
     assert row["appointment_id"] == str(world.appointment.id)
     assert row["change_summary"] == "Consulta → Avaliação"
+
+
+async def test_another_doctors_change_is_not_described_to_a_restricted_viewer(
+    client: AsyncClient, db, acting, provider
+):
+    """Review M2: a doctor who sees only his own agenda still sees the held window (as before) but
+    not what another doctor's consultation would change - the rule of the "rebook" rows."""
+    world = await _suspended_world(db, acting, client)
+    async with db() as session:
+        doctor = Professional(id=uuid4(), tenant_id=world.tenant.id, name="Dra. Outra")
+        session.add(doctor)
+        await session.commit()
+    view_as(AgendaViewer("own", doctor.id))
+
+    [row] = (await client.get(f"{CALENDAR}/awaiting-payment", params=_window(world))).json()
+
+    assert row["kind"] == "difference" and row["change_summary"] is None
 
 
 async def test_a_visit_whose_old_slot_was_taken_is_listed_for_the_clinic(

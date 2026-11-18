@@ -32,6 +32,7 @@ with every active doctor's.
 """
 
 import asyncio
+import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
@@ -1117,16 +1118,28 @@ async def list_awaiting_payment(
                 DepositAdjustment.id,
                 DepositAdjustment.appointment_id,
                 DepositAdjustment.pending_edit,
-            ).where(
+                Appointment.professional_id,
+            )
+            .outerjoin(
+                Appointment,
+                and_(
+                    Appointment.id == DepositAdjustment.appointment_id,
+                    Appointment.tenant_id == tenant.id,
+                ),
+            )
+            .where(
                 DepositAdjustment.tenant_id == tenant.id,
                 DepositAdjustment.id.in_(adjustment_ids),
                 DepositAdjustment.mode == MODE_SUSPEND,
                 DepositAdjustment.status.in_(SUSPENDED_STATUSES),
             )
         )
+        # Review M2: what the change would do is said only to a viewer who sees the
+        # consultation's doctor (the same rule as the "rebook" rows and GET /events); the held
+        # window itself stays listed for everyone, as before.
         differences = {
-            adjustment_id: (appointment_id, pending_edit)
-            for adjustment_id, appointment_id, pending_edit in rows
+            adjustment_id: (appointment_id, pending_edit if viewer.sees(owner_id) else None)
+            for adjustment_id, appointment_id, pending_edit, owner_id in rows
         }
     # D-R11: ONE more tenant-scoped query - the consultations whose old slot was taken, in the
     # window, still live, of a doctor the viewer sees.
@@ -1386,6 +1399,48 @@ async def cancel_preview(
     )
 
 
+async def _recheck_rebook_due_cancel(
+    session: AsyncSession,
+    tenant: Tenant,
+    appointment_id: UUID,
+    adjustment_id: UUID,
+    deleted_event_id: str | None,
+) -> None:
+    """Lock the row (consultation first, like every writer of a change) and confirm the cancel
+    of an `old_slot_lost` visit still applies: the row is live, still points at the event the
+    route deleted, and that change is still the one suspending it. 409 `appointment_changed`
+    otherwise (the session is rolled back; nothing was written)."""
+    locked = await session.scalar(
+        select(Appointment)
+        .where(Appointment.id == appointment_id, Appointment.tenant_id == tenant.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    change = (
+        await adjustment_queries.open_suspension(
+            session, tenant_id=tenant.id, appointment_id=appointment_id
+        )
+        if locked is not None
+        else None
+    )
+    if (
+        locked is not None
+        and locked.status in LIVE_APPOINTMENT_STATUSES
+        and (locked.google_event_id or "") == (deleted_event_id or "")
+        and change is not None
+        and change.id == adjustment_id
+        and change.status == STATUS_OLD_SLOT_LOST
+    ):
+        return
+    await session.rollback()
+    logger.info(
+        "hub_cancel_rebook_due_changed",
+        appointment_id=str(appointment_id),
+        adjustment_id=str(adjustment_id),
+    )
+    raise HTTPException(status.HTTP_409_CONFLICT, _detail(*_REBOOK_CHANGED))
+
+
 @router.post("/appointments/{appointment_id}/cancel", response_model=AppointmentCancelRead)
 async def cancel_appointment(
     appointment_id: str,
@@ -1428,6 +1483,14 @@ async def cancel_appointment(
                 "A consulta não foi cancelada; tente de novo em instantes."
             ) from exc
 
+    if rebook_due_id is not None:
+        # Review M1: the patient's "Outro horário" may have moved this row to a NEW event while
+        # the old one was being deleted. Under the row lock, the row must still point at the
+        # event just deleted and still wait for this `old_slot_lost` change - else 409, nothing
+        # cancelled (what was deleted is the old event, already off the agenda).
+        await _recheck_rebook_due_cancel(
+            session, tenant, appt.id, rebook_due_id, appt.google_event_id
+        )
     previous_status = appt.status
     appt.status = AppointmentStatus.CANCELLED
     appt.updated_at = datetime.now(UTC)
@@ -2002,29 +2065,52 @@ _REBOOK_FAILED = (
 )
 
 
-def _written_window(event: dict) -> tuple[datetime, datetime] | None:
-    """The [start, end) an agenda write answered (Google's `{"dateTime": ...}` or a plain ISO
-    string), or None when the answer does not say (a test double) or cannot be read."""
+def _clinic_window(tenant: Tenant, start: datetime, end: datetime) -> tuple[datetime, datetime]:
+    """[start, end) as aware UTC. A value without an offset is read on the clinic's clock - as the
+    agendas themselves read it (`CalendarService._ensure_tz`, the own agenda) - so the event, the
+    row and the rebook id all see the same instant (review M3)."""
+    tz = ZoneInfo(tenant.timezone or "America/Sao_Paulo")
 
-    def _one(value) -> datetime | None:
-        if isinstance(value, dict):
-            value = value.get("dateTime")
-        if not isinstance(value, str):
-            return None
-        try:
-            return as_utc(datetime.fromisoformat(value))
-        except ValueError:
-            return None
+    def _one(value: datetime) -> datetime:
+        aware = value if value.tzinfo is not None else value.replace(tzinfo=tz)
+        return aware.astimezone(UTC)
 
-    start, end = _one(event.get("start")), _one(event.get("end"))
-    return (start, end) if start is not None and end is not None else None
+    return _one(start), _one(end)
+
+
+def _hub_rebook_event_id(
+    adjustment_id: UUID, *, calendar, start: datetime, end: datetime
+) -> str:
+    """The id of the event the clinic's rebook of `adjustment_id` creates at [start, end) (UTC).
+
+    UA1's `old_slot.rebook_event_id(source="hub")` (`difhub<hex>`, `loc_` on the own agenda) plus
+    16 hex digits of the window (review I1): a double click on the SAME window is the same id
+    (idempotent: the agenda hands the event back), while another window - or a retry after an
+    attempt whose event was created and then deleted (an agenda never re-uses an id) - is a fresh
+    one. Only 0-9a-f are added, so the id stays in Google's base32hex (a-v, 0-9); at most
+    `loc_` + 6 + 32 + 16 = 58 characters (Google: 5-1024; `calendar_events.id`: 64)."""
+    window = f"{start.astimezone(UTC).isoformat()}|{end.astimezone(UTC).isoformat()}"
+    digest = hashlib.sha256(f"{adjustment_id}|{window}".encode()).hexdigest()[:16]
+    return old_slot.rebook_event_id(adjustment_id, calendar=calendar, source="hub") + digest
+
+
+async def _event_id_spent(calendar, event_id: str) -> bool:
+    """Whether `event_id` is an event somebody already DELETED on this agenda (the agenda answers
+    it `cancelled`, and Google refuses to create it again: "event id is taken"). False when the
+    agenda cannot say."""
+    try:
+        existing = await calendar.get_event(event_id)
+    except Exception as exc:  # noqa: BLE001 - cannot tell: the caller reports its own failure
+        logger.warning("hub_rebook_event_unreadable", error_type=type(exc).__name__)
+        return False
+    return bool(existing) and str(existing.get("status") or "") == "cancelled"
 
 
 async def _discard_unless_kept(
     session: AsyncSession, calendar, tenant_id: UUID, appointment_id: UUID, event_id: str
 ) -> None:
     """Compensation of a rebook that did not stand: delete the `difhub` event created for it -
-    unless the consultation points at it now (a twin request with the same deterministic id
+    unless the consultation points at it now (a twin request - same window, so the same id -
     won). Never raises (`old_slot.discard_event`)."""
     try:
         current = await session.scalar(
@@ -2063,8 +2149,10 @@ async def _rebook_lost_slot(
        agenda failed) or 409 (the change was decided elsewhere meanwhile); nothing created.
     2. The new window with the hub's own rules (a slot somebody is paying for is 409, the
        doctor's other clinic only warns - an encaixe stays allowed), then the `difhub` event
-       (`old_slot.rebook_event_id(source="hub")`, idempotent) on the agenda that owns the
-       consultation, OUTSIDE any transaction. A refusal there is 502 with nothing changed.
+       (`_hub_rebook_event_id`: one id per window, idempotent for a double click) on the agenda
+       that owns the consultation, OUTSIDE any transaction, with a PLAIN `create_event` like
+       every hub write (an exclusive write would refuse an encaixe). A refusal there is 502 with
+       nothing changed. A window without an offset is read on the clinic's clock.
     3. ONE transaction: the row locked, start/end/RESCHEDULED written, then
        `old_slot.finish_rebook(source="hub")` (event id/link on the row, `rebooked`, hold
        released, the clinic's item closed). True -> commit; False (decided meanwhile) -> rollback
@@ -2074,6 +2162,7 @@ async def _rebook_lost_slot(
     (`register_reschedule` is not called) and the reminders follow the new time."""
     tenant_id, appointment_id, adjustment_id = tenant.id, appt.id, change.id
     log = {"appointment_id": str(appointment_id), "adjustment_id": str(adjustment_id)}
+    new_start, new_end = _clinic_window(tenant, body.new_start, body.new_end)
 
     # 1. The old event off the agenda (commits the session it gets: nothing is pending here).
     if not await old_slot.ensure_old_event_gone(
@@ -2107,17 +2196,15 @@ async def _rebook_lost_slot(
     await _refuse_if_slot_is_held(
         session,
         tenant,
-        body.new_start,
-        body.new_end,
+        new_start,
+        new_end,
         professional_id=appt.professional_id if appt.professional_id else "any",
     )
     calendar = None
     try:
         owner = await _owning_calendar(session, tenant, appt)
         calendar = await calendar_at_unit(session, owner, tenant_id, appt.unit_id)
-        conflicts_other_agenda = await overlaps_other_agenda(
-            calendar, body.new_start, body.new_end
-        )
+        conflicts_other_agenda = await overlaps_other_agenda(calendar, new_start, new_end)
         patient = await _patient_of(session, tenant, appt)
         summary = service_change.agenda_summary(appt, patient.name if patient else None)
         description = build_event_description(
@@ -2127,23 +2214,31 @@ async def _rebook_lost_slot(
             **await booking_unit_fields(session, tenant_id, appt.unit_id, appt.professional_id),
         )
         await session.commit()  # end the reads: nothing open while the agenda answers
-        wanted = old_slot.rebook_event_id(adjustment_id, calendar=calendar, source="hub")
-        event = await calendar.create_event(
-            start=body.new_start,
-            end=body.new_end,
-            summary=summary,
-            description=description,
-            event_id=wanted,
+        wanted = _hub_rebook_event_id(
+            adjustment_id, calendar=calendar, start=new_start, end=new_end
         )
-        if str(event.get("status") or "") == "cancelled":
-            # The deterministic id was used and deleted by an earlier attempt that did not stand
-            # (an agenda never re-uses an id): a plain create, as every hub booking does.
-            logger.warning("hub_rebook_event_id_spent", **log)
+        try:
             event = await calendar.create_event(
-                start=body.new_start,
-                end=body.new_end,
+                start=new_start,
+                end=new_end,
                 summary=summary,
                 description=description,
+                event_id=wanted,
+            )
+        except GoogleTokenRevokedError:
+            raise
+        except Exception:
+            # Google refuses an id it already deleted ("event id is taken"); anything else is a
+            # real failure.
+            if not await _event_id_spent(calendar, wanted):
+                raise
+            event = {"id": wanted, "status": "cancelled"}
+        if str(event.get("status") or "") == "cancelled":
+            # An earlier attempt at THIS window created the event and deleted it (it did not
+            # stand): the id is spent for good, so a plain create, as every hub booking does.
+            logger.warning("hub_rebook_event_id_spent", **log)
+            event = await calendar.create_event(
+                start=new_start, end=new_end, summary=summary, description=description
             )
     except HTTPException:
         raise
@@ -2156,14 +2251,12 @@ async def _rebook_lost_slot(
             "Nada foi alterado; tente de novo em instantes."
         ) from exc
     event_id = str(event.get("id") or "").strip()
-    written = _written_window(event)
-    if not event_id or (
-        written is not None and written != (as_utc(body.new_start), as_utc(body.new_end))
-    ):
-        # The same deterministic id answered another window: a twin request of this very change
-        # is placing it elsewhere right now. Never delete it (it may become the consultation's).
-        logger.warning("hub_rebook_twin_in_flight", **log)
-        raise HTTPException(status.HTTP_409_CONFLICT, _detail(*_REBOOK_CHANGED))
+    if not event_id:
+        logger.error("hub_rebook_event_without_id", **log)
+        raise _calendar_unavailable(
+            "Não foi possível criar o evento na agenda. "
+            "Nada foi alterado; tente de novo em instantes."
+        )
 
     # 3. The row and the change, in ONE transaction.
     now = datetime.now(UTC)
@@ -2178,8 +2271,8 @@ async def _rebook_lost_slot(
         previous_status = None
         if locked is not None and locked.status in LIVE_APPOINTMENT_STATUSES:
             previous_status = locked.status
-            locked.start_at = body.new_start
-            locked.end_at = body.new_end
+            locked.start_at = new_start
+            locked.end_at = new_end
             locked.status = AppointmentStatus.RESCHEDULED
             locked.updated_at = now
             won = await old_slot.finish_rebook(
@@ -2203,7 +2296,7 @@ async def _rebook_lost_slot(
             old_status=previous_status,
             new_status=AppointmentStatus.RESCHEDULED,
             source=SOURCE_HUB,
-            idempotency_key=f"rebook:{adjustment_id}:{body.new_start.isoformat()}",
+            idempotency_key=f"rebook:{adjustment_id}:{new_start.isoformat()}",
         )
         await session.commit()
     except HTTPException:
