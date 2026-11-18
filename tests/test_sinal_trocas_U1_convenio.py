@@ -376,7 +376,11 @@ def test_the_payment_copy_module_is_gone():
 
 
 # --------------------------------------------------------------------------
-# The hub: no toggle, no flag out, an older Portal's flag is not refused
+# The hub - one-release compat (fix round 1, review I2): every plan read says
+# `charge_deposit: true` (the truth: every convênio pays the sinal) whatever the legacy row holds,
+# and the old PATCH toggle is a tenant-scoped no-op, so an older screen (secretarIA-frontend
+# /configuracao, a not-yet-redeployed Portal) shows ON and a click snaps back instead of erroring.
+# TASK-085 D-R12 compat - remove after secretarIA-frontend /configuracao drops the switch.
 # --------------------------------------------------------------------------
 
 
@@ -405,15 +409,24 @@ async def hub(db):
     app.dependency_overrides.pop(get_current_tenant, None)
 
 
-async def test_hub_plans_carry_no_sinal_flag_and_an_old_portal_flag_is_ignored(
+async def test_hub_plans_always_say_the_sinal_is_charged_and_an_old_flag_is_ignored(
     client: AsyncClient, hub, db
 ):
+    async with db() as session:
+        # A row saved while the "não cobra sinal" option existed.
+        session.add(TenantInsurancePlan(tenant_id=hub, catalog_id=AMIL, charge_deposit=False))
+        await session.commit()
     saved = await client.put(
         "/tenants/me/insurance-plans",
-        json={"plans": [{"catalog_id": str(UNIMED), "charge_deposit": False}]},
+        json={
+            "plans": [
+                {"catalog_id": str(UNIMED), "charge_deposit": False},
+                {"catalog_id": str(AMIL), "charge_deposit": False},
+            ]
+        },
     )
     assert saved.status_code == 200, saved.text
-    assert "charge_deposit" not in saved.json()[0]
+    assert [plan["charge_deposit"] for plan in saved.json()] == [True, True]
     custom = await client.post(
         "/tenants/me/insurance-plans/custom",
         json={
@@ -423,33 +436,78 @@ async def test_hub_plans_carry_no_sinal_flag_and_an_old_portal_flag_is_ignored(
         },
     )
     assert custom.status_code == 201, custom.text
-    assert "charge_deposit" not in custom.json()
+    assert custom.json()["charge_deposit"] is True
     listed = await client.get("/tenants/me/insurance-plans")
-    assert all("charge_deposit" not in plan for plan in listed.json())
+    assert [plan["charge_deposit"] for plan in listed.json()] == [True, True, True]
     async with db() as session:
-        stored = (
-            await session.scalars(
-                select(TenantInsurancePlan.charge_deposit).where(
-                    TenantInsurancePlan.tenant_id == hub
+        stored = sorted(
+            (
+                await session.scalars(
+                    select(TenantInsurancePlan.charge_deposit).where(
+                        TenantInsurancePlan.tenant_id == hub
+                    )
                 )
-            )
-        ).all()
-    # The old Portal's "no" was not written: the flag is ignored, never set.
-    assert stored == [True, True]
+            ).all()
+        )
+    # The old screen's "no" was never written; the legacy False is kept but never read.
+    assert stored == [False, True, True]
 
 
-async def test_hub_has_no_sinal_toggle_route(client: AsyncClient, hub, db):
+async def test_hub_professional_plans_always_say_the_sinal_is_charged(
+    client: AsyncClient, hub, db
+):
     async with db() as session:
-        plan = TenantInsurancePlan(tenant_id=hub, catalog_id=UNIMED)
-        session.add(plan)
+        tenant = await session.get(Tenant, hub)
+        tenant.insurance_mode = "independent"
+        doctor = Professional(id=uuid4(), tenant_id=hub, name="Dra. Ana", is_active=True)
+        session.add(doctor)
+        await session.flush()
+        session.add(
+            ProfessionalInsurancePlan(
+                professional_id=doctor.id,
+                tenant_id=hub,
+                custom_name="Plano da Ana",
+                custom_payment_note="Nota.",
+                charge_deposit=False,
+            )
+        )
         await session.commit()
+    got = await client.get(f"/tenants/me/professionals/{doctor.id}/insurance-plans")
+    assert got.status_code == 200, got.text
+    selectable = got.json()["selectable"]
+    assert any(plan["name"] == "Plano da Ana" for plan in selectable)
+    assert {plan["charge_deposit"] for plan in selectable} == {True}
+
+
+async def test_hub_toggle_is_a_tenant_scoped_no_op(client: AsyncClient, hub, db):
+    async with db() as session:
+        mine = TenantInsurancePlan(tenant_id=hub, catalog_id=UNIMED, charge_deposit=False)
+        other_clinic, _p = await _clinic(session)
+        foreign = TenantInsurancePlan(tenant_id=other_clinic.id, catalog_id=UNIMED)
+        session.add_all([mine, foreign])
+        await session.commit()
+
     response = await client.patch(
-        f"/tenants/me/insurance-plans/{plan.id}", json={"charge_deposit": False}
+        f"/tenants/me/insurance-plans/{mine.id}", json={"charge_deposit": False}
     )
-    assert response.status_code in (404, 405)
+    assert response.status_code == 200, response.text
+    assert response.json()["id"] == str(mine.id)
+    assert response.json()["charge_deposit"] is True
+
+    for bad in (str(foreign.id), str(uuid4()), "not-a-uuid"):
+        refused = await client.patch(
+            f"/tenants/me/insurance-plans/{bad}", json={"charge_deposit": True}
+        )
+        assert refused.status_code == 404, (bad, refused.text)
+
+    async with db() as session:
+        # Nothing written: the body's value is ignored, the legacy value stays as it was.
+        assert (await session.get(TenantInsurancePlan, mine.id)).charge_deposit is False
+        assert (await session.get(TenantInsurancePlan, foreign.id)).charge_deposit is True
 
 
-def test_the_agenda_plan_has_no_sinal_flag():
+def test_the_agenda_plan_always_says_the_sinal_is_charged():
     from secretaria.schemas.calendar import CalendarInsurancePlanRead
 
-    assert set(CalendarInsurancePlanRead.model_fields) == {"id", "name"}
+    assert set(CalendarInsurancePlanRead.model_fields) == {"id", "name", "charge_deposit"}
+    assert CalendarInsurancePlanRead(id="p", name="Unimed").charge_deposit is True

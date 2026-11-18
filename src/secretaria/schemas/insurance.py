@@ -6,6 +6,8 @@ silently ignored would leave a clinic charging deposits it meant to switch
 off. Full contract: docs/CHECKPOINT_convenio_catalogo.md.
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from secretaria.models.insurance import INSURANCE_MECHANISMS, INSURANCE_MODES
@@ -36,6 +38,10 @@ class TenantInsurancePlanRead(BaseModel):
     name: str
     is_custom: bool
     custom_payment_note: str | None = None
+    # TASK-085 D-R12 compat - remove after secretarIA-frontend /configuracao drops the switch.
+    # Always true - the truth since D-R12 (a convênio never exempts the sinal) - whatever the
+    # legacy column holds, so an older screen shows its "Cobrar sinal" switch ON.
+    charge_deposit: Literal[True] = True
     # Position the clinic chose in the patient's list (0 = first); None = not placed,
     # follows the placed ones alphabetically. The list itself comes back in this order.
     sort_order: int | None = None
@@ -84,6 +90,17 @@ class TenantInsurancePlanOrderUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     plan_ids: list[str] = Field(default_factory=list, max_length=100)
+
+
+class TenantInsurancePlanDepositUpdate(BaseModel):
+    """PATCH /tenants/me/insurance-plans/{plan_id} - the old toggle's body, IGNORED.
+
+    TASK-085 D-R12 compat - remove after secretarIA-frontend /configuracao drops the switch.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    charge_deposit: bool
 
 
 class InsuranceModeRead(BaseModel):

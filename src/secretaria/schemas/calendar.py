@@ -14,15 +14,18 @@ from secretaria.models.appointment import AppointmentStatus
 class CalendarInsurancePlanRead(BaseModel):
     """The convênio plan an appointment resolved to, as the agenda shows it.
 
-    Deliberately two fields. `id` is the ROW the booking pointed at: a
-    `tenant_insurance_plans.id` (shared / clinic_with_exceptions modes) or, in
-    `independent` mode, a `professional_insurance_plans.id`. No sinal flag
-    (TASK-085 R D-R12: a convênio never exempts the sinal). The clinic's payment
+    `id` is the ROW the booking pointed at: a `tenant_insurance_plans.id` (shared /
+    clinic_with_exceptions modes) or, in `independent` mode, a
+    `professional_insurance_plans.id`. `charge_deposit` is a constant `true` kept for one
+    release (TASK-085 R D-R12: a convênio never exempts the sinal). The clinic's payment
     note and the catalog metadata stay out.
     """
 
     id: str
     name: str
+    # TASK-085 D-R12 compat - remove after secretarIA-frontend /configuracao drops the switch.
+    # Always true (a convênio never exempts the sinal); nothing decides on it.
+    charge_deposit: Literal[True] = True
 
 
 class AwaitingPaymentRead(BaseModel):

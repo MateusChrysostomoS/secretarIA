@@ -307,8 +307,8 @@ async def test_http_clinic_put_removing_plan_cascades_to_doctor(client: AsyncCli
     assert len(body) == 1
     assert body[0]["catalog_id"] == str(AMIL)
     assert body[0]["name"] == "Amil"
-    # TASK-085 R D-R12: an older Portal's flag is accepted and ignored; it never comes back.
-    assert "charge_deposit" not in body[0]
+    # TASK-085 R D-R12: an older Portal's "false" is accepted and ignored; reads always say true.
+    assert body[0]["charge_deposit"] is True
     assert body[0]["is_custom"] is False
     got = await client.get(f"/tenants/me/professionals/{ana.id}/insurance-plans")
     # Ana had customized down to Unimed alone, which just got removed - she
@@ -540,7 +540,9 @@ async def test_deposit_legacy_no_charge_plan_no_longer_skips(db, skips):
     assert skips == [deposit_lifecycle.DEPOSIT_SKIP_NO_API_KEY]
 
 
-async def test_deposit_plan_that_charges_passes_the_insurance_guard(db, skips):
+async def test_deposit_under_a_plan_goes_on_to_the_next_guard(db, skips):
+    """No convênio check exists any more (TASK-085 R D-R12): a booking under a plan stops only
+    at the next real guard (no Asaas key)."""
     async with db() as session:
         tenant, patient, appointment = await _seed_booking(session, charge_deposit=True)
         await session.commit()
@@ -548,12 +550,11 @@ async def test_deposit_plan_that_charges_passes_the_insurance_guard(db, skips):
             session, tenant=tenant, patient=patient, appointment=appointment, waba_token="tok"
         )
     assert deposit is None
-    # Went past the new guard and stopped at the NEXT one (no Asaas key).
     assert skips == [deposit_lifecycle.DEPOSIT_SKIP_NO_API_KEY]
 
 
 async def test_deposit_without_plan_id_is_tenant_policy_only(db, skips):
-    """ "Particular"/"Outro": no plan id -> the guard never interferes."""
+    """ "Particular"/"Outro": no plan id -> only the clinic's own sinal policy decides."""
     async with db() as session:
         tenant, patient, appointment = await _seed_booking(
             session, charge_deposit=False, with_plan_id=False
@@ -570,19 +571,6 @@ async def test_deposit_plan_no_longer_enabled_is_tenant_policy_only(db, skips):
     """A plan id the clinic no longer accepts -> tenant policy, not a silent skip."""
     async with db() as session:
         tenant, patient, appointment = await _seed_booking(session, charge_deposit=None)
-        await session.commit()
-        await deposit_lifecycle.maybe_create_deposit(
-            session, tenant=tenant, patient=patient, appointment=appointment, waba_token="tok"
-        )
-    assert skips == [deposit_lifecycle.DEPOSIT_SKIP_NO_API_KEY]
-
-
-async def test_deposit_other_clinics_no_charge_flag_does_not_leak(db, skips):
-    """Clinic B's legacy "no deposit" Unimed never affects clinic A's Unimed booking."""
-    async with db() as session:
-        tenant, patient, appointment = await _seed_booking(session, charge_deposit=True)
-        other = await _tenant(session)
-        await set_tenant_plans(session, other, [UNIMED])
         await session.commit()
         await deposit_lifecycle.maybe_create_deposit(
             session, tenant=tenant, patient=patient, appointment=appointment, waba_token="tok"

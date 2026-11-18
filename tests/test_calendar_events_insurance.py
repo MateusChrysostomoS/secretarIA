@@ -121,11 +121,11 @@ def test_a_legacy_event_gains_three_null_fields_and_loses_nothing():
     assert dumped["status"] is None and dumped["reminders"] is None
 
 
-def test_the_plan_wire_carries_exactly_two_keys():
+def test_the_plan_wire_carries_exactly_three_keys():
     """custom_payment_note / mechanism / note must never be widened into this
-    shape by accident: the agenda shows a name, nothing else (no sinal flag since
-    TASK-085 R D-R12 - a convênio never exempts the sinal)."""
-    assert set(CalendarInsurancePlanRead.model_fields) == {"id", "name"}
+    shape by accident: the agenda shows a name; `charge_deposit` is a constant true kept
+    for one release (TASK-085 D-R12 compat - a convênio never exempts the sinal)."""
+    assert set(CalendarInsurancePlanRead.model_fields) == {"id", "name", "charge_deposit"}
 
 
 def test_the_deposit_wire_carries_exactly_three_keys():
@@ -386,7 +386,7 @@ async def test_a_doctor_row_that_points_at_a_clinic_row_has_no_name_of_its_own(d
 
 
 def test_the_professional_row_wins_and_never_falls_back_to_the_clinic_row():
-    """Same precedence as deposit_lifecycle._insurance_charges_deposit."""
+    """A doctor's row (independent mode) decides alone; the clinic row is never a fallback."""
     clinic_id, doctor_id = uuid4(), uuid4()
     clinic_plan = AppointmentPlan(clinic_id, "Clinic Unimed")
     doctor_plan = AppointmentPlan(doctor_id, "Doctor Amil")
@@ -620,8 +620,8 @@ async def test_the_clinic_path_carries_label_and_plan_name(client: AsyncClient, 
     assert resp.status_code == 200
     body = resp.json()[0]
     assert body["insurance"] == "Unimed"
-    # A legacy "no sinal" row: the flag no longer leaves the server (D-R12).
-    assert body["insurance_plan"] == {"id": str(plan), "name": "Unimed"}
+    # A legacy "no sinal" row still reads true: a convênio never exempts the sinal (D-R12).
+    assert body["insurance_plan"] == {"id": str(plan), "name": "Unimed", "charge_deposit": True}
 
 
 async def test_the_independent_path_resolves_through_the_professional_row(
@@ -635,7 +635,11 @@ async def test_the_independent_path_resolves_through_the_professional_row(
     body = (await _events(client)).json()[0]
 
     assert body["insurance"] == "Amil"
-    assert body["insurance_plan"] == {"id": str(doctor_plan), "name": "Amil"}
+    assert body["insurance_plan"] == {
+        "id": str(doctor_plan),
+        "name": "Amil",
+        "charge_deposit": True,
+    }
 
 
 async def test_a_clinic_outro_shows_its_name_and_never_its_payment_note(
@@ -652,7 +656,7 @@ async def test_a_clinic_outro_shows_its_name_and_never_its_payment_note(
 
     body = resp.json()[0]
     assert body["insurance_plan"]["name"] == "Cabesp"
-    assert set(body["insurance_plan"]) == {"id", "name"}
+    assert set(body["insurance_plan"]) == {"id", "name", "charge_deposit"}
     assert "NOTA-INTERNA-NAO-VAZAR" not in resp.text
 
 
