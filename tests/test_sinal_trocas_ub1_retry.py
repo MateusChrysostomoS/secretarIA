@@ -418,7 +418,14 @@ async def test_a_follow_up_never_rearms_a_notice_answered_after_the_edit(db, mai
         assert len([m for m in mail["sent"] if m[0] == "acted@example.test"]) == 1
 
         later_edit = NOW + timedelta(hours=1)  # a real new price edit after the answer
+        # UB2: an edit that leaves A's price as it was (e.g. another service's) no longer mails
+        # A - the R$ 12 already abated is netted (`preview_price_requote`), so nothing changed.
         await sweep(tenant.id, pool, now=later_edit, changed_at=later_edit)
+        assert len([m for m in mail["sent"] if m[0] == "acted@example.test"]) == 1
+        # A genuinely new drop of A's price re-arms A's notice and mails again.
+        await reprice(db, tenant.id, "R$ 120,00")  # R$ 36: R$ 12 more beyond the abatement
+        newer_edit = later_edit + timedelta(minutes=10)
+        await sweep(tenant.id, pool, now=newer_edit, changed_at=newer_edit)
         assert len([m for m in mail["sent"] if m[0] == "acted@example.test"]) == 2
     finally:
         price_change.send_transactional_email_result = original

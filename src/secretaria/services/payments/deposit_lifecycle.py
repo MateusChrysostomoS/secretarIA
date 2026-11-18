@@ -625,6 +625,16 @@ REQUOTE_CLINIC_WILL_CALL_TEXT = (
     "Não consegui gerar o novo Pix agora; a clínica vai falar com você sobre o sinal."
 )
 
+# TASK-085 R 3rd round (D-R14, mapa-u §4.6): the same re-quote when the CLINIC changed the price
+# (`recharge_after_edit(reason="price_change")`, from the price-change link's opening) - nothing
+# of the consultation was edited, so the wording speaks of its value, not of "a alteração".
+RechargeReason = Literal["edit", "price_change"]
+PRICE_REQUOTE_OPENING_TEXT = (
+    "O valor da sua consulta mudou e o sinal também. O Pix anterior foi cancelado "
+    "(não pague aquele código)."
+)
+PRICE_REQUOTE_NO_SINAL_TEXT = "Com o novo valor, esta consulta não pede sinal."
+
 
 async def requote_amount_cents(session: AsyncSession, *, tenant: Tenant, appointment) -> int:
     """The sinal a consultation shaped like `appointment` would carry NOW, in cents - the same
@@ -858,6 +868,7 @@ async def recharge_after_edit(
     old_amount_cents: int | None,
     waba_token: str | None = None,
     redis=None,
+    reason: RechargeReason = "edit",
 ) -> UUID | None:
     """After the commit of an edit whose `requote_awaiting` answered "voided" (own session, the
     `plugins/pix_deposit._post_booking` way): creates the new sinal for the edited consultation
@@ -873,6 +884,11 @@ async def recharge_after_edit(
     consultation row lock serialises two concurrent calls). A provider that needs a payer field
     asks for it (the `after` question, `payer_data_after`) after the "Pix anterior cancelado"
     notice. A provider failure only sends that notice (the edit stands without a sinal; logged).
+
+    `reason="price_change"` (TASK-085 R UB2, D-R14): the clinic changed the PRICE and the patient
+    opened the e-mail's link (`price_change.open_price_notice` voided the old Pix). Same steps;
+    only the wording changes (`PRICE_REQUOTE_OPENING_TEXT` / `PRICE_REQUOTE_NO_SINAL_TEXT`), and
+    a failed new Pix opens its clinic item under its own reference (no edit stamp to key it on).
     """
     try:
         async with async_session_factory() as session:
@@ -883,6 +899,7 @@ async def recharge_after_edit(
                 old_amount_cents=old_amount_cents,
                 waba_token=waba_token,
                 redis=redis,
+                reason=reason,
             )
     except Exception as exc:  # noqa: BLE001 - post-commit, best-effort
         logger.warning(
@@ -900,6 +917,9 @@ async def _recharge_failed(
     patient: Patient,
     appointment: Appointment,
     new_cents: int,
+    *,
+    reason: RechargeReason = "edit",
+    old_amount_cents: int | None = None,
 ) -> None:
     """The old Pix was voided and the new one was NOT created (the provider refused it, or the
     payer-data question could not be asked): ONE attention item tells the clinic to collect the
@@ -910,6 +930,10 @@ async def _recharge_failed(
     provider = tenant.payment_provider or PROVIDER_ASAAS
     stamp = appointment.updated_at
     reference = f"requote:{appointment.id}:{int(stamp.timestamp()) if stamp else 0}"
+    if reason == "price_change":
+        # UB2: a price change writes nothing on the consultation (no `updated_at` to key on); one
+        # item per price move of this consultation (old -> new sinal), so a retry dedupes.
+        reference = f"price_requote:{appointment.id}:{old_amount_cents or 0}:{new_cents}"
     try:
         # A savepoint: a failed insert must not poison the session the patient's notice uses.
         async with session.begin_nested():
@@ -944,6 +968,7 @@ async def _recharge(
     old_amount_cents: int | None,
     waba_token: str | None,
     redis,
+    reason: RechargeReason = "edit",
 ) -> UUID | None:
     tenant = await session.get(Tenant, tenant_id)
     appointment = await session.scalar(
@@ -963,12 +988,15 @@ async def _recharge(
         return None
 
     voided = old_amount_cents is not None
+    price_change = reason == "price_change"
+    voided_text = PRICE_REQUOTE_OPENING_TEXT if price_change else REQUOTE_OPENING_TEXT
+    no_sinal_text = PRICE_REQUOTE_NO_SINAL_TEXT if price_change else REQUOTE_NO_SINAL_TEXT
+    failed = {"reason": reason, "old_amount_cents": old_amount_cents}
     new_cents = await requote_amount_cents(session, tenant=tenant, appointment=appointment)
     if new_cents <= 0:
         if voided:
             await _tell_patient(
-                session, tenant, patient, f"{REQUOTE_OPENING_TEXT} {REQUOTE_NO_SINAL_TEXT}",
-                waba_token,
+                session, tenant, patient, f"{voided_text} {no_sinal_text}", waba_token
             )
         return None
 
@@ -984,7 +1012,7 @@ async def _recharge(
             redis=redis,
             conversation_id=conversation_id,
             existing_consultation=True,
-            opening=REQUOTE_OPENING_TEXT if voided else NEWLY_REQUIRED_OPENING_TEXT,
+            opening=voided_text if voided else NEWLY_REQUIRED_OPENING_TEXT,
         )
     except payer_data.PayerDataNeeded as need:
         # Nothing was charged nor stored. Say the old code is dead, then ask what the provider
@@ -992,7 +1020,7 @@ async def _recharge(
         from secretaria.services.payments import payer_data_after
 
         if voided:
-            await _tell_patient(session, tenant, patient, REQUOTE_OPENING_TEXT, waba_token)
+            await _tell_patient(session, tenant, patient, voided_text, waba_token)
         asked = await payer_data_after.ask_after_booking(
             session,
             tenant=tenant,
@@ -1008,7 +1036,7 @@ async def _recharge(
         if not asked and voided:
             # The question could not go out: the Pix is skipped, as on any `after` booking - but
             # the old one is already dead, so the clinic takes it from here.
-            await _recharge_failed(session, tenant, patient, appointment, new_cents)
+            await _recharge_failed(session, tenant, patient, appointment, new_cents, **failed)
             await _tell_patient(session, tenant, patient, REQUOTE_CLINIC_WILL_CALL_TEXT, waba_token)
         await session.commit()
         return None
@@ -1020,10 +1048,10 @@ async def _recharge(
             had_sinal=voided,
         )
         if voided:
-            await _recharge_failed(session, tenant, patient, appointment, new_cents)
+            await _recharge_failed(session, tenant, patient, appointment, new_cents, **failed)
             await _tell_patient(
                 session, tenant, patient,
-                f"{REQUOTE_OPENING_TEXT} {REQUOTE_CLINIC_WILL_CALL_TEXT}", waba_token,
+                f"{voided_text} {REQUOTE_CLINIC_WILL_CALL_TEXT}", waba_token,
             )
         await session.commit()
         return None
