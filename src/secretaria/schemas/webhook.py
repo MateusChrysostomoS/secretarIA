@@ -739,6 +739,10 @@ _ACTION_BUTTON_PREFIXES: tuple[str, ...] = (
     "svcdiffkeep|",
     "svcdiffresend|",
     "svcdiffboth|",
+    # TASK-085 R, 3rd round (D-R11): "Outro horário" - the old consultation's slot was taken while
+    # it was out of the agenda; the patient picks a new slot for it (same service, doctor, unit).
+    # Same DepositAdjustment id and the same patient/clinic scoping as the three above.
+    "svcdiffother|",
 )
 
 

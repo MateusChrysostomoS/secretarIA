@@ -32,7 +32,10 @@ from secretaria.models.deposit_adjustment import (
     STATUS_EXPIRED,
     STATUS_KEPT_CREDIT,
     STATUS_KEPT_OLD,
+    STATUS_OLD_SLOT_LOST,
+    STATUS_REBOOKED,
     STATUS_REFUND_REQUESTED,
+    STATUS_RESTORING,
 )
 from secretaria.models.payment_attention_item import ATTENTION_REASONS
 from secretaria.models.pix_deposit import PixDepositStatus
@@ -103,6 +106,10 @@ def test_constants_match_the_spec():
         # TASK-085 R (D-R4/D-R8): the choice after an expired difference Pix (no migration).
         STATUS_AWAITING_CHOICE,
         STATUS_KEPT_OLD,
+        # TASK-085 R 3rd round (D-R10/D-R11): the old consultation out of the agenda (no migration).
+        STATUS_RESTORING,
+        STATUS_OLD_SLOT_LOST,
+        STATUS_REBOOKED,
     } == ADJUSTMENT_STATUSES
     # Follow-up B (2026-10-27): both fit the VARCHAR(24) column (no migration).
     assert (STATUS_COLLECT_DUE, STATUS_CANCELLED_VOID_PENDING) == (
@@ -235,8 +242,9 @@ def test_upgrade_creates_only_the_table_and_downgrade_drops_it():
 
 def test_the_model_matches_the_migration_columns():
     sql = _offline("up").lower()
-    # `mode` is added later, by c9e4a2f7b3d1 (TASK-085 R: tests/test_sinal_trocas_s0_migration.py).
-    later = {"mode"}
+    # `mode` is added later, by c9e4a2f7b3d1 (TASK-085 R: tests/test_sinal_trocas_s0_migration.py);
+    # `old_slot` / `old_slot_at` by d5a8c3e1f7b9 (tests/test_sinal_trocas_u0_migration.py).
+    later = {"mode", "old_slot", "old_slot_at"}
     for column in DepositAdjustment.__table__.columns:
         if column.name not in later:
             assert column.name in sql, column.name

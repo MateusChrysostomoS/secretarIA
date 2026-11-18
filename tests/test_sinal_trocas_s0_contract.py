@@ -80,7 +80,12 @@ def test_the_new_modes_and_statuses():
     assert (STATUS_AWAITING_CHOICE, STATUS_KEPT_OLD) == ("awaiting_choice", "kept_old")
     assert {STATUS_AWAITING_CHOICE, STATUS_KEPT_OLD} <= ADJUSTMENT_STATUSES
     assert all(len(status) <= 24 for status in ADJUSTMENT_STATUSES)  # VARCHAR(24)
-    assert SUSPENDED_STATUSES == (STATUS_AWAITING_PAYMENT, STATUS_AWAITING_CHOICE)
+    # 3rd round (mapa-u §4.2): the old consultation stays suspended while it is being restored
+    # and when its slot was lost (tests/test_sinal_trocas_u0_contract.py pins the rest).
+    assert SUSPENDED_STATUSES[:2] == (STATUS_AWAITING_PAYMENT, STATUS_AWAITING_CHOICE)
+    assert SUSPENDED_STATUSES == (
+        STATUS_AWAITING_PAYMENT, STATUS_AWAITING_CHOICE, "restoring", "old_slot_lost",
+    )
 
 
 def test_the_unpaid_difference_reason():
