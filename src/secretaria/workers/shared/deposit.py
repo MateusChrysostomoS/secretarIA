@@ -1,6 +1,8 @@
 """deposit - split out of workers/tasks.py (TASK-023)."""
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from uuid import UUID
 
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
@@ -23,9 +25,15 @@ from secretaria.services.flow_router import (
     FlowRouterResult,
     MenuBubble,
 )
+from secretaria.services.insurance_catalog import resolve_booking_plan_ids
 from secretaria.services.payments import adjustment_queries, deposit_lifecycle, service_change
 from secretaria.services.payments.deposit_lifecycle import _tenant_tz
 from secretaria.services.payments.money import format_brl
+from secretaria.services.payments.service_change_policy import (
+    MONEY_FIELD_UNIT,
+    MoneyTerms,
+    money_fields_changed,
+)
 from secretaria.services.whatsapp import (
     WhatsAppClient,
 )
@@ -138,6 +146,11 @@ def _hours_until_start(appointment: Appointment, now: datetime) -> float | None:
         return None
     return (_as_utc(appointment.start_at) - now).total_seconds() / 3600
 
+# The sentence of the "before" card line that promises both times reserved (D-R4); dropped when
+# the change falls back to the legacy deferred mode (no room for a suspension, contrato §1).
+_RESERVED_SENTENCE = " Até lá,"
+
+
 async def _send_reschedule_limit_buttons(
     client: WhatsAppClient, to: str | None, appointment_id, count: int, limit: int
 ) -> None:
@@ -161,23 +174,117 @@ async def _send_reschedule_limit_buttons(
         ],
     )
 
-async def _with_service_difference(result: FlowRouterResult, tenant: Tenant) -> FlowRouterResult:
-    """The confirmation card of an edit that changes the SERVICE of a consultation whose sinal
-    is PAID gets one more line: the difference of the sinal (to pay by Pix, or above the new
-    value), from the same decision `service_change.request_service_change` takes at Confirmar
-    (browser proof 2026-10-26). Read-only and best-effort: any doubt leaves the card as it was
-    (Confirmar still shows the value with the Pix).
+def _draft_target(current: dict, appointment: Appointment) -> dict:
+    """The draft's money terms as an R6 edit dict (`MoneyTerms.with_edit` keys) - the same shape
+    `appointment_edit_flow._apply_confirm` hands the worker, so the card and Confirmar agree."""
+    target = {
+        "appointment_type": current.get("service"),
+        "professional_id": current.get("professional_id", appointment.professional_id),
+        "insurance": current.get("insurance", appointment.insurance),
+    }
+    if "unit_id" in current:
+        target["unit_id"] = current.get("unit_id")
+    if "attendee_name" in current:
+        target["attendee_name"] = current.get("attendee_name")
+    return target
 
-    TASK-085: the new price is the one of the draft's unit; a change of the UNIT only gets the
-    line too when the price there differs (R3) - at the same price the card stays as it was."""
+
+def _uuid(value) -> UUID | None:
+    if value in (None, ""):
+        return None
+    return value if isinstance(value, UUID) else UUID(str(value))
+
+
+async def _paid_card_line(
+    session, tenant: Tenant, appointment: Appointment, deposit, target: dict, start_at, changed
+) -> str | None:
+    """PAID sinal: the line of the decision `request_paid_change` takes at Confirmar (TASK-085 R:
+    every money field, the clinic's timing)."""
+    now = datetime.now(UTC)
+    unit = {"unit_id": target["unit_id"]} if "unit_id" in target else {}
+    decision = await service_change.preview_service_change(
+        session,
+        tenant=tenant,
+        appointment=appointment,
+        deposit=deposit,
+        new_service=str(target["appointment_type"]),
+        professional_id=target["professional_id"],
+        start_at=start_at,
+        now=now,
+        insurance=target["insurance"],
+        **unit,
+    )
+    # Lazy: appointment_edit_apply imports this package's support module.
+    from secretaria.workers.shared import appointment_edit_apply as apply
+
+    before = service_change.timing_is_before(tenant)
+    no_room = (
+        before
+        and decision.action == "increase_charge"
+        and apply.legacy_without_room(tenant, appointment, start_at, now)
+    )
+    if no_room and apply.legacy_cannot_carry(appointment, target, changed):
+        # The legacy deferred mode never writes doctor / convênio / who: Confirmar refuses it
+        # (`LEGACY_NO_ROOM_TEXT`) - the card says so instead of a Pix of the difference.
+        return apply.LEGACY_NO_ROOM_CARD_TEXT
+    line = service_change.confirm_card_line_text(
+        decision.action,
+        decision.diff_cents,
+        unit_only=changed == frozenset({MONEY_FIELD_UNIT}),
+        timing="before" if before else "after",
+    )
+    if line and no_room:
+        # No room for a suspension before the visits (contrato §1): the legacy deferred mode
+        # reserves nothing - the card must not promise it.
+        line = line.split(_RESERVED_SENTENCE, 1)[0]
+    return line
+
+
+async def _requote_card_line(
+    session, tenant: Tenant, appointment: Appointment, deposit, target: dict
+) -> str | None:
+    """UNPAID sinal (D-R6): "O sinal passa de X para Y; ao confirmar, cancelamos o Pix anterior e
+    enviamos um novo." - the amount `requote_awaiting` will compute at Confirmar."""
+    if deposit.deposit_timing == "before":
+        return None  # `requote_awaiting` never touches such a row
+    professional_id = _uuid(target["professional_id"])
+    plan_id, professional_plan_id = await resolve_booking_plan_ids(
+        session, tenant.id, target["insurance"], professional_id
+    )
+    probe = SimpleNamespace(
+        id=appointment.id,
+        appointment_type=target["appointment_type"],
+        professional_id=professional_id,
+        unit_id=_uuid(target["unit_id"]) if "unit_id" in target else appointment.unit_id,
+        insurance_plan_id=plan_id,
+        insurance_professional_plan_id=professional_plan_id,
+    )
+    new_cents = await deposit_lifecycle.requote_amount_cents(
+        session, tenant=tenant, appointment=probe
+    )
+    if new_cents == deposit.amount_cents:
+        return None
+    return deposit_lifecycle.requote_card_line_text(deposit.amount_cents, new_cents)
+
+
+async def _with_service_difference(result: FlowRouterResult, tenant: Tenant) -> FlowRouterResult:
+    """The confirmation card of an edit that changes a MONEY field (service, unit, doctor,
+    convênio - `service_change_policy.money_fields_changed`) of a consultation with a sinal gets
+    one more line. Read-only and best-effort: any doubt leaves the card as it was (Confirmar still
+    explains).
+
+    * PAID sinal: the difference of the sinal (to pay by Pix - "after": the change is made at
+      once; "before": it waits for the Pix with both times reserved -, or above the new value),
+      from the same decision `service_change.request_paid_change` takes at Confirmar (browser
+      proof 2026-10-26; TASK-085 R: every money field, the clinic's timing). A change that does
+      not move the price (`no_change`) adds nothing.
+    * UNPAID sinal (TASK-085 R D-R6): the re-quote - the old Pix is cancelled and a new one with
+      the new amount is sent at Confirmar.
+    """
     draft = result.flow_edit_draft if isinstance(result.flow_edit_draft, dict) else {}
-    current, original = draft.get("current") or {}, draft.get("original") or {}
+    current = draft.get("current") or {}
     new_service = current.get("service")
     if not new_service:
-        return result
-    service_changed = new_service != original.get("service")
-    unit_changed = "unit_id" in current and current.get("unit_id") != original.get("unit_id")
-    if not service_changed and not unit_changed:
         return result
     card = next(
         (b for b in result.bubbles if isinstance(b, MenuBubble) and LABEL_CONFIRM in b.labels),
@@ -189,38 +296,31 @@ async def _with_service_difference(result: FlowRouterResult, tenant: Tenant) -> 
     try:
         async with async_session_factory() as session:
             deposit = await deposit_lifecycle.get_deposit_for_appointment(session, appointment_id)
-            if deposit is None or deposit.status != PixDepositStatus.PAID:
+            if deposit is None or deposit.status not in (
+                PixDepositStatus.PAID,
+                PixDepositStatus.AWAITING,
+            ):
                 return result
             appointment = await session.get(Appointment, appointment_id)
             if appointment is None or appointment.tenant_id != tenant.id:
                 return result
-            # The unit the change lands on: the draft's (a key only on a booking with a unit).
-            unit = {"unit_id": current.get("unit_id")} if "unit_id" in current else {}
-            if not service_changed:
-                # The unit only (`unit_changed`, so the key is there): a line only when the
-                # price at the new unit is another one.
-                moves = await service_change.unit_change_moves_price(
-                    session, tenant=tenant, appointment=appointment, unit_id=unit["unit_id"]
+            target = _draft_target(current, appointment)
+            terms = MoneyTerms.of_appointment(appointment)
+            changed = money_fields_changed(terms, terms.with_edit(target))
+            if not changed:
+                return result
+            if deposit.status == PixDepositStatus.AWAITING:
+                line = await _requote_card_line(session, tenant, appointment, deposit, target)
+            else:
+                start = current.get("start_at")
+                start_at = (
+                    datetime.fromisoformat(start).replace(tzinfo=_tenant_tz(tenant))
+                    if start
+                    else appointment.start_at
                 )
-                if not moves:
-                    return result
-            start = current.get("start_at")
-            start_at = (
-                datetime.fromisoformat(start).replace(tzinfo=_tenant_tz(tenant))
-                if start
-                else appointment.start_at
-            )
-            decision = await service_change.preview_service_change(
-                session,
-                tenant=tenant,
-                appointment=appointment,
-                deposit=deposit,
-                new_service=str(new_service),
-                professional_id=current.get("professional_id") or appointment.professional_id,
-                start_at=start_at,
-                now=datetime.now(UTC),
-                **unit,
-            )
+                line = await _paid_card_line(
+                    session, tenant, appointment, deposit, target, start_at, changed
+                )
     except Exception as exc:  # noqa: BLE001 - the card goes out as it was
         logger.warning(
             "edit_confirm_difference_failed",
@@ -228,9 +328,6 @@ async def _with_service_difference(result: FlowRouterResult, tenant: Tenant) -> 
             error_type=type(exc).__name__,
         )
         return result
-    line = service_change.confirm_card_line_text(
-        decision.action, decision.diff_cents, unit_only=not service_changed
-    )
     body = f"{card.body.rstrip()}\n\n{line}" if line else card.body
     if line and len(body) <= MAX_INTERACTIVE_BODY_CHARS:
         card.body = body

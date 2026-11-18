@@ -61,6 +61,16 @@ def _wire(monkeypatch, db):  # noqa: F811
 
 
 @pytest.fixture
+def legacy_deferred_mode(monkeypatch):
+    """TASK-085 R: pins ONE test to the legacy deferred mode (`mode` NULL: nothing written until
+    the Pix is paid) - rows made before TASK-085 R and the "before" fallback without room for a
+    useful Pix (contrato §1). Same patches as S1's autouse fixture in tests/test_service_change.py,
+    but opt-in: the other tests here run today's rules ("after" clinic, D-R5)."""
+    monkeypatch.setattr(service_change, "timing_is_before", lambda tenant: True)
+    monkeypatch.setattr(service_change, "suspend_pix_expiry", lambda *args, **kwargs: None)
+
+
+@pytest.fixture
 def provider(monkeypatch) -> FakeProvider:
     fake = FakeProvider(state=ChargeState(status=PaymentStatus.PENDING))
     fake.created_charge = CreatedCharge(provider_charge_id="pay_diff_1", copy_paste="000201pix")
@@ -282,11 +292,15 @@ async def test_a_unit_change_at_the_same_price_is_todays_edit(db, provider, cent
 # --------------------------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("legacy_deferred_mode")
 async def test_the_card_shows_the_difference_of_a_dearer_unit(db, provider):  # noqa: F811
+    """TASK-085 R: pinned to the legacy deferred mode (S1's fixture: "before" without room
+    for a suspension) - the card says the unit waits for the Pix and promises no reserved
+    time."""
     world = await _world(db, centro=("R$ 250,00", None))  # R$ 75,00 - R$ 60,00
     body = await _card(world)
-    line = service_change.confirm_card_line_text("increase_charge", 1500, unit_only=True)
-    assert body == f"{CARD}\n\n{line}"
+    line = body.removeprefix(f"{CARD}\n\n")
+    assert body != line
     assert line == (
         "Diferença do sinal: R$ 15,00. Ao confirmar, enviamos o Pix dessa diferença; "
         "a unidade só muda depois do pagamento."
@@ -294,6 +308,7 @@ async def test_the_card_shows_the_difference_of_a_dearer_unit(db, provider):  # 
     assert provider.calls == [] and await _adjustments(db) == []  # a preview only
 
 
+@pytest.mark.usefixtures("legacy_deferred_mode")
 @pytest.mark.parametrize("deferred", [False, True])
 async def test_confirming_a_dearer_unit_sends_the_pix_and_changes_nothing(
     db,  # noqa: F811
@@ -347,9 +362,9 @@ async def test_confirming_a_cheaper_unit_moves_now_and_asks_about_the_difference
     assert await _notices(db) == 1  # written ONCE, by the money engine
     [adjustment] = await _adjustments(db)
     assert (adjustment.status, adjustment.diff_cents) == (STATUS_ASKED, 1500)
-    # Back in line with the row first, then the change: the event ends at Centro.
-    assert len(calendar.detail_updates) == 2
-    assert "Unidade: Centro" in calendar.detail_updates[-1][4]
+    # TASK-085 R: the router already put the event at Centro (`calendar_deferred` False) and
+    # the change stands now - the worker leaves that write alone (it used to undo/redo it).
+    assert calendar.detail_updates == []
     question = service_change.refund_question_text("Consulta na Unidade Centro", 1500)
     assert question in _texts()
     assert question.startswith("Pronto, sua consulta agora é Consulta na Unidade Centro.")

@@ -30,6 +30,7 @@ from secretaria.services.channel_sender import (
 )
 from secretaria.services.entitlements_client import get_entitlements
 from secretaria.services.flow_router import reactivation_gap_minutes
+from secretaria.services.payments import adjustment_suspension
 from secretaria.services.reminder_text import REMINDER_TERMINAL_TEXT
 from secretaria.workers.orchestrator import (
     _send_bot_reply,
@@ -430,6 +431,17 @@ async def _brain_message_entry_decision(
                 )
                 return None
             appointment_id = appointment.id
+            if await adjustment_suspension.is_suspended(
+                session, tenant_id=tenant_id, appointment_id=appointment.id
+            ):
+                # TASK-085 R (D-R4): the reminder's consultation waits for the Pix of a change's
+                # difference and is hidden from the patient - the ordinary opening goes out
+                # (it never shows a suspended consultation), never that consultation's card.
+                logger.info(
+                    "brain_message_enter_suspended_reminder",
+                    conversation_id=str(conversation.id),
+                )
+                appointment_id = None
         if explicit and latest is not None:
             message = await session.get(Message, latest.id)
             # Keep the current visible card on reload. If it has fallen out
@@ -459,6 +471,10 @@ async def _brain_message_entry_decision(
                             and row.tenant_id == tenant_id
                             and row.invalidated_at is None
                             and (appointment_id is None or row.appointment_id == appointment_id)
+                            # TASK-085 R: a suspended consultation's card is not "current".
+                            and not await adjustment_suspension.is_suspended(
+                                session, tenant_id=tenant_id, appointment_id=current.id
+                            )
                         ):
                             return None
             if (

@@ -275,13 +275,12 @@ async def test_the_s2_signatures_are_frozen():
     ]
 
 
-async def test_the_s3b_stub_is_frozen():
+async def test_the_s3b_signature_is_frozen():
+    """S3b implemented the stub (tests/test_sinal_trocas_s3b_worker.py); the signature stays."""
     from secretaria.workers.shared import service_change_actions
 
     fn = service_change_actions.handle_service_diff_choice
     assert _params(fn) == ["reply", "action", "adjustment_id", "redis"]
-    with pytest.raises(NotImplementedError, match="TASK-085 R S3b"):
-        await fn(None, "svcdiffkeep", uuid4())
 
 
 # --- the suspended consultation (S5 hides it; S4 refuses edits on it) -------------------------

@@ -27,7 +27,7 @@ from secretaria.services.appointment_calendar_origin import (
     CalendarOriginUnresolved,
     calendar_professional_id,
 )
-from secretaria.services.appointment_edit import EditContext, EditDraft
+from secretaria.services.appointment_edit import EditDraft
 from secretaria.services.appointment_edit_flow import enter_edit_menu
 from secretaria.services.appointment_status import (
     SOURCE_BUTTON,
@@ -46,8 +46,8 @@ from secretaria.services.flow_router import (
 from secretaria.services.patient_context import (
     load_upcoming_appointments,
 )
-from secretaria.services.payments import deposit_lifecycle
-from secretaria.services.payments.service_change import REFUND_ACTIONS
+from secretaria.services.payments import adjustment_suspension, deposit_lifecycle
+from secretaria.services.payments.service_change import CHOICE_ACTIONS, REFUND_ACTIONS
 from secretaria.services.release_offer import RELEASE_OFFER_ACTIONS
 from secretaria.services.reminder_text import REMINDER_ROW_ACTIONS
 from secretaria.services.service_catalog import (
@@ -59,7 +59,11 @@ from secretaria.services.tenant_config import (
     load_tenant_config,
     resolve_professional_calendar,
 )
-from secretaria.workers.shared.appointment_edit_support import edit_guards
+from secretaria.workers.shared.appointment_edit_support import (
+    edit_guards,
+    make_edit_context,
+    visit_suspended,
+)
 from secretaria.workers.shared.context import (
     _ReplyContext,
 )
@@ -87,7 +91,10 @@ from secretaria.workers.shared.sender import (
     _reply_sender,
     _send_simple_text,
 )
-from secretaria.workers.shared.service_change_actions import handle_service_diff_tap
+from secretaria.workers.shared.service_change_actions import (
+    handle_service_diff_choice,
+    handle_service_diff_tap,
+)
 from secretaria.workers.shared.text import (
     _as_utc,
 )
@@ -96,6 +103,13 @@ logger = get_logger(__name__)
 
 
 _APPOINTMENT_NOT_FOUND_TEXT = "Não encontrei essa consulta."
+
+# TASK-085 R (contrato §3.8): what an old button may NOT do to a SUSPENDED consultation (one
+# waiting for the Pix of a change's difference): confirm, reschedule, edit, rebook it. Cancelling
+# stays allowed - it is "Cancelar ambas" (the cancellation settles the pending change).
+_REFUSED_ON_SUSPENDED = frozenset(
+    {"apptconfirm", "apptresched", CONTINUE_EDIT, "rebooksame", "rebookother"}
+)
 
 
 async def _calendar_for_appointment(
@@ -245,6 +259,11 @@ async def _handle_action_button(
     if action in REFUND_ACTIONS:
         await handle_service_diff_tap(reply, action, appt_uuid)
         return
+    # TASK-085 R (D-R4/D-R7): "Manter a antiga" / "Reenviar o Pix" / "Cancelar ambas" - the id is
+    # a DepositAdjustment's too, checked against the conversation's patient by the handler.
+    if action in CHOICE_ACTIONS:
+        await handle_service_diff_choice(reply, action, appt_uuid, redis=redis)
+        return
 
     # TASK-032 R2/R3: the reminder buttons carry a REMINDER row id, not an
     # appointment id; their handler checks the row against the patient. Some
@@ -300,6 +319,14 @@ async def _handle_action_button(
         )
         if appointment is None:
             await client.send_text_message(to=reply.patient_ref, body=_APPOINTMENT_NOT_FOUND_TEXT)
+            return
+
+        if action in _REFUSED_ON_SUSPENDED and await adjustment_suspension.is_suspended(
+            session, tenant_id=tenant.id, appointment_id=appointment.id
+        ):
+            await client.send_text_message(
+                to=reply.patient_ref, body=adjustment_suspension.SUSPENDED_VISIT_TEXT
+            )
             return
 
         if action == "apptconfirm":
@@ -418,7 +445,11 @@ async def _handle_action_button(
                 enter_edit_menu(
                     tenant,
                     appt_view,
-                    EditContext(paid_deposit=paid, reschedule_blocked=blocked),
+                    make_edit_context(
+                        paid_deposit=paid,
+                        reschedule_blocked=blocked,
+                        suspended=await visit_suspended(session, tenant, appointment),
+                    ),
                     draft=existing,
                 ),
             )
