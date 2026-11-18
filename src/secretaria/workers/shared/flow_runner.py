@@ -1,5 +1,6 @@
 """flow_runner - split out of workers/tasks.py (TASK-023)."""
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import NAMESPACE_URL, uuid5
 
@@ -59,7 +60,7 @@ from secretaria.services.no_unit_notice import send_no_unit_notice
 from secretaria.services.patient_context import (
     has_upcoming_appointment,
 )
-from secretaria.services.payments import deposit_lifecycle
+from secretaria.services.payments import deposit_lifecycle, old_slot, service_change
 from secretaria.services.pii_pseudonymization import remember_attendee_name
 from secretaria.services.professional_edit_outbox import record_professional_edit
 from secretaria.workers.shared.appointment_edit_apply import (
@@ -315,6 +316,8 @@ async def _apply_flow_result(
     # cancelled or moved at the patient's request - mailed to the clinic, the doctor
     # and the Portal patient only once the transaction committed.
     patient_changes: list[tuple] = []
+    # TASK-085 R (D-R11): "Outro horário" whose change was decided meanwhile (finish_rebook False).
+    rebook_lost = False
     try:
         async with async_session_factory() as session:
             async with session.begin():
@@ -532,6 +535,11 @@ async def _apply_flow_result(
                             if resched_appt is not None and tenant is not None
                             else None
                         )
+                        # TASK-085 R (D-R11): "Outro horário" - the row moves AND the change
+                        # closes (`old_slot.finish_rebook`) in a SAVEPOINT: a change decided
+                        # meanwhile undoes the move alone (the flow state still commits).
+                        rebook = resched.get("rebook")
+                        savepoint = await session.begin_nested() if rebook else None
                         # The SAME row moves to the new window and stays LIVE -
                         # RESCHEDULED is not a tombstone (PROMPT_FIX_16, see the
                         # taxonomy on models/appointment.py). Its id,
@@ -551,6 +559,23 @@ async def _apply_flow_result(
                                 status=AppointmentStatus.RESCHEDULED,
                             )
                         )
+                        if savepoint is not None:
+                            won = resched_appt is not None and await old_slot.finish_rebook(
+                                session,
+                                tenant_id=conv.tenant_id,
+                                adjustment_id=rebook["adjustment_id"],
+                                appointment=resched_appt,
+                                event_id=rebook["event_id"],
+                                event_link=rebook.get("event_link"),
+                                now=datetime.now(UTC),
+                                source="patient",
+                            )
+                            if won:
+                                await savepoint.commit()
+                            else:
+                                await savepoint.rollback()
+                                rebook_lost = True
+                                resched_appt = None  # nothing of the move stands
                         if resched_appt is not None:
                             patient_changes.append(
                                 (
@@ -607,7 +632,8 @@ async def _apply_flow_result(
                         # already pre-checked by _apply_deposit_awareness /
                         # the button carrier's own check) — never unwind an
                         # already-persisted reschedule over a counter race.
-                        if tenant is not None:
+                        # TASK-085 R (mapa-u §7.6): "Outro horário" never counts.
+                        if tenant is not None and rebook is None:
                             if resched_appt is not None:
                                 allowed, _count = await deposit_lifecycle.register_reschedule(
                                     session, tenant=tenant, appointment=resched_appt
@@ -655,6 +681,27 @@ async def _apply_flow_result(
     # plugins/post_booking.py. Only when the appointment row actually made it
     # to the DB (never on a persist failure) and `tenant` is loaded (always
     # true here — the flow engine only runs once `tenant` is resolved).
+    rebook = (result.appointment_reschedule or {}).get("rebook")
+    if rebook is not None and (rebook_lost or not persisted):
+        # TASK-085 R (D-R11): the event "Outro horário" created is not the consultation's - it goes
+        # (unless a twin turn with the same id won and the row points at it).
+        await _discard_rebook_event(tenant, rebook)
+        if not persisted:
+            # Nothing was written: never "Pronto" - a person takes over, as for an edit.
+            await _handle_calendar_unavailable(
+                reply, redis=redis, tenant=tenant, waba_token=waba_token
+            )
+            return True
+        # Decided meanwhile (paid, cancelled, the clinic rescheduled): one line, nothing moved.
+        result.bubbles = [
+            TextBubble(
+                body=service_change.choice_answer_text(
+                    service_change.ChoiceOutcome(
+                        kind="already_decided", adjustment_id=rebook["adjustment_id"]
+                    )
+                )
+            )
+        ]
     if result.appointment_edit is not None and not persisted:
         # TASK-085 R (S7a): a Pix of the difference the rolled-back edit created and the provider
         # refused to void becomes the clinic's item now that the transaction is gone.
@@ -835,6 +882,36 @@ async def _apply_flow_result(
             )
         return True
     return False  # delegate_llm
+
+
+async def _discard_rebook_event(tenant: Tenant | None, rebook: dict) -> None:
+    """TASK-085 R (D-R11): the event "Outro horário" created for a move that was NOT written (the
+    change was decided meanwhile, or the transaction failed) is deleted
+    (`old_slot.discard_event`, never raises) - unless the consultation points at it: a twin
+    turn with the same deterministic id won. Its own read; never raises."""
+    event_id = str(rebook.get("event_id") or "")
+    calendar = rebook.get("calendar")
+    if not event_id or calendar is None:
+        return
+    try:
+        if tenant is not None:
+            async with async_session_factory() as session:
+                current = await session.scalar(
+                    select(Appointment.id).where(
+                        Appointment.google_event_id == event_id,
+                        Appointment.tenant_id == tenant.id,
+                    )
+                )
+            if current is not None:
+                return
+    except Exception as exc:  # noqa: BLE001 - cannot tell: the event is ours and unused
+        logger.warning("worker_rebook_discard_check_failed", error_type=type(exc).__name__)
+    logger.info(
+        "worker_rebook_event_discarded",
+        tenant_id=str(getattr(tenant, "id", None)),
+        adjustment_id=str(rebook.get("adjustment_id")),
+    )
+    await old_slot.discard_event(calendar, event_id)
 
 
 async def _notify_no_unit_for_service(

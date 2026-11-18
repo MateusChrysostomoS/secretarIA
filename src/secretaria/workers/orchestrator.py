@@ -565,7 +565,16 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                     )
                     if wants_upcoming_appointments and conversation.patient_id is not None:
                         upcoming_appointments = await load_upcoming_appointments(
-                            session, tenant.id, conversation.patient_id
+                            session,
+                            tenant.id,
+                            conversation.patient_id,
+                            # TASK-085 R (D-R11): "Outro horário" moves a consultation hidden
+                            # from every list; the manage flow keeps seeing THAT one.
+                            rebooking_id=(
+                                conversation.flow_managing_appointment_id
+                                if conversation.flow_state == FlowState.MANAGE_BOOKING
+                                else None
+                            ),
                         )
                     # Owning-professional calendar for THIS manage turn: cancel/
                     # reschedule must act on the agenda that actually owns the

@@ -65,6 +65,15 @@ from tests.test_appointment_edit_paid_service import _edit, _world
 DIFF_TEXT = "Diferença do sinal"
 
 
+def _held_pix(new_service: str, code: str, minutes: int) -> str:
+    """The Pix text of a SUSPENDED change (`held_new_slot=True`) - never the legacy one. TASK-085
+    R UA3: compared with the engine's own output so D-R10's rewrite of the words (UA2) does not
+    need this file; the legacy variant must differ."""
+    held = service_change.difference_pix_text(new_service, 5000, code, minutes, held_new_slot=True)
+    assert held != service_change.difference_pix_text(new_service, 5000, code, minutes)
+    return held
+
+
 @pytest.fixture(autouse=True)
 def _wire(monkeypatch, db):  # noqa: F811
     wire(monkeypatch, db)
@@ -181,7 +190,7 @@ async def test_after_clinic_dearer_change_is_made_now_and_the_difference_pix_fol
 
 
 @pytest.mark.parametrize("deferred", [True, False])
-async def test_before_clinic_dearer_change_is_suspended_and_says_both_times_are_kept(
+async def test_before_clinic_dearer_change_is_suspended_and_sends_the_suspension_pix(
     db,  # noqa: F811
     provider,
     deferred,
@@ -210,7 +219,9 @@ async def test_before_clinic_dearer_change_is_suspended_and_says_both_times_are_
     texts = _texts()
     assert not any(text.startswith(ae.EDIT_APPLIED) for text in texts)  # never "done"
     [pix] = [text for text in texts if "R$ 50,00" in text]
-    assert "ficam reservados para você" in pix
+    # TASK-085 R UA3: the suspension's own Pix text (`held_new_slot=True`; its words are UA2's,
+    # D-R10 rewrote them), never the legacy deferred one.
+    assert pix == _held_pix("Avaliação", "000201pix", 30)
     assert pix.rstrip().endswith("```000201pix```")
     async with db() as session:
         assert await adjustment_suspension.is_suspended(
@@ -550,7 +561,7 @@ async def test_cancel_both_cancels_the_old_consultation_in_one_message(db, provi
     assert text.startswith("Certo! A troca foi desfeita") and "Consulta cancelada." in text
 
 
-async def test_resend_sends_the_new_pix_with_both_times_reserved(db, provider, monkeypatch):  # noqa: F811
+async def test_resend_sends_the_new_pix_of_the_suspension(db, provider, monkeypatch):  # noqa: F811
     world = await _world(db)
     adjustment_id = await _suspend(db, world, status=STATUS_AWAITING_CHOICE)
 
@@ -572,7 +583,7 @@ async def test_resend_sends_the_new_pix_with_both_times_reserved(db, provider, m
 
     [text] = _texts()
     assert text.startswith("Certo! Enviamos um novo Pix da diferença (R$ 50,00)")
-    assert "ficam reservados para você" in text and "20 minutos" in text
+    assert text.endswith(_held_pix("Avaliação", "000201new", 20))  # the real deadline
     assert text.rstrip().endswith("```000201new```")
 
 
@@ -637,7 +648,7 @@ def _recap():
     return [TextBubble(body=f"{ae.EDIT_APPLIED}\n\nx"), fr.MenuBubble(body="m", labels=["A"])]
 
 
-def test_the_suspended_reply_promises_both_times_and_never_says_done():
+def test_the_suspended_reply_is_the_suspension_pix_and_never_says_done():
     outcome = service_change.ServiceChangeResult(
         kind="suspended",
         diff_cents=5000,
@@ -652,8 +663,8 @@ def test_the_suspended_reply_promises_both_times_and_never_says_done():
         tenant=SimpleNamespace(deposit_hold_ttl_minutes=30),
     )
     assert not bubbles[0].body.startswith(ae.EDIT_APPLIED)
-    assert "ficam reservados para você" in bubbles[0].body
-    assert "12 minutos" in bubbles[0].body  # the real deadline, not the clinic's TTL
+    # The real deadline (12 min), not the clinic's TTL; the suspension's own words (UA2's).
+    assert bubbles[0].body == _held_pix("Avaliação", "000201pix", 12)
 
 
 def test_the_legacy_awaiting_reply_keeps_todays_words():
@@ -743,7 +754,7 @@ async def test_the_card_of_an_after_clinic_says_the_change_is_made_at_once(db, p
     assert line == service_change.confirm_card_line_text("increase_charge", 5000, timing="after")
 
 
-async def test_the_card_of_a_before_clinic_says_both_times_are_kept(db, provider):  # noqa: F811
+async def test_the_card_of_a_before_clinic_says_the_new_time_is_reserved(db, provider):  # noqa: F811
     world = await _world(db)
     await _set_tenant(db, world, deposit_timing="before")
     line = await _card_line(world, service="Avaliação")
